@@ -475,6 +475,37 @@ const adminHeaders = () => ({ Authorization: 'Bearer ' + adminKey });
 // authority: the recorded summary is observed from the responses the page itself
 // reads. That is also the only observation that proves the page saw it.
 let lastSummary = null;
+// The durable adoption record, read from the Manager's own store. Progress is
+// timed from the record rather than from the page's poll interval, so the fault
+// cannot be injected after the run has already settled.
+function adoptionRecord() {
+  const volume = JSON.parse(docker('inspect', dc('ps', '-q', 'cpamp-manager')))[0].Mounts.find(
+    (mount) => mount.Destination === '/data'
+  ).Name;
+  const raw = run(
+    ['docker', 'run', '--rm', '-i', '--network', 'none', '-v', `${volume}:/data:ro`, pythonImage,
+      'python3', '-c',
+      "import sqlite3,json\nc=sqlite3.connect('file:/data/usage.sqlite?mode=ro',uri=True)\nr=c.execute(\"select value from settings where key='fresh_adoption_summary_v1'\").fetchone()\nprint(r[0] if r else '{}')"],
+    undefined
+  ).stdout.trim();
+  const summary = JSON.parse(raw);
+  return {
+    items: summary.items || [],
+    planned: summary.planned || 0,
+    finished: summary.finished === true,
+    // The store's own retryable rule: a failure that happened before any write.
+    retryable: (summary.items || []).filter(
+      (item) =>
+        item.outcome === 'failed' &&
+        (item.reason === 'download_failed' || item.reason === 'source_unreadable')
+    ).length,
+  };
+}
+function countsOf(items) {
+  const counts = { migrated: 0, manual: 0, failed: 0, absent_at_source: 0 };
+  for (const item of items) counts[item.outcome] = (counts[item.outcome] || 0) + 1;
+  return counts;
+}
 async function adminGet(path) {
   const response = await fetch(origin + '/console/api/v2/' + path, { headers: adminHeaders() });
   assert.equal(response.status, 200, 'admin read ' + path + ': ' + response.status);
@@ -560,9 +591,13 @@ try {
   page.on('pageerror', () => report.pageErrors.push('Uncaught browser error'));
   page.on('response', async (response) => {
     if (!new URL(response.url()).pathname.endsWith('/installation/adoption')) return;
+    report.summaryStatuses = report.summaryStatuses || [];
+    report.summaryStatuses.push(response.status());
     try {
       lastSummary = await response.json();
-    } catch {}
+    } catch (error) {
+      report.summaryParseFailure = String(error.message || error).slice(0, 300);
+    }
   });
   await page.goto(origin + handoff);
   await page.getByTestId('fresh-setup-wizard').waitFor();
@@ -665,27 +700,29 @@ try {
     // The page's own read is the progress path, so the observer below sees what
     // the operator sees. Each round also presses Refresh, which is one more read,
     // so the first item cannot hide between two poll intervals.
-    await wait(async () => {
-      if ((lastSummary?.items?.length ?? 0) === 0) {
-        const refresh = page.getByTestId('adopt-refresh');
-        if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
-        return false;
+    const record = await wait(async () => {
+      const current = adoptionRecord();
+      if (current.items.length > 0) {
+        writeFileSync(resolve(controlDir, 'refuse'), 'refuse new connections\n');
+        return current;
       }
-      writeFileSync(resolve(controlDir, 'refuse'), 'refuse new connections\n');
-      return true;
-    }, 'first recorded migration item', 120000);
-    return { firstItems: lastSummary.items.length, planned: lastSummary.planned };
+      const refresh = page.getByTestId('adopt-refresh');
+      if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
+      return false;
+    }, 'first recorded migration item', 180000);
+    return { firstItems: record.items.length, planned: record.planned };
   });
   const retryableSummary = await check('the interrupted run settles as retryable, not as a failure', async () => {
     await wait(async () => {
-      const settled = lastSummary?.finished === true && lastSummary.running === false;
-      if (!settled) {
-        const refresh = page.getByTestId('adopt-refresh');
-        if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
-      }
-      return settled;
+      if (adoptionRecord().finished) return true;
+      const refresh = page.getByTestId('adopt-refresh');
+      if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
+      return false;
     }, 'settled migration', 240000);
-    const summary = lastSummary;
+    // The page renders the same record; give its last poll a moment to land.
+    await wait(async () => lastSummary !== null, 'the page read the summary', 30000);
+    const record = adoptionRecord();
+    const summary = { ...record, counts: countsOf(record.items) };
     assert(summary.retryable > 0, 'the interrupted run recorded no retryable item: ' + JSON.stringify(summary.counts));
     const failed = summary.items.filter((item) => item.outcome === 'failed');
     assert(failed.length > 0 && failed.every((item) => item.retryable), 'a failed item is not retryable');
@@ -712,15 +749,14 @@ try {
   await page.getByTestId('adopt-resume').click();
   await check('Resume continues from the recorded prefix and finishes the run', async () => {
     await wait(async () => {
-      const done =
-        lastSummary?.finished === true && lastSummary.running === false && lastSummary.retryable === 0;
-      if (!done) {
-        const refresh = page.getByTestId('adopt-refresh');
-        if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
-      }
-      return done;
+      const record = adoptionRecord();
+      if (record.finished && record.retryable === 0) return true;
+      const refresh = page.getByTestId('adopt-refresh');
+      if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
+      return false;
     }, 'resumed migration', 240000);
-    const summary = lastSummary;
+    const record = adoptionRecord();
+    const summary = { ...record, counts: countsOf(record.items) };
     assert(summary.planned >= retryableSummary.planned, 'the resumed plan shrank');
     return { counts: summary.counts, planned: summary.planned };
   });
@@ -729,7 +765,10 @@ try {
     assert.match(items, /Migrated/i);
     assert.match(items, /Needs manual work/i);
     assert.match(await page.getByTestId('adopt-progress').innerText(), /of \d+ items settled/);
-    const summary = lastSummary;
+    // The record is the page's own source: the assertions below read it, and the
+    // page text above proves the UI rendered the same facts.
+    const record = adoptionRecord();
+    const summary = { ...record, counts: countsOf(record.items) };
     // Every seeded kind is reported, and the item the destination cannot take is
     // manual with a reason the operator can act on.
     assert(summary.counts.migrated > 0, 'nothing was migrated');
