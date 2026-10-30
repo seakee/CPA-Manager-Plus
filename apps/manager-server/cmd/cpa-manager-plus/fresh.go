@@ -106,7 +106,7 @@ type freshApplication struct {
 	// pluginCapability is the short-lived proof behind X-CPA-SUPPORT-PLUGIN.
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
-	legacy          http.Handler
+	legacy           http.Handler
 	// legacyCredentialGate serializes the legacy requests that present the saved
 	// management credential. A console page opens several at once, and five
 	// failed authentications ban this address, so the first refusal has to be
@@ -118,9 +118,9 @@ type freshApplication struct {
 	// accepts the connection and never answers must not stall every other console
 	// read. Zero means externalCredentialHeaderBudgetDefault.
 	credentialHeaderBudget time.Duration
-	legacyCollector *collectorservice.Service
-	collectorWorker *worker.CollectorWorker
-	identityWorker  *identityreconcile.Worker
+	legacyCollector        *collectorservice.Service
+	collectorWorker        *worker.CollectorWorker
+	identityWorker         *identityreconcile.Worker
 	// Usage chain: staged keys own source bindings, Collector events feed the
 	// canonical identity projection, and the workspace reads attributed usage.
 	managedSource   freshkeyapply.ManagedSource
@@ -174,7 +174,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	settings := setting.New(opened.DB, opened.Protector)
 	a := &freshApplication{
 		cfg: cfg, store: st, authority: fresh.New(st), routing: freshrouting.New(st, driver),
-		protector: opened.Protector,
+		protector:       opened.Protector,
 		runtimeSettings: settings, runtimeJournal: newFreshRuntimeJournal(opened.DB),
 		rejection: newExternalRejection(opened.DB),
 	}
@@ -319,7 +319,8 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		a.externalPermit = privateFreshExternalAdmitted
 	}
 	a.fixed = freshbootstrap.Handler{Authority: a.authority, Routing: a.routing, Current: a.current,
-		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime)}
+		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime),
+		Adoption: http.HandlerFunc(a.fixedAdoption)}
 	return a
 }
 
@@ -434,6 +435,11 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		// cutover, but is never an Admin credential for the Console/CPA proxy.
 		allowed := resource == "operation" && r.Method == http.MethodGet || !op.ProductComplete &&
 			(resource == "installation/runtime" && r.Method == http.MethodGet ||
+				// The per-item migration summary is the progress read of an
+				// adoption's own run, so the session that committed the
+				// adoption reads it exactly as it reads the runtime
+				// observation.
+				resource == "installation/adoption" && r.Method == http.MethodGet ||
 				(resource == "strategy" || resource == "complete") && r.Method == http.MethodPost)
 		if !allowed || a.authority.ValidateContinuation(record, continuation) != nil {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -474,6 +480,8 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		a.legacyResource(w, r, resource)
 	case resource == "installation/runtime" && r.Method == http.MethodGet:
 		a.installationRuntime(w, r, op)
+	case resource == "installation/adoption" && r.Method == http.MethodGet:
+		a.adoptionSummary(w, r, op)
 	case resource == "strategy" && r.Method == http.MethodPost:
 		a.executeStrategy(w, r, op)
 	case resource == "complete" && r.Method == http.MethodPost:
@@ -550,6 +558,28 @@ func (a *freshApplication) fixedRuntime(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	a.installationRuntime(w, r, op)
+}
+
+// fixedAdoption serves the migration summary on the pre-cutover carrier. It
+// authorizes with the installation session exactly as the runtime observation
+// does: an adoption's progress belongs to the claim that committed it. The
+// summary is reachable here only while the routing checkpoint is uncommitted —
+// freshbootstrap.Handler answers 404 for every resource once it is committed,
+// and fresh.Service.Authorize refuses a committed claim. After the cutover the
+// same `installation/adoption` resource is served by canonicalAPI: to that
+// session until the product completes, and to the Admin key afterwards.
+func (a *freshApplication) fixedAdoption(w http.ResponseWriter, r *http.Request) {
+	token, ok := freshbootstrap.SessionToken(r)
+	if !ok {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	op, err := a.authority.Authorize(r.Context(), token)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	a.adoptionSummary(w, r, op)
 }
 
 func (a *freshApplication) fixedStrategy(w http.ResponseWriter, r *http.Request) {

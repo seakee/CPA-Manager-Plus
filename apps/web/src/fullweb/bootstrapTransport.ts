@@ -2,6 +2,12 @@
 // secrets. This module belongs to the existing Full Web entry graph.
 import { validControlBasePath } from './routingContext';
 import {
+  ADOPT_SOURCE_CLASS,
+  parseAdoptionSummary,
+  type AdoptionDecision,
+  type AdoptionSummary,
+} from './freshAdoption';
+import {
   parseRuntimeJSON,
   runtimeRequestJSON,
   validRuntimeGeneration,
@@ -10,6 +16,16 @@ import {
 export const BOOTSTRAP_ROOT = '/.well-known/cpamp-bootstrap';
 export const BOOTSTRAP_UI = `${BOOTSTRAP_ROOT}/ui`;
 const API = `${BOOTSTRAP_ROOT}/api/v2/`;
+
+// The completion refusals an adoption's operator can act on. A code outside this
+// set never reaches the UI: the completion screen shows a message for a cause it
+// knows, and a plain failure otherwise.
+const COMPLETE_REFUSALS: Record<string, true> = {
+  adopt_migration_running: true,
+  adopt_migration_incomplete: true,
+  adopt_migration_retryable: true,
+  adopt_destination_unproven: true,
+};
 
 export interface FreshIdentity {
   admissionId: string;
@@ -35,6 +51,13 @@ export interface FreshStrategyCheckpoint {
   stage?: string;
   /** The persisted plugin opt-in of a New Managed install; absent means off. */
   pluginsEnabled?: boolean;
+  /** An adoption's recorded source class and connection identities. */
+  sourceClass?: string;
+  sourceIdentity?: string;
+  destinationConnectionIdentity?: string;
+  /** An adoption's discovered resources and their recorded dispositions. */
+  adoptionResources?: string[];
+  adoptionDecisions?: AdoptionDecision[];
 }
 
 export interface FreshOperation {
@@ -79,13 +102,29 @@ export class BootstrapTransportError extends Error {
   // Absent when the refusal carried none, which keeps a lost reply and a typed
   // refusal distinguishable.
   readonly code?: string;
+  // The bounded capability list a strategy blocker names
+  // ({ "Code": "…", "Unsupported": ["…"] }): what the refusal says is not
+  // supported, never free text.
+  readonly unsupported?: readonly string[];
+  // The item count of an `adopt_migration_retryable` completion refusal, which
+  // is the number the operator decides over.
+  readonly retryable?: number;
 
-  constructor(message: string, kind: BootstrapErrorKind, status?: number, code?: string) {
+  constructor(
+    message: string,
+    kind: BootstrapErrorKind,
+    status?: number,
+    code?: string,
+    unsupported?: readonly string[],
+    retryable?: number
+  ) {
     super(message);
     this.name = 'BootstrapTransportError';
     this.kind = kind;
     this.status = status;
     this.code = code;
+    this.unsupported = unsupported;
+    this.retryable = retryable;
   }
 }
 
@@ -211,11 +250,17 @@ function validOperationState(next: FreshOperation | undefined, previous?: FreshO
           ? validRuntimeGeneration(checkpoint.targetGeneration) &&
             /^sha256:[a-f0-9]{64}$/.test(checkpoint.targetArtifactId || '') &&
             ['staged', 'starting', 'committed'].includes(checkpoint.stage || '')
-          : checkpoint.strategy === 'connect_external' &&
-            checkpoint.targetGeneration === 1 &&
-            !checkpoint.targetArtifactId &&
-            /^external:sha256:[a-f0-9]{64}$/.test(checkpoint.targetIdentity) &&
-            ['validated', 'committed'].includes(checkpoint.stage || '')))) &&
+          : checkpoint.strategy === 'adopt_existing'
+            ? // An adoption has no starting stage: it is staged by the two-POST
+              // inventory, or committed once the destination is verified.
+              validRuntimeGeneration(checkpoint.targetGeneration) &&
+              /^sha256:[a-f0-9]{64}$/.test(checkpoint.targetArtifactId || '') &&
+              ['staged', 'committed'].includes(checkpoint.stage || '')
+            : checkpoint.strategy === 'connect_external' &&
+              checkpoint.targetGeneration === 1 &&
+              !checkpoint.targetArtifactId &&
+              /^external:sha256:[a-f0-9]{64}$/.test(checkpoint.targetIdentity) &&
+              ['validated', 'committed'].includes(checkpoint.stage || '')))) &&
     (!previousCheckpoint?.strategy ||
       (checkpoint?.strategy === previousCheckpoint.strategy &&
         checkpoint.targetIdentity === previousCheckpoint.targetIdentity &&
@@ -279,6 +324,20 @@ export function consumeHandoff(
   }
 }
 
+// The exact field set of an adoption strategy body. The carrier adds the
+// identity and the revision, so anything else is a body this client never
+// builds and the server would refuse.
+const ADOPT_BODY_FIELDS: Record<string, true> = {
+  strategy: true,
+  adoptSourceClass: true,
+  baseUrl: true,
+  managementKey: true,
+  expectedRuntimeIdentity: true,
+  expectedRuntimeGeneration: true,
+  expectedArtifactId: true,
+  pluginsEnabled: true,
+};
+
 const methods = {
   'claim/exchange': 'POST',
   operation: 'GET',
@@ -288,6 +347,7 @@ const methods = {
   'routing/activate': 'POST',
   strategy: 'POST',
   'installation/runtime': 'GET',
+  'installation/adoption': 'GET',
   complete: 'POST',
 } as const;
 type Resource = keyof typeof methods;
@@ -302,7 +362,13 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       !['http:', 'https:'].includes(window.location.protocol) ||
       !Object.prototype.hasOwnProperty.call(methods, resource) ||
       (canonicalBase &&
-        !['operation', 'strategy', 'installation/runtime', 'complete'].includes(resource)) ||
+        ![
+          'operation',
+          'strategy',
+          'installation/runtime',
+          'installation/adoption',
+          'complete',
+        ].includes(resource)) ||
       (resource !== 'claim/exchange' && !token)
     ) {
       throw new BootstrapTransportError('Bootstrap authority unavailable', 'authority');
@@ -331,13 +397,34 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       throw new BootstrapTransportError('Bootstrap transport unavailable', 'transport');
     }
     if (!response.ok) {
-      // The Fresh strategy adapter refuses with a typed, bounded blocker body.
-      // Preserve its code so a typed refusal stays distinguishable from a reply
-      // that was lost after the server may have acted.
+      // Two bounded refusal envelopes exist, and they are read by the call that
+      // can act on them:
+      //  - a strategy blocker answers `{"Code": "…", "Unsupported": […]}`;
+      //  - an adoption completion answers `{"code": "…", "retryable": N}`.
+      // Preserving them keeps a typed refusal distinguishable from a reply that
+      // was lost after the server may have acted.
       let code: string | undefined;
+      let unsupported: readonly string[] | undefined;
+      let retryable: number | undefined;
       try {
-        const refusal = (await response.json()) as { Code?: unknown };
-        if (typeof refusal?.Code === 'string' && refusal.Code) code = refusal.Code;
+        const refusal = (await response.json()) as {
+          Code?: unknown;
+          Unsupported?: unknown;
+          code?: unknown;
+          retryable?: unknown;
+        };
+        if (resource === 'complete') {
+          if (typeof refusal?.code === 'string' && COMPLETE_REFUSALS[refusal.code] === true)
+            code = refusal.code;
+          if (code && Number.isSafeInteger(refusal.retryable) && (refusal.retryable as number) > 0)
+            retryable = refusal.retryable as number;
+        } else {
+          if (typeof refusal?.Code === 'string' && refusal.Code) code = refusal.Code;
+          if (Array.isArray(refusal?.Unsupported))
+            unsupported = refusal.Unsupported.filter(
+              (entry): entry is string => typeof entry === 'string' && !!entry && entry.length <= 64
+            );
+        }
       } catch {
         /* A refusal without a bounded envelope stays a plain status failure. */
       }
@@ -345,7 +432,9 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
         'Bootstrap request unavailable',
         classifyStatus(response.status),
         response.status,
-        code
+        code,
+        unsupported,
+        retryable
       );
     }
     try {
@@ -580,6 +669,24 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       if (!operation?.adminInitialized) {
         throw new BootstrapTransportError('Installation authority unavailable', 'authority');
       }
+      // An adoption body is the whole two-POST contract, so it is validated as a
+      // whole before it leaves the browser: the server decodes it strictly, and
+      // the destination snapshot is keyed by it, so a malformed body is a
+      // request the server would refuse rather than an attempt worth sending.
+      if (body.strategy === 'adopt_existing') {
+        const adopt = body as Record<string, unknown>;
+        if (
+          Object.keys(adopt).some((key) => !ADOPT_BODY_FIELDS[key]) ||
+          adopt.adoptSourceClass !== ADOPT_SOURCE_CLASS ||
+          typeof adopt.baseUrl !== 'string' ||
+          typeof adopt.managementKey !== 'string' ||
+          typeof adopt.pluginsEnabled !== 'boolean' ||
+          typeof adopt.expectedRuntimeIdentity !== 'string' ||
+          typeof adopt.expectedArtifactId !== 'string' ||
+          !validRuntimeGeneration(adopt.expectedRuntimeGeneration)
+        )
+          throw new BootstrapTransportError('Adoption request unavailable', 'bad_request');
+      }
       const next = await request<FreshOperation & { initialClientKey?: unknown }>('strategy', {
         ...body,
         identity: operation.identity,
@@ -606,11 +713,11 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       operation = next;
       return { operation: next, initialClientKey: delivered ?? '' };
     },
-    async complete(): Promise<FreshOperation> {
+    async complete(body: { acceptRetryable?: true } = {}): Promise<FreshOperation> {
       if (!canonicalBase || !operation?.adminInitialized) {
         throw new BootstrapTransportError('Installation authority unavailable', 'authority');
       }
-      const next = await request<FreshOperation>('complete', {});
+      const next = await request<FreshOperation>('complete', body);
       if (
         !sameIdentity(next?.identity, operation.identity) ||
         !validOperationState(next, operation) ||
@@ -620,6 +727,17 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       }
       operation = next;
       return next;
+    },
+    async readAdoption(): Promise<AdoptionSummary> {
+      if (!operation?.adminInitialized) {
+        throw new BootstrapTransportError('Installation authority unavailable', 'authority');
+      }
+      const next = await request<unknown>('installation/adoption');
+      try {
+        return parseAdoptionSummary(next);
+      } catch {
+        throw new BootstrapTransportError('Adoption response unavailable', 'response');
+      }
     },
     request,
     clear() {
