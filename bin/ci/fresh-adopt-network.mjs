@@ -805,8 +805,10 @@ try {
     assert.match(items, /Migrated/i);
     assert.match(items, /Needs manual work/i);
     assert.match(await page.getByTestId('adopt-progress').innerText(), /of \d+ items settled/);
-    // The record is the page's own source: the assertions below read it, and the
-    // page text above proves the UI rendered the same facts.
+    // The page's own projection is what the operator saw; the text above proves it
+    // rendered the same facts these assertions read.
+    assert(lastSummary, 'the page never read the summary');
+    const summary = lastSummary;
     // Every seeded kind is reported, and the item the destination cannot take is
     // manual with a reason the operator can act on.
     assert(summary.counts.migrated > 0, 'nothing was migrated');
