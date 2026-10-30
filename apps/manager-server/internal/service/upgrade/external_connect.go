@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -53,8 +52,6 @@ const (
 	// externalConnectEvidenceVersion is the evidence contract. An unknown
 	// version is refused rather than guessed.
 	externalConnectEvidenceVersion = 1
-	// externalModelSurfaceLimit bounds the model list read.
-	externalModelSurfaceLimit = 1 << 20
 	// externalConnectAction is the action a version refusal names. It is part of
 	// the refusal's operator text, not a suggestion: there is no way past the
 	// stop except a CPA that serves the v8 contract.
@@ -76,14 +73,20 @@ const (
 // carries no credential: the address digest (the identity) and the generation
 // are the comparable facts, exactly as freshkeyapply derives them.
 type ExternalConnectEvidence struct {
-	Version      int    `json:"version"`
-	BaseURL      string `json:"baseUrl"`
-	Identity     string `json:"identity"`
-	Generation   string `json:"generation"`
-	CPAVersion   string `json:"cpaVersion,omitempty"`
-	Support      string `json:"support"`
-	ClientKeys   int    `json:"clientKeys"`
-	ObservedAtMS int64  `json:"observedAtMs"`
+	Version    int    `json:"version"`
+	BaseURL    string `json:"baseUrl"`
+	Identity   string `json:"identity"`
+	Generation string `json:"generation"`
+	// ServerFingerprint is informational: the digest of the version the CPA
+	// advertised and the configuration digest read beside it. Two CPAs can hide
+	// behind one URL, and this is the fact that tells them apart on the page. It
+	// is never the moved-target decision: the identity stays address-based, so a
+	// CPA that restarts with a new build does not strand the installation.
+	ServerFingerprint string `json:"serverFingerprint,omitempty"`
+	CPAVersion        string `json:"cpaVersion,omitempty"`
+	Support           string `json:"support"`
+	ClientKeys        int    `json:"clientKeys"`
+	ObservedAtMS      int64  `json:"observedAtMs"`
 }
 
 // ExternalConnectOptions is one invocation of the External connect step.
@@ -109,6 +112,11 @@ type ExternalConnectOptions struct {
 	readExternalKeys func(ctx context.Context, baseURL, managementKey string) (cpa.ExternalKeySnapshot, error)
 	// proveModelSurface is the "does the gateway answer" seam.
 	proveModelSurface func(ctx context.Context, baseURL, clientKey string) error
+	// readV8Config is the strict v8 configuration proof seam. Production leaves
+	// it nil and cpa.ReadV8Config runs: an External CPA that answers /v8 but
+	// whose document is not a v8 configuration is not the contract this Manager
+	// writes, and "any 200" is not a proof of it.
+	readV8Config func(ctx context.Context, baseURL, managementKey string) (cpa.V8ConfigObservation, error)
 	// externalIdentity is the identity seam; production derives the address
 	// digest through freshkeyapply.
 	externalIdentity func(baseURL string) string
@@ -138,7 +146,16 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	if err != nil {
 		return ExternalConnectResult{}, err
 	}
-	baseURL, err := cpa.NormalizeV8BaseURL(strings.TrimSpace(options.BaseURL))
+	normalized, err := cpa.NormalizeV8BaseURL(strings.TrimSpace(options.BaseURL))
+	if err != nil {
+		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
+			"the CPA address is not a usable http(s) endpoint; nothing was connected and the operation did not advance", err)
+	}
+	// The address is recorded in its one canonical spelling, so the identity this
+	// step derives is the identity every other producer derives for the same CPA:
+	// a capitalized host, an explicit default port and a trailing slash are one
+	// destination, and hashing the operator's spelling would make them three.
+	baseURL, err := identity.CanonicalExternalURL(normalized)
 	if err != nil {
 		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
 			"the CPA address is not a usable http(s) endpoint; nothing was connected and the operation did not advance", err)
@@ -200,6 +217,10 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 			cpa.ErrExternalVersionUnsupported))
 	}
 
+	if err := externalConnectConfig(ctx, options, baseURL, managementKey); err != nil {
+		return ExternalConnectResult{}, externalConnectRefused(ctx, paths.Database, err)
+	}
+
 	snapshot, err := externalConnectKeys(ctx, options, baseURL, managementKey)
 	if err != nil {
 		return ExternalConnectResult{}, externalConnectRefused(ctx, paths.Database, err)
@@ -218,19 +239,20 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	}
 
 	evidence = ExternalConnectEvidence{
-		Version:      externalConnectEvidenceVersion,
-		BaseURL:      baseURL,
-		Identity:     identity,
-		Generation:   identity,
-		CPAVersion:   strings.TrimSpace(report.Version),
-		Support:      report.Support,
-		ClientKeys:   len(snapshot.Keys),
-		ObservedAtMS: time.Now().UnixMilli(),
+		Version:           externalConnectEvidenceVersion,
+		BaseURL:           baseURL,
+		Identity:          identity,
+		Generation:        identity,
+		ServerFingerprint: freshkeyapply.ExternalServerFingerprint(report.Version, snapshot.SourceSHA256),
+		CPAVersion:        strings.TrimSpace(report.Version),
+		Support:           report.Support,
+		ClientKeys:        len(snapshot.Keys),
+		ObservedAtMS:      time.Now().UnixMilli(),
 	}
 	if err := writeExternalConnectEvidence(targetRoot, evidence); err != nil {
 		return ExternalConnectResult{}, err
 	}
-	operation, err := recordExternalConnect(ctx, paths.Database, recorded)
+	operation, err := recordExternalConnect(ctx, paths.Database)
 	if err != nil {
 		return ExternalConnectResult{}, err
 	}
@@ -255,6 +277,46 @@ func externalConnectVersion(ctx context.Context, options ExternalConnectOptions,
 		}
 	}
 	return report, nil
+}
+
+// externalConnectConfig proves the target is a v8 configuration, not merely an
+// endpoint that answers.
+//
+// The version report classifies what the CPA advertises; it does not inspect the
+// document this Manager would write into. A translated or proxied target can
+// advertise v8 — or answer any 200 — while its configuration is a v7 document,
+// and connecting to it would land the v2 configuration in a contract that cannot
+// hold it. cpa.ReadV8Config is the strict reader the Fresh External path already
+// uses: exactly one authenticated read, version 8, a bounded port and a non-empty
+// auth-dir, or a refusal.
+func externalConnectConfig(ctx context.Context, options ExternalConnectOptions, baseURL, managementKey string) error {
+	read := options.readV8Config
+	if read == nil {
+		read = cpa.ReadV8Config
+	}
+	_, err := read(ctx, baseURL, managementKey)
+	if err == nil {
+		return nil
+	}
+	var readErr cpa.V8ReadError
+	if errors.As(err, &readErr) {
+		switch readErr {
+		case cpa.V8AuthenticationRejected:
+			return newUpgradeError(UpgradeErrorExternalManagementRejected, externalConnectRejectedDetail, err)
+		case cpa.V8OwnerUpgradeRequired, cpa.V8AdoptionSourceEmpty:
+			// The management surface does not serve the v8 document at all: the
+			// owner has to upgrade the CPA before this Manager can write into it.
+			return newUpgradeError(UpgradeErrorExternalVersionUnsupported, externalConnectAction, err)
+		case cpa.V8InvalidConfig, cpa.V8InvalidConnection:
+			// The endpoint answers but its configuration is not the v8 contract.
+			// Naming the version would be a guess; the fact is that the document
+			// cannot hold the write.
+			return newUpgradeError(UpgradeErrorExternalVersionUnsupported,
+				fmt.Sprintf("the CPA at %s answered, but its configuration is not the v8 document this Manager writes; nothing was connected and the operation did not advance. %s",
+					redactExternalAddress(baseURL), externalConnectAction), err)
+		}
+	}
+	return externalConnectProbeError(err)
 }
 
 // externalConnectKeys performs the second authenticated read: it proves the key
@@ -283,49 +345,21 @@ func externalConnectKeys(ctx context.Context, options ExternalConnectOptions, ba
 // externalConnectModelSurface asks the gateway behind the CPA for its model
 // list. The client key is optional: a CPA with no client keys serves the list
 // anonymously, and one with keys answers the first of them.
+//
+// The probe travels on the External transport, never on a fresh default client:
+// the request carries a client credential, and a default transport would honour
+// HTTP_PROXY and hand that credential to whatever host the environment names,
+// then report the proxy's answer as the CPA's. The same file's other External
+// reads already build this transport for the same reason.
 func externalConnectModelSurface(ctx context.Context, options ExternalConnectOptions, baseURL, clientKey string) error {
 	if options.proveModelSurface != nil {
 		return options.proveModelSurface(ctx, baseURL, clientKey)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/models", nil)
+	endpoint, err := cpa.NormalizeV8BaseURL(baseURL)
 	if err != nil {
 		return cpa.ErrProofUnavailable
 	}
-	if clientKey != "" {
-		request.Header.Set("Authorization", "Bearer "+clientKey)
-	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Cache-Control", "no-store")
-	client := &http.Client{
-		Timeout:       5 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return cpa.ErrProofUnavailable
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		return cpa.ErrProofUnavailable
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, externalModelSurfaceLimit+1))
-	if err != nil || len(body) > externalModelSurfaceLimit {
-		return cpa.ErrProofUnavailable
-	}
-	var models struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if json.Unmarshal(body, &models) != nil {
-		return cpa.ErrProofUnavailable
-	}
-	for _, entry := range models.Data {
-		if strings.TrimSpace(entry.ID) != "" {
-			return nil
-		}
-	}
-	return cpa.ErrProofUnavailable
+	return cpa.NewTransportForEndpoint(endpoint).ExternalModelSurface(ctx, clientKey)
 }
 
 // externalConnectProbeError maps a probe failure onto the External vocabulary.
@@ -390,32 +424,53 @@ func externalConnectRefusalDetail(err error) string {
 }
 
 // recordExternalConnect writes the two domains this step proved and the stage
-// that authorizes them in a single row write. It starts from the recorded row so
-// the provenance a later rollback relies on is carried over untouched, and it
-// clears any refusal a previous run recorded.
-func recordExternalConnect(ctx context.Context, databasePath string, recorded model.UpgradeOperation) (model.UpgradeOperation, error) {
+// that authorizes them in one transaction.
+//
+// It must not rebuild the row from the snapshot the step read: the three network
+// probes above are unbounded in time, and anything that advanced the operation
+// while they ran — the verify step, a rollback — would be erased by writing that
+// snapshot back, including the domains it proves. The transaction therefore
+// re-reads the row under the write lock, and the forward-only rule refuses a stage
+// that moved past this one rather than rewinding it. The cleared refusal commits
+// beside the marks for the same reason.
+func recordExternalConnect(ctx context.Context, databasePath string) (model.UpgradeOperation, error) {
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("open the v2 database to record the External connection: %w", err)
 	}
 	defer func() { _ = db.Close() }()
-	recorded.MarkDomain(model.UpgradeDomainCPAConfig)
-	recorded.MarkDomain(model.UpgradeDomainIdentity)
-	recorded.Stage = model.UpgradeStageExternalConnect
-	recorded.ErrorCode = ""
-	recorded.ErrorDetail = ""
-	recorded.UpdatedAtMS = time.Now().UnixMilli()
-	if err := upgradeoperation.New(db).Put(ctx, recorded); err != nil {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("begin recording the External connection: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	operation, err := upgradeoperation.AdvanceTx(ctx, tx, model.UpgradeDomainCPAConfig, model.UpgradeStageExternalConnect)
+	if err != nil {
+		return model.UpgradeOperation{}, mapExternalConnectRecordError(err)
+	}
+	operation, err = upgradeoperation.AdvanceTx(ctx, tx, model.UpgradeDomainIdentity, model.UpgradeStageExternalConnect)
+	if err != nil {
+		return model.UpgradeOperation{}, mapExternalConnectRecordError(err)
+	}
+	if err := upgradeoperation.ClearErrorTx(ctx, tx); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the External connection: %w", err)
 	}
-	operation, found, err := upgradeoperation.New(db).Get(ctx)
-	if err != nil {
-		return model.UpgradeOperation{}, err
-	}
-	if !found {
-		return model.UpgradeOperation{}, errors.New("the External connection row disappeared after it was recorded")
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("record the External connection: %w", err)
 	}
 	return operation, nil
+}
+
+// mapExternalConnectRecordError turns the row's own refusal into the typed step
+// refusal. A stage that moved while the probes ran is not an environment failure:
+// the operation went on without this step, so retrying it is not what the
+// operator should do and the wizard must not offer the step again.
+func mapExternalConnectRecordError(err error) error {
+	if errors.Is(err, upgradeoperation.ErrStageRegression) {
+		return newUpgradeError(UpgradeErrorExternalNotApplicable,
+			"the operation advanced past the External connect step while it was proving the CPA; the step's result cannot be recorded and nothing was connected", err)
+	}
+	return fmt.Errorf("record the External connection: %w", err)
 }
 
 func externalConnectResult(operation model.UpgradeOperation, evidence ExternalConnectEvidence, already bool) ExternalConnectResult {

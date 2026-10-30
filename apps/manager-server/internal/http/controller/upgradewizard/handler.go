@@ -143,13 +143,26 @@ var externalConnectRefusals = map[string]bool{
 	"external_target_moved":            true,
 }
 
+// externalConnectStages are the stages a recorded External refusal can be sitting
+// on. The step legitimately runs from the three of them — the copy-in of a legacy
+// second volume finished, reconciliation finished, or the CPA import finished —
+// and it never advances the row, so a refusal is found on whichever stage the
+// operator ran it from. Offering reconciliation from any of them would send the
+// operator to a step that is already finished and has nothing to do with the
+// standing stop.
+var externalConnectStages = map[string]bool{
+	StageCopyIn:    true,
+	StageReconcile: true,
+	StageCPAImport: true,
+}
+
 // nextActionForRecordedStage refines the stage table with the refusal the row
-// recorded. An operation parked at cpa_import by an External CPA it could not
-// connect to must offer the External connect step: reconciliation is not what
-// resolves a v7 CPA or a rejected key, and offering it would send the operator
-// past a stop that is still standing.
+// recorded. An operation parked on any stage the External connect step runs from
+// by an External CPA it could not connect to must offer that step:
+// reconciliation is not what resolves a v7 CPA or a rejected key, and offering it
+// would send the operator past a stop that is still standing.
 func nextActionForRecordedStage(stage, errorCode string) string {
-	if stage == StageCPAImport && externalConnectRefusals[errorCode] {
+	if externalConnectStages[stage] && externalConnectRefusals[errorCode] {
 		return ActionExternalConnect
 	}
 	return nextAction(stage)

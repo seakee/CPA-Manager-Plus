@@ -19,14 +19,22 @@ const cliManagementKey = "management-key"
 // list. rejectKey answers 401 to every authenticated read.
 type externalCPAServer struct {
 	*httptest.Server
-	version   string
-	rejectKey bool
-	requests  []string
+	version string
+	// configDocument is what /v8/management/config answers. It defaults to a v8
+	// document; a translated target answers a v7 one while still advertising v8.
+	configDocument string
+	rejectKey      bool
+	requests       []string
 }
+
+// v8ConfigDocument is the strict v8 configuration the connect step requires: the
+// version, a bounded port, an auth directory and the client-key list.
+const v8ConfigDocument = `{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"/auth"},` +
+	`"access":{"api-keys":["client-key-1"]}}`
 
 func newExternalCPAServer(t *testing.T, version string) *externalCPAServer {
 	t.Helper()
-	server := &externalCPAServer{version: version}
+	server := &externalCPAServer{version: version, configDocument: v8ConfigDocument}
 	server.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.requests = append(server.requests, r.Method+" "+r.URL.Path)
 		if r.URL.Path == "/v1/models" {
@@ -45,6 +53,9 @@ func newExternalCPAServer(t *testing.T, version string) *externalCPAServer {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
+		case "/v8/management/config":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(server.configDocument))
 		case "/v8/management/config/access/api-keys":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`["client-key-1"]`))
@@ -185,6 +196,51 @@ func TestExternalConnectCLIRejectedKeyIsNotAVersionProblem(t *testing.T) {
 	}
 	if strings.Contains(output.ErrorCode, "version") {
 		t.Fatalf("a rejected key was reported as a version problem: %q", output.ErrorCode)
+	}
+}
+
+// TestExternalConnectCLIRefusesATranslatedV7Document drives the strict document
+// read through the real path: a target that advertises v8 and answers /v8 with a
+// v7 configuration is not connected, because the document this Manager would
+// write into is the contract that has to accept the write.
+func TestExternalConnectCLIRefusesATranslatedV7Document(t *testing.T) {
+	target := copiedTarget(t)
+	server := newExternalCPAServer(t, "v8.0.13")
+	server.configDocument = `{"config-version":7,"server":{"port":8317},"oauth":{"auth-dir":"/auth"},` +
+		`"access":{"api-keys":["client-key-1"]}}`
+
+	code, stdout, stderr := run(t, "external-connect", "--json",
+		"--target", target, "--cpa-base-url", server.URL,
+		"--management-key-file", managementKeyFile(t, cliManagementKey))
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr)
+	}
+	var output externalConnectOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output: %v; output: %s", err, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorExternalVersionUnsupported) {
+		t.Fatalf("error code = %q", output.ErrorCode)
+	}
+	if !strings.Contains(output.Error, "upgrade the CPA") {
+		t.Fatalf("refusal does not name the action: %q", output.Error)
+	}
+	// A refused document is not written to: no key write reached the CPA.
+	for _, request := range server.requests {
+		if strings.HasPrefix(request, "PUT ") || strings.HasPrefix(request, "POST ") {
+			t.Fatalf("a refused document still wrote to the CPA: %v", server.requests)
+		}
+	}
+	code, statusJSON, stderr := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite"))
+	if code != 0 {
+		t.Fatalf("status exit code = %d; stderr: %s", code, stderr)
+	}
+	var status statusOutput
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.Operation == nil || status.Operation.Stage != "copy_in" {
+		t.Fatalf("a refused document advanced the row: %+v", status.Operation)
 	}
 }
 

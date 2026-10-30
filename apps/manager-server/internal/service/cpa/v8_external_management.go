@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 )
 
 // ErrManagementRejected is CPA's own 401 to an External management request: the
@@ -124,6 +125,42 @@ func (t *Transport) ExternalWriteKeySet(ctx context.Context, management string, 
 		return ErrManagementClientForbidden
 	}
 	return ErrApplyUnknown
+}
+
+// ExternalModelSurface proves the gateway behind the External CPA serves the
+// model list, over the same transport every other External read and write uses.
+//
+// The probe carries a client credential, so where it goes is as much a security
+// fact as what it answers: a probe built on the default transport would honour
+// HTTP_PROXY and hand that credential to whatever the environment names. This
+// method therefore refuses to exist outside this Transport, whose client is
+// direct, unbuffered by a proxy, unbounded in no dimension and redirect-free.
+//
+// The client key is optional: a CPA with no client keys serves the list
+// anonymously. A non-200 answer, an unparsable body or an empty list is
+// ErrProofUnavailable; the caller maps that onto the External vocabulary.
+func (t *Transport) ExternalModelSurface(ctx context.Context, clientKey string) error {
+	if t == nil || t.client == nil || (clientKey != "" && !validExternalKey(clientKey)) {
+		return ErrProofUnavailable
+	}
+	code, body, err := t.request(ctx, http.MethodGet, "/v1/models", clientKey, nil)
+	if err != nil || code != http.StatusOK {
+		return ErrProofUnavailable
+	}
+	var models struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(body, &models) != nil {
+		return ErrProofUnavailable
+	}
+	for _, entry := range models.Data {
+		if strings.TrimSpace(entry.ID) != "" {
+			return nil
+		}
+	}
+	return ErrProofUnavailable
 }
 
 // validExternalKey accepts the client credentials a CPA v8 configuration stores:

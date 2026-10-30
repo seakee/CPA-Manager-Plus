@@ -43,8 +43,31 @@ func TestNextActionForAnExternalConnectRefusal(t *testing.T) {
 			want:      ActionReconcile,
 		},
 		{
-			name:      "the same code at another stage keeps the stage table",
+			// The step runs from the copy-in of a second legacy volume as well as
+			// from the CPA import, so a stop recorded there is the same standing
+			// stop and must not offer the reconciliation that already finished.
+			name:      "v7 cpa after copy-in",
+			stage:     StageCopyIn,
+			errorCode: "external_cpa_version_unsupported",
+			want:      ActionExternalConnect,
+		},
+		{
+			name:      "rejected key after reconciliation",
 			stage:     StageReconcile,
+			errorCode: "external_management_key_rejected",
+			want:      ActionExternalConnect,
+		},
+		{
+			name:      "moved target after reconciliation",
+			stage:     StageReconcile,
+			errorCode: "external_target_moved",
+			want:      ActionExternalConnect,
+		},
+		{
+			// A stage the step cannot run from keeps the stage table: the code
+			// there describes something other than this step's refusal.
+			name:      "the same code at a stage the step cannot run from",
+			stage:     StageVerify,
 			errorCode: "external_cpa_version_unsupported",
 			want:      ActionReconcile,
 		},
@@ -102,5 +125,48 @@ func TestStatusProjectsAStoppedExternalConnect(t *testing.T) {
 	}
 	if status.ErrorDetail == "" {
 		t.Fatalf("the refusal detail was dropped: %+v", status)
+	}
+}
+
+// TestStatusProjectsAStoppedExternalConnectFromEveryEntryStage reads the route
+// from each stage the step legitimately runs from. The step never advances the
+// row, so a refusal recorded after the copy-in of a second legacy volume or after
+// reconciliation sits on that stage; the wizard must still offer the step that
+// resolves it instead of a step the operator already finished.
+func TestStatusProjectsAStoppedExternalConnectFromEveryEntryStage(t *testing.T) {
+	for _, stage := range []model.UpgradeStage{
+		model.UpgradeStageCopyIn,
+		model.UpgradeStageReconcile,
+		model.UpgradeStageCPAImport,
+	} {
+		t.Run(string(stage), func(t *testing.T) {
+			database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{
+				Stage:          stage,
+				DomainsDone:    []string{model.UpgradeDomainSourceCopy},
+				SourceKind:     "upgraded-legacy",
+				ErrorCode:      "external_cpa_version_unsupported",
+				ErrorDetail:    "the CPA answered version v7.2.1, which is not the v8 management contract this Manager writes",
+				ManualItems:    []string{},
+				Reconciliation: json.RawMessage(`{}`),
+			})
+			handler := &Handler{
+				LegacyRoot: func() string { return "" },
+				Database:   func() string { return database },
+			}
+			_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+			var status statusDocument
+			if err := json.Unmarshal([]byte(body), &status); err != nil {
+				t.Fatalf("decode status: %v; body: %s", err, body)
+			}
+			if !status.Recorded || status.Stage != string(stage) {
+				t.Fatalf("status = %+v", status)
+			}
+			if status.NextAction != ActionExternalConnect {
+				t.Fatalf("next action at %q = %q, want %q", stage, status.NextAction, ActionExternalConnect)
+			}
+			if status.ErrorCode != "external_cpa_version_unsupported" {
+				t.Fatalf("error code = %q", status.ErrorCode)
+			}
+		})
 	}
 }

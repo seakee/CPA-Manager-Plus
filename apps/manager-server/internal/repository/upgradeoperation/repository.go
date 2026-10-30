@@ -382,6 +382,28 @@ func (r *Repository) RecordError(ctx context.Context, code, detail string) error
 	return nil
 }
 
+// ClearErrorTx clears a refusal inside the caller's transaction, so a step that
+// succeeded can commit the cleared refusal beside the stage it advanced to. The
+// refusal is the durable statement that the step did not advance; leaving it
+// behind after a successful run would keep telling the wizard a stop is still
+// standing. Only the error columns and the update time move.
+func ClearErrorTx(ctx context.Context, tx Tx) error {
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = null, error_detail = null, updated_at_ms = ? where id = 1`,
+		time.Now().UnixMilli())
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: no operation row to clear the refusal on", ErrInvalidRow)
+	}
+	return nil
+}
+
 // RecordReconciliation stores the reconciliation report on the single row
 // without rebuilding it: Put would clear the provenance a completed operation
 // must keep carrying, so this is the only writer for this column. A row must

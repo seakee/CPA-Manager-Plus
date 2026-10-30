@@ -17,14 +17,15 @@ const externalTestKey = "external-management-key"
 
 // externalTarget is one invocation's inputs plus the seams a test replaces.
 type externalTarget struct {
-	copied   copiedVolume
-	options  ExternalConnectOptions
-	version  cpa.ExternalVersionReport
-	probErr  error
-	keys     []string
-	keyErr   error
-	modelErr error
-	probes   int
+	copied    copiedVolume
+	options   ExternalConnectOptions
+	version   cpa.ExternalVersionReport
+	probErr   error
+	keys      []string
+	keyErr    error
+	configErr error
+	modelErr  error
+	probes    int
 }
 
 // newExternalTarget builds a recorded copy-in and an External connect pointing
@@ -51,6 +52,12 @@ func newExternalTarget(t *testing.T) *externalTarget {
 			}
 			return cpa.ExternalKeySnapshot{Keys: target.keys, SourceSHA256: strings.Repeat("a", 64)}, nil
 		},
+		readV8Config: func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
+			if target.configErr != nil {
+				return cpa.V8ConfigObservation{}, target.configErr
+			}
+			return cpa.V8ConfigObservation{BaseURL: "https://cpa.example", ClientKeyCount: len(target.keys)}, nil
+		},
 		proveModelSurface: func(context.Context, string, string) error { return target.modelErr },
 	}
 	return target
@@ -61,6 +68,32 @@ func (e *externalTarget) databasePath() string { return e.copied.databasePath() 
 func (e *externalTarget) connect(t *testing.T) (ExternalConnectResult, error) {
 	t.Helper()
 	return ExternalConnect(context.Background(), e.options)
+}
+
+// connectWith runs the step with the harness's seams but the caller's inputs, so
+// a test can point one recorded copy-in at another CPA.
+func (e *externalTarget) connectWith(t *testing.T, options ExternalConnectOptions) (ExternalConnectResult, error) {
+	t.Helper()
+	if options.observeExternalVersion == nil {
+		options.observeExternalVersion = e.options.observeExternalVersion
+	}
+	if options.readExternalKeys == nil {
+		options.readExternalKeys = e.options.readExternalKeys
+	}
+	if options.proveModelSurface == nil {
+		options.proveModelSurface = e.options.proveModelSurface
+	}
+	return ExternalConnect(context.Background(), options)
+}
+
+// newExternalTargetAt reconnects the same recorded copy-in to another address.
+func newExternalTargetAt(t *testing.T, target *externalTarget, address string) (ExternalConnectResult, error) {
+	t.Helper()
+	return target.connectWith(t, ExternalConnectOptions{
+		TargetRoot:    target.copied.target,
+		BaseURL:       address,
+		ManagementKey: externalTestKey,
+	})
 }
 
 // TestExternalConnectV8RecordsIdentity proves the v8 path: the row advances to
