@@ -5054,5 +5054,20 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "provider_names": {
+    "title": "供應商群組名稱",
+    "hint": "將信箱或備註儲存為 CPA v8 原生群組名稱。名稱僅供顯示，不作為路由身分。重新整理會捨棄目前草稿。",
+    "refresh": "重新整理名稱",
+    "read_failed": "無法讀取名稱，需要支援設定 ETag 的 CPA v8。",
+    "save_failed": "無法確認儲存結果，草稿已保留。請先重新整理再編輯，不會自動重試寫入。",
+    "loading": "正在讀取供應商名稱…",
+    "read_only": "目前安裝為唯讀。",
+    "empty": "尚無 API Key 供應商群組。",
+    "unnamed": "未命名群組",
+    "edit": "編輯名稱",
+    "name": "信箱 / 顯示名稱",
+    "save": "儲存",
+    "cancel": "取消"
   }
 }
