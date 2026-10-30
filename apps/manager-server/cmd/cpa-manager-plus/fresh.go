@@ -452,6 +452,8 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	switch {
+	case resource == "providers/names":
+		a.providerNames(w, r, op.ProductComplete)
 	case resource == "gateway/config" || strings.HasPrefix(resource, "gateway/config/"):
 		a.gatewayConfiguration(w, r, strings.TrimPrefix(strings.TrimPrefix(resource, "gateway/config"), "/"))
 	case resource == "plugins/runtime" || strings.HasPrefix(resource, "plugins/runtime/"):

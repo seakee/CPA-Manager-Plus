@@ -5062,5 +5062,20 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "provider_names": {
+    "title": "Provider group names",
+    "hint": "Save an email or label in CPA v8 native group names. Names are display metadata, never routing identities. Refresh discards the current draft.",
+    "refresh": "Refresh names",
+    "read_failed": "Names unavailable. CPA v8 with configuration ETag support is required.",
+    "save_failed": "Save could not be confirmed. Your draft is kept. Refresh before another edit; the write will not be retried.",
+    "loading": "Loading provider names…",
+    "read_only": "This installation is read-only.",
+    "empty": "No API key provider groups.",
+    "unnamed": "Unnamed group",
+    "edit": "Edit name",
+    "name": "Email / display name",
+    "save": "Save",
+    "cancel": "Cancel"
   }
 }
