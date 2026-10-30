@@ -201,6 +201,39 @@ func TestPrepareRollbackRefusesAnUnpinnableImage(t *testing.T) {
 		t.Fatalf("latest override = %v, want %v", err, ErrRollbackImageUnpinned)
 	}
 	assertNoPlan(t, fixture.targetRoot)
+
+	// A repository without a version, an empty tag and a digest reference are
+	// all refused instead of being turned into a moving reference.
+	for _, override := range []string{
+		LegacyImageRepository,
+		LegacyImageRepository + ":",
+		LegacyImageRepository + "@sha256:" + strings.Repeat("a", 64),
+		"latest",
+	} {
+		options := fixture.options()
+		options.TagOverride = override
+		if _, err := PrepareRollback(context.Background(), options); !errors.Is(err, ErrRollbackImageUnpinned) {
+			t.Fatalf("override %q = %v, want %v", override, err, ErrRollbackImageUnpinned)
+		}
+		assertNoPlan(t, fixture.targetRoot)
+	}
+	// An explicit full reference is kept as given, and a bare version is
+	// resolved against the 1.x repository.
+	for override, want := range map[string]string{
+		"v1.13.0":                                LegacyImageRepository + ":v1.13.0",
+		LegacyImageRepository + ":v1.13.0":       LegacyImageRepository + ":v1.13.0",
+		"registry.example.com/cpamp/cpamp:v1.13": "registry.example.com/cpamp/cpamp:v1.13",
+	} {
+		options := fixture.options()
+		options.TagOverride = override
+		plan, err := PrepareRollback(context.Background(), options)
+		if err != nil {
+			t.Fatalf("override %q: %v", override, err)
+		}
+		if plan.Image != want || strings.Contains(plan.Image, ":latest") {
+			t.Fatalf("override %q pinned %q, want %q", override, plan.Image, want)
+		}
+	}
 }
 
 func (f rollbackFixture) provenEvidence() RollbackEvidence {
@@ -219,6 +252,7 @@ func (f rollbackFixture) provenEvidence() RollbackEvidence {
 func TestRecordRollbackRefusesUnprovenEvidence(t *testing.T) {
 	fixture := newRollbackFixture(t)
 	before := fixture.recordedRow(t)
+	sourceBefore := fingerprintTree(t, fixture.volume.root)
 	for _, test := range []struct {
 		name   string
 		mutate func(*RollbackEvidence)
@@ -244,6 +278,44 @@ func TestRecordRollbackRefusesUnprovenEvidence(t *testing.T) {
 			after.BackupManifestSHA256 != before.BackupManifestSHA256 {
 			t.Fatalf("%s rewrote provenance: %+v", test.name, after)
 		}
+	}
+	// No refusal wrote the 1.x volume, not even beside it.
+	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
+}
+
+// TestRecordRollbackRefusesARowWithoutFingerprints covers the unproven half of
+// the fingerprint rule: a row that never recorded both fingerprints has nothing
+// to compare the observed volume with, so the verdict is unproven rather than
+// a changed source.
+func TestRecordRollbackRefusesARowWithoutFingerprints(t *testing.T) {
+	for _, missing := range []string{"before", "after"} {
+		t.Run(missing, func(t *testing.T) {
+			fixture := newRollbackFixture(t)
+			before := fixture.recordedRow(t)
+			db, err := managersqlite.Open(filepath.Join(fixture.targetRoot, databaseFileName))
+			if err != nil {
+				t.Fatalf("open the v2 store: %v", err)
+			}
+			row := fixture.recorded
+			if missing == "before" {
+				row.SourceFingerprintBefore = ""
+			} else {
+				row.SourceFingerprintAfter = ""
+			}
+			if err := upgradeoperation.New(db).Put(context.Background(), row); err != nil {
+				_ = db.Close()
+				t.Fatalf("clear the %s fingerprint: %v", missing, err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatalf("close the v2 store: %v", err)
+			}
+			if _, err := RecordRollback(context.Background(), fixture.provenEvidence()); !errors.Is(err, ErrRollbackUnproven) {
+				t.Fatalf("missing %s fingerprint = %v, want %v", missing, err, ErrRollbackUnproven)
+			}
+			if after := fixture.recordedRow(t); after.Stage != before.Stage {
+				t.Fatalf("a refused verdict moved the stage from %q to %q", before.Stage, after.Stage)
+			}
+		})
 	}
 }
 

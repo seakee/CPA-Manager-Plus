@@ -194,14 +194,34 @@ func readRollbackRecord(ctx context.Context, targetRoot string) (model.UpgradeOp
 
 // rollbackImage resolves the exact 1.x tag. A recorded version that is not a
 // full release cannot be pinned, and the 1.x compose file's moving tag is never
-// an acceptable rollback target.
+// an acceptable rollback target. An explicit reference must name a version: a
+// bare repository, an empty tag and a digest-only reference are refused rather
+// than turned into a reference the operator did not ask for.
 func rollbackImage(recorded model.UpgradeOperation, override string) (string, error) {
 	if tag := strings.TrimSpace(override); tag != "" {
 		if tag == "latest" || strings.HasSuffix(tag, ":latest") {
 			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
 				"a rollback may not pin a moving tag; pass an exact version", nil)
 		}
+		if strings.Contains(tag, "@") {
+			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+				"a rollback pins a published version tag, not a digest reference", nil)
+		}
 		if strings.HasPrefix(tag, LegacyImageRepository+":") {
+			if strings.TrimSpace(strings.TrimPrefix(tag, LegacyImageRepository+":")) == "" {
+				return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+					"the 1.x image reference names an empty tag; pass an exact version", nil)
+			}
+			return tag, nil
+		}
+		// A reference that names a repository (a slash) without a tag of its
+		// own is a floating reference, not a version.
+		if strings.Contains(tag, "/") {
+			colon := strings.LastIndex(tag, ":")
+			if colon <= strings.LastIndex(tag, "/") || colon == len(tag)-1 {
+				return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+					"the 1.x image reference names no version tag; pass an exact version", nil)
+			}
 			return tag, nil
 		}
 		return LegacyImageRepository + ":" + tag, nil
@@ -375,8 +395,15 @@ func RecordRollback(ctx context.Context, evidence RollbackEvidence) (model.Upgra
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("fingerprint the 1.x source: %w", err)
 	}
-	if recorded.SourceFingerprintBefore == "" || fingerprint != recorded.SourceFingerprintBefore ||
-		evidence.SourceFingerprint != recorded.SourceFingerprintBefore {
+	// A row that never recorded both fingerprints cannot prove a rollback:
+	// there is nothing to compare the observed volume with, which is unproven
+	// rather than a changed source.
+	if recorded.SourceFingerprintBefore == "" || recorded.SourceFingerprintAfter == "" ||
+		strings.TrimSpace(evidence.SourceFingerprint) == "" {
+		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the recorded operation carries no before/after source fingerprint, so the observed volume cannot be proven", nil)
+	}
+	if fingerprint != recorded.SourceFingerprintBefore || evidence.SourceFingerprint != recorded.SourceFingerprintBefore {
 		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorSourceChanged,
 			"the observed 1.x source is not the volume this operation copied", nil)
 	}

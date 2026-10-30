@@ -25,13 +25,13 @@ const (
 	// rolled back. Nothing was written.
 	UpgradeErrorRollbackNotApplicable UpgradeErrorCode = "upgrade_rollback_not_applicable"
 	// UpgradeErrorRollbackUnproven reports that the evidence a rollback would
-	// rely on does not hold: no operation row, no before/after fingerprint, or a
-	// backup destination that no longer carries the recorded manifest. Nothing
-	// was written.
+	// rely on does not hold: no before/after source fingerprint, no recorded
+	// backup manifest digest, or an observation that does not prove a read-only
+	// open and a healthy 1.x status probe. Nothing was written.
 	UpgradeErrorRollbackUnproven UpgradeErrorCode = "upgrade_rollback_unproven"
-	// UpgradeErrorRollbackImageUnpinned reports that the 1.x image tag named by
-	// the operation cannot be derived as an exact version, so a rollback plan
-	// would have to fall back on a moving tag. Nothing was written.
+	// UpgradeErrorRollbackImageUnpinned reports that the 1.x image reference the
+	// operation or the operator named carries no exact version, so a rollback
+	// plan would have to fall back on a moving tag. Nothing was written.
 	UpgradeErrorRollbackImageUnpinned UpgradeErrorCode = "upgrade_rollback_image_unpinned"
 )
 
