@@ -1,0 +1,97 @@
+name: Upgrade Docker Acceptance
+
+# The real-Docker Upgrade chain (U1-8). It builds the 1.x fixture image from the
+# release tag, seeds a real 1.x data volume through the 1.x API, runs the v2
+# upgrade chain, injects the five faults and proves the rollback. It is
+# deliberately not skippable but by an explicit SKIP_UPGRADE_DOCKER=1.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+      - v2
+    paths:
+      - 'apps/manager-server/**'
+      - 'bin/ci/upgrade-docker.mjs'
+      - 'bin/ci/evidence/upgrade-d/**'
+      - '.github/workflows/upgrade-docker.yml'
+  push:
+    branches:
+      - dev
+      - v2
+    paths:
+      - 'apps/manager-server/**'
+      - 'bin/ci/upgrade-docker.mjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade-docker:
+    name: Real-Docker Upgrade chain
+    runs-on: ubuntu-latest
+
+    env:
+      SKIP_UPGRADE_DOCKER: ${{ vars.SKIP_UPGRADE_DOCKER }}
+      GO_VERSION: '1.24.13'
+      NODE_VERSION: '22'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Classify the skip variable
+        id: skip
+        shell: bash
+        run: |
+          if [ "${SKIP_UPGRADE_DOCKER}" = "1" ]; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skipped=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: State that the run was skipped
+        if: steps.skip.outputs.skipped == 'true'
+        shell: bash
+        run: echo "::warning::SKIP_UPGRADE_DOCKER=1 was set; the real-Docker Upgrade acceptance did not run"
+
+      - name: Set up Go
+        if: steps.skip.outputs.skipped != 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: apps/manager-server/go.sum
+
+      - name: Set up Node
+        if: steps.skip.outputs.skipped != 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Show the Docker versions
+        if: steps.skip.outputs.skipped != 'true'
+        shell: bash
+        run: |
+          docker version
+          docker compose version
+
+      - name: Run the real-Docker Upgrade acceptance
+        if: steps.skip.outputs.skipped != 'true'
+        shell: bash
+        run: npm run test:upgrade-docker
+
+      - name: Upload the evidence
+        if: always() && steps.skip.outputs.skipped != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upgrade-docker-evidence
+          path: bin/ci/evidence/upgrade-d/*.json
+          if-no-files-found: warn

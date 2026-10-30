@@ -49,6 +49,14 @@ var v1BaseSchema = []string{
 		raw_deleted_at_ms integer
 	)`,
 	`insert into usage_monitoring_rollup_state (rollup_name, schema_version, status, coverage_event_id) values ('projection_v1', 1, 'ready', 100)`,
+	// Every 1.14.x release creates this table, v1.14.0 included: it is part of
+	// the base schema, not a later marker.
+	`create table usage_archive_deleted_coverage_daily (
+		utc_day integer primary key,
+		deleted_event_count integer not null,
+		min_timestamp_ms integer not null,
+		max_timestamp_ms integer not null
+	)`,
 	`insert into usage_events (event_hash, timestamp_ms) values ('live-event', 1000)`,
 }
 
@@ -120,14 +128,18 @@ func addProjection(t *testing.T, db *sql.DB, eventID int64, timestampMS int64) {
 	execFixture(t, db, `insert into usage_monitoring_event_projection_v1 (event_id, timestamp_ms) values (?, ?)`, eventID, timestampMS)
 }
 
+// deletedCoverage records the deleted-raw summary a real 1.x archive run writes
+// when it removes the raw rows of a segment, so a fixture whose refs are
+// already raw-deleted stays consistent in the coverage dimension.
+func deletedCoverage(t *testing.T, db *sql.DB, timestampMS int64, deleted int64) {
+	t.Helper()
+	execFixture(t, db, `insert into usage_archive_deleted_coverage_daily (
+		utc_day, deleted_event_count, min_timestamp_ms, max_timestamp_ms
+	) values (?, ?, ?, ?)`, timestampMS/msPerDay, deleted, timestampMS, timestampMS)
+}
+
 func withNewerThanPinned(t *testing.T, db *sql.DB) {
 	t.Helper()
-	execFixture(t, db, `create table usage_archive_deleted_coverage_daily (
-		utc_day integer primary key,
-		deleted_event_count integer not null,
-		min_timestamp_ms integer not null,
-		max_timestamp_ms integer not null
-	)`)
 	execFixture(t, db, `insert into settings (key, value, updated_at_ms) values ('usage_cache_accounting_semantics_revision', '3', 1)`)
 	execFixture(t, db, `create index idx_usage_events_ts_latency_ttft_cover on usage_events(timestamp_ms)`)
 }
@@ -389,6 +401,63 @@ func TestPreflightRejectsSourceNewerThanPinned(t *testing.T) {
 	check, found := checkByName(report, CheckSourceVersion)
 	if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
 		t.Fatalf("version check = %+v", check)
+	}
+}
+
+// v1SchemaTables is the table set every 1.14.x release creates, as observed in
+// a real v1.14.4 source: the deleted-raw summary is part of it, and only the
+// cache-accounting revision and the latency-covering index move after it.
+func v1SchemaTables() map[string]bool {
+	return map[string]bool{
+		"settings":                             true,
+		"usage_events":                         true,
+		"usage_event_identity_ledger":          true,
+		"usage_archive_event_refs":             true,
+		"usage_monitoring_event_projection_v1": true,
+		"usage_monitoring_rollup_state":        true,
+		"usage_archive_deleted_coverage_daily": true,
+	}
+}
+
+// TestSourceVersionAcceptsThePinnedReleaseSchema is the regression for the
+// defect the real-Docker harness found: the deleted-raw summary table exists in
+// every 1.14.x release, so listing it as a v1.14.6 marker refused a source of
+// the pinned release itself and no real 1.x install could ever pass preflight.
+func TestSourceVersionAcceptsThePinnedReleaseSchema(t *testing.T) {
+	observation := detectSourceVersion(sourceSchema{
+		tables:   v1SchemaTables(),
+		indexes:  map[string]bool{},
+		settings: map[string]string{},
+	}, "v1.14.4")
+	if observation.Release != "v1.14.0" {
+		t.Fatalf("release = %q, want v1.14.0", observation.Release)
+	}
+	if len(observation.Newer) != 0 {
+		t.Fatalf("newer = %v, want none: the pinned release carries this schema", observation.Newer)
+	}
+	if !observation.compatible() {
+		t.Fatalf("compatible = false for the pinned release's own schema: %s", observation.detail())
+	}
+}
+
+// TestSourceVersionNamesOnlyMarkersThePinnedReleaseLacks keeps the mismatch
+// report actionable: a source that really moved past the pin names exactly the
+// two markers that moved, never the table both releases carry.
+func TestSourceVersionNamesOnlyMarkersThePinnedReleaseLacks(t *testing.T) {
+	observation := detectSourceVersion(sourceSchema{
+		tables:   v1SchemaTables(),
+		indexes:  map[string]bool{"idx_usage_events_ts_latency_ttft_cover": true},
+		settings: map[string]string{"usage_cache_accounting_semantics_revision": "3"},
+	}, "v1.14.4")
+	if observation.Release != "v1.14.7" {
+		t.Fatalf("release = %q, want v1.14.7", observation.Release)
+	}
+	want := []string{"idx_usage_events_ts_latency_ttft_cover", "usage_cache_accounting_semantics_revision=3"}
+	if !reflect.DeepEqual(observation.Newer, want) {
+		t.Fatalf("newer = %v, want %v", observation.Newer, want)
+	}
+	if observation.compatible() {
+		t.Fatal("compatible = true for a source newer than the pinned release")
 	}
 }
 
@@ -715,6 +784,8 @@ func TestPreflightParityDetectsProjectionlessRefOnly(t *testing.T) {
 		archivedRef(t, db, "healthy-event", 10, healthyTimestamp)
 		addProjection(t, db, 10, healthyTimestamp)
 		archivedRef(t, db, "projectionless-event", 20, missingTimestamp)
+		deletedCoverage(t, db, healthyTimestamp, 1)
+		deletedCoverage(t, db, missingTimestamp, 1)
 	})
 	report := preflight(t, fixture.root, Options{})
 	if !report.ParityGaps.ProjectionStateUsable {

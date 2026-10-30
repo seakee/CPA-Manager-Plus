@@ -28,6 +28,8 @@ func readySource(t *testing.T) string {
 		`create table usage_monitoring_event_projection_v1 (event_id integer primary key, timestamp_ms integer not null)`,
 		`create table usage_monitoring_rollup_state (rollup_name text primary key, schema_version integer not null, status text not null, coverage_event_id integer not null default 0, updated_at_ms integer not null default 0)`,
 		`create table usage_archive_event_refs (event_hash text primary key, run_id text not null, segment_sequence integer not null, raw_event_id integer not null, timestamp_ms integer not null, archived_at_ms integer not null, raw_deleted_at_ms integer)`,
+		// Every 1.14.x release creates the deleted-raw summary, v1.14.0 included.
+		`create table usage_archive_deleted_coverage_daily (utc_day integer primary key, deleted_event_count integer not null, min_timestamp_ms integer not null, max_timestamp_ms integer not null)`,
 		`insert into usage_monitoring_rollup_state (rollup_name, schema_version, status, coverage_event_id) values ('projection_v1', 1, 'ready', 1)`,
 	}
 	databasePath := filepath.Join(root, "usage.sqlite")
@@ -280,11 +282,12 @@ func copyReadySource(t *testing.T) string {
 			}
 		}
 	}
-	// The v1.14.6 and v1.14.7 markers arrived after the pinned release; a
-	// source that carries them is a different source than the one this pin
-	// accepts, so the fixture must not have them either.
+	// The cache-accounting revision and the latency-covering index arrived after
+	// the pinned release; a source that carries them is a different source than
+	// the one this pin accepts, so the fixture must not have them. The
+	// deleted-raw summary is not one of them: every 1.14.x release creates it,
+	// the pinned one included, so it stays.
 	for _, statement := range []string{
-		`drop table if exists usage_archive_deleted_coverage_daily`,
 		`drop index if exists idx_usage_events_ts_latency_ttft_cover`,
 		`delete from settings where key = 'usage_cache_accounting_semantics_revision'`,
 	} {

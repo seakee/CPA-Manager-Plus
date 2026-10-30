@@ -363,9 +363,14 @@ var sourceVersionLadder = []versionStep{
 		{kind: markerTable, name: "usage_archive_event_refs"},
 		{kind: markerTable, name: "usage_monitoring_event_projection_v1"},
 		{kind: markerTable, name: "usage_monitoring_rollup_state"},
+		// The deleted-raw summary is part of the v1.14.0 schema itself
+		// (repository/sqlite/migrate.go creates it in every 1.14.x release), so
+		// it cannot identify v1.14.6. Listing it there made every real 1.x
+		// source look newer than the pinned release and refused the pinned
+		// release itself.
+		{kind: markerTable, name: "usage_archive_deleted_coverage_daily"},
 	}},
 	{release: "v1.14.6", markers: []sourceMarker{
-		{kind: markerTable, name: "usage_archive_deleted_coverage_daily"},
 		{kind: markerSetting, name: "usage_cache_accounting_semantics_revision", value: "3"},
 	}},
 	{release: "v1.14.7", markers: []sourceMarker{
@@ -428,12 +433,31 @@ func detectSourceVersion(schema sourceSchema, pinned string) versionObservation 
 	if floor > 0 {
 		observation.Release = sourceVersionLadder[floor-1].release
 	}
+	// Every marker a step at or below the pinned release requires is part of
+	// the schema the pin already accepts.
+	acceptedMarkers := map[string]bool{}
+	for _, step := range sourceVersionLadder {
+		rank, ok := parseRelease(step.release)
+		if !ok || !pinnedKnown || rank > pinnedRank {
+			continue
+		}
+		for _, marker := range step.markers {
+			acceptedMarkers[marker.label()] = true
+		}
+	}
 	for _, step := range sourceVersionLadder {
 		rank, ok := parseRelease(step.release)
 		if !ok || !pinnedKnown || rank <= pinnedRank {
 			continue
 		}
 		for _, marker := range step.markers {
+			// A marker the pinned release's own schema already carries cannot
+			// name a newer release, whatever step it is listed under. Without
+			// this, one misattributed marker refuses every source of the
+			// pinned release instead of only the ones that moved past it.
+			if acceptedMarkers[marker.label()] {
+				continue
+			}
 			if schema.has(marker) {
 				observation.Newer = append(observation.Newer, marker.label())
 			}

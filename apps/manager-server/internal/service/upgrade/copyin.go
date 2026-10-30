@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -651,31 +652,54 @@ func targetDescribedByMarker(ctx context.Context, paths targetPaths, manifest ma
 	if !found || !sameDatabasePath(marker.TargetDatabase, paths.Database) || marker.BackupManifestSHA256 != digest {
 		return false, nil
 	}
-	return targetMigrated(ctx, paths, manifest)
+	return targetMaterialized(paths, manifest)
 }
 
-// targetMigrated reports whether the v2 layout holds this backup, either
-// byte-identical or already migrated. The database counts as in place when it
-// carries the schema the incremental migration produces; every other member
-// must still match the backup.
-func targetMigrated(ctx context.Context, paths targetPaths, manifest maintenancebundle.Manifest) (bool, error) {
-	databaseInPlace := false
-	if entry, ok := manifest.Entries["database"]; ok && entry.Present {
-		matching, err := entryMatches(paths.Database, entry)
-		if err != nil {
-			return false, err
-		}
-		if matching {
-			databaseInPlace = true
-		} else if databaseInPlace, err = databaseCarriesV2Schema(ctx, paths.Database); err != nil {
-			return false, err
-		}
+// targetMaterialized reports whether the v2 layout holds the members an
+// interrupted run moved into place. The marker is published only after every
+// member has been moved, so its presence plus a copied database is the
+// materialization evidence.
+//
+// The database and its sidecars are deliberately not compared with the backup:
+// the incremental migration rewrites them in place, and a process killed inside
+// that rewrite leaves neither the backup bytes nor the finished v2 schema. A
+// byte comparison here made exactly that window unresumable — the run wiped the
+// marker, restored again and then refused to replace the members already in
+// place. The members the migration never touches must still match the backup,
+// so a data key or archive tree that moved is still refused.
+func targetMaterialized(paths targetPaths, manifest maintenancebundle.Manifest) (bool, error) {
+	entry, ok := manifest.Entries["database"]
+	if !ok || !entry.Present {
+		return false, nil
 	}
-	if !databaseInPlace {
+	info, err := os.Lstat(paths.Database)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return false, nil
+	}
+	header := make([]byte, 16)
+	file, err := os.Open(paths.Database)
+	if err != nil {
+		return false, err
+	}
+	_, readErr := io.ReadFull(file, header)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return false, errors.Join(readErr, closeErr)
+	}
+	if string(header) != "SQLite format 3\x00" {
 		return false, nil
 	}
 	for _, member := range copyInMembers {
-		if member.bundle == "database" {
+		switch member.bundle {
+		case "database", "database-wal", "database-shm", "database-journal":
+			// Owned by the migration: their bytes are not comparable once it has
+			// run, and a live WAL is its own evidence that a run got this far.
 			continue
 		}
 		matching, err := targetMemberMatches(paths.Root, manifest, member.bundle)
