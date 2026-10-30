@@ -65,6 +65,17 @@ func (s sourceSchema) has(m sourceMarker) bool {
 // verifies integrity with a single quick_check. It creates no WAL/SHM files,
 // applies no pragma that persists state and never migrates.
 func openReadOnlySource(ctx context.Context, path string) (*sql.DB, sourceSchema, error) {
+	return openSource(ctx, path, false)
+}
+
+// openImmutableSource reads a byte-for-byte snapshot nobody writes, such as a
+// verified backup member. immutable keeps SQLite from creating a WAL index
+// beside it, which would make the snapshot disagree with its own manifest.
+func openImmutableSource(ctx context.Context, path string) (*sql.DB, sourceSchema, error) {
+	return openSource(ctx, path, true)
+}
+
+func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sourceSchema, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -75,7 +86,7 @@ func openReadOnlySource(ctx context.Context, path string) (*sql.DB, sourceSchema
 	if !info.Mode().IsRegular() || info.Size() == 0 {
 		return nil, sourceSchema{}, errSourceDatabaseMissing
 	}
-	db, err := sql.Open("sqlite", readOnlyDataSourceName(path))
+	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, immutable))
 	if err != nil {
 		return nil, sourceSchema{}, err
 	}
@@ -99,7 +110,7 @@ func openReadOnlySource(ctx context.Context, path string) (*sql.DB, sourceSchema
 	return db, schema, nil
 }
 
-func readOnlyDataSourceName(path string) string {
+func readOnlyDataSourceName(path string, immutable bool) string {
 	uriPath := filepath.ToSlash(path)
 	if !strings.HasPrefix(uriPath, "/") {
 		uriPath = "/" + uriPath
@@ -108,6 +119,9 @@ func readOnlyDataSourceName(path string) string {
 	q := dsn.Query()
 	q.Set("mode", "ro")
 	q.Add("_pragma", "query_only(1)")
+	if immutable {
+		q.Set("immutable", "1")
+	}
 	dsn.RawQuery = q.Encode()
 	return dsn.String()
 }

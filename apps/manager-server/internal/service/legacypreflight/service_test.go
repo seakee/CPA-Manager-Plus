@@ -406,7 +406,7 @@ func TestFreshAdmissionRejectsInterposedOwnershipMarker(t *testing.T) {
 			}
 			options := Options{SourceStopped: true, Initialize: initialize}
 			before, err := inspect(context.Background(), paths, options, nil, false)
-			if err != nil || before.SourceKind != "fresh" || !startupAllowed(before) {
+			if err != nil || before.SourceKind != "fresh" || !startupAllowed(before, UpgradeStageNone) {
 				t.Fatalf("first inspection was not fresh: report=%+v err=%v", before, err)
 			}
 			cmd := exec.Command(os.Args[0], "-test.run=^TestFreshAdmissionRejectsInterposedOwnershipMarker$")
@@ -491,7 +491,7 @@ func TestStartupRejectsLegacyUnknownAndPartialWithoutSourceWrites(t *testing.T) 
 			}
 			if kind == "process-lock-without-db" {
 				report, err := Inspect(context.Background(), paths, Options{SourceStopped: true})
-				if err != nil || report.SourceKind != "partial-source" || startupAllowed(report) || report.UpgradeAuthorized {
+				if err != nil || report.SourceKind != "partial-source" || startupAllowed(report, UpgradeStageNone) || report.UpgradeAuthorized {
 					t.Fatalf("old ownership marker treated as fresh: report=%+v err=%v", report, err)
 				}
 			}
@@ -595,7 +595,7 @@ func TestConfigOnlyStartupRequiresExplicitInitialization(t *testing.T) {
 		t.Fatal("unclassified source changed")
 	}
 	report, err := Inspect(context.Background(), paths, Options{})
-	if err != nil || report.SourceKind != "partial-source" || startupAllowed(report) {
+	if err != nil || report.SourceKind != "partial-source" || startupAllowed(report, UpgradeStageNone) {
 		t.Fatalf("existing config is not fresh evidence: report=%+v err=%v", report, err)
 	}
 	lock, err = AdmitStartup(context.Background(), paths, Options{Initialize: true})

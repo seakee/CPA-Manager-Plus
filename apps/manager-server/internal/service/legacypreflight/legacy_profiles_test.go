@@ -25,7 +25,7 @@ func TestHistoricalLegacyProfilesAreObservationsNotUpgradeGrants(t *testing.T) {
 			if report.SourceKind != "legacy-manager" || profile == nil || profile.Status != "recognized" || profile.Family != fixture.Family {
 				t.Fatalf("wrong historical classification: %+v", report)
 			}
-			if report.ExactSourceRelease.Status != "unknown" || report.BridgeReadiness.Status != "unknown" || report.UpgradeAuthorized || startupAllowed(report) {
+			if report.ExactSourceRelease.Status != "unknown" || report.BridgeReadiness.Status != "unknown" || report.UpgradeAuthorized || startupAllowed(report, UpgradeStageNone) {
 				t.Fatalf("observation granted authority: %+v", report)
 			}
 			for _, item := range report.Unknown {
@@ -80,7 +80,7 @@ func TestLegacyProfileNegativeShapesNeverBecomeAnotherFamily(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if report.CompatibilityProfile.Status != test.status || report.CompatibilityProfile.Family != "" || report.UpgradeAuthorized || startupAllowed(report) {
+			if report.CompatibilityProfile.Status != test.status || report.CompatibilityProfile.Family != "" || report.UpgradeAuthorized || startupAllowed(report, UpgradeStageNone) {
 				t.Fatalf("unsafe profile: %+v", report)
 			}
 			if !reflect.DeepEqual(before, sourceState(t, filepath.Dir(paths.Database))) {

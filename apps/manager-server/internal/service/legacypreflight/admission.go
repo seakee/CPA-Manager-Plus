@@ -1,0 +1,236 @@
+// Package legacypreflight: the Upgrade admission seam.
+//
+// The startup gate classifies a source by its schema. That classification alone
+// can never admit a 1.x source, and it cannot describe a v2 store whose data was
+// copied in from 1.x: after the copy-in the schema is an ordinary v2 schema, so
+// the schema says "native-v2" while the operation is still unfinished. The
+// seam below is the one additional, explicit input: a durable Upgrade operation
+// row, read through an injected reader. Nothing here flips
+// Report.UpgradeAuthorized or TrustedHopReceipt.
+package legacypreflight
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+)
+
+// Source kinds. Only fresh and native-v2 are admitted on their own; a 1.x
+// source and an upgraded one need the Upgrade operation below.
+const (
+	SourceKindFresh           = "fresh"
+	SourceKindNativeV2        = "native-v2"
+	SourceKindLegacyManager   = "legacy-manager"
+	SourceKindUpgradedLegacy  = "upgraded-legacy"
+	SourceKindMissingDatabase = "missing-database"
+	SourceKindPartialSource   = "partial-source"
+	SourceKindEmptyDatabase   = "empty-database"
+	SourceKindUnknown         = "unknown"
+)
+
+// UpgradeStage is the admission position of a recorded Upgrade operation.
+type UpgradeStage string
+
+const (
+	// UpgradeStageNone means no Upgrade operation is recorded. The gate then
+	// behaves exactly as it did before this seam existed.
+	UpgradeStageNone UpgradeStage = "none"
+	// UpgradeStageInProgress means an operation is recorded and unfinished.
+	// The source may start, but only the Upgrade surface may be served.
+	UpgradeStageInProgress UpgradeStage = "in_progress"
+	// UpgradeStageComplete means the recorded operation finished. The source is
+	// an ordinary v2 store for every surface.
+	UpgradeStageComplete UpgradeStage = "complete"
+)
+
+// UpgradeAdmission is the injected, read-only reader of the durable Upgrade
+// operation. A nil reader is the historical behavior: no source is ever
+// admitted on the strength of an Upgrade record.
+type UpgradeAdmission interface {
+	Admitted(ctx context.Context) (UpgradeStage, error)
+}
+
+func (s UpgradeStage) normalized() UpgradeStage {
+	if s == "" {
+		return UpgradeStageNone
+	}
+	return s
+}
+
+func (s UpgradeStage) valid() bool {
+	switch s.normalized() {
+	case UpgradeStageNone, UpgradeStageInProgress, UpgradeStageComplete:
+		return true
+	default:
+		return false
+	}
+}
+
+// StartupSurface names what an admitted process may serve.
+type StartupSurface string
+
+const (
+	// SurfaceFull is the complete v2 application.
+	SurfaceFull StartupSurface = "full"
+	// SurfaceUpgradeOnly is the Upgrade surface: Bootstrap discovery status
+	// reads, the read-only shell and the Upgrade authentication leaf. Console,
+	// Key workspace, gateway configuration and model traffic stay closed.
+	SurfaceUpgradeOnly StartupSurface = "upgrade-only"
+)
+
+// UpgradeSurfaceOnly reports whether the recorded stage restricts startup to
+// the Upgrade surface. A completed operation does not.
+func UpgradeSurfaceOnly(stage UpgradeStage) bool {
+	return stage.normalized() == UpgradeStageInProgress
+}
+
+// Surface is the surface this admission permits. An absent admission has none.
+func (a *Admission) Surface() StartupSurface {
+	if a == nil {
+		return ""
+	}
+	if UpgradeSurfaceOnly(a.UpgradeStage) {
+		return SurfaceUpgradeOnly
+	}
+	return SurfaceFull
+}
+
+// upgradeAdmissionStage resolves the injected reader once per admission. A
+// reader failure fails closed: an unreadable operation record could hide an
+// unfinished upgrade, and treating that as "no record" would serve a partially
+// copied store as a finished install.
+func upgradeAdmissionStage(ctx context.Context, reader UpgradeAdmission) (UpgradeStage, error) {
+	if reader == nil {
+		return UpgradeStageNone, nil
+	}
+	stage, err := reader.Admitted(ctx)
+	if err != nil {
+		return UpgradeStageNone, fmt.Errorf("read the Upgrade operation: %w", err)
+	}
+	if !stage.valid() {
+		return UpgradeStageNone, fmt.Errorf("Upgrade admission %q is not supported", string(stage))
+	}
+	return stage.normalized(), nil
+}
+
+// startupAllowed admits a source for writable startup. A recorded, unfinished
+// or finished Upgrade operation is the only thing that may relabel a source:
+// while it exists the source is `upgraded-legacy`, whatever the schema
+// classification says, because the copy-in already ran the incremental v2
+// migration. Every other classification keeps its existing rule.
+func startupAllowed(report Report, stage UpgradeStage) bool {
+	if len(report.Blocked) != 0 {
+		return false
+	}
+	switch admittedKind(report.SourceKind, stage) {
+	case SourceKindFresh, SourceKindNativeV2:
+		return true
+	case SourceKindUpgradedLegacy:
+		// Only a recorded operation may admit an upgraded 1.x source; a source
+		// that merely claims the label is not evidence.
+		return stage.normalized() == UpgradeStageInProgress || stage.normalized() == UpgradeStageComplete
+	default:
+		return false
+	}
+}
+
+func admittedKind(classified string, stage UpgradeStage) string {
+	switch stage.normalized() {
+	case UpgradeStageInProgress, UpgradeStageComplete:
+		switch classified {
+		case SourceKindLegacyManager, SourceKindNativeV2, SourceKindUpgradedLegacy:
+			return SourceKindUpgradedLegacy
+		}
+	}
+	return classified
+}
+
+// DatabaseUpgradeAdmission reads the single upgrade_operations row from the
+// Manager database. It opens the store read-only, never creates it, applies no
+// pragma that persists state and never migrates.
+type DatabaseUpgradeAdmission struct{ DatabasePath string }
+
+func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, error) {
+	path := strings.TrimSpace(a.DatabasePath)
+	if path == "" {
+		return UpgradeStageNone, errors.New("upgrade admission requires the Manager database path")
+	}
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) || info != nil && (!info.Mode().IsRegular() || info.Size() == 0) {
+		return UpgradeStageNone, nil
+	}
+	if err != nil {
+		return UpgradeStageNone, err
+	}
+	db, err := sql.Open("sqlite", admissionDataSourceName(path))
+	if err != nil {
+		return UpgradeStageNone, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer func() { _ = db.Close() }()
+	// Before the incremental migration has ever run the table is absent, which
+	// is not an error: no Upgrade operation has been recorded.
+	var present int
+	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
+		where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
+		return UpgradeStageNone, err
+	}
+	if present == 0 {
+		return UpgradeStageNone, nil
+	}
+	var stage string
+	err = db.QueryRowContext(ctx, `select stage from upgrade_operations where id = 1`).Scan(&stage)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UpgradeStageNone, nil
+	}
+	if err != nil {
+		return UpgradeStageNone, err
+	}
+	return upgradeStageFromRecord(model.UpgradeStage(stage))
+}
+
+// upgradeStageFromRecord maps the durable stage onto the two admission stages.
+// A failed operation is unfinished, never complete: it must not serve the
+// normal surfaces.
+func upgradeStageFromRecord(stage model.UpgradeStage) (UpgradeStage, error) {
+	switch stage {
+	case model.UpgradeStageComplete:
+		return UpgradeStageComplete, nil
+	case "", model.UpgradeStagePreflight, model.UpgradeStageCopyIn, model.UpgradeStageReconcile,
+		model.UpgradeStageCPAImport, model.UpgradeStageExternalConnect, model.UpgradeStageVerify,
+		model.UpgradeStageFailed:
+		return UpgradeStageInProgress, nil
+	default:
+		return UpgradeStageNone, fmt.Errorf("recorded Upgrade stage %q is not supported", string(stage))
+	}
+}
+
+// admissionDataSourceName mirrors the bounded inspection DSN: read-only, no
+// persistence, and immutable only when there is no live WAL to join.
+func admissionDataSourceName(path string) string {
+	immutable := true
+	if info, err := os.Lstat(path + "-wal"); err == nil && info.Size() > 0 {
+		immutable = false
+	}
+	uriPath := filepath.ToSlash(path)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsn := &url.URL{Scheme: "file", Path: uriPath}
+	query := dsn.Query()
+	query.Set("mode", "ro")
+	query.Add("_pragma", "query_only(1)")
+	if immutable {
+		query.Set("immutable", "1")
+	}
+	dsn.RawQuery = query.Encode()
+	return dsn.String()
+}

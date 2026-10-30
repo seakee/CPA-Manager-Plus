@@ -64,11 +64,23 @@ const (
 
 type Options struct {
 	// LegacyRoot is the v1 data directory: usage.sqlite, data.key and
-	// usage-archives/.
+	// usage-archives/. Preflight reads it; CopyIn copies out of it.
 	LegacyRoot string
 	// AvailableBytes overrides the free-space probe. Tests inject a requirement
 	// without depending on the host disk. Nil uses the platform probe.
 	AvailableBytes func(legacyRoot string) (int64, error)
+	// TargetRoot is the v2 data directory that receives usage.sqlite, data.key
+	// and usage-archives/. CopyIn only.
+	TargetRoot string
+	// BundleDir is the backup destination. CopyIn only; an existing verified
+	// bundle is reused instead of recreated.
+	BundleDir string
+	// Lock is the caller's held 1.x ownership fence. CopyIn requires the lock
+	// bound to the source database; Preflight acquires its own.
+	Lock *processlock.Lock
+	// checkpoint is a package-private synchronous test seam. Production never
+	// sets it; every returned error aborts the copy-in at that phase.
+	checkpoint func(phase string) error
 }
 
 // Check is one preflight observation. Detail is free text for the operator and

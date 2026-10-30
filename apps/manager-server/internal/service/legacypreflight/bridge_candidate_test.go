@@ -33,7 +33,7 @@ func TestPlannedBridgeCandidateDoesNotIdentifyHistoricalSource(t *testing.T) {
 			if candidate == nil || candidate.Status != "planned" || candidate.Release != "v1.14.4" || candidate.SourceCommit != "166262365d506157b99968105c890f480cc7c07c" {
 				t.Fatalf("missing fixed planned target: %+v", candidate)
 			}
-			if report.CompatibilityProfile.Family != fixture.Family || report.ExactSourceRelease.Status != "unknown" || !slices.Contains(report.Unknown, "exact-source-release") || !slices.Contains(report.Unknown, "forward-hop-evidence") || report.UpgradeAuthorized || startupAllowed(report) {
+			if report.CompatibilityProfile.Family != fixture.Family || report.ExactSourceRelease.Status != "unknown" || !slices.Contains(report.Unknown, "exact-source-release") || !slices.Contains(report.Unknown, "forward-hop-evidence") || report.UpgradeAuthorized || startupAllowed(report, UpgradeStageNone) {
 				t.Fatalf("planned target became source identity/authority: %+v", report)
 			}
 			if len(report.Blocked) != 0 || report.BridgeReadiness.Status != "unknown" {
@@ -98,7 +98,7 @@ func TestPlannedBridgeCandidateOmittedWithoutRecognizedLegacy(t *testing.T) {
 			if _, exists := object["plannedBridgeCandidate"]; exists {
 				t.Fatal("inapplicable candidate was serialized")
 			}
-			if startupAllowed(report) != (test.name == "fresh" || test.name == "native") {
+			if startupAllowed(report, UpgradeStageNone) != (test.name == "fresh" || test.name == "native") {
 				t.Fatal("planned target changed startup authority")
 			}
 			if !reflect.DeepEqual(before, sourceState(t, filepath.Dir(paths.Database))) {
@@ -159,7 +159,7 @@ func TestCallerOwnedReceiptCannotMintProvenance(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if report.ForwardHopEvidence != nil || report.UpgradeAuthorized || startupAllowed(report) || !slices.Contains(report.Unknown, "forward-hop-evidence") {
+		if report.ForwardHopEvidence != nil || report.UpgradeAuthorized || startupAllowed(report, UpgradeStageNone) || !slices.Contains(report.Unknown, "forward-hop-evidence") {
 			t.Fatalf("unqualified authority attached: %+v", report)
 		}
 	}

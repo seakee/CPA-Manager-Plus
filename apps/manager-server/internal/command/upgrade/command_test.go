@@ -13,6 +13,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
@@ -197,5 +198,220 @@ func TestExitCodeMapping(t *testing.T) {
 	}
 	if !errors.Is(ErrBlocked, ErrBlocked) {
 		t.Fatal("blocked error lost its identity")
+	}
+}
+
+// copyReadySource builds a stopped 1.x volume that both the preflight and the
+// backup accept: the carried-forward usage schema with rows, no v2-only tables,
+// a real data key, archives and the v1 ownership marker.
+func copyReadySource(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve fixture root: %v", err)
+	}
+	databasePath := filepath.Join(root, "usage.sqlite")
+	db, err := sqliterepo.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open fixture database: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_events (event_hash, timestamp_ms, timestamp, model, requested_model, created_at_ms)
+		values ('legacy-event-1', 1000, '1000', 'gpt-test', 'gpt-test', 1000)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed fixture event: %v", err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("open fixture connection: %v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `pragma foreign_keys = off`); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		t.Fatalf("disable fixture foreign keys: %v", err)
+	}
+	for _, pattern := range []string{`gateway\_%`, `fresh\_%`, `upgrade_operations`} {
+		rows, err := conn.QueryContext(context.Background(),
+			`select name from sqlite_master where type = 'table' and name like ? escape '\'`, pattern)
+		if err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("list v2-only fixture tables: %v", err)
+		}
+		names := []string{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				_ = rows.Close()
+				_ = conn.Close()
+				_ = db.Close()
+				t.Fatalf("scan v2-only fixture table: %v", err)
+			}
+			names = append(names, name)
+		}
+		if err := rows.Close(); err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("close v2-only table list: %v", err)
+		}
+		for _, name := range names {
+			if _, err := conn.ExecContext(context.Background(), `drop table `+name); err != nil {
+				_ = conn.Close()
+				_ = db.Close()
+				t.Fatalf("drop v2-only fixture table %s: %v", name, err)
+			}
+		}
+	}
+	// The v1.14.6 and v1.14.7 markers arrived after the pinned release; a
+	// source that carries them is a different source than the one this pin
+	// accepts, so the fixture must not have them either.
+	for _, statement := range []string{
+		`drop table if exists usage_archive_deleted_coverage_daily`,
+		`drop index if exists idx_usage_events_ts_latency_ttft_cover`,
+		`delete from settings where key = 'usage_cache_accounting_semantics_revision'`,
+	} {
+		if _, err := conn.ExecContext(context.Background(), statement); err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("strip post-pin marker %q: %v", statement, err)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		_ = db.Close()
+		t.Fatalf("close fixture connection: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture database: %v", err)
+	}
+	if _, _, err := security.LoadOrCreateDataKey("", filepath.Join(root, "data.key")); err != nil {
+		t.Fatalf("create fixture data key: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "usage-archives", "2026-03"), 0o755); err != nil {
+		t.Fatalf("create fixture archives: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "usage-archives", "2026-03", "segment-000001.jsonl"), []byte(`{"events":1}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write fixture archive: %v", err)
+	}
+	if err := os.WriteFile(databasePath+".manager.lock", nil, 0o600); err != nil {
+		t.Fatalf("write fixture source lock: %v", err)
+	}
+	return root
+}
+
+func TestRunCopiesAStoppedSourceAndRecordsTheStage(t *testing.T) {
+	source := copyReadySource(t)
+	target := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "backup")
+
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var output runOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode run output: %v; output: %s", err, stdout)
+	}
+	if output.Preflight == nil || !output.Preflight.Ready {
+		t.Fatalf("preflight = %+v, want a ready report", output.Preflight)
+	}
+	if output.Result == nil {
+		t.Fatalf("run output has no result: %s", stdout)
+	}
+	if output.Result.Stage != model.UpgradeStageCopyIn || output.Result.SourceKind != upgradeservice.SourceKindUpgradedLegacy {
+		t.Fatalf("result stage/kind = %q/%q", output.Result.Stage, output.Result.SourceKind)
+	}
+	for _, path := range []string{
+		filepath.Join(target, "usage.sqlite"),
+		filepath.Join(target, "data.key"),
+		filepath.Join(target, "usage-archives", "2026-03", "segment-000001.jsonl"),
+		bundle,
+	} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("copy-in did not produce %s: %v", path, err)
+		}
+	}
+
+	code, statusJSON, stderr := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite"))
+	if code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var status statusOutput
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		t.Fatalf("decode status: %v; output: %s", err, statusJSON)
+	}
+	if !status.Recorded || status.Operation == nil || status.Operation.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("status = %+v, want a recorded copy_in", status)
+	}
+	if status.Operation.BackupManifestSHA256 != output.Result.BackupManifestSHA256 {
+		t.Fatalf("recorded manifest = %q, want %q", status.Operation.BackupManifestSHA256, output.Result.BackupManifestSHA256)
+	}
+	if status.Operation.SourceFingerprintBefore != output.Result.SourceFingerprintBefore {
+		t.Fatalf("recorded fingerprint = %q, want %q", status.Operation.SourceFingerprintBefore, output.Result.SourceFingerprintBefore)
+	}
+
+	// A second run reports the recorded copy-in instead of copying again.
+	code, again, stderr := run(t, "run", "--json", "--legacy", source, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("second run exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var repeated runOutput
+	if err := json.Unmarshal([]byte(again), &repeated); err != nil {
+		t.Fatalf("decode second run: %v", err)
+	}
+	if repeated.Result == nil || !repeated.Result.AlreadyComplete || repeated.Result.Restored {
+		t.Fatalf("second run = %+v, want an already complete copy-in", repeated.Result)
+	}
+}
+
+func TestRunRefusesABlockedSourceAndWritesNothing(t *testing.T) {
+	source := copyReadySource(t)
+	// Removing the ownership marker makes the source unprovably stopped.
+	if err := os.Remove(filepath.Join(source, "usage.sqlite.manager.lock")); err != nil {
+		t.Fatalf("remove source lock: %v", err)
+	}
+	target := t.TempDir()
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	var output runOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode blocked run: %v; output: %s", err, stdout)
+	}
+	if output.Preflight == nil || output.Preflight.Ready || output.Result != nil {
+		t.Fatalf("blocked run = %+v, want a blocked report and no result", output)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("blocked run wrote %v into the v2 data root", entries)
+	}
+}
+
+func TestRunUsageErrors(t *testing.T) {
+	if code, _, _ := run(t, "run"); code != 2 {
+		t.Fatalf("missing --legacy exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "run", "--legacy", t.TempDir(), "extra"); code != 2 {
+		t.Fatalf("positional argument exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "run", "--legacy", filepath.Join(t.TempDir(), "missing")); code != 2 {
+		t.Fatalf("missing source exit code = %d, want 2", code)
+	}
+}
+
+func TestTargetDefaultsToTheManagerDataDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("USAGE_DATA_DIR", dataDir)
+	t.Setenv("USAGE_DB_PATH", "")
+	t.Setenv("CPA_MANAGER_CONFIG", filepath.Join(t.TempDir(), "absent-config.json"))
+	root, err := resolveTargetRoot("")
+	if err != nil {
+		t.Fatalf("resolve default target: %v", err)
+	}
+	if root != dataDir {
+		t.Fatalf("default target = %q, want the Manager data directory %q", root, dataDir)
 	}
 }
