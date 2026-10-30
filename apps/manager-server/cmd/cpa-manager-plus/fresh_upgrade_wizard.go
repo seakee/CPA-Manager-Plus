@@ -36,18 +36,22 @@ func (a *freshApplication) newUpgradeWizard() upgradewizard.Handler {
 }
 
 // upgradeCredentialDatabase is the Upgrade surface's one credential resolution:
-// the configured 1.x database when the mount holds it, otherwise the Manager's
-// own store. The entry leaf and both wizard reads ask this question here and
-// nowhere else, so a key accepted at the entry page is accepted by the reads.
+// the configured 1.x database when the mount holds one the shared database file
+// policy accepts, otherwise the Manager's own store. A mount whose usage.sqlite
+// is a link (or otherwise fails the policy) counts as no mount, so the surface
+// stays reachable and the preflight can name the condition. The entry leaf and
+// both wizard reads ask this question here and nowhere else, so a key accepted at
+// the entry page is accepted by the reads.
 func upgradeCredentialDatabase(managerDatabase string) string {
 	return upgradeservice.CredentialDatabase(configuredLegacyRoot(), managerDatabase)
 }
 
 // upgradeCredentialPaths is the surface's one credential resolution expressed as
-// the inspection paths the entry leaf reads. When the resolved credential file
-// is the configured 1.x database, its sibling data key and archive tree are the
+// the inspection paths the entry leaf reads. When the resolved credential file is
+// the configured 1.x database, its sibling data key and archive tree are the
 // layout the rest of the 1.x inspection already uses; otherwise the Manager's
-// own paths are the credential source and are used unchanged.
+// own paths are the credential source and are used unchanged — which includes the
+// case where the mount holds only a database the shared file policy refuses.
 func upgradeCredentialPaths(manager sqliterepo.InspectionPaths) sqliterepo.InspectionPaths {
 	database := upgradeCredentialDatabase(manager.Database)
 	if strings.TrimSpace(database) == strings.TrimSpace(manager.Database) {

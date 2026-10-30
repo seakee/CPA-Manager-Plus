@@ -39,16 +39,17 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 	)
 	base := bootstrap.FixedBootstrapAPIPath + "installation/upgrade"
 	cases := []struct {
-		name         string
-		mountLegacy  bool
-		observable   bool
-		accepted     string
-		refused      string
-		entryStatus  int
-		entryCode    string
-		preflight    int
-		preflightErr string
-		sourceRoot   string
+		name            string
+		mountLegacy     bool
+		symlinkDatabase bool
+		observable      bool
+		accepted        string
+		refused         string
+		entryStatus     int
+		entryCode       string
+		preflight       int
+		preflightErr    string
+		sourceRoot      string
 	}{
 		{
 			name: "legacy mount wins", mountLegacy: true, observable: false,
@@ -56,6 +57,17 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 			entryStatus: http.StatusOK,
 			preflight:   http.StatusOK,
 			sourceRoot:  "available",
+		},
+		{
+			// The mount holds no database the shared file policy accepts, so it does
+			// not count as a source: the surface must stay reachable through the
+			// Manager store and name the condition instead of answering 503.
+			name: "symlinked mount database falls back to the manager store", mountLegacy: true, symlinkDatabase: true, observable: true,
+			accepted: managerKey, refused: legacyKey,
+			entryStatus:  http.StatusOK,
+			preflight:     http.StatusOK,
+			preflightErr: "upgrade_source_symlinked",
+			sourceRoot:   "upgrade_source_symlinked",
 		},
 		{
 			name: "manager store without a mount", mountLegacy: false, observable: true,
@@ -79,6 +91,9 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			legacyRoot, _ := upgradeAuthSource(t, legacyKey)
 			if testCase.mountLegacy {
+				if testCase.symlinkDatabase {
+					symlinkMountDatabase(t, legacyRoot)
+				}
 				t.Setenv(legacyRootEnvironment, legacyRoot)
 			} else {
 				t.Setenv(legacyRootEnvironment, "")
@@ -177,6 +192,22 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// symlinkMountDatabase replaces the mount's usage.sqlite with a symbolic link to
+// a file beside it. The directory still looks like a 1.x data directory, but the
+// file behind usage.sqlite is reached through a link, which the shared database
+// file policy refuses on both the mount lookup and the credential read.
+func symlinkMountDatabase(t *testing.T, root string) {
+	t.Helper()
+	database := filepath.Join(root, "usage.sqlite")
+	target := filepath.Join(root, "usage.actual.sqlite")
+	if err := os.Rename(database, target); err != nil {
+		t.Fatalf("move the mount database: %v", err)
+	}
+	if err := os.Symlink(target, database); err != nil {
+		t.Skipf("create the mount database symlink: %v", err)
 	}
 }
 

@@ -256,13 +256,19 @@ in addition to its initial graph; dynamic Console imports remain unavailable.
 The entry leaf and both wizard reads resolve exactly one administrator
 credential: the database inside the configured 1.x data directory
 (`CPAMP_LEGACY_ROOT`, otherwise `/legacy`) when that mount actually holds
-`usage.sqlite`, and otherwise the Manager's own store. The resolution is
-implemented once (`upgrade.CredentialDatabase`) and both leaves verify the
-resolved file with the same credential read (`upgrade.VerifyAdminSource`), which
-compares one persisted credential row and never the whole source. A key accepted
-at the entry page is therefore accepted by the reads, and a key kept in the
-other file is refused by all of them; two files with different keys cannot split
-the surface.
+`usage.sqlite`, and otherwise the Manager's own store. "Actually holds" is the
+shared database file policy the credential read applies — the path names the
+file itself, never a symbolic or hard link, with content — so a mount whose
+`usage.sqlite` is a link holds no database as far as the surface is concerned:
+the credential falls back to the Manager store instead of pointing the read at a
+file it would refuse, and the surface stays reachable instead of answering 503 on
+every leaf. The resolution is implemented once (`upgrade.MountDatabase` for the
+mount question, `upgrade.CredentialDatabase` for the resolved file) and both
+leaves verify the resolved file with the same credential read
+(`upgrade.VerifyAdminSource`), which compares one persisted credential row and
+never the whole source. A key accepted at the entry page is therefore accepted by
+the reads, and a key kept in the other file is refused by all of them; two files
+with different keys cannot split the surface.
 
 The entry leaf additionally runs the bounded public observation to project
 `unsupported_upgrade`. That observation deliberately refuses a WAL source as
@@ -273,10 +279,16 @@ never reported as a wrong key, and never as an accepted one either.
 
 `status` is answered from the Manager store and does not require the source
 mount. It reports the recorded stage plus a typed `sourceRoot` marker
-(`available`, or `upgrade_legacy_root_missing` / `upgrade_source_missing` /
-`upgrade_legacy_root_unusable` / `upgrade_source_unreadable`) so the stage is
-never mistaken for proof that a step needing the source can run. `preflight`
-still answers `upgrade_legacy_root_missing` without the mount.
+(`available`, or the preflight's own code for the mount:
+`upgrade_legacy_root_missing` / `upgrade_source_missing` /
+`upgrade_source_symlinked` / `upgrade_source_lock_unavailable` /
+`upgrade_source_unreadable`) so the stage is never mistaken for proof that a step
+needing the source can run. The marker asks the same mount question the
+credential resolution asks, so a mount whose database is a link is named as
+`upgrade_source_symlinked` — the operator sees why the mount is not being used
+even though the surface kept answering. `preflight` still answers
+`upgrade_legacy_root_missing` without the mount, and it inspects the mount the
+operator supplied rather than the credential file the surface fell back to.
 
 Before the operation row commits, the copy-in publishes its provenance marker.
 A marker that names this database with no row is an in-progress operation:

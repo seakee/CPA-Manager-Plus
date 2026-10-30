@@ -363,20 +363,60 @@ func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
 	return verifyAdminCredential(ctx, source, key)
 }
 
+// MountDatabase answers the one question the whole Upgrade surface asks about
+// the operator's mount: does the configured 1.x data directory hold a database
+// this build may read? It applies the same database file policy the credential
+// read applies — the path must name the file itself, never a symbolic or hard
+// link, with content — so a mount it refuses is exactly a mount that read would
+// refuse. A mount that fails the policy therefore holds no database as far as
+// the surface is concerned, and the second result names why with the code the
+// preflight reports for the same mount: source_missing for an absent or empty
+// file, source_symlinked for a link, and the ownership marker's code for every
+// other refusal the preflight meets at the same step. Both results are empty
+// when no mount is configured at all.
+//
+// A mount-level refusal must never be reported as a credential verdict. Counting
+// a symlinked usage.sqlite as "the mount holds a database" would make the
+// credential read refuse the file it was pointed at, so the entry page and both
+// reads would answer 503 and the operator could not even reach the page that
+// names the condition.
+func MountDatabase(legacyRoot string) (string, string) {
+	root := strings.TrimSpace(legacyRoot)
+	if root == "" {
+		return "", ""
+	}
+	database := filepath.Join(root, databaseFileName)
+	// inspectSourceDatabase is the credential read's own inspection: the shared
+	// file policy plus the content requirement. Asking any other question here
+	// is how the two decisions drift apart.
+	if _, err := inspectSourceDatabase(database); err != nil {
+		switch {
+		case errors.Is(err, ErrSourceDatabaseMissing):
+			return "", CodeSourceMissing
+		case errors.Is(err, ErrSourceSymlinked):
+			return "", CodeSourceSymlinked
+		default:
+			// A hard-linked, non-regular or unreadable database is refused by the
+			// ownership probe before anything is opened, which is the preflight's
+			// upgrade_source_lock_unavailable for the same mount.
+			return "", CodeSourceLockUnavailable
+		}
+	}
+	return database, ""
+}
+
 // CredentialDatabase resolves the one administrator credential of the whole
 // Upgrade surface. A configured 1.x data directory that actually holds its
-// database is the source; otherwise the Manager's own store is, because a v2
-// root a copy-in produced carries the same administrator credential and is the
-// only file left when the operator did not mount the source. The entry leaf and
-// both wizard reads resolve the credential here and nowhere else, so a key
-// accepted at the entry page is accepted by the reads and a key kept in the
-// other file is refused by all of them.
+// database — the shared file policy accepts it — is the source; otherwise the
+// Manager's own store is, because a v2 root a copy-in produced carries the same
+// administrator credential and is the only file left when the operator did not
+// mount the source, and because a mount the policy refuses is a mount no read
+// can use. The entry leaf and both wizard reads resolve the credential here and
+// nowhere else, so a key accepted at the entry page is accepted by the reads and
+// a key kept in the other file is refused by all of them.
 func CredentialDatabase(legacyRoot, managerDatabase string) string {
-	if root := strings.TrimSpace(legacyRoot); root != "" {
-		database := filepath.Join(root, databaseFileName)
-		if info, err := os.Stat(database); err == nil && info.Mode().IsRegular() {
-			return database
-		}
+	if database, _ := MountDatabase(legacyRoot); database != "" {
+		return database
 	}
 	return strings.TrimSpace(managerDatabase)
 }
