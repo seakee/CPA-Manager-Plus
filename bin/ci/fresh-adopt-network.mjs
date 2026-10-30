@@ -1074,13 +1074,21 @@ try {
       'ready',
       'the Manager reported itself as ' + JSON.stringify(status.manager)
     );
-    assert.match(status.status || '', /^(ready|starting|offline|unknown)$/, 'unexpected runtime status: ' + status.status);
+    assert.match(
+      status.status || '',
+      /^(ready|starting|offline|unknown)$/,
+      'unexpected runtime status: ' + status.status
+    );
     assert.equal(status.errorCode, undefined, 'a readable status carried the error ' + status.errorCode);
     assert(status.gateway && typeof status.gateway === 'object', 'the status carried no gateway observation');
     // The gateway block is the same observation the status is named after: one
     // read cannot report two states.
     assert.equal(status.gateway.state, status.status, 'the gateway state and the status disagree');
-    assert.equal(status.gateway.ready, status.status === 'ready', 'gateway.ready disagrees with ' + status.status);
+    assert.equal(
+      status.gateway.ready,
+      status.status === 'ready',
+      'gateway.ready disagrees with ' + status.status
+    );
     assert.match(status.gateway.identity || '', /\S/, 'the observation named no runtime identity');
     assert(
       Number.isSafeInteger(status.gateway.generation) && status.gateway.generation > 0,
