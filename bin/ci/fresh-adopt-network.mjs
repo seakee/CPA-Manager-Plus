@@ -493,9 +493,30 @@ function sourceListing() {
 // `EnableDestination`), and the gateway config and auth directory are its two
 // files (`destination.publish`).
 const destinationRoot = '/runtime/supervisor/destination';
+// The staged destination is Supervisor-owned, so the management key the
+// Supervisor generated for it is in the stage snapshot. The harness is the
+// trusted Docker operator, so it may read that file; the value joins the secret
+// list and is never printed.
+let destinationKey = '';
+function destinationManagementKey() {
+  if (destinationKey) return destinationKey;
+  const stage = JSON.parse(dc('exec', '-T', 'cpamp-runtime', 'cat', destinationRoot + '/stage.json'));
+  destinationKey = stage.managementKey;
+  assert(destinationKey, 'the staged destination carries no management key');
+  secretValues.push(destinationKey);
+  return destinationKey;
+}
+// CPA rewrites its own config document as YAML the first time it saves a change
+// (`internal/config/config_load.go:223` in v8.0.13), so the file on disk is not a
+// JSON document after the migration. The CPA's own management read is the exact
+// configuration the child serves, and it is JSON.
 function destinationConfig() {
-  const raw = dc('exec', '-T', 'cpamp-runtime', 'cat', destinationRoot + '/config.yaml');
-  return JSON.parse(raw);
+  const body = run([
+    'docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
+    images['cpamp-manager'], '-qO-', '--header=Authorization: Bearer ' + destinationManagementKey(),
+    'http://cpamp-runtime:8317/v8/management/config',
+  ]).stdout;
+  return JSON.parse(body);
 }
 function destinationCredentials() {
   const listing = dc('exec', '-T', 'cpamp-runtime', 'sh', '-c', 'ls -1 ' + destinationRoot + '/auth 2>/dev/null || true');
