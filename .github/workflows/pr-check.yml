@@ -212,9 +212,29 @@ jobs:
               env "${root_go_env[@]}" "${go_bin}" "$@"
           }
           as_root -C apps/runtime-supervisor build -trimpath -o "${tools}/cpamp-runtime-supervisor" ./cmd/cpamp-runtime-supervisor
-          export CPAMP_TEST_CPA_V8="${tools}/v8/cli-proxy-api"
-          export CPAMP_TEST_CPA_LEGACY="${tools}/v7/cli-proxy-api"
-          export CPAMP_TEST_RUNTIME="${tools}/cpamp-runtime-supervisor"
+          # The destination child runs as the image identity (uid 10001), but a
+          # hosted runner's home is not world-traversable: RUNNER_TEMP lives
+          # under /home/runner (0750), so an exec of a binary staged there fails
+          # with EACCES. CPA v8 then never binds the destination, and both tests
+          # report only a 20s "controlled CPA/Runtime observation did not become
+          # available" timeout. Stage every executable the child must reach in a
+          # world-traversable directory instead, and prove the identity can
+          # execute them before spending the tests on it.
+          staged=/tmp/cpamp-fresh-adoption-tools
+          install -d -m 0755 "${staged}"
+          chmod 0755 "${staged}"
+          install -m 0755 "${tools}/v8/cli-proxy-api" "${staged}/cpa-v8"
+          install -m 0755 "${tools}/v7/cli-proxy-api" "${staged}/cpa-v7"
+          install -m 0755 "${tools}/cpamp-runtime-supervisor" "${staged}/cpamp-runtime-supervisor"
+          for executable in "${staged}/cpa-v8" "${staged}/cpa-v7" "${staged}/cpamp-runtime-supervisor"; do
+            if ! sudo -n setpriv --reuid 10001 --regid 10001 --clear-groups /bin/sh -c "test -x '${executable}'"; then
+              echo "the destination identity cannot execute ${executable}" >&2
+              exit 1
+            fi
+          done
+          export CPAMP_TEST_CPA_V8="${staged}/cpa-v8"
+          export CPAMP_TEST_CPA_LEGACY="${staged}/cpa-v7"
+          export CPAMP_TEST_RUNTIME="${staged}/cpamp-runtime-supervisor"
           export CPAMP_TEST_CPA_LEGACY_ARCHIVE_SHA256="8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74"
           export CPAMP_TEST_FRESH_TRANSITION_OUT="${evidence}/fresh-legacy-transition.json"
           export CPAMP_TEST_FRESH_TRANSITION_HEAD="$(git rev-parse HEAD)"
