@@ -304,12 +304,16 @@ on both surfaces at once, and no write route exists.
 - **Credential.** The Upgrade surface has its own identity — the source
   administrator key the bootstrap Upgrade entry verified — presented as
   `Authorization: Bearer <key>` with exactly one header value. The whole surface
-  resolves one credential file (`upgrade.CredentialDatabase`): the configured
-  1.x database when the mount holds one the shared file policy accepts,
-  otherwise the Manager's own store, because a copied-in v2 root carries the
-  same administrator credential and is the only file left without a mount. The
-  handler verifies it through `upgrade.VerifyAdminSource`, which opens that file
-  read-only and runs `setting.LoadAdminCredential` + `security.VerifyAdminKey`.
+  resolves one credential file by one rule
+  (`upgrade.CredentialDatabaseFrom`): the configured 1.x database when the mount
+  holds one the shared file policy accepts, otherwise the Manager's own store,
+  because a copied-in v2 root carries the same administrator credential and is
+  the only file left without a mount. The rule has one implementation, and the
+  handler has no credential input of its own: it applies that rule to the mount
+  it inspected for the request, so nothing a caller supplies can point the read
+  at a file the policy refused. The handler verifies the resolved file through
+  `upgrade.VerifyAdminSource`, which opens it read-only and runs
+  `setting.LoadAdminCredential` + `security.VerifyAdminKey`.
   That open reads the credential row and nothing else:
   no `quick_check`, no schema vocabulary, no parity, bounded to
   `CredentialVerifyTimeout` (2s). Every authenticated request runs it, including
@@ -323,6 +327,13 @@ on both surfaces at once, and no write route exists.
   The installation session, the Fresh Admin key, a cookie and an absent header
   are all `401`; the two surfaces no longer check a session before this handler
   runs, so no missing decision can read as allow.
+  The rule is applied at two different times. The entry leaf resolves once, when
+  it is constructed (`upgrade.CredentialDatabase` over the startup `paths`); the
+  two read routes resolve per request. A key accepted at the entry page is
+  therefore accepted by the reads while the mount is unchanged, and a key kept in
+  the other file is refused by both — but a mount that appears, disappears or is
+  repointed after startup is seen by the reads first, and the entry leaf keeps its
+  startup resolution until it is rebuilt.
 - **One file policy on both paths.** The mount lookup applies the same database
   file rules as the preflight and the credential read
   (`processlock.InspectDatabaseFile`, via `upgrade.MountDatabase`): the path must
@@ -331,10 +342,14 @@ on both surfaces at once, and no write route exists.
   database — the credential resolves to the Manager store and every leaf stays
   usable, instead of the read being pointed at a file it would refuse and
   answering 503 on the page that should name the condition. The refusal carries
-  the preflight's code for that mount (`upgrade_source_symlinked` for a link,
+  the file policy's code (`upgrade_source_symlinked` for a link,
   `upgrade_source_missing` for an absent or empty file,
   `upgrade_source_lock_unavailable` for a hard-linked or otherwise uninspectable
   one) and the status projection reports it as its `sourceRoot` marker.
+  The lookup is asked at most once per request — authentication and the marker
+  share the answer — and it runs under `MountLookupTimeout` (2s), because the
+  filesystem calls behind it cannot be cancelled: a mount that never answers is
+  reported as `upgrade_source_unreadable` instead of holding the poll open.
   `503 upgrade_source_symlinked` on a leaf therefore means the resolved file
   itself is a link — in practice the Manager store — never the mount the
   operator mounted through one. SQLite opens lazily on the first query, so
@@ -351,13 +366,21 @@ on both surfaces at once, and no write route exists.
   credential sees `405` (`Allow: GET`) or `404`.
 - **Failure order.** `401` is reserved for a credential verdict. A missing or
   unusable mount answers `503 upgrade_legacy_root_missing` /
-  `upgrade_legacy_root_unusable`; a mount with no database answers
-  `503 upgrade_source_missing`; a credential read that exceeds its bound answers
-  `503 upgrade_credential_timeout`; a resolved database that is itself a link
-  answers `503 upgrade_source_symlinked`; a source that exists but cannot be read
-  to verify the key answers `503 upgrade_source_unreadable`. None of these is a
-  wrong-password message, and none of them is the ownership-marker code — that
-  code is the preflight's, and this surface never inspects the marker.
+  `upgrade_legacy_root_unusable`; a configured mount whose database the file
+  policy refuses answers that refusal
+  (`503 upgrade_source_missing`, `upgrade_source_symlinked`, or
+  `upgrade_source_lock_unavailable` for a hard-linked or non-regular database),
+  and only when there is no Manager store to fall back to — with one, the
+  credential resolves there and the refusal is reported as the `sourceRoot`
+  marker instead; a mount lookup that outlives its bound answers
+  `503 upgrade_source_unreadable`; a credential read that exceeds its bound
+  answers `503 upgrade_credential_timeout`; a resolved database that is itself a
+  link answers `503 upgrade_source_symlinked`; a source that exists but cannot be
+  read to verify the key answers `503 upgrade_source_unreadable`. None of these is
+  a wrong-password message, and none of them is the ownership marker's verdict:
+  that marker is the preflight's, and this surface never inspects it — the
+  `upgrade_source_lock_unavailable` above is the file policy refusing the file,
+  and it is the code the preflight also uses for an uninspectable marker.
 - **Ownership without the fence.** `upgrade.Preflight` observes the source with
   `processlock.ProbeExisting`: a shared, non-blocking lock on the existing
   marker. A live writer is `upgrade_source_busy`; a symbolic database link is
@@ -372,14 +395,21 @@ on both surfaces at once, and no write route exists.
   source kind/version, reconciliation days, manual items, error code/detail,
   updated time) and maps the stage onto `nextAction`. An unknown stage is shown
   verbatim; fingerprints, digests and paths have no field at all. The recorded
-  stage is readable without the mount; a separate `sourceRoot` marker answers
-  the shared mount lookup with `available` or the preflight's code for the mount
-  (`upgrade_legacy_root_missing`, `upgrade_source_missing`,
-  `upgrade_source_symlinked`, `upgrade_source_lock_unavailable`,
-  `upgrade_source_unreadable`), so a step needing the source is never assumed
-  runnable and a mount the surface refused is named rather than silently
-  replaced. `preflight` still inspects that mount, not the credential file the
-  surface fell back to.
+  stage is readable without the mount; a separate `sourceRoot` marker reports
+  `available` or the code this request's mount lookup reached, and those are the
+  only reachable values: `upgrade_legacy_root_missing` /
+  `upgrade_legacy_root_unusable` for the configured directory,
+  `upgrade_source_missing` / `upgrade_source_symlinked` /
+  `upgrade_source_lock_unavailable` from the shared database file policy, and
+  `upgrade_source_unreadable` when the lookup outlived its bound.
+  The marker mirrors the file policy, not the preflight: a mount whose ownership
+  marker is absent or busy, or whose database fails its integrity check, still
+  reads `available` here and is refused by the preflight, which is the step that
+  qualifies the source. The marker is only visible to a caller holding the
+  resolved credential: when the mount is refused the credential is the Manager
+  store, so the mount's own key gets `401` and cannot read the marker that
+  explains the refusal. `preflight` still inspects that mount, not the credential
+  file the surface fell back to.
 - **Scrubbing.** Operator-visible text is redacted by content, not by path
   shape: `Bearer …` (including a value wrapped onto the next line after a lone
   `Bearer`), `Authorization: Basic …`, `sk-…`, this product's own

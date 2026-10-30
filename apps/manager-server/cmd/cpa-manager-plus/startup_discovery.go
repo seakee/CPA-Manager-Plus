@@ -149,16 +149,17 @@ func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.Inspection
 	// refused by all three.
 	if handler, err := upgradeauth.New(upgradeCredentialPaths(paths), os.Getenv("CPAMP_PUBLIC_ORIGIN")); err == nil {
 		h.upgradeAuth = handler
-		// The wizard routes read the same source credential the entry leaf
-		// verifies. They are mounted with the leaf and closed with it: an
-		// unfinished Upgrade operation has no Fresh record, so the fixed
-		// surface is the only carrier that can still show what it recorded.
+		// The wizard routes resolve the credential with the surface's one rule
+		// from the mount they inspect and this database, exactly as the entry
+		// leaf resolved it for `paths` at startup. They are mounted with the
+		// leaf and closed with it: an unfinished Upgrade operation has no Fresh
+		// record, so the fixed surface is the only carrier that can still show
+		// what it recorded.
 		h.upgradeWizard = upgradewizard.Handler{
-			LegacyRoot:         configuredLegacyRoot,
-			CredentialDatabase: func() string { return upgradeCredentialDatabase(paths.Database) },
-			PublicOrigin:       strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
-			Database:           func() string { return paths.Database },
-			Timeout:            upgradewizard.DefaultTimeout,
+			LegacyRoot:   configuredLegacyRoot,
+			PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
+			Database:     func() string { return paths.Database },
+			Timeout:      upgradewizard.DefaultTimeout,
 		}
 	}
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
