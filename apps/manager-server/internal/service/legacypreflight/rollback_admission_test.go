@@ -59,6 +59,23 @@ func TestRolledBackAdmissionStaysOnTheUpgradeSurface(t *testing.T) {
 	if resolvedStage != UpgradeStageInProgress || resolvedReason != ReasonUpgradeRolledBack {
 		t.Fatalf("resolved = %q/%q", resolvedStage, resolvedReason)
 	}
+
+	// The same decision survives the real startup admission: the process starts,
+	// keeps the Upgrade surface and carries the typed reason the console shows.
+	admission, err = AdmitStartup(context.Background(), paths, Options{
+		UpgradeAdmission: DatabaseUpgradeAdmission{DatabasePath: paths.Database},
+	})
+	if err != nil {
+		t.Fatalf("admit startup on a rolled-back store: %v", err)
+	}
+	defer func() { _ = admission.Close() }()
+	if admission.UpgradeStage != UpgradeStageInProgress || admission.UpgradeReason != ReasonUpgradeRolledBack {
+		t.Fatalf("startup admission = %q/%q, want %q/%q",
+			admission.UpgradeStage, admission.UpgradeReason, UpgradeStageInProgress, ReasonUpgradeRolledBack)
+	}
+	if surface := admission.Surface(); surface != SurfaceUpgradeOnly {
+		t.Fatalf("startup surface = %q, want %q", surface, SurfaceUpgradeOnly)
+	}
 }
 
 func TestOtherStagesCarryNoRollbackReason(t *testing.T) {

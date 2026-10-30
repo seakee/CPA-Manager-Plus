@@ -143,7 +143,10 @@ func TestRollbackVerifyRefusesUnprovenEvidence(t *testing.T) {
 		mutate func(string) string
 	}{
 		{name: "unhealthy probe", probe: statusProbe(t, false)},
-		{name: "missing probe", mutate: func(root string) string { return root }},
+		// The volume no longer holds a 1.x database, so no read-only open can
+		// prove the rollback. This case is deliberately independent of the host
+		// network: it must not depend on nothing listening on the 1.x port.
+		{name: "volume without a database", mutate: func(string) string { return t.TempDir() }},
 	} {
 		legacy := source
 		if test.mutate != nil {
@@ -262,5 +265,52 @@ func TestRunReportsALaterStageWithoutTouchingIt(t *testing.T) {
 	}
 	if after.Stage != before.Stage || after.UpdatedAtMS != before.UpdatedAtMS {
 		t.Fatalf("run touched a later stage: before=%+v after=%+v", before, after)
+	}
+}
+
+// TestRunAfterARollbackReportsTheTerminalStage is the blocking half of a
+// rollback at the run boundary: a rolled-back operation already copied in, so
+// `upgrade run` must neither copy again nor print a reconciliation command that
+// would resume an abandoned upgrade.
+func TestRunAfterARollbackReportsTheTerminalStage(t *testing.T) {
+	source := copyReadySource(t)
+	target := rollbackReadyTarget(t, source)
+	databasePath := filepath.Join(target, "usage.sqlite")
+	db, err := sqliterepo.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open the v2 store: %v", err)
+	}
+	if _, err := upgradeoperation.New(db).Advance(context.Background(), "", model.UpgradeStageRolledBack); err != nil {
+		_ = db.Close()
+		t.Fatalf("record the rolled_back stage: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the v2 store: %v", err)
+	}
+	before, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
+	if err != nil || !found {
+		t.Fatalf("read the recorded operation: found=%t err=%v", found, err)
+	}
+
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var output runOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode run output: %v; output: %s", err, stdout)
+	}
+	if output.Operation == nil || output.Operation.Stage != model.UpgradeStageRolledBack {
+		t.Fatalf("run = %+v, want the rolled_back stage reported", output.Operation)
+	}
+	if output.Result != nil || output.Next != "" {
+		t.Fatalf("run resumed a rolled-back operation: result=%+v next=%q", output.Result, output.Next)
+	}
+	after, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
+	if err != nil || !found {
+		t.Fatalf("re-read the recorded operation: found=%t err=%v", found, err)
+	}
+	if after.Stage != before.Stage || after.UpdatedAtMS != before.UpdatedAtMS {
+		t.Fatalf("run touched a rolled-back row: before=%+v after=%+v", before, after)
 	}
 }

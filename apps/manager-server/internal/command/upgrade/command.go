@@ -78,7 +78,7 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                      back up and copy a stopped 1.x source into the v2 data root")
 	_, _ = fmt.Fprintln(w, "  status [--json] [--db-path PATH]    read the persisted upgrade operation")
 	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--legacy-image <ref>] [--json]")
-	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> --status-url <url> [--legacy-image <ref>] [--json]")
+	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--status-url <url>] [--legacy-image <ref>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
 	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked or refused, 2 usage or environment error.")
 }
@@ -298,6 +298,11 @@ func stagePastCopyIn(stage model.UpgradeStage) bool {
 	switch stage {
 	case model.UpgradeStageReconcile, model.UpgradeStageCPAImport,
 		model.UpgradeStageExternalConnect, model.UpgradeStageVerify, model.UpgradeStageComplete:
+		return true
+	// A rolled-back operation already copied in and then abandoned the v2
+	// root. It is reported like any later stage: the copy-in is never redone,
+	// and nothing may suggest that reconciliation is still the next step.
+	case model.UpgradeStageRolledBack:
 		return true
 	default:
 		return false
