@@ -539,7 +539,8 @@ try {
   await wait(async () => managementProbe('cpamp-d-adopt-empty', emptySourceKey), 'empty source', 120000);
   const before = sourceSnapshot();
   report.sourceSnapshot = { configSha256: before.configSha256, credentials: before.credentials };
-  assert(before.credentials.includes('claude-source.json'), 'the source credential list');
+  assert(before.credentials.includes('source-00.json'), 'the source credential list');
+  assert(before.credentials.includes('legacy-token.txt'), 'the unparseable file is not in the auth dir');
 
   // The Manager's own boot is the operator's: a read-only listener until the Host
   // admits the store, then the claimable service.
