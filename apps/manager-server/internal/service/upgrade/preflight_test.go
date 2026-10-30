@@ -752,6 +752,13 @@ func TestPreflightDiskRequirement(t *testing.T) {
 	if !found || check.Status != StatusBlocked || check.Code != CodeDiskInsufficient {
 		t.Fatalf("disk check = %+v", check)
 	}
+	// The detail states the scratch requirement beside the copy requirement: the
+	// snapshot needs room before the target volume is touched at all.
+	for _, want := range []string{"requiredBytes=", "availableBytes=", "scratchRequiredBytes="} {
+		if !strings.Contains(check.Detail, want) {
+			t.Fatalf("disk detail %q does not carry %q", check.Detail, want)
+		}
+	}
 
 	report = preflight(t, fixture.root, Options{
 		DeclaredVersion: pinnedSourceVersion(),
@@ -1009,4 +1016,197 @@ func entrySize(t *testing.T, entry os.DirEntry) int64 {
 		t.Fatalf("stat %s: %v", entry.Name(), err)
 	}
 	return info.Size()
+}
+
+// TestPreflightBlocksV113ShapeDeclaredAsThePinnedRelease is the H3 regression:
+// a source that lacks usage_archive_event_refs was accepted as v1.14.4 because
+// the operator's declaration was the only version check. The declaration is not
+// evidence; the structural lower bound is, and a missing table names itself.
+func TestPreflightBlocksV113ShapeDeclaredAsThePinnedRelease(t *testing.T) {
+	fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+		execFixture(t, db, `drop table usage_archive_event_refs`)
+	})
+	report := preflight(t, fixture.root, declared())
+	requireBlocked(t, report, CodeSourceVersionUnsupported)
+	if report.SourceVersion != pinnedSourceVersion() {
+		t.Fatalf("source version = %q, want the declaration %q", report.SourceVersion, pinnedSourceVersion())
+	}
+	if len(report.MissingTables) != 1 || report.MissingTables[0] != "usage_archive_event_refs" {
+		t.Fatalf("missing tables = %v, want [usage_archive_event_refs]", report.MissingTables)
+	}
+	check, found := checkByName(report, CheckSourceVersion)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
+		t.Fatalf("version check = %+v, want blocked %s", check, CodeSourceVersionUnsupported)
+	}
+	if !strings.Contains(check.Detail, "usage_archive_event_refs") {
+		t.Fatalf("version detail %q does not name the missing table", check.Detail)
+	}
+	if !strings.Contains(check.Detail, pinnedSourceVersion()) {
+		t.Fatalf("version detail %q does not carry the pinned release", check.Detail)
+	}
+}
+
+// TestPreflightParityIsNotApplicableWithoutTheRetainedArchiveTables is the
+// second half of H3: when the source has no archive refs or no deleted coverage
+// rollup, parity is not "zero gaps" — it was never measurable, and the report
+// says so with a reason.
+func TestPreflightParityIsNotApplicableWithoutTheRetainedArchiveTables(t *testing.T) {
+	cases := []struct {
+		name      string
+		statement string
+		missing   string
+	}{
+		{name: "archive event refs", statement: `drop table usage_archive_event_refs`, missing: "usage_archive_event_refs"},
+		{name: "deleted coverage daily", statement: `drop table usage_archive_deleted_coverage_daily`, missing: "usage_archive_deleted_coverage_daily"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+				execFixture(t, db, testCase.statement)
+			})
+			report := preflight(t, fixture.root, declared())
+			if report.ParityGaps.Applicable {
+				t.Fatalf("parity reported applicable without %s", testCase.missing)
+			}
+			if !strings.Contains(report.ParityGaps.Reason, testCase.missing) {
+				t.Fatalf("parity reason = %q, want it to name %s", report.ParityGaps.Reason, testCase.missing)
+			}
+			if report.ParityGaps.any() || report.ParityGaps.DeletedEventRefs != 0 || len(report.ParityGaps.AffectedDates) != 0 {
+				t.Fatalf("parity gaps = %+v, want no measured counts", report.ParityGaps)
+			}
+			check, found := checkByName(report, CheckParity)
+			if !found || check.Status != StatusNotApplicable {
+				t.Fatalf("parity check = %+v, want status %q", check, StatusNotApplicable)
+			}
+			if !strings.Contains(check.Detail, testCase.missing) {
+				t.Fatalf("parity detail %q does not name %s", check.Detail, testCase.missing)
+			}
+			// The structural bound still blocks, so no path reaches ready on a
+			// source without the retained history.
+			requireBlocked(t, report, CodeSourceVersionUnsupported)
+		})
+	}
+}
+
+// TestPreflightBlocksWhenThePostCopyFingerprintFails is N4: a second whole-tree
+// fingerprint error used to be swallowed, leaving the pre-copy value as if the
+// copy had been proven against it.
+func TestPreflightBlocksWhenThePostCopyFingerprintFails(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	report := preflight(t, fixture.root, Options{
+		DeclaredVersion: pinnedSourceVersion(),
+		afterCopy: func() {
+			// The database file is replaced by a directory: the pre-copy value
+			// still exists, but the tree can no longer be read back.
+			if err := os.Remove(fixture.dbPath); err != nil {
+				t.Errorf("remove source database: %v", err)
+				return
+			}
+			if err := os.Mkdir(fixture.dbPath, 0o755); err != nil {
+				t.Errorf("replace source database with a directory: %v", err)
+			}
+		},
+	})
+	requireBlocked(t, report, CodeSourceUnreadable)
+	check, found := checkByName(report, CheckFingerprint)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceUnreadable {
+		t.Fatalf("fingerprint check = %+v, want blocked %s", check, CodeSourceUnreadable)
+	}
+	if !strings.Contains(check.Detail, "after the snapshot") {
+		t.Fatalf("fingerprint detail %q does not say the second fingerprint failed", check.Detail)
+	}
+	if report.Fingerprint == "" {
+		t.Fatal("the pre-copy fingerprint was not reported")
+	}
+}
+
+// TestPreflightRefusesScratchInsideTheLegacyRoot is N2's first half: the whole
+// database copy must never land in the tree preflight promises to preserve.
+func TestPreflightRefusesScratchInsideTheLegacyRoot(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	scratch := filepath.Join(fixture.root, "upgrade-scratch")
+	before := snapshotTree(t, fixture.root)
+
+	report := preflight(t, fixture.root, Options{
+		DeclaredVersion: pinnedSourceVersion(),
+		ScratchDir:      scratch,
+	})
+	requireBlocked(t, report, CodeSnapshotFailed)
+	if _, err := os.Lstat(scratch); !os.IsNotExist(err) {
+		t.Fatalf("scratch directory was created inside the source root: %v", err)
+	}
+	after := snapshotTree(t, fixture.root)
+	if len(after) != len(before) {
+		t.Fatalf("source tree entry count changed: %d -> %d", len(before), len(after))
+	}
+	for path, digest := range before {
+		if after[path] != digest {
+			t.Fatalf("source entry %s changed", path)
+		}
+	}
+	check, found := checkByName(report, CheckSourceOwnership)
+	if !found || check.Code != CodeSnapshotFailed {
+		t.Fatalf("ownership check = %+v, want %s", check, CodeSnapshotFailed)
+	}
+	if !strings.Contains(check.Detail, "legacy source root") {
+		t.Fatalf("ownership detail %q does not name the legacy source root", check.Detail)
+	}
+}
+
+// TestPreflightRefusesScratchInsideTheTargetRoot is N2's second half: scratch in
+// the volume that will receive the copy is refused before anything is written.
+func TestPreflightRefusesScratchInsideTheTargetRoot(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	target := t.TempDir()
+	scratch := filepath.Join(target, "upgrade-scratch")
+
+	report := preflight(t, fixture.root, Options{
+		DeclaredVersion: pinnedSourceVersion(),
+		TargetDir:       target,
+		ScratchDir:      scratch,
+	})
+	requireBlocked(t, report, CodeSnapshotFailed)
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("read target root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("target root was written: %v", entries)
+	}
+	check, found := checkByName(report, CheckSourceOwnership)
+	if !found || check.Code != CodeSnapshotFailed {
+		t.Fatalf("ownership check = %+v, want %s", check, CodeSnapshotFailed)
+	}
+	if !strings.Contains(check.Detail, "target root") {
+		t.Fatalf("ownership detail %q does not name the target root", check.Detail)
+	}
+}
+
+// TestDiskTargetNeverMeasuresTheWorkingDirectory is N3: with no target and no
+// scratch directory the probe measures the volume the snapshot would use, never
+// the process working directory, which describes neither volume.
+func TestDiskTargetNeverMeasuresTheWorkingDirectory(t *testing.T) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("working directory: %v", err)
+	}
+	target, defaulted := diskTarget("", "")
+	if !defaulted {
+		t.Fatal("an unset target was not reported as defaulted")
+	}
+	if target == workingDirectory {
+		t.Fatalf("disk target = %q, want the scratch volume rather than the working directory", target)
+	}
+	if target != os.TempDir() {
+		t.Fatalf("disk target = %q, want the OS temporary directory", target)
+	}
+	scratch := t.TempDir()
+	target, defaulted = diskTarget("", scratch)
+	if !defaulted || target != scratch {
+		t.Fatalf("scratch-volume target = %q defaulted = %t, want %q defaulted", target, defaulted, scratch)
+	}
+	target, defaulted = diskTarget(filepath.Join(scratch, "manager-data"), scratch)
+	if defaulted || target != filepath.Join(scratch, "manager-data") {
+		t.Fatalf("explicit target = %q defaulted = %t", target, defaulted)
+	}
 }

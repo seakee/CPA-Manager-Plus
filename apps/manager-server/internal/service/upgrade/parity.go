@@ -35,9 +35,23 @@ type projectionState struct {
 // repairs nothing and blocks nothing.
 func detectParityGaps(ctx context.Context, db *sql.DB, schema sourceSchema) (ParityGaps, error) {
 	gaps := ParityGaps{AffectedDates: []string{}}
-	if !schema.tables["usage_archive_event_refs"] || !schema.tables["usage_events"] {
+	// The parity question only exists for a source that retained the archive
+	// refs and the deleted-coverage rollup. A source without them has no
+	// retained history to compare, so the answer is "not applicable" and never
+	// a clean zero, which would read as "no gaps found".
+	if !schema.tables["usage_archive_event_refs"] {
+		gaps.Reason = "usage_archive_event_refs is missing"
 		return gaps, nil
 	}
+	if !schema.tables["usage_archive_deleted_coverage_daily"] {
+		gaps.Reason = "usage_archive_deleted_coverage_daily is missing"
+		return gaps, nil
+	}
+	if !schema.tables["usage_events"] {
+		gaps.Reason = "usage_events is missing"
+		return gaps, nil
+	}
+	gaps.Applicable = true
 	state, err := projectionWatermark(ctx, db, schema)
 	if err != nil {
 		return gaps, err
@@ -92,27 +106,25 @@ func detectParityGaps(ctx context.Context, db *sql.DB, schema sourceSchema) (Par
 		return gaps, err
 	}
 
-	if schema.tables["usage_archive_deleted_coverage_daily"] {
-		coverage, err := readDeletedCoverageDaily(ctx, db)
-		if err != nil {
-			return gaps, err
-		}
-		refs, err := countDeletedRefsPerDay(ctx, db)
-		if err != nil {
-			return gaps, err
-		}
-		days := make(map[int64]bool, len(coverage)+len(refs))
-		for day := range coverage {
-			days[day] = true
-		}
-		for day := range refs {
-			days[day] = true
-		}
-		for day := range days {
-			if coverage[day] != refs[day] {
-				gaps.CoverageDaysWithGaps++
-				affected[utcDayLabel(day)] = true
-			}
+	coverage, err := readDeletedCoverageDaily(ctx, db)
+	if err != nil {
+		return gaps, err
+	}
+	refs, err := countDeletedRefsPerDay(ctx, db)
+	if err != nil {
+		return gaps, err
+	}
+	days := make(map[int64]bool, len(coverage)+len(refs))
+	for day := range coverage {
+		days[day] = true
+	}
+	for day := range refs {
+		days[day] = true
+	}
+	for day := range days {
+		if coverage[day] != refs[day] {
+			gaps.CoverageDaysWithGaps++
+			affected[utcDayLabel(day)] = true
 		}
 	}
 

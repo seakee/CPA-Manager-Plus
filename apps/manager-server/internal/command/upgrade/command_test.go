@@ -8,10 +8,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -34,6 +38,7 @@ func readySource(t *testing.T) string {
 		`create table usage_monitoring_event_projection_v1 (event_id integer primary key, timestamp_ms integer not null)`,
 		`create table usage_monitoring_rollup_state (rollup_name text primary key, schema_version integer not null, structure_revision text not null default '', status text not null, coverage_event_id integer not null default 0, updated_at_ms integer not null default 0)`,
 		`create table usage_archive_event_refs (event_hash text primary key, run_id text not null, segment_sequence integer not null, raw_event_id integer not null, timestamp_ms integer not null, archived_at_ms integer not null, raw_deleted_at_ms integer)`,
+		`create table usage_archive_deleted_coverage_daily (utc_day integer primary key, deleted_event_count integer not null, min_timestamp_ms integer not null, max_timestamp_ms integer not null)`,
 		`insert into usage_monitoring_rollup_state (rollup_name, schema_version, structure_revision, status, coverage_event_id) values ('projection_v1', 1, '` + usageidentity.MonitoringProjectionStructureRevision() + `', 'ready', 1)`,
 	}
 	databasePath := filepath.Join(root, "usage.sqlite")
@@ -75,7 +80,7 @@ func run(t *testing.T, args ...string) (int, string, string) {
 
 func TestPreflightJSONExitCodeReady(t *testing.T) {
 	root := readySource(t)
-	code, stdout, stderr := run(t, "preflight", "--legacy", root, "--source-version", bootstrap.PlannedDirectRelease, "--json")
+	code, stdout, stderr := run(t, "preflight", "--legacy", root, "--source-version", bootstrap.PlannedDirectRelease, "--target-dir", t.TempDir(), "--json")
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -93,7 +98,7 @@ func TestPreflightJSONExitCodeReady(t *testing.T) {
 
 func TestPreflightJSONExitCodeBlocked(t *testing.T) {
 	root := t.TempDir()
-	code, stdout, _ := run(t, "preflight", "--legacy", root, "--json")
+	code, stdout, _ := run(t, "preflight", "--legacy", root, "--target-dir", t.TempDir(), "--json")
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -208,7 +213,7 @@ func TestExitCodeMapping(t *testing.T) {
 
 func TestPreflightBlocksWithoutADeclaredSourceVersion(t *testing.T) {
 	root := readySource(t)
-	code, stdout, stderr := run(t, "preflight", "--legacy", root, "--json")
+	code, stdout, stderr := run(t, "preflight", "--legacy", root, "--target-dir", t.TempDir(), "--json")
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr)
 	}
@@ -309,4 +314,204 @@ func treeDigests(t *testing.T, root string) map[string]string {
 		t.Fatalf("digest manager volume: %v", walkErr)
 	}
 	return digests
+}
+
+// newManagerDatabase creates a migrated Manager database with one persisted
+// operation, the way a running Manager leaves it. It returns the directory and
+// the database path.
+func newManagerDatabase(t *testing.T) (string, string) {
+	t.Helper()
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "manager.sqlite")
+	db, err := sqliterepo.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open manager database: %v", err)
+	}
+	repository := upgradeoperation.New(db)
+	if _, err := repository.Advance(context.Background(), model.UpgradeDomainUsageEvents, model.UpgradeStageCopyIn); err != nil {
+		_ = db.Close()
+		t.Fatalf("advance: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close manager database: %v", err)
+	}
+	return directory, databasePath
+}
+
+func runError(t *testing.T, args ...string) (error, string, string) {
+	t.Helper()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err := Run(context.Background(), args, stdout, stderr)
+	return err, stdout.String(), stderr.String()
+}
+
+// TestStatusSucceedsAgainstALiveWriterWithinItsRetryBudget is the regression for
+// N1: `upgrade status` used to fail every time it raced a Manager that was
+// writing, because one snapshot attempt was all it made. A live Manager writes
+// in bursts, so a bounded retry finds a quiet window.
+func TestStatusSucceedsAgainstALiveWriterWithinItsRetryBudget(t *testing.T) {
+	_, databasePath := newManagerDatabase(t)
+	writer, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	writer.SetMaxOpenConns(1)
+	// A payload large enough that one snapshot copy spans many writer commits:
+	// the first attempt cannot quietly finish between two of them.
+	if _, err := writer.Exec(`create table status_writer_probe (id integer primary key, payload blob)`); err != nil {
+		_ = writer.Close()
+		t.Fatalf("create writer table: %v", err)
+	}
+	if _, err := writer.Exec(`insert into status_writer_probe (id, payload) values (1, zeroblob(?))`, 8<<20); err != nil {
+		_ = writer.Close()
+		t.Fatalf("seed writer payload: %v", err)
+	}
+
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	var stopOnce sync.Once
+	attempts, raced := 0, 0
+	original := openSnapshot
+	openSnapshot = func(ctx context.Context, path string, scratch string) (*upgradeservice.Snapshot, error) {
+		attempts++
+		snapshot, err := original(ctx, path, scratch)
+		if err != nil && errors.Is(err, upgradeservice.ErrSourceChanged) {
+			raced++
+			// The writer was live through this attempt. Let it go quiet, like a
+			// Manager between bursts, so a retry sees a stopped writer.
+			stopOnce.Do(func() { close(stop) })
+		}
+		return snapshot, err
+	}
+	t.Cleanup(func() { openSnapshot = original })
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, _ = writer.Exec(`insert into status_writer_probe (id, payload)
+				values ((select coalesce(max(id), 1) + 1 from status_writer_probe), x'')`)
+			time.Sleep(50 * time.Microsecond)
+		}
+	}()
+
+	runErr, stdout, stderr := runError(t, "status", "--json", "--db-path", databasePath)
+	<-stopped
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	if runErr != nil {
+		t.Fatalf("status against a live writer: %v; stderr: %s", runErr, stderr)
+	}
+	if raced == 0 {
+		t.Fatal("no snapshot attempt raced the live writer; the retry was never exercised")
+	}
+	if attempts > statusSnapshotAttempts {
+		t.Fatalf("snapshot attempts = %d, want at most %d", attempts, statusSnapshotAttempts)
+	}
+	var output statusOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode status: %v; output: %s", err, stdout)
+	}
+	if !output.Recorded || output.Operation == nil || output.Operation.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("status = %+v, want the recorded operation", output)
+	}
+	t.Logf("snapshot attempts against a live writer: %d (raced %d)", attempts, raced)
+}
+
+// TestStatusReportsARetryableCodeWhenTheWriterNeverStops covers the exhausted
+// budget: the failure is the shared upgrade_source_changed code marked
+// retryable, not a generic usage error.
+func TestStatusReportsARetryableCodeWhenTheWriterNeverStops(t *testing.T) {
+	_, databasePath := newManagerDatabase(t)
+	attempts := 0
+	original := openSnapshot
+	openSnapshot = func(context.Context, string, string) (*upgradeservice.Snapshot, error) {
+		attempts++
+		return nil, fmt.Errorf("%w: writer held the database", upgradeservice.ErrSourceChanged)
+	}
+	t.Cleanup(func() { openSnapshot = original })
+
+	runErr, _, _ := runError(t, "status", "--json", "--db-path", databasePath)
+	if runErr == nil {
+		t.Fatal("status succeeded against a writer that never stopped")
+	}
+	if !errors.Is(runErr, ErrRetryable) {
+		t.Fatalf("error = %v, want ErrRetryable", runErr)
+	}
+	if errors.Is(runErr, ErrUsage) {
+		t.Fatalf("error = %v, was reported as a usage error", runErr)
+	}
+	if !strings.Contains(runErr.Error(), upgradeservice.CodeSourceChanged) {
+		t.Fatalf("error %q does not carry %s", runErr, upgradeservice.CodeSourceChanged)
+	}
+	if attempts != statusSnapshotAttempts {
+		t.Fatalf("snapshot attempts = %d, want the bounded %d", attempts, statusSnapshotAttempts)
+	}
+	if code := ExitCode(runErr); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+}
+
+// TestStatusRefusesScratchInsideTheManagerVolume is the status half of N2: the
+// snapshot copy must never land in the volume it is upgrading.
+func TestStatusRefusesScratchInsideTheManagerVolume(t *testing.T) {
+	directory, databasePath := newManagerDatabase(t)
+	before := treeDigests(t, directory)
+
+	runErr, _, _ := runError(t, "status", "--json", "--db-path", databasePath, "--scratch-dir", filepath.Join(directory, "scratch"))
+	if runErr == nil {
+		t.Fatal("status accepted a scratch directory inside the Manager volume")
+	}
+	if !strings.Contains(runErr.Error(), upgradeservice.CodeSnapshotFailed) {
+		t.Fatalf("error %q does not carry %s", runErr, upgradeservice.CodeSnapshotFailed)
+	}
+	if code := ExitCode(runErr); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, "scratch")); !os.IsNotExist(err) {
+		t.Fatalf("scratch directory was created: %v", err)
+	}
+	after := treeDigests(t, directory)
+	if len(before) != len(after) {
+		t.Fatalf("Manager volume entry count changed: %v -> %v", before, after)
+	}
+	for path, digest := range before {
+		if after[path] != digest {
+			t.Fatalf("Manager entry %s changed: %q -> %q", path, digest, after[path])
+		}
+	}
+}
+
+// TestPreflightRequiresTargetDirWhenTheManagerPathCannotBeDerived is N3: the
+// disk check belongs to the Manager volume, and without that path there is
+// nothing to measure — the working directory is not a substitute.
+func TestPreflightRequiresTargetDirWhenTheManagerPathCannotBeDerived(t *testing.T) {
+	root := readySource(t)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write broken config: %v", err)
+	}
+	t.Setenv("CPA_MANAGER_CONFIG", configPath)
+
+	runErr, _, _ := runError(t, "preflight", "--legacy", root, "--source-version", bootstrap.PlannedDirectRelease, "--json")
+	if runErr == nil {
+		t.Fatal("preflight succeeded without a derivable Manager path or --target-dir")
+	}
+	if !errors.Is(runErr, ErrUsage) {
+		t.Fatalf("error = %v, want ErrUsage", runErr)
+	}
+	if !strings.Contains(runErr.Error(), "--target-dir") {
+		t.Fatalf("error %q does not ask for --target-dir", runErr)
+	}
+	if errors.Is(runErr, ErrRetryable) {
+		t.Fatalf("error = %v, was reported as retryable", runErr)
+	}
+	if code := ExitCode(runErr); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
 }

@@ -110,9 +110,9 @@ func decodeStringList(raw string, column string) ([]string, error) {
 
 // Put replaces the single row without letting recorded progress move
 // backwards. The stage may only advance (or park in failed), every domain that
-// is already recorded must still be present, and the creation time is fixed by
-// the first write. Observations, reconciliation output and error details may be
-// rewritten freely.
+// is already recorded must still be present, updated_at_ms only moves forward,
+// and the creation time is fixed by the first write. Observations,
+// reconciliation output and error details may be rewritten freely.
 func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	op.Normalize()
 	if err := op.Validate(); err != nil {
@@ -151,8 +151,15 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	} else if op.CreatedAtMS == 0 {
 		op.CreatedAtMS = now
 	}
-	if op.UpdatedAtMS == 0 || op.UpdatedAtMS < op.CreatedAtMS {
+	// updated_at_ms only moves forward. A caller-supplied value older than the
+	// stored one (or older than the creation time, or a clock that went
+	// backwards) is replaced by now, and then clamped to the stored value, so a
+	// row can never look older than the write that preceded it.
+	if op.UpdatedAtMS < op.CreatedAtMS || op.UpdatedAtMS < current.UpdatedAtMS {
 		op.UpdatedAtMS = now
+	}
+	if op.UpdatedAtMS < current.UpdatedAtMS {
+		op.UpdatedAtMS = current.UpdatedAtMS
 	}
 	if err := writeOperation(ctx, tx, op); err != nil {
 		return err

@@ -237,6 +237,50 @@ func TestPutRefusesToClearRecordedDomains(t *testing.T) {
 	}
 }
 
+// TestPutNeverMovesUpdatedAtBackwards is N5: Put honoured any caller-supplied
+// updated_at_ms that was not below created_at_ms, so a stale caller could make
+// the row look older than the write it replaced.
+func TestPutNeverMovesUpdatedAtBackwards(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	created, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStagePreflight)
+	if err != nil {
+		t.Fatalf("advance preflight: %v", err)
+	}
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStageCopyIn,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		UpdatedAtMS: created.UpdatedAtMS - 5_000,
+	}); err != nil {
+		t.Fatalf("put with an older timestamp: %v", err)
+	}
+	first, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get after put: found=%t err=%v", found, err)
+	}
+	if first.UpdatedAtMS < created.UpdatedAtMS {
+		t.Fatalf("updated_at_ms went backwards: %d -> %d", created.UpdatedAtMS, first.UpdatedAtMS)
+	}
+
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStageReconcile,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		UpdatedAtMS: 1,
+	}); err != nil {
+		t.Fatalf("put with a stale timestamp: %v", err)
+	}
+	second, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after second put: %v", err)
+	}
+	if second.UpdatedAtMS < first.UpdatedAtMS {
+		t.Fatalf("updated_at_ms went backwards: %d -> %d", first.UpdatedAtMS, second.UpdatedAtMS)
+	}
+	if second.UpdatedAtMS < second.CreatedAtMS {
+		t.Fatalf("updated_at_ms = %d is before created_at_ms = %d", second.UpdatedAtMS, second.CreatedAtMS)
+	}
+}
+
 func TestPutMayOnlyAppendDomainsAndAdvance(t *testing.T) {
 	repository, _ := newRepository(t)
 	ctx := context.Background()

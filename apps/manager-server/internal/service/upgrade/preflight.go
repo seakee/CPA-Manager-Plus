@@ -40,6 +40,10 @@ const (
 	StatusBlocked = "blocked"
 	StatusSkipped = "skipped"
 	StatusGap     = "gap"
+	// StatusNotApplicable marks a check the source cannot answer, such as parity
+	// on a source that predates the retained projection. It is not a pass: an
+	// unanswerable check never reports a clean zero.
+	StatusNotApplicable = "not-applicable"
 )
 
 // Blocked codes. Parity gaps are never codes: they are reported for explicit
@@ -97,11 +101,15 @@ type Options struct {
 	DeclaredVersion string
 	// ScratchDir is the base directory for the private snapshot copy. It has to
 	// be writable and big enough to hold the source database. Empty uses the OS
-	// temporary directory.
+	// temporary directory. A scratch directory inside the legacy source root or
+	// inside TargetDir is refused with upgrade_snapshot_failed before anything
+	// is created: the transient copy must never land in a tree that is supposed
+	// to stay untouched or that will receive the upgrade.
 	ScratchDir string
 	// TargetDir is the directory on the volume that will receive the upgrade
 	// copy. The disk probe measures free space there. Empty probes the scratch
-	// volume.
+	// volume; it never measures the working directory, which says nothing about
+	// either volume.
 	TargetDir string
 	// AvailableBytes overrides the free-space probe. Tests inject a requirement
 	// without depending on the host disk. Nil uses the platform probe.
@@ -124,7 +132,15 @@ type Check struct {
 // mismatched, stale or past the projection watermark, plus the days where the
 // deleted coverage table disagrees with the archive refs. Counts and dates only:
 // a gap does not block, it asks the operator for a later explicit decision.
+//
+// Applicable is false when the source cannot answer the question at all, for
+// example because it predates usage_archive_event_refs or the deleted coverage
+// table. Reason then names the missing evidence, and every count stays zero
+// because it was never measured — a zero count with Applicable false is not a
+// clean result.
 type ParityGaps struct {
+	Applicable            bool     `json:"applicable"`
+	Reason                string   `json:"reason,omitempty"`
 	DeletedEventRefs      int      `json:"deletedEventRefs"`
 	MissingProjection     int      `json:"missingProjection"`
 	MismatchedProjection  int      `json:"mismatchedProjection"`
@@ -144,8 +160,11 @@ type Report struct {
 	Fingerprint   string     `json:"fingerprint"`
 	Checks        []Check    `json:"checks"`
 	ParityGaps    ParityGaps `json:"parityGaps"`
-	Blocked       []string   `json:"blocked"`
-	Ready         bool       `json:"ready"`
+	// MissingTables is the structural lower bound the source failed to meet. A
+	// declaration that matches the pinned release never clears this list.
+	MissingTables []string `json:"missingTables"`
+	Blocked       []string `json:"blocked"`
+	Ready         bool     `json:"ready"`
 }
 
 // Preflight inspects the source without writing to it. A returned error is
@@ -164,6 +183,7 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		SourceVersion: VersionUnknown,
 		Checks:        []Check{},
 		ParityGaps:    ParityGaps{AffectedDates: []string{}},
+		MissingTables: []string{},
 		Blocked:       []string{},
 	}
 	block := func(code string) {
@@ -177,14 +197,17 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 
 	scratchBase := strings.TrimSpace(options.ScratchDir)
 	targetDir := strings.TrimSpace(options.TargetDir)
-	if targetDir == "" {
-		targetDir = scratchBase
-	}
 
 	databasePath := filepath.Join(root, databaseFileName)
 	if _, statErr := os.Lstat(databasePath); os.IsNotExist(statErr) {
 		report.SourceKind = SourceKindMissingDatabase
 	}
+
+	// A scratch copy inside the source root would write the whole database back
+	// into the tree this command promises to preserve, and one inside the target
+	// root would leave upgrade scratch in the volume the copy is measured
+	// against. Both are refused before a single directory is created.
+	scratchErr := ValidateScratchDir(scratchBase, root, targetDir)
 
 	// The fingerprint is the state the snapshot has to preserve. It is taken
 	// before the copy and repeated afterwards, so a source that is still being
@@ -199,19 +222,30 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	}
 	var snapshot *Snapshot
 	var openErr error
-	if lockErr == nil {
+	var afterFingerprintErr error
+	switch {
+	case scratchErr != nil:
+		openErr = scratchErr
+	case lockErr == nil:
 		snapshot, openErr = OpenSnapshot(ctx, databasePath, scratchBase)
-		if snapshot != nil {
-			defer func() { _ = snapshot.Close() }()
-			if options.afterCopy != nil {
-				options.afterCopy()
-			}
-			if fingerprintErr == nil {
-				if after, afterErr := fingerprintSource(root); afterErr == nil && after.Digest != before.Digest {
-					_ = snapshot.Close()
-					snapshot = nil
-					openErr = errSourceChanged
-				}
+	}
+	if snapshot != nil {
+		defer func() { _ = snapshot.Close() }()
+		if options.afterCopy != nil {
+			options.afterCopy()
+		}
+		if fingerprintErr == nil {
+			// A second fingerprint that cannot be taken is as unusable as a
+			// source that changed: without it there is no proof the copy matches
+			// one stable state, so it blocks instead of being ignored.
+			after, afterErr := fingerprintSource(root)
+			switch {
+			case afterErr != nil:
+				afterFingerprintErr = afterErr
+			case after.Digest != before.Digest:
+				_ = snapshot.Close()
+				snapshot = nil
+				openErr = ErrSourceChanged
 			}
 		}
 	}
@@ -237,15 +271,16 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		block(code)
 	}
 
-	// 2. Declared source version against the pinned contract, plus the v2-only
-	// table guard.
+	// 2. Declared source version against the pinned contract and the v1.14
+	// structural lower bound, plus the v2-only table guard.
 	if !readable {
 		report.Checks = append(report.Checks, Check{
 			Name: CheckSourceVersion, Status: StatusSkipped, Detail: "source database was not readable",
 		})
 	} else {
 		report.SourceVersion = declaredVersion(options.DeclaredVersion)
-		check := versionCheck(report.SourceKind, schema.v2OnlyTables(), options.DeclaredVersion, pinnedSourceVersion())
+		report.MissingTables = schema.missingTables(requiredLegacyTables)
+		check := versionCheck(report.SourceKind, schema.v2OnlyTables(), report.MissingTables, options.DeclaredVersion, pinnedSourceVersion())
 		if check.Status == StatusBlocked {
 			block(check.Code)
 		}
@@ -266,11 +301,20 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 			Name: CheckFingerprint, Status: StatusPass,
 			Detail: fmt.Sprintf("sha256 over source manifest; sourceBytes=%d", before.Bytes),
 		}
-		if errors.Is(openErr, errSourceChanged) {
+		switch {
+		case errors.Is(openErr, ErrSourceChanged):
 			check.Status = StatusBlocked
 			check.Code = CodeSourceChanged
 			check.Detail = fmt.Sprintf("sha256 of the pre-copy state; sourceBytes=%d", before.Bytes)
 			block(CodeSourceChanged)
+		case afterFingerprintErr != nil:
+			// The post-copy fingerprint is the proof the copy matches the
+			// reported state. Without it there is no evidence, so it blocks
+			// instead of passing on the pre-copy value alone.
+			check.Status = StatusBlocked
+			check.Code = CodeSourceUnreadable
+			check.Detail = "source files could not be read after the snapshot: " + rootCause(afterFingerprintErr)
+			block(CodeSourceUnreadable)
 		}
 		report.Checks = append(report.Checks, check)
 	}
@@ -286,18 +330,26 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	// 5. CPA classification. Never an import or a version qualification.
 	report.Checks = append(report.Checks, classifyCPA(root))
 
-	// 6. Parity gaps. Reported for confirmation; never blocking.
+	// 6. Parity gaps. Reported for confirmation; never blocking. A source that
+	// cannot answer the question says so instead of reporting a clean zero.
 	if !readable {
 		report.Checks = append(report.Checks, Check{
 			Name: CheckParity, Status: StatusSkipped, Detail: "source database was not readable",
 		})
 	} else {
 		gaps, parityErr := detectParityGaps(ctx, snapshot.DB(), schema)
-		if parityErr != nil {
+		switch {
+		case parityErr != nil:
 			report.Checks = append(report.Checks, Check{
 				Name: CheckParity, Status: StatusSkipped, Detail: "parity detection unavailable: " + rootCause(parityErr),
 			})
-		} else {
+		case !gaps.Applicable:
+			report.ParityGaps = gaps
+			report.Checks = append(report.Checks, Check{
+				Name: CheckParity, Status: StatusNotApplicable,
+				Detail: "parity not applicable: " + gaps.Reason,
+			})
+		default:
 			report.ParityGaps = gaps
 			status := StatusPass
 			if gaps.any() {
@@ -357,9 +409,9 @@ func ownershipFailure(err error) (string, string) {
 		return CodeSourceUnreadable, "source database is missing"
 	case errors.Is(err, errSourceIntegrity):
 		return CodeSourceUnreadable, "source database failed quick_check"
-	case errors.Is(err, errSourceChanged):
+	case errors.Is(err, ErrSourceChanged):
 		return CodeSourceChanged, "source files changed while the snapshot was taken"
-	case errors.Is(err, errSnapshotFailed):
+	case errors.Is(err, ErrSnapshotFailed):
 		return CodeSnapshotFailed, rootCause(err)
 	default:
 		return CodeSourceUnreadable, "source database could not be read through a private snapshot"

@@ -25,10 +25,38 @@ const VersionUnknown = "unknown"
 // The schema cannot identify a 1.x release: v1.14.0 through v1.14.10 create the
 // same tables, and the only per-release markers v1 writes are format revisions
 // of derived rollups that several releases share. Preflight therefore never
-// infers a release from DDL; it accepts exactly the release the operator
-// declares (Options.DeclaredVersion) and blocks everything else.
+// infers a release from DDL. What it does require is a structural lower bound:
+// a source below the v1.14 shape is refused no matter what release it declares.
 type sourceSchema struct {
 	tables map[string]bool
+}
+
+// requiredLegacyTables is the structural lower bound a v1.14.x source must
+// carry. It is not a version discriminator: v1.14.0 through v1.14.10 all have
+// these tables, and several v1.13 releases do not. A declaration alone never
+// satisfies it, because the tables are the only evidence the source can
+// actually produce. usage_archive_event_refs is the table that marks the
+// archive/retained-projection shape this upgrade copies.
+var requiredLegacyTables = []string{
+	"settings",
+	"usage_events",
+	"usage_event_identity_ledger",
+	"usage_archive_event_refs",
+	"usage_monitoring_event_projection_v1",
+	"usage_monitoring_rollup_state",
+	"usage_archive_deleted_coverage_daily",
+}
+
+// missingTables returns the required tables the source does not have, in the
+// order they are required so the first missing table is the most specific.
+func (s sourceSchema) missingTables(required []string) []string {
+	missing := []string{}
+	for _, name := range required {
+		if !s.tables[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing
 }
 
 func (s sourceSchema) sourceKind() string {
@@ -109,10 +137,12 @@ func declaredVersion(declared string) string {
 	return trimmed
 }
 
-// versionCheck decides the source version check from the declaration alone. The
-// database is not consulted: v1 never persisted its release, so a value read
-// out of the source would be a guess dressed as evidence.
-func versionCheck(kind string, v2Tables []string, declared string, pinned string) Check {
+// versionCheck decides the source version check from the declaration plus the
+// structural lower bound. The release is never read out of the database: v1
+// never persisted it, so a value inferred from DDL would be a guess dressed as
+// evidence. The required tables, by contrast, are real evidence, and a source
+// that lacks one is refused even when the declaration matches.
+func versionCheck(kind string, v2Tables []string, missingTables []string, declared string, pinned string) Check {
 	check := Check{Name: CheckSourceVersion, Status: StatusPass}
 	switch {
 	case kind == SourceKindNativeV2:
@@ -123,6 +153,11 @@ func versionCheck(kind string, v2Tables []string, declared string, pinned string
 		check.Status = StatusBlocked
 		check.Code = CodeSourceUnreadable
 		check.Detail = "source database is not a 1.x Manager database"
+	case len(missingTables) != 0:
+		check.Status = StatusBlocked
+		check.Code = CodeSourceVersionUnsupported
+		check.Detail = fmt.Sprintf("expected=%s declared=%s missingTables=%s; the source does not carry the v1.14 structure",
+			pinned, declaredVersion(declared), strings.Join(missingTables, ","))
 	case strings.TrimSpace(declared) == "":
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUndeclared
@@ -132,7 +167,7 @@ func versionCheck(kind string, v2Tables []string, declared string, pinned string
 		check.Code = CodeSourceVersionUnsupported
 		check.Detail = fmt.Sprintf("expected=%s declared=%s", pinned, declared)
 	default:
-		check.Detail = fmt.Sprintf("expected=%s declared=%s", pinned, declared)
+		check.Detail = fmt.Sprintf("expected=%s declared=%s; structural lower bound satisfied", pinned, declared)
 	}
 	return check
 }

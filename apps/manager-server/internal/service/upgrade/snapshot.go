@@ -21,13 +21,14 @@ import (
 const snapshotDirPrefix = "cpamp-upgrade-snapshot-"
 
 var (
-	// errSnapshotFailed reports scratch space this process could not use. It is
+	// ErrSnapshotFailed reports scratch space this process could not use. It is
 	// a blocking condition: without a private copy there is no read-only way to
-	// inspect a WAL database.
-	errSnapshotFailed = errors.New("upgrade database snapshot could not be created")
-	// errSourceChanged reports a source that was modified while its snapshot was
+	// inspect a WAL database. It is also the code for a scratch directory that
+	// would land inside a tree the operation must not write to.
+	ErrSnapshotFailed = errors.New("upgrade database snapshot could not be created")
+	// ErrSourceChanged reports a source that was modified while its snapshot was
 	// taken. The copy is discarded and the report blocks.
-	errSourceChanged = errors.New("source changed while it was being snapshotted")
+	ErrSourceChanged = errors.New("source changed while it was being snapshotted")
 )
 
 // databaseSidecars are the files SQLite needs to see every committed row of a
@@ -58,7 +59,7 @@ type Snapshot struct {
 //
 // The source files are digested before the copy, again after it, and the copy is
 // digested as it is written. Any difference means the source was not stopped, so
-// the copy is discarded and errSourceChanged is returned instead of a report
+// the copy is discarded and ErrSourceChanged is returned instead of a report
 // about a mixture of two states.
 func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) (*Snapshot, error) {
 	if err := ctx.Err(); err != nil {
@@ -70,7 +71,7 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	}
 	dir, err := os.MkdirTemp(scratchBase, snapshotDirPrefix)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", errSnapshotFailed, rootCause(err))
+		return nil, fmt.Errorf("%w: %s", ErrSnapshotFailed, rootCause(err))
 	}
 	snapshot := &Snapshot{dir: dir, path: filepath.Join(dir, filepath.Base(databasePath))}
 	copied, err := copyDatabaseFiles(ctx, databasePath, dir)
@@ -78,7 +79,7 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 		var after map[string]databaseFileDigest
 		if after, err = digestDatabaseFiles(databasePath); err == nil {
 			if !sameDigests(before, after) || !sameDigests(before, copied) {
-				err = errSourceChanged
+				err = ErrSourceChanged
 			}
 		}
 	}
@@ -91,7 +92,7 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	// rebuild the index from the copied WAL inside our own scratch directory.
 	if err := os.Remove(snapshot.path + "-shm"); err != nil && !os.IsNotExist(err) {
 		_ = snapshot.Close()
-		return nil, fmt.Errorf("%w: %s", errSnapshotFailed, rootCause(err))
+		return nil, fmt.Errorf("%w: %s", ErrSnapshotFailed, rootCause(err))
 	}
 	db, err := sql.Open("sqlite", snapshotDataSourceName(snapshot.path))
 	if err != nil {
@@ -107,6 +108,73 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	}
 	snapshot.db = db
 	return snapshot, nil
+}
+
+// ValidateScratchDir refuses a scratch directory that lies inside a root this
+// operation must not write to.
+//
+// The snapshot copies the whole database, so a scratch directory under the
+// legacy source root would write that copy back into the tree preflight promises
+// to preserve, and one under the target root would leave upgrade scratch in the
+// volume the copy is measured against. Both are refused before a directory is
+// created. An empty scratch directory is allowed: it means the OS temporary
+// directory, which the caller never shares with either root.
+func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) error {
+	scratch := strings.TrimSpace(scratchDir)
+	if scratch == "" {
+		return nil
+	}
+	scratchPath := canonicalPath(scratch)
+	for _, root := range []struct {
+		label string
+		dir   string
+	}{
+		{label: "the legacy source root", dir: legacyRoot},
+		{label: "the target root", dir: targetDir},
+	} {
+		dir := strings.TrimSpace(root.dir)
+		if dir == "" {
+			continue
+		}
+		if pathWithin(scratchPath, canonicalPath(dir)) {
+			return fmt.Errorf("%w: scratch directory is inside %s; pass a --scratch-dir on a separate volume",
+				ErrSnapshotFailed, root.label)
+		}
+	}
+	return nil
+}
+
+// pathWithin reports whether child is parent itself or lies underneath it. Both
+// paths must already be canonical.
+func pathWithin(child string, parent string) bool {
+	if child == parent {
+		return true
+	}
+	return strings.HasPrefix(child, parent+string(filepath.Separator))
+}
+
+// canonicalPath makes a path absolute and resolves the symlinks of the deepest
+// existing ancestor. A directory that does not exist yet still belongs to a real
+// parent, and on some hosts (macOS /var, for example) comparing unresolved paths
+// with resolved ones reports a false miss.
+func canonicalPath(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	current := absolute
+	missing := []string{}
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(append([]string{resolved}, missing...)...)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return absolute
+		}
+		missing = append([]string{filepath.Base(current)}, missing...)
+		current = parent
+	}
 }
 
 // DB returns the read-only handle on the private copy.
@@ -200,7 +268,7 @@ func copyDatabaseFiles(ctx context.Context, databasePath string, destination str
 		}
 		digest, size, err := copyFileWithDigest(sourcePath, filepath.Join(destination, filepath.Base(sourcePath)))
 		if err != nil {
-			return nil, fmt.Errorf("%w: %s", errSnapshotFailed, rootCause(err))
+			return nil, fmt.Errorf("%w: %s", ErrSnapshotFailed, rootCause(err))
 		}
 		copied[suffix] = databaseFileDigest{size: size, digest: digest}
 	}

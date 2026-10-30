@@ -15,7 +15,7 @@ Paths below are relative to `apps/manager-server/`.
 | `internal/service/legacyprofile/profile.go`: `Classify` | Reuse exact known capability shapes. Shape is never historical release provenance. |
 | `internal/repository/sqlite/legacy_inspection.go`: `InspectLegacySource` | Reuse immutable cold read or private WAL recovery copy. Add an administrator-protected entry using the same reader before schema/history inspection. |
 | `internal/repository/setting`: `LoadAdminCredential`; `internal/security`: `VerifyAdminKey` | Reuse the existing salt/HMAC credential and verification. No writable Store, Session substitution, CPA credential fallback, administrator initialization or reset. |
-| `internal/processlock`: `AcquireExisting`, `Validate` | Hold one canonical source fence through authentication, inventory, expensive validation and final rechecks. No new marker; cooperating Manager writers are excluded. |
+| `internal/processlock`: `AcquireExisting`, `AcquireExistingReadOnly`, `Validate` | Hold one canonical source fence through authentication, inventory, expensive validation and final rechecks. `AcquireExistingReadOnly` takes the same marker through a read-only descriptor, so a stopped source preserved on a read-only mount still proves exclusivity; it is used by the U1-1a read-only preflight and grants nothing here. No new marker; cooperating Manager writers are excluded. |
 | `internal/service/maintenancebundle`: `Inspect`, `Verify`, `ValidateMatchingEvidence`, `RevalidateSource` | Validate the existing bundle and exact current source revision. Preserve DB/WAL/SHM/journal/key/config/archive presence and full-file digests; reuse SQLite/key/config/archive validation and private production-open checks. No second snapshot format or publication journal. |
 | `internal/service/maintenancebundle`: `Create`, `RecoverPublication`, `RestoreNew` | Keep existing host maintenance owners and recovery semantics. The new check does not create, recover, restore or modify any bundle. |
 | `internal/domain/bootstrap`: `UpgradeAdmission`, `ExactV1144Candidate` | Return existing contract-compatible shape/candidate/unverified/blocked evidence. No new public status or persisted operation. |
@@ -170,8 +170,11 @@ hard `false`; the new surface grants no migration authority.
   fingerprints, the backup manifest reference, reconciliation output and manual
   items. `internal/repository/upgradeoperation.Advance` appends a domain and
   moves the stage in one transaction; a backwards move is rejected and leaves
-  the row untouched. `Put` is monotonic too: it may only advance the stage and
-  append domains, so a retry cannot make recorded work look uncompleted.
+  row untouched. `Put` is monotonic too: it may only advance the stage and
+  append domains, and `updated_at_ms` never moves backwards — an older
+  caller-supplied value (or a clock that went backwards) is replaced, so a retry
+  cannot make recorded work look uncompleted or the row look older than the
+  write it replaced.
   `complete` never moves again, `failed` parks the operation without dropping
   completed domains. The table is created by the v2 migration in the Manager
   database, never in the legacy source root.
@@ -204,20 +207,54 @@ hard `false`; the new surface grants no migration authority.
   DDL therefore cannot discriminate releases, so preflight never infers one. The
   operator declares the release (`--source-version`); preflight accepts only
   exact equality with `bootstrap.PlannedDirectRelease` and blocks anything else
-  with both values. A source that already carries a v2-only table
-  (`gateway_*`, `fresh_*`, `upgrade_operations`) blocks with
-  `upgrade_source_already_v2`. Re-pinning to v1.14.10 is U1-1b, not this slice.
+  with both values.
+- **Structural lower bound.** A declaration is a claim, so it is never the last
+  word. The source must also carry the v1.14 structure: `settings`,
+  `usage_events`, `usage_event_identity_ledger`, `usage_archive_event_refs`,
+  `usage_monitoring_event_projection_v1`, `usage_monitoring_rollup_state` and
+  `usage_archive_deleted_coverage_daily`. Missing any of them blocks with
+  `upgrade_source_version_unsupported`; the check detail and
+  `report.missingTables` name every missing table. This is a lower bound, not a
+  discriminator — all v1.14 releases pass it, some v1.13 shapes do not — so a
+  correct declaration cannot make a structurally older source ready. A source
+  that already carries a v2-only table (`gateway_*`, `fresh_*`,
+  `upgrade_operations`) blocks with `upgrade_source_already_v2`. Re-pinning to
+  v1.14.10 is U1-1b, not this slice.
 - **Parity trust.** The `projection_v1` watermark is trusted only when
   `schema_version = 1`, `structure_revision` equals
   `usageidentity.MonitoringProjectionStructureRevision()` and the status is set
   and not `clearing`. A same-timestamp projection row in any other state is
   reported as stale rather than healthy, because the state that produced it
-  cannot vouch for it.
+  cannot vouch for it. Parity is *not applicable* — status `not-applicable`,
+  `parityGaps.applicable=false` and a reason naming the table — when
+  `usage_archive_event_refs` or `usage_archive_deleted_coverage_daily` is
+  absent. Such a source has no retained history to compare; reporting zero gaps
+  would read as a clean result.
+- **Scratch placement.** `--scratch-dir` may not point inside the legacy source
+  root or inside the target root (the Manager data directory): the snapshot
+  copies the whole database, so either place writes data into a tree this
+  operation must not touch or into the volume being upgraded. Both are refused
+  before a directory is created, with `upgrade_snapshot_failed` and nothing
+  written. The scratch volume and the target volume each need room for the
+  source bytes; the disk detail states both (`requiredBytes`,
+  `scratchRequiredBytes`). An unset target is never measured as the working
+  directory: the probe falls back to the scratch volume, and the CLI requires an
+  explicit `--target-dir` when the Manager database path cannot be derived.
+  The second whole-tree fingerprint is evidence too: if it cannot be taken after
+  the copy, the report blocks with `upgrade_source_unreadable` instead of
+  trusting the pre-copy value.
 - **CLI.** `cpa-manager-plus upgrade preflight --legacy <dir> --source-version
-  <release> [--target-dir DIR] [--json]` prints the report and exits 0 (ready),
-  1 (blocked) or 2 (usage/environment). `cpa-manager-plus upgrade status
-  [--json] [--db-path PATH]` reads the operation row from a private snapshot, so
-  both work on non-writable volumes.
+  <release> [--target-dir DIR] [--scratch-dir DIR] [--json]` prints the report
+  and exits 0 (ready), 1 (blocked) or 2 (usage/environment/retryable).
+  `--target-dir` is required when the Manager database path cannot be derived;
+  the command never substitutes the working directory. `cpa-manager-plus upgrade
+  status [--json] [--db-path PATH] [--scratch-dir DIR]` reads the operation row
+  from a private snapshot, so both work on non-writable volumes. `status` retries
+  a bounded number of times (8 attempts, exponential backoff capped at 200 ms)
+  when the Manager database keeps changing during the copy; exhausted retries
+  are reported with the shared `upgrade_source_changed` code and the retryable
+  marker instead of a generic usage error. Preflight never retries: a legacy
+  source that is still being written remains a stop condition.
 - **Deferred:** v1.14.10 re-pin and its qualification evidence (U1-1b), the
   copy-in entry, reconciliation execution and CPA import (U1-2), and route
   cutover/rollback (U1-3).
