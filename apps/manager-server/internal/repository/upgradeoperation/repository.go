@@ -119,8 +119,35 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 		op.UpdatedAtMS = now
 	}
 	if op.CreatedAtMS == 0 {
-		op.CreatedAtMS = now
+		// Resolve the creation time in the same transaction as the write so a
+		// concurrent advance cannot be overwritten with a later creation time.
+		tx, err := r.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		var existing int64
+		switch err := tx.QueryRowContext(ctx, `select created_at_ms from `+tableName+` where id = 1`).Scan(&existing); {
+		case errors.Is(err, sql.ErrNoRows), err == nil && existing <= 0:
+			op.CreatedAtMS = now
+		case err != nil:
+			return err
+		default:
+			op.CreatedAtMS = existing
+		}
+		if err := writeOperation(ctx, tx, op); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
+	return writeOperation(ctx, r.db, op)
+}
+
+type operationWriter interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func writeOperation(ctx context.Context, writer operationWriter, op model.UpgradeOperation) error {
 	domains, err := json.Marshal(op.DomainsDone)
 	if err != nil {
 		return err
@@ -129,7 +156,7 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.db.ExecContext(ctx, `insert into `+tableName+` (
+	_, err = writer.ExecContext(ctx, `insert into `+tableName+` (
 		id, stage, domains_done, source_kind, source_version,
 		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
 		reconciliation, manual_items, error_code, error_detail, created_at_ms, updated_at_ms
@@ -146,8 +173,7 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 		manual_items = excluded.manual_items,
 		error_code = excluded.error_code,
 		error_detail = excluded.error_detail,
-		created_at_ms = case when excluded.created_at_ms > 0 then excluded.created_at_ms
-			else upgrade_operations.created_at_ms end,
+		created_at_ms = excluded.created_at_ms,
 		updated_at_ms = excluded.updated_at_ms`,
 		string(op.Stage), string(domains), nullString(op.SourceKind), nullString(op.SourceVersion),
 		nullString(op.SourceFingerprintBefore), nullString(op.SourceFingerprintAfter),

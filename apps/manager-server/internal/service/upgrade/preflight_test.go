@@ -418,6 +418,43 @@ func TestPreflightDoesNotWriteTheSource(t *testing.T) {
 	}
 }
 
+func TestPreflightWorksOnAReadOnlySourceTree(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	// A stopped source is normally preserved read-only. Only the ownership lock
+	// file keeps write access: the v1 writer opens it read-write.
+	walkErr := filepath.WalkDir(fixture.root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, 0o555)
+		}
+		if path == fixture.dbPath+".manager.lock" {
+			return os.Chmod(path, 0o600)
+		}
+		return os.Chmod(path, 0o444)
+	})
+	if walkErr != nil {
+		t.Fatalf("make source read-only: %v", walkErr)
+	}
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(fixture.root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if entry.IsDir() {
+				return os.Chmod(path, 0o755)
+			}
+			return os.Chmod(path, 0o600)
+		})
+	})
+
+	report := preflight(t, fixture.root, Options{})
+	if !report.Ready {
+		t.Fatalf("ready = false on a read-only source, blocked = %v", report.Blocked)
+	}
+}
+
 func TestModelStageOrderMatchesPreflightStages(t *testing.T) {
 	// The operation model's forward order is the contract the preflight report
 	// describes to the operator.
