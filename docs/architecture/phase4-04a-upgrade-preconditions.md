@@ -270,7 +270,7 @@ database. A reader error fails closed; a `nil` reader keeps the historical rule.
 | --- | --- | --- |
 | no table, no row and no marker for this database (or `nil` reader) | `none` | unchanged: only `fresh` and `native-v2` are admitted; a 1.x source stays blocked |
 | copy-in marker, no row (the crash window: the migration ran, the row did not) | `in_progress` | Upgrade surface only |
-| `preflight`, `copy_in`, `reconcile`, `cpa_import`, `external_connect`, `verify`, `failed` | `in_progress` | Upgrade surface only: fixed Bootstrap discovery status reads, the read-only shell and the Upgrade authentication leaf. Console, Key workspace, gateway configuration, lifecycle and model traffic answer 404; health stays 503 and no writable subsystem starts |
+| `preflight`, `copy_in`, `reconcile`, `cpa_import`, `external_connect`, `verify`, `failed` | `in_progress` | Upgrade surface only: fixed Bootstrap discovery status reads, the read-only shell, the Upgrade authentication leaf and the wizard's two read-only routes. Console, Key workspace, gateway configuration, lifecycle and model traffic answer 404; health stays 503 and no writable subsystem starts |
 | `rolled_back` | `in_progress` + reason `upgrade_rolled_back` | Upgrade surface only, same as any unfinished operation. The reason is the typed string the console shows; it is never a completion |
 | `complete` with `source_kind=upgraded-legacy`, both source fingerprints and the backup manifest digest | `complete` | normal v2 surfaces, as for a native store |
 | `complete` missing any of those observations | — | not admitted (fail closed) |
@@ -287,9 +287,20 @@ blocked and is never admitted to the full surface.
 
 `internal/http/controller/upgradewizard` serves `installation/upgrade/preflight`
 and `installation/upgrade/status`. The fixed Bootstrap API carries them before
-route cutover, the canonical continuation carries them before completion, and a
-`ProductComplete` installation answers 404: the reads end with the operation.
-They never appear on both surfaces at once, and no write route exists.
+route cutover and again while an admitted Upgrade operation is unfinished, the
+canonical continuation carries them before completion, and a `ProductComplete`
+installation answers 404: the reads end with the operation. They never appear
+on both surfaces at once, and no write route exists.
+
+- **Fixed surface while the operation is unfinished.**
+  `cmd/cpa-manager-plus/startup_discovery.go` mounts the two reads beside the
+  Upgrade authentication leaf on the fixed Bootstrap API. They share that
+  leaf's gate — not ready, discovery still active, Upgrade auth constructed —
+  and close on `BeginWritableStartup`, on readiness and on completion. This is
+  the only carrier a copied-in v2 root has: the copy-in replaces `usage.sqlite`
+  and leaves no Fresh record, so the canonical continuation would answer 404
+  while the operation is in progress. No other fixed-carrier resource opens to a
+  source credential.
 
 - **Credential.** The Upgrade surface has its own identity — the source
   administrator key the bootstrap Upgrade entry verified — presented as

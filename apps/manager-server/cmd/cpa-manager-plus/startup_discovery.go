@@ -12,6 +12,7 @@ import (
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	routingdomain "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradeauth"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradewizard"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
@@ -31,6 +32,7 @@ type startupHTTPHandler struct {
 	projection        bootstrap.PublicDiscovery
 	readOnlyDiscovery http.Handler
 	upgradeAuth       http.Handler
+	upgradeWizard     http.Handler
 	next              atomic.Value // *startupHandlerTarget
 	lifecycle         atomic.Value // routingdomain.DiscoveryLifecycle
 	ready             atomic.Bool
@@ -54,19 +56,34 @@ func newStartupHTTPHandler(result bootstrap.PublicDiscovery) *startupHTTPHandler
 }
 
 // The blocked/pre-ready operator may inspect the same bounded public discovery
-// in a read-only shell. The separate Upgrade leaf authenticates only; no
-// Bootstrap API or Upgrade writer is mounted.
+// in a read-only shell. The separate Upgrade surface mounts its entry leaf and
+// its two read-only wizard routes; no Bootstrap API or Upgrade writer is
+// mounted.
 func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == bootstrap.FixedBootstrapDiscoveryPath {
 		h.discovery.ServeHTTP(w, r)
 		return
 	}
-	if r.URL.Path == upgradeauth.Path {
+	// The Upgrade surface owns one gate: not ready, discovery still active and
+	// the Upgrade entry leaf present. Its entry authenticates only; its wizard
+	// routes read the operation this process has not finished. An unfinished
+	// operation has no Fresh record for the canonical continuation to carry, so
+	// the two reads are mounted here, beside the entry leaf, with their own
+	// source credential and their own credential-before-verb order.
+	if fixedUpgradeSurfaceLeaf(r.URL.Path) {
 		h.projectionMu.RLock()
 		defer h.projectionMu.RUnlock()
-		if !h.ready.Load() && h.discoveryLifecycle() == routingdomain.DiscoveryActive && h.readOnlyDiscovery != nil && h.upgradeAuth != nil {
+		if h.ready.Load() || h.discoveryLifecycle() != routingdomain.DiscoveryActive ||
+			h.readOnlyDiscovery == nil || h.upgradeAuth == nil {
+			http.NotFound(w, r)
+			return
+		}
+		switch {
+		case r.URL.Path == upgradeauth.Path:
 			h.upgradeAuth.ServeHTTP(w, r)
-		} else {
+		case h.upgradeWizard != nil:
+			h.upgradeWizard.ServeHTTP(w, r)
+		default:
 			http.NotFound(w, r)
 		}
 		return
@@ -91,6 +108,21 @@ func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.
 	h.readOnlyShell.ServeHTTP(w, r)
 }
 
+// fixedUpgradeSurfaceLeaf reports whether a fixed-surface path belongs to the
+// Upgrade surface: its authentication entry and its two read-only wizard
+// routes, all under the fixed Bootstrap carrier.
+func fixedUpgradeSurfaceLeaf(value string) bool {
+	if value == upgradeauth.Path {
+		return true
+	}
+	for _, suffix := range []string{upgradewizard.PreflightSuffix, upgradewizard.StatusSuffix} {
+		if value == bootstrap.FixedBootstrapAPIPath+strings.TrimPrefix(suffix, "/") {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *startupHTTPHandler) serveDiscovery(w http.ResponseWriter, r *http.Request) {
 	h.projectionMu.RLock()
 	defer h.projectionMu.RUnlock()
@@ -110,8 +142,18 @@ func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.Inspection
 	defer h.projectionMu.Unlock()
 	// Entropy failure leaves this leaf closed without weakening discovery.
 	h.upgradeAuth = nil
+	h.upgradeWizard = nil
 	if handler, err := upgradeauth.New(paths, os.Getenv("CPAMP_PUBLIC_ORIGIN")); err == nil {
 		h.upgradeAuth = handler
+		// The wizard routes read the same source credential the entry leaf
+		// verifies. They are mounted with the leaf and closed with it: an
+		// unfinished Upgrade operation has no Fresh record, so the fixed
+		// surface is the only carrier that can still show what it recorded.
+		h.upgradeWizard = upgradewizard.Handler{
+			LegacyRoot: configuredLegacyRoot,
+			Database:   func() string { return paths.Database },
+			Timeout:    upgradewizard.DefaultTimeout,
+		}
 	}
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
@@ -131,6 +173,7 @@ func (h *startupHTTPHandler) BeginWritableStartup() {
 	h.projection = bootstrapdiscovery.Unavailable()
 	h.readOnlyDiscovery = nil
 	h.upgradeAuth = nil
+	h.upgradeWizard = nil
 }
 
 func (h *startupHTTPHandler) discoveryLifecycle() routingdomain.DiscoveryLifecycle {
