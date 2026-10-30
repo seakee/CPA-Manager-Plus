@@ -13,6 +13,7 @@ const CODES = [
   'upgrade_source_version_unsupported',
   'upgrade_disk_insufficient',
   'upgrade_credential_timeout',
+  'upgrade_mount_timeout',
   'upgrade_legacy_root_missing',
   'upgrade_legacy_root_unusable',
   'upgrade_preflight_timeout',
@@ -56,6 +57,27 @@ describe('upgrade wizard blocked codes', () => {
       expect(blockedCodeText('upgrade_credential_timeout', language)).not.toBe(
         blockedCodeText('upgrade_source_unreadable', language)
       );
+    }
+  });
+
+  it('keeps a mount that did not answer apart from an unreadable database', () => {
+    // A mount that is only slow is a retry; a database that cannot be read is a
+    // repair, and the credential's own deadline is a third condition. No two of
+    // them may share a sentence, or the operator is sent after the wrong cause.
+    for (const language of LOCALES) {
+      expect(blockedCodeText('upgrade_mount_timeout', language)).not.toBe(
+        blockedCodeText('upgrade_source_unreadable', language)
+      );
+      expect(blockedCodeText('upgrade_mount_timeout', language)).not.toBe(
+        blockedCodeText('upgrade_credential_timeout', language)
+      );
+    }
+  });
+
+  it('translates the mount deadline rather than repeating the English text', () => {
+    const english = blockedCodeText('upgrade_mount_timeout', 'en-US');
+    for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+      expect(blockedCodeText('upgrade_mount_timeout', language)).not.toBe(english);
     }
   });
 

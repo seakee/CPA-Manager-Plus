@@ -155,7 +155,7 @@ func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.Inspection
 		// leaf and closed with it: an unfinished Upgrade operation has no Fresh
 		// record, so the fixed surface is the only carrier that can still show
 		// what it recorded.
-		h.upgradeWizard = upgradewizard.Handler{
+		h.upgradeWizard = &upgradewizard.Handler{
 			LegacyRoot:   configuredLegacyRoot,
 			PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
 			Database:     func() string { return paths.Database },

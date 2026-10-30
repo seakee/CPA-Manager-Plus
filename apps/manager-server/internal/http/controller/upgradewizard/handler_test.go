@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,8 +93,8 @@ create table usage_events (id integer primary key autoincrement, event_hash text
 	return dir
 }
 
-func newHandler(legacyRoot, database string) Handler {
-	return Handler{
+func newHandler(legacyRoot, database string) *Handler {
+	return &Handler{
 		LegacyRoot: func() string { return legacyRoot },
 		Database:   func() string { return database },
 		Timeout:    10 * time.Second,
@@ -300,35 +302,89 @@ func TestSymlinkedSourceStaysUsableOnBothRoutes(t *testing.T) {
 	}
 }
 
+// TestMountIsInspectedOnlyAfterTheCredentialAndOriginGates is Low-1 at the route
+// boundary. The credential's shape and the browser's origin are decided from the
+// request alone, so a caller that presents no credential, and a cross-site caller
+// whatever it presents, never makes this handler touch the operator's mount.
+//
+// A caller that does present a credential shape is different on purpose: the
+// surface's one credential file is the mount's own database when the shared file
+// policy accepts it, so the key cannot be tested without that answer. It gets one
+// bounded, shared lookup (see resolveMount), never one lookup per request it
+// sends before the timeout.
+func TestMountIsInspectedOnlyAfterTheCredentialAndOriginGates(t *testing.T) {
+	root := legacySourceDir(t)
+	handler := newHandler(root, "")
+	var lookups int32
+	handler.lookupMount = func(root string) mountResolution {
+		atomic.AddInt32(&lookups, 1)
+		return mountResolution{root: root, database: filepath.Join(root, "usage.sqlite")}
+	}
+
+	for name, authorization := range map[string]string{
+		"absent":       "",
+		"other-scheme": "Basic b3BlcmF0b3I6cGFzcw==",
+		"no-value":     "Bearer ",
+		"bare-key":     testAdminKey,
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, resource := range []string{PreflightSuffix, StatusSuffix} {
+				request(t, handler, http.MethodGet, testPrefix+resource, authorization, http.StatusUnauthorized)
+			}
+		})
+	}
+
+	// A well-formed credential from another site is refused before the lookup.
+	crossSite := httptest.NewRequest(http.MethodGet, testPrefix+StatusSuffix, nil)
+	crossSite.Host = "manager.test"
+	crossSite.Header.Set("Authorization", bearer(testAdminKey))
+	crossSite.Header.Set("Origin", "https://attacker.test")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, crossSite)
+	if recorder.Code != http.StatusForbidden || !strings.Contains(recorder.Body.String(), `"`+upgradesurface.CodeOriginRejected+`"`) {
+		t.Fatalf("cross-site read = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := atomic.LoadInt32(&lookups); got != 0 {
+		t.Fatalf("%d mount lookups for callers the surface never admitted", got)
+	}
+
+	// A well-formed key is one the surface has to test, and the file it tests is
+	// the mount's database: that is one lookup, then the refusal.
+	request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(foreignKey), http.StatusUnauthorized)
+	if got := atomic.LoadInt32(&lookups); got != 1 {
+		t.Fatalf("a refused key performed %d mount lookups, want 1", got)
+	}
+
+	// The admitted caller pays the same one lookup per request and gets its
+	// answer from the same resolution.
+	request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusOK)
+	if got := atomic.LoadInt32(&lookups); got != 2 {
+		t.Fatalf("an admitted caller performed %d mount lookups, want 2", got)
+	}
+}
+
 // TestMountLookupRunsOncePerRequestInsideItsBound is Low-3 at the route
 // boundary. Authentication and the sourceRoot marker ask the same question, so
-// a status poll asks it once; and because none of the filesystem calls behind it
-// can be cancelled, a mount that never answers must not hold the poll open past
-// the bound.
+// a status poll asks it once; a mount that never answers must not hold the poll
+// open past the bound; and however many polls arrive while it is hung, only one
+// lookup runs.
 func TestMountLookupRunsOncePerRequestInsideItsBound(t *testing.T) {
 	const managerKey = "manager-store-key-for-a-slow-mount"
 	database := managerCredentialStore(t, managerKey)
 	root := t.TempDir()
-	handler := Handler{
+	handler := &Handler{
 		LegacyRoot: func() string { return root },
 		Database:   func() string { return database },
 		Timeout:    10 * time.Second,
 	}
-	real := inspectMount
-	release := make(chan struct{})
-	t.Cleanup(func() {
-		close(release)
-		inspectMount = real
-	})
-
-	lookups := 0
-	inspectMount = func(string) mountResolution {
-		lookups++
+	var lookups int32
+	handler.lookupMount = func(string) mountResolution {
+		atomic.AddInt32(&lookups, 1)
 		return mountResolution{root: root, code: CodeSourceSymlinked}
 	}
 	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(managerKey), http.StatusOK)
-	if lookups != 1 {
-		t.Fatalf("status poll performed %d mount lookups, want 1", lookups)
+	if got := atomic.LoadInt32(&lookups); got != 1 {
+		t.Fatalf("status poll performed %d mount lookups, want 1", got)
 	}
 	var status statusDocument
 	if err := json.Unmarshal([]byte(body), &status); err != nil {
@@ -338,26 +394,105 @@ func TestMountLookupRunsOncePerRequestInsideItsBound(t *testing.T) {
 		t.Fatalf("source root marker = %q, want the resolved lookup's own code", status.SourceRoot)
 	}
 
-	// A mount whose filesystem never answers. The poll stops at the bound and
-	// names the mount as unreadable instead of waiting on it, and the credential
-	// still resolves — to the Manager store — so the projection is answered.
-	inspectMount = func(string) mountResolution {
+	// A mount whose filesystem never answers. Every poll stops at the bound and
+	// names the deadline instead of waiting on it, the credential still resolves
+	// — to the Manager store — so the projection is answered, and the lookup
+	// itself is started once for all of them.
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var calls, active, peak int32
+	handler.lookupMount = func(string) mountResolution {
+		atomic.AddInt32(&calls, 1)
+		running := atomic.AddInt32(&active, 1)
+		for {
+			seen := atomic.LoadInt32(&peak)
+			if running <= seen || atomic.CompareAndSwapInt32(&peak, seen, running) {
+				break
+			}
+		}
 		<-release
+		atomic.AddInt32(&active, -1)
+		close(finished)
 		return mountResolution{root: root}
 	}
 	handler.MountTimeout = 20 * time.Millisecond
+
+	const polls = 20
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	codes := make([]int, polls)
+	bodies := make([]string, polls)
+	for index := range polls {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			poll := httptest.NewRequest(http.MethodGet, testPrefix+StatusSuffix, nil)
+			poll.Host = "manager.test"
+			poll.Header.Set("Authorization", bearer(managerKey))
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, poll)
+			codes[index] = recorder.Code
+			bodies[index] = recorder.Body.String()
+		}(index)
+	}
 	started := time.Now()
-	_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(managerKey), http.StatusOK)
+	close(start)
+	wait.Wait()
 	elapsed := time.Since(started)
 	if elapsed > time.Second {
-		t.Fatalf("status poll waited %s on a mount that never answered, bound %s", elapsed, handler.MountTimeout)
+		t.Fatalf("%d status polls waited %s on a mount that never answered, bound %s", polls, elapsed, handler.MountTimeout)
 	}
-	if err := json.Unmarshal([]byte(body), &status); err != nil {
-		t.Fatal(err)
+	for index := range codes {
+		if codes[index] != http.StatusOK {
+			t.Fatalf("poll %d on a hung mount = %d: %s", index, codes[index], bodies[index])
+		}
+		if !strings.Contains(bodies[index], `"`+CodeMountTimeout+`"`) {
+			t.Fatalf("poll %d did not name the mount deadline: %s", index, bodies[index])
+		}
+		if strings.Contains(bodies[index], `"`+CodeSourceUnreadable+`"`) {
+			t.Fatalf("poll %d reported the mount deadline as an unreadable source: %s", index, bodies[index])
+		}
 	}
-	if status.SourceRoot != CodeSourceUnreadable {
-		t.Fatalf("source root marker = %q, want %q", status.SourceRoot, CodeSourceUnreadable)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("%d concurrent polls started %d mount lookups, want 1", polls, got)
 	}
+	if got := atomic.LoadInt32(&peak); got != 1 {
+		t.Fatalf("%d mount lookups ran at once, want at most 1", got)
+	}
+	close(release)
+	<-finished
+}
+
+// TestMountDeadlineIsATimeoutNotAnUnreadableSource is Low-4 at the route
+// boundary: a mount that did not answer is its own condition, and its copy can
+// say so. Reporting it as an unreadable database would send the operator to
+// volume permissions for a mount whose only problem is that it was slow.
+func TestMountDeadlineIsATimeoutNotAnUnreadableSource(t *testing.T) {
+	root := t.TempDir()
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	handler := &Handler{
+		LegacyRoot:   func() string { return root },
+		Timeout:      10 * time.Second,
+		MountTimeout: 20 * time.Millisecond,
+	}
+	handler.lookupMount = func(string) mountResolution {
+		<-release
+		close(finished)
+		return mountResolution{root: root}
+	}
+	for _, resource := range []string{PreflightSuffix, StatusSuffix} {
+		_, body := request(t, handler, http.MethodGet, testPrefix+resource, bearer(testAdminKey), http.StatusServiceUnavailable)
+		if !strings.Contains(body, `"`+CodeMountTimeout+`"`) {
+			t.Fatalf("%s did not name the mount deadline: %s", resource, body)
+		}
+		if strings.Contains(body, `"`+CodeSourceUnreadable+`"`) {
+			t.Fatalf("%s reported the mount deadline as an unreadable source: %s", resource, body)
+		}
+	}
+	close(release)
+	<-finished
 }
 
 // managerCredentialStore writes the Manager's own store with an administrator
@@ -417,7 +552,7 @@ func TestRefusedMountFallsBackToTheManagerStore(t *testing.T) {
 		t.Skipf("create database symlink: %v", err)
 	}
 	manager := managerCredentialStore(t, managerKey)
-	handler := Handler{
+	handler := &Handler{
 		LegacyRoot: func() string { return root },
 		Database:   func() string { return manager },
 		Timeout:    10 * time.Second,
@@ -918,7 +1053,7 @@ func TestStatusAnswersFromTheManagerStoreWithoutTheSourceMount(t *testing.T) {
 		Stage:       model.UpgradeStageReconcile,
 		DomainsDone: []string{model.UpgradeDomainSourceCopy},
 	})
-	handler := Handler{
+	handler := &Handler{
 		LegacyRoot: func() string { return "" },
 		Database:   func() string { return database },
 		Timeout:    10 * time.Second,
