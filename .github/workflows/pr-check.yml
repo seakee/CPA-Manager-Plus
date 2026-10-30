@@ -192,7 +192,26 @@ jobs:
           printf '%s  %s\n' 8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74 "${tools}/v7/cpa.tar.gz" | sha256sum --check --status
           tar -xzf "${tools}/v7/cpa.tar.gz" -C "${tools}/v7" cli-proxy-api
 
-          go -C apps/runtime-supervisor build -trimpath -o "${tools}/cpamp-runtime-supervisor" ./cmd/cpamp-runtime-supervisor
+          # The pinned proof stages the exact image layout, and that layout is
+          # root-owned: /runtime is 0711, the Supervisor root is root:<cpa gid>
+          # 0710, and the CPA child runs as the image identity. Both tests refuse
+          # to run as anything else
+          # (apps/manager-server/internal/service/freshstrategy/adoption_cpa_test.go),
+          # so the Go commands below run as root. Only those commands do: root gets
+          # its own GOCACHE/GOMODCACHE under RUNNER_TEMP, so the runner's caches
+          # stay runner-owned and no later step meets root-owned files inside them.
+          root_caches="${RUNNER_TEMP}/fresh-adoption-root-caches"
+          sudo -n install -d -o root -g root -m 0755 "${root_caches}/go-build" "${root_caches}/go-mod"
+          go_bin="$(command -v go)"
+          root_go_env=(GOCACHE="${root_caches}/go-build" GOMODCACHE="${root_caches}/go-mod")
+          if [ -n "${GOROOT:-}" ]; then
+            root_go_env+=("GOROOT=${GOROOT}")
+          fi
+          as_root() {
+            sudo -n --preserve-env=CPAMP_TEST_CPA_V8,CPAMP_TEST_CPA_LEGACY,CPAMP_TEST_RUNTIME,CPAMP_TEST_CPA_LEGACY_ARCHIVE_SHA256,CPAMP_TEST_FRESH_TRANSITION_OUT,CPAMP_TEST_FRESH_TRANSITION_HEAD,CPAMP_TEST_FRESH_TRANSITION_TREE,CPAMP_TEST_FRESH_TRANSITION_SOURCE_HEAD,CPAMP_TEST_FRESH_RESOURCE_OUT_DIR \
+              env "${root_go_env[@]}" "${go_bin}" "$@"
+          }
+          as_root -C apps/runtime-supervisor build -trimpath -o "${tools}/cpamp-runtime-supervisor" ./cmd/cpamp-runtime-supervisor
           export CPAMP_TEST_CPA_V8="${tools}/v8/cli-proxy-api"
           export CPAMP_TEST_CPA_LEGACY="${tools}/v7/cli-proxy-api"
           export CPAMP_TEST_RUNTIME="${tools}/cpamp-runtime-supervisor"
@@ -202,8 +221,11 @@ jobs:
           export CPAMP_TEST_FRESH_TRANSITION_TREE="$(git rev-parse HEAD^{tree})"
           export CPAMP_TEST_FRESH_TRANSITION_SOURCE_HEAD="${SOURCE_HEAD}"
           export CPAMP_TEST_FRESH_RESOURCE_OUT_DIR="${evidence}"
-          go -C apps/runtime-supervisor test -race -count=1 -json -run '^TestDestinationRealCPAV8$' ./internal/lifecycle | tee "${evidence}/supervisor.jsonl"
-          go -C apps/manager-server test -race -count=1 -json -run '^TestAdoptionExactCPAV8WithSupervisor$' ./internal/service/freshstrategy | tee "${evidence}/adoption.jsonl"
+          as_root -C apps/runtime-supervisor test -race -count=1 -json -run '^TestDestinationRealCPAV8$' ./internal/lifecycle | tee "${evidence}/supervisor.jsonl"
+          as_root -C apps/manager-server test -race -count=1 -json -run '^TestAdoptionExactCPAV8WithSupervisor$' ./internal/service/freshstrategy | tee "${evidence}/adoption.jsonl"
+          # Both tests emit their evidence 0600 while running as root; the
+          # verification below and the artifact upload run as the runner user.
+          sudo -n chmod -R a+rX "${evidence}"
           python3 - <<'PY'
           import hashlib, json, os, platform, subprocess
           def output(*args):
@@ -293,6 +315,9 @@ jobs:
           with open(os.path.join(evidence,'environment.json'),'w') as f:
               json.dump(value, f, indent=2)
           PY
+          # Root's caches are inside RUNNER_TEMP; remove them so the runner's own
+          # temp cleanup never meets root-owned paths.
+          sudo -n rm -rf "${root_caches}"
 
       - name: Upload controlled Fresh adoption observations
         if: always() && needs.changes.outputs.manager_runtime == 'true'
