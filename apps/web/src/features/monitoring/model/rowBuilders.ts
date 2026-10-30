@@ -62,9 +62,7 @@ export const buildRangeFilteredRows = (
 
   return rows.filter((row) => {
     const outsideEnd =
-      timeRange === 'yesterday'
-        ? row.timestampMs >= bounds.endMs
-        : row.timestampMs > bounds.endMs;
+      timeRange === 'yesterday' ? row.timestampMs >= bounds.endMs : row.timestampMs > bounds.endMs;
     if (row.timestampMs < bounds.startMs || outsideEnd) {
       return false;
     }
@@ -499,7 +497,10 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
             sourceHashes,
             apiKeyHashes,
           }) || item.account,
-        displayAccount: resolveAccountDisplayName(item.account, channels),
+        displayAccount:
+          Array.from(new Set(item.rows.map((row) => row.credentialLabel).filter(Boolean))).join(
+            ' / '
+          ) || resolveAccountDisplayName(item.account, channels),
         accountMasked: item.accountMasked,
         authLabels: Array.from(item.authLabels).sort(),
         authIndices,

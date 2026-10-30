@@ -78,17 +78,17 @@ export const buildEventRows = (
         (authMeta?.authIndex ? channelByAuthIndex.get(authMeta.authIndex) : undefined);
       const channelLabel =
         channelMeta?.name || authMeta?.provider || snapshotProvider || sourceMeta.type || '-';
-      const resolvedSourceName = readString(sourceMeta.displayName);
+      const resolvedSourceName = readString(sourceMeta.originalDisplayName || sourceMeta.displayName);
       const labelCandidates = authMeta?.label || snapshotLabel || snapshotDisplay;
       const configuredSourceName = Boolean(
         resolvedSourceName &&
-          sourceMeta.identityKey &&
-          !sourceMeta.identityKey.startsWith('source:') &&
-          !sourceMeta.identityKey.startsWith('auth:')
+        sourceMeta.identityKey &&
+        !sourceMeta.identityKey.startsWith('source:') &&
+        !sourceMeta.identityKey.startsWith('auth:')
       );
       // Prefer multi-key OpenAI-compatible disambiguation (e.g. "kuaileshifu #1") over the
       // bare provider/auth label so realtime cells match account overview identity.
-      const sourceLabel =
+      const originalSourceLabel =
         (resolvedSourceName &&
         (isKeyDisambiguatedLabel(resolvedSourceName, channelMeta?.name) ||
           isKeyDisambiguatedLabel(resolvedSourceName, channelMeta?.host) ||
@@ -103,8 +103,9 @@ export const buildEventRows = (
         snapshotDisplay ||
         resolvedSourceName ||
         authIndex;
-      const sourceMasked = maskEmailLike(sourceLabel);
-      const account = authMeta?.account || snapshotAccount || sourceLabel;
+      const sourceLabel = sourceMeta.credentialLabel || originalSourceLabel;
+      const sourceMasked = sourceMeta.credentialLabel || maskEmailLike(sourceLabel);
+      const account = authMeta?.account || snapshotAccount || originalSourceLabel;
       const accountMasked = maskEmailLike(account);
       const apiKeyHash = readString(detail.api_key_hash ?? detail.apiKeyHash).toLowerCase();
       const apiKeyDisplay = apiKeyDisplayMap.get(apiKeyHash);
@@ -128,17 +129,11 @@ export const buildEventRows = (
         detail.__responseModel ?? detail.response_model ?? detail.responseModel
       );
       const sessionId = readString(detail.session_id ?? detail.sessionId);
-      const parentSessionId = readString(
-        detail.parent_session_id ?? detail.parentSessionId
-      );
-      const accessTokenSha256 = readString(
-        detail.access_token_sha256 ?? detail.accessTokenSha256
-      );
+      const parentSessionId = readString(detail.parent_session_id ?? detail.parentSessionId);
+      const accessTokenSha256 = readString(detail.access_token_sha256 ?? detail.accessTokenSha256);
       const generate = typeof detail.generate === 'boolean' ? detail.generate : undefined;
       const stream = typeof detail.stream === 'boolean' ? detail.stream : undefined;
-      const accountId = readString(
-        detail.auth_account_id_snapshot ?? detail.authAccountIdSnapshot
-      );
+      const accountId = readString(detail.auth_account_id_snapshot ?? detail.authAccountIdSnapshot);
       const rawProjectId = readString(
         detail.auth_project_id_snapshot ?? detail.authProjectIdSnapshot
       );
@@ -242,6 +237,7 @@ export const buildEventRows = (
         userAgent,
         sourceKey,
         source: sourceLabel,
+        credentialLabel: sourceMeta.credentialLabel,
         sourceIdentity,
         sourceHashIdentity,
         sourceMasked,

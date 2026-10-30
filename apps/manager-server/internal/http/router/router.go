@@ -9,6 +9,7 @@ import (
 	apikeyaliascontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/apikeyalias"
 	automationcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/automation"
 	codexinspectioncontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/codexinspection"
+	credentiallabelcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/credentiallabel"
 	dashboardcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/dashboard"
 	healthcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/health"
 	managerconfigcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/managerconfig"
@@ -85,6 +86,10 @@ func rootHandler(
 		}
 		if strings.HasPrefix(r.URL.Path, "/v0/management/model-prices") {
 			middleware.WithCORS(appCtx.Config, modelPriceHandler.Handle)(w, r)
+			return
+		}
+		if r.URL.Path == "/v0/management/credential-labels" || strings.HasPrefix(r.URL.Path, "/v0/management/credential-labels/") {
+			middleware.WithCORS(appCtx.Config, (&credentiallabelcontroller.Handler{App: appCtx}).Handle)(w, r)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/v0/management/api-key-aliases") {

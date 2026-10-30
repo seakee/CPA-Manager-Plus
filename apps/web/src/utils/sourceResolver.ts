@@ -1,3 +1,4 @@
+import { sha256Hex } from '@/utils/apiKeyHash';
 import type { GeminiKeyConfig, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
 import type { CredentialInfo, SourceInfo, SourceProviderEnabledState } from '@/types/sourceInfo';
 import {
@@ -7,6 +8,7 @@ import {
 } from '@/utils/usage';
 
 export interface SourceInfoMapInput {
+  credentialLabels?: Readonly<Record<string, string>>;
   geminiApiKeys?: GeminiKeyConfig[];
   claudeApiKeys?: ProviderKeyConfig[];
   codexApiKeys?: ProviderKeyConfig[];
@@ -17,13 +19,14 @@ export interface SourceInfoMapInput {
 }
 
 type SourceInfoEntry = Required<Pick<SourceInfo, 'displayName' | 'type' | 'identityKey'>> &
-  Pick<SourceInfo, 'providerEnabledState'>;
+  Pick<SourceInfo, 'providerEnabledState' | 'credentialLabel'>;
 
 export interface SourceInfoMap {
   byAuthIndex: Map<string, SourceInfoEntry | null>;
   bySource: Map<string, SourceInfoEntry | null>;
   bySourceAndProvider?: Map<string, SourceInfoEntry | null>;
   byIdentityKey: Map<string, SourceInfoEntry>;
+  credentialLabels?: Readonly<Record<string, string>>;
 }
 
 const buildProviderIdentityKey = (type: string, index: number | string) => `${type}:${index}`;
@@ -63,6 +66,8 @@ const registerIdentity = (
     map.set(key, {
       displayName: existing.displayName,
       type: existing.type === entry.type ? existing.type : '',
+      credentialLabel:
+        existing.credentialLabel === entry.credentialLabel ? entry.credentialLabel : undefined,
       identityKey: `shared:${key}`,
       providerEnabledState: mergeProviderEnabledState(
         existing.providerEnabledState,
@@ -201,6 +206,9 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     items.forEach((item, index) => {
       registerProvider(
         {
+          credentialLabel: item.apiKey
+            ? input.credentialLabels?.[sha256Hex(item.apiKey)]
+            : undefined,
           displayName: displayNames[index] || `${label} #${index + 1}`,
           type,
           identityKey: buildProviderIdentityKey(type, index),
@@ -244,6 +252,9 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
           displayName:
             openaiKeyDisplayNames.get(`${providerIndex}:${entryIndex}`) ||
             providerEntry.displayName,
+          credentialLabel: entry.apiKey
+            ? input.credentialLabels?.[sha256Hex(entry.apiKey)]
+            : undefined,
           type: 'openai',
           identityKey: buildProviderIdentityKey('openai', `${providerIndex}:${entryIndex}`),
           providerEnabledState: providerEntry.providerEnabledState,
@@ -262,7 +273,13 @@ export function buildSourceInfoMap(input: SourceInfoMapInput): SourceInfoMap {
     });
   });
 
-  return { byAuthIndex, bySource, bySourceAndProvider, byIdentityKey };
+  return {
+    byAuthIndex,
+    bySource,
+    bySourceAndProvider,
+    byIdentityKey,
+    credentialLabels: input.credentialLabels,
+  };
 }
 
 export const buildSourceProviderStateMap = (sourceInfoMap: SourceInfoMap) => {
@@ -274,6 +291,9 @@ export const buildSourceProviderStateMap = (sourceInfoMap: SourceInfoMap) => {
   });
   return map;
 };
+
+const withCredentialLabel = (entry: SourceInfo): SourceInfo =>
+  entry.credentialLabel ? { ...entry, originalDisplayName: entry.displayName, displayName: entry.credentialLabel } : entry;
 
 export function resolveSourceDisplay(
   sourceRaw: string,
@@ -287,7 +307,7 @@ export function resolveSourceDisplay(
 
   if (authIndexKey) {
     const matchedByAuthIndex = sourceInfoMap.byAuthIndex.get(authIndexKey);
-    if (matchedByAuthIndex) return matchedByAuthIndex;
+    if (matchedByAuthIndex) return withCredentialLabel(matchedByAuthIndex);
 
     const authInfo = authFileMap.get(authIndexKey);
     if (authInfo) {
@@ -302,7 +322,7 @@ export function resolveSourceDisplay(
   const matchedBySource = source ? sourceInfoMap.bySource.get(source) : null;
   const sharedAcrossProviders =
     matchedBySource?.identityKey.startsWith('shared:') && !matchedBySource.type;
-  if (matchedBySource && !sharedAcrossProviders) return matchedBySource;
+  if (matchedBySource && !sharedAcrossProviders) return withCredentialLabel(matchedBySource);
 
   // A source shared across providers may have one display name but distinct
   // provider identities. Keep same-provider ambiguity unchanged.
@@ -311,13 +331,18 @@ export function resolveSourceDisplay(
     const matchedByProvider = provider
       ? sourceInfoMap.bySourceAndProvider?.get(buildProviderSourceKey(provider, source))
       : null;
-    if (matchedByProvider) return matchedByProvider;
+    if (matchedByProvider) return withCredentialLabel(matchedByProvider);
   }
-  if (matchedBySource) return matchedBySource;
+  if (matchedBySource) return withCredentialLabel(matchedBySource);
 
   if (source) {
     return {
-      displayName: formatRawSourceDisplayName(source),
+      displayName: source.startsWith('h:')
+        ? sourceInfoMap.credentialLabels?.[source.slice(2)] || formatRawSourceDisplayName(source)
+        : formatRawSourceDisplayName(source),
+      credentialLabel: source.startsWith('h:')
+        ? sourceInfoMap.credentialLabels?.[source.slice(2)]
+        : undefined,
       type: '',
       identityKey: `source:${source}`,
     };

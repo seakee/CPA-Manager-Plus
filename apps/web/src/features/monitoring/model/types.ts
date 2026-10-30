@@ -31,14 +31,7 @@ export type MonitoringAuthMeta = {
   updatedAt: string;
 };
 
-export type MonitoringTimeRange =
-  | 'today'
-  | 'yesterday'
-  | '7d'
-  | '14d'
-  | '30d'
-  | 'all'
-  | 'custom';
+export type MonitoringTimeRange = 'today' | 'yesterday' | '7d' | '14d' | '30d' | 'all' | 'custom';
 
 export type MonitoringCustomTimeRange = {
   startMs: number;
@@ -152,6 +145,7 @@ export type MonitoringFailureRow = {
 };
 
 export type MonitoringEventRow = {
+  credentialLabel?: string;
   id: string;
   timestamp: string;
   timestampMs: number;

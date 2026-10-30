@@ -30,6 +30,11 @@ vi.mock('@/features/monitoring/services/monitoringMetaService', () => ({
   loadMonitoringMetaPayload: monitoringMetaMocks.load,
 }));
 
+const remarkMocks = vi.hoisted(() => ({ labels: {} as Record<string, string> }));
+vi.mock('@/hooks/useCredentialLabels', () => ({
+  useCredentialLabels: () => ({ labels: remarkMocks.labels }),
+}));
+
 vi.mock('@/stores', () => ({
   useConfigStore: (selector: (state: { config: null }) => unknown) => selector({ config: null }),
 }));
@@ -87,6 +92,7 @@ const localHourStartMs = (timestampMs: number) => {
 describe('useUsageAnalytics request orchestration', () => {
   let renderer: ReactTestRenderer | null = null;
   let latestResult: ReturnType<typeof useUsageAnalytics> | null = null;
+  let credentialSource = '';
   let selectorError = '';
   let credentialTimelineError = '';
   let credentialTimelineLoading = false;
@@ -111,6 +117,7 @@ describe('useUsageAnalytics request orchestration', () => {
           ...emptyAnalyticsResponse,
           credential_stats: [
             {
+              source: credentialSource,
               id: 'credential-a.json',
               auth_file_snapshot: 'credential-a.json',
               auth_index: 'auth-a',
@@ -234,6 +241,8 @@ describe('useUsageAnalytics request orchestration', () => {
   }
 
   beforeEach(() => {
+    credentialSource = '';
+    remarkMocks.labels = {};
     selectorError = '';
     credentialTimelineError = '';
     credentialTimelineLoading = false;
@@ -573,6 +582,29 @@ describe('useUsageAnalytics request orchestration', () => {
     expect(latestResult?.credentialTrendLoading).toBe(false);
     expect(latestResult?.credentialTrendError).toBe('timeline failed');
     expect(latestResult?.credentialRows).toHaveLength(1);
+  });
+
+  it('updates usage credential remarks without changing totals, selection or trend identity', async () => {
+    const hash = 'a'.repeat(64);
+    credentialSource = `h:${hash}`;
+    await renderHook('/usage-analytics?tab=credentials');
+    const original = latestResult!.credentialRows[0];
+    remarkMocks.labels = { [hash]: 'account@example.com' };
+    await act(async () => {
+      renderer!.update(<MemoryRouter initialEntries={['/usage-analytics?tab=credentials']}><Harness /></MemoryRouter>);
+      await Promise.resolve();
+    });
+    const renamed = latestResult!.credentialRows[0];
+    expect(renamed.label).toBe('account@example.com');
+    expect(renamed.account).toBe('account@example.com');
+    expect({ ...renamed, label: original.label, account: original.account }).toEqual(original);
+    expect(latestResult!.selectedCredential?.id).toBe(original.id);
+    remarkMocks.labels = {};
+    await act(async () => {
+      renderer!.update(<MemoryRouter initialEntries={['/usage-analytics?tab=credentials']}><Harness /></MemoryRouter>);
+      await Promise.resolve();
+    });
+    expect(latestResult!.credentialRows[0]).toEqual(original);
   });
 
   it('retains last-good metadata when a manual metadata refresh partially fails', async () => {

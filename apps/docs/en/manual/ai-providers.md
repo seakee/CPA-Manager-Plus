@@ -39,6 +39,14 @@ Fields vary by provider, but they generally cover the base URL, credential, mode
 5. Save, then run a low-cost key test or real request.
 6. Confirm the provider, model, and account in [Monitoring](./monitoring.md).
 
+## Upstream Credential Remarks
+
+In Manager Server mode, use the pencil beside a native provider key to save an email or account remark (up to 120 characters). The remark appears in provider lists/details, the dashboard, [Monitoring](./monitoring.md), and [Usage Analytics](./usage-analytics.md). Save an empty value to clear it. Account summaries retain the existing masked/full display toggle.
+
+Remarks are stored in the Manager database under the full SHA-256 of the original key, without storing the raw key. They affect display only: routing, aggregation, deduplication, and historical identities remain unchanged, and equal remarks do not merge credentials. Client API key aliases remain separate. Manager database backups include remarks.
+
+The lightweight CPA panel and older Managers without this API do not show the remark editor.
+
 ## xAI API Keys
 
 The panel manages CPA `xai-api-key` entries, including:
