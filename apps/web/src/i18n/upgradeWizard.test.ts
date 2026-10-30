@@ -8,9 +8,11 @@ const CODES = [
   'upgrade_source_missing',
   'upgrade_source_busy',
   'upgrade_source_lock_unavailable',
+  'upgrade_source_symlinked',
   'upgrade_source_unreadable',
   'upgrade_source_version_unsupported',
   'upgrade_disk_insufficient',
+  'upgrade_credential_timeout',
   'upgrade_legacy_root_missing',
   'upgrade_legacy_root_unusable',
   'upgrade_preflight_timeout',
@@ -43,6 +45,24 @@ describe('upgrade wizard blocked codes', () => {
     for (const language of LOCALES) {
       expect(blockedCodeText('upgrade_source_missing', language)).not.toBe(
         blockedCodeText('upgrade_legacy_root_missing', language)
+      );
+    }
+  });
+
+  it('keeps a deadline apart from an unreadable source', () => {
+    // A slow volume and a broken one need different operator responses, so the
+    // two codes must never share one sentence.
+    for (const language of LOCALES) {
+      expect(blockedCodeText('upgrade_credential_timeout', language)).not.toBe(
+        blockedCodeText('upgrade_source_unreadable', language)
+      );
+    }
+  });
+
+  it('keeps a linked source apart from an undiscoverable ownership marker', () => {
+    for (const language of LOCALES) {
+      expect(blockedCodeText('upgrade_source_symlinked', language)).not.toBe(
+        blockedCodeText('upgrade_source_lock_unavailable', language)
       );
     }
   });

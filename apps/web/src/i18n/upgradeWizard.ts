@@ -55,10 +55,14 @@ const en = {
     'The 1.x source is still locked by a running process. Stop it and try again.',
   codeUpgradeSourceLockUnavailable:
     'The source ownership marker cannot be inspected read-only. Check the mounted 1.x volume; nothing was written.',
+  codeUpgradeSourceSymlinked:
+    'The 1.x database is reached through a link, not as the file itself. Mount the data directory itself, without linked files, then try again.',
   codeUpgradeSourceUnreadable:
     'The 1.x database cannot be read safely. Check the volume and its permissions on the host.',
   codeUpgradeSourceVersionUnsupported: 'This 1.x version is not supported as an upgrade source.',
   codeUpgradeDiskInsufficient: 'There is not enough free space for the copy.',
+  codeUpgradeCredentialTimeout:
+    'The source did not answer in time to verify the administrator key. Try again when the host is idle.',
   codeUpgradeLegacyRootMissing:
     'No 1.x data directory is mounted. Mount it read-only and try again.',
   codeUpgradeLegacyRootUnusable: 'The mounted 1.x data directory cannot be used.',
@@ -207,9 +211,12 @@ const zh: typeof en = {
   codeUpgradeSourceBusy: '1.x 来源仍被运行中的进程占用。请先停止它再重试。',
   codeUpgradeSourceLockUnavailable:
     '无法只读检查来源的归属标记。请检查挂载的 1.x 卷；未写入任何内容。',
+  codeUpgradeSourceSymlinked:
+    '1.x 数据库是通过链接访问的，而不是普通文件。请挂载数据目录本身（不要使用链接文件）后重试。',
   codeUpgradeSourceUnreadable: '无法安全读取 1.x 数据库。请在宿主机上检查卷和权限。',
   codeUpgradeSourceVersionUnsupported: '该 1.x 版本不能作为升级来源。',
   codeUpgradeDiskInsufficient: '复制所需的可用空间不足。',
+  codeUpgradeCredentialTimeout: '来源未在限定时间内响应，无法验证管理员密钥。请在宿主机空闲时重试。',
   codeUpgradeLegacyRootMissing: '未挂载 1.x 数据目录。请只读挂载后重试。',
   codeUpgradeLegacyRootUnusable: '已挂载的 1.x 数据目录不可用。',
   codeUpgradePreflightTimeout: '预检未在限定时间内完成。请在宿主机空闲时重新预检。',
@@ -343,9 +350,12 @@ const tw: typeof en = {
   codeUpgradeSourceBusy: '1.x 來源仍被執行中的程序佔用。請先停止它再重試。',
   codeUpgradeSourceLockUnavailable:
     '無法只讀檢查來源的歸屬標記。請檢查掛載的 1.x 卷；未寫入任何內容。',
+  codeUpgradeSourceSymlinked:
+    '1.x 資料庫是透過連結存取，而不是一般檔案。請掛載資料目錄本身（不要使用連結檔案）後重試。',
   codeUpgradeSourceUnreadable: '無法安全讀取 1.x 資料庫。請在主機上檢查磁碟區與權限。',
   codeUpgradeSourceVersionUnsupported: '此 1.x 版本不能作為升級來源。',
   codeUpgradeDiskInsufficient: '複製所需的可用空間不足。',
+  codeUpgradeCredentialTimeout: '來源未在限定時間內回應，無法驗證管理員金鑰。請在主機閒置時重試。',
   codeUpgradeLegacyRootMissing: '未掛載 1.x 資料目錄。請以唯讀方式掛載後重試。',
   codeUpgradeLegacyRootUnusable: '已掛載的 1.x 資料目錄不可用。',
   codeUpgradePreflightTimeout: '預檢未在限定時間內完成。請在主機閒置時重新預檢。',
@@ -480,9 +490,13 @@ const ru: typeof en = {
   codeUpgradeSourceBusy: 'Источник 1.x всё ещё занят работающим процессом. Остановите его и повторите.',
   codeUpgradeSourceLockUnavailable:
     'Маркер владения источником нельзя проверить только для чтения. Проверьте смонтированный том 1.x; ничего не записано.',
+  codeUpgradeSourceSymlinked:
+    'База 1.x доступна через ссылку, а не как сам файл. Смонтируйте сам каталог данных, без файлов-ссылок, и повторите.',
   codeUpgradeSourceUnreadable: 'База 1.x не читается безопасно. Проверьте том и его права на хосте.',
   codeUpgradeSourceVersionUnsupported: 'Эта версия 1.x не поддерживается как источник обновления.',
   codeUpgradeDiskInsufficient: 'Недостаточно свободного места для копирования.',
+  codeUpgradeCredentialTimeout:
+    'Источник не ответил вовремя, поэтому ключ администратора не проверен. Повторите, когда хост свободен.',
   codeUpgradeLegacyRootMissing: 'Каталог данных 1.x не смонтирован. Смонтируйте его только для чтения и повторите.',
   codeUpgradeLegacyRootUnusable: 'Смонтированный каталог данных 1.x непригоден.',
   codeUpgradePreflightTimeout: 'Проверка не завершилась вовремя. Повторите её, когда хост свободен.',
@@ -637,12 +651,16 @@ export function blockedCodeText(code: string, language = fullWebLanguage()): str
       return upgradeWizardText('codeUpgradeSourceBusy', language);
     case 'upgrade_source_lock_unavailable':
       return upgradeWizardText('codeUpgradeSourceLockUnavailable', language);
+    case 'upgrade_source_symlinked':
+      return upgradeWizardText('codeUpgradeSourceSymlinked', language);
     case 'upgrade_source_unreadable':
       return upgradeWizardText('codeUpgradeSourceUnreadable', language);
     case 'upgrade_source_version_unsupported':
       return upgradeWizardText('codeUpgradeSourceVersionUnsupported', language);
     case 'upgrade_disk_insufficient':
       return upgradeWizardText('codeUpgradeDiskInsufficient', language);
+    case 'upgrade_credential_timeout':
+      return upgradeWizardText('codeUpgradeCredentialTimeout', language);
     case 'upgrade_legacy_root_missing':
       return upgradeWizardText('codeUpgradeLegacyRootMissing', language);
     case 'upgrade_legacy_root_unusable':

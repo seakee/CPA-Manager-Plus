@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -484,6 +485,115 @@ func TestVerifyAdminReadsOnlyTheCredentialRow(t *testing.T) {
 	report := preflight(t, fixture.root, Options{})
 	if report.Ready || len(report.Blocked) != 1 || report.Blocked[0] != CodeSourceUnreadable {
 		t.Fatalf("blocked = %v, want [%s]", report.Blocked, CodeSourceUnreadable)
+	}
+}
+
+// newCredentialFixture writes a 1.x source whose administrator credential is key.
+func newCredentialFixture(t *testing.T, key string) sourceFixture {
+	t.Helper()
+	credential, err := security.NewAdminCredential(key, "test")
+	if err != nil {
+		t.Fatalf("build credential: %v", err)
+	}
+	raw, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatalf("encode credential: %v", err)
+	}
+	return newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+		execFixture(t, db, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
+	})
+}
+
+// TestSourceDatabaseFilePolicyIsSharedByBothPaths proves the preflight and the
+// credential read apply one file policy: a source database reached through a
+// symbolic link is refused by both, with the same code, because the file that is
+// inspected has to be the file that is read.
+func TestSourceDatabaseFilePolicyIsSharedByBothPaths(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := newCredentialFixture(t, key)
+	real := fixture.dbPath + ".real"
+	if err := os.Rename(fixture.dbPath, real); err != nil {
+		t.Fatalf("move fixture database: %v", err)
+	}
+	if err := os.Symlink(real, fixture.dbPath); err != nil {
+		t.Skipf("create database symlink: %v", err)
+	}
+
+	err := VerifyAdmin(context.Background(), fixture.root, key)
+	if !errors.Is(err, ErrSourceSymlinked) {
+		t.Fatalf("credential read through a symlink = %v, want %v", err, ErrSourceSymlinked)
+	}
+	if errors.Is(err, ErrAdminUnauthorized) || errors.Is(err, ErrSourceDatabaseMissing) {
+		t.Fatalf("a symlinked source was misreported as %v", err)
+	}
+
+	report := preflight(t, fixture.root, Options{})
+	// The ownership check names the link with the very code the credential read
+	// returns. The fingerprint step refuses the same file for its own reason (it
+	// hashes plain files), so it contributes its own code as well.
+	if report.Ready || len(report.Blocked) == 0 || report.Blocked[0] != CodeSourceSymlinked {
+		t.Fatalf("blocked = %v, want [%s ...]", report.Blocked, CodeSourceSymlinked)
+	}
+	for _, code := range report.Blocked {
+		if code == CodeSourceLockUnavailable || code == CodeSourceMissing || code == CodeSourceBusy {
+			t.Fatalf("a symlinked source was reported as %s: %v", code, report.Blocked)
+		}
+	}
+	check, found := checkByName(report, CheckSourceOwnership)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceSymlinked {
+		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceSymlinked)
+	}
+}
+
+// TestVerifyAdminRefusesASwapBetweenInspectionAndRead proves the credential that
+// is compared belongs to the file that was inspected. SQLite opens lazily, so
+// the swap lands between the inspection and the first read; the read itself
+// still succeeds, and the identity comparison is what refuses the credential.
+func TestVerifyAdminRefusesASwapBetweenInspectionAndRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses to replace an open file, so the swap cannot be staged")
+	}
+	const inspectedKey = "legacy-manager-credential"
+	const replacementKey = "another-manager-credential"
+	fixture := newCredentialFixture(t, inspectedKey)
+	replacement := newCredentialFixture(t, replacementKey)
+
+	source, err := openCredentialSource(fixture.dbPath)
+	if err != nil {
+		t.Fatalf("open credential source: %v", err)
+	}
+	defer func() { _ = source.close() }()
+	if err := os.Rename(replacement.dbPath, fixture.dbPath); err != nil {
+		t.Fatalf("swap fixture database: %v", err)
+	}
+	// The replacement carries a key of its own: without the identity comparison
+	// this read would prove a credential from a file nothing inspected.
+	err = verifyAdminCredential(context.Background(), source, replacementKey)
+	if !errors.Is(err, ErrSourceDatabaseChanged) {
+		t.Fatalf("swapped source = %v, want %v", err, ErrSourceDatabaseChanged)
+	}
+	if errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("the swap was reported as a credential verdict: %v", err)
+	}
+}
+
+// TestVerifyAdminReportsADeadlineAsATimeout is the L-a contract: a healthy
+// source that outlives the credential budget is a deadline, never an unreadable
+// source and never a wrong key. The bound is placed inside the read, so the
+// failure happens after the source opened.
+func TestVerifyAdminReportsADeadlineAsATimeout(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := newCredentialFixture(t, key)
+	previous := credentialVerifyTimeout
+	credentialVerifyTimeout = -time.Second
+	t.Cleanup(func() { credentialVerifyTimeout = previous })
+
+	err := VerifyAdmin(context.Background(), fixture.root, key)
+	if !errors.Is(err, ErrCredentialVerifyTimeout) {
+		t.Fatalf("expired credential read = %v, want %v", err, ErrCredentialVerifyTimeout)
+	}
+	if errors.Is(err, ErrSourceDatabaseMissing) || errors.Is(err, ErrAdminUnauthorized) || errors.Is(err, ErrSourceDatabaseChanged) {
+		t.Fatalf("a deadline was misreported as %v", err)
 	}
 }
 

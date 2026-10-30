@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +58,14 @@ const (
 	CodePreflightTimeout   = "upgrade_preflight_timeout"
 	CodePreflightFailed    = "upgrade_preflight_failed"
 	CodeOperationUnread    = "upgrade_operation_unreadable"
+	// CodeCredentialTimeout is the credential read's deadline verdict: the source
+	// exists but did not answer in time. It is not an unreadable source and never
+	// a wrong key.
+	CodeCredentialTimeout = upgradeservice.CodeCredentialTimeout
+	// CodeSourceSymlinked is the shared database file policy's refusal of a source
+	// reached through a link. The preflight reports the same code for the same
+	// mount.
+	CodeSourceSymlinked = upgradeservice.CodeSourceSymlinked
 	// CodeSourceMissing and CodeSourceUnreadable are the same codes the
 	// preflight reports: the source itself is absent or cannot be read, so this
 	// step can neither prove the key nor report on the source. They are never a
@@ -172,8 +181,16 @@ func (h Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	case errors.Is(err, upgradeservice.ErrAdminUnauthorized):
 		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
+	case errors.Is(err, upgradeservice.ErrCredentialVerifyTimeout):
+		// A deadline is not an unreadable source: the volume may be healthy and
+		// only slow, and the operator's next move is to retry, not to repair it.
+		writeError(w, http.StatusServiceUnavailable, CodeCredentialTimeout)
 	case errors.Is(err, upgradeservice.ErrSourceDatabaseMissing):
 		writeError(w, http.StatusServiceUnavailable, CodeSourceMissing)
+	case errors.Is(err, upgradeservice.ErrSourceSymlinked):
+		// The preflight refuses the same mount with the same code: both paths read
+		// the file itself, never whatever a link points at.
+		writeError(w, http.StatusServiceUnavailable, CodeSourceSymlinked)
 	default:
 		// The credential is not wrong: the source could not be read to verify it.
 		// Naming that condition keeps a wrong-password message off a mount the
@@ -550,6 +567,9 @@ const (
 	sourceText     = "<source>"
 	maxDetailLine  = 600
 	maxDetailLines = 40
+	// minProductKeyBody is the shortest key body this product issues after its
+	// prefix. The key pattern and the wrapped-key rule both read it.
+	minProductKeyBody = 4
 )
 
 var (
@@ -562,10 +582,15 @@ var (
 	apiKeyHeaderPattern = regexp.MustCompile(`(?i)(x[-_]api[-_]key\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)`)
 	// issuedKeyPattern is the issued key prefix the Manager and its clients use.
 	issuedKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{4,}`)
-	// productKeyPattern is this product's own key vocabulary: installation,
-	// usage and administrator keys all start with one of these prefixes and
-	// carry no other marker.
-	productKeyPattern = regexp.MustCompile(`\b(?:cpamp_|cmp_admin_)[A-Za-z0-9_.\-]{4,}`)
+	// productKeyPrefixes and productKeyPattern are this product's own key
+	// vocabulary: installation, usage and administrator keys all start with one
+	// of these prefixes and carry no other marker. The prefix match is
+	// case-insensitive, because a key pasted with a different prefix case is
+	// still a credential, and the same list is what a key wrapped across a line
+	// boundary is recognised by.
+	productKeyPrefixes = []string{"cpamp_", "cmp_admin_"}
+	productKeyPattern  = regexp.MustCompile(
+		`(?i)\b(?:` + strings.Join(productKeyPrefixes, "|") + `)[A-Za-z0-9_.\-]{` + strconv.Itoa(minProductKeyBody) + `,}`)
 	// passwordPattern is a password written as an assignment: a query string, a
 	// DSN, an env-style variable or a copied command.
 	passwordPattern = regexp.MustCompile(`(?i)(password\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
@@ -616,8 +641,17 @@ func (s scrubber) text(value string) string {
 	// see them. Nothing else is joined — a line break is evidence.
 	lines = joinSplitBearer(lines)
 	scrubbed := make([]string, 0, len(lines))
+	// A product key broken mid-token is one credential too. The line that carries
+	// the head is redacted by the key pattern, and the fragment on the next line
+	// carries no prefix of its own, so the run that continues it is removed there
+	// instead. The line break itself stays: it is still evidence of shape.
+	openKey := false
 	for _, line := range lines {
 		line = strings.ReplaceAll(line, "\x00", "")
+		if openKey {
+			line = redactKeyTail(line)
+		}
+		openKey = endsWithOpenProductKey(line)
 		for _, token := range s.replacements {
 			if token == "" || token == "/" || token == "." {
 				continue
@@ -671,6 +705,62 @@ func joinSplitBearer(lines []string) []string {
 func endsWithBareBearer(line string) bool {
 	trimmed := strings.ToLower(strings.TrimRight(line, " \t"))
 	return trimmed == "bearer" || strings.HasSuffix(trimmed, " bearer")
+}
+
+// redactKeyTail removes the leading key run of a line whose predecessor ended
+// inside a product key: that run is the rest of the token, so it is credential
+// material even though it carries no prefix of its own. A run shorter than the
+// shortest key body is left alone — it is not a fragment this product issues.
+func redactKeyTail(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	run := 0
+	for _, r := range trimmed {
+		if !isKeyRune(r) {
+			break
+		}
+		run += len(string(r))
+	}
+	if run < minProductKeyBody {
+		return line
+	}
+	return redactedText + trimmed[run:]
+}
+
+// endsWithOpenProductKey reports whether a line ends inside a product key: the
+// text from the last prefix to the end of the line is nothing but key
+// characters, so the next line may carry the rest of the same token.
+func endsWithOpenProductKey(line string) bool {
+	trimmed := strings.TrimRight(line, " \t")
+	lower := strings.ToLower(trimmed)
+	index := -1
+	for _, prefix := range productKeyPrefixes {
+		if at := strings.LastIndex(lower, prefix); at > index {
+			index = at
+		}
+	}
+	return index >= 0 && isKeyFragment(trimmed[index:])
+}
+
+// isKeyFragment reports whether a value is nothing but key characters.
+func isKeyFragment(value string) bool {
+	for _, r := range value {
+		if !isKeyRune(r) {
+			return false
+		}
+	}
+	return value != ""
+}
+
+// isKeyRune reports whether r can appear in a product key body.
+func isKeyRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	case r == '_', r == '.', r == '-':
+		return true
+	default:
+		return false
+	}
 }
 
 // capText truncates on a rune boundary so a cut never produces invalid text.

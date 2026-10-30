@@ -228,6 +228,63 @@ func TestStatusReportsAnAbsentSourceWithItsOwnCode(t *testing.T) {
 	}
 }
 
+// TestCredentialDeadlineIsATimeoutNotAnUnreadableSource proves a deadline is
+// named as a deadline on both routes. A slow but healthy volume and an
+// unreadable one need different operator responses, so the wizard must not show
+// the repair copy for a condition a retry fixes.
+func TestCredentialDeadlineIsATimeoutNotAnUnreadableSource(t *testing.T) {
+	handler := newHandler(legacySourceDir(t), "")
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	for _, prefix := range []string{testPrefix, canonical} {
+		for _, resource := range []string{PreflightSuffix, StatusSuffix} {
+			r := httptest.NewRequest(http.MethodGet, prefix+resource, nil).WithContext(expired)
+			r.Host = "manager.test"
+			r.Header.Set("Authorization", bearer(testAdminKey))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			body := w.Body.String()
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s%s answered %d: %s", prefix, resource, w.Code, body)
+			}
+			if !strings.Contains(body, `"`+CodeCredentialTimeout+`"`) {
+				t.Fatalf("%s%s did not name the deadline: %s", prefix, resource, body)
+			}
+			if strings.Contains(body, `"`+CodeSourceUnreadable+`"`) {
+				t.Fatalf("%s%s reported a deadline as an unreadable source: %s", prefix, resource, body)
+			}
+		}
+	}
+}
+
+// TestSymlinkedSourceIsRefusedOnBothRoutes proves the two paths share one
+// database file policy: a source reached through a link is refused with the same
+// code by the preflight and by the credential read, because the file that is
+// inspected has to be the file that is read.
+func TestSymlinkedSourceIsRefusedOnBothRoutes(t *testing.T) {
+	root := legacySourceDir(t)
+	database := filepath.Join(root, "usage.sqlite")
+	if err := os.Rename(database, database+".real"); err != nil {
+		t.Fatalf("move fixture database: %v", err)
+	}
+	if err := os.Symlink(database+".real", database); err != nil {
+		t.Skipf("create database symlink: %v", err)
+	}
+	handler := newHandler(root, "")
+	// Authentication opens the source too, so both routes answer the same refusal
+	// before the preflight report is even built: the code is shared with the
+	// report the service layer produces for the same mount.
+	for _, resource := range []string{PreflightSuffix, StatusSuffix} {
+		_, body := request(t, handler, http.MethodGet, testPrefix+resource, bearer(testAdminKey), http.StatusServiceUnavailable)
+		if !strings.Contains(body, `"`+CodeSourceSymlinked+`"`) {
+			t.Fatalf("%s did not refuse the symlink: %s", resource, body)
+		}
+		if strings.Contains(body, `"`+CodeAdminUnauthorized+`"`) {
+			t.Fatalf("%s reported a symlinked source as a credential verdict: %s", resource, body)
+		}
+	}
+}
+
 // TestUnauthenticatedCallersLearnNothingAboutMethodOrPath is the ordering
 // contract both Upgrade surfaces share: the credential is answered before the
 // verb and before the path, so a caller without one cannot tell a real route
@@ -616,6 +673,8 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 		{in: "url https://admin:pw-12345@gateway.internal/x refused", secret: "pw-12345"},
 		{in: "usage key " + productKey + " rejected", secret: productKey},
 		{in: "administrator key " + adminKey + " rotated", secret: adminKey},
+		{in: "usage key Cpamp_SK_0123456789 rejected", secret: "Cpamp_SK_0123456789"},
+		{in: "administrator key CMP_ADMIN_Rotation_0123456789 rotated", secret: "CMP_ADMIN_Rotation_0123456789"},
 		{in: "Authorization: Basic " + basicSecret + " refused", secret: basicSecret},
 		{in: "gateway login password=" + passwordText + " refused", secret: passwordText},
 		{in: "dsn postgres://gateway.internal/x?password=" + passwordText, secret: passwordText},
@@ -649,6 +708,23 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 		t.Fatalf("split bearer is not joined and redacted: %q", got)
 	} else if got := strings.Count(got, "\n"); got != 2 {
 		t.Fatalf("split bearer changed the detail shape: %q", got)
+	}
+	// A product key broken mid-token is one credential too: the head is redacted
+	// by the key pattern, and the continuation carries no prefix of its own, so it
+	// is removed where it sits. The line break itself stays.
+	const (
+		wrappedHead = "cpamp_sk_0123456789abc"
+		wrappedTail = "def0123456789"
+	)
+	if got := scrubError("usage key " + wrappedHead + "\n" + wrappedTail + " rejected"); strings.Contains(got, wrappedHead) || strings.Contains(got, wrappedTail) {
+		t.Fatalf("wrapped product key survived: %q", got)
+	} else if want := "usage key " + redactedText + "\n" + redactedText + " rejected"; got != want {
+		t.Fatalf("wrapped product key = %q, want %q", got, want)
+	}
+	// The same rule applies to a case-variant prefix, which is why the prefix
+	// match is case-insensitive.
+	if got := scrubError("administrator key CMP_ADMIN_rotation\n0123456789 rejected"); strings.Contains(got, "0123456789") {
+		t.Fatalf("wrapped case-variant key tail survived: %q", got)
 	}
 	// A NUL byte is not text and never reaches the operator.
 	if got := scrubError("broken\x00value"); strings.Contains(got, "\x00") {

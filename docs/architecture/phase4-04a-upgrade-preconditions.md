@@ -182,12 +182,17 @@ hard `false`; the new surface grants no migration authority.
 - **Checks, in order:** `source_ownership` (`upgrade_source_missing` when the
   mount holds no database at all, `upgrade_source_busy` when a live writer holds
   the marker, `upgrade_source_lock_unavailable` when the marker cannot be
-  inspected at all, `upgrade_source_unreadable` when the database or the
+  inspected at all, `upgrade_source_symlinked` when the database path is a
+  symbolic link, `upgrade_source_unreadable` when the database or the
   integrity check fails), `source_version`
   (`upgrade_source_version_unsupported`), `fingerprint`, `disk`
   (`upgrade_disk_insufficient`), `cpa_classification`, `parity`. Parity gaps
   (missing/mismatched projection, past watermark, per-day deleted coverage
   disagreement) never block; they are reported for a later explicit decision.
+  The database file policy is shared with the credential read (see U1-7): the
+  file that is inspected has to be the file that is read, so a linked
+  `usage.sqlite` is refused by both paths with `upgrade_source_symlinked`, and
+  the fingerprint step adds its own refusal because it hashes plain files.
 - **Version source.** 1.x never persisted its release, so the release is a
   floor derived from schema and settings markers and compared with
   `bootstrap.PlannedDirectRelease`. A marker introduced after the pinned release
@@ -296,9 +301,24 @@ They never appear on both surfaces at once, and no write route exists.
   every status poll, so a whole-file scan there would answer 503 on a large
   source and the result page would never arrive. The integrity check stays in
   `Preflight`, which is what qualifies a source. `VerifyAdmin` takes no fence.
+  A read that outlives the bound — or a caller whose own deadline had passed —
+  is `503 upgrade_credential_timeout`: a slow but healthy volume is a retry, not
+  a repair.
   The installation session, the Fresh Admin key, a cookie and an absent header
   are all `401`; the two surfaces no longer check a session before this handler
   runs, so no missing decision can read as allow.
+- **One file policy on both paths.** The credential read applies the same
+  database file rules as the preflight (`processlock.InspectDatabaseFile`): the
+  path must be the database itself, never a symbolic link, and a regular file
+  reachable by exactly one link. A linked `usage.sqlite` is therefore
+  `503 upgrade_source_symlinked` here and `upgrade_source_symlinked` in the
+  report — one condition, one code. SQLite opens lazily on the first query, so
+  the open also pins a descriptor and compares it with the inspected file
+  (`processlock.OpenedDatabase`, the reader's form of `openedMarker`); after the
+  credential row is read the path is compared once more, so a swap between the
+  inspection and the read is refused (`ErrSourceDatabaseChanged`, reported as
+  `upgrade_source_unreadable`) instead of comparing a credential from a file
+  nothing assessed.
 - **Order.** The credential is answered before the path and before the verb, on
   both the entry leaf and these two routes: an unauthenticated caller receives
   `401` whatever its method and whatever the path, so it cannot tell a real
@@ -307,15 +327,19 @@ They never appear on both surfaces at once, and no write route exists.
 - **Failure order.** `401` is reserved for a credential verdict. A missing or
   unusable mount answers `503 upgrade_legacy_root_missing` /
   `upgrade_legacy_root_unusable`; a mount with no database answers
-  `503 upgrade_source_missing`; a source that exists but cannot be read to
+  `503 upgrade_source_missing`; a credential read that exceeds its bound answers
+  `503 upgrade_credential_timeout`; a linked database answers
+  `503 upgrade_source_symlinked`; a source that exists but cannot be read to
   verify the key answers `503 upgrade_source_unreadable`. None of these is a
   wrong-password message, and none of them is the ownership-marker code — that
   code is the preflight's, and this surface never inspects the marker.
 - **Ownership without the fence.** `upgrade.Preflight` observes the source with
   `processlock.ProbeExisting`: a shared, non-blocking lock on the existing
-  marker. A live writer is `upgrade_source_busy`; a marker that cannot be
-  inspected at all (missing, unreadable, not a regular file, or a hard-linked
-  database) is the distinct `upgrade_source_lock_unavailable`. A read-only source
+  marker. A live writer is `upgrade_source_busy`; a symbolic database link is
+  the shared file policy's `upgrade_source_symlinked` (the same code the
+  credential read returns); a marker that cannot be inspected at all (missing,
+  unreadable, not a regular file, or a hard-linked database) is the distinct
+  `upgrade_source_lock_unavailable`. A read-only source
   tree therefore yields a real report, two concurrent preflights both reach a
   verdict, and the before/after fingerprint gate in `upgrade run` — which holds
   the exclusive lock — remains the write path's guard.
@@ -326,7 +350,9 @@ They never appear on both surfaces at once, and no write route exists.
 - **Scrubbing.** Operator-visible text is redacted by content, not by path
   shape: `Bearer …` (including a value wrapped onto the next line after a lone
   `Bearer`), `Authorization: Basic …`, `sk-…`, this product's own
-  `cpamp_`/`cmp_admin_` key prefixes, `x-api-key`/`X_API_KEY` values, a
+  `cpamp_`/`cmp_admin_` key prefixes in any case (a key broken mid-token across a
+  line boundary has its continuation removed where it sits, so the fragment
+  without a prefix does not survive), `x-api-key`/`X_API_KEY` values, a
   `password=`/`password:` assignment in a query string, DSN, variable or
   command, credentials embedded in a URL authority and local paths; the same
   scrubber covers `manual_items`, and a multi-line detail is scrubbed line by

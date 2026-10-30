@@ -12,6 +12,11 @@ var (
 	ErrLocked         = errors.New("manager database process lock is already held")
 	ErrHardLinked     = errors.New("manager database has multiple hard links")
 	ErrNoExistingLock = errors.New("manager database process lock does not exist")
+	// ErrSymlinkedDatabase reports that the configured database path is a
+	// symbolic link. Every read-only path refuses it: the file that is inspected
+	// and the file that is read have to be the same one, and a link can be
+	// repointed between the two.
+	ErrSymlinkedDatabase = errors.New("database inspection does not accept a symbolic link")
 )
 
 type Lock struct {
@@ -90,15 +95,10 @@ func existingLockTarget(databasePath string) (string, string, os.FileInfo, error
 		return "", "", nil, err
 	}
 	absolutePath = filepath.Join(directory, filepath.Base(absolutePath))
-	if info, err := os.Lstat(absolutePath); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return "", "", nil, errors.New("database inspection does not accept a symbolic link")
-	} else if err != nil && !os.IsNotExist(err) {
+	if _, err := InspectDatabaseFile(absolutePath); err != nil && !os.IsNotExist(err) {
 		return "", "", nil, err
 	}
 	lockPath := absolutePath + ".manager.lock"
-	if err := rejectHardLinkedDatabase(absolutePath); err != nil {
-		return "", "", nil, err
-	}
 	marker, err := os.Lstat(lockPath)
 	if os.IsNotExist(err) {
 		return "", "", nil, ErrNoExistingLock
@@ -112,12 +112,45 @@ func existingLockTarget(databasePath string) (string, string, os.FileInfo, error
 	return absolutePath, lockPath, marker, nil
 }
 
+// InspectDatabaseFile applies the shared source-database file policy: the path
+// must name the database itself (never a symbolic link), a regular file, and a
+// file reachable by exactly one link. It returns the inspected identity, which a
+// reader compares its own descriptor against. A missing database is reported as
+// os.IsNotExist, so a caller that tolerates an absent file can say so.
+func InspectDatabaseFile(databasePath string) (os.FileInfo, error) {
+	info, err := os.Lstat(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s", ErrSymlinkedDatabase, databasePath)
+	}
+	if err := rejectHardLinkedDatabase(databasePath); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
 // openedMarker re-checks that the opened descriptor is still the marker the
 // target named, and that no second hard link reaches it.
 func openedMarker(file *os.File, marker os.FileInfo) error {
+	return openedIdentity(file, marker, errors.New("existing process lock changed during inspection"))
+}
+
+// OpenedDatabase is the reader's openedMarker: it proves the descriptor a
+// read-only reader opened is still the file that was inspected, and that no
+// second hard link reaches it. A file swapped between the inspection and the
+// open is refused instead of read.
+func OpenedDatabase(file *os.File, inspected os.FileInfo) error {
+	return openedIdentity(file, inspected, errors.New("source database changed during inspection"))
+}
+
+// openedIdentity proves an opened descriptor is the file that was inspected and
+// that it is reachable by exactly one link.
+func openedIdentity(file *os.File, inspected os.FileInfo, replaced error) error {
 	opened, err := file.Stat()
-	if err == nil && !os.SameFile(marker, opened) {
-		err = errors.New("existing process lock changed during inspection")
+	if err == nil && !os.SameFile(inspected, opened) {
+		err = replaced
 	}
 	if err != nil {
 		return err

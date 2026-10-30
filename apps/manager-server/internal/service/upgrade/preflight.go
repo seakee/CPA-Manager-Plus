@@ -45,10 +45,16 @@ const (
 	CodeSourceMissing            = "upgrade_source_missing"
 	CodeSourceBusy               = "upgrade_source_busy"
 	CodeSourceLockUnavailable    = "upgrade_source_lock_unavailable"
+	CodeSourceSymlinked          = "upgrade_source_symlinked"
 	CodeSourceUnreadable         = "upgrade_source_unreadable"
 	CodeSourceVersionUnsupported = "upgrade_source_version_unsupported"
 	CodeDiskInsufficient         = "upgrade_disk_insufficient"
 )
+
+// CodeCredentialTimeout is the route-level code of ErrCredentialVerifyTimeout.
+// It is not a preflight blocked code: authentication fails before the preflight
+// runs, and the source itself may be perfectly healthy — only slow.
+const CodeCredentialTimeout = "upgrade_credential_timeout"
 
 // Source kinds reuse the vocabulary of the existing legacy preflight.
 const (
@@ -178,6 +184,14 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceMissing, Detail: unreadableDetail(openErr),
 		})
 		block(CodeSourceMissing)
+	case errors.Is(lockErr, processlock.ErrSymlinkedDatabase), errors.Is(openErr, ErrSourceSymlinked):
+		// The same file policy the credential read applies: a link is refused on
+		// both paths, with the same code, because the file that is inspected and
+		// the file that is read have to be the same one.
+		report.Checks = append(report.Checks, Check{
+			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceSymlinked, Detail: symlinkedSourceDetail(),
+		})
+		block(CodeSourceSymlinked)
 	case errors.Is(lockErr, processlock.ErrLocked):
 		report.Checks = append(report.Checks, Check{
 			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceBusy, Detail: ownershipDetail(lockErr),
@@ -278,10 +292,22 @@ func (g ParityGaps) any() bool {
 // readable and its administrator credential rejected the presented key.
 var ErrAdminUnauthorized = errors.New("source administrator credential could not be verified")
 
+// ErrCredentialVerifyTimeout is the deadline verdict: the source did not answer
+// within CredentialVerifyTimeout, or the caller's own deadline had already
+// passed. It is never a verdict on the presented key and never a statement that
+// the source is unreadable: a healthy source on a slow volume looks exactly like
+// this.
+var ErrCredentialVerifyTimeout = errors.New("source credential verification timed out")
+
 // CredentialVerifyTimeout bounds the credential read. It is separate from the
 // preflight budget on purpose: authentication is the slow path of every
 // authenticated request, so it must stay far below a source qualification.
 const CredentialVerifyTimeout = 2 * time.Second
+
+// credentialVerifyTimeout is the bound VerifyAdmin applies. It is
+// CredentialVerifyTimeout in production; a test shortens it to place the
+// deadline inside the read rather than before it.
+var credentialVerifyTimeout = CredentialVerifyTimeout
 
 // VerifyAdmin proves the source administrator credential — the key the
 // bootstrap Upgrade entry already verified — through the read-only credential
@@ -294,10 +320,11 @@ const CredentialVerifyTimeout = 2 * time.Second
 // a route that never reads the database. The integrity check stays in Preflight,
 // where the source is actually being qualified.
 //
-// It deliberately does not take the source's ownership fence: a reader must not
-// exclude the 1.x writer it only observes, and a source mounted read-only cannot
-// hand out a writable marker. The copy-in re-verifies the source under its own
-// exclusive lock before it writes anything.
+// It applies the same database file policy as the preflight — the database
+// itself, never a symbolic or hard link — without taking the source's ownership
+// fence: a reader must not exclude the 1.x writer it only observes, and a source
+// mounted read-only cannot hand out a writable marker. The copy-in re-verifies
+// the source under its own exclusive lock before it writes anything.
 func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
@@ -307,25 +334,45 @@ func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return credentialTimeout(err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, CredentialVerifyTimeout)
+	ctx, cancel := context.WithTimeout(ctx, credentialVerifyTimeout)
 	defer cancel()
-	db, openErr := openCredentialSource(filepath.Join(root, databaseFileName))
-	if db != nil {
-		defer func() { _ = db.Close() }()
-	}
+	source, openErr := openCredentialSource(filepath.Join(root, databaseFileName))
 	if openErr != nil {
 		return openErr
 	}
-	credential, found, err := setting.New(db).LoadAdminCredential(ctx)
+	defer func() { _ = source.close() }()
+	return verifyAdminCredential(ctx, source, key)
+}
+
+// verifyAdminCredential reads the one credential row from an opened source,
+// proves the read came from the file that was inspected, and compares the key.
+// The read and the identity check are one function so nothing can be compared
+// from an uninspected file even if the caller's open raced a swap.
+func verifyAdminCredential(ctx context.Context, source *credentialSource, key string) error {
+	credential, found, err := setting.New(source.db).LoadAdminCredential(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return credentialTimeout(err)
+		}
+		return err
+	}
+	if err := source.verifyUnchanged(); err != nil {
 		return err
 	}
 	if !found || !security.VerifyAdminKey(credential, key) {
 		return ErrAdminUnauthorized
 	}
 	return nil
+}
+
+// credentialTimeout names the deadline verdict while keeping the cause for logs.
+func credentialTimeout(cause error) error {
+	if cause == nil {
+		return ErrCredentialVerifyTimeout
+	}
+	return fmt.Errorf("%w: %v", ErrCredentialVerifyTimeout, cause)
 }
 
 func resolveLegacyRoot(root string) (string, error) {
@@ -376,6 +423,13 @@ func lockUnavailableDetail(err error) string {
 	default:
 		return "source ownership marker could not be opened read-only"
 	}
+}
+
+// symlinkedSourceDetail names the one condition the shared database file policy
+// refuses before any read: the configured database is a link, so the file that
+// would be inspected is not the file that would be read.
+func symlinkedSourceDetail() string {
+	return "source database is a symbolic link; the upgrade reads the file itself, not a link"
 }
 
 func unreadableDetail(err error) string {
