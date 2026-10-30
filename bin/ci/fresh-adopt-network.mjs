@@ -712,17 +712,18 @@ try {
     // The page's own read is the progress path, so the observer below sees what
     // the operator sees. Each round also presses Refresh, which is one more read,
     // so the first item cannot hide between two poll intervals.
-    const record = await wait(async () => {
-      const current = adoptionRecord();
-      if (current.items.length > 0) {
+    let first = null;
+    await wait(async () => {
+      first = adoptionRecord();
+      if (first.items.length > 0) {
         writeFileSync(resolve(controlDir, 'refuse'), 'refuse new connections\n');
-        return current;
+        return true;
       }
       const refresh = page.getByTestId('adopt-refresh');
       if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
       return false;
     }, 'first recorded migration item', 180000);
-    return { firstItems: record.items.length, planned: record.planned };
+    return { firstItems: first.items.length, planned: first.planned };
   });
   const retryableSummary = await check('the interrupted run settles as retryable, not as a failure', async () => {
     await wait(async () => {
