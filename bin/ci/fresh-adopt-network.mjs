@@ -77,9 +77,6 @@ const report = {
     'Non-English locale layouts and other browser engines',
   ],
 };
-// Every value that must never reach a log or the report. Every secret here is
-// generated in the script, so the list is the complete set for this run.
-const secretValues = [];
 const managementKey = 'cpamp-d-adopt-' + randomBytes(24).toString('hex');
 const emptySourceKey = 'cpamp-d-adopt-empty-' + randomBytes(24).toString('hex');
 const seedKeys = [
@@ -136,10 +133,21 @@ const overlongFile = {
 // inventory: it must stay off the destination and must not be invented as a manual
 // item. It stays in the fixture because that distinction is what this run proves.
 const unparseableFile = { 'legacy-token.json': 'not a CPA credential document\n' };
-secretValues.push(managementKey, emptySourceKey, ...seedKeys, ...Object.values(providerKeys));
-for (const [name, body] of Object.entries({ ...credentialFiles, ...overlongFile, ...unparseableFile })) {
+const sourceFiles = { ...credentialFiles, ...overlongFile, ...unparseableFile };
+// Every value that must never reach a log or the report, in one declaration and
+// before anything runs: every literal secret this script generated, plus every
+// token inside the fixture bodies. The three values that only exist at runtime —
+// the staged destination key, the claim token and the Admin key — join it the
+// moment they exist, because nothing can know them earlier.
+const secretValues = [
+  managementKey,
+  emptySourceKey,
+  ...seedKeys,
+  ...Object.values(providerKeys),
+  ...Object.values(sourceFiles).flatMap((body) => body.match(/[A-Za-z0-9_-]{16,}/g) || []),
+];
+for (const [name, body] of Object.entries(sourceFiles)) {
   writeFileSync(resolve(sourceAuthDir, name), body, { mode: 0o600 });
-  for (const value of body.match(/[A-Za-z0-9_-]{16,}/g) || []) secretValues.push(value);
 }
 
 // A free loopback port, pinned before Compose starts: publishing port 0 lets the
@@ -380,11 +388,17 @@ const forwarderContainer = project + '-forwarder';
 const legacyContainer = project + '-cpa-v7';
 const pythonImage = docker('image', 'inspect', 'python:3.13-alpine', '--format', '{{.Id}}');
 
+// The check that ended the journey. A thrown check stops the script, so every
+// check after it is unobserved; the report records that instead of simply
+// stopping short, which would make a failed run read as a shorter one.
+let abandonedAfter = '';
+
 function pass(name, observed) {
   report.checks.push({ name, result: 'PASS', ...(observed ? { observed } : {}) });
   console.log('PASS ' + name + (observed ? ' ' + redact(JSON.stringify(observed)) : ''));
 }
 function fail(name, observed) {
+  abandonedAfter = name;
   report.checks.push({ name, result: 'FAIL', ...(observed ? { observed } : {}) });
   console.log('FAIL ' + name + (observed ? ' ' + redact(JSON.stringify(observed)) : ''));
   throw new Error('Check failed: ' + name);
@@ -543,6 +557,11 @@ let lastSummary = null;
 // The durable adoption record, read from the Manager's own store. Progress is
 // timed from the record rather than from the page's poll interval, so the fault
 // cannot be injected after the run has already settled.
+//
+// Only the run markers come from here. The retryable rule is the route's own
+// projection (`freshstore`'s rule, emitted as `items[].retryable`), and a second
+// copy of it in this script is exactly how the harness and the product drift
+// apart: every retryable decision below reads the page's summary.
 function adoptionRecord() {
   const volume = JSON.parse(docker('inspect', dc('ps', '-q', 'cpamp-manager')))[0].Mounts.find(
     (mount) => mount.Destination === '/data'
@@ -558,12 +577,6 @@ function adoptionRecord() {
     items: summary.items || [],
     planned: summary.planned || 0,
     finished: summary.finished === true,
-    // The store's own retryable rule: a failure that happened before any write.
-    retryable: (summary.items || []).filter(
-      (item) =>
-        item.outcome === 'failed' &&
-        (item.reason === 'download_failed' || item.reason === 'source_unreadable')
-    ).length,
   };
 }
 async function adminGet(path) {
@@ -571,6 +584,34 @@ async function adminGet(path) {
   assert.equal(response.status, 200, 'admin read ' + path + ': ' + response.status);
   return response.json();
 }
+
+// Every check this run declares, in the order it declares them. A thrown check
+// ends the script, so the ones behind it never run; naming them here is what lets
+// the report say they were not observed instead of ending early.
+const plannedChecks = [
+  'an independent CPA v8.0.13 source answers its v8 management API',
+  'the source lists only the credentials its v8 API can classify',
+  'Adopt is selectable and the wizard opens its source form',
+  'a wrong management key is refused with adoption_source_read_unavailable',
+  'a source with zero client keys is refused with adoption_source_empty',
+  'a source that is the destination is refused with adoption_destination_identity_conflict',
+  'a v7 source is refused with nothing committed',
+  'the inventory names what copies and what needs manual work',
+  'the migration commits the destination and records the first item',
+  'the interrupted run settles as retryable, not as a failure',
+  'the completion screen does not call a run with uncopied items complete',
+  'completion refuses a run with retryable items until they are accepted',
+  'Resume continues from the recorded prefix and finishes the run',
+  'the completion screen groups the per-item results',
+  'completion succeeds once every planned item is settled',
+  'the destination carries exactly the source client keys',
+  'the gateway configuration holds the seeded source values',
+  'the migrated credentials are listed on the destination with the source bytes',
+  'a client key is admitted by the Gateway through Ingress',
+  'the usage collector started for the adopted installation',
+  'runtime status is readable for the completed installation',
+  'the source CPA is unchanged: identical config bytes and credential list',
+];
 
 try {
   dc('up', '-d', '--no-build', '--pull', 'never');
@@ -631,7 +672,7 @@ try {
   const before = sourceSnapshot();
   report.sourceSnapshot = { configSha256: before.configSha256, credentials: before.credentials };
   assert(before.credentials.includes('source-00.json'), 'the source credential list');
-  assert(before.credentials.includes('legacy-token.json'), 'the unparseable file is not in the auth dir');
+  assert(before.credentials.includes('legacy-token.json'), 'the fixture is missing its unparseable file');
   // The inventory is the source's own v8 listing. A file it cannot classify exists
   // on the host but is not a credential the source reports, so it can be neither
   // copied nor recorded: this check pins that boundary before the run relies on it.
@@ -806,18 +847,22 @@ try {
       if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
       return false;
     }, 'settled migration', 240000);
-    // The page renders the same record; give its last poll a moment to land.
-    await wait(async () => lastSummary !== null, 'the page read the summary', 30000);
-    // The route's own projection carries the per-item retryable rule; the record
-    // only carries reasons. The page has read it by now, so its view is the one
-    // the operator saw.
+    // The route's own projection is the only carrier of the per-item retryable
+    // rule, so every number below is the page's. The wait is on the settled
+    // projection itself: a summary that predates the last checkpoint is not an
+    // observation of the settled run.
+    await wait(
+      async () => lastSummary?.finished === true && lastSummary.running === false,
+      'the page read the settled summary',
+      60000
+    );
     assert(lastSummary, 'the page never read the summary');
     const summary = lastSummary;
     assert(summary.retryable > 0, 'the interrupted run recorded no retryable item: ' + JSON.stringify(summary.counts));
     // A failure that wrote nothing is retryable; one that failed after a write is
     // not, and both are honest results of the same interruption. What the run must
     // show is that the source-side failures were recorded as retryable, and that
-    // the count the record reports is that set.
+    // the count the projection reports is that set.
     const failed = summary.items.filter((item) => item.outcome === 'failed');
     const retryable = failed.filter((item) => item.retryable);
     assert(failed.length > 0, 'the interrupted run recorded no failure');
@@ -831,6 +876,20 @@ try {
     return { counts: summary.counts, retryable: summary.retryable, planned: summary.planned };
   });
   await screenshot('adopt-migration-retryable');
+  await check('the completion screen does not call a run with uncopied items complete', async () => {
+    // The success headline is a claim about the installation. A settled run whose
+    // retryable items are still on the source has not made it, and the screen has
+    // to name what is left instead.
+    const body = await page.locator('body').innerText();
+    assert(!/Adoption complete/i.test(body), 'the screen claimed a complete adoption over uncopied items');
+    assert(!/The console is ready/i.test(body), 'the screen claimed a ready console over uncopied items');
+    assert(/Migration settled/i.test(body), 'the settled state did not name itself: ' + body.slice(0, 300));
+    assert(
+      new RegExp(retryableSummary.retryable + ' item\\(s\\) could not be copied', 'i').test(body),
+      'the screen did not name the retryable items: ' + body.slice(0, 300)
+    );
+    return { headline: 'settled', retryable: retryableSummary.retryable };
+  });
   await check('completion refuses a run with retryable items until they are accepted', async () => {
     // A completion can also be refused for a run that is still winding down, so
     // the operator's action is repeated until the answer is the one that matters:
@@ -857,28 +916,27 @@ try {
   // Restore the source and resume from the durable prefix: the same committed
   // replay the operator's Resume button sends.
   rmSync(resolve(controlDir, 'refuse'), { force: true });
+  // The summary on screen describes the interrupted run. Dropping the observation
+  // makes every number below an answer the resumed run produced, not the record
+  // Resume replaced.
+  lastSummary = null;
   await page.getByTestId('adopt-resume').click();
   await check('Resume continues from the recorded prefix and finishes the run', async () => {
-    await wait(async () => {
-      const record = adoptionRecord();
-      if (record.finished && record.retryable === 0) return true;
-      const refresh = page.getByTestId('adopt-refresh');
-      if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
-      return false;
-    }, 'resumed migration', 240000);
-    assert(lastSummary, 'the page never read the resumed summary');
+    // The resumed run is read through the page's own projection, which is the
+    // route's answer and the only one the operator saw.
+    await wait(
+      async () => lastSummary?.finished === true && lastSummary.running === false && lastSummary.retryable === 0,
+      'resumed migration',
+      240000
+    );
     const summary = lastSummary;
+    assert(summary, 'the page never read the resumed summary');
+    // The resumed run reports the whole plan, not the failure subset it started
+    // from: the replay skipped what the record had already settled.
     assert(summary.planned >= retryableSummary.planned, 'the resumed plan shrank');
-    return { counts: summary.counts, planned: summary.planned };
+    assert(summary.items.length >= retryableSummary.planned, 'the resumed summary lost recorded items');
+    return { counts: summary.counts, planned: summary.planned, items: summary.items.length };
   });
-  await wait(
-    async () =>
-      lastSummary?.finished === true &&
-      lastSummary.running === false &&
-      lastSummary.retryable === 0,
-    'the page rendered the finished run',
-    60000
-  );
   await check('the completion screen groups the per-item results', async () => {
     const items = await page.getByTestId('adopt-items').innerText();
     assert.match(items, /Migrated/i);
@@ -888,6 +946,23 @@ try {
     // rendered the same facts these assertions read.
     assert(lastSummary, 'the page never read the summary');
     const summary = lastSummary;
+    // The rendered numbers, not just the groups: each one is the wire's own count,
+    // so "Migrated" is the copies the run made and a resource the source never had
+    // is not one of them. An empty group renders an em dash rather than a zero.
+    const renderedCount = async (outcome) => {
+      const text = await page.getByTestId('adopt-count-' + outcome).innerText();
+      return text === '—' ? 0 : Number(text);
+    };
+    assert.deepEqual(
+      {
+        migrated: await renderedCount('migrated'),
+        manual: await renderedCount('manual'),
+        failed: await renderedCount('failed'),
+        absent_at_source: await renderedCount('absent_at_source'),
+      },
+      summary.counts,
+      'the rendered counts disagree with the route summary'
+    );
     // Every seeded kind is reported, and the item the record cannot carry is manual
     // with the instruction the operator needs. The unclassifiable source file is not
     // an item at all: the source's own listing never contained it, so the run
@@ -967,12 +1042,24 @@ try {
     const logs = containerLog('cpamp-manager', 400);
     assert(!/Fresh usage collection unavailable/.test(logs), 'the collector did not start');
     assert(!/Fresh usage collection start unavailable/.test(logs), 'the collection start was not recorded');
-    // The key workspace must answer for the completed installation, and the
-    // Manager's own start path must have recorded the collection window; a start
-    // failure logs one of the two lines above.
     const keys = await adminGet('api-keys');
     assert(Array.isArray(keys.keys), 'the key workspace answered no list');
-    return { keys: keys.keys.length, presenceUnverified: keys.presenceUnverified === true };
+    // The positive observable: the usage workspace's own coverage says whether the
+    // durable collection window exists. `collection_unproven` is what the Manager
+    // reports when nothing was started, so an installation that only stayed quiet
+    // in its log cannot pass this check. The window is global, so it is readable
+    // before any Client Key of this workspace has usage of its own.
+    const usage = await adminGet('api-keys/usage-summary');
+    assert(usage && typeof usage.coverage === 'object', 'the usage workspace answered no coverage');
+    assert(
+      usage.coverage.reason !== 'collection_unproven',
+      'the Manager recorded no collection window: ' + JSON.stringify(usage.coverage)
+    );
+    return {
+      keys: keys.keys.length,
+      presenceUnverified: keys.presenceUnverified === true,
+      coverage: usage.coverage,
+    };
   });
   await check('runtime status is readable for the completed installation', async () => {
     const status = await adminGet('runtime/status');
@@ -1004,6 +1091,13 @@ try {
   if (page && !page.isClosed()) {
     report.failurePage = await page.locator('body').innerText().catch(() => 'Page unavailable');
     await page.screenshot({ path: resolve(out, 'failure.png'), fullPage: true }).catch(() => {});
+  }
+  // The journey stopped, so every check behind the failing one was never
+  // observed. Recording them keeps a failed report readable: silence here would
+  // read as a run that had fewer checks, not one that stopped early.
+  for (const name of plannedChecks) {
+    if (report.checks.some((entry) => entry.name === name)) continue;
+    notRun(name, 'abandoned after "' + abandonedAfter + '" failed');
   }
 } finally {
   if (browser) await browser.close();

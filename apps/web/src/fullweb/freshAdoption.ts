@@ -91,6 +91,41 @@ export interface AdoptionSummary {
   counts: { migrated: number; manual: number; failed: number; absent_at_source: number };
 }
 
+/** One group per recorded outcome, plus the plan the record never settled. */
+export interface AdoptionGroups {
+  migrated: AdoptionItem[];
+  manual: AdoptionItem[];
+  failed: AdoptionItem[];
+  absent_at_source: AdoptionItem[];
+  /**
+   * Planned items the record never settled. A run can finish with this above
+   * zero — the plan is fixed before the first write, and a run that stopped
+   * early leaves the remainder unrecorded — so it is a fact the completion
+   * screen has to state rather than hide behind the finished flag.
+   */
+  remaining: number;
+}
+
+/**
+ * groupAdoptionItems is the completion screen's only read of the record.
+ *
+ * Each item lands in the group its own outcome names. `absent_at_source` is a
+ * settled result about a resource the source never had, so it is its own group:
+ * grouping it with `migrated` would put a copy count on the screen that no copy
+ * produced.
+ */
+export function groupAdoptionItems(summary: AdoptionSummary): AdoptionGroups {
+  const groups: AdoptionGroups = {
+    migrated: [],
+    manual: [],
+    failed: [],
+    absent_at_source: [],
+    remaining: Math.max(summary.planned, summary.items.length) - summary.items.length,
+  };
+  for (const item of summary.items) groups[item.outcome].push(item);
+  return groups;
+}
+
 const kinds: Record<string, true> = {
   credential: true,
   config_leaf: true,

@@ -61,6 +61,16 @@ const en = {
     'The destination CPA could not be proven with the management key this Manager installed. Retry once the CPA is ready.',
   done: 'Adoption complete',
   doneHelp: 'The console is ready.',
+  // The settled-but-incomplete state: the run stopped, but the installation is
+  // not complete. The title never says "complete", and the body names what is
+  // left instead.
+  settledTitle: 'Migration settled',
+  settledHelp:
+    'The copy has stopped before the installation was complete. Resume the migration to finish what is left.',
+  remainingItems: '{count} planned item(s) were never processed.',
+  retryProgress: 'Retry the progress read',
+  progressUnavailable:
+    'The migration record could not be read, so this page stopped polling. Check the Manager and try again.',
   refresh: 'Check the status',
   unknownHelp:
     'The reply was lost, so the write may or may not have been applied. Check the status before trying again.',
@@ -123,6 +133,11 @@ const zh: typeof en = {
   unprovenRefusal: '无法用本管理程序安装的管理密钥校验目标 CPA。请等 CPA 就绪后重试。',
   done: '接管完成',
   doneHelp: '控制台已就绪。',
+  settledTitle: '迁移已停止',
+  settledHelp: '复制在安装完成前停止。可以继续迁移以处理剩余条目。',
+  remainingItems: '有 {count} 项计划中的条目从未处理。',
+  retryProgress: '重试读取进度',
+  progressUnavailable: '无法读取迁移记录，本页已停止轮询。请检查管理程序后重试。',
   refresh: '检查状态',
   unknownHelp: '响应已丢失，本次写入可能已生效也可能没有。请先检查状态，再决定是否重试。',
   failure: '接管已暂停',
@@ -182,6 +197,11 @@ const tw: typeof en = {
   unprovenRefusal: '無法用本管理程式安裝的管理金鑰驗證目標 CPA。請等 CPA 就緒後重試。',
   done: '接管完成',
   doneHelp: '主控台已就緒。',
+  settledTitle: '遷移已停止',
+  settledHelp: '複製在安裝完成前停止。可以繼續遷移以處理剩餘項目。',
+  remainingItems: '有 {count} 項計畫中的項目從未處理。',
+  retryProgress: '重試讀取進度',
+  progressUnavailable: '無法讀取遷移記錄，本頁已停止輪詢。請檢查管理程式後重試。',
   refresh: '檢查狀態',
   unknownHelp: '回應已遺失，本次寫入可能已生效也可能沒有。請先檢查狀態，再決定是否重試。',
   failure: '接管已暫停',
@@ -251,6 +271,13 @@ const ru: typeof en = {
     'Не удалось подтвердить целевой CPA ключом управления, установленным этим Manager. Повторите, когда CPA будет готов.',
   done: 'Подключение завершено',
   doneHelp: 'Консоль готова.',
+  settledTitle: 'Перенос остановлен',
+  settledHelp:
+    'Копирование остановилось до завершения установки. Продолжите перенос, чтобы обработать оставшееся.',
+  remainingItems: 'Не обработано запланированных элементов: {count}.',
+  retryProgress: 'Повторить чтение прогресса',
+  progressUnavailable:
+    'Запись о переносе не читается, поэтому страница перестала опрашивать. Проверьте Manager и повторите.',
   refresh: 'Проверить состояние',
   unknownHelp:
     'Ответ потерян: запись могла примениться, а могла и нет. Проверьте состояние, прежде чем повторять.',

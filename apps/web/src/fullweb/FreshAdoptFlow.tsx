@@ -13,10 +13,10 @@ import {
 } from './bootstrapTransport';
 import {
   adoptStrategyBody,
+  groupAdoptionItems,
   normalizeCPAAddress,
   validManagementKey,
   type AdoptionDecision,
-  type AdoptionItem,
   type AdoptionSummary,
   type AdoptRuntimeTarget,
 } from './freshAdoption';
@@ -47,6 +47,10 @@ type Stage = 'source' | 'inventory' | 'migration';
 // than a healthy one.
 const POLL_INTERVAL = 2000;
 const POLL_INTERVAL_MAX = 8000;
+// A read that keeps failing is a state the screen has to state, not a spinner
+// that spins forever. The loop gives up after this many consecutive failures and
+// waits for the operator's retry, which is the only thing that restarts it.
+const POLL_FAILURE_LIMIT = 3;
 
 function decisions(checkpoint?: FreshStrategyCheckpoint): AdoptionDecision[] {
   const value = checkpoint?.adoptionDecisions;
@@ -65,18 +69,6 @@ function groupDecisions(list: AdoptionDecision[]) {
     else groups.unsupported.push(decision);
   }
   return groups;
-}
-
-function groupItems(items: AdoptionItem[]) {
-  const migrated: AdoptionItem[] = [];
-  const manual: AdoptionItem[] = [];
-  const failed: AdoptionItem[] = [];
-  for (const item of items) {
-    if (item.outcome === 'migrated' || item.outcome === 'absent_at_source') migrated.push(item);
-    else if (item.outcome === 'manual') manual.push(item);
-    else failed.push(item);
-  }
-  return { migrated, manual, failed };
 }
 
 // Both carriers report a coded refusal with their own error type; the flow only
@@ -147,7 +139,17 @@ export function FreshAdoptFlow({
   const [note, setNote] = useState('');
   const [completion, setCompletion] = useState<{ code?: string; retryable?: number } | null>(null);
   const [acceptRetryable, setAcceptRetryable] = useState(false);
+  // The progress read's own failure state. A coded refusal is answered with its
+  // own sentence; an uncoded one gets the generic read sentence, so the screen
+  // never claims to know why the record is unreachable.
+  const [progressFailure, setProgressFailure] = useState<{ code?: string; message: string } | null>(
+    null
+  );
   const [pollEpoch, setPollEpoch] = useState(0);
+  // The retryable count the acknowledgement was given for. It is a ref because
+  // the poll loop reads it without being restarted by it, and because clearing
+  // it must not re-render.
+  const acceptedRetryable = useRef<number | null>(null);
   const inflight = useRef(false);
   const alive = useRef(true);
   // The carrier is built by the host on every render, because it closes over the
@@ -166,14 +168,22 @@ export function FreshAdoptFlow({
   }, [stage, onStage]);
 
   const poll = useCallback(() => setPollEpoch((value) => value + 1), []);
+  // A retry is the operator's action, so it clears the failure it answers for
+  // and restarts the loop with a fresh failure count.
+  const retryProgress = useCallback(() => {
+    setProgressFailure(null);
+    poll();
+  }, [poll]);
 
   // One poll loop while the migration screen is showing. It stops on the record's
   // own settled pair — finished and not running — so the page never polls a run
   // that has nothing left to report, and a Resume restarts it through `pollEpoch`.
+  // A completed installation is read once and then left alone: the completion
+  // screen still states what the run recorded, and nothing can change it.
   useEffect(() => {
-    if (stage !== 'migration' || operation.productComplete) return;
+    if (stage !== 'migration') return;
     let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timer: number | undefined;
     let failures = 0;
     const tick = async () => {
       if (cancelled || !alive.current) return;
@@ -181,14 +191,29 @@ export function FreshAdoptFlow({
       try {
         const next = await carrierRef.current.readAdoption();
         if (cancelled || !alive.current) return;
-        setSummary(next);
         failures = 0;
+        setProgressFailure(null);
+        setSummary(next);
+        // The acknowledgement belongs to the retryable set the operator was
+        // shown. A different set is a decision they have not made yet.
+        if (acceptedRetryable.current !== null && acceptedRetryable.current !== next.retryable) {
+          acceptedRetryable.current = null;
+          setAcceptRetryable(false);
+        }
         settled = next.finished && !next.running;
-      } catch {
+      } catch (err) {
         if (cancelled || !alive.current) return;
         failures += 1;
+        if (failures >= POLL_FAILURE_LIMIT) {
+          const coded = refusal(err);
+          setProgressFailure({
+            code: coded.code,
+            message: coded.code ? adoptBlockerText(coded.code) : adoptText('progressUnavailable'),
+          });
+          return;
+        }
       }
-      if (settled) return;
+      if (settled || operation.productComplete) return;
       timer = setTimeout(tick, Math.min(POLL_INTERVAL + failures * 1000, POLL_INTERVAL_MAX));
     };
     timer = setTimeout(tick, 0);
@@ -197,6 +222,20 @@ export function FreshAdoptFlow({
       clearTimeout(timer);
     };
   }, [stage, pollEpoch, operation.productComplete]);
+
+  /**
+   * beginRun clears the retryable acknowledgement. It is given to the set of
+   * items the operator was shown, so a run they have not seen yet must ask again
+   * rather than inherit it: the run a Resume starts is a new decision even when
+   * it ends with the same count.
+   */
+  function beginRun() {
+    acceptedRetryable.current = null;
+    setAcceptRetryable(false);
+    // The previous run's completion refusal is about that run: its retryable
+    // set, and the acknowledgement offered for it, are gone with it.
+    setCompletion(null);
+  }
 
   /**
    * run performs one operator action. It is the only writer, it never runs two at
@@ -263,6 +302,7 @@ export function FreshAdoptFlow({
         // not this page, decides where the journey is.
         setManagementKey('');
         setStage('migration');
+        beginRun();
         poll();
         return;
       }
@@ -287,6 +327,7 @@ export function FreshAdoptFlow({
       setManagementKey('');
       setStage('migration');
       setSummary(null);
+      beginRun();
       poll();
     });
   }
@@ -325,6 +366,8 @@ export function FreshAdoptFlow({
       setBody(next);
       setManagementKey('');
       setStage('migration');
+      setSummary(null);
+      beginRun();
       poll();
     });
   }
@@ -393,12 +436,34 @@ export function FreshAdoptFlow({
     }
   }
 
-  const needingResume =
-    !!summary && !summary.running && (!summary.finished || summary.retryable > 0);
-  const resumeForm = needingResume && !body;
-  const groups = summary ? groupItems(summary.items) : null;
+  const groups = summary ? groupAdoptionItems(summary) : null;
   const inventory = groupDecisions(decisions(checkpoint));
-  const settled = summary ? summary.items.length : 0;
+  const processed = summary ? summary.items.length : 0;
+  const planned = summary ? Math.max(summary.planned, processed) : 0;
+  // A run that finished with planned items it never recorded is not a run with
+  // nothing left to do: the remainder has to be resumed, and completion cannot
+  // be granted over it.
+  const remaining = groups ? groups.remaining : 0;
+  const settledRun = !!summary && summary.finished && !summary.running;
+  // The success headline is a claim about the installation, so it needs all
+  // three facts: the run settled, no retryable item remains, and the
+  // installation itself completed. A settled run missing any of them says what
+  // is left instead of borrowing the sentence for a finished console.
+  const adoptionComplete =
+    !!summary && settledRun && summary.retryable === 0 && remaining === 0 && operation.productComplete;
+  const needingResume =
+    !!summary && !summary.running && (!summary.finished || summary.retryable > 0 || remaining > 0);
+  const resumeForm = needingResume && !body;
+  const headline =
+    stage === 'inventory'
+      ? { title: adoptText('inventoryTitle'), help: adoptText('inventoryHelp') }
+      : stage === 'migration'
+        ? adoptionComplete
+          ? { title: adoptText('done'), help: adoptText('doneHelp') }
+          : settledRun
+            ? { title: adoptText('settledTitle'), help: adoptText('settledHelp') }
+            : { title: adoptText('migrationTitle'), help: adoptText('migrationHelp') }
+        : { title: adoptText('title'), help: adoptText('help') };
 
   const journey = (
     <>
@@ -408,24 +473,8 @@ export function FreshAdoptFlow({
             <FullWebIcon name="copy" size={30} />
           </span>
           <div>
-            <h1 className="wizard-title">
-              {stage === 'inventory'
-                ? adoptText('inventoryTitle')
-                : stage === 'migration'
-                  ? summary?.finished
-                    ? adoptText('done')
-                    : adoptText('migrationTitle')
-                  : adoptText('title')}
-            </h1>
-            <p className="wizard-desc">
-              {stage === 'inventory'
-                ? adoptText('inventoryHelp')
-                : stage === 'migration'
-                  ? summary?.finished
-                    ? adoptText('doneHelp')
-                    : adoptText('migrationHelp')
-                  : adoptText('help')}
-            </p>
+            <h1 className="wizard-title">{headline.title}</h1>
+            <p className="wizard-desc">{headline.help}</p>
           </div>
         </div>
         {error && (
@@ -547,6 +596,20 @@ export function FreshAdoptFlow({
         )}
         {stage === 'migration' && (
           <div className="adopt-migration" data-testid="adopt-migration">
+            {progressFailure && (
+              <p role="alert" className="alert alert-warn" data-testid="adopt-progress-error">
+                {progressFailure.message}{' '}
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  data-testid="adopt-retry-progress"
+                  disabled={busy}
+                  onClick={retryProgress}
+                >
+                  {adoptText('retryProgress')}
+                </button>
+              </p>
+            )}
             {!summary ? (
               <p className="journey-quiet" role="status" data-testid="adopt-progress">
                 {adoptText('waiting')}
@@ -554,36 +617,32 @@ export function FreshAdoptFlow({
             ) : (
               <>
                 <p className="journey-quiet" data-testid="adopt-progress">
-                  {adoptText('progress', {
-                    settled,
-                    planned: Math.max(summary.planned, settled),
-                  })}
+                  {adoptText('progress', { settled: processed, planned })}
                 </p>
                 {groups && (
                   <ol className="journey-stages" data-testid="adopt-items">
                     {(
                       [
-                        ['migrated', adoptText('migratedGroup'), groups.migrated],
-                        ['manual', adoptText('manualBadge'), groups.manual],
-                        ['failed', adoptText('failedGroup'), groups.failed],
+                        ['migrated', adoptText('migratedGroup'), groups.migrated, 'check'],
+                        ['manual', adoptText('manualBadge'), groups.manual, 'info'],
+                        ['failed', adoptText('failedGroup'), groups.failed, 'alert'],
+                        [
+                          'absent_at_source',
+                          adoptText('absentBadge'),
+                          groups.absent_at_source,
+                          'info',
+                        ],
                       ] as const
-                    ).map(([outcome, label, items]) => (
+                    ).map(([outcome, label, items, icon]) => (
                       <li key={outcome} data-testid={`adopt-group-${outcome}`}>
                         <span className="journey-stage-mark">
-                          <FullWebIcon
-                            name={
-                              outcome === 'failed'
-                                ? 'alert'
-                                : outcome === 'manual'
-                                  ? 'info'
-                                  : 'check'
-                            }
-                            size={22}
-                          />
+                          <FullWebIcon name={icon} size={22} />
                         </span>
                         <div>
                           <strong>{label}</strong>
-                          <p>{items.length === 0 ? '—' : items.length}</p>
+                          <p data-testid={`adopt-count-${outcome}`}>
+                            {items.length === 0 ? '—' : items.length}
+                          </p>
                           {items.length > 0 && (
                             <ul className="adopt-items">
                               {items.map((item) => (
@@ -601,11 +660,6 @@ export function FreshAdoptFlow({
                                       )[item.kind]
                                     )}
                                   </span>
-                                  {item.outcome === 'absent_at_source' && (
-                                    <span className="badge badge-neutral">
-                                      {adoptText('absentBadge')}
-                                    </span>
-                                  )}
                                   {item.reason && (
                                     <span className="adopt-item-reason">
                                       {adoptReasonText(item.reason)}
@@ -639,6 +693,11 @@ export function FreshAdoptFlow({
             {summary && summary.retryable > 0 && !summary.running && (
               <p className="journey-help" data-testid="adopt-retryable">
                 {adoptText('retryableRefusal', { count: summary.retryable })}
+              </p>
+            )}
+            {summary && !summary.running && remaining > 0 && (
+              <p className="journey-help" data-testid="adopt-remaining">
+                {adoptText('remainingItems', { count: remaining })}
               </p>
             )}
           </div>
@@ -696,7 +755,7 @@ export function FreshAdoptFlow({
               className="btn btn-secondary"
               data-testid="adopt-refresh"
               disabled={busy}
-              onClick={poll}
+              onClick={retryProgress}
             >
               <FullWebIcon name="refresh" size={20} />
               {adoptText('refresh')}
@@ -719,7 +778,14 @@ export function FreshAdoptFlow({
                   type="checkbox"
                   data-testid="adopt-accept-retryable"
                   checked={acceptRetryable}
-                  onChange={(event) => setAcceptRetryable(event.target.checked)}
+                  onChange={(event) => {
+                    setAcceptRetryable(event.target.checked);
+                    // The acknowledgement covers the set on screen right now,
+                    // and only that set.
+                    acceptedRetryable.current = event.target.checked
+                      ? (summary?.retryable ?? 0)
+                      : null;
+                  }}
                 />
                 {adoptText('acceptRetryable')}
               </label>
@@ -728,10 +794,12 @@ export function FreshAdoptFlow({
               type="button"
               className="btn btn-primary"
               data-testid="adopt-complete"
-              // A settled run may always be completed from here: the server's
-              // own refusal is what tells the operator about retryable items,
-              // and its count is what the acknowledgement is about.
-              disabled={busy || !summary?.finished || summary.running}
+              // A settled run with retryable items can always ask to complete:
+              // the server's refusal is what names them, and the count is what
+              // the acknowledgement is about. A run that never processed its own
+              // plan is different — completion cannot succeed over it — so the
+              // only action offered there is Resume.
+              disabled={busy || !settledRun || remaining > 0}
               onClick={() => void complete()}
             >
               {adoptText(busy ? 'completing' : 'complete')}

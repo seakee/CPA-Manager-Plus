@@ -104,6 +104,61 @@ const finishedRun: AdoptionSummary = {
   counts: { migrated: 1, manual: 2, failed: 1, absent_at_source: 0 },
 };
 
+// A run that stopped with planned items it never recorded. Nothing is retryable
+// and the run is finished, so the old completion rule called this a finished
+// console — the one state whose only working action is a resume.
+const shortfallRun: AdoptionSummary = {
+  items: [
+    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+    { item: 'credential:b.json', kind: 'credential', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+  ],
+  planned: 5,
+  finished: true,
+  running: false,
+  retryable: 0,
+  counts: { migrated: 3, manual: 0, failed: 0, absent_at_source: 0 },
+};
+
+// Every outcome at once. The copy count on screen has to be the wire's
+// `counts.migrated`, and a resource the source never had is not a copy.
+const allOutcomes: AdoptionSummary = {
+  items: [
+    { item: 'credential:copied-a.json', kind: 'credential', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+    {
+      item: 'credential:runtime-only.json',
+      kind: 'credential',
+      outcome: 'manual',
+      reason: 'runtime_only_credential',
+      instruction: 'This credential exists only in the source CPA process.',
+      retryable: false,
+    },
+    { item: 'credential:left-1.json', kind: 'credential', outcome: 'absent_at_source', reason: '', instruction: '', retryable: false },
+    { item: 'credential:left-2.json', kind: 'credential', outcome: 'absent_at_source', reason: '', instruction: '', retryable: false },
+    { item: 'credential:left-3.json', kind: 'credential', outcome: 'absent_at_source', reason: '', instruction: '', retryable: false },
+  ],
+  planned: 6,
+  finished: true,
+  running: false,
+  retryable: 0,
+  counts: { migrated: 2, manual: 1, failed: 0, absent_at_source: 3 },
+};
+
+// A settled run with nothing left over: the only record that may be called a
+// complete adoption, and only once the installation itself is complete.
+const cleanRun: AdoptionSummary = {
+  items: [
+    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+  ],
+  planned: 2,
+  finished: true,
+  running: false,
+  retryable: 0,
+  counts: { migrated: 2, manual: 0, failed: 0, absent_at_source: 0 },
+};
+
 let renderer: ReactTestRenderer;
 beforeEach(() => {
   setFullWebLanguage('en');
@@ -157,6 +212,9 @@ async function adoptServer(options: {
   pluginChecked?: boolean;
   summaries?: AdoptionSummary[];
   completions?: { status: number; body: Record<string, unknown> }[];
+  // The next N progress reads answer a plain 500, which is what a lost route or a
+  // refused credential looks like to the page: no bounded refusal envelope.
+  readFailures?: number;
 } = {}) {
   // A resume is a browser that reloaded a committed adoption: the checkpoint is
   // durable and the source key is not.
@@ -190,6 +248,7 @@ async function adoptServer(options: {
   const completions = [...(options.completions ?? [])];
   const strategyBodies: Record<string, unknown>[] = [];
   let summaryReads = 0;
+  let readFailures = options.readFailures ?? 0;
   const fetcher = vi.fn<typeof fetch>(async (url, init) => {
     const resource = new URL(String(url)).pathname.split('/api/v2/')[1];
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
@@ -248,6 +307,10 @@ async function adoptServer(options: {
     }
     if (resource === 'installation/adoption') {
       summaryReads += 1;
+      if (readFailures > 0) {
+        readFailures -= 1;
+        return new Response('unavailable', { status: 500 });
+      }
       const summary = summaries.length > 1 ? summaries.shift()! : summaries[0];
       return Response.json(summary);
     }
@@ -449,6 +512,130 @@ it('localizes a known reason and falls back to one sentence for an unknown one',
   expect(text()).toContain('This credential exists only in the source CPA process');
 });
 
+it('never claims a complete adoption over a settled run with retryable items', async () => {
+  await adoptServer();
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  // `finished` is a fact about the run. It is not a fact about the installation,
+  // and an item that could not be copied is still on the source.
+  expect(text()).not.toContain(adoptText('done'));
+  expect(text()).not.toContain(adoptText('doneHelp'));
+  expect(text()).toContain(adoptText('settledTitle'));
+  expect(text()).toContain(adoptText('settledHelp'));
+  expect(text()).toContain(adoptText('retryableRefusal', { count: 1 }));
+});
+
+it('counts only copies as migrated and gives source-absent items their own group', async () => {
+  await adoptServer({ summaries: [allOutcomes] });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(byID('adopt-count-migrated').props.children).toBe(allOutcomes.counts.migrated);
+  expect(byID('adopt-count-absent_at_source').props.children).toBe(
+    allOutcomes.counts.absent_at_source
+  );
+  expect(byID('adopt-count-manual').props.children).toBe(allOutcomes.counts.manual);
+  expect(byID('adopt-count-failed').props.children).toBe('—');
+  // Each item is listed under its own outcome, so the migrated group can never
+  // stand in for a resource the source did not have.
+  expect(
+    renderer.root
+      .findByProps({ 'data-testid': 'adopt-group-migrated' })
+      .findAllByProps({ className: 'adopt-item-name' })
+      .map((name) => name.props.children)
+  ).toEqual(['credential:copied-a.json', 'config:routing.strategy']);
+  expect(
+    renderer.root
+      .findByProps({ 'data-testid': 'adopt-group-absent_at_source' })
+      .findAllByProps({ className: 'adopt-item-name' })
+      .map((name) => name.props.children)
+  ).toEqual(['credential:left-1.json', 'credential:left-2.json', 'credential:left-3.json']);
+  expect(byID('adopt-progress').props.children).toBe(
+    adoptText('progress', { settled: 6, planned: 6 })
+  );
+});
+
+it('offers a resume, not a completion, when a settled run left planned items unprocessed', async () => {
+  const server = await adoptServer({ summaries: [shortfallRun] });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  // The plan is what the run fixed before its first write, so a run that settled
+  // short of it has work left even though nothing failed.
+  expect(byID('adopt-progress').props.children).toBe(
+    adoptText('progress', { settled: 3, planned: 5 })
+  );
+  expect(text()).toContain(adoptText('remainingItems', { count: 2 }));
+  expect(maybe('adopt-resume')).toHaveLength(1);
+  expect(byID('adopt-complete').props.disabled).toBe(true);
+  expect(text()).not.toContain(adoptText('done'));
+  // The next action works: a replay with the same body, not a dead button.
+  await click('adopt-resume');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(3);
+});
+
+it('does not carry the retryable acknowledgement into the run a Resume starts', async () => {
+  const server = await adoptServer({
+    summaries: [finishedRun, finishedRun],
+    completions: [
+      { status: 409, body: { code: 'adopt_migration_retryable', retryable: 1 } },
+      { status: 409, body: { code: 'adopt_migration_retryable', retryable: 1 } },
+    ],
+  });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  await click('adopt-complete');
+  await input('adopt-accept-retryable', true);
+  expect(byID('adopt-accept-retryable').props.checked).toBe(true);
+  // Resume starts a run the operator has not seen. The old acknowledgement was
+  // given for the old set, so the next completion must not carry it.
+  await click('adopt-resume');
+  await settle();
+  expect(maybe('adopt-accept-retryable')).toHaveLength(0);
+  await click('adopt-complete');
+  expect(JSON.parse(String(server.posts('complete')[1][1]!.body))).toEqual({});
+  expect(maybe('adopt-accept-retryable')).toHaveLength(1);
+  expect(byID('adopt-accept-retryable').props.checked).toBe(false);
+});
+
+it('stops polling and says so when the progress read keeps failing', async () => {
+  vi.useFakeTimers();
+  try {
+    const server = await adoptServer({ readFailures: 3 });
+    await click('adopt-read-inventory');
+    await input('adopt-confirm-inventory', true);
+    await click('adopt-confirm-migrate');
+    // Three consecutive failures are all the loop accepts; a fourth read would
+    // mean it is still spinning behind a screen that cannot name the problem.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30000);
+    });
+    expect(server.summaryReads()).toBe(3);
+    expect(text()).toContain(adoptText('progressUnavailable'));
+    expect(maybe('adopt-retry-progress')).toHaveLength(1);
+    // The retry is the operator's, and it is the only thing that restarts the
+    // read: the next answer is the record.
+    await act(async () => {
+      await byID('adopt-retry-progress').props.onClick();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(server.summaryReads()).toBe(4);
+    expect(maybe('adopt-progress-error')).toHaveLength(0);
+    expect(text()).toContain(adoptText('progress', { settled: 4, planned: 4 }));
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 // --- the Console carrier ---------------------------------------------------
 
 // The Console path holds the same adoption but talks to the canonical API, so the
@@ -540,4 +727,62 @@ it('sends the New Managed plugin opt-in from the Console path', async () => {
     expectedRuntimeGeneration: runtime.runtimeGeneration,
     expectedArtifactId: artifactId,
   });
+});
+
+// A completed installation whose operator accepted the retryable items: the
+// installation is done, the copies are not. The screen said "Adoption complete"
+// here, next to a list of items that were never copied.
+it('does not call an installation complete while accepted items are still uncopied', async () => {
+  const done: FreshOperation = {
+    identity,
+    revision: 12,
+    adminInitialized: true,
+    productComplete: true,
+    gatewayPending: true,
+    routing: {
+      operationId: identity.operationId,
+      revision: 1,
+      target: '/console',
+      stage: 'committed',
+      committed: true,
+    },
+    strategy: { ...adoptCheckpoint, stage: 'committed' },
+  };
+  const get = vi.fn(async (resource: string) =>
+    resource === 'installation/adoption' ? finishedRun : done
+  );
+  await mountManaged(done, get);
+  await settle();
+  expect(text()).not.toContain(adoptText('done'));
+  expect(text()).not.toContain(adoptText('doneHelp'));
+  expect(text()).toContain(adoptText('settledTitle'));
+  expect(text()).toContain(adoptText('retryableRefusal', { count: 1 }));
+});
+
+// The one state that may say the adoption is complete: the run settled, nothing
+// is left to retry, and the installation completed.
+it('shows the success headline only for a settled, clean, completed installation', async () => {
+  const done: FreshOperation = {
+    identity,
+    revision: 12,
+    adminInitialized: true,
+    productComplete: true,
+    gatewayPending: true,
+    routing: {
+      operationId: identity.operationId,
+      revision: 1,
+      target: '/console',
+      stage: 'committed',
+      committed: true,
+    },
+    strategy: { ...adoptCheckpoint, stage: 'committed' },
+  };
+  const get = vi.fn(async (resource: string) =>
+    resource === 'installation/adoption' ? cleanRun : done
+  );
+  await mountManaged(done, get);
+  await settle();
+  expect(text()).toContain(adoptText('done'));
+  expect(text()).toContain(adoptText('doneHelp'));
+  expect(text()).not.toContain(adoptText('settledTitle'));
 });

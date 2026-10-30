@@ -371,6 +371,9 @@ type adoptMigrationFixture struct {
 	destination *migrationFakeCPA
 	record      freshstore.Record
 	request     freshstrategy.Request
+	// session is the installation session the browser holds across the cutover:
+	// a claim exchanged before it, never an Admin credential.
+	session string
 }
 
 func newAdoptMigrationFixture(t *testing.T) *adoptMigrationFixture {
@@ -452,6 +455,15 @@ func newAdoptMigrationFixture(t *testing.T) *adoptMigrationFixture {
 	staged, err := app.strategy.Execute(ctx, record.Operation, fixture.request)
 	if err != nil || staged.Checkpoint.Stage != "staged" {
 		t.Fatalf("stage: %+v %v", staged, err)
+	}
+	// The browser claims and exchanges its session before the route cutover, and
+	// keeps it across it. Issuing it here is the only way to hold one: both
+	// claim routes close with the cutover, and the session is what reads the
+	// migration summary afterwards.
+	fixture.session = installationSession(t, app)
+	record, err = app.store.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
 	record, err = app.store.Update(ctx, record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
 		r.Operation.Strategy = staged.Checkpoint

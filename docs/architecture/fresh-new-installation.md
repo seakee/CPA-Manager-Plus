@@ -707,11 +707,14 @@ node bin/ci/fresh-adopt-network.mjs \
 ```
 
 It is the browser journey, not an API reconstruction. A real CPA v8.0.13 runs as
-its own container with two credential files, two provider sections, three gateway
-leaves and one file the destination cannot parse; the destination is the CPA the
-project's own Compose Runtime stages, because an adoption needs a Manager-owned
-destination. The script claims the installation, chooses Adopt, enters the source
-and confirms the inventory in Chromium.
+its own container holding 40 credential files, one gateway config with the seeded
+routing, provider and client-key sections, one credential whose item name is past
+the record's limit (recorded `manual` with an instruction, never uploaded) and one
+`.json` file the source cannot classify (present on the host, absent from the
+source's own v8 credential listing, so never an item); the destination is the CPA
+the project's own Compose Runtime stages, because an adoption needs a
+Manager-owned destination. The script claims the installation, chooses Adopt,
+enters the source and confirms the inventory in Chromium.
 
 It proves, in order:
 
@@ -726,25 +729,32 @@ It proves, in order:
    new connection once the run has recorded its first item, so the remaining items
    fail before writing anything and are recorded retryable — a deterministic fault
    rather than a race;
-4. completion answers `adopt_migration_retryable`, and the screen shows the count
-   with the acknowledgement;
+4. the interrupted screen does not call the adoption complete: a settled run with
+   retryable items still on the source shows the settled state and names the count.
+   Completion then answers `adopt_migration_retryable`, and the screen offers the
+   acknowledgement;
 5. removing the control file and pressing **Resume** continues from the durable
-   prefix, the run finishes with no retryable item, and completion succeeds;
+   prefix and finishes the run. The resumed run is read from the summary the page
+   receives *after* the click, so no assertion can be satisfied by the interrupted
+   run's own summary, and its rendered per-outcome numbers are reconciled against
+   the route's `counts`;
 6. the destination — read from the CPA the Supervisor staged, not from the Manager's
    own report — carries exactly the source client keys, the seeded gateway values
-   and the migrated credential bytes (and not the unparseable file), admits a
-   client key through Ingress `/v1/models` while refusing an unknown one, starts the
-   usage collector, reports a readable runtime status, and leaves the source's
-   config bytes and credential list unchanged.
+   and the migrated credential bytes (and neither the unparseable file nor the
+   credential the record cannot name), admits a client key through Ingress
+   `/v1/models` while refusing an unknown one, records a collection window the usage
+   workspace reports as proven, reports a readable runtime status, and leaves the
+   source's config bytes and credential list unchanged.
 
 Screenshots cover the source form, the inventory, the retryable result, the
 retryable completion and the finished installation. The report goes to
 `bin/tmp/d-adopt/report.json`, is written 0600, and records PASS/FAIL/NOT RUN for
-every check plus `gitHead`, the image revisions and the failure logs. The harness
-is the External one — secrets in a sibling directory outside the artifact
-directory, `assertNoSecret` over the unredacted report, the run log and every
-container log before teardown, a dirty tree refused, and a `finally` that removes
-only this project.
+every check — including the checks a failure prevented from running, which are
+recorded as NOT RUN with the check that ended the run — plus `gitHead`, the image
+revisions and the failure logs. The harness is the External one — secrets in a
+sibling directory outside the artifact directory, `assertNoSecret` over the
+unredacted report, the run log and every container log before teardown, a dirty
+tree refused, and a `finally` that removes only this project.
 
 ### D acceptance: `bin/ci/fresh-external-management.mjs`
 
@@ -1288,7 +1298,10 @@ value, and `counts` tallies the four outcomes. The reply omits the record's sour
 and destination digests: they are the Manager's evidence, and dropping them keeps
 the route a statement about progress. A staged adoption, a non-adoption and an
 unreadable record answer `404 {"code":"adopt_summary_unavailable"}` rather than an
-empty list that reads like a finished run.
+empty list that reads like a finished run. The session branch is bounded by
+`ProductComplete`: the claim that committed the adoption reads its own progress
+until the installation completes, and afterwards the route is an Admin resource
+and the same session is answered `401`.
 
 Both wizards render one shared `FreshAdoptFlow`:
 
@@ -1307,17 +1320,29 @@ Both wizards render one shared `FreshAdoptFlow`:
   sends the identical body;
 - the committed run is polled every two seconds with a bounded backoff until the
   record says `finished` and not `running`, then the per-item results are grouped
-  as migrated / manual / failed (retryable or not). Each reason code has a
-  localized sentence and the server's English `instruction` stays behind a
-  "details" disclosure;
-- a run that stopped, or a page reloaded mid-run, resumes from the durable prefix
-  with the same `baseUrl`, key and `pluginsEnabled`. The key is not kept anywhere,
-  so the resume form asks for it again and pins the recorded plugin choice;
+  by their own outcome — migrated, manual, failed and `absent_at_source` — so the
+  number beside "Migrated" is `counts.migrated` and a resource the source never had
+  is never counted as a copy. Each reason code has a localized sentence and the
+  server's English `instruction` stays behind a "details" disclosure;
+- the progress read is bounded: three consecutive failures stop the loop and show
+  a typed state with an explicit retry, so a refused or lost route cannot leave
+  "reading the migration record" spinning forever;
+- the success headline is a claim about the installation, so it requires the run to
+  be settled, no retryable item to remain, and the installation itself to be
+  complete. A settled run missing any of the three shows the settled state and
+  names the retryable or unprocessed items instead;
+- a run that stopped, a page reloaded mid-run, or a finished run that never
+  processed its own plan resumes from the durable prefix with the same `baseUrl`,
+  key and `pluginsEnabled`. The key is not kept anywhere, so the resume form asks
+  for it again and pins the recorded plugin choice. Completion is refused over an
+  unprocessed plan, because the server cannot accept it either;
 - the completion's coded refusals each have their own next action:
   `adopt_migration_running` keeps polling, `adopt_migration_incomplete` offers
   Resume, `adopt_migration_retryable` shows the count plus an explicit
   "finish anyway" checkbox that sends `acceptRetryable`, and
-  `adopt_destination_unproven` names the specific failure.
+  `adopt_destination_unproven` names the specific failure. The acknowledgement is
+  bound to the retryable set the operator was shown: a new run, or a new set, asks
+  again instead of carrying the old answer into a decision nobody made.
 
 The strategy body and both refusal envelopes are read by both carriers: the
 bootstrap transport parses `Code` and `Unsupported` for a blocker and lowercase

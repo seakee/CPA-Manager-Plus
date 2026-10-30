@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -19,11 +20,57 @@ import (
 // with the Admin credential of a committed installation.
 func (f *adoptMigrationFixture) adoption(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
+	return f.adoptionWith("Bearer " + strategyTestAdmin)
+}
+
+// adoptionWith is the same read with an explicit credential, because the route's
+// authorization is part of what these tests have to prove.
+func (f *adoptMigrationFixture) adoptionWith(auth string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/adoption", nil)
-	request.Header.Set("Authorization", "Bearer "+strategyTestAdmin)
+	if auth != "" {
+		request.Header.Set("Authorization", auth)
+	}
 	response := httptest.NewRecorder()
 	f.app.canonicalAPI(response, request)
 	return response
+}
+
+// installationSession issues the installation session of an app that has not cut
+// over yet and returns the token the browser holds as `Fresh <token>`. The
+// session survives the cutover; the claim routes do not, so this must be taken
+// before the routing checkpoint commits.
+func installationSession(t *testing.T, app *freshApplication) string {
+	t.Helper()
+	record, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := app.authority.Issue(t.Context())
+	if err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	claim, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(handoff.Fragment, "#handoff="))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issued struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(claim, &issued); err != nil || issued.Token == "" {
+		t.Fatalf("the claim is not a token: %v", err)
+	}
+	if handoff.Resume {
+		// A resumed handoff already carries the session: the installation has
+		// its Admin credential, so the claim is exchanged for it by the handoff.
+		return issued.Token
+	}
+	session, err := app.authority.Exchange(t.Context(), fresh.ExchangeRequest{
+		Identity: record.Operation.Identity, ClaimGeneration: handoff.ClaimGeneration, Token: issued.Token,
+	})
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	return session.Token
 }
 
 // readAdoption decodes the summary reply, failing on anything the completion
@@ -129,6 +176,10 @@ func TestAdoptionSummaryRefusesANonAdoption(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = opened.Close() })
 	app := newFreshApplication(opened, config.Config{}, nil)
+	// The session has to be taken while the installation is still claimable:
+	// both claim routes close with the cutover, and the session is what the
+	// browser keeps afterwards.
+	session := installationSession(t, app)
 	record, err := app.store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -148,6 +199,16 @@ func TestAdoptionSummaryRefusesANonAdoption(t *testing.T) {
 	app.canonicalAPI(response, request)
 	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), adoptionSummaryUnavailable) {
 		t.Fatalf("a non-adoption answered %d: %s", response.Code, response.Body.String())
+	}
+	// The browser's own credential reaches the same answer: the session branch
+	// admits the read, and the route's projection refuses it because no adoption
+	// was ever committed.
+	request = httptest.NewRequest(http.MethodGet, "/control/api/v2/installation/adoption", nil)
+	request.Header.Set("Authorization", "Fresh "+session)
+	response = httptest.NewRecorder()
+	app.canonicalAPI(response, request)
+	if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), adoptionSummaryUnavailable) {
+		t.Fatalf("a non-adoption answered its session %d: %s", response.Code, response.Body.String())
 	}
 }
 
@@ -196,6 +257,42 @@ func TestAdoptionSummaryMarksRetryableItems(t *testing.T) {
 	}
 	if retryable != 1 {
 		t.Fatalf("per-item retryable flags disagree with the count: %d", retryable)
+	}
+}
+
+// The browser reads the progress with its Fresh installation session, not with
+// an Admin credential, so the session branch is the one the completion screen
+// actually uses. This drives each of its answers.
+func TestAdoptionSummaryAuthorizesTheInstallationSession(t *testing.T) {
+	fixture := settledAdoption(t)
+	session := fixture.session
+	record := fixture.reload(t)
+	if record.Operation.ProductComplete {
+		t.Fatal("the fixture completed before the session read was taken")
+	}
+	reply := readAdoption(t, fixture.adoptionWith("Fresh "+session))
+	if reply.Planned != record.AdoptionSummary.Planned ||
+		len(reply.Items) != len(record.AdoptionSummary.Items) {
+		t.Fatalf("the session read a different summary: %+v", reply)
+	}
+	// No credential, an invented session and the Admin key sent as one are all
+	// refused: the branch admits exactly the claim that committed the adoption.
+	for _, auth := range []string{"", "Fresh " + strings.Repeat("a", 43), "Bearer " + session} {
+		if response := fixture.adoptionWith(auth); response.Code != http.StatusUnauthorized {
+			t.Fatalf("%q was not refused: %d %s", auth, response.Code, response.Body.String())
+		}
+	}
+	// Completion ends the claim's reach. The summary it read while the
+	// installation was pending is not readable through it afterwards, because a
+	// completed installation reads through its Admin credential only.
+	if _, err := fixture.app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.ProductComplete = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if response := fixture.adoptionWith("Fresh " + session); response.Code != http.StatusUnauthorized {
+		t.Fatalf("a completed installation served its summary to the claim: %d %s", response.Code, response.Body.String())
 	}
 }
 
