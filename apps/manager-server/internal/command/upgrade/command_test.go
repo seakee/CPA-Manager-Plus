@@ -346,6 +346,16 @@ func runError(t *testing.T, args ...string) (error, string, string) {
 	return err, stdout.String(), stderr.String()
 }
 
+// setOSTempDir points the OS temporary directory at dir for the rest of the
+// test. Every variable os.TempDir consults is set, so the redirect holds on Unix
+// (TMPDIR) as well as on Windows (TMP, then TEMP).
+func setOSTempDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("TMPDIR", dir)
+	t.Setenv("TMP", dir)
+	t.Setenv("TEMP", dir)
+}
+
 // TestStatusSucceedsAgainstALiveWriterWithinItsRetryBudget is the regression for
 // N1: `upgrade status` used to fail every time it raced a Manager that was
 // writing, because one snapshot attempt was all it made. A live Manager writes
@@ -475,6 +485,47 @@ func TestStatusRefusesScratchInsideTheManagerVolume(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(directory, "scratch")); !os.IsNotExist(err) {
 		t.Fatalf("scratch directory was created: %v", err)
+	}
+	after := treeDigests(t, directory)
+	if len(before) != len(after) {
+		t.Fatalf("Manager volume entry count changed: %v -> %v", before, after)
+	}
+	for path, digest := range before {
+		if after[path] != digest {
+			t.Fatalf("Manager entry %s changed: %q -> %q", path, digest, after[path])
+		}
+	}
+}
+
+// TestStatusRefusesADefaultTemporaryDirectoryInsideTheManagerVolume is the
+// status half of the default-scratch rule: with no --scratch-dir, `upgrade
+// status` used to skip the placement check and write a full copy of the Manager
+// database into the volume it is upgrading.
+func TestStatusRefusesADefaultTemporaryDirectoryInsideTheManagerVolume(t *testing.T) {
+	directory, databasePath := newManagerDatabase(t)
+	temp := filepath.Join(directory, "tmp")
+	if err := os.Mkdir(temp, 0o755); err != nil {
+		t.Fatalf("create default temporary directory: %v", err)
+	}
+	setOSTempDir(t, temp)
+	before := treeDigests(t, directory)
+
+	runErr, _, _ := runError(t, "status", "--json", "--db-path", databasePath)
+	if runErr == nil {
+		t.Fatal("status accepted a default temporary directory inside the Manager volume")
+	}
+	if !strings.Contains(runErr.Error(), upgradeservice.CodeSnapshotFailed) {
+		t.Fatalf("error %q does not carry %s", runErr, upgradeservice.CodeSnapshotFailed)
+	}
+	if code := ExitCode(runErr); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	entries, err := os.ReadDir(temp)
+	if err != nil {
+		t.Fatalf("read default temporary directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("scratch was created in the default temporary directory: %v", entries)
 	}
 	after := treeDigests(t, directory)
 	if len(before) != len(after) {

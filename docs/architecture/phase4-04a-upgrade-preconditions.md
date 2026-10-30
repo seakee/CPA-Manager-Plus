@@ -235,24 +235,34 @@ hard `false`; the new surface grants no migration authority.
   copies the whole database, so either place writes data into a tree this
   operation must not touch or into the volume being upgraded. Both are refused
   before a directory is created, with `upgrade_snapshot_failed` and nothing
-  written. The scratch volume and the target volume each need room for the
-  source bytes; the disk detail states both (`requiredBytes`,
-  `scratchRequiredBytes`). An unset target is never measured as the working
-  directory: the probe falls back to the scratch volume, and the CLI requires an
-  explicit `--target-dir` when the Manager database path cannot be derived.
-  The second whole-tree fingerprint is evidence too: if it cannot be taken after
-  the copy, the report blocks with `upgrade_source_unreadable` instead of
-  trusting the pre-copy value.
+  written. An unset `--scratch-dir` is not an exemption: it means the OS
+  temporary directory, and that default is checked against both roots the same
+  way. A host whose `TMPDIR` points into the source tree or the Manager volume
+  is refused before anything is created; otherwise the default would put the
+  copy there, and a snapshot abandoned by a `SIGKILL` (no deferred cleanup runs)
+  would stay on that volume for good. The scratch volume and the target volume
+  each need room for the source bytes; the disk detail states both
+  (`requiredBytes`, `scratchRequiredBytes`). An unset target is never measured as
+  the working directory: the probe falls back to the scratch volume, and the CLI
+  requires an explicit `--target-dir` when the Manager database path cannot be
+  derived. The second whole-tree fingerprint is evidence too: if it cannot be
+  taken after the copy, the report blocks with `upgrade_source_unreadable`
+  instead of trusting the pre-copy value.
 - **CLI.** `cpa-manager-plus upgrade preflight --legacy <dir> --source-version
   <release> [--target-dir DIR] [--scratch-dir DIR] [--json]` prints the report
   and exits 0 (ready), 1 (blocked) or 2 (usage/environment/retryable).
   `--target-dir` is required when the Manager database path cannot be derived;
   the command never substitutes the working directory. `cpa-manager-plus upgrade
   status [--json] [--db-path PATH] [--scratch-dir DIR]` reads the operation row
-  from a private snapshot, so both work on non-writable volumes. `status` retries
-  a bounded number of times (8 attempts, exponential backoff capped at 200 ms)
-  when the Manager database keeps changing during the copy; exhausted retries
-  are reported with the shared `upgrade_source_changed` code and the retryable
+  from a private snapshot, so both work on non-writable volumes. That snapshot is
+  a full copy of the Manager database and its sidecars: the read costs time and
+  scratch space proportional to the database size, not to the single row it
+  returns, so `status` is not a cheap poll and should not be looped tightly on a
+  large database. While a Manager writes — an upgrade in progress is the normal
+  case — the copy can race a commit and `status` may briefly report the
+  retryable `upgrade_source_changed`; it retries a bounded number of times
+  (8 attempts, exponential backoff capped at 200 ms) until a write gap appears,
+  and only an exhausted budget is reported, with the same code and the retryable
   marker instead of a generic usage error. Preflight never retries: a legacy
   source that is still being written remains a stop condition.
 - **Deferred:** v1.14.10 re-pin and its qualification evidence (U1-1b), the

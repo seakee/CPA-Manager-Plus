@@ -96,6 +96,7 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  status [--json] [--db-path PATH] [--scratch-dir DIR]")
 	_, _ = fmt.Fprintln(w, "                                     read the persisted upgrade operation")
 	_, _ = fmt.Fprintln(w, "  --scratch-dir must be outside the legacy source root and the target root.")
+	_, _ = fmt.Fprintln(w, "                                     the default OS temporary directory is checked the same way")
 	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, 2 usage, environment or retryable error.")
 }
 
@@ -195,7 +196,10 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 	// A scratch copy under the Manager data directory would write the whole
-	// database back into the volume this operation is upgrading.
+	// database back into the volume this operation is upgrading. An unset
+	// --scratch-dir means the OS temporary directory and is checked the same
+	// way, so a host whose TMPDIR points into that volume is refused instead of
+	// leaving a full copy behind.
 	if err := upgradeservice.ValidateScratchDir(*scratchDir, "", filepath.Dir(path)); err != nil {
 		return codedFailure(upgradeservice.CodeSnapshotFailed, err)
 	}

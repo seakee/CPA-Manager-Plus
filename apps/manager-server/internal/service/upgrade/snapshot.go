@@ -117,12 +117,18 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 // legacy source root would write that copy back into the tree preflight promises
 // to preserve, and one under the target root would leave upgrade scratch in the
 // volume the copy is measured against. Both are refused before a directory is
-// created. An empty scratch directory is allowed: it means the OS temporary
-// directory, which the caller never shares with either root.
+// created.
+//
+// An empty scratch directory means the OS temporary directory, and it is
+// checked like an explicit one. A host whose TMPDIR points into the legacy root
+// or the target volume would otherwise hide a full database copy in a tree this
+// operation must not write to, and a snapshot abandoned by a killed process —
+// no deferred cleanup runs — would stay on that volume for good.
 func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) error {
 	scratch := strings.TrimSpace(scratchDir)
-	if scratch == "" {
-		return nil
+	defaulted := scratch == ""
+	if defaulted {
+		scratch = os.TempDir()
 	}
 	scratchPath := canonicalPath(scratch)
 	for _, root := range []struct {
@@ -137,8 +143,15 @@ func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) 
 			continue
 		}
 		if pathWithin(scratchPath, canonicalPath(dir)) {
-			return fmt.Errorf("%w: scratch directory is inside %s; pass a --scratch-dir on a separate volume",
-				ErrSnapshotFailed, root.label)
+			// The default is named as such: an operator who never passed
+			// --scratch-dir has to learn that the OS temporary directory is the
+			// one that landed inside the root.
+			origin := "scratch directory"
+			if defaulted {
+				origin = "default scratch directory (the OS temporary directory)"
+			}
+			return fmt.Errorf("%w: %s is inside %s; pass a --scratch-dir on a separate volume",
+				ErrSnapshotFailed, origin, root.label)
 		}
 	}
 	return nil

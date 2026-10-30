@@ -3,6 +3,7 @@ package upgrade
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -385,6 +386,16 @@ func preflight(t *testing.T, root string, options Options) Report {
 		t.Fatalf("preflight: %v", err)
 	}
 	return report
+}
+
+// setOSTempDir points the OS temporary directory at dir for the rest of the
+// test. Every variable os.TempDir consults is set, so the redirect holds on Unix
+// (TMPDIR) as well as on Windows (TMP, then TEMP).
+func setOSTempDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("TMPDIR", dir)
+	t.Setenv("TMP", dir)
+	t.Setenv("TEMP", dir)
 }
 
 func checkByName(report Report, name string) (Check, bool) {
@@ -1179,6 +1190,98 @@ func TestPreflightRefusesScratchInsideTheTargetRoot(t *testing.T) {
 	}
 	if !strings.Contains(check.Detail, "target root") {
 		t.Fatalf("ownership detail %q does not name the target root", check.Detail)
+	}
+}
+
+// TestPreflightRefusesADefaultTemporaryDirectoryInsideTheLegacyRoot covers the
+// remaining placement hole: with no --scratch-dir the OS temporary directory
+// used to skip the check entirely, so a TMPDIR that points into the source tree
+// received a full copy of the database and a snapshot abandoned by a killed
+// process would have stayed there.
+func TestPreflightRefusesADefaultTemporaryDirectoryInsideTheLegacyRoot(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	temp := filepath.Join(fixture.root, "tmp")
+	if err := os.Mkdir(temp, 0o755); err != nil {
+		t.Fatalf("create default temporary directory: %v", err)
+	}
+	setOSTempDir(t, temp)
+	before := snapshotTree(t, fixture.root)
+
+	report := preflight(t, fixture.root, declared())
+	requireBlocked(t, report, CodeSnapshotFailed)
+	entries, err := os.ReadDir(temp)
+	if err != nil {
+		t.Fatalf("read default temporary directory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("scratch was created in the default temporary directory: %v", entries)
+	}
+	after := snapshotTree(t, fixture.root)
+	if len(after) != len(before) {
+		t.Fatalf("source tree entry count changed: %d -> %d", len(before), len(after))
+	}
+	for path, digest := range before {
+		if after[path] != digest {
+			t.Fatalf("source entry %s changed", path)
+		}
+	}
+	check, found := checkByName(report, CheckSourceOwnership)
+	if !found || check.Code != CodeSnapshotFailed {
+		t.Fatalf("ownership check = %+v, want %s", check, CodeSnapshotFailed)
+	}
+	if !strings.Contains(check.Detail, "OS temporary directory") {
+		t.Fatalf("ownership detail %q does not name the default directory", check.Detail)
+	}
+	if !strings.Contains(check.Detail, "legacy source root") {
+		t.Fatalf("ownership detail %q does not name the legacy source root", check.Detail)
+	}
+}
+
+// TestValidateScratchDirChecksTheDefaultTemporaryDirectory is the unit-level
+// form of the same rule for both roots, plus the counter-proof that an ordinary
+// OS temporary directory is still accepted.
+func TestValidateScratchDirChecksTheDefaultTemporaryDirectory(t *testing.T) {
+	legacy := t.TempDir()
+	target := t.TempDir()
+	for _, testCase := range []struct {
+		name string
+		root string
+	}{
+		{name: "the legacy source root", root: legacy},
+		{name: "the target root", root: target},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			defaultScratch := filepath.Join(testCase.root, "tmp")
+			if err := os.Mkdir(defaultScratch, 0o755); err != nil {
+				t.Fatalf("create default temporary directory: %v", err)
+			}
+			setOSTempDir(t, defaultScratch)
+			for _, scratch := range []string{"", "   "} {
+				err := ValidateScratchDir(scratch, legacy, target)
+				if !errors.Is(err, ErrSnapshotFailed) {
+					t.Fatalf("scratch %q error = %v, want %s", scratch, err, ErrSnapshotFailed)
+				}
+				if !strings.Contains(err.Error(), testCase.name) {
+					t.Fatalf("scratch %q error %q does not name %s", scratch, err, testCase.name)
+				}
+				if !strings.Contains(err.Error(), "OS temporary directory") {
+					t.Fatalf("scratch %q error %q does not name the default directory", scratch, err)
+				}
+			}
+			entries, err := os.ReadDir(defaultScratch)
+			if err != nil {
+				t.Fatalf("read default temporary directory: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("scratch was created in the default temporary directory: %v", entries)
+			}
+		})
+	}
+	if err := ValidateScratchDir("", legacy, target); err != nil {
+		t.Fatalf("an ordinary OS temporary directory was refused: %v", err)
+	}
+	if err := ValidateScratchDir(os.TempDir(), legacy, target); err != nil {
+		t.Fatalf("the OS temporary directory named explicitly was refused: %v", err)
 	}
 }
 
