@@ -105,5 +105,16 @@ refused command (`targetRootUnchanged`).
   `complete` row, so the completed-admission case writes that stage onto the row
   the real copy-in recorded. The evidence admission demands — the
   `upgraded-legacy` kind, both source fingerprints and the backup manifest digest
-  — is the copy-in's own; only the stage token is the harness's. The evidence
+  is the copy-in's own; only the stage token is the harness's. The evidence
   says so (`admission.completionInput`).
+* **Mount lookup bound.** Every wizard request inspects the operator's mount once
+  under `MountLookupTimeout` (2s), and a lookup that outlives that bound answers
+  `upgrade_source_unreadable` instead of holding the poll open. The harness
+  cannot reach that state: the mount it supplies is a local directory, and a
+  filesystem whose `stat` blocks needs a hung network or FUSE mount this harness
+  may not create. The bound is proved by
+  `internal/http/controller/upgradewizard/handler_test.go`
+  `TestMountLookupRunsOncePerRequestInsideItsBound`, which substitutes the
+  lookup; the harness proves the codes a local mount does reach — absent
+  (`upgrade_legacy_root_missing`) and refused by the shared database file policy
+  (`upgrade_source_symlinked`).
