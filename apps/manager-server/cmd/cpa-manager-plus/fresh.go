@@ -319,7 +319,8 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		a.externalPermit = privateFreshExternalAdmitted
 	}
 	a.fixed = freshbootstrap.Handler{Authority: a.authority, Routing: a.routing, Current: a.current,
-		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime)}
+		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime),
+		Upgrade: http.HandlerFunc(a.newUpgradeWizard().ServeHTTP)}
 	return a
 }
 
@@ -434,7 +435,17 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		// cutover, but is never an Admin credential for the Console/CPA proxy.
 		allowed := resource == "operation" && r.Method == http.MethodGet || !op.ProductComplete &&
 			(resource == "installation/runtime" && r.Method == http.MethodGet ||
+				upgradeWizardResource(resource) && r.Method == http.MethodGet ||
 				(resource == "strategy" || resource == "complete") && r.Method == http.MethodPost)
+		if !allowed && !op.ProductComplete && upgradeWizardResource(resource) &&
+			a.authority.ValidateContinuation(record, continuation) == nil {
+			// The Upgrade reads exist on this surface and only read. An
+			// authenticated session using another method is a method error, not
+			// a credential one.
+			w.Header().Set("Allow", http.MethodGet)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		if !allowed || a.authority.ValidateContinuation(record, continuation) != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -474,6 +485,10 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		a.legacyResource(w, r, resource)
 	case resource == "installation/runtime" && r.Method == http.MethodGet:
 		a.installationRuntime(w, r, op)
+	case upgradeWizardResource(resource) && r.Method == http.MethodGet && !op.ProductComplete:
+		// The Upgrade wizard reads end with the operation. A completed
+		// installation serves its normal surfaces, never an Upgrade step.
+		a.newUpgradeWizard().ServeHTTP(w, r)
 	case resource == "strategy" && r.Method == http.MethodPost:
 		a.executeStrategy(w, r, op)
 	case resource == "complete" && r.Method == http.MethodPost:

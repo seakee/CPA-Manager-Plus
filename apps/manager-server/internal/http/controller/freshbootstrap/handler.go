@@ -26,6 +26,9 @@ type Handler struct {
 	Shell     http.Handler
 	Strategy  http.Handler
 	Runtime   http.Handler
+	// Upgrade serves the two read-only Upgrade wizard routes. Nil keeps them
+	// closed, so an installation that mounts no Upgrade reader answers 503.
+	Upgrade http.Handler
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +91,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, result)
 		return
 	}
-	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet}
+	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet, "installation/upgrade/preflight": http.MethodGet, "installation/upgrade/status": http.MethodGet}
 	method, ok := known[resource]
 	if !ok {
 		http.NotFound(w, r)
@@ -179,6 +182,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.Runtime.ServeHTTP(w, r)
+	case "installation/upgrade/preflight", "installation/upgrade/status":
+		if h.Upgrade == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		h.Upgrade.ServeHTTP(w, r)
 	}
 }
 
