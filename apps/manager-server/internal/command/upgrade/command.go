@@ -2,8 +2,9 @@
 //
 // "upgrade preflight" inspects a stopped 1.x source and writes nothing, not
 // even inside the source root. "upgrade status" reads the single
-// upgrade_operations row from the Manager database in read-only mode, so both
-// subcommands work when the volumes are not writable.
+// upgrade_operations row from a private snapshot of the Manager database.
+// Neither subcommand opens a database in place, so both work when the volumes
+// are not writable.
 package upgrade
 
 import (
@@ -14,7 +15,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"path/filepath"
 	"strings"
 
@@ -69,8 +69,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 
 func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage: cpa-manager-plus upgrade <subcommand>")
-	_, _ = fmt.Fprintln(w, "  preflight --legacy <dir> [--json]   inspect a stopped 1.x source; writes nothing")
-	_, _ = fmt.Fprintln(w, "  status [--json] [--db-path PATH]    read the persisted upgrade operation")
+	_, _ = fmt.Fprintln(w, "  preflight --legacy <dir> --source-version <vX.Y.Z> [--json]")
+	_, _ = fmt.Fprintln(w, "                                     inspect a stopped 1.x source; writes nothing")
+	_, _ = fmt.Fprintln(w, "  status [--json] [--db-path PATH]   read the persisted upgrade operation")
 	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, 2 usage or environment error.")
 }
 
@@ -78,6 +79,9 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	flags := flag.NewFlagSet("upgrade preflight", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	legacy := flags.String("legacy", "", "1.x source data directory (usage.sqlite, data.key, usage-archives/)")
+	sourceVersion := flags.String("source-version", "", "1.x release the source was running (required; the database does not record it)")
+	targetDir := flags.String("target-dir", "", "directory on the volume that will receive the upgrade copy; defaults to the Manager data directory")
+	scratchDir := flags.String("scratch-dir", "", "directory for the transient snapshot copy; defaults to the OS temporary directory")
 	asJSON := flags.Bool("json", false, "print the report as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -85,7 +89,18 @@ func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if flags.NArg() != 0 || strings.TrimSpace(*legacy) == "" {
 		return fmt.Errorf("%w: --legacy <dir> is required and no positional arguments are accepted", ErrUsage)
 	}
-	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{LegacyRoot: *legacy})
+	if strings.TrimSpace(*targetDir) == "" {
+		// The disk requirement belongs to the Manager volume, not to the source.
+		if managerDatabase, err := resolveManagerDatabasePath(""); err == nil {
+			*targetDir = filepath.Dir(managerDatabase)
+		}
+	}
+	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
+		LegacyRoot:      *legacy,
+		DeclaredVersion: *sourceVersion,
+		TargetDir:       *targetDir,
+		ScratchDir:      *scratchDir,
+	})
 	if err != nil {
 		return err
 	}
@@ -132,6 +147,7 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	flags := flag.NewFlagSet("upgrade status", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	dbPath := flags.String("db-path", "", "Manager SQLite path; defaults to the Manager configuration")
+	scratchDir := flags.String("scratch-dir", "", "directory for the transient snapshot copy; defaults to the OS temporary directory")
 	asJSON := flags.Bool("json", false, "print the operation as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -143,11 +159,14 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	db, err := openReadOnly(path)
+	// A read-only open of a WAL database creates -shm/-wal next to it, which
+	// fails on a read-only volume. The row is read from a private copy instead.
+	snapshot, err := upgradeservice.OpenSnapshot(ctx, path, *scratchDir)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = db.Close() }()
+	defer func() { _ = snapshot.Close() }()
+	db := snapshot.DB()
 	tablePresent, err := upgradeOperationTablePresent(ctx, db)
 	if err != nil {
 		return err
@@ -202,25 +221,6 @@ func resolveManagerDatabasePath(override string) (string, error) {
 		return "", fmt.Errorf("%w: Manager database path is empty; pass --db-path", ErrUsage)
 	}
 	return cfg.DBPath, nil
-}
-
-func openReadOnly(path string) (*sql.DB, error) {
-	uriPath := filepath.ToSlash(path)
-	if !strings.HasPrefix(uriPath, "/") {
-		uriPath = "/" + uriPath
-	}
-	dsn := &url.URL{Scheme: "file", Path: uriPath}
-	query := dsn.Query()
-	query.Set("mode", "ro")
-	query.Add("_pragma", "query_only(1)")
-	dsn.RawQuery = query.Encode()
-	db, err := sql.Open("sqlite", dsn.String())
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	return db, nil
 }
 
 func upgradeOperationTablePresent(ctx context.Context, db *sql.DB) (bool, error) {

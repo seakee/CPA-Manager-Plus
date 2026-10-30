@@ -3,17 +3,22 @@ package upgrade
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 // readySource builds a minimal 1.x data directory that preflight accepts: the
@@ -22,13 +27,14 @@ func readySource(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	logical := []string{
+		`pragma journal_mode = WAL`,
 		`create table settings (key text primary key, value text not null, updated_at_ms integer not null)`,
 		`create table usage_events (id integer primary key autoincrement, event_hash text not null unique, timestamp_ms integer not null)`,
 		`create table usage_event_identity_ledger (event_hash text primary key, raw_event_id integer, timestamp_ms integer, bucket_ms integer)`,
 		`create table usage_monitoring_event_projection_v1 (event_id integer primary key, timestamp_ms integer not null)`,
-		`create table usage_monitoring_rollup_state (rollup_name text primary key, schema_version integer not null, status text not null, coverage_event_id integer not null default 0, updated_at_ms integer not null default 0)`,
+		`create table usage_monitoring_rollup_state (rollup_name text primary key, schema_version integer not null, structure_revision text not null default '', status text not null, coverage_event_id integer not null default 0, updated_at_ms integer not null default 0)`,
 		`create table usage_archive_event_refs (event_hash text primary key, run_id text not null, segment_sequence integer not null, raw_event_id integer not null, timestamp_ms integer not null, archived_at_ms integer not null, raw_deleted_at_ms integer)`,
-		`insert into usage_monitoring_rollup_state (rollup_name, schema_version, status, coverage_event_id) values ('projection_v1', 1, 'ready', 1)`,
+		`insert into usage_monitoring_rollup_state (rollup_name, schema_version, structure_revision, status, coverage_event_id) values ('projection_v1', 1, '` + usageidentity.MonitoringProjectionStructureRevision() + `', 'ready', 1)`,
 	}
 	databasePath := filepath.Join(root, "usage.sqlite")
 	db, err := sql.Open("sqlite", databasePath)
@@ -69,7 +75,7 @@ func run(t *testing.T, args ...string) (int, string, string) {
 
 func TestPreflightJSONExitCodeReady(t *testing.T) {
 	root := readySource(t)
-	code, stdout, stderr := run(t, "preflight", "--legacy", root, "--json")
+	code, stdout, stderr := run(t, "preflight", "--legacy", root, "--source-version", bootstrap.PlannedDirectRelease, "--json")
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -198,4 +204,109 @@ func TestExitCodeMapping(t *testing.T) {
 	if !errors.Is(ErrBlocked, ErrBlocked) {
 		t.Fatal("blocked error lost its identity")
 	}
+}
+
+func TestPreflightBlocksWithoutADeclaredSourceVersion(t *testing.T) {
+	root := readySource(t)
+	code, stdout, stderr := run(t, "preflight", "--legacy", root, "--json")
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr: %s", code, stderr)
+	}
+	var report upgradeservice.Report
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("decode report: %v; output: %s", err, stdout)
+	}
+	if len(report.Blocked) != 1 || report.Blocked[0] != upgradeservice.CodeSourceVersionUndeclared {
+		t.Fatalf("blocked = %v, want [%s]", report.Blocked, upgradeservice.CodeSourceVersionUndeclared)
+	}
+}
+
+// TestStatusWorksOnAReadOnlyManagerVolume is the snapshot requirement for
+// `upgrade status`: reading the row used to need write access to the volume
+// because a read-only open of a WAL database creates -shm/-wal beside it.
+func TestStatusWorksOnAReadOnlyManagerVolume(t *testing.T) {
+	directory := t.TempDir()
+	databasePath := filepath.Join(directory, "manager.sqlite")
+	db, err := sqliterepo.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open manager database: %v", err)
+	}
+	repository := upgradeoperation.New(db)
+	if _, err := repository.Advance(context.Background(), model.UpgradeDomainUsageEvents, model.UpgradeStageCopyIn); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close manager database: %v", err)
+	}
+	before := treeDigests(t, directory)
+
+	if err := os.Chmod(directory, 0o555); err != nil {
+		t.Fatalf("make manager volume read-only: %v", err)
+	}
+	if err := os.Chmod(databasePath, 0o444); err != nil {
+		t.Fatalf("make manager database read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(directory, 0o755)
+		_ = os.Chmod(databasePath, 0o600)
+	})
+
+	code, stdout, stderr := run(t, "status", "--json", "--db-path", databasePath)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var output statusOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode status: %v; output: %s", err, stdout)
+	}
+	if !output.Recorded || output.Operation == nil || output.Operation.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("status = %+v, want the recorded operation", output)
+	}
+	if err := os.Chmod(directory, 0o755); err != nil {
+		t.Fatalf("restore manager volume: %v", err)
+	}
+	if err := os.Chmod(databasePath, 0o600); err != nil {
+		t.Fatalf("restore manager database: %v", err)
+	}
+	after := treeDigests(t, directory)
+	if len(before) != len(after) {
+		t.Fatalf("manager volume entry count changed: %v -> %v", before, after)
+	}
+	for path, digest := range before {
+		if after[path] != digest {
+			t.Fatalf("manager entry %s changed: %q -> %q", path, digest, after[path])
+		}
+	}
+}
+
+func treeDigests(t *testing.T, root string) map[string]string {
+	t.Helper()
+	digests := map[string]string{}
+	walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = file.Close() }()
+		digest := sha256.New()
+		if _, err := io.Copy(digest, file); err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		digests[relative] = hex.EncodeToString(digest.Sum(nil))
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("digest manager volume: %v", walkErr)
+	}
+	return digests
 }

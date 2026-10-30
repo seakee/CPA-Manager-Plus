@@ -170,27 +170,54 @@ hard `false`; the new surface grants no migration authority.
   fingerprints, the backup manifest reference, reconciliation output and manual
   items. `internal/repository/upgradeoperation.Advance` appends a domain and
   moves the stage in one transaction; a backwards move is rejected and leaves
-  the row untouched. `complete` never moves again, `failed` parks the operation
-  without dropping completed domains. The table is created by the v2 migration
-  in the Manager database, never in the legacy source root.
-- **Preflight** (`internal/service/upgrade.Preflight`) is read-only. It holds
-  the existing source fence (`processlock.AcquireExisting`), opens
-  `usage.sqlite` with `mode=ro` plus `query_only` and runs `quick_check`, and
-  writes nothing — no WAL, no migration, no journal.
+  the row untouched. `Put` is monotonic too: it may only advance the stage and
+  append domains, so a retry cannot make recorded work look uncompleted.
+  `complete` never moves again, `failed` parks the operation without dropping
+  completed domains. The table is created by the v2 migration in the Manager
+  database, never in the legacy source root.
+- **Never in place.** Every v1.14.x release sets `pragma journal_mode = WAL`, and
+  a plain `mode=ro` open of a WAL database creates `usage.sqlite-wal` and
+  `usage.sqlite-shm` next to it. Preflight therefore copies `usage.sqlite` and
+  its sidecars into a private scratch directory (`OpenSnapshot`), digests the
+  source files before the copy, again after it, and the copy as it is written —
+  any difference blocks with `upgrade_source_changed` — then opens only the copy
+  with `mode=ro` plus `query_only` and removes the scratch directory. The source
+  fence is taken through a read-only descriptor
+  (`processlock.AcquireExistingReadOnly`), so a stopped source preserved on a
+  read-only mount still proves exclusivity. `upgrade status` uses the same
+  snapshot for the Manager database, so it works when the Manager volume is not
+  writable.
 - **Checks, in order:** `source_ownership` (`upgrade_source_busy`,
-  `upgrade_source_unreadable`), `source_version`
-  (`upgrade_source_version_unsupported`), `fingerprint`, `disk`
-  (`upgrade_disk_insufficient`), `cpa_classification`, `parity`. Parity gaps
-  (missing/mismatched projection, past watermark, per-day deleted coverage
-  disagreement) never block; they are reported for a later explicit decision.
-- **Version source.** 1.x never persisted its release, so the release is a
-  floor derived from schema and settings markers and compared with
-  `bootstrap.PlannedDirectRelease`. A marker introduced after the pinned release
-  is a mismatch. Re-pinning to v1.14.10 is U1-1b, not this slice.
-- **CLI.** `cpa-manager-plus upgrade preflight --legacy <dir> [--json]` prints
-  the report and exits 0 (ready), 1 (blocked) or 2 (usage/environment).
-  `cpa-manager-plus upgrade status [--json] [--db-path PATH]` reads the
-  operation row read-only, so both work on non-writable volumes.
+  `upgrade_source_unreadable`, `upgrade_source_changed`,
+  `upgrade_snapshot_failed`), `source_version`
+  (`upgrade_source_version_undeclared`, `upgrade_source_version_unsupported`,
+  `upgrade_source_already_v2`), `fingerprint`, `disk`
+  (`upgrade_disk_insufficient`, `upgrade_disk_probe_failed`),
+  `cpa_classification`, `parity`. Parity gaps (missing/mismatched/stale
+  projection, past watermark, per-day deleted coverage disagreement) never
+  block; they are reported for a later explicit decision. A failed free-space
+  probe blocks: an unmeasured target volume is never assumed to be big enough,
+  and the probe measures the volume that will receive the copy, not the source.
+- **Version source.** No 1.x release persisted its release string: v1.14.0
+  through v1.14.10 write the same tables, and the only per-release values in
+  `settings` are derived-rollup format revisions that several releases share.
+  DDL therefore cannot discriminate releases, so preflight never infers one. The
+  operator declares the release (`--source-version`); preflight accepts only
+  exact equality with `bootstrap.PlannedDirectRelease` and blocks anything else
+  with both values. A source that already carries a v2-only table
+  (`gateway_*`, `fresh_*`, `upgrade_operations`) blocks with
+  `upgrade_source_already_v2`. Re-pinning to v1.14.10 is U1-1b, not this slice.
+- **Parity trust.** The `projection_v1` watermark is trusted only when
+  `schema_version = 1`, `structure_revision` equals
+  `usageidentity.MonitoringProjectionStructureRevision()` and the status is set
+  and not `clearing`. A same-timestamp projection row in any other state is
+  reported as stale rather than healthy, because the state that produced it
+  cannot vouch for it.
+- **CLI.** `cpa-manager-plus upgrade preflight --legacy <dir> --source-version
+  <release> [--target-dir DIR] [--json]` prints the report and exits 0 (ready),
+  1 (blocked) or 2 (usage/environment). `cpa-manager-plus upgrade status
+  [--json] [--db-path PATH]` reads the operation row from a private snapshot, so
+  both work on non-writable volumes.
 - **Deferred:** v1.14.10 re-pin and its qualification evidence (U1-1b), the
   copy-in entry, reconciliation execution and CPA import (U1-2), and route
   cutover/rollback (U1-3).

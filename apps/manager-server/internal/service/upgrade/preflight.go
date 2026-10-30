@@ -5,6 +5,12 @@
 // locks in place or otherwise writes anything under that root. A report is
 // evidence for a later authorized step, not an authorization: no flag in it
 // permits a write.
+//
+// The source database is never opened in place. A plain read-only open of a WAL
+// database creates -shm/-wal files beside it, which would write into a source
+// that is supposed to be preserved. Preflight copies usage.sqlite and its WAL
+// sidecars into private scratch space, proves that the source did not change
+// while the copy was taken, and reads only that copy.
 package upgrade
 
 import (
@@ -39,10 +45,28 @@ const (
 // Blocked codes. Parity gaps are never codes: they are reported for explicit
 // operator confirmation instead of blocking.
 const (
-	CodeSourceBusy               = "upgrade_source_busy"
-	CodeSourceUnreadable         = "upgrade_source_unreadable"
+	// CodeSourceBusy means the 1.x Manager still owns the source.
+	CodeSourceBusy = "upgrade_source_busy"
+	// CodeSourceUnreadable means the source cannot be used as a 1.x Manager
+	// database: missing, broken, or not a Manager database at all.
+	CodeSourceUnreadable = "upgrade_source_unreadable"
+	// CodeSourceVersionUnsupported means the declared release differs from the
+	// pinned one. Both values are in the check detail.
 	CodeSourceVersionUnsupported = "upgrade_source_version_unsupported"
-	CodeDiskInsufficient         = "upgrade_disk_insufficient"
+	// CodeSourceVersionUndeclared means no release was declared. The version is
+	// not recoverable from the database, so a declaration is required.
+	CodeSourceVersionUndeclared = "upgrade_source_version_undeclared"
+	// CodeSourceAlreadyV2 means the source already carries v2-only tables.
+	CodeSourceAlreadyV2 = "upgrade_source_already_v2"
+	// CodeSourceChanged means the source was written while it was being copied.
+	CodeSourceChanged = "upgrade_source_changed"
+	// CodeSnapshotFailed means the private copy could not be made.
+	CodeSnapshotFailed = "upgrade_snapshot_failed"
+	// CodeDiskInsufficient means the target volume cannot hold the copy.
+	CodeDiskInsufficient = "upgrade_disk_insufficient"
+	// CodeDiskProbeFailed means free space could not be measured. An unknown
+	// value is never treated as enough.
+	CodeDiskProbeFailed = "upgrade_disk_probe_failed"
 )
 
 // Source kinds reuse the vocabulary of the existing legacy preflight.
@@ -66,9 +90,25 @@ type Options struct {
 	// LegacyRoot is the v1 data directory: usage.sqlite, data.key and
 	// usage-archives/.
 	LegacyRoot string
+	// DeclaredVersion is the 1.x release the operator declares the source was
+	// running. A 1.x database does not record its release, so this declaration
+	// is the only exact version signal; it must equal the pinned release. An
+	// empty value blocks the source.
+	DeclaredVersion string
+	// ScratchDir is the base directory for the private snapshot copy. It has to
+	// be writable and big enough to hold the source database. Empty uses the OS
+	// temporary directory.
+	ScratchDir string
+	// TargetDir is the directory on the volume that will receive the upgrade
+	// copy. The disk probe measures free space there. Empty probes the scratch
+	// volume.
+	TargetDir string
 	// AvailableBytes overrides the free-space probe. Tests inject a requirement
 	// without depending on the host disk. Nil uses the platform probe.
-	AvailableBytes func(legacyRoot string) (int64, error)
+	AvailableBytes func(targetDir string) (int64, error)
+	// afterCopy runs after the snapshot copy and before the second source
+	// fingerprint. Tests use it to simulate a source that was not stopped.
+	afterCopy func()
 }
 
 // Check is one preflight observation. Detail is free text for the operator and
@@ -81,15 +121,17 @@ type Check struct {
 }
 
 // ParityGaps counts raw-deleted events whose retained projection is missing,
-// mismatched or past the projection watermark, plus the days where the deleted
-// coverage table disagrees with the archive refs. Counts and dates only: a gap
-// does not block, it asks the operator for a later explicit decision.
+// mismatched, stale or past the projection watermark, plus the days where the
+// deleted coverage table disagrees with the archive refs. Counts and dates only:
+// a gap does not block, it asks the operator for a later explicit decision.
 type ParityGaps struct {
 	DeletedEventRefs      int      `json:"deletedEventRefs"`
 	MissingProjection     int      `json:"missingProjection"`
 	MismatchedProjection  int      `json:"mismatchedProjection"`
+	StaleProjection       int      `json:"staleProjection"`
 	PastWatermark         int      `json:"pastWatermark"`
 	ProjectionStateUsable bool     `json:"projectionStateUsable"`
+	ProjectionStateReason string   `json:"projectionStateReason,omitempty"`
 	CoverageDaysWithGaps  int      `json:"coverageDaysWithGaps"`
 	AffectedDates         []string `json:"affectedDates"`
 }
@@ -133,60 +175,85 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		report.Blocked = append(report.Blocked, code)
 	}
 
+	scratchBase := strings.TrimSpace(options.ScratchDir)
+	targetDir := strings.TrimSpace(options.TargetDir)
+	if targetDir == "" {
+		targetDir = scratchBase
+	}
+
 	databasePath := filepath.Join(root, databaseFileName)
-	// The fence is taken first and held for the whole inspection; every later
-	// read happens while this process exclusively owns the source.
-	lock, lockErr := processlock.AcquireExisting(databasePath)
-	if lockErr == nil {
-		defer func() { _ = lock.Close() }()
-	}
-	db, schema, openErr := openReadOnlySource(ctx, databasePath)
-	if db != nil {
-		defer func() { _ = db.Close() }()
-	}
-	if openErr == nil {
-		report.SourceKind = schema.sourceKind()
-	} else if errors.Is(openErr, errSourceDatabaseMissing) {
+	if _, statErr := os.Lstat(databasePath); os.IsNotExist(statErr) {
 		report.SourceKind = SourceKindMissingDatabase
 	}
 
-	// 1. Source stopped and exclusively ours, plus read-only integrity.
-	switch {
-	case lockErr != nil:
-		report.Checks = append(report.Checks, Check{
-			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceBusy, Detail: ownershipDetail(lockErr),
-		})
-		block(CodeSourceBusy)
-	case openErr != nil:
-		report.Checks = append(report.Checks, Check{
-			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceUnreadable, Detail: unreadableDetail(openErr),
-		})
-		block(CodeSourceUnreadable)
-	default:
-		report.Checks = append(report.Checks, Check{
-			Name: CheckSourceOwnership, Status: StatusPass, Detail: "exclusive source lock held; quick_check ok",
-		})
+	// The fingerprint is the state the snapshot has to preserve. It is taken
+	// before the copy and repeated afterwards, so a source that is still being
+	// written is refused instead of half-imported.
+	before, fingerprintErr := fingerprintSource(root)
+
+	// The fence is taken first and held for the whole inspection. It is opened
+	// read-only: a stopped source is normally preserved without write access.
+	lock, lockErr := processlock.AcquireExistingReadOnly(databasePath)
+	if lockErr == nil {
+		defer func() { _ = lock.Close() }()
+	}
+	var snapshot *Snapshot
+	var openErr error
+	if lockErr == nil {
+		snapshot, openErr = OpenSnapshot(ctx, databasePath, scratchBase)
+		if snapshot != nil {
+			defer func() { _ = snapshot.Close() }()
+			if options.afterCopy != nil {
+				options.afterCopy()
+			}
+			if fingerprintErr == nil {
+				if after, afterErr := fingerprintSource(root); afterErr == nil && after.Digest != before.Digest {
+					_ = snapshot.Close()
+					snapshot = nil
+					openErr = errSourceChanged
+				}
+			}
+		}
 	}
 
-	// 2. Source version against the pinned contract.
-	if openErr != nil {
+	var schema sourceSchema
+	if snapshot != nil {
+		if err := quickCheckSource(ctx, snapshot.DB()); err != nil {
+			openErr = err
+		} else if schema, err = readSourceSchema(ctx, snapshot.DB()); err != nil {
+			openErr = err
+		} else {
+			report.SourceKind = schema.sourceKind()
+		}
+	}
+
+	// Nothing below reads the source when the fence could not be taken: a live
+	// source is never inspected, not even for a version string.
+	readable := lockErr == nil && openErr == nil
+
+	// 1. Source stopped and exclusively ours, plus read-only integrity.
+	report.Checks = append(report.Checks, ownershipCheck(lockErr, openErr))
+	if code := ownershipCode(lockErr, openErr); code != "" {
+		block(code)
+	}
+
+	// 2. Declared source version against the pinned contract, plus the v2-only
+	// table guard.
+	if !readable {
 		report.Checks = append(report.Checks, Check{
 			Name: CheckSourceVersion, Status: StatusSkipped, Detail: "source database was not readable",
 		})
 	} else {
-		version := detectSourceVersion(schema, pinnedSourceVersion())
-		report.SourceVersion = version.Release
-		check := Check{Name: CheckSourceVersion, Status: StatusPass, Detail: version.detail()}
-		if !version.compatible() {
-			check.Status = StatusBlocked
-			check.Code = CodeSourceVersionUnsupported
-			block(CodeSourceVersionUnsupported)
+		report.SourceVersion = declaredVersion(options.DeclaredVersion)
+		check := versionCheck(report.SourceKind, schema.v2OnlyTables(), options.DeclaredVersion, pinnedSourceVersion())
+		if check.Status == StatusBlocked {
+			block(check.Code)
 		}
 		report.Checks = append(report.Checks, check)
 	}
 
-	// 3. Deterministic source fingerprint.
-	fingerprint, sourceBytes, fingerprintErr := fingerprintSource(root)
+	// 3. Deterministic source fingerprint. The reported value is the state the
+	// snapshot was taken from.
 	if fingerprintErr != nil {
 		report.Checks = append(report.Checks, Check{
 			Name: CheckFingerprint, Status: StatusBlocked, Code: CodeSourceUnreadable,
@@ -194,16 +261,25 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		})
 		block(CodeSourceUnreadable)
 	} else {
-		report.Fingerprint = fingerprint
-		report.Checks = append(report.Checks, Check{
-			Name: CheckFingerprint, Status: StatusPass, Detail: fmt.Sprintf("sha256 over source manifest; sourceBytes=%d", sourceBytes),
-		})
+		report.Fingerprint = before.Digest
+		check := Check{
+			Name: CheckFingerprint, Status: StatusPass,
+			Detail: fmt.Sprintf("sha256 over source manifest; sourceBytes=%d", before.Bytes),
+		}
+		if errors.Is(openErr, errSourceChanged) {
+			check.Status = StatusBlocked
+			check.Code = CodeSourceChanged
+			check.Detail = fmt.Sprintf("sha256 of the pre-copy state; sourceBytes=%d", before.Bytes)
+			block(CodeSourceChanged)
+		}
+		report.Checks = append(report.Checks, check)
 	}
 
-	// 4. Disk space for the copy plus 20% headroom.
-	check, diskBlocked := diskCheck(root, sourceBytes, options)
+	// 4. Disk space for the copy plus 20% headroom, on the volume that will
+	// receive it.
+	check, diskBlocked := diskCheck(before.Bytes, targetDir, options)
 	if diskBlocked {
-		block(CodeDiskInsufficient)
+		block(check.Code)
 	}
 	report.Checks = append(report.Checks, check)
 
@@ -211,12 +287,12 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	report.Checks = append(report.Checks, classifyCPA(root))
 
 	// 6. Parity gaps. Reported for confirmation; never blocking.
-	if openErr != nil {
+	if !readable {
 		report.Checks = append(report.Checks, Check{
 			Name: CheckParity, Status: StatusSkipped, Detail: "source database was not readable",
 		})
 	} else {
-		gaps, parityErr := detectParityGaps(ctx, db, schema)
+		gaps, parityErr := detectParityGaps(ctx, snapshot.DB(), schema)
 		if parityErr != nil {
 			report.Checks = append(report.Checks, Check{
 				Name: CheckParity, Status: StatusSkipped, Detail: "parity detection unavailable: " + rootCause(parityErr),
@@ -227,11 +303,13 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 			if gaps.any() {
 				status = StatusGap
 			}
-			report.Checks = append(report.Checks, Check{
-				Name: CheckParity, Status: status,
-				Detail: fmt.Sprintf("deletedEventRefs=%d missingProjection=%d mismatchedProjection=%d pastWatermark=%d coverageDaysWithGaps=%d",
-					gaps.DeletedEventRefs, gaps.MissingProjection, gaps.MismatchedProjection, gaps.PastWatermark, gaps.CoverageDaysWithGaps),
-			})
+			detail := fmt.Sprintf("deletedEventRefs=%d missingProjection=%d mismatchedProjection=%d staleProjection=%d pastWatermark=%d coverageDaysWithGaps=%d",
+				gaps.DeletedEventRefs, gaps.MissingProjection, gaps.MismatchedProjection, gaps.StaleProjection,
+				gaps.PastWatermark, gaps.CoverageDaysWithGaps)
+			if !gaps.ProjectionStateUsable && gaps.ProjectionStateReason != "" {
+				detail += "; projection state unusable: " + gaps.ProjectionStateReason
+			}
+			report.Checks = append(report.Checks, Check{Name: CheckParity, Status: status, Detail: detail})
 		}
 	}
 
@@ -240,7 +318,52 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 }
 
 func (g ParityGaps) any() bool {
-	return g.MissingProjection > 0 || g.MismatchedProjection > 0 || g.PastWatermark > 0 || g.CoverageDaysWithGaps > 0
+	return g.MissingProjection > 0 || g.MismatchedProjection > 0 || g.StaleProjection > 0 ||
+		g.PastWatermark > 0 || g.CoverageDaysWithGaps > 0
+}
+
+// ownershipCheck reports the exclusivity and integrity observation.
+func ownershipCheck(lockErr, openErr error) Check {
+	check := Check{Name: CheckSourceOwnership, Status: StatusPass}
+	switch {
+	case lockErr != nil:
+		check.Status = StatusBlocked
+		check.Code = CodeSourceBusy
+		check.Detail = ownershipDetail(lockErr)
+	case openErr != nil:
+		check.Status = StatusBlocked
+		check.Code, check.Detail = ownershipFailure(openErr)
+	default:
+		check.Detail = "source lock held read-only; private snapshot verified; quick_check ok"
+	}
+	return check
+}
+
+func ownershipCode(lockErr, openErr error) string {
+	switch {
+	case lockErr != nil:
+		return CodeSourceBusy
+	case openErr != nil:
+		code, _ := ownershipFailure(openErr)
+		return code
+	default:
+		return ""
+	}
+}
+
+func ownershipFailure(err error) (string, string) {
+	switch {
+	case errors.Is(err, errDatabaseMissing):
+		return CodeSourceUnreadable, "source database is missing"
+	case errors.Is(err, errSourceIntegrity):
+		return CodeSourceUnreadable, "source database failed quick_check"
+	case errors.Is(err, errSourceChanged):
+		return CodeSourceChanged, "source files changed while the snapshot was taken"
+	case errors.Is(err, errSnapshotFailed):
+		return CodeSnapshotFailed, rootCause(err)
+	default:
+		return CodeSourceUnreadable, "source database could not be read through a private snapshot"
+	}
 }
 
 func resolveLegacyRoot(root string) (string, error) {
@@ -277,16 +400,6 @@ func ownershipDetail(err error) string {
 	default:
 		return "source lock could not be taken"
 	}
-}
-
-func unreadableDetail(err error) string {
-	if errors.Is(err, errSourceDatabaseMissing) {
-		return "source database is missing"
-	}
-	if errors.Is(err, errSourceIntegrity) {
-		return "source database failed quick_check"
-	}
-	return "source database could not be opened read-only"
 }
 
 // rootCause is the shortest stable description of a wrapped error.

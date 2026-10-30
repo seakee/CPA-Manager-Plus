@@ -185,3 +185,78 @@ func TestPutKeepsOneRowAndCreationTime(t *testing.T) {
 		t.Fatalf("reconciliation = %s, want {}", stored.Reconciliation)
 	}
 }
+
+// TestPutRefusesToMoveTheStageBackwards is the regression for M3: Put used to
+// overwrite the stage and the domain list with whatever the caller passed.
+func TestPutRefusesToMoveTheStageBackwards(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("advance verify: %v", err)
+	}
+	before, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	err = repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStagePreflight,
+		DomainsDone: []string{model.UpgradeDomainUsageEvents},
+	})
+	if !errors.Is(err, upgradeoperation.ErrStageRegression) {
+		t.Fatalf("put error = %v, want ErrStageRegression", err)
+	}
+	after, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after rejected put: %v", err)
+	}
+	if after.Stage != before.Stage || after.UpdatedAtMS != before.UpdatedAtMS {
+		t.Fatalf("rejected put changed the row: %q/%d -> %q/%d", before.Stage, before.UpdatedAtMS, after.Stage, after.UpdatedAtMS)
+	}
+}
+
+// TestPutRefusesToClearRecordedDomains is the second half of M3.
+func TestPutRefusesToClearRecordedDomains(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCopyIn); err != nil {
+		t.Fatalf("advance copy_in: %v", err)
+	}
+	err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStageReconcile,
+		DomainsDone: []string{},
+	})
+	if !errors.Is(err, upgradeoperation.ErrDomainCleared) {
+		t.Fatalf("put error = %v, want ErrDomainCleared", err)
+	}
+	stored, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !stored.HasDomain(model.UpgradeDomainSourceCopy) {
+		t.Fatalf("domains = %v, want source_copy retained", stored.DomainsDone)
+	}
+}
+
+func TestPutMayOnlyAppendDomainsAndAdvance(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStagePreflight); err != nil {
+		t.Fatalf("advance preflight: %v", err)
+	}
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStageCopyIn,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainUsageEvents},
+	}); err != nil {
+		t.Fatalf("forward put: %v", err)
+	}
+	stored, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if stored.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("stage = %q, want copy_in", stored.Stage)
+	}
+	if !stored.HasDomain(model.UpgradeDomainUsageEvents) {
+		t.Fatalf("domains = %v, want usage_events appended", stored.DomainsDone)
+	}
+}

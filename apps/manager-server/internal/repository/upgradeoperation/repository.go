@@ -25,6 +25,7 @@ var (
 	// ErrStageRegression reports an attempt to move the operation backwards.
 	// The attempted write is rejected without touching the row.
 	ErrStageRegression = errors.New("upgrade operation stage cannot move backwards")
+	ErrDomainCleared   = errors.New("upgrade operation domain cannot be removed")
 	ErrUnknownDomain   = errors.New("upgrade operation domain is not supported")
 	ErrUnknownStage    = errors.New("upgrade operation stage is not supported")
 	ErrInvalidRow      = errors.New("upgrade operation row is invalid")
@@ -107,40 +108,56 @@ func decodeStringList(raw string, column string) ([]string, error) {
 	return values, nil
 }
 
-// Put replaces the single row. A zero CreatedAtMS keeps the recorded creation
-// time of an existing row, so re-writing progress never rewrites history.
+// Put replaces the single row without letting recorded progress move
+// backwards. The stage may only advance (or park in failed), every domain that
+// is already recorded must still be present, and the creation time is fixed by
+// the first write. Observations, reconciliation output and error details may be
+// rewritten freely.
 func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	op.Normalize()
 	if err := op.Validate(); err != nil {
 		return err
 	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UnixMilli()
-	if op.UpdatedAtMS == 0 {
+	// Take the write lock before reading so a concurrent advance cannot be
+	// overwritten with an older stage or a shorter domain list.
+	if _, err := tx.ExecContext(ctx, `insert into `+tableName+`
+		(id, stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?)
+		on conflict(id) do nothing`, string(op.Stage), now, now); err != nil {
+		return err
+	}
+	current, found, err := scanOperation(tx.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("upgrade operation row disappeared during put")
+	}
+	if !current.Stage.CanAdvanceTo(op.Stage) {
+		return fmt.Errorf("%w: %q -> %q", ErrStageRegression, current.Stage, op.Stage)
+	}
+	for _, domain := range current.DomainsDone {
+		if !op.HasDomain(domain) {
+			return fmt.Errorf("%w: %q", ErrDomainCleared, domain)
+		}
+	}
+	if current.CreatedAtMS > 0 {
+		op.CreatedAtMS = current.CreatedAtMS
+	} else if op.CreatedAtMS == 0 {
+		op.CreatedAtMS = now
+	}
+	if op.UpdatedAtMS == 0 || op.UpdatedAtMS < op.CreatedAtMS {
 		op.UpdatedAtMS = now
 	}
-	if op.CreatedAtMS == 0 {
-		// Resolve the creation time in the same transaction as the write so a
-		// concurrent advance cannot be overwritten with a later creation time.
-		tx, err := r.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		var existing int64
-		switch err := tx.QueryRowContext(ctx, `select created_at_ms from `+tableName+` where id = 1`).Scan(&existing); {
-		case errors.Is(err, sql.ErrNoRows), err == nil && existing <= 0:
-			op.CreatedAtMS = now
-		case err != nil:
-			return err
-		default:
-			op.CreatedAtMS = existing
-		}
-		if err := writeOperation(ctx, tx, op); err != nil {
-			return err
-		}
-		return tx.Commit()
+	if err := writeOperation(ctx, tx, op); err != nil {
+		return err
 	}
-	return writeOperation(ctx, r.db, op)
+	return tx.Commit()
 }
 
 type operationWriter interface {
