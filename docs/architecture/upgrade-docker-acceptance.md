@@ -43,7 +43,8 @@ node bin/ci/upgrade-docker.mjs --keep          # keep the scratch tree
 | fault: dropped table on the target | `upgrade_reconcile_target_incomplete` naming the missing table |
 | fault: natively busy source | `upgrade_source_busy` from `flock` held on `usage.sqlite.manager.lock` |
 | rollback | plan → real compose apply on the plan's volume and port → the restarted 1.x accepts a new row → probe of the manager's own listener refused with `upgrade_rollback_probe_self` → `--verify` records `rolled_back` with the image, endpoint and observed fingerprint |
-| admission | with the operation unfinished the manager answers `/health` 503 and serves neither wizard route |
+| admission, unfinished | with the recorded row at `copy_in` and at `reconcile` the manager answers `/health` 503 and serves both wizard reads on the fixed Bootstrap carrier: 200 to the 1.x administrator key only (status shows the recorded stage and `nextAction`), 401 to no credential or a foreign one, and 405 with `Allow: GET` only after the key is proved; the canonical continuation stays 404 because a copied root carries no Fresh record |
+| admission, complete | the terminal `complete` row admits the full writable surface (`/health` 200) and both reads answer 404 to every caller, the source key included |
 
 Every fault case also asserts that the target root is byte-identical across the
 refused command (`targetRootUnchanged`).
@@ -67,6 +68,15 @@ refused command (`targetRootUnchanged`).
    the marker exists for. The marker now proves materialization and only the
    members the migration never touches are compared. Regression:
    `TestCopyInResumesAfterAnInterruptionInsideTheMigration`.
+3. **Wizard reads after the copy-in** (`cmd/cpa-manager-plus/startup_discovery.go`,
+   was `:59`). An unfinished operation admits only the fixed Bootstrap surface,
+   and the copy-in replaces `usage.sqlite`, so the copied root carries no Fresh
+   record for the canonical continuation: both wizard read routes answered 404
+   while the process had a `copy_in` or `reconcile` stage recorded, and the
+   operator could never see the stage the chain had just written. The two reads
+   are now mounted beside the Upgrade entry leaf on the fixed surface, under the
+   same gate and the same source credential, and retire on completion.
+   Regression: `TestStartupServesTheUpgradeWizardFromTheCopiedOperation`.
 
 ## Gaps the harness records but cannot close inside this slice
 
@@ -77,11 +87,9 @@ refused command (`targetRootUnchanged`).
   against it, while building and recording the `v1.14.10` fixture for the U1-1b
   re-pin (same image, same seed script: `--v1-tag v1.14.10`). After the re-pin
   the two fixtures collapse into one and the harness needs no change.
-* **Wizard after the copy-in.** An unfinished operation admits only the read-only
-  discovery surface (`cmd/cpa-manager-plus/startup_discovery.go:59`), so the two
-  Upgrade wizard read routes are not mounted and the wizard cannot show the stage
-  it just recorded. The copy-in target root also cannot carry a Fresh
-  installation record, because the copy-in replaces `usage.sqlite`. The harness
-  proves the routes on a real Fresh installation and asserts the post-copy-in
-  admission as it is, so the gap stays visible in the evidence
-  (`upgrade_wizard_unreachable_after_copy_in`).
+* **Completion transition.** No step in this milestone writes the terminal
+  `complete` row, so the completed-admission case writes that stage onto the row
+  the real copy-in recorded. The evidence admission demands — the
+  `upgraded-legacy` kind, both source fingerprints and the backup manifest digest
+  — is the copy-in's own; only the stage token is the harness's. The evidence
+  says so (`admission.completionInput`).

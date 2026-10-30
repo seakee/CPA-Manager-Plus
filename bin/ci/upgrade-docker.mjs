@@ -11,7 +11,9 @@
 //     unchanged target root;
 //   * a rollback recorded against a real 1.x stack that wrote after the copy;
 //   * that the manager admits only the Upgrade surface while the operation is
-//     unfinished, and that a probe answered by the manager itself is refused.
+//     unfinished — both wizard reads included, from the copied root alone —
+//     that it serves the full surface and retires those reads once the operation
+//     is complete, and that a probe answered by the manager itself is refused.
 //
 // Everything it creates is named `<prefix>-*` where the prefix is
 // `cpampd<runid>`; nothing else on the host is stopped, removed or renamed, and
@@ -186,7 +188,7 @@ async function main() {
     evidence.chains.main = primary;
 
     await assertWizard(binary, workspace.main.source);
-    await assertAdmission(binary, workspace.main.target);
+    await assertAdmission(binary, workspace);
 
     await faultSourceTouched(binary, workspace);
     await faultInterruptedCopyIn(binary, workspace);
@@ -264,8 +266,8 @@ function diff(before, after) {
   return `removed=[${removed.join(',')}] added=[${added.join(',')}]`;
 }
 
-// recordProductFixes names the two product defects this harness found, with the
-// regression that keeps them closed. They are recorded in every run so the
+// recordProductFixes names the product defects this harness found, with the
+// regression that keeps each closed. They are recorded in every run so the
 // evidence says what the chain could not have proved before them.
 function recordProductFixes() {
   evidence.findings.push({
@@ -283,6 +285,14 @@ function recordProductFixes() {
       'a copy-in killed after materialize and before the operation row committed left its provenance marker, but the resume compared the migration-rewritten database sidecars with the backup, deleted the marker and then refused to replace the members it had already moved, so the window the marker exists for could not be resumed',
     file: 'apps/manager-server/internal/service/upgrade/copyin.go:657',
     regression: 'apps/manager-server/internal/service/upgrade/copyin_test.go TestCopyInResumesAfterAnInterruptionInsideTheMigration',
+  });
+  evidence.findings.push({
+    code: 'upgrade_wizard_unreachable_after_copy_in',
+    status: 'fixed',
+    detail:
+      'an unfinished operation admits only the fixed Bootstrap surface, and the copy-in target replaces usage.sqlite so it carries no Fresh record for the canonical continuation: both wizard read routes answered 404 while the wizard had a stage recorded, so the operator could never see the copy_in or reconcile the process had just written. The two reads are now mounted beside the Upgrade entry leaf on the fixed surface, under the same gate and the same source credential, and retire with completion',
+    file: 'apps/manager-server/cmd/cpa-manager-plus/startup_discovery.go:73',
+    regression: 'apps/manager-server/cmd/cpa-manager-plus/startup_upgrade_wizard_test.go TestStartupServesTheUpgradeWizardFromTheCopiedOperation',
   });
 }
 
@@ -626,6 +636,21 @@ function expectedReleaseOf(command) {
 // wizard read routes
 // ---------------------------------------------------------------------------
 
+// assertNoSecretInBody refuses a read body that publishes a credential, the
+// configured source path, the harness's own paths or a full digest.
+function assertNoSecretInBody(label, body, secrets) {
+  const text = JSON.stringify(body);
+  for (const secret of secrets) {
+    if (secret && text.includes(secret)) {
+      throw new Error(`${label} leaked ${JSON.stringify(String(secret).slice(0, 24))}: ${text.slice(0, 200)}`);
+    }
+  }
+  const fullDigest = /[0-9a-f]{64}/.exec(text);
+  if (fullDigest) {
+    throw new Error(`${label} published a full digest (${fullDigest[0].slice(0, 12)}…): ${text.slice(0, 200)}`);
+  }
+}
+
 // assertWizard proves the two read-only Upgrade routes on a real Fresh
 // installation: the 1.x administrator key is the only credential they accept,
 // the preflight is the real report of the real source, and no secret reaches the
@@ -677,17 +702,8 @@ async function assertWizard(binary, sourceRoot) {
   // No secret in either body: the source administrator key, the data key
   // material, any absolute path, the full fingerprint or the v2 Admin key.
   const dataKey = fs.readFileSync(path.join(sourceRoot, 'data.key'), 'utf8').trim();
-  const bodies = [JSON.stringify(preflight.body), JSON.stringify(status.body)];
-  for (const body of bodies) {
-    for (const secret of [ADMIN_V1, ADMIN_V2, dataKey, sourceRoot, SCRATCH, root]) {
-      if (secret && body.includes(secret)) {
-        throw new Error(`the wizard route leaked ${JSON.stringify(secret.slice(0, 24))}: ${body.slice(0, 200)}`);
-      }
-    }
-    const fullDigest = /[0-9a-f]{64}/.exec(body);
-    if (fullDigest) {
-      throw new Error(`the wizard route published a full digest (${fullDigest[0].slice(0, 12)}…): ${body.slice(0, 200)}`);
-    }
+  for (const body of [preflight.body, status.body]) {
+    assertNoSecretInBody('wizard', body, [ADMIN_V1, ADMIN_V2, dataKey, sourceRoot, SCRATCH, root]);
   }
 
   evidence.wizard = {
@@ -709,41 +725,171 @@ async function assertWizard(binary, sourceRoot) {
   stableFacts.push(`wizard:${preflight.body.ready}:${status.body.nextAction}`);
 
   stopHostManager(name);
-  evidence.findings.push({
-    code: 'upgrade_wizard_unreachable_after_copy_in',
-    severity: 'blocker',
-    detail:
-      'an unfinished operation admits only the read-only discovery surface, so the two Upgrade wizard read routes are not mounted and the wizard cannot show the stage it just recorded; the routes answer only from a Fresh installation that the copy-in target root cannot carry',
-    file: 'apps/manager-server/cmd/cpa-manager-plus/startup_discovery.go:59',
-    observed: 'manager started on the copied v2 root: /health 503, both installation/upgrade routes 404',
-  });
 }
 
-// assertAdmission proves the manager admits only the Upgrade surface while the
-// operation is unfinished, and that nothing else is served.
-async function assertAdmission(binary, targetRoot) {
-  const port = freePort();
-  const name = `${PREFIX}-admission`;
-  startHostManager({ name, binary, dataDir: targetRoot, port, adminKey: ADMIN_V2, legacyRoot: '' });
-  await waitForContainerExitOrHealth(name, port);
-  const health = httpJson('GET', `http://127.0.0.1:${port}/health`, {});
-  const status = httpJson('GET', `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/status`, {
-    headers: { Authorization: `Bearer ${ADMIN_V1}` },
-  });
-  const canonical = httpJson('GET', `http://127.0.0.1:${port}/control/api/v2/installation/upgrade/status`, {
-    headers: { Authorization: `Bearer ${ADMIN_V1}` },
-  });
-  assertValue(health.status === 503, `admission: /health = ${health.status} want 503 while the operation is unfinished`);
-  assertValue(status.status === 404, `admission: wizard status = ${status.status} want 404`);
-  assertValue(canonical.status === 404, `admission: canonical wizard status = ${canonical.status} want 404`);
-  evidence.admission = {
-    health: health.status,
-    wizardStatus: status.status,
-    canonicalWizardStatus: canonical.status,
-    surface: 'upgrade-only',
+// ---------------------------------------------------------------------------
+// admission: the Upgrade surface
+// ---------------------------------------------------------------------------
+
+// proveWizardReadContract asserts the contract of both read routes on a manager
+// the harness already started. The source administrator key is proved before any
+// path or verb verdict — an anonymous or foreign caller never learns the verb —
+// a write is the 405 only a proved credential sees, and each body is the recorded
+// operation or the source preflight, with no credential, path or full digest.
+function proveWizardReadContract(port, label, expectedStage, sourceRoot) {
+  const base = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
+  const read = {};
+  for (const resource of ['preflight', 'status']) {
+    const target = `${base}/${resource}`;
+    const anonymous = httpJson('GET', target, {});
+    assertValue(anonymous.status === 401, `${label}: anonymous GET ${resource} = ${anonymous.status} want 401`);
+    const foreign = httpJson('GET', target, { headers: { Authorization: `Bearer ${ADMIN_V2}` } });
+    assertValue(foreign.status === 401, `${label}: GET ${resource} with the v2 Admin key = ${foreign.status} want 401`);
+    const anonymousWrite = httpJson('POST', target, {});
+    assertValue(anonymousWrite.status === 401, `${label}: anonymous POST ${resource} = ${anonymousWrite.status} want 401`);
+    // Only a proved credential learns the verb.
+    const write = httpJson('POST', target, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+    assertValue(
+      write.status === 405 && write.allow === 'GET',
+      `${label}: POST ${resource} with the source Admin key = ${write.status} Allow=${write.allow} want 405 with Allow: GET`,
+    );
+    const proved = httpJson('GET', target, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+    assertValue(proved.status === 200, `${label}: GET ${resource} with the source Admin key = ${proved.status}: ${JSON.stringify(proved.body).slice(0, 200)}`);
+    assertValue(proved.body?.contractVersion === 'cpamp.upgrade-wizard.v1', `${label}: GET ${resource} contract = ${proved.body?.contractVersion}`);
+    assertNoSecretInBody(`${label}: GET ${resource}`, proved.body, [ADMIN_V1, ADMIN_V2, sourceRoot, SCRATCH]);
+    if (resource === 'preflight') {
+      assertValue(proved.body?.ready === true, `${label}: preflight ready = ${proved.body?.ready}`);
+      assertValue(proved.body?.sourceKind === 'legacy-manager', `${label}: preflight source kind = ${proved.body?.sourceKind}`);
+      read.preflight = { status: proved.status, contractVersion: proved.body.contractVersion, ready: proved.body.ready, sourceKind: proved.body.sourceKind };
+      continue;
+    }
+    // The status body is the operation the copy-in recorded: the wizard can show
+    // the stage it just reached from the copied root alone.
+    assertValue(proved.body?.recorded === true, `${label}: status recorded = ${proved.body?.recorded}`);
+    assertValue(proved.body?.stage === expectedStage, `${label}: status stage = ${proved.body?.stage} want ${expectedStage}`);
+    assertValue(proved.body?.nextAction === expectedStage, `${label}: status nextAction = ${proved.body?.nextAction} want ${expectedStage}`);
+    read.status = {
+      status: proved.status,
+      contractVersion: proved.body.contractVersion,
+      recorded: proved.body.recorded,
+      stage: proved.body.stage,
+      nextAction: proved.body.nextAction,
+    };
+  }
+  // Only the two exact leaves are mounted: a query string, a trailing slash, an
+  // extra segment and another fixed-carrier resource answer 404 even to the key
+  // the reads accept.
+  const fixedAPI = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2`;
+  for (const shape of [`${base}`, `${base}/status?wait=1`, `${base}/status/`, `${base}/status/extra`, `${fixedAPI}/operation`]) {
+    const probe = httpJson('GET', shape, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+    assertValue(probe.status === 404, `${label}: ${shape} = ${probe.status} want 404: only the two exact leaves are mounted`);
+  }
+  return {
+    credential: { anonymous: 401, v2AdminKey: 401, write: 405, allow: 'GET' },
+    pathShapes: 404,
+    ...read,
   };
-  stableFacts.push(`admission:${health.status}:${status.status}`);
-  stopHostManager(name);
+}
+
+// proveUnfinishedAdmission starts the manager on a copied root whose recorded
+// row is unfinished and proves the whole admission contract of that state: 503
+// on /health, both reads answering 200 to the 1.x administrator key alone, and
+// no canonical continuation, because the copy-in target carries no Fresh record.
+async function proveUnfinishedAdmission(binary, root, sourceRoot, stage) {
+  const port = freePort();
+  const name = `${PREFIX}-admission-${stage.replace(/_/g, '')}`;
+  startHostManager({ name, binary, dataDir: root, port, adminKey: ADMIN_V2, legacyRoot: sourceRoot });
+  try {
+    await waitForContainerExitOrHealth(name, port);
+    const health = httpJson('GET', `http://127.0.0.1:${port}/health`, {});
+    assertValue(health.status === 503, `admission(${stage}): /health = ${health.status} want 503 while the operation is unfinished`);
+    const reads = proveWizardReadContract(port, `admission(${stage})`, stage, sourceRoot);
+    const canonical = httpJson('GET', `http://127.0.0.1:${port}/control/api/v2/installation/upgrade/status`, {
+      headers: { Authorization: `Bearer ${ADMIN_V1}` },
+    });
+    assertValue(canonical.status === 404, `admission(${stage}): canonical wizard status = ${canonical.status} want 404: the copied root carries no Fresh record`);
+    return { health: health.status, surface: 'upgrade-only', ...reads, canonicalWizardStatus: canonical.status };
+  } finally {
+    stopHostManager(name);
+  }
+}
+
+// proveCompletedAdmission proves the reads end with the operation. The recorded
+// row is the terminal `complete` one, so admission serves the full writable
+// surface — /health 200 — and both fixed-surface reads answer 404 to every
+// caller, including the key they accepted a moment earlier.
+async function proveCompletedAdmission(binary, completedRoot, sourceRoot) {
+  const port = freePort();
+  const name = `${PREFIX}-admission-complete`;
+  startHostManager({ name, binary, dataDir: completedRoot, port, adminKey: ADMIN_V2, legacyRoot: sourceRoot });
+  try {
+    await waitForHealth(port, `${name} /health`, 200);
+    const base = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
+    const reads = {};
+    for (const resource of ['preflight', 'status']) {
+      for (const [credential, headers] of [
+        ['anonymous', {}],
+        ['the source Admin key', { Authorization: `Bearer ${ADMIN_V1}` }],
+      ]) {
+        const read = httpJson('GET', `${base}/${resource}`, { headers });
+        assertValue(read.status === 404, `admission(complete): GET ${resource} with ${credential} = ${read.status} want 404 after ProductComplete`);
+      }
+      reads[resource] = 404;
+    }
+    return { health: 200, surface: 'full', preflight: reads.preflight, status: reads.status };
+  } finally {
+    stopHostManager(name);
+  }
+}
+
+// assertAdmission proves both sides of the Upgrade surface's admission: while
+// the recorded operation is unfinished (copy_in and reconcile) the fixed
+// Bootstrap carrier serves the wizard's two read routes beside the Upgrade entry
+// leaf under the source credential, and once the operation is complete the same
+// process serves the full surface and the reads are gone.
+async function assertAdmission(binary, workspace) {
+  const sourceRoot = workspace.main.source;
+  // The copy_in state: the same source the chain copied, stopped after `run`, so
+  // the row is at a stage the wizard has to be able to show before reconcile.
+  const copyInRoot = path.join(SCRATCH, 'work', 'admission', 'copy_in');
+  fs.rmSync(copyInRoot, { recursive: true, force: true });
+  fs.mkdirSync(copyInRoot, { recursive: true });
+  const preflight = runCli(binary, ['upgrade', 'preflight', '--legacy', sourceRoot, '--json'], 'admission:preflight', { expectExit: 0 });
+  assertValue(parseJson(preflight.stdout, 'admission:preflight').ready === true, 'admission: the chain source is not ready');
+  const run = runCli(binary, ['upgrade', 'run', '--legacy', sourceRoot, '--target', copyInRoot, '--json'], 'admission:run', { expectExit: 0 });
+  const runStage = parseJson(run.stdout, 'admission:run').result?.stage;
+  assertValue(runStage === 'copy_in', `admission: run stage=${runStage}`);
+
+  const copyIn = await proveUnfinishedAdmission(binary, copyInRoot, sourceRoot, 'copy_in');
+  const reconcile = await proveUnfinishedAdmission(binary, workspace.main.target, sourceRoot, 'reconcile');
+
+  // Completion is the terminal stage on the row the copy-in recorded. No
+  // completion transition ships in this milestone (it is the operation's own
+  // later steps), so the harness writes that stage onto the real row: the
+  // evidence admission demands — the upgraded-legacy kind, both fingerprints and
+  // the backup manifest digest — is the copy-in's own, and the stage token is
+  // the only input the harness supplies.
+  const completedRoot = path.join(SCRATCH, 'work', 'admission', 'complete');
+  fs.rmSync(completedRoot, { recursive: true, force: true });
+  copyTree(workspace.main.target, completedRoot);
+  fs.rmSync(path.join(completedRoot, 'usage.sqlite.manager.lock'), { force: true });
+  const completedDatabase = path.join(completedRoot, 'usage.sqlite');
+  sqliteExec(completedDatabase, "update upgrade_operations set stage = 'complete' where id = 1");
+  assertValue(
+    sqliteCount(completedDatabase, "select count(*) as count from upgrade_operations where id = 1 and stage = 'complete'") === 1,
+    'admission: the terminal stage did not land on the recorded row',
+  );
+  const completed = await proveCompletedAdmission(binary, completedRoot, sourceRoot);
+
+  evidence.admission = {
+    surface: 'upgrade-only',
+    states: { copy_in: copyIn, reconcile },
+    completed,
+    completionInput: 'terminal stage written onto the row the real copy-in recorded; the evidence the admission demands is the copy-in\'s own',
+  };
+  stableFacts.push(`admission:copy_in:${copyIn.health}:${copyIn.status.status}:${copyIn.status.stage}:${copyIn.status.nextAction}:${copyIn.preflight.status}`);
+  stableFacts.push(`admission:reconcile:${reconcile.health}:${reconcile.status.status}:${reconcile.status.stage}:${reconcile.status.nextAction}:${reconcile.preflight.status}`);
+  stableFacts.push(`admission:complete:${completed.health}:${completed.status}:${completed.preflight}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1316,7 +1462,9 @@ function httpJson(method, url, { headers = {}, body } = {}) {
           body: body ? body : undefined,
         });
         const text = await response.text();
-        process.stdout.write(JSON.stringify({ status: response.status, body: text }));
+        // The Allow verdict is the 405 contract a proved credential sees, so it
+        // travels with the answer instead of being inferred from the status.
+        process.stdout.write(JSON.stringify({ status: response.status, allow: response.headers.get('allow'), body: text }));
       })().catch((error) => {
         process.stdout.write(JSON.stringify({ status: 0, body: String(error) }));
       });
@@ -1338,7 +1486,7 @@ function httpJson(method, url, { headers = {}, body } = {}) {
   } catch {
     payload = { raw: String(parsed.body).slice(0, 400) };
   }
-  return { status: parsed.status, body: payload, raw: parsed.body };
+  return { status: parsed.status, allow: parsed.allow ?? null, body: payload, raw: parsed.body };
 }
 
 // ---------------------------------------------------------------------------

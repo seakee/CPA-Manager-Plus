@@ -1,0 +1,777 @@
+{
+  "contract": "cpamp.upgrade-docker.v1",
+  "runId": "7338f04f",
+  "prefix": "cpampd7338f04f",
+  "mode": {
+    "reuseFixture": true,
+    "v1Tag": "v1.14.10",
+    "sourceTagOverride": "v1.14.4",
+    "acceptedRelease": "v1.14.4"
+  },
+  "host": {
+    "platform": "darwin",
+    "arch": "x64",
+    "node": "v22.21.1",
+    "docker": "27.3.1"
+  },
+  "fixtures": [
+    {
+      "role": "source",
+      "tag": "v1.14.4",
+      "commit": "166262365d506157b99968105c890f480cc7c07c",
+      "image": "cpamp-d-fixture-v1:1.14.4",
+      "rollbackImage": "cpampd-fixture/upgrade:1.14.4",
+      "imageId": "sha256:775b2040f4a2990fa3dbb0ddf72175068a935092f57b3ca7dcc06af85951262b",
+      "built": false,
+      "dataset": {
+        "events": 36,
+        "days": [
+          "2026-10-20",
+          "2026-10-21",
+          "2026-10-22"
+        ],
+        "models": [
+          "gpt-5.1",
+          "claude-sonnet-4.5"
+        ],
+        "apiKeys": 2,
+        "prices": 2,
+        "archivedSegments": 1,
+        "archivedEvents": 12,
+        "importedEvents": 36,
+        "archivedRunEvents": 12,
+        "archiveSegments": 1,
+        "sourceSha256": "5382c477d16bb17786add280f2162b16966904355ced594e48f25b2043546404"
+      }
+    },
+    {
+      "role": "next",
+      "tag": "v1.14.10",
+      "commit": "a67ed8834a914ab24c36d2490fa6bb6d4166724c",
+      "image": "cpamp-d-fixture-v1:1.14.10",
+      "rollbackImage": "cpampd-fixture/upgrade:1.14.10",
+      "imageId": "sha256:94a99b1bad2cb0d8633854f8a532fc7b74110da25f21e971cb6cc144563fae1a",
+      "built": false,
+      "dataset": {
+        "events": 36,
+        "days": [
+          "2026-10-20",
+          "2026-10-21",
+          "2026-10-22"
+        ],
+        "models": [
+          "gpt-5.1",
+          "claude-sonnet-4.5"
+        ],
+        "apiKeys": 2,
+        "prices": 2,
+        "archivedSegments": 1,
+        "archivedEvents": 12,
+        "importedEvents": 36,
+        "archivedRunEvents": 12,
+        "archiveSegments": 1,
+        "sourceSha256": "f4eb419298abd37f947e211a421351110906a80fe744be212a81d50cee134d7a"
+      }
+    }
+  ],
+  "commands": [
+    {
+      "name": "go build ./cmd/cpa-manager-plus",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker run cpampd7338f04f-seed-v11410",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker stop cpampd7338f04f-seed-v11410",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker run cpampd7338f04f-seed-v11410",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker stop cpampd7338f04f-seed-v11410",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "preflight(next-fixture)",
+      "exitCode": 1,
+      "stdoutSha256": "1df63c2bcbffda36981bf20ec0ca09b94616c77c06732cfee6dba4eae6f4480e",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "next-fixture:run",
+      "exitCode": 1,
+      "stdoutSha256": "acdbc324e23b9d85316da2f71c914fdaf08215c34105ba28e231bfc5a8a77d94",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker run cpampd7338f04f-seed-v1144",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker stop cpampd7338f04f-seed-v1144",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker run cpampd7338f04f-seed-v1144",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker stop cpampd7338f04f-seed-v1144",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "main:preflight",
+      "exitCode": 0,
+      "stdoutSha256": "4445499c0ec694449593a73b70c11ce3d6c5175c3dbeb293612f85ffa1c545b7",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "main:run",
+      "exitCode": 0,
+      "stdoutSha256": "dc2e433029984e6fe78b9ceb16e4cc4e1e131a782747fdd30757b534c6ff22cc",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "main:reconcile",
+      "exitCode": 0,
+      "stdoutSha256": "38e0b2743fb9295f5e026e9c6187d36609e03a26e71d3fefd89ddf3c6bc9894e",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "main:status",
+      "exitCode": 0,
+      "stdoutSha256": "9ff83d2acbae5f16ace531964426a1b6a3640ff605a2b46aa5815f7319491d2f",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "cpa-manager-plus initialize",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "admission:preflight",
+      "exitCode": 0,
+      "stdoutSha256": "b5b278b536146faca812fa803c07cedd1676e6d5a15aa64fb1b5f7800242cfdc",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "admission:run",
+      "exitCode": 0,
+      "stdoutSha256": "2445ad57845802a589aa3accb30e4a90017cafcf94ad0db721e7e7b1302a05c8",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "touched:preflight",
+      "exitCode": 0,
+      "stdoutSha256": "515935de00e6ea5487f36a5f949478f2f560eb3ec1abac355cb5973c5fbb7264",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "touched:run",
+      "exitCode": 0,
+      "stdoutSha256": "98691d21a564819de2d036456754c666bb8c4908220663a7c0139ce3209e638a",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "touched:reconcile",
+      "exitCode": 0,
+      "stdoutSha256": "6e4d2fa0d8d441335b7f4536d671ab5e929c20e77ddf176088cc3d16983b4028",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "touched:status",
+      "exitCode": 0,
+      "stdoutSha256": "25c19539db28a0da9bdac3d352f1ffcf5c539e11b02516dc0e4b8fbf1c303785",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "touched:rerun",
+      "exitCode": 0,
+      "stdoutSha256": "3fc6e8a4d815cb41c495292fffb4a3a0e7c6aeffd264a6773532300aca13ff4c",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "touched:rollback-prepare",
+      "exitCode": 1,
+      "stdoutSha256": null,
+      "stderrSha256": "0b1e8c9f43b65a2cb04d210d745ba8d617f592b5c94e67f7582be0d1c149ac6d",
+      "stderrTail": "upgrade_source_changed: the 1.x source is not the volume this operation copied; a v1 restart would not restore the recorded state\n2026/10/30 20:00:33 upgrade: upgrade: refused: upgrade_source_changed: the 1.x source is not the volume this operation copied; a v1 restart would not restore the recorded state"
+    },
+    {
+      "name": "upgrade run (SIGKILL after the marker)",
+      "exitCode": -1,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "interrupted:status",
+      "exitCode": 0,
+      "stdoutSha256": "b632745afc6369e139c80404488d5cf82a4321aaa0c05b87f3c499add3170361",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "interrupted:resume",
+      "exitCode": 0,
+      "stdoutSha256": "5c04fc2739e6feb520b1437401c07f1750603e7c15cac1ee71456202d0287a65",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "interrupted:recorded",
+      "exitCode": 0,
+      "stdoutSha256": "fe26f2f0d22bf4bb796a3969e9a8f66e0c615381b0ec94718a04e85c3b58ee97",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-recoverable:preflight",
+      "exitCode": 0,
+      "stdoutSha256": "ff45079bb3cff2941e0447cfbe445488d2c3f7b26286b778dc8299e01874af6f",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-recoverable:run",
+      "exitCode": 0,
+      "stdoutSha256": "b15d43ce9b71c8ff59dc035c81d7e29ecc6b6b5846c47917329e9f3cc415f5b0",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-recoverable:reconcile",
+      "exitCode": 0,
+      "stdoutSha256": "e6880354b9d9c075da595156f62a25f51b37bd496cb9443e47909a89bcfe28cf",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-recoverable:status",
+      "exitCode": 0,
+      "stdoutSha256": "b75e94efd69efc09d98cbfb261a4414bac95533e6c32134c54b4a1f032e0f999",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-recoverable:refused",
+      "exitCode": 1,
+      "stdoutSha256": "cab1a26461c02ecffadebc25d69293b88e9296777ba2e1d17b281bb11bad5708",
+      "stderrSha256": "7baf22762d192428b18ab26728c6a769363cfd9a6b4b8d4a5e4e9548e4eb31f3",
+      "stderrTail": "2026/10/30 20:00:34 upgrade: upgrade_reconcile_mismatch: 3 days must be acknowledged before they can be marked incomplete; nothing was marked: 2026-10-20, 2026-10-21, 2026-10-22"
+    },
+    {
+      "name": "rollup-recoverable:acknowledged",
+      "exitCode": 0,
+      "stdoutSha256": "a459dd0d1420015e5e1b5fbeda586c1a6e78503fdce0ee01e1934bd6469387fc",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-unrecoverable:preflight",
+      "exitCode": 0,
+      "stdoutSha256": "41052633dd2594966cadbea7972b88cfb6144e74451a87ffe74b261509c1369e",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-unrecoverable:run",
+      "exitCode": 0,
+      "stdoutSha256": "45edcf737e3f16a738920a948abf07b79fa91768e3d6d5787dc1f610c5435624",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-unrecoverable:reconcile",
+      "exitCode": 0,
+      "stdoutSha256": "541b87ee0add45a22c943c60b94728c39688306427b446874d0ec48a9a0c7780",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-unrecoverable:status",
+      "exitCode": 0,
+      "stdoutSha256": "0abcd56f6a9713b1d92d778550f128669eddc35576e226c2cb30080269106f6e",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollup-unrecoverable:refused",
+      "exitCode": 1,
+      "stdoutSha256": "b81d45d85e635e9491abdc8c67a951d5462dd59121b567253b27d921b1bad5fe",
+      "stderrSha256": "dfc11e42fd03187b6f5c0bc2c2999b29d641e56d37772eada782377a6fc21e67",
+      "stderrTail": "2026/10/30 20:00:34 upgrade: upgrade_reconcile_target_incomplete: the cleared usage_pricing_hourly_rollups_v1 rollup lost 1 day the v2 store holds no retained events for, so nothing can rebuild 1 it and no acknowledgement can waive 1 it: 2026-10-20; nothing was compared and nothing was marked"
+    },
+    {
+      "name": "dropped:preflight",
+      "exitCode": 0,
+      "stdoutSha256": "42c61656976370d0bf16e01f8e6b0b17076624c8295318428824ed3787259e9a",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "dropped:run",
+      "exitCode": 0,
+      "stdoutSha256": "08be05555327744510f59bcad9d29fcd41e57604fd900553b981c990782b3191",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "dropped:reconcile",
+      "exitCode": 0,
+      "stdoutSha256": "253d5d4e4cfee55ee441eb78efa93cf1688cef763a6bd1940f49c01af88ef5d7",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "dropped:status",
+      "exitCode": 0,
+      "stdoutSha256": "814b03fedf5012243f2e6502cd9abaae9f23c0120987587fdaa427ff1888cab3",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "dropped:refused",
+      "exitCode": 1,
+      "stdoutSha256": "7da70959c855cef29a6b7aa848f75120d7b63791e7aef7711a329a50f64e77fd",
+      "stderrSha256": "df69cafadbf0f19bce95f9e07304f015e319e0e29da7bb6608d73a5a92a076da",
+      "stderrTail": "2026/10/30 20:00:35 upgrade: upgrade_reconcile_target_incomplete: the v2 store holds no usage_monitoring_account_daily_rollups_v1 table, so the \"history\" domain cannot show the 3 days the 1.x source holds; nothing was compared and nothing was marked"
+    },
+    {
+      "name": "busy:preflight",
+      "exitCode": 1,
+      "stdoutSha256": "a2da81955d083a0c34e0aab454b2a274c1e1622b0aef31596b8f923906659eaf",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollback:prepare",
+      "exitCode": 0,
+      "stdoutSha256": "41b5768b599e45ba8481bfc52ecd9be2614759bd2aca2b63305e8b60de6b2043",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker compose -p cpampd7338f04f -f - up -d",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollback:self-probe",
+      "exitCode": 1,
+      "stdoutSha256": null,
+      "stderrSha256": "a3efb0cbbc6a11595c582d2bbc6a90f6601d45f616b0b74849f30bb516c2dbbd",
+      "stderrTail": "…rt the rollback plan printed (18318) instead\n2026/10/30 20:00:36 upgrade: upgrade: refused: upgrade_rollback_probe_self: the health probe addresses this Manager's own listener on port 19770; the v2 Manager answers /health with the same \"cpa-manager-plus\" identity, so that answer proves the v2 stack is up, not that the 1.x volume is back; probe the 1.x port the rollback plan printed (18318) instead"
+    },
+    {
+      "name": "rollback:verify",
+      "exitCode": 0,
+      "stdoutSha256": "dea1e722c9e2cb6bc774666f85a371682376ea45baecde0812651b651c74a14d",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "rollback:status",
+      "exitCode": 0,
+      "stdoutSha256": "80d695a9a26154d45ee84ec8e86f2c5d9d0dd3b19fb5512ae9ae08601f55f1b6",
+      "stderrSha256": null,
+      "stderrTail": ""
+    },
+    {
+      "name": "docker compose -p cpampd7338f04f down",
+      "exitCode": 0,
+      "stdoutSha256": null,
+      "stderrSha256": null,
+      "stderrTail": ""
+    }
+  ],
+  "chains": {
+    "main": {
+      "source": "/Users/seakee/WorkSpace/Worktree/CPA-Manager-Plus/feat/v2-upgrade-wizard/bin/tmp/u1-8/7338f04f/work/main/source",
+      "target": "/Users/seakee/WorkSpace/Worktree/CPA-Manager-Plus/feat/v2-upgrade-wizard/bin/tmp/u1-8/7338f04f/work/main/target",
+      "preflight": {
+        "exitCode": 0,
+        "ready": true,
+        "sourceKind": "legacy-manager",
+        "sourceVersion": "v1.14.0",
+        "fingerprint": "e45b142a06737d29e90b57f16449596773a7c5e01f6ad029b3d6c1352e8973bd",
+        "parityGaps": {
+          "deletedEventRefs": 12,
+          "missingProjection": 0,
+          "mismatchedProjection": 0,
+          "pastWatermark": 0,
+          "projectionStateUsable": true,
+          "coverageDaysWithGaps": 0,
+          "affectedDates": []
+        },
+        "reportSha256": "4445499c0ec694449593a73b70c11ce3d6c5175c3dbeb293612f85ffa1c545b7"
+      },
+      "copyIn": {
+        "exitCode": 0,
+        "stage": "copy_in",
+        "domainsDone": [
+          "source_copy"
+        ],
+        "backupManifestSha256": "78d62a2823278bac8fb08793b75e65022b0a11e0df0c1fe9083ad67b8d8d8aec",
+        "sourceFingerprintBefore": "e45b142a06737d29e90b57f16449596773a7c5e01f6ad029b3d6c1352e8973bd",
+        "sourceFingerprintAfter": "e45b142a06737d29e90b57f16449596773a7c5e01f6ad029b3d6c1352e8973bd",
+        "reportSha256": "dc2e433029984e6fe78b9ceb16e4cc4e1e131a782747fdd30757b534c6ff22cc"
+      },
+      "reconcile": {
+        "exitCode": 0,
+        "stage": "reconcile",
+        "domainsDone": [
+          "source_copy",
+          "retained_projection",
+          "pricing",
+          "coverage"
+        ],
+        "domains": [
+          {
+            "domain": "retained",
+            "table": "usage_events",
+            "applicable": true,
+            "sourceDays": 2,
+            "comparedDays": 2,
+            "mismatches": 0
+          },
+          {
+            "domain": "pricing",
+            "table": "usage_pricing_hourly_rollups_v1",
+            "applicable": true,
+            "sourceDays": 3,
+            "comparedDays": 3,
+            "mismatches": 0
+          },
+          {
+            "domain": "coverage",
+            "table": "usage_archive_deleted_coverage_daily",
+            "applicable": true,
+            "sourceDays": 1,
+            "comparedDays": 1,
+            "mismatches": 0
+          },
+          {
+            "domain": "history",
+            "table": "usage_monitoring_account_daily_rollups_v1",
+            "applicable": true,
+            "sourceDays": 3,
+            "comparedDays": 3,
+            "mismatches": 0
+          }
+        ],
+        "reportSha256": "38e0b2743fb9295f5e026e9c6187d36609e03a26e71d3fefd89ddf3c6bc9894e"
+      },
+      "status": {
+        "exitCode": 0,
+        "recorded": true,
+        "stage": "reconcile",
+        "domainsDone": [
+          "source_copy",
+          "retained_projection",
+          "pricing",
+          "coverage"
+        ],
+        "reportSha256": "9ff83d2acbae5f16ace531964426a1b6a3640ff605a2b46aa5815f7319491d2f"
+      }
+    }
+  },
+  "faults": [
+    {
+      "name": "source-touched-after-copy-in",
+      "exitCode": 1,
+      "code": "upgrade_source_changed",
+      "targetRootUnchanged": true,
+      "rerunExit": 0,
+      "rerunStage": "reconcile"
+    },
+    {
+      "name": "copy-in-interrupted-before-the-row",
+      "exitCode": 0,
+      "code": "resumed_copy_in",
+      "targetRootUnchanged": false,
+      "markerSeen": true,
+      "recordedBeforeResume": false,
+      "resumedStage": "copy_in",
+      "restoredAgain": false
+    },
+    {
+      "name": "cleared-derived-rollup-with-retained-support",
+      "exitCode": 1,
+      "code": "upgrade_reconcile_mismatch",
+      "targetRootUnchanged": true,
+      "acknowledgedDays": [
+        "2026-10-20",
+        "2026-10-21",
+        "2026-10-22"
+      ],
+      "newlyMarkedDays": 3,
+      "acknowledgedExit": 0
+    },
+    {
+      "name": "cleared-derived-rollup-without-support",
+      "exitCode": 1,
+      "code": "upgrade_reconcile_target_incomplete",
+      "targetRootUnchanged": true,
+      "acknowledgeAttempted": "2026-10-20"
+    },
+    {
+      "name": "dropped-table-on-the-target",
+      "exitCode": 1,
+      "code": "upgrade_reconcile_target_incomplete",
+      "targetRootUnchanged": true,
+      "table": "usage_monitoring_account_daily_rollups_v1"
+    },
+    {
+      "name": "natively-busy-source",
+      "exitCode": 1,
+      "code": "upgrade_source_busy",
+      "targetRootUnchanged": true,
+      "fence": "flock(LOCK_EX) on usage.sqlite.manager.lock"
+    }
+  ],
+  "rollback": {
+    "plan": {
+      "exitCode": 0,
+      "digest": "cbf5144f923df572f6cccfca90df3004e185ddc91881fe86763528f5d5e56809",
+      "image": "cpampd-fixture/upgrade:1.14.4",
+      "volume": "cpampd7338f04f_cpa-manager-plus-data",
+      "port": 19079,
+      "managerPort": 19770,
+      "backupDirectory": "/Users/seakee/WorkSpace/Worktree/CPA-Manager-Plus/feat/v2-upgrade-wizard/bin/tmp/u1-8/7338f04f/work/main/target/upgrade-backup",
+      "backupManifestSha256": "78d62a2823278bac8fb08793b75e65022b0a11e0df0c1fe9083ad67b8d8d8aec",
+      "sourceFingerprint": "e45b142a06737d29e90b57f16449596773a7c5e01f6ad029b3d6c1352e8973bd",
+      "reportSha256": "41b5768b599e45ba8481bfc52ecd9be2614759bd2aca2b63305e8b60de6b2043"
+    },
+    "applied": {
+      "exitCode": 0,
+      "health": "ok"
+    },
+    "v1WroteAfterCopyIn": {
+      "exitCode": 201,
+      "added": 1
+    },
+    "selfProbe": {
+      "exitCode": 1,
+      "code": "upgrade_rollback_probe_self"
+    },
+    "verify": {
+      "exitCode": 0,
+      "stage": "rolled_back",
+      "image": "cpampd-fixture/upgrade:1.14.4",
+      "statusUrl": "http://127.0.0.1:19079/health",
+      "observedFingerprint": "e45b142a06737d29e90b57f16449596773a7c5e01f6ad029b3d6c1352e8973bd",
+      "reportSha256": "dea1e722c9e2cb6bc774666f85a371682376ea45baecde0812651b651c74a14d"
+    },
+    "persistedStage": "rolled_back"
+  },
+  "wizard": {
+    "fragment": "/.well-known/cpamp-bootstrap/ui#handoff=redacted",
+    "port": 19180,
+    "contracts": {
+      "preflight": {
+        "exitCode": 200,
+        "contractVersion": "cpamp.upgrade-wizard.v1",
+        "ready": true,
+        "sourceKind": "legacy-manager"
+      },
+      "status": {
+        "exitCode": 200,
+        "recorded": false,
+        "nextAction": "preflight",
+        "stage": ""
+      }
+    },
+    "credential": {
+      "sourceAdminKey": "accepted",
+      "v2AdminKey": "refused (401)",
+      "anonymous": "refused (401)",
+      "write": "refused (405)"
+    },
+    "noSecretInBody": true,
+    "bodySha256": {
+      "preflight": "1fe6ed13aa186a3c8f26b58955a73105c3ce770053b9ec2ffdef86592c3fd60c",
+      "status": "965eb7ad387f5ce53e244808a45d32f65ff9e5d63ce9c51af59d7cdf769f3cb5"
+    }
+  },
+  "admission": {
+    "surface": "upgrade-only",
+    "states": {
+      "copy_in": {
+        "health": 503,
+        "surface": "upgrade-only",
+        "credential": {
+          "anonymous": 401,
+          "v2AdminKey": 401,
+          "write": 405,
+          "allow": "GET"
+        },
+        "pathShapes": 404,
+        "preflight": {
+          "status": 200,
+          "contractVersion": "cpamp.upgrade-wizard.v1",
+          "ready": true,
+          "sourceKind": "legacy-manager"
+        },
+        "status": {
+          "status": 200,
+          "contractVersion": "cpamp.upgrade-wizard.v1",
+          "recorded": true,
+          "stage": "copy_in",
+          "nextAction": "copy_in"
+        },
+        "canonicalWizardStatus": 404
+      },
+      "reconcile": {
+        "health": 503,
+        "surface": "upgrade-only",
+        "credential": {
+          "anonymous": 401,
+          "v2AdminKey": 401,
+          "write": 405,
+          "allow": "GET"
+        },
+        "pathShapes": 404,
+        "preflight": {
+          "status": 200,
+          "contractVersion": "cpamp.upgrade-wizard.v1",
+          "ready": true,
+          "sourceKind": "legacy-manager"
+        },
+        "status": {
+          "status": 200,
+          "contractVersion": "cpamp.upgrade-wizard.v1",
+          "recorded": true,
+          "stage": "reconcile",
+          "nextAction": "reconcile"
+        },
+        "canonicalWizardStatus": 404
+      }
+    },
+    "completed": {
+      "health": 200,
+      "surface": "full",
+      "preflight": 404,
+      "status": 404
+    },
+    "completionInput": "terminal stage written onto the row the real copy-in recorded; the evidence the admission demands is the copy-in's own"
+  },
+  "cleanup": {
+    "containers": [],
+    "volumes": [
+      {
+        "volume": "cpampd7338f04f_cpa-manager-plus-data",
+        "exitCode": 0
+      }
+    ],
+    "worktrees": [],
+    "errors": [],
+    "leftovers": {
+      "containers": [],
+      "volumes": []
+    }
+  },
+  "findings": [
+    {
+      "code": "upgrade_source_version_ladder",
+      "status": "fixed",
+      "detail": "the deleted-raw summary table was listed as a v1.14.6 marker although every 1.14.x release creates it, so a real source of the pinned release was reported newer than the pin and refused with upgrade_source_version_unsupported: no real 1.x install could pass preflight",
+      "file": "apps/manager-server/internal/service/upgrade/schema.go:366",
+      "regression": "apps/manager-server/internal/service/upgrade/preflight_test.go TestSourceVersionAcceptsThePinnedReleaseSchema"
+    },
+    {
+      "code": "upgrade_copy_in_interrupted_migration",
+      "status": "fixed",
+      "detail": "a copy-in killed after materialize and before the operation row committed left its provenance marker, but the resume compared the migration-rewritten database sidecars with the backup, deleted the marker and then refused to replace the members it had already moved, so the window the marker exists for could not be resumed",
+      "file": "apps/manager-server/internal/service/upgrade/copyin.go:657",
+      "regression": "apps/manager-server/internal/service/upgrade/copyin_test.go TestCopyInResumesAfterAnInterruptionInsideTheMigration"
+    },
+    {
+      "code": "upgrade_wizard_unreachable_after_copy_in",
+      "status": "fixed",
+      "detail": "an unfinished operation admits only the fixed Bootstrap surface, and the copy-in target replaces usage.sqlite so it carries no Fresh record for the canonical continuation: both wizard read routes answered 404 while the wizard had a stage recorded, so the operator could never see the copy_in or reconcile the process had just written. The two reads are now mounted beside the Upgrade entry leaf on the fixed surface, under the same gate and the same source credential, and retire with completion",
+      "file": "apps/manager-server/cmd/cpa-manager-plus/startup_discovery.go:73",
+      "regression": "apps/manager-server/cmd/cpa-manager-plus/startup_upgrade_wizard_test.go TestStartupServesTheUpgradeWizardFromTheCopiedOperation"
+    },
+    {
+      "code": "upgrade_source_version_pinned",
+      "severity": "blocker-for-u1-1b",
+      "detail": "the contract accepts v1.14.4, so a real v1.14.10 source is refused with upgrade_source_version_unsupported; the U1-1b re-pin is what makes the planned fixture usable",
+      "file": "apps/manager-server/internal/domain/bootstrap/contract.go:12",
+      "fixtureReusedForRePin": "cpamp-d-fixture-v1:1.14.10 (sha256:94a99b1bad2cb0d8633854f8a532fc7b74110da25f21e971cb6cc144563fae1a)"
+    }
+  ],
+  "startedAt": "2026-10-30T12:00:23.388Z",
+  "versionGap": {
+    "plannedTag": "v1.14.10",
+    "acceptedRelease": "v1.14.4",
+    "image": "cpamp-d-fixture-v1:1.14.10",
+    "imageId": "sha256:94a99b1bad2cb0d8633854f8a532fc7b74110da25f21e971cb6cc144563fae1a",
+    "commit": "a67ed8834a914ab24c36d2490fa6bb6d4166724c",
+    "preflight": {
+      "exitCode": 1,
+      "code": "upgrade_source_version_unsupported",
+      "detail": "expected=v1.14.4 observed=v1.14.7; markers newer than pinned: idx_usage_events_ts_latency_ttft_cover,usage_cache_accounting_semantics_revision=3",
+      "reportSha256": "1df63c2bcbffda36981bf20ec0ca09b94616c77c06732cfee6dba4eae6f4480e"
+    },
+    "targetRootCreated": false
+  },
+  "snapshot_source": "/Users/seakee/WorkSpace/Worktree/CPA-Manager-Plus/feat/v2-upgrade-wizard/bin/tmp/u1-8/7338f04f/source-v1.14.4",
+  "snapshot_archived": "/Users/seakee/WorkSpace/Worktree/CPA-Manager-Plus/feat/v2-upgrade-wizard/bin/tmp/u1-8/7338f04f/source-archived-v1.14.4",
+  "hostUntouched": {
+    "containers": 3,
+    "volumes": 70
+  },
+  "endedAt": "2026-10-30T12:00:37.345Z",
+  "durationMs": 13957,
+  "stableDigest": "fcb4e866b00d7b2ec3c30a2d66c8086a4172b4b42b93dceeed780f0835e04d7e",
+  "sha256": "7790472aca082afaf232610487b2a4fa3934b3662dcb1c47923eaa593d6ab207"
+}
