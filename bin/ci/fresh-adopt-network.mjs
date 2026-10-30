@@ -90,17 +90,19 @@ const providerKeys = {
   gemini: 'gemini-d-adopt-' + randomBytes(10).toString('hex'),
   codex: 'codex-d-adopt-' + randomBytes(10).toString('hex'),
 };
-const credentialFiles = {
-  'claude-source.json': JSON.stringify({
-    type: 'claude',
-    access_token: 'claude-d-adopt-' + randomBytes(12).toString('hex'),
-    expired: '2099-01-01T00:00:00Z',
-  }),
-  'codex-source.json': JSON.stringify({
-    type: 'codex',
-    access_token: 'codex-d-adopt-' + randomBytes(12).toString('hex'),
-  }),
-};
+// Enough credentials that the copy is a real run rather than one round trip: the
+// fault below is injected while the run is in flight, and a plan of a few items
+// could settle before an observer sees it.
+const credentialFiles = Object.fromEntries(
+  Array.from({ length: 40 }, (_, index) => [
+    'source-' + String(index).padStart(2, '0') + '.json',
+    JSON.stringify({
+      type: index % 2 === 0 ? 'claude' : 'codex',
+      access_token: 'adopt-seed-' + randomBytes(12).toString('hex'),
+      expired: '2099-01-01T00:00:00Z',
+    }),
+  ])
+);
 // A file the destination cannot parse. It is listed by the source like any other
 // credential, so it is copied by the plan and recorded as manual exactly as an
 // operator's own broken file would be.
@@ -467,22 +469,12 @@ function destinationCredentials() {
 
 let origin = '';
 let network = '';
-let sessionToken = '';
 let adminKey = '';
-const freshHeaders = () => ({ 'Content-Type': 'application/json', Authorization: 'Fresh ' + sessionToken });
 const adminHeaders = () => ({ Authorization: 'Bearer ' + adminKey });
-async function freshCall(resource, body) {
-  const response = await fetch(origin + api + resource, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: freshHeaders(),
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  let payload = null;
-  try {
-    payload = await response.json();
-  } catch {}
-  return { status: response.status, payload };
-}
+// The browser owns the one-time claim, so this script never holds a second Fresh
+// authority: the recorded summary is observed from the responses the page itself
+// reads. That is also the only observation that proves the page saw it.
+let lastSummary = null;
 async function adminGet(path) {
   const response = await fetch(origin + '/console/api/v2/' + path, { headers: adminHeaders() });
   assert.equal(response.status, 200, 'admin read ' + path + ': ' + response.status);
@@ -557,18 +549,6 @@ try {
   await wait(async () => (await fetch(origin + bootstrap + '/ui')).ok, 'Bootstrap UI', 120000);
   const claim = JSON.parse(Buffer.from(handoff.split('#handoff=')[1], 'base64url').toString());
   secretValues.push(claim.token);
-  const exchange = await fetch(origin + api + 'claim/exchange', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      identity: claim.identity,
-      claimGeneration: claim.claimGeneration,
-      token: claim.token,
-    }),
-  });
-  assert.equal(exchange.status, 200, 'claim exchange');
-  sessionToken = (await exchange.json()).token;
-  secretValues.push(sessionToken);
 
   browser = await chromium.launch({
     headless: true,
@@ -577,6 +557,12 @@ try {
   const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 1000 } });
   page = await context.newPage();
   page.on('pageerror', () => report.pageErrors.push('Uncaught browser error'));
+  page.on('response', async (response) => {
+    if (!new URL(response.url()).pathname.endsWith('/installation/adoption')) return;
+    try {
+      lastSummary = await response.json();
+    } catch {}
+  });
   await page.goto(origin + handoff);
   await page.getByTestId('fresh-setup-wizard').waitFor();
   await page.getByTestId('choose-adopt_existing').click();
@@ -601,8 +587,10 @@ try {
     const alert = page.getByRole('alert').first();
     await alert.waitFor({ timeout: 30000 });
     const message = await alert.innerText();
-    const operation = await freshCall('operation');
-    assert.equal(operation.payload?.strategy?.strategy ?? '', '', 'a refusal committed a strategy');
+    // Nothing was committed: the source form is still the page, and no inventory
+    // exists to confirm.
+    assert.equal(await page.getByTestId('adopt-inventory').count(), 0, 'a refusal staged an inventory');
+    assert.equal(await page.getByTestId('adopt-source-url').count(), 1, 'a refusal left the source stage');
     return message;
   };
   await check('a wrong management key is refused with adoption_source_read_unavailable', async () => {
@@ -665,14 +653,7 @@ try {
       true,
       'the commit must not be possible before the inventory is confirmed'
     );
-    const operation = await freshCall('operation');
-    assert.equal(operation.payload?.strategy?.stage, 'staged');
-    assert(
-      Array.isArray(operation.payload?.strategy?.adoptionDecisions) &&
-        operation.payload.strategy.adoptionDecisions.length > 0,
-      'the staged checkpoint carries no decisions'
-    );
-    return { stage: 'staged', decisions: operation.payload.strategy.adoptionDecisions.length };
+    return { stage: 'staged', text: inventory.slice(0, 200) };
   });
 
   await page.getByTestId('adopt-confirm-inventory').check();
@@ -680,26 +661,30 @@ try {
   // The run has begun. Cut the forwarder's NEW connections as soon as the first
   // item is recorded, so the remaining items fail before writing anything.
   await check('the migration commits the destination and records the first item', async () => {
+    // The page's own read is the progress path, so the observer below sees what
+    // the operator sees. Each round also presses Refresh, which is one more read,
+    // so the first item cannot hide between two poll intervals.
     await wait(async () => {
-      const summary = await freshCall('installation/adoption');
-      if (summary.status !== 200) return false;
-      if ((summary.payload?.items?.length ?? 0) > 0) {
-        writeFileSync(resolve(controlDir, 'refuse'), 'refuse new connections\n');
-        return true;
+      if ((lastSummary?.items?.length ?? 0) === 0) {
+        const refresh = page.getByTestId('adopt-refresh');
+        if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
+        return false;
       }
-      return false;
+      writeFileSync(resolve(controlDir, 'refuse'), 'refuse new connections\n');
+      return true;
     }, 'first recorded migration item', 120000);
-    const operation = await freshCall('operation');
-    assert.equal(operation.payload?.strategy?.stage, 'committed');
-    return { stage: 'committed' };
+    return { firstItems: lastSummary.items.length, planned: lastSummary.planned };
   });
   const retryableSummary = await check('the interrupted run settles as retryable, not as a failure', async () => {
-    let summary;
     await wait(async () => {
-      const read = await freshCall('installation/adoption');
-      summary = read.payload;
-      return read.status === 200 && summary?.finished === true && summary.running === false;
-    }, 'settled migration', 180000);
+      const settled = lastSummary?.finished === true && lastSummary.running === false;
+      if (!settled) {
+        const refresh = page.getByTestId('adopt-refresh');
+        if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
+      }
+      return settled;
+    }, 'settled migration', 240000);
+    const summary = lastSummary;
     assert(summary.retryable > 0, 'the interrupted run recorded no retryable item: ' + JSON.stringify(summary.counts));
     const failed = summary.items.filter((item) => item.outcome === 'failed');
     assert(failed.length > 0 && failed.every((item) => item.retryable), 'a failed item is not retryable');
@@ -725,17 +710,16 @@ try {
   rmSync(resolve(controlDir, 'refuse'), { force: true });
   await page.getByTestId('adopt-resume').click();
   await check('Resume continues from the recorded prefix and finishes the run', async () => {
-    let summary;
     await wait(async () => {
-      const read = await freshCall('installation/adoption');
-      summary = read.payload;
-      return (
-        read.status === 200 &&
-        summary?.finished === true &&
-        summary.running === false &&
-        summary.retryable === 0
-      );
-    }, 'resumed migration', 180000);
+      const done =
+        lastSummary?.finished === true && lastSummary.running === false && lastSummary.retryable === 0;
+      if (!done) {
+        const refresh = page.getByTestId('adopt-refresh');
+        if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
+      }
+      return done;
+    }, 'resumed migration', 240000);
+    const summary = lastSummary;
     assert(summary.planned >= retryableSummary.planned, 'the resumed plan shrank');
     return { counts: summary.counts, planned: summary.planned };
   });
@@ -744,8 +728,7 @@ try {
     assert.match(items, /Migrated/i);
     assert.match(items, /Needs manual work/i);
     assert.match(await page.getByTestId('adopt-progress').innerText(), /of \d+ items settled/);
-    const source = await freshCall('installation/adoption');
-    const summary = source.payload;
+    const summary = lastSummary;
     // Every seeded kind is reported, and the item the destination cannot take is
     // manual with a reason the operator can act on.
     assert(summary.counts.migrated > 0, 'nothing was migrated');
