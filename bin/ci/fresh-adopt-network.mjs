@@ -501,11 +501,6 @@ function adoptionRecord() {
     ).length,
   };
 }
-function countsOf(items) {
-  const counts = { migrated: 0, manual: 0, failed: 0, absent_at_source: 0 };
-  for (const item of items) counts[item.outcome] = (counts[item.outcome] || 0) + 1;
-  return counts;
-}
 async function adminGet(path) {
   const response = await fetch(origin + '/console/api/v2/' + path, { headers: adminHeaders() });
   assert.equal(response.status, 200, 'admin read ' + path + ': ' + response.status);
@@ -734,8 +729,11 @@ try {
     }, 'settled migration', 240000);
     // The page renders the same record; give its last poll a moment to land.
     await wait(async () => lastSummary !== null, 'the page read the summary', 30000);
-    const record = adoptionRecord();
-    const summary = { ...record, counts: countsOf(record.items) };
+    // The route's own projection carries the per-item retryable rule; the record
+    // only carries reasons. The page has read it by now, so its view is the one
+    // the operator saw.
+    assert(lastSummary, 'the page never read the summary');
+    const summary = lastSummary;
     assert(summary.retryable > 0, 'the interrupted run recorded no retryable item: ' + JSON.stringify(summary.counts));
     // A failure that wrote nothing is retryable; one that failed after a write is
     // not, and both are honest results of the same interruption. What the run must
@@ -780,11 +778,19 @@ try {
       if ((await refresh.count()) > 0 && !(await refresh.isDisabled())) await refresh.click();
       return false;
     }, 'resumed migration', 240000);
-    const record = adoptionRecord();
-    const summary = { ...record, counts: countsOf(record.items) };
+    assert(lastSummary, 'the page never read the resumed summary');
+    const summary = lastSummary;
     assert(summary.planned >= retryableSummary.planned, 'the resumed plan shrank');
     return { counts: summary.counts, planned: summary.planned };
   });
+  await wait(
+    async () =>
+      lastSummary?.finished === true &&
+      lastSummary.running === false &&
+      lastSummary.retryable === 0,
+    'the page rendered the finished run',
+    60000
+  );
   await check('the completion screen groups the per-item results', async () => {
     const items = await page.getByTestId('adopt-items').innerText();
     assert.match(items, /Migrated/i);
@@ -792,8 +798,6 @@ try {
     assert.match(await page.getByTestId('adopt-progress').innerText(), /of \d+ items settled/);
     // The record is the page's own source: the assertions below read it, and the
     // page text above proves the UI rendered the same facts.
-    const record = adoptionRecord();
-    const summary = { ...record, counts: countsOf(record.items) };
     // Every seeded kind is reported, and the item the destination cannot take is
     // manual with a reason the operator can act on.
     assert(summary.counts.migrated > 0, 'nothing was migrated');
