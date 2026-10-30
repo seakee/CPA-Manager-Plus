@@ -1253,6 +1253,7 @@ func Migrate(db *sql.DB) error {
 			domains_done text not null default '[]',
 			source_kind text,
 			source_version text,
+			source_root text,
 			source_fingerprint_before text,
 			source_fingerprint_after text,
 			backup_manifest_sha256 text,
@@ -1260,6 +1261,10 @@ func Migrate(db *sql.DB) error {
 			manual_items text not null default '[]',
 			error_code text,
 			error_detail text,
+			rollback_image text,
+			rollback_status_url text,
+			rollback_source_fingerprint text,
+			rollback_observed_at_ms integer,
 			created_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
@@ -1289,6 +1294,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureUsageArchiveRunColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUpgradeOperationRollbackColumns(db); err != nil {
 		return err
 	}
 	if err := ensureUsageEventSnapshotColumns(db); err != nil {
@@ -2984,6 +2992,52 @@ func ensureUsageArchiveRunColumns(db *sql.DB) error {
 	}
 	return nil
 
+}
+
+// ensureUpgradeOperationRollbackColumns adds the observation columns a rollback
+// records. A table created before a rollback could be recorded keeps its row:
+// the new columns are nullable, so an existing operation simply carries no
+// rollback evidence until one is recorded.
+func ensureUpgradeOperationRollbackColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(upgrade_operations)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, column := range []string{
+		"source_root text",
+		"rollback_image text",
+		"rollback_status_url text",
+		"rollback_source_fingerprint text",
+		"rollback_observed_at_ms integer",
+	} {
+		if _, ok := existing[strings.Fields(column)[0]]; ok {
+			continue
+		}
+		if _, err := db.Exec(`alter table upgrade_operations add column ` + column); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureCodexInspectionOwnershipColumns(db *sql.DB) error {

@@ -33,6 +33,33 @@ const (
 	// operation or the operator named carries no exact version, so a rollback
 	// plan would have to fall back on a moving tag. Nothing was written.
 	UpgradeErrorRollbackImageUnpinned UpgradeErrorCode = "upgrade_rollback_image_unpinned"
+	// UpgradeErrorRollbackImageFamily reports that the 1.x image names a release
+	// outside the recorded source's version family. A rollback restarts the
+	// version the operation copied, so a different family needs the explicit
+	// override. Nothing was written.
+	UpgradeErrorRollbackImageFamily UpgradeErrorCode = "upgrade_rollback_image_family"
+	// UpgradeErrorRollbackVolumeUnbound reports that the 1.x directory under
+	// decision cannot be tied to the source root the operation recorded, so no
+	// plan or verdict may claim "the original volume". Nothing was written.
+	UpgradeErrorRollbackVolumeUnbound UpgradeErrorCode = "upgrade_rollback_volume_unbound"
+	// UpgradeErrorRollbackRootsOverlap reports that the v2 data root and the 1.x
+	// source root contain each other. The 1.x volume is a source and must never
+	// become a rollback destination. Nothing was written.
+	UpgradeErrorRollbackRootsOverlap UpgradeErrorCode = "upgrade_rollback_roots_overlap"
+	// UpgradeErrorRollbackEvidenceStale reports that the observation a verdict
+	// would rest on was taken outside the freshness window, so it no longer
+	// describes the install being recorded. Nothing was written.
+	UpgradeErrorRollbackEvidenceStale UpgradeErrorCode = "upgrade_rollback_evidence_stale"
+	// UpgradeErrorRollbackProbeEndpoint reports that the health probe does not
+	// address the 1.x `GET /health` endpoint. Every other endpoint on the 1.x
+	// manager requires credentials, so a probe there proves nothing about the
+	// volume. Nothing was written.
+	UpgradeErrorRollbackProbeEndpoint UpgradeErrorCode = "upgrade_rollback_probe_endpoint"
+	// UpgradeErrorRollbackIdentityForeign reports that something answered, but
+	// not as this install: a health response naming another service, a backup
+	// that is not the recorded one, or a live volume that no longer holds the
+	// rows and archives the backup retained. Nothing was written.
+	UpgradeErrorRollbackIdentityForeign UpgradeErrorCode = "upgrade_rollback_identity_foreign"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -68,6 +95,12 @@ var (
 	ErrRollbackNotApplicable = &UpgradeError{Code: UpgradeErrorRollbackNotApplicable}
 	ErrRollbackUnproven      = &UpgradeError{Code: UpgradeErrorRollbackUnproven}
 	ErrRollbackImageUnpinned = &UpgradeError{Code: UpgradeErrorRollbackImageUnpinned}
+	ErrRollbackImageFamily   = &UpgradeError{Code: UpgradeErrorRollbackImageFamily}
+	ErrRollbackVolumeUnbound = &UpgradeError{Code: UpgradeErrorRollbackVolumeUnbound}
+	ErrRollbackRootsOverlap  = &UpgradeError{Code: UpgradeErrorRollbackRootsOverlap}
+	ErrRollbackEvidenceStale = &UpgradeError{Code: UpgradeErrorRollbackEvidenceStale}
+	ErrRollbackProbeEndpoint = &UpgradeError{Code: UpgradeErrorRollbackProbeEndpoint}
+	ErrRollbackIdentity      = &UpgradeError{Code: UpgradeErrorRollbackIdentityForeign}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

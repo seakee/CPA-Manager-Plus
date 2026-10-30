@@ -2494,6 +2494,65 @@ func TestEnsureAutomationColumnsAddsDecisionMetadata(t *testing.T) {
 	}
 }
 
+func TestEnsureUpgradeOperationRollbackColumnsKeepsTheRecordedRow(t *testing.T) {
+	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "legacy-upgrade-operation.sqlite")))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	// The shape an upgrade_operations table had before a rollback could carry
+	// observations.
+	if _, err := db.Exec(`create table upgrade_operations (
+		id integer primary key check(id = 1),
+		stage text not null default '',
+		domains_done text not null default '[]',
+		source_kind text,
+		source_version text,
+		source_fingerprint_before text,
+		source_fingerprint_after text,
+		backup_manifest_sha256 text,
+		reconciliation text not null default '{}',
+		manual_items text not null default '[]',
+		error_code text,
+		error_detail text,
+		created_at_ms integer not null,
+		updated_at_ms integer not null
+	)`); err != nil {
+		t.Fatalf("create the legacy upgrade_operations table: %v", err)
+	}
+	if _, err := db.Exec(`insert into upgrade_operations (
+		id, stage, domains_done, source_kind, source_version,
+		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
+		created_at_ms, updated_at_ms
+	) values (1, 'copy_in', '["source_copy"]', 'upgraded-legacy', 'v1.14.7',
+		'before', 'after', 'manifest', 1, 2)`); err != nil {
+		t.Fatalf("insert the recorded operation: %v", err)
+	}
+	if err := ensureUpgradeOperationRollbackColumns(db); err != nil {
+		t.Fatalf("migrate the rollback columns: %v", err)
+	}
+	columns := migrationTableColumns(t, db, "upgrade_operations")
+	for _, column := range []string{
+		"source_root", "rollback_image", "rollback_status_url",
+		"rollback_source_fingerprint", "rollback_observed_at_ms",
+	} {
+		if !columns[column] {
+			t.Fatalf("missing rollback column %s", column)
+		}
+	}
+	// The row that predates the columns survives with its provenance intact and
+	// carries no rollback evidence.
+	var stage, fingerprint string
+	var evidence sql.NullString
+	if err := db.QueryRow(`select stage, source_fingerprint_before, rollback_image
+		from upgrade_operations where id = 1`).Scan(&stage, &fingerprint, &evidence); err != nil {
+		t.Fatalf("read the migrated row: %v", err)
+	}
+	if stage != "copy_in" || fingerprint != "before" || evidence.Valid {
+		t.Fatalf("migrated row = %q/%q/%v", stage, fingerprint, evidence)
+	}
+}
+
 func TestEnsureCodexInspectionResultColumnsAddsIdentityAndAutoRecoveryColumns(t *testing.T) {
 	db, err := sql.Open("sqlite", dataSourceName(filepath.Join(t.TempDir(), "legacy-codex-inspection.sqlite")))
 	if err != nil {

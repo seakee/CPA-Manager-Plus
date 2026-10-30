@@ -3,6 +3,7 @@ package upgrade
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,18 +29,27 @@ func rollbackReadyTarget(t *testing.T, source string) string {
 	return target
 }
 
-// statusProbe serves the 1.x health endpoint the rollback verify path probes.
-func statusProbe(t *testing.T, healthy bool) string {
+// healthProbe serves the 1.x health endpoint the rollback verify path probes.
+// The body is the documented contract, so a test can decide what answer, and
+// which identity, the probe sees.
+func healthProbe(t *testing.T, status int, body string) string {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if !healthy {
-			w.WriteHeader(http.StatusServiceUnavailable)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != upgradeservice.LegacyHealthPath {
+			http.NotFound(w, r)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
 	}))
 	t.Cleanup(server.Close)
-	return server.URL + "/status"
+	return server.URL + upgradeservice.LegacyHealthPath
+}
+
+func healthyProbe(t *testing.T) string {
+	t.Helper()
+	return healthProbe(t, http.StatusOK, `{"ok":true,"service":"`+upgradeservice.LegacyServiceID+`"}`)
 }
 
 func TestRollbackPreparePrintsAPinnedPlan(t *testing.T) {
@@ -62,6 +72,11 @@ func TestRollbackPreparePrintsAPinnedPlan(t *testing.T) {
 	if strings.Contains(plan.ComposeFile, ":latest") {
 		t.Fatalf("compose file names a moving tag: %s", plan.ComposeFile)
 	}
+	if plan.Volume != upgradeservice.LegacyVolumeName ||
+		plan.VolumeMountPoint != upgradeservice.LegacyVolumeMountPoint ||
+		!strings.Contains(plan.ComposeFile, plan.Volume+":"+plan.VolumeMountPoint) {
+		t.Fatalf("plan volume = %q at %q", plan.Volume, plan.VolumeMountPoint)
+	}
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		t.Fatalf("resolve the target root: %v", err)
@@ -72,13 +87,24 @@ func TestRollbackPreparePrintsAPinnedPlan(t *testing.T) {
 	if _, err := os.Lstat(plan.ReportPath); err != nil {
 		t.Fatalf("plan file was not written: %v", err)
 	}
-	// The human form names the same decision.
+	// The human form names the same decision, and its next step uses the
+	// unauthenticated health endpoint with the identity it must state.
 	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
 	if code != 0 {
 		t.Fatalf("human prepare exit code = %d, want 0; stderr: %s", code, stderr)
 	}
-	if !strings.Contains(human, plan.Image) || !strings.Contains(human, "docker compose -p cpamp -f - up -d") {
-		t.Fatalf("human plan = %s", human)
+	for _, want := range []string{
+		plan.Image,
+		"docker compose -p cpamp -f - up -d",
+		upgradeservice.LegacyHealthURL(),
+		upgradeservice.LegacyServiceID,
+	} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human plan does not mention %q: %s", want, human)
+		}
+	}
+	if strings.Contains(human, "/status") {
+		t.Fatalf("human plan still proves health with /status: %s", human)
 	}
 }
 
@@ -104,9 +130,8 @@ func TestRollbackPrepareRefusesAndWritesNothing(t *testing.T) {
 func TestRollbackVerifyRecordsAProvenVerdict(t *testing.T) {
 	source := copyReadySource(t)
 	target := rollbackReadyTarget(t, source)
-	probe := statusProbe(t, true)
 	code, stdout, stderr := run(t, "rollback", "--verify", "--legacy", source, "--target", target,
-		"--status-url", probe, "--json")
+		"--status-url", healthyProbe(t), "--json")
 	if code != 0 {
 		t.Fatalf("verify exit code = %d, want 0; stdout: %s stderr: %s", code, stdout, stderr)
 	}
@@ -118,9 +143,11 @@ func TestRollbackVerifyRecordsAProvenVerdict(t *testing.T) {
 		t.Fatalf("stage = %q, want %q", operation.Stage, model.UpgradeStageRolledBack)
 	}
 	if operation.SourceKind != upgradeservice.SourceKindUpgradedLegacy ||
-		operation.SourceFingerprintBefore == "" || operation.BackupManifestSHA256 == "" {
+		operation.SourceFingerprintBefore == "" || operation.BackupManifestSHA256 == "" ||
+		operation.SourceRoot == "" {
 		t.Fatalf("recorded operation lost provenance: %+v", operation)
 	}
+	// The evidence is readable from the persisted row, not only from stdout.
 	code, statusJSON, stderr := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite"))
 	if code != 0 {
 		t.Fatalf("status exit code = %d; stderr: %s", code, stderr)
@@ -132,6 +159,19 @@ func TestRollbackVerifyRecordsAProvenVerdict(t *testing.T) {
 	if status.Operation == nil || status.Operation.Stage != model.UpgradeStageRolledBack {
 		t.Fatalf("persisted stage = %+v, want rolled_back", status.Operation)
 	}
+	evidence := status.Operation.Rollback
+	if evidence == nil {
+		t.Fatalf("persisted row carries no rollback evidence: %+v", status.Operation)
+	}
+	if !strings.Contains(evidence.Image, ":v") || strings.Contains(evidence.Image, ":latest") {
+		t.Fatalf("recorded image = %q, want an exact release", evidence.Image)
+	}
+	if !strings.HasSuffix(evidence.StatusURL, upgradeservice.LegacyHealthPath) {
+		t.Fatalf("recorded health endpoint = %q, want %q", evidence.StatusURL, upgradeservice.LegacyHealthPath)
+	}
+	if evidence.SourceFingerprint == "" || evidence.ObservedAtMS <= 0 {
+		t.Fatalf("recorded observation = %+v", evidence)
+	}
 }
 
 func TestRollbackVerifyRefusesUnprovenEvidence(t *testing.T) {
@@ -139,26 +179,66 @@ func TestRollbackVerifyRefusesUnprovenEvidence(t *testing.T) {
 	target := rollbackReadyTarget(t, source)
 	for _, test := range []struct {
 		name   string
-		probe  string
+		probe  func(t *testing.T) string
 		mutate func(string) string
+		code   string
 	}{
-		{name: "unhealthy probe", probe: statusProbe(t, false)},
-		// The volume no longer holds a 1.x database, so no read-only open can
-		// prove the rollback. This case is deliberately independent of the host
-		// network: it must not depend on nothing listening on the 1.x port.
-		{name: "volume without a database", mutate: func(string) string { return t.TempDir() }},
+		{
+			name:  "unhealthy probe",
+			probe: func(t *testing.T) string { return healthProbe(t, http.StatusServiceUnavailable, "") },
+			code:  string(upgradeservice.UpgradeErrorRollbackUnproven),
+		},
+		{
+			// A 2xx from something that is not this install: a stray 200 that
+			// names another service must not pass as a health proof.
+			name: "another service answers",
+			probe: func(t *testing.T) string {
+				return healthProbe(t, http.StatusOK, `{"ok":true,"service":"existing-manager"}`)
+			},
+			code: string(upgradeservice.UpgradeErrorRollbackIdentityForeign),
+		},
+		{
+			// A bare 2xx without the documented body is not a health proof.
+			name: "bare 200",
+			probe: func(t *testing.T) string {
+				return healthProbe(t, http.StatusOK, "OK")
+			},
+			code: string(upgradeservice.UpgradeErrorRollbackIdentityForeign),
+		},
+		{
+			// The credentialed endpoint answers 401 without a key, so it can
+			// never prove the volume.
+			name: "the credentialed endpoint",
+			probe: func(t *testing.T) string {
+				return strings.TrimSuffix(healthyProbe(t), upgradeservice.LegacyHealthPath) + "/status"
+			},
+			code: string(upgradeservice.UpgradeErrorRollbackProbeEndpoint),
+		},
+		{
+			// The volume no longer holds a 1.x database, so no read-only open
+			// can prove the rollback. This case is deliberately independent of
+			// the host network: it must not depend on nothing listening on the
+			// 1.x port.
+			name:   "volume without a database",
+			mutate: func(string) string { return t.TempDir() },
+			code:   string(upgradeservice.UpgradeErrorRollbackVolumeUnbound),
+		},
 	} {
 		legacy := source
 		if test.mutate != nil {
 			legacy = test.mutate(source)
 		}
+		probe := ""
+		if test.probe != nil {
+			probe = test.probe(t)
+		}
 		code, stdout, stderr := run(t, "rollback", "--verify", "--legacy", legacy, "--target", target,
-			"--status-url", test.probe)
+			"--status-url", probe)
 		if code != 1 {
 			t.Fatalf("%s exit code = %d, want 1; stdout: %s stderr: %s", test.name, code, stdout, stderr)
 		}
-		if stderr == "" {
-			t.Fatalf("%s produced no explanation", test.name)
+		if !strings.Contains(stderr, test.code) {
+			t.Fatalf("%s refusal did not name %q: %s", test.name, test.code, stderr)
 		}
 	}
 	// Nothing was recorded by any refusal.
@@ -172,6 +252,63 @@ func TestRollbackVerifyRefusesUnprovenEvidence(t *testing.T) {
 	}
 	if status.Operation == nil || status.Operation.Stage != model.UpgradeStageCopyIn {
 		t.Fatalf("a refused verify moved the row: %+v", status.Operation)
+	}
+	if status.Operation.Rollback != nil {
+		t.Fatalf("a refused verify recorded evidence: %+v", status.Operation.Rollback)
+	}
+}
+
+// TestRollbackVerifyKeepsTheImageInTheSourceFamily covers the CLI half of M6:
+// another version family needs the explicit override, and the override refuses
+// to be passed without an image.
+func TestRollbackVerifyKeepsTheImageInTheSourceFamily(t *testing.T) {
+	source := copyReadySource(t)
+	target := rollbackReadyTarget(t, source)
+	databasePath := filepath.Join(target, "usage.sqlite")
+	operation, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
+	if err != nil || !found {
+		t.Fatalf("read the recorded operation: found=%t err=%v", found, err)
+	}
+	probe := healthyProbe(t)
+	code, _, stderr := run(t, "rollback", "--verify", "--legacy", source, "--target", target,
+		"--status-url", probe, "--legacy-image", "v1.13.0")
+	if code != 1 {
+		t.Fatalf("foreign family exit code = %d, want 1; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorRollbackImageFamily)) {
+		t.Fatalf("foreign family refusal did not name its code: %s", stderr)
+	}
+	if after, _, err := upgradeservice.ReadRecord(context.Background(), databasePath); err != nil || after.Stage != operation.Stage {
+		t.Fatalf("a refused family moved the row to %q", after.Stage)
+	}
+
+	// The override flag is refused on its own: it authorizes nothing without an
+	// explicit image.
+	if code, _, _ := run(t, "rollback", "--verify", "--legacy", source, "--target", target,
+		"--allow-image-family-mismatch"); code != 2 {
+		t.Fatalf("family override without an image exit code = %d, want 2", code)
+	}
+}
+
+// TestRollbackPreparePrintsAnExactVerifyCommand keeps the printed next step
+// runnable as-is: it names the image the plan pinned, and the family override
+// when the plan needed one.
+func TestRollbackPreparePrintsAnExactVerifyCommand(t *testing.T) {
+	source := copyReadySource(t)
+	target := rollbackReadyTarget(t, source)
+	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target,
+		"--legacy-image", "v1.13.0", "--allow-image-family-mismatch")
+	if code != 0 {
+		t.Fatalf("prepare exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	for _, want := range []string{
+		"--legacy-image " + upgradeservice.LegacyImageRepository + ":v1.13.0",
+		"--allow-image-family-mismatch",
+		"--status-url " + upgradeservice.LegacyHealthURL(),
+	} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("printed verify command does not carry %q: %s", want, human)
+		}
 	}
 }
 
@@ -214,6 +351,11 @@ func TestRunStopsAfterTheCopyInAndPrintsTheNextCommand(t *testing.T) {
 	}
 	if operation.Stage != model.UpgradeStageCopyIn {
 		t.Fatalf("recorded stage = %q, want the copy-in to be the last step run performs", operation.Stage)
+	}
+	// The copy-in records the 1.x directory it read, so a later rollback can
+	// bind its volume instead of asserting "the original volume".
+	if operation.SourceRoot == "" {
+		t.Fatalf("the copy-in recorded no source root: %+v", operation)
 	}
 	// The human form carries the same next step.
 	code, human, stderr := run(t, "run", "--legacy", source, "--target", target)

@@ -8,9 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/maintenancebundle"
 )
 
 // Rollback is modelled, never executed here. The Manager runs inside a
@@ -36,13 +40,44 @@ const (
 	LegacyImageRepository = "seakee/cpa-manager-plus"
 	LegacyComposeProject  = "cpamp"
 	LegacyComposeService  = "cpa-manager-plus"
-	// LegacyVolumeName is the volume the v1 stack created under the compose
-	// project above. It is referenced as an external volume so compose refuses a
-	// rollback against a volume that does not exist instead of creating an empty
-	// one and starting v1 against no data.
-	LegacyVolumeName  = "cpamp_cpa-manager-plus-data"
-	LegacyManagerPort = 18317
+	// LegacyVolumeSuffix is how the 1.x compose file names its data volume
+	// below the compose project. The full name is derived from the project the
+	// plan restarts the stack under, never assumed, and the container path it
+	// is mounted at is stated beside it so the binding is checkable.
+	LegacyVolumeSuffix = "_cpa-manager-plus-data"
+	// LegacyVolumeName is the volume of the default 1.x compose project. A plan
+	// for another project derives its own name from that project.
+	LegacyVolumeName       = LegacyComposeProject + LegacyVolumeSuffix
+	LegacyVolumeMountPoint = "/data"
+	LegacyManagerPort      = 18317
+	// LegacyHealthPath is the one unauthenticated endpoint the 1.x manager
+	// serves. Every other endpoint of the 1.x surface requires credentials, so
+	// a rollback proves the volume with this endpoint and the identity it
+	// states, not with a bare 2xx.
+	LegacyHealthPath = "/health"
+	// LegacyServiceID is the identity the 1.x manager states on GET /health as
+	// {"ok":true,"service":"cpa-manager-plus"}. A probe that answers 2xx for a
+	// different identity is refused: something else is listening.
+	LegacyServiceID = "cpa-manager-plus"
+
+	// rollbackEvidenceFreshness bounds how old an observation may be when it is
+	// recorded. An operator who probed the 1.x stack hours ago has not observed
+	// the install that is being recorded now.
+	rollbackEvidenceFreshness = 15 * time.Minute
+	// rollbackEvidenceFutureSkew tolerates a small clock difference between the
+	// operator's host and the Manager.
+	rollbackEvidenceFutureSkew = 2 * time.Minute
+
+	// maxHealthBodyBytes bounds the health response read: the contract is a
+	// two-field object.
+	maxHealthBodyBytes = 4 * 1024
+	// maxReportedIdentity bounds an identity echoed back in a refusal.
+	maxReportedIdentity = 64
 )
+
+// composeProjectPattern is the compose project name alphabet. A name outside it
+// cannot name a volume, so it is refused instead of being turned into one.
+var composeProjectPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
 // rollbackApplicableStages are the recorded stages a rollback may start from.
 // A rolled-back row is deliberately absent: the verdict is recorded once.
@@ -66,17 +101,32 @@ type RollbackOptions struct {
 	// TagOverride replaces the derived v1 image tag. An empty value derives
 	// v<source_version> from the recorded row.
 	TagOverride string
+	// Project is the compose project the 1.x stack ran under; it names the
+	// volume. Empty uses the default 1.x project.
+	Project string
+	// AllowImageFamilyMismatch accepts a 1.x image from another version family
+	// than the recorded source. It is the explicit override; the default keeps
+	// the rollback on the version the operation copied.
+	AllowImageFamilyMismatch bool
 }
 
-// Plan is the rollback instruction set. It names the exact image to pin and the
-// exact compose invocation, so the operator never has to guess a tag. It grants
-// nothing: only RecordRollback changes the operation.
+// Plan is the rollback instruction set. It names the exact image to pin, the
+// volume and mountpoint the 1.x stack restarts against, and the exact compose
+// invocation, so the operator never has to guess. It grants nothing: only
+// RecordRollback changes the operation.
 type Plan struct {
-	LegacyRoot           string             `json:"legacyRoot"`
-	TargetRoot           string             `json:"targetRoot"`
-	SourceVersion        string             `json:"sourceVersion"`
-	Image                string             `json:"image"`
+	TargetRoot string `json:"targetRoot"`
+	// SourceRoot is the 1.x data directory the operation recorded and this plan
+	// was derived from. The volume claim rests on it.
+	SourceRoot    string `json:"sourceRoot"`
+	SourceVersion string `json:"sourceVersion"`
+	Image         string `json:"image"`
+	// ImageFamilyOverride records that the plan pins a release outside the
+	// recorded source's family because the operator asked for it, so the verify
+	// command printed with the plan stays exact.
+	ImageFamilyOverride  bool               `json:"imageFamilyOverride,omitempty"`
 	Volume               string             `json:"volume"`
+	VolumeMountPoint     string             `json:"volumeMountPoint"`
 	ComposeProject       string             `json:"composeProject"`
 	ComposeService       string             `json:"composeService"`
 	ComposeInvocation    string             `json:"composeInvocation"`
@@ -92,10 +142,13 @@ type Plan struct {
 
 // PrepareRollback derives the rollback plan from the recorded operation and the
 // 1.x volume. It refuses unless the operation is in a rollback-applicable stage
-// (upgrade_rollback_not_applicable), the source is still the volume the
-// operation described (upgrade_source_changed), the evidence the plan rests on
-// still holds (upgrade_rollback_unproven) and the 1.x image resolves to an exact
-// version (upgrade_rollback_image_unpinned). A refusal writes nothing.
+// (upgrade_rollback_not_applicable), the directory under decision is the one the
+// operation recorded (upgrade_rollback_volume_unbound), the source is still the
+// volume the operation described (upgrade_source_changed), the evidence the plan
+// rests on still holds (upgrade_rollback_unproven), the 1.x image resolves to an
+// exact release in the recorded version family (upgrade_rollback_image_unpinned,
+// upgrade_rollback_image_family) and the two roots do not contain each other
+// (upgrade_rollback_roots_overlap). A refusal writes nothing.
 func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error) {
 	if err := ctx.Err(); err != nil {
 		return Plan{}, err
@@ -117,6 +170,9 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 	if targetRoot, err = canonicalPath(targetRoot); err != nil {
 		return Plan{}, fmt.Errorf("resolve the v2 data root: %w", err)
 	}
+	if err := refuseRootOverlap(sourceRoot, targetRoot); err != nil {
+		return Plan{}, err
+	}
 	recorded, found, err := readRollbackRecord(ctx, targetRoot)
 	if err != nil {
 		return Plan{}, fmt.Errorf("read the recorded upgrade operation: %w", err)
@@ -128,6 +184,9 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 	if !rollbackApplicableStages[recorded.Stage] {
 		return Plan{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
 			fmt.Sprintf("the operation is recorded at stage %q, which a rollback cannot start from", string(recorded.Stage)), nil)
+	}
+	if err := requireRecordedSourceRoot(recorded, sourceRoot); err != nil {
+		return Plan{}, err
 	}
 
 	fingerprint, _, err := fingerprintSource(sourceRoot)
@@ -146,22 +205,29 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		return Plan{}, newUpgradeError(UpgradeErrorRollbackUnproven,
 			"the recorded operation names no backup manifest, so the copied-out state cannot be re-verified", nil)
 	}
-	image, err := rollbackImage(recorded, options.TagOverride)
+	image, err := rollbackImage(recorded, options.TagOverride, options.AllowImageFamilyMismatch)
+	if err != nil {
+		return Plan{}, err
+	}
+	project, volume, err := rollbackVolume(options.Project)
 	if err != nil {
 		return Plan{}, err
 	}
 
 	plan := Plan{
-		LegacyRoot:           sourceRoot,
-		TargetRoot:           targetRoot,
-		SourceVersion:        recorded.SourceVersion,
-		Image:                image,
-		Volume:               LegacyVolumeName,
-		ComposeProject:       LegacyComposeProject,
-		ComposeService:       LegacyComposeService,
-		ComposeInvocation:    fmt.Sprintf("docker compose -p %s -f - up -d %s", LegacyComposeProject, LegacyComposeService),
-		ComposeFile:          rollbackComposeFile(image),
-		Preconditions:        rollbackPreconditions(),
+		TargetRoot:          targetRoot,
+		SourceRoot:          recorded.SourceRoot,
+		SourceVersion:       recorded.SourceVersion,
+		Image:               image,
+		ImageFamilyOverride: options.AllowImageFamilyMismatch,
+		Volume:              volume,
+		VolumeMountPoint:    LegacyVolumeMountPoint,
+		ComposeProject:      project,
+		ComposeService:      LegacyComposeService,
+		ComposeInvocation: fmt.Sprintf("docker compose -p %s -f - up -d %s",
+			project, LegacyComposeService),
+		ComposeFile:          rollbackComposeFile(image, volume),
+		Preconditions:        rollbackPreconditions(project, volume, image, recorded.SourceRoot),
 		HealthChecks:         rollbackHealthChecks(),
 		SourceFingerprint:    fingerprint,
 		BackupManifestSHA256: recorded.BackupManifestSHA256,
@@ -192,51 +258,147 @@ func readRollbackRecord(ctx context.Context, targetRoot string) (model.UpgradeOp
 	return ReadRecord(ctx, databasePath)
 }
 
-// rollbackImage resolves the exact 1.x tag. A recorded version that is not a
-// full release cannot be pinned, and the 1.x compose file's moving tag is never
-// an acceptable rollback target. An explicit reference must name a version: a
-// bare repository, an empty tag and a digest-only reference are refused rather
-// than turned into a reference the operator did not ask for.
-func rollbackImage(recorded model.UpgradeOperation, override string) (string, error) {
-	if tag := strings.TrimSpace(override); tag != "" {
-		if tag == "latest" || strings.HasSuffix(tag, ":latest") {
-			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-				"a rollback may not pin a moving tag; pass an exact version", nil)
-		}
-		if strings.Contains(tag, "@") {
-			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-				"a rollback pins a published version tag, not a digest reference", nil)
-		}
-		if strings.HasPrefix(tag, LegacyImageRepository+":") {
-			if strings.TrimSpace(strings.TrimPrefix(tag, LegacyImageRepository+":")) == "" {
-				return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-					"the 1.x image reference names an empty tag; pass an exact version", nil)
-			}
-			return tag, nil
-		}
-		// A reference that names a repository (a slash) without a tag of its
-		// own is a floating reference, not a version.
-		if strings.Contains(tag, "/") {
-			colon := strings.LastIndex(tag, ":")
-			if colon <= strings.LastIndex(tag, "/") || colon == len(tag)-1 {
-				return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-					"the 1.x image reference names no version tag; pass an exact version", nil)
-			}
-			return tag, nil
-		}
-		return LegacyImageRepository + ":" + tag, nil
+// requireRecordedSourceRoot binds a rollback decision to the 1.x directory the
+// copy-in recorded. Without a recorded root there is nothing to bind to, and a
+// different root is a different directory: either way the caller may not claim
+// the plan restarts "the original volume".
+func requireRecordedSourceRoot(recorded model.UpgradeOperation, sourceRoot string) error {
+	recordedRoot := strings.TrimSpace(recorded.SourceRoot)
+	if recordedRoot == "" {
+		return newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
+			"the recorded operation does not name the 1.x data directory it copied from, so a v1 restart cannot be shown to use the original volume; record the copy-in again with this version before rolling back", nil)
 	}
-	if _, ok := parseRelease(recorded.SourceVersion); !ok {
+	if filepath.Clean(recordedRoot) != filepath.Clean(sourceRoot) {
+		return newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
+			"the 1.x data directory given here is not the one this operation recorded; a v1 restart against it would not be the original volume, so pass the directory the copy-in read", nil)
+	}
+	return nil
+}
+
+// refuseRootOverlap keeps every rollback write inside the v2 data root. The 1.x
+// volume is a source, never a destination, so a target nested under it (or a
+// source nested under the target) is refused before anything is read or
+// written.
+func refuseRootOverlap(sourceRoot, targetRoot string) error {
+	if rootsOverlap(sourceRoot, targetRoot) {
+		return newUpgradeError(UpgradeErrorRollbackRootsOverlap,
+			"the v2 data root and the 1.x source root must not contain each other", nil)
+	}
+	return nil
+}
+
+// rootsOverlap reports whether either root contains the other. Copy-in applies
+// the same rule; both must, or one path could write the volume the other only
+// reads.
+func rootsOverlap(sourceRoot, targetRoot string) bool {
+	return within(sourceRoot, targetRoot) || within(targetRoot, sourceRoot)
+}
+
+// rollbackVolume derives the 1.x volume name from the compose project the stack
+// restarts under, and refuses a project name that cannot name a volume.
+func rollbackVolume(project string) (string, string, error) {
+	trimmed := strings.TrimSpace(project)
+	if trimmed == "" {
+		trimmed = LegacyComposeProject
+	}
+	if !composeProjectPattern.MatchString(trimmed) {
+		return "", "", newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
+			"the compose project must be a lowercase alphanumeric name with - or _, because it names the 1.x volume", nil)
+	}
+	return trimmed, trimmed + LegacyVolumeSuffix, nil
+}
+
+// rollbackImage resolves the exact 1.x release to pin. An explicit reference
+// must name a full release, and unless the caller overrides it that release must
+// belong to the recorded source's version family: a rollback restarts the
+// version the operation copied, not an adjacent one.
+func rollbackImage(recorded model.UpgradeOperation, override string, allowFamilyMismatch bool) (string, error) {
+	sourceRelease, sourceOK := parseRelease(recorded.SourceVersion)
+	image, err := rollbackImageReference(override, sourceOK, recorded.SourceVersion)
+	if err != nil {
+		return "", err
+	}
+	if allowFamilyMismatch {
+		return image, nil
+	}
+	tag := imageTag(image)
+	targetRelease, ok := parseRelease(tag)
+	if !ok {
+		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+			"the 1.x image reference does not name an exact release, so it cannot be pinned", nil)
+	}
+	if !sourceOK {
 		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
 			"the recorded source version is not an exact release, so no 1.x image can be pinned", nil)
 	}
-	return LegacyImageRepository + ":v" + strings.TrimPrefix(strings.TrimSpace(recorded.SourceVersion), "v"), nil
+	if releaseFamily(targetRelease) != releaseFamily(sourceRelease) {
+		return "", newUpgradeError(UpgradeErrorRollbackImageFamily,
+			fmt.Sprintf("the 1.x image names release family %s but the operation copied %s; pass the family override only after confirming the v1 data is readable by that release",
+				releaseFamilyText(targetRelease), releaseFamilyText(sourceRelease)), nil)
+	}
+	return image, nil
 }
 
-// rollbackComposeFile is the 1.x service definition with the image pinned. It is
-// fed to `docker compose -f -` on stdin, so no file is written outside the v2
-// data root and the operator's checkout is never edited.
-func rollbackComposeFile(image string) string {
+// rollbackImageReference turns the operator's reference or the recorded version
+// into a pinned image. A moving tag, an empty tag and a digest-only reference
+// are refused rather than turned into a reference the operator did not ask for.
+func rollbackImageReference(override string, sourceOK bool, sourceVersion string) (string, error) {
+	tag := strings.TrimSpace(override)
+	if tag == "" {
+		if !sourceOK {
+			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+				"the recorded source version is not an exact release, so no 1.x image can be pinned", nil)
+		}
+		return LegacyImageRepository + ":v" + strings.TrimPrefix(strings.TrimSpace(sourceVersion), "v"), nil
+	}
+	if tag == "latest" || strings.HasSuffix(tag, ":latest") {
+		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+			"a rollback may not pin a moving tag; pass an exact version", nil)
+	}
+	if strings.Contains(tag, "@") {
+		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+			"a rollback pins a published version tag, not a digest reference", nil)
+	}
+	if strings.HasPrefix(tag, LegacyImageRepository+":") {
+		if imageTag(tag) == "" {
+			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+				"the 1.x image reference names an empty tag; pass an exact version", nil)
+		}
+		return tag, nil
+	}
+	// A reference that names a repository (a slash) without a tag of its own is
+	// a floating reference, not a version.
+	if strings.Contains(tag, "/") {
+		if imageTag(tag) == "" {
+			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+				"the 1.x image reference names no version tag; pass an exact version", nil)
+		}
+		return tag, nil
+	}
+	return LegacyImageRepository + ":" + tag, nil
+}
+
+// imageTag returns the tag of a reference, or "" when it names none.
+func imageTag(reference string) string {
+	colon := strings.LastIndex(reference, ":")
+	if colon <= strings.LastIndex(reference, "/") || colon == len(reference)-1 {
+		return ""
+	}
+	return reference[colon+1:]
+}
+
+// releaseFamily keeps only the major and minor part of a parsed release.
+func releaseFamily(release int) int { return release / 1_000 * 1_000 }
+
+// releaseFamilyText renders a parsed release as major.minor.
+func releaseFamilyText(release int) string {
+	return fmt.Sprintf("%d.%d", release/1_000_000, release/1_000%1_000)
+}
+
+// rollbackComposeFile is the 1.x service definition with the image pinned and
+// the volume bound. It is fed to `docker compose -f -` on stdin, so no file is
+// written outside the v2 data root and the operator's checkout is never edited.
+func rollbackComposeFile(image, volume string) string {
 	port := strconv.Itoa(LegacyManagerPort)
 	return strings.Join([]string{
 		"services:",
@@ -247,38 +409,52 @@ func rollbackComposeFile(image string) string {
 		`      - "` + port + ":" + port + `"`,
 		"    environment:",
 		`      HTTP_ADDR: "0.0.0.0:` + port + `"`,
-		`      USAGE_DB_PATH: "/data/` + databaseFileName + `"`,
-		`      CPA_MANAGER_DATA_KEY_PATH: "/data/` + dataKeyFileName + `"`,
+		`      USAGE_DB_PATH: "` + LegacyVolumeMountPoint + "/" + databaseFileName + `"`,
+		`      CPA_MANAGER_DATA_KEY_PATH: "` + LegacyVolumeMountPoint + "/" + dataKeyFileName + `"`,
 		`      USAGE_COLLECTOR_MODE: "auto"`,
 		"    healthcheck:",
-		`      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:` + port + `/status"]`,
+		`      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:` + port + LegacyHealthPath + `"]`,
 		"      interval: 10s",
 		"      timeout: 3s",
 		"      retries: 3",
 		"    volumes:",
-		"      - " + LegacyVolumeName + ":/data",
+		"      - " + volume + ":" + LegacyVolumeMountPoint,
 		"volumes:",
-		"  " + LegacyVolumeName + ":",
+		"  " + volume + ":",
 		"    external: true",
-		"    name: " + LegacyVolumeName,
+		"    name: " + volume,
 	}, "\n") + "\n"
 }
 
 // rollbackPreconditions are the checks the operator runs before applying the
 // plan. The volume must already exist: an external volume makes compose refuse
-// rather than create one, but the operator should see that before the restart.
-func rollbackPreconditions() []string {
+// rather than create one. The mountpoint check is the binding: the volume must
+// be the directory the operation recorded, or the restart is not a rollback.
+func rollbackPreconditions(project, volume, image, sourceRoot string) []string {
 	return []string{
-		"docker volume inspect " + LegacyVolumeName,
-		"the v1 manager image must already be pulled: docker pull <image>",
+		"docker volume inspect " + volume + " --format '{{ .Mountpoint }}'",
+		"that mountpoint must be the 1.x data directory this operation recorded: " + sourceRoot,
+		"the v1 stack restarts under compose project " + project + ", because that project names the volume",
+		"pull the pinned 1.x image before restarting: docker pull " + image,
 	}
 }
 
+// rollbackHealthChecks are the two proofs the operator can reproduce by hand.
+// The first is the unauthenticated health endpoint and the identity it must
+// state; the second is the read-only open of the volume itself.
 func rollbackHealthChecks() []string {
 	return []string{
-		fmt.Sprintf("curl -fsS http://127.0.0.1:%d/status", LegacyManagerPort),
-		fmt.Sprintf("open %s read-only and pass a SQLite quick_check", filepath.Join("/data", databaseFileName)),
+		"curl -fsS " + LegacyHealthURL(),
+		`the body must be {"ok":true,"service":"` + LegacyServiceID + `"}; a bare 2xx is not a health proof`,
+		"open " + LegacyVolumeMountPoint + "/" + databaseFileName + " read-only and pass a SQLite quick_check",
+		"the volume must still hold the rows and archived segments the recorded backup describes",
 	}
+}
+
+// LegacyHealthURL is the 1.x health endpoint the plan, the plan summary and the
+// default verify probe use.
+func LegacyHealthURL() string {
+	return fmt.Sprintf("http://127.0.0.1:%d%s", LegacyManagerPort, LegacyHealthPath)
 }
 
 // planDigest is the canonical digest of a plan: the plan without its own digest
@@ -310,72 +486,66 @@ func writePlan(plan Plan) error {
 	return nil
 }
 
-// RollbackEvidence is what the operator observed after applying the plan. It is
-// the only input RecordRollback trusts, and it is checked rather than believed:
-// a read-only open of the 1.x volume, the status probe when one was run, and the
-// source fingerprint that proves this is still the original volume.
-type RollbackEvidence struct {
+// RollbackObservation is what the operator reports about the applied rollback:
+// where, against which image, and when. It carries no verdict: the read-only
+// open, the health identity and the retained-row proof are derived here, so a
+// caller cannot assert them.
+type RollbackObservation struct {
 	LegacyRoot string `json:"legacyRoot"`
 	TargetRoot string `json:"targetRoot"`
-	// Image is the reference the operator actually started. It must be pinned.
-	Image string `json:"image"`
-	// ReadOnlyOpen reports that the 1.x database opened read-only and passed a
-	// quick_check.
-	ReadOnlyOpen bool `json:"readOnlyOpen"`
-	// StatusURL is the v1 status endpoint the operator probed, if any.
+	// BackupDir is the recorded backup snapshot. Empty uses the v2 default
+	// backup directory inside TargetRoot.
+	BackupDir string `json:"backupDir,omitempty"`
+	// Image is the reference the operator actually started. It must be a pinned
+	// release in the recorded source family unless the family override is set.
+	Image string `json:"image,omitempty"`
+	// StatusURL is the 1.x health endpoint that was probed. Empty probes the
+	// default 1.x `/health` endpoint.
 	StatusURL string `json:"statusUrl,omitempty"`
-	// StatusOK reports that the probe answered with a 2xx.
-	StatusOK bool `json:"statusOk"`
-	// SourceFingerprint is the fingerprint the operator observed.
-	SourceFingerprint string `json:"sourceFingerprint"`
-	ObservedAtMS      int64  `json:"observedAtMs"`
+	// ObservedAtMS is when the operator observed the restarted 1.x stack.
+	ObservedAtMS int64 `json:"observedAtMs"`
+	// AllowImageFamilyMismatch is the explicit override for a 1.x image from
+	// another version family.
+	AllowImageFamilyMismatch bool `json:"allowImageFamilyMismatch,omitempty"`
 }
 
-// RecordRollback records the rolled_back verdict through Advance and nothing
-// else: it never rewrites provenance columns, so the source kind, both
-// fingerprints and the backup manifest digest survive the rollback. It refuses
-// evidence that does not prove a read-only open and a healthy probe
-// (upgrade_rollback_unproven), a source that is not the recorded volume
-// (upgrade_source_changed), an unpinned image and a stage a rollback cannot
-// start from. Every refusal leaves the row untouched.
-func RecordRollback(ctx context.Context, evidence RollbackEvidence) (model.UpgradeOperation, error) {
+// RecordRollback records the rolled_back verdict with the evidence that
+// justified it. The evidence is written with the stage in one transaction, so
+// the row always names the image, the health endpoint, the observed fingerprint
+// and the observation time that produced the verdict. It never rewrites
+// provenance: the source kind, the recorded source root, both fingerprints, the
+// backup manifest digest and the completed domains survive.
+//
+// Every refusal has its own typed code: a stage a rollback cannot start from
+// (upgrade_rollback_not_applicable), a directory that is not the recorded source
+// root (upgrade_rollback_volume_unbound), an observation outside the freshness
+// window (upgrade_rollback_evidence_stale), an image that is unpinned or from
+// another version family (upgrade_rollback_image_unpinned,
+// upgrade_rollback_image_family), a probe that does not address /health
+// (upgrade_rollback_probe_endpoint), a volume that does not open read-only
+// (upgrade_rollback_unproven) and something that answers but is not this install
+// (upgrade_rollback_identity_foreign). Every refusal leaves the row untouched.
+func RecordRollback(ctx context.Context, observation RollbackObservation) (model.UpgradeOperation, error) {
 	if err := ctx.Err(); err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	sourceRoot, err := resolveLegacyRoot(evidence.LegacyRoot)
+	sourceRoot, err := resolveLegacyRoot(observation.LegacyRoot)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	if sourceRoot, err = canonicalPath(sourceRoot); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("resolve the 1.x source root: %w", err)
 	}
-	targetRoot, err := resolveTargetRoot(evidence.TargetRoot)
+	targetRoot, err := resolveTargetRoot(observation.TargetRoot)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	if targetRoot, err = canonicalPath(targetRoot); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("resolve the v2 data root: %w", err)
 	}
-	if !evidence.ReadOnlyOpen {
-		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackUnproven,
-			"the 1.x volume was not proven to open read-only, so a rollback is not observed", nil)
+	if err := refuseRootOverlap(sourceRoot, targetRoot); err != nil {
+		return model.UpgradeOperation{}, err
 	}
-	// Both observations are required: a read-only open with a passing
-	// quick_check proves the 1.x volume still opens, and the status probe proves
-	// the 1.x manager is actually serving it again.
-	if strings.TrimSpace(evidence.StatusURL) == "" {
-		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackUnproven,
-			"no 1.x status probe was recorded, so a rollback is not observed", nil)
-	}
-	if !evidence.StatusOK {
-		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackUnproven,
-			"the 1.x status probe answered unhealthy, so a rollback is not observed", nil)
-	}
-	if evidence.ObservedAtMS <= 0 {
-		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackUnproven,
-			"the rollback evidence carries no observation time", nil)
-	}
-	databasePath := filepath.Join(targetRoot, databaseFileName)
 	recorded, found, err := readRollbackRecord(ctx, targetRoot)
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("read the recorded upgrade operation: %w", err)
@@ -388,32 +558,50 @@ func RecordRollback(ctx context.Context, evidence RollbackEvidence) (model.Upgra
 		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
 			fmt.Sprintf("the operation is recorded at stage %q, which a rollback cannot start from", string(recorded.Stage)), nil)
 	}
-	if _, err := rollbackImage(recorded, evidence.Image); err != nil {
+	if err := requireRecordedSourceRoot(recorded, sourceRoot); err != nil {
 		return model.UpgradeOperation{}, err
 	}
+	if err := requireFreshObservation(observation.ObservedAtMS, time.Now()); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	image, err := rollbackImage(recorded, observation.Image, observation.AllowImageFamilyMismatch)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := requireRecordedBackup(recorded); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	bundleDir, err := rollbackBundleDir(observation.BackupDir, targetRoot)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+
+	// From here on the checks observe the install rather than the operator's
+	// claim. The fingerprint is informational: the 1.x manager has been serving
+	// again, so its rows may have moved.
 	fingerprint, _, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("fingerprint the 1.x source: %w", err)
 	}
-	// A row that never recorded both fingerprints cannot prove a rollback:
-	// there is nothing to compare the observed volume with, which is unproven
-	// rather than a changed source.
-	if recorded.SourceFingerprintBefore == "" || recorded.SourceFingerprintAfter == "" ||
-		strings.TrimSpace(evidence.SourceFingerprint) == "" {
-		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackUnproven,
-			"the recorded operation carries no before/after source fingerprint, so the observed volume cannot be proven", nil)
+	health, err := CheckLegacyHealth(ctx, observation.StatusURL)
+	if err != nil {
+		return model.UpgradeOperation{}, err
 	}
-	if fingerprint != recorded.SourceFingerprintBefore || evidence.SourceFingerprint != recorded.SourceFingerprintBefore {
-		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorSourceChanged,
-			"the observed 1.x source is not the volume this operation copied", nil)
+	if err := verifyRollbackInstall(ctx, sourceRoot, bundleDir, recorded); err != nil {
+		return model.UpgradeOperation{}, err
 	}
 
-	db, err := managersqlite.Open(databasePath)
+	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("open the v2 database to record the rollback: %w", err)
 	}
 	defer func() { _ = db.Close() }()
-	advanced, err := upgradeoperation.New(db).Advance(ctx, "", model.UpgradeStageRolledBack)
+	advanced, err := upgradeoperation.New(db).RecordRollback(ctx, model.RollbackEvidence{
+		Image:             image,
+		StatusURL:         health.URL,
+		SourceFingerprint: fingerprint,
+		ObservedAtMS:      observation.ObservedAtMS,
+	})
 	if err != nil {
 		if errors.Is(err, upgradeoperation.ErrStageRegression) {
 			return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
@@ -424,56 +612,300 @@ func RecordRollback(ctx context.Context, evidence RollbackEvidence) (model.Upgra
 	return advanced, nil
 }
 
-// CheckLegacyStatus probes the 1.x status endpoint. It is exported so the CLI
-// and the U1-8 harness observe the same signal.
-func CheckLegacyStatus(ctx context.Context, url string) (bool, error) {
-	trimmed := strings.TrimSpace(url)
-	if trimmed == "" {
-		return false, errors.New("a 1.x status probe needs a URL")
+// requireRecordedBackup refuses a row that names no backup: without it the live
+// volume has nothing to be compared against.
+func requireRecordedBackup(recorded model.UpgradeOperation) error {
+	if strings.TrimSpace(recorded.BackupManifestSHA256) == "" {
+		return newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the recorded operation names no backup manifest, so the live volume cannot be compared with the copy it came from", nil)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, trimmed, nil)
+	return nil
+}
+
+// requireFreshObservation refuses an observation taken outside the freshness
+// window, or dated in the future beyond a small clock difference. Evidence that
+// describes a different moment cannot justify this moment's verdict.
+func requireFreshObservation(observedAtMS int64, now time.Time) error {
+	if observedAtMS <= 0 {
+		return newUpgradeError(UpgradeErrorRollbackEvidenceStale,
+			"the observation carries no time, so it cannot be shown to describe the install being recorded; re-run the probe now", nil)
+	}
+	observed := time.UnixMilli(observedAtMS)
+	if observed.Sub(now) > rollbackEvidenceFutureSkew {
+		return newUpgradeError(UpgradeErrorRollbackEvidenceStale,
+			"the observation is dated in the future, so it cannot describe the install being recorded", nil)
+	}
+	if now.Sub(observed) > rollbackEvidenceFreshness {
+		return newUpgradeError(UpgradeErrorRollbackEvidenceStale,
+			fmt.Sprintf("the observation is older than %s, so it no longer describes the install being recorded; start v1, probe it and record again",
+				rollbackEvidenceFreshness), nil)
+	}
+	return nil
+}
+
+// rollbackBundleDir resolves the recorded backup snapshot. The default is the
+// v2 backup directory, which survives inside the v2 data root.
+func rollbackBundleDir(override, targetRoot string) (string, error) {
+	dir := strings.TrimSpace(override)
+	if dir == "" {
+		dir = DefaultBundleDirectory(targetRoot)
+	}
+	absolute, err := resolveBundleDir(dir)
 	if err != nil {
-		return false, err
+		return "", err
+	}
+	return canonicalPath(absolute)
+}
+
+// LegacyHealth is what the 1.x manager answered on its health endpoint.
+type LegacyHealth struct {
+	URL        string `json:"url"`
+	StatusCode int    `json:"statusCode"`
+	Service    string `json:"service"`
+}
+
+// legacyHealthBody is the documented body of the 1.x health endpoint. A 2xx
+// without it is an answer from something that is not the 1.x manager.
+type legacyHealthBody struct {
+	OK      bool   `json:"ok"`
+	Service string `json:"service"`
+}
+
+// CheckLegacyHealth probes the 1.x health endpoint and requires the documented
+// identity, not merely a 2xx: a stray 200 from a proxy or another service must
+// not prove the volume. A different identity is refused as a foreign install,
+// and a non-2xx answer as unproven. An empty URL probes the default 1.x health
+// endpoint.
+//
+// Only /health is accepted. Every other endpoint of the 1.x manager requires
+// credentials, so probing one proves nothing about the volume.
+func CheckLegacyHealth(ctx context.Context, rawURL string) (LegacyHealth, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		trimmed = LegacyHealthURL()
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return LegacyHealth{}, fmt.Errorf("the 1.x health probe needs an absolute URL, got %q", trimmed)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return LegacyHealth{}, fmt.Errorf("the 1.x health probe needs an http or https URL, got scheme %q", parsed.Scheme)
+	}
+	if path := strings.TrimSuffix(parsed.Path, "/"); path != LegacyHealthPath {
+		return LegacyHealth{}, newUpgradeError(UpgradeErrorRollbackProbeEndpoint,
+			fmt.Sprintf("the 1.x health proof is GET %s; %q requires credentials and says nothing about the volume, so probe %s instead",
+				LegacyHealthPath, parsed.Path, LegacyHealthURL()), nil)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return LegacyHealth{}, fmt.Errorf("build the 1.x health request: %w", err)
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	response, err := client.Do(request)
 	if err != nil {
-		return false, err
+		return LegacyHealth{}, newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the 1.x health probe did not answer, so the v1 manager is not proven to be serving this volume", err)
 	}
 	defer func() { _ = response.Body.Close() }()
-	return response.StatusCode >= 200 && response.StatusCode < 300, nil
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxHealthBodyBytes))
+	observation := LegacyHealth{URL: parsed.String(), StatusCode: response.StatusCode}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		detail := ""
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			detail = "; " + LegacyHealthPath + " must answer without credentials, so a probe that needs a key is the wrong endpoint"
+		}
+		return observation, newUpgradeError(UpgradeErrorRollbackUnproven,
+			fmt.Sprintf("the 1.x health probe answered HTTP %d%s", response.StatusCode, detail), nil)
+	}
+	if readErr != nil {
+		return observation, newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the 1.x health probe answered but its body could not be read", readErr)
+	}
+	var stated legacyHealthBody
+	if err := json.Unmarshal(body, &stated); err != nil {
+		return observation, newUpgradeError(UpgradeErrorRollbackIdentityForeign,
+			"the 1.x health probe answered 2xx without the documented body, so something other than the 1.x manager is listening", nil)
+	}
+	observation.Service = stated.Service
+	switch {
+	case !stated.OK:
+		return observation, newUpgradeError(UpgradeErrorRollbackIdentityForeign,
+			"the 1.x health probe answered 2xx but did not report itself healthy, so it is not a health proof", nil)
+	case stated.Service == "":
+		return observation, newUpgradeError(UpgradeErrorRollbackIdentityForeign,
+			"the 1.x health probe answered 2xx without naming a service, so something other than the 1.x manager is listening", nil)
+	case stated.Service != LegacyServiceID:
+		return observation, newUpgradeError(UpgradeErrorRollbackIdentityForeign,
+			fmt.Sprintf("the 1.x health probe answered as service %q, not %q, so the probed port is not serving this install",
+				sanitizeIdentity(stated.Service), LegacyServiceID), nil)
+	}
+	return observation, nil
 }
 
-// ProbeLegacyReadOnly opens the 1.x database without writing anything beside it
-// and runs a quick_check. It is the machine half of "the v1 volume still
-// opens": immutable keeps SQLite from creating a WAL index next to the source,
-// which a rollback probe must never do.
-func ProbeLegacyReadOnly(ctx context.Context, legacyRoot string) (bool, error) {
-	root, err := resolveLegacyRoot(legacyRoot)
-	if err != nil {
-		return false, err
+// sanitizeIdentity keeps an echoed identity short and free of control bytes: a
+// refusal must not replay the body it refused.
+func sanitizeIdentity(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if len(trimmed) > maxReportedIdentity {
+		trimmed = trimmed[:maxReportedIdentity]
 	}
-	path := filepath.Join(root, databaseFileName)
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
+	cleaned := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '.', r == '-', r == '_':
+			return r
+		default:
+			return -1
 		}
-		return false, err
+	}, trimmed)
+	if cleaned == "" {
+		return "unnamed"
 	}
-	if !info.Mode().IsRegular() || info.Size() == 0 {
-		return false, nil
-	}
-	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, true))
+	return cleaned
+}
+
+// retainedRowGroup is one durable population a rollback proves survived. Usage
+// events are grouped with their archive projection because the v1 archive
+// maintenance deletes raw rows once it has archived them: an event is retained
+// as a raw row or as its archived reference, never as neither.
+type retainedRowGroup struct {
+	name   string
+	tables []string
+}
+
+// rollbackRetainedRows are the populations the backup records and the live
+// volume must still hold at least.
+var rollbackRetainedRows = []retainedRowGroup{
+	{name: "usage event", tables: []string{"usage_events", "usage_archive_event_refs"}},
+}
+
+// verifyRollbackInstall proves the live 1.x root is the install the recorded
+// backup describes without requiring byte equality, which a v1 that kept
+// serving can never satisfy. It reads the backup snapshot read-only, opens the
+// live database read-only and runs a quick_check on it, then requires the live
+// volume to still retain at least the rows and archived segments the backup
+// holds. A different backup, a missing row population or a changed archive
+// segment is a foreign install.
+//
+// The live database is opened immutable, exactly as the 1.x probe always was: a
+// plain read-only open would create a WAL index beside the source, and a
+// rollback must leave the volume untouched. Both stores it compares are the same
+// install, so a row that is only committed to the live WAL is an *extra* row it
+// does not count; the retained-row rule is a lower bound, never an equality.
+func verifyRollbackInstall(ctx context.Context, sourceRoot, bundleDir string, recorded model.UpgradeOperation) error {
+	manifest, digest, err := verifyRecordedBackup(ctx, bundleDir)
 	if err != nil {
-		return false, err
+		return newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the recorded backup snapshot cannot be verified read-only, so there is nothing to compare the live volume with", err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	defer func() { _ = db.Close() }()
-	var result string
-	if err := db.QueryRowContext(ctx, "pragma quick_check").Scan(&result); err != nil {
-		return false, nil
+	if digest != recorded.BackupManifestSHA256 {
+		return newUpgradeError(UpgradeErrorRollbackIdentityForeign,
+			"the backup snapshot read here is not the one this operation recorded, so it cannot describe the volume being rolled back", nil)
 	}
-	return result == "ok", nil
+
+	backupDB, _, err := openImmutableSource(ctx, maintenancebundle.BundleLayout(bundleDir).DatabasePath)
+	if backupDB != nil {
+		defer func() { _ = backupDB.Close() }()
+	}
+	if err != nil {
+		return newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the backup snapshot database does not open read-only with a passing quick_check", err)
+	}
+	backupRows, err := countRetainedRows(ctx, backupDB)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the retained rows of the backup snapshot cannot be counted", err)
+	}
+
+	liveDB, _, err := openImmutableSource(ctx, filepath.Join(sourceRoot, databaseFileName))
+	if liveDB != nil {
+		defer func() { _ = liveDB.Close() }()
+	}
+	if err != nil {
+		return newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the live 1.x database does not open read-only with a passing quick_check; stop the 1.x manager's writes and record again", err)
+	}
+	liveRows, err := countRetainedRows(ctx, liveDB)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the retained rows of the live 1.x database cannot be counted", err)
+	}
+	for _, group := range rollbackRetainedRows {
+		if liveRows[group.name] < backupRows[group.name] {
+			return newUpgradeError(UpgradeErrorRollbackIdentityForeign,
+				fmt.Sprintf("the live 1.x volume retains %d %s rows but the recorded backup holds %d, so it is not the install this operation copied",
+					liveRows[group.name], group.name, backupRows[group.name]), nil)
+		}
+	}
+	return requireRecordedArchives(sourceRoot, manifest)
+}
+
+// requireRecordedArchives requires every archived segment and the data key the
+// backup describes to still be present byte for byte beside the live database.
+// The archive tree is append-only, so a new segment is fine and a changed or
+// missing one is not.
+func requireRecordedArchives(sourceRoot string, manifest maintenancebundle.Manifest) error {
+	for name, entry := range manifest.Entries {
+		if entry.Directory {
+			continue
+		}
+		switch {
+		case name == archivesDirName, strings.HasPrefix(name, archivesDirName+"/"):
+			matching, err := entryMatches(filepath.Join(sourceRoot, filepath.FromSlash(name)), entry)
+			if err != nil {
+				return fmt.Errorf("inspect the live 1.x archive member: %w", err)
+			}
+			if !matching {
+				return newUpgradeError(UpgradeErrorRollbackIdentityForeign,
+					"the live 1.x volume no longer holds an archived segment the recorded backup describes, so it is not the install this operation copied", nil)
+			}
+		case name == "data-key" && entry.Present:
+			matching, err := entryMatches(filepath.Join(sourceRoot, dataKeyFileName), entry)
+			if err != nil {
+				return fmt.Errorf("inspect the live 1.x data key: %w", err)
+			}
+			if !matching {
+				return newUpgradeError(UpgradeErrorRollbackIdentityForeign,
+					"the live 1.x volume holds a different data key than the recorded backup, so it cannot decrypt the copied data", nil)
+			}
+		}
+	}
+	return nil
+}
+
+// countRetainedRows counts every retained-row group in one store. A table the
+// store does not have contributes nothing.
+func countRetainedRows(ctx context.Context, db *sql.DB) (map[string]int64, error) {
+	totals := make(map[string]int64, len(rollbackRetainedRows))
+	for _, group := range rollbackRetainedRows {
+		var total int64
+		for _, table := range group.tables {
+			count, present, err := countTableRows(ctx, db, table)
+			if err != nil {
+				return nil, err
+			}
+			if present {
+				total += count
+			}
+		}
+		totals[group.name] = total
+	}
+	return totals, nil
+}
+
+func countTableRows(ctx context.Context, db *sql.DB, table string) (int64, bool, error) {
+	var present int
+	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
+		where type = 'table' and name = ?`, table).Scan(&present); err != nil {
+		return 0, false, err
+	}
+	if present != 1 {
+		return 0, false, nil
+	}
+	var count int64
+	if err := db.QueryRowContext(ctx, `select count(*) from `+table).Scan(&count); err != nil {
+		return 0, false, err
+	}
+	return count, true, nil
 }

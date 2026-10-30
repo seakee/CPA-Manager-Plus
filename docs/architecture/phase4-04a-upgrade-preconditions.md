@@ -286,43 +286,67 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   than extending it, so the completion barrier does not apply to it.
 - **`PrepareRollback`** (`internal/service/upgrade/rollback.go`) requires a
   recorded operation in `copy_in|reconcile|cpa_import|external_connect|verify|complete`
-  (`upgrade_rollback_not_applicable` otherwise), recomputes the 1.x source
+  (`upgrade_rollback_not_applicable` otherwise), binds the directory under
+  decision to the source root the copy-in recorded
+  (`upgrade_rollback_volume_unbound`, because a plan may not claim "the original
+  volume" it cannot check), rejects roots that contain each other exactly as
+  copy-in does (`upgrade_rollback_roots_overlap`), recomputes the 1.x source
   fingerprint and refuses a difference (`upgrade_source_changed`), refuses a row
   without both fingerprints or the backup manifest digest
   (`upgrade_rollback_unproven`), and pins the 1.x image to
   `seakee/cpa-manager-plus:v<source_version>`. A recorded version that is not an
   exact release, or an explicit reference that names no version — `:latest`, a
-  bare repository, an empty tag or a `@sha256:` digest — is
-  `upgrade_rollback_image_unpinned`: the plan never names a moving tag.
-  Refusals write nothing at all.
+  bare repository, an empty tag, a partial version or a `@sha256:` digest — is
+  `upgrade_rollback_image_unpinned`; an explicit release outside the recorded
+  source's version family is `upgrade_rollback_image_family` unless the operator
+  passes the family override. Refusals write nothing at all.
 - **The plan** (`<v2 data root>/.upgrade-rollback/plan.json`, canonical-JSON
-  SHA-256 in `digest`) names the pinned image, the volume, the compose project,
-  the exact `docker compose -p cpamp -f - up -d cpa-manager-plus` invocation,
-  the 1.x compose file to feed on stdin, and two health checks (`GET /status`
-  on 18317 and a read-only SQLite open). It is evidence for the operator, not an
-  authorization, and it is written only under the v2 data root.
-- **`RecordRollback`** advances the row to `rolled_back` through
-  `upgradeoperation.Advance` and nothing else, so `source_kind`, both
-  fingerprints, `backup_manifest_sha256` and the completed domains survive. It
-  refuses unproven evidence: no read-only open, no status probe, an unhealthy
-  probe, no observation time, an unpinned image, or a row or observation without
-  both source fingerprints is `upgrade_rollback_unproven`;
-  an observed fingerprint that is not the recorded one is
-  `upgrade_source_changed`; a stage a rollback cannot start from — including a
-  second verdict — is `upgrade_rollback_not_applicable`. Every refusal leaves
-  the row untouched.
+  SHA-256 in `digest`) names the pinned image, the volume derived from the
+  compose project and the mountpoint the 1.x container uses, the recorded source
+  root, the exact `docker compose -p cpamp -f - up -d cpa-manager-plus`
+  invocation, the 1.x compose file to feed on stdin, the preconditions (including
+  the volume mountpoint check) and the health proof: `GET /health` on 18317 with
+  the documented `{"ok":true,"service":"cpa-manager-plus"}` identity, plus a
+  read-only SQLite open. `/health` is the only unauthenticated 1.x endpoint —
+  `/status` requires the admin key and answers 401 without it, so it can never
+  prove a volume. It is evidence for the operator, not an authorization, and it
+  is written only under the v2 data root.
+- **`RecordRollback`** takes the operator's observation (roots, backup, image,
+  health URL, time) and derives the proof itself in one call: it probes the
+  health endpoint and requires the documented identity (a bare 2xx or another
+  service is `upgrade_rollback_identity_foreign`, a probe that does not address
+  `/health` is `upgrade_rollback_probe_endpoint`); it opens the live 1.x
+  database immutable read-only with a `quick_check`; it reads the recorded
+  backup snapshot read-only, re-verifies its manifest digest, and requires the
+  live volume to still retain at least the rows the backup holds — raw usage
+  events counted together with the append-only archive projection — and every
+  archived segment and the data key the backup describes
+  (`upgrade_rollback_identity_foreign` on any difference,
+  `upgrade_rollback_unproven` when a store cannot be opened). It writes the
+  stage and the evidence (image, health endpoint, observed fingerprint,
+  observation time) in one transaction through
+  `upgradeoperation.RecordRollback`, which never rewrites `source_kind`,
+  `source_root`, both fingerprints, `backup_manifest_sha256` or the completed
+  domains; a second verdict is `upgrade_rollback_not_applicable`. An observation
+  older than the freshness window is `upgrade_rollback_evidence_stale`. The
+  observed fingerprint is informational: the restarted 1.x manager keeps writing
+  rows, so byte equality with the recorded before-fingerprint is neither
+  required nor recorded as one.
 - **CLI.** `upgrade rollback --prepare --legacy <dir> [--legacy-image <ref>]
-  [--json]` prints the plan and exits 0, or 1 with the typed refusal written to
-  stderr. `upgrade rollback --verify --legacy <dir> [--status-url <url>]
-  [--legacy-image <ref>] [--json]` runs the read-only open and the status probe
-  itself (the probe URL defaults to the plan's `http://127.0.0.1:18317/status`),
-  then records; unproven evidence exits 1, usage errors 2.
+  [--project <name>] [--allow-image-family-mismatch] [--json]` prints the plan
+  and exits 0, or 1 with the typed refusal written to stderr. `upgrade rollback
+  --verify --legacy <dir> [--backup <dir>] [--status-url <url>]
+  [--legacy-image <ref>] [--json]` passes the observation to the service, which
+  probes the default `http://127.0.0.1:18317/health` unless a URL is given, then
+  records; unproven evidence exits 1, usage errors 2.
 - **`upgrade run` stops at the copy-in.** It performs preflight plus copy-in,
-  never reconciliation, and prints the exact
+  never reconciliation, and records the 1.x data directory it read so a later
+  rollback can bind its volume. It prints the exact
   `upgrade reconcile --legacy … --target …` command (with `--bundle` only when
   the operator passed one). A recorded stage beyond `copy_in` — including a
   terminal `rolled_back` — is reported as-is with no write and no reconciliation
   hint, and a blocked preflight still writes nothing.
-- **The 1.x volume is never written** by any path above: the probe opens the
-  database immutable so not even a WAL index appears beside it, and the source
-  manifest is unchanged by prepare, verify and every refusal.
+- **The 1.x volume is never written** by any path above: both the health probe
+  and the database probe are read-only, the database is opened immutable so not
+  even a WAL index appears beside it, and the source manifest is unchanged by
+  prepare, verify and every refusal.

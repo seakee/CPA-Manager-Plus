@@ -77,8 +77,8 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  run --legacy <dir> [--target <dir>] [--bundle <dir>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      back up and copy a stopped 1.x source into the v2 data root")
 	_, _ = fmt.Fprintln(w, "  status [--json] [--db-path PATH]    read the persisted upgrade operation")
-	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--legacy-image <ref>] [--json]")
-	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--status-url <url>] [--legacy-image <ref>] [--json]")
+	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--legacy-image <ref>] [--project <name>] [--json]")
+	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--backup <dir>] [--status-url <url>] [--legacy-image <ref>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
 	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked or refused, 2 usage or environment error.")
 }

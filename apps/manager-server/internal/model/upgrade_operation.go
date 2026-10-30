@@ -109,15 +109,37 @@ var upgradeDomains = map[string]bool{
 
 func ValidUpgradeDomain(domain string) bool { return upgradeDomains[domain] }
 
+// RollbackEvidence is the observation a rolled_back verdict rests on. It is
+// written together with the stage, so a later reader can see what was observed
+// instead of only learning that someone advanced the row. The checks that
+// produced it are not recorded here: they are re-derived when the verdict is
+// written, and this value is the report of that run.
+type RollbackEvidence struct {
+	// Image is the exact 1.x image the operator started.
+	Image string `json:"image"`
+	// StatusURL is the 1.x health endpoint that answered for this install.
+	StatusURL string `json:"statusUrl"`
+	// SourceFingerprint is the fingerprint observed on the live 1.x volume. It
+	// is informational: a v1 that kept serving writes new rows, so equality with
+	// the recorded before-fingerprint is not required and never claimed.
+	SourceFingerprint string `json:"sourceFingerprint"`
+	// ObservedAtMS is when the observation was taken.
+	ObservedAtMS int64 `json:"observedAtMs"`
+}
+
 // UpgradeOperation is the whole persistent state of the v2 Upgrade operation:
 // one row, one operation, no history rows. It carries observations (source
 // kind/version/fingerprints, backup manifest, manual items) and never an
 // authorization flag.
 type UpgradeOperation struct {
-	Stage                   UpgradeStage    `json:"stage"`
-	DomainsDone             []string        `json:"domainsDone"`
-	SourceKind              string          `json:"sourceKind,omitempty"`
-	SourceVersion           string          `json:"sourceVersion,omitempty"`
+	Stage         UpgradeStage `json:"stage"`
+	DomainsDone   []string     `json:"domainsDone"`
+	SourceKind    string       `json:"sourceKind,omitempty"`
+	SourceVersion string       `json:"sourceVersion,omitempty"`
+	// SourceRoot is the 1.x data directory the copy-in read. A rollback binds
+	// the volume it restarts to this directory, so "the original volume" is a
+	// checkable claim rather than the operator's assertion.
+	SourceRoot              string          `json:"sourceRoot,omitempty"`
 	SourceFingerprintBefore string          `json:"sourceFingerprintBefore,omitempty"`
 	SourceFingerprintAfter  string          `json:"sourceFingerprintAfter,omitempty"`
 	BackupManifestSHA256    string          `json:"backupManifestSha256,omitempty"`
@@ -125,8 +147,11 @@ type UpgradeOperation struct {
 	ManualItems             []string        `json:"manualItems"`
 	ErrorCode               string          `json:"errorCode,omitempty"`
 	ErrorDetail             string          `json:"errorDetail,omitempty"`
-	CreatedAtMS             int64           `json:"createdAtMs"`
-	UpdatedAtMS             int64           `json:"updatedAtMs"`
+	// Rollback is the evidence recorded with the rolled_back verdict, and nil
+	// for every other stage.
+	Rollback    *RollbackEvidence `json:"rollback,omitempty"`
+	CreatedAtMS int64             `json:"createdAtMs"`
+	UpdatedAtMS int64             `json:"updatedAtMs"`
 }
 
 // Normalize fills the zero values that the schema requires and drops duplicate
@@ -196,6 +221,16 @@ func (o UpgradeOperation) Validate() error {
 		var object map[string]json.RawMessage
 		if err := json.Unmarshal(o.Reconciliation, &object); err != nil {
 			return errors.New("upgrade operation reconciliation must be a JSON object")
+		}
+	}
+	// Evidence is written whole or not at all. A partial record would let a
+	// reader believe a verdict was observed when only its shape survived.
+	if o.Rollback != nil {
+		if o.Rollback.Image == "" || o.Rollback.StatusURL == "" || o.Rollback.SourceFingerprint == "" {
+			return errors.New("upgrade operation rollback evidence must name the image, the health endpoint and the observed fingerprint")
+		}
+		if o.Rollback.ObservedAtMS <= 0 {
+			return errors.New("upgrade operation rollback evidence must name when it was observed")
 		}
 	}
 	return nil
