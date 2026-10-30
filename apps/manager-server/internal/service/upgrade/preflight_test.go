@@ -282,6 +282,34 @@ func TestPreflightFingerprintIsDeterministicAndDetectsChanges(t *testing.T) {
 	}
 }
 
+// TestPreflightFingerprintCoversTheJournalAndNewRootFiles is the regression for
+// the two gaps the fingerprint had: a rollback journal was invisible even though
+// it changes what the database means on its first open, and a file appearing
+// beside the source did not change the fingerprint at all.
+func TestPreflightFingerprintCoversTheJournalAndNewRootFiles(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	base := preflight(t, fixture.root, Options{})
+
+	journal := filepath.Join(fixture.root, databaseFileName+"-journal")
+	writeFixtureFile(t, journal, "journal-frames\n")
+	if withJournal := preflight(t, fixture.root, Options{}); withJournal.Fingerprint == base.Fingerprint {
+		t.Fatal("fingerprint did not change after a rollback journal appeared")
+	}
+	if err := os.Remove(journal); err != nil {
+		t.Fatalf("remove the rollback journal: %v", err)
+	}
+	if restored := preflight(t, fixture.root, Options{}); restored.Fingerprint != base.Fingerprint {
+		t.Fatal("fingerprint did not return to its original value after the journal was removed")
+	}
+
+	// A file beside the source is a change to the source, even though the copy
+	// never carries it.
+	writeFixtureFile(t, filepath.Join(fixture.root, "written-by-another-tool.bin"), "evidence\n")
+	if withExtra := preflight(t, fixture.root, Options{}); withExtra.Fingerprint == base.Fingerprint {
+		t.Fatal("fingerprint did not change after a new file appeared in the source root")
+	}
+}
+
 func TestPreflightDiskRequirement(t *testing.T) {
 	fixture := newSourceFixture(t, nil)
 	sourceBytes := coveredBytes(t, fixture.root)

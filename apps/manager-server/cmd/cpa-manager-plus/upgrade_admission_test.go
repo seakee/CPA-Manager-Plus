@@ -18,7 +18,9 @@ import (
 )
 
 // recordUpgradeStage writes the single Operation row into a v2 store, which is
-// the shape a copy-in leaves behind: a fully migrated schema plus the stage.
+// the shape a copy-in leaves behind: a fully migrated schema, the stage and the
+// observations the copy-in records. A `complete` row without them is not a
+// finished copy-in and is refused by the admission reader.
 func recordUpgradeStage(t *testing.T, databasePath, stage string) {
 	t.Helper()
 	db, err := sqliterepo.Open(databasePath)
@@ -27,9 +29,12 @@ func recordUpgradeStage(t *testing.T, databasePath, stage string) {
 	}
 	defer func() { _ = db.Close() }()
 	operation := model.UpgradeOperation{
-		Stage:       model.UpgradeStage(stage),
-		DomainsDone: []string{model.UpgradeDomainSourceCopy},
-		SourceKind:  upgradeservice.SourceKindUpgradedLegacy,
+		Stage:                   model.UpgradeStage(stage),
+		DomainsDone:             []string{model.UpgradeDomainSourceCopy},
+		SourceKind:              upgradeservice.SourceKindUpgradedLegacy,
+		SourceFingerprintBefore: "source-fingerprint",
+		SourceFingerprintAfter:  "source-fingerprint",
+		BackupManifestSHA256:    "backup-manifest-sha256",
 	}
 	if err := upgradeoperation.New(db).Put(context.Background(), operation); err != nil {
 		t.Fatalf("record fixture stage %q: %v", stage, err)

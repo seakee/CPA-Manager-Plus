@@ -15,6 +15,7 @@ import (
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/maintenancebundle"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	_ "modernc.org/sqlite"
 )
 
@@ -549,4 +550,302 @@ func TestCopyInRequiresTheSourceFenceAndDisjointRoots(t *testing.T) {
 	if _, err := CopyIn(context.Background(), foreignLockOptions); err == nil {
 		t.Fatal("copy in accepted a lock for another database")
 	}
+}
+
+// materializeMigratedTarget reproduces the state a process death inside the copy
+// leaves behind: the backup verified, every member renamed into the v2 layout,
+// the migration committed, and the operation row never written. The provenance
+// marker is the only description of that state. It returns the backup manifest
+// digest and the source fingerprint the marker carries.
+func materializeMigratedTarget(t *testing.T, volume legacyVolume, targetRoot string, lock *processlock.Lock) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+	bundleDir := DefaultBundleDirectory(targetRoot)
+	created, err := maintenancebundle.Create(ctx, sourceBundleLayout(volume.root), bundleDir, lock)
+	if err != nil {
+		t.Fatalf("back up the 1.x volume: %v", err)
+	}
+	verified, err := maintenancebundle.Verify(ctx, bundleDir)
+	if err != nil || !reflect.DeepEqual(created, verified) {
+		t.Fatalf("verify the fixture backup: %v", err)
+	}
+	digest, err := manifestDigest(bundleDir)
+	if err != nil {
+		t.Fatalf("digest the fixture backup manifest: %v", err)
+	}
+	if err := os.MkdirAll(targetRoot, 0o755); err != nil {
+		t.Fatalf("create the v2 data root: %v", err)
+	}
+	staging := filepath.Join(targetRoot, copyInWorkDirectoryName, copyInStagingDirectory)
+	if err := os.MkdirAll(filepath.Join(targetRoot, copyInWorkDirectoryName), 0o700); err != nil {
+		t.Fatalf("create the copy-in work directory: %v", err)
+	}
+	if _, err := maintenancebundle.RestoreNew(ctx, bundleDir, staging); err != nil {
+		t.Fatalf("restore the fixture backup: %v", err)
+	}
+	for _, member := range copyInMembers {
+		entry, ok := verified.Entries[member.bundle]
+		if !ok || !entry.Present {
+			continue
+		}
+		if err := os.Rename(filepath.Join(staging, member.bundle), filepath.Join(targetRoot, member.target)); err != nil {
+			t.Fatalf("materialize %s: %v", member.target, err)
+		}
+	}
+	// The migration runs and rewrites the copied database; the process dies
+	// before the operation row can commit.
+	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
+	if err != nil {
+		t.Fatalf("migrate the copied database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the migrated database: %v", err)
+	}
+	fingerprint, _, err := fingerprintSource(volume.root)
+	if err != nil {
+		t.Fatalf("fingerprint the 1.x source: %v", err)
+	}
+	if err := copyinmarker.Write(targetRoot, copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		TargetDatabase:          filepath.Join(targetRoot, databaseFileName),
+		SourceKind:              SourceKindUpgradedLegacy,
+		SourceFingerprintBefore: fingerprint,
+		SourceFingerprintAfter:  fingerprint,
+		BackupManifestSHA256:    digest,
+		BackupDirectory:         bundleDir,
+	}); err != nil {
+		t.Fatalf("write the provenance marker: %v", err)
+	}
+	return digest, fingerprint
+}
+
+// TestCopyInResumesWhenTheMigrationCommittedWithoutTheRecord is the crash-window
+// regression: a v2 root whose database was migrated but whose operation row was
+// never written used to be refused forever, because the migrated database can
+// no longer match the backup digest and the copy-in would not replace it.
+func TestCopyInResumesWhenTheMigrationCommittedWithoutTheRecord(t *testing.T) {
+	volume := newLegacyVolume(t)
+	targetRoot := canonicalTempDir(t)
+	lock := volume.lock(t)
+	digest, fingerprint := materializeMigratedTarget(t, volume, targetRoot, lock)
+	databasePath := filepath.Join(targetRoot, databaseFileName)
+	if _, found, err := ReadRecord(context.Background(), databasePath); err != nil || found {
+		t.Fatalf("the constructed state recorded an operation: found=%t err=%v", found, err)
+	}
+	assertMigratedStore(t, databasePath)
+	migrated, err := os.Lstat(databasePath)
+	if err != nil {
+		t.Fatalf("inspect the migrated database: %v", err)
+	}
+
+	options := copyInOptions(volume, targetRoot)
+	options.Lock = lock
+	result, err := CopyIn(context.Background(), options)
+	if err != nil {
+		t.Fatalf("resumed copy in: %v", err)
+	}
+	if result.Restored {
+		t.Fatal("resumed copy in restored bytes over the migrated target")
+	}
+	if result.AlreadyComplete {
+		t.Fatal("resumed copy in reported a completed operation that was never recorded")
+	}
+	if result.Stage != model.UpgradeStageCopyIn || result.BackupManifestSHA256 != digest {
+		t.Fatalf("resumed copy in = %+v, want the copy_in stage and the backup manifest", result)
+	}
+	if result.SourceFingerprintBefore != fingerprint || result.SourceFingerprintAfter != fingerprint {
+		t.Fatalf("resumed fingerprints = %q/%q, want %q", result.SourceFingerprintBefore, result.SourceFingerprintAfter, fingerprint)
+	}
+
+	// The migration is idempotent and the row it now records describes the copy.
+	recorded, found, err := ReadRecord(context.Background(), databasePath)
+	if err != nil || !found {
+		t.Fatalf("read the recorded operation: found=%t err=%v", found, err)
+	}
+	if recorded.Stage != model.UpgradeStageCopyIn || recorded.SourceKind != SourceKindUpgradedLegacy {
+		t.Fatalf("recorded stage/kind = %q/%q", recorded.Stage, recorded.SourceKind)
+	}
+	if !recorded.HasDomain(model.UpgradeDomainSourceCopy) {
+		t.Fatalf("recorded domains = %v, want %s", recorded.DomainsDone, model.UpgradeDomainSourceCopy)
+	}
+	if recorded.BackupManifestSHA256 != digest || recorded.SourceFingerprintBefore != fingerprint {
+		t.Fatalf("recorded row = %+v, want the backup manifest and the source fingerprint", recorded)
+	}
+	// The database was adopted, not replaced.
+	current, err := os.Lstat(databasePath)
+	if err != nil {
+		t.Fatalf("inspect the resumed database: %v", err)
+	}
+	if !os.SameFile(migrated, current) {
+		t.Fatal("resumed copy in replaced the migrated database instead of adopting it")
+	}
+	assertMigratedStore(t, databasePath)
+	if _, err := os.Lstat(filepath.Join(targetRoot, copyInWorkDirectoryName)); !os.IsNotExist(err) {
+		t.Fatalf("resumed copy in left its work directory behind (err=%v)", err)
+	}
+}
+
+// TestCopyInRefusesToReportACompletedCopyInWhoseTargetChanged is the regression
+// for the false success: `alreadyComplete` used to trust the row alone, so a
+// modified data key or an archive tree that gained entries was reported as a
+// finished copy-in.
+func TestCopyInRefusesToReportACompletedCopyInWhoseTargetChanged(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(t *testing.T, targetRoot string)
+	}{
+		{
+			name: "data key digest",
+			change: func(t *testing.T, targetRoot string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(targetRoot, dataKeyFileName), []byte("replaced-key\n"), 0o600); err != nil {
+					t.Fatalf("replace the data key: %v", err)
+				}
+			},
+		},
+		{
+			name: "extra archive entry",
+			change: func(t *testing.T, targetRoot string) {
+				t.Helper()
+				writeFixtureTree(t, filepath.Join(targetRoot, archivesDirName, "2026-05", "segment-000009.jsonl"), "{}\n")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			volume := newLegacyVolume(t)
+			targetRoot := canonicalTempDir(t)
+			options := copyInOptions(volume, targetRoot)
+			options.Lock = volume.lock(t)
+			if _, err := CopyIn(context.Background(), options); err != nil {
+				t.Fatalf("copy in: %v", err)
+			}
+			test.change(t, targetRoot)
+			changed := fingerprintTree(t, targetRoot)
+
+			if _, err := CopyIn(context.Background(), options); !errors.Is(err, ErrTargetModified) {
+				t.Fatalf("copy in over a modified target = %v, want %s", err, ErrTargetModified)
+			} else if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorTargetModified {
+				t.Fatalf("copy in error code = %q/%t, want %s", code, ok, UpgradeErrorTargetModified)
+			}
+			if _, err := CopyIn(context.Background(), options); !errors.Is(err, ErrTargetModified) {
+				t.Fatalf("repeated copy in over a modified target = %v, want %s", err, ErrTargetModified)
+			}
+			// The refusal neither repaired nor replaced anything.
+			assertTreeUnchanged(t, "v2 data root", changed, fingerprintTree(t, targetRoot))
+		})
+	}
+}
+
+// TestCopyInRollsBackWhenTheSourceChangesMidRun is the regression for the abort
+// path: a source that changes while the copy runs must leave neither a
+// materialized target nor a staged copy, and must report a typed failure.
+func TestCopyInRollsBackWhenTheSourceChangesMidRun(t *testing.T) {
+	volume := newLegacyVolume(t)
+	targetRoot := canonicalTempDir(t)
+	options := copyInOptions(volume, targetRoot)
+	options.Lock = volume.lock(t)
+	options.checkpoint = func(phase string) error {
+		if phase != "target-restored" {
+			return nil
+		}
+		// Another writer touches the source while the copy is in flight.
+		return os.WriteFile(volume.archives()[0], []byte("{\"segment\":\"changed\"}\n"), 0o600)
+	}
+
+	if _, err := CopyIn(context.Background(), options); !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("copy in with a changing source = %v, want %s", err, ErrSourceChanged)
+	} else if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSourceChanged {
+		t.Fatalf("copy in error code = %q/%t, want %s", code, ok, UpgradeErrorSourceChanged)
+	}
+	for _, name := range []string{databaseFileName, dataKeyFileName, archivesDirName, copyInWorkDirectoryName} {
+		if _, err := os.Lstat(filepath.Join(targetRoot, name)); !os.IsNotExist(err) {
+			t.Fatalf("aborted copy in left %s in the v2 data root (err=%v)", name, err)
+		}
+	}
+	// The backup stays: it is the evidence of the refused attempt, and the next
+	// run reuses it instead of backing up the changed source again.
+	if _, err := maintenancebundle.Verify(context.Background(), options.BundleDir); err != nil {
+		t.Fatalf("aborted copy in lost its verified backup: %v", err)
+	}
+}
+
+// TestCopyInRefusesExtraArchiveEntriesNextToAMatchingTarget is the regression
+// for the target match: a target that already holds the backup bytes is not
+// restored again, but it must not silently adopt content the backup does not
+// describe.
+func TestCopyInRefusesExtraArchiveEntriesNextToAMatchingTarget(t *testing.T) {
+	volume := newLegacyVolume(t)
+	targetRoot := canonicalTempDir(t)
+	options := copyInOptions(volume, targetRoot)
+	options.Lock = volume.lock(t)
+	injected := errors.New("injected interruption after the restore")
+	options.checkpoint = func(phase string) error {
+		if phase == "target-restored" {
+			return injected
+		}
+		return nil
+	}
+	if _, err := CopyIn(context.Background(), options); !errors.Is(err, injected) {
+		t.Fatalf("interrupted copy in = %v, want the injected error", err)
+	}
+	// The target holds the backup bytes and no record; another entry appears in
+	// the archive tree before the resume.
+	writeFixtureTree(t, filepath.Join(targetRoot, archivesDirName, "2026-05", "segment-000009.jsonl"), "{}\n")
+	options.checkpoint = nil
+	before := fingerprintTree(t, targetRoot)
+
+	if _, err := CopyIn(context.Background(), options); !errors.Is(err, ErrTargetModified) {
+		t.Fatalf("copy in next to an extra archive entry = %v, want %s", err, ErrTargetModified)
+	}
+	// The refusal wrote nothing: the tree is exactly as the extra entry left it.
+	assertTreeUnchanged(t, "v2 data root", before, fingerprintTree(t, targetRoot))
+	if _, found, err := ReadRecord(context.Background(), filepath.Join(targetRoot, databaseFileName)); err != nil || found {
+		t.Fatalf("refused copy in recorded an operation: found=%t err=%v", found, err)
+	}
+}
+
+// TestCopyInReusesAPublishedStagingTree covers the resume branch that adopts a
+// staged restore instead of restoring the backup again: the members that reach
+// the v2 layout are the staged files themselves.
+func TestCopyInReusesAPublishedStagingTree(t *testing.T) {
+	volume := newLegacyVolume(t)
+	targetRoot := canonicalTempDir(t)
+	lock := volume.lock(t)
+	ctx := context.Background()
+	bundleDir := DefaultBundleDirectory(targetRoot)
+	if err := os.MkdirAll(targetRoot, 0o755); err != nil {
+		t.Fatalf("create the v2 data root: %v", err)
+	}
+	if _, err := maintenancebundle.Create(ctx, sourceBundleLayout(volume.root), bundleDir, lock); err != nil {
+		t.Fatalf("back up the 1.x volume: %v", err)
+	}
+	staging := filepath.Join(targetRoot, copyInWorkDirectoryName, copyInStagingDirectory)
+	if err := os.MkdirAll(filepath.Join(targetRoot, copyInWorkDirectoryName), 0o700); err != nil {
+		t.Fatalf("create the copy-in work directory: %v", err)
+	}
+	if _, err := maintenancebundle.RestoreNew(ctx, bundleDir, staging); err != nil {
+		t.Fatalf("restore into the staging tree: %v", err)
+	}
+	stagedKey, err := os.Lstat(filepath.Join(staging, "data-key"))
+	if err != nil {
+		t.Fatalf("inspect the staged data key: %v", err)
+	}
+
+	options := copyInOptions(volume, targetRoot)
+	options.Lock = lock
+	result, err := CopyIn(ctx, options)
+	if err != nil {
+		t.Fatalf("resumed copy in: %v", err)
+	}
+	if !result.Restored || result.AlreadyComplete {
+		t.Fatalf("resumed copy in = %+v, want a completed copy", result)
+	}
+	movedKey, err := os.Lstat(result.TargetDataKey)
+	if err != nil {
+		t.Fatalf("inspect the copied data key: %v", err)
+	}
+	if !os.SameFile(stagedKey, movedKey) {
+		t.Fatal("copy in restored the backup again instead of reusing the published staging tree")
+	}
+	assertMigratedStore(t, result.TargetDatabase)
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // upgradeAdmissionFixture creates a stopped 1.x source: the carried-forward
@@ -52,7 +53,29 @@ func upgradeAdmissionFixture(t *testing.T) sqlite.InspectionPaths {
 	return paths
 }
 
+// recordEvidence is the observation half of an operation row. A finished copy-in
+// fills every field; a row that only carries a stage cannot describe one.
+type recordEvidence struct {
+	sourceKind        string
+	fingerprintBefore string
+	fingerprintAfter  string
+	backupManifest    string
+}
+
+// fullCopyInEvidence is what a completed source copy records.
+var fullCopyInEvidence = recordEvidence{
+	sourceKind:        SourceKindUpgradedLegacy,
+	fingerprintBefore: "source-fingerprint",
+	fingerprintAfter:  "source-fingerprint",
+	backupManifest:    "backup-manifest-sha256",
+}
+
 func recordFixtureStage(t *testing.T, databasePath, stage string) {
+	t.Helper()
+	recordFixtureOperation(t, databasePath, stage, fullCopyInEvidence)
+}
+
+func recordFixtureOperation(t *testing.T, databasePath, stage string, evidence recordEvidence) {
 	t.Helper()
 	db, err := sql.Open("sqlite", databasePath)
 	if err != nil {
@@ -60,9 +83,15 @@ func recordFixtureStage(t *testing.T, databasePath, stage string) {
 	}
 	defer func() { _ = db.Close() }()
 	if _, err := db.Exec(`insert into upgrade_operations (
-		id, stage, domains_done, source_kind, created_at_ms, updated_at_ms
-	) values (1, ?, '["source_copy"]', 'upgraded-legacy', 1, 1)
-	on conflict(id) do update set stage = excluded.stage`, stage); err != nil {
+		id, stage, domains_done, source_kind, source_fingerprint_before,
+		source_fingerprint_after, backup_manifest_sha256, created_at_ms, updated_at_ms
+	) values (1, ?, '["source_copy"]', nullif(?, ''), nullif(?, ''), nullif(?, ''), nullif(?, ''), 1, 1)
+	on conflict(id) do update set stage = excluded.stage,
+		source_kind = excluded.source_kind,
+		source_fingerprint_before = excluded.source_fingerprint_before,
+		source_fingerprint_after = excluded.source_fingerprint_after,
+		backup_manifest_sha256 = excluded.backup_manifest_sha256`,
+		stage, evidence.sourceKind, evidence.fingerprintBefore, evidence.fingerprintAfter, evidence.backupManifest); err != nil {
 		t.Fatalf("record fixture stage %q: %v", stage, err)
 	}
 }
@@ -98,8 +127,10 @@ func TestStartupAllowedKeepsEveryExistingRule(t *testing.T) {
 		{name: "native v2 in progress", kind: SourceKindNativeV2, stage: UpgradeStageInProgress, expect: true},
 		{name: "native v2 complete", kind: SourceKindNativeV2, stage: UpgradeStageComplete, expect: true},
 		{name: "legacy without a record", kind: SourceKindLegacyManager, stage: UpgradeStageNone, expect: false},
-		{name: "legacy in progress", kind: SourceKindLegacyManager, stage: UpgradeStageInProgress, expect: true},
-		{name: "legacy complete", kind: SourceKindLegacyManager, stage: UpgradeStageComplete, expect: true},
+		// A copy-in migrates the target, so a 1.x schema can never be the
+		// producer of a recorded operation: the classification keeps deciding.
+		{name: "legacy in progress", kind: SourceKindLegacyManager, stage: UpgradeStageInProgress, expect: false},
+		{name: "legacy complete", kind: SourceKindLegacyManager, stage: UpgradeStageComplete, expect: false},
 		{name: "already relabelled in progress", kind: SourceKindUpgradedLegacy, stage: UpgradeStageInProgress, expect: true},
 		{name: "already relabelled complete", kind: SourceKindUpgradedLegacy, stage: UpgradeStageComplete, expect: true},
 		{name: "already relabelled without a record", kind: SourceKindUpgradedLegacy, stage: UpgradeStageNone, expect: false},
@@ -235,6 +266,37 @@ func TestDatabaseUpgradeAdmissionReadsTheRecordedStage(t *testing.T) {
 			t.Fatalf("recorded %q = %q/%v, want %q", test.recorded, stage, err, test.expect)
 		}
 	}
+
+	// A `complete` row that does not describe a finished copy-in cannot unlock
+	// the normal surfaces: each missing observation fails closed.
+	for _, test := range []struct {
+		name     string
+		evidence recordEvidence
+	}{
+		{name: "no source kind", evidence: recordEvidence{
+			fingerprintBefore: "before", fingerprintAfter: "before", backupManifest: "digest",
+		}},
+		{name: "a 1.x source kind", evidence: recordEvidence{
+			sourceKind: SourceKindLegacyManager, fingerprintBefore: "before", fingerprintAfter: "before", backupManifest: "digest",
+		}},
+		{name: "no fingerprints", evidence: recordEvidence{
+			sourceKind: SourceKindUpgradedLegacy, backupManifest: "digest",
+		}},
+		{name: "one fingerprint", evidence: recordEvidence{
+			sourceKind: SourceKindUpgradedLegacy, fingerprintBefore: "before", backupManifest: "digest",
+		}},
+		{name: "no backup digest", evidence: recordEvidence{
+			sourceKind: SourceKindUpgradedLegacy, fingerprintBefore: "before", fingerprintAfter: "before",
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recordFixtureOperation(t, paths.Database, "complete", test.evidence)
+			if stage, err := reader.Admitted(context.Background()); err == nil {
+				t.Fatalf("a complete row with %s was read as %q", test.name, stage)
+			}
+		})
+	}
+
 	// Reading never adds a WAL/shm sidecar beside the store.
 	for _, sidecar := range []string{"-wal", "-shm"} {
 		if _, err := os.Lstat(paths.Database + sidecar); !os.IsNotExist(err) {
@@ -276,7 +338,11 @@ func recordedUpgradeFixture(t *testing.T) sqlite.InspectionPaths {
 	return paths
 }
 
-func TestLegacySourceIsAdmittedOnlyThroughARecordedUpgrade(t *testing.T) {
+// TestLegacySchemaNeverReachesTheFullSurface is the regression for the removed
+// `legacy-manager` relabel: a 1.x schema with a complete row (full evidence and
+// all) was admitted to the full surface, which no legitimate producer can
+// create. The classification must keep deciding.
+func TestLegacySchemaNeverReachesTheFullSurface(t *testing.T) {
 	paths := recordedUpgradeFixture(t)
 	if report, err := Inspect(context.Background(), paths, Options{SourceStopped: true}); err != nil || report.SourceKind != SourceKindLegacyManager {
 		t.Fatalf("fixture classification = %q/%v, want %s", report.SourceKind, err, SourceKindLegacyManager)
@@ -285,20 +351,12 @@ func TestLegacySourceIsAdmittedOnlyThroughARecordedUpgrade(t *testing.T) {
 		t.Fatal("a legacy source was admitted without a recorded Upgrade operation")
 	}
 
-	for _, test := range []struct {
-		recorded string
-		stage    UpgradeStage
-		surface  StartupSurface
-	}{
-		{recorded: "copy_in", stage: UpgradeStageInProgress, surface: SurfaceUpgradeOnly},
-		{recorded: "failed", stage: UpgradeStageInProgress, surface: SurfaceUpgradeOnly},
-		{recorded: "complete", stage: UpgradeStageComplete, surface: SurfaceFull},
-	} {
-		t.Run(test.recorded, func(t *testing.T) {
-			recordFixtureStage(t, paths.Database, test.recorded)
+	for _, recorded := range []string{"copy_in", "failed", "complete"} {
+		t.Run(recorded, func(t *testing.T) {
+			recordFixtureStage(t, paths.Database, recorded)
 			report, err := Inspect(context.Background(), paths, Options{SourceStopped: true})
 			if err != nil {
-				t.Fatalf("inspect with a recorded %s operation: %v", test.recorded, err)
+				t.Fatalf("inspect with a recorded %s operation: %v", recorded, err)
 			}
 			if report.UpgradeAuthorized {
 				t.Fatal("the preflight report gained Upgrade authority from a recorded operation")
@@ -306,16 +364,106 @@ func TestLegacySourceIsAdmittedOnlyThroughARecordedUpgrade(t *testing.T) {
 			admission, err := AdmitStartup(context.Background(), paths, Options{
 				UpgradeAdmission: DatabaseUpgradeAdmission{DatabasePath: paths.Database},
 			})
-			if err != nil {
-				t.Fatalf("admission with a recorded %s operation: %v", test.recorded, err)
+			if err == nil {
+				_ = admission.Close()
+				t.Fatalf("a 1.x schema with a recorded %s operation was admitted", recorded)
 			}
-			defer func() { _ = admission.Close() }()
-			if admission.UpgradeStage != test.stage {
-				t.Fatalf("admission stage = %q, want %q", admission.UpgradeStage, test.stage)
-			}
-			if surface := admission.Surface(); surface != test.surface {
-				t.Fatalf("admission surface = %q, want %q", surface, test.surface)
+			if _, statErr := os.Lstat(paths.Database + ".manager.lock"); !os.IsNotExist(statErr) {
+				t.Fatalf("a refused %s admission created an ownership marker (err=%v)", recorded, statErr)
 			}
 		})
+	}
+}
+
+// TestCopiedInStoreIsAdmittedOnlyWithProperEvidence walks the positive half of
+// the same rule on the store a copy-in actually leaves: the migration ran, so
+// the schema is native-v2 and only the row decides the surface.
+func TestCopiedInStoreIsAdmittedOnlyWithProperEvidence(t *testing.T) {
+	paths := fixturePaths(t)
+	store, err := sqlite.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("create the migrated v2 store: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close the migrated v2 store: %v", err)
+	}
+	recordFixtureStage(t, paths.Database, "copy_in")
+	assertUpgradeAdmission(t, paths.Database, UpgradeStageInProgress, SurfaceUpgradeOnly)
+
+	recordFixtureStage(t, paths.Database, "complete")
+	assertUpgradeAdmission(t, paths.Database, UpgradeStageComplete, SurfaceFull)
+
+	recordFixtureOperation(t, paths.Database, "complete", recordEvidence{sourceKind: SourceKindUpgradedLegacy})
+	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: paths.Database}).Admitted(context.Background()); err == nil {
+		t.Fatalf("a complete row without fingerprints was read as %q", stage)
+	}
+}
+
+// TestCopyInMarkerKeepsAnUnfinishedCopyInInProgress is the crash-window
+// regression: the copy-in migrated the copied store but died before it could
+// record the operation. The schema now says native-v2 and there is no row, so
+// without the marker this store is admitted as a finished install.
+func TestCopyInMarkerKeepsAnUnfinishedCopyInInProgress(t *testing.T) {
+	paths := fixturePaths(t)
+	store, err := sqlite.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("create the migrated v2 store: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close the migrated v2 store: %v", err)
+	}
+	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: paths.Database}).Admitted(context.Background()); err != nil || stage != UpgradeStageNone {
+		t.Fatalf("a migrated store without a row = %q/%v, want none", stage, err)
+	}
+
+	marker := copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		TargetDatabase:          paths.Database,
+		SourceKind:              SourceKindUpgradedLegacy,
+		SourceFingerprintBefore: "source-fingerprint",
+		SourceFingerprintAfter:  "source-fingerprint",
+		BackupManifestSHA256:    "backup-manifest-sha256",
+		WrittenAtMS:             1,
+	}
+	if err := copyinmarker.Write(filepath.Dir(paths.Database), marker); err != nil {
+		t.Fatalf("write the copy-in marker: %v", err)
+	}
+	assertUpgradeAdmission(t, paths.Database, UpgradeStageInProgress, SurfaceUpgradeOnly)
+
+	// A marker that names another database describes nothing here.
+	other := marker
+	other.TargetDatabase = filepath.Join(t.TempDir(), "usage.sqlite")
+	if err := copyinmarker.Write(filepath.Dir(paths.Database), other); err != nil {
+		t.Fatalf("write a foreign copy-in marker: %v", err)
+	}
+	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: paths.Database}).Admitted(context.Background()); err != nil || stage != UpgradeStageNone {
+		t.Fatalf("marker for another database = %q/%v, want none", stage, err)
+	}
+
+	// An unreadable marker fails closed.
+	if err := os.WriteFile(copyinmarker.Path(filepath.Dir(paths.Database)), []byte("{"), 0o600); err != nil {
+		t.Fatalf("corrupt the copy-in marker: %v", err)
+	}
+	if _, err := (DatabaseUpgradeAdmission{DatabasePath: paths.Database}).Admitted(context.Background()); err == nil {
+		t.Fatal("a corrupt copy-in marker was treated as no marker")
+	}
+}
+
+// assertUpgradeAdmission resolves the reader and checks both halves of the
+// decision: the admission stage and the surface a native-v2 store gets.
+func assertUpgradeAdmission(t *testing.T, databasePath string, wantStage UpgradeStage, wantSurface StartupSurface) {
+	t.Helper()
+	stage, err := upgradeAdmissionStage(context.Background(), DatabaseUpgradeAdmission{DatabasePath: databasePath})
+	if err != nil {
+		t.Fatalf("admission = %v", err)
+	}
+	if stage != wantStage {
+		t.Fatalf("admission stage = %q, want %q", stage, wantStage)
+	}
+	if !startupAllowed(Report{SourceKind: SourceKindNativeV2}, stage) {
+		t.Fatalf("a native-v2 store was not admitted at stage %q", stage)
+	}
+	if surface := (&Admission{UpgradeStage: stage}).Surface(); surface != wantSurface {
+		t.Fatalf("surface = %q, want %q", surface, wantSurface)
 	}
 }

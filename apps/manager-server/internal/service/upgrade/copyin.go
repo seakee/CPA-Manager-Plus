@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/maintenancebundle"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // SourceKindUpgradedLegacy is the source kind a copy-in records: the v2 store
@@ -28,9 +30,10 @@ const (
 	// backup must survive the copy-in that it makes possible.
 	bundleDirectoryName = "upgrade-backup"
 	// copyInWorkDirectoryName is this operation's reserved scratch area inside
-	// the v2 data root. It only ever holds a restored staging tree and the
-	// maintenance-bundle publication journal for that exact staging root.
-	copyInWorkDirectoryName = ".upgrade-copy-in"
+	// the v2 data root. It only ever holds a restored staging tree, the
+	// maintenance-bundle publication journal for that exact staging root and the
+	// copy-in provenance marker that survives a crash before the record commits.
+	copyInWorkDirectoryName = copyinmarker.WorkDirectoryName
 	copyInStagingDirectory  = "restored"
 	// configMemberName keeps maintenancebundle's layout explicit. The copy-in
 	// carries no source config member: the 1.x CPA config is YAML, lives outside
@@ -96,11 +99,13 @@ func DefaultBundleDirectory(targetRoot string) string {
 // It is the only Upgrade step that writes: the 1.x source is opened read-only
 // and is never renamed, moved or written beside. The order is fixed —
 // fingerprint, Create, Verify, RestoreNew into a reserved staging root inside
-// the v2 data root, rename each member into the v2 layout, migrate the new
-// store, record the outcome — and every step is resumable: a verified bundle is
-// reused instead of recreated, an already materialized target is not restored
-// again, and a recorded copy_in returns the stored result without touching
-// anything.
+// the v2 data root, rename each member into the v2 layout, publish the
+// provenance marker, migrate the new store, record the outcome — and every step
+// is resumable: a verified bundle is reused instead of recreated, an already
+// materialized target is not restored again (the marker proves it even after the
+// migration rewrote the database), and a recorded copy_in returns the stored
+// result without touching anything. A source that changes while the fence is
+// held aborts with a typed failure after rolling back this run's own writes.
 func CopyIn(ctx context.Context, options Options) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
@@ -149,11 +154,12 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 		DomainsDone:     []string{},
 	}
 	// A recorded copy-in is the completion evidence for this function. Reading
-	// it must not migrate, restore or otherwise touch the store.
+	// it must not migrate, restore or otherwise touch the store, and the record
+	// is verified against the v2 layout instead of being taken on trust.
 	if recorded, found, err := readRecordedCopyIn(ctx, paths.Database); err != nil {
 		return Result{}, err
 	} else if found {
-		return completedResult(recorded, result), nil
+		return completedResult(ctx, paths, bundleDir, recorded, result)
 	}
 
 	before, _, err := fingerprintSource(sourceRoot)
@@ -173,7 +179,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 		return Result{}, err
 	}
 
-	restored, err := materializeTarget(ctx, paths, bundleDir, manifest)
+	restored, moved, err := materializeTarget(ctx, paths, bundleDir, manifest, digest)
 	if err != nil {
 		return Result{}, err
 	}
@@ -189,16 +195,30 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 		return Result{}, fmt.Errorf("fingerprint the 1.x source after the copy: %w", err)
 	}
 	if after != before {
-		return Result{}, errors.New("the 1.x source changed during the copy-in; nothing was recorded")
+		aborted := newUpgradeError(UpgradeErrorSourceChanged,
+			"the 1.x source changed during the copy-in; the members this run moved were rolled back and nothing was recorded", nil)
+		if rollbackErr := rollbackMaterialized(paths, moved); rollbackErr != nil {
+			return Result{}, errors.Join(aborted, fmt.Errorf("roll back the copy-in: %w", rollbackErr))
+		}
+		return Result{}, aborted
 	}
 	result.SourceFingerprintAfter = after
+
+	// Provenance is published before the migration commits. The migration
+	// rewrites the copied database in place, so a process death between that
+	// commit and the operation row would otherwise leave a v2 store that nothing
+	// describes: the admission gate would read "native-v2, no record" and serve
+	// a half-finished install as a normal one.
+	if err := writeCopyInMarker(paths, digest, result); err != nil {
+		return Result{}, err
+	}
 
 	recorded, err := migrateAndRecord(ctx, paths, result)
 	if err != nil {
 		return Result{}, err
 	}
-	// The staging tree and its publication journal are only removed once the
-	// record is committed; before that they are the resume evidence.
+	// The staging tree, its publication journal and the marker are only removed
+	// once the record is committed; before that they are the resume evidence.
 	if err := os.RemoveAll(paths.Work); err != nil {
 		return Result{}, fmt.Errorf("remove the copy-in work directory: %w", err)
 	}
@@ -394,7 +414,14 @@ func copyInRecorded(recorded model.UpgradeOperation) bool {
 	return model.UpgradeStageCopyIn.CanAdvanceTo(recorded.Stage)
 }
 
-func completedResult(recorded model.UpgradeOperation, result Result) Result {
+// completedResult returns the stored outcome of a recorded copy-in, but only
+// after proving the v2 layout still holds what the record says was copied. A
+// recorded row is not evidence by itself: the bytes the operator will keep
+// using are what has to match.
+func completedResult(ctx context.Context, paths targetPaths, bundleDir string, recorded model.UpgradeOperation, result Result) (Result, error) {
+	if err := verifyCompletedTarget(ctx, paths, bundleDir, recorded); err != nil {
+		return Result{}, err
+	}
 	result.AlreadyComplete = true
 	result.Stage = recorded.Stage
 	result.DomainsDone = recorded.DomainsDone
@@ -403,7 +430,72 @@ func completedResult(recorded model.UpgradeOperation, result Result) Result {
 	result.SourceFingerprintAfter = recorded.SourceFingerprintAfter
 	result.BackupManifestSHA256 = recorded.BackupManifestSHA256
 	result.UpdatedAtMS = recorded.UpdatedAtMS
-	return result
+	return result, nil
+}
+
+// verifyCompletedTarget compares the v2 data root with the backup that made the
+// copy eligible. The database is the migrated store, so its bytes can never
+// match the backup again; it must exist and carry the schema the migration
+// produced. Everything else the copy-in placed must still match byte for byte.
+func verifyCompletedTarget(ctx context.Context, paths targetPaths, bundleDir string, recorded model.UpgradeOperation) error {
+	if strings.TrimSpace(recorded.BackupManifestSHA256) == "" {
+		return newUpgradeError(UpgradeErrorTargetModified,
+			"the recorded copy-in names no backup manifest, so the v2 data root cannot be verified", nil)
+	}
+	manifest, digest, err := verifyRecordedBackup(ctx, bundleDir)
+	if err != nil {
+		return err
+	}
+	if digest != recorded.BackupManifestSHA256 {
+		return newUpgradeError(UpgradeErrorTargetModified,
+			"the backup destination holds a different manifest than the one the copy-in recorded", nil)
+	}
+	if err := requireTargetMember(paths.Root, manifest, "data-key", "the v2 data key does not match the backup"); err != nil {
+		return err
+	}
+	if err := requireTargetMember(paths.Root, manifest, archivesDirName, "the v2 archive tree does not match the backup"); err != nil {
+		return err
+	}
+	if err := refuseExtraTargetEntries(paths, manifest); err != nil {
+		return err
+	}
+	migrated, err := databaseCarriesV2Schema(ctx, paths.Database)
+	if err != nil {
+		return err
+	}
+	if !migrated {
+		return newUpgradeError(UpgradeErrorTargetModified,
+			"the v2 database is missing or is not the migrated store the copy-in recorded", nil)
+	}
+	return nil
+}
+
+// verifyRecordedBackup re-verifies the backup and returns its published
+// manifest digest. The backup is the only reference for every target digest, so
+// an unverifiable one leaves nothing to compare against.
+func verifyRecordedBackup(ctx context.Context, bundleDir string) (maintenancebundle.Manifest, string, error) {
+	manifest, err := maintenancebundle.Verify(ctx, bundleDir)
+	if err != nil {
+		return maintenancebundle.Manifest{}, "", fmt.Errorf("the backup that made the copy eligible does not verify: %w", err)
+	}
+	digest, err := manifestDigest(bundleDir)
+	if err != nil {
+		return maintenancebundle.Manifest{}, "", fmt.Errorf("read the backup manifest digest: %w", err)
+	}
+	return manifest, digest, nil
+}
+
+// requireTargetMember refuses a member the backup describes but the v2 layout
+// does not hold, or holds with different bytes.
+func requireTargetMember(root string, manifest maintenancebundle.Manifest, member, detail string) error {
+	matching, err := targetMemberMatches(root, manifest, member)
+	if err != nil {
+		return err
+	}
+	if !matching {
+		return newUpgradeError(UpgradeErrorTargetModified, detail, nil)
+	}
+	return nil
 }
 
 func runCheckpoint(options Options, phase string) error {
@@ -470,21 +562,36 @@ func bundleSourceRelease(ctx context.Context, bundleDir string) string {
 }
 
 // materializeTarget moves the restored members into the v2 layout. It reports
-// whether this run had to write anything: an already materialized target is
-// never restored a second time.
-func materializeTarget(ctx context.Context, paths targetPaths, bundleDir string, manifest maintenancebundle.Manifest) (bool, error) {
+// whether this run had to write anything and exactly which target paths it
+// moved, so an abort can roll back only its own work.
+//
+// An already materialized target is never restored a second time. The marker
+// makes that safe across the crash window: it names the backup this target was
+// materialized from, so a target whose migration already ran is recognized even
+// though the migration changed the database bytes.
+func materializeTarget(ctx context.Context, paths targetPaths, bundleDir string, manifest maintenancebundle.Manifest, digest string) (bool, []string, error) {
 	if entry, ok := manifest.Entries["config"]; ok && entry.Present {
-		return false, errors.New("the backup carries a source config member the v2 data root does not accept")
+		return false, nil, errors.New("the backup carries a source config member the v2 data root does not accept")
+	}
+	if done, err := targetDescribedByMarker(ctx, paths, manifest, digest); err != nil {
+		return false, nil, err
+	} else if done {
+		return false, nil, nil
 	}
 	matching, err := targetMatches(paths, manifest)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if matching {
-		return false, nil
+		// A target that already holds the backup is not restored again, but it
+		// must hold nothing else: an extra archive entry is not part of the copy.
+		if err := refuseExtraTargetEntries(paths, manifest); err != nil {
+			return false, nil, err
+		}
+		return false, nil, nil
 	}
 	if err := os.MkdirAll(paths.Work, 0o700); err != nil {
-		return false, fmt.Errorf("create the copy-in work directory: %w", err)
+		return false, nil, fmt.Errorf("create the copy-in work directory: %w", err)
 	}
 	// A published staging root that still describes this backup is the resume
 	// evidence of an interrupted run; anything else in the reserved work
@@ -497,29 +604,117 @@ func materializeTarget(ctx context.Context, paths targetPaths, bundleDir string,
 	}
 	if !reused {
 		if err := os.RemoveAll(paths.Work); err != nil {
-			return false, fmt.Errorf("clear the copy-in work directory: %w", err)
+			return false, nil, fmt.Errorf("clear the copy-in work directory: %w", err)
 		}
 		if err := os.MkdirAll(paths.Work, 0o700); err != nil {
-			return false, fmt.Errorf("create the copy-in work directory: %w", err)
+			return false, nil, fmt.Errorf("create the copy-in work directory: %w", err)
 		}
 		if _, err := maintenancebundle.RestoreNew(ctx, bundleDir, paths.Staging); err != nil {
-			return false, fmt.Errorf("restore the backup into the v2 data root: %w", err)
+			return false, nil, fmt.Errorf("restore the backup into the v2 data root: %w", err)
 		}
 	}
-	if err := moveMembers(ctx, paths, paths.Staging, manifest); err != nil {
+	moved, err := moveMembers(ctx, paths, paths.Staging, manifest)
+	if err != nil {
+		return false, moved, err
+	}
+	return true, moved, nil
+}
+
+// targetDescribedByMarker reports whether an earlier run of this exact copy-in
+// already materialized the target. The marker is the only durable witness of
+// that, because the migration rewrites the copied database and its digest can
+// never be compared with the backup again.
+func targetDescribedByMarker(ctx context.Context, paths targetPaths, manifest maintenancebundle.Manifest, digest string) (bool, error) {
+	marker, found, err := copyinmarker.Read(paths.Root)
+	if err != nil {
+		return false, fmt.Errorf("read the copy-in provenance marker: %w", err)
+	}
+	if !found || !sameDatabasePath(marker.TargetDatabase, paths.Database) || marker.BackupManifestSHA256 != digest {
+		return false, nil
+	}
+	return targetMigrated(ctx, paths, manifest)
+}
+
+// targetMigrated reports whether the v2 layout holds this backup, either
+// byte-identical or already migrated. The database counts as in place when it
+// carries the schema the incremental migration produces; every other member
+// must still match the backup.
+func targetMigrated(ctx context.Context, paths targetPaths, manifest maintenancebundle.Manifest) (bool, error) {
+	databaseInPlace := false
+	if entry, ok := manifest.Entries["database"]; ok && entry.Present {
+		matching, err := entryMatches(paths.Database, entry)
+		if err != nil {
+			return false, err
+		}
+		if matching {
+			databaseInPlace = true
+		} else if databaseInPlace, err = databaseCarriesV2Schema(ctx, paths.Database); err != nil {
+			return false, err
+		}
+	}
+	if !databaseInPlace {
+		return false, nil
+	}
+	for _, member := range copyInMembers {
+		if member.bundle == "database" {
+			continue
+		}
+		matching, err := targetMemberMatches(paths.Root, manifest, member.bundle)
+		if err != nil || !matching {
+			return false, err
+		}
+	}
+	if err := refuseExtraTargetEntries(paths, manifest); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
+// databaseCarriesV2Schema reports whether the target database holds the store
+// the migration produces. It joins a live WAL, because a process death between
+// the migration commit and the operation row can leave the migrated schema in
+// the WAL only.
+func databaseCarriesV2Schema(ctx context.Context, path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return false, nil
+	}
+	db, schema, err := openTargetSnapshot(ctx, path)
+	if db != nil {
+		defer func() { _ = db.Close() }()
+	}
+	if err != nil {
+		return false, fmt.Errorf("read the copied v2 database: %w", err)
+	}
+	return schema.sourceKind() == SourceKindNativeV2, nil
+}
+
+// openTargetSnapshot reads the copied store of a stopped process: immutable
+// only when no live WAL exists, so a WAL that still holds the migration is not
+// silently skipped.
+func openTargetSnapshot(ctx context.Context, path string) (*sql.DB, sourceSchema, error) {
+	immutable := true
+	if info, err := os.Lstat(path + "-wal"); err == nil && info.Size() > 0 {
+		immutable = false
+	}
+	return openSource(ctx, path, immutable)
+}
+
 // moveMembers renames each restored member into the v2 layout. A member that is
 // already in place is skipped, so a run interrupted between two renames
 // completes instead of restarting; a different file with the same name is never
-// replaced.
-func moveMembers(ctx context.Context, paths targetPaths, staging string, manifest maintenancebundle.Manifest) error {
+// replaced. The returned paths are exactly what this run moved.
+func moveMembers(ctx context.Context, paths targetPaths, staging string, manifest maintenancebundle.Manifest) ([]string, error) {
+	moved := []string{}
 	for _, member := range copyInMembers {
 		if err := ctx.Err(); err != nil {
-			return err
+			return moved, err
 		}
 		entry, ok := manifest.Entries[member.bundle]
 		if !ok || !entry.Present {
@@ -527,20 +722,114 @@ func moveMembers(ctx context.Context, paths targetPaths, staging string, manifes
 		}
 		matching, err := targetMemberMatches(paths.Root, manifest, member.bundle)
 		if err != nil {
-			return err
+			return moved, err
 		}
 		if matching {
 			continue
 		}
 		target := filepath.Join(paths.Root, member.target)
 		if _, err := os.Lstat(target); err == nil {
-			return fmt.Errorf("the v2 data root already holds %s; refusing to replace it", member.target)
+			return moved, fmt.Errorf("the v2 data root already holds %s; refusing to replace it", member.target)
 		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("inspect the v2 data root %s: %w", member.target, err)
+			return moved, fmt.Errorf("inspect the v2 data root %s: %w", member.target, err)
 		}
 		if err := os.Rename(filepath.Join(staging, member.bundle), target); err != nil {
-			return fmt.Errorf("move %s into the v2 data root: %w", member.target, err)
+			return moved, fmt.Errorf("move %s into the v2 data root: %w", member.target, err)
 		}
+		moved = append(moved, target)
+	}
+	return moved, nil
+}
+
+// rollbackMaterialized removes exactly what this run moved into the v2 layout
+// and the work directory that carried it. Paths that existed before this run
+// are never in the list, so nothing older is touched.
+func rollbackMaterialized(paths targetPaths, moved []string) error {
+	if len(moved) == 0 {
+		return nil
+	}
+	var err error
+	for index := len(moved) - 1; index >= 0; index-- {
+		if removeErr := os.RemoveAll(moved[index]); removeErr != nil {
+			err = errors.Join(err, removeErr)
+		}
+	}
+	return errors.Join(err, os.RemoveAll(paths.Work))
+}
+
+// refuseExtraTargetEntries refuses target content the backup does not describe.
+// The archive tree is the only directory the copy-in owns, so an additional
+// entry there means the v2 data root was modified after the copy and is no
+// longer the tree the backup explains.
+func refuseExtraTargetEntries(paths targetPaths, manifest maintenancebundle.Manifest) error {
+	info, err := os.Lstat(paths.Archives)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return newUpgradeError(UpgradeErrorTargetModified, "the v2 archive path is not a directory", nil)
+	}
+	unexpected := ""
+	if err := filepath.WalkDir(paths.Archives, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(paths.Root, path)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(relative)
+		if _, ok := manifest.Entries[name]; !ok {
+			unexpected = name
+			return filepath.SkipAll
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if unexpected != "" {
+		return newUpgradeError(UpgradeErrorTargetModified,
+			fmt.Sprintf("the v2 archive tree holds %s, which the backup does not describe", unexpected), nil)
+	}
+	return nil
+}
+
+// sameDatabasePath compares a marker's target with the database this run owns,
+// resolving symlinks in the parent so a canonical path and its alias agree.
+func sameDatabasePath(recorded, actual string) bool {
+	canonical := func(path string) string {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return filepath.Clean(path)
+		}
+		if resolved, err := filepath.EvalSymlinks(filepath.Dir(absolute)); err == nil {
+			absolute = filepath.Join(resolved, filepath.Base(absolute))
+		}
+		return filepath.Clean(absolute)
+	}
+	return canonical(recorded) == canonical(actual)
+}
+
+// writeCopyInMarker publishes the provenance of this copy-in inside the work
+// directory. It is written before the migration starts and removed only after
+// the operation row commits.
+func writeCopyInMarker(paths targetPaths, digest string, result Result) error {
+	marker := copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		TargetDatabase:          paths.Database,
+		SourceKind:              result.SourceKind,
+		SourceVersion:           result.SourceVersion,
+		SourceFingerprintBefore: result.SourceFingerprintBefore,
+		SourceFingerprintAfter:  result.SourceFingerprintAfter,
+		BackupManifestSHA256:    digest,
+		BackupDirectory:         result.BackupDirectory,
+		WrittenAtMS:             time.Now().UnixMilli(),
+	}
+	if err := copyinmarker.Write(paths.Root, marker); err != nil {
+		return fmt.Errorf("write the copy-in provenance marker: %w", err)
 	}
 	return nil
 }
