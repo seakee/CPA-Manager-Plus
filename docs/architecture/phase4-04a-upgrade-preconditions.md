@@ -173,12 +173,15 @@ hard `false`; the new surface grants no migration authority.
   the row untouched. `complete` never moves again, `failed` parks the operation
   without dropping completed domains. The table is created by the v2 migration
   in the Manager database, never in the legacy source root.
-- **Preflight** (`internal/service/upgrade.Preflight`) is read-only. It holds
-  the existing source fence (`processlock.AcquireExisting`), opens
+- **Preflight** (`internal/service/upgrade.Preflight`) is read-only. It opens
   `usage.sqlite` with `mode=ro` plus `query_only` and runs `quick_check`, and
-  writes nothing — no WAL, no migration, no journal.
-- **Checks, in order:** `source_ownership` (`upgrade_source_busy`,
-  `upgrade_source_unreadable`), `source_version`
+  writes nothing — no WAL, no migration, no journal. It does not take the
+  source's ownership fence (see U1-7): a reader must stay readable on a source
+  mounted read-only, and the copy-in re-verifies the fingerprint under its own
+  exclusive lock before it writes.
+- **Checks, in order:** `source_ownership` (`upgrade_source_busy` when a live
+  writer holds the marker, `upgrade_source_lock_unavailable` when the marker
+  cannot be inspected at all, `upgrade_source_unreadable`), `source_version`
   (`upgrade_source_version_unsupported`), `fingerprint`, `disk`
   (`upgrade_disk_insufficient`), `cpa_classification`, `parity`. Parity gaps
   (missing/mismatched projection, past watermark, per-day deleted coverage
@@ -271,3 +274,44 @@ classified kind of a copied-in store is `native-v2`. `legacy-manager` is
 therefore never relabelled — a 1.x schema with a row (complete or not) stays
 blocked and is never admitted to the full surface.
 
+
+## U1-7: the Upgrade wizard's two read routes
+
+`internal/http/controller/upgradewizard` serves `installation/upgrade/preflight`
+and `installation/upgrade/status`. The fixed Bootstrap API carries them before
+route cutover, the canonical continuation carries them before completion, and a
+`ProductComplete` installation answers 404: the reads end with the operation.
+They never appear on both surfaces at once, and no write route exists.
+
+- **Credential.** The Upgrade surface has its own identity — the source
+  administrator key the bootstrap Upgrade entry verified — presented as
+  `Authorization: Bearer <key>` with exactly one header value. The handler
+  verifies it through `upgrade.Service.VerifyAdmin`, which opens the configured
+  1.x source with the same read-only `mode=ro`/`query_only` handle the preflight
+  uses and runs the same `setting.LoadAdminCredential` + `security.VerifyAdminKey`
+  comparison the entry consumes. It takes no fence. The installation session,
+  the Fresh Admin key, a cookie and an absent header are all `401`; the two
+  surfaces no longer check a session before this handler runs, so no missing
+  decision can read as allow.
+- **Failure order.** `401` is reserved for a credential verdict. A missing or
+  unusable mount answers `503 upgrade_legacy_root_missing` /
+  `upgrade_legacy_root_unusable`, and a source that cannot be read to verify the
+  key answers `503 upgrade_source_lock_unavailable` — never a wrong-password
+  message for a mount the operator has to fix first.
+- **Ownership without the fence.** `upgrade.Preflight` observes the source with
+  `processlock.ProbeExisting`: a shared, non-blocking lock on the existing
+  marker. A live writer is `upgrade_source_busy`; a marker that cannot be
+  inspected at all (missing, unreadable, not a regular file, or a hard-linked
+  database) is the distinct `upgrade_source_lock_unavailable`. A read-only source
+  tree therefore yields a real report, two concurrent preflights both reach a
+  verdict, and the before/after fingerprint gate in `upgrade run` — which holds
+  the exclusive lock — remains the write path's guard.
+- **Projection.** The status route selects named columns (stage, domains,
+  source kind/version, reconciliation days, manual items, error code/detail,
+  updated time) and maps the stage onto `nextAction`. An unknown stage is shown
+  verbatim; fingerprints, digests and paths have no field at all.
+- **Scrubbing.** Operator-visible text is redacted by content, not by path
+  shape: `Bearer …`, `sk-…`, `x-api-key`/`X_API_KEY` values, credentials
+  embedded in a URL authority and local paths; the same scrubber covers
+  `manual_items`, and a multi-line detail is scrubbed line by line instead of
+  being dropped.

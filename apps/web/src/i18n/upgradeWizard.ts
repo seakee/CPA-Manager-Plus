@@ -36,7 +36,7 @@ const en = {
     'Days whose deleted raw events no longer match the retained projection. The copy-in reports them; it never repairs them silently.',
   preflightGapsDays: 'Days with gaps',
 
-  checkSourceOwnership: 'Source stopped and exclusively owned',
+  checkSourceOwnership: 'Source has no running writer',
   checkSourceVersion: 'Source version supported',
   checkFingerprint: 'Source fingerprint recorded',
   checkDisk: 'Free space for the copy',
@@ -51,6 +51,8 @@ const en = {
 
   codeUpgradeSourceBusy:
     'The 1.x source is still locked by a running process. Stop it and try again.',
+  codeUpgradeSourceLockUnavailable:
+    'The source ownership marker cannot be inspected read-only. Check the mounted 1.x volume; nothing was written.',
   codeUpgradeSourceUnreadable:
     'The 1.x database cannot be read safely. Check the volume and its permissions on the host.',
   codeUpgradeSourceVersionUnsupported: 'This 1.x version is not supported as an upgrade source.',
@@ -185,7 +187,7 @@ const zh: typeof en = {
     '这些日期的原始事件已删除，但与留存投影不一致。复制步骤会如实上报，不会静默修补。',
   preflightGapsDays: '存在缺口的日期数',
 
-  checkSourceOwnership: '来源已停止且由本机独占',
+  checkSourceOwnership: '来源没有运行中的写入者',
   checkSourceVersion: '来源版本受支持',
   checkFingerprint: '来源指纹已记录',
   checkDisk: '复制所需可用空间',
@@ -199,6 +201,8 @@ const zh: typeof en = {
   checkUnknown: '未上报',
 
   codeUpgradeSourceBusy: '1.x 来源仍被运行中的进程占用。请先停止它再重试。',
+  codeUpgradeSourceLockUnavailable:
+    '无法只读检查来源的归属标记。请检查挂载的 1.x 卷；未写入任何内容。',
   codeUpgradeSourceUnreadable: '无法安全读取 1.x 数据库。请在宿主机上检查卷和权限。',
   codeUpgradeSourceVersionUnsupported: '该 1.x 版本不能作为升级来源。',
   codeUpgradeDiskInsufficient: '复制所需的可用空间不足。',
@@ -317,7 +321,7 @@ const tw: typeof en = {
     '這些日期的原始事件已刪除，但與留存投影不一致。複製步驟會如實回報，不會靜默修補。',
   preflightGapsDays: '存在缺口的日期數',
 
-  checkSourceOwnership: '來源已停止且由本機獨佔',
+  checkSourceOwnership: '來源沒有執行中的寫入者',
   checkSourceVersion: '來源版本受支援',
   checkFingerprint: '來源指紋已記錄',
   checkDisk: '複製所需可用空間',
@@ -331,6 +335,8 @@ const tw: typeof en = {
   checkUnknown: '未回報',
 
   codeUpgradeSourceBusy: '1.x 來源仍被執行中的程序佔用。請先停止它再重試。',
+  codeUpgradeSourceLockUnavailable:
+    '無法只讀檢查來源的歸屬標記。請檢查掛載的 1.x 卷；未寫入任何內容。',
   codeUpgradeSourceUnreadable: '無法安全讀取 1.x 資料庫。請在主機上檢查磁碟區與權限。',
   codeUpgradeSourceVersionUnsupported: '此 1.x 版本不能作為升級來源。',
   codeUpgradeDiskInsufficient: '複製所需的可用空間不足。',
@@ -450,7 +456,7 @@ const ru: typeof en = {
     'Дни, в которых удалённые исходные события больше не совпадают с сохранённой проекцией. Копирование сообщает о них и никогда не исправляет их молча.',
   preflightGapsDays: 'Дней с пробелами',
 
-  checkSourceOwnership: 'Источник остановлен и занят только этим процессом',
+  checkSourceOwnership: 'Источник не занят работающим процессом',
   checkSourceVersion: 'Версия источника поддерживается',
   checkFingerprint: 'Отпечаток источника записан',
   checkDisk: 'Свободное место для копирования',
@@ -464,6 +470,8 @@ const ru: typeof en = {
   checkUnknown: 'Не сообщается',
 
   codeUpgradeSourceBusy: 'Источник 1.x всё ещё занят работающим процессом. Остановите его и повторите.',
+  codeUpgradeSourceLockUnavailable:
+    'Маркер владения источником нельзя проверить только для чтения. Проверьте смонтированный том 1.x; ничего не записано.',
   codeUpgradeSourceUnreadable: 'База 1.x не читается безопасно. Проверьте том и его права на хосте.',
   codeUpgradeSourceVersionUnsupported: 'Эта версия 1.x не поддерживается как источник обновления.',
   codeUpgradeDiskInsufficient: 'Недостаточно свободного места для копирования.',
@@ -617,6 +625,8 @@ export function blockedCodeText(code: string, language = fullWebLanguage()): str
   switch (code) {
     case 'upgrade_source_busy':
       return upgradeWizardText('codeUpgradeSourceBusy', language);
+    case 'upgrade_source_lock_unavailable':
+      return upgradeWizardText('codeUpgradeSourceLockUnavailable', language);
     case 'upgrade_source_unreadable':
       return upgradeWizardText('codeUpgradeSourceUnreadable', language);
     case 'upgrade_source_version_unsupported':

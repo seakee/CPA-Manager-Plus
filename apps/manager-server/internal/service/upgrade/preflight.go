@@ -16,6 +16,8 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
 
 // Check names, in report order.
@@ -40,6 +42,7 @@ const (
 // operator confirmation instead of blocking.
 const (
 	CodeSourceBusy               = "upgrade_source_busy"
+	CodeSourceLockUnavailable    = "upgrade_source_lock_unavailable"
 	CodeSourceUnreadable         = "upgrade_source_unreadable"
 	CodeSourceVersionUnsupported = "upgrade_source_version_unsupported"
 	CodeDiskInsufficient         = "upgrade_disk_insufficient"
@@ -146,12 +149,13 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	}
 
 	databasePath := filepath.Join(root, databaseFileName)
-	// The fence is taken first and held for the whole inspection; every later
-	// read happens while this process exclusively owns the source.
-	lock, lockErr := processlock.AcquireExisting(databasePath)
-	if lockErr == nil {
-		defer func() { _ = lock.Close() }()
-	}
+	// A read-only preflight observes the source's ownership marker instead of
+	// taking the writer fence. Every later read happens on a bounded read-only
+	// snapshot, and the copy-in re-verifies the before/after fingerprint under
+	// its own exclusive lock. Taking the lock here would demand write access to
+	// a source this step must be able to inspect as read-only media, and would
+	// report a read-only mount as a busy source.
+	lockErr := processlock.ProbeExisting(databasePath)
 	db, schema, openErr := openReadOnlySource(ctx, databasePath)
 	if db != nil {
 		defer func() { _ = db.Close() }()
@@ -162,13 +166,18 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		report.SourceKind = SourceKindMissingDatabase
 	}
 
-	// 1. Source stopped and exclusively ours, plus read-only integrity.
+	// 1. No live source writer, plus read-only integrity.
 	switch {
-	case lockErr != nil:
+	case errors.Is(lockErr, processlock.ErrLocked):
 		report.Checks = append(report.Checks, Check{
 			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceBusy, Detail: ownershipDetail(lockErr),
 		})
 		block(CodeSourceBusy)
+	case lockErr != nil:
+		report.Checks = append(report.Checks, Check{
+			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceLockUnavailable, Detail: lockUnavailableDetail(lockErr),
+		})
+		block(CodeSourceLockUnavailable)
 	case openErr != nil:
 		report.Checks = append(report.Checks, Check{
 			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceUnreadable, Detail: unreadableDetail(openErr),
@@ -176,7 +185,7 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		block(CodeSourceUnreadable)
 	default:
 		report.Checks = append(report.Checks, Check{
-			Name: CheckSourceOwnership, Status: StatusPass, Detail: "exclusive source lock held; quick_check ok",
+			Name: CheckSourceOwnership, Status: StatusPass, Detail: "no live source writer; read-only snapshot; quick_check ok",
 		})
 	}
 
@@ -255,6 +264,47 @@ func (g ParityGaps) any() bool {
 	return g.MissingProjection > 0 || g.MismatchedProjection > 0 || g.PastWatermark > 0 || g.CoverageDaysWithGaps > 0
 }
 
+// ErrAdminUnauthorized is VerifyAdmin's negative verdict: the source was
+// readable and its administrator credential rejected the presented key.
+var ErrAdminUnauthorized = errors.New("source administrator credential could not be verified")
+
+// VerifyAdmin proves the source administrator credential — the key the
+// bootstrap Upgrade entry already verified — through the same read-only SQLite
+// open the preflight uses and the same credential load and comparison that entry
+// consumes (setting.LoadAdminCredential plus security.VerifyAdminKey).
+//
+// It deliberately does not take the source's ownership fence: a reader must not
+// exclude the 1.x writer it only observes, and a source mounted read-only cannot
+// hand out a writable marker. The copy-in re-verifies the source under its own
+// exclusive lock before it writes anything.
+func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
+	if strings.TrimSpace(key) == "" {
+		return ErrAdminUnauthorized
+	}
+	root, err := resolveLegacyRoot(legacyRoot)
+	if err != nil {
+		return err
+	}
+	db, _, openErr := openReadOnlySource(ctx, filepath.Join(root, databaseFileName))
+	if db != nil {
+		defer func() { _ = db.Close() }()
+	}
+	if openErr != nil {
+		return openErr
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	credential, found, err := setting.New(db).LoadAdminCredential(ctx)
+	if err != nil {
+		return err
+	}
+	if !found || !security.VerifyAdminKey(credential, key) {
+		return ErrAdminUnauthorized
+	}
+	return nil
+}
+
 func resolveLegacyRoot(root string) (string, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -288,6 +338,20 @@ func ownershipDetail(err error) string {
 		return "source database has multiple hard links"
 	default:
 		return "source lock could not be taken"
+	}
+}
+
+// lockUnavailableDetail reports an ownership marker a read-only observation
+// cannot inspect at all. It is separate from a busy source: nothing is holding
+// the source, but this step cannot prove that from the source itself.
+func lockUnavailableDetail(err error) string {
+	switch {
+	case errors.Is(err, processlock.ErrNoExistingLock):
+		return "source has no ownership marker to inspect; the ownership of the source cannot be established"
+	case errors.Is(err, processlock.ErrHardLinked):
+		return "source database has multiple hard links"
+	default:
+		return "source ownership marker could not be opened read-only"
 	}
 }
 

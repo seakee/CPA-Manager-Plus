@@ -429,23 +429,25 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		writeFreshJSON(w, freshrouting.StateFor(op))
 		return
 	}
+	// The Upgrade reads own their credential. They are neither the installation
+	// session's nor the Fresh Admin's, so they are answered before either gate and
+	// the reader decides the caller. A completed installation has no Upgrade step
+	// at all, so the resources stop existing with the operation.
+	if upgradeWizardResource(resource) {
+		if op.ProductComplete {
+			http.NotFound(w, r)
+			return
+		}
+		a.newUpgradeWizard().ServeHTTP(w, r)
+		return
+	}
 	continuation, freshAuth := freshbootstrap.SessionToken(r)
 	if freshAuth {
 		// The existing claim may finish its own installation after route
 		// cutover, but is never an Admin credential for the Console/CPA proxy.
 		allowed := resource == "operation" && r.Method == http.MethodGet || !op.ProductComplete &&
 			(resource == "installation/runtime" && r.Method == http.MethodGet ||
-				upgradeWizardResource(resource) && r.Method == http.MethodGet ||
 				(resource == "strategy" || resource == "complete") && r.Method == http.MethodPost)
-		if !allowed && !op.ProductComplete && upgradeWizardResource(resource) &&
-			a.authority.ValidateContinuation(record, continuation) == nil {
-			// The Upgrade reads exist on this surface and only read. An
-			// authenticated session using another method is a method error, not
-			// a credential one.
-			w.Header().Set("Allow", http.MethodGet)
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
 		if !allowed || a.authority.ValidateContinuation(record, continuation) != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -485,10 +487,6 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		a.legacyResource(w, r, resource)
 	case resource == "installation/runtime" && r.Method == http.MethodGet:
 		a.installationRuntime(w, r, op)
-	case upgradeWizardResource(resource) && r.Method == http.MethodGet && !op.ProductComplete:
-		// The Upgrade wizard reads end with the operation. A completed
-		// installation serves its normal surfaces, never an Upgrade step.
-		a.newUpgradeWizard().ServeHTTP(w, r)
 	case resource == "strategy" && r.Method == http.MethodPost:
 		a.executeStrategy(w, r, op)
 	case resource == "complete" && r.Method == http.MethodPost:

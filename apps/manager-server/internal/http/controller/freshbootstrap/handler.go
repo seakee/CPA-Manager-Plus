@@ -67,6 +67,18 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resource := strings.TrimPrefix(r.URL.Path, bootstrap.FixedBootstrapAPIPath)
+	// The Upgrade reads are the one pair of resources on this carrier that is
+	// not session-authorized: the Upgrade surface holds its own credential (the
+	// source administrator key), so the reader it mounts decides both the method
+	// and the caller. A missing reader keeps the resources closed.
+	if upgradeResource(resource) {
+		if h.Upgrade == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		h.Upgrade.ServeHTTP(w, r)
+		return
+	}
 	if resource == "claim/exchange" {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -91,7 +103,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, result)
 		return
 	}
-	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet, "installation/upgrade/preflight": http.MethodGet, "installation/upgrade/status": http.MethodGet}
+	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet}
 	method, ok := known[resource]
 	if !ok {
 		http.NotFound(w, r)
@@ -182,13 +194,13 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.Runtime.ServeHTTP(w, r)
-	case "installation/upgrade/preflight", "installation/upgrade/status":
-		if h.Upgrade == nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		h.Upgrade.ServeHTTP(w, r)
 	}
+}
+
+// upgradeResource reports whether a fixed-carrier resource belongs to the
+// Upgrade surface's own credential instead of the installation session.
+func upgradeResource(resource string) bool {
+	return resource == "installation/upgrade/preflight" || resource == "installation/upgrade/status"
 }
 
 // SessionToken deliberately uses a distinct scheme. Bearer Admin/CPA keys and

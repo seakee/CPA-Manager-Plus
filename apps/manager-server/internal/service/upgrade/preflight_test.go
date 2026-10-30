@@ -3,14 +3,20 @@ package upgrade
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
 
 const msPerDay = int64(86_400_000)
@@ -201,14 +207,167 @@ func TestPreflightReportsSourceBusyWhenLockIsHeld(t *testing.T) {
 	}
 }
 
-func TestPreflightReportsMissingLockFile(t *testing.T) {
+// TestPreflightConcurrentReadersBothReachAVerdict proves the read-only preflight
+// does not fence the source. Two inspections of the same source at the same time
+// both observe it, and neither reports the other as a busy writer.
+func TestPreflightConcurrentReadersBothReachAVerdict(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	const readers = 4
+	type verdict struct {
+		report Report
+		err    error
+	}
+	results := make(chan verdict, readers)
+	release := make(chan struct{})
+	var group sync.WaitGroup
+	for range readers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-release
+			report, err := Preflight(context.Background(), Options{LegacyRoot: fixture.root})
+			results <- verdict{report: report, err: err}
+		}()
+	}
+	close(release)
+	group.Wait()
+	close(results)
+	seen := 0
+	for got := range results {
+		seen++
+		if got.err != nil {
+			t.Fatalf("concurrent preflight: %v", got.err)
+		}
+		if !got.report.Ready {
+			t.Fatalf("concurrent preflight blocked = %v", got.report.Blocked)
+		}
+		for _, code := range got.report.Blocked {
+			if code == CodeSourceBusy {
+				t.Fatalf("a concurrent reader was reported as a live writer")
+			}
+		}
+		if check, found := checkByName(got.report, CheckSourceOwnership); !found || check.Status != StatusPass {
+			t.Fatalf("ownership check = %+v", check)
+		}
+	}
+	if seen != readers {
+		t.Fatalf("verdicts = %d, want %d", seen, readers)
+	}
+}
+
+// TestPreflightReadsAReadOnlySourceTree proves the source volume an installation
+// mounts read-only still yields a real report: the observation needs no writable
+// marker and writes nothing to the source.
+func TestPreflightReadsAReadOnlySourceTree(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	before := sourceContents(t, fixture.root)
+	chmodTree(t, fixture.root, 0o555, 0o444)
+	t.Cleanup(func() { chmodTree(t, fixture.root, 0o755, 0o644) })
+
+	report := preflight(t, fixture.root, Options{})
+	if !report.Ready {
+		t.Fatalf("read-only source blocked = %v", report.Blocked)
+	}
+	if check, found := checkByName(report, CheckSourceOwnership); !found || check.Status != StatusPass {
+		t.Fatalf("ownership check = %+v", check)
+	}
+	if after := sourceContents(t, fixture.root); !reflect.DeepEqual(before, after) {
+		t.Fatalf("preflight changed the source: before %+v after %+v", before, after)
+	}
+}
+
+// TestVerifyAdminUsesTheSourceCredential proves the credential the bootstrap
+// Upgrade entry verified is the only one this read accepts, and that a source
+// with no credential proves nothing.
+func TestVerifyAdminUsesTheSourceCredential(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+		credential, err := security.NewAdminCredential(key, "test")
+		if err != nil {
+			t.Fatalf("build credential: %v", err)
+		}
+		raw, err := json.Marshal(credential)
+		if err != nil {
+			t.Fatalf("encode credential: %v", err)
+		}
+		execFixture(t, db, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
+	})
+	if err := VerifyAdmin(context.Background(), fixture.root, key); err != nil {
+		t.Fatalf("verify the source credential: %v", err)
+	}
+	for _, candidate := range []string{"", "another-Manager-key"} {
+		if err := VerifyAdmin(context.Background(), fixture.root, candidate); !errors.Is(err, ErrAdminUnauthorized) {
+			t.Fatalf("candidate %q = %v, want %v", candidate, err, ErrAdminUnauthorized)
+		}
+	}
+	unrecorded := newSourceFixture(t, nil)
+	if err := VerifyAdmin(context.Background(), unrecorded.root, key); !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("source without a credential = %v, want %v", err, ErrAdminUnauthorized)
+	}
+	if err := VerifyAdmin(context.Background(), filepath.Join(fixture.root, "absent"), key); err == nil {
+		t.Fatal("absent root verified a credential")
+	}
+}
+
+// sourceContents reads every file under a source root so a test can prove the
+// observation wrote nothing.
+func sourceContents(t *testing.T, root string) map[string]string {
+	t.Helper()
+	contents := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		contents[path] = string(raw)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read source contents: %v", err)
+	}
+	return contents
+}
+
+// chmodTree rewrites the mode of a fixture tree so a test can mount it read-only.
+func chmodTree(t *testing.T, root string, directoryMode, fileMode os.FileMode) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, directoryMode)
+		}
+		if entry.Type().IsRegular() {
+			return os.Chmod(path, fileMode)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("chmod fixture tree: %v", err)
+	}
+}
+
+func TestPreflightReportsUninspectableOwnershipMarker(t *testing.T) {
 	fixture := newSourceFixture(t, nil)
 	if err := os.Remove(fixture.dbPath + ".manager.lock"); err != nil {
 		t.Fatalf("remove lock file: %v", err)
 	}
 	report := preflight(t, fixture.root, Options{})
-	if report.Ready || len(report.Blocked) != 1 || report.Blocked[0] != CodeSourceBusy {
-		t.Fatalf("blocked = %v ready = %t, want [%s]", report.Blocked, report.Ready, CodeSourceBusy)
+	// Nothing is holding the source, so this is not a busy source: the marker
+	// whose absence the read-only observation cannot read is a distinct code.
+	if report.Ready || len(report.Blocked) != 1 || report.Blocked[0] != CodeSourceLockUnavailable {
+		t.Fatalf("blocked = %v ready = %t, want [%s]", report.Blocked, report.Ready, CodeSourceLockUnavailable)
+	}
+	check, found := checkByName(report, CheckSourceOwnership)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceLockUnavailable {
+		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceLockUnavailable)
 	}
 }
 
@@ -240,8 +399,8 @@ func TestPreflightReportsMissingDatabase(t *testing.T) {
 		t.Fatalf("source kind = %q, want %q", report.SourceKind, SourceKindMissingDatabase)
 	}
 	// An empty directory has neither the ownership marker nor the database; the
-	// first failing condition is the ownership fence.
-	wantBlocked := []string{CodeSourceBusy}
+	// first failing condition is the marker this read-only step cannot inspect.
+	wantBlocked := []string{CodeSourceLockUnavailable}
 	if len(report.Blocked) != len(wantBlocked) {
 		t.Fatalf("blocked = %v, want %v", report.Blocked, wantBlocked)
 	}

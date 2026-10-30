@@ -1,6 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  createUpgradeWizardRead,
   FreshUpgradeFlow,
   type UpgradeStatus,
   type UpgradeWizardRead,
@@ -21,7 +22,7 @@ function preflightDocument(overrides: Record<string, unknown> = {}) {
     sourceVersion: '1.9.4',
     fingerprint: 'ab12cd34ef56…',
     checks: [
-      { name: 'source_ownership', status: 'pass', code: '', detail: 'exclusive source lock held' },
+      { name: 'source_ownership', status: 'pass', code: '', detail: 'no live source writer' },
       { name: 'source_version', status: 'pass', code: '', detail: 'version=1.9.4' },
       { name: 'fingerprint', status: 'pass', code: '', detail: 'sha256 over source manifest' },
       { name: 'disk', status: 'pass', code: '', detail: 'needs 12 GiB, has 40 GiB' },
@@ -277,6 +278,64 @@ describe('Full Web upgrade wizard', () => {
       await act(async () => renderer!.unmount());
       renderer = undefined;
     }
+  });
+
+  it("reads both routes with the entry page's own credential scheme", async () => {
+    // The wizard has no session of its own: the entry page proves the source
+    // administrator key against the 1.x source, keeps it in a ref and hands this
+    // factory a getter. The reader must send exactly that key as a Bearer value
+    // on both routes — never the installation session token.
+    const credential = 'Cpamp_Legacy_Upgrade_Admin_Secret_11440';
+    const calls: Array<{ url: string; authorization: string }> = [];
+    const transport = vi.fn(
+      async (input: string, init: { headers: Record<string, string> }) => {
+        calls.push({ url: input, authorization: init.headers.Authorization });
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ contractVersion: 'cpamp.upgrade-wizard.v1' }),
+        };
+      }
+    ) as unknown as typeof fetch;
+    vi.stubGlobal('document', { getElementById: () => null });
+    vi.stubGlobal('window', {
+      setTimeout,
+      clearTimeout,
+      location: { origin: 'http://manager.test' },
+    });
+
+    const read = createUpgradeWizardRead(() => credential, transport);
+    const signal = new AbortController().signal;
+    await read('installation/upgrade/preflight', signal);
+    await read('installation/upgrade/status', signal);
+
+    const base = '/.well-known/cpamp-bootstrap/api/v2';
+    expect(calls).toEqual([
+      {
+        url: `http://manager.test${base}/installation/upgrade/preflight`,
+        authorization: `Bearer ${credential}`,
+      },
+      {
+        url: `http://manager.test${base}/installation/upgrade/status`,
+        authorization: `Bearer ${credential}`,
+      },
+    ]);
+  });
+
+  it('refuses to read at all without the entry credential', async () => {
+    const transport = vi.fn() as unknown as typeof fetch;
+    vi.stubGlobal('document', { getElementById: () => null });
+    vi.stubGlobal('window', {
+      setTimeout,
+      clearTimeout,
+      location: { origin: 'http://manager.test' },
+    });
+
+    const read = createUpgradeWizardRead(() => '', transport);
+    await expect(
+      read('installation/upgrade/status', new AbortController().signal)
+    ).rejects.toMatchObject({ failure: 'authentication' });
+    expect(transport).not.toHaveBeenCalled();
   });
 
   it('treats a contradictory preflight report as a typed read failure', async () => {

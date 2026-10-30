@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net/http"
 	"os"
 	"strings"
 
@@ -16,16 +15,16 @@ const (
 	defaultLegacyRoot     = "/legacy"
 )
 
-// newUpgradeWizard builds the read-only Upgrade wizard routes. Authorization is
-// decided by the surface that mounts this handler: the installation session on
-// the fixed Bootstrap API, the canonical continuation before the product is
-// complete. Both routes only read.
+// newUpgradeWizard builds the read-only Upgrade wizard routes. The handler
+// proves its own credential — the source administrator key the Upgrade entry
+// verified, presented as a Bearer value — against the configured 1.x source, so
+// no surface-level session or "authorize everything" hook can stand in for it.
+// Both routes only read.
 func (a *freshApplication) newUpgradeWizard() upgradewizard.Handler {
 	return upgradewizard.Handler{
-		Authorize: func(*http.Request) int { return 0 },
 		LegacyRoot: configuredLegacyRoot,
-		Database:  func() string { return a.cfg.DBPath },
-		Timeout:   upgradewizard.DefaultTimeout,
+		Database:   func() string { return a.cfg.DBPath },
+		Timeout:    upgradewizard.DefaultTimeout,
 	}
 }
 

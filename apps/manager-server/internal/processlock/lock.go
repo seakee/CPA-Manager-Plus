@@ -27,57 +27,19 @@ type Lock struct {
 // directory or file. The returned lock can be retained for normal startup;
 // releasing it between inspection and startup would lose the ownership fence.
 func AcquireExisting(databasePath string) (*Lock, error) {
-	absolutePath, err := filepath.Abs(databasePath)
+	absolutePath, lockPath, marker, err := existingLockTarget(databasePath)
 	if err != nil {
 		return nil, err
-	}
-	// Resolve an existing parent without using resolveDatabasePath, which mkdirs.
-	directory, err := filepath.EvalSymlinks(filepath.Dir(absolutePath))
-	if os.IsNotExist(err) {
-		return nil, ErrNoExistingLock
-	}
-	if err != nil {
-		return nil, err
-	}
-	absolutePath = filepath.Join(directory, filepath.Base(absolutePath))
-	if info, err := os.Lstat(absolutePath); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("database inspection does not accept a symbolic link")
-	} else if err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	lockPath := absolutePath + ".manager.lock"
-	if err := rejectHardLinkedDatabase(absolutePath); err != nil {
-		return nil, err
-	}
-	info, err := os.Lstat(lockPath)
-	if os.IsNotExist(err) {
-		return nil, ErrNoExistingLock
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errors.New("existing process lock is not a regular file")
 	}
 	file, err := openLockFile(lockPath, os.O_RDWR)
 	if err != nil {
 		return nil, err
 	}
-	opened, err := file.Stat()
-	if err == nil && !os.SameFile(info, opened) {
-		err = errors.New("existing process lock changed during inspection")
+	if err := openedMarker(file, marker); err != nil {
+		_ = file.Close()
+		return nil, err
 	}
-	if err == nil {
-		var multiple bool
-		multiple, err = hasMultipleLinks(file)
-		if multiple {
-			err = ErrHardLinked
-		}
-	}
-	if err == nil {
-		err = lockFile(file)
-	}
-	if err != nil {
+	if err := lockFile(file); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -87,6 +49,85 @@ func AcquireExisting(databasePath string) (*Lock, error) {
 		return nil, err
 	}
 	return lock, nil
+}
+
+// ProbeExisting observes the source ownership marker without taking the fence:
+// a shared, non-blocking lock proves that no writer holds it and is released
+// before returning. A read-only caller must not use AcquireExisting, which needs
+// write access to the marker and would exclude the 1.x writer it only observes.
+// ErrLocked means a live writer holds the source; ErrNoExistingLock means there
+// is no ownership marker to inspect.
+func ProbeExisting(databasePath string) error {
+	_, lockPath, marker, err := existingLockTarget(databasePath)
+	if err != nil {
+		return err
+	}
+	file, err := openLockFile(lockPath, os.O_RDONLY)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	if err := openedMarker(file, marker); err != nil {
+		return err
+	}
+	return probeLockFile(file)
+}
+
+// existingLockTarget validates the source database and its persistent ownership
+// marker without opening the marker. It is the shared guard of the callers that
+// open it: AcquireExisting takes the fence, ProbeExisting only observes it.
+func existingLockTarget(databasePath string) (string, string, os.FileInfo, error) {
+	absolutePath, err := filepath.Abs(databasePath)
+	if err != nil {
+		return "", "", nil, err
+	}
+	// Resolve an existing parent without using resolveDatabasePath, which mkdirs.
+	directory, err := filepath.EvalSymlinks(filepath.Dir(absolutePath))
+	if os.IsNotExist(err) {
+		return "", "", nil, ErrNoExistingLock
+	}
+	if err != nil {
+		return "", "", nil, err
+	}
+	absolutePath = filepath.Join(directory, filepath.Base(absolutePath))
+	if info, err := os.Lstat(absolutePath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", "", nil, errors.New("database inspection does not accept a symbolic link")
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", "", nil, err
+	}
+	lockPath := absolutePath + ".manager.lock"
+	if err := rejectHardLinkedDatabase(absolutePath); err != nil {
+		return "", "", nil, err
+	}
+	marker, err := os.Lstat(lockPath)
+	if os.IsNotExist(err) {
+		return "", "", nil, ErrNoExistingLock
+	}
+	if err != nil {
+		return "", "", nil, err
+	}
+	if !marker.Mode().IsRegular() {
+		return "", "", nil, errors.New("existing process lock is not a regular file")
+	}
+	return absolutePath, lockPath, marker, nil
+}
+
+// openedMarker re-checks that the opened descriptor is still the marker the
+// target named, and that no second hard link reaches it.
+func openedMarker(file *os.File, marker os.FileInfo) error {
+	opened, err := file.Stat()
+	if err == nil && !os.SameFile(marker, opened) {
+		err = errors.New("existing process lock changed during inspection")
+	}
+	if err != nil {
+		return err
+	}
+	if multiple, linkErr := hasMultipleLinks(file); linkErr != nil {
+		return linkErr
+	} else if multiple {
+		return ErrHardLinked
+	}
+	return nil
 }
 
 func Acquire(databasePath string) (*Lock, error) {

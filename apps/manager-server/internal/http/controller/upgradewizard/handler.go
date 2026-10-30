@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -38,9 +39,17 @@ const (
 )
 
 // DefaultTimeout bounds one read-only preflight. A 1.x source is inspected
-// under a lock probe and a bounded SQLite snapshot; it must not hold a request
-// open indefinitely.
+// through a read-only snapshot and a bounded SQLite read; it must not hold a
+// request open indefinitely.
 const DefaultTimeout = 30 * time.Second
+
+// CredentialTimeout bounds the source read that verifies the caller's key. It is
+// shorter than a preflight: authentication must never become the slow path.
+const CredentialTimeout = 10 * time.Second
+
+// CodeAdminUnauthorized is the negative identity verdict. It is the only 401
+// this package writes.
+const CodeAdminUnauthorized = "admin_unauthorized"
 
 // Typed environment codes. They are reported instead of a bare 500 so the
 // wizard can name the condition and offer a retry.
@@ -50,6 +59,10 @@ const (
 	CodePreflightTimeout   = "upgrade_preflight_timeout"
 	CodePreflightFailed    = "upgrade_preflight_failed"
 	CodeOperationUnread    = "upgrade_operation_unreadable"
+	// CodeSourceLockUnavailable is the same code the preflight reports: the
+	// source cannot be read here, so this step can neither prove the key nor
+	// report the source. It is never a verdict on the credential itself.
+	CodeSourceLockUnavailable = upgradeservice.CodeSourceLockUnavailable
 )
 
 // Stages the projection understands. The list is deliberately a string
@@ -78,12 +91,14 @@ const (
 )
 
 // Handler serves both routes. It has no write path at all.
+//
+// Authentication is the Upgrade surface's own credential: the source
+// administrator key the bootstrap Upgrade entry already verified, presented as
+// `Authorization: Bearer <key>`. Each request proves it through
+// upgradeservice.VerifyAdmin, which reads the configured 1.x source read-only.
+// No session, cookie or Fresh claim is a substitute, and an absent decision
+// cannot read as allow.
 type Handler struct {
-	// Authorize refuses a request with a non-zero status. The two surfaces
-	// have different credentials (the installation session before cutover, the
-	// canonical continuation while the product is incomplete), so the caller
-	// owns that decision. A nil Authorize refuses everything.
-	Authorize func(*http.Request) int
 	// LegacyRoot returns the configured 1.x data directory. It is read only.
 	LegacyRoot func() string
 	// Database returns the Manager database path that holds the operation row.
@@ -115,12 +130,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
-	if h.Authorize == nil {
-		writeError(w, http.StatusUnauthorized, "admin_unauthorized")
-		return
-	}
-	if status := h.Authorize(r); status != 0 {
-		writeError(w, status, "admin_unauthorized")
+	if !h.authenticate(w, r) {
 		return
 	}
 	if preflight {
@@ -128,6 +138,53 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serveStatus(w, r)
+}
+
+// authenticate proves the caller holds the source administrator credential. The
+// key is bounded and trimmed here; nothing else about the request (a session
+// header, a cookie, an origin) can stand in for it.
+func (h Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
+	key, ok := bearerKey(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
+		return false
+	}
+	root, status, code := h.legacyRoot()
+	if status != 0 {
+		writeError(w, status, code)
+		return false
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), CredentialTimeout)
+	defer cancel()
+	switch err := upgradeservice.VerifyAdmin(ctx, root, key); {
+	case err == nil:
+		return true
+	case errors.Is(err, upgradeservice.ErrAdminUnauthorized):
+		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
+	default:
+		// The credential is not wrong: the source could not be read to verify it.
+		// Naming that condition keeps a wrong-password message off a mount the
+		// operator has to fix first.
+		writeError(w, http.StatusServiceUnavailable, CodeSourceLockUnavailable)
+	}
+	return false
+}
+
+// bearerKey extracts the single bounded Bearer value. Anything else — no header,
+// two headers, another scheme, an empty or padded key — is not a credential.
+func bearerKey(r *http.Request) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
+		return "", false
+	}
+	key := strings.TrimPrefix(values[0], "Bearer ")
+	if key == "" || len(key) > 4096 || strings.TrimSpace(key) != key {
+		return "", false
+	}
+	return key, true
 }
 
 // preflightCheck mirrors one Upgrade preflight observation. Detail is free text
@@ -338,7 +395,10 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 	document.StageKnown = knownStage(row.Stage)
 	document.NextAction = nextAction(row.Stage)
 	document.DomainsDone = decodeStrings(row.Domains)
-	document.ManualItems = decodeStrings(row.ManualItems)
+	// Manual items are operator instructions written by another step, so they
+	// pass the same content scrubber as the error detail: a copy-pasted command
+	// can carry a credential, and a path in an instruction is still a path.
+	document.ManualItems = scrubList(decodeStrings(row.ManualItems))
 	document.SourceKind = row.SourceKind.String
 	document.SourceVersion = row.SourceVersion.String
 	document.ErrorCode = row.ErrorCode.String
@@ -459,26 +519,47 @@ func decodeStrings(raw string) []string {
 	return values
 }
 
-// scrubError keeps an operation's own error detail but drops anything that
-// looks like a host path, so an error written by another step cannot become a
-// path disclosure here.
+// scrubList applies the content scrubber to every item and keeps the list shape.
+func scrubList(values []string) []string {
+	scrubbed := make([]string, 0, len(values))
+	for _, value := range values {
+		scrubbed = append(scrubbed, scrubError(value))
+	}
+	return scrubbed
+}
+
+// Operator-visible strings are scrubbed by content, not by path shape: a
+// credential carries no path, and an error written by another step can quote one
+// without naming a file. A multi-line detail is evidence too, so it is scrubbed
+// line by line instead of being dropped.
+const (
+	redactedText   = "<redacted>"
+	sourceText     = "<source>"
+	maxDetailLine  = 600
+	maxDetailLines = 40
+)
+
+var (
+	// bearerTokenPattern is the credential half of a Bearer value.
+	bearerTokenPattern = regexp.MustCompile(`(?i)(bearer\s+)[^\s,;"'()<>]+`)
+	// apiKeyHeaderPattern is an x-api-key header, assignment or env-style name.
+	apiKeyHeaderPattern = regexp.MustCompile(`(?i)(x[-_]api[-_]key\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)`)
+	// issuedKeyPattern is the issued key prefix the Manager and its clients use.
+	issuedKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{4,}`)
+	// urlCredentialPattern is a URL whose authority embeds credentials.
+	urlCredentialPattern = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s:@]+(:[^/\s@]*)?@`)
+	// localPathPattern is an absolute POSIX path at a token boundary. The colon
+	// of a URL scheme is not a boundary, so a remote URL is never a local path.
+	localPathPattern = regexp.MustCompile(`(^|[\s"'(=])/[^\s"'),;:]+`)
+	// windowsPathPattern is a drive-letter or UNC path at a token boundary.
+	windowsPathPattern = regexp.MustCompile(`(^|[\s"'(=])(?:[A-Za-z]:\\[^\s"'),;]+|\\\\[^\s"'),;]+)`)
+)
+
+// scrubError keeps an operation's own error detail while removing host paths and
+// credential material, so an error written by another step cannot become a path
+// or secret disclosure here.
 func scrubError(detail string) string {
-	trimmed := strings.TrimSpace(detail)
-	if trimmed == "" {
-		return ""
-	}
-	if strings.ContainsAny(trimmed, "\x00\n\r") {
-		return ""
-	}
-	for _, token := range strings.Fields(trimmed) {
-		if strings.HasPrefix(token, "/") || strings.Contains(token, "\\\\") {
-			return "operation reported an error that referenced a local path"
-		}
-	}
-	if len(trimmed) > 512 {
-		return trimmed[:512]
-	}
-	return trimmed
+	return newScrubber("").text(detail)
 }
 
 type scrubber struct{ replacements []string }
@@ -494,15 +575,62 @@ func newScrubber(root string) scrubber {
 	return s
 }
 
+// detail scrubs one operator-visible preflight detail.
 func (s scrubber) detail(detail string) string {
-	out := detail
-	for _, token := range s.replacements {
-		if token == "" || token == "/" || token == "." {
-			continue
-		}
-		out = strings.ReplaceAll(out, token, "<source>")
+	return s.text(detail)
+}
+
+// text scrubs a possibly multi-line value: the configured source paths first,
+// then credential material and local paths, then the per-line and total bounds.
+func (s scrubber) text(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
 	}
-	return out
+	lines := strings.Split(strings.ReplaceAll(trimmed, "\r\n", "\n"), "\n")
+	scrubbed := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.ReplaceAll(line, "\x00", "")
+		for _, token := range s.replacements {
+			if token == "" || token == "/" || token == "." {
+				continue
+			}
+			line = strings.ReplaceAll(line, token, sourceText)
+		}
+		line = scrubCredentials(line)
+		if len(line) > maxDetailLine {
+			line = capText(line, maxDetailLine)
+		}
+		scrubbed = append(scrubbed, line)
+	}
+	if len(scrubbed) > maxDetailLines {
+		scrubbed = scrubbed[:maxDetailLines]
+	}
+	return strings.Join(scrubbed, "\n")
+}
+
+// scrubCredentials redacts the credential shapes an error can quote. URL
+// credentials go first so the userinfo cannot be read as part of a token.
+func scrubCredentials(line string) string {
+	line = urlCredentialPattern.ReplaceAllString(line, "$1"+redactedText+"@")
+	line = bearerTokenPattern.ReplaceAllString(line, "$1"+redactedText)
+	line = apiKeyHeaderPattern.ReplaceAllString(line, "$1"+redactedText)
+	line = issuedKeyPattern.ReplaceAllString(line, redactedText)
+	line = windowsPathPattern.ReplaceAllString(line, "$1"+sourceText)
+	line = localPathPattern.ReplaceAllString(line, "$1"+sourceText)
+	return line
+}
+
+// capText truncates on a rune boundary so a cut never produces invalid text.
+func capText(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
 }
 
 // abbreviate keeps the short form the console shows elsewhere: enough to tell
