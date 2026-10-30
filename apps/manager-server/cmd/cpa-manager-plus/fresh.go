@@ -562,8 +562,12 @@ func (a *freshApplication) fixedRuntime(w http.ResponseWriter, r *http.Request) 
 
 // fixedAdoption serves the migration summary on the pre-cutover carrier. It
 // authorizes with the installation session exactly as the runtime observation
-// does: an adoption's progress belongs to the claim that committed it, and the
-// summary route is otherwise unreachable until the public route is committed.
+// does: an adoption's progress belongs to the claim that committed it. The
+// summary is reachable here only while the routing checkpoint is uncommitted —
+// freshbootstrap.Handler answers 404 for every resource once it is committed,
+// and fresh.Service.Authorize refuses a committed claim. After the cutover the
+// same `installation/adoption` resource is served by canonicalAPI: to that
+// session until the product completes, and to the Admin key afterwards.
 func (a *freshApplication) fixedAdoption(w http.ResponseWriter, r *http.Request) {
 	token, ok := freshbootstrap.SessionToken(r)
 	if !ok {
