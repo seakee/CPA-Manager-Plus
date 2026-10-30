@@ -91,6 +91,13 @@ type Window struct {
 	UnmappedEvents int64
 }
 
+// IncompleteDay is one UTC day a v2 Upgrade marked incomplete. Reason is a
+// stable code; the UI owns its wording.
+type IncompleteDay struct {
+	Day    string
+	Reason string
+}
+
 // Repository is the storage port. Every method returns counts only.
 type Repository interface {
 	// Binding returns the attribution window of the key or ErrBindingNotFound
@@ -109,6 +116,11 @@ type Repository interface {
 	// RawDeletedIn reports whether archived raw events were deleted inside the
 	// range, which bounds what any window can still prove.
 	RawDeletedIn(ctx context.Context, fromMS, toMS int64) (bool, error)
+
+	// IncompleteDaysIn returns the UTC days inside the range that a v2 Upgrade
+	// permanently marked incomplete. Their numbers are a lower bound forever, so
+	// no window may present them as complete.
+	IncompleteDaysIn(ctx context.Context, fromMS, toMS int64) ([]IncompleteDay, error)
 
 	// CollectionStartedAtMS returns the durable instant collection first ran for
 	// this installation, or 0 when Manager cannot prove it ever ran.

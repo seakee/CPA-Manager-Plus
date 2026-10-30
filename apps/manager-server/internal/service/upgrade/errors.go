@@ -20,6 +20,11 @@ const (
 	// copy-in held its fence. The members this run moved were rolled back and
 	// nothing was recorded.
 	UpgradeErrorSourceChanged UpgradeErrorCode = "upgrade_source_changed"
+	// UpgradeErrorReconcileMismatch reports that the copied-in store and the 1.x
+	// source disagree, or that the source can never complete a day again, and
+	// the operator has not acknowledged those days. Nothing was marked and the
+	// operation row did not advance.
+	UpgradeErrorReconcileMismatch UpgradeErrorCode = "upgrade_reconcile_mismatch"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -50,8 +55,9 @@ func (e *UpgradeError) Is(target error) bool {
 
 // Sentinels for errors.Is. They carry no message of their own.
 var (
-	ErrTargetModified = &UpgradeError{Code: UpgradeErrorTargetModified}
-	ErrSourceChanged  = &UpgradeError{Code: UpgradeErrorSourceChanged}
+	ErrTargetModified    = &UpgradeError{Code: UpgradeErrorTargetModified}
+	ErrSourceChanged     = &UpgradeError{Code: UpgradeErrorSourceChanged}
+	ErrReconcileMismatch = &UpgradeError{Code: UpgradeErrorReconcileMismatch}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

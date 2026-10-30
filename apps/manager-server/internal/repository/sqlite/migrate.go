@@ -1263,6 +1263,16 @@ func Migrate(db *sql.DB) error {
 			created_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
+		// A UTC day the v2 Upgrade reconciliation permanently marked incomplete:
+		// the source can never be read again for it, so its covered numbers stay
+		// a lower bound for the life of this store. The row is evidence, not a
+		// derived table: no revision change or cleanup job may drop or rebuild it.
+		`create table if not exists usage_coverage_incomplete_days (
+			day text primary key,
+			reason text not null,
+			source text not null,
+			recorded_at_ms integer not null
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {

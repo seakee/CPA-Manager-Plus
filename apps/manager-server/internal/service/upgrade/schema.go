@@ -76,6 +76,13 @@ func openImmutableSource(ctx context.Context, path string) (*sql.DB, sourceSchem
 }
 
 func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sourceSchema, error) {
+	return openSourceWith(ctx, path, readOnlyDataSourceName(path, immutable))
+}
+
+// openSourceWith opens the database at path through dsn and verifies integrity
+// with a single quick_check. It never migrates and never writes application
+// data, whatever access mode dsn grants.
+func openSourceWith(ctx context.Context, path, dsn string) (*sql.DB, sourceSchema, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -86,7 +93,7 @@ func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sour
 	if !info.Mode().IsRegular() || info.Size() == 0 {
 		return nil, sourceSchema{}, errSourceDatabaseMissing
 	}
-	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, immutable))
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, sourceSchema{}, err
 	}

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageevent"
@@ -169,6 +170,20 @@ type RawCoverage struct {
 	RawDeletedEventCount  int64 `json:"raw_deleted_event_count"`
 	MinDeletedTimestampMS int64 `json:"min_deleted_timestamp_ms,omitempty"`
 	MaxDeletedTimestampMS int64 `json:"max_deleted_timestamp_ms,omitempty"`
+	// Incomplete reports whether any day in the range carries a permanent
+	// Upgrade mark, and IncompleteDays names each of those days with its
+	// reason. The counts above still describe exactly what this store holds: a
+	// marked day is a lower bound, not a different number.
+	Incomplete     bool                    `json:"incomplete"`
+	IncompleteDays []CoverageIncompleteDay `json:"incomplete_days,omitempty"`
+}
+
+// CoverageIncompleteDay is one UTC day whose covered numbers are a permanent
+// lower bound. The v2 Upgrade marked it because the source can never be read
+// again for it, so no read may present the day as complete.
+type CoverageIncompleteDay struct {
+	Day    string `json:"day"`
+	Reason string `json:"reason"`
 }
 
 type MaintenanceLock struct {
@@ -617,6 +632,19 @@ func (r *Repository) RawCoverage(ctx context.Context, fromTimestampMS, toTimesta
 		if err := tx.QueryRowContext(ctx, `select count(*) from usage_events
 			where timestamp_ms >= ? and timestamp_ms < ?`, fromTimestampMS, toTimestampMS).Scan(&coverage.RawEventCount); err != nil {
 			return RawCoverage{}, err
+		}
+	}
+	// The marks are read in the same snapshot as the counts they qualify, so a
+	// day cannot be reported complete beside an incomplete number.
+	marks, err := coverageincomplete.DaysIn(ctx, tx, fromTimestampMS, toTimestampMS)
+	if err != nil {
+		return RawCoverage{}, err
+	}
+	if len(marks) > 0 {
+		coverage.Incomplete = true
+		coverage.IncompleteDays = make([]CoverageIncompleteDay, 0, len(marks))
+		for _, mark := range marks {
+			coverage.IncompleteDays = append(coverage.IncompleteDays, CoverageIncompleteDay{Day: mark.Day, Reason: mark.Reason})
 		}
 	}
 	if err := tx.Commit(); err != nil {

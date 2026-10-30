@@ -246,3 +246,31 @@ func nullString(value string) any {
 	}
 	return value
 }
+
+// RecordReconciliation stores the reconciliation report on the single row
+// without rebuilding it: Put would clear the provenance a completed operation
+// must keep carrying, so this is the only writer for this column. A row must
+// already exist, because a reconciliation only ever describes a recorded
+// copy-in.
+func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMessage) error {
+	if len(report) == 0 {
+		report = json.RawMessage("{}")
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(report, &object); err != nil {
+		return fmt.Errorf("%w: reconciliation must be a JSON object", ErrInvalidRow)
+	}
+	result, err := r.db.ExecContext(ctx, `update `+tableName+`
+		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(report), time.Now().UnixMilli())
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
+	}
+	return nil
+}

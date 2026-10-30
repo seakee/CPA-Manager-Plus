@@ -225,7 +225,21 @@ type AnalyticsCoverage struct {
 	ComparisonMinDeletedTimestampMS int64                    `json:"comparison_min_deleted_timestamp_ms,omitempty"`
 	ComparisonMaxDeletedTimestampMS int64                    `json:"comparison_max_deleted_timestamp_ms,omitempty"`
 	AuxiliaryRanges                 []AnalyticsCoverageRange `json:"auxiliary_ranges,omitempty"`
-	FidelityLimitations             []string                 `json:"fidelity_limitations"`
+	// Incomplete reports whether any day in the requested range carries a
+	// permanent Upgrade mark, and IncompleteDays names each of those days with
+	// its reason. A marked day is a lower bound, not a measurement; an
+	// unmarked range leaves both fields at their zero value.
+	Incomplete          bool                             `json:"incomplete"`
+	IncompleteDays      []AnalyticsCoverageIncompleteDay `json:"incomplete_days,omitempty"`
+	FidelityLimitations []string                         `json:"fidelity_limitations"`
+}
+
+// AnalyticsCoverageIncompleteDay is one UTC day whose covered numbers are a
+// permanent lower bound: the v2 Upgrade marked it because the 1.x source can
+// never be read again for it.
+type AnalyticsCoverageIncompleteDay struct {
+	Day    string `json:"day"`
+	Reason string `json:"reason"`
 }
 
 type AnalyticsCoverageRange struct {
@@ -974,10 +988,12 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 			Coverage: coverage,
 		})
 	}
-	coverageWarningRequired := rawCoverage.RawDeletedEventCount > 0 ||
-		(comparisonRawCoverage != nil && comparisonRawCoverage.RawDeletedEventCount > 0)
+	// A marked day needs the coverage object even when nothing was deleted in
+	// range: the numbers are a lower bound, and that has to reach the operator.
+	coverageWarningRequired := rawCoverage.RawDeletedEventCount > 0 || rawCoverage.Incomplete ||
+		(comparisonRawCoverage != nil && (comparisonRawCoverage.RawDeletedEventCount > 0 || comparisonRawCoverage.Incomplete))
 	for _, auxiliary := range auxiliaryRawCoverage {
-		if auxiliary.Coverage.RawDeletedEventCount > 0 {
+		if auxiliary.Coverage.RawDeletedEventCount > 0 || auxiliary.Coverage.Incomplete {
 			coverageWarningRequired = true
 			break
 		}
@@ -1691,7 +1707,14 @@ func buildAnalyticsCoverage(
 		RawDeletedEventCount:  coverage.RawDeletedEventCount,
 		MinDeletedTimestampMS: coverage.MinDeletedTimestampMS,
 		MaxDeletedTimestampMS: coverage.MaxDeletedTimestampMS,
+		Incomplete:            coverage.Incomplete,
 		FidelityLimitations:   limitations,
+	}
+	if len(coverage.IncompleteDays) > 0 {
+		result.IncompleteDays = make([]AnalyticsCoverageIncompleteDay, 0, len(coverage.IncompleteDays))
+		for _, day := range coverage.IncompleteDays {
+			result.IncompleteDays = append(result.IncompleteDays, AnalyticsCoverageIncompleteDay{Day: day.Day, Reason: day.Reason})
+		}
 	}
 	if comparisonCoverage != nil {
 		result.ComparisonRawEventCount = comparisonCoverage.RawEventCount

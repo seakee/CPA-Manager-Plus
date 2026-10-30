@@ -78,6 +78,19 @@ type Options struct {
 	// Lock is the caller's held 1.x ownership fence. CopyIn requires the lock
 	// bound to the source database; Preflight acquires its own.
 	Lock *processlock.Lock
+	// ScratchDir is this step's private working area. Reconcile copies the
+	// stopped 1.x database here and reads the copy, so the source root is never
+	// opened as a database. Unset uses <TargetRoot>/.upgrade-reconcile and the
+	// directory is removed before Reconcile returns. Reconcile only.
+	ScratchDir string
+	// Acknowledged lists the UTC days (YYYY-MM-DD) the operator explicitly
+	// accepts as permanently incomplete. Reconcile only.
+	Acknowledged []string
+	// AcknowledgeParityGaps accepts every day the parity detection reports as
+	// lost before v1.14.6, without naming each one. The days actually accepted
+	// are still written into the report, so the record names them. Reconcile
+	// only.
+	AcknowledgeParityGaps bool
 	// checkpoint is a package-private synchronous test seam. Production never
 	// sets it; every returned error aborts the copy-in at that phase.
 	checkpoint func(phase string) error
