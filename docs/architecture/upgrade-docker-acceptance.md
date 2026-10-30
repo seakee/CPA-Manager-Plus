@@ -45,6 +45,7 @@ node bin/ci/upgrade-docker.mjs --keep          # keep the scratch tree
 | rollback | plan → real compose apply on the plan's volume and port → the restarted 1.x accepts a new row → probe of the manager's own listener refused with `upgrade_rollback_probe_self` → `--verify` records `rolled_back` with the image, endpoint and observed fingerprint |
 | admission, unfinished | with the recorded row at `copy_in` and at `reconcile` the manager answers `/health` 503 and serves both wizard reads on the fixed Bootstrap carrier: 200 to the 1.x administrator key only (status shows the recorded stage and `nextAction`), 401 to no credential or a foreign one, and 405 with `Allow: GET` only after the key is proved; the canonical continuation stays 404 because a copied root carries no Fresh record |
 | admission, mountless | with the source mount absent, the same two roots still answer `status` 200 from the Manager store — `evidence: operation_row`, the recorded stage and a typed `sourceRoot: upgrade_legacy_root_missing` — to the key the mount accepted, while the v2 Admin key stays 401 and the preflight keeps its typed 503 with the same code |
+| admission, refused mount | with the source mounted but its `usage.sqlite` a symbolic link — a file the shared database file policy refuses on both the mount lookup and the credential read — the same two roots keep answering `status` 200 from the Manager store with the recorded stage and a typed `sourceRoot: upgrade_source_symlinked` to the key the mount accepted, the v2 Admin key stays 401, and the preflight still inspects the mount the operator supplied: 200, `ready: false`, `source_ownership` blocked with `upgrade_source_symlinked`. Before the fix this state answered 503 on the entry page and both reads, so the operator could not reach the page that names the condition |
 | origin rule, both reads | on both surfaces a cross-site `Origin` is 403 `origin_rejected` and `Sec-Fetch-Site: cross-site` is 403 (the surface's code on the fixed carrier, the transport's fetch-metadata refusal on the Fresh admin surface), this very origin is served 200, and an anonymous cross-site caller is still 401 first, so the credential is proved before the origin verdict |
 | admission, complete | the terminal `complete` row admits the full writable surface (`/health` 200) and both reads answer 404 to every caller, the source key included |
 
@@ -79,6 +80,17 @@ refused command (`targetRootUnchanged`).
    are now mounted beside the Upgrade entry leaf on the fixed surface, under the
    same gate and the same source credential, and retire on completion.
    Regression: `TestStartupServesTheUpgradeWizardFromTheCopiedOperation`.
+4. **Wizard surface on a refused mount** (`internal/service/upgrade/preflight.go:397`,
+   `MountDatabase`). The mount lookup counted a mount's `usage.sqlite` with
+   `os.Stat`, which follows a symbolic link, so the mount looked like a source;
+   the credential read then refused the linked file under the shared database
+   file policy, and the entry page and both reads answered 503 — the operator
+   could not reach the page that names the condition. The mount question now asks
+   the credential read's own inspection, so a mount the policy refuses holds no
+   database for the surface: the credential resolves to the Manager store, the
+   surface stays reachable, and `status` and `preflight` both report
+   `upgrade_source_symlinked` for that mount. Regression:
+   `TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere`.
 
 ## Gaps the harness records but cannot close inside this slice
 

@@ -15,9 +15,12 @@
 //     unfinished — both wizard reads included, from the copied root alone —
 //     that those reads keep answering from the Manager store with a typed
 //     `sourceRoot` marker when the 1.x source is no longer mounted while the
-//     preflight keeps its 503, that the copy-in marker window reads `copy_in`,
-//     that it serves the full surface and retires those reads once the operation
-//     is complete, and that a probe answered by the manager itself is refused.
+//     preflight keeps its 503, that a mounted source whose usage.sqlite is a
+//     symbolic link stays reachable the same way with `upgrade_source_symlinked`
+//     instead of bricking the surface, that the copy-in marker window reads
+//     `copy_in`, that it serves the full surface and retires those reads once the
+//     operation is complete, and that a probe answered by the manager itself is
+//     refused.
 //
 // Everything it creates is named `<prefix>-*` where the prefix is
 // `cpampd<runid>`; nothing else on the host is stopped, removed or renamed, and
@@ -297,6 +300,14 @@ function recordProductFixes() {
       'an unfinished operation admits only the fixed Bootstrap surface, and the copy-in target replaces usage.sqlite so it carries no Fresh record for the canonical continuation: both wizard read routes answered 404 while the wizard had a stage recorded, so the operator could never see the copy_in or reconcile the process had just written. The two reads are now mounted beside the Upgrade entry leaf on the fixed surface, under the same gate and the same source credential, and retire with completion',
     file: 'apps/manager-server/cmd/cpa-manager-plus/startup_discovery.go:73',
     regression: 'apps/manager-server/cmd/cpa-manager-plus/startup_upgrade_wizard_test.go TestStartupServesTheUpgradeWizardFromTheCopiedOperation',
+  });
+  evidence.findings.push({
+    code: 'upgrade_wizard_unreachable_on_a_refused_mount',
+    status: 'fixed',
+    detail:
+      'the mount lookup counted a mount\'s usage.sqlite with os.Stat, which follows a symbolic link: the mount looked like a source, the credential read then refused the linked file under the shared database file policy, and the entry page and both wizard reads answered 503, so the operator could not reach the page that names the condition. The mount question now asks the credential read\'s own inspection through one MountDatabase lookup, so a mount the policy refuses holds no database for the surface: the credential resolves to the Manager store, the surface stays reachable, and status and preflight report upgrade_source_symlinked for that mount',
+    file: 'apps/manager-server/internal/service/upgrade/preflight.go:397',
+    regression: 'apps/manager-server/cmd/cpa-manager-plus/startup_upgrade_surface_test.go TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere',
   });
 }
 
@@ -939,6 +950,91 @@ async function proveMountlessStatus(binary, root, stage) {
   }
 }
 
+// proveRefusedMountStatus starts the manager on a root whose recorded operation
+// is unfinished and whose 1.x mount holds a usage.sqlite that is a symbolic
+// link. The shared database file policy refuses a link on both the mount lookup
+// and the credential read, so the mount counts as no source at all: the surface
+// must resolve the Manager store, keep the recorded stage readable on a 200 and
+// name the condition, rather than answering 503 on the entry page and both
+// reads — which is what the regression this case exists for did, so the operator
+// could not even reach the page that names the file policy's verdict.
+async function proveRefusedMountStatus(binary, root, stage, sourceRoot) {
+  const label = `refused-mount(${stage})`;
+  // A real copy of the source the chain copied, so the mount still looks like a
+  // 1.x data directory; only the file behind usage.sqlite is a link.
+  const mountRoot = path.join(SCRATCH, 'work', 'refused-mount', stage, 'source');
+  copyTree(sourceRoot, mountRoot);
+  const database = path.join(mountRoot, 'usage.sqlite');
+  const linkTarget = path.join(mountRoot, 'usage.actual.sqlite');
+  fs.renameSync(database, linkTarget);
+  fs.symlinkSync(linkTarget, database);
+  assertValue(
+    fs.lstatSync(database).isSymbolicLink() && fs.statSync(database).isFile(),
+    `${label}: the mount's usage.sqlite is not a symbolic link to a file`,
+  );
+
+  const port = freePort();
+  const name = `${PREFIX}-refusedmount-${stage.replace(/_/g, '')}`;
+  startHostManager({ name, binary, dataDir: root, port, adminKey: ADMIN_V2, legacyRoot: mountRoot });
+  try {
+    await waitForHealth(port, `${name} /health`, 503);
+    const base = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
+    // Reachability is the assertion: a refused mount may not take the surface
+    // down. The store answers the projection with the stage the chain recorded.
+    const status = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+    assertValue(
+      status.status === 200,
+      `${label}: status with a symlinked mount database = ${status.status}: ${JSON.stringify(status.body).slice(0, 200)} want 200 from the Manager store`,
+    );
+    assertValue(status.body?.recorded === true, `${label}: status recorded with a symlinked mount database = ${status.body?.recorded}`);
+    assertValue(status.body?.evidence === 'operation_row', `${label}: status evidence = ${status.body?.evidence} want operation_row`);
+    assertValue(status.body?.stage === stage, `${label}: status stage = ${status.body?.stage} want ${stage}`);
+    assertValue(status.body?.nextAction === stage, `${label}: status nextAction = ${status.body?.nextAction} want ${stage}`);
+    // The refused mount is named on the successful projection, with the code the
+    // preflight reports for the same mount.
+    assertValue(
+      status.body?.sourceRoot === 'upgrade_source_symlinked',
+      `${label}: status sourceRoot = ${status.body?.sourceRoot} want upgrade_source_symlinked`,
+    );
+    assertNoSecretInBody(`${label}: status`, status.body, [ADMIN_V1, ADMIN_V2, root, SCRATCH, mountRoot, linkTarget]);
+    // The store is the credential, and it holds the key the mount accepted: that
+    // key keeps working, the one in the other file never does.
+    const foreign = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V2}` } });
+    assertValue(foreign.status === 401, `${label}: status with the v2 Admin key = ${foreign.status} want 401 on a refused mount`);
+    // The preflight inspects the mount the operator supplied, never the file the
+    // credential fell back to, so it names the link itself.
+    const preflight = httpJson('GET', `${base}/preflight`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+    assertValue(preflight.status === 200, `${label}: preflight = ${preflight.status}: ${JSON.stringify(preflight.body).slice(0, 200)} want 200`);
+    assertValue(preflight.body?.ready === false, `${label}: preflight ready with a symlinked mount database = ${preflight.body?.ready} want false`);
+    const ownership = (preflight.body?.checks ?? []).find((check) => check.name === 'source_ownership');
+    assertValue(
+      ownership?.code === 'upgrade_source_symlinked',
+      `${label}: preflight source_ownership code = ${ownership?.code} want upgrade_source_symlinked`,
+    );
+    assertValue(
+      (preflight.body?.blocked ?? []).includes('upgrade_source_symlinked'),
+      `${label}: preflight blocked = ${JSON.stringify(preflight.body?.blocked)} want upgrade_source_symlinked`,
+    );
+    assertNoSecretInBody(`${label}: preflight`, preflight.body, [ADMIN_V1, ADMIN_V2, root, SCRATCH, mountRoot, linkTarget]);
+    return {
+      mount: 'symlinked',
+      health: 503,
+      status: {
+        status: status.status,
+        recorded: status.body.recorded,
+        evidence: status.body.evidence,
+        stage: status.body.stage,
+        nextAction: status.body.nextAction,
+        sourceRoot: status.body.sourceRoot,
+      },
+      preflight: { status: preflight.status, ready: preflight.body.ready, code: ownership.code, blocked: preflight.body.blocked },
+      credential: { storeAdminKey: status.status, v2AdminKey: foreign.status },
+    };
+  } finally {
+    stopHostManager(name);
+  }
+}
+
 // proveCompletedAdmission proves the reads end with the operation. The recorded
 // row is the terminal `complete` one, so admission serves the full writable
 // surface — /health 200 — and both fixed-surface reads answer 404 to every
@@ -994,6 +1090,14 @@ async function assertAdmission(binary, workspace) {
     copy_in: await proveMountlessStatus(binary, copyInRoot, 'copy_in'),
     reconcile: await proveMountlessStatus(binary, workspace.main.target, 'reconcile'),
   };
+  // And the same two roots with the mount present but refused by the shared
+  // database file policy (usage.sqlite is a link): the mount holds no database the
+  // surface may read, so the Manager store is the credential and the surface stays
+  // reachable while both projections name the condition.
+  const refusedMount = {
+    copy_in: await proveRefusedMountStatus(binary, copyInRoot, 'copy_in', sourceRoot),
+    reconcile: await proveRefusedMountStatus(binary, workspace.main.target, 'reconcile', sourceRoot),
+  };
 
   // Completion is the terminal stage on the row the copy-in recorded. No
   // completion transition ships in this milestone (it is the operation's own
@@ -1017,6 +1121,7 @@ async function assertAdmission(binary, workspace) {
     surface: 'upgrade-only',
     states: { copy_in: copyIn, reconcile },
     mountless,
+    refusedMount,
     completed,
     completionInput: 'terminal stage written onto the row the real copy-in recorded; the evidence the admission demands is the copy-in\'s own',
   };
@@ -1027,6 +1132,12 @@ async function assertAdmission(binary, workspace) {
   );
   stableFacts.push(
     `admission:mountless:reconcile:${mountless.reconcile.status.status}:${mountless.reconcile.status.stage}:${mountless.reconcile.status.nextAction}:${mountless.reconcile.status.sourceRoot}:${mountless.reconcile.preflight.status}:${mountless.reconcile.preflight.code}`,
+  );
+  stableFacts.push(
+    `admission:refused-mount:copy_in:${refusedMount.copy_in.health}:${refusedMount.copy_in.status.status}:${refusedMount.copy_in.status.stage}:${refusedMount.copy_in.status.nextAction}:${refusedMount.copy_in.status.sourceRoot}:${refusedMount.copy_in.preflight.status}:${refusedMount.copy_in.preflight.ready}:${refusedMount.copy_in.preflight.code}`,
+  );
+  stableFacts.push(
+    `admission:refused-mount:reconcile:${refusedMount.reconcile.health}:${refusedMount.reconcile.status.status}:${refusedMount.reconcile.status.stage}:${refusedMount.reconcile.status.nextAction}:${refusedMount.reconcile.status.sourceRoot}:${refusedMount.reconcile.preflight.status}:${refusedMount.reconcile.preflight.ready}:${refusedMount.reconcile.preflight.code}`,
   );
   stableFacts.push(`admission:complete:${completed.health}:${completed.status}:${completed.preflight}`);
 }
