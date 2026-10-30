@@ -323,6 +323,104 @@ func TestRecordRollbackRefusesIncompleteEvidence(t *testing.T) {
 	}
 }
 
+// TestAdvanceRefusesTheTerminalVerdict covers L-D at the first stage-writing
+// path: Advance carries no observation, so it can never write rolled_back. A
+// terminal verdict nobody can check would otherwise be one call away.
+func TestAdvanceRefusesTheTerminalVerdict(t *testing.T) {
+	ctx := context.Background()
+	repository, _ := newRepository(t)
+	recordedCopyIn(t, repository)
+	before, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("read the recorded copy-in: %v", err)
+	}
+	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageRolledBack); !errors.Is(err, upgradeoperation.ErrRollbackEvidenceRequired) {
+		t.Fatalf("advance to rolled_back = %v, want %v", err, upgradeoperation.ErrRollbackEvidenceRequired)
+	}
+	after, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("read the row after the refusal: %v", err)
+	}
+	if after.Stage != before.Stage || after.Rollback != nil || after.UpdatedAtMS != before.UpdatedAtMS {
+		t.Fatalf("a refused advance wrote the row: before=%+v after=%+v", before, after)
+	}
+}
+
+// TestPutRefusesARolledBackRowWithoutEvidence covers L-D at the replacement
+// path: a row that names the terminal stage but no observation never reaches the
+// table, so a reader cannot find a verdict it cannot check.
+func TestPutRefusesARolledBackRowWithoutEvidence(t *testing.T) {
+	ctx := context.Background()
+	repository, _ := newRepository(t)
+	before := recordedCopyIn(t, repository)
+	before.Stage = model.UpgradeStageRolledBack
+	before.Rollback = nil
+	if err := repository.Put(ctx, before); !errors.Is(err, upgradeoperation.ErrRollbackEvidenceRequired) {
+		t.Fatalf("put a rolled_back row without evidence = %v, want %v", err, upgradeoperation.ErrRollbackEvidenceRequired)
+	}
+	stored, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("read the row after the refusal: found=%t err=%v", found, err)
+	}
+	if stored.Stage == model.UpgradeStageRolledBack {
+		t.Fatalf("the evidence-less verdict was written: %+v", stored)
+	}
+}
+
+// TestRecordSourceRootBackfillsOnce covers the repair an operation written by an
+// earlier build needs: the directory is filled in when it is missing, and a row
+// that already names one is never rewritten.
+func TestRecordSourceRootBackfillsOnce(t *testing.T) {
+	ctx := context.Background()
+	repository, _ := newRepository(t)
+	recorded := recordedCopyIn(t, repository)
+	recorded.SourceRoot = ""
+	if err := repository.Put(ctx, recorded); err != nil {
+		t.Fatalf("clear the recorded source root: %v", err)
+	}
+
+	backfilled, err := repository.RecordSourceRoot(ctx, "/srv/cpamp/data")
+	if err != nil {
+		t.Fatalf("backfill the source root: %v", err)
+	}
+	if backfilled.SourceRoot != "/srv/cpamp/data" {
+		t.Fatalf("backfilled root = %q", backfilled.SourceRoot)
+	}
+	stored, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("read the backfilled row: %v", err)
+	}
+	if stored.SourceRoot != "/srv/cpamp/data" {
+		t.Fatalf("persisted root = %q", stored.SourceRoot)
+	}
+	if stored.SourceFingerprintBefore != recorded.SourceFingerprintBefore ||
+		stored.BackupManifestSHA256 != recorded.BackupManifestSHA256 ||
+		stored.SourceVersion != recorded.SourceVersion {
+		t.Fatalf("the backfill rewrote provenance: %+v", stored)
+	}
+
+	again, err := repository.RecordSourceRoot(ctx, "/somewhere/else")
+	if err != nil {
+		t.Fatalf("re-record the source root: %v", err)
+	}
+	if again.SourceRoot != "/srv/cpamp/data" {
+		t.Fatalf("a recorded root was rewritten to %q", again.SourceRoot)
+	}
+}
+
+// TestRecordSourceRootNeedsARecordedOperation keeps the repair inside an
+// existing operation: a backfill never creates a row.
+func TestRecordSourceRootNeedsARecordedOperation(t *testing.T) {
+	ctx := context.Background()
+	repository, _ := newRepository(t)
+	if _, err := repository.RecordSourceRoot(ctx, "/srv/cpamp/data"); err == nil {
+		t.Fatal("a backfill created an operation row")
+	}
+	if _, found, err := repository.Get(ctx); err != nil || found {
+		t.Fatalf("a refused backfill created a row: found=%t err=%v", found, err)
+	}
+}
+
 // TestPutKeepsRecordedRollbackEvidence keeps Put a full replacement of the row:
 // a resnapshotted row carries the evidence it read.
 func TestPutKeepsRecordedRollbackEvidence(t *testing.T) {

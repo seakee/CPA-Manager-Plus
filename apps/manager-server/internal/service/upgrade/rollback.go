@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -49,7 +51,17 @@ const (
 	// for another project derives its own name from that project.
 	LegacyVolumeName       = LegacyComposeProject + LegacyVolumeSuffix
 	LegacyVolumeMountPoint = "/data"
-	LegacyManagerPort      = 18317
+	// ManagerDefaultPort is the port the v2 Manager publishes unless it is
+	// configured otherwise. The 1.x manager defaulted to the same number and the
+	// two state the same service identity on GET /health, so a rollback cannot
+	// prove itself against this port: a 2xx there may be the v2 stack describing
+	// itself.
+	ManagerDefaultPort = 18317
+	// LegacyRollbackPort is the port the rollback plan publishes the restarted
+	// 1.x manager on. It is deliberately beside ManagerDefaultPort: while the v2
+	// stack still holds its port, nothing can answer a probe on this one as v2,
+	// and a plan whose port is already taken is refused instead of applied.
+	LegacyRollbackPort = ManagerDefaultPort + 1
 	// LegacyHealthPath is the one unauthenticated endpoint the 1.x manager
 	// serves. Every other endpoint of the 1.x surface requires credentials, so
 	// a rollback proves the volume with this endpoint and the identity it
@@ -57,7 +69,9 @@ const (
 	LegacyHealthPath = "/health"
 	// LegacyServiceID is the identity the 1.x manager states on GET /health as
 	// {"ok":true,"service":"cpa-manager-plus"}. A probe that answers 2xx for a
-	// different identity is refused: something else is listening.
+	// different identity is refused: something else is listening. The v2 Manager
+	// states the same identity, which is why the probe target is checked against
+	// this Manager's own listener before the answer is trusted.
 	LegacyServiceID = "cpa-manager-plus"
 
 	// rollbackEvidenceFreshness bounds how old an observation may be when it is
@@ -98,12 +112,24 @@ type RollbackOptions struct {
 	// TargetRoot is the v2 data directory that holds the operation row and
 	// receives the plan report.
 	TargetRoot string
+	// BackupDir is the recorded backup snapshot the plan verifies against.
+	// Empty uses the v2 default backup directory inside TargetRoot.
+	BackupDir string
 	// TagOverride replaces the derived v1 image tag. An empty value derives
 	// v<source_version> from the recorded row.
 	TagOverride string
 	// Project is the compose project the 1.x stack ran under; it names the
 	// volume. Empty uses the default 1.x project.
 	Project string
+	// Port is the port the plan publishes the restarted 1.x manager on. Empty
+	// uses LegacyRollbackPort, which never collides with the v2 Manager's own
+	// port.
+	Port int
+	// ManagerAddress is the v2 Manager's own listen address (host:port). The plan
+	// may not publish its port, and when the operator names it the plan also
+	// refuses while the v2 stack still answers there. Empty assumes the
+	// documented Manager default port.
+	ManagerAddress string
 	// AllowImageFamilyMismatch accepts a 1.x image from another version family
 	// than the recorded source. It is the explicit override; the default keeps
 	// the rollback on the version the operation copied.
@@ -124,13 +150,29 @@ type Plan struct {
 	// ImageFamilyOverride records that the plan pins a release outside the
 	// recorded source's family because the operator asked for it, so the verify
 	// command printed with the plan stays exact.
-	ImageFamilyOverride  bool               `json:"imageFamilyOverride,omitempty"`
-	Volume               string             `json:"volume"`
-	VolumeMountPoint     string             `json:"volumeMountPoint"`
-	ComposeProject       string             `json:"composeProject"`
-	ComposeService       string             `json:"composeService"`
-	ComposeInvocation    string             `json:"composeInvocation"`
-	ComposeFile          string             `json:"composeFile"`
+	ImageFamilyOverride bool   `json:"imageFamilyOverride,omitempty"`
+	Volume              string `json:"volume"`
+	VolumeMountPoint    string `json:"volumeMountPoint"`
+	ComposeProject      string `json:"composeProject"`
+	ComposeService      string `json:"composeService"`
+	ComposeInvocation   string `json:"composeInvocation"`
+	ComposeFile         string `json:"composeFile"`
+	// Port is the host port the plan publishes the 1.x manager on. It never
+	// collides with the port the v2 Manager holds, so an answer there cannot be
+	// the v2 stack describing itself.
+	Port int `json:"port"`
+	// ManagerPort is the port the v2 Manager listens on. The plan states it so
+	// the operator knows which listener has to be gone before a probe can only
+	// reach v1.
+	ManagerPort int `json:"managerPort"`
+	// ManagerAddress is the v2 Manager address the plan was derived against, when
+	// the operator named one. The printed verify command carries it, so the
+	// verdict refuses a probe of that listener too.
+	ManagerAddress string `json:"managerAddress,omitempty"`
+	// BackupDirectory is the recorded snapshot the verdict re-verifies. The
+	// printed verify command names it, so the operator cannot record against a
+	// different copy.
+	BackupDirectory      string             `json:"backupDirectory"`
 	Preconditions        []string           `json:"preconditions"`
 	HealthChecks         []string           `json:"healthChecks"`
 	SourceFingerprint    string             `json:"sourceFingerprint"`
@@ -147,8 +189,16 @@ type Plan struct {
 // volume the operation described (upgrade_source_changed), the evidence the plan
 // rests on still holds (upgrade_rollback_unproven), the 1.x image resolves to an
 // exact release in the recorded version family (upgrade_rollback_image_unpinned,
-// upgrade_rollback_image_family) and the two roots do not contain each other
-// (upgrade_rollback_roots_overlap). A refusal writes nothing.
+// upgrade_rollback_image_family), the plan's port is neither the port this
+// Manager holds (upgrade_rollback_port_collision) nor taken by anything else
+// (upgrade_rollback_port_busy, upgrade_rollback_v2_running) and the two roots do
+// not contain each other (upgrade_rollback_roots_overlap). A refusal writes
+// nothing.
+//
+// A row written before the source-root column existed is bound once by the
+// fingerprint the copy-in recorded: that is the only path that can still record
+// which direction the rollback restores, because the copy-in refuses to run
+// again after it is recorded.
 func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error) {
 	if err := ctx.Err(); err != nil {
 		return Plan{}, err
@@ -185,10 +235,6 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		return Plan{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
 			fmt.Sprintf("the operation is recorded at stage %q, which a rollback cannot start from", string(recorded.Stage)), nil)
 	}
-	if err := requireRecordedSourceRoot(recorded, sourceRoot); err != nil {
-		return Plan{}, err
-	}
-
 	fingerprint, _, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return Plan{}, fmt.Errorf("fingerprint the 1.x source: %w", err)
@@ -197,9 +243,15 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		return Plan{}, newUpgradeError(UpgradeErrorRollbackUnproven,
 			"the recorded operation carries no before/after source fingerprint, so a rollback cannot be shown safe", nil)
 	}
-	if fingerprint != recorded.SourceFingerprintBefore {
+	// A row that names no directory has nothing to compare against yet: the
+	// binding decides whether this directory can still be proven to be the one
+	// the copy-in read, and refuses with what works when it cannot.
+	if strings.TrimSpace(recorded.SourceRoot) != "" && fingerprint != recorded.SourceFingerprintBefore {
 		return Plan{}, newUpgradeError(UpgradeErrorSourceChanged,
 			"the 1.x source is not the volume this operation copied; a v1 restart would not restore the recorded state", nil)
+	}
+	if err := requireBoundedSourceRoot(recorded, sourceRoot, fingerprint); err != nil {
+		return Plan{}, err
 	}
 	if strings.TrimSpace(recorded.BackupManifestSHA256) == "" {
 		return Plan{}, newUpgradeError(UpgradeErrorRollbackUnproven,
@@ -210,6 +262,27 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		return Plan{}, err
 	}
 	project, volume, err := rollbackVolume(options.Project)
+	if err != nil {
+		return Plan{}, err
+	}
+	// The port the plan publishes and the v2 stack's own port are decided before
+	// anything is written: a plan is only rollback-ready when the restarted v1
+	// can answer where v2 cannot.
+	port, err := rollbackPlanPort(options.Port, options.ManagerAddress)
+	if err != nil {
+		return Plan{}, err
+	}
+	if err := requireV2Stopped(ctx, options.ManagerAddress); err != nil {
+		return Plan{}, err
+	}
+	bundleDir, err := rollbackBundleDir(options.BackupDir, targetRoot)
+	if err != nil {
+		return Plan{}, err
+	}
+	// Every refusal above wrote nothing. Binding the recorded root may backfill a
+	// row written before the column existed, which is a write to the v2 store, so
+	// it happens last.
+	recorded, err = bindSourceRoot(ctx, recorded, targetRoot, sourceRoot)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -226,9 +299,13 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		ComposeService:      LegacyComposeService,
 		ComposeInvocation: fmt.Sprintf("docker compose -p %s -f - up -d %s",
 			project, LegacyComposeService),
-		ComposeFile:          rollbackComposeFile(image, volume),
-		Preconditions:        rollbackPreconditions(project, volume, image, recorded.SourceRoot),
-		HealthChecks:         rollbackHealthChecks(),
+		ComposeFile:          rollbackComposeFile(image, volume, port),
+		Port:                 port,
+		ManagerPort:          managerAddressPort(options.ManagerAddress),
+		ManagerAddress:       strings.TrimSpace(options.ManagerAddress),
+		BackupDirectory:      bundleDir,
+		Preconditions:        rollbackPreconditions(project, volume, image, recorded.SourceRoot, bundleDir, port, managerAddressPort(options.ManagerAddress)),
+		HealthChecks:         rollbackHealthChecks(port),
 		SourceFingerprint:    fingerprint,
 		BackupManifestSHA256: recorded.BackupManifestSHA256,
 		Stage:                recorded.Stage,
@@ -258,21 +335,56 @@ func readRollbackRecord(ctx context.Context, targetRoot string) (model.UpgradeOp
 	return ReadRecord(ctx, databasePath)
 }
 
-// requireRecordedSourceRoot binds a rollback decision to the 1.x directory the
-// copy-in recorded. Without a recorded root there is nothing to bind to, and a
-// different root is a different directory: either way the caller may not claim
-// the plan restarts "the original volume".
-func requireRecordedSourceRoot(recorded model.UpgradeOperation, sourceRoot string) error {
-	recordedRoot := strings.TrimSpace(recorded.SourceRoot)
-	if recordedRoot == "" {
-		return newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
-			"the recorded operation does not name the 1.x data directory it copied from, so a v1 restart cannot be shown to use the original volume; record the copy-in again with this version before rolling back", nil)
+// sourceRootRecorded reports whether the row already names the 1.x directory it
+// copied from.
+func sourceRootRecorded(recorded model.UpgradeOperation) bool {
+	return strings.TrimSpace(recorded.SourceRoot) != ""
+}
+
+// requireBoundedSourceRoot binds a rollback decision to the 1.x directory the
+// copy-in recorded, and writes nothing. A different directory is a different
+// volume. A row written before the column existed names none: the fingerprint
+// the copy-in stored is the only proof left, because the copy-in refuses to run
+// again once it is recorded, so a directory that reproduces it may be bound and
+// anything else may not. The refusal for the impossible case says what works.
+func requireBoundedSourceRoot(recorded model.UpgradeOperation, sourceRoot, fingerprint string) error {
+	if sourceRootRecorded(recorded) {
+		if filepath.Clean(recorded.SourceRoot) != filepath.Clean(sourceRoot) {
+			return newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
+				"the 1.x data directory given here is not the one this operation recorded; a v1 restart against it would not be the original volume, so pass the directory the copy-in read", nil)
+		}
+		return nil
 	}
-	if filepath.Clean(recordedRoot) != filepath.Clean(sourceRoot) {
-		return newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
-			"the 1.x data directory given here is not the one this operation recorded; a v1 restart against it would not be the original volume, so pass the directory the copy-in read", nil)
+	if recorded.SourceFingerprintBefore != "" && fingerprint == recorded.SourceFingerprintBefore {
+		return nil
 	}
-	return nil
+	return newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
+		"the recorded operation names no 1.x data directory, and the directory given here does not reproduce the fingerprint the copy-in recorded, so nothing can bind this rollback to a volume; point --legacy at the mounted 1.x volume (docker volume inspect) whose contents reproduce that fingerprint, or run --prepare while that volume is still stopped and unchanged", nil)
+}
+
+// bindSourceRoot records the directory of a row that names none. It is the one
+// write a binding may make, so callers run it after every refusal and before
+// their own write.
+func bindSourceRoot(ctx context.Context, recorded model.UpgradeOperation, targetRoot, sourceRoot string) (model.UpgradeOperation, error) {
+	if sourceRootRecorded(recorded) {
+		return recorded, nil
+	}
+	backfilled, err := backfillRecordedSourceRoot(ctx, targetRoot, sourceRoot)
+	if err != nil {
+		return recorded, fmt.Errorf("record the 1.x data directory this operation copied: %w", err)
+	}
+	return backfilled, nil
+}
+
+// backfillRecordedSourceRoot writes the directory once, through a writable open
+// so the store's own migration is what adds the column if it is missing.
+func backfillRecordedSourceRoot(ctx context.Context, targetRoot, sourceRoot string) (model.UpgradeOperation, error) {
+	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = db.Close() }()
+	return upgradeoperation.New(db).RecordSourceRoot(ctx, sourceRoot)
 }
 
 // refuseRootOverlap keeps every rollback write inside the v2 data root. The 1.x
@@ -306,6 +418,157 @@ func rollbackVolume(project string) (string, string, error) {
 			"the compose project must be a lowercase alphanumeric name with - or _, because it names the 1.x volume", nil)
 	}
 	return trimmed, trimmed + LegacyVolumeSuffix, nil
+}
+
+// rollbackPlanPort resolves the port the plan publishes the restarted 1.x
+// manager on. It refuses the port this Manager itself listens on, because the
+// v2 stack holds it while it runs and both managers answer /health the same way,
+// and it refuses a port something else already holds, because the plan would
+// then be applied against whatever answers there.
+func rollbackPlanPort(port int, managerAddress string) (int, error) {
+	resolved := port
+	if resolved == 0 {
+		resolved = LegacyRollbackPort
+	}
+	if resolved < 1 || resolved > 65535 {
+		return 0, fmt.Errorf("the 1.x rollback port %d is not a TCP port", resolved)
+	}
+	if managerPort := managerAddressPort(managerAddress); resolved == managerPort {
+		return 0, newUpgradeError(UpgradeErrorRollbackPortCollision,
+			fmt.Sprintf("the plan would publish port %d, which is the port this Manager listens on; the v2 stack holds it while it runs and answers /health with the same identity, so start v1 on the plan's own port instead", resolved), nil)
+	}
+	if !portFree(resolved) {
+		return 0, newUpgradeError(UpgradeErrorRollbackPortBusy,
+			fmt.Sprintf("port %d is already held on this host, so the 1.x stack cannot publish it and a probe there would answer whatever holds it; stop that listener and prepare the plan again", resolved), nil)
+	}
+	return resolved, nil
+}
+
+// requireV2Stopped refuses a plan while the v2 stack still answers on the
+// address the operator named. An unnamed address proves nothing either way, so
+// it is not guessed at: the operator names the published address when the plan
+// must prove the stack is down.
+func requireV2Stopped(ctx context.Context, managerAddress string) error {
+	address := strings.TrimSpace(managerAddress)
+	if address == "" {
+		return nil
+	}
+	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+	connection, err := dialer.DialContext(ctx, "tcp", managerAddressDialTarget(address))
+	if err != nil {
+		return nil
+	}
+	_ = connection.Close()
+	return newUpgradeError(UpgradeErrorRollbackV2Running,
+		fmt.Sprintf("the v2 stack still answers on %q, so it was not stopped; stop the v2 stack before preparing a rollback plan, or a probe of the port could be answered by it", address), nil)
+}
+
+// managerAddressPort is the port of the Manager's own listen address. An empty
+// address is the documented default port: a probe that names no address must
+// still be refused when it targets the port the Manager publishes on.
+func managerAddressPort(address string) int {
+	trimmed := strings.TrimSpace(address)
+	if trimmed == "" {
+		return ManagerDefaultPort
+	}
+	if _, port, err := net.SplitHostPort(trimmed); err == nil {
+		if value, err := strconv.Atoi(port); err == nil && value > 0 {
+			return value
+		}
+	}
+	if value, err := strconv.Atoi(trimmed); err == nil && value > 0 {
+		return value
+	}
+	return ManagerDefaultPort
+}
+
+// managerAddressDialTarget turns a listen address into something dialable: a
+// wildcard bind address is reached on loopback.
+func managerAddressDialTarget(address string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(address))
+	if err != nil {
+		if value, convErr := strconv.Atoi(strings.TrimSpace(address)); convErr == nil {
+			return net.JoinHostPort("127.0.0.1", strconv.Itoa(value))
+		}
+		return address
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// portFree reports whether the port can still be published on this host.
+//
+// A single wildcard bind is not enough: on platforms that allow a wildcard bind
+// beside a specific listener the wildcard succeeds while the port is served, and
+// a dial probe is unreliable when a local proxy answers connections. So the port
+// is bound on every address of this host and on both wildcards, and only an
+// address-in-use failure counts as occupied.
+func portFree(port int) bool {
+	for _, host := range localBindHosts() {
+		listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err == nil {
+			_ = listener.Close()
+			continue
+		}
+		if errors.Is(err, syscall.EADDRINUSE) {
+			return false
+		}
+	}
+	return true
+}
+
+// localBindHosts is every address a listener on this host could sit on: both
+// wildcards, loopback and each interface address.
+func localBindHosts() []string {
+	hosts := []string{"0.0.0.0", "::", "127.0.0.1", "::1"}
+	seen := map[string]bool{}
+	for _, host := range hosts {
+		seen[host] = true
+	}
+	if addresses, err := net.InterfaceAddrs(); err == nil {
+		for _, address := range addresses {
+			network, ok := address.(*net.IPNet)
+			if !ok || network.IP == nil || network.IP.IsUnspecified() {
+				continue
+			}
+			ip := network.IP.String()
+			if seen[ip] {
+				continue
+			}
+			seen[ip] = true
+			hosts = append(hosts, ip)
+		}
+	}
+	return hosts
+}
+
+// localAddressHosts is the set of host names that address this host itself.
+func localAddressHosts() map[string]bool {
+	hosts := map[string]bool{
+		"localhost": true,
+		"127.0.0.1": true,
+		"::1":       true,
+		"0.0.0.0":   true,
+		"::":        true,
+	}
+	if name, err := os.Hostname(); err == nil && name != "" {
+		hosts[strings.ToLower(name)] = true
+		if resolved, err := net.LookupHost(name); err == nil {
+			for _, address := range resolved {
+				hosts[address] = true
+			}
+		}
+	}
+	if addresses, err := net.InterfaceAddrs(); err == nil {
+		for _, address := range addresses {
+			if network, ok := address.(*net.IPNet); ok && network.IP != nil {
+				hosts[network.IP.String()] = true
+			}
+		}
+	}
+	return hosts
 }
 
 // rollbackImage resolves the exact 1.x release to pin. An explicit reference
@@ -395,25 +658,26 @@ func releaseFamilyText(release int) string {
 	return fmt.Sprintf("%d.%d", release/1_000_000, release/1_000%1_000)
 }
 
-// rollbackComposeFile is the 1.x service definition with the image pinned and
-// the volume bound. It is fed to `docker compose -f -` on stdin, so no file is
-// written outside the v2 data root and the operator's checkout is never edited.
-func rollbackComposeFile(image, volume string) string {
-	port := strconv.Itoa(LegacyManagerPort)
+// rollbackComposeFile is the 1.x service definition with the image pinned, the
+// volume bound and the published port one the v2 stack does not use. It is fed
+// to `docker compose -f -` on stdin, so no file is written outside the v2 data
+// root and the operator's checkout is never edited.
+func rollbackComposeFile(image, volume string, port int) string {
+	published := strconv.Itoa(port)
 	return strings.Join([]string{
 		"services:",
 		"  " + LegacyComposeService + ":",
 		"    image: " + image,
 		"    restart: unless-stopped",
 		"    ports:",
-		`      - "` + port + ":" + port + `"`,
+		`      - "` + published + ":" + published + `"`,
 		"    environment:",
-		`      HTTP_ADDR: "0.0.0.0:` + port + `"`,
+		`      HTTP_ADDR: "0.0.0.0:` + published + `"`,
 		`      USAGE_DB_PATH: "` + LegacyVolumeMountPoint + "/" + databaseFileName + `"`,
 		`      CPA_MANAGER_DATA_KEY_PATH: "` + LegacyVolumeMountPoint + "/" + dataKeyFileName + `"`,
 		`      USAGE_COLLECTOR_MODE: "auto"`,
 		"    healthcheck:",
-		`      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:` + port + LegacyHealthPath + `"]`,
+		`      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:` + published + LegacyHealthPath + `"]`,
 		"      interval: 10s",
 		"      timeout: 3s",
 		"      retries: 3",
@@ -427,34 +691,50 @@ func rollbackComposeFile(image, volume string) string {
 }
 
 // rollbackPreconditions are the checks the operator runs before applying the
-// plan. The volume must already exist: an external volume makes compose refuse
-// rather than create one. The mountpoint check is the binding: the volume must
-// be the directory the operation recorded, or the restart is not a rollback.
-func rollbackPreconditions(project, volume, image, sourceRoot string) []string {
+// plan. The v2 stack must be down and the plan's port free, or the restarted 1.x
+// cannot be the one that answers. The volume must already exist: an external
+// volume makes compose refuse rather than create one. The mountpoint check is
+// the binding: the volume must be the directory the operation recorded, or the
+// restart is not a rollback. Every path is quoted, so a directory with a space
+// is still one argument.
+func rollbackPreconditions(project, volume, image, sourceRoot, backupDir string, port, managerPort int) []string {
+	published := strconv.Itoa(port)
+	held := strconv.Itoa(managerPort)
 	return []string{
-		"docker volume inspect " + volume + " --format '{{ .Mountpoint }}'",
-		"that mountpoint must be the 1.x data directory this operation recorded: " + sourceRoot,
+		"stop the v2 stack first: while it runs it publishes port " + held + " and holds the v2 data root this plan was derived from",
+		"confirm the plan's port is free on the Docker host: docker ps --filter publish=" + published + " --format '{{.Names}}' must print nothing",
+		"confirm nothing else listens on it: lsof -nP -iTCP:" + published + " -sTCP:LISTEN must print nothing",
+		"docker volume inspect " + strconv.Quote(volume) + " --format '{{ .Mountpoint }}'",
+		"that mountpoint must be the 1.x data directory this operation recorded: " + strconv.Quote(sourceRoot),
 		"the v1 stack restarts under compose project " + project + ", because that project names the volume",
 		"pull the pinned 1.x image before restarting: docker pull " + image,
+		"the v1 stack publishes " + published + " rather than the v2 port " + held + ", so a /health answer can only come from v1",
+		"the recorded backup this verdict is checked against is " + strconv.Quote(backupDir),
 	}
 }
 
 // rollbackHealthChecks are the two proofs the operator can reproduce by hand.
 // The first is the unauthenticated health endpoint and the identity it must
 // state; the second is the read-only open of the volume itself.
-func rollbackHealthChecks() []string {
+func rollbackHealthChecks(port int) []string {
 	return []string{
-		"curl -fsS " + LegacyHealthURL(),
+		"curl -fsS " + RollbackHealthURL(port),
 		`the body must be {"ok":true,"service":"` + LegacyServiceID + `"}; a bare 2xx is not a health proof`,
 		"open " + LegacyVolumeMountPoint + "/" + databaseFileName + " read-only and pass a SQLite quick_check",
 		"the volume must still hold the rows and archived segments the recorded backup describes",
 	}
 }
 
-// LegacyHealthURL is the 1.x health endpoint the plan, the plan summary and the
-// default verify probe use.
+// RollbackHealthURL is the health endpoint a 1.x stack started by a rollback plan
+// answers on.
+func RollbackHealthURL(port int) string {
+	return fmt.Sprintf("http://127.0.0.1:%d%s", port, LegacyHealthPath)
+}
+
+// LegacyHealthURL is the health endpoint of the default rollback plan: the
+// default verify probe uses it, and it is never the port the v2 Manager holds.
 func LegacyHealthURL() string {
-	return fmt.Sprintf("http://127.0.0.1:%d%s", LegacyManagerPort, LegacyHealthPath)
+	return RollbackHealthURL(LegacyRollbackPort)
 }
 
 // planDigest is the canonical digest of a plan: the plan without its own digest
@@ -502,7 +782,14 @@ type RollbackObservation struct {
 	// StatusURL is the 1.x health endpoint that was probed. Empty probes the
 	// default 1.x `/health` endpoint.
 	StatusURL string `json:"statusUrl,omitempty"`
-	// ObservedAtMS is when the operator observed the restarted 1.x stack.
+	// ManagerAddress is the v2 Manager's own listen address (host:port). A probe
+	// that addresses it is refused: the 1.x and the v2 Manager state the same
+	// identity, so an answer there is the v2 stack, not a restored volume. Empty
+	// assumes the documented Manager default port.
+	ManagerAddress string `json:"managerAddress,omitempty"`
+	// ObservedAtMS is when the operator asked for the verdict. It is only a
+	// freshness claim: the observation time written with the verdict is the one
+	// this service stamps when it has finished its own proofs.
 	ObservedAtMS int64 `json:"observedAtMs"`
 	// AllowImageFamilyMismatch is the explicit override for a 1.x image from
 	// another version family.
@@ -514,7 +801,8 @@ type RollbackObservation struct {
 // the row always names the image, the health endpoint, the observed fingerprint
 // and the observation time that produced the verdict. It never rewrites
 // provenance: the source kind, the recorded source root, both fingerprints, the
-// backup manifest digest and the completed domains survive.
+// backup manifest digest and the completed domains survive. The observation time
+// is the service's own clock reading, not the caller's label.
 //
 // Every refusal has its own typed code: a stage a rollback cannot start from
 // (upgrade_rollback_not_applicable), a directory that is not the recorded source
@@ -522,9 +810,12 @@ type RollbackObservation struct {
 // window (upgrade_rollback_evidence_stale), an image that is unpinned or from
 // another version family (upgrade_rollback_image_unpinned,
 // upgrade_rollback_image_family), a probe that does not address /health
-// (upgrade_rollback_probe_endpoint), a volume that does not open read-only
-// (upgrade_rollback_unproven) and something that answers but is not this install
-// (upgrade_rollback_identity_foreign). Every refusal leaves the row untouched.
+// (upgrade_rollback_probe_endpoint), a probe that addresses this Manager's own
+// listener (upgrade_rollback_probe_self), a v2 stack that still answers on the
+// named address (upgrade_rollback_v2_running), a volume that does not open
+// read-only (upgrade_rollback_unproven) and something that answers but is not
+// this install (upgrade_rollback_identity_foreign). Every refusal leaves the row
+// untouched.
 func RecordRollback(ctx context.Context, observation RollbackObservation) (model.UpgradeOperation, error) {
 	if err := ctx.Err(); err != nil {
 		return model.UpgradeOperation{}, err
@@ -558,9 +849,6 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
 			fmt.Sprintf("the operation is recorded at stage %q, which a rollback cannot start from", string(recorded.Stage)), nil)
 	}
-	if err := requireRecordedSourceRoot(recorded, sourceRoot); err != nil {
-		return model.UpgradeOperation{}, err
-	}
 	if err := requireFreshObservation(observation.ObservedAtMS, time.Now()); err != nil {
 		return model.UpgradeOperation{}, err
 	}
@@ -583,13 +871,35 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("fingerprint the 1.x source: %w", err)
 	}
-	health, err := CheckLegacyHealth(ctx, observation.StatusURL)
+	// A row written before the source-root column existed is bound as well, so a
+	// verdict is never recorded against a volume nobody described. The live
+	// fingerprint has usually moved by now, so the backfill proof is only
+	// available to the plan that ran while the volume was still stopped.
+	if err := requireBoundedSourceRoot(recorded, sourceRoot, fingerprint); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	health, err := CheckLegacyHealth(ctx, observation.StatusURL, observation.ManagerAddress)
 	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	// The verdict says the v2 root was abandoned, so a v2 stack that still
+	// answers on the address the operator named makes it untrue.
+	if err := requireV2Stopped(ctx, observation.ManagerAddress); err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	if err := verifyRollbackInstall(ctx, sourceRoot, bundleDir, recorded); err != nil {
 		return model.UpgradeOperation{}, err
 	}
+	// The binding may write a backfill, so it comes after every refusal: the only
+	// step left is the verdict itself.
+	recorded, err = bindSourceRoot(ctx, recorded, targetRoot, sourceRoot)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	// The observation time is stamped here, after every proof this service
+	// derives itself, so the recorded moment describes these proofs rather than
+	// the caller's claim about them.
+	observedAtMS := time.Now().UnixMilli()
 
 	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
@@ -600,7 +910,7 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 		Image:             image,
 		StatusURL:         health.URL,
 		SourceFingerprint: fingerprint,
-		ObservedAtMS:      observation.ObservedAtMS,
+		ObservedAtMS:      observedAtMS,
 	})
 	if err != nil {
 		if errors.Is(err, upgradeoperation.ErrStageRegression) {
@@ -674,12 +984,19 @@ type legacyHealthBody struct {
 // CheckLegacyHealth probes the 1.x health endpoint and requires the documented
 // identity, not merely a 2xx: a stray 200 from a proxy or another service must
 // not prove the volume. A different identity is refused as a foreign install,
-// and a non-2xx answer as unproven. An empty URL probes the default 1.x health
-// endpoint.
+// and a non-2xx answer as unproven. An empty URL probes the default rollback
+// health endpoint.
 //
 // Only /health is accepted. Every other endpoint of the 1.x manager requires
 // credentials, so probing one proves nothing about the volume.
-func CheckLegacyHealth(ctx context.Context, rawURL string) (LegacyHealth, error) {
+//
+// A probe that addresses this Manager's own listener is refused before it is
+// sent (upgrade_rollback_probe_self). The 1.x manager and the v2 Manager state
+// the same identity on that endpoint, so an answer from the port this Manager
+// holds is the v2 stack describing itself, never a restored 1.x volume.
+// managerAddress is that listener (host:port); empty means the documented
+// Manager default port.
+func CheckLegacyHealth(ctx context.Context, rawURL, managerAddress string) (LegacyHealth, error) {
 	trimmed := strings.TrimSpace(rawURL)
 	if trimmed == "" {
 		trimmed = LegacyHealthURL()
@@ -695,6 +1012,9 @@ func CheckLegacyHealth(ctx context.Context, rawURL string) (LegacyHealth, error)
 		return LegacyHealth{}, newUpgradeError(UpgradeErrorRollbackProbeEndpoint,
 			fmt.Sprintf("the 1.x health proof is GET %s; %q requires credentials and says nothing about the volume, so probe %s instead",
 				LegacyHealthPath, parsed.Path, LegacyHealthURL()), nil)
+	}
+	if err := refuseSelfProbe(parsed, managerAddress); err != nil {
+		return LegacyHealth{}, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
@@ -740,6 +1060,75 @@ func CheckLegacyHealth(ctx context.Context, rawURL string) (LegacyHealth, error)
 				sanitizeIdentity(stated.Service), LegacyServiceID), nil)
 	}
 	return observation, nil
+}
+
+// refuseSelfProbe refuses a probe that would be answered by this Manager's own
+// listener. The port is what identifies it: the v2 Manager binds every local
+// address of that port, and a container-local address is one of them, so any
+// host that resolves to this machine on the Manager's port is this Manager.
+func refuseSelfProbe(parsed *url.URL, managerAddress string) error {
+	probePort := urlPort(parsed)
+	managerPort := managerAddressPort(managerAddress)
+	if probePort != managerPort {
+		return nil
+	}
+	probeHost := parsed.Hostname()
+	if !addressesThisHost(probeHost) && !sameHost(probeHost, managerAddress) {
+		return nil
+	}
+	return newUpgradeError(UpgradeErrorRollbackProbeSelf,
+		fmt.Sprintf("the health probe addresses this Manager's own listener on port %d; the v2 Manager answers %s with the same %q identity, so that answer proves the v2 stack is up, not that the 1.x volume is back; probe the 1.x port the rollback plan printed (%d) instead",
+			probePort, LegacyHealthPath, LegacyServiceID, LegacyRollbackPort), nil)
+}
+
+// urlPort is the effective port of a parsed http(s) URL.
+func urlPort(parsed *url.URL) int {
+	if port := parsed.Port(); port != "" {
+		if value, err := strconv.Atoi(port); err == nil {
+			return value
+		}
+	}
+	if parsed.Scheme == "https" {
+		return 443
+	}
+	return 80
+}
+
+// addressesThisHost reports whether a probe host resolves to this machine: a
+// loopback or wildcard name, an interface address, this host's own name, or any
+// address that name resolves to.
+func addressesThisHost(host string) bool {
+	trimmed := strings.TrimSpace(strings.ToLower(host))
+	if trimmed == "" {
+		return true
+	}
+	local := localAddressHosts()
+	if local[trimmed] {
+		return true
+	}
+	if net.ParseIP(trimmed) != nil {
+		return false
+	}
+	resolved, err := net.LookupHost(trimmed)
+	if err != nil {
+		return false
+	}
+	for _, address := range resolved {
+		if local[address] {
+			return true
+		}
+	}
+	return false
+}
+
+// sameHost reports whether a probe host is exactly the host the Manager was told
+// to listen on, even when that host is not one of this machine's addresses.
+func sameHost(probeHost, managerAddress string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(managerAddress))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.Trim(host, "[]"), strings.Trim(probeHost, "[]"))
 }
 
 // sanitizeIdentity keeps an echoed identity short and free of control bytes: a

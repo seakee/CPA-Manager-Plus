@@ -2,13 +2,16 @@ package upgrade
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -141,7 +144,12 @@ func TestPrepareRollbackRefusesAStageItCannotStartFrom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the v2 store: %v", err)
 	}
-	if _, err := upgradeoperation.New(db).Advance(context.Background(), "", model.UpgradeStageRolledBack); err != nil {
+	if _, err := upgradeoperation.New(db).RecordRollback(context.Background(), model.RollbackEvidence{
+		Image:             LegacyImageRepository + ":v1.14.7",
+		StatusURL:         LegacyHealthURL(),
+		SourceFingerprint: "observed",
+		ObservedAtMS:      time.Now().UnixMilli(),
+	}); err != nil {
 		_ = db.Close()
 		t.Fatalf("record a rolled-back operation: %v", err)
 	}
@@ -170,8 +178,8 @@ func TestPrepareRollbackRefusesAChangedSource(t *testing.T) {
 }
 
 // TestPrepareRollbackBindsTheVolumeToTheRecordedRoot covers the claim "the
-// original volume": a byte-identical directory is still a different volume, and
-// a row that recorded no source root cannot be bound at all.
+// original volume": a byte-identical directory is still a different volume when
+// the row recorded one.
 func TestPrepareRollbackBindsTheVolumeToTheRecordedRoot(t *testing.T) {
 	fixture := newRollbackFixture(t)
 	clone := canonicalTempDir(t)
@@ -188,13 +196,58 @@ func TestPrepareRollbackBindsTheVolumeToTheRecordedRoot(t *testing.T) {
 	assertNoPlan(t, fixture.targetRoot)
 	assertTreeUnchanged(t, "cloned 1.x source", cloneBefore, fingerprintTree(t, clone))
 	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
+}
 
+// TestPrepareRollbackBackfillsAMissingSourceRoot covers the row an earlier build
+// wrote: the copy-in cannot record the directory again once it is recorded, so a
+// directory that reproduces the recorded fingerprint is bound once instead of
+// being answered with a command that cannot run.
+func TestPrepareRollbackBackfillsAMissingSourceRoot(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	sourceBefore := fingerprintTree(t, fixture.volume.root)
 	fixture.writeRow(t, func(row *model.UpgradeOperation) { row.SourceRoot = "" })
-	if _, err := PrepareRollback(context.Background(), fixture.options()); !errors.Is(err, ErrRollbackVolumeUnbound) {
-		t.Fatalf("a row without a source root = %v, want %v", err, ErrRollbackVolumeUnbound)
+
+	plan, err := PrepareRollback(context.Background(), fixture.options())
+	if err != nil {
+		t.Fatalf("prepare a plan for a row without a source root: %v", err)
 	}
-	assertNoPlan(t, fixture.targetRoot)
+	if plan.SourceRoot != fixture.volume.root {
+		t.Fatalf("plan source root = %q, want the backfilled %q", plan.SourceRoot, fixture.volume.root)
+	}
+	backfilled := fixture.recordedRow(t)
+	if backfilled.SourceRoot != fixture.volume.root {
+		t.Fatalf("recorded source root = %q, want %q", backfilled.SourceRoot, fixture.volume.root)
+	}
+	// Only the missing directory was filled: the rest of the provenance survives.
+	if backfilled.SourceFingerprintBefore != fixture.recorded.SourceFingerprintBefore ||
+		backfilled.SourceFingerprintAfter != fixture.recorded.SourceFingerprintAfter ||
+		backfilled.BackupManifestSHA256 != fixture.recorded.BackupManifestSHA256 ||
+		backfilled.SourceVersion != fixture.recorded.SourceVersion {
+		t.Fatalf("the backfill rewrote provenance: %+v", backfilled)
+	}
 	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
+
+	// A directory whose contents do not reproduce the recorded fingerprint cannot
+	// be bound, and the refusal says what does work instead of pointing at the
+	// copy-in that refuses to run again.
+	fixture.writeRow(t, func(row *model.UpgradeOperation) { row.SourceRoot = "" })
+	other := canonicalTempDir(t)
+	copyTree(t, fixture.volume.root, other)
+	if err := os.WriteFile(filepath.Join(other, dataKeyFileName), []byte("not the volume\n"), 0o600); err != nil {
+		t.Fatalf("change the other directory: %v", err)
+	}
+	options := fixture.options()
+	options.LegacyRoot = other
+	_, err = PrepareRollback(context.Background(), options)
+	if !errors.Is(err, ErrRollbackVolumeUnbound) {
+		t.Fatalf("an unprovable directory = %v, want %v", err, ErrRollbackVolumeUnbound)
+	}
+	if message := err.Error(); strings.Contains(message, "record the copy-in again") || !strings.Contains(message, "docker volume inspect") {
+		t.Fatalf("the refusal does not say what works: %s", message)
+	}
+	if again := fixture.recordedRow(t); again.SourceRoot != "" {
+		t.Fatalf("a refused backfill wrote %q", again.SourceRoot)
+	}
 }
 
 // TestRollbackRefusesNestedRoots covers the rule copy-in already applies: the
@@ -428,9 +481,16 @@ func TestRecordRollbackAcceptsAVolumeThatKeptWriting(t *testing.T) {
 	}
 	if persisted.Rollback.Image != observation.Image ||
 		persisted.Rollback.StatusURL != observation.StatusURL ||
-		persisted.Rollback.SourceFingerprint != observedFingerprint ||
-		persisted.Rollback.ObservedAtMS != observation.ObservedAtMS {
+		persisted.Rollback.SourceFingerprint != observedFingerprint {
 		t.Fatalf("recorded evidence = %+v", persisted.Rollback)
+	}
+	// The observation time is stamped by the service after its own proofs, not
+	// taken from the caller's label: it is no older than the moment the caller
+	// asked and no newer than now.
+	if persisted.Rollback.ObservedAtMS < observation.ObservedAtMS ||
+		persisted.Rollback.ObservedAtMS > time.Now().UnixMilli() {
+		t.Fatalf("recorded observation time = %d, want a service stamp in [%d, %d]",
+			persisted.Rollback.ObservedAtMS, observation.ObservedAtMS, time.Now().UnixMilli())
 	}
 	if persisted.SourceRoot != before.SourceRoot || persisted.SourceKind != before.SourceKind ||
 		persisted.BackupManifestSHA256 != before.BackupManifestSHA256 ||
@@ -629,6 +689,153 @@ func TestRecordRollbackRefusesStaleEvidence(t *testing.T) {
 	}
 }
 
+// TestRecordRollbackRefusesAProbeOfThisManager is the M4 regression: the 1.x and
+// the v2 Manager answer /health with the same identity, so an answer from this
+// Manager's own listener proves the v2 stack is up, never that a 1.x volume was
+// restored. No stage is written.
+func TestRecordRollbackRefusesAProbeOfThisManager(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != LegacyHealthPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"service":"`+LegacyServiceID+`"}`)
+	}))
+	t.Cleanup(server.Close)
+	address := strings.TrimPrefix(server.URL, "http://")
+
+	sourceBefore := fingerprintTree(t, fixture.volume.root)
+	before := fixture.recordedRow(t)
+	observation := fixture.observation(t)
+	observation.StatusURL = server.URL + LegacyHealthPath
+	observation.ManagerAddress = address
+	if _, err := RecordRollback(context.Background(), observation); !errors.Is(err, ErrRollbackProbeSelf) {
+		t.Fatalf("a probe of this Manager = %v, want %v", err, ErrRollbackProbeSelf)
+	}
+	after := fixture.recordedRow(t)
+	if after.Stage != before.Stage || after.Rollback != nil {
+		t.Fatalf("a self probe was recorded: %+v", after)
+	}
+	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
+
+	// The same answer on the plan's own port is a health proof: the refusal is
+	// about the listener, not about the identity.
+	observation.ManagerAddress = ""
+	if _, err := RecordRollback(context.Background(), observation); err != nil {
+		t.Fatalf("a probe of another port was refused: %v", err)
+	}
+}
+
+// TestPrepareRollbackRefusesAPortItMayNotPublish covers the two ways a plan can
+// be rollback-ready while the v2 stack still holds the port: the plan's port is
+// the port this Manager listens on, or something already answers there.
+func TestPrepareRollbackRefusesAPortItMayNotPublish(t *testing.T) {
+	t.Run("the port this Manager holds", func(t *testing.T) {
+		fixture := newRollbackFixture(t)
+		port := freePort(t)
+		options := fixture.options()
+		options.ManagerAddress = "127.0.0.1:" + strconv.Itoa(port)
+		options.Port = port
+		if _, err := PrepareRollback(context.Background(), options); !errors.Is(err, ErrRollbackPortCollision) {
+			t.Fatalf("the Manager's own port = %v, want %v", err, ErrRollbackPortCollision)
+		}
+		assertNoPlan(t, fixture.targetRoot)
+	})
+
+	t.Run("a port something else holds", func(t *testing.T) {
+		fixture := newRollbackFixture(t)
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("hold a port: %v", err)
+		}
+		defer func() { _ = listener.Close() }()
+		options := fixture.options()
+		options.Port = listener.Addr().(*net.TCPAddr).Port
+		if _, err := PrepareRollback(context.Background(), options); !errors.Is(err, ErrRollbackPortBusy) {
+			t.Fatalf("an occupied port = %v, want %v", err, ErrRollbackPortBusy)
+		}
+		assertNoPlan(t, fixture.targetRoot)
+	})
+
+	t.Run("the v2 stack still answers", func(t *testing.T) {
+		fixture := newRollbackFixture(t)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"ok":true,"service":"`+LegacyServiceID+`"}`)
+		}))
+		t.Cleanup(server.Close)
+		options := fixture.options()
+		options.Port = freePort(t)
+		options.ManagerAddress = strings.TrimPrefix(server.URL, "http://")
+		if _, err := PrepareRollback(context.Background(), options); !errors.Is(err, ErrRollbackV2Running) {
+			t.Fatalf("a running v2 stack = %v, want %v", err, ErrRollbackV2Running)
+		}
+		assertNoPlan(t, fixture.targetRoot)
+
+		// The verdict is refused for the same reason: it would say a v2 root was
+		// abandoned while that stack still answers.
+		observation := fixture.observation(t)
+		observation.ManagerAddress = strings.TrimPrefix(server.URL, "http://")
+		before := fixture.recordedRow(t)
+		if _, err := RecordRollback(context.Background(), observation); !errors.Is(err, ErrRollbackV2Running) {
+			t.Fatalf("a verdict beside a running v2 stack = %v, want %v", err, ErrRollbackV2Running)
+		}
+		if after := fixture.recordedRow(t); after.Stage != before.Stage || after.Rollback != nil {
+			t.Fatalf("a refused verdict wrote the row: %+v", after)
+		}
+	})
+}
+
+// TestPrepareRollbackPublishesItsOwnPort keeps the plan's port off the v2
+// Manager's port and prints the check the operator reproduces on the host.
+func TestPrepareRollbackPublishesItsOwnPort(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	plan, err := PrepareRollback(context.Background(), fixture.options())
+	if err != nil {
+		t.Fatalf("prepare the rollback plan: %v", err)
+	}
+	if plan.Port != LegacyRollbackPort || plan.Port == ManagerDefaultPort {
+		t.Fatalf("plan port = %d, want %d beside the Manager's %d", plan.Port, LegacyRollbackPort, ManagerDefaultPort)
+	}
+	if plan.ManagerPort != ManagerDefaultPort {
+		t.Fatalf("plan manager port = %d, want the Manager default %d", plan.ManagerPort, ManagerDefaultPort)
+	}
+	published := strconv.Itoa(plan.Port)
+	if !strings.Contains(plan.ComposeFile, published+":"+published) {
+		t.Fatalf("compose file does not publish %s: %s", published, plan.ComposeFile)
+	}
+	if !strings.Contains(plan.ComposeFile, "HTTP_ADDR: \"0.0.0.0:"+published+"\"") {
+		t.Fatalf("compose file does not bind %s: %s", published, plan.ComposeFile)
+	}
+	joined := strings.Join(plan.Preconditions, "\n")
+	for _, want := range []string{
+		"--filter publish=" + published,
+		"-iTCP:" + published + " -sTCP:LISTEN",
+		"stop the v2 stack",
+		plan.BackupDirectory,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("preconditions do not name %q: %v", want, plan.Preconditions)
+		}
+	}
+	health := strings.Join(plan.HealthChecks, "\n")
+	if !strings.Contains(health, RollbackHealthURL(plan.Port)) {
+		t.Fatalf("health checks do not probe the plan's port: %v", plan.HealthChecks)
+	}
+	// A port the operator chose is published too, and one the Manager holds is
+	// never accepted silently.
+	options := fixture.options()
+	options.Port = freePort(t)
+	plan, err = PrepareRollback(context.Background(), options)
+	if err != nil {
+		t.Fatalf("prepare on an explicit port: %v", err)
+	}
+	if !strings.Contains(plan.ComposeFile, strconv.Itoa(options.Port)+":") {
+		t.Fatalf("compose file ignores the explicit port %d: %s", options.Port, plan.ComposeFile)
+	}
+}
+
 // TestRecordRollbackRefusesAnotherRoot covers the binding half of the verdict: a
 // verdict may only be recorded for the directory the operation recorded.
 func TestRecordRollbackRefusesAnotherRoot(t *testing.T) {
@@ -680,7 +887,7 @@ func TestRecordRollbackRefusesAForeignBackup(t *testing.T) {
 // identity is not a health proof, however healthy it looks.
 func TestCheckLegacyHealthRequiresTheDocumentedIdentity(t *testing.T) {
 	observation, err := CheckLegacyHealth(context.Background(),
-		rollbackProbe(t, http.StatusOK, `{"ok":true,"service":"`+LegacyServiceID+`"}`))
+		rollbackProbe(t, http.StatusOK, `{"ok":true,"service":"`+LegacyServiceID+`"}`), "")
 	if err != nil {
 		t.Fatalf("the documented identity was refused: %v", err)
 	}
@@ -695,11 +902,11 @@ func TestCheckLegacyHealthRequiresTheDocumentedIdentity(t *testing.T) {
 		`{"ok":false,"service":"` + LegacyServiceID + `"}`,
 		`[1,2,3]`,
 	} {
-		if _, err := CheckLegacyHealth(context.Background(), rollbackProbe(t, http.StatusOK, body)); !errors.Is(err, ErrRollbackIdentity) {
+		if _, err := CheckLegacyHealth(context.Background(), rollbackProbe(t, http.StatusOK, body), ""); !errors.Is(err, ErrRollbackIdentity) {
 			t.Fatalf("body %q = %v, want %v", body, err, ErrRollbackIdentity)
 		}
 	}
-	if _, err := CheckLegacyHealth(context.Background(), "http://127.0.0.1:18317/status"); !errors.Is(err, ErrRollbackProbeEndpoint) {
+	if _, err := CheckLegacyHealth(context.Background(), "http://127.0.0.1:18317/status", ""); !errors.Is(err, ErrRollbackProbeEndpoint) {
 		t.Fatalf("the credentialed endpoint = %v, want %v", err, ErrRollbackProbeEndpoint)
 	}
 }
@@ -713,7 +920,7 @@ func TestRollbackReadsTheVolumeWithoutWritingIt(t *testing.T) {
 		t.Fatalf("verify the install: %v", err)
 	}
 	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
-	if _, err := CheckLegacyHealth(context.Background(), healthyProbe(t)); err != nil {
+	if _, err := CheckLegacyHealth(context.Background(), healthyProbe(t), ""); err != nil {
 		t.Fatalf("probe the health endpoint: %v", err)
 	}
 	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
@@ -742,6 +949,76 @@ func TestRolledBackIsTerminal(t *testing.T) {
 			t.Fatalf("%q cannot advance to rolled_back", previous)
 		}
 	}
+}
+
+// TestReadRecordReportsAnOutdatedStore covers the read-only reader against a
+// store written by an earlier build: the table exists, the columns a rollback
+// records do not, and a read-only open cannot migrate. The operator gets a typed
+// code instead of raw SQL, and the code says the store must be opened once by
+// this build.
+func TestReadRecordReportsAnOutdatedStore(t *testing.T) {
+	root := canonicalTempDir(t)
+	databasePath := filepath.Join(root, databaseFileName)
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath))
+	if err != nil {
+		t.Fatalf("create the earlier store: %v", err)
+	}
+	for _, statement := range []string{
+		`create table upgrade_operations (
+			id integer primary key check(id = 1),
+			stage text not null default '',
+			domains_done text not null default '[]',
+			source_kind text,
+			source_version text,
+			source_fingerprint_before text,
+			source_fingerprint_after text,
+			backup_manifest_sha256 text,
+			reconciliation text not null default '{}',
+			manual_items text not null default '[]',
+			error_code text,
+			error_detail text,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`insert into upgrade_operations (id, stage, domains_done, source_kind, created_at_ms, updated_at_ms)
+			values (1, 'copy_in', '[]', 'upgraded-legacy', 1, 1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatalf("write the earlier store: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the earlier store: %v", err)
+	}
+
+	_, found, err := ReadRecord(context.Background(), databasePath)
+	if !errors.Is(err, ErrStoreSchemaOutdated) {
+		t.Fatalf("an outdated store = %v (found=%t), want %v", err, found, ErrStoreSchemaOutdated)
+	}
+	for _, want := range []string{"source_root", "rollback_image", "open it once with this build"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not say %q: %s", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "SQL logic error") || strings.Contains(err.Error(), "no such column") {
+		t.Fatalf("the refusal surfaced raw SQL: %s", err)
+	}
+}
+
+// freePort reserves and releases a TCP port, so a test can name a port that is
+// free at the moment it is asked.
+func freePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release the port: %v", err)
+	}
+	return port
 }
 
 // emptyV1AndWrite puts the fixture volume in the state a restarted 1.x manager

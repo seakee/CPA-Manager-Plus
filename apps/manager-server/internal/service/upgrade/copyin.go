@@ -263,7 +263,20 @@ func recordedOperation(ctx context.Context, databasePath string, immutable bool)
 	if err != nil || !present {
 		return model.UpgradeOperation{}, false, err
 	}
-	return upgradeoperation.New(db).Get(ctx)
+	repository := upgradeoperation.New(db)
+	// A read-only open cannot migrate, and the columns a rollback records were
+	// added by a later build. Saying so is the operator's next step; letting the
+	// select fail would surface raw SQL instead.
+	missing, err := repository.MissingColumns(ctx)
+	if err != nil {
+		return model.UpgradeOperation{}, false, err
+	}
+	if len(missing) > 0 {
+		return model.UpgradeOperation{}, false, newUpgradeError(UpgradeErrorStoreSchemaOutdated,
+			fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read without a writable open; open it once with this build before reading it read-only",
+				strings.Join(missing, ", ")), nil)
+	}
+	return repository.Get(ctx)
 }
 
 type targetPaths struct {

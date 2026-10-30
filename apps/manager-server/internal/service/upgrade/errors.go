@@ -60,6 +60,29 @@ const (
 	// that is not the recorded one, or a live volume that no longer holds the
 	// rows and archives the backup retained. Nothing was written.
 	UpgradeErrorRollbackIdentityForeign UpgradeErrorCode = "upgrade_rollback_identity_foreign"
+	// UpgradeErrorRollbackProbeSelf reports that the health probe addresses this
+	// Manager's own listener. The 1.x and the v2 Manager state the same service
+	// identity, so an answer there is the v2 stack describing itself: it proves
+	// nothing about a 1.x volume. Nothing was written.
+	UpgradeErrorRollbackProbeSelf UpgradeErrorCode = "upgrade_rollback_probe_self"
+	// UpgradeErrorRollbackPortCollision reports that the plan would publish the
+	// port this Manager itself listens on. The v2 stack holds that port while it
+	// runs, so a v1 started there could never prove it is the one answering.
+	// Nothing was written.
+	UpgradeErrorRollbackPortCollision UpgradeErrorCode = "upgrade_rollback_port_collision"
+	// UpgradeErrorRollbackPortBusy reports that something already holds the port
+	// the plan would publish. A v1 cannot be started there, and an operator who
+	// applied the plan anyway would probe whatever holds it. Nothing was written.
+	UpgradeErrorRollbackPortBusy UpgradeErrorCode = "upgrade_rollback_port_busy"
+	// UpgradeErrorRollbackV2Running reports that the v2 stack still answers on
+	// the address the operator named, so it was not stopped before the plan was
+	// derived. Nothing was written.
+	UpgradeErrorRollbackV2Running UpgradeErrorCode = "upgrade_rollback_v2_running"
+	// UpgradeErrorStoreSchemaOutdated reports that the Manager store predates the
+	// current build's upgrade table, so its operation row cannot be read without
+	// the columns a writable open adds. The store must be opened once by this
+	// build; nothing was written.
+	UpgradeErrorStoreSchemaOutdated UpgradeErrorCode = "upgrade_store_schema_outdated"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -101,6 +124,11 @@ var (
 	ErrRollbackEvidenceStale = &UpgradeError{Code: UpgradeErrorRollbackEvidenceStale}
 	ErrRollbackProbeEndpoint = &UpgradeError{Code: UpgradeErrorRollbackProbeEndpoint}
 	ErrRollbackIdentity      = &UpgradeError{Code: UpgradeErrorRollbackIdentityForeign}
+	ErrRollbackProbeSelf     = &UpgradeError{Code: UpgradeErrorRollbackProbeSelf}
+	ErrRollbackPortCollision = &UpgradeError{Code: UpgradeErrorRollbackPortCollision}
+	ErrRollbackPortBusy      = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
+	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
+	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

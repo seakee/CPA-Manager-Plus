@@ -2,14 +2,18 @@ package upgrade
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -98,6 +102,9 @@ func TestRollbackPreparePrintsAPinnedPlan(t *testing.T) {
 		"docker compose -p cpamp -f - up -d",
 		upgradeservice.LegacyHealthURL(),
 		upgradeservice.LegacyServiceID,
+		"--filter publish=",
+		"-sTCP:LISTEN",
+		"stop the v2 stack",
 	} {
 		if !strings.Contains(human, want) {
 			t.Fatalf("human plan does not mention %q: %s", want, human)
@@ -302,9 +309,12 @@ func TestRollbackPreparePrintsAnExactVerifyCommand(t *testing.T) {
 		t.Fatalf("prepare exit code = %d, want 0; stderr: %s", code, stderr)
 	}
 	for _, want := range []string{
-		"--legacy-image " + upgradeservice.LegacyImageRepository + ":v1.13.0",
+		"--legacy-image \"" + upgradeservice.LegacyImageRepository + ":v1.13.0\"",
 		"--allow-image-family-mismatch",
-		"--status-url " + upgradeservice.LegacyHealthURL(),
+		"--status-url \"" + upgradeservice.LegacyHealthURL() + "\"",
+		"--backup \"",
+		"--target \"",
+		"--legacy \"",
 	} {
 		if !strings.Contains(human, want) {
 			t.Fatalf("printed verify command does not carry %q: %s", want, human)
@@ -320,6 +330,10 @@ func TestRollbackUsageErrors(t *testing.T) {
 		"both modes": {"rollback", "--prepare", "--verify", "--legacy", source, "--target", target},
 		"no legacy":  {"rollback", "--prepare", "--target", target},
 		"positional": {"rollback", "--prepare", "--legacy", source, "--target", target, "extra"},
+		"bad manager address": {"rollback", "--prepare", "--legacy", source, "--target", target,
+			"--manager-addr", "not-an-address"},
+		"port on verify": {"rollback", "--verify", "--legacy", source, "--target", target,
+			"--port", "18319"},
 	} {
 		if code, _, _ := run(t, args...); code != 2 {
 			t.Fatalf("%s exit code = %d, want 2", name, code)
@@ -422,7 +436,12 @@ func TestRunAfterARollbackReportsTheTerminalStage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open the v2 store: %v", err)
 	}
-	if _, err := upgradeoperation.New(db).Advance(context.Background(), "", model.UpgradeStageRolledBack); err != nil {
+	if _, err := upgradeoperation.New(db).RecordRollback(context.Background(), model.RollbackEvidence{
+		Image:             upgradeservice.LegacyImageRepository + ":v1.14.7",
+		StatusURL:         upgradeservice.LegacyHealthURL(),
+		SourceFingerprint: "observed",
+		ObservedAtMS:      time.Now().UnixMilli(),
+	}); err != nil {
 		_ = db.Close()
 		t.Fatalf("record the rolled_back stage: %v", err)
 	}
@@ -454,5 +473,157 @@ func TestRunAfterARollbackReportsTheTerminalStage(t *testing.T) {
 	}
 	if after.Stage != before.Stage || after.UpdatedAtMS != before.UpdatedAtMS {
 		t.Fatalf("run touched a rolled-back row: before=%+v after=%+v", before, after)
+	}
+}
+
+// managerAnswer is a listener that answers exactly as the Manager does on
+// GET /health. The 1.x and the v2 Manager serve the same body, so a test can
+// prove the refusal is about the listener and not about the identity.
+func managerAnswer(t *testing.T) (address string, statusURL string) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != upgradeservice.LegacyHealthPath {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"service":"`+upgradeservice.LegacyServiceID+`"}`)
+	}))
+	t.Cleanup(server.Close)
+	return strings.TrimPrefix(server.URL, "http://"), server.URL + upgradeservice.LegacyHealthPath
+}
+
+// freePort reserves and releases a TCP port, so a test can name a port that is
+// free at the moment it is asked.
+func freePort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve a port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatalf("release the port: %v", err)
+	}
+	return port
+}
+
+// TestRollbackPrepareRefusesARunningV2Stack covers the missing precondition: a
+// plan is not rollback-ready while the v2 stack still answers on the address the
+// operator named, and nothing is written.
+func TestRollbackPrepareRefusesARunningV2Stack(t *testing.T) {
+	source := copyReadySource(t)
+	target := rollbackReadyTarget(t, source)
+	address, _ := managerAnswer(t)
+
+	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target,
+		"--manager-addr", address, "--port", strconv.Itoa(freePort(t)))
+	if code != 1 {
+		t.Fatalf("prepare against a running v2 stack exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorRollbackV2Running)) {
+		t.Fatalf("refusal did not name its code: %s", stderr)
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".upgrade-rollback")); !os.IsNotExist(err) {
+		t.Fatalf("a refused prepare wrote a plan (err=%v)", err)
+	}
+}
+
+// TestRollbackVerifyRefusesAProbeOfThisManager covers M4 end to end: the Manager
+// answers /health with the 1.x identity, so a probe of the Manager's own
+// listener is refused and no stage is written.
+func TestRollbackVerifyRefusesAProbeOfThisManager(t *testing.T) {
+	source := copyReadySource(t)
+	target := rollbackReadyTarget(t, source)
+	address, statusURL := managerAnswer(t)
+
+	code, stdout, stderr := run(t, "rollback", "--verify", "--legacy", source, "--target", target,
+		"--status-url", statusURL, "--manager-addr", address)
+	if code != 1 {
+		t.Fatalf("verify against this Manager exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorRollbackProbeSelf)) {
+		t.Fatalf("refusal did not name its code: %s", stderr)
+	}
+	databasePath := filepath.Join(target, "usage.sqlite")
+	recorded, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
+	if err != nil || !found {
+		t.Fatalf("read the recorded operation: found=%t err=%v", found, err)
+	}
+	if recorded.Stage != model.UpgradeStageCopyIn || recorded.Rollback != nil {
+		t.Fatalf("a refused self probe wrote the row: %+v", recorded)
+	}
+}
+
+// TestStatusAndPrepareReportAnOutdatedStore covers L-A: a store written before
+// the rollback columns existed cannot be read read-only, and both commands say
+// so with a typed code instead of surfacing raw SQL.
+func TestStatusAndPrepareReportAnOutdatedStore(t *testing.T) {
+	target := t.TempDir()
+	databasePath := filepath.Join(target, "usage.sqlite")
+	writeOutdatedStore(t, databasePath)
+
+	code, stdout, stderr := run(t, "status", "--db-path", databasePath)
+	if code != 1 {
+		t.Fatalf("status exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorStoreSchemaOutdated)) {
+		t.Fatalf("status did not name the typed code: %s", stderr)
+	}
+	if strings.Contains(stderr, "no such column") || strings.Contains(stderr, "SQL logic error") {
+		t.Fatalf("status surfaced raw SQL: %s", stderr)
+	}
+
+	source := copyReadySource(t)
+	code, stdout, stderr = run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
+	if code != 1 {
+		t.Fatalf("prepare exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorStoreSchemaOutdated)) {
+		t.Fatalf("prepare did not name the typed code: %s", stderr)
+	}
+	if strings.Contains(stderr, "no such column") {
+		t.Fatalf("prepare surfaced raw SQL: %s", stderr)
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".upgrade-rollback")); !os.IsNotExist(err) {
+		t.Fatalf("a refused prepare wrote a plan (err=%v)", err)
+	}
+}
+
+// writeOutdatedStore writes the upgrade table as an earlier build created it:
+// the table exists, the columns a rollback records do not.
+func writeOutdatedStore(t *testing.T, databasePath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath))
+	if err != nil {
+		t.Fatalf("create the earlier store: %v", err)
+	}
+	for _, statement := range []string{
+		`create table upgrade_operations (
+			id integer primary key check(id = 1),
+			stage text not null default '',
+			domains_done text not null default '[]',
+			source_kind text,
+			source_version text,
+			source_fingerprint_before text,
+			source_fingerprint_after text,
+			backup_manifest_sha256 text,
+			reconciliation text not null default '{}',
+			manual_items text not null default '[]',
+			error_code text,
+			error_detail text,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`insert into upgrade_operations (id, stage, domains_done, source_kind, created_at_ms, updated_at_ms)
+			values (1, 'copy_in', '[]', 'upgraded-legacy', 1, 1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatalf("write the earlier store: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the earlier store: %v", err)
 	}
 }

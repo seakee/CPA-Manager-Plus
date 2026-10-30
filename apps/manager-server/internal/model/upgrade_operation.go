@@ -223,6 +223,12 @@ func (o UpgradeOperation) Validate() error {
 			return errors.New("upgrade operation reconciliation must be a JSON object")
 		}
 	}
+	// A rolled_back operation is terminal, so it can never be re-proven. It must
+	// carry the observation that justified it: a terminal verdict without
+	// evidence is a claim nobody can check, and no path may write one.
+	if o.Stage == UpgradeStageRolledBack && o.Rollback == nil {
+		return errors.New("a rolled_back upgrade operation must carry the evidence that justified it")
+	}
 	// Evidence is written whole or not at all. A partial record would let a
 	// reader believe a verdict was observed when only its shape survived.
 	if o.Rollback != nil {

@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +29,16 @@ func refuse(stderr io.Writer, err error) error {
 	return fmt.Errorf("%w: %w", ErrRefused, err)
 }
 
+// refuseTyped keeps a typed Upgrade refusal in the CLI refusal contract, so the
+// machine code is visible and the exit status is 1 rather than the usage 2 that
+// an untyped failure reports. Anything else is returned unchanged.
+func refuseTyped(stderr io.Writer, err error) error {
+	if _, ok := upgradeservice.UpgradeErrorCodeOf(err); ok {
+		return refuse(stderr, err)
+	}
+	return err
+}
+
 // runRollback prepares a 1.x rollback plan or records a proven one. It never
 // applies a container change: the Manager runs inside a container and must not
 // drive the Docker socket, so --prepare prints the exact invocation for the
@@ -41,7 +53,12 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	legacyImage := flags.String("legacy-image", "", "exact 1.x image reference to pin; defaults to v<source version>")
 	project := flags.String("project", "", "1.x compose project that names the data volume; defaults to cpamp")
 	backup := flags.String("backup", "", "recorded backup snapshot; defaults to the v2 backup directory")
-	statusURL := flags.String("status-url", "", "1.x health endpoint probed by --verify; defaults to http://127.0.0.1:18317/health")
+	statusURL := flags.String("status-url", "",
+		"1.x health endpoint probed by --verify; defaults to "+upgradeservice.LegacyHealthURL())
+	rollbackPort := flags.Int("port", upgradeservice.LegacyRollbackPort,
+		"host port --prepare publishes the restarted 1.x manager on; it may not be the v2 Manager's port")
+	managerAddr := flags.String("manager-addr", "",
+		"v2 Manager listen address (host:port); naming it makes --prepare prove the v2 stack is stopped and refuses a probe of it")
 	allowFamily := flags.Bool("allow-image-family-mismatch", false,
 		"accept a 1.x image from another version family than the recorded source")
 	asJSON := flags.Bool("json", false, "print the plan or the recorded operation as JSON")
@@ -57,6 +74,16 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if *allowFamily && strings.TrimSpace(*legacyImage) == "" {
 		return fmt.Errorf("%w: --allow-image-family-mismatch needs --legacy-image", ErrUsage)
 	}
+	if *verify && *rollbackPort != upgradeservice.LegacyRollbackPort {
+		return fmt.Errorf("%w: --port belongs to --prepare; --verify proves the endpoint the plan printed", ErrUsage)
+	}
+	if trimmed := strings.TrimSpace(*managerAddr); trimmed != "" {
+		// The address is compared with the probe target and dialled to prove the
+		// v2 stack is down, so it has to name a port.
+		if _, _, err := net.SplitHostPort(trimmed); err != nil {
+			return fmt.Errorf("%w: --manager-addr must be host:port, got %q", ErrUsage, trimmed)
+		}
+	}
 	targetRoot, err := resolveTargetRoot(*target)
 	if err != nil {
 		return err
@@ -65,8 +92,11 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		return runRollbackPrepare(ctx, stdout, stderr, *asJSON, upgradeservice.RollbackOptions{
 			LegacyRoot:               *legacy,
 			TargetRoot:               targetRoot,
+			BackupDir:                *backup,
 			TagOverride:              *legacyImage,
 			Project:                  *project,
+			Port:                     *rollbackPort,
+			ManagerAddress:           *managerAddr,
 			AllowImageFamilyMismatch: *allowFamily,
 		})
 	}
@@ -76,6 +106,7 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		BackupDir:                *backup,
 		Image:                    *legacyImage,
 		StatusURL:                *statusURL,
+		ManagerAddress:           *managerAddr,
 		ObservedAtMS:             time.Now().UnixMilli(),
 		AllowImageFamilyMismatch: *allowFamily,
 	})
@@ -100,8 +131,12 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	_, _ = fmt.Fprintf(w, "  image: %s\n", plan.Image)
 	_, _ = fmt.Fprintf(w, "  volume: %s\n", plan.Volume)
 	_, _ = fmt.Fprintf(w, "  volume mountpoint (v1 container): %s\n", plan.VolumeMountPoint)
+	_, _ = fmt.Fprintf(w, "  published port (v1 host): %d\n", plan.Port)
+	_, _ = fmt.Fprintf(w, "  v2 Manager port: %d\n", plan.ManagerPort)
+	_, _ = fmt.Fprintf(w, "  health proof: %s\n", upgradeservice.RollbackHealthURL(plan.Port))
 	_, _ = fmt.Fprintf(w, "  source root: %s\n", plan.SourceRoot)
 	_, _ = fmt.Fprintf(w, "  source fingerprint: %s\n", plan.SourceFingerprint)
+	_, _ = fmt.Fprintf(w, "  backup directory: %s\n", plan.BackupDirectory)
 	_, _ = fmt.Fprintf(w, "  backup manifest sha256: %s\n", plan.BackupManifestSHA256)
 	_, _ = fmt.Fprintf(w, "  compose project: %s\n", plan.ComposeProject)
 	_, _ = fmt.Fprintf(w, "  invocation: %s\n", plan.ComposeInvocation)
@@ -120,10 +155,17 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	_, _ = fmt.Fprintf(w, "  plan file: %s\n", plan.ReportPath)
 	_, _ = fmt.Fprintf(w, "  plan digest: %s\n", plan.Digest)
 	_, _ = fmt.Fprintln(w, "apply it, then record the verdict:")
-	verifyCommand := fmt.Sprintf("  cpa-manager-plus upgrade rollback --verify --legacy %s --legacy-image %s --status-url %s",
-		plan.SourceRoot, plan.Image, upgradeservice.LegacyHealthURL())
+	// The command is printed to be pasted as-is: every path is quoted, and the
+	// recorded bundle and the plan's own port are named so the verdict cannot be
+	// recorded against a different copy or endpoint.
+	verifyCommand := fmt.Sprintf("  cpa-manager-plus upgrade rollback --verify --legacy %s --target %s --backup %s --legacy-image %s --status-url %s",
+		strconv.Quote(plan.SourceRoot), strconv.Quote(plan.TargetRoot), strconv.Quote(plan.BackupDirectory),
+		strconv.Quote(plan.Image), strconv.Quote(upgradeservice.RollbackHealthURL(plan.Port)))
 	if plan.ImageFamilyOverride {
 		verifyCommand += " --allow-image-family-mismatch"
+	}
+	if plan.ManagerAddress != "" {
+		verifyCommand += " --manager-addr " + strconv.Quote(plan.ManagerAddress)
 	}
 	_, _ = fmt.Fprintln(w, verifyCommand)
 }

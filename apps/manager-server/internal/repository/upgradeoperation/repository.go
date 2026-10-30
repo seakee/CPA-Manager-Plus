@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -25,9 +26,13 @@ var (
 	// ErrStageRegression reports an attempt to move the operation backwards.
 	// The attempted write is rejected without touching the row.
 	ErrStageRegression = errors.New("upgrade operation stage cannot move backwards")
-	ErrUnknownDomain   = errors.New("upgrade operation domain is not supported")
-	ErrUnknownStage    = errors.New("upgrade operation stage is not supported")
-	ErrInvalidRow      = errors.New("upgrade operation row is invalid")
+	// ErrRollbackEvidenceRequired reports an attempt to write the terminal
+	// rolled_back stage without the observation that justified it. The verdict
+	// is recorded once, with its evidence, and never as a bare stage.
+	ErrRollbackEvidenceRequired = errors.New("a rolled_back operation requires recorded evidence")
+	ErrUnknownDomain            = errors.New("upgrade operation domain is not supported")
+	ErrUnknownStage             = errors.New("upgrade operation stage is not supported")
+	ErrInvalidRow               = errors.New("upgrade operation row is invalid")
 )
 
 type Repository struct{ db *sql.DB }
@@ -39,6 +44,48 @@ const selectColumns = `stage, domains_done, source_kind, source_version, source_
 	reconciliation, manual_items, error_code, error_detail,
 	rollback_image, rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
 	created_at_ms, updated_at_ms`
+
+// requiredColumns are the columns selectColumns reads. The table is created by a
+// writable open, so a store written by an earlier build can hold the table
+// without these columns; a read-only reader cannot migrate it and must say so
+// instead of letting the SQL fail.
+var requiredColumns = []string{
+	"stage", "domains_done", "source_kind", "source_version", "source_root",
+	"source_fingerprint_before", "source_fingerprint_after", "backup_manifest_sha256",
+	"reconciliation", "manual_items", "error_code", "error_detail",
+	"rollback_image", "rollback_status_url", "rollback_source_fingerprint", "rollback_observed_at_ms",
+	"created_at_ms", "updated_at_ms",
+}
+
+// MissingColumns reports the columns of a readable operation row that this
+// store does not have. An empty result means the row can be selected. The
+// caller must have seen the table itself: a store without the table is a store
+// with no recorded operation, not an outdated one.
+func (r *Repository) MissingColumns(ctx context.Context) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `select name from pragma_table_info(?)`, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	present := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	missing := make([]string, 0, len(requiredColumns))
+	for _, column := range requiredColumns {
+		if !present[column] {
+			missing = append(missing, column)
+		}
+	}
+	return missing, nil
+}
 
 // Get returns the single operation row. found is false before the first
 // Advance; the caller must not treat that as an operation in progress.
@@ -125,6 +172,12 @@ func decodeStringList(raw string, column string) ([]string, error) {
 // time of an existing row, so re-writing progress never rewrites history.
 func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	op.Normalize()
+	// This is one of the two paths that write a stage, so the terminal verdict's
+	// evidence invariant is enforced here, before the model's shape check turns
+	// it into a plain error.
+	if err := requireVerdictEvidence(op); err != nil {
+		return err
+	}
 	if err := op.Validate(); err != nil {
 		return err
 	}
@@ -227,6 +280,11 @@ func (r *Repository) Advance(ctx context.Context, domain string, stage model.Upg
 	if !stage.Valid() {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %q", ErrUnknownStage, stage)
 	}
+	// Advance carries no observation, so it can never write the terminal
+	// verdict: the evidence and the stage land together in RecordRollback.
+	if stage == model.UpgradeStageRolledBack {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: record the verdict with its evidence instead", ErrRollbackEvidenceRequired)
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.UpgradeOperation{}, err
@@ -281,6 +339,58 @@ func nullString(value string) any {
 	return value
 }
 
+// requireVerdictEvidence keeps the terminal verdict and its observation
+// inseparable: rolled_back is never resumed, so a row without its evidence could
+// never be re-proven.
+func requireVerdictEvidence(op model.UpgradeOperation) error {
+	if op.Stage == model.UpgradeStageRolledBack && op.Rollback == nil {
+		return fmt.Errorf("%w: write rolled_back with RollbackEvidence", ErrRollbackEvidenceRequired)
+	}
+	return nil
+}
+
+// RecordSourceRoot backfills the 1.x data directory of a row that recorded none:
+// an operation written before the column existed still has to bind its rollback
+// to the volume it copied. It only fills an empty value, so provenance is never
+// rewritten, and it refuses a row that has no operation at all.
+func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (model.UpgradeOperation, error) {
+	if strings.TrimSpace(sourceRoot) == "" {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: the 1.x data directory is empty", ErrInvalidRow)
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found {
+		return model.UpgradeOperation{}, errors.New("no upgrade operation is recorded, so there is no source root to record")
+	}
+	if current.SourceRoot != "" {
+		// Another path recorded it first, so this one changed nothing.
+		return current, tx.Commit()
+	}
+	now := time.Now().UnixMilli()
+	current.SourceRoot = sourceRoot
+	current.UpdatedAtMS = now
+	if current.CreatedAtMS == 0 {
+		current.CreatedAtMS = now
+	}
+	if _, err := tx.ExecContext(ctx, `update `+tableName+`
+		set source_root = ?, updated_at_ms = ? where id = 1`,
+		sourceRoot, current.UpdatedAtMS); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
+}
+
 // RecordRollback writes the rolled_back stage together with the observation
 // that justified it, in one transaction. It never rewrites provenance: the
 // source kind, the source root, both fingerprints, the backup manifest digest
@@ -300,12 +410,13 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UnixMilli()
-	// Take the write lock before reading so two verdicts cannot interleave. A
-	// row created here is a verdict without provenance: the deferred rollback
-	// removes it.
+	// Take the write lock before reading so two verdicts cannot interleave. The
+	// placeholder row carries no stage, so even inside this transaction no
+	// rolled_back row exists without its evidence; the deferred rollback removes
+	// it either way.
 	inserted, err := tx.ExecContext(ctx, `insert into `+tableName+`
 		(id, stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?)
-		on conflict(id) do nothing`, string(model.UpgradeStageRolledBack), now, now)
+		on conflict(id) do nothing`, "", now, now)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
