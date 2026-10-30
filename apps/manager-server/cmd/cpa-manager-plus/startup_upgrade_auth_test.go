@@ -147,15 +147,17 @@ func TestStartupUpgradeAuthenticationReadOnlyAndSourceBound(t *testing.T) {
 	h.SetCompleted()
 	request(h, "POST", upgradeauth.Path, key, "", "", 404)
 	// Damaged and missing sources cannot be authenticated or initialized here.
+	// Neither is a verdict on the key: the source could not be read to compare
+	// it, so the answer names the source, exactly as on the wizard reads.
 	h = newHandler()
 	if err := os.WriteFile(database, []byte("not SQLite"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	request(h, "POST", upgradeauth.Path, key, "", "", 401)
+	request(h, "POST", upgradeauth.Path, key, "", "", 503)
 	if err := os.Remove(database); err != nil {
 		t.Fatal(err)
 	}
-	request(h, "POST", upgradeauth.Path, key, "", "", 401)
+	request(h, "POST", upgradeauth.Path, key, "", "", 503)
 }
 
 // upgradeAuthSource writes the smallest 1.x source the entry page can verify and

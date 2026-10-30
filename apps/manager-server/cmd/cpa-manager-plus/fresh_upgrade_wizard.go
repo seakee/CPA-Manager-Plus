@@ -5,6 +5,9 @@ import (
 	"strings"
 
 	upgradewizard "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradewizard"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
 const (
@@ -18,16 +21,39 @@ const (
 )
 
 // newUpgradeWizard builds the read-only Upgrade wizard routes. The handler
-// proves its own credential — the source administrator key the Upgrade entry
-// verified, presented as a Bearer value — against the configured 1.x source, so
-// no surface-level session or "authorize everything" hook can stand in for it.
+// proves its own credential — the key the Upgrade entry verified, presented as a
+// Bearer value — against the surface's one resolved source, so no
+// surface-level session or "authorize everything" hook can stand in for it.
 // Both routes only read.
 func (a *freshApplication) newUpgradeWizard() upgradewizard.Handler {
 	return upgradewizard.Handler{
-		LegacyRoot: configuredLegacyRoot,
-		Database:   func() string { return a.cfg.DBPath },
-		Timeout:    upgradewizard.DefaultTimeout,
+		LegacyRoot:         configuredLegacyRoot,
+		CredentialDatabase: func() string { return upgradeCredentialDatabase(a.cfg.DBPath) },
+		PublicOrigin:       strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
+		Database:           func() string { return a.cfg.DBPath },
+		Timeout:            upgradewizard.DefaultTimeout,
 	}
+}
+
+// upgradeCredentialDatabase is the Upgrade surface's one credential resolution:
+// the configured 1.x database when the mount holds it, otherwise the Manager's
+// own store. The entry leaf and both wizard reads ask this question here and
+// nowhere else, so a key accepted at the entry page is accepted by the reads.
+func upgradeCredentialDatabase(managerDatabase string) string {
+	return upgradeservice.CredentialDatabase(configuredLegacyRoot(), managerDatabase)
+}
+
+// upgradeCredentialPaths is the surface's one credential resolution expressed as
+// the inspection paths the entry leaf reads. When the resolved credential file
+// is the configured 1.x database, its sibling data key and archive tree are the
+// layout the rest of the 1.x inspection already uses; otherwise the Manager's
+// own paths are the credential source and are used unchanged.
+func upgradeCredentialPaths(manager sqliterepo.InspectionPaths) sqliterepo.InspectionPaths {
+	database := upgradeCredentialDatabase(manager.Database)
+	if strings.TrimSpace(database) == strings.TrimSpace(manager.Database) {
+		return manager
+	}
+	return legacypreflight.DefaultPaths(database)
 }
 
 // configuredLegacyRoot resolves the mounted 1.x source. An absent mount is not

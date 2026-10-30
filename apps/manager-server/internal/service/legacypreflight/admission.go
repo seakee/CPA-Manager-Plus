@@ -239,26 +239,10 @@ func copyInMarkerStage(databasePath string) (UpgradeStage, error) {
 	if err != nil {
 		return UpgradeStageNone, fmt.Errorf("read the copy-in provenance marker: %w", err)
 	}
-	if !found || !sameDatabaseFile(marker.TargetDatabase, databasePath) {
+	if !found || !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
 		return UpgradeStageNone, nil
 	}
 	return UpgradeStageInProgress, nil
-}
-
-// sameDatabaseFile compares a marker's target with the database being admitted,
-// resolving symlinks in the parent so a canonical path and its alias agree.
-func sameDatabaseFile(recorded, actual string) bool {
-	canonical := func(path string) string {
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			return filepath.Clean(path)
-		}
-		if resolved, err := filepath.EvalSymlinks(filepath.Dir(absolute)); err == nil {
-			absolute = filepath.Join(resolved, filepath.Base(absolute))
-		}
-		return filepath.Clean(absolute)
-	}
-	return canonical(recorded) == canonical(actual)
 }
 
 // upgradeRecord is the row half of the admission decision. The admission never

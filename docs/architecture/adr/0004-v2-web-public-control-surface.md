@@ -234,8 +234,10 @@ key sees 405. Browser
 requests must be same-origin; there is no CORS/cookie authentication. The
 origin is checked against the existing trusted `CPAMP_PUBLIC_ORIGIN` deployment
 setting when supplied (including TLS termination), otherwise direct TLS/Host.
-Forwarded headers cannot establish this trust. Query
-strings, unknown paths and aliases are generic 404 for a proved credential.
+Forwarded headers cannot establish this trust. The same rule is applied by the
+wizard's two read routes through the same helper, so the page that authenticates
+and the reads behind it cannot accept different browser origins.
+Query strings, unknown paths and aliases are generic 404 for a proved credential.
 Responses are `no-store`.
 Writable startup, readiness, Fresh takeover or canonical commit/completion
 retires this leaf to the captured generic 404 behavior. It never delegates to
@@ -245,10 +247,43 @@ migration executor. The same fixed surface also serves the Upgrade wizard's two
 read-only routes (`installation/upgrade/preflight` and
 `installation/upgrade/status`) while the operation is unfinished — the copied-in
 v2 root carries no Fresh record for the canonical continuation. They share this
-leaf's gate and source credential and retire with it; no write route widens the
-Fresh-only fixed API.
+leaf's gate and retire with it; no write route widens the Fresh-only fixed API.
 The fixed asset carrier admits only the Upgrade entry's static manifest closure
 in addition to its initial graph; dynamic Console imports remain unavailable.
+
+#### One credential for the whole Upgrade surface (2026-10-30)
+
+The entry leaf and both wizard reads resolve exactly one administrator
+credential: the database inside the configured 1.x data directory
+(`CPAMP_LEGACY_ROOT`, otherwise `/legacy`) when that mount actually holds
+`usage.sqlite`, and otherwise the Manager's own store. The resolution is
+implemented once (`upgrade.CredentialDatabase`) and both leaves verify the
+resolved file with the same credential read (`upgrade.VerifyAdminSource`), which
+compares one persisted credential row and never the whole source. A key accepted
+at the entry page is therefore accepted by the reads, and a key kept in the
+other file is refused by all of them; two files with different keys cannot split
+the surface.
+
+The entry leaf additionally runs the bounded public observation to project
+`unsupported_upgrade`. That observation deliberately refuses a WAL source as
+recovery-owned. When it refuses, the leaf re-checks the key with the surface's
+credential read and answers 503 `source_unavailable` for a proved key and 401
+only when the credential itself rejects it: a source that cannot be observed is
+never reported as a wrong key, and never as an accepted one either.
+
+`status` is answered from the Manager store and does not require the source
+mount. It reports the recorded stage plus a typed `sourceRoot` marker
+(`available`, or `upgrade_legacy_root_missing` / `upgrade_source_missing` /
+`upgrade_legacy_root_unusable` / `upgrade_source_unreadable`) so the stage is
+never mistaken for proof that a step needing the source can run. `preflight`
+still answers `upgrade_legacy_root_missing` without the mount.
+
+Before the operation row commits, the copy-in publishes its provenance marker.
+A marker that names this database with no row is an in-progress operation:
+`status` reports `recorded:true`, `evidence:"copy_in_marker"`, stage `copy_in`
+and next action `copy_in` — the same position startup admission reads — instead
+of the pre-operation `preflight` projection. A marker that names another file
+describes nothing here.
 
 Administrator initialization is independent of Bootstrap classification. A
 matching durable Fresh installation, generation and OperationID checkpoint can

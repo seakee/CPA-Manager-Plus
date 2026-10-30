@@ -68,8 +68,8 @@ func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.
 	// the Upgrade entry leaf present. Its entry authenticates only; its wizard
 	// routes read the operation this process has not finished. An unfinished
 	// operation has no Fresh record for the canonical continuation to carry, so
-	// the two reads are mounted here, beside the entry leaf, with their own
-	// source credential and their own credential-before-verb order.
+	// the two reads are mounted here, beside the entry leaf, on the one resolved
+	// credential and with the same credential-before-verb order.
 	if fixedUpgradeSurfaceLeaf(r.URL.Path) {
 		h.projectionMu.RLock()
 		defer h.projectionMu.RUnlock()
@@ -143,16 +143,22 @@ func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.Inspection
 	// Entropy failure leaves this leaf closed without weakening discovery.
 	h.upgradeAuth = nil
 	h.upgradeWizard = nil
-	if handler, err := upgradeauth.New(paths, os.Getenv("CPAMP_PUBLIC_ORIGIN")); err == nil {
+	// One credential resolution for the whole surface: the entry leaf and both
+	// wizard reads verify the key against the same file, so a key the entry page
+	// accepts is a key the reads accept, and the key kept in the other file is
+	// refused by all three.
+	if handler, err := upgradeauth.New(upgradeCredentialPaths(paths), os.Getenv("CPAMP_PUBLIC_ORIGIN")); err == nil {
 		h.upgradeAuth = handler
 		// The wizard routes read the same source credential the entry leaf
 		// verifies. They are mounted with the leaf and closed with it: an
 		// unfinished Upgrade operation has no Fresh record, so the fixed
 		// surface is the only carrier that can still show what it recorded.
 		h.upgradeWizard = upgradewizard.Handler{
-			LegacyRoot: configuredLegacyRoot,
-			Database:   func() string { return paths.Database },
-			Timeout:    upgradewizard.DefaultTimeout,
+			LegacyRoot:         configuredLegacyRoot,
+			CredentialDatabase: func() string { return upgradeCredentialDatabase(paths.Database) },
+			PublicOrigin:       strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
+			Database:           func() string { return paths.Database },
+			Timeout:            upgradewizard.DefaultTimeout,
 		}
 	}
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
