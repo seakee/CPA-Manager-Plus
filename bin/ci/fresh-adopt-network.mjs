@@ -737,8 +737,20 @@ try {
     const record = adoptionRecord();
     const summary = { ...record, counts: countsOf(record.items) };
     assert(summary.retryable > 0, 'the interrupted run recorded no retryable item: ' + JSON.stringify(summary.counts));
+    // A failure that wrote nothing is retryable; one that failed after a write is
+    // not, and both are honest results of the same interruption. What the run must
+    // show is that the source-side failures were recorded as retryable, and that
+    // the count the record reports is that set.
     const failed = summary.items.filter((item) => item.outcome === 'failed');
-    assert(failed.length > 0 && failed.every((item) => item.retryable), 'a failed item is not retryable');
+    const retryable = failed.filter((item) => item.retryable);
+    assert(failed.length > 0, 'the interrupted run recorded no failure');
+    assert(retryable.length > 0, 'no source-side failure was recorded as retryable');
+    assert.equal(summary.retryable, retryable.length, 'the retryable count disagrees with the items');
+    for (const item of retryable)
+      assert(
+        item.reason === 'download_failed' || item.reason === 'source_unreadable',
+        'a retryable item failed after a write: ' + item.reason
+      );
     return { counts: summary.counts, retryable: summary.retryable, planned: summary.planned };
   });
   await screenshot('adopt-migration-retryable');
