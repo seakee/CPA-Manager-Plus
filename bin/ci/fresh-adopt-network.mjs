@@ -753,16 +753,25 @@ try {
   });
   await screenshot('adopt-migration-retryable');
   await check('completion refuses a run with retryable items until they are accepted', async () => {
-    await page.getByTestId('adopt-complete').click();
-    await wait(
-      async () =>
-        (await page.getByTestId('adopt-accept-retryable').count()) === 1 ||
-        (await page.getByTestId('adopt-resume').count()) === 1,
-      'retryable completion refusal'
+    // A completion can also be refused for a run that is still winding down, so
+    // the operator's action is repeated until the answer is the one that matters:
+    // the acknowledgement, or a page that completed without it (which would mean
+    // the run had nothing left to retry).
+    let answer = null;
+    for (let attempt = 0; attempt < 8 && answer === null; attempt += 1) {
+      const complete = page.getByTestId('adopt-complete');
+      if ((await complete.count()) > 0 && (await complete.isEnabled())) await complete.click();
+      await page.waitForTimeout(700);
+      if ((await page.getByTestId('adopt-accept-retryable').count()) > 0) answer = 'retryable';
+      else if ((await page.getByTestId('enter-console').count()) > 0) answer = 'completed';
+    }
+    assert.equal(
+      answer,
+      'retryable',
+      'completion over ' + retryableSummary.retryable + ' retryable items answered ' + answer
     );
     const message = await page.getByTestId('adopt-migration').innerText();
     assert.match(message, /could not be copied/i);
-    assert.equal(await page.getByTestId('adopt-accept-retryable').count(), 1);
     return { retryable: retryableSummary.retryable };
   });
   await screenshot('adopt-completion-retryable');
