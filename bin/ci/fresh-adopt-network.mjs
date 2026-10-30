@@ -488,20 +488,24 @@ function sourceListing() {
 }
 // The destination CPA is the Supervisor's own, so its state is read from the
 // runtime's filesystem: that is the process the adoption actually configured,
-// independent of what the Manager reports about itself.
+// independent of what the Manager reports about itself. The Supervisor stages it
+// under its journal root (`supervisorRoot/destination`, lifecycle/destination.go
+// `EnableDestination`), and the gateway config and auth directory are its two
+// files (`destination.publish`).
+const destinationRoot = '/runtime/supervisor/destination';
 function destinationConfig() {
-  const raw = dc('exec', '-T', 'cpamp-runtime', 'cat', '/runtime/destination/config.yaml');
+  const raw = dc('exec', '-T', 'cpamp-runtime', 'cat', destinationRoot + '/config.yaml');
   return JSON.parse(raw);
 }
 function destinationCredentials() {
-  const listing = dc('exec', '-T', 'cpamp-runtime', 'sh', '-c', 'ls -1 /runtime/destination/auth 2>/dev/null || true');
+  const listing = dc('exec', '-T', 'cpamp-runtime', 'sh', '-c', 'ls -1 ' + destinationRoot + '/auth 2>/dev/null || true');
   const names = listing.trim().split('\n').filter(Boolean).sort();
   return {
     names,
     digests: Object.fromEntries(
       names.map((name) => [
         name,
-        sha256(dc('exec', '-T', 'cpamp-runtime', 'cat', '/runtime/destination/auth/' + name)),
+        sha256(dc('exec', '-T', 'cpamp-runtime', 'cat', destinationRoot + '/auth/' + name)),
       ])
     ),
   };
