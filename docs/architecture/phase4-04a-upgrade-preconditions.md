@@ -304,27 +304,41 @@ on both surfaces at once, and no write route exists.
 
 - **Credential.** The Upgrade surface has its own identity — the source
   administrator key the bootstrap Upgrade entry verified — presented as
-  `Authorization: Bearer <key>` with exactly one header value. The handler
-  verifies it through `upgrade.Service.VerifyAdmin`, which opens the configured
-  1.x source read-only and runs `setting.LoadAdminCredential` +
-  `security.VerifyAdminKey`. That open reads the credential row and nothing else:
+  `Authorization: Bearer <key>` with exactly one header value. The whole surface
+  resolves one credential file (`upgrade.CredentialDatabase`): the configured
+  1.x database when the mount holds one the shared file policy accepts,
+  otherwise the Manager's own store, because a copied-in v2 root carries the
+  same administrator credential and is the only file left without a mount. The
+  handler verifies it through `upgrade.VerifyAdminSource`, which opens that file
+  read-only and runs `setting.LoadAdminCredential` + `security.VerifyAdminKey`.
+  That open reads the credential row and nothing else:
   no `quick_check`, no schema vocabulary, no parity, bounded to
   `CredentialVerifyTimeout` (2s). Every authenticated request runs it, including
   every status poll, so a whole-file scan there would answer 503 on a large
   source and the result page would never arrive. The integrity check stays in
-  `Preflight`, which is what qualifies a source. `VerifyAdmin` takes no fence.
+  `Preflight`, which is what qualifies a source. `VerifyAdminSource` takes no
+  fence.
   A read that outlives the bound — or a caller whose own deadline had passed —
   is `503 upgrade_credential_timeout`: a slow but healthy volume is a retry, not
   a repair.
   The installation session, the Fresh Admin key, a cookie and an absent header
   are all `401`; the two surfaces no longer check a session before this handler
   runs, so no missing decision can read as allow.
-- **One file policy on both paths.** The credential read applies the same
-  database file rules as the preflight (`processlock.InspectDatabaseFile`): the
-  path must be the database itself, never a symbolic link, and a regular file
-  reachable by exactly one link. A linked `usage.sqlite` is therefore
-  `503 upgrade_source_symlinked` here and `upgrade_source_symlinked` in the
-  report — one condition, one code. SQLite opens lazily on the first query, so
+- **One file policy on both paths.** The mount lookup applies the same database
+  file rules as the preflight and the credential read
+  (`processlock.InspectDatabaseFile`, via `upgrade.MountDatabase`): the path must
+  be the database itself, never a symbolic link, and a regular file with content
+  reachable by exactly one link. A mount that fails the policy therefore holds no
+  database — the credential resolves to the Manager store and every leaf stays
+  usable, instead of the read being pointed at a file it would refuse and
+  answering 503 on the page that should name the condition. The refusal carries
+  the preflight's code for that mount (`upgrade_source_symlinked` for a link,
+  `upgrade_source_missing` for an absent or empty file,
+  `upgrade_source_lock_unavailable` for a hard-linked or otherwise uninspectable
+  one) and the status projection reports it as its `sourceRoot` marker.
+  `503 upgrade_source_symlinked` on a leaf therefore means the resolved file
+  itself is a link — in practice the Manager store — never the mount the
+  operator mounted through one. SQLite opens lazily on the first query, so
   the open also pins a descriptor and compares it with the inspected file
   (`processlock.OpenedDatabase`, the reader's form of `openedMarker`); after the
   credential row is read the path is compared once more, so a swap between the
@@ -340,9 +354,9 @@ on both surfaces at once, and no write route exists.
   unusable mount answers `503 upgrade_legacy_root_missing` /
   `upgrade_legacy_root_unusable`; a mount with no database answers
   `503 upgrade_source_missing`; a credential read that exceeds its bound answers
-  `503 upgrade_credential_timeout`; a linked database answers
-  `503 upgrade_source_symlinked`; a source that exists but cannot be read to
-  verify the key answers `503 upgrade_source_unreadable`. None of these is a
+  `503 upgrade_credential_timeout`; a resolved database that is itself a link
+  answers `503 upgrade_source_symlinked`; a source that exists but cannot be read
+  to verify the key answers `503 upgrade_source_unreadable`. None of these is a
   wrong-password message, and none of them is the ownership-marker code — that
   code is the preflight's, and this surface never inspects the marker.
 - **Ownership without the fence.** `upgrade.Preflight` observes the source with
@@ -358,7 +372,15 @@ on both surfaces at once, and no write route exists.
 - **Projection.** The status route selects named columns (stage, domains,
   source kind/version, reconciliation days, manual items, error code/detail,
   updated time) and maps the stage onto `nextAction`. An unknown stage is shown
-  verbatim; fingerprints, digests and paths have no field at all.
+  verbatim; fingerprints, digests and paths have no field at all. The recorded
+  stage is readable without the mount; a separate `sourceRoot` marker answers
+  the shared mount lookup with `available` or the preflight's code for the mount
+  (`upgrade_legacy_root_missing`, `upgrade_source_missing`,
+  `upgrade_source_symlinked`, `upgrade_source_lock_unavailable`,
+  `upgrade_source_unreadable`), so a step needing the source is never assumed
+  runnable and a mount the surface refused is named rather than silently
+  replaced. `preflight` still inspects that mount, not the credential file the
+  surface fell back to.
 - **Scrubbing.** Operator-visible text is redacted by content, not by path
   shape: `Bearer …` (including a value wrapped onto the next line after a lone
   `Bearer`), `Authorization: Basic …`, `sk-…`, this product's own

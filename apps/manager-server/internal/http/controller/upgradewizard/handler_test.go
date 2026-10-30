@@ -15,10 +15,12 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
@@ -284,6 +286,96 @@ func TestSymlinkedSourceIsRefusedOnBothRoutes(t *testing.T) {
 		}
 		if strings.Contains(body, `"`+CodeAdminUnauthorized+`"`) {
 			t.Fatalf("%s reported a symlinked source as a credential verdict: %s", resource, body)
+		}
+	}
+}
+
+// managerCredentialStore writes the Manager's own store with an administrator
+// credential and one recorded operation row: everything the surface reads when
+// it is not reading a 1.x mount.
+func managerCredentialStore(t *testing.T, key string) string {
+	t.Helper()
+	database := filepath.Join(t.TempDir(), "usage.sqlite")
+	db, err := sqliterepo.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := security.NewAdminCredential(key, "test")
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := setting.New(db).SaveAdminCredential(context.Background(), credential); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := upgradeoperation.New(db).Put(context.Background(), model.UpgradeOperation{
+		Stage:       model.UpgradeStageCopyIn,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		ManualItems: []string{},
+	}); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return database
+}
+
+// TestRefusedMountFallsBackToTheManagerStore is the reachability contract for a
+// mount whose usage.sqlite the shared file policy refuses. The mount holds no
+// database the surface may read, so the one credential resolves to the Manager
+// store: the entry page and both reads stay usable, the projection names the
+// mount's own condition, and the preflight still reports on the mount instead of
+// on the file the credential fell back to.
+func TestRefusedMountFallsBackToTheManagerStore(t *testing.T) {
+	const managerKey = "manager-store-administrator-key"
+	root := legacySourceDir(t)
+	database := filepath.Join(root, "usage.sqlite")
+	if err := os.Rename(database, database+".real"); err != nil {
+		t.Fatalf("move fixture database: %v", err)
+	}
+	if err := os.Symlink(database+".real", database); err != nil {
+		t.Skipf("create database symlink: %v", err)
+	}
+	manager := managerCredentialStore(t, managerKey)
+	handler := Handler{
+		LegacyRoot:         func() string { return root },
+		CredentialDatabase: func() string { return upgradeservice.CredentialDatabase(root, manager) },
+		Database:           func() string { return manager },
+		Timeout:            10 * time.Second,
+	}
+
+	// The Manager store is the surface's credential, so both reads answer with
+	// its key while the mount is refused.
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(managerKey), http.StatusOK)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Recorded || status.Stage != StageCopyIn {
+		t.Fatalf("status with a refused mount = %+v", status)
+	}
+	if status.SourceRoot != CodeSourceSymlinked {
+		t.Fatalf("source root marker = %q, want %q", status.SourceRoot, CodeSourceSymlinked)
+	}
+	// The mount's own key is not the surface's credential any more: the surface
+	// reads the file it resolved, not the file the mount points at.
+	_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusUnauthorized)
+	if !strings.Contains(body, `"`+CodeAdminUnauthorized+`"`) {
+		t.Fatalf("the refused mount's key was not refused: %s", body)
+	}
+
+	// The preflight inspects the mount, so it names the condition the projection
+	// named rather than reporting on the Manager store.
+	_, body = request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(managerKey), http.StatusOK)
+	if !strings.Contains(body, `"`+CodeSourceSymlinked+`"`) {
+		t.Fatalf("preflight did not name the refused mount: %s", body)
+	}
+	for _, secret := range []string{root, manager} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("preflight leaked %q: %s", secret, body)
 		}
 	}
 }

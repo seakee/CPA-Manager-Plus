@@ -614,6 +614,97 @@ func TestSourceDatabaseFilePolicyIsSharedByBothPaths(t *testing.T) {
 	}
 }
 
+// TestMountDatabaseAppliesTheCredentialFilePolicy proves the surface's mount
+// lookup asks exactly the question the credential read will ask: the path must
+// name the database itself, with content, never a link. A mount the policy
+// refuses does not count as holding a database, so the one credential resolution
+// falls back to the Manager store instead of pointing the read at a file it would
+// refuse — which is what bricked the entry page. The refusal carries the code the
+// preflight reports for the same mount.
+func TestMountDatabaseAppliesTheCredentialFilePolicy(t *testing.T) {
+	const (
+		key          = "legacy-manager-credential"
+		managerStore = "/srv/cpamp/usage.sqlite"
+	)
+	// No mount at all: the Manager store is the only credential file, and there is
+	// no mount condition to name.
+	if database, refusal := MountDatabase(""); database != "" || refusal != "" {
+		t.Fatalf("MountDatabase(no mount) = %q, %q; want both empty", database, refusal)
+	}
+	if database := CredentialDatabase("", managerStore); database != managerStore {
+		t.Fatalf("CredentialDatabase(no mount) = %q, want the Manager store %q", database, managerStore)
+	}
+
+	cases := []struct {
+		name    string
+		prepare func(t *testing.T, fixture sourceFixture)
+		refusal string
+	}{
+		{name: "genuine database", prepare: func(t *testing.T, fixture sourceFixture) {}},
+		{name: "symbolic link", prepare: func(t *testing.T, fixture sourceFixture) {
+			real := fixture.dbPath + ".real"
+			if err := os.Rename(fixture.dbPath, real); err != nil {
+				t.Fatalf("move fixture database: %v", err)
+			}
+			if err := os.Symlink(real, fixture.dbPath); err != nil {
+				t.Skipf("create database symlink: %v", err)
+			}
+		}, refusal: CodeSourceSymlinked},
+		{name: "hard link", prepare: func(t *testing.T, fixture sourceFixture) {
+			if err := os.Link(fixture.dbPath, fixture.dbPath+".alias"); err != nil {
+				t.Skipf("create database hard link: %v", err)
+			}
+		}, refusal: CodeSourceLockUnavailable},
+		{name: "empty database", prepare: func(t *testing.T, fixture sourceFixture) {
+			if err := os.WriteFile(fixture.dbPath, nil, 0o600); err != nil {
+				t.Fatalf("empty the fixture database: %v", err)
+			}
+		}, refusal: CodeSourceMissing},
+		{name: "absent database", prepare: func(t *testing.T, fixture sourceFixture) {
+			if err := os.Remove(fixture.dbPath); err != nil {
+				t.Fatalf("remove the fixture database: %v", err)
+			}
+		}, refusal: CodeSourceMissing},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newCredentialFixture(t, key)
+			testCase.prepare(t, fixture)
+
+			database, refusal := MountDatabase(fixture.root)
+			resolved := CredentialDatabase(fixture.root, managerStore)
+			if testCase.refusal == "" {
+				if refusal != "" || database != fixture.dbPath || resolved != fixture.dbPath {
+					t.Fatalf("MountDatabase(genuine mount) = %q, %q; resolved %q", database, refusal, resolved)
+				}
+			} else {
+				if refusal != testCase.refusal {
+					t.Fatalf("MountDatabase refusal = %q, want %q", refusal, testCase.refusal)
+				}
+				if database != "" || resolved != managerStore {
+					t.Fatalf("a refused mount resolved to %q (database %q); want the Manager store %q", resolved, database, managerStore)
+				}
+			}
+
+			// One condition, one code: the report the operator reads names the same
+			// condition the mount lookup refused.
+			report := preflight(t, fixture.root, Options{})
+			named := false
+			for _, code := range report.Blocked {
+				if code == testCase.refusal {
+					named = true
+				}
+			}
+			if testCase.refusal != "" && !named {
+				t.Fatalf("preflight blocked = %v, want it to name %s", report.Blocked, testCase.refusal)
+			}
+			if testCase.refusal == "" && !report.Ready {
+				t.Fatalf("genuine mount is not ready: %v", report.Blocked)
+			}
+		})
+	}
+}
+
 // TestVerifyAdminRefusesASwapBetweenInspectionAndRead proves the credential that
 // is compared belongs to the file that was inspected. SQLite opens lazily, so
 // the swap lands between the inspection and the first read; the read itself

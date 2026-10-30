@@ -152,7 +152,8 @@ type Handler struct {
 	LegacyRoot func() string
 	// CredentialDatabase returns the source database whose administrator
 	// credential every leaf of this surface verifies: the configured 1.x
-	// database when the mount holds one, otherwise the Manager's own store.
+	// database when the mount holds one the shared database file policy accepts
+	// (the file itself, never a link), otherwise the Manager's own store.
 	// Nil falls back to the credential inside LegacyRoot.
 	CredentialDatabase func() string
 	// PublicOrigin is the trusted public origin (CPAMP_PUBLIC_ORIGIN). Empty
@@ -258,7 +259,10 @@ func (h Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 // credentialDatabase names the one file whose administrator credential both
 // routes verify: the surface's single resolution when it is wired, and otherwise
 // the credential inside the configured 1.x root. An absent file is the legacy
-// root verdict the operator must fix.
+// root verdict the operator must fix. The resolution itself — which already
+// applies the shared database file policy, so a mount holding only a linked or
+// otherwise refused usage.sqlite counts as no mount — lives in the service layer
+// so no leaf can answer this question differently.
 func (h Handler) credentialDatabase() (string, int, string) {
 	if h.CredentialDatabase != nil {
 		if database := strings.TrimSpace(h.CredentialDatabase()); database != "" {
@@ -320,6 +324,11 @@ type preflightDocument struct {
 	Ready           bool             `json:"ready"`
 }
 
+// servePreflight reports on the mount the operator supplied, never on the
+// surface's resolved credential file. The credential may fall back to the
+// Manager store when the mount holds no database the shared file policy accepts;
+// this step still inspects the mount, so a refused mount is named as that mount's
+// condition instead of being replaced by a file the operator did not ask about.
 func (h Handler) servePreflight(w http.ResponseWriter, r *http.Request) {
 	root, status, code := h.legacyRoot()
 	if status != 0 {
@@ -412,8 +421,11 @@ type statusDocument struct {
 	StageKnown bool   `json:"stageKnown"`
 	NextAction string `json:"nextAction"`
 	// SourceRoot is SourceRootAvailable or the typed code naming why the 1.x
-	// source is not usable. The projection never requires the mount; the stage
-	// does not promise a step that needs it can run.
+	// source is not usable — the same code the preflight reports for that mount.
+	// The mount question applies the shared database file policy, so a mount
+	// whose database is a link is named here rather than counted as usable. The
+	// projection never requires the mount; the stage does not promise a step
+	// that needs it can run.
 	SourceRoot     string          `json:"sourceRoot"`
 	DomainsDone    []string        `json:"domainsDone"`
 	SourceKind     string          `json:"sourceKind,omitempty"`
@@ -451,23 +463,26 @@ func (h Handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 // sourceRootState names whether the configured 1.x source is usable right now.
 // It is a marker on a successful projection, not an error: the recorded stage is
 // readable without the source, and a step that needs the source is refused with
-// the same code here and on the preflight.
+// the same code here and on the preflight. The question is the shared mount
+// lookup — the same file policy the credential read applies — so a mount whose
+// usage.sqlite is a link is named as such instead of counting as a source the
+// surface could use, which is also why the surface falls back to the Manager
+// store for the credential.
 func (h Handler) sourceRootState() string {
 	root, status, code := h.legacyRoot()
 	if status != 0 {
 		return code
 	}
-	info, err := os.Stat(filepath.Join(root, databaseFileName))
+	database, refusal := upgradeservice.MountDatabase(root)
 	switch {
-	case err == nil && info.Mode().IsRegular():
+	case database != "":
 		return SourceRootAvailable
-	case err != nil && !os.IsNotExist(err):
-		return CodeSourceUnreadable
-	case err != nil:
-		// The root is mounted but holds no database: a source that is not there.
-		return CodeSourceMissing
+	case refusal != "":
+		return refusal
 	default:
-		return CodeLegacyRootUnusable
+		// legacyRoot already refused an unconfigured mount, so this is reached
+		// only if the mount disappears between the two inspections.
+		return CodeSourceMissing
 	}
 }
 
