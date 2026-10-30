@@ -27,21 +27,26 @@ const (
 // Both routes only read.
 func (a *freshApplication) newUpgradeWizard() upgradewizard.Handler {
 	return upgradewizard.Handler{
-		LegacyRoot:         configuredLegacyRoot,
-		CredentialDatabase: func() string { return upgradeCredentialDatabase(a.cfg.DBPath) },
-		PublicOrigin:       strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
-		Database:           func() string { return a.cfg.DBPath },
-		Timeout:            upgradewizard.DefaultTimeout,
+		LegacyRoot:   configuredLegacyRoot,
+		PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
+		Database:     func() string { return a.cfg.DBPath },
+		Timeout:      upgradewizard.DefaultTimeout,
 	}
 }
 
-// upgradeCredentialDatabase is the Upgrade surface's one credential resolution:
-// the configured 1.x database when the mount holds one the shared database file
-// policy accepts, otherwise the Manager's own store. A mount whose usage.sqlite
-// is a link (or otherwise fails the policy) counts as no mount, so the surface
-// stays reachable and the preflight can name the condition. The entry leaf and
-// both wizard reads ask this question here and nowhere else, so a key accepted at
-// the entry page is accepted by the reads.
+// upgradeCredentialDatabase is the Upgrade surface's one credential rule applied
+// at startup: the configured 1.x database when the mount holds one the shared
+// database file policy accepts, otherwise the Manager's own store. A mount whose
+// usage.sqlite is a link (or otherwise fails the policy) counts as no mount, so
+// the surface stays reachable and the preflight can name the condition.
+//
+// Only the entry leaf resolves through this function, and it resolves once, when
+// it is constructed. The wizard's two reads inspect the mount per request and
+// apply the same rule (upgradeservice.CredentialDatabaseFrom), so a key the entry
+// page accepted is the key the reads accept as long as the mount is unchanged; a
+// mount that appears, disappears or is repointed after startup is seen by the
+// reads first, and the entry leaf keeps its startup resolution until it is
+// rebuilt.
 func upgradeCredentialDatabase(managerDatabase string) string {
 	return upgradeservice.CredentialDatabase(configuredLegacyRoot(), managerDatabase)
 }

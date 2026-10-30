@@ -20,7 +20,6 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
-	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
@@ -262,11 +261,17 @@ func TestCredentialDeadlineIsATimeoutNotAnUnreadableSource(t *testing.T) {
 	}
 }
 
-// TestSymlinkedSourceIsRefusedOnBothRoutes proves the two paths share one
-// database file policy: a source reached through a link is refused with the same
-// code by the preflight and by the credential read, because the file that is
-// inspected has to be the file that is read.
-func TestSymlinkedSourceIsRefusedOnBothRoutes(t *testing.T) {
+// TestSymlinkedSourceStaysUsableOnBothRoutes is the reachability contract for a
+// mount reached through a link. The routes resolve the credential with the
+// surface's one rule and one input — the mount this request inspected — so a
+// mount the shared file policy refuses holds no database, the credential is the
+// Manager store, and the surface stays usable on both prefixes and both routes.
+// This test used to assert the 503 the old nil resolution produced, which is
+// exactly the bricking behaviour it has to prevent now; the refused file must
+// never reach the credential read, and the mount's own key must be refused
+// because the surface never read it.
+func TestSymlinkedSourceStaysUsableOnBothRoutes(t *testing.T) {
+	const managerKey = "manager-store-key-for-a-refused-mount"
 	root := legacySourceDir(t)
 	database := filepath.Join(root, "usage.sqlite")
 	if err := os.Rename(database, database+".real"); err != nil {
@@ -275,18 +280,83 @@ func TestSymlinkedSourceIsRefusedOnBothRoutes(t *testing.T) {
 	if err := os.Symlink(database+".real", database); err != nil {
 		t.Skipf("create database symlink: %v", err)
 	}
-	handler := newHandler(root, "")
-	// Authentication opens the source too, so both routes answer the same refusal
-	// before the preflight report is even built: the code is shared with the
-	// report the service layer produces for the same mount.
-	for _, resource := range []string{PreflightSuffix, StatusSuffix} {
-		_, body := request(t, handler, http.MethodGet, testPrefix+resource, bearer(testAdminKey), http.StatusServiceUnavailable)
-		if !strings.Contains(body, `"`+CodeSourceSymlinked+`"`) {
-			t.Fatalf("%s did not refuse the symlink: %s", resource, body)
+	handler := newHandler(root, managerCredentialStore(t, managerKey))
+	for _, prefix := range []string{testPrefix, canonical} {
+		for _, resource := range []string{PreflightSuffix, StatusSuffix} {
+			_, body := request(t, handler, http.MethodGet, prefix+resource, bearer(managerKey), http.StatusOK)
+			if !strings.Contains(body, `"`+CodeSourceSymlinked+`"`) {
+				t.Fatalf("%s%s did not name the refused mount: %s", prefix, resource, body)
+			}
+			if strings.Contains(body, `"`+CodeAdminUnauthorized+`"`) {
+				t.Fatalf("%s%s reported a symlinked mount as a credential verdict: %s", prefix, resource, body)
+			}
 		}
-		if strings.Contains(body, `"`+CodeAdminUnauthorized+`"`) {
-			t.Fatalf("%s reported a symlinked source as a credential verdict: %s", resource, body)
-		}
+	}
+	// The mount's key is not the surface's credential: nothing here read the
+	// refused file, so it can neither prove nor disprove that key.
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusUnauthorized)
+	if !strings.Contains(body, `"`+CodeAdminUnauthorized+`"`) {
+		t.Fatalf("the refused mount's key was not refused: %s", body)
+	}
+}
+
+// TestMountLookupRunsOncePerRequestInsideItsBound is Low-3 at the route
+// boundary. Authentication and the sourceRoot marker ask the same question, so
+// a status poll asks it once; and because none of the filesystem calls behind it
+// can be cancelled, a mount that never answers must not hold the poll open past
+// the bound.
+func TestMountLookupRunsOncePerRequestInsideItsBound(t *testing.T) {
+	const managerKey = "manager-store-key-for-a-slow-mount"
+	database := managerCredentialStore(t, managerKey)
+	root := t.TempDir()
+	handler := Handler{
+		LegacyRoot: func() string { return root },
+		Database:   func() string { return database },
+		Timeout:    10 * time.Second,
+	}
+	real := inspectMount
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+		inspectMount = real
+	})
+
+	lookups := 0
+	inspectMount = func(string) mountResolution {
+		lookups++
+		return mountResolution{root: root, code: CodeSourceSymlinked}
+	}
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(managerKey), http.StatusOK)
+	if lookups != 1 {
+		t.Fatalf("status poll performed %d mount lookups, want 1", lookups)
+	}
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.SourceRoot != CodeSourceSymlinked {
+		t.Fatalf("source root marker = %q, want the resolved lookup's own code", status.SourceRoot)
+	}
+
+	// A mount whose filesystem never answers. The poll stops at the bound and
+	// names the mount as unreadable instead of waiting on it, and the credential
+	// still resolves — to the Manager store — so the projection is answered.
+	inspectMount = func(string) mountResolution {
+		<-release
+		return mountResolution{root: root}
+	}
+	handler.MountTimeout = 20 * time.Millisecond
+	started := time.Now()
+	_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(managerKey), http.StatusOK)
+	elapsed := time.Since(started)
+	if elapsed > time.Second {
+		t.Fatalf("status poll waited %s on a mount that never answered, bound %s", elapsed, handler.MountTimeout)
+	}
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.SourceRoot != CodeSourceUnreadable {
+		t.Fatalf("source root marker = %q, want %q", status.SourceRoot, CodeSourceUnreadable)
 	}
 }
 
@@ -294,6 +364,17 @@ func TestSymlinkedSourceIsRefusedOnBothRoutes(t *testing.T) {
 // credential and one recorded operation row: everything the surface reads when
 // it is not reading a 1.x mount.
 func managerCredentialStore(t *testing.T, key string) string {
+	t.Helper()
+	return managerStoreWithOperation(t, key, model.UpgradeOperation{
+		Stage:       model.UpgradeStageCopyIn,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		ManualItems: []string{},
+	})
+}
+
+// managerStoreWithOperation is managerCredentialStore for a caller that needs a
+// specific recorded stage.
+func managerStoreWithOperation(t *testing.T, key string, operation model.UpgradeOperation) string {
 	t.Helper()
 	database := filepath.Join(t.TempDir(), "usage.sqlite")
 	db, err := sqliterepo.Open(database)
@@ -309,11 +390,7 @@ func managerCredentialStore(t *testing.T, key string) string {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	if err := upgradeoperation.New(db).Put(context.Background(), model.UpgradeOperation{
-		Stage:       model.UpgradeStageCopyIn,
-		DomainsDone: []string{model.UpgradeDomainSourceCopy},
-		ManualItems: []string{},
-	}); err != nil {
+	if err := upgradeoperation.New(db).Put(context.Background(), operation); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -341,10 +418,9 @@ func TestRefusedMountFallsBackToTheManagerStore(t *testing.T) {
 	}
 	manager := managerCredentialStore(t, managerKey)
 	handler := Handler{
-		LegacyRoot:         func() string { return root },
-		CredentialDatabase: func() string { return upgradeservice.CredentialDatabase(root, manager) },
-		Database:           func() string { return manager },
-		Timeout:            10 * time.Second,
+		LegacyRoot: func() string { return root },
+		Database:   func() string { return manager },
+		Timeout:    10 * time.Second,
 	}
 
 	// The Manager store is the surface's credential, so both reads answer with
@@ -836,17 +912,16 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 // source as a typed marker instead of refusing to answer, and the preflight
 // keeps its typed 503.
 func TestStatusAnswersFromTheManagerStoreWithoutTheSourceMount(t *testing.T) {
-	credentialRoot := legacySourceDir(t)
-	database := filepath.Join(t.TempDir(), "usage.sqlite")
-	recordOperation(t, database, model.UpgradeOperation{
+	// No mount at all: the Manager store is the surface's only credential
+	// source and the only place the operation row can live.
+	database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{
 		Stage:       model.UpgradeStageReconcile,
 		DomainsDone: []string{model.UpgradeDomainSourceCopy},
 	})
 	handler := Handler{
-		LegacyRoot:         func() string { return "" },
-		CredentialDatabase: func() string { return filepath.Join(credentialRoot, "usage.sqlite") },
-		Database:           func() string { return database },
-		Timeout:            10 * time.Second,
+		LegacyRoot: func() string { return "" },
+		Database:   func() string { return database },
+		Timeout:    10 * time.Second,
 	}
 	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
 	var status statusDocument
@@ -859,7 +934,7 @@ func TestStatusAnswersFromTheManagerStoreWithoutTheSourceMount(t *testing.T) {
 	if status.SourceRoot != CodeLegacyRootMissing {
 		t.Fatalf("source root marker = %q, want %q", status.SourceRoot, CodeLegacyRootMissing)
 	}
-	for _, secret := range []string{credentialRoot, database, testAdminKey} {
+	for _, secret := range []string{database, testAdminKey} {
 		if strings.Contains(body, secret) {
 			t.Fatalf("status leaked %q: %s", secret, body)
 		}

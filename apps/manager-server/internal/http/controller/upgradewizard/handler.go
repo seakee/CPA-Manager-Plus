@@ -52,6 +52,16 @@ const (
 // runs on every request, the preflight only when the wizard asks for a report.
 const DefaultTimeout = 30 * time.Second
 
+// MountLookupTimeout bounds the per-request mount lookup. The lookup is a few
+// filesystem calls on the operator's mount and normally answers in
+// microseconds, but none of them can be cancelled: on a hung network mount they
+// never return, and every status poll would wait on them. It is set beside
+// upgradeservice.CredentialVerifyTimeout because it gates the same
+// authentication, and kept separate from it because the two failures differ: a
+// lookup that outlives this bound is a mount condition the projection names,
+// while a credential read that outlives its own bound is a retry.
+const MountLookupTimeout = 2 * time.Second
+
 // CodeAdminUnauthorized is the negative identity verdict. It is the only 401
 // this package writes.
 const CodeAdminUnauthorized = "admin_unauthorized"
@@ -122,11 +132,6 @@ const (
 	EvidenceNone         = "none"
 )
 
-// databaseFileName is the 1.x database inside a configured source root. The
-// preflight service owns the same name; this package only needs it to name the
-// credential file behind a root that is not wired to the surface resolution.
-const databaseFileName = "usage.sqlite"
-
 // domainSourceCopy is the one domain the copy-in marker proves: the marker is
 // published after the target was materialized, which is the same work the
 // recorded copy_in row names.
@@ -140,9 +145,12 @@ const domainSourceCopy = "source_copy"
 // upgradeservice.VerifyAdminSource, which reads one resolved source file
 // read-only — the credential row only, never a whole-file integrity check,
 // because this runs on every request including every status poll. The file is
-// the one CredentialDatabase resolved for the whole surface, so the key the
-// entry page accepted is the key these routes accept. No session, cookie or
-// Fresh claim is a substitute, and an absent decision cannot read as allow.
+// the one the surface's shared resolution names: the mount's database when the
+// shared file policy accepts it, otherwise the Manager store. That resolution
+// has exactly one implementation (upgradeservice.CredentialDatabaseFrom) and one
+// input — the mount this request inspected — so no caller-side alternative can
+// point authentication at a file the policy refused. No session, cookie or Fresh
+// claim is a substitute, and an absent decision cannot read as allow.
 //
 // Browser callers are same-origin only, exactly as on the entry leaf.
 type Handler struct {
@@ -150,20 +158,19 @@ type Handler struct {
 	// and it is what the preflight qualifies; it is not automatically the
 	// credential source.
 	LegacyRoot func() string
-	// CredentialDatabase returns the source database whose administrator
-	// credential every leaf of this surface verifies: the configured 1.x
-	// database when the mount holds one the shared database file policy accepts
-	// (the file itself, never a link), otherwise the Manager's own store.
-	// Nil falls back to the credential inside LegacyRoot.
-	CredentialDatabase func() string
 	// PublicOrigin is the trusted public origin (CPAMP_PUBLIC_ORIGIN). Empty
 	// means the request's own scheme and Host are the expected origin; an
 	// unusable value trusts no browser origin at all.
 	PublicOrigin string
-	// Database returns the Manager database path that holds the operation row.
+	// Database returns the Manager database path that holds the operation row,
+	// and it is the surface's credential source when the mount holds no
+	// database the shared file policy accepts.
 	Database func() string
 	// Timeout bounds one preflight. Zero uses DefaultTimeout.
 	Timeout time.Duration
+	// MountTimeout bounds the mount lookup, which every request runs before it
+	// authenticates. Zero uses MountLookupTimeout.
+	MountTimeout time.Duration
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -174,12 +181,16 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// One mount lookup serves the whole request: authentication and the
+	// sourceRoot marker ask the same question, and asking it twice doubled the
+	// filesystem work on every status poll.
+	mount := h.resolveMount(r.Context())
 	// The credential comes first on every surface order. An unauthenticated
 	// caller therefore learns nothing about which resources exist or which verb
 	// they take: an absent, wrong or unreadable credential is the only answer it
 	// ever gets, whether the path is real, unknown, or read with the wrong
 	// method.
-	if !h.authenticate(w, r) {
+	if !h.authenticate(w, r, mount) {
 		return
 	}
 	if r.URL.RawQuery != "" {
@@ -202,17 +213,18 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if preflight {
-		h.servePreflight(w, r)
+		h.servePreflight(w, r, mount)
 		return
 	}
-	h.serveStatus(w, r)
+	h.serveStatus(w, r, mount)
 }
 
 // authenticate proves the caller holds the source administrator credential. The
 // key is bounded and trimmed here; nothing else about the request (a session
 // header, a cookie) can stand in for it, and a browser asking from another
-// origin is refused before the credential is even read.
-func (h Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
+// origin is refused before the credential is even read. The mount was inspected
+// once for this request, so both routes and both questions share one answer.
+func (h Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mountResolution) bool {
 	key, ok := bearerKey(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
@@ -225,7 +237,14 @@ func (h Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 		writeError(w, http.StatusForbidden, upgradesurface.CodeOriginRejected)
 		return false
 	}
-	database, status, code := h.credentialDatabase()
+	if mount.expired {
+		// The caller's own deadline had already passed. The credential read
+		// reports that as a deadline, and it is the honest verdict here too: the
+		// mount was never assessed, so no mount condition may replace it.
+		writeError(w, http.StatusServiceUnavailable, CodeCredentialTimeout)
+		return false
+	}
+	database, status, code := h.credentialDatabase(mount)
 	if status != 0 {
 		writeError(w, status, code)
 		return false
@@ -257,24 +276,132 @@ func (h Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // credentialDatabase names the one file whose administrator credential both
-// routes verify: the surface's single resolution when it is wired, and otherwise
-// the credential inside the configured 1.x root. An absent file is the legacy
-// root verdict the operator must fix. The resolution itself — which already
-// applies the shared database file policy, so a mount holding only a linked or
-// otherwise refused usage.sqlite counts as no mount — lives in the service layer
-// so no leaf can answer this question differently.
-func (h Handler) credentialDatabase() (string, int, string) {
-	if h.CredentialDatabase != nil {
-		if database := strings.TrimSpace(h.CredentialDatabase()); database != "" {
-			return database, 0, ""
+// routes verify, and it derives it from the mount this request already
+// inspected. The fallback rule — the mount's database when the shared file
+// policy accepts it, otherwise the Manager store — has one implementation
+// (upgradeservice.CredentialDatabaseFrom) and one input (this request's mount),
+// so no leaf and no caller can point authentication at a file the policy
+// refused. When neither file exists the answer is the mount's own condition:
+// the operator's next move is to fix that mount, not to guess at a credential.
+func (h Handler) credentialDatabase(mount mountResolution) (string, int, string) {
+	if database := upgradeservice.CredentialDatabaseFrom(mount.database, h.managerDatabase()); database != "" {
+		return database, 0, ""
+	}
+	if mount.code != "" {
+		return "", http.StatusServiceUnavailable, mount.code
+	}
+	return "", http.StatusServiceUnavailable, CodeLegacyRootMissing
+}
+
+// managerDatabase is the Manager store the surface reads and falls back to. It
+// is the operation row's own database on both carriers.
+func (h Handler) managerDatabase() string {
+	if h.Database == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.Database())
+}
+
+// mountResolution is the one answer about the operator's mount that a request
+// needs. A zero-lookup request (no root configured) is a resolution with no
+// database and the legacy-root code.
+type mountResolution struct {
+	// root is the configured 1.x data directory, empty when none is configured.
+	root string
+	// database is the mount's database the shared file policy accepts. Empty
+	// when the mount holds no database this build may read.
+	database string
+	// code names why the mount is not usable: the configured directory itself
+	// (upgrade_legacy_root_missing / _unusable), the shared database file
+	// policy's refusal of the file inside it, or upgrade_source_unreadable when
+	// the lookup outlived its bound. It is the code the preflight uses for the
+	// same condition.
+	code string
+	// expired reports a request whose own deadline had already passed, so the
+	// lookup never ran.
+	expired bool
+}
+
+// state is the projection's sourceRoot marker: the only non-error value, or the
+// typed code naming why a later step that needs the source cannot run.
+func (m mountResolution) state() string {
+	if m.database != "" {
+		return SourceRootAvailable
+	}
+	if m.code != "" {
+		return m.code
+	}
+	// Unreachable through resolveMount: a resolution with no accepted database
+	// always names a condition. It is named rather than left empty so a marker
+	// is never blank.
+	return CodeSourceMissing
+}
+
+// rootInspects reports whether the resolution's code is about the configured
+// directory rather than the database inside it. The preflight has nothing to
+// inspect in that case; a file-level refusal is a report it produces itself.
+func (m mountResolution) rootInspects() bool {
+	return m.code == CodeLegacyRootMissing || m.code == CodeLegacyRootUnusable
+}
+
+// resolveMount answers the mount question once for the request, inside a bound
+// (Low-3). The filesystem calls behind it cannot be cancelled, so the lookup
+// runs on its own goroutine and the request stops waiting at the bound; the
+// goroutine finishes whenever the mount answers and holds no lock until then.
+func (h Handler) resolveMount(ctx context.Context) mountResolution {
+	root := ""
+	if h.LegacyRoot != nil {
+		root = strings.TrimSpace(h.LegacyRoot())
+	}
+	timeout := h.MountTimeout
+	if timeout <= 0 {
+		timeout = MountLookupTimeout
+	}
+	bounded, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	answers := make(chan mountResolution, 1)
+	lookup := inspectMount
+	go func() { answers <- lookup(root) }()
+	select {
+	case resolution := <-answers:
+		return resolution
+	case <-bounded.Done():
+		if ctx.Err() != nil {
+			return mountResolution{root: root, expired: true}
 		}
-		return "", http.StatusServiceUnavailable, CodeLegacyRootMissing
+		// The lookup outlived its bound: the mount could not be inspected, which
+		// is a condition on the mount, not on the credential.
+		return mountResolution{root: root, code: CodeSourceUnreadable}
 	}
-	root, status, code := h.legacyRoot()
-	if status != 0 {
-		return "", status, code
+}
+
+// inspectMount is the bounded body of resolveMount: the configured directory's
+// own condition, then the shared database file policy. It is a variable only so
+// a test can substitute a lookup that never answers and prove the bound; the
+// production value is the service layer's own lookup, never a second policy.
+var inspectMount = func(root string) mountResolution {
+	if root == "" {
+		return mountResolution{code: CodeLegacyRootMissing}
 	}
-	return filepath.Join(root, databaseFileName), 0, ""
+	info, err := os.Stat(root)
+	switch {
+	case os.IsNotExist(err):
+		return mountResolution{root: root, code: CodeLegacyRootMissing}
+	case err != nil:
+		return mountResolution{root: root, code: CodeLegacyRootUnusable}
+	case !info.IsDir():
+		return mountResolution{root: root, code: CodeLegacyRootUnusable}
+	}
+	database, refusal := upgradeservice.MountDatabase(root)
+	if database == "" {
+		if refusal == "" {
+			// The directory check above passed, so this is only reachable if the
+			// mount disappears between the two inspections.
+			refusal = CodeSourceMissing
+		}
+		return mountResolution{root: root, code: refusal}
+	}
+	return mountResolution{root: root, database: database}
 }
 
 // bearerKey extracts the single bounded Bearer value. Anything else — no header,
@@ -329,12 +456,15 @@ type preflightDocument struct {
 // Manager store when the mount holds no database the shared file policy accepts;
 // this step still inspects the mount, so a refused mount is named as that mount's
 // condition instead of being replaced by a file the operator did not ask about.
-func (h Handler) servePreflight(w http.ResponseWriter, r *http.Request) {
-	root, status, code := h.legacyRoot()
-	if status != 0 {
-		writeError(w, status, code)
+// The mount the request already inspected supplies the root; only the two
+// directory-level conditions short-circuit it, because those leave nothing to
+// inspect.
+func (h Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount mountResolution) {
+	if mount.rootInspects() {
+		writeError(w, http.StatusServiceUnavailable, mount.code)
 		return
 	}
+	root := mount.root
 	timeout := h.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
@@ -388,26 +518,6 @@ func (h Handler) servePreflight(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h Handler) legacyRoot() (string, int, string) {
-	root := ""
-	if h.LegacyRoot != nil {
-		root = strings.TrimSpace(h.LegacyRoot())
-	}
-	if root == "" {
-		return "", http.StatusServiceUnavailable, CodeLegacyRootMissing
-	}
-	info, err := os.Stat(root)
-	switch {
-	case os.IsNotExist(err):
-		return "", http.StatusServiceUnavailable, CodeLegacyRootMissing
-	case err != nil:
-		return "", http.StatusServiceUnavailable, CodeLegacyRootUnusable
-	case !info.IsDir():
-		return "", http.StatusServiceUnavailable, CodeLegacyRootUnusable
-	}
-	return root, 0, ""
-}
-
 // statusDocument is the operation row projection. Every field is either a
 // bounded count, an enumerated stage, or a string the operation itself
 // recorded; no fingerprint, digest or path has a field here on purpose.
@@ -421,11 +531,14 @@ type statusDocument struct {
 	StageKnown bool   `json:"stageKnown"`
 	NextAction string `json:"nextAction"`
 	// SourceRoot is SourceRootAvailable or the typed code naming why the 1.x
-	// source is not usable — the same code the preflight reports for that mount.
-	// The mount question applies the shared database file policy, so a mount
-	// whose database is a link is named here rather than counted as usable. The
-	// projection never requires the mount; the stage does not promise a step
-	// that needs it can run.
+	// source is not usable. The marker mirrors the shared database file policy —
+	// so a mount whose database is a link is named here rather than counted as
+	// usable — and it is exactly the code the credential resolution reached for
+	// this request. It is a mirror of the file policy, not of the preflight: a
+	// mount whose ownership marker is absent, busy or corrupt still reads
+	// available here and is refused by the preflight, which is the step that
+	// actually qualifies the source. The projection never requires the mount; the
+	// stage does not promise a step that needs it can run.
 	SourceRoot     string          `json:"sourceRoot"`
 	DomainsDone    []string        `json:"domainsDone"`
 	SourceKind     string          `json:"sourceKind,omitempty"`
@@ -437,11 +550,8 @@ type statusDocument struct {
 	UpdatedAtMS    int64           `json:"updatedAtMs"`
 }
 
-func (h Handler) serveStatus(w http.ResponseWriter, r *http.Request) {
-	database := ""
-	if h.Database != nil {
-		database = strings.TrimSpace(h.Database())
-	}
+func (h Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount mountResolution) {
+	database := h.managerDatabase()
 	if database == "" {
 		writeError(w, http.StatusServiceUnavailable, CodeOperationUnread)
 		return
@@ -455,35 +565,13 @@ func (h Handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// The stage is answered from the Manager store whether or not the operator
 	// mounted the source: an unfinished operation still has to be inspectable
-	// when its mount is gone. What the mount would enable is stated separately.
-	document.SourceRoot = h.sourceRootState()
+	// when its mount is gone. What the mount would enable is stated separately,
+	// from the one lookup this request already made: the shared database file
+	// policy, which is the same question the credential resolution asked. A
+	// stricter preflight verdict (a busy writer, an absent ownership marker, a
+	// corrupt database) is not a mount-level refusal and is not claimed here.
+	document.SourceRoot = mount.state()
 	writeJSON(w, http.StatusOK, document)
-}
-
-// sourceRootState names whether the configured 1.x source is usable right now.
-// It is a marker on a successful projection, not an error: the recorded stage is
-// readable without the source, and a step that needs the source is refused with
-// the same code here and on the preflight. The question is the shared mount
-// lookup — the same file policy the credential read applies — so a mount whose
-// usage.sqlite is a link is named as such instead of counting as a source the
-// surface could use, which is also why the surface falls back to the Manager
-// store for the credential.
-func (h Handler) sourceRootState() string {
-	root, status, code := h.legacyRoot()
-	if status != 0 {
-		return code
-	}
-	database, refusal := upgradeservice.MountDatabase(root)
-	switch {
-	case database != "":
-		return SourceRootAvailable
-	case refusal != "":
-		return refusal
-	default:
-		// legacyRoot already refused an unconfigured mount, so this is reached
-		// only if the mount disappears between the two inspections.
-		return CodeSourceMissing
-	}
 }
 
 type statusRow struct {

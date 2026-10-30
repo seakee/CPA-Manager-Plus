@@ -384,10 +384,20 @@ func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
 // link, with content — so a mount it refuses is exactly a mount that read would
 // refuse. A mount that fails the policy therefore holds no database as far as
 // the surface is concerned, and the second result names why with the code the
-// preflight reports for the same mount: source_missing for an absent or empty
-// file, source_symlinked for a link, and the ownership marker's code for every
-// other refusal the preflight meets at the same step. Both results are empty
-// when no mount is configured at all.
+// preflight reports for the file: source_missing for an absent or empty file and
+// source_symlinked for a link. Both results are empty when no mount is
+// configured at all.
+//
+// This is the file policy only. It is deliberately weaker than the preflight: an
+// absent ownership marker, a live writer or a database that fails its integrity
+// check still pass here, because a reader must not exclude the writer it only
+// observes and must not scan the whole file on every status poll. Those
+// conditions are the preflight's verdict, not this lookup's.
+//
+// The lookup is a few filesystem calls with no internal deadline: a path on a
+// hung network mount answers whenever the filesystem does. A caller that must
+// stay responsive — every request of the wizard, including every status poll —
+// runs it under its own bound; see upgradewizard.Handler.MountTimeout.
 //
 // A mount-level refusal must never be reported as a credential verdict. Counting
 // a symlinked usage.sqlite as "the mount holds a database" would make the
@@ -419,20 +429,35 @@ func MountDatabase(legacyRoot string) (string, string) {
 	return database, ""
 }
 
+// CredentialDatabaseFrom applies the surface's one credential rule to a mount
+// that has already been inspected: the mount's database when it holds one the
+// file policy accepts, otherwise the Manager's own store. The wizard routes
+// inspect the mount once per request and cannot afford to ask the filesystem
+// again, so the rule is stated here once instead of being restated at each
+// caller; CredentialDatabase below is the same rule with the lookup included.
+func CredentialDatabaseFrom(mountDatabase, managerDatabase string) string {
+	if database := strings.TrimSpace(mountDatabase); database != "" {
+		return database
+	}
+	return strings.TrimSpace(managerDatabase)
+}
+
 // CredentialDatabase resolves the one administrator credential of the whole
 // Upgrade surface. A configured 1.x data directory that actually holds its
 // database — the shared file policy accepts it — is the source; otherwise the
 // Manager's own store is, because a v2 root a copy-in produced carries the same
 // administrator credential and is the only file left when the operator did not
 // mount the source, and because a mount the policy refuses is a mount no read
-// can use. The entry leaf and both wizard reads resolve the credential here and
-// nowhere else, so a key accepted at the entry page is accepted by the reads and
-// a key kept in the other file is refused by all of them.
+// can use. The entry leaf and both wizard reads resolve the credential this way
+// and nowhere else, so a key accepted at the entry page is accepted by the reads
+// and a key kept in the other file is refused by all of them — except across a
+// mount change, which is why the entry leaf resolves at startup and the reads
+// resolve per request: a mount that appears, disappears or is repointed after
+// startup is seen only by the reads, and the entry page keeps the resolution it
+// admitted the operator with until it is rebuilt.
 func CredentialDatabase(legacyRoot, managerDatabase string) string {
-	if database, _ := MountDatabase(legacyRoot); database != "" {
-		return database
-	}
-	return strings.TrimSpace(managerDatabase)
+	database, _ := MountDatabase(legacyRoot)
+	return CredentialDatabaseFrom(database, managerDatabase)
 }
 
 // verifyAdminCredential reads the one credential row from an opened source,

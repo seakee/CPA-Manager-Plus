@@ -262,13 +262,30 @@ file itself, never a symbolic or hard link, with content — so a mount whose
 `usage.sqlite` is a link holds no database as far as the surface is concerned:
 the credential falls back to the Manager store instead of pointing the read at a
 file it would refuse, and the surface stays reachable instead of answering 503 on
-every leaf. The resolution is implemented once (`upgrade.MountDatabase` for the
-mount question, `upgrade.CredentialDatabase` for the resolved file) and both
-leaves verify the resolved file with the same credential read
-(`upgrade.VerifyAdminSource`), which compares one persisted credential row and
-never the whole source. A key accepted at the entry page is therefore accepted by
-the reads, and a key kept in the other file is refused by all of them; two files
-with different keys cannot split the surface.
+every leaf. The rule is implemented once (`upgrade.CredentialDatabaseFrom`:
+mount database, else Manager store, with `upgrade.MountDatabase` as its only
+mount question) and both leaves verify the resolved file with the same credential
+read (`upgrade.VerifyAdminSource`), which compares one persisted credential row
+and never the whole source. The reads take no credential argument of their own:
+they apply that rule to the one mount they inspected for the request, so no
+caller-supplied path can point authentication at a file the policy refused.
+
+The resolution is asked at two different times, and that bounds the "one key
+accepted everywhere" claim. The entry leaf resolves once, when it is
+constructed; the wizard's two reads resolve per request. While the mount is
+unchanged, a key the entry page accepted is the key the reads accept and a key
+kept in the other file is refused by all of them, so two files with different
+keys cannot split the surface. A mount that appears, disappears or is repointed
+after the entry leaf was built is seen by the reads first: they fall back to the
+Manager store immediately, and the entry leaf keeps its startup resolution until
+it is rebuilt.
+
+The wizard reads inspect the mount at most once per request — authentication and
+the status marker share that one answer — and the lookup runs under a bound
+(`MountLookupTimeout`, 2s). The filesystem calls behind it cannot be cancelled,
+so the lookup runs on its own goroutine and the request stops waiting at the
+bound: a mount that never answers reports `upgrade_source_unreadable` instead of
+holding every status poll open.
 
 The entry leaf additionally runs the bounded public observation to project
 `unsupported_upgrade`. That observation deliberately refuses a WAL source as
@@ -278,17 +295,28 @@ only when the credential itself rejects it: a source that cannot be observed is
 never reported as a wrong key, and never as an accepted one either.
 
 `status` is answered from the Manager store and does not require the source
-mount. It reports the recorded stage plus a typed `sourceRoot` marker
-(`available`, or the preflight's own code for the mount:
-`upgrade_legacy_root_missing` / `upgrade_source_missing` /
-`upgrade_source_symlinked` / `upgrade_source_lock_unavailable` /
-`upgrade_source_unreadable`) so the stage is never mistaken for proof that a step
-needing the source can run. The marker asks the same mount question the
-credential resolution asks, so a mount whose database is a link is named as
-`upgrade_source_symlinked` — the operator sees why the mount is not being used
-even though the surface kept answering. `preflight` still answers
-`upgrade_legacy_root_missing` without the mount, and it inspects the mount the
-operator supplied rather than the credential file the surface fell back to.
+mount. It reports the recorded stage plus a typed `sourceRoot` marker:
+`available`, or the code the mount lookup reached —
+`upgrade_legacy_root_missing` / `upgrade_legacy_root_unusable` for the
+configured directory, `upgrade_source_missing` / `upgrade_source_symlinked` /
+`upgrade_source_lock_unavailable` from the shared database file policy, and
+`upgrade_source_unreadable` when the lookup outlived its bound. Those are the
+only values, and the list is exactly the reachable ones. The marker answers the
+file policy, which is the same question the credential resolution asks — that is
+why a mount whose database is a link is named `upgrade_source_symlinked` while
+the surface keeps answering. It is not the preflight's verdict and does not
+mirror it: a mount whose ownership marker is absent, whose writer is busy or
+whose database fails its integrity check still reads `available` here and is
+refused by the preflight, which is the step that qualifies the source. The
+`preflight` route answers `upgrade_legacy_root_missing` / `_unusable` without the
+mount, and otherwise inspects the mount the operator supplied rather than the
+credential file the surface fell back to.
+
+The marker is visible only to a caller who holds the resolved credential. When
+the mount is refused, the credential is the Manager store, so the mount's own
+administrator key gets 401 and cannot read the marker that explains the refusal;
+the operator has to reach the surface with the credential the surface actually
+verifies before it can be told why the mount is not being used.
 
 Before the operation row commits, the copy-in publishes its provenance marker.
 A marker that names this database with no row is an in-progress operation:
