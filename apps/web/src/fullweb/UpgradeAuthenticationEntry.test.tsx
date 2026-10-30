@@ -32,6 +32,7 @@ describe('upgrade authentication lifecycle', () => {
     mocks.candidate.mockReset().mockReturnValue('');
     mocks.verify.mockReset().mockResolvedValue('a'.repeat(64));
     mocks.remember.mockReset();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')));
     vi.stubGlobal('window', {
       location: new URL('https://manager.test'),
       setTimeout,
@@ -81,6 +82,12 @@ describe('upgrade authentication lifecycle', () => {
       1
     );
     expect(JSON.stringify(renderer.toJSON())).toContain('Migration is not available');
+    // The wizard is mounted only behind a verified session, and it is a reader:
+    // it asked the preflight route and nothing else.
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
+    expect(vi.mocked(fetch).mock.calls[0][0]).toBe(
+      'https://manager.test/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/preflight'
+    );
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
     });
@@ -122,7 +129,9 @@ describe('upgrade authentication lifecycle', () => {
         0
       );
       expect(renderer.root.findByType('h1')).toBe(heading);
-      expect(renderer.root.findByProps({ className: 'btn btn-primary' }).props.disabled).toBe(true);
+      expect(renderer.root.findByProps({ 'data-testid': 'upgrade-verify' }).props.disabled).toBe(
+        true
+      );
       expect(JSON.stringify(renderer.toJSON())).not.toContain('Administrator identity verified');
       await act(async () => {
         finish('a'.repeat(64));

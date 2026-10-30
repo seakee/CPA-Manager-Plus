@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FullWebLoginPage, FullWebUpgradeHeader } from './FullWebLoginPage';
 import { FullWebIcon } from './FullWebIcon';
+import { createUpgradeWizardRead, FreshUpgradeFlow } from './FreshUpgradeFlow';
 import { upgradeEntryText as text } from '../i18n/upgradeEntry';
 import './upgradeEntry.css';
 import {
@@ -93,6 +94,11 @@ export function UpgradeAuthenticationEntry() {
     [authenticate, checking, error, language, restore]
   );
 
+  // The wizard reads the two upgrade routes with the credential this entry
+  // already verified. The reader takes a getter, so the key stays in the ref
+  // and is never a prop, a state value or a rendered attribute.
+  const wizardRead = useMemo(() => createUpgradeWizardRead(() => credential.current), []);
+
   const inJourney = Boolean(revision);
   useEffect(() => {
     // Entering the journey moves focus once. Background checks and appearance
@@ -171,6 +177,7 @@ export function UpgradeAuthenticationEntry() {
             </button>
             <button
               className="btn btn-primary"
+              data-testid="upgrade-verify"
               disabled={checking}
               onClick={() => void authenticate(credential.current, false, revision)}
             >
@@ -178,6 +185,9 @@ export function UpgradeAuthenticationEntry() {
             </button>
           </div>
         </section>
+        {/* The wizard is mounted only once the server has verified a session,
+            and it reads nothing but the two upgrade routes. */}
+        <FreshUpgradeFlow read={wizardRead} language={language} />
       </main>
       <footer className="journey-copyright">{text('footer', language)}</footer>
     </div>

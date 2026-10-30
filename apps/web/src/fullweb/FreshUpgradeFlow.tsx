@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { fullWebLanguage } from '../i18n/fullweb';
 import {
   blockedCodeText,
@@ -654,15 +654,17 @@ export function FreshUpgradeFlow({
               </div>
             </div>
           )}
-          <div className="upgrade-actions">
-            <button
-              className="btn btn-primary"
-              data-testid="upgrade-progress-retry"
-              onClick={reread}
-            >
-              <FullWebIcon name="refresh" size={18} /> {t('progressRetry', language)}
-            </button>
-          </div>
+          {status.phase === 'stalled' && (
+            <div className="upgrade-actions">
+              <button
+                className="btn btn-primary"
+                data-testid="upgrade-progress-retry"
+                onClick={reread}
+              >
+                <FullWebIcon name="refresh" size={18} /> {t('progressRetry', language)}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
