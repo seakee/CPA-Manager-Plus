@@ -106,7 +106,10 @@ const credentialFiles = Object.fromEntries(
 // A file the destination cannot parse. It is listed by the source like any other
 // credential, so it is copied by the plan and recorded as manual exactly as an
 // operator's own broken file would be.
-const unparseableFile = { 'legacy-token.txt': 'not a CPA credential document\n' };
+// The source lists JSON credentials, so the broken file carries that extension: it
+// is discovered and downloaded like any other, and only the destination's parse
+// refuses it.
+const unparseableFile = { 'legacy-token.json': 'not a CPA credential document\n' };
 secretValues.push(managementKey, emptySourceKey, ...seedKeys, ...Object.values(providerKeys));
 for (const [name, body] of Object.entries({ ...credentialFiles, ...unparseableFile })) {
   writeFileSync(resolve(sourceAuthDir, name), body, { mode: 0o600 });
@@ -566,7 +569,7 @@ try {
   const before = sourceSnapshot();
   report.sourceSnapshot = { configSha256: before.configSha256, credentials: before.credentials };
   assert(before.credentials.includes('source-00.json'), 'the source credential list');
-  assert(before.credentials.includes('legacy-token.txt'), 'the unparseable file is not in the auth dir');
+  assert(before.credentials.includes('legacy-token.json'), 'the unparseable file is not in the auth dir');
 
   // The Manager's own boot is the operator's: a read-only listener until the Host
   // admits the store, then the claimable service.
@@ -855,7 +858,7 @@ try {
       assert(adopted.names.includes(name), 'missing credential ' + name);
       assert.equal(adopted.digests[name], before.digests[name], 'credential bytes differ: ' + name);
     }
-    assert.equal(adopted.names.includes('legacy-token.txt'), false, 'an unparseable file was uploaded');
+    assert.equal(adopted.names.includes('legacy-token.json'), false, 'an unparseable file was uploaded');
     return { names: adopted.names };
   });
   await check('a client key is admitted by the Gateway through Ingress', async () => {
