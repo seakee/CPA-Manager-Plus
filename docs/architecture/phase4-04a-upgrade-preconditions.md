@@ -191,6 +191,62 @@ hard `false`; the new surface grants no migration authority.
   the report and exits 0 (ready), 1 (blocked) or 2 (usage/environment).
   `cpa-manager-plus upgrade status [--json] [--db-path PATH]` reads the
   operation row read-only, so both work on non-writable volumes.
-- **Deferred:** v1.14.10 re-pin and its qualification evidence (U1-1b), the
-  copy-in entry, reconciliation execution and CPA import (U1-2), and route
-  cutover/rollback (U1-3).
+- **Deferred:** v1.14.10 re-pin and its qualification evidence (U1-1b),
+  reconciliation execution and CPA import (U1-3) and route cutover/rollback
+  (U1-3).
+
+## U1-2: copy-in and the two-stage admission gate
+
+`internal/service/upgrade.CopyIn` is the only Upgrade step that writes, and it
+writes only inside the v2 data root. `UpgradeAuthorized` and `TrustedHopReceipt`
+stay hard `false`; the recorded operation grants startup surface, never
+migration authority.
+
+- **Pipeline, fixed order:** fingerprint the 1.x source (`source_fingerprint_before`)
+  → `maintenancebundle.Create` into the backup destination → `Verify` → validate
+  the manifest digest → `RestoreNew` into `.upgrade-copy-in/restored` inside the
+  v2 data root → `os.Rename` each restored member into the v2 layout
+  (`database`→`usage.sqlite`, its WAL/SHM/journal, `data-key`→`data.key`,
+  `usage-archives`→`usage-archives/`) → open the copied store, run the
+  incremental v2 migration and commit `copy_in` → remove the staging tree only
+  after that commit. Everything is on one filesystem, so no member is ever
+  copied.
+- **Source immutability.** The 1.x volume is opened read-only under the held
+  `processlock` fence; nothing is created, renamed or unlinked beside it. The
+  fingerprint is recomputed after the copy and a difference aborts before
+  anything is recorded.
+- **Resumability.** A verified bundle is reused instead of recreated. A target
+  whose members already match the manifest is not restored again. A committed
+  `copy_in` (or later stage) returns the stored result without touching the
+  store, and the staging tree is the only resume artifact until the record
+  commits. A target that holds *different* bytes under a member name is never
+  replaced.
+- **Recorded fields** in `upgrade_operations`: `stage=copy_in`,
+  `domains_done+=[source_copy]`, `source_kind=upgraded-legacy`,
+  `source_version` (release floor read from the backup copy),
+  `source_fingerprint_before`, `source_fingerprint_after` and
+  `backup_manifest_sha256` (digest of the published `manifest.json`). The stage
+  only moves forward; a retry after a later stage keeps that later stage.
+- **CLI.** `cpa-manager-plus upgrade run --legacy <dir> [--target <dir>]
+  [--bundle <dir>] [--json]` runs the preflight gate first (a blocked source
+  writes nothing), then the copy-in, and prints the same `Result` that the
+  record holds. `upgrade preflight` and `upgrade status` remain read-only.
+
+### Admission surface table
+
+`legacypreflight.AdmitStartup` reads the injectable
+`UpgradeAdmission` (`DatabaseUpgradeAdmission` in production) before it
+classifies a source. A reader error fails closed; a `nil` reader keeps the
+historical rule. `Surface()` then selects what the process serves:
+
+| Recorded stage | Admission | Startup surface |
+| --- | --- | --- |
+| no table, no row (or `nil` reader) | `none` | unchanged: only `fresh` and `native-v2` are admitted; a 1.x source stays blocked |
+| `preflight`, `copy_in`, `reconcile`, `cpa_import`, `external_connect`, `verify`, `failed` | `in_progress` | Upgrade surface only: fixed Bootstrap discovery status reads, the read-only shell and the Upgrade authentication leaf. Console, Key workspace, gateway configuration, lifecycle and model traffic answer 404; health stays 503 and no writable subsystem starts |
+| `complete` | `complete` | normal v2 surfaces, as for a native store |
+| reader error or unsupported stage | — | not admitted (fail closed) |
+
+The classification still decides the source label: while a record exists the
+source is reported as `upgraded-legacy`, because the copy-in already ran the
+incremental migration and the schema alone can no longer describe it.
+
