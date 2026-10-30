@@ -9,13 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
 const Path = "/.well-known/cpamp-bootstrap/upgrade/authenticate"
@@ -32,16 +33,15 @@ type Handler struct {
 }
 
 func New(paths sqlite.InspectionPaths, publicOrigin string) (*Handler, error) {
-	publicOrigin = strings.TrimRight(strings.TrimSpace(publicOrigin), "/")
-	if publicOrigin != "" {
-		origin, err := url.Parse(publicOrigin)
-		if err != nil || (origin.Scheme != "http" && origin.Scheme != "https") || origin.Host == "" || origin.User != nil || origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" {
-			return nil, errors.New("invalid Upgrade public origin")
-		}
+	normalized, err := upgradesurface.NormalizeOrigin(publicOrigin)
+	if err != nil {
+		return nil, err
 	}
-	h := &Handler{paths: paths, publicOrigin: publicOrigin}
-	_, err := rand.Read(h.instance[:])
-	return h, err
+	h := &Handler{paths: paths, publicOrigin: normalized}
+	if _, err := rand.Read(h.instance[:]); err != nil {
+		return nil, err
+	}
+	return h, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -68,27 +68,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Browser clients are same-origin only. Do not trust forwarded hosts or
 	// cookies; CLI callers without Origin still need the original Manager key.
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	expectedOrigin := h.publicOrigin
-	if expectedOrigin == "" {
-		expectedOrigin = scheme + "://" + r.Host
-	}
-	if origin := r.Header.Get("Origin"); origin != "" && origin != expectedOrigin {
-		write(w, http.StatusForbidden, "origin_rejected")
-		return
-	}
-	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
-		write(w, http.StatusForbidden, "origin_rejected")
+	// The wizard reads apply the same rule, through the same helper.
+	if upgradesurface.CrossSite(r, h.publicOrigin) {
+		write(w, http.StatusForbidden, upgradesurface.CodeOriginRejected)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), legacypreflight.DiscoveryInspectionTimeout)
 	defer cancel()
 	legacypreflight.WithAuthenticatedInspection(ctx, h.paths, key, func(report legacypreflight.Report, err error) {
 		if errors.Is(err, sqlite.ErrLegacyAdminUnauthorized) {
-			write(w, http.StatusUnauthorized, "admin_unauthorized")
+			// The public observation can refuse a source before it ever reads the
+			// credential (a WAL source, a changed inventory, an ownership marker it
+			// cannot prove). That is a source condition, not a verdict on the key,
+			// so ask the surface's one credential read — the same function the
+			// wizard reads use, on the same file — before answering 401. A proved
+			// key on a source that cannot be publicly observed still answers 503:
+			// only the observation is unavailable, and it never becomes a 401.
+			if verifyErr := upgradeservice.VerifyAdminSource(ctx, h.paths.Database, key); errors.Is(verifyErr, upgradeservice.ErrAdminUnauthorized) {
+				write(w, http.StatusUnauthorized, "admin_unauthorized")
+			} else {
+				write(w, http.StatusServiceUnavailable, "source_unavailable")
+			}
 			return
 		}
 		if err != nil {

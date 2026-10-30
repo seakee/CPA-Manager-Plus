@@ -2,7 +2,10 @@
 // wizard: the preflight report and the persisted operation projection.
 //
 // Nothing here advances the operation, opens a writable store, migrates, or
-// reads a credential. The status projection selects named columns, so a value
+// writes anything. Authentication proves the caller's key by reading one
+// credential row from the surface's single resolved source; the status
+// projection then reads the Manager store, and the preflight inspects the 1.x
+// source. Both selects are bounded: the projection names its columns, so a value
 // this package never selected (a source fingerprint, a backup digest, a data
 // key, a filesystem path) cannot reach the browser even if the row carries it.
 package upgradewizard
@@ -12,6 +15,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,7 +29,9 @@ import (
 	// The projection opens the Manager store read-only through database/sql.
 	_ "modernc.org/sqlite"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // Contract is the wire contract of both routes.
@@ -100,18 +106,59 @@ const (
 	ActionRolledBack = "rolled_back"
 )
 
+// SourceRoot states whether the 1.x source the later steps need is still
+// mounted. A recorded operation is readable without it — the row and the copy-in
+// marker live in the Manager store — but its stage is not proof that a step that
+// needs the source can run. "available" is the only non-error value; everything
+// else is one of the typed codes above.
+const SourceRootAvailable = "available"
+
+// Evidence names the durable record the projection was read from. A copy-in
+// marker is a record of an unfinished operation whose row has not committed yet,
+// so it is evidence of progress, not of a remembered default.
+const (
+	EvidenceOperationRow = "operation_row"
+	EvidenceCopyInMarker = "copy_in_marker"
+	EvidenceNone         = "none"
+)
+
+// databaseFileName is the 1.x database inside a configured source root. The
+// preflight service owns the same name; this package only needs it to name the
+// credential file behind a root that is not wired to the surface resolution.
+const databaseFileName = "usage.sqlite"
+
+// domainSourceCopy is the one domain the copy-in marker proves: the marker is
+// published after the target was materialized, which is the same work the
+// recorded copy_in row names.
+const domainSourceCopy = "source_copy"
+
 // Handler serves both routes. It has no write path at all.
 //
 // Authentication is the Upgrade surface's own credential: the source
 // administrator key the bootstrap Upgrade entry already verified, presented as
 // `Authorization: Bearer <key>`. Each request proves it through
-// upgradeservice.VerifyAdmin, which reads the configured 1.x source read-only —
-// the credential row only, never a whole-file integrity check, because this runs
-// on every request including every status poll. No session, cookie or Fresh
-// claim is a substitute, and an absent decision cannot read as allow.
+// upgradeservice.VerifyAdminSource, which reads one resolved source file
+// read-only — the credential row only, never a whole-file integrity check,
+// because this runs on every request including every status poll. The file is
+// the one CredentialDatabase resolved for the whole surface, so the key the
+// entry page accepted is the key these routes accept. No session, cookie or
+// Fresh claim is a substitute, and an absent decision cannot read as allow.
+//
+// Browser callers are same-origin only, exactly as on the entry leaf.
 type Handler struct {
-	// LegacyRoot returns the configured 1.x data directory. It is read only.
+	// LegacyRoot returns the configured 1.x data directory. It is read only,
+	// and it is what the preflight qualifies; it is not automatically the
+	// credential source.
 	LegacyRoot func() string
+	// CredentialDatabase returns the source database whose administrator
+	// credential every leaf of this surface verifies: the configured 1.x
+	// database when the mount holds one, otherwise the Manager's own store.
+	// Nil falls back to the credential inside LegacyRoot.
+	CredentialDatabase func() string
+	// PublicOrigin is the trusted public origin (CPAMP_PUBLIC_ORIGIN). Empty
+	// means the request's own scheme and Host are the expected origin; an
+	// unusable value trusts no browser origin at all.
+	PublicOrigin string
 	// Database returns the Manager database path that holds the operation row.
 	Database func() string
 	// Timeout bounds one preflight. Zero uses DefaultTimeout.
@@ -162,21 +209,29 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // authenticate proves the caller holds the source administrator credential. The
 // key is bounded and trimmed here; nothing else about the request (a session
-// header, a cookie, an origin) can stand in for it.
+// header, a cookie) can stand in for it, and a browser asking from another
+// origin is refused before the credential is even read.
 func (h Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 	key, ok := bearerKey(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
 		return false
 	}
-	root, status, code := h.legacyRoot()
+	// One origin rule for the whole surface: the entry leaf applies it with this
+	// same helper, so the page that authenticates and the reads behind it cannot
+	// accept different browser origins.
+	if upgradesurface.CrossSite(r, h.PublicOrigin) {
+		writeError(w, http.StatusForbidden, upgradesurface.CodeOriginRejected)
+		return false
+	}
+	database, status, code := h.credentialDatabase()
 	if status != 0 {
 		writeError(w, status, code)
 		return false
 	}
-	// VerifyAdmin bounds its own read: this runs on every request, including
-	// every status poll, and reads the credential row only.
-	switch err := upgradeservice.VerifyAdmin(r.Context(), root, key); {
+	// VerifyAdminSource bounds its own read: this runs on every request,
+	// including every status poll, and reads the credential row only.
+	switch err := upgradeservice.VerifyAdminSource(r.Context(), database, key); {
 	case err == nil:
 		return true
 	case errors.Is(err, upgradeservice.ErrAdminUnauthorized):
@@ -198,6 +253,24 @@ func (h Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 		writeError(w, http.StatusServiceUnavailable, CodeSourceUnreadable)
 	}
 	return false
+}
+
+// credentialDatabase names the one file whose administrator credential both
+// routes verify: the surface's single resolution when it is wired, and otherwise
+// the credential inside the configured 1.x root. An absent file is the legacy
+// root verdict the operator must fix.
+func (h Handler) credentialDatabase() (string, int, string) {
+	if h.CredentialDatabase != nil {
+		if database := strings.TrimSpace(h.CredentialDatabase()); database != "" {
+			return database, 0, ""
+		}
+		return "", http.StatusServiceUnavailable, CodeLegacyRootMissing
+	}
+	root, status, code := h.legacyRoot()
+	if status != 0 {
+		return "", status, code
+	}
+	return filepath.Join(root, databaseFileName), 0, ""
 }
 
 // bearerKey extracts the single bounded Bearer value. Anything else — no header,
@@ -330,19 +403,26 @@ func (h Handler) legacyRoot() (string, int, string) {
 // bounded count, an enumerated stage, or a string the operation itself
 // recorded; no fingerprint, digest or path has a field here on purpose.
 type statusDocument struct {
-	ContractVersion string          `json:"contractVersion"`
-	Recorded        bool            `json:"recorded"`
-	Stage           string          `json:"stage"`
-	StageKnown      bool            `json:"stageKnown"`
-	NextAction      string          `json:"nextAction"`
-	DomainsDone     []string        `json:"domainsDone"`
-	SourceKind      string          `json:"sourceKind,omitempty"`
-	SourceVersion   string          `json:"sourceVersion,omitempty"`
-	Reconciliation  json.RawMessage `json:"reconciliation"`
-	ManualItems     []string        `json:"manualItems"`
-	ErrorCode       string          `json:"errorCode,omitempty"`
-	ErrorDetail     string          `json:"errorDetail,omitempty"`
-	UpdatedAtMS     int64           `json:"updatedAtMs"`
+	ContractVersion string `json:"contractVersion"`
+	// Recorded reports a durable record of this operation: the row, or, before
+	// the row commits, the copy-in marker that supersedes it.
+	Recorded   bool   `json:"recorded"`
+	Evidence   string `json:"evidence"`
+	Stage      string `json:"stage"`
+	StageKnown bool   `json:"stageKnown"`
+	NextAction string `json:"nextAction"`
+	// SourceRoot is SourceRootAvailable or the typed code naming why the 1.x
+	// source is not usable. The projection never requires the mount; the stage
+	// does not promise a step that needs it can run.
+	SourceRoot     string          `json:"sourceRoot"`
+	DomainsDone    []string        `json:"domainsDone"`
+	SourceKind     string          `json:"sourceKind,omitempty"`
+	SourceVersion  string          `json:"sourceVersion,omitempty"`
+	Reconciliation json.RawMessage `json:"reconciliation"`
+	ManualItems    []string        `json:"manualItems"`
+	ErrorCode      string          `json:"errorCode,omitempty"`
+	ErrorDetail    string          `json:"errorDetail,omitempty"`
+	UpdatedAtMS    int64           `json:"updatedAtMs"`
 }
 
 func (h Handler) serveStatus(w http.ResponseWriter, r *http.Request) {
@@ -361,7 +441,34 @@ func (h Handler) serveStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, CodeOperationUnread)
 		return
 	}
+	// The stage is answered from the Manager store whether or not the operator
+	// mounted the source: an unfinished operation still has to be inspectable
+	// when its mount is gone. What the mount would enable is stated separately.
+	document.SourceRoot = h.sourceRootState()
 	writeJSON(w, http.StatusOK, document)
+}
+
+// sourceRootState names whether the configured 1.x source is usable right now.
+// It is a marker on a successful projection, not an error: the recorded stage is
+// readable without the source, and a step that needs the source is refused with
+// the same code here and on the preflight.
+func (h Handler) sourceRootState() string {
+	root, status, code := h.legacyRoot()
+	if status != 0 {
+		return code
+	}
+	info, err := os.Stat(filepath.Join(root, databaseFileName))
+	switch {
+	case err == nil && info.Mode().IsRegular():
+		return SourceRootAvailable
+	case err != nil && !os.IsNotExist(err):
+		return CodeSourceUnreadable
+	case err != nil:
+		// The root is mounted but holds no database: a source that is not there.
+		return CodeSourceMissing
+	default:
+		return CodeLegacyRootUnusable
+	}
 }
 
 type statusRow struct {
@@ -378,10 +485,13 @@ type statusRow struct {
 
 // readStatus reads the single operation row without the model validator: a
 // stage this build does not know (a newer build's rolled_back, or a failed
-// attempt) is still an honest observation and must reach the operator.
+// attempt) is still an honest observation and must reach the operator. A store
+// with no row is not the same as no operation: the copy-in publishes its
+// provenance before the row commits, and that window must not read "preflight".
 func readStatus(ctx context.Context, databasePath string) (statusDocument, error) {
 	document := statusDocument{
 		ContractVersion: Contract,
+		Evidence:        EvidenceNone,
 		StageKnown:      true,
 		NextAction:      ActionPreflight,
 		DomainsDone:     []string{},
@@ -390,10 +500,10 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 	}
 	info, err := os.Stat(databasePath)
 	if os.IsNotExist(err) {
-		return document, nil
+		return withCopyInMarker(databasePath, document)
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-		return document, nil
+		return withCopyInMarker(databasePath, document)
 	}
 	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath))
 	if err != nil {
@@ -407,7 +517,7 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 		return statusDocument{}, err
 	}
 	if present == 0 {
-		return document, nil
+		return withCopyInMarker(databasePath, document)
 	}
 	var row statusRow
 	err = db.QueryRowContext(ctx, `select stage, domains_done, source_kind, source_version,
@@ -415,12 +525,13 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 		from upgrade_operations where id = 1`).Scan(&row.Stage, &row.Domains, &row.SourceKind, &row.SourceVersion,
 		&row.Reconciled, &row.ManualItems, &row.ErrorCode, &row.ErrorDetail, &row.UpdatedAtMS)
 	if errors.Is(err, sql.ErrNoRows) {
-		return document, nil
+		return withCopyInMarker(databasePath, document)
 	}
 	if err != nil {
 		return statusDocument{}, err
 	}
 	document.Recorded = true
+	document.Evidence = EvidenceOperationRow
 	document.Stage = row.Stage
 	document.StageKnown = knownStage(row.Stage)
 	document.NextAction = nextAction(row.Stage)
@@ -435,6 +546,35 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 	document.ErrorDetail = scrubError(row.ErrorDetail.String)
 	document.UpdatedAtMS = row.UpdatedAtMS
 	document.Reconciliation = reconciliationSummary(row.Reconciled)
+	return document, nil
+}
+
+// withCopyInMarker answers the window the row cannot. The copy-in publishes its
+// provenance before the migration commits and removes it only after the row
+// commits, so a marker that names this database with no row means the operation
+// is in progress at copy_in — the same reading the startup admission makes. The
+// stage is reported with the marker as its evidence, and the next action is the
+// copy-in the operator has to resume; "preflight" would claim nothing had
+// started while admission refuses every normal surface.
+func withCopyInMarker(databasePath string, document statusDocument) (statusDocument, error) {
+	marker, found, err := copyinmarker.Read(filepath.Dir(databasePath))
+	if err != nil {
+		return statusDocument{}, fmt.Errorf("read the copy-in provenance marker: %w", err)
+	}
+	if !found || !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
+		return document, nil
+	}
+	document.Recorded = true
+	document.Evidence = EvidenceCopyInMarker
+	document.Stage = StageCopyIn
+	document.StageKnown = true
+	document.NextAction = nextAction(StageCopyIn)
+	// The marker is written after the target was materialized, which is exactly
+	// the domain the recorded copy_in row names.
+	document.DomainsDone = []string{domainSourceCopy}
+	document.SourceKind = marker.SourceKind
+	document.SourceVersion = marker.SourceVersion
+	document.UpdatedAtMS = marker.WrittenAtMS
 	return document, nil
 }
 

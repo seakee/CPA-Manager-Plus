@@ -333,17 +333,52 @@ func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 	if err != nil {
 		return err
 	}
+	return VerifyAdminSource(ctx, filepath.Join(root, databaseFileName), key)
+}
+
+// VerifyAdminSource is VerifyAdmin against an explicit source database file.
+// The Upgrade surface resolves one credential source, and that source may be the
+// Manager's own store rather than a 1.x data directory: the copied-in store
+// carries the same administrator credential, and it is the only file left when
+// the operator did not mount the source. Naming the file directly keeps the
+// verified file and the resolved file the same one.
+func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
+	if strings.TrimSpace(key) == "" {
+		return ErrAdminUnauthorized
+	}
+	databasePath = strings.TrimSpace(databasePath)
+	if databasePath == "" {
+		return ErrSourceDatabaseMissing
+	}
 	if err := ctx.Err(); err != nil {
 		return credentialTimeout(err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, credentialVerifyTimeout)
 	defer cancel()
-	source, openErr := openCredentialSource(filepath.Join(root, databaseFileName))
+	source, openErr := openCredentialSource(databasePath)
 	if openErr != nil {
 		return openErr
 	}
 	defer func() { _ = source.close() }()
 	return verifyAdminCredential(ctx, source, key)
+}
+
+// CredentialDatabase resolves the one administrator credential of the whole
+// Upgrade surface. A configured 1.x data directory that actually holds its
+// database is the source; otherwise the Manager's own store is, because a v2
+// root a copy-in produced carries the same administrator credential and is the
+// only file left when the operator did not mount the source. The entry leaf and
+// both wizard reads resolve the credential here and nowhere else, so a key
+// accepted at the entry page is accepted by the reads and a key kept in the
+// other file is refused by all of them.
+func CredentialDatabase(legacyRoot, managerDatabase string) string {
+	if root := strings.TrimSpace(legacyRoot); root != "" {
+		database := filepath.Join(root, databaseFileName)
+		if info, err := os.Stat(database); err == nil && info.Mode().IsRegular() {
+			return database
+		}
+	}
+	return strings.TrimSpace(managerDatabase)
 }
 
 // verifyAdminCredential reads the one credential row from an opened source,

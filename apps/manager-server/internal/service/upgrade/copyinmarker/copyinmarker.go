@@ -166,6 +166,24 @@ func Read(targetRoot string) (Marker, bool, error) {
 	return marker, true, nil
 }
 
+// SameTarget reports whether a marker names the database it was read beside.
+// Both the startup admission and the wizard's status projection read the marker,
+// so both have to agree on what "this database" means: parent symlinks are
+// resolved so a canonical path and its alias describe the same file.
+func SameTarget(recorded, actual string) bool {
+	canonical := func(path string) string {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return filepath.Clean(path)
+		}
+		if resolved, err := filepath.EvalSymlinks(filepath.Dir(absolute)); err == nil {
+			absolute = filepath.Join(resolved, filepath.Base(absolute))
+		}
+		return filepath.Clean(absolute)
+	}
+	return canonical(recorded) == canonical(actual)
+}
+
 func writeAll(file *os.File, data []byte) error {
 	for len(data) != 0 {
 		written, err := file.Write(data)

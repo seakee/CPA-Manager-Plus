@@ -13,10 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 const (
@@ -732,5 +735,174 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 	}
 	if got := abbreviate("0123456789abcdef"); got != "0123456789ab…" {
 		t.Fatalf("abbreviate = %q", got)
+	}
+}
+
+// TestStatusAnswersFromTheManagerStoreWithoutTheSourceMount is L1 at the route
+// boundary. The recorded stage lives in the Manager store, so an operator whose
+// source mount is gone can still read it; the projection names the missing
+// source as a typed marker instead of refusing to answer, and the preflight
+// keeps its typed 503.
+func TestStatusAnswersFromTheManagerStoreWithoutTheSourceMount(t *testing.T) {
+	credentialRoot := legacySourceDir(t)
+	database := filepath.Join(t.TempDir(), "usage.sqlite")
+	recordOperation(t, database, model.UpgradeOperation{
+		Stage:       model.UpgradeStageReconcile,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy},
+	})
+	handler := Handler{
+		LegacyRoot:         func() string { return "" },
+		CredentialDatabase: func() string { return filepath.Join(credentialRoot, "usage.sqlite") },
+		Database:           func() string { return database },
+		Timeout:            10 * time.Second,
+	}
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Recorded || status.Stage != StageReconcile || status.NextAction != ActionReconcile {
+		t.Fatalf("status without a source mount = %+v", status)
+	}
+	if status.SourceRoot != CodeLegacyRootMissing {
+		t.Fatalf("source root marker = %q, want %q", status.SourceRoot, CodeLegacyRootMissing)
+	}
+	for _, secret := range []string{credentialRoot, database, testAdminKey} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("status leaked %q: %s", secret, body)
+		}
+	}
+	// The preflight is the step that needs the source, so it keeps reporting the
+	// mount the operator has to supply.
+	_, body = request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusServiceUnavailable)
+	if !strings.Contains(body, `"`+CodeLegacyRootMissing+`"`) {
+		t.Fatalf("preflight without a mount = %s", body)
+	}
+	// A mounted root that holds no database is the source's own condition, not
+	// the mount's.
+	handler.LegacyRoot = func() string { return t.TempDir() }
+	_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.SourceRoot != CodeSourceMissing {
+		t.Fatalf("source root marker = %q, want %q", status.SourceRoot, CodeSourceMissing)
+	}
+}
+
+// TestStatusReportsTheCopyInMarkerWindow is L2. The copy-in publishes its
+// provenance before the operation row commits, so a marker with no row is an
+// unfinished operation; status must read it the way admission does and name the
+// next action the operator actually has, not the step before any work started.
+func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
+	root := legacySourceDir(t)
+	database := filepath.Join(t.TempDir(), "usage.sqlite")
+	db, err := sqliterepo.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		TargetDatabase:          database,
+		SourceKind:              "upgraded-legacy",
+		SourceVersion:           "1.14.4",
+		SourceFingerprintBefore: "fingerprint-before",
+		SourceFingerprintAfter:  "fingerprint-after",
+		BackupManifestSHA256:    "manifest",
+		WrittenAtMS:             1717171717000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, body := request(t, newHandler(root, database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Recorded || status.Evidence != EvidenceCopyInMarker {
+		t.Fatalf("marker window was reported as no operation: %+v", status)
+	}
+	if status.Stage != StageCopyIn || !status.StageKnown || status.NextAction != ActionCopyIn {
+		t.Fatalf("marker window stage = %+v", status)
+	}
+	if len(status.DomainsDone) != 1 || status.DomainsDone[0] != domainSourceCopy {
+		t.Fatalf("marker window domains = %v", status.DomainsDone)
+	}
+	if status.SourceKind != "upgraded-legacy" || status.SourceVersion != "1.14.4" || status.UpdatedAtMS != 1717171717000 {
+		t.Fatalf("marker window source = %+v", status)
+	}
+	// The next action is the one admission agrees with: the operation is in
+	// progress, so it can never read as the step before any work started.
+	stage, err := legacypreflight.DatabaseUpgradeAdmission{DatabasePath: database}.Admitted(context.Background())
+	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
+		t.Fatalf("admission = %q err=%v", stage, err)
+	}
+	// A marker that names another database describes nothing here.
+	foreign := filepath.Join(t.TempDir(), "usage.sqlite")
+	if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		TargetDatabase:          foreign,
+		SourceKind:              "upgraded-legacy",
+		SourceFingerprintBefore: "fingerprint-before",
+		SourceFingerprintAfter:  "fingerprint-after",
+		BackupManifestSHA256:    "manifest",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, body = request(t, newHandler(root, database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Recorded || status.Stage != "" || status.NextAction != ActionPreflight || status.Evidence != EvidenceNone {
+		t.Fatalf("a foreign marker was read as this operation: %+v", status)
+	}
+}
+
+// TestReadsRefuseCrossSiteOrigins is L4: the entry leaf's cross-site rule is the
+// surface's rule, so the two reads refuse browser provenance from another site
+// with the same code. The credential still comes first.
+func TestReadsRefuseCrossSiteOrigins(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "usage.sqlite")
+	recordOperation(t, database, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+	handler := newHandler(legacySourceDir(t), database)
+	handler.PublicOrigin = "https://manager.test"
+	send := func(resource, authorization, origin, site string, want int) string {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, testPrefix+resource, nil)
+		r.Host = "manager.test"
+		if authorization != "" {
+			r.Header.Set("Authorization", authorization)
+		}
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if site != "" {
+			r.Header.Set("Sec-Fetch-Site", site)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("%s origin=%q site=%q: got %d want %d: %s", resource, origin, site, w.Code, want, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	for _, resource := range []string{PreflightSuffix, StatusSuffix} {
+		for _, rejected := range [][2]string{
+			{"https://attacker.test", ""},
+			{"http://manager.test", ""}, // the configured origin is TLS-terminated
+			{"https://manager.test", "cross-site"},
+			{"https://manager.test", "same-site"},
+		} {
+			body := send(resource, bearer(testAdminKey), rejected[0], rejected[1], http.StatusForbidden)
+			if !strings.Contains(body, `"`+upgradesurface.CodeOriginRejected+`"`) {
+				t.Fatalf("%s did not name the origin rejection: %s", resource, body)
+			}
+		}
+		send(resource, bearer(testAdminKey), "https://manager.test", "same-origin", http.StatusOK)
+		send(resource, bearer(testAdminKey), "", "", http.StatusOK)
+		// An unauthenticated caller learns nothing about the origin rule either.
+		send(resource, "", "https://attacker.test", "", http.StatusUnauthorized)
 	}
 }
