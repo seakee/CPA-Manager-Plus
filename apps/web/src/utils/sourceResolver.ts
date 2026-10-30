@@ -293,7 +293,9 @@ export const buildSourceProviderStateMap = (sourceInfoMap: SourceInfoMap) => {
 };
 
 const withCredentialLabel = (entry: SourceInfo): SourceInfo =>
-  entry.credentialLabel ? { ...entry, originalDisplayName: entry.displayName, displayName: entry.credentialLabel } : entry;
+  entry.credentialLabel
+    ? { ...entry, originalDisplayName: entry.displayName, displayName: entry.credentialLabel }
+    : entry;
 
 export function resolveSourceDisplay(
   sourceRaw: string,
@@ -336,16 +338,14 @@ export function resolveSourceDisplay(
   if (matchedBySource) return withCredentialLabel(matchedBySource);
 
   if (source) {
-    return {
-      displayName: source.startsWith('h:')
-        ? sourceInfoMap.credentialLabels?.[source.slice(2)] || formatRawSourceDisplayName(source)
-        : formatRawSourceDisplayName(source),
+    return withCredentialLabel({
+      displayName: formatRawSourceDisplayName(source),
       credentialLabel: source.startsWith('h:')
         ? sourceInfoMap.credentialLabels?.[source.slice(2)]
         : undefined,
       type: '',
       identityKey: `source:${source}`,
-    };
+    });
   }
 
   if (authIndexKey) {

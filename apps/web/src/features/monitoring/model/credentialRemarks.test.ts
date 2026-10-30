@@ -48,6 +48,39 @@ describe('upstream credential remarks across monitoring', () => {
     );
     expect(resolveSourceIdentityKey(`h:${hash}`, '', map, empty)).toBe(`source:h:${hash}`);
   });
+  it('preserves historical realtime stream grouping when a removed key is renamed or cleared', () => {
+    const details = [
+      {
+        timestamp: '2026-10-30T00:00:00Z',
+        source: `h:${hash}`,
+        provider: 'codex',
+        tokens: { input_tokens: 100, output_tokens: 20 },
+        __modelName: 'test-model',
+        __endpoint: '/v1/responses',
+      },
+    ];
+    const rows = (labels: Record<string, string>) =>
+      buildEventRows(
+        details as never,
+        empty,
+        empty,
+        buildSourceInfoMap({ credentialLabels: labels }),
+        empty,
+        {},
+        empty
+      );
+    const before = rows({});
+    for (const label of ['account@example.com', 'Renamed account']) {
+      const after = rows({ [hash]: label });
+      expect(after[0].source).toBe(label);
+      expect(after[0].account).toBe(before[0].account);
+      expect(buildRealtimeLogRows(after)[0].streamKey).toBe(
+        buildRealtimeLogRows(before)[0].streamKey
+      );
+      expect(buildAccountRows(after)[0].filterValue).toBe(buildAccountRows(before)[0].filterValue);
+    }
+    expect(rows({})).toEqual(before);
+  });
   it('does not merge separate keys that have the same remark', () => {
     const other = 'sk-synthetic-account-b';
     const map = buildSourceInfoMap({
@@ -106,8 +139,12 @@ describe('upstream credential remarks across monitoring', () => {
       after = rows(namedMap());
     expect(after[0].sourceMasked).toBe('account@example.com');
     expect(after[0].id).toBe(before[0].id);
-    expect(buildRealtimeLogRows(after)[0].streamKey).toBe(buildRealtimeLogRows(before)[0].streamKey);
-    expect(buildRealtimeSourceDisplay(after[0], ((key: string) => key) as never).primary).toBe('account@example.com');
+    expect(buildRealtimeLogRows(after)[0].streamKey).toBe(
+      buildRealtimeLogRows(before)[0].streamKey
+    );
+    expect(buildRealtimeSourceDisplay(after[0], ((key: string) => key) as never).primary).toBe(
+      'account@example.com'
+    );
     const oldAccounts = buildAccountRows(before),
       newAccounts = buildAccountRows(after);
     expect(newAccounts[0].displayAccount).toBe('account@example.com');
