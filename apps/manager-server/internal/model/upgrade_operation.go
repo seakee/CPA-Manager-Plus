@@ -21,6 +21,11 @@ const (
 	UpgradeStageExternalConnect UpgradeStage = "external_connect"
 	UpgradeStageVerify          UpgradeStage = "verify"
 	UpgradeStageComplete        UpgradeStage = "complete"
+	// UpgradeStageRolledBack records that the v2 root was abandoned and the
+	// v1 manager was put back in charge. It is a terminal position: a
+	// rolled-back operation is never resumed, so it can only be re-entered
+	// from itself.
+	UpgradeStageRolledBack UpgradeStage = "rolled_back"
 	// UpgradeStageFailed parks the operation without losing the domains that
 	// already completed. It has no position in the forward order.
 	UpgradeStageFailed UpgradeStage = "failed"
@@ -37,6 +42,7 @@ var upgradeStageRanks = map[UpgradeStage]int{
 	UpgradeStageExternalConnect: 5,
 	UpgradeStageVerify:          6,
 	UpgradeStageComplete:        7,
+	UpgradeStageRolledBack:      8,
 }
 
 func (s UpgradeStage) Valid() bool {
@@ -55,6 +61,16 @@ func (s UpgradeStage) rank() int { return upgradeStageRanks[s] }
 func (s UpgradeStage) CanAdvanceTo(next UpgradeStage) bool {
 	if s == next {
 		return true
+	}
+	if s == UpgradeStageRolledBack {
+		return false
+	}
+	// A rollback abandons the forward order instead of extending it. It is the
+	// one move a completed operation may still make, so the completion barrier
+	// below does not apply to it; the caller decides which positions may be
+	// abandoned.
+	if next == UpgradeStageRolledBack {
+		return s.Valid()
 	}
 	if s == UpgradeStageComplete {
 		return false
@@ -93,15 +109,37 @@ var upgradeDomains = map[string]bool{
 
 func ValidUpgradeDomain(domain string) bool { return upgradeDomains[domain] }
 
+// RollbackEvidence is the observation a rolled_back verdict rests on. It is
+// written together with the stage, so a later reader can see what was observed
+// instead of only learning that someone advanced the row. The checks that
+// produced it are not recorded here: they are re-derived when the verdict is
+// written, and this value is the report of that run.
+type RollbackEvidence struct {
+	// Image is the exact 1.x image the operator started.
+	Image string `json:"image"`
+	// StatusURL is the 1.x health endpoint that answered for this install.
+	StatusURL string `json:"statusUrl"`
+	// SourceFingerprint is the fingerprint observed on the live 1.x volume. It
+	// is informational: a v1 that kept serving writes new rows, so equality with
+	// the recorded before-fingerprint is not required and never claimed.
+	SourceFingerprint string `json:"sourceFingerprint"`
+	// ObservedAtMS is when the observation was taken.
+	ObservedAtMS int64 `json:"observedAtMs"`
+}
+
 // UpgradeOperation is the whole persistent state of the v2 Upgrade operation:
 // one row, one operation, no history rows. It carries observations (source
 // kind/version/fingerprints, backup manifest, manual items) and never an
 // authorization flag.
 type UpgradeOperation struct {
-	Stage                   UpgradeStage    `json:"stage"`
-	DomainsDone             []string        `json:"domainsDone"`
-	SourceKind              string          `json:"sourceKind,omitempty"`
-	SourceVersion           string          `json:"sourceVersion,omitempty"`
+	Stage         UpgradeStage `json:"stage"`
+	DomainsDone   []string     `json:"domainsDone"`
+	SourceKind    string       `json:"sourceKind,omitempty"`
+	SourceVersion string       `json:"sourceVersion,omitempty"`
+	// SourceRoot is the 1.x data directory the copy-in read. A rollback binds
+	// the volume it restarts to this directory, so "the original volume" is a
+	// checkable claim rather than the operator's assertion.
+	SourceRoot              string          `json:"sourceRoot,omitempty"`
 	SourceFingerprintBefore string          `json:"sourceFingerprintBefore,omitempty"`
 	SourceFingerprintAfter  string          `json:"sourceFingerprintAfter,omitempty"`
 	BackupManifestSHA256    string          `json:"backupManifestSha256,omitempty"`
@@ -109,8 +147,11 @@ type UpgradeOperation struct {
 	ManualItems             []string        `json:"manualItems"`
 	ErrorCode               string          `json:"errorCode,omitempty"`
 	ErrorDetail             string          `json:"errorDetail,omitempty"`
-	CreatedAtMS             int64           `json:"createdAtMs"`
-	UpdatedAtMS             int64           `json:"updatedAtMs"`
+	// Rollback is the evidence recorded with the rolled_back verdict, and nil
+	// for every other stage.
+	Rollback    *RollbackEvidence `json:"rollback,omitempty"`
+	CreatedAtMS int64             `json:"createdAtMs"`
+	UpdatedAtMS int64             `json:"updatedAtMs"`
 }
 
 // Normalize fills the zero values that the schema requires and drops duplicate
@@ -180,6 +221,22 @@ func (o UpgradeOperation) Validate() error {
 		var object map[string]json.RawMessage
 		if err := json.Unmarshal(o.Reconciliation, &object); err != nil {
 			return errors.New("upgrade operation reconciliation must be a JSON object")
+		}
+	}
+	// A rolled_back operation is terminal, so it can never be re-proven. It must
+	// carry the observation that justified it: a terminal verdict without
+	// evidence is a claim nobody can check, and no path may write one.
+	if o.Stage == UpgradeStageRolledBack && o.Rollback == nil {
+		return errors.New("a rolled_back upgrade operation must carry the evidence that justified it")
+	}
+	// Evidence is written whole or not at all. A partial record would let a
+	// reader believe a verdict was observed when only its shape survived.
+	if o.Rollback != nil {
+		if o.Rollback.Image == "" || o.Rollback.StatusURL == "" || o.Rollback.SourceFingerprint == "" {
+			return errors.New("upgrade operation rollback evidence must name the image, the health endpoint and the observed fingerprint")
+		}
+		if o.Rollback.ObservedAtMS <= 0 {
+			return errors.New("upgrade operation rollback evidence must name when it was observed")
 		}
 	}
 	return nil

@@ -290,7 +290,12 @@ func runServerWithOptions(options legacypreflight.Options) {
 			log.Printf("close upgrade admission fence: %v", err)
 		}
 		startupHandler.EnableReadOnlyDiscovery(paths, options, inspectionTimeout)
-		log.Printf("Upgrade operation %s is unfinished; serving only the Upgrade surface", databaseLock.UpgradeStage)
+		if databaseLock.UpgradeReason != "" {
+			log.Printf("Upgrade operation %s is unfinished (reason %s); serving only the Upgrade surface",
+				databaseLock.UpgradeStage, databaseLock.UpgradeReason)
+		} else {
+			log.Printf("Upgrade operation %s is unfinished; serving only the Upgrade surface", databaseLock.UpgradeStage)
+		}
 		waitForReadOnlyStartup(ctx, server, serverResult)
 		return
 	}

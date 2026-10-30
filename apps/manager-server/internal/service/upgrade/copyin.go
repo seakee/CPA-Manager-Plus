@@ -68,18 +68,22 @@ func SourceDatabasePath(root string) string { return filepath.Join(root, databas
 // fingerprints are the two source observations, and BackupManifestSHA256 names
 // the backup that made the copy eligible.
 type Result struct {
-	Stage                   model.UpgradeStage `json:"stage"`
-	DomainsDone             []string           `json:"domainsDone"`
-	SourceKind              string             `json:"sourceKind"`
-	SourceVersion           string             `json:"sourceVersion"`
-	SourceFingerprintBefore string             `json:"sourceFingerprintBefore"`
-	SourceFingerprintAfter  string             `json:"sourceFingerprintAfter"`
-	BackupManifestSHA256    string             `json:"backupManifestSha256"`
-	BackupSourceRevision    string             `json:"backupSourceRevision"`
-	BackupDirectory         string             `json:"backupDirectory"`
-	TargetDatabase          string             `json:"targetDatabase"`
-	TargetDataKey           string             `json:"targetDataKey"`
-	TargetArchives          string             `json:"targetArchives"`
+	Stage         model.UpgradeStage `json:"stage"`
+	DomainsDone   []string           `json:"domainsDone"`
+	SourceKind    string             `json:"sourceKind"`
+	SourceVersion string             `json:"sourceVersion"`
+	// SourceRoot is the 1.x data directory this run read. It is recorded with
+	// the row so a later rollback can bind the v1 volume to the exact directory
+	// the copy came from instead of asserting "the original volume".
+	SourceRoot              string `json:"sourceRoot"`
+	SourceFingerprintBefore string `json:"sourceFingerprintBefore"`
+	SourceFingerprintAfter  string `json:"sourceFingerprintAfter"`
+	BackupManifestSHA256    string `json:"backupManifestSha256"`
+	BackupSourceRevision    string `json:"backupSourceRevision"`
+	BackupDirectory         string `json:"backupDirectory"`
+	TargetDatabase          string `json:"targetDatabase"`
+	TargetDataKey           string `json:"targetDataKey"`
+	TargetArchives          string `json:"targetArchives"`
 	// AlreadyComplete reports that the stored record already contained this
 	// copy-in, so nothing was copied, restored or migrated again.
 	AlreadyComplete bool `json:"alreadyComplete"`
@@ -147,6 +151,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	paths := newTargetPaths(targetRoot)
 	result := Result{
 		SourceKind:      SourceKindUpgradedLegacy,
+		SourceRoot:      sourceRoot,
 		BackupDirectory: bundleDir,
 		TargetDatabase:  paths.Database,
 		TargetDataKey:   paths.DataKey,
@@ -258,7 +263,20 @@ func recordedOperation(ctx context.Context, databasePath string, immutable bool)
 	if err != nil || !present {
 		return model.UpgradeOperation{}, false, err
 	}
-	return upgradeoperation.New(db).Get(ctx)
+	repository := upgradeoperation.New(db)
+	// A read-only open cannot migrate, and the columns a rollback records were
+	// added by a later build. Saying so is the operator's next step; letting the
+	// select fail would surface raw SQL instead.
+	missing, err := repository.MissingColumns(ctx)
+	if err != nil {
+		return model.UpgradeOperation{}, false, err
+	}
+	if len(missing) > 0 {
+		return model.UpgradeOperation{}, false, newUpgradeError(UpgradeErrorStoreSchemaOutdated,
+			fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read without a writable open; open it once with this build before reading it read-only",
+				strings.Join(missing, ", ")), nil)
+	}
+	return repository.Get(ctx)
 }
 
 type targetPaths struct {
@@ -347,7 +365,7 @@ func within(parent, child string) bool {
 // rejectOverlap keeps every write inside the v2 data root. The 1.x volume is a
 // source, never a destination.
 func rejectOverlap(sourceRoot, targetRoot, bundleDir string) error {
-	if within(sourceRoot, targetRoot) || within(targetRoot, sourceRoot) {
+	if rootsOverlap(sourceRoot, targetRoot) {
 		return errors.New("the v2 data root and the 1.x source root must not contain each other")
 	}
 	if within(sourceRoot, bundleDir) {
@@ -426,6 +444,7 @@ func completedResult(ctx context.Context, paths targetPaths, bundleDir string, r
 	result.Stage = recorded.Stage
 	result.DomainsDone = recorded.DomainsDone
 	result.SourceVersion = recorded.SourceVersion
+	result.SourceRoot = recorded.SourceRoot
 	result.SourceFingerprintBefore = recorded.SourceFingerprintBefore
 	result.SourceFingerprintAfter = recorded.SourceFingerprintAfter
 	result.BackupManifestSHA256 = recorded.BackupManifestSHA256
@@ -927,6 +946,7 @@ func migrateAndRecord(ctx context.Context, paths targetPaths, result Result) (mo
 	}
 	recorded.SourceKind = SourceKindUpgradedLegacy
 	recorded.SourceVersion = result.SourceVersion
+	recorded.SourceRoot = result.SourceRoot
 	recorded.SourceFingerprintBefore = result.SourceFingerprintBefore
 	recorded.SourceFingerprintAfter = result.SourceFingerprintAfter
 	recorded.BackupManifestSHA256 = result.BackupManifestSHA256

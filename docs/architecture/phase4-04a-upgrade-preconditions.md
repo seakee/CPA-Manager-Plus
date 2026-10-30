@@ -271,6 +271,7 @@ database. A reader error fails closed; a `nil` reader keeps the historical rule.
 | no table, no row and no marker for this database (or `nil` reader) | `none` | unchanged: only `fresh` and `native-v2` are admitted; a 1.x source stays blocked |
 | copy-in marker, no row (the crash window: the migration ran, the row did not) | `in_progress` | Upgrade surface only |
 | `preflight`, `copy_in`, `reconcile`, `cpa_import`, `external_connect`, `verify`, `failed` | `in_progress` | Upgrade surface only: fixed Bootstrap discovery status reads, the read-only shell and the Upgrade authentication leaf. Console, Key workspace, gateway configuration, lifecycle and model traffic answer 404; health stays 503 and no writable subsystem starts |
+| `rolled_back` | `in_progress` + reason `upgrade_rolled_back` | Upgrade surface only, same as any unfinished operation. The reason is the typed string the console shows; it is never a completion |
 | `complete` with `source_kind=upgraded-legacy`, both source fingerprints and the backup manifest digest | `complete` | normal v2 surfaces, as for a native store |
 | `complete` missing any of those observations | — | not admitted (fail closed) |
 | reader error, unreadable marker or unsupported stage | — | not admitted (fail closed) |
@@ -536,3 +537,132 @@ first (the report is printed either way), so the exit code only says the
 migration did not advance and the code says why. The `--bundle` default is the
 recorded copy-in's backup destination, and the recorded copy-in is re-verified
 against it before anything is compared.
+## U1-6: rollback to 1.x and the `upgrade run` boundary
+
+Added after the copy-in slice. A rollback is modelled, never executed by the
+Manager: the process runs inside a container and must not drive the Docker
+socket, so it *prepares* an exact invocation and *records* a proven verdict.
+
+- **`rolled_back` is a terminal stage.** `model.UpgradeStageRolledBack` is
+  valid and rank 8, but `CanAdvanceTo` refuses every successor and refuses to
+  leave it, including a relabel to `failed`. It is also the one move a
+  `complete` row may still make: a rollback abandons the forward order rather
+  than extending it, so the completion barrier does not apply to it.
+- **`PrepareRollback`** (`internal/service/upgrade/rollback.go`) requires a
+  recorded operation in `copy_in|reconcile|cpa_import|external_connect|verify|complete`
+  (`upgrade_rollback_not_applicable` otherwise), binds the directory under
+  decision to the source root the copy-in recorded
+  (`upgrade_rollback_volume_unbound`, because a plan may not claim "the original
+  volume" it cannot check), rejects roots that contain each other exactly as
+  copy-in does (`upgrade_rollback_roots_overlap`), recomputes the 1.x source
+  fingerprint and refuses a difference (`upgrade_source_changed`), refuses a row
+  without both fingerprints or the backup manifest digest
+  (`upgrade_rollback_unproven`), and pins the 1.x image to
+  `seakee/cpa-manager-plus:v<source_version>`. A recorded version that is not an
+  exact release, or an explicit reference that names no version — `:latest`, a
+  bare repository, an empty tag, a partial version or a `@sha256:` digest — is
+  `upgrade_rollback_image_unpinned`; an explicit release outside the recorded
+  source's version family is `upgrade_rollback_image_family` unless the operator
+  passes the family override. Refusals write nothing at all.
+- **A row without a source root is bound once, not sent back to the copy-in.**
+  When the row names no 1.x directory (a row written before the column existed),
+  the plan compares the directory under decision with the before-fingerprint the
+  copy-in recorded. Equality is the proof that this is the volume it read, and
+  the row is backfilled once through `upgradeoperation.RecordSourceRoot` (a
+  writable open, which is also what adds the column). A directory that does not
+  reproduce that fingerprint is `upgrade_rollback_volume_unbound`, and the
+  refusal names what works — point `--legacy` at the mounted volume whose
+  contents reproduce the fingerprint, or run `--prepare` while the volume is
+  still stopped and unchanged. Re-running the copy-in is never suggested: it
+  refuses once it is recorded.
+- **The plan's port is not the v2 port.** A rollback publishes the restarted
+  1.x manager on `18318` (`--port` overrides it), never on the `18317` this
+  Manager publishes, because both managers answer `GET /health` with the same
+  identity. A plan whose port is the Manager's own is
+  `upgrade_rollback_port_collision`; a plan whose port is already held on the
+  host is `upgrade_rollback_port_busy` (the port is bound on every local address
+  and both wildcards, so a listener on any interface is found); with
+  `--manager-addr` the plan also refuses while the v2 stack still answers there
+  (`upgrade_rollback_v2_running`). A refusal writes nothing.
+- **The plan** (`<v2 data root>/.upgrade-rollback/plan.json`, canonical-JSON
+  SHA-256 in `digest`) names the pinned image, the volume derived from the
+  compose project and the mountpoint the 1.x container uses, the recorded source
+  root, the published `port` and the v2 Manager `managerPort` beside it, the
+  recorded `backupDirectory`, the exact `docker compose -p cpamp -f - up - d
+  cpa-manager-plus` invocation, the 1.x compose file to feed on stdin (publishing
+  and binding the plan's own port), the preconditions and the health proof:
+  `GET /health` on the plan's port with the documented
+  `{"ok":true,"service":"cpa-manager-plus"}` identity, plus a read-only SQLite
+  open. The preconditions state that the v2 stack must be stopped first, print
+  the port check the operator reproduces on the host (`docker ps --filter
+  publish=<port>` and `lsof -nP -iTCP:<port> -sTCP:LISTEN` must print nothing),
+  and quote every path. `/health` is the only unauthenticated 1.x endpoint —
+  `/status` requires the admin key and answers 401 without it, so it can never
+  prove a volume. It is evidence for the operator, not an authorization, and it
+  is written only under the v2 data root.
+- **`RecordRollback`** takes the operator's observation (roots, backup, image,
+  health URL, time) and derives the proof itself in one call: it probes the
+  health endpoint and requires the documented identity (a bare 2xx or another
+  service is `upgrade_rollback_identity_foreign`, a probe that does not address
+  `/health` is `upgrade_rollback_probe_endpoint`); it refuses a probe that
+  addresses this Manager's own listener before the request is sent
+  (`upgrade_rollback_probe_self`): the 1.x and the v2 Manager state the same
+  service identity, so an answer from the port this Manager holds describes the
+  v2 stack, never a restored volume. The probe target's port is compared with the
+  Manager's own port (`--manager-addr`, or the documented default), and the host
+  must not resolve to this machine — a loopback, wildcard, interface or
+  hostname address is refused, including a container-local one. It also refuses
+  a verdict while the v2 stack still answers on the address the operator named
+  (`upgrade_rollback_v2_running`): the verdict says that stack was abandoned. It
+  then opens the live 1.x database immutable read-only with a `quick_check`; it
+  reads the recorded backup snapshot read-only, re-verifies its manifest digest,
+  and requires the live volume to still retain at least the rows the backup
+  holds — raw usage events counted together with the append-only archive
+  projection — and every archived segment and the data key the backup describes
+  (`upgrade_rollback_identity_foreign` on any difference,
+  `upgrade_rollback_unproven` when a store cannot be opened). It writes the
+  stage and the evidence (image, health endpoint, observed fingerprint,
+  observation time) in one transaction through
+  `upgradeoperation.RecordRollback`, which never rewrites `source_kind`,
+  `source_root`, both fingerprints, `backup_manifest_sha256` or the completed
+  domains; a second verdict is `upgrade_rollback_not_applicable`. The recorded
+  observation time is the service's own clock reading after its proofs, not the
+  caller's label; a caller-supplied time outside the freshness window is still
+  refused (`upgrade_rollback_evidence_stale`). The observed fingerprint is
+  informational: the restarted 1.x manager keeps writing rows, so byte equality
+  with the recorded before-fingerprint is neither required nor recorded as one.
+- **CLI.** `upgrade rollback --prepare --legacy <dir> [--legacy-image <ref>]
+  [--project <name>] [--port N] [--manager-addr HOST:PORT] [--backup <dir>]
+  [--allow-image-family-mismatch] [--json]` prints the plan and exits 0, or 1
+  with the typed refusal written to stderr; the printed verify command is
+  quoted, names `--target`, `--backup`, `--legacy-image` and `--status-url` at the
+  plan's own port, and carries `--manager-addr` when the plan was derived against
+  one. `upgrade rollback --verify --legacy <dir> [--backup <dir>]
+  [--status-url <url>] [--manager-addr HOST:PORT] [--legacy-image <ref>]
+  [--json]` passes the observation to the service, which probes the default
+  `http://127.0.0.1:18318/health` unless a URL is given, then records; unproven
+  evidence exits 1, usage errors 2.
+- **The verdict cannot exist without its evidence.** `model.Validate` requires
+  `Rollback` whenever the stage is `rolled_back`, and the repository enforces the
+  same invariant at both stage-writing paths: `Put` refuses such a row, and
+  `Advance` refuses the terminal stage outright
+  (`upgradeoperation.ErrRollbackEvidenceRequired`) because it carries no
+  observation. The verdict is only ever written by
+  `upgradeoperation.RecordRollback`, stage and evidence in one transaction.
+- **A store this build has not opened says so.** `upgrade status` and `upgrade
+  rollback --prepare` read the operation row through a read-only open, which
+  cannot migrate. A store whose `upgrade_operations` table predates the current
+  columns is reported as `upgrade_store_schema_outdated` (naming the missing
+  columns and the writable open that adds them) instead of surfacing raw SQL, and
+  the command exits 1.
+- **`upgrade run` stops at the copy-in.** It performs preflight plus copy-in,
+  never reconciliation, and records the 1.x data directory it read so a later
+  rollback can bind its volume. It prints the exact
+  `upgrade reconcile --legacy … --target …` command (with `--bundle` only when
+  the operator passed one). A recorded stage beyond `copy_in` — including a
+  terminal `rolled_back` — is reported as-is with no write and no reconciliation
+  hint, and a blocked preflight still writes nothing.
+- **The 1.x volume is never written** by any path above: both the health probe
+  and the database probe are read-only, the database is opened immutable so not
+  even a WAL index appears beside it, and the source manifest is unchanged by
+  prepare, verify and every refusal.

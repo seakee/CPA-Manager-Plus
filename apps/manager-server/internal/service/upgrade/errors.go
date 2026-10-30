@@ -37,6 +37,69 @@ const (
 	// record, so the operation row did not advance and nothing was marked
 	// instead of a recorded stage that names no domain.
 	UpgradeErrorReconcileNothingCompared UpgradeErrorCode = "upgrade_reconcile_nothing_compared"
+	// UpgradeErrorRollbackNotApplicable reports that the recorded operation is
+	// not in a stage a rollback can start from, or that it has already been
+	// rolled back. Nothing was written.
+	UpgradeErrorRollbackNotApplicable UpgradeErrorCode = "upgrade_rollback_not_applicable"
+	// UpgradeErrorRollbackUnproven reports that the evidence a rollback would
+	// rely on does not hold: no before/after source fingerprint, no recorded
+	// backup manifest digest, or an observation that does not prove a read-only
+	// open and a healthy 1.x status probe. Nothing was written.
+	UpgradeErrorRollbackUnproven UpgradeErrorCode = "upgrade_rollback_unproven"
+	// UpgradeErrorRollbackImageUnpinned reports that the 1.x image reference the
+	// operation or the operator named carries no exact version, so a rollback
+	// plan would have to fall back on a moving tag. Nothing was written.
+	UpgradeErrorRollbackImageUnpinned UpgradeErrorCode = "upgrade_rollback_image_unpinned"
+	// UpgradeErrorRollbackImageFamily reports that the 1.x image names a release
+	// outside the recorded source's version family. A rollback restarts the
+	// version the operation copied, so a different family needs the explicit
+	// override. Nothing was written.
+	UpgradeErrorRollbackImageFamily UpgradeErrorCode = "upgrade_rollback_image_family"
+	// UpgradeErrorRollbackVolumeUnbound reports that the 1.x directory under
+	// decision cannot be tied to the source root the operation recorded, so no
+	// plan or verdict may claim "the original volume". Nothing was written.
+	UpgradeErrorRollbackVolumeUnbound UpgradeErrorCode = "upgrade_rollback_volume_unbound"
+	// UpgradeErrorRollbackRootsOverlap reports that the v2 data root and the 1.x
+	// source root contain each other. The 1.x volume is a source and must never
+	// become a rollback destination. Nothing was written.
+	UpgradeErrorRollbackRootsOverlap UpgradeErrorCode = "upgrade_rollback_roots_overlap"
+	// UpgradeErrorRollbackEvidenceStale reports that the observation a verdict
+	// would rest on was taken outside the freshness window, so it no longer
+	// describes the install being recorded. Nothing was written.
+	UpgradeErrorRollbackEvidenceStale UpgradeErrorCode = "upgrade_rollback_evidence_stale"
+	// UpgradeErrorRollbackProbeEndpoint reports that the health probe does not
+	// address the 1.x `GET /health` endpoint. Every other endpoint on the 1.x
+	// manager requires credentials, so a probe there proves nothing about the
+	// volume. Nothing was written.
+	UpgradeErrorRollbackProbeEndpoint UpgradeErrorCode = "upgrade_rollback_probe_endpoint"
+	// UpgradeErrorRollbackIdentityForeign reports that something answered, but
+	// not as this install: a health response naming another service, a backup
+	// that is not the recorded one, or a live volume that no longer holds the
+	// rows and archives the backup retained. Nothing was written.
+	UpgradeErrorRollbackIdentityForeign UpgradeErrorCode = "upgrade_rollback_identity_foreign"
+	// UpgradeErrorRollbackProbeSelf reports that the health probe addresses this
+	// Manager's own listener. The 1.x and the v2 Manager state the same service
+	// identity, so an answer there is the v2 stack describing itself: it proves
+	// nothing about a 1.x volume. Nothing was written.
+	UpgradeErrorRollbackProbeSelf UpgradeErrorCode = "upgrade_rollback_probe_self"
+	// UpgradeErrorRollbackPortCollision reports that the plan would publish the
+	// port this Manager itself listens on. The v2 stack holds that port while it
+	// runs, so a v1 started there could never prove it is the one answering.
+	// Nothing was written.
+	UpgradeErrorRollbackPortCollision UpgradeErrorCode = "upgrade_rollback_port_collision"
+	// UpgradeErrorRollbackPortBusy reports that something already holds the port
+	// the plan would publish. A v1 cannot be started there, and an operator who
+	// applied the plan anyway would probe whatever holds it. Nothing was written.
+	UpgradeErrorRollbackPortBusy UpgradeErrorCode = "upgrade_rollback_port_busy"
+	// UpgradeErrorRollbackV2Running reports that the v2 stack still answers on
+	// the address the operator named, so it was not stopped before the plan was
+	// derived. Nothing was written.
+	UpgradeErrorRollbackV2Running UpgradeErrorCode = "upgrade_rollback_v2_running"
+	// UpgradeErrorStoreSchemaOutdated reports that the Manager store predates the
+	// current build's upgrade table, so its operation row cannot be read without
+	// the columns a writable open adds. The store must be opened once by this
+	// build; nothing was written.
+	UpgradeErrorStoreSchemaOutdated UpgradeErrorCode = "upgrade_store_schema_outdated"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -72,6 +135,21 @@ var (
 	ErrReconcileMismatch         = &UpgradeError{Code: UpgradeErrorReconcileMismatch}
 	ErrReconcileTargetIncomplete = &UpgradeError{Code: UpgradeErrorReconcileTargetIncomplete}
 	ErrReconcileNothingCompared  = &UpgradeError{Code: UpgradeErrorReconcileNothingCompared}
+
+	ErrRollbackNotApplicable = &UpgradeError{Code: UpgradeErrorRollbackNotApplicable}
+	ErrRollbackUnproven      = &UpgradeError{Code: UpgradeErrorRollbackUnproven}
+	ErrRollbackImageUnpinned = &UpgradeError{Code: UpgradeErrorRollbackImageUnpinned}
+	ErrRollbackImageFamily   = &UpgradeError{Code: UpgradeErrorRollbackImageFamily}
+	ErrRollbackVolumeUnbound = &UpgradeError{Code: UpgradeErrorRollbackVolumeUnbound}
+	ErrRollbackRootsOverlap  = &UpgradeError{Code: UpgradeErrorRollbackRootsOverlap}
+	ErrRollbackEvidenceStale = &UpgradeError{Code: UpgradeErrorRollbackEvidenceStale}
+	ErrRollbackProbeEndpoint = &UpgradeError{Code: UpgradeErrorRollbackProbeEndpoint}
+	ErrRollbackIdentity      = &UpgradeError{Code: UpgradeErrorRollbackIdentityForeign}
+	ErrRollbackProbeSelf     = &UpgradeError{Code: UpgradeErrorRollbackProbeSelf}
+	ErrRollbackPortCollision = &UpgradeError{Code: UpgradeErrorRollbackPortCollision}
+	ErrRollbackPortBusy      = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
+	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
+	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {
