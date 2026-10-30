@@ -1745,6 +1745,7 @@ func TestRateLimitAutoDisableWorkerEarlyRecoveryIsEventDriven(t *testing.T) {
 	}
 	defer st.Close()
 
+	disabled := true
 	patchCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
@@ -1756,7 +1757,7 @@ func TestRateLimitAutoDisableWorkerEarlyRecoveryIsEventDriven(t *testing.T) {
 				"provider":   "codex",
 				"account":    "alice@example.com",
 				"account_id": "workspace-1",
-				"disabled":   true,
+				"disabled":   disabled,
 			}})
 		case "PATCH /v0/management/auth-files/status":
 			var payload struct {
@@ -1767,6 +1768,7 @@ func TestRateLimitAutoDisableWorkerEarlyRecoveryIsEventDriven(t *testing.T) {
 				return
 			}
 			patchCalls++
+			disabled = payload.Disabled
 			if payload.Disabled {
 				http.Error(w, "expected enable", http.StatusBadRequest)
 				return
@@ -1937,6 +1939,76 @@ func (r *pausedActiveQuotaCooldownRepository) ListActive(ctx context.Context) ([
 	return items, err
 }
 
+func TestRateLimitAutoDisableWorkerEarlyRecoveryRequiresEnabledPostCondition(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	patchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id":         "runtime-alice",
+				"name":       "codex-auth.json",
+				"auth_index": "auth-1",
+				"provider":   "codex",
+				"account":    "alice@example.com",
+				"account_id": "workspace-1",
+				"disabled":   true,
+			}})
+		case "PATCH /v0/management/auth-files/status":
+			patchCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	seeded, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:     "codex-auth.json",
+		AuthIndex:        "auth-1",
+		AccountSnapshot:  "alice@example.com",
+		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
+		RecoverAtMS:      now.Add(time.Hour).UnixMilli(),
+		Owner:            model.QuotaCooldownOwnerUsage429,
+		EventHash:        "evt-post-condition",
+		PreDisabledState: false,
+		DisabledAtMS:     now.Add(-time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	recovered, err := worker.RecoverOwnedCooldown(ctx, "codex-auth.json", "auth-1", "codex", seeded.ID, seeded.UpdatedAtMS)
+	if err == nil || !strings.Contains(err.Error(), "remains disabled") {
+		t.Fatalf("early recover error = %v, want remains-disabled verification failure", err)
+	}
+	if recovered {
+		t.Fatal("early recover = true, want false when post-condition is not observed")
+	}
+	if patchCalls != 1 {
+		t.Fatalf("patch calls = %d, want 1", patchCalls)
+	}
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 1 || !strings.Contains(active[0].LastError, "remains disabled") {
+		t.Fatalf("active cooldowns = %#v, want retained cooldown with post-condition failure", active)
+	}
+}
+
 func TestRateLimitAutoDisableWorkerEarlyRecoveryDoesNotEnablePreDisabledCredential(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
@@ -2003,6 +2075,7 @@ func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvi
 	}
 	defer st.Close()
 
+	disabled := true
 	patchCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
@@ -2014,7 +2087,7 @@ func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvi
 				"provider":   "codex",
 				"account":    "alice@example.com",
 				"account_id": "workspace-1",
-				"disabled":   true,
+				"disabled":   disabled,
 			}})
 		case "PATCH /v0/management/auth-files/status":
 			var payload struct {
@@ -2025,6 +2098,7 @@ func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvi
 				return
 			}
 			patchCalls++
+			disabled = payload.Disabled
 			if payload.Disabled {
 				http.Error(w, "expected enable", http.StatusBadRequest)
 				return
