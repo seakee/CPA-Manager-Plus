@@ -1244,6 +1244,25 @@ func Migrate(db *sql.DB) error {
 			revision integer not null default 0
 		)`,
 		`insert or ignore into gateway_source_binding_revision (id, revision) values (1, 0)`,
+		// The v2 Upgrade operation is a single durable row of progress and
+		// observations. It lives in the Manager database, never in the legacy
+		// source root, so a read-only preflight never has to write its result.
+		`create table if not exists upgrade_operations (
+			id integer primary key check(id = 1),
+			stage text not null default '',
+			domains_done text not null default '[]',
+			source_kind text,
+			source_version text,
+			source_fingerprint_before text,
+			source_fingerprint_after text,
+			backup_manifest_sha256 text,
+			reconciliation text not null default '{}',
+			manual_items text not null default '[]',
+			error_code text,
+			error_detail text,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
