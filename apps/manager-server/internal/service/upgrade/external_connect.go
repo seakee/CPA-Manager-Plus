@@ -113,9 +113,9 @@ type ExternalConnectOptions struct {
 	// proveModelSurface is the "does the gateway answer" seam.
 	proveModelSurface func(ctx context.Context, baseURL, clientKey string) error
 	// readV8Config is the strict v8 configuration proof seam. Production leaves
-	// it nil and cpa.ReadV8Config runs: an External CPA that answers /v8 but
-	// whose document is not a v8 configuration is not the contract this Manager
-	// writes, and "any 200" is not a proof of it.
+	// it nil and cpa.ReadV8ConfigDocument runs: an External CPA that answers /v8
+	// but whose document is not a v8 configuration is not the contract this
+	// Manager writes, and "any 200" is not a proof of it.
 	readV8Config func(ctx context.Context, baseURL, managementKey string) (cpa.V8ConfigObservation, error)
 	// externalIdentity is the identity seam; production derives the address
 	// digest through freshkeyapply.
@@ -151,10 +151,18 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
 			"the CPA address is not a usable http(s) endpoint; nothing was connected and the operation did not advance", err)
 	}
-	// The address is recorded in its one canonical spelling, so the identity this
-	// step derives is the identity every other producer derives for the same CPA:
-	// a capitalized host, an explicit default port and a trailing slash are one
-	// destination, and hashing the operator's spelling would make them three.
+	// The address is canonicalized here, by the two functions that decide what an
+	// address means: cpa.NormalizeV8BaseURL rejects what cannot be a target, and
+	// identity.CanonicalExternalURL collapses the spellings of one CPA (a
+	// capitalized host, an explicit default port, a trailing slash) into the
+	// single spelling the identity is hashed from.
+	//
+	// Canonicalizing is this step's job, not the identity function's:
+	// freshkeyapply.ExternalIdentity hashes the exact bytes it is given, so every
+	// producer of an External identity must canonicalize first. The Fresh External
+	// commit path does it through the same identity.CanonicalExternalURL; this
+	// step records the canonical spelling in its evidence so the value it compares
+	// on a rerun is the value it persisted.
 	baseURL, err := identity.CanonicalExternalURL(normalized)
 	if err != nil {
 		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
@@ -249,12 +257,21 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 		ClientKeys:        len(snapshot.Keys),
 		ObservedAtMS:      time.Now().UnixMilli(),
 	}
-	if err := writeExternalConnectEvidence(targetRoot, evidence); err != nil {
-		return ExternalConnectResult{}, err
-	}
+	// The row is recorded first and the evidence file second, because the row is
+	// the authority and the file is not: writing the file first left a "connected"
+	// evidence record behind whenever the guarded write below refused (a stage
+	// that moved while the probes ran), so a rerun would have read a connection
+	// the operation never took. With this order a refusal leaves neither, and a
+	// failed evidence write after a committed record only costs a repeated proof —
+	// the row already says the step happened, so the rerun reaches the same
+	// place without contacting a CPA the operation no longer depends on.
 	operation, err := recordExternalConnect(ctx, paths.Database)
 	if err != nil {
 		return ExternalConnectResult{}, err
+	}
+	if err := writeExternalConnectEvidence(targetRoot, evidence); err != nil {
+		return ExternalConnectResult{}, fmt.Errorf(
+			"the External connection was recorded, but its evidence file could not be written: %w", err)
 	}
 	return externalConnectResult(operation, evidence, false), nil
 }
@@ -286,13 +303,13 @@ func externalConnectVersion(ctx context.Context, options ExternalConnectOptions,
 // document this Manager would write into. A translated or proxied target can
 // advertise v8 — or answer any 200 — while its configuration is a v7 document,
 // and connecting to it would land the v2 configuration in a contract that cannot
-// hold it. cpa.ReadV8Config is the strict reader the Fresh External path already
-// uses: exactly one authenticated read, version 8, a bounded port and a non-empty
-// auth-dir, or a refusal.
+// hold it. cpa.ReadV8ConfigDocument is that proof: exactly one authenticated
+// read, classified so a document that declares another generation is a version
+// stop, while a body that is not a v8 document at all is its own stop.
 func externalConnectConfig(ctx context.Context, options ExternalConnectOptions, baseURL, managementKey string) error {
 	read := options.readV8Config
 	if read == nil {
-		read = cpa.ReadV8Config
+		read = cpa.ReadV8ConfigDocument
 	}
 	_, err := read(ctx, baseURL, managementKey)
 	if err == nil {
@@ -303,17 +320,27 @@ func externalConnectConfig(ctx context.Context, options ExternalConnectOptions, 
 		switch readErr {
 		case cpa.V8AuthenticationRejected:
 			return newUpgradeError(UpgradeErrorExternalManagementRejected, externalConnectRejectedDetail, err)
-		case cpa.V8OwnerUpgradeRequired, cpa.V8AdoptionSourceEmpty:
+		case cpa.V8OwnerUpgradeRequired:
 			// The management surface does not serve the v8 document at all: the
 			// owner has to upgrade the CPA before this Manager can write into it.
+			// V8AdoptionSourceEmpty is not listed: only the adoption read produces
+			// it, and this step uses the configuration read, so the arm would be
+			// dead code pretending the two reads are the same.
 			return newUpgradeError(UpgradeErrorExternalVersionUnsupported, externalConnectAction, err)
-		case cpa.V8InvalidConfig, cpa.V8InvalidConnection:
-			// The endpoint answers but its configuration is not the v8 contract.
-			// Naming the version would be a guess; the fact is that the document
-			// cannot hold the write.
+		case cpa.V8InvalidConfig:
+			// A well-formed document that declares another generation: the CPA is
+			// not v8 yet, so the action is to upgrade it.
 			return newUpgradeError(UpgradeErrorExternalVersionUnsupported,
-				fmt.Sprintf("the CPA at %s answered, but its configuration is not the v8 document this Manager writes; nothing was connected and the operation did not advance. %s",
+				fmt.Sprintf("the CPA at %s serves a configuration that is not the v8 document this Manager writes; nothing was connected and the operation did not advance. %s",
 					redactExternalAddress(baseURL), externalConnectAction), err)
+		case cpa.V8ConfigDocumentInvalid, cpa.V8InvalidConnection:
+			// The endpoint answered, but no v8 document came back: a proxy
+			// rewriting the answer, a truncated body, an impossible port. Telling
+			// the operator to upgrade a CPA that may already be v8 sends them
+			// after the wrong cause, so this is its own code with its own action.
+			return newUpgradeError(UpgradeErrorExternalConfigDocumentInvalid,
+				fmt.Sprintf("the CPA at %s answered, but what it served is not a v8 configuration document — a proxy rewriting the answer, a truncated body or an impossible port; nothing was connected and the operation did not advance. The CPA is not the version to look at: check the proxy in front of it and the document it serves, then run the step again",
+					redactExternalAddress(baseURL)), err)
 		}
 	}
 	return externalConnectProbeError(err)
@@ -397,7 +424,8 @@ func externalConnectRefused(ctx context.Context, databasePath string, err error)
 		return err
 	}
 	switch code {
-	case UpgradeErrorExternalVersionUnsupported, UpgradeErrorExternalManagementRejected, UpgradeErrorExternalTargetMoved:
+	case UpgradeErrorExternalVersionUnsupported, UpgradeErrorExternalConfigDocumentInvalid,
+		UpgradeErrorExternalManagementRejected, UpgradeErrorExternalTargetMoved:
 	default:
 		return err
 	}

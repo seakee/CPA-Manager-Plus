@@ -248,13 +248,18 @@ func TestExternalConnectIsIdempotent(t *testing.T) {
 	if !second.AlreadyComplete {
 		t.Fatalf("repeat reported a fresh connection: %+v", second)
 	}
-	if second.Generation != first.Generation || second.UpdatedAtMS != first.UpdatedAtMS {
-		t.Fatalf("repeat churned the record: %+v vs %+v", second, first)
+	// The report is compared against the row, not against the first report: the
+	// first result carries the stamp of the transaction that recorded it, while
+	// reading the same row back can observe a later stamp from the refusal clear
+	// that commits in that transaction. What must not happen is a repeat that
+	// rewrites the row, so the durable value is the one to compare.
+	after := operationRow(t, target.databasePath())
+	if second.Generation != first.Generation || second.UpdatedAtMS != after.UpdatedAtMS {
+		t.Fatalf("repeat churned the record: %+v vs %+v (row %+v)", second, first, after)
 	}
 	if target.probes != probes {
 		t.Fatalf("repeat probed the CPA %d more time(s)", target.probes-probes)
 	}
-	after := operationRow(t, target.databasePath())
 	if after.UpdatedAtMS != before.UpdatedAtMS || len(after.DomainsDone) != len(before.DomainsDone) {
 		t.Fatalf("repeat rewrote the row: %+v vs %+v", after, before)
 	}

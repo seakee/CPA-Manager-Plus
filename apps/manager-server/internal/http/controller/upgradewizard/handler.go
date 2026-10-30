@@ -138,9 +138,10 @@ const (
 // reports. A row that carries one of them has not advanced, so the wizard offers
 // the step that resolves it rather than the reconciliation that follows it.
 var externalConnectRefusals = map[string]bool{
-	"external_cpa_version_unsupported": true,
-	"external_management_key_rejected": true,
-	"external_target_moved":            true,
+	"external_cpa_version_unsupported":     true,
+	"external_cpa_config_document_invalid": true,
+	"external_management_key_rejected":     true,
+	"external_target_moved":                true,
 }
 
 // externalConnectStages are the stages a recorded External refusal can be sitting

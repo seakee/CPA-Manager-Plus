@@ -117,6 +117,15 @@ const (
 	// stage, carries this code, and the owner upgrades the CPA first. There is
 	// no continue-anyway path.
 	UpgradeErrorExternalVersionUnsupported UpgradeErrorCode = cpa.ReasonExternalVersionUnsupported
+	// UpgradeErrorExternalConfigDocumentInvalid reports that the CPA at the
+	// address answered, but what it served on the v8 read cannot be a v8
+	// configuration document: not JSON, truncated, a port outside the TCP range,
+	// or a client-key list that is not a list of strings. It is deliberately
+	// apart from UpgradeErrorExternalVersionUnsupported, because that one tells
+	// the operator to upgrade a CPA that is already v8: here the CPA may be v8
+	// and the document, or a proxy rewriting it, is what failed. Nothing was
+	// connected and the operation did not advance.
+	UpgradeErrorExternalConfigDocumentInvalid UpgradeErrorCode = "external_cpa_config_document_invalid"
 	// UpgradeErrorExternalManagementRejected reports the user's CPA refusing the
 	// management credential — a 401, or the 403 it answers when it bans this
 	// client — so the key is the problem, never the version. Only rebinding the
@@ -191,11 +200,12 @@ var (
 	// External Connect (U1-5). A v7 CPA, a rejected management credential and a
 	// moved target are decisions the owner has to look at; an unreachable target
 	// is an environment condition.
-	ErrExternalVersionUnsupported   = &UpgradeError{Code: UpgradeErrorExternalVersionUnsupported}
-	ErrExternalManagementRejected   = &UpgradeError{Code: UpgradeErrorExternalManagementRejected}
-	ErrExternalTargetMoved          = &UpgradeError{Code: UpgradeErrorExternalTargetMoved}
-	ErrExternalAuthorityUnavailable = &UpgradeError{Code: UpgradeErrorExternalAuthorityUnavailable}
-	ErrExternalNotApplicable        = &UpgradeError{Code: UpgradeErrorExternalNotApplicable}
+	ErrExternalVersionUnsupported    = &UpgradeError{Code: UpgradeErrorExternalVersionUnsupported}
+	ErrExternalConfigDocumentInvalid = &UpgradeError{Code: UpgradeErrorExternalConfigDocumentInvalid}
+	ErrExternalManagementRejected    = &UpgradeError{Code: UpgradeErrorExternalManagementRejected}
+	ErrExternalTargetMoved           = &UpgradeError{Code: UpgradeErrorExternalTargetMoved}
+	ErrExternalAuthorityUnavailable  = &UpgradeError{Code: UpgradeErrorExternalAuthorityUnavailable}
+	ErrExternalNotApplicable         = &UpgradeError{Code: UpgradeErrorExternalNotApplicable}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

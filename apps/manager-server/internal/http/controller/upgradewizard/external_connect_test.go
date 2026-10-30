@@ -25,6 +25,15 @@ func TestNextActionForAnExternalConnectRefusal(t *testing.T) {
 			want:      ActionExternalConnect,
 		},
 		{
+			// The CPA answered, but not with a v8 document. The step recorded its
+			// own code, and the step that resolves it is still the connect step:
+			// nothing about the upgrade advanced.
+			name:      "a document that is not the v8 contract",
+			stage:     StageCPAImport,
+			errorCode: "external_cpa_config_document_invalid",
+			want:      ActionExternalConnect,
+		},
+		{
 			name:      "rejected key",
 			stage:     StageCPAImport,
 			errorCode: "external_management_key_rejected",

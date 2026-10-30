@@ -52,9 +52,11 @@ func ExitCode(err error) int {
 		errors.Is(err, upgradeservice.ErrReconcileTargetIncomplete),
 		errors.Is(err, upgradeservice.ErrReconcileNothingCompared),
 		// The External connect stop is a decision about the user's CPA: a v7
-		// target, a rejected management key, or a target that moved. The owner
-		// has to act, so it shares exit 1 and never reads as a transient error.
+		// target, a rejected management key, a target that moved, or a document
+		// that is not the v8 contract. The owner has to act, so it shares exit 1
+		// and never reads as a transient error.
 		errors.Is(err, upgradeservice.ErrExternalVersionUnsupported),
+		errors.Is(err, upgradeservice.ErrExternalConfigDocumentInvalid),
 		errors.Is(err, upgradeservice.ErrExternalManagementRejected),
 		errors.Is(err, upgradeservice.ErrExternalTargetMoved):
 		return 1

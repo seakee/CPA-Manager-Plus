@@ -27,8 +27,10 @@ type externalCPAServer struct {
 	requests       []string
 }
 
-// v8ConfigDocument is the strict v8 configuration the connect step requires: the
-// version, a bounded port, an auth directory and the client-key list.
+// v8ConfigDocument is a v8 configuration document: the generation a v8 CPA
+// declares, a bounded port, and the client-key list. The auth directory and the
+// list itself are optional in a real document; this one carries both so the
+// server's other answers stay consistent with it.
 const v8ConfigDocument = `{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"/auth"},` +
 	`"access":{"api-keys":["client-key-1"]}}`
 
@@ -272,6 +274,13 @@ func TestExitCodePinsTheExternalRefusals(t *testing.T) {
 	}{
 		{name: "v7 cpa", err: typed(upgradeservice.UpgradeErrorExternalVersionUnsupported), want: 1},
 		{name: "v7 cpa (sentinel)", err: upgradeservice.ErrExternalVersionUnsupported, want: 1},
+		{
+			// The CPA answered with something that is not the v8 document: still a
+			// decision the owner has to look at, never a transient failure.
+			name: "a document that is not the v8 contract",
+			err:  upgradeservice.ErrExternalConfigDocumentInvalid,
+			want: 1,
+		},
 		{name: "rejected key", err: upgradeservice.ErrExternalManagementRejected, want: 1},
 		{name: "moved target", err: upgradeservice.ErrExternalTargetMoved, want: 1},
 		{name: "unreachable cpa", err: typed(upgradeservice.UpgradeErrorExternalAuthorityUnavailable), want: 2},
