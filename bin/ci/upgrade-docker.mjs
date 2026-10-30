@@ -6,12 +6,16 @@
 //
 //   * preflight, copy-in, reconciliation and the persisted status, end to end;
 //   * the two read-only Upgrade wizard routes, on a real Fresh installation,
-//     with the 1.x administrator key and with no secret in the body;
-//   * five isolated fault cases, each asserted by exit code, typed code and an
+//     with the 1.x administrator key, with no secret in the body, and with a
+//     cross-site `Origin` refused on each of them;
+//   * six isolated fault cases, each asserted by exit code, typed code and an
 //     unchanged target root;
 //   * a rollback recorded against a real 1.x stack that wrote after the copy;
 //   * that the manager admits only the Upgrade surface while the operation is
 //     unfinished — both wizard reads included, from the copied root alone —
+//     that those reads keep answering from the Manager store with a typed
+//     `sourceRoot` marker when the 1.x source is no longer mounted while the
+//     preflight keeps its 503, that the copy-in marker window reads `copy_in`,
 //     that it serves the full surface and retires those reads once the operation
 //     is complete, and that a probe answered by the manager itself is refused.
 //
@@ -651,6 +655,61 @@ function assertNoSecretInBody(label, body, secrets) {
   }
 }
 
+// assertOriginRule proves the Upgrade surface's cross-site rule on the given read
+// leaves: browser provenance from another site is refused, a browser on this very
+// origin is served, and an unauthenticated caller never learns the origin verdict
+// — the credential is proved first. With no CPAMP_PUBLIC_ORIGIN configured the
+// request's own scheme and Host are the expected origin, which is what the
+// manager sees here.
+//
+// Both shapes a browser sends are refused: an `Origin` from another site answers
+// the surface's own `origin_rejected` document, and `Sec-Fetch-Site: cross-site`
+// answers 403 as well. On the Fresh admin surface the transport's fetch-metadata
+// policy owns that leg and answers its plain-text refusal first, so `fetchVerdict`
+// names which answer that surface owes: the surface's own code, or
+// `transport_refusal` when the transport's fetch-metadata policy answers first
+// with its plain-text refusal.
+function assertOriginRule(port, base, resources, label, { fetchVerdict = 'origin_rejected' } = {}) {
+  const result = {};
+  const surfaceCode = (answer) => answer.body?.error?.code ?? null;
+  const owesVerdict = (answer, verdict) => (verdict === 'transport_refusal' ? surfaceCode(answer) === null : surfaceCode(answer) === verdict);
+  for (const resource of resources) {
+    const target = `${base}/${resource}`;
+    const crossSite = httpJson('GET', target, {
+      headers: { Authorization: `Bearer ${ADMIN_V1}`, Origin: 'https://upgrade-attacker.invalid' },
+    });
+    assertValue(
+      crossSite.status === 403 && surfaceCode(crossSite) === 'origin_rejected',
+      `${label}: GET ${resource} from a cross-site Origin = ${crossSite.status} ${JSON.stringify(crossSite.body).slice(0, 160)} want 403 origin_rejected`,
+    );
+    const crossSiteFetch = httpJson('GET', target, {
+      headers: { Authorization: `Bearer ${ADMIN_V1}`, 'Sec-Fetch-Site': 'cross-site' },
+    });
+    assertValue(
+      crossSiteFetch.status === 403 && owesVerdict(crossSiteFetch, fetchVerdict),
+      `${label}: GET ${resource} with Sec-Fetch-Site: cross-site = ${crossSiteFetch.status} ${JSON.stringify(crossSiteFetch.body).slice(0, 160)} want 403 ${fetchVerdict}`,
+    );
+    const sameOrigin = httpJson('GET', target, {
+      headers: { Authorization: `Bearer ${ADMIN_V1}`, Origin: `http://127.0.0.1:${port}` },
+    });
+    assertValue(sameOrigin.status === 200, `${label}: GET ${resource} from this very origin = ${sameOrigin.status} want 200`);
+    const anonymous = httpJson('GET', target, { headers: { Origin: 'https://upgrade-attacker.invalid' } });
+    assertValue(
+      anonymous.status === 401,
+      `${label}: anonymous GET ${resource} from a cross-site Origin = ${anonymous.status} want 401: the credential is proved before the origin rule`,
+    );
+    result[resource] = {
+      crossSiteOrigin: crossSite.status,
+      crossSiteFetchMetadata: crossSiteFetch.status,
+      sameOrigin: sameOrigin.status,
+      anonymous: anonymous.status,
+      code: surfaceCode(crossSite),
+      fetchVerdict,
+    };
+  }
+  return result;
+}
+
 // assertWizard proves the two read-only Upgrade routes on a real Fresh
 // installation: the 1.x administrator key is the only credential they accept,
 // the preflight is the real report of the real source, and no secret reaches the
@@ -698,6 +757,7 @@ async function assertWizard(binary, sourceRoot) {
   assertValue(status.status === 200, `wizard status = ${status.status}`);
   assertValue(status.body?.recorded === false, `wizard status recorded = ${status.body?.recorded}`);
   assertValue(status.body?.nextAction === 'preflight', `wizard status nextAction = ${status.body?.nextAction}`);
+  const origin = assertOriginRule(port, base, ['preflight', 'status'], 'wizard', { fetchVerdict: 'transport_refusal' });
 
   // No secret in either body: the source administrator key, the data key
   // material, any absolute path, the full fingerprint or the v2 Admin key.
@@ -720,9 +780,11 @@ async function assertWizard(binary, sourceRoot) {
       write: `refused (${write.status})`,
     },
     noSecretInBody: true,
+    origin,
     bodySha256: { preflight: sha256(JSON.stringify(preflight.body)), status: sha256(JSON.stringify(status.body)) },
   };
   stableFacts.push(`wizard:${preflight.body.ready}:${status.body.nextAction}`);
+  stableFacts.push(`wizard:origin:${origin.preflight.crossSiteOrigin}:${origin.preflight.sameOrigin}:${origin.status.crossSiteOrigin}:${origin.status.sameOrigin}`);
 
   stopHostManager(name);
 }
@@ -776,6 +838,9 @@ function proveWizardReadContract(port, label, expectedStage, sourceRoot) {
       nextAction: proved.body.nextAction,
     };
   }
+  // One origin rule for the whole surface: the entry leaf's cross-site refusal is
+  // the reads' refusal, with the same code.
+  const origin = assertOriginRule(port, base, ['preflight', 'status'], label);
   // Only the two exact leaves are mounted: a query string, a trailing slash, an
   // extra segment and another fixed-carrier resource answer 404 even to the key
   // the reads accept.
@@ -787,6 +852,7 @@ function proveWizardReadContract(port, label, expectedStage, sourceRoot) {
   return {
     credential: { anonymous: 401, v2AdminKey: 401, write: 405, allow: 'GET' },
     pathShapes: 404,
+    origin,
     ...read,
   };
 }
@@ -809,6 +875,65 @@ async function proveUnfinishedAdmission(binary, root, sourceRoot, stage) {
     });
     assertValue(canonical.status === 404, `admission(${stage}): canonical wizard status = ${canonical.status} want 404: the copied root carries no Fresh record`);
     return { health: health.status, surface: 'upgrade-only', ...reads, canonicalWizardStatus: canonical.status };
+  } finally {
+    stopHostManager(name);
+  }
+}
+
+// proveMountlessStatus starts the manager on a root whose recorded operation is
+// unfinished and whose 1.x source is no longer mounted, and proves the projection
+// does not need it: the status answers 200 from the Manager store, keeps the
+// recorded stage, and names the absent source as a typed marker, while the
+// preflight — the step that does need the source — keeps its typed 503. The
+// credential is the store's own, which is the key the mount accepted, so the key
+// kept in the other file stays refused.
+async function proveMountlessStatus(binary, root, stage) {
+  const port = freePort();
+  const name = `${PREFIX}-mountless-${stage.replace(/_/g, '')}`;
+  // An explicit absent mount, so the case does not depend on the host's /legacy.
+  const absentRoot = path.join(SCRATCH, 'work', 'mountless', `${stage}-absent`);
+  fs.rmSync(absentRoot, { recursive: true, force: true });
+  startHostManager({ name, binary, dataDir: root, port, adminKey: ADMIN_V2, legacyRoot: absentRoot });
+  const label = `mountless(${stage})`;
+  try {
+    await waitForHealth(port, `${name} /health`, 503);
+    const base = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
+    const status = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+    assertValue(status.status === 200, `${label}: status without the source mount = ${status.status}: ${JSON.stringify(status.body).slice(0, 200)} want 200`);
+    assertValue(status.body?.recorded === true, `${label}: status recorded without the source mount = ${status.body?.recorded}`);
+    assertValue(status.body?.evidence === 'operation_row', `${label}: status evidence = ${status.body?.evidence} want operation_row`);
+    assertValue(status.body?.stage === stage, `${label}: status stage without the source mount = ${status.body?.stage} want ${stage}`);
+    assertValue(status.body?.nextAction === stage, `${label}: status nextAction without the source mount = ${status.body?.nextAction} want ${stage}`);
+    // The mount is named, not hidden: the projection says what the operator has
+    // to supply, with the same code the preflight reports.
+    assertValue(
+      status.body?.sourceRoot === 'upgrade_legacy_root_missing',
+      `${label}: status sourceRoot = ${status.body?.sourceRoot} want upgrade_legacy_root_missing`,
+    );
+    assertNoSecretInBody(`${label}: status`, status.body, [ADMIN_V1, ADMIN_V2, root, SCRATCH, absentRoot]);
+    // The store is the credential, and it holds the source's key: the key the
+    // mount accepted keeps working, the other file's key never does.
+    const foreign = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V2}` } });
+    assertValue(foreign.status === 401, `${label}: status with the v2 Admin key = ${foreign.status} want 401 without the mount`);
+    const preflight = httpJson('GET', `${base}/preflight`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+    assertValue(
+      preflight.status === 503 && preflight.body?.error?.code === 'upgrade_legacy_root_missing',
+      `${label}: preflight without the source mount = ${preflight.status} ${JSON.stringify(preflight.body).slice(0, 160)} want 503 upgrade_legacy_root_missing`,
+    );
+    return {
+      mount: 'absent',
+      health: 503,
+      status: {
+        status: status.status,
+        recorded: status.body.recorded,
+        evidence: status.body.evidence,
+        stage: status.body.stage,
+        nextAction: status.body.nextAction,
+        sourceRoot: status.body.sourceRoot,
+      },
+      preflight: { status: preflight.status, code: preflight.body?.error?.code },
+      credential: { storeAdminKey: status.status, v2AdminKey: foreign.status },
+    };
   } finally {
     stopHostManager(name);
   }
@@ -862,6 +987,13 @@ async function assertAdmission(binary, workspace) {
 
   const copyIn = await proveUnfinishedAdmission(binary, copyInRoot, sourceRoot, 'copy_in');
   const reconcile = await proveUnfinishedAdmission(binary, workspace.main.target, sourceRoot, 'reconcile');
+  // The same two roots with the source mount gone: the recorded stage is still
+  // readable, and the missing source is a typed marker on a 200 rather than a
+  // refusal to answer.
+  const mountless = {
+    copy_in: await proveMountlessStatus(binary, copyInRoot, 'copy_in'),
+    reconcile: await proveMountlessStatus(binary, workspace.main.target, 'reconcile'),
+  };
 
   // Completion is the terminal stage on the row the copy-in recorded. No
   // completion transition ships in this milestone (it is the operation's own
@@ -884,11 +1016,18 @@ async function assertAdmission(binary, workspace) {
   evidence.admission = {
     surface: 'upgrade-only',
     states: { copy_in: copyIn, reconcile },
+    mountless,
     completed,
     completionInput: 'terminal stage written onto the row the real copy-in recorded; the evidence the admission demands is the copy-in\'s own',
   };
   stableFacts.push(`admission:copy_in:${copyIn.health}:${copyIn.status.status}:${copyIn.status.stage}:${copyIn.status.nextAction}:${copyIn.preflight.status}`);
   stableFacts.push(`admission:reconcile:${reconcile.health}:${reconcile.status.status}:${reconcile.status.stage}:${reconcile.status.nextAction}:${reconcile.preflight.status}`);
+  stableFacts.push(
+    `admission:mountless:copy_in:${mountless.copy_in.status.status}:${mountless.copy_in.status.stage}:${mountless.copy_in.status.nextAction}:${mountless.copy_in.status.sourceRoot}:${mountless.copy_in.preflight.status}:${mountless.copy_in.preflight.code}`,
+  );
+  stableFacts.push(
+    `admission:mountless:reconcile:${mountless.reconcile.status.status}:${mountless.reconcile.status.stage}:${mountless.reconcile.status.nextAction}:${mountless.reconcile.status.sourceRoot}:${mountless.reconcile.preflight.status}:${mountless.reconcile.preflight.code}`,
+  );
   stableFacts.push(`admission:complete:${completed.health}:${completed.status}:${completed.preflight}`);
 }
 
@@ -927,6 +1066,45 @@ function faultSourceTouched(binary, workspace) {
   assertValue(code === 'upgrade_source_changed', `touched: refusal code=${code}`);
   assertValue(dirDigest(target) === digestAfterTouch, 'touched: the refused rollback plan wrote the v2 data root');
   recordFault('source-touched-after-copy-in', prepare, code, true, { rerunExit: rerun.code, rerunStage: rerunReport.operation.stage });
+}
+
+// proveCopyInMarkerWindow reads the window the interrupted copy-in leaves behind
+// over the operator's own HTTP projection. The provenance marker is published
+// before the operation row commits, so the store holds a marker and no row:
+// status must report the copy_in the admission already enforces, name the marker
+// as its evidence, and offer copy_in as the next action instead of claiming that
+// nothing had started.
+async function proveCopyInMarkerWindow(binary, target, sourceRoot) {
+  const port = freePort();
+  const name = `${PREFIX}-marker-window`;
+  const label = 'marker-window';
+  startHostManager({ name, binary, dataDir: target, port, adminKey: ADMIN_V2, legacyRoot: sourceRoot });
+  try {
+    await waitForHealth(port, `${name} /health`, 503);
+    const base = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
+    const status = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+    assertValue(status.status === 200, `${label}: status = ${status.status}: ${JSON.stringify(status.body).slice(0, 200)} want 200`);
+    assertValue(status.body?.recorded === true, `${label}: status recorded = ${status.body?.recorded} want true: the marker records an operation in progress`);
+    assertValue(status.body?.evidence === 'copy_in_marker', `${label}: status evidence = ${status.body?.evidence} want copy_in_marker`);
+    assertValue(status.body?.stage === 'copy_in', `${label}: status stage = ${status.body?.stage} want copy_in`);
+    assertValue(
+      status.body?.nextAction === 'copy_in',
+      `${label}: status nextAction = ${status.body?.nextAction} want copy_in, not the step before any work started`,
+    );
+    assertValue(status.body?.sourceRoot === 'available', `${label}: status sourceRoot = ${status.body?.sourceRoot} want available`);
+    assertNoSecretInBody(`${label}: status`, status.body, [ADMIN_V1, ADMIN_V2, sourceRoot, target, SCRATCH]);
+    return {
+      status: status.status,
+      recorded: status.body.recorded,
+      evidence: status.body.evidence,
+      stage: status.body.stage,
+      nextAction: status.body.nextAction,
+      sourceRoot: status.body.sourceRoot,
+      domainsDone: status.body.domainsDone,
+    };
+  } finally {
+    stopHostManager(name);
+  }
 }
 
 // 2. The copy-in is killed after materialize and before the operation row
@@ -973,6 +1151,9 @@ async function faultInterruptedCopyIn(binary, workspace) {
   const statusReport = parseJson(status.stdout, 'interrupted:status');
   assertValue(statusReport.recorded === false, 'interrupted: an operation row was committed before the migration finished');
 
+  // The window the marker covers, read over the projection the operator uses.
+  const markerWindow = await proveCopyInMarkerWindow(binary, target, source);
+
   const resume = runCli(binary, ['upgrade', 'run', '--legacy', source, '--target', target, '--json'], 'interrupted:resume', { expectExit: 0 });
   const resumeReport = parseJson(resume.stdout, 'interrupted:resume');
   assertValue(resumeReport.result?.stage === 'copy_in', `interrupted: resume stage=${resumeReport.result?.stage}`);
@@ -990,8 +1171,10 @@ async function faultInterruptedCopyIn(binary, workspace) {
     recordedBeforeResume: false,
     resumedStage: resumeReport.result.stage,
     restoredAgain: resumeReport.result.restored,
+    markerWindow,
   });
   stableFacts.push('fault:interrupted:resumed');
+  stableFacts.push(`fault:interrupted:marker-window:${markerWindow.status}:${markerWindow.recorded}:${markerWindow.evidence}:${markerWindow.stage}:${markerWindow.nextAction}:${markerWindow.sourceRoot}`);
 }
 
 // 3. A derived rollup cleared on a target that still holds the retained events
