@@ -25,8 +25,8 @@ const (
 // Bearer value — against the surface's one resolved source, so no
 // surface-level session or "authorize everything" hook can stand in for it.
 // Both routes only read.
-func (a *freshApplication) newUpgradeWizard() upgradewizard.Handler {
-	return upgradewizard.Handler{
+func (a *freshApplication) newUpgradeWizard() *upgradewizard.Handler {
+	return &upgradewizard.Handler{
 		LegacyRoot:   configuredLegacyRoot,
 		PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
 		Database:     func() string { return a.cfg.DBPath },

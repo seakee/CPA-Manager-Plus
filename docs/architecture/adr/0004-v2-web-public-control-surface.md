@@ -280,12 +280,22 @@ after the entry leaf was built is seen by the reads first: they fall back to the
 Manager store immediately, and the entry leaf keeps its startup resolution until
 it is rebuilt.
 
-The wizard reads inspect the mount at most once per request — authentication and
-the status marker share that one answer — and the lookup runs under a bound
-(`MountLookupTimeout`, 2s). The filesystem calls behind it cannot be cancelled,
-so the lookup runs on its own goroutine and the request stops waiting at the
-bound: a mount that never answers reports `upgrade_source_unreadable` instead of
-holding every status poll open.
+The wizard reads decide the credential's shape and the browser's origin from the
+request alone, and only then inspect the mount: a caller that presents no
+credential, and a cross-site caller whatever it presents, performs no filesystem
+work at all. A caller that does present a credential shape is tested against the
+surface's resolved file — the mount's own database when the shared file policy
+accepts it — so it pays one lookup, which the authentication and the status
+marker share for that request. The lookup runs under a bound
+(`MountLookupTimeout`, 2s), and at most one lookup per handler is in flight: the
+filesystem calls behind it cannot be cancelled, so the lookup runs on its own
+goroutine, the request stops waiting at the bound, and a poll that arrives while
+a hung lookup is still running joins that same lookup instead of starting
+another. A mount that never answers therefore holds one goroutine however many
+polls arrive, and reports `upgrade_mount_timeout` — a retry — instead of holding
+every status poll open or naming an unreadable database. The lookup itself is a
+handler field, so the package holds no mutable state and a test's substitution
+belongs to one handler.
 
 The entry leaf additionally runs the bounded public observation to project
 `unsupported_upgrade`. That observation deliberately refuses a WAL source as
@@ -300,7 +310,7 @@ mount. It reports the recorded stage plus a typed `sourceRoot` marker:
 `upgrade_legacy_root_missing` / `upgrade_legacy_root_unusable` for the
 configured directory, `upgrade_source_missing` / `upgrade_source_symlinked` /
 `upgrade_source_lock_unavailable` from the shared database file policy, and
-`upgrade_source_unreadable` when the lookup outlived its bound. Those are the
+`upgrade_mount_timeout` when the lookup outlived its bound. Those are the
 only values, and the list is exactly the reachable ones. The marker answers the
 file policy, which is the same question the credential resolution asks — that is
 why a mount whose database is a link is named `upgrade_source_symlinked` while

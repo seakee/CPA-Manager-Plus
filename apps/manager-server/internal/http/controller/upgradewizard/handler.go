@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	// The projection opens the Manager store read-only through database/sql.
@@ -52,14 +53,19 @@ const (
 // runs on every request, the preflight only when the wizard asks for a report.
 const DefaultTimeout = 30 * time.Second
 
-// MountLookupTimeout bounds the per-request mount lookup. The lookup is a few
-// filesystem calls on the operator's mount and normally answers in
-// microseconds, but none of them can be cancelled: on a hung network mount they
-// never return, and every status poll would wait on them. It is set beside
+// MountLookupTimeout bounds the per-request wait on the mount lookup. The
+// lookup is a few filesystem calls on the operator's mount and normally answers
+// in microseconds, but none of them can be cancelled: on a hung network mount
+// they never return, and every status poll would wait on them. It is set beside
 // upgradeservice.CredentialVerifyTimeout because it gates the same
 // authentication, and kept separate from it because the two failures differ: a
-// lookup that outlives this bound is a mount condition the projection names,
-// while a credential read that outlives its own bound is a retry.
+// lookup that outlives this bound is a mount that did not answer in time —
+// reported as CodeMountTimeout, and a retry is reasonable — while a credential
+// read that outlives its own bound is a retry on a slow source.
+//
+// The bound is not the only protection: at most one lookup per handler is in
+// flight at a time, so a mount that never answers holds exactly one goroutine
+// however many status polls arrive; see Handler.resolveMount.
 const MountLookupTimeout = 2 * time.Second
 
 // CodeAdminUnauthorized is the negative identity verdict. It is the only 401
@@ -78,6 +84,14 @@ const (
 	// exists but did not answer in time. It is not an unreadable source and never
 	// a wrong key.
 	CodeCredentialTimeout = upgradeservice.CodeCredentialTimeout
+	// CodeMountTimeout is the mount lookup's deadline verdict: the configured
+	// mount did not answer inside MountLookupTimeout, so it was never assessed.
+	// It is deliberately not CodeSourceUnreadable — that code says the database
+	// is there and cannot be read, and its copy sends the operator to volume
+	// permissions — because a mount that is only slow is repaired by trying
+	// again, not by changing a file this surface never opened. The status marker
+	// and a 503 both carry this code.
+	CodeMountTimeout = "upgrade_mount_timeout"
 	// CodeSourceSymlinked is the shared database file policy's refusal of a source
 	// reached through a link. The preflight reports the same code for the same
 	// mount.
@@ -152,6 +166,14 @@ const domainSourceCopy = "source_copy"
 // point authentication at a file the policy refused. No session, cookie or Fresh
 // claim is a substitute, and an absent decision cannot read as allow.
 //
+// The order is credential shape, then browser origin, then the credential, then
+// the route's own question. The credential's file is the mount's database when
+// the shared file policy accepts it, so that lookup is part of proving the key:
+// it runs after the two gates that need no filesystem at all, it is bounded, at
+// most one lookup per handler is in flight, and the sourceRoot marker reuses the
+// answer the request already paid for. A caller that presents no credential and
+// a cross-site caller reach no filesystem call at all.
+//
 // Browser callers are same-origin only, exactly as on the entry leaf.
 type Handler struct {
 	// LegacyRoot returns the configured 1.x data directory. It is read only,
@@ -168,12 +190,36 @@ type Handler struct {
 	Database func() string
 	// Timeout bounds one preflight. Zero uses DefaultTimeout.
 	Timeout time.Duration
-	// MountTimeout bounds the mount lookup, which every request runs before it
-	// authenticates. Zero uses MountLookupTimeout.
+	// MountTimeout bounds the per-request wait on the mount lookup. Zero uses
+	// MountLookupTimeout.
 	MountTimeout time.Duration
+
+	// lookupMount is the test seam for the mount lookup: a test substitutes a
+	// lookup that never answers to prove the bound and the one-in-flight rule.
+	// Production leaves it nil and the package's own inspectMount runs, so no
+	// caller — and no test — can install a second filesystem policy. It is a
+	// field rather than a package variable so the substitution belongs to one
+	// handler and cannot leak into a parallel test.
+	lookupMount func(root string) mountResolution
+	// mountMu guards mountFlight, and mountFlight is the lookup a request joins
+	// instead of starting another. Both live on the Handler: the one-in-flight
+	// rule is per handler, and the previous answer (or the bound's verdict) is
+	// shared by every poll that arrives while a hung mount is being probed.
+	mountMu     sync.Mutex
+	mountFlight *mountFlight
 }
 
-func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// mountFlight is one mount lookup in progress. The goroutine that runs it fills
+// answer and closes done; every request that arrives meanwhile waits on done
+// instead of starting a second lookup, so a mount that never answers cannot
+// accumulate one goroutine per poll.
+type mountFlight struct {
+	root   string
+	done   chan struct{}
+	answer mountResolution
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -181,16 +227,37 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// One mount lookup serves the whole request: authentication and the
-	// sourceRoot marker ask the same question, and asking it twice doubled the
-	// filesystem work on every status poll.
-	mount := h.resolveMount(r.Context())
 	// The credential comes first on every surface order. An unauthenticated
 	// caller therefore learns nothing about which resources exist or which verb
 	// they take: an absent, wrong or unreadable credential is the only answer it
 	// ever gets, whether the path is real, unknown, or read with the wrong
 	// method.
-	if !h.authenticate(w, r, mount) {
+	//
+	// The shape of the credential and the browser's origin are decided from the
+	// request alone, and both are decided before the mount is touched: a caller
+	// that presents no credential, and a cross-site caller whatever it presents,
+	// performs no filesystem lookup at all. A caller that does present a
+	// credential shape from its own origin is one the surface has to test, and
+	// the file it tests is the mount's own database, so it pays exactly one
+	// bounded, shared lookup (see resolveMount).
+	key, ok := bearerKey(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
+		return
+	}
+	// One origin rule for the whole surface: the entry leaf applies it with this
+	// same helper, so the page that authenticates and the reads behind it cannot
+	// accept different browser origins.
+	if upgradesurface.CrossSite(r, h.PublicOrigin) {
+		writeError(w, http.StatusForbidden, upgradesurface.CodeOriginRejected)
+		return
+	}
+	// One mount lookup serves the whole request: the credential's file is the
+	// surface's one resolved source — the mount's database when the shared file
+	// policy accepts it, otherwise the Manager store — so proving the key needs
+	// that answer, and the sourceRoot marker asks the same question again.
+	mount := h.resolveMount(r.Context())
+	if !h.authenticate(w, r, mount, key) {
 		return
 	}
 	if r.URL.RawQuery != "" {
@@ -220,23 +287,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // authenticate proves the caller holds the source administrator credential. The
-// key is bounded and trimmed here; nothing else about the request (a session
-// header, a cookie) can stand in for it, and a browser asking from another
-// origin is refused before the credential is even read. The mount was inspected
-// once for this request, so both routes and both questions share one answer.
-func (h Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mountResolution) bool {
-	key, ok := bearerKey(r)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
-		return false
-	}
-	// One origin rule for the whole surface: the entry leaf applies it with this
-	// same helper, so the page that authenticates and the reads behind it cannot
-	// accept different browser origins.
-	if upgradesurface.CrossSite(r, h.PublicOrigin) {
-		writeError(w, http.StatusForbidden, upgradesurface.CodeOriginRejected)
-		return false
-	}
+// key was bounded and trimmed by bearerKey, and the browser's origin was decided
+// before this runs; nothing else about the request (a session header, a cookie)
+// can stand in for the key. The mount was inspected once for this request, so
+// both routes and both questions share one answer.
+func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mountResolution, key string) bool {
 	if mount.expired {
 		// The caller's own deadline had already passed. The credential read
 		// reports that as a deadline, and it is the honest verdict here too: the
@@ -283,7 +338,7 @@ func (h Handler) authenticate(w http.ResponseWriter, r *http.Request, mount moun
 // so no leaf and no caller can point authentication at a file the policy
 // refused. When neither file exists the answer is the mount's own condition:
 // the operator's next move is to fix that mount, not to guess at a credential.
-func (h Handler) credentialDatabase(mount mountResolution) (string, int, string) {
+func (h *Handler) credentialDatabase(mount mountResolution) (string, int, string) {
 	if database := upgradeservice.CredentialDatabaseFrom(mount.database, h.managerDatabase()); database != "" {
 		return database, 0, ""
 	}
@@ -295,7 +350,7 @@ func (h Handler) credentialDatabase(mount mountResolution) (string, int, string)
 
 // managerDatabase is the Manager store the surface reads and falls back to. It
 // is the operation row's own database on both carriers.
-func (h Handler) managerDatabase() string {
+func (h *Handler) managerDatabase() string {
 	if h.Database == nil {
 		return ""
 	}
@@ -313,9 +368,10 @@ type mountResolution struct {
 	database string
 	// code names why the mount is not usable: the configured directory itself
 	// (upgrade_legacy_root_missing / _unusable), the shared database file
-	// policy's refusal of the file inside it, or upgrade_source_unreadable when
-	// the lookup outlived its bound. It is the code the preflight uses for the
-	// same condition.
+	// policy's refusal of the file inside it, or upgrade_mount_timeout when the
+	// lookup outlived its bound. It is the code the preflight uses for the same
+	// condition, except the deadline: a mount that did not answer in time is
+	// named as that, not as an unreadable database.
 	code string
 	// expired reports a request whose own deadline had already passed, so the
 	// lookup never ran.
@@ -344,42 +400,86 @@ func (m mountResolution) rootInspects() bool {
 	return m.code == CodeLegacyRootMissing || m.code == CodeLegacyRootUnusable
 }
 
-// resolveMount answers the mount question once for the request, inside a bound
-// (Low-3). The filesystem calls behind it cannot be cancelled, so the lookup
-// runs on its own goroutine and the request stops waiting at the bound; the
-// goroutine finishes whenever the mount answers and holds no lock until then.
-func (h Handler) resolveMount(ctx context.Context) mountResolution {
+// resolveMount answers the mount question once for the request, inside a bound.
+// The filesystem calls behind it cannot be cancelled, so the lookup runs on its
+// own goroutine and the request stops waiting at the bound.
+//
+// Two properties come from that, and neither depends on the mount answering:
+//
+//   - The bound is a deadline, not a lease. A lookup that outlives
+//     MountLookupTimeout answers CodeMountTimeout — the mount did not answer in
+//     time, which is a retry, not a file the operator has to repair — and the
+//     request is answered without it.
+//   - At most one lookup is in flight per handler. A poll that arrives while a
+//     hung lookup is still running joins that same flight instead of starting
+//     another, and takes its answer when it lands or its own bound's verdict if
+//     it does not. A mount that never answers therefore holds one goroutine,
+//     however many polls arrive, instead of one goroutine per poll.
+func (h *Handler) resolveMount(ctx context.Context) mountResolution {
 	root := ""
 	if h.LegacyRoot != nil {
 		root = strings.TrimSpace(h.LegacyRoot())
+	}
+	// A caller whose own deadline had already passed learns nothing from a
+	// lookup, and no mount condition may replace that deadline's verdict.
+	if ctx.Err() != nil {
+		return mountResolution{root: root, expired: true}
 	}
 	timeout := h.MountTimeout
 	if timeout <= 0 {
 		timeout = MountLookupTimeout
 	}
-	bounded, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	answers := make(chan mountResolution, 1)
-	lookup := inspectMount
-	go func() { answers <- lookup(root) }()
+	flight := h.joinMountFlight(root)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
-	case resolution := <-answers:
-		return resolution
-	case <-bounded.Done():
-		if ctx.Err() != nil {
-			return mountResolution{root: root, expired: true}
-		}
-		// The lookup outlived its bound: the mount could not be inspected, which
-		// is a condition on the mount, not on the credential.
-		return mountResolution{root: root, code: CodeSourceUnreadable}
+	case <-flight.done:
+		return flight.answer
+	case <-ctx.Done():
+		return mountResolution{root: root, expired: true}
+	case <-timer.C:
+		// The lookup outlived its bound. The goroutine keeps running — its
+		// filesystem calls cannot be cancelled — but it is not replaced: the
+		// flight stays in place and the next poll joins it.
+		return mountResolution{root: root, code: CodeMountTimeout}
 	}
 }
 
-// inspectMount is the bounded body of resolveMount: the configured directory's
-// own condition, then the shared database file policy. It is a variable only so
-// a test can substitute a lookup that never answers and prove the bound; the
-// production value is the service layer's own lookup, never a second policy.
-var inspectMount = func(root string) mountResolution {
+// joinMountFlight returns this request's share of the mount answer: the lookup
+// already in flight for this root, or a new one started here. The configured
+// root is fixed for the lifetime of a handler, so a flight is shared by every
+// concurrent poll; a different root retires the previous flight rather than
+// answering about another directory.
+func (h *Handler) joinMountFlight(root string) *mountFlight {
+	lookup := inspectMount
+	if h.lookupMount != nil {
+		lookup = h.lookupMount
+	}
+	h.mountMu.Lock()
+	defer h.mountMu.Unlock()
+	if h.mountFlight != nil && h.mountFlight.root == root {
+		return h.mountFlight
+	}
+	flight := &mountFlight{root: root, done: make(chan struct{})}
+	h.mountFlight = flight
+	go func() {
+		answer := lookup(root)
+		h.mountMu.Lock()
+		flight.answer = answer
+		if h.mountFlight == flight {
+			h.mountFlight = nil
+		}
+		h.mountMu.Unlock()
+		close(flight.done)
+	}()
+	return flight
+}
+
+// inspectMount is the body of resolveMount: the configured directory's own
+// condition, then the shared database file policy. It is a function, not a
+// package variable: a test substitutes it through Handler.lookupMount, so the
+// package holds no mutable state and a substitution cannot leak between tests.
+func inspectMount(root string) mountResolution {
 	if root == "" {
 		return mountResolution{code: CodeLegacyRootMissing}
 	}
@@ -459,7 +559,7 @@ type preflightDocument struct {
 // The mount the request already inspected supplies the root; only the two
 // directory-level conditions short-circuit it, because those leave nothing to
 // inspect.
-func (h Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount mountResolution) {
+func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount mountResolution) {
 	if mount.rootInspects() {
 		writeError(w, http.StatusServiceUnavailable, mount.code)
 		return
@@ -550,7 +650,7 @@ type statusDocument struct {
 	UpdatedAtMS    int64           `json:"updatedAtMs"`
 }
 
-func (h Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount mountResolution) {
+func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount mountResolution) {
 	database := h.managerDatabase()
 	if database == "" {
 		writeError(w, http.StatusServiceUnavailable, CodeOperationUnread)

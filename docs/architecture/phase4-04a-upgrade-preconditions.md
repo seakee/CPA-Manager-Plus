@@ -347,10 +347,17 @@ on both surfaces at once, and no write route exists.
   `upgrade_source_missing` for an absent or empty file,
   `upgrade_source_lock_unavailable` for a hard-linked or otherwise uninspectable
   one) and the status projection reports it as its `sourceRoot` marker.
-  The lookup is asked at most once per request — authentication and the marker
-  share the answer — and it runs under `MountLookupTimeout` (2s), because the
-  filesystem calls behind it cannot be cancelled: a mount that never answers is
-  reported as `upgrade_source_unreadable` instead of holding the poll open.
+  The lookup belongs to the request that presented a credential shape from the
+  request's own origin: no credential and a cross-site request never reach it,
+  and an admitted request asks it at most once — authentication and the marker
+  share that answer. It runs under `MountLookupTimeout` (2s) and at most one
+  lookup per handler is in flight, because the filesystem calls behind it cannot
+  be cancelled: a poll that arrives while a hung lookup is running joins it
+  instead of starting another, and a mount that never answers is reported as
+  `upgrade_mount_timeout` — a retry, not a database the operator has to repair —
+  instead of holding the poll open. The lookup is a handler field rather than a
+  package variable, so a test substitutes it for one handler and the package
+  holds no mutable state.
   `503 upgrade_source_symlinked` on a leaf therefore means the resolved file
   itself is a link — in practice the Manager store — never the mount the
   operator mounted through one. SQLite opens lazily on the first query, so
@@ -364,7 +371,10 @@ on both surfaces at once, and no write route exists.
   both the entry leaf and these two routes: an unauthenticated caller receives
   `401` whatever its method and whatever the path, so it cannot tell a real
   route from an unknown one or learn which method a route takes. Only a proved
-  credential sees `405` (`Allow: GET`) or `404`.
+  credential sees `405` (`Allow: GET`) or `404`. The mount lookup itself sits
+  behind the two gates that need no filesystem at all — the credential's shape
+  and the browser's origin — so a caller that presents no credential, and a
+  cross-site caller whatever it presents, makes the reads touch no file.
 - **Failure order.** `401` is reserved for a credential verdict. A missing or
   unusable mount answers `503 upgrade_legacy_root_missing` /
   `upgrade_legacy_root_unusable`; a configured mount whose database the file
@@ -374,7 +384,7 @@ on both surfaces at once, and no write route exists.
   and only when there is no Manager store to fall back to — with one, the
   credential resolves there and the refusal is reported as the `sourceRoot`
   marker instead; a mount lookup that outlives its bound answers
-  `503 upgrade_source_unreadable`; a credential read that exceeds its bound
+  `503 upgrade_mount_timeout`; a credential read that exceeds its bound
   answers `503 upgrade_credential_timeout`; a resolved database that is itself a
   link answers `503 upgrade_source_symlinked`; a source that exists but cannot be
   read to verify the key answers `503 upgrade_source_unreadable`. None of these is
@@ -402,7 +412,7 @@ on both surfaces at once, and no write route exists.
   `upgrade_legacy_root_unusable` for the configured directory,
   `upgrade_source_missing` / `upgrade_source_symlinked` /
   `upgrade_source_lock_unavailable` from the shared database file policy, and
-  `upgrade_source_unreadable` when the lookup outlived its bound.
+  `upgrade_mount_timeout` when the lookup outlived its bound.
   The marker mirrors the file policy, not the preflight: a mount whose ownership
   marker is absent or busy, or whose database fails its integrity check, still
   reads `available` here and is refused by the preflight, which is the step that

@@ -669,9 +669,9 @@ function assertNoSecretInBody(label, body, secrets) {
 // assertOriginRule proves the Upgrade surface's cross-site rule on the given read
 // leaves: browser provenance from another site is refused, a browser on this very
 // origin is served, and an unauthenticated caller never learns the origin verdict
-// — the credential is proved first. With no CPAMP_PUBLIC_ORIGIN configured the
-// request's own scheme and Host are the expected origin, which is what the
-// manager sees here.
+// — the credential's shape is decided first, from the request alone. With no
+// CPAMP_PUBLIC_ORIGIN configured the request's own scheme and Host are the
+// expected origin, which is what the manager sees here.
 //
 // Both shapes a browser sends are refused: an `Origin` from another site answers
 // the surface's own `origin_rejected` document, and `Sec-Fetch-Site: cross-site`
@@ -707,7 +707,7 @@ function assertOriginRule(port, base, resources, label, { fetchVerdict = 'origin
     const anonymous = httpJson('GET', target, { headers: { Origin: 'https://upgrade-attacker.invalid' } });
     assertValue(
       anonymous.status === 401,
-      `${label}: anonymous GET ${resource} from a cross-site Origin = ${anonymous.status} want 401: the credential is proved before the origin rule`,
+      `${label}: anonymous GET ${resource} from a cross-site Origin = ${anonymous.status} want 401: the credential's shape is decided before the origin rule`,
     );
     result[resource] = {
       crossSiteOrigin: crossSite.status,

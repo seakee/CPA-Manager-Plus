@@ -63,6 +63,8 @@ const en = {
   codeUpgradeDiskInsufficient: 'There is not enough free space for the copy.',
   codeUpgradeCredentialTimeout:
     'The source did not answer in time to verify the administrator key. Try again when the host is idle.',
+  codeUpgradeMountTimeout:
+    'The mounted 1.x volume did not answer in time, so it was never inspected. Try again when the host responds; nothing was read from it or written to it.',
   codeUpgradeLegacyRootMissing:
     'No 1.x data directory is mounted. Mount it read-only and try again.',
   codeUpgradeLegacyRootUnusable: 'The mounted 1.x data directory cannot be used.',
@@ -217,6 +219,8 @@ const zh: typeof en = {
   codeUpgradeSourceVersionUnsupported: '该 1.x 版本不能作为升级来源。',
   codeUpgradeDiskInsufficient: '复制所需的可用空间不足。',
   codeUpgradeCredentialTimeout: '来源未在限定时间内响应，无法验证管理员密钥。请在宿主机空闲时重试。',
+  codeUpgradeMountTimeout:
+    '已挂载的 1.x 卷未在限定时间内响应，因此未能检查。请在宿主机可响应时重试；本次未从该卷读取任何内容，也未写入任何内容。',
   codeUpgradeLegacyRootMissing: '未挂载 1.x 数据目录。请只读挂载后重试。',
   codeUpgradeLegacyRootUnusable: '已挂载的 1.x 数据目录不可用。',
   codeUpgradePreflightTimeout: '预检未在限定时间内完成。请在宿主机空闲时重新预检。',
@@ -356,6 +360,8 @@ const tw: typeof en = {
   codeUpgradeSourceVersionUnsupported: '此 1.x 版本不能作為升級來源。',
   codeUpgradeDiskInsufficient: '複製所需的可用空間不足。',
   codeUpgradeCredentialTimeout: '來源未在限定時間內回應，無法驗證管理員金鑰。請在主機閒置時重試。',
+  codeUpgradeMountTimeout:
+    '已掛載的 1.x 磁碟區未在限定時間內回應，因此未能檢查。請在主機可回應時重試；本次未從該磁碟區讀取任何內容，也未寫入任何內容。',
   codeUpgradeLegacyRootMissing: '未掛載 1.x 資料目錄。請以唯讀方式掛載後重試。',
   codeUpgradeLegacyRootUnusable: '已掛載的 1.x 資料目錄不可用。',
   codeUpgradePreflightTimeout: '預檢未在限定時間內完成。請在主機閒置時重新預檢。',
@@ -497,6 +503,8 @@ const ru: typeof en = {
   codeUpgradeDiskInsufficient: 'Недостаточно свободного места для копирования.',
   codeUpgradeCredentialTimeout:
     'Источник не ответил вовремя, поэтому ключ администратора не проверен. Повторите, когда хост свободен.',
+  codeUpgradeMountTimeout:
+    'Смонтированный том 1.x не ответил вовремя, поэтому проверка не выполнялась. Повторите, когда хост ответит; из тома ничего не читалось и в него ничего не записывалось.',
   codeUpgradeLegacyRootMissing: 'Каталог данных 1.x не смонтирован. Смонтируйте его только для чтения и повторите.',
   codeUpgradeLegacyRootUnusable: 'Смонтированный каталог данных 1.x непригоден.',
   codeUpgradePreflightTimeout: 'Проверка не завершилась вовремя. Повторите её, когда хост свободен.',
@@ -661,6 +669,8 @@ export function blockedCodeText(code: string, language = fullWebLanguage()): str
       return upgradeWizardText('codeUpgradeDiskInsufficient', language);
     case 'upgrade_credential_timeout':
       return upgradeWizardText('codeUpgradeCredentialTimeout', language);
+    case 'upgrade_mount_timeout':
+      return upgradeWizardText('codeUpgradeMountTimeout', language);
     case 'upgrade_legacy_root_missing':
       return upgradeWizardText('codeUpgradeLegacyRootMissing', language);
     case 'upgrade_legacy_root_unusable':

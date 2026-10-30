@@ -46,7 +46,7 @@ node bin/ci/upgrade-docker.mjs --keep          # keep the scratch tree
 | admission, unfinished | with the recorded row at `copy_in` and at `reconcile` the manager answers `/health` 503 and serves both wizard reads on the fixed Bootstrap carrier: 200 to the 1.x administrator key only (status shows the recorded stage and `nextAction`), 401 to no credential or a foreign one, and 405 with `Allow: GET` only after the key is proved; the canonical continuation stays 404 because a copied root carries no Fresh record |
 | admission, mountless | with the source mount absent, the same two roots still answer `status` 200 from the Manager store — `evidence: operation_row`, the recorded stage and a typed `sourceRoot: upgrade_legacy_root_missing` — to the key the mount accepted, while the v2 Admin key stays 401 and the preflight keeps its typed 503 with the same code |
 | admission, refused mount | with the source mounted but its `usage.sqlite` a symbolic link — a file the shared database file policy refuses on both the mount lookup and the credential read — the same two roots keep answering `status` 200 from the Manager store with the recorded stage and a typed `sourceRoot: upgrade_source_symlinked` to the key the mount accepted, the v2 Admin key stays 401, and the preflight still inspects the mount the operator supplied: 200, `ready: false`, `source_ownership` blocked with `upgrade_source_symlinked`. Before the fix this state answered 503 on the entry page and both reads, so the operator could not reach the page that names the condition |
-| origin rule, both reads | on both surfaces a cross-site `Origin` is 403 `origin_rejected` and `Sec-Fetch-Site: cross-site` is 403 (the surface's code on the fixed carrier, the transport's fetch-metadata refusal on the Fresh admin surface), this very origin is served 200, and an anonymous cross-site caller is still 401 first, so the credential is proved before the origin verdict |
+| origin rule, both reads | on both surfaces a cross-site `Origin` is 403 `origin_rejected` and `Sec-Fetch-Site: cross-site` is 403 (the surface's code on the fixed carrier, the transport's fetch-metadata refusal on the Fresh admin surface), this very origin is served 200, and an anonymous cross-site caller is still 401 first, because the credential's shape is decided from the request alone before the origin verdict |
 | admission, complete | the terminal `complete` row admits the full writable surface (`/health` 200) and both reads answer 404 to every caller, the source key included |
 
 Every fault case also asserts that the target root is byte-identical across the
@@ -107,14 +107,23 @@ refused command (`targetRootUnchanged`).
   `upgraded-legacy` kind, both source fingerprints and the backup manifest digest
   is the copy-in's own; only the stage token is the harness's. The evidence
   says so (`admission.completionInput`).
-* **Mount lookup bound.** Every wizard request inspects the operator's mount once
-  under `MountLookupTimeout` (2s), and a lookup that outlives that bound answers
-  `upgrade_source_unreadable` instead of holding the poll open. The harness
-  cannot reach that state: the mount it supplies is a local directory, and a
-  filesystem whose `stat` blocks needs a hung network or FUSE mount this harness
-  may not create. The bound is proved by
+* **Mount lookup bound.** The wizard reads decide the credential's shape and the
+  browser's origin from the request alone, so the anonymous and cross-site cases
+  of the origin-rule row above never reach the operator's mount, and a caller
+  that does present a credential shape pays one lookup — under
+  `MountLookupTimeout` (2s) — shared by the authentication and the `sourceRoot`
+  marker, with at most one lookup per handler in flight. A lookup that outlives
+  its bound answers `upgrade_mount_timeout` — a retry, not a database the
+  operator has to repair — and a poll that arrives while a hung lookup is running
+  joins that lookup instead of starting another. The harness cannot reach the
+  deadline or the one-in-flight state: the mount it supplies is a local
+  directory, and a filesystem whose `stat` blocks needs a hung network or FUSE
+  mount this harness may not create. Both are proved by
   `internal/http/controller/upgradewizard/handler_test.go`
-  `TestMountLookupRunsOncePerRequestInsideItsBound`, which substitutes the
-  lookup; the harness proves the codes a local mount does reach — absent
-  (`upgrade_legacy_root_missing`) and refused by the shared database file policy
-  (`upgrade_source_symlinked`).
+  `TestMountLookupRunsOncePerRequestInsideItsBound`,
+  `TestMountDeadlineIsATimeoutNotAnUnreadableSource` and
+  `TestMountIsInspectedOnlyAfterTheCredentialAndOriginGates`, which substitute
+  the lookup for one handler; the harness proves the gate order it can observe
+  (anonymous 401 and cross-site 403 on both reads) and the codes a local mount
+  does reach — absent (`upgrade_legacy_root_missing`) and refused by the shared
+  database file policy (`upgrade_source_symlinked`).
