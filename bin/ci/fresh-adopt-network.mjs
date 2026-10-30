@@ -93,25 +93,51 @@ const providerKeys = {
 // Enough credentials that the copy is a real run rather than one round trip: the
 // fault below is injected while the run is in flight, and a plan of a few items
 // could settle before an observer sees it.
+//
+// The bytes are the form CPA itself writes an auth file in: the metadata map it
+// holds, marshalled (sorted keys, `disabled` present). CPA's upload path re-marshals
+// a credential whose bytes differ from that form (`sdk/auth/filestore.go:135-146` in
+// v8.0.13), so bytes in any other key order come back changed and the executor's
+// byte-equality read-back would report every one of them as unverified. A real
+// source CPA holds canonical files; a fixture that does not is not the state the
+// migration is specified against.
 const credentialFiles = Object.fromEntries(
   Array.from({ length: 40 }, (_, index) => [
     'source-' + String(index).padStart(2, '0') + '.json',
     JSON.stringify({
-      type: index % 2 === 0 ? 'claude' : 'codex',
       access_token: 'adopt-seed-' + randomBytes(12).toString('hex'),
+      disabled: false,
       expired: '2099-01-01T00:00:00Z',
+      type: index % 2 === 0 ? 'claude' : 'codex',
     }),
   ])
 );
-// A file the destination cannot parse. It is listed by the source like any other
-// credential, so it is copied by the plan and recorded as manual exactly as an
-// operator's own broken file would be.
-// The source lists JSON credentials, so the broken file carries that extension: it
-// is discovered and downloaded like any other, and only the destination's parse
-// refuses it.
+// A credential the source lists but the migration record cannot name: its item
+// identity is past `freshstore.MaxAdoptionItemName()` (256), so the preflight
+// records it as manual with an instruction and never downloads or uploads it
+// (`internal/service/freshadopt/executor.go:455-475`). This is the contract's own
+// manual path — "an item the migration does not carry" — and it is the one the
+// completion screen's manual group must render.
+const overlongName = 'overlong-' + 'a'.repeat(238) + '.json';
+const overlongFile = {
+  [overlongName]: JSON.stringify({
+    access_token: 'adopt-seed-' + randomBytes(12).toString('hex'),
+    disabled: false,
+    expired: '2099-01-01T00:00:00Z',
+    type: 'claude',
+  }),
+};
+// A `.json` file the source cannot classify. CPA v8.0.13 only lists a credential it
+// synthesized: a body that is not a JSON object, or one without a `type`, returns
+// no auth and never reaches `/v8/management/credentials`
+// (`internal/watcher/synthesizer/file.go:75-83,158-160`), and the route lists the
+// auth manager's own set (`internal/api/handlers/management/auth_files.go:143-147`).
+// The file therefore exists on the source host but is not an item of the migration
+// inventory: it must stay off the destination and must not be invented as a manual
+// item. It stays in the fixture because that distinction is what this run proves.
 const unparseableFile = { 'legacy-token.json': 'not a CPA credential document\n' };
 secretValues.push(managementKey, emptySourceKey, ...seedKeys, ...Object.values(providerKeys));
-for (const [name, body] of Object.entries({ ...credentialFiles, ...unparseableFile })) {
+for (const [name, body] of Object.entries({ ...credentialFiles, ...overlongFile, ...unparseableFile })) {
   writeFileSync(resolve(sourceAuthDir, name), body, { mode: 0o600 });
   for (const value of body.match(/[A-Za-z0-9_-]{16,}/g) || []) secretValues.push(value);
 }
@@ -449,6 +475,17 @@ function sourceSnapshot() {
   );
   return { configSha256: sha256(config), config, credentials: names, digests };
 }
+// The source's own credential listing, read inside the source container's network
+// namespace so the answer is CPA's and not a copy of it. It is the inventory the
+// Adopt contract defines the credential migration over.
+function sourceListing() {
+  const listing = run([
+    'docker', 'run', '--rm', '--network', 'container:' + sourceContainer, '--entrypoint', 'wget',
+    images['cpamp-manager'], '-qO-', '--header=Authorization: Bearer ' + managementKey,
+    'http://127.0.0.1:8317/v8/management/credentials',
+  ]).stdout;
+  return JSON.parse(listing).files.map((file) => file.name);
+}
 // The destination CPA is the Supervisor's own, so its state is read from the
 // runtime's filesystem: that is the process the adoption actually configured,
 // independent of what the Manager reports about itself.
@@ -570,6 +607,20 @@ try {
   report.sourceSnapshot = { configSha256: before.configSha256, credentials: before.credentials };
   assert(before.credentials.includes('source-00.json'), 'the source credential list');
   assert(before.credentials.includes('legacy-token.json'), 'the unparseable file is not in the auth dir');
+  // The inventory is the source's own v8 listing. A file it cannot classify exists
+  // on the host but is not a credential the source reports, so it can be neither
+  // copied nor recorded: this check pins that boundary before the run relies on it.
+  await check('the source lists only the credentials its v8 API can classify', async () => {
+    const listed = sourceListing();
+    assert(listed.includes('source-00.json'), 'the source listing is missing a seeded credential');
+    assert(listed.includes(overlongName), 'the source listing is missing the over-long credential');
+    assert.equal(
+      listed.includes('legacy-token.json'),
+      false,
+      'the v8 listing reported a file it cannot classify'
+    );
+    return { listed: listed.length };
+  });
 
   // The Manager's own boot is the operator's: a read-only listener until the Host
   // admits the store, then the claimable service.
@@ -812,14 +863,24 @@ try {
     // rendered the same facts these assertions read.
     assert(lastSummary, 'the page never read the summary');
     const summary = lastSummary;
-    // Every seeded kind is reported, and the item the destination cannot take is
-    // manual with a reason the operator can act on.
+    // Every seeded kind is reported, and the item the record cannot carry is manual
+    // with the instruction the operator needs. The unclassifiable source file is not
+    // an item at all: the source's own listing never contained it, so the run
+    // neither copied it nor claimed it.
     assert(summary.counts.migrated > 0, 'nothing was migrated');
-    assert(summary.counts.manual > 0, 'the unparseable credential was not reported as manual');
+    assert(summary.counts.manual > 0, 'the item the record cannot carry was not reported as manual');
+    const manual = summary.items.filter((item) => item.outcome === 'manual');
+    assert(manual.every((item) => item.reason), 'a manual item carries no reason');
+    assert(manual.every((item) => item.instruction), 'a manual item carries no instruction');
     assert(
-      summary.items.filter((item) => item.outcome === 'manual').every((item) => item.reason),
-      'a manual item carries no reason'
+      manual.some((item) => item.reason === 'adoption_item_name_too_long'),
+      'the over-long credential was not the manual item: ' + JSON.stringify(manual.map((item) => item.reason))
     );
+    assert(
+      summary.items.every((item) => !item.item.includes('legacy-token.json')),
+      'a file the source never listed was invented as an item'
+    );
+    assert.equal(summary.counts.failed, 0, 'a resumed run left failures behind');
     const kinds = new Set(
       summary.items.filter((item) => item.outcome === 'migrated').map((item) => item.kind)
     );
@@ -859,6 +920,11 @@ try {
       assert.equal(adopted.digests[name], before.digests[name], 'credential bytes differ: ' + name);
     }
     assert.equal(adopted.names.includes('legacy-token.json'), false, 'an unparseable file was uploaded');
+    assert.equal(
+      adopted.names.includes(overlongName),
+      false,
+      'the credential the record cannot name was uploaded'
+    );
     return { names: adopted.names };
   });
   await check('a client key is admitted by the Gateway through Ingress', async () => {
