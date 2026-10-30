@@ -44,6 +44,12 @@ type freshUsageHarness struct {
 	cleanup func()
 }
 
+// harnessKeyCreatedAtMS is the creation instant of every Key this harness mints.
+// It is a whole hour, and the recorded calls are seeded one second apart from
+// it, so the six events can never straddle two hourly buckets: the series
+// assertion is about the numbers, not about where in the hour the test ran.
+var harnessKeyCreatedAtMS = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+
 func newFreshUsageHarness(t *testing.T) *freshUsageHarness {
 	t.Helper()
 	ctx := t.Context()
@@ -65,6 +71,12 @@ func newFreshUsageHarness(t *testing.T) *freshUsageHarness {
 		app: app, db: opened.DB, runtimeIdentity: string(validInstallationRuntime().Identity),
 		cleanup: func() { _ = opened.Close() },
 	}
+	// Replace the wall-clock key service with one stamped at a fixed whole hour.
+	// Every handler resolves a.keys per request, so the swap covers create,
+	// detail and usage reads; nothing in this test mints keys through keyApply.
+	harness.app.keys = freshkeys.New(app.keyRepo, opened.Protector,
+		freshkeys.WithSourceRuntime(app.installedRuntimeIdentity),
+		freshkeys.WithClock(func() int64 { return harnessKeyCreatedAtMS }))
 	harness.call = func(method, resource, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		request := httptest.NewRequest(method, "/control/api/v2/"+resource, bytes.NewBufferString(body))
@@ -249,6 +261,13 @@ func TestFreshKeyUsageReportsRealNumbersAndHonestCoverage(t *testing.T) {
 	defer harness.cleanup()
 	summaryPath := "api-keys/usage-summary"
 	detailPath := "api-keys/" + string(harness.key.ID) + "/usage"
+
+	// The service was built with a fixed clock, so creation has to be stamped at
+	// that instant rather than at the wall clock. This is what keeps the seeded
+	// events inside one hourly bucket no matter when the test runs.
+	if harness.key.CreatedAtMS != harnessKeyCreatedAtMS {
+		t.Fatalf("key creation instant = %d, want the fixed clock %d", harness.key.CreatedAtMS, harnessKeyCreatedAtMS)
+	}
 
 	// Creation binds the key's source in the same transaction, so the
 	// workspace has an attribution window from the first event on.
