@@ -45,7 +45,12 @@ type Options struct {
 	FreshAdmission   bool
 	ValidatedHop     *legacyartifact.ValidatedHopEvidence
 	readOnlySnapshot bool
-	adminKey         string
+	// observeOnly replaces the ownership fence with a shared, non-blocking probe
+	// of the same marker. The authentication leaf sets it: proving a credential
+	// must work on a source mounted read-only, where the marker cannot be opened
+	// for writing at all. It is never set on a path that admits a writer.
+	observeOnly bool
+	adminKey    string
 	// UpgradeAdmission is the injected, read-only Upgrade operation reader. Nil
 	// keeps the pre-seam behavior: no source is admitted on an Upgrade record.
 	UpgradeAdmission UpgradeAdmission
@@ -108,6 +113,10 @@ const DiscoveryInspectionTimeout = 2 * time.Second
 // fail closed for a later qualified owner. A pre-existing Manager marker may be
 // retained as coordination evidence, but public discovery never enters the
 // general recovery-copy inspection path and never creates a marker.
+//
+// The marker is taken as a fence, except when Options.observeOnly asks only for
+// its state: that mode reads a source mounted read-only and must not need write
+// access to the marker.
 func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, options Options, consume func(Report, error)) {
 	ctx, cancel := context.WithTimeout(ctx, DiscoveryInspectionTimeout)
 	defer cancel()
@@ -130,7 +139,7 @@ func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, opt
 		return
 	}
 
-	lock, err := processlock.AcquireExisting(paths.Database)
+	lock, err := fenceSource(paths.Database, options.observeOnly)
 	if err != nil && !errors.Is(err, processlock.ErrNoExistingLock) {
 		consume(Report{}, errors.New("source ownership unavailable"))
 		return
@@ -149,6 +158,17 @@ func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, opt
 		inspectErr = errors.Join(inspectErr, lock.Validate())
 	}
 	consume(report, errors.Join(inspectErr, ctx.Err()))
+}
+
+// fenceSource takes the source's ownership fence, or only observes it when the
+// caller must stay readable on media mounted read-only. The probe is shared and
+// non-blocking and is released before it returns, so it proves no writer holds
+// the marker without ever opening it for writing.
+func fenceSource(databasePath string, observeOnly bool) (*processlock.Lock, error) {
+	if observeOnly {
+		return nil, processlock.ProbeExisting(databasePath)
+	}
+	return processlock.AcquireExisting(databasePath)
 }
 
 func Inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options) (report Report, err error) {

@@ -3,6 +3,7 @@ package upgrade
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -389,6 +391,102 @@ func TestPreflightRejectsSourceNewerThanPinned(t *testing.T) {
 	}
 }
 
+// largeCredentialSource builds a source whose database is large enough for a
+// whole-file integrity scan to dominate, then corrupts the root page of its
+// padding table. The integrity check must fail while the pages the credential
+// row lives on stay readable, which is what separates "this read proves the
+// credential" from "this read verifies the whole database".
+func largeCredentialSource(t *testing.T, key string, megabytes int) sourceFixture {
+	t.Helper()
+	credential, err := security.NewAdminCredential(key, "test")
+	if err != nil {
+		t.Fatalf("build credential: %v", err)
+	}
+	raw, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatalf("encode credential: %v", err)
+	}
+	paddingRoot := 0
+	fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+		execFixture(t, db, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
+		execFixture(t, db, `create table padding (id integer primary key, payload blob)`)
+		for range megabytes {
+			execFixture(t, db, `insert into padding (payload) values (zeroblob(1048576))`)
+		}
+		if err := db.QueryRow(`select rootpage from sqlite_master where name = 'padding'`).Scan(&paddingRoot); err != nil {
+			t.Fatalf("read the padding root page: %v", err)
+		}
+	})
+	corruptDatabasePage(t, fixture.dbPath, paddingRoot)
+	return fixture
+}
+
+// corruptDatabasePage overwrites one b-tree page with bytes no page type
+// accepts. The damage is confined to the tree that page belongs to: the
+// integrity check reports it, and every other tree still reads.
+func corruptDatabasePage(t *testing.T, path string, page int) {
+	t.Helper()
+	file, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture database: %v", err)
+	}
+	pageSize := int(binary.BigEndian.Uint16(file[16:18]))
+	if pageSize == 1 {
+		pageSize = 65536
+	}
+	offset := (page - 1) * pageSize
+	if page < 2 || offset+pageSize > len(file) {
+		t.Fatalf("page %d does not fit a %d-byte database", page, len(file))
+	}
+	for index := offset; index < offset+pageSize; index++ {
+		file[index] = 0xff
+	}
+	if err := os.WriteFile(path, file, 0o600); err != nil {
+		t.Fatalf("corrupt fixture database: %v", err)
+	}
+}
+
+const (
+	// credentialFixtureMegabytes keeps the fixture large enough that a whole-file
+	// scan, not the single credential page, is what a source of this shape costs.
+	credentialFixtureMegabytes = 256
+	// credentialBudget is far below a whole-file scan of that fixture and far
+	// below the credential read's own timeout.
+	credentialBudget = time.Second
+)
+
+// TestVerifyAdminReadsOnlyTheCredentialRow is the R1 contract at the service
+// layer: a source whose whole-file integrity check fails, and whose size dwarfs
+// any credential budget, still proves the right key quickly. Preflight, which
+// does qualify the source, still runs the check and blocks on it.
+func TestVerifyAdminReadsOnlyTheCredentialRow(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := largeCredentialSource(t, key, credentialFixtureMegabytes)
+	// The corruption is real: the qualification path cannot read this file.
+	if db, _, err := openReadOnlySource(context.Background(), fixture.dbPath); err == nil {
+		_ = db.Close()
+		t.Fatal("the fixture passed the whole-database integrity check")
+	}
+
+	started := time.Now()
+	if err := VerifyAdmin(context.Background(), fixture.root, key); err != nil {
+		t.Fatalf("verify the source credential: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > credentialBudget {
+		t.Fatalf("credential read took %s, budget %s", elapsed, credentialBudget)
+	} else {
+		t.Logf("credential read on a %d MB source: %s", credentialFixtureMegabytes, elapsed)
+	}
+	if err := VerifyAdmin(context.Background(), fixture.root, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("foreign key = %v, want %v", err, ErrAdminUnauthorized)
+	}
+
+	report := preflight(t, fixture.root, Options{})
+	if report.Ready || len(report.Blocked) != 1 || report.Blocked[0] != CodeSourceUnreadable {
+		t.Fatalf("blocked = %v, want [%s]", report.Blocked, CodeSourceUnreadable)
+	}
+}
+
 func TestPreflightReportsMissingDatabase(t *testing.T) {
 	root := t.TempDir()
 	report := preflight(t, root, Options{})
@@ -398,9 +496,10 @@ func TestPreflightReportsMissingDatabase(t *testing.T) {
 	if report.SourceKind != SourceKindMissingDatabase {
 		t.Fatalf("source kind = %q, want %q", report.SourceKind, SourceKindMissingDatabase)
 	}
-	// An empty directory has neither the ownership marker nor the database; the
-	// first failing condition is the marker this read-only step cannot inspect.
-	wantBlocked := []string{CodeSourceLockUnavailable}
+	// An empty directory has neither the ownership marker nor the database. The
+	// absent database is what the operator has to fix, so it is named as itself;
+	// the ownership marker is a separate code and only when a source exists.
+	wantBlocked := []string{CodeSourceMissing}
 	if len(report.Blocked) != len(wantBlocked) {
 		t.Fatalf("blocked = %v, want %v", report.Blocked, wantBlocked)
 	}
@@ -410,8 +509,11 @@ func TestPreflightReportsMissingDatabase(t *testing.T) {
 		}
 	}
 	check, found := checkByName(report, CheckSourceOwnership)
-	if !found || check.Status != StatusBlocked {
-		t.Fatalf("ownership check = %+v, want blocked", check)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceMissing {
+		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceMissing)
+	}
+	if !strings.Contains(check.Detail, "missing") {
+		t.Fatalf("ownership detail = %q, want the missing database named", check.Detail)
 	}
 }
 

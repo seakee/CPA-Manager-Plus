@@ -70,11 +70,13 @@ func TestUnfinishedUpgradeServesOnlyTheUpgradeSurface(t *testing.T) {
 		t.Fatalf("an unfinished Upgrade did not take the admitted path:\n%s", logs)
 	}
 
-	// The Upgrade authentication leaf is mounted; its method guard proves the
-	// leaf itself answers instead of a generic 404.
-	if status, _ := waitForManagerResponse(t, process.addr, http.MethodGet, upgradeauth.Path); status != http.StatusMethodNotAllowed {
+	// The Upgrade authentication leaf is mounted; its own credential verdict
+	// proves the leaf itself answers instead of a generic 404. The credential is
+	// answered before the verb, so an unauthenticated caller sees 401 here even
+	// with the wrong method — it cannot learn that this path takes POST.
+	if status, _ := waitForManagerResponse(t, process.addr, http.MethodGet, upgradeauth.Path); status != http.StatusUnauthorized {
 		process.stop(t)
-		t.Fatalf("Upgrade authentication leaf status=%d, want 405", status)
+		t.Fatalf("Upgrade authentication leaf status=%d, want 401", status)
 	}
 
 	// Discovery status reads are served. A copied store keeps the v2 WAL mode,

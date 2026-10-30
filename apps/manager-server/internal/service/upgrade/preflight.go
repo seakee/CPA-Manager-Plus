@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
@@ -41,6 +42,7 @@ const (
 // Blocked codes. Parity gaps are never codes: they are reported for explicit
 // operator confirmation instead of blocking.
 const (
+	CodeSourceMissing            = "upgrade_source_missing"
 	CodeSourceBusy               = "upgrade_source_busy"
 	CodeSourceLockUnavailable    = "upgrade_source_lock_unavailable"
 	CodeSourceUnreadable         = "upgrade_source_unreadable"
@@ -162,12 +164,20 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	}
 	if openErr == nil {
 		report.SourceKind = schema.sourceKind()
-	} else if errors.Is(openErr, errSourceDatabaseMissing) {
+	} else if errors.Is(openErr, ErrSourceDatabaseMissing) {
 		report.SourceKind = SourceKindMissingDatabase
 	}
 
-	// 1. No live source writer, plus read-only integrity.
+	// 1. No live source writer, plus read-only integrity. A source with no
+	// database at all is named as exactly that: reporting the ownership marker
+	// would describe a file the mount does not have, and the operator has to
+	// mount the 1.x data directory before any lock question exists.
 	switch {
+	case errors.Is(openErr, ErrSourceDatabaseMissing):
+		report.Checks = append(report.Checks, Check{
+			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceMissing, Detail: unreadableDetail(openErr),
+		})
+		block(CodeSourceMissing)
 	case errors.Is(lockErr, processlock.ErrLocked):
 		report.Checks = append(report.Checks, Check{
 			Name: CheckSourceOwnership, Status: StatusBlocked, Code: CodeSourceBusy, Detail: ownershipDetail(lockErr),
@@ -268,10 +278,21 @@ func (g ParityGaps) any() bool {
 // readable and its administrator credential rejected the presented key.
 var ErrAdminUnauthorized = errors.New("source administrator credential could not be verified")
 
+// CredentialVerifyTimeout bounds the credential read. It is separate from the
+// preflight budget on purpose: authentication is the slow path of every
+// authenticated request, so it must stay far below a source qualification.
+const CredentialVerifyTimeout = 2 * time.Second
+
 // VerifyAdmin proves the source administrator credential — the key the
-// bootstrap Upgrade entry already verified — through the same read-only SQLite
-// open the preflight uses and the same credential load and comparison that entry
-// consumes (setting.LoadAdminCredential plus security.VerifyAdminKey).
+// bootstrap Upgrade entry already verified — through the read-only credential
+// open and the same credential load and comparison that entry consumes
+// (setting.LoadAdminCredential plus security.VerifyAdminKey).
+//
+// It reads one row and nothing else: no quick_check, no schema vocabulary, no
+// parity. Every authenticated request runs this, including every status poll,
+// and a whole-file integrity scan here would make a large source answer 503 on
+// a route that never reads the database. The integrity check stays in Preflight,
+// where the source is actually being qualified.
 //
 // It deliberately does not take the source's ownership fence: a reader must not
 // exclude the 1.x writer it only observes, and a source mounted read-only cannot
@@ -285,15 +306,17 @@ func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 	if err != nil {
 		return err
 	}
-	db, _, openErr := openReadOnlySource(ctx, filepath.Join(root, databaseFileName))
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, CredentialVerifyTimeout)
+	defer cancel()
+	db, openErr := openCredentialSource(filepath.Join(root, databaseFileName))
 	if db != nil {
 		defer func() { _ = db.Close() }()
 	}
 	if openErr != nil {
 		return openErr
-	}
-	if err := ctx.Err(); err != nil {
-		return err
 	}
 	credential, found, err := setting.New(db).LoadAdminCredential(ctx)
 	if err != nil {
@@ -356,7 +379,7 @@ func lockUnavailableDetail(err error) string {
 }
 
 func unreadableDetail(err error) string {
-	if errors.Is(err, errSourceDatabaseMissing) {
+	if errors.Is(err, ErrSourceDatabaseMissing) {
 		return "source database is missing"
 	}
 	if errors.Is(err, errSourceIntegrity) {

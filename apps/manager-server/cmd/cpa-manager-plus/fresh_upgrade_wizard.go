@@ -9,8 +9,10 @@ import (
 
 const (
 	// legacyRootEnvironment names the 1.x data directory an operator mounted for
-	// the Upgrade operation. The installation's compose override mounts it
-	// read-only at defaultLegacyRoot; nothing here writes inside it.
+	// the Upgrade operation. No shipped compose file mounts it and nothing here
+	// writes inside it: the operator supplies the mount themselves, read-only,
+	// for example `-v /srv/cpamp-1x:/legacy:ro` or a host path in
+	// CPAMP_LEGACY_ROOT.
 	legacyRootEnvironment = "CPAMP_LEGACY_ROOT"
 	defaultLegacyRoot     = "/legacy"
 )

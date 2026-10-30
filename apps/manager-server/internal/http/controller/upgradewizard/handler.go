@@ -40,12 +40,10 @@ const (
 
 // DefaultTimeout bounds one read-only preflight. A 1.x source is inspected
 // through a read-only snapshot and a bounded SQLite read; it must not hold a
-// request open indefinitely.
+// request open indefinitely. The credential read is bounded separately by
+// upgradeservice.CredentialVerifyTimeout, which is far shorter: authentication
+// runs on every request, the preflight only when the wizard asks for a report.
 const DefaultTimeout = 30 * time.Second
-
-// CredentialTimeout bounds the source read that verifies the caller's key. It is
-// shorter than a preflight: authentication must never become the slow path.
-const CredentialTimeout = 10 * time.Second
 
 // CodeAdminUnauthorized is the negative identity verdict. It is the only 401
 // this package writes.
@@ -59,10 +57,13 @@ const (
 	CodePreflightTimeout   = "upgrade_preflight_timeout"
 	CodePreflightFailed    = "upgrade_preflight_failed"
 	CodeOperationUnread    = "upgrade_operation_unreadable"
-	// CodeSourceLockUnavailable is the same code the preflight reports: the
-	// source cannot be read here, so this step can neither prove the key nor
-	// report the source. It is never a verdict on the credential itself.
-	CodeSourceLockUnavailable = upgradeservice.CodeSourceLockUnavailable
+	// CodeSourceMissing and CodeSourceUnreadable are the same codes the
+	// preflight reports: the source itself is absent or cannot be read, so this
+	// step can neither prove the key nor report on the source. They are never a
+	// verdict on the credential, and they are never the ownership marker —
+	// authentication does not inspect that marker at all.
+	CodeSourceMissing    = upgradeservice.CodeSourceMissing
+	CodeSourceUnreadable = upgradeservice.CodeSourceUnreadable
 )
 
 // Stages the projection understands. The list is deliberately a string
@@ -95,9 +96,10 @@ const (
 // Authentication is the Upgrade surface's own credential: the source
 // administrator key the bootstrap Upgrade entry already verified, presented as
 // `Authorization: Bearer <key>`. Each request proves it through
-// upgradeservice.VerifyAdmin, which reads the configured 1.x source read-only.
-// No session, cookie or Fresh claim is a substitute, and an absent decision
-// cannot read as allow.
+// upgradeservice.VerifyAdmin, which reads the configured 1.x source read-only —
+// the credential row only, never a whole-file integrity check, because this runs
+// on every request including every status poll. No session, cookie or Fresh
+// claim is a substitute, and an absent decision cannot read as allow.
 type Handler struct {
 	// LegacyRoot returns the configured 1.x data directory. It is read only.
 	LegacyRoot func() string
@@ -111,7 +113,19 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if r == nil || r.URL == nil || r.URL.RawQuery != "" {
+	if r == nil || r.URL == nil {
+		http.NotFound(w, r)
+		return
+	}
+	// The credential comes first on every surface order. An unauthenticated
+	// caller therefore learns nothing about which resources exist or which verb
+	// they take: an absent, wrong or unreadable credential is the only answer it
+	// ever gets, whether the path is real, unknown, or read with the wrong
+	// method.
+	if !h.authenticate(w, r) {
+		return
+	}
+	if r.URL.RawQuery != "" {
 		http.NotFound(w, r)
 		return
 	}
@@ -128,9 +142,6 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET")
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
-	}
-	if !h.authenticate(w, r) {
 		return
 	}
 	if preflight {
@@ -154,18 +165,20 @@ func (h Handler) authenticate(w http.ResponseWriter, r *http.Request) bool {
 		writeError(w, status, code)
 		return false
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), CredentialTimeout)
-	defer cancel()
-	switch err := upgradeservice.VerifyAdmin(ctx, root, key); {
+	// VerifyAdmin bounds its own read: this runs on every request, including
+	// every status poll, and reads the credential row only.
+	switch err := upgradeservice.VerifyAdmin(r.Context(), root, key); {
 	case err == nil:
 		return true
 	case errors.Is(err, upgradeservice.ErrAdminUnauthorized):
 		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
+	case errors.Is(err, upgradeservice.ErrSourceDatabaseMissing):
+		writeError(w, http.StatusServiceUnavailable, CodeSourceMissing)
 	default:
 		// The credential is not wrong: the source could not be read to verify it.
 		// Naming that condition keeps a wrong-password message off a mount the
 		// operator has to fix first.
-		writeError(w, http.StatusServiceUnavailable, CodeSourceLockUnavailable)
+		writeError(w, http.StatusServiceUnavailable, CodeSourceUnreadable)
 	}
 	return false
 }
@@ -542,10 +555,20 @@ const (
 var (
 	// bearerTokenPattern is the credential half of a Bearer value.
 	bearerTokenPattern = regexp.MustCompile(`(?i)(bearer\s+)[^\s,;"'()<>]+`)
+	// basicCredentialPattern is an Authorization: Basic value, which is a
+	// base64-encoded password: it is a credential in a different alphabet.
+	basicCredentialPattern = regexp.MustCompile(`(?i)(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=]{4,}`)
 	// apiKeyHeaderPattern is an x-api-key header, assignment or env-style name.
 	apiKeyHeaderPattern = regexp.MustCompile(`(?i)(x[-_]api[-_]key\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)`)
 	// issuedKeyPattern is the issued key prefix the Manager and its clients use.
 	issuedKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{4,}`)
+	// productKeyPattern is this product's own key vocabulary: installation,
+	// usage and administrator keys all start with one of these prefixes and
+	// carry no other marker.
+	productKeyPattern = regexp.MustCompile(`\b(?:cpamp_|cmp_admin_)[A-Za-z0-9_.\-]{4,}`)
+	// passwordPattern is a password written as an assignment: a query string, a
+	// DSN, an env-style variable or a copied command.
+	passwordPattern = regexp.MustCompile(`(?i)(password\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
 	// urlCredentialPattern is a URL whose authority embeds credentials.
 	urlCredentialPattern = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s:@]+(:[^/\s@]*)?@`)
 	// localPathPattern is an absolute POSIX path at a token boundary. The colon
@@ -588,6 +611,10 @@ func (s scrubber) text(value string) string {
 		return ""
 	}
 	lines := strings.Split(strings.ReplaceAll(trimmed, "\r\n", "\n"), "\n")
+	// A credential wrapped across two lines is still one credential: a lone
+	// trailing `Bearer` and the line after it are joined before the patterns
+	// see them. Nothing else is joined — a line break is evidence.
+	lines = joinSplitBearer(lines)
 	scrubbed := make([]string, 0, len(lines))
 	for _, line := range lines {
 		line = strings.ReplaceAll(line, "\x00", "")
@@ -613,12 +640,37 @@ func (s scrubber) text(value string) string {
 // credentials go first so the userinfo cannot be read as part of a token.
 func scrubCredentials(line string) string {
 	line = urlCredentialPattern.ReplaceAllString(line, "$1"+redactedText+"@")
+	line = basicCredentialPattern.ReplaceAllString(line, "$1"+redactedText)
 	line = bearerTokenPattern.ReplaceAllString(line, "$1"+redactedText)
 	line = apiKeyHeaderPattern.ReplaceAllString(line, "$1"+redactedText)
+	line = productKeyPattern.ReplaceAllString(line, redactedText)
 	line = issuedKeyPattern.ReplaceAllString(line, redactedText)
+	line = passwordPattern.ReplaceAllString(line, "$1"+redactedText)
 	line = windowsPathPattern.ReplaceAllString(line, "$1"+sourceText)
 	line = localPathPattern.ReplaceAllString(line, "$1"+sourceText)
 	return line
+}
+
+// joinSplitBearer joins a line whose last word is a bare `Bearer` with the line
+// that carries its value, so a value wrapped onto the next line is redacted
+// instead of surviving as an unlabelled secret.
+func joinSplitBearer(lines []string) []string {
+	joined := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if len(joined) != 0 && endsWithBareBearer(joined[len(joined)-1]) {
+			joined[len(joined)-1] += " " + strings.TrimSpace(line)
+			continue
+		}
+		joined = append(joined, line)
+	}
+	return joined
+}
+
+// endsWithBareBearer reports whether a line ends with the scheme word and no
+// value after it.
+func endsWithBareBearer(line string) bool {
+	trimmed := strings.ToLower(strings.TrimRight(line, " \t"))
+	return trimmed == "bearer" || strings.HasSuffix(trimmed, " bearer")
 }
 
 // capText truncates on a rune boundary so a cut never produces invalid text.

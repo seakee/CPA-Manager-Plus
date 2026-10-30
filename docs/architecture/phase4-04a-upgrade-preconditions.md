@@ -179,9 +179,11 @@ hard `false`; the new surface grants no migration authority.
   source's ownership fence (see U1-7): a reader must stay readable on a source
   mounted read-only, and the copy-in re-verifies the fingerprint under its own
   exclusive lock before it writes.
-- **Checks, in order:** `source_ownership` (`upgrade_source_busy` when a live
-  writer holds the marker, `upgrade_source_lock_unavailable` when the marker
-  cannot be inspected at all, `upgrade_source_unreadable`), `source_version`
+- **Checks, in order:** `source_ownership` (`upgrade_source_missing` when the
+  mount holds no database at all, `upgrade_source_busy` when a live writer holds
+  the marker, `upgrade_source_lock_unavailable` when the marker cannot be
+  inspected at all, `upgrade_source_unreadable` when the database or the
+  integrity check fails), `source_version`
   (`upgrade_source_version_unsupported`), `fingerprint`, `disk`
   (`upgrade_disk_insufficient`), `cpa_classification`, `parity`. Parity gaps
   (missing/mismatched projection, past watermark, per-day deleted coverage
@@ -287,17 +289,28 @@ They never appear on both surfaces at once, and no write route exists.
   administrator key the bootstrap Upgrade entry verified — presented as
   `Authorization: Bearer <key>` with exactly one header value. The handler
   verifies it through `upgrade.Service.VerifyAdmin`, which opens the configured
-  1.x source with the same read-only `mode=ro`/`query_only` handle the preflight
-  uses and runs the same `setting.LoadAdminCredential` + `security.VerifyAdminKey`
-  comparison the entry consumes. It takes no fence. The installation session,
-  the Fresh Admin key, a cookie and an absent header are all `401`; the two
-  surfaces no longer check a session before this handler runs, so no missing
-  decision can read as allow.
+  1.x source read-only and runs `setting.LoadAdminCredential` +
+  `security.VerifyAdminKey`. That open reads the credential row and nothing else:
+  no `quick_check`, no schema vocabulary, no parity, bounded to
+  `CredentialVerifyTimeout` (2s). Every authenticated request runs it, including
+  every status poll, so a whole-file scan there would answer 503 on a large
+  source and the result page would never arrive. The integrity check stays in
+  `Preflight`, which is what qualifies a source. `VerifyAdmin` takes no fence.
+  The installation session, the Fresh Admin key, a cookie and an absent header
+  are all `401`; the two surfaces no longer check a session before this handler
+  runs, so no missing decision can read as allow.
+- **Order.** The credential is answered before the path and before the verb, on
+  both the entry leaf and these two routes: an unauthenticated caller receives
+  `401` whatever its method and whatever the path, so it cannot tell a real
+  route from an unknown one or learn which method a route takes. Only a proved
+  credential sees `405` (`Allow: GET`) or `404`.
 - **Failure order.** `401` is reserved for a credential verdict. A missing or
   unusable mount answers `503 upgrade_legacy_root_missing` /
-  `upgrade_legacy_root_unusable`, and a source that cannot be read to verify the
-  key answers `503 upgrade_source_lock_unavailable` — never a wrong-password
-  message for a mount the operator has to fix first.
+  `upgrade_legacy_root_unusable`; a mount with no database answers
+  `503 upgrade_source_missing`; a source that exists but cannot be read to
+  verify the key answers `503 upgrade_source_unreadable`. None of these is a
+  wrong-password message, and none of them is the ownership-marker code — that
+  code is the preflight's, and this surface never inspects the marker.
 - **Ownership without the fence.** `upgrade.Preflight` observes the source with
   `processlock.ProbeExisting`: a shared, non-blocking lock on the existing
   marker. A live writer is `upgrade_source_busy`; a marker that cannot be
@@ -311,7 +324,10 @@ They never appear on both surfaces at once, and no write route exists.
   updated time) and maps the stage onto `nextAction`. An unknown stage is shown
   verbatim; fingerprints, digests and paths have no field at all.
 - **Scrubbing.** Operator-visible text is redacted by content, not by path
-  shape: `Bearer …`, `sk-…`, `x-api-key`/`X_API_KEY` values, credentials
-  embedded in a URL authority and local paths; the same scrubber covers
-  `manual_items`, and a multi-line detail is scrubbed line by line instead of
-  being dropped.
+  shape: `Bearer …` (including a value wrapped onto the next line after a lone
+  `Bearer`), `Authorization: Basic …`, `sk-…`, this product's own
+  `cpamp_`/`cmp_admin_` key prefixes, `x-api-key`/`X_API_KEY` values, a
+  `password=`/`password:` assignment in a query string, DSN, variable or
+  command, credentials embedded in a URL authority and local paths; the same
+  scrubber covers `manual_items`, and a multi-line detail is scrubbed line by
+  line instead of being dropped.

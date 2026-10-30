@@ -3,6 +3,7 @@ package upgradewizard
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -203,10 +204,55 @@ func TestPreflightMissingLegacyRootIsTyped(t *testing.T) {
 		t.Fatalf("unusable root code missing: %s", body)
 	}
 	// A source without the recorded credential proves nothing: a well-formed key
-	// is not accepted because the root exists.
+	// is not accepted because the root exists. The source here has no database at
+	// all, so the answer names that, not an ownership marker.
 	_, body = request(t, newHandler(t.TempDir(), ""), http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusServiceUnavailable)
-	if !strings.Contains(body, `"`+CodeSourceLockUnavailable+`"`) {
-		t.Fatalf("unreadable source code missing: %s", body)
+	if !strings.Contains(body, `"`+CodeSourceMissing+`"`) {
+		t.Fatalf("missing source code missing: %s", body)
+	}
+}
+
+// TestStatusReportsAnAbsentSourceWithItsOwnCode proves a missing source is named
+// as a missing source on both routes, with a typed code the wizard can describe,
+// rather than as an ownership marker the mount does not have.
+func TestStatusReportsAnAbsentSourceWithItsOwnCode(t *testing.T) {
+	handler := newHandler(t.TempDir(), "")
+	for _, resource := range []string{PreflightSuffix, StatusSuffix} {
+		_, body := request(t, handler, http.MethodGet, testPrefix+resource, bearer(testAdminKey), http.StatusServiceUnavailable)
+		if !strings.Contains(body, `"`+CodeSourceMissing+`"`) {
+			t.Fatalf("%s: missing source code absent: %s", resource, body)
+		}
+		if strings.Contains(body, `"upgrade_source_lock_unavailable"`) {
+			t.Fatalf("%s: an absent source was reported as an ownership marker: %s", resource, body)
+		}
+	}
+}
+
+// TestUnauthenticatedCallersLearnNothingAboutMethodOrPath is the ordering
+// contract both Upgrade surfaces share: the credential is answered before the
+// verb and before the path, so a caller without one cannot tell a real route
+// from an unknown one, or learn which method a route takes. Only a proved
+// credential reveals 405 and 404.
+func TestUnauthenticatedCallersLearnNothingAboutMethodOrPath(t *testing.T) {
+	handler := newHandler(legacySourceDir(t), "")
+	targets := []string{
+		testPrefix + PreflightSuffix,
+		testPrefix + StatusSuffix,
+		testPrefix + "/installation/upgrade/unknown",
+		testPrefix + PreflightSuffix + "?legacy=/etc",
+	}
+	for _, target := range targets {
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions} {
+			_, body := request(t, handler, method, target, "", http.StatusUnauthorized)
+			if !strings.Contains(body, `"`+CodeAdminUnauthorized+`"`) {
+				t.Fatalf("%s %s = %s", method, target, body)
+			}
+		}
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions} {
+		request(t, handler, method, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusMethodNotAllowed)
+		request(t, handler, method, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusMethodNotAllowed)
+		request(t, handler, method, testPrefix+"/installation/upgrade/unknown", bearer(testAdminKey), http.StatusNotFound)
 	}
 }
 
@@ -408,6 +454,114 @@ func TestStatusUnrecordedAndUnreadable(t *testing.T) {
 	}
 }
 
+const (
+	// largeSourceMegabytes keeps the fixture in the range a real 1.x source
+	// reaches, where a whole-file integrity scan — not the credential row — is
+	// the dominant cost of a request.
+	largeSourceMegabytes = 256
+	// statusPollBudget is far below a whole-file scan of that fixture and below
+	// the credential read's own timeout.
+	statusPollBudget = time.Second
+)
+
+// largeCorruptSourceDir grows the smallest 1.x source into a multi-hundred
+// megabyte database and corrupts the root page of its padding tree. The
+// credential row still reads; a whole-file integrity check cannot pass.
+func largeCorruptSourceDir(t *testing.T, megabytes int) string {
+	t.Helper()
+	dir := legacySourceDir(t)
+	database := filepath.Join(dir, "usage.sqlite")
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`create table padding (id integer primary key, payload blob)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	for range megabytes {
+		if _, err := db.Exec(`insert into padding (payload) values (zeroblob(1048576))`); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	var root int
+	if err := db.QueryRow(`select rootpage from sqlite_master where name = 'padding'`).Scan(&root); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	corruptDatabasePage(t, database, root)
+	return dir
+}
+
+// corruptDatabasePage overwrites one b-tree page with bytes no page type
+// accepts. The damage is confined to the tree that page belongs to: the
+// integrity check reports it, every other tree still reads.
+func corruptDatabasePage(t *testing.T, path string, page int) {
+	t.Helper()
+	file, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture database: %v", err)
+	}
+	pageSize := int(binary.BigEndian.Uint16(file[16:18]))
+	if pageSize == 1 {
+		pageSize = 65536
+	}
+	offset := (page - 1) * pageSize
+	if page < 2 || offset+pageSize > len(file) {
+		t.Fatalf("page %d does not fit a %d-byte database", page, len(file))
+	}
+	for index := offset; index < offset+pageSize; index++ {
+		file[index] = 0xff
+	}
+	if err := os.WriteFile(path, file, 0o600); err != nil {
+		t.Fatalf("corrupt fixture database: %v", err)
+	}
+}
+
+// TestStatusPollAuthenticatesWithoutVerifyingTheWholeSource is the R1 contract at
+// the route boundary. Every request proves the credential, so the read behind it
+// must not scan the source: the fixture's padding tree is corrupt, which a
+// whole-file check reports and a credential row read never touches. The poll
+// still answers quickly with the operation projection, and the preflight on the
+// same source still runs the check and reports it.
+func TestStatusPollAuthenticatesWithoutVerifyingTheWholeSource(t *testing.T) {
+	root := largeCorruptSourceDir(t, largeSourceMegabytes)
+	database := filepath.Join(t.TempDir(), "usage.sqlite")
+	db, err := sqliterepo.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	handler := newHandler(root, database)
+
+	started := time.Now()
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	elapsed := time.Since(started)
+	if elapsed > statusPollBudget {
+		t.Fatalf("status poll took %s on a %d MB source, budget %s", elapsed, largeSourceMegabytes, statusPollBudget)
+	}
+	t.Logf("status poll on a %d MB source: %s", largeSourceMegabytes, elapsed)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatalf("decode status: %v: %s", err, body)
+	}
+	if status.Recorded || status.NextAction != ActionPreflight {
+		t.Fatalf("status projection = %+v", status)
+	}
+
+	// The qualification path runs the whole-file check on the same source.
+	_, body = request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusOK)
+	if !strings.Contains(body, `"`+CodeSourceUnreadable+`"`) {
+		t.Fatalf("preflight did not report the failed integrity check: %s", body)
+	}
+}
+
 // TestStatusRolledBackIsAnObservation proves a stage written by a build that
 // knows rollback is readable here even though this build's model validator
 // would reject it.
@@ -448,12 +602,24 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 		t.Fatalf("error detail = %q", got)
 	}
 	// A credential is redacted by its own content, with no path in sight.
+	const (
+		productKey   = "cpamp_sk_0123456789abcdef0123456789abcdef"
+		adminKey     = "cmp_admin_rotation_0123456789abcdef"
+		basicSecret  = "b3BlcmF0b3I6aHVudGVyMnBhc3N3b3JkAA=="
+		passwordText = "hunter2password"
+	)
 	for _, testCase := range []struct{ in, secret string }{
 		{in: "request failed with Authorization: Bearer abc.def.ghi", secret: "abc.def.ghi"},
 		{in: "upstream key sk-live-0123456789 expired", secret: "sk-live-0123456789"},
 		{in: "header x-api-key: cpaManagedSecret rejected", secret: "cpaManagedSecret"},
 		{in: "header X-Api-Key=cpaManagedSecret rejected", secret: "cpaManagedSecret"},
 		{in: "url https://admin:pw-12345@gateway.internal/x refused", secret: "pw-12345"},
+		{in: "usage key " + productKey + " rejected", secret: productKey},
+		{in: "administrator key " + adminKey + " rotated", secret: adminKey},
+		{in: "Authorization: Basic " + basicSecret + " refused", secret: basicSecret},
+		{in: "gateway login password=" + passwordText + " refused", secret: passwordText},
+		{in: "dsn postgres://gateway.internal/x?password=" + passwordText, secret: passwordText},
+		{in: "env CPA_MANAGER_PASSWORD = " + passwordText, secret: passwordText},
 	} {
 		got := scrubError(testCase.in)
 		if strings.Contains(got, testCase.secret) {
@@ -473,6 +639,16 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 	// Multi-line detail survives line by line.
 	if got := scrubError("first\nsecond Bearer leaked-token\nthird"); got != "first\nsecond Bearer "+redactedText+"\nthird" {
 		t.Fatalf("multi-line detail = %q", got)
+	}
+	// A credential wrapped across a line break is still one credential: the
+	// scheme word alone would leave the value on the next line unlabelled.
+	const splitSecret = "eyJhbGciOiJIUzI1NiJ9.c3BsaXQ.c2lnbmF0dXJl"
+	if got := scrubError("upstream refused\nAuthorization: Bearer\n" + splitSecret + "\nretry later"); strings.Contains(got, splitSecret) {
+		t.Fatalf("split bearer survived: %q", got)
+	} else if !strings.Contains(got, "Authorization: Bearer "+redactedText) {
+		t.Fatalf("split bearer is not joined and redacted: %q", got)
+	} else if got := strings.Count(got, "\n"); got != 2 {
+		t.Fatalf("split bearer changed the detail shape: %q", got)
 	}
 	// A NUL byte is not text and never reaches the operator.
 	if got := scrubError("broken\x00value"); strings.Contains(got, "\x00") {

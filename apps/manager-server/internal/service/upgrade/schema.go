@@ -17,7 +17,11 @@ import (
 )
 
 var (
-	errSourceDatabaseMissing = errors.New("source database is missing")
+	// ErrSourceDatabaseMissing is the credential read's environment verdict: the
+	// configured root holds no database to read a credential from. It is never a
+	// verdict on the presented key, so a route that reports it must not answer
+	// 401.
+	ErrSourceDatabaseMissing = errors.New("source database is missing")
 	errSourceIntegrity       = errors.New("source database integrity check failed")
 )
 
@@ -75,39 +79,72 @@ func openImmutableSource(ctx context.Context, path string) (*sql.DB, sourceSchem
 	return openSource(ctx, path, true)
 }
 
+// openCredentialSource opens the legacy database read-only for the one row a
+// credential check reads, and stops there. It deliberately runs no quick_check:
+// that read scans every page of the file, and every authenticated request —
+// including every status poll — proves the credential, so an integrity scan
+// here would make a large source time out on a route that never sees the
+// database otherwise. The full preflight keeps the check where the source is
+// actually being qualified.
+func openCredentialSource(path string) (*sql.DB, error) {
+	return openSourceDatabase(path, false)
+}
+
+// openSource opens the source and qualifies it: integrity first, then the
+// bounded schema vocabulary a preflight is allowed to observe.
 func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sourceSchema, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, sourceSchema{}, errSourceDatabaseMissing
-		}
-		return nil, sourceSchema{}, err
-	}
-	if !info.Mode().IsRegular() || info.Size() == 0 {
-		return nil, sourceSchema{}, errSourceDatabaseMissing
-	}
-	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, immutable))
+	db, err := openSourceDatabase(path, immutable)
 	if err != nil {
 		return nil, sourceSchema{}, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
 	fail := func(err error) (*sql.DB, sourceSchema, error) {
 		_ = db.Close()
 		return nil, sourceSchema{}, err
 	}
-	var result string
-	if err := db.QueryRowContext(ctx, "pragma quick_check").Scan(&result); err != nil {
+	if err := quickCheckSource(ctx, db); err != nil {
 		return fail(err)
-	}
-	if result != "ok" {
-		return fail(errSourceIntegrity)
 	}
 	schema := sourceSchema{tables: map[string]bool{}, indexes: map[string]bool{}, settings: map[string]string{}}
 	if err := readSourceSchema(ctx, db, &schema); err != nil {
 		return fail(err)
 	}
 	return db, schema, nil
+}
+
+// openSourceDatabase opens an existing source file read-only and reads nothing
+// from it: the caller decides how much of the file to verify.
+func openSourceDatabase(path string, immutable bool) (*sql.DB, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrSourceDatabaseMissing
+		}
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return nil, ErrSourceDatabaseMissing
+	}
+	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, immutable))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return db, nil
+}
+
+// quickCheckSource proves the whole database is structurally readable. It scans
+// every page, so it belongs to the full preflight and never to a credential
+// read.
+func quickCheckSource(ctx context.Context, db *sql.DB) error {
+	var result string
+	if err := db.QueryRowContext(ctx, "pragma quick_check").Scan(&result); err != nil {
+		return err
+	}
+	if result != "ok" {
+		return errSourceIntegrity
+	}
+	return nil
 }
 
 func readOnlyDataSourceName(path string, immutable bool) string {

@@ -202,8 +202,11 @@ Manager administrator key** in `Authorization: Bearer <key>`. It is outside
 session, claim, backup, migration, route or completion receipt. CPA keys, cookies
 and browser logged-in flags are not credentials for it.
 
-The leaf uses the current bounded, fenced, no-migrate source inspection and the
-persisted credential verifier. Only a safely observed, initialized legacy or
+The leaf uses the current bounded, no-migrate source inspection and the
+persisted credential verifier. The ownership marker is only probed — a shared,
+non-blocking read of the same file — never fenced, so a 1.x volume mounted
+read-only (0555 directories, 0444 files including the marker) authenticates and
+the leaf writes nothing there. Only a safely observed, initialized legacy or
 unowned native-v2 source projecting `unsupported_upgrade` can authenticate;
 Fresh-owned sources remain unavailable. Its success DTO is
 `{contract_version:"cpamp.upgrade-auth.v1", authenticated:true,
@@ -224,12 +227,16 @@ same-origin Manager base/runtime provenance require manual login.
 
 Errors use `{contract_version:"cpamp.upgrade-auth.v1", error:{code:<code>}}`:
 401 `admin_unauthorized`, 403 `origin_rejected`, 409 `source_changed`,
-503 `source_unavailable`, 405 `method_not_allowed` (`Allow: POST`). Browser
+503 `source_unavailable`, 405 `method_not_allowed` (`Allow: POST`). The
+credential is answered before the verb, exactly as on the wizard's two read
+routes: a caller without one receives 401 whatever its method, and only a proved
+key sees 405. Browser
 requests must be same-origin; there is no CORS/cookie authentication. The
 origin is checked against the existing trusted `CPAMP_PUBLIC_ORIGIN` deployment
 setting when supplied (including TLS termination), otherwise direct TLS/Host.
 Forwarded headers cannot establish this trust. Query
-strings, unknown paths and aliases are generic 404. Responses are `no-store`.
+strings, unknown paths and aliases are generic 404 for a proved credential.
+Responses are `no-store`.
 Writable startup, readiness, Fresh takeover or canonical commit/completion
 retires this leaf to the captured generic 404 behavior. It never delegates to
 Gateway, normal login/config loading, `store.Open`, bootstrap initialization or

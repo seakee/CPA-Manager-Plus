@@ -48,13 +48,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if r.URL.Path != Path || r.URL.RawQuery != "" {
-		http.NotFound(w, r)
+	// One order, shared with the wizard routes: a credential is required first,
+	// then the path, then the verb, and only a proved credential ever reveals
+	// which of the two exists. Nothing about this resource is answered to a
+	// caller without one.
+	authorization := r.Header.Values("Authorization")
+	if len(authorization) != 1 || !strings.HasPrefix(authorization[0], "Bearer ") {
+		write(w, http.StatusUnauthorized, "admin_unauthorized")
 		return
 	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		write(w, http.StatusMethodNotAllowed, "method_not_allowed")
+	key := strings.TrimPrefix(authorization[0], "Bearer ")
+	if key == "" || len(key) > 4096 || strings.TrimSpace(key) != key {
+		write(w, http.StatusUnauthorized, "admin_unauthorized")
+		return
+	}
+	if r.URL.Path != Path || r.URL.RawQuery != "" {
+		http.NotFound(w, r)
 		return
 	}
 	// Browser clients are same-origin only. Do not trust forwarded hosts or
@@ -75,16 +84,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusForbidden, "origin_rejected")
 		return
 	}
-	authorization := r.Header.Values("Authorization")
-	if len(authorization) != 1 || !strings.HasPrefix(authorization[0], "Bearer ") {
-		write(w, http.StatusUnauthorized, "admin_unauthorized")
-		return
-	}
-	key := strings.TrimPrefix(authorization[0], "Bearer ")
-	if key == "" || len(key) > 4096 || strings.TrimSpace(key) != key {
-		write(w, http.StatusUnauthorized, "admin_unauthorized")
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), legacypreflight.DiscoveryInspectionTimeout)
 	defer cancel()
 	legacypreflight.WithAuthenticatedInspection(ctx, h.paths, key, func(report legacypreflight.Report, err error) {
@@ -92,8 +91,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			write(w, http.StatusUnauthorized, "admin_unauthorized")
 			return
 		}
+		if err != nil {
+			write(w, http.StatusServiceUnavailable, "source_unavailable")
+			return
+		}
+		// The credential is proved before the verb is answered, exactly as on the
+		// wizard routes: a caller without one learns nothing about this resource,
+		// including which method it takes.
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			write(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
 		projection := bootstrapdiscovery.Project(bootstrapdiscovery.Input{Report: report, InspectionError: err})
-		if err != nil || string(projection.Status) != "unsupported_upgrade" || report.Observed.FreshOwnershipCheckpointPresent {
+		if string(projection.Status) != "unsupported_upgrade" || report.Observed.FreshOwnershipCheckpointPresent {
 			write(w, http.StatusServiceUnavailable, "source_unavailable")
 			return
 		}

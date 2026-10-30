@@ -49,6 +49,8 @@ const en = {
   checkGap: 'Gap',
   checkUnknown: 'Unreported',
 
+  codeUpgradeSourceMissing:
+    'The mounted 1.x directory has no usage.sqlite. Check that the whole data directory is mounted read-only, then try again.',
   codeUpgradeSourceBusy:
     'The 1.x source is still locked by a running process. Stop it and try again.',
   codeUpgradeSourceLockUnavailable:
@@ -200,6 +202,8 @@ const zh: typeof en = {
   checkGap: '缺口',
   checkUnknown: '未上报',
 
+  codeUpgradeSourceMissing:
+    '已挂载的 1.x 目录中没有 usage.sqlite。请确认整个数据目录都以只读方式挂载后重试。',
   codeUpgradeSourceBusy: '1.x 来源仍被运行中的进程占用。请先停止它再重试。',
   codeUpgradeSourceLockUnavailable:
     '无法只读检查来源的归属标记。请检查挂载的 1.x 卷；未写入任何内容。',
@@ -334,6 +338,8 @@ const tw: typeof en = {
   checkGap: '缺口',
   checkUnknown: '未回報',
 
+  codeUpgradeSourceMissing:
+    '已掛載的 1.x 目錄中沒有 usage.sqlite。請確認整個資料目錄都以唯讀方式掛載後重試。',
   codeUpgradeSourceBusy: '1.x 來源仍被執行中的程序佔用。請先停止它再重試。',
   codeUpgradeSourceLockUnavailable:
     '無法只讀檢查來源的歸屬標記。請檢查掛載的 1.x 卷；未寫入任何內容。',
@@ -469,6 +475,8 @@ const ru: typeof en = {
   checkGap: 'Пробел',
   checkUnknown: 'Не сообщается',
 
+  codeUpgradeSourceMissing:
+    'В смонтированном каталоге 1.x нет usage.sqlite. Проверьте, что каталог данных смонтирован целиком и только для чтения, и повторите.',
   codeUpgradeSourceBusy: 'Источник 1.x всё ещё занят работающим процессом. Остановите его и повторите.',
   codeUpgradeSourceLockUnavailable:
     'Маркер владения источником нельзя проверить только для чтения. Проверьте смонтированный том 1.x; ничего не записано.',
@@ -623,6 +631,8 @@ export function checkOutcomeText(status: string, language = fullWebLanguage()): 
 // `codeUnknown` asks for the exact value instead of inventing a meaning.
 export function blockedCodeText(code: string, language = fullWebLanguage()): string {
   switch (code) {
+    case 'upgrade_source_missing':
+      return upgradeWizardText('codeUpgradeSourceMissing', language);
     case 'upgrade_source_busy':
       return upgradeWizardText('codeUpgradeSourceBusy', language);
     case 'upgrade_source_lock_unavailable':
