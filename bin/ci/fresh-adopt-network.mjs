@@ -589,6 +589,18 @@ try {
   const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 1000 } });
   page = await context.newPage();
   page.on('pageerror', () => report.pageErrors.push('Uncaught browser error'));
+  // The page's own progress read is the product path; a request that never leaves
+  // or never answers is named here rather than inferred from a spinner.
+  page.on('requestfailed', (request) => {
+    if (!new URL(request.url()).pathname.endsWith('/installation/adoption')) return;
+    report.summaryRequestFailures = report.summaryRequestFailures || [];
+    report.summaryRequestFailures.push(request.failure()?.errorText || 'failed');
+  });
+  page.on('console', (message) => {
+    if (message.type() !== 'error') return;
+    report.consoleErrors = report.consoleErrors || [];
+    report.consoleErrors.push(redact(message.text()).slice(0, 200));
+  });
   page.on('response', async (response) => {
     if (!new URL(response.url()).pathname.endsWith('/installation/adoption')) return;
     report.summaryStatuses = report.summaryStatuses || [];
