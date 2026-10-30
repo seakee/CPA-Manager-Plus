@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
+	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 )
 
 // copiedVolume is a 1.x source that already went through the copy-in: the v2
@@ -289,6 +292,44 @@ func TestReconcileReportsADayOnlyOneSideHolds(t *testing.T) {
 	}
 	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
 		t.Fatalf("marked days = %v, want none", got)
+	}
+}
+
+func TestReconcileRefusesAStoreThatCanNoLongerEnterTheStep(t *testing.T) {
+	copied := newCopiedVolume(t)
+	// A store the operation already carried past "reconcile": comparing it would
+	// mark days for numbers that have grown since the copy.
+	db, err := managersqlite.Open(copied.databasePath())
+	if err != nil {
+		t.Fatalf("open the copied store: %v", err)
+	}
+	if _, err := upgradeoperation.New(db).Advance(context.Background(),
+		model.UpgradeDomainCPAConfig, model.UpgradeStageCPAImport); err != nil {
+		_ = db.Close()
+		t.Fatalf("advance past the reconcile step: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the copied store: %v", err)
+	}
+	before := fingerprintTree(t, copied.target)
+
+	report, err := Reconcile(context.Background(), copied.reconcileOptions())
+	if err == nil {
+		t.Fatalf("reconcile = %+v, want a refusal for a closed stage", report)
+	}
+	if report.Recorded {
+		t.Fatal("a refused reconcile recorded the operation")
+	}
+	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+		t.Fatalf("marked days = %v, want none", got)
+	}
+	if recorded := operationRow(t, copied.databasePath()); recorded.Stage != model.UpgradeStageCPAImport {
+		t.Fatalf("stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageCPAImport)
+	}
+	// The scratch area is the only thing this step may leave behind, and it is
+	// created after the gate; the store itself must be byte-identical.
+	if after := fingerprintTree(t, copied.target); !reflect.DeepEqual(before, after) {
+		assertTreeUnchanged(t, "v2 data root", before, after)
 	}
 }
 

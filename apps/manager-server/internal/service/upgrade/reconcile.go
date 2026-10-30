@@ -171,6 +171,17 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	if !found {
 		return ReconcileReport{}, errors.New("the v2 data root holds no recorded copy-in, so there is nothing to reconcile against")
 	}
+	// The step may only run where it could still record its result. A store the
+	// operation already carried past "reconcile", or one a rollback closed, can
+	// never take this stage, so comparing it would write permanent marks for
+	// numbers that no longer match by design and report a success it cannot
+	// record. This is the same monotonicity rule Advance enforces, asked before
+	// anything is read or written.
+	if recorded.Stage != "" && !recorded.Stage.CanAdvanceTo(model.UpgradeStageReconcile) {
+		return ReconcileReport{}, fmt.Errorf(
+			"the recorded operation is at stage %q, which cannot enter the reconcile step; nothing was compared and nothing was marked",
+			recorded.Stage)
+	}
 	if err := verifyCompletedTarget(ctx, paths, bundleDir, recorded); err != nil {
 		return ReconcileReport{}, err
 	}
