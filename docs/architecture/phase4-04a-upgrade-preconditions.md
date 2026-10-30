@@ -208,6 +208,19 @@ hard `false`; the new surface grants no migration authority.
   operator declares the release (`--source-version`); preflight accepts only
   exact equality with `bootstrap.PlannedDirectRelease` and blocks anything else
   with both values.
+- **Newer markers.** A declaration is a claim, so it is not the last word on the
+  newer side either. A source that carries a marker the pinned release genuinely
+  lacks has already moved past the pin, and blocks with
+  `upgrade_source_version_unsupported` even when the declaration matches; the
+  detail names each marker. For a v1.14.4 pin those markers are the
+  `usage_cache_accounting_semantics_revision=3` setting v1.14.6 wrote and the
+  `idx_usage_events_ts_latency_ttft_cover` index v1.14.7 added. The list is keyed
+  by the release that introduced each marker, so a later re-pin drops the
+  markers its own schema accepts instead of refusing its own source. No base
+  table is a later marker: every 1.14.x release creates
+  `usage_archive_deleted_coverage_daily`, the pinned one included, so reading it
+  as a v1.14.6 marker would refuse the pin's own source — the defect the
+  real-Docker harness found.
 - **Structural lower bound.** A declaration is a claim, so it is never the last
   word. The source must also carry the v1.14 structure: `settings`,
   `usage_events`, `usage_event_identity_ledger`, `usage_archive_event_refs`,

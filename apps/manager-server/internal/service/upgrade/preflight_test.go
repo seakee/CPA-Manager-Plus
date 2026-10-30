@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -18,10 +19,12 @@ import (
 
 const msPerDay = int64(86_400_000)
 
-// v1SchemaStatements is the v1.14.10 DDL for the tables preflight reads, copied
-// from the released migration. It is deliberately hand-written: a fixture built
-// by the v2 migration is not a 1.x source, and the point of these tests is that
-// a real WAL-mode source is inspected without being written to.
+// v1SchemaStatements is the 1.14.x DDL for the tables preflight reads, copied
+// from the released migration. The table set does not change across 1.14.0 to
+// 1.14.10, and a real pinned-release source carries all of it. It is
+// deliberately hand-written: a fixture built by the v2 migration is not a 1.x
+// source, and the point of these tests is that a real WAL-mode source is
+// inspected without being written to.
 var v1SchemaStatements = []string{
 	`create table settings (
 		key text primary key,
@@ -244,17 +247,18 @@ var v1SchemaStatements = []string{
 	)`,
 }
 
-// v1SeedStatements are the rows a stopped v1.14.10 Manager leaves behind: the
-// derived-format markers in settings, the rollup state, a few live events, one
-// archive run with a projection-covered deleted event and the matching deleted
-// coverage day.
+// v1SeedStatements are the rows a stopped 1.14.x Manager at the pinned release
+// leaves behind: the derived-format markers in settings, the rollup state, a few
+// live events, one archive run with a projection-covered deleted event and the
+// matching deleted coverage day. The cache-accounting semantics revision v1.14.6
+// wrote is deliberately absent: it is a marker the pinned release lacks, and a
+// source carrying it is refused (see withNewerThanPinned).
 var v1SeedStatements = []string{
 	`insert into settings (key, value, updated_at_ms) values
 		('bootstrap_state_v1', '{"version":1,"status":"ready","adminReady":true,"projectInit":true}', 1),
 		('usage_monitoring_model_format_version', '1', 1),
 		('usage_account_history_identity_format_version', '` + usageidentity.AccountHistoryStructureRevision() + `', 1),
-		('usage_dashboard_hourly_format_version', '3', 1),
-		('usage_cache_accounting_semantics_revision', '3', 1)`,
+		('usage_dashboard_hourly_format_version', '3', 1)`,
 	`insert into usage_events (id, event_hash, timestamp_ms, timestamp, model, input_tokens, output_tokens, total_tokens, created_at_ms)
 		values (1, 'live-1', 1_772_000_000_000, '2026-02-01T00:00:00Z', 'gpt-5', 10, 5, 15, 1_772_000_000_000),
 		       (2, 'live-2', 1_772_000_060_000, '2026-02-01T00:01:00Z', 'gpt-5', 11, 6, 17, 1_772_000_060_000)`,
@@ -374,6 +378,32 @@ func setProjectionState(t *testing.T, db *sql.DB, revision string, status string
 		set structure_revision = ?, status = ? where rollup_name = 'projection_v1'`, revision, status)
 }
 
+// addCacheAccountingRevision writes the settings row v1.14.6 introduced. It is a
+// marker the pinned release lacks, so a source that carries it has moved past
+// the pin.
+func addCacheAccountingRevision(t *testing.T, db *sql.DB) {
+	t.Helper()
+	execFixture(t, db, `insert into settings (key, value, updated_at_ms)
+		values ('usage_cache_accounting_semantics_revision', '3', 1)`)
+}
+
+// addLatencyCoveringIndex creates the index v1.14.7 added over the latency and
+// TTFT columns, the other marker the pinned release lacks.
+func addLatencyCoveringIndex(t *testing.T, db *sql.DB) {
+	t.Helper()
+	execFixture(t, db, `create index idx_usage_events_ts_latency_ttft_cover
+		on usage_events (timestamp_ms, latency_ms, ttft_ms)`)
+}
+
+// withNewerThanPinned adds every marker the 1.x line introduced after the pinned
+// release: the cache-accounting semantics revision v1.14.6 wrote and the
+// latency-covering index v1.14.7 added.
+func withNewerThanPinned(t *testing.T, db *sql.DB) {
+	t.Helper()
+	addCacheAccountingRevision(t, db)
+	addLatencyCoveringIndex(t, db)
+}
+
 func declared() Options {
 	return Options{DeclaredVersion: pinnedSourceVersion()}
 }
@@ -422,7 +452,13 @@ func requireBlocked(t *testing.T, report Report, want ...string) {
 	}
 }
 
-func TestPreflightIsReadyOnAV11410SourceWithThePinnedDeclaration(t *testing.T) {
+// TestPreflightIsReadyOnThePinnedReleaseSchema is the real-Docker harness
+// regression: a source that carries exactly the schema the pinned release
+// creates passes preflight. usage_archive_deleted_coverage_daily is part of that
+// schema in every 1.14.x release, v1.14.0 included, so reading it as a marker of
+// a later release refused the pinned release itself and no real 1.x install
+// could pass.
+func TestPreflightIsReadyOnThePinnedReleaseSchema(t *testing.T) {
 	fixture := newSourceFixture(t, nil)
 	report := preflight(t, fixture.root, declared())
 	if !report.Ready {
@@ -457,6 +493,13 @@ func TestPreflightIsReadyOnAV11410SourceWithThePinnedDeclaration(t *testing.T) {
 	}
 	if report.ParityGaps.DeletedEventRefs != 1 {
 		t.Fatalf("deleted event refs = %d, want 1", report.ParityGaps.DeletedEventRefs)
+	}
+	version, found := checkByName(report, CheckSourceVersion)
+	if !found || version.Status != StatusPass {
+		t.Fatalf("version check = %+v, want pass", version)
+	}
+	if strings.Contains(version.Detail, "newer than pinned") {
+		t.Fatalf("version detail %q reads the pinned release's own schema as newer", version.Detail)
 	}
 }
 
@@ -670,6 +713,91 @@ func TestPreflightBlocksDeclaredVersionThatIsNotPinned(t *testing.T) {
 		if !strings.Contains(check.Detail, want) {
 			t.Fatalf("version detail %q does not carry %q", check.Detail, want)
 		}
+	}
+}
+
+// TestPreflightBlocksAMarkerThePinnedReleaseLacks is the second half of the
+// harness regression: the newer-marker rule still refuses a source that
+// genuinely moved past the pin, and it names only the markers the pin lacks.
+// The deleted-raw summary is not one of them — it is base shape in every 1.14.x
+// release — so the refusal must not blame it.
+func TestPreflightBlocksAMarkerThePinnedReleaseLacks(t *testing.T) {
+	cases := []struct {
+		name      string
+		configure func(t *testing.T, db *sql.DB)
+		want      []string
+	}{
+		{
+			name:      "cache accounting semantics revision",
+			configure: addCacheAccountingRevision,
+			want:      []string{"usage_cache_accounting_semantics_revision=3"},
+		},
+		{
+			name:      "latency covering index",
+			configure: addLatencyCoveringIndex,
+			want:      []string{"idx_usage_events_ts_latency_ttft_cover"},
+		},
+		{
+			name:      "both later markers",
+			configure: withNewerThanPinned,
+			want:      []string{"idx_usage_events_ts_latency_ttft_cover", "usage_cache_accounting_semantics_revision=3"},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newSourceFixture(t, testCase.configure)
+			report := preflight(t, fixture.root, declared())
+			requireBlocked(t, report, CodeSourceVersionUnsupported)
+			check, found := checkByName(report, CheckSourceVersion)
+			if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
+				t.Fatalf("version check = %+v, want blocked %s", check, CodeSourceVersionUnsupported)
+			}
+			if !strings.Contains(check.Detail, "markers newer than pinned") {
+				t.Fatalf("version detail %q does not report the newer markers", check.Detail)
+			}
+			for _, want := range testCase.want {
+				if !strings.Contains(check.Detail, want) {
+					t.Fatalf("version detail %q does not name %q", check.Detail, want)
+				}
+			}
+			if strings.Contains(check.Detail, "usage_archive_deleted_coverage_daily") {
+				t.Fatalf("version detail %q blames the pinned release's own schema", check.Detail)
+			}
+			if report.SourceVersion != pinnedSourceVersion() {
+				t.Fatalf("source version = %q, want the declaration %q", report.SourceVersion, pinnedSourceVersion())
+			}
+		})
+	}
+}
+
+// TestSourceSchemaNewerMarkersFollowThePin locks both halves of the rule: a
+// marker introduced at or below the pin is part of the schema the pin already
+// accepts, and a base table is never a marker at all. Without the release
+// filter a re-pin would refuse its own source, the same defect one release
+// later.
+func TestSourceSchemaNewerMarkersFollowThePin(t *testing.T) {
+	baseOnly := sourceSchema{
+		tables:   map[string]bool{"usage_archive_deleted_coverage_daily": true},
+		indexes:  map[string]bool{},
+		settings: map[string]string{},
+	}
+	if newer := baseOnly.newerMarkers("v1.14.4"); len(newer) != 0 {
+		t.Fatalf("newer = %v for the base shape, want none: every 1.14.x release creates the deleted-raw summary", newer)
+	}
+	source := sourceSchema{
+		tables:   map[string]bool{"usage_archive_deleted_coverage_daily": true},
+		indexes:  map[string]bool{"idx_usage_events_ts_latency_ttft_cover": true},
+		settings: map[string]string{"usage_cache_accounting_semantics_revision": "3"},
+	}
+	want := []string{"idx_usage_events_ts_latency_ttft_cover", "usage_cache_accounting_semantics_revision=3"}
+	if newer := source.newerMarkers("v1.14.4"); !reflect.DeepEqual(newer, want) {
+		t.Fatalf("newer against v1.14.4 = %v, want %v", newer, want)
+	}
+	if newer := source.newerMarkers("v1.14.6"); !reflect.DeepEqual(newer, []string{"idx_usage_events_ts_latency_ttft_cover"}) {
+		t.Fatalf("newer against v1.14.6 = %v, want only the index", newer)
+	}
+	if newer := source.newerMarkers("v1.14.7"); len(newer) != 0 {
+		t.Fatalf("newer against v1.14.7 = %v, want none: the pin now accepts both markers", newer)
 	}
 }
 

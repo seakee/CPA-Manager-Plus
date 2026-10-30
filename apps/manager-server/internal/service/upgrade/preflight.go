@@ -272,7 +272,8 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	}
 
 	// 2. Declared source version against the pinned contract and the v1.14
-	// structural lower bound, plus the v2-only table guard.
+	// structural lower bound, plus the v2-only table guard and the markers the
+	// pinned release genuinely lacks.
 	if !readable {
 		report.Checks = append(report.Checks, Check{
 			Name: CheckSourceVersion, Status: StatusSkipped, Detail: "source database was not readable",
@@ -280,7 +281,11 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	} else {
 		report.SourceVersion = declaredVersion(options.DeclaredVersion)
 		report.MissingTables = schema.missingTables(requiredLegacyTables)
-		check := versionCheck(report.SourceKind, schema.v2OnlyTables(), report.MissingTables, options.DeclaredVersion, pinnedSourceVersion())
+		newerMarkers := schema.newerMarkers(pinnedSourceVersion())
+		check := versionCheck(
+			report.SourceKind, schema.v2OnlyTables(), report.MissingTables, newerMarkers,
+			options.DeclaredVersion, pinnedSourceVersion(),
+		)
 		if check.Status == StatusBlocked {
 			block(check.Code)
 		}

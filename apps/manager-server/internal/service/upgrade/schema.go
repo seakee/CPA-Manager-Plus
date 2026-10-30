@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 )
 
 var (
@@ -27,8 +29,12 @@ const VersionUnknown = "unknown"
 // of derived rollups that several releases share. Preflight therefore never
 // infers a release from DDL. What it does require is a structural lower bound:
 // a source below the v1.14 shape is refused no matter what release it declares.
+// It also refuses a source that carries a marker the pinned release genuinely
+// lacks, because that source has already moved past the pin.
 type sourceSchema struct {
-	tables map[string]bool
+	tables   map[string]bool
+	indexes  map[string]bool
+	settings map[string]string
 }
 
 // requiredLegacyTables is the structural lower bound a v1.14.x source must
@@ -36,7 +42,10 @@ type sourceSchema struct {
 // these tables, and several v1.13 releases do not. A declaration alone never
 // satisfies it, because the tables are the only evidence the source can
 // actually produce. usage_archive_event_refs is the table that marks the
-// archive/retained-projection shape this upgrade copies.
+// archive/retained-projection shape this upgrade copies, and
+// usage_archive_deleted_coverage_daily is part of the v1.14.0 schema itself
+// (repository/sqlite/migrate.go creates it in every 1.14.x release), so neither
+// can identify a release after the pinned one.
 var requiredLegacyTables = []string{
 	"settings",
 	"usage_events",
@@ -103,23 +112,57 @@ func quickCheckSource(ctx context.Context, db *sql.DB) error {
 }
 
 func readSourceSchema(ctx context.Context, db *sql.DB) (sourceSchema, error) {
-	schema := sourceSchema{tables: map[string]bool{}}
-	rows, err := db.QueryContext(ctx, `select name from sqlite_master where type = 'table'`)
+	schema := sourceSchema{tables: map[string]bool{}, indexes: map[string]bool{}, settings: map[string]string{}}
+	rows, err := db.QueryContext(ctx, `select type, name from sqlite_master where type in ('table', 'index')`)
 	if err != nil {
 		return sourceSchema{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var kind, name string
+		if err := rows.Scan(&kind, &name); err != nil {
 			return sourceSchema{}, err
+		}
+		if kind == "index" {
+			schema.indexes[name] = true
+			continue
 		}
 		schema.tables[name] = true
 	}
 	if err := rows.Err(); err != nil {
 		return sourceSchema{}, err
 	}
-	return schema, nil
+	// A source without a settings table is not a Manager database at all; the
+	// version check refuses it by kind, so there is nothing to read there.
+	if !schema.tables["settings"] {
+		return schema, nil
+	}
+	marks := make([]string, len(sourceMarkerKeys))
+	for index := range sourceMarkerKeys {
+		marks[index] = "?"
+	}
+	settingRows, err := db.QueryContext(ctx,
+		`select key, value from settings where key in (`+strings.Join(marks, ", ")+`)`, stringArgs(sourceMarkerKeys)...)
+	if err != nil {
+		return sourceSchema{}, err
+	}
+	defer settingRows.Close()
+	for settingRows.Next() {
+		var key, value string
+		if err := settingRows.Scan(&key, &value); err != nil {
+			return sourceSchema{}, err
+		}
+		schema.settings[key] = value
+	}
+	return schema, settingRows.Err()
+}
+
+func stringArgs(values []string) []any {
+	args := make([]any, len(values))
+	for index, value := range values {
+		args[index] = value
+	}
+	return args
 }
 
 // pinnedSourceVersion is the accepted source release. It is read from the
@@ -141,8 +184,10 @@ func declaredVersion(declared string) string {
 // structural lower bound. The release is never read out of the database: v1
 // never persisted it, so a value inferred from DDL would be a guess dressed as
 // evidence. The required tables, by contrast, are real evidence, and a source
-// that lacks one is refused even when the declaration matches.
-func versionCheck(kind string, v2Tables []string, missingTables []string, declared string, pinned string) Check {
+// that lacks one is refused even when the declaration matches. So is a source
+// that carries a marker the pinned release genuinely lacks: the declaration
+// claims a release, and that claim cannot survive evidence of a later one.
+func versionCheck(kind string, v2Tables []string, missingTables []string, newerMarkers []string, declared string, pinned string) Check {
 	check := Check{Name: CheckSourceVersion, Status: StatusPass}
 	switch {
 	case kind == SourceKindNativeV2:
@@ -166,8 +211,118 @@ func versionCheck(kind string, v2Tables []string, missingTables []string, declar
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUnsupported
 		check.Detail = fmt.Sprintf("expected=%s declared=%s", pinned, declared)
+	case len(newerMarkers) != 0:
+		check.Status = StatusBlocked
+		check.Code = CodeSourceVersionUnsupported
+		check.Detail = fmt.Sprintf("expected=%s declared=%s; markers newer than pinned: %s",
+			pinned, declaredVersion(declared), strings.Join(newerMarkers, ","))
 	default:
 		check.Detail = fmt.Sprintf("expected=%s declared=%s; structural lower bound satisfied", pinned, declared)
 	}
 	return check
+}
+
+const (
+	markerIndex   = "index"
+	markerSetting = "setting"
+)
+
+// sourceMarker is one observation the version check may make against the
+// source. label is what the report names for the operator: the marker itself,
+// plus the value for a setting.
+type sourceMarker struct {
+	kind  string
+	name  string
+	value string
+}
+
+func (m sourceMarker) label() string {
+	if m.kind == markerSetting {
+		return m.name + "=" + m.value
+	}
+	return m.name
+}
+
+// sourceMarkerKeys are the settings rows the version check reads. The v1 code
+// writes them itself; they are revision facts, not credentials.
+var sourceMarkerKeys = []string{datamigration.UsageCacheAccountingSemanticsRevisionKey}
+
+func (s sourceSchema) has(marker sourceMarker) bool {
+	switch marker.kind {
+	case markerIndex:
+		return s.indexes[marker.name]
+	case markerSetting:
+		return s.settings[marker.name] == marker.value
+	default:
+		return s.tables[marker.name]
+	}
+}
+
+type versionMarker struct {
+	release string
+	marker  sourceMarker
+}
+
+// laterSourceMarkers lists the markers the 1.x line introduced after the
+// pinned release, with the release that introduced each one. None of them is a
+// table: the table set is identical across 1.14.x, and every base table in
+// requiredLegacyTables is created by the pinned release too. Listing one here —
+// usage_archive_deleted_coverage_daily was once mistaken for a v1.14.6 marker —
+// refuses a source of the pinned release itself, which is exactly the defect
+// the real-Docker harness found. The release is carried so a later re-pin drops
+// the markers its own schema accepts instead of refusing itself.
+var laterSourceMarkers = []versionMarker{
+	{release: "v1.14.6", marker: sourceMarker{
+		kind:  markerSetting,
+		name:  datamigration.UsageCacheAccountingSemanticsRevisionKey,
+		value: strconv.Itoa(datamigration.CurrentUsageCacheAccountingSemanticsRevision),
+	}},
+	{release: "v1.14.7", marker: sourceMarker{kind: markerIndex, name: "idx_usage_events_ts_latency_ttft_cover"}},
+}
+
+// newerMarkers returns the labels of the markers the source carries that the
+// pinned release genuinely lacks, in lexical order. A marker introduced at or
+// below the pin is part of the schema the pin already accepts, so it can never
+// prove that the source moved past it.
+func (s sourceSchema) newerMarkers(pinned string) []string {
+	newer := []string{}
+	pinnedRank, pinnedKnown := parseRelease(pinned)
+	if !pinnedKnown {
+		return newer
+	}
+	for _, candidate := range laterSourceMarkers {
+		rank, ok := parseRelease(candidate.release)
+		if !ok || rank <= pinnedRank {
+			continue
+		}
+		if s.has(candidate.marker) {
+			newer = append(newer, candidate.marker.label())
+		}
+	}
+	sort.Strings(newer)
+	return newer
+}
+
+func parseRelease(release string) (int, bool) {
+	trimmed := strings.TrimPrefix(strings.TrimSpace(release), "v")
+	parts := strings.Split(trimmed, ".")
+	if len(parts) != 3 {
+		return 0, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, false
+	}
+	patch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return 0, false
+	}
+	if major < 0 || minor < 0 || patch < 0 {
+		return 0, false
+	}
+	return major*1_000_000 + minor*1_000 + patch, true
 }
