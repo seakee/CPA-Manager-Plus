@@ -33,6 +33,13 @@ var (
 	ErrUnknownDomain            = errors.New("upgrade operation domain is not supported")
 	ErrUnknownStage             = errors.New("upgrade operation stage is not supported")
 	ErrInvalidRow               = errors.New("upgrade operation row is invalid")
+	// ErrRollbackEvidenceMissing reports a stored rolled_back row that carries
+	// none of, or only part of, the observation that justified it. Both write
+	// paths refuse such a row before it reaches the table, so a store that holds
+	// one was written by a build that recorded the verdict without its evidence.
+	// A read-only reader cannot repair it and reports the store as the outdated
+	// one it is instead of as a malformed row.
+	ErrRollbackEvidenceMissing = errors.New("upgrade operation rolled_back row carries no evidence")
 )
 
 type Repository struct{ db *sql.DB }
@@ -148,6 +155,13 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	}
 	op.Reconciliation = json.RawMessage(reconciliation)
 	op.Normalize()
+	// The verdict and its evidence are written together, so a store that holds
+	// the terminal stage without a whole observation was written by a build that
+	// did not. Validate would report it as a malformed row; naming the case lets
+	// a reader report the store the operator can act on.
+	if op.Stage == model.UpgradeStageRolledBack && (op.Rollback == nil || !op.Rollback.Complete()) {
+		return model.UpgradeOperation{}, false, ErrRollbackEvidenceMissing
+	}
 	if err := op.Validate(); err != nil {
 		return model.UpgradeOperation{}, false, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}

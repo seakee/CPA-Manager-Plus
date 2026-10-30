@@ -363,8 +363,10 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   `source_root`, both fingerprints, `backup_manifest_sha256` or the completed
   domains; a second verdict is `upgrade_rollback_not_applicable`. The recorded
   observation time is the service's own clock reading after its proofs, not the
-  caller's label; a caller-supplied time outside the freshness window is still
-  refused (`upgrade_rollback_evidence_stale`). The observed fingerprint is
+  caller's label; a supplied time outside the freshness window is still
+  refused (`upgrade_rollback_evidence_stale`), and a zero `observedAtMs` leaves
+  the moment to the service, so a programmatic caller that proves the install
+  without labelling a time is not refused. The observed fingerprint is
   informational: the restarted 1.x manager keeps writing rows, so byte equality
   with the recorded before-fingerprint is neither required nor recorded as one.
 - **CLI.** `upgrade rollback --prepare --legacy <dir> [--legacy-image <ref>]
@@ -391,6 +393,16 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   columns is reported as `upgrade_store_schema_outdated` (naming the missing
   columns and the writable open that adds them) instead of surfacing raw SQL, and
   the command exits 1.
+- **A verdict without its evidence is the same outdated store.** A row that
+  names `rolled_back` and none — or only part — of its evidence is reported as
+  `upgrade_store_schema_outdated` too, with the same code and the same exit 1
+  from both `upgrade status` and `upgrade rollback --prepare`: no write path of
+  this build records the stage without its observation, so such a row comes from
+  a build before the evidence columns, and a writable open only adds columns. The
+  copy therefore promises no repair; it says the operation cannot be read as
+  recorded and names the only real path: copy the 1.x source into a new v2 data
+  root with `upgrade run` and decide against that record. A test reopens the
+  store writable and re-reads it to keep that claim true.
 - **`upgrade run` stops at the copy-in.** It performs preflight plus copy-in,
   never reconciliation, and records the 1.x data directory it read so a later
   rollback can bind its volume. It prints the exact

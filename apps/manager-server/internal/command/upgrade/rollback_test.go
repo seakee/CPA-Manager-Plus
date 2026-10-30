@@ -627,3 +627,56 @@ func writeOutdatedStore(t *testing.T, databasePath string) {
 		t.Fatalf("close the earlier store: %v", err)
 	}
 }
+
+// TestStatusAndPrepareReportATerminalRowWithoutEvidence covers the second shape
+// of an outdated store: the row names the rolled_back stage and none of its
+// evidence. This build refuses such a row on both write paths and a writable
+// open repairs nothing, so both read paths have to report the same typed code,
+// the same copy and the same exit status, without promising a repair.
+func TestStatusAndPrepareReportATerminalRowWithoutEvidence(t *testing.T) {
+	source := copyReadySource(t)
+	target := rollbackReadyTarget(t, source)
+	databasePath := filepath.Join(target, "usage.sqlite")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath))
+	if err != nil {
+		t.Fatalf("open the v2 store: %v", err)
+	}
+	// Write behind the repository: this is the row the production paths refuse,
+	// so only a build from before the evidence invariant could leave it.
+	if _, err := db.Exec(`update upgrade_operations
+		set stage = 'rolled_back',
+			rollback_image = null, rollback_status_url = null,
+			rollback_source_fingerprint = null, rollback_observed_at_ms = null
+		where id = 1`); err != nil {
+		_ = db.Close()
+		t.Fatalf("write the evidence-less verdict: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the v2 store: %v", err)
+	}
+
+	statusCode, _, statusErr := run(t, "status", "--db-path", databasePath)
+	prepareCode, _, prepareErr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
+	if statusCode != prepareCode {
+		t.Fatalf("status exit code = %d, prepare exit code = %d, want one status", statusCode, prepareCode)
+	}
+	if statusCode != 1 {
+		t.Fatalf("exit code = %d, want 1; status stderr: %s prepare stderr: %s", statusCode, statusErr, prepareErr)
+	}
+	for name, stderr := range map[string]string{"status": statusErr, "prepare": prepareErr} {
+		if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorStoreSchemaOutdated)) {
+			t.Fatalf("%s did not name the typed code: %s", name, stderr)
+		}
+		for _, want := range []string{"cannot be read as recorded", "new v2 data root"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("%s does not say %q: %s", name, want, stderr)
+			}
+		}
+		if strings.Contains(stderr, "open it once with this build") {
+			t.Fatalf("%s promises a repair a writable open cannot make: %s", name, stderr)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(target, ".upgrade-rollback")); !os.IsNotExist(err) {
+		t.Fatalf("a refused prepare wrote a plan (err=%v)", err)
+	}
+}

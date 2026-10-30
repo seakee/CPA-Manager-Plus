@@ -127,6 +127,14 @@ type RollbackEvidence struct {
 	ObservedAtMS int64 `json:"observedAtMs"`
 }
 
+// Complete reports whether the evidence names everything a verdict rests on.
+// The fields are recorded whole or not at all, so an incomplete value describes
+// only the shape of an observation: a reader can neither re-check it nor name
+// the moment it belonged to.
+func (e RollbackEvidence) Complete() bool {
+	return e.Image != "" && e.StatusURL != "" && e.SourceFingerprint != "" && e.ObservedAtMS > 0
+}
+
 // UpgradeOperation is the whole persistent state of the v2 Upgrade operation:
 // one row, one operation, no history rows. It carries observations (source
 // kind/version/fingerprints, backup manifest, manual items) and never an
@@ -231,13 +239,8 @@ func (o UpgradeOperation) Validate() error {
 	}
 	// Evidence is written whole or not at all. A partial record would let a
 	// reader believe a verdict was observed when only its shape survived.
-	if o.Rollback != nil {
-		if o.Rollback.Image == "" || o.Rollback.StatusURL == "" || o.Rollback.SourceFingerprint == "" {
-			return errors.New("upgrade operation rollback evidence must name the image, the health endpoint and the observed fingerprint")
-		}
-		if o.Rollback.ObservedAtMS <= 0 {
-			return errors.New("upgrade operation rollback evidence must name when it was observed")
-		}
+	if o.Rollback != nil && !o.Rollback.Complete() {
+		return errors.New("upgrade operation rollback evidence must name the image, the health endpoint, the observed fingerprint and when it was observed")
 	}
 	return nil
 }

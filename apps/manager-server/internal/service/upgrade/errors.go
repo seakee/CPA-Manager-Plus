@@ -80,8 +80,10 @@ const (
 	UpgradeErrorRollbackV2Running UpgradeErrorCode = "upgrade_rollback_v2_running"
 	// UpgradeErrorStoreSchemaOutdated reports that the Manager store predates the
 	// current build's upgrade table, so its operation row cannot be read without
-	// the columns a writable open adds. The store must be opened once by this
-	// build; nothing was written.
+	// the columns a writable open adds. It also reports the related row a writable
+	// open cannot repair: a rolled_back stage whose evidence did not survive, which
+	// only a build that recorded the two separately could write. Both commands that
+	// read the row report it with this code and exit 1; nothing was written.
 	UpgradeErrorStoreSchemaOutdated UpgradeErrorCode = "upgrade_store_schema_outdated"
 )
 

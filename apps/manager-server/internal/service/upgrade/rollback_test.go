@@ -671,10 +671,11 @@ func TestRecordRollbackRefusesAnUnprovenHealthAnswer(t *testing.T) {
 
 // TestRecordRollbackRefusesStaleEvidence covers M3's freshness window: an
 // observation taken before the install being recorded is stale, not evidence.
+// A supplied time keeps its window; a zero is the caller's "now", covered below.
 func TestRecordRollbackRefusesStaleEvidence(t *testing.T) {
 	fixture := newRollbackFixture(t)
 	for _, observedAt := range []int64{
-		0,
+		-1,
 		time.Now().Add(-rollbackEvidenceFreshness - time.Minute).UnixMilli(),
 		time.Now().Add(rollbackEvidenceFutureSkew + time.Minute).UnixMilli(),
 	} {
@@ -686,6 +687,33 @@ func TestRecordRollbackRefusesStaleEvidence(t *testing.T) {
 		if after := fixture.recordedRow(t); after.Rollback != nil {
 			t.Fatalf("stale evidence was recorded: %+v", after.Rollback)
 		}
+	}
+}
+
+// TestRecordRollbackLeavesTheMomentToTheService covers the programmatic caller
+// that proves the install and names no observation time: the verdict is stamped
+// from this service's own clock after every proof, so a zero is not a stale
+// claim and the caller is not refused for omitting a label it cannot need.
+func TestRecordRollbackLeavesTheMomentToTheService(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	observation := fixture.observation(t)
+	observation.ObservedAtMS = 0
+	recorded, err := RecordRollback(context.Background(), observation)
+	if err != nil {
+		t.Fatalf("record with no observation time: %v", err)
+	}
+	if recorded.Stage != model.UpgradeStageRolledBack || recorded.Rollback == nil {
+		t.Fatalf("recorded = %+v, want a rolled_back verdict with its evidence", recorded)
+	}
+	if recorded.Rollback.ObservedAtMS <= 0 {
+		t.Fatalf("recorded observation time = %d, want this service's clock", recorded.Rollback.ObservedAtMS)
+	}
+	persisted := fixture.recordedRow(t)
+	if persisted.Rollback == nil || persisted.Rollback.ObservedAtMS != recorded.Rollback.ObservedAtMS {
+		t.Fatalf("persisted evidence = %+v, want the stamped moment", persisted.Rollback)
+	}
+	if persisted.Rollback.Image != observation.Image {
+		t.Fatalf("recorded image = %q, want %q", persisted.Rollback.Image, observation.Image)
 	}
 }
 
@@ -1003,6 +1031,61 @@ func TestReadRecordReportsAnOutdatedStore(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "SQL logic error") || strings.Contains(err.Error(), "no such column") {
 		t.Fatalf("the refusal surfaced raw SQL: %s", err)
+	}
+}
+
+// TestReadRecordReportsATerminalRowWithoutEvidence covers the second shape of a
+// store this build cannot describe: the columns exist, the columns are empty,
+// and the row claims a terminal verdict. No write path of this build records the
+// stage without its observation, and a writable open only adds columns, so the
+// refusal must say the operation cannot be read as recorded and name the record
+// the operator can decide against instead.
+func TestReadRecordReportsATerminalRowWithoutEvidence(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	databasePath := filepath.Join(fixture.targetRoot, databaseFileName)
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath))
+	if err != nil {
+		t.Fatalf("open the v2 store: %v", err)
+	}
+	// Write behind the repository: this is the row the production paths refuse,
+	// so only a build from before the evidence invariant could leave it.
+	if _, err := db.Exec(`update upgrade_operations
+		set stage = 'rolled_back',
+			rollback_image = null, rollback_status_url = null,
+			rollback_source_fingerprint = null, rollback_observed_at_ms = null
+		where id = 1`); err != nil {
+		_ = db.Close()
+		t.Fatalf("write the evidence-less verdict: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the v2 store: %v", err)
+	}
+
+	_, found, err := ReadRecord(context.Background(), databasePath)
+	if !errors.Is(err, ErrStoreSchemaOutdated) {
+		t.Fatalf("an evidence-less verdict = %v (found=%t), want %v", err, found, ErrStoreSchemaOutdated)
+	}
+	for _, want := range []string{"cannot be read as recorded", "new v2 data root"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not say %q: %s", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "open it once with this build") {
+		t.Fatalf("the refusal promises a repair a writable open cannot make: %s", err)
+	}
+
+	// A writable open migrates the table and repairs nothing else, so the row is
+	// still unreadable afterwards. Keeping that true is what keeps the copy
+	// honest.
+	reopened, err := managersqlite.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open the store writable: %v", err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatalf("close the writable store: %v", err)
+	}
+	if _, _, err := ReadRecord(context.Background(), databasePath); !errors.Is(err, ErrStoreSchemaOutdated) {
+		t.Fatalf("a writable open repaired the row: %v", err)
 	}
 }
 

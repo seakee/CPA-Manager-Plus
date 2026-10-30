@@ -789,7 +789,9 @@ type RollbackObservation struct {
 	ManagerAddress string `json:"managerAddress,omitempty"`
 	// ObservedAtMS is when the operator asked for the verdict. It is only a
 	// freshness claim: the observation time written with the verdict is the one
-	// this service stamps when it has finished its own proofs.
+	// this service stamps when it has finished its own proofs. Zero leaves the
+	// moment to this service — the same moment it stamps — so a programmatic
+	// caller that proves the install without labelling a time is not refused.
 	ObservedAtMS int64 `json:"observedAtMs"`
 	// AllowImageFamilyMismatch is the explicit override for a 1.x image from
 	// another version family.
@@ -807,8 +809,9 @@ type RollbackObservation struct {
 // Every refusal has its own typed code: a stage a rollback cannot start from
 // (upgrade_rollback_not_applicable), a directory that is not the recorded source
 // root (upgrade_rollback_volume_unbound), an observation outside the freshness
-// window (upgrade_rollback_evidence_stale), an image that is unpinned or from
-// another version family (upgrade_rollback_image_unpinned,
+// window (upgrade_rollback_evidence_stale; a zero observation time means now, so
+// a caller that leaves the moment to this service is not refused), an image that
+// is unpinned or from another version family (upgrade_rollback_image_unpinned,
 // upgrade_rollback_image_family), a probe that does not address /health
 // (upgrade_rollback_probe_endpoint), a probe that addresses this Manager's own
 // listener (upgrade_rollback_probe_self), a v2 stack that still answers on the
@@ -935,10 +938,13 @@ func requireRecordedBackup(recorded model.UpgradeOperation) error {
 // requireFreshObservation refuses an observation taken outside the freshness
 // window, or dated in the future beyond a small clock difference. Evidence that
 // describes a different moment cannot justify this moment's verdict.
+//
+// A zero observation is a caller leaving the moment to this service: the verdict
+// is stamped from this service's own clock after every proof, so there is no
+// claim to check and nothing to refuse. A supplied time keeps its window.
 func requireFreshObservation(observedAtMS int64, now time.Time) error {
-	if observedAtMS <= 0 {
-		return newUpgradeError(UpgradeErrorRollbackEvidenceStale,
-			"the observation carries no time, so it cannot be shown to describe the install being recorded; re-run the probe now", nil)
+	if observedAtMS == 0 {
+		return nil
 	}
 	observed := time.UnixMilli(observedAtMS)
 	if observed.Sub(now) > rollbackEvidenceFutureSkew {

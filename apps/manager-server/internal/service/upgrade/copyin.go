@@ -276,7 +276,16 @@ func recordedOperation(ctx context.Context, databasePath string, immutable bool)
 			fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read without a writable open; open it once with this build before reading it read-only",
 				strings.Join(missing, ", ")), nil)
 	}
-	return repository.Get(ctx)
+	operation, found, err := repository.Get(ctx)
+	// A rolled_back row whose observation did not survive was written by a build
+	// that did not record the two together. No path of this build writes one and
+	// no open repairs one, so the store is the outdated thing here: the operator
+	// is told the record cannot be read and which record they can decide against.
+	if errors.Is(err, upgradeoperation.ErrRollbackEvidenceMissing) {
+		return model.UpgradeOperation{}, false, newUpgradeError(UpgradeErrorStoreSchemaOutdated,
+			"this Manager store records a rolled_back operation without the observation that justified it, which this build refuses on every write path, so the operation cannot be read as recorded and opening the store does not repair it; copy the 1.x source into a new v2 data root with `upgrade run` and decide against that record", nil)
+	}
+	return operation, found, err
 }
 
 type targetPaths struct {

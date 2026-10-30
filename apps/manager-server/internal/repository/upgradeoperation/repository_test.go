@@ -446,3 +446,42 @@ func TestPutKeepsRecordedRollbackEvidence(t *testing.T) {
 		t.Fatalf("re-written row lost its evidence: %+v", again.Rollback)
 	}
 }
+
+// TestGetReportsATerminalRowWithoutEvidence covers the read half of the write
+// invariant: a store written by a build that recorded the verdict without its
+// observation holds a row this build refuses to write on both paths. The reader
+// names that case, so a read-only caller can report the store rather than a
+// malformed row.
+func TestGetReportsATerminalRowWithoutEvidence(t *testing.T) {
+	for name, statement := range map[string]string{
+		"no evidence": `update upgrade_operations
+			set stage = 'rolled_back',
+				rollback_image = null, rollback_status_url = null,
+				rollback_source_fingerprint = null, rollback_observed_at_ms = null
+			where id = 1`,
+		"partial evidence": `update upgrade_operations
+			set stage = 'rolled_back',
+				rollback_image = 'seakee/cpa-manager-plus:v1.14.7',
+				rollback_status_url = null, rollback_source_fingerprint = null,
+				rollback_observed_at_ms = null
+			where id = 1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			repository, db := newRepository(t)
+			recordedCopyIn(t, repository)
+			// Write behind the repository: this is the row the production paths
+			// refuse, so only a build from before the invariant could leave it.
+			if _, err := db.Exec(statement); err != nil {
+				t.Fatalf("write the evidence-less verdict: %v", err)
+			}
+			_, found, err := repository.Get(ctx)
+			if !errors.Is(err, upgradeoperation.ErrRollbackEvidenceMissing) {
+				t.Fatalf("get = %v (found=%t), want %v", err, found, upgradeoperation.ErrRollbackEvidenceMissing)
+			}
+			if errors.Is(err, upgradeoperation.ErrInvalidRow) {
+				t.Fatalf("an outdated store was reported as a malformed row: %v", err)
+			}
+		})
+	}
+}
