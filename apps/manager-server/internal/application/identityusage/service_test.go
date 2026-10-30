@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityusage"
@@ -26,6 +27,7 @@ type fakeRepo struct {
 	windows       map[identity.APIKeyID]ports.Window
 	series        []ports.Bucket
 	rawDeleted    bool
+	incomplete    []ports.IncompleteDay
 	windowFromMS  int64
 	windowToMS    int64
 	markedAt      int64
@@ -61,6 +63,10 @@ func (f *fakeRepo) Series(context.Context, identity.APIKeyID, int64, int64, int6
 
 func (f *fakeRepo) RawDeletedIn(context.Context, int64, int64) (bool, error) {
 	return f.rawDeleted, nil
+}
+
+func (f *fakeRepo) IncompleteDaysIn(context.Context, int64, int64) ([]ports.IncompleteDay, error) {
+	return f.incomplete, nil
 }
 
 func (f *fakeRepo) CollectionStartedAtMS(context.Context) (int64, error) {
@@ -179,6 +185,9 @@ func TestDetailReportsPartialBoundsWithoutClaimingExhaustiveness(t *testing.T) {
 			r.windows = map[identity.APIKeyID]ports.Window{testKeyID: {Totals: r.windows[testKeyID].Totals, UnmappedEvents: 2}}
 		}, "identity_unmapped"},
 		{"raw deleted", func(r *fakeRepo) { r.rawDeleted = true }, "raw_deleted"},
+		{"upgrade marked the day", func(r *fakeRepo) {
+			r.incomplete = []ports.IncompleteDay{{Day: markedDay(), Reason: "reconcile_mismatch"}}
+		}, "upgrade_incomplete"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -192,6 +201,39 @@ func TestDetailReportsPartialBoundsWithoutClaimingExhaustiveness(t *testing.T) {
 				t.Fatalf("partial window must keep its observed lower bound, totals = %+v", response.Totals)
 			}
 		})
+	}
+}
+
+// markedDay is the UTC day one hour inside the default window, so a mark on it
+// provably overlaps what the detail read covers.
+func markedDay() string {
+	return time.UnixMilli(testNowMS - 3_600_000).UTC().Format("2006-01-02")
+}
+
+func TestDetailReportsTheUpgradeMarkThatBoundsTheWindow(t *testing.T) {
+	repo := healthy()
+	repo.incomplete = []ports.IncompleteDay{
+		{Day: "1999-12-31", Reason: "projection_lost_before_v1_14_6"},
+		{Day: markedDay(), Reason: "reconcile_mismatch"},
+	}
+	response := detail(t, repo, PhaseRunning)
+	if response.Coverage.State != "partial" || response.Coverage.Reason != "upgrade_incomplete" {
+		t.Fatalf("coverage = %+v, want the upgrade mark to bound the window", response.Coverage)
+	}
+	if len(response.IncompleteDays) != 1 || response.IncompleteDays[0].Day != markedDay() ||
+		response.IncompleteDays[0].Reason != "reconcile_mismatch" {
+		t.Fatalf("incomplete days = %+v, want only the day inside the window", response.IncompleteDays)
+	}
+	if response.Totals == nil || response.Totals.Calls != 3 {
+		t.Fatalf("totals = %+v, want the observed lower bound", response.Totals)
+	}
+
+	// A mark that predates the provable window says nothing about this key.
+	outside := healthy()
+	outside.incomplete = []ports.IncompleteDay{{Day: "1999-12-31", Reason: "reconcile_mismatch"}}
+	clean := detail(t, outside, PhaseRunning)
+	if clean.Coverage.State != "complete" || len(clean.IncompleteDays) != 0 {
+		t.Fatalf("coverage = %+v with %+v, want a complete window", clean.Coverage, clean.IncompleteDays)
 	}
 }
 

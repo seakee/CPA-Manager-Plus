@@ -6,6 +6,9 @@
 // subcommands work when the volumes are not writable. "upgrade run" performs
 // the backup and copy-in while the 1.x server is stopped: it refuses a blocked
 // preflight, writes only inside the v2 data root and records the outcome.
+// "upgrade reconcile" compares the copied store against the stopped source and
+// marks the days that can never be completed again; it refuses to mark anything
+// the operator has not acknowledged.
 package upgrade
 
 import (
@@ -32,13 +35,20 @@ var (
 	ErrBlocked = errors.New("upgrade preflight is blocked")
 )
 
-// ExitCode maps a Run result to the CLI contract: 0 ready, 1 blocked,
-// 2 anything else.
+// ExitCode maps a Run result to the CLI contract: 0 ready, 1 a refusal the
+// operator has to look at — a blocked preflight, an unacknowledged mismatch, a
+// store that cannot show what the source holds, or a reconciliation that
+// compared nothing — and 2 anything else. A refusal is a decision about the
+// migration, not a usage or environment error, so every reconcile refusal shares
+// exit 1 and the typed code in the report says which one it was.
 func ExitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
-	case errors.Is(err, ErrBlocked):
+	case errors.Is(err, ErrBlocked),
+		errors.Is(err, upgradeservice.ErrReconcileMismatch),
+		errors.Is(err, upgradeservice.ErrReconcileTargetIncomplete),
+		errors.Is(err, upgradeservice.ErrReconcileNothingCompared):
 		return 1
 	default:
 		return 2
@@ -59,6 +69,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runStatus(ctx, args[1:], stdout, stderr)
 	case "run":
 		return runCopyIn(ctx, args[1:], stdout, stderr)
+	case "reconcile":
+		return runReconcile(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		writeUsage(stdout)
 		return nil
@@ -73,8 +85,12 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  preflight --legacy <dir> [--json]   inspect a stopped 1.x source; writes nothing")
 	_, _ = fmt.Fprintln(w, "  run --legacy <dir> [--target <dir>] [--bundle <dir>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      back up and copy a stopped 1.x source into the v2 data root")
+	_, _ = fmt.Fprintln(w, "  reconcile --legacy <dir> [--target <dir>] [--bundle <dir>] [--json]")
+	_, _ = fmt.Fprintln(w, "            [--acknowledge <YYYY-MM-DD>]... [--acknowledge-parity-gaps]")
+	_, _ = fmt.Fprintln(w, "                                      compare the copied store with the 1.x source and mark")
+	_, _ = fmt.Fprintln(w, "                                      the days that can never be completed again")
 	_, _ = fmt.Fprintln(w, "  status [--json] [--db-path PATH]    read the persisted upgrade operation")
-	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, 2 usage or environment error.")
+	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked or unacknowledged mismatch, 2 usage or environment error.")
 }
 
 func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -281,6 +297,137 @@ func writeRunOutput(w io.Writer, asJSON bool, output runOutput) {
 	_, _ = fmt.Fprintf(w, "  database: %s\n", result.TargetDatabase)
 	_, _ = fmt.Fprintf(w, "  data key: %s\n", result.TargetDataKey)
 	_, _ = fmt.Fprintf(w, "  archives: %s\n", result.TargetArchives)
+}
+
+// runReconcile compares the copied-in store with the stopped 1.x source. The
+// preflight gate runs first, so a blocked source is never compared. A
+// disagreement writes the report and exits 1: nothing was marked, and the
+// report names every day that needs an explicit acknowledgement.
+func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("upgrade reconcile", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	legacy := flags.String("legacy", "", "1.x source data directory (usage.sqlite, data.key, usage-archives/)")
+	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory")
+	bundle := flags.String("bundle", "", "backup destination of the recorded copy-in; defaults to <target>/upgrade-backup")
+	asJSON := flags.Bool("json", false, "print the preflight report and the reconciliation as JSON")
+	acknowledgeParityGaps := flags.Bool("acknowledge-parity-gaps", false,
+		"accept every day the parity check reports as lost before v1.14.6")
+	acknowledged := make([]string, 0, 1)
+	flags.Func("acknowledge", "accept one UTC day (YYYY-MM-DD) as permanently incomplete; repeat for each day",
+		func(value string) error {
+			acknowledged = append(acknowledged, value)
+			return nil
+		})
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*legacy) == "" {
+		return fmt.Errorf("%w: --legacy <dir> is required and no positional arguments are accepted", ErrUsage)
+	}
+	targetRoot, err := resolveTargetRoot(*target)
+	if err != nil {
+		return err
+	}
+	legacyRoot, err := filepath.Abs(strings.TrimSpace(*legacy))
+	if err != nil {
+		return fmt.Errorf("resolve the 1.x source root: %w", err)
+	}
+	bundleDir := strings.TrimSpace(*bundle)
+	if bundleDir == "" {
+		bundleDir = upgradeservice.DefaultBundleDirectory(targetRoot)
+	}
+	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{LegacyRoot: legacyRoot})
+	if err != nil {
+		return err
+	}
+	output := reconcileOutput{Preflight: &report}
+	if !report.Ready {
+		writeReconcileOutput(stdout, *asJSON, output)
+		return ErrBlocked
+	}
+	reconcileReport, err := upgradeservice.Reconcile(ctx, upgradeservice.Options{
+		LegacyRoot:            legacyRoot,
+		TargetRoot:            targetRoot,
+		BundleDir:             bundleDir,
+		Acknowledged:          acknowledged,
+		AcknowledgeParityGaps: *acknowledgeParityGaps,
+	})
+	output.Report = &reconcileReport
+	if err != nil {
+		if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok {
+			output.ErrorCode = string(code)
+		}
+		output.Error = err.Error()
+		writeReconcileOutput(stdout, *asJSON, output)
+		return err
+	}
+	writeReconcileOutput(stdout, *asJSON, output)
+	return nil
+}
+
+type reconcileOutput struct {
+	Preflight *upgradeservice.Report          `json:"preflight"`
+	Report    *upgradeservice.ReconcileReport `json:"report,omitempty"`
+	Error     string                          `json:"error,omitempty"`
+	ErrorCode string                          `json:"errorCode,omitempty"`
+}
+
+func writeReconcileOutput(w io.Writer, asJSON bool, output reconcileOutput) {
+	if asJSON {
+		_ = json.NewEncoder(w).Encode(output)
+		return
+	}
+	if output.Preflight != nil {
+		writePreflightSummary(w, *output.Preflight)
+	}
+	if output.Report != nil {
+		writeReconcileSummary(w, *output.Report)
+	}
+	if output.Error != "" {
+		_, _ = fmt.Fprintf(w, "reconcile error: %s\n", output.Error)
+	}
+}
+
+func writeReconcileSummary(w io.Writer, report upgradeservice.ReconcileReport) {
+	_, _ = fmt.Fprintln(w, "reconcile:")
+	_, _ = fmt.Fprintf(w, "  source fingerprint: %s\n", report.SourceFingerprint)
+	for _, domain := range report.Domains {
+		line := fmt.Sprintf("  %s: ", domain.Domain)
+		if !domain.Applicable {
+			line += "not applicable (" + domain.Reason + ")"
+			_, _ = fmt.Fprintln(w, line)
+			continue
+		}
+		line += fmt.Sprintf("%d day(s) compared of %d source day(s), %d mismatch(es)",
+			domain.ComparedDays, domain.SourceDays, len(domain.Mismatches))
+		_, _ = fmt.Fprintln(w, line)
+		for _, mismatch := range domain.Mismatches {
+			detail := fmt.Sprintf("    %s %s", mismatch.Day, mismatch.Field)
+			if mismatch.Dimension != "" {
+				detail += "[" + mismatch.Dimension + "]"
+			}
+			detail += fmt.Sprintf(": source %s, store %s", mismatch.Source, mismatch.Target)
+			_, _ = fmt.Fprintln(w, detail)
+		}
+	}
+	if len(report.ParityGapDays) > 0 {
+		_, _ = fmt.Fprintf(w, "  parity gaps: %s\n", strings.Join(report.ParityGapDays, ","))
+	}
+	if len(report.AcknowledgedDays) > 0 {
+		_, _ = fmt.Fprintf(w, "  acknowledged: %s\n", strings.Join(report.AcknowledgedDays, ","))
+	}
+	for _, day := range report.IncompleteDays {
+		_, _ = fmt.Fprintf(w, "  incomplete: %s %s\n", day.Day, day.Reason)
+	}
+	if len(report.UnacknowledgedDays) > 0 {
+		_, _ = fmt.Fprintf(w, "  needs acknowledgement: %s\n", strings.Join(report.UnacknowledgedDays, ","))
+	}
+	_, _ = fmt.Fprintf(w, "  newly marked: %d\n", report.NewlyMarkedDays)
+	_, _ = fmt.Fprintf(w, "  recorded: %t\n", report.Recorded)
+	if report.Stage != "" {
+		_, _ = fmt.Fprintf(w, "  stage: %s\n", report.Stage)
+		_, _ = fmt.Fprintf(w, "  domains done: %s\n", strings.Join(report.DomainsDone, ","))
+	}
 }
 
 // resolveTargetRoot resolves the v2 data root. The Manager configuration is

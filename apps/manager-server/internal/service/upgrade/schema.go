@@ -169,18 +169,47 @@ func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sour
 	if err != nil {
 		return nil, sourceSchema{}, err
 	}
-	fail := func(err error) (*sql.DB, sourceSchema, error) {
+	schema, err := qualifySource(ctx, db)
+	if err != nil {
 		_ = db.Close()
 		return nil, sourceSchema{}, err
 	}
+	return db, schema, nil
+}
+
+// openSourceWith opens the database at path through dsn and qualifies it the
+// same way openSource does. It exists for the caller that must read its own
+// copy of the source with a different access mode, and it applies the same
+// file policy so both paths refuse the same shapes.
+func openSourceWith(ctx context.Context, path, dsn string) (*sql.DB, sourceSchema, error) {
+	if _, err := inspectSourceDatabase(path); err != nil {
+		return nil, sourceSchema{}, err
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, sourceSchema{}, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	schema, err := qualifySource(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, sourceSchema{}, err
+	}
+	return db, schema, nil
+}
+
+// qualifySource proves the whole file is structurally readable and reads the
+// bounded schema vocabulary a preflight is allowed to observe.
+func qualifySource(ctx context.Context, db *sql.DB) (sourceSchema, error) {
 	if err := quickCheckSource(ctx, db); err != nil {
-		return fail(err)
+		return sourceSchema{}, err
 	}
 	schema := sourceSchema{tables: map[string]bool{}, indexes: map[string]bool{}, settings: map[string]string{}}
 	if err := readSourceSchema(ctx, db, &schema); err != nil {
-		return fail(err)
+		return sourceSchema{}, err
 	}
-	return db, schema, nil
+	return schema, nil
 }
 
 // openSourceDatabase opens an existing source file read-only and reads nothing

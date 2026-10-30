@@ -20,6 +20,23 @@ const (
 	// copy-in held its fence. The members this run moved were rolled back and
 	// nothing was recorded.
 	UpgradeErrorSourceChanged UpgradeErrorCode = "upgrade_source_changed"
+	// UpgradeErrorReconcileMismatch reports that the copied-in store and the 1.x
+	// source disagree, or that the source can never complete a day again, and
+	// the operator has not acknowledged those days. Nothing was marked and the
+	// operation row did not advance.
+	UpgradeErrorReconcileMismatch UpgradeErrorCode = "upgrade_reconcile_mismatch"
+	// UpgradeErrorReconcileTargetIncomplete reports that the v2 store cannot show
+	// a domain the 1.x source holds days of: the table is missing, or not one day
+	// could be compared. That is lost data, not a disagreement, so no
+	// acknowledgement can waive it. Nothing was marked and the operation row did
+	// not advance.
+	UpgradeErrorReconcileTargetIncomplete UpgradeErrorCode = "upgrade_reconcile_target_incomplete"
+	// UpgradeErrorReconcileNothingCompared reports that the run established no
+	// operation domain at all: the 1.x source holds none of the compared tables,
+	// so nothing was compared. A run without a comparison has no result to
+	// record, so the operation row did not advance and nothing was marked
+	// instead of a recorded stage that names no domain.
+	UpgradeErrorReconcileNothingCompared UpgradeErrorCode = "upgrade_reconcile_nothing_compared"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -50,8 +67,11 @@ func (e *UpgradeError) Is(target error) bool {
 
 // Sentinels for errors.Is. They carry no message of their own.
 var (
-	ErrTargetModified = &UpgradeError{Code: UpgradeErrorTargetModified}
-	ErrSourceChanged  = &UpgradeError{Code: UpgradeErrorSourceChanged}
+	ErrTargetModified            = &UpgradeError{Code: UpgradeErrorTargetModified}
+	ErrSourceChanged             = &UpgradeError{Code: UpgradeErrorSourceChanged}
+	ErrReconcileMismatch         = &UpgradeError{Code: UpgradeErrorReconcileMismatch}
+	ErrReconcileTargetIncomplete = &UpgradeError{Code: UpgradeErrorReconcileTargetIncomplete}
+	ErrReconcileNothingCompared  = &UpgradeError{Code: UpgradeErrorReconcileNothingCompared}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

@@ -3953,6 +3953,100 @@ func TestAnalyticsReportsComparisonCoverageSeparately(t *testing.T) {
 	}
 }
 
+// TestAnalyticsCarriesIncompleteMarksIntoComparisonAndAuxiliaryRanges reads the
+// response as JSON, so it fails on the pre-fix builder, which copied the marks of
+// the requested range only and presented a marked day as complete everywhere
+// else.
+func TestAnalyticsCarriesIncompleteMarksIntoComparisonAndAuxiliaryRanges(t *testing.T) {
+	sqlDB, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open coverage store: %v", err)
+	}
+	db := store.New(sqlDB)
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	ctx := context.Background()
+	baseMS := time.Date(2026, time.August, 10, 0, 0, 0, 0, time.UTC).UnixMilli()
+	currentFromMS := baseMS + time.Hour.Milliseconds()
+	currentToMS := currentFromMS + time.Hour.Milliseconds()
+	if _, err := db.InsertEvents(ctx, []usage.Event{
+		monitoringEvent("marked-archived", baseMS+1_000, "gpt-a", "auth-1", "source-a", false, 10, 2, 0, 0, 12, nil),
+		monitoringEvent("marked-current", currentFromMS+1_000, "gpt-b", "auth-2", "source-b", false, 20, 3, 0, 0, 23, nil),
+	}); err != nil {
+		t.Fatalf("insert marked events: %v", err)
+	}
+	catchUpMonitoringArchiveDeleteReadiness(t, ctx, db)
+	archiveMonitoringEventsThrough(t, ctx, db, currentFromMS)
+	if _, err := sqlDB.ExecContext(ctx, `insert into usage_coverage_incomplete_days
+		(day, reason, source, recorded_at_ms) values ('2026-08-10', 'reconcile_mismatch', 'upgrade_reconcile', 1)`); err != nil {
+		t.Fatalf("mark the day: %v", err)
+	}
+
+	response, err := New(db, true).Analytics(ctx, Request{
+		FromMS: currentFromMS,
+		ToMS:   currentToMS,
+		Include: Include{
+			Summary:           true,
+			SummaryProfile:    "compact",
+			SummaryComparison: true,
+			Granularity:       "hour",
+			DrilldownPreview: &DrilldownPreview{
+				FromMS: baseMS,
+				ToMS:   currentFromMS,
+				Limit:  10,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marked coverage analytics: %v", err)
+	}
+	if response.Coverage == nil || !response.Coverage.Incomplete ||
+		len(response.Coverage.IncompleteDays) != 1 || response.Coverage.IncompleteDays[0].Day != "2026-08-10" {
+		t.Fatalf("requested coverage = %#v, want the marked day", response.Coverage)
+	}
+
+	payload, err := json.Marshal(response.Coverage)
+	if err != nil {
+		t.Fatalf("encode coverage: %v", err)
+	}
+	type coverageDay struct {
+		Day    string `json:"day"`
+		Reason string `json:"reason"`
+	}
+	var decoded struct {
+		ComparisonIncomplete     bool          `json:"comparison_incomplete"`
+		ComparisonIncompleteDays []coverageDay `json:"comparison_incomplete_days"`
+		AuxiliaryRanges          []struct {
+			Scope          string        `json:"scope"`
+			Incomplete     bool          `json:"incomplete"`
+			IncompleteDays []coverageDay `json:"incomplete_days"`
+		} `json:"auxiliary_ranges"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("decode coverage: %v", err)
+	}
+	if !decoded.ComparisonIncomplete || len(decoded.ComparisonIncompleteDays) != 1 ||
+		decoded.ComparisonIncompleteDays[0].Day != "2026-08-10" ||
+		decoded.ComparisonIncompleteDays[0].Reason != "reconcile_mismatch" {
+		t.Fatalf("comparison coverage = %s, want the marked day beside the current range", payload)
+	}
+	drilldownMarked := false
+	for _, item := range decoded.AuxiliaryRanges {
+		if item.Scope != "drilldown_preview" {
+			continue
+		}
+		if !item.Incomplete || len(item.IncompleteDays) != 1 ||
+			item.IncompleteDays[0].Day != "2026-08-10" {
+			t.Fatalf("drilldown range = %+v, want the marked day", item)
+		}
+		drilldownMarked = true
+	}
+	if !drilldownMarked {
+		t.Fatalf("coverage = %s, want a drilldown_preview range", payload)
+	}
+}
+
 func TestAnalyticsReportsIndependentRollingAndDrilldownCoverage(t *testing.T) {
 	sqlDB, err := sqliterepo.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {

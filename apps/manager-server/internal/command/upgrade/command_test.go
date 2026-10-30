@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -186,18 +185,37 @@ func TestStatusWithoutMigrationReportsNoRecord(t *testing.T) {
 	}
 }
 
-func TestExitCodeMapping(t *testing.T) {
-	if code := ExitCode(nil); code != 0 {
-		t.Fatalf("nil exit code = %d, want 0", code)
+// TestExitCodePinsEveryRefusal pins the CLI contract one row per refusal: a
+// decision the operator has to look at exits 1 no matter which typed code it
+// carries, and only a usage or environment failure exits 2. The rows carry a
+// message like the service sends, so the mapping is proven for a real typed
+// error and not just for the bare sentinel.
+func TestExitCodePinsEveryRefusal(t *testing.T) {
+	typed := func(code upgradeservice.UpgradeErrorCode) error {
+		return &upgradeservice.UpgradeError{Code: code, Message: "pinned by the exit-code table"}
 	}
-	if code := ExitCode(ErrBlocked); code != 1 {
-		t.Fatalf("blocked exit code = %d, want 1", code)
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "ready", err: nil, want: 0},
+		{name: "blocked preflight (sentinel)", err: ErrBlocked, want: 1},
+		{name: "unacknowledged mismatch", err: typed(upgradeservice.UpgradeErrorReconcileMismatch), want: 1},
+		{name: "target incomplete", err: typed(upgradeservice.UpgradeErrorReconcileTargetIncomplete), want: 1},
+		{name: "nothing compared", err: typed(upgradeservice.UpgradeErrorReconcileNothingCompared), want: 1},
+		{name: "nothing compared (sentinel)", err: upgradeservice.ErrReconcileNothingCompared, want: 1},
+		{name: "source changed", err: typed(upgradeservice.UpgradeErrorSourceChanged), want: 2},
+		{name: "target modified", err: typed(upgradeservice.UpgradeErrorTargetModified), want: 2},
+		{name: "usage", err: ErrUsage, want: 2},
 	}
-	if code := ExitCode(ErrUsage); code != 2 {
-		t.Fatalf("usage exit code = %d, want 2", code)
-	}
-	if !errors.Is(ErrBlocked, ErrBlocked) {
-		t.Fatal("blocked error lost its identity")
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if code := ExitCode(testCase.err); code != testCase.want {
+				code2, _ := upgradeservice.UpgradeErrorCodeOf(testCase.err)
+				t.Fatalf("exit code for %q = %d, want %d", code2, code, testCase.want)
+			}
+		})
 	}
 }
 
@@ -387,6 +405,116 @@ func TestRunRefusesABlockedSourceAndWritesNothing(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("blocked run wrote %v into the v2 data root", entries)
+	}
+}
+
+// reconcileRoots returns a v2 data root and a backup destination with every
+// symlink resolved: the bundle verifier refuses a path below a symbolic link,
+// and every macOS temporary directory is one.
+func reconcileRoots(t *testing.T) (string, string) {
+	t.Helper()
+	target, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve the v2 data root: %v", err)
+	}
+	bundle, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve the backup destination: %v", err)
+	}
+	return target, filepath.Join(bundle, "backup")
+}
+
+func TestReconcileReportsTheCopiedStoreAndRecordsTheStage(t *testing.T) {
+	source := copyReadySource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("reconcile exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
+	}
+	if output.Preflight == nil || !output.Preflight.Ready {
+		t.Fatalf("preflight = %+v, want a ready report", output.Preflight)
+	}
+	if output.Report == nil || !output.Report.Recorded {
+		t.Fatalf("reconcile output = %+v, want a recorded report", output)
+	}
+	if output.Report.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("stage = %q, want %q", output.Report.Stage, model.UpgradeStageReconcile)
+	}
+	if len(output.Report.IncompleteDays) != 0 {
+		t.Fatalf("incomplete days = %+v, want none", output.Report.IncompleteDays)
+	}
+}
+
+func TestReconcileExitsOneOnAnUnacknowledgedMismatch(t *testing.T) {
+	source := copyReadySource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	// A token total that no longer matches the source: the day has to be
+	// acknowledged before anything may be marked.
+	db, err := sql.Open("sqlite", filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the copied store: %v", err)
+	}
+	if _, err := db.Exec(`update usage_events set total_tokens = total_tokens + 1`); err != nil {
+		_ = db.Close()
+		t.Fatalf("change one token total: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the copied store: %v", err)
+	}
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--target", target, "--bundle", bundle)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorReconcileMismatch) {
+		t.Fatalf("error code = %q, want %q", output.ErrorCode, upgradeservice.UpgradeErrorReconcileMismatch)
+	}
+	if output.Report == nil || output.Report.Recorded || len(output.Report.UnacknowledgedDays) != 1 {
+		t.Fatalf("reconcile output = %+v, want one unacknowledged day and no record", output)
+	}
+
+	// Acknowledging the reported day marks it and completes the step.
+	day := output.Report.UnacknowledgedDays[0]
+	code, stdout, stderr = run(t, "reconcile", "--json", "--legacy", source, "--target", target,
+		"--bundle", bundle, "--acknowledge", day)
+	if code != 0 {
+		t.Fatalf("acknowledged exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var acknowledged reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &acknowledged); err != nil {
+		t.Fatalf("decode acknowledged output: %v; output: %s", err, stdout)
+	}
+	if acknowledged.Report == nil || !acknowledged.Report.Recorded ||
+		acknowledged.Report.NewlyMarkedDays != 1 ||
+		acknowledged.Report.IncompleteDays[0].Day != day {
+		t.Fatalf("acknowledged reconcile = %+v, want the day marked once", acknowledged.Report)
+	}
+}
+
+func TestReconcileUsageErrors(t *testing.T) {
+	if code, _, _ := run(t, "reconcile"); code != 2 {
+		t.Fatalf("missing --legacy exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "reconcile", "--legacy", t.TempDir(), "extra"); code != 2 {
+		t.Fatalf("positional argument exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "reconcile", "--legacy", filepath.Join(t.TempDir(), "missing")); code != 2 {
+		t.Fatalf("missing source exit code = %d, want 2", code)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	identityprojection "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identityprojection"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usageaggregate"
@@ -2343,6 +2344,67 @@ func catchUpDeleteReadiness(t *testing.T, ctx context.Context, db *sql.DB, nowMS
 		if !completed {
 			t.Fatalf("%s catch-up remained pending", catchUp.name)
 		}
+	}
+}
+
+// TestRawCoverageReportsThePermanentlyIncompleteDays proves the read path never
+// presents a marked day as complete: the counts still describe what the store
+// holds, and the mark is reported beside them.
+func TestRawCoverageReportsThePermanentlyIncompleteDays(t *testing.T) {
+	db := openArchiveTestDB(t)
+	ctx := context.Background()
+	repository := New(db)
+	dayMS := int64(24 * 60 * 60 * 1000)
+	markedDay := int64(2) // 1970-01-03
+	cleanDay := int64(3)  // 1970-01-04
+	for _, day := range []int64{markedDay, cleanDay} {
+		if _, err := db.ExecContext(ctx, `insert into usage_archive_deleted_coverage_daily (
+			utc_day, deleted_event_count, min_timestamp_ms, max_timestamp_ms
+		) values (?, 4, ?, ?)`, day, day*dayMS, day*dayMS); err != nil {
+			t.Fatalf("seed coverage day %d: %v", day, err)
+		}
+	}
+	from, to := dayMS, dayMS*5
+	clean, err := repository.RawCoverage(ctx, from, to)
+	if err != nil {
+		t.Fatalf("read coverage before a mark: %v", err)
+	}
+	if clean.Incomplete || len(clean.IncompleteDays) != 0 {
+		t.Fatalf("coverage before a mark = %#v, want no incomplete report", clean)
+	}
+	if clean.RawDeletedEventCount != 8 {
+		t.Fatalf("deleted count = %d, want the seeded 8", clean.RawDeletedEventCount)
+	}
+
+	if _, err := coverageincomplete.New(db).Mark(ctx, []coverageincomplete.Day{
+		{Day: "1970-01-03", Reason: coverageincomplete.ReasonReconcileMismatch},
+	}, 1); err != nil {
+		t.Fatalf("mark the day: %v", err)
+	}
+	reported, err := repository.RawCoverage(ctx, from, to)
+	if err != nil {
+		t.Fatalf("read coverage after a mark: %v", err)
+	}
+	if !reported.Incomplete || len(reported.IncompleteDays) != 1 {
+		t.Fatalf("coverage after a mark = %#v, want one incomplete day", reported)
+	}
+	if reported.IncompleteDays[0].Day != "1970-01-03" ||
+		reported.IncompleteDays[0].Reason != coverageincomplete.ReasonReconcileMismatch {
+		t.Fatalf("incomplete day = %#v, want 1970-01-03 with its reason", reported.IncompleteDays[0])
+	}
+	// The mark is evidence beside the numbers, not a correction of them.
+	if reported.RawDeletedEventCount != clean.RawDeletedEventCount ||
+		reported.MinDeletedTimestampMS != clean.MinDeletedTimestampMS ||
+		reported.MaxDeletedTimestampMS != clean.MaxDeletedTimestampMS {
+		t.Fatalf("counts changed with the mark: %#v vs %#v", reported, clean)
+	}
+	// A range that excludes the marked day stays complete.
+	narrow, err := repository.RawCoverage(ctx, dayMS*4, dayMS*5)
+	if err != nil {
+		t.Fatalf("read the unmarked range: %v", err)
+	}
+	if narrow.Incomplete || len(narrow.IncompleteDays) != 0 {
+		t.Fatalf("unmarked range = %#v, want no incomplete report", narrow)
 	}
 }
 

@@ -357,3 +357,182 @@ They never appear on both surfaces at once, and no write route exists.
   command, credentials embedded in a URL authority and local paths; the same
   scrubber covers `manual_items`, and a multi-line detail is scrubbed line by
   line instead of being dropped.
+## U1-3: four-domain reconciliation and permanent incomplete marking
+
+`upgrade reconcile` compares the copied v2 store against the stopped 1.x source
+it was copied from and permanently marks the UTC days that can never be
+completed again. It is the only Upgrade step that reads both stores, and it
+never re-runs the copy-in.
+
+### The source is read through a copy
+
+The source fingerprint recorded by the copy-in is re-checked first, before and
+after the comparison; a source that moved fails with `upgrade_source_changed`
+and nothing is compared. The database and its `-wal`/`-shm`/`-journal` sidecars
+are then copied into `<TargetRoot>/.upgrade-reconcile` and the *copy* is opened
+read-write with `query_only`, so SQLite joins a WAL there. Opening the original,
+even read-only, would create a WAL index beside it and change the fingerprint
+the copy-in recorded. The scratch area is `<ScratchDir>/.upgrade-reconcile`
+(the v2 data root by default): only that tool-owned subdirectory is created and
+removed, so the directory the caller named is never the path the step deletes.
+The named root must not be, sit inside, or contain the source root, and the copy
+itself is removed on every return path — a clean comparison, a mismatch, or a
+failure before the comparison finished — so nothing but the report (counts and
+days, never rows) survives the step.
+
+### The four compared domains
+
+| Domain | Query | Match rule |
+| --- | --- | --- |
+| `retained` | `usage_events` grouped by UTC hour, `model` and `coalesce(api_key_hash, '')`: `count(*)`, `sum(total_tokens)`, `sum(failed)` | every hour bucket and every per-key, per-model total equal |
+| `pricing` | `usage_pricing_hourly_rollups_v1` per stored row (hour bucket and the whole identity, `failed` included): calls, every token class and cost | every row and every column equal; cost is recomputed per side |
+| `coverage` | `usage_archive_deleted_coverage_daily`: per-day `deleted_event_count`, `min_timestamp_ms`, `max_timestamp_ms` | all three equal per day |
+| `history` | `usage_monitoring_account_daily_rollups_v1` per day, `account_snapshot`, `auth_label_snapshot`, `auth_file_snapshot`, `provider`, `coalesce(api_key_hash, '')`, `executor_type` and `model` | calls and tokens equal per identity |
+
+Each query groups by exactly the expression it selects, so one reported key is
+one row: a NULL and an empty `api_key_hash` are the same "no key" and are summed
+into one bucket instead of returning two groups that overwrite each other in the
+cell map.
+
+The pricing table stores no cost, so cost is recomputed on both sides with
+`pricing.CostForModelCandidatesWithServiceTier`; a price change between the two
+stores is therefore visible instead of invisible, and it is compared exactly: the
+same inputs produce the same integer micro sum, so every difference is a
+difference and no relative tolerance may hide one. Comparing at the granularity
+each read path exposes is what makes a permutation inside a day visible instead
+of cancelling out in a day sum: a bucket that moved an hour, two `failed` rows
+trading their calls, a rewritten API key, provider or model, or rewritten
+coverage edges are reported in the column that moved (`bucket_ms`, `calls`,
+`api_key_hash`, `min_timestamp_ms`, …), on the row they moved on.
+
+Each side is read inside one read-only transaction. A day present on only one
+side is reported as a `presence` mismatch, never as a skip, and `comparedDays`
+counts only the days both sides hold. A domain both sides hold is `applicable`.
+A domain the 1.x source holds rows of but the store cannot show blocks with the
+typed `upgrade_reconcile_target_incomplete` naming the domain and the table,
+because that is lost data rather than a measured disagreement. The one
+exception is a derived rollup, and the boundary is what the table is derived
+from:
+
+- `pricing` and `history` are rollups of the retained event log. A rollup table
+  that is still there but holds none of the source's days is a rebuild away from
+  being correct, so it does not block: but the exception is only as strong as
+  its premise, which is the retained support the rebuild reads. Each lost day is
+  classified on its own: a day the store still holds at least one retained
+  event for is listed in the domain's `recoverableDays`, joins the days that
+  need an acknowledgement, and is marked `derived_rollup_lost` once the operator
+  accepts it. A lost day the store holds no retained event for has nothing to
+  rebuild it from: it is listed in `unrecoverableDays`, the run fails closed
+  with `upgrade_reconcile_target_incomplete` naming that day, and no
+  acknowledgement can waive it. That is the reviewer's probe: a source pricing
+  day with no retained events of its own, and a cleared store-side rollup, is
+  refused instead of being treated as recoverable.
+- A missing derived table, and any day of `retained` or `coverage` the store
+  cannot show, stays unwaivable: the retained events are the log itself and the
+  deleted coverage table records what an archive run removed, so neither can be
+  recomputed from anything else.
+
+A run that established no operation domain at all — the source holds none of the
+compared tables — compared nothing, so it is not recorded: it fails with the
+typed `upgrade_reconcile_nothing_compared` instead of reporting a recorded stage
+that names no domain. Nothing is marked and the row keeps the stage `copy_in`.
+
+### Verdict, marks and blocking
+
+Every measured mismatch day and every day the parity detection flags (raw-deleted
+rows whose projection is missing, stale or past the watermark, plus a deleted
+coverage table that disagrees with the archive refs) must be acknowledged:
+
+- `--acknowledge <YYYY-MM-DD>`, repeatable; anything that is not a calendar day
+  is a usage error, so a typo cannot acknowledge another day.
+- `--acknowledge-parity-gaps` accepts whatever the parity detection reports. The
+  days it accepted are still written into the evidence.
+
+An unacknowledged day blocks with the typed `upgrade_reconcile_mismatch`, marks
+nothing, records nothing and leaves the stage at `copy_in`; the report still
+names every day that needs the decision. An acknowledged day is inserted into
+`usage_coverage_incomplete_days` with `reconcile_mismatch` when a measure
+disagreed, `derived_rollup_lost` when only a cleared derived rollup explains it,
+or `projection_lost_before_v1_14_6` when only projection loss does — a measured
+disagreement always keeps the stronger reason.
+
+Each derived day is acknowledged individually. `--acknowledge <YYYY-MM-DD>` names
+one calendar day per flag and has to be repeated for every day the report lists,
+because there is no bulk switch for a cleared derived rollup:
+`--acknowledge-parity-gaps` covers only what the parity detection reports. The
+report lists the days under the domain's `recoverableDays` and repeats them in
+`unacknowledgedDays`, so the operator acknowledges exactly the days the run
+measured, and a day listed in `unrecoverableDays` cannot be acknowledged at all.
+
+The marks, the evidence JSON in `upgrade_operations.reconciliation` and the
+`Advance` over the operation domains the comparison actually established —
+`retained_projection` for the retained events and the account rollups derived
+from them, `pricing`, `coverage` — to stage `reconcile` are written in one
+transaction, always with `Advance`, never `Put`: `Put` rebuilds the row and would
+clear the provenance `complete` requires. A reader therefore never sees marks
+without the evidence that explains them, and an interruption leaves the store
+exactly as it was; because every write is idempotent, running the step again
+writes the whole result. A domain that was not applicable is never recorded, so
+`domains_done` only ever lists domains this step compared. A store the operation
+already carried past `reconcile` is refused before anything is compared, and the
+mark insert is `on conflict (day) do nothing`, so a day keeps its first reason
+and timestamp and a second run marks nothing new.
+
+### After a rebuild
+
+Rebuilding a cleared derived rollup later does not clear its mark, and no code
+path in this repository removes one: `derived_rollup_lost` records what the
+migrated store lost, not what the running server can recompute later, and the
+marking table is evidence rather than derived data. The mark is therefore a
+lower bound that stays for the life of the store — it disappears only when the
+store itself is rewritten, and such a store starts from its own reconciliation
+and writes its own marks. An operator who rebuilds the lost days must leave the
+mark in place and keep treating those ranges as partial: `RawCoverage`,
+`AnalyticsCoverage` and the Key workspace report a marked day as incomplete no
+matter what the rebuilt rollup now holds, and a manual `delete from
+usage_coverage_incomplete_days` would silently restore the overstatement the
+mark exists to prevent.
+
+### The marking table and its consumer
+
+```sql
+create table if not exists usage_coverage_incomplete_days (
+  day text primary key,
+  -- 'projection_lost_before_v1_14_6' | 'reconcile_mismatch' | 'derived_rollup_lost'
+  reason text not null,
+  source text not null,          -- 'upgrade_reconcile'
+  recorded_at_ms integer not null
+)
+```
+
+The rows are evidence, not derived data: no revision change or cleanup job may
+drop or rebuild them. Three read paths report them instead of presenting a
+marked day as complete, and none of them changes the numbers:
+
+- `usagearchive.Repository.RawCoverage` sets `Incomplete` and lists
+  `IncompleteDays[{day, reason}]` beside the counts it already returned.
+- `monitoring.AnalyticsCoverage` carries the same `Incomplete`/`IncompleteDays`
+  pair for the requested range, a `ComparisonIncomplete`/
+  `ComparisonIncompleteDays` pair for the comparison window, and
+  `Incomplete`/`IncompleteDays` inside every `AuxiliaryRange` — a marked day
+  cannot be presented as complete in a drilldown or a previous window — and
+  `coverageWarningRequired` turns true when any range is marked, so the analytics
+  coverage warning is raised for it.
+- The Key workspace (`identityusage`) reads `IncompleteDaysIn`, and a key's
+  numbers read `partial` with reason `upgrade_incomplete` when a marked day falls
+  inside that key's provable window.
+
+### CLI
+
+`cpa-manager-plus upgrade reconcile --legacy <dir> [--target <dir>]
+[--bundle <dir>] [--json] [--acknowledge <day>]… [--acknowledge-parity-gaps]`
+runs the preflight gate first, then the reconciliation. Exit 0 reconciled; exit 1
+is a refusal the operator has to look at — a blocked preflight, an
+unacknowledged mismatch (`upgrade_reconcile_mismatch`), a store that cannot show
+what the source holds (`upgrade_reconcile_target_incomplete`), or a run that
+compared nothing (`upgrade_reconcile_nothing_compared`); exit 2 is a usage or
+environment error. Every refusal prints the report with its typed `errorCode`
+first (the report is printed either way), so the exit code only says the
+migration did not advance and the code says why. The `--bundle` default is the
+recorded copy-in's backup destination, and the recorded copy-in is re-verified
+against it before anything is compared.
