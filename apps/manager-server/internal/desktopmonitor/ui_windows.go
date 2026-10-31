@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -16,42 +17,43 @@ import (
 
 // Stable native dialog control IDs (also exposed by MSAA/UI Automation).
 const (
-	IDPin           = 101
-	IDCompact       = 102
-	IDHide          = 103
-	IDClose         = 104
-	IDConnection    = 105
-	IDOpenPanel     = 106
-	IDURL           = 201
-	IDKey           = 202
-	IDRemember      = 203
-	IDConnect       = 204
-	IDCancel        = 205
-	IDFormURL       = 206
-	IDFormKey       = 207
-	IDFormHelp      = 208
-	IDStatus        = 301
-	IDModel         = 302
-	IDRequest       = 303
-	IDSpeed         = 304
-	IDTTFT          = 305
-	IDDuration      = 306
-	IDTokens        = 307
-	IDCost          = 308
-	IDToday         = 309
-	IDRecent1       = 310
-	IDRecent2       = 311
-	IDUpdated       = 312
-	IDBrand         = 313
-	IDSpeedLabel    = 314
-	IDTTFTLabel     = 315
-	IDDurationLabel = 316
-	IDTokenSection  = 317
-	IDTodaySection  = 318
-	IDRecentSection = 319
-	IDTrayRestore   = 320
-	IDTrayPanel     = 321
-	IDTrayExit      = 322
+	IDPin            = 101
+	IDCompact        = 102
+	IDHide           = 103
+	IDClose          = 104
+	IDConnection     = 105
+	IDOpenPanel      = 106
+	IDURL            = 201
+	IDKey            = 202
+	IDRemember       = 203
+	IDConnect        = 204
+	IDCancel         = 205
+	IDFormURL        = 206
+	IDFormKey        = 207
+	IDFormHelp       = 208
+	IDAllowPlainHTTP = 209
+	IDStatus         = 301
+	IDModel          = 302
+	IDRequest        = 303
+	IDSpeed          = 304
+	IDTTFT           = 305
+	IDDuration       = 306
+	IDTokens         = 307
+	IDCost           = 308
+	IDToday          = 309
+	IDRecent1        = 310
+	IDRecent2        = 311
+	IDUpdated        = 312
+	IDBrand          = 313
+	IDSpeedLabel     = 314
+	IDTTFTLabel      = 315
+	IDDurationLabel  = 316
+	IDTokenSection   = 317
+	IDTodaySection   = 318
+	IDRecentSection  = 319
+	IDTrayRestore    = 320
+	IDTrayPanel      = 321
+	IDTrayExit       = 322
 )
 const (
 	wmClose   = 0x10
@@ -106,6 +108,16 @@ var (
 	setBkMode             = gdi32.NewProc("SetBkMode")
 	selectObject          = gdi32.NewProc("SelectObject")
 	createFont            = gdi32.NewProc("CreateFontW")
+	roundRect             = gdi32.NewProc("RoundRect")
+	getStockObject        = gdi32.NewProc("GetStockObject")
+	createRoundRectRgn    = gdi32.NewProc("CreateRoundRectRgn")
+	setWindowRgn          = user32.NewProc("SetWindowRgn")
+	moveToEx              = gdi32.NewProc("MoveToEx")
+	lineTo                = gdi32.NewProc("LineTo")
+	polygon               = gdi32.NewProc("Polygon")
+	ellipse               = gdi32.NewProc("Ellipse")
+	createPen             = gdi32.NewProc("CreatePen")
+	getDlgCtrlID          = user32.NewProc("GetDlgCtrlID")
 	setWindowTheme        = themeDLL.NewProc("SetWindowTheme")
 	dwmSetAttribute       = dwmDLL.NewProc("DwmSetWindowAttribute")
 	shellNotify           = shell32.NewProc("Shell_NotifyIconW")
@@ -226,21 +238,21 @@ func RunWithOptions(opts Options) error {
 }
 
 type nativeWindow struct {
-	hwnd                                                     uintptr
-	controls                                                 map[int]uintptr
-	prefs                                                    WindowPreferences
-	store                                                    preferencesStore
-	state                                                    ViewState
-	poller                                                   *poller
-	client                                                   *Client
-	lang                                                     string
-	editing, hidden, remember                                bool
-	dpi                                                      int
-	brush, softBrush, font, smallFont, modelFont, metricFont uintptr
-	tray                                                     notifyIconData
-	trayAdded                                                bool
-	taskbarCreated                                           uint32
-	notice                                                   string
+	hwnd                                                                                        uintptr
+	controls                                                                                    map[int]uintptr
+	prefs                                                                                       WindowPreferences
+	store                                                                                       preferencesStore
+	state                                                                                       ViewState
+	poller                                                                                      *poller
+	client                                                                                      *Client
+	lang                                                                                        string
+	editing, hidden, remember                                                                   bool
+	dpi                                                                                         int
+	brush, softBrush, accentBrush, font, smallFont, modelFont, metricFont, labelFont, valueFont uintptr
+	tray                                                                                        notifyIconData
+	trayAdded                                                                                   bool
+	taskbarCreated                                                                              uint32
+	notice                                                                                      string
 }
 
 func (w *nativeWindow) tr(en, zh string) string {
@@ -263,7 +275,8 @@ func newNativeWindow(opts Options, store preferencesStore) (*nativeWindow, error
 	classOnce.Do(func() {
 		icon, _, _ := loadIcon.Call(0, 32516)
 		cursor, _, _ := loadCursor.Call(0, 32512)
-		cls := windowClass{Proc: nativeCallback, Instance: uintptr(instance), Icon: icon, SmallIcon: icon, Cursor: cursor, ClassName: utf(windowClassName)}
+		surface, _, _ := createBrush.Call(0x211D19)
+		cls := windowClass{Proc: nativeCallback, Instance: uintptr(instance), Icon: icon, SmallIcon: icon, Cursor: cursor, Background: surface, ClassName: utf(windowClassName)}
 		cls.Size = uint32(unsafe.Sizeof(cls))
 		if r, _, err := registerClass.Call(uintptr(unsafe.Pointer(&cls))); r == 0 {
 			classErr = fmt.Errorf("register native window: %w", err)
@@ -288,8 +301,9 @@ func newNativeWindow(opts Options, store preferencesStore) (*nativeWindow, error
 		w.notice = w.tr("Preferences reset; reconnect if needed.", "设置损坏已重置，请重新连接。")
 	}
 	w.state.Reset()
-	w.brush, _, _ = createBrush.Call(0x211D19) // RGB #191d21; neutral dark surface.
-	w.softBrush, _, _ = createBrush.Call(0x332C25)
+	w.brush, _, _ = createBrush.Call(0x211D19)       // #191d21 surface
+	w.softBrush, _, _ = createBrush.Call(0x2E2723)   // #23272E raised/hover
+	w.accentBrush, _, _ = createBrush.Call(0xE8B03B) // #3BB0E8 blue accent
 	// WS_POPUP | WS_THICKFRAME, native accessible controls, no browser or framework.
 	hwnd, _, err := createWindow.Call(0x80|0x10000, uintptr(unsafe.Pointer(utf(windowClassName))), uintptr(unsafe.Pointer(utf("CPAMP Monitor"))), 0x80000000|0x40000, 100, 100, 440, 660, 0, 0, uintptr(instance), 0)
 	if hwnd == 0 {
@@ -327,7 +341,7 @@ func newNativeWindow(opts Options, store preferencesStore) (*nativeWindow, error
 		sendMessage.Call(w.controls[IDRemember], 0xF1, 1, 0)
 	}
 	if !w.editing {
-		w.client, _ = NewClient(w.prefs.BaseURL, key)
+		w.client, _ = NewClientWithOptions(w.prefs.BaseURL, key, ClientOptions{AllowRemotePlainHTTP: w.prefs.AllowPlainHTTP})
 		if w.client != nil {
 			w.poller.Configure(w.client, w.state.Generation, true)
 		}
@@ -359,12 +373,14 @@ func (w *nativeWindow) makeFonts() {
 		r, _, _ := createFont.Call(uintptr(int32(-w.scale(size))), 0, 0, 0, uintptr(weight), 0, 0, 0, 1, 0, 0, 5, 0, uintptr(unsafe.Pointer(utf("Segoe UI"))))
 		return r
 	}
-	w.font = makeFont(14, 400)
-	w.smallFont = makeFont(12, 400)
-	size := 23
-	metricSize := 19
+	w.font = makeFont(13, 400)
+	w.smallFont = makeFont(11, 400)
+	w.labelFont = makeFont(11, 400)
+	w.valueFont = makeFont(15, 600)
+	size := 20
+	metricSize := 18
 	if w.prefs.Compact && !w.editing {
-		size = 16
+		size = 13
 		metricSize = 16
 	}
 	w.modelFont = makeFont(size, 600)
@@ -379,8 +395,10 @@ func (w *nativeWindow) controlFont(id int) uintptr {
 		return w.modelFont
 	case IDSpeed, IDTTFT, IDDuration:
 		return w.metricFont
-	case IDSpeedLabel, IDTTFTLabel, IDDurationLabel, IDTokenSection, IDTodaySection, IDRecentSection, IDUpdated:
+	case IDSpeedLabel, IDTTFTLabel, IDDurationLabel, IDTokenSection, IDTodaySection, IDRecentSection, IDUpdated, IDStatus, IDRequest, IDRecent1, IDRecent2, IDCost:
 		return w.smallFont
+	case IDTokens:
+		return w.valueFont
 	}
 	if w.prefs.Compact && !w.editing && id == IDToday {
 		return w.smallFont
@@ -388,8 +406,13 @@ func (w *nativeWindow) controlFont(id int) uintptr {
 	return w.font
 }
 func (w *nativeWindow) createControls() error {
-	static := func(id int, text string) error { return w.control(id, "STATIC", text, 0x80) }        // SS_NOPREFIX
-	button := func(id int, text string) error { return w.control(id, "BUTTON", text, 0x10000|0xB) } // BS_OWNERDRAW; native button semantics
+	// Static text is painted by the window itself (crisp hierarchy, no themed
+	// white background); the native STATIC still exposes text to MSAA.
+	static := func(id int, text string) error {
+		return w.control(id, "STATIC", text, 0x80|0x0100) // SS_NOPREFIX | SS_NOPAINT
+	}
+	// Buttons keep native click/keyboard semantics but are drawn by the parent.
+	button := func(id int, text string) error { return w.control(id, "BUTTON", text, 0x10000|0xB) } // BS_OWNERDRAW
 	for _, c := range []struct {
 		id   int
 		text string
@@ -423,10 +446,15 @@ func (w *nativeWindow) createControls() error {
 	if err := w.control(IDRemember, "BUTTON", w.tr("Remember key (current-user DPAPI)", "记住密钥（当前用户 DPAPI 加密）"), 0x10000|3); err != nil {
 		return err
 	}
+	if err := w.control(IDAllowPlainHTTP, "BUTTON", w.tr("Allow remote plain HTTP (key is not encrypted in transit)", "允许远程明文 HTTP（密钥在传输中不加密）"), 0x10000|3); err != nil {
+		return err
+	}
 	return nil
 }
 func (w *nativeWindow) control(id int, class, text string, style uintptr) error {
-	h, _, err := createWindow.Call(0, uintptr(unsafe.Pointer(utf(class))), uintptr(unsafe.Pointer(utf(text))), 0x40000000|0x10000000|style, 0, 0, 1, 1, w.hwnd, uintptr(id), 0, 0)
+	// WS_EX_TRANSPARENT keeps the parent's painted surface visible behind every
+	// label; the controls themselves only carry text and hit-testing.
+	h, _, err := createWindow.Call(0x20, uintptr(unsafe.Pointer(utf(class))), uintptr(unsafe.Pointer(utf(text))), 0x40000000|0x10000000|style, 0, 0, 1, 1, w.hwnd, uintptr(id), 0, 0)
 	if h == 0 {
 		return fmt.Errorf("create native control %d: %w", id, err)
 	}
@@ -464,7 +492,12 @@ func (w *nativeWindow) workArea() workRect {
 }
 func (w *nativeWindow) resizeAndClamp() {
 	w.prefs = clampPreferences(w.prefs, w.scale(w.width()), w.scale(w.height()), w.workArea())
-	setWindowPos.Call(w.hwnd, 0, uintptr(w.prefs.X), uintptr(w.prefs.Y), uintptr(w.scale(w.width())), uintptr(w.scale(w.height())), 0x14)
+	cw, ch := w.scale(w.width()), w.scale(w.height())
+	setWindowPos.Call(w.hwnd, 0, uintptr(w.prefs.X), uintptr(w.prefs.Y), uintptr(cw), uintptr(ch), 0x14)
+	// Rounded corners like the approved mockup; the region owns the handle.
+	if rgn, _, _ := createRoundRectRgn.Call(0, 0, uintptr(cw+1), uintptr(ch+1), uintptr(w.scale(12)), uintptr(w.scale(12))); rgn != 0 {
+		setWindowRgn.Call(w.hwnd, rgn, 1)
+	}
 }
 func (w *nativeWindow) layout() {
 	if w.hwnd == 0 {
@@ -484,7 +517,7 @@ func (w *nativeWindow) layout() {
 	place(IDCompact, 191, 8, 76, 32, true)
 	place(IDHide, 271, 8, 76, 32, true)
 	place(IDClose, 351, 8, 72, 32, true)
-	for _, id := range []int{IDFormURL, IDFormKey, IDFormHelp, IDURL, IDKey, IDRemember, IDConnect, IDCancel} {
+	for _, id := range []int{IDFormURL, IDFormKey, IDFormHelp, IDURL, IDKey, IDRemember, IDAllowPlainHTTP, IDConnect, IDCancel} {
 		showWindow.Call(w.controls[id], 0)
 	}
 	for _, id := range []int{IDStatus, IDModel, IDRequest, IDSpeed, IDTTFT, IDDuration, IDTokens, IDCost, IDToday, IDRecent1, IDRecent2, IDUpdated, IDConnection, IDOpenPanel, IDSpeedLabel, IDTTFTLabel, IDDurationLabel, IDTokenSection, IDTodaySection, IDRecentSection} {
@@ -496,10 +529,11 @@ func (w *nativeWindow) layout() {
 		place(IDFormKey, 20, 150, 400, 24, true)
 		place(IDKey, 20, 178, 400, 32, true)
 		place(IDRemember, 20, 228, 400, 30, true)
-		place(IDFormHelp, 20, 270, 400, 65, true)
-		place(IDConnect, 20, 350, 190, 34, true)
-		place(IDCancel, 230, 350, 190, 34, true)
-		place(IDStatus, 20, 394, 400, 26, true)
+		place(IDAllowPlainHTTP, 20, 260, 400, 30, true)
+		place(IDFormHelp, 20, 296, 400, 60, true)
+		place(IDConnect, 20, 362, 190, 34, true)
+		place(IDCancel, 230, 362, 190, 34, true)
+		place(IDStatus, 20, 400, 400, 26, true)
 	} else if w.prefs.Compact {
 		place(IDBrand, 14, 9, 76, 21, true)
 		place(IDPin, 96, 4, 60, 26, true)
@@ -508,12 +542,12 @@ func (w *nativeWindow) layout() {
 		place(IDClose, 284, 4, 56, 26, true)
 		place(IDModel, 14, 40, 196, 24, true)
 		place(IDToday, 218, 43, 124, 20, true)
-		place(IDSpeedLabel, 14, 72, 110, 18, true)
-		place(IDTTFTLabel, 132, 72, 100, 18, true)
-		place(IDDurationLabel, 250, 72, 90, 18, true)
-		place(IDSpeed, 14, 91, 110, 22, true)
-		place(IDTTFT, 132, 91, 100, 22, true)
-		place(IDDuration, 250, 91, 90, 22, true)
+		place(IDSpeedLabel, 14, 71, 104, 18, true)
+		place(IDTTFTLabel, 122, 71, 104, 18, true)
+		place(IDDurationLabel, 230, 71, 104, 18, true)
+		place(IDSpeed, 14, 90, 104, 24, true)
+		place(IDTTFT, 122, 90, 104, 24, true)
+		place(IDDuration, 230, 90, 104, 24, true)
 		place(IDUpdated, 14, 119, 328, 16, true)
 	} else {
 		place(IDStatus, 20, 60, 400, 24, true)
@@ -526,7 +560,7 @@ func (w *nativeWindow) layout() {
 		place(IDTTFT, 158, 199, 125, 30, true)
 		place(IDDuration, 296, 199, 124, 30, true)
 		place(IDTokenSection, 20, 251, 400, 20, true)
-		place(IDTokens, 20, 282, 400, 48, true)
+		place(IDTokens, 20, 279, 400, 52, true)
 		place(IDCost, 20, 333, 400, 25, true)
 		place(IDTodaySection, 20, 380, 400, 20, true)
 		place(IDToday, 20, 411, 400, 32, true)
@@ -679,9 +713,14 @@ func editValue(h uintptr, limit int) string {
 func (w *nativeWindow) connect() {
 	base := editValue(w.controls[IDURL], 2048)
 	key := editValue(w.controls[IDKey], 8192)
-	c, err := NewClient(base, key)
+	allowPlain, _, _ := sendMessage.Call(w.controls[IDAllowPlainHTTP], 0xF0, 0, 0)
+	c, err := NewClientWithOptions(base, key, ClientOptions{AllowRemotePlainHTTP: allowPlain == 1})
 	if err != nil || key == "" {
-		w.notice = w.tr("Enter a valid Manager URL and administrator key", "请输入有效的 Manager 地址与管理员密钥")
+		if err != nil && allowPlain != 1 && strings.HasPrefix(strings.ToLower(strings.TrimSpace(base)), "http://") {
+			w.notice = w.tr("Remote plain HTTP is refused. Tick the HTTP option below only if you accept that the admin key travels unencrypted.", "已拒绝远程明文 HTTP。如确认接受管理员密钥明文传输，请勾选下方 HTTP 选项。")
+		} else {
+			w.notice = w.tr("Enter a valid Manager URL and administrator key", "请输入有效的 Manager 地址与管理员密钥")
+		}
 		w.render()
 		return
 	}
@@ -702,6 +741,7 @@ func (w *nativeWindow) connect() {
 	}
 	w.client = c
 	w.prefs.BaseURL = c.base
+	w.prefs.AllowPlainHTTP = allowPlain == 1
 	w.remember = checked == 1
 	w.state.Reset()
 	w.notice = ""
@@ -772,7 +812,7 @@ func (w *nativeWindow) restore() {
 	}
 }
 func (w *nativeWindow) releaseGDI() {
-	for _, h := range []uintptr{w.font, w.smallFont, w.modelFont, w.metricFont, w.brush, w.softBrush} {
+	for _, h := range []uintptr{w.font, w.smallFont, w.modelFont, w.metricFont, w.labelFont, w.valueFont, w.brush, w.softBrush, w.accentBrush} {
 		if h != 0 {
 			deleteObject.Call(h)
 		}
@@ -930,35 +970,14 @@ func (w *nativeWindow) message(msg uint32, wp, lp uintptr) uintptr {
 		return w.brush
 	case 0x2B: // WM_DRAWITEM for real owner-drawn native buttons.
 		item := (*drawItem)(messagePointer(lp)) // OS-owned DRAWITEMSTRUCT for this message only.
-		fillRect.Call(item.DC, uintptr(unsafe.Pointer(&item.Rect)), w.softBrush)
-		setBkMode.Call(item.DC, 1)
-		setTextColor.Call(item.DC, 0xF5EFEA)
-		selectObject.Call(item.DC, w.font)
-		text := editValue(item.Hwnd, 128)
-		r := item.Rect
-		drawText.Call(item.DC, uintptr(unsafe.Pointer(utf(text))), ^uintptr(0), uintptr(unsafe.Pointer(&r)), 1|4|0x20)
-		if item.State&0x10 != 0 {
-			drawFocusRect.Call(item.DC, uintptr(unsafe.Pointer(&r)))
-		}
+		w.drawButton(item)
 		return 1
 	case 0x14:
 		return 1 // WM_ERASEBKGND handled in paint.
 	case 0xF:
 		var p paintStruct
 		dc, _, _ := beginPaint.Call(w.hwnd, uintptr(unsafe.Pointer(&p)))
-		var r winRect
-		getClientRect.Call(w.hwnd, uintptr(unsafe.Pointer(&r)))
-		fillRect.Call(dc, uintptr(unsafe.Pointer(&r)), w.brush)
-		lines := []int{49}
-		if w.prefs.Compact && !w.editing {
-			lines = []int{33, 68}
-		} else if !w.editing {
-			lines = []int{49, 166, 238, 368, 456, 607}
-		}
-		for _, y := range lines {
-			line := winRect{int32(w.scale(20)), int32(w.scale(y)), int32(w.scale(w.width() - 20)), int32(w.scale(y) + 1)}
-			fillRect.Call(dc, uintptr(unsafe.Pointer(&line)), w.softBrush)
-		}
+		w.paint(dc)
 		endPaint.Call(w.hwnd, uintptr(unsafe.Pointer(&p)))
 		return 0
 	case wmClose:

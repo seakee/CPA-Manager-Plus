@@ -22,6 +22,9 @@ type WindowPreferences struct {
 	HasPosition bool   `json:"has_position"`
 	Compact     bool   `json:"compact"`
 	Topmost     bool   `json:"topmost"`
+	// AllowPlainHTTP is a deliberate opt-in for a remote Manager that only
+	// serves plain HTTP; the admin key is then sent unencrypted.
+	AllowPlainHTTP bool `json:"allow_plain_http,omitempty"`
 }
 type workRect struct{ Left, Top, Right, Bottom int }
 
@@ -56,7 +59,7 @@ func (s preferencesStore) Load() (WindowPreferences, error) {
 		return defaults, errors.New("invalid window preferences")
 	}
 	if p.BaseURL != "" {
-		base, err := normalizeBaseURL(p.BaseURL)
+		base, err := normalizeBaseURLWith(p.BaseURL, p.AllowPlainHTTP)
 		if err != nil {
 			return defaults, errors.New("invalid saved Manager URL")
 		}
@@ -66,7 +69,7 @@ func (s preferencesStore) Load() (WindowPreferences, error) {
 }
 func (s preferencesStore) Save(p WindowPreferences) error {
 	if p.BaseURL != "" {
-		base, err := normalizeBaseURL(p.BaseURL)
+		base, err := normalizeBaseURLWith(p.BaseURL, p.AllowPlainHTTP)
 		if err != nil {
 			return err
 		}

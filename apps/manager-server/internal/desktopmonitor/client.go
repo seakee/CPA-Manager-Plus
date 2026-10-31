@@ -31,8 +31,19 @@ type Client struct {
 	http *http.Client
 }
 
+// ClientOptions carries nonsecret connection policy chosen in the UI.
+type ClientOptions struct {
+	// AllowRemotePlainHTTP permits http:// to a non-loopback host. The admin
+	// key then travels unencrypted, so it is opt-in and never a default.
+	AllowRemotePlainHTTP bool
+}
+
 func NewClient(baseURL, adminKey string) (*Client, error) {
-	base, err := normalizeBaseURL(baseURL)
+	return NewClientWithOptions(baseURL, adminKey, ClientOptions{})
+}
+
+func NewClientWithOptions(baseURL, adminKey string, opts ClientOptions) (*Client, error) {
+	base, err := normalizeBaseURLWith(baseURL, opts.AllowRemotePlainHTTP)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +56,9 @@ func NewClient(baseURL, adminKey string) (*Client, error) {
 	transport.TLSHandshakeTimeout = 5 * time.Second
 	return &Client{base: base, key: strings.TrimSpace(adminKey), http: &http.Client{Transport: transport, Timeout: 12 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect rejected") }}}, nil
 }
-func normalizeBaseURL(raw string) (string, error) {
+func normalizeBaseURL(raw string) (string, error) { return normalizeBaseURLWith(raw, false) }
+
+func normalizeBaseURLWith(raw string, allowRemotePlainHTTP bool) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	bad := errors.New("use loopback HTTP or HTTPS Manager URL without credentials, query or fragment")
 	if err != nil || u.Host == "" || u.Opaque != "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(raw, "?#\x00\r\n") {
@@ -53,7 +66,8 @@ func normalizeBaseURL(raw string) (string, error) {
 	}
 	if u.Scheme != "https" {
 		ip := net.ParseIP(u.Hostname())
-		if u.Scheme != "http" || !(strings.EqualFold(u.Hostname(), "localhost") || ip != nil && ip.IsLoopback()) {
+		loopback := strings.EqualFold(u.Hostname(), "localhost") || ip != nil && ip.IsLoopback()
+		if u.Scheme != "http" || (!loopback && !allowRemotePlainHTTP) {
 			return "", bad
 		}
 	}

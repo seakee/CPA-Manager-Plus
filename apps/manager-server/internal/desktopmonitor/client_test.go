@@ -191,6 +191,37 @@ func TestURLPolicy(t *testing.T) {
 	}
 }
 
+// Remote plaintext HTTP is refused by default, but an explicit opt-in must work
+// so a user with an HTTP-only Manager can connect. Opt-in never relaxes the
+// credential/query/fragment/path rules.
+func TestRemotePlainHTTPRequiresExplicitOptIn(t *testing.T) {
+	const remote = "http://185.222.43.103:18317"
+	if _, err := NewClient(remote, "key"); err == nil {
+		t.Fatal("remote plain HTTP accepted without opt-in")
+	}
+	if _, err := NewClientWithOptions(remote, "key", ClientOptions{}); err == nil {
+		t.Fatal("zero-value options accepted remote plain HTTP")
+	}
+	c, err := NewClientWithOptions(remote, "key", ClientOptions{AllowRemotePlainHTTP: true})
+	if err != nil {
+		t.Fatalf("opt-in rejected: %v", err)
+	}
+	if c.base != remote {
+		t.Fatalf("base %q want %q", c.base, remote)
+	}
+	for _, bad := range []string{"http://user:pw@185.222.43.103:18317", "http://185.222.43.103:18317/?k=v", "http://185.222.43.103:18317/#x", "http://185.222.43.103:18317/a/../b", "ftp://185.222.43.103"} {
+		if _, err := NewClientWithOptions(bad, "key", ClientOptions{AllowRemotePlainHTTP: true}); err == nil {
+			t.Errorf("opt-in accepted unsafe URL %s", bad)
+		}
+	}
+	// The opt-in is a plain-HTTP policy only; loopback and HTTPS keep working.
+	for _, good := range []string{"http://127.0.0.1:18317", "https://remote.example/x"} {
+		if _, err := NewClientWithOptions(good, "key", ClientOptions{AllowRemotePlainHTTP: true}); err != nil {
+			t.Errorf("rejected %s: %v", good, err)
+		}
+	}
+}
+
 func TestFetchErrorsAreSanitizedAndRedirectNeverForwardsKey(t *testing.T) {
 	var leaked atomic.Int32
 	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Add(1) }))
