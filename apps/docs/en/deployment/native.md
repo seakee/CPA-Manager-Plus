@@ -24,9 +24,9 @@ Windows amd64/arm64 packages also include `cpa-manager-plus-monitor.exe`. This i
 .\cpa-manager-plus-monitor.exe --url http://127.0.0.1:18317 --lang en
 ```
 
-![CPAMP Windows floating monitor, expanded](../images/windows-floating-monitor.png)
+![CPAMP Windows floating monitor, expanded](../../images/windows-floating-monitor.png)
 
-![CPAMP Windows floating monitor, compact](../images/windows-floating-monitor-compact.png)
+![CPAMP Windows floating monitor, compact](../../images/windows-floating-monitor-compact.png)
 
 `--url` is a **Manager** base URL, not the CPA gateway or a `management.html` URL. Reverse-proxy prefixes are preserved, for example `https://HOST/cpamp`. Loopback HTTP or any HTTPS host is accepted. A remote Manager that only serves plain HTTP can be used only after ticking the explicit **Allow remote plain HTTP** option, which sends the admin key unencrypted. URL credentials, queries, fragments and ambiguous paths are rejected. `--lang en` and `--lang zh` select English/Chinese. Enter the **CPAMP Admin Key** in the native password edit. There is no key command-line flag, environment variable or URL parameter.
 
@@ -34,10 +34,10 @@ Windows amd64/arm64 packages also include `cpa-manager-plus-monitor.exe`. This i
 
 - Drag the CPAMP header to move. Pin toggles the real Windows topmost flag. Compact/Expand switches between the small bar and full accounting view. The window adapts to per-monitor DPI and clamps saved positions into the nearest work area after display changes.
 - Expanded: latest recorded request model, completion/failure status and time; input, output, cache-hit and total tokens; estimated request cost; local-day calls/tokens/cost; output speed, streaming TTFT and duration; two earlier requests.
-- The window is painted by the app itself (rounded dark surface, section dividers, footer band, blue accent) rather than themed dialog controls.
+- The window embeds the exact approved HTML/CSS/SVG in Microsoft Edge WebView2 rather than approximating it with GDI. Expanded is 354 × 628 CSS pixels; compact is 354 × 96 CSS pixels. Windows 11 normally includes WebView2 Runtime; install the Microsoft runtime if it is missing.
 - Compact: model, today tokens, output speed, TTFT and duration, plus connection/update status. Expand for full accounting/history. Compact is intentionally not a live token-stream progress view.
 - Hide keeps a notification-area icon and pauses/cancels network work. Click or right-click the icon to restore and immediately refresh. Close exits the companion and cancels/joins its worker. Connection edits pause polling; Cancel keeps the old connection. Open panel launches the validated base plus `/management.html` in your browser **without** the key.
-- Native buttons, static text and edit controls support keyboard navigation and accessibility. Automation class: `CPAMPFloatingMonitorWindow`. Button IDs: Pin 101, Compact 102, Hide 103, Close 104, Connection 105, Open panel 106. Form IDs: URL 201, password 202, Remember checkbox 203, Connect 204, Cancel 205. Metric IDs: status 301, model 302, request 303, speed 304, TTFT 305, duration 306, tokens 307, request cost 308, today 309, history 310/311, update time 312. Use normal Win32 messages; no production screenshot/test backdoor exists.
+- Visible controls and the password form use WebView2 accessibility and keyboard navigation. Click the CPAMP brand or connection status to open settings; use the tray to hide. Native command boundaries remain available for compatibility automation. Window class: `CPAMPFloatingMonitorWindow`. Button IDs: Pin 101, Compact 102, Hide 103, Close 104, Connection 105, Open panel 106. Form IDs: URL 201, password 202, Remember checkbox 203, Connect 204, Cancel 205. Metric IDs: status 301, model 302, request 303, speed 304, TTFT 305, duration 306, tokens 307, request cost 308, today 309, history 310/311, update time 312. Use normal Win32 messages; no production screenshot/test backdoor exists.
 
 ### Telemetry and estimates
 

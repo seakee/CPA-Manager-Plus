@@ -238,6 +238,9 @@ func RunWithOptions(opts Options) error {
 }
 
 type nativeWindow struct {
+	comInitialized                                                                              bool
+	browser                                                                                     *widgetBrowser
+	expandedHeight                                                                              int
 	hwnd                                                                                        uintptr
 	controls                                                                                    map[int]uintptr
 	prefs                                                                                       WindowPreferences
@@ -276,7 +279,7 @@ func newNativeWindow(opts Options, store preferencesStore) (*nativeWindow, error
 		icon, _, _ := loadIcon.Call(0, 32516)
 		cursor, _, _ := loadCursor.Call(0, 32512)
 		surface, _, _ := createBrush.Call(0x211D19)
-		cls := windowClass{Proc: nativeCallback, Instance: uintptr(instance), Icon: icon, SmallIcon: icon, Cursor: cursor, Background: surface, ClassName: utf(windowClassName)}
+		cls := windowClass{Style: 0x20000, Proc: nativeCallback, Instance: uintptr(instance), Icon: icon, SmallIcon: icon, Cursor: cursor, Background: surface, ClassName: utf(windowClassName)}
 		cls.Size = uint32(unsafe.Sizeof(cls))
 		if r, _, err := registerClass.Call(uintptr(unsafe.Pointer(&cls))); r == 0 {
 			classErr = fmt.Errorf("register native window: %w", err)
@@ -286,8 +289,11 @@ func newNativeWindow(opts Options, store preferencesStore) (*nativeWindow, error
 		return nil, classErr
 	}
 	prefs, loadErr := store.Load()
+	if prefs.BaseURL == "" {
+		prefs.BaseURL = "http://127.0.0.1:18317"
+	}
 	if opts.BaseURL != "" {
-		base, err := normalizeBaseURL(opts.BaseURL)
+		base, err := normalizeBaseURLWith(opts.BaseURL, true)
 		if err != nil {
 			return nil, err
 		}
@@ -356,15 +362,15 @@ func newNativeWindow(opts Options, store preferencesStore) (*nativeWindow, error
 	w.applyTopmost()
 	w.addTray()
 	setTimer.Call(hwnd, 1, 200, 0)
-	showWindow.Call(hwnd, 5)
-	if w.editing {
-		setFocus.Call(w.controls[IDKey])
+	if err := w.attachWidget(); err != nil {
+		destroyWindow.Call(hwnd)
+		return nil, err
 	}
 	return w, nil
 }
 func (w *nativeWindow) scale(v int) int { return v * w.dpi / 96 }
 func (w *nativeWindow) makeFonts() {
-	for _, f := range []uintptr{w.font, w.smallFont, w.modelFont, w.metricFont} {
+	for _, f := range []uintptr{w.font, w.smallFont, w.modelFont, w.metricFont, w.labelFont, w.valueFont} {
 		if f != 0 {
 			deleteObject.Call(f)
 		}
@@ -467,19 +473,17 @@ func (w *nativeWindow) control(id int, class, text string, style uintptr) error 
 }
 func (w *nativeWindow) height() int {
 	if w.editing {
-		return 430
+		return 450
 	}
 	if w.prefs.Compact {
-		return 138
+		return 96
 	}
-	return 660
-}
-func (w *nativeWindow) width() int {
-	if w.prefs.Compact && !w.editing {
-		return 354
+	if w.expandedHeight >= 600 && w.expandedHeight <= 900 {
+		return w.expandedHeight
 	}
-	return 440
+	return 628
 }
+func (w *nativeWindow) width() int { return 354 }
 func (w *nativeWindow) workArea() workRect {
 	r := winRect{int32(w.prefs.X), int32(w.prefs.Y), int32(w.prefs.X + 440), int32(w.prefs.Y + 660)}
 	monitor, _, _ := monitorFromRect.Call(uintptr(unsafe.Pointer(&r)), 2)
@@ -495,12 +499,20 @@ func (w *nativeWindow) resizeAndClamp() {
 	cw, ch := w.scale(w.width()), w.scale(w.height())
 	setWindowPos.Call(w.hwnd, 0, uintptr(w.prefs.X), uintptr(w.prefs.Y), uintptr(cw), uintptr(ch), 0x14)
 	// Rounded corners like the approved mockup; the region owns the handle.
-	if rgn, _, _ := createRoundRectRgn.Call(0, 0, uintptr(cw+1), uintptr(ch+1), uintptr(w.scale(12)), uintptr(w.scale(12))); rgn != 0 {
+	if rgn, _, _ := createRoundRectRgn.Call(0, 0, uintptr(cw+1), uintptr(ch+1), uintptr(w.scale(24)), uintptr(w.scale(24))); rgn != 0 {
 		setWindowRgn.Call(w.hwnd, rgn, 1)
 	}
 }
 func (w *nativeWindow) layout() {
 	if w.hwnd == 0 {
+		return
+	}
+	if w.browser != nil {
+		for _, h := range w.controls {
+			showWindow.Call(h, 0)
+		}
+		w.browser.chromium.Resize()
+		w.updateWidget()
 		return
 	}
 	place := func(id, x, y, width, height int, visible bool) {
@@ -587,6 +599,7 @@ func (w *nativeWindow) applyTopmost() {
 	}())
 }
 func (w *nativeWindow) render() {
+	defer w.updateWidget()
 	status := w.tr("Disconnected", "未连接")
 	switch w.state.Status {
 	case StatusConnected:
@@ -838,9 +851,6 @@ func (w *nativeWindow) message(msg uint32, wp, lp uintptr) uintptr {
 		var r winRect
 		getWindowRect.Call(w.hwnd, uintptr(unsafe.Pointer(&r)))
 		x, y := int(int16(lp&0xffff))-int(r.Left), int(int16((lp>>16)&0xffff))-int(r.Top)
-		if y >= int(r.Bottom-r.Top)-w.scale(5) {
-			return 15
-		}
 		if y < w.scale(48) && x < w.scale(108) {
 			return 2
 		}
@@ -849,11 +859,19 @@ func (w *nativeWindow) message(msg uint32, wp, lp uintptr) uintptr {
 		// lParam points to an OS-owned MINMAXINFO for this message only.
 		mm := (*minMaxInfo)(messagePointer(lp))
 		mm.MinTrack = winPoint{int32(w.scale(w.width())), int32(w.scale(w.height()))}
-		mm.MaxTrack = winPoint{int32(w.scale(w.width())), int32(w.scale(1200))}
+		mm.MaxTrack = winPoint{int32(w.scale(w.width())), int32(w.scale(w.height()))}
 		return 0
 	case 0x5:
+		if w.browser != nil {
+			w.browser.chromium.Resize()
+		}
 		if len(w.controls) > 0 {
 			w.layout()
+		}
+		return 0
+	case 0x3:
+		if w.browser != nil {
+			w.browser.chromium.NotifyParentWindowPositionChanged()
 		}
 		return 0
 	case 0x232:
@@ -872,6 +890,9 @@ func (w *nativeWindow) message(msg uint32, wp, lp uintptr) uintptr {
 		w.resizeAndClamp()
 		w.layout()
 		return 0 // display/work-area changes
+	case wmWidgetAction:
+		w.handleWidgetMessages()
+		return 0
 	case wmCommand:
 		id := int(wp & 0xffff)
 		switch id {
@@ -897,7 +918,7 @@ func (w *nativeWindow) message(msg uint32, wp, lp uintptr) uintptr {
 		case IDTrayExit:
 			sendMessage.Call(w.hwnd, wmClose, 0, 0)
 		case IDOpenPanel, IDTrayPanel:
-			if target, err := panelURL(w.prefs.BaseURL); err == nil {
+			if target, err := panelURLWithPolicy(w.prefs.BaseURL, w.prefs.AllowPlainHTTP); err == nil {
 				// ShellExecute receives only the validated URL, never a key or request data.
 				result, _, _ := shell32.NewProc("ShellExecuteW").Call(w.hwnd, uintptr(unsafe.Pointer(utf("open"))), uintptr(unsafe.Pointer(utf(target))), 0, 0, 1)
 				if result <= 32 {
@@ -977,7 +998,9 @@ func (w *nativeWindow) message(msg uint32, wp, lp uintptr) uintptr {
 	case 0xF:
 		var p paintStruct
 		dc, _, _ := beginPaint.Call(w.hwnd, uintptr(unsafe.Pointer(&p)))
-		w.paint(dc)
+		var bounds winRect
+		getClientRect.Call(w.hwnd, uintptr(unsafe.Pointer(&bounds)))
+		fillRect.Call(dc, uintptr(unsafe.Pointer(&bounds)), w.brush)
 		endPaint.Call(w.hwnd, uintptr(unsafe.Pointer(&p)))
 		return 0
 	case wmClose:
@@ -985,6 +1008,7 @@ func (w *nativeWindow) message(msg uint32, wp, lp uintptr) uintptr {
 		destroyWindow.Call(w.hwnd)
 		return 0
 	case wmDestroy:
+		w.closeWidget()
 		killTimer.Call(w.hwnd, 1)
 		w.state.Close()
 		w.poller.Close()

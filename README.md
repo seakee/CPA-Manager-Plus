@@ -114,7 +114,7 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 
 ### Windows Floating Monitor
 
-Windows native packages include `cpa-manager-plus-monitor.exe`, a standalone dark Win32 always-on-top monitor. Run `cpa-manager-plus-monitor.exe --url http://127.0.0.1:18317 --lang en`, then enter the CPAMP Admin Key in its masked connection form. No key is accepted on the command line. Optional remembered keys use current-user DPAPI and a private Windows DACL; window preferences are secret-free.
+Windows native packages include `cpa-manager-plus-monitor.exe`, a standalone dark always-on-top monitor (Win32 host + WebView2, using the approved mockup HTML/CSS/SVG). Run `cpa-manager-plus-monitor.exe --url http://127.0.0.1:18317 --lang en`, then enter the CPAMP Admin Key in its masked connection form. No key is accepted on the command line. Optional remembered keys use current-user DPAPI and a private Windows DACL; window preferences are secret-free.
 
 Expanded mode shows the latest recorded model, input/output/cache/total, estimated request cost, today totals, output tok/s, streaming TTFT, duration and two earlier requests. Compact mode keeps model, today tokens and all three timing metrics in a small bar. Throughput matches upstream output tokens / **full request latency**, not latency minus TTFT. Missing telemetry/prices remain `—`; costs are estimates. Hiding pauses polling; closing exits only the monitor, not Manager. See [native monitor controls, security and build instructions](apps/docs/en/deployment/native.md#windows-floating-monitor).
 

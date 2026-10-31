@@ -82,8 +82,9 @@ func normalizeBaseURLWith(raw string, allowRemotePlainHTTP bool) (string, error)
 	}
 	return strings.TrimRight(u.String(), "/"), nil
 }
-func panelURL(base string) (string, error) {
-	normalized, err := normalizeBaseURL(base)
+func panelURL(base string) (string, error) { return panelURLWithPolicy(base, false) }
+func panelURLWithPolicy(base string, allowHTTP bool) (string, error) {
+	normalized, err := normalizeBaseURLWith(base, allowHTTP)
 	if err != nil {
 		return "", err
 	}

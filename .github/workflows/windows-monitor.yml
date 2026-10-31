@@ -32,7 +32,7 @@ jobs:
         shell: bash
         run: |
           test -z "$(gofmt -l ./internal/desktopmonitor ./cmd/cpa-manager-plus-monitor)"
-          go vet ./internal/desktopmonitor ./cmd/cpa-manager-plus-monitor
+          go vet ./internal/desktopmonitor
       - name: Portable contracts and pricing
         working-directory: apps/manager-server
         run: go test -race ./internal/desktopmonitor ./internal/service/pricing

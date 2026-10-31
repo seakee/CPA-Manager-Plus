@@ -79,6 +79,12 @@ func TestNativeControlsLifecycleAndHTTP(t *testing.T) {
 		}
 	}()
 	hwnd := w.hwnd
+	pumpUntil(t, func() bool { return w.browser != nil && w.browser.ready && w.browser.shown })
+	var browserVisible int32
+	comCall(unsafe.Pointer(w.browser.chromium.GetController()), 3, uintptr(unsafe.Pointer(&browserVisible)))
+	if browserVisible == 0 {
+		t.Fatal("WebView2 is invisible inside the real desktop HWND")
+	}
 	for _, id := range []int{IDPin, IDCompact, IDHide, IDClose, IDConnection, IDURL, IDKey, IDRemember, IDConnect, IDCancel, IDStatus, IDModel, IDSpeed, IDTTFT, IDDuration, IDTokens, IDToday, IDRecent1, IDRecent2, IDUpdated} {
 		h, _, _ := getDlgItem.Call(hwnd, uintptr(id))
 		if h == 0 {
@@ -134,10 +140,15 @@ func TestNativeControlsLifecycleAndHTTP(t *testing.T) {
 	if text := controlText(w.controls[IDTTFTLabel]); text != "TTFT" {
 		t.Fatalf("compact label too verbose: %s", text)
 	}
+	if w.browser == nil || !w.browser.ready {
+		t.Fatal("approved HTML renderer was not initialized")
+	}
+	// Native telemetry controls are kept only for the command/state boundary;
+	// rendering is exclusively the original HTML/CSS, not overlapping GDI labels.
 	for _, id := range []int{IDSpeed, IDTTFT, IDDuration, IDToday} {
 		visible, _, _ := isWindowVisible.Call(w.controls[id])
-		if visible == 0 {
-			t.Fatalf("compact lost metric %d", id)
+		if visible != 0 {
+			t.Fatalf("legacy control overlays HTML metric %d", id)
 		}
 	}
 	for _, id := range []int{IDTokens, IDCost, IDRequest, IDRecent1, IDRecent2, IDTokenSection, IDRecentSection} {
@@ -175,10 +186,6 @@ func TestNativeControlsLifecycleAndHTTP(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("close did not join poller")
 	}
-	// Reopen in the same process and thread: class/tray/GDI lifecycle must be reusable.
-	again, err := newNativeWindow(Options{Lang: "zh"}, preferencesStore{dir: t.TempDir()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sendMessage.Call(again.hwnd, wmClose, 0, 0)
+	// Close exits the companion process. Reopening is verified through a fresh
+	// executable instance in the desktop smoke test, not by reusing a quit thread.
 }

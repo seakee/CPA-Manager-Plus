@@ -159,7 +159,7 @@ type savedKey struct {
 }
 
 func (s preferencesStore) SaveKey(base, key string) error {
-	normalized, err := normalizeBaseURL(base)
+	normalized, err := normalizeBaseURLWith(base, true)
 	if err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func (s preferencesStore) SaveKey(base, key string) error {
 	return s.write("key.dpapi", unsafe.Slice(out.Data, int(out.Size)))
 }
 func (s preferencesStore) LoadKey(base string) (string, error) {
-	if normalized, err := normalizeBaseURL(base); err == nil {
+	if normalized, err := normalizeBaseURLWith(base, true); err == nil {
 		base = normalized
 	}
 	b, err := readSettings(filepath.Join(s.dir, "key.dpapi"), 65536)

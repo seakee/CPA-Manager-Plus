@@ -24,9 +24,9 @@ Windows amd64/arm64 原生包同时包含 `cpa-manager-plus-monitor.exe`。它�
 .\cpa-manager-plus-monitor.exe --url http://127.0.0.1:18317 --lang zh
 ```
 
-![CPAMP Windows 桌面浮窗，展开](../../images/windows-floating-monitor.png)
+![CPAMP Windows 桌面浮窗，展开](../images/windows-floating-monitor.png)
 
-![CPAMP Windows 桌面浮窗，收起](../../images/windows-floating-monitor-compact.png)
+![CPAMP Windows 桌面浮窗，收起](../images/windows-floating-monitor-compact.png)
 
 `--url` 是 **Manager** 地址，不是 CPA 网关，也不是 `management.html` 页面地址。反向代理前缀会保留，例如 `https://HOST/cpamp`；只接受本机 HTTP 或任意 HTTPS 地址。仅在远程 Manager 只提供明文 HTTP 时，勾选 **允许远程明文 HTTP** 才能连接；此时管理员密钥在传输中不加密。带账号密码、查询串、片段或含义不明路径的 URL 会被拒绝。`--lang zh` / `--lang en` 选择中文或英文。在原生密码输入框中填写 **CPAMP 管理员密钥**；没有密钥命令行参数、环境变量或 URL 参数。
 
@@ -34,10 +34,10 @@ Windows amd64/arm64 原生包同时包含 `cpa-manager-plus-monitor.exe`。它�
 
 - 拖动 CPAMP 标题区域移动窗口。置顶切换真实 Windows 置顶属性。收起/展开在小型浮条与完整账单视图之间切换。窗口按显示器 DPI 缩放，显示器变化后会把保存位置限制在最近工作区内。
 - 展开：最近一条已记录请求的模型、完成/失败状态与时间；输入、输出、缓存命中、合计 Token；本次预估费用；本机当日请求数/Token/预估费用；输出速度、流式首字延迟、总耗时；两条更早请求。
-- 窗口由程序自绘（圆角深色底、分段线、页脚条、蓝色强调），不是系统主题对话框。
+- 窗口使用与确认设计稿相同的 HTML、CSS、SVG，由 Microsoft Edge WebView2 渲染；不再用 GDI 近似绘制。展开为 354 × 628 CSS 像素，收起为 354 × 96 CSS 像素。Windows 11 通常已安装 WebView2 Runtime；缺少时需安装微软运行时。
 - 收起：模型、今日 Token、输出速度、首字延迟、总耗时以及连接/更新时间。完整消耗和历史需展开查看。收起状态不是实时 Token 流进度。
 - 隐藏：保留通知区域图标，同时暂停并取消网络请求；单击或右键图标恢复并立即刷新。关闭：退出浮窗并等待工作线程结束。修改连接时暂停轮询；取消保留原连接。「打开面板」用浏览器打开校验后的 Manager 地址加 `/management.html`，**不带密钥**。
-- 原生按钮、静态文本和输入框支持键盘与辅助功能。自动化窗口类名 `CPAMPFloatingMonitorWindow`。按钮 ID：置顶 101、收起 102、隐藏 103、关闭 104、连接设置 105、打开面板 106。表单 ID：地址 201、密码 202、记住 203、连接 204、取消 205。指标 ID：状态 301、模型 302、请求 303、速度 304、首字 305、耗时 306、Token 307、本次费用 308、今日 309、历史 310/311、更新时间 312。使用标准 Win32 消息；生产代码中没有截图或测试后门。
+- 可见按钮、文本和密码表单由 WebView2 提供键盘与辅助功能支持。点击 CPAMP 标志或连接状态可打开连接设置；隐藏在系统托盘操作。原生命令边界保留兼容自动化入口，窗口类名 `CPAMPFloatingMonitorWindow`。按钮 ID：置顶 101、收起 102、隐藏 103、关闭 104、连接设置 105、打开面板 106。表单 ID：地址 201、密码 202、记住 203、连接 204、取消 205。指标 ID：状态 301、模型 302、请求 303、速度 304、首字 305、耗时 306、Token 307、本次费用 308、今日 309、历史 310/311、更新时间 312。使用标准 Win32 消息；生产代码中没有截图或测试后门。
 
 ### 统计口径与估算
 
