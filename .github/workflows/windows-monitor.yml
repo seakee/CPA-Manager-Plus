@@ -1,0 +1,64 @@
+name: Windows Floating Monitor
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - apps/manager-server/internal/desktopmonitor/**
+      - apps/manager-server/cmd/cpa-manager-plus-monitor/**
+      - apps/manager-server/internal/service/pricing/**
+      - apps/manager-server/internal/usage/**
+      - apps/manager-server/internal/usageidentity/**
+      - apps/manager-server/internal/model/model_price*
+      - apps/manager-server/go.*
+      - bin/release/package-native.sh
+      - tests/nativeMonitorPackage.test.mjs
+      - .github/workflows/windows-monitor.yml
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/manager-server/go.mod
+      - name: Format and vet
+        working-directory: apps/manager-server
+        shell: bash
+        run: |
+          test -z "$(gofmt -l ./internal/desktopmonitor ./cmd/cpa-manager-plus-monitor)"
+          go vet ./internal/desktopmonitor ./cmd/cpa-manager-plus-monitor
+      - name: Portable contracts and pricing
+        working-directory: apps/manager-server
+        run: go test -race ./internal/desktopmonitor ./internal/service/pricing
+      - name: Cross-build both Windows GUI architectures
+        working-directory: apps/manager-server
+        shell: bash
+        run: |
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=windows GOARCH="$arch" go build -trimpath -ldflags '-s -w -H windowsgui' -o "$RUNNER_TEMP/monitor-$arch.exe" ./cmd/cpa-manager-plus-monitor
+            CGO_ENABLED=0 GOOS=windows GOARCH="$arch" go test -c -o "$RUNNER_TEMP/monitor-$arch.test.exe" ./internal/desktopmonitor
+          done
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.22.1'
+          cache: npm
+      - run: npm ci
+      - name: Package contents contract (all six targets)
+        run: npx vitest run tests/nativeMonitorPackage.test.mjs
+
+  native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/manager-server/go.mod
+      - name: Native controls, lifecycle, preferences and current-user DPAPI
+        working-directory: apps/manager-server
+        run: go test -race -count=1 -timeout=180s ./internal/desktopmonitor ./internal/service/pricing

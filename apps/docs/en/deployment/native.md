@@ -16,6 +16,57 @@ If you only want to install the CPAMP native package, you can use [One-Click Ins
 
 For long-running production use, choose systemd, launchd, Windows Service Manager, or another process manager afterward.
 
+## Windows Floating Monitor
+
+Windows amd64/arm64 packages also include `cpa-manager-plus-monitor.exe`. This is an independent read-only desktop client, not another Manager Server, collector, proxy or database reader. Keep Manager running separately; closing the monitor does not stop Manager or CPA.
+
+```powershell
+.\cpa-manager-plus-monitor.exe --url http://127.0.0.1:18317 --lang en
+```
+
+![CPAMP Windows floating monitor, expanded](../images/windows-floating-monitor.png)
+
+![CPAMP Windows floating monitor, compact](../images/windows-floating-monitor-compact.png)
+
+`--url` is a **Manager** base URL, not the CPA gateway or a `management.html` URL. Reverse-proxy prefixes are preserved, for example `https://HOST/cpamp`. Loopback HTTP or any HTTPS host is accepted. URL credentials, queries, fragments and ambiguous paths are rejected. `--lang en` and `--lang zh` select English/Chinese. Enter the **CPAMP Admin Key** in the native password edit. There is no key command-line flag, environment variable or URL parameter.
+
+### Display and controls
+
+- Drag the CPAMP header to move. Pin toggles the real Windows topmost flag. Compact/Expand switches between the small bar and full accounting view. The window adapts to per-monitor DPI and clamps saved positions into the nearest work area after display changes.
+- Expanded: latest recorded request model, completion/failure status and time; input, output, cache-hit and total tokens; estimated request cost; local-day calls/tokens/cost; output speed, streaming TTFT and duration; two earlier requests.
+- Compact: model, today tokens, output speed, TTFT and duration, plus connection/update status. Expand for full accounting/history. Compact is intentionally not a live token-stream progress view.
+- Hide keeps a notification-area icon and pauses/cancels network work. Click or right-click the icon to restore and immediately refresh. Close exits the companion and cancels/joins its worker. Connection edits pause polling; Cancel keeps the old connection. Open panel launches the validated base plus `/management.html` in your browser **without** the key.
+- Native buttons, static text and edit controls support keyboard navigation and accessibility. Automation class: `CPAMPFloatingMonitorWindow`. Button IDs: Pin 101, Compact 102, Hide 103, Close 104, Connection 105, Open panel 106. Form IDs: URL 201, password 202, Remember checkbox 203, Connect 204, Cancel 205. Metric IDs: status 301, model 302, request 303, speed 304, TTFT 305, duration 306, tokens 307, request cost 308, today 309, history 310/311, update time 312. Use normal Win32 messages; no production screenshot/test backdoor exists.
+
+### Telemetry and estimates
+
+Polling is serialized outside the UI thread (three seconds after a completed fetch), with cancellation on hide, reconnect, authorization loss or close. Each HTTP call has a 12-second timeout; a complete poll has a 20-second deadline and each response a 2 MiB limit. Redirects are rejected, including same-origin redirects. Network/status/JSON errors never echo response bodies or keys.
+
+Today's totals come from `/v0/management/dashboard/summary` using local midnight and the current instant. Midnight/DST resets today's values to unknown until refreshed; the last request does not disappear at midnight. Recent history is a separate 30-calendar-day analytics query with `events_page.limit=3` and unnecessary aggregate flags disabled. History can be incomplete after retention/archive deletion; the UI labels a server-reported partial history.
+
+Output speed follows CPAMP monitoring: **output tokens / full request latency**, including first-token waiting. It is a duration-average output rate, not an observed generation-only rate. It deliberately does not subtract TTFT as the illustrative design mockup did. TTFT is displayed only for confirmed streaming records with a positive measurement; nonstreaming, zero, invalid and absent TTFT are unknown. Duration and token zero values remain legitimate measured zeros; missing/invalid values show `—`. Cache hits are already included in normalized input and are not added to total a second time.
+
+Request estimates reuse the Manager's `internal/service/pricing` engine and model-prices endpoint, including model resolution, context bands, cache buckets and service tiers. Missing prices/cost remain unknown, not invented free requests. Explicit zero/free prices remain zero. Today's cost is the dashboard's estimate, not a recomputation from three recent requests. A transient error retains same-connection last-good data with offline/update labels; reconnect clears old scope and authorization loss clears all telemetry and removes the remembered key.
+
+### Local settings and cleanup
+
+Only base URL, position, compact and pin preferences are saved in `%LOCALAPPDATA%\CPA-Manager-Plus\monitor\preferences.json`. Remember is off by default. When selected, a separate `key.dpapi` contains current-user DPAPI ciphertext bound to the normalized Manager URL. The directory and files use protected current-user/SYSTEM DACLs rather than relying on Unix permission bits. Changing the URL never reuses a key saved for another Manager. Uncheck Remember and connect to remove saved ciphertext. A decryption/corruption error requests a new key rather than forwarding invalid credentials. No account identity, request body, raw event metadata or usage database is persisted by the monitor.
+
+After closing the monitor, remove only `%LOCALAPPDATA%\CPA-Manager-Plus\monitor` to reset its preferences and key. Do not delete Manager's data/config directories. Default Go strings are not a secure-memory facility: an entered key necessarily exists in process memory while authenticated.
+
+### Build and focused tests
+
+From the repository root (Git Bash/Linux/macOS), no frontend build or CGO is required for the monitor alone:
+
+```bash
+cd apps/manager-server
+go test ./internal/desktopmonitor ./internal/service/pricing
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags '-s -w -H windowsgui' -o cpa-manager-plus-monitor.exe ./cmd/cpa-manager-plus-monitor
+CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags '-s -w -H windowsgui' -o cpa-manager-plus-monitor-arm64.exe ./cmd/cpa-manager-plus-monitor
+```
+
+Portable HTTP/model tests run on other OSes. Native controls/lifecycle, preferences, Windows DACL and DPAPI tests execute on Windows with temporary stores and controlled HTTP fixtures, not real Manager data. The focused Windows Floating Monitor CI workflow tests these packages and cross-builds both architectures. `bin/release/package-native.sh` adds the GUI only to Windows archives; it leaves other platforms unchanged. The package contract can be checked with `npx vitest run tests/nativeMonitorPackage.test.mjs`.
+
 ## Requirements
 
 Before running it, prepare:
