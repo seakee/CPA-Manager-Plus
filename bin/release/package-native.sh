@@ -55,6 +55,15 @@ for target in "${targets[@]}"; do
     CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=$(git rev-parse HEAD)" -o "${package_dir}/${exe_name}" ./cmd/cpa-manager-plus
   )
 
+  # The companion is native Win32 and has no runtime/framework dependency.
+  # Do not include a GUI executable in Linux/macOS archives.
+  if [ "${goos}" = "windows" ]; then
+    (
+      cd "${work_dir}/manager-server"
+      CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -ldflags "-s -w -H windowsgui" -o "${package_dir}/cpa-manager-plus-monitor.exe" ./cmd/cpa-manager-plus-monitor
+    )
+  fi
+
   cp "${repo_root}/README.md" "${package_dir}/README.md"
   cp "${repo_root}/README_CN.md" "${package_dir}/README_CN.md"
   cp -R "${repo_root}/docs" "${package_dir}/docs"
