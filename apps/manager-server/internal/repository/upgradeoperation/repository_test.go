@@ -358,6 +358,27 @@ func TestPutThenAdvanceNeverMovesUpdatedAtBackwards(t *testing.T) {
 	}
 }
 
+// TestPutReportsTypedInputErrors is the regression for the review finding that
+// Put returned bare model errors: a caller could classify a bad stage or domain
+// from Advance with errors.Is but not from Put.
+func TestPutReportsTypedInputErrors(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if err := repository.Put(ctx, model.UpgradeOperation{Stage: "unknown_stage"}); !errors.Is(err, upgradeoperation.ErrUnknownStage) {
+		t.Fatalf("put with an unknown stage error = %v, want ErrUnknownStage", err)
+	}
+	err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStagePreflight,
+		DomainsDone: []string{"unknown_domain"},
+	})
+	if !errors.Is(err, upgradeoperation.ErrUnknownDomain) {
+		t.Fatalf("put with an unknown domain error = %v, want ErrUnknownDomain", err)
+	}
+	if _, found, getErr := repository.Get(ctx); getErr != nil || found {
+		t.Fatalf("a rejected put wrote a row: found=%t err=%v", found, getErr)
+	}
+}
+
 func TestPutMayOnlyAppendDomainsAndAdvance(t *testing.T) {
 	repository, _ := newRepository(t)
 	ctx := context.Background()

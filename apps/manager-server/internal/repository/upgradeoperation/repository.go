@@ -115,6 +115,16 @@ func decodeStringList(raw string, column string) ([]string, error) {
 // reconciliation output and error details may be rewritten freely.
 func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	op.Normalize()
+	// A bad stage or domain is reported with the same sentinels Advance uses, so
+	// a caller can classify input errors from either write API with errors.Is.
+	if !op.Stage.Valid() {
+		return fmt.Errorf("%w: %q", ErrUnknownStage, op.Stage)
+	}
+	for _, domain := range op.DomainsDone {
+		if !model.ValidUpgradeDomain(domain) {
+			return fmt.Errorf("%w: %q", ErrUnknownDomain, domain)
+		}
+	}
 	if err := op.Validate(); err != nil {
 		return err
 	}
