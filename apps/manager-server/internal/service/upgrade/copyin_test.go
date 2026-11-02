@@ -40,11 +40,7 @@ func (v legacyVolume) archives() []string {
 // maintenancebundle refuses any bundle path below a symbolic link.
 func canonicalTempDir(t *testing.T) string {
 	t.Helper()
-	resolved, err := canonicalPath(t.TempDir())
-	if err != nil {
-		t.Fatalf("resolve temporary directory: %v", err)
-	}
-	return resolved
+	return canonicalPath(t.TempDir())
 }
 
 func newLegacyVolume(t *testing.T) legacyVolume {
@@ -554,7 +550,7 @@ func TestCopyInResumesAfterAnInterruptionInsideTheMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("digest backup manifest: %v", err)
 	}
-	fingerprint, _, err := fingerprintSource(volume.root)
+	fingerprint, err := fingerprintSource(volume.root)
 	if err != nil {
 		t.Fatalf("fingerprint the 1.x source: %v", err)
 	}
@@ -563,8 +559,8 @@ func TestCopyInResumesAfterAnInterruptionInsideTheMigration(t *testing.T) {
 		Version:                 copyinmarker.Version,
 		TargetDatabase:          databasePath,
 		SourceKind:              SourceKindUpgradedLegacy,
-		SourceFingerprintBefore: fingerprint,
-		SourceFingerprintAfter:  fingerprint,
+		SourceFingerprintBefore: fingerprint.Digest,
+		SourceFingerprintAfter:  fingerprint.Digest,
 		BackupManifestSHA256:    digest,
 		BackupDirectory:         options.BundleDir,
 		WrittenAtMS:             1,
@@ -672,7 +668,7 @@ func TestCopyInRefusesToResumeOverAMemberItDidNotWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("digest backup manifest: %v", err)
 	}
-	fingerprint, _, err := fingerprintSource(volume.root)
+	fingerprint, err := fingerprintSource(volume.root)
 	if err != nil {
 		t.Fatalf("fingerprint the 1.x source: %v", err)
 	}
@@ -681,8 +677,8 @@ func TestCopyInRefusesToResumeOverAMemberItDidNotWrite(t *testing.T) {
 		Version:                 copyinmarker.Version,
 		TargetDatabase:          databasePath,
 		SourceKind:              SourceKindUpgradedLegacy,
-		SourceFingerprintBefore: fingerprint,
-		SourceFingerprintAfter:  fingerprint,
+		SourceFingerprintBefore: fingerprint.Digest,
+		SourceFingerprintAfter:  fingerprint.Digest,
 		BackupManifestSHA256:    digest,
 		BackupDirectory:         options.BundleDir,
 		WrittenAtMS:             1,
@@ -802,7 +798,7 @@ func materializeMigratedTarget(t *testing.T, volume legacyVolume, targetRoot str
 	if err := db.Close(); err != nil {
 		t.Fatalf("close the migrated database: %v", err)
 	}
-	fingerprint, _, err := fingerprintSource(volume.root)
+	fingerprint, err := fingerprintSource(volume.root)
 	if err != nil {
 		t.Fatalf("fingerprint the 1.x source: %v", err)
 	}
@@ -810,14 +806,14 @@ func materializeMigratedTarget(t *testing.T, volume legacyVolume, targetRoot str
 		Version:                 copyinmarker.Version,
 		TargetDatabase:          filepath.Join(targetRoot, databaseFileName),
 		SourceKind:              SourceKindUpgradedLegacy,
-		SourceFingerprintBefore: fingerprint,
-		SourceFingerprintAfter:  fingerprint,
+		SourceFingerprintBefore: fingerprint.Digest,
+		SourceFingerprintAfter:  fingerprint.Digest,
 		BackupManifestSHA256:    digest,
 		BackupDirectory:         bundleDir,
 	}); err != nil {
 		t.Fatalf("write the provenance marker: %v", err)
 	}
-	return digest, fingerprint
+	return digest, fingerprint.Digest
 }
 
 // TestCopyInResumesWhenTheMigrationCommittedWithoutTheRecord is the crash-window

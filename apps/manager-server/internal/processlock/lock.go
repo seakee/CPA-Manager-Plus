@@ -27,6 +27,18 @@ type Lock struct {
 // directory or file. The returned lock can be retained for normal startup;
 // releasing it between inspection and startup would lose the ownership fence.
 func AcquireExisting(databasePath string) (*Lock, error) {
+	return acquireExisting(databasePath, os.O_RDWR)
+}
+
+// AcquireExistingReadOnly takes the same exclusive ownership lock through a
+// read-only descriptor, so a stopped source that is preserved on a read-only
+// mount still proves exclusivity. It never creates or modifies the marker, and
+// it excludes exactly the same writers as AcquireExisting.
+func AcquireExistingReadOnly(databasePath string) (*Lock, error) {
+	return acquireExisting(databasePath, os.O_RDONLY)
+}
+
+func acquireExisting(databasePath string, flags int) (*Lock, error) {
 	absolutePath, err := filepath.Abs(databasePath)
 	if err != nil {
 		return nil, err
@@ -59,7 +71,7 @@ func AcquireExisting(databasePath string) (*Lock, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("existing process lock is not a regular file")
 	}
-	file, err := openLockFile(lockPath, os.O_RDWR)
+	file, err := openLockFile(lockPath, flags)
 	if err != nil {
 		return nil, err
 	}
