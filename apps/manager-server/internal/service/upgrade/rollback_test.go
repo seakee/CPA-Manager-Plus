@@ -2,7 +2,9 @@ package upgrade
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -1170,5 +1172,107 @@ func copyTree(t *testing.T, from, to string) {
 	})
 	if err != nil {
 		t.Fatalf("copy %s: %v", from, err)
+	}
+}
+
+// withWritableFixtureDatabase writes into a fixture database that this test owns
+// (the backup copy or the stopped 1.x volume), so the scenario can be built
+// without the production paths that refuse it. Sidecars the write leaves behind
+// are removed: the bundle manifest describes the files a rollback compares.
+func withWritableFixtureDatabase(t *testing.T, path string, mutate func(*sql.DB)) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatalf("open the fixture database %s: %v", filepath.Base(path), err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`pragma foreign_keys = off`); err != nil {
+		_ = db.Close()
+		t.Fatalf("disable fixture foreign keys: %v", err)
+	}
+	mutate(db)
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the fixture database %s: %v", filepath.Base(path), err)
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("remove the fixture %s sidecar: %v", filepath.Base(path), err)
+		}
+	}
+}
+
+// TestVerifyRollbackInstallCountsAnEventOnceAcrossItsRowAndArchiveRef is the
+// regression for M1. The 1.x archive maintenance writes the reference first and
+// deletes the raw row in a later batch, so a backup taken between the two steps
+// holds an event as a row and as its reference, while the live volume — after
+// v1 finished the delete following the rollback — holds it only as a reference.
+// Counting rows per table added the two populations and refused the same
+// install; the retained population is the identity, counted once.
+func TestVerifyRollbackInstallCountsAnEventOnceAcrossItsRowAndArchiveRef(t *testing.T) {
+	volume := newLegacyVolume(t)
+	ctx := context.Background()
+	const runID = "0123456789abcdef0123456789abcdef"
+	payload := []byte("{\"segment\":1}\n")
+	segmentPath := filepath.Join(volume.root, archivesDirName, runID, "segment-000001.jsonl")
+	if err := os.MkdirAll(filepath.Dir(segmentPath), 0o755); err != nil {
+		t.Fatalf("create the archive run directory: %v", err)
+	}
+	if err := os.WriteFile(segmentPath, payload, 0o600); err != nil {
+		t.Fatalf("write the archive segment: %v", err)
+	}
+	digest := sha256.Sum256(payload)
+	// The 1.x archive maintenance writes the reference first and deletes the raw
+	// rows in a later batch, so this is the source a backup can be taken from
+	// between the two steps: each archived event is a row and a reference.
+	withWritableFixtureDatabase(t, volume.databasePath(), func(db *sql.DB) {
+		for _, statement := range []string{
+			`insert into usage_archive_runs
+				(id, mode, schema_version, format, status, cutoff_timestamp_ms, target_event_id, event_count, created_at_ms, updated_at_ms)
+				values ('` + runID + `', 'manual', 1, 'gzip-jsonl-v1', 'cancelled', 2000, 2, 2, 1, 1)`,
+			`insert into usage_archive_segments
+				(run_id, sequence, status, file_name, first_event_id, last_event_id, min_timestamp_ms, max_timestamp_ms,
+				 event_count, uncompressed_bytes, compressed_bytes, content_sha256, event_hash_digest, created_at_ms)
+				values ('` + runID + `', 1, 'published', '` + runID + `/segment-000001.jsonl', 1, 2, 1000, 2000,
+				 2, ` + strconv.Itoa(len(payload)) + `, ` + strconv.Itoa(len(payload)) + `, '` + hex.EncodeToString(digest[:]) + `', 'digest', 1)`,
+			`insert into usage_event_identity_ledger
+				(event_hash, raw_event_id, timestamp_ms, bucket_ms, first_seen_at_ms, updated_at_ms)
+				values ('legacy-event-1', 1, 1000, 0, 1, 1)`,
+			`insert into usage_event_identity_ledger
+				(event_hash, raw_event_id, timestamp_ms, bucket_ms, first_seen_at_ms, updated_at_ms)
+				values ('legacy-event-2', 2, 2000, 0, 1, 1)`,
+			`insert into usage_archive_event_refs
+				(event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms)
+				values ('legacy-event-1', '` + runID + `', 1, 1, 1000, 1000, null)`,
+			`insert into usage_archive_event_refs
+				(event_hash, run_id, segment_sequence, raw_event_id, timestamp_ms, archived_at_ms, raw_deleted_at_ms)
+				values ('legacy-event-2', '` + runID + `', 1, 2, 2000, 2000, null)`,
+		} {
+			if _, err := db.Exec(statement); err != nil {
+				t.Fatalf("seed the archived event: %v", err)
+			}
+		}
+	})
+	targetRoot := canonicalTempDir(t)
+	options := copyInOptions(volume, targetRoot)
+	options.DeclaredVersion = bootstrap.PlannedDirectRelease
+	options.Lock = volume.lock(t)
+	result, err := CopyIn(ctx, options)
+	if err != nil {
+		t.Fatalf("copy the 1.x fixture in: %v", err)
+	}
+	recorded, found, err := ReadRecord(ctx, filepath.Join(targetRoot, databaseFileName))
+	if err != nil || !found {
+		t.Fatalf("read the recorded copy-in: found=%t err=%v", found, err)
+	}
+	// The 1.x manager kept running after the rollback and finished the raw delete
+	// of both archived events, so the live volume now holds them only as refs.
+	withWritableFixtureDatabase(t, volume.databasePath(), func(db *sql.DB) {
+		if _, err := db.Exec(`delete from usage_events
+			where event_hash in ('legacy-event-1', 'legacy-event-2')`); err != nil {
+			t.Fatalf("finish the 1.x raw delete: %v", err)
+		}
+	})
+	if err := verifyRollbackInstall(ctx, volume.root, result.BackupDirectory, recorded); err != nil {
+		t.Fatalf("the same install was refused: %v", err)
 	}
 }

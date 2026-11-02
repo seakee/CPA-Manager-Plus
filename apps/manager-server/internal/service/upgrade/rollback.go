@@ -1156,17 +1156,22 @@ func sanitizeIdentity(value string) string {
 
 // retainedRowGroup is one durable population a rollback proves survived. Usage
 // events are grouped with their archive projection because the v1 archive
-// maintenance deletes raw rows once it has archived them: an event is retained
-// as a raw row or as its archived reference, never as neither.
+// maintenance writes the reference first and deletes the raw rows in later
+// batches: between those steps one event is present in both tables. The
+// population is therefore the event identity, counted once across the tables,
+// never the row count of either.
 type retainedRowGroup struct {
-	name   string
-	tables []string
+	name string
+	// identity is the column that names one member of the population. The same
+	// value in two tables is one retained event, not two.
+	identity string
+	tables   []string
 }
 
 // rollbackRetainedRows are the populations the backup records and the live
 // volume must still hold at least.
 var rollbackRetainedRows = []retainedRowGroup{
-	{name: "usage event", tables: []string{"usage_events", "usage_archive_event_refs"}},
+	{name: "usage event", identity: "event_hash", tables: []string{"usage_events", "usage_archive_event_refs"}},
 }
 
 // verifyRollbackInstall proves the live 1.x root is the install the recorded
@@ -1263,38 +1268,42 @@ func requireRecordedArchives(sourceRoot string, manifest maintenancebundle.Manif
 	return nil
 }
 
-// countRetainedRows counts every retained-row group in one store. A table the
-// store does not have contributes nothing.
+// countRetainedRows counts every retained-row group in one store by identity. A
+// table the store does not have contributes nothing, and an identity two tables
+// both hold is one retained member.
 func countRetainedRows(ctx context.Context, db *sql.DB) (map[string]int64, error) {
 	totals := make(map[string]int64, len(rollbackRetainedRows))
 	for _, group := range rollbackRetainedRows {
-		var total int64
-		for _, table := range group.tables {
-			count, present, err := countTableRows(ctx, db, table)
-			if err != nil {
-				return nil, err
-			}
-			if present {
-				total += count
-			}
+		total, err := countRetainedIdentities(ctx, db, group)
+		if err != nil {
+			return nil, err
 		}
 		totals[group.name] = total
 	}
 	return totals, nil
 }
 
-func countTableRows(ctx context.Context, db *sql.DB, table string) (int64, bool, error) {
-	var present int
-	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
-		where type = 'table' and name = ?`, table).Scan(&present); err != nil {
-		return 0, false, err
+// countRetainedIdentities counts the distinct identities of one group across its
+// tables. Union (not union all) is what makes an event retained as a raw row and
+// as its archived reference count once.
+func countRetainedIdentities(ctx context.Context, db *sql.DB, group retainedRowGroup) (int64, error) {
+	selections := []string{}
+	for _, table := range group.tables {
+		present, err := tablePresent(ctx, db, table)
+		if err != nil {
+			return 0, err
+		}
+		if present {
+			selections = append(selections, `select `+group.identity+` from `+table)
+		}
 	}
-	if present != 1 {
-		return 0, false, nil
+	if len(selections) == 0 {
+		return 0, nil
 	}
 	var count int64
-	if err := db.QueryRowContext(ctx, `select count(*) from `+table).Scan(&count); err != nil {
-		return 0, false, err
+	if err := db.QueryRowContext(ctx,
+		`select count(*) from (`+strings.Join(selections, ` union `)+`)`).Scan(&count); err != nil {
+		return 0, err
 	}
-	return count, true, nil
+	return count, nil
 }
