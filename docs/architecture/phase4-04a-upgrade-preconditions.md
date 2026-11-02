@@ -341,6 +341,20 @@ migration authority.
   incremental v2 migration and commit `copy_in` → remove the work directory,
   marker included, only after that commit. Everything is on one filesystem, so
   no member is ever copied.
+- **V2 data-root fence.** `CopyIn` takes the v2 data root's own ownership
+  lock (`processlock.Acquire` on `<target>/usage.sqlite`) in the service,
+  before its first write to that root, and holds it for the whole mutating
+  path: target creation, backup creation/reuse, staging restore, the member
+  renames, the marker publications, the migration, the row commit and the
+  work-directory/marker cleanup. The
+  CLI does not take it, so every caller is covered by the same fence, and it
+  is a different lock in a different directory from the 1.x source fence.
+  A held root is a typed refusal (`upgrade_copy_in_v2_running`) before any
+  target or backup byte is written; the CLI reports exit 1 for it, like a
+  blocked preflight, while usage and environment failures stay exit 2. The
+  fence excludes cooperating Manager writers; it does not claim anything
+  about a process that ignores the marker. `upgrade preflight` and
+  `upgrade status` remain read-only and take no exclusive target lock.
 - **Crash windows.** Two interruptions matter. Inside the move, some members are
   in the v2 layout and the rest are in the staging tree; the marker's
   `materializing` phase says so, and the resume continues the move from its own
@@ -367,12 +381,20 @@ migration authority.
   copies the database and its WAL sidecars into private scratch space, proves the
   source did not change while the copy was taken and reads only that copy, so a
   `-shm` is never created or rewritten beside a stopped source; the copy-in reads
-  the source as bytes under the held `processlock` fence. The fingerprint covers
+  the source as bytes under the held `processlock` fence. `upgrade run` takes
+  that fence through a read-only descriptor
+  (`processlock.AcquireExistingReadOnly`, as preflight does): the same exclusive
+  marker and the same excluded writers, but the source is never opened for
+  writing and a stopped source preserved on a read-only mount still proves
+  exclusivity. The fingerprint covers
   the database, its WAL/SHM/journal, `data.key`, every archive file and every
   other entry of the source root (the ownership marker is the one deliberate
   exception: it belongs to the holder, not the source). It is recomputed after
   the copy; a difference rolls back the members this run moved plus the work
-  directory and aborts with `upgrade_source_changed`.
+  directory and aborts with `upgrade_source_changed`. The read-only descriptor
+  is proven on the test host with a `0400` source marker; an actual Linux
+  read-only (EROFS) bind mount was not exercised, so that mount qualification
+  remains unverified.
 - **Resumability.** A verified bundle is reused instead of recreated. A target
   whose members already match the manifest is not restored again. A published
   staging tree that still describes the backup is adopted rather than restored
@@ -395,7 +417,10 @@ migration authority.
   `backup_manifest_sha256` (digest of the published `manifest.json`). The stage
   only moves forward; a retry after a later stage keeps that later stage. Every
   write goes through `upgradeoperation.Repository`, whose `nextUpdatedAtMS` keeps
-  `updated_at_ms` monotonic; no caller proposes a timestamp.
+  `updated_at_ms` monotonic; no caller proposes a timestamp. The run's `Result`
+  is read back from the persisted row after the commit, so `updatedAtMs` reports
+  the durable `updated_at_ms`: a first run no longer prints `0`, and a rerun that
+  rewrites the row reports the timestamp it just wrote.
 - **CLI.** `cpa-manager-plus upgrade run --legacy <dir> --source-version
   <release> [--target <dir>] [--bundle <dir>] [--scratch-dir DIR] [--json]` runs
   the preflight gate first (a blocked source writes nothing), then the copy-in,
@@ -407,21 +432,40 @@ migration authority.
   and no inline environment key may override the copied key. Anything else is
   refused with `upgrade_target_layout_mismatch`, because a copied data key the
   service never loads leaves the 1.x encrypted fields undecryptable.
-  `upgrade preflight` and `upgrade status` remain read-only.
+  `upgrade preflight` and `upgrade status` remain read-only. The copy-in's exit
+  codes are unchanged in shape: 0 ready, 1 blocked — including a v2 data root
+  owned by another Manager process (`upgrade_copy_in_v2_running`) — and 2 for
+  usage, environment and retryable failures.
 
 ### Admission surface table
 
 `legacypreflight.AdmitStartup` reads the injectable
 `UpgradeAdmission` (`DatabaseUpgradeAdmission` in production) before it
-classifies a source. The reader resolves the `upgrade_operations` row first and,
-when the row is missing, the `.upgrade-copy-in/copy-in.json` marker beside the
-database. A reader error fails closed; a `nil` reader keeps the historical rule.
-`Surface()` then selects what the process serves:
+classifies a source. The reader consults the `.upgrade-copy-in/copy-in.json`
+marker beside the database first, because the marker is the only evidence that
+can be read without opening the target:
+
+- A valid `materializing` marker is decided from the marker alone. That marker is
+  published before the first member is moved and before the migration that
+  creates the operation table, so no row can describe such a target; opening it
+  read-only joins the copied WAL and rewrites `usage-sqlite-shm`, the member the
+  resumed move compares with the backup. Admission would otherwise make an
+  interrupted live-WAL copy-in unresumable.
+- Any other marker state reads the `upgrade_operations` row next, so a committed
+  row outlives its marker: the marker turns `migrating` before the migration and
+  is removed only after the row commits, and a death between those events leaves
+  both, where the row is the stronger evidence.
+- Without a row, a marker still answers `in_progress`.
+
+A reader error fails closed, including an unreadable marker beside a readable
+row; a `nil` reader keeps the historical rule. `Surface()` then selects what the
+process serves:
 
 | Recorded state | Admission | Startup surface |
 | --- | --- | --- |
 | no table, no row and no marker for this database (or `nil` reader) | `none` | unchanged: only `fresh` and `native-v2` are admitted; a 1.x source stays blocked |
-| copy-in marker, no row (the crash windows: the members moved, the row did not) | `in_progress` | Upgrade surface only |
+| `materializing` marker, no row (the members are being moved, the migration has not run) | `in_progress` | Upgrade surface only, and the target is not opened: the resume keeps the `-shm` it restored |
+| `migrating` marker, no row (the members moved, the row did not) | `in_progress` | Upgrade surface only |
 | the same marker under another absolute path, or a root relocated to another mount | `in_progress` | Upgrade surface only: the marker belongs to the data root it sits in, so a relocated volume is never read as "no record" |
 | a marker naming a different database file | — | not admitted (fail closed): it is evidence for another run |
 | `preflight`, `copy_in`, `reconcile`, `cpa_import`, `external_connect`, `verify`, `failed` | `in_progress` | Upgrade surface only: fixed Bootstrap discovery status reads, the read-only shell and the Upgrade authentication leaf. Console, Key workspace, gateway configuration, lifecycle and model traffic answer 404; health stays 503 and no writable subsystem starts |
