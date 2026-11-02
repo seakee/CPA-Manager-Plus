@@ -2017,7 +2017,10 @@ function faultSourceTouched(binary, workspace) {
     binary,
     ['upgrade', 'rollback', '--prepare', '--legacy', source, '--target', target, '--json'],
     'touched:rollback-prepare',
-    { expectExit: 1 },
+    // One typed code has one exit code on every subcommand: the retryable
+    // upgrade_source_changed is exit 2 here exactly as it is for run and
+    // reconcile.
+    { expectExit: 2 },
   );
   const code = typedCode(prepare);
   assertValue(code === 'upgrade_source_changed', `touched: refusal code=${code}`);

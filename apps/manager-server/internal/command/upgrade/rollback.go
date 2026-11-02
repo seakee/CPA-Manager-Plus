@@ -15,32 +15,21 @@ import (
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
-// ErrRefused marks an Upgrade decision the operator asked for that the recorded
-// state does not support: nothing was written, and the exit code is 1 rather
-// than the usage error 2.
-var ErrRefused = errors.New("upgrade: refused")
-
 // ErrReported marks a failure whose operator text a subcommand already wrote to
 // stderr, so the process entry point does not print it a second time.
 var ErrReported = errors.New("upgrade: reported")
 
-// refuse keeps the typed service failure in the chain so a caller can match both
-// the CLI refusal and the machine code, while the exit code stays 1. The reason
-// is written to stderr: an exit code alone does not tell the operator what the
-// recorded state refused.
-func refuse(stderr io.Writer, err error) error {
-	_, _ = fmt.Fprintln(stderr, err)
-	return fmt.Errorf("%w: %w", ErrRefused, err)
-}
-
-// refuseTyped keeps a typed Upgrade refusal in the CLI refusal contract, so the
-// machine code is visible and the exit status is 1 rather than the usage 2 that
-// an untyped failure reports. Anything else is returned unchanged.
+// refuseTyped writes a typed failure to stderr once and marks it reported, so
+// the process entry point does not log the same reason again. It does not choose
+// the exit code: ExitCode reads the typed code through its one table, so a code
+// exits the same way on every subcommand. An untyped failure is returned
+// unchanged and reaches the entry point's own log line.
 func refuseTyped(stderr io.Writer, err error) error {
-	if _, ok := upgradeservice.UpgradeErrorCodeOf(err); ok {
-		return refuse(stderr, err)
+	if _, ok := upgradeservice.UpgradeErrorCodeOf(err); !ok {
+		return err
 	}
-	return err
+	_, _ = fmt.Fprintln(stderr, err)
+	return fmt.Errorf("%w: %w", ErrReported, err)
 }
 
 // runRollback prepares a 1.x rollback plan or records a proven one. It never

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -9,6 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 )
 
 // runUpgradeCLI executes the real process entry point through the helper test
@@ -105,5 +110,44 @@ func TestUpgradeCLITypedRefusalsExitOneAndPrintOnce(t *testing.T) {
 	code, _, stderr = runUpgradeCLI(t, "upgrade", "run", "--target", t.TempDir())
 	if code != 2 {
 		t.Fatalf("usage exit code = %d, want 2; stderr: %s", code, stderr)
+	}
+}
+
+// TestUpgradeCLIKeepsAChangedSourceRetryable is the M-1 regression through the
+// real process entry: the rollback lane wrapped every typed failure as a
+// refusal, so upgrade_source_changed exited 1 there while run and reconcile
+// kept the documented retryable 2. One typed code now reads one table, so the
+// same failure exits 2 here without the rollback path choosing it.
+func TestUpgradeCLIKeepsAChangedSourceRetryable(t *testing.T) {
+	const sourceChanged = "upgrade_source_changed"
+	source := t.TempDir()
+	target := t.TempDir()
+	db, err := sqliterepo.Open(filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the v2 store: %v", err)
+	}
+	if err := upgradeoperation.New(db).Put(context.Background(), model.UpgradeOperation{
+		Stage:                   model.UpgradeStageCopyIn,
+		DomainsDone:             []string{model.UpgradeDomainSourceCopy},
+		SourceVersion:           "v1.14.4",
+		SourceRoot:              source,
+		SourceFingerprintBefore: strings.Repeat("0", 64),
+		SourceFingerprintAfter:  strings.Repeat("0", 64),
+		BackupManifestSHA256:    strings.Repeat("0", 64),
+	}); err != nil {
+		_ = db.Close()
+		t.Fatalf("record the copy-in: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the v2 store: %v", err)
+	}
+
+	code, stdout, stderr := runUpgradeCLI(t, "upgrade", "rollback", "--prepare",
+		"--legacy", source, "--target", target)
+	if code != 2 {
+		t.Fatalf("changed-source exit code = %d, want the retryable 2; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if count := strings.Count(stderr, sourceChanged); count != 1 {
+		t.Fatalf("%s appears %d times in stderr, want once: %s", sourceChanged, count, stderr)
 	}
 }

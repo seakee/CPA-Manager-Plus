@@ -60,60 +60,83 @@ const (
 // exhaustion without depending on a real race.
 var openSnapshot = upgradeservice.OpenSnapshot
 
-// ExitCode maps a Run result to the CLI contract: 0 ready, 1 a refusal the
-// operator has to look at — a blocked preflight, a source or v2 data root
-// another process holds, an unacknowledged mismatch, a store that cannot show
-// what the source holds, a reconciliation that compared nothing, a store
-// whose recorded copy-in does not allow the step, or a rollback whose recorded
-// evidence does not hold — and 2 anything else. A refusal is a decision about
-// the migration, not a usage or environment error, so every refusal shares
-// exit 1 and the typed code in the report or stderr says which one it was. A
-// changed source stays retryable and keeps exit 2: the retry marker is what
-// tells the operator to run it again. When a command wrote its own refusal to
-// stderr, main.go must not log the same reason twice; ErrRefused and
-// ErrReported are the markers for that, and neither changes the exit code.
+// ExitCode maps a Run result to the CLI contract: 0 ready, 1 a decision the
+// operator has to look at, and 2 anything else. The decision set is the single
+// table below, and every subcommand goes through it: run, status, migrate,
+// rollback, reconcile and external-connect cannot disagree about the same typed
+// code, because none of them chooses an exit code itself. A changed source and a
+// v2 root that no longer matches its copy stay retryable at exit 2, and the
+// typed code in the report or stderr says which failure it was.
+//
+// When a command wrote its own refusal to stderr, main.go must not log the same
+// reason twice; ErrReported is the marker for that, and it never changes the
+// exit code.
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
-	if errors.Is(err, ErrBlocked) || errors.Is(err, ErrRefused) {
+	if errors.Is(err, ErrBlocked) {
 		return 1
 	}
 	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok && slices.Contains(refusalCodes, code) {
 		return 1
 	}
-	// The External connect stop is a decision about the user's CPA: a v7
-	// target, a rejected management key, a target that moved, or a document
-	// that is not the v8 contract. The owner has to act, so it shares exit 1
-	// and never reads as a transient error. A store another process owns is
-	// blocked, not broken: the operator stops that process, so it is the same
-	// "in use" decision as a blocked preflight.
-	if errors.Is(err, upgradeservice.ErrExternalVersionUnsupported) ||
-		errors.Is(err, upgradeservice.ErrExternalConfigDocumentInvalid) ||
-		errors.Is(err, upgradeservice.ErrExternalManagementRejected) ||
-		errors.Is(err, upgradeservice.ErrExternalTargetMoved) ||
-		errors.Is(err, upgradeservice.ErrExternalV2Running) {
-		return 1
-	}
 	return 2
 }
 
-// refusalCodes are the typed failures that are a decision about the migration
-// rather than a usage or environment problem: the operator has to look at the
-// source, the store, or the day the report names, so the CLI exits 1 and the
-// code in the report says which. upgrade_source_changed is deliberately absent:
-// a source that moved or is still being written is retryable, so it keeps exit
-// 2 like every other retryable failure.
+// refusalCodes is the one exit-code table for typed failures. A code listed here
+// is a decision about the migration, the recorded store or the operator's CPA:
+// the operator has to look at the source, the store, or the day the report
+// names, so every subcommand exits 1 and the code in the report says which. A
+// code absent from the table is a usage, environment or retryable failure and
+// exits 2 on every subcommand. Adding a code means deciding here, once.
 var refusalCodes = []upgradeservice.UpgradeErrorCode{
+	// The source or the v2 data root is not this run's to read or write: a live
+	// writer holds it, or the offline store already holds an operation that the
+	// step may not overwrite.
 	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy),
 	upgradeservice.UpgradeErrorV2Running,
 	upgradeservice.UpgradeErrorTargetLocked,
+	// The recorded copy-in or the reconciliation is a decision about what the
+	// store holds and which days it can never complete again.
 	upgradeservice.UpgradeErrorReconcileMismatch,
 	upgradeservice.UpgradeErrorReconcileTargetIncomplete,
 	upgradeservice.UpgradeErrorReconcileNothingCompared,
 	upgradeservice.UpgradeErrorReconcileNotCopiedIn,
 	upgradeservice.UpgradeErrorReconcileStageClosed,
 	upgradeservice.UpgradeErrorReconcileRecordIncomplete,
+	// The offline store cannot be read or migrated without the operator: the
+	// row predates this build, a live Manager holds the lock, or the store never
+	// recorded the copy-in the migration needs.
+	upgradeservice.UpgradeErrorStoreSchemaOutdated,
+	upgradeservice.UpgradeErrorStoreLocked,
+	upgradeservice.UpgradeErrorMigrateNotCopiedIn,
+	// A rollback plan or verdict the recorded evidence does not support. These
+	// codes have no other subcommand; they were exit 1 before the table existed
+	// and stay there.
+	upgradeservice.UpgradeErrorRollbackNotApplicable,
+	upgradeservice.UpgradeErrorRollbackUnproven,
+	upgradeservice.UpgradeErrorRollbackImageUnpinned,
+	upgradeservice.UpgradeErrorRollbackImageFamily,
+	upgradeservice.UpgradeErrorRollbackVolumeUnbound,
+	upgradeservice.UpgradeErrorRollbackRootsOverlap,
+	upgradeservice.UpgradeErrorRollbackEvidenceStale,
+	upgradeservice.UpgradeErrorRollbackProbeEndpoint,
+	upgradeservice.UpgradeErrorRollbackIdentityForeign,
+	upgradeservice.UpgradeErrorRollbackProbeSelf,
+	upgradeservice.UpgradeErrorRollbackPortCollision,
+	upgradeservice.UpgradeErrorRollbackPortBusy,
+	upgradeservice.UpgradeErrorRollbackV2Running,
+	// A decision about the user's CPA: a v7 target, a rejected management key, a
+	// target that moved, or a document that is not the v8 contract. The owner
+	// has to act, so it is never read as a transient error. An unreachable CPA
+	// and a store the step cannot run from are environment conditions and stay
+	// out of the table.
+	upgradeservice.UpgradeErrorExternalVersionUnsupported,
+	upgradeservice.UpgradeErrorExternalConfigDocumentInvalid,
+	upgradeservice.UpgradeErrorExternalManagementRejected,
+	upgradeservice.UpgradeErrorExternalTargetMoved,
+	upgradeservice.UpgradeErrorExternalV2Running,
 }
 
 func IsHelp(err error) bool { return errors.Is(err, flag.ErrHelp) }

@@ -157,14 +157,12 @@ func main() {
 					return
 				}
 				code := upgradecommand.ExitCode(err)
-				// A blocked preflight, a typed refusal and a subcommand that
-				// already wrote its own failure to stderr all carry the operator's
-				// text; logging them here too would print the same reason twice.
-				// Every other failure reaches this log path, so nothing is
-				// suppressed.
+				// A blocked preflight and a subcommand that already wrote its
+				// own failure to stderr both carry the operator's text; logging
+				// them here too would print the same reason twice. Every other
+				// failure reaches this log path, so nothing is suppressed.
 				if !errors.Is(err, upgradecommand.ErrBlocked) &&
-					!errors.Is(err, upgradecommand.ErrReported) &&
-					!errors.Is(err, upgradecommand.ErrRefused) {
+					!errors.Is(err, upgradecommand.ErrReported) {
 					log.Printf("upgrade: %v", err)
 				}
 				os.Exit(code)

@@ -200,11 +200,60 @@ func TestStatusWithoutMigrationReportsNoRecord(t *testing.T) {
 	}
 }
 
-// TestExitCodePinsEveryRefusal pins the CLI contract one row per refusal: a
-// decision the operator has to look at exits 1 no matter which typed code it
-// carries, and only a usage or environment failure exits 2. The rows carry a
-// message like the service sends, so the mapping is proven for a real typed
-// error and not just for the bare sentinel.
+// exitCodeContract is the whole typed vocabulary the service exports, one row
+// per code: the exit every subcommand must report for it. The table is the
+// contract, so a code that moves between the decision and retryable sets — or a
+// new code that ships without a row — fails the test below instead of only a
+// script that branches on the value.
+var exitCodeContract = []struct {
+	name string
+	code upgradeservice.UpgradeErrorCode
+	want int
+}{
+	// A decision the operator has to look at: exit 1 on every subcommand.
+	{name: "source busy", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy), want: 1},
+	{name: "v2 root running", code: upgradeservice.UpgradeErrorV2Running, want: 1},
+	{name: "target locked", code: upgradeservice.UpgradeErrorTargetLocked, want: 1},
+	{name: "reconcile mismatch", code: upgradeservice.UpgradeErrorReconcileMismatch, want: 1},
+	{name: "reconcile target incomplete", code: upgradeservice.UpgradeErrorReconcileTargetIncomplete, want: 1},
+	{name: "reconcile nothing compared", code: upgradeservice.UpgradeErrorReconcileNothingCompared, want: 1},
+	{name: "reconcile not copied in", code: upgradeservice.UpgradeErrorReconcileNotCopiedIn, want: 1},
+	{name: "reconcile stage closed", code: upgradeservice.UpgradeErrorReconcileStageClosed, want: 1},
+	{name: "reconcile record incomplete", code: upgradeservice.UpgradeErrorReconcileRecordIncomplete, want: 1},
+	{name: "store schema outdated", code: upgradeservice.UpgradeErrorStoreSchemaOutdated, want: 1},
+	{name: "store locked", code: upgradeservice.UpgradeErrorStoreLocked, want: 1},
+	{name: "migrate not copied in", code: upgradeservice.UpgradeErrorMigrateNotCopiedIn, want: 1},
+	{name: "rollback not applicable", code: upgradeservice.UpgradeErrorRollbackNotApplicable, want: 1},
+	{name: "rollback unproven", code: upgradeservice.UpgradeErrorRollbackUnproven, want: 1},
+	{name: "rollback image unpinned", code: upgradeservice.UpgradeErrorRollbackImageUnpinned, want: 1},
+	{name: "rollback image family", code: upgradeservice.UpgradeErrorRollbackImageFamily, want: 1},
+	{name: "rollback volume unbound", code: upgradeservice.UpgradeErrorRollbackVolumeUnbound, want: 1},
+	{name: "rollback roots overlap", code: upgradeservice.UpgradeErrorRollbackRootsOverlap, want: 1},
+	{name: "rollback evidence stale", code: upgradeservice.UpgradeErrorRollbackEvidenceStale, want: 1},
+	{name: "rollback probe endpoint", code: upgradeservice.UpgradeErrorRollbackProbeEndpoint, want: 1},
+	{name: "rollback identity foreign", code: upgradeservice.UpgradeErrorRollbackIdentityForeign, want: 1},
+	{name: "rollback probe self", code: upgradeservice.UpgradeErrorRollbackProbeSelf, want: 1},
+	{name: "rollback port collision", code: upgradeservice.UpgradeErrorRollbackPortCollision, want: 1},
+	{name: "rollback port busy", code: upgradeservice.UpgradeErrorRollbackPortBusy, want: 1},
+	{name: "rollback v2 running", code: upgradeservice.UpgradeErrorRollbackV2Running, want: 1},
+	{name: "external version unsupported", code: upgradeservice.UpgradeErrorExternalVersionUnsupported, want: 1},
+	{name: "external document invalid", code: upgradeservice.UpgradeErrorExternalConfigDocumentInvalid, want: 1},
+	{name: "external management rejected", code: upgradeservice.UpgradeErrorExternalManagementRejected, want: 1},
+	{name: "external target moved", code: upgradeservice.UpgradeErrorExternalTargetMoved, want: 1},
+	{name: "external v2 running", code: upgradeservice.UpgradeErrorExternalV2Running, want: 1},
+	// Retryable or environmental: exit 2 on every subcommand, including the
+	// source that moved, which the copy-in lane has always kept retryable.
+	{name: "source changed", code: upgradeservice.UpgradeErrorSourceChanged, want: 2},
+	{name: "target modified", code: upgradeservice.UpgradeErrorTargetModified, want: 2},
+	{name: "target conflict", code: upgradeservice.UpgradeErrorTargetConflict, want: 2},
+	{name: "snapshot failed", code: upgradeservice.UpgradeErrorSnapshotFailed, want: 2},
+	{name: "external authority unavailable", code: upgradeservice.UpgradeErrorExternalAuthorityUnavailable, want: 2},
+	{name: "external not applicable", code: upgradeservice.UpgradeErrorExternalNotApplicable, want: 2},
+}
+
+// TestExitCodePinsEveryRefusal pins the CLI contract one row per typed code.
+// The rows carry a message like the service sends, so the mapping is proven for
+// a real typed error and not just for the bare sentinel.
 func TestExitCodePinsEveryRefusal(t *testing.T) {
 	typed := func(code upgradeservice.UpgradeErrorCode) error {
 		return &upgradeservice.UpgradeError{Code: code, Message: "pinned by the exit-code table"}
@@ -216,13 +265,22 @@ func TestExitCodePinsEveryRefusal(t *testing.T) {
 	}{
 		{name: "ready", err: nil, want: 0},
 		{name: "blocked preflight (sentinel)", err: ErrBlocked, want: 1},
-		{name: "unacknowledged mismatch", err: typed(upgradeservice.UpgradeErrorReconcileMismatch), want: 1},
-		{name: "target incomplete", err: typed(upgradeservice.UpgradeErrorReconcileTargetIncomplete), want: 1},
-		{name: "nothing compared", err: typed(upgradeservice.UpgradeErrorReconcileNothingCompared), want: 1},
 		{name: "nothing compared (sentinel)", err: upgradeservice.ErrReconcileNothingCompared, want: 1},
-		{name: "source changed", err: typed(upgradeservice.UpgradeErrorSourceChanged), want: 2},
-		{name: "target modified", err: typed(upgradeservice.UpgradeErrorTargetModified), want: 2},
 		{name: "usage", err: ErrUsage, want: 2},
+	}
+	for _, contract := range exitCodeContract {
+		cases = append(cases, struct {
+			name string
+			err  error
+			want int
+		}{name: contract.name, err: typed(contract.code), want: contract.want})
+	}
+	seen := map[upgradeservice.UpgradeErrorCode]bool{}
+	for _, contract := range exitCodeContract {
+		if seen[contract.code] {
+			t.Fatalf("exit-code table lists %q twice", contract.code)
+		}
+		seen[contract.code] = true
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -231,6 +289,38 @@ func TestExitCodePinsEveryRefusal(t *testing.T) {
 				t.Fatalf("exit code for %q = %d, want %d", code2, code, testCase.want)
 			}
 		})
+	}
+}
+
+// TestEverySubcommandUsesTheExitCodeTable feeds each typed code through every
+// way a subcommand reports it. The reporting helpers must keep the typed code in
+// the chain and mark it reported without choosing an exit code; a helper that
+// mapped every typed failure to exit 1 — as the rollback path did — fails here
+// even though ExitCode itself is correct.
+func TestEverySubcommandUsesTheExitCodeTable(t *testing.T) {
+	reporters := []struct {
+		subcommands string
+		report      func(io.Writer, error) error
+	}{
+		{subcommands: "run, status, migrate, rollback", report: refuseTyped},
+		{subcommands: "external-connect", report: reportExternalConnectFailure},
+		{subcommands: "reconcile", report: func(_ io.Writer, err error) error { return err }},
+	}
+	for _, contract := range exitCodeContract {
+		typed := &upgradeservice.UpgradeError{Code: contract.code, Message: "pinned by the exit-code table"}
+		want := ExitCode(typed)
+		for _, reporter := range reporters {
+			reported := reporter.report(io.Discard, typed)
+			if got := ExitCode(reported); got != want {
+				t.Fatalf("%s reported %s as exit %d, want the table's %d", reporter.subcommands, contract.code, got, want)
+			}
+			if got, ok := upgradeservice.UpgradeErrorCodeOf(reported); !ok || got != contract.code {
+				t.Fatalf("%s lost the typed code %s (got %q)", reporter.subcommands, contract.code, got)
+			}
+			if reporter.subcommands != "reconcile" && !errors.Is(reported, ErrReported) {
+				t.Fatalf("%s did not mark %s reported, so the entry point prints it twice", reporter.subcommands, contract.code)
+			}
+		}
 	}
 }
 
@@ -1227,6 +1317,145 @@ func TestReconcileKeepsAChangedSourceRetryable(t *testing.T) {
 	if output.ErrorCode != string(upgradeservice.UpgradeErrorSourceChanged) {
 		t.Fatalf("error code = %q, want %q; output: %s", output.ErrorCode, upgradeservice.UpgradeErrorSourceChanged, stdout)
 	}
+}
+
+// TestEverySubcommandKeepsAChangedSourceRetryable is the M-1 regression through
+// the CLI dispatcher: one typed code, one exit code. A source that moved is
+// `upgrade_source_changed` in run, rollback --prepare and reconcile, and every
+// one of them must report the table's retryable 2. The rollback path used to
+// wrap every typed failure as a refusal (exit 1), so the same code exited 1
+// there and 2 in run and reconcile.
+func TestEverySubcommandKeepsAChangedSourceRetryable(t *testing.T) {
+	const (
+		sourceChanged = string(upgradeservice.UpgradeErrorSourceChanged)
+		wantExit      = 2
+	)
+
+	// run: the copy-in fingerprints the source before and after the copy, so a
+	// source that changes after the backup and before the post-copy fingerprint
+	// is the real refusal. The mutation starts only once the backup manifest is
+	// published (after the preflight and after the pre-copy fingerprint) and
+	// keeps going until Run returns, so both fingerprints cannot agree.
+	t.Run("run", func(t *testing.T) {
+		source := copyReadySource(t)
+		// A larger archive widens the remaining copy so the mutation lands
+		// before the post-copy fingerprint rather than after it.
+		archive := filepath.Join(source, "usage-archives", "2026-03", "segment-000001.jsonl")
+		if err := os.WriteFile(archive, bytes.Repeat([]byte("x"), 8<<20), 0o600); err != nil {
+			t.Fatalf("enlarge the fixture archive: %v", err)
+		}
+		target := t.TempDir()
+		stop := make(chan struct{})
+		mutated := make(chan struct{})
+		go func() {
+			defer close(mutated)
+			manifest := filepath.Join(target, "upgrade-backup", "manifest.json")
+			for {
+				if _, err := os.Stat(manifest); err == nil {
+					break
+				}
+				select {
+				case <-stop:
+					return
+				case <-time.After(time.Millisecond):
+				}
+			}
+			for {
+				file, err := os.OpenFile(archive, os.O_APPEND|os.O_WRONLY, 0)
+				if err == nil {
+					_, _ = file.WriteString("{\"events\":1}\n")
+					_ = file.Close()
+				}
+				select {
+				case <-stop:
+					return
+				case <-time.After(time.Millisecond):
+				}
+			}
+		}()
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		err := Run(context.Background(), []string{"run", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+			"--target", target}, &stdout, &stderr)
+		close(stop)
+		<-mutated
+		code := ExitCode(err)
+		if code != wantExit {
+			t.Fatalf("run exit code = %d, want %d (error %v); stderr: %s; stdout: %s", code, wantExit, err, stderr.String(), stdout.String())
+		}
+		if !strings.Contains(stderr.String(), sourceChanged) {
+			t.Fatalf("run stderr does not name %s (error %v): %s", sourceChanged, err, stderr.String())
+		}
+	})
+
+	// rollback --prepare: the recorded copy-in names a source fingerprint this
+	// directory no longer reproduces, so the plan refuses before writing.
+	t.Run("rollback-prepare", func(t *testing.T) {
+		source := readySource(t)
+		target := t.TempDir()
+		db, err := sqliterepo.Open(filepath.Join(target, "usage.sqlite"))
+		if err != nil {
+			t.Fatalf("open the v2 store: %v", err)
+		}
+		repository := upgradeoperation.New(db)
+		if err := repository.Put(context.Background(), model.UpgradeOperation{
+			Stage:                   model.UpgradeStageCopyIn,
+			DomainsDone:             []string{model.UpgradeDomainSourceCopy},
+			SourceKind:              string(upgradeservice.SourceKindUpgradedLegacy),
+			SourceVersion:           bootstrap.PlannedDirectRelease,
+			SourceRoot:              source,
+			SourceFingerprintBefore: strings.Repeat("0", 64),
+			SourceFingerprintAfter:  strings.Repeat("0", 64),
+			BackupManifestSHA256:    strings.Repeat("0", 64),
+		}); err != nil {
+			_ = db.Close()
+			t.Fatalf("record the copy-in: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close the v2 store: %v", err)
+		}
+		code, _, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
+		if code != wantExit {
+			t.Fatalf("rollback --prepare exit code = %d, want %d; stderr: %s", code, wantExit, stderr)
+		}
+		if !strings.Contains(stderr, sourceChanged) {
+			t.Fatalf("rollback --prepare stderr does not name %s: %s", sourceChanged, stderr)
+		}
+	})
+
+	// reconcile: a clean copy-in, then the source drifts, so the recorded
+	// fingerprint and the directory no longer agree.
+	t.Run("reconcile", func(t *testing.T) {
+		source := copyReadyRunSource(t)
+		target, bundle := reconcileRoots(t)
+		if code, _, stderr := run(t, "run", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+			"--target", target, "--bundle", bundle); code != 0 {
+			t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+		}
+		db, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+		if err != nil {
+			t.Fatalf("open the 1.x source: %v", err)
+		}
+		if _, err := db.Exec(`insert into settings (key, value, updated_at_ms) values ('drifted', '1', 1)`); err != nil {
+			_ = db.Close()
+			t.Fatalf("drift the 1.x source: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close the 1.x source: %v", err)
+		}
+		code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source,
+			"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+		if code != wantExit {
+			t.Fatalf("reconcile exit code = %d, want %d; stderr: %s; stdout: %s", code, wantExit, stderr, stdout)
+		}
+		var output reconcileOutput
+		if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+			t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
+		}
+		if output.ErrorCode != sourceChanged {
+			t.Fatalf("reconcile error code = %q, want %q; output: %s", output.ErrorCode, sourceChanged, stdout)
+		}
+	})
 }
 
 // TestReconcileTakesTheSourceFenceReadOnly proves the reconcile step opens the
