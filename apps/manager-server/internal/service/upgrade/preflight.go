@@ -491,18 +491,20 @@ func ownershipFailure(err error) (string, string) {
 var ErrAdminUnauthorized = errors.New("source administrator credential could not be verified")
 
 // ErrCredentialVerifyTimeout is the deadline verdict: the source did not answer
-// within CredentialVerifyTimeout, or the caller's own deadline had already
-// passed. It is never a verdict on the presented key and never a statement that
-// the source is unreadable: a healthy source on a slow volume looks exactly like
-// this.
+// within the read's budget, or the caller's own deadline had already passed. It
+// is never a verdict on the presented key and never a statement that the source
+// is unreadable: a healthy source on a slow volume looks exactly like this.
 var ErrCredentialVerifyTimeout = errors.New("source credential verification timed out")
 
-// CredentialVerifyTimeout bounds the credential read. It is separate from the
-// preflight budget on purpose: authentication is the slow path of every
-// authenticated request, so it must stay far below a source qualification.
+// CredentialVerifyTimeout is the base budget of one uncached credential read.
+// The read itself is bounded by credentialVerifyBudget, which adds time in
+// proportion to the source size and caps the total, because the source is read
+// through a private copy whose cost grows with the file. This base stays far
+// below a source qualification on purpose, and every unchanged source is
+// answered from the credential cache instead of being read again.
 const CredentialVerifyTimeout = 2 * time.Second
 
-// credentialVerifyTimeout is the bound VerifyAdmin applies. It is
+// credentialVerifyTimeout is the base budget VerifyAdmin applies. It is
 // CredentialVerifyTimeout in production; a test shortens it to place the
 // deadline inside the read rather than before it.
 var credentialVerifyTimeout = CredentialVerifyTimeout
@@ -549,6 +551,11 @@ func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 // WAL that appears while the read is being set up. Callers passing the Manager's
 // own store use VerifyManagerCredential instead: that store is this process's
 // live database, not a source volume to preserve.
+//
+// A proved credential is remembered for the source state it was proved against
+// (see credential_cache.go). A source is preserved, so identical bytes carry the
+// identical credential row; any change — a WAL that appears, a checkpoint, a
+// rewrite, a replaced file — produces a different identity and a fresh read.
 func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
@@ -560,20 +567,37 @@ func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
 	if err := ctx.Err(); err != nil {
 		return credentialTimeout(err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, credentialVerifyTimeout)
-	defer cancel()
-	source, openErr := openCredentialSource(ctx, databasePath)
-	if openErr != nil {
-		// The bound is placed before and during the snapshot, so a read that
-		// outlives it fails here instead of in the query. That is a deadline, not
-		// an unreadable source and never a verdict on the key.
-		if ctx.Err() != nil {
-			return credentialTimeout(openErr)
-		}
-		return openErr
+	if _, err := inspectSourceDatabase(databasePath); err != nil {
+		return credentialSourceError(err)
 	}
-	defer func() { _ = source.close() }()
-	return verifyAdminCredential(ctx, source, key)
+	// Every request describes the source it is asking about. An unchanged
+	// description reuses a proved verdict — the source is preserved, so the same
+	// bytes hold the same credential row — and any change falls through to a full
+	// read. The stat is the only cost of a poll that hits the cache.
+	identity, err := identifySourceCredential(databasePath)
+	if err != nil {
+		return err
+	}
+	cacheKey := credentialCacheKey(key, canonicalPath(databasePath), identity)
+	return sourceCredentialCache.verify(ctx, cacheKey, func() error {
+		// The first read of a source state pays for the copy and its digests, so
+		// its budget scales with the source and is capped; a later poll is served
+		// by the cache instead of repeating that cost.
+		ctx, cancel := context.WithTimeout(context.Background(), credentialVerifyBudget(identity.database.size))
+		defer cancel()
+		source, openErr := openCredentialSource(ctx, databasePath)
+		if openErr != nil {
+			// The bound is placed before and during the snapshot, so a read that
+			// outlives it fails here instead of in the query. That is a deadline,
+			// not an unreadable source and never a verdict on the key.
+			if ctx.Err() != nil {
+				return credentialTimeout(openErr)
+			}
+			return openErr
+		}
+		defer func() { _ = source.close() }()
+		return verifyAdminCredential(ctx, source, key)
+	})
 }
 
 // MountDatabase answers the one question the whole Upgrade surface asks about
@@ -687,6 +711,13 @@ func verifyAdminCredential(ctx context.Context, source *credentialSource, key st
 // exactly as the admission and status reads of the same store already do. A
 // snapshot of it would copy a database that changes under it and answer 503 on
 // the copy race, which is the wrong verdict for a poll.
+//
+// The Manager store's credential is not cached either. It is the live database:
+// ordinary Manager traffic appends to its WAL and checkpoints it, so a cached
+// verdict would either miss on almost every poll or, on a filesystem with a
+// coarse modification time, answer with a credential row that was already
+// rotated. The read itself is one indexed row in the process's own open store,
+// not the whole-file copy that makes a preserved source expensive.
 func VerifyManagerCredential(ctx context.Context, databasePath, key string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized

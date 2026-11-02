@@ -25,6 +25,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
@@ -927,23 +928,40 @@ func TestStatusUnrecordedAndUnreadable(t *testing.T) {
 }
 
 const (
-	// largeSourceMegabytes keeps the fixture in the range a real 1.x source
-	// reaches, where a whole-file integrity scan — not the credential row — is
-	// the dominant cost of a request. It stays small enough that the credential
-	// read's private copy and digests finish well inside CredentialVerifyTimeout
-	// on a loaded machine, so the fixture proves the scan distinction without
-	// making the test a stopwatch.
-	largeSourceMegabytes = 96
+	// largeSourceMegabytes is the size a real 1.x source reaches, where the
+	// credential read's private copy and digests dominate a request. The fixture
+	// is real bytes, not a sparse file, and it sits past the size this read used
+	// to hide behind a small fixture: the first read has to fit a budget scaled
+	// to the source, and a poll after it has to be answered without a second
+	// copy.
+	largeSourceMegabytes = 512
 )
 
-// largeCorruptSourceDir grows the smallest 1.x source into a multi-hundred
-// megabyte database and corrupts the root page of its padding tree. The
-// credential row still reads; a whole-file integrity check cannot pass.
+// largeSourceDir grows the smallest 1.x source into a real-sized database: the
+// credential read must prove the credential on it, not just on a toy file.
+func largeSourceDir(t *testing.T, megabytes int) string {
+	t.Helper()
+	dir, _ := growLargeSource(t, megabytes)
+	return dir
+}
+
+// largeCorruptSourceDir grows the smallest 1.x source into a real-sized database
+// and corrupts the root page of its padding tree. The credential row still
+// reads; a whole-file integrity check cannot pass.
 func largeCorruptSourceDir(t *testing.T, megabytes int) string {
 	t.Helper()
+	dir, paddingRoot := growLargeSource(t, megabytes)
+	corruptDatabasePage(t, filepath.Join(dir, "usage.sqlite"), paddingRoot)
+	return dir
+}
+
+// growLargeSource returns the fixture root and the root page of the padding tree
+// that the corruption cases damage. The padding is inserted in one transaction:
+// the fixture is about size, not about commit cost.
+func growLargeSource(t *testing.T, megabytes int) (string, int) {
+	t.Helper()
 	dir := legacySourceDir(t)
-	database := filepath.Join(dir, "usage.sqlite")
-	db, err := sql.Open("sqlite", database)
+	db, err := sql.Open("sqlite", filepath.Join(dir, "usage.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -951,22 +969,31 @@ func largeCorruptSourceDir(t *testing.T, megabytes int) string {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
 	for range megabytes {
-		if _, err := db.Exec(`insert into padding (payload) values (zeroblob(1048576))`); err != nil {
+		if _, err := tx.Exec(`insert into padding (payload) values (zeroblob(1048576))`); err != nil {
+			_ = tx.Rollback()
 			_ = db.Close()
 			t.Fatal(err)
 		}
 	}
-	var root int
-	if err := db.QueryRow(`select rootpage from sqlite_master where name = 'padding'`).Scan(&root); err != nil {
+	if err := tx.Commit(); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	var paddingRoot int
+	if err := db.QueryRow(`select rootpage from sqlite_master where name = 'padding'`).Scan(&paddingRoot); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	corruptDatabasePage(t, database, root)
-	return dir
+	return dir, paddingRoot
 }
 
 // corruptDatabasePage overwrites one b-tree page with bytes no page type
@@ -1033,6 +1060,55 @@ func TestStatusPollAuthenticatesWithoutVerifyingTheWholeSource(t *testing.T) {
 	_, body = request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusOK)
 	if !strings.Contains(body, `"`+CodeSourceUnreadable+`"`) {
 		t.Fatalf("preflight did not report the failed integrity check: %s", body)
+	}
+}
+
+// TestStatusFirstReadOfALargeSourceFitsTheScaledBudgetAndPollsAreCached is D3 at
+// the route boundary. A healthy 512 MiB source is a real 1.x size, and proving a
+// correct credential on it cannot fit a fixed 2 s deadline: the read is a private
+// copy plus its digests. The first request must therefore fit a budget scaled to
+// the source while staying under its cap, and every poll after it must be
+// answered from the remembered verdict instead of copying the file again.
+func TestStatusFirstReadOfALargeSourceFitsTheScaledBudgetAndPollsAreCached(t *testing.T) {
+	root := largeSourceDir(t, largeSourceMegabytes)
+	info, err := os.Stat(filepath.Join(root, "usage.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() < 512<<20 {
+		t.Fatalf("the fixture is %d bytes, want a real source of at least 512 MiB", info.Size())
+	}
+	database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+	handler := newHandler(root, database)
+
+	started := time.Now()
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	first := time.Since(started)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Recorded || status.Stage != StageCopyIn {
+		t.Fatalf("status on a %d-byte source = %s", info.Size(), body)
+	}
+	t.Logf("first authenticated read of a %d-byte source: %s", info.Size(), first)
+	if first >= upgradeservice.CredentialVerifyMaxBudget {
+		t.Fatalf("the first read of a %d-byte source took %s, at or beyond the capped budget %s",
+			info.Size(), first, upgradeservice.CredentialVerifyMaxBudget)
+	}
+
+	// A poll reuses the verdict for the source state it described: the only work
+	// left is describing the source again. The comparison is relative — four
+	// times faster than the read that had to copy the file — because the absolute
+	// cost of a stat belongs to the machine, not to this contract.
+	for index := range 3 {
+		pollStarted := time.Now()
+		_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+		poll := time.Since(pollStarted)
+		if poll*4 >= first {
+			t.Fatalf("poll %d after the first read took %s against a %s first read; the verified source was not reused (%s)",
+				index, poll, first, body)
+		}
 	}
 }
 
