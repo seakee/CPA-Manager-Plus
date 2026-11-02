@@ -1308,6 +1308,50 @@ func TestVerifyRollbackInstallCountsAnEventOnceAcrossItsRowAndArchiveRef(t *test
 	}
 }
 
+// TestVerifyRollbackInstallReadsTheLiveWAL is the L8 regression: a 1.x manager
+// serving again has committed rows in its write-ahead log that the main file
+// does not hold yet. An immutable open of the live file cannot see them, so the
+// same install was counted short and refused as foreign. The live store is read
+// through a private snapshot instead, which copies the sidecars and leaves the
+// source as v1 left it.
+func TestVerifyRollbackInstallReadsTheLiveWAL(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	ctx := context.Background()
+	// Build the state a running 1.x manager leaves between checkpoints: the main
+	// file is a checkpoint without the events and the WAL holds them.
+	writer, err := sql.Open("sqlite", "file:"+filepath.ToSlash(fixture.volume.databasePath()))
+	if err != nil {
+		t.Fatalf("open the live 1.x database: %v", err)
+	}
+	writer.SetMaxOpenConns(1)
+	for _, statement := range []string{
+		`pragma journal_mode = wal`,
+		`pragma wal_autocheckpoint = 0`,
+		`delete from usage_events`,
+		`pragma wal_checkpoint(truncate)`,
+		`insert into usage_events (event_hash, timestamp_ms, timestamp, model, requested_model, created_at_ms)
+			values ('legacy-event-1', 1000, '1000', 'gpt-test', 'gpt-test', 1000)`,
+		`insert into usage_events (event_hash, timestamp_ms, timestamp, model, requested_model, created_at_ms)
+			values ('legacy-event-2', 2000, '2000', 'gpt-test', 'gpt-test', 2000)`,
+	} {
+		if _, err := writer.Exec(statement); err != nil {
+			_ = writer.Close()
+			t.Fatalf("build the live WAL state: %v", err)
+		}
+	}
+	// The v1 is serving while the verdict is proven: no source lock is taken and
+	// no in-place open is made.
+	sourceBefore := fingerprintTree(t, fixture.volume.root)
+	if err := verifyRollbackInstall(ctx, fixture.volume.root, fixture.bundleDir, fixture.recorded); err != nil {
+		_ = writer.Close()
+		t.Fatalf("the same install was refused: %v", err)
+	}
+	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close the live 1.x database: %v", err)
+	}
+}
+
 // TestCheckLegacyHealthNeverUsesTheEnvironmentProxy is the regression for M2:
 // the probe used the default transport, so any HTTP_PROXY in the host or the
 // container answered for the v1 and the volume was recorded as proven.

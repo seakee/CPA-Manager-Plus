@@ -1352,15 +1352,17 @@ var rollbackRetainedRows = []retainedRowGroup{
 
 // verifyRollbackInstall proves the live 1.x root is the install the recorded
 // backup describes without requiring byte equality, which a v1 that kept
-// serving can never satisfy. It reads the backup snapshot read-only, opens the
-// live database read-only and runs a quick_check on it, then requires the live
-// volume to still retain at least the rows and archived segments the backup
-// holds. A different backup, a missing row population or a changed archive
-// segment is a foreign install.
+// serving can never satisfy. It reads the backup snapshot read-only, reads the
+// live database through a private snapshot of the database and its WAL
+// sidecars, and requires the live volume to still retain at least the rows and
+// archived segments the backup holds. A different backup, a missing row
+// population or a changed archive segment is a foreign install.
 //
-// The live database is opened immutable, exactly as the 1.x probe always was: a
-// plain read-only open would create a WAL index beside the source, and a
-// rollback must leave the volume untouched. Both stores it compares are the same
+// The live database is never opened in place and never immutable: a live 1.x
+// manager keeps committed rows in its WAL, an immutable open cannot see them,
+// and a read-only open in place creates the WAL index beside it. The private
+// copy is retried a bounded number of times when it races v1 writes, and the
+// source is left exactly as v1 left it. Both stores it compares are the same
 // install, so a row that is only committed to the live WAL is an *extra* row it
 // does not count; the retained-row rule is a lower bound, never an equality.
 func verifyRollbackInstall(ctx context.Context, sourceRoot, bundleDir string, recorded model.UpgradeOperation) error {
@@ -1388,13 +1390,18 @@ func verifyRollbackInstall(ctx context.Context, sourceRoot, bundleDir string, re
 			"the retained rows of the backup snapshot cannot be counted", err)
 	}
 
-	liveDB, _, err := openImmutableSource(ctx, filepath.Join(sourceRoot, databaseFileName))
-	if liveDB != nil {
-		defer func() { _ = liveDB.Close() }()
+	liveSnapshot, err := OpenSnapshotWithRetry(ctx, OpenSnapshot, filepath.Join(sourceRoot, databaseFileName), "")
+	if liveSnapshot != nil {
+		defer func() { _ = liveSnapshot.Close() }()
 	}
 	if err != nil {
 		return newUpgradeError(UpgradeErrorRollbackUnproven,
-			"the live 1.x database does not open read-only with a passing quick_check; stop the 1.x manager's writes and record again", err)
+			"the live 1.x database could not be read through a private snapshot, so the retained rows cannot be counted; v1 may still be writing, so record the verdict again", err)
+	}
+	liveDB := liveSnapshot.DB()
+	if err := quickCheckSource(ctx, liveDB); err != nil {
+		return newUpgradeError(UpgradeErrorRollbackUnproven,
+			"the private copy of the live 1.x database did not pass quick_check; v1 may still be writing, so record the verdict again", err)
 	}
 	liveRows, err := countRetainedRows(ctx, liveDB)
 	if err != nil {

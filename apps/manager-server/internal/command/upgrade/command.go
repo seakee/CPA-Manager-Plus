@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -44,27 +43,29 @@ var (
 	ErrRetryable = errors.New("upgrade: retryable")
 )
 
-// statusSnapshotAttempts bounds how often `upgrade status` copies a Manager
-// database that is being written. A live Manager writes in bursts, so a handful
-// of attempts across roughly a second normally finds a quiet window. Preflight
-// never retries: a legacy source that is still being written is a stop
-// condition, not a race to win.
+// statusSnapshotAttempts is the shared snapshot retry budget. `upgrade status`
+// copies a Manager database that may still be written, and the rollback proof
+// copies a live 1.x database the same way; both use the policy and the budget
+// the upgrade service owns. Preflight never retries: a legacy source that is
+// still being written is a stop condition, not a race to win.
 const (
-	statusSnapshotAttempts  = 8
-	statusSnapshotBaseDelay = 20 * time.Millisecond
-	statusSnapshotMaxDelay  = 200 * time.Millisecond
+	statusSnapshotAttempts  = upgradeservice.SnapshotAttempts
+	statusSnapshotBaseDelay = upgradeservice.SnapshotBaseDelay
+	statusSnapshotMaxDelay  = upgradeservice.SnapshotMaxDelay
 )
 
 // openSnapshot is a seam so a test can prove the bounded retry and its
 // exhaustion without depending on a real race.
 var openSnapshot = upgradeservice.OpenSnapshot
 
-// ExitCode maps a Run result to the CLI contract: 0 ready, 1 blocked by a
-// precondition outside this run's control, 2 anything else.
+// ExitCode maps a Run result to the CLI contract: 0 ready, 1 a decision the
+// recorded state or a precondition outside this run's control refuses, 2
+// anything else.
 //
-// A held v2 data root lock reports 1, like a blocked preflight: nothing the
-// operator typed was wrong and nothing was written, but the run cannot proceed
-// until the other Manager process is stopped. Usage and environment failures
+// Every command shares it: a blocked preflight, a typed operational refusal from
+// run/status/migrate/rollback (written to stderr exactly once by the command),
+// and a held v2 data root lock all report 1. Nothing the operator typed was
+// wrong in those cases and nothing was written. Usage and environment failures
 // stay 2.
 func ExitCode(err error) int {
 	switch {
@@ -579,35 +580,7 @@ func layoutMismatch(detail string) error {
 // This is the one place retries are allowed. Preflight stays fail-closed — a
 // legacy source that is still being written must be stopped, never polled.
 func openStatusSnapshot(ctx context.Context, path string, scratchDir string) (*upgradeservice.Snapshot, error) {
-	delay := statusSnapshotBaseDelay
-	var lastErr error
-	for attempt := 1; attempt <= statusSnapshotAttempts; attempt++ {
-		snapshot, err := openSnapshot(ctx, path, scratchDir)
-		if err == nil {
-			return snapshot, nil
-		}
-		if !errors.Is(err, upgradeservice.ErrSourceChanged) {
-			return nil, err
-		}
-		lastErr = err
-		if attempt == statusSnapshotAttempts {
-			break
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-		if delay < statusSnapshotMaxDelay {
-			delay *= 2
-			if delay > statusSnapshotMaxDelay {
-				delay = statusSnapshotMaxDelay
-			}
-		}
-	}
-	return nil, lastErr
+	return upgradeservice.OpenSnapshotWithRetry(ctx, openSnapshot, path, scratchDir)
 }
 
 // codedFailure prefixes a failure with the shared upgrade code vocabulary so the

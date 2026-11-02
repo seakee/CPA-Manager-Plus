@@ -540,13 +540,25 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   refuses once it is recorded.
 - **The plan's port is not the v2 port.** A rollback publishes the restarted
   1.x manager on `18318` (`--port` overrides it), never on the `18317` this
-  Manager publishes, because both managers answer `GET /health` with the same
-  identity. A plan whose port is the Manager's own is
-  `upgrade_rollback_port_collision`; a plan whose port is already held on the
-  host is `upgrade_rollback_port_busy` (the port is bound on every local address
-  and both wildcards, so a listener on any interface is found); with
-  `--manager-addr` the plan also refuses while the v2 stack still answers there
-  (`upgrade_rollback_v2_running`). A refusal writes nothing.
+  Manager publishes by default, because both managers answer `GET /health` with
+  the same identity. A plan whose port is the Manager's own is
+  `upgrade_rollback_port_collision`; a plan whose port is already held is
+  `upgrade_rollback_port_busy` (the port is bound on every local address and
+  both wildcards). `--manager-addr` overrides the v2 listen address; without it
+  the CLI uses the configured `HTTP_ADDR`, so a Manager moved to another port is
+  compared and dialled on the port it actually holds. A wildcard bind
+  (`0.0.0.0:PORT`, `[::]:PORT`) is the normal configuration and is reached on
+  loopback. With that address the plan refuses while the v2 stack still answers
+  there (`upgrade_rollback_v2_running`), and a probe of that listener is
+  `upgrade_rollback_probe_self`. A refusal writes nothing.
+- **The port and v2-running checks only see the CLI's own network namespace.**
+  `portFree` binds the port on every address of the process that runs the
+  command, and `requireV2Stopped` dials from the same namespace, so under
+  `docker compose run --rm` they describe the run container, not the host.
+  That is why the plan states the host-side checks (`docker ps
+  --filter publish=<port>`, `lsof -nP -iTCP:<port> -sTCP:LISTEN`, and the
+  compose invocation itself) for the operator to reproduce where the stack
+  really runs; the checks are not claimed to be host observations.
 - **The volume is the one the install used, and the identity half is the
   operator's.** `--volume` names either a Docker volume (including the
   unprefixed `cpa-manager-plus-data` a `docker run -v` install uses) or the
@@ -591,13 +603,17 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   (`upgrade_rollback_probe_self`): the 1.x and the v2 Manager state the same
   service identity, so an answer from the port this Manager holds describes the
   v2 stack, never a restored volume. The probe target's port is compared with the
-  Manager's own port (`--manager-addr`, or the documented default), and the host
-  must not resolve to this machine — a loopback, wildcard, interface or
+  Manager's own port (`--manager-addr`, or the configured `HTTP_ADDR`), and the
+  host must not resolve to this machine — a loopback, wildcard, interface or
   hostname address is refused, including a container-local one. It also refuses
   a verdict while the v2 stack still answers on the address the operator named
   (`upgrade_rollback_v2_running`): the verdict says that stack was abandoned. It
-  then opens the live 1.x database immutable read-only with a `quick_check`; it
-  reads the recorded backup snapshot read-only, re-verifies its manifest digest,
+  then reads the live 1.x database through a private snapshot of the database
+  and its WAL sidecars and runs `quick_check` on that copy — never an in-place
+  open and never `immutable=1`, which cannot see rows a live v1 has committed to
+  its WAL — retrying the bounded snapshot budget when the copy races v1 writes.
+  No exclusive 1.x source lock is taken: v1 is expected to be serving. It reads
+  the recorded backup snapshot read-only, re-verifies its manifest digest,
   and requires the live volume to still retain at least the rows the backup
   holds — raw usage events counted together with the append-only archive
   projection — and every archived segment and the data key the backup describes
@@ -643,10 +659,17 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   `upgrade_operations` table predates the current columns is therefore reported as
   `upgrade_store_schema_outdated` (naming the missing columns) instead of
   surfacing raw SQL, and the command exits 1. The remedy the refusal prints is
-  `cpa-manager-plus upgrade migrate [--db-path PATH]`: it takes the v2 data-root
-  process lock, opens the store writable once, adds the columns, and is
-  idempotent. With the v2 Manager still running it refuses as
-  `upgrade_store_locked`, because the writable Manager holds that same lock.
+  `cpa-manager-plus upgrade migrate [--db-path PATH]`: it proves from a private
+  snapshot that the store holds the row the copy-in records (`source_kind`
+  `upgraded-legacy`, `domains_done` contains `source_copy`, both fingerprints and
+  the backup manifest), then takes the v2 data-root process lock, opens the store
+  writable once, adds the columns, and is idempotent. Any other store — a 1.x
+  store, or a native store with no recorded copy-in — is refused as
+  `upgrade_migrate_not_copied_in` before the lock or any writable open, because
+  that open would migrate it into a store this build admits as native without the
+  Upgrade evidence; its bytes are unchanged. With the v2 Manager still running it
+  refuses as `upgrade_store_locked`, because the writable Manager holds that same
+  lock.
 - **A verdict without its evidence is the same outdated store.** A row that
   names `rolled_back` and none — or only part — of its evidence is reported as
   `upgrade_store_schema_outdated` too, with the same code and the same exit 1

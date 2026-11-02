@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
@@ -60,7 +61,7 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	rollbackPort := flags.Int("port", upgradeservice.LegacyRollbackPort,
 		"host port --prepare publishes the restarted 1.x manager on; it may not be the v2 Manager's port")
 	managerAddr := flags.String("manager-addr", "",
-		"v2 Manager listen address (host:port); naming it makes --prepare prove the v2 stack is stopped and refuses a probe of it")
+		"v2 Manager listen address (host:port); defaults to the configured HTTP_ADDR. Naming it makes --prepare prove the v2 stack is stopped and refuses a probe of it")
 	allowFamily := flags.Bool("allow-image-family-mismatch", false,
 		"accept a 1.x image from another version family than the recorded source")
 	asJSON := flags.Bool("json", false, "print the plan or the recorded operation as JSON")
@@ -89,6 +90,18 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			return fmt.Errorf("%w: --manager-addr must be host:port, got %q", ErrUsage, trimmed)
 		}
 	}
+	// An unnamed address is the configured listen address, not the documented
+	// default: HTTP_ADDR may move the Manager to another port, and every check
+	// below has to compare against the port it actually holds.
+	managerAddress, err := resolveManagerAddress(*managerAddr)
+	if err != nil {
+		return err
+	}
+	if managerAddress != "" {
+		if _, _, err := net.SplitHostPort(managerAddress); err != nil {
+			return fmt.Errorf("%w: the configured HTTP_ADDR %q is not host:port", ErrUsage, managerAddress)
+		}
+	}
 	targetRoot, err := resolveTargetRoot(*target)
 	if err != nil {
 		return err
@@ -102,7 +115,7 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			Project:                  *project,
 			Volume:                   *volume,
 			Port:                     *rollbackPort,
-			ManagerAddress:           *managerAddr,
+			ManagerAddress:           managerAddress,
 			AllowImageFamilyMismatch: *allowFamily,
 		})
 	}
@@ -112,16 +125,36 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		BackupDir:                *backup,
 		Image:                    *legacyImage,
 		StatusURL:                *statusURL,
-		ManagerAddress:           *managerAddr,
+		ManagerAddress:           managerAddress,
 		ObservedAtMS:             time.Now().UnixMilli(),
 		AllowImageFamilyMismatch: *allowFamily,
 	})
 }
 
+// resolveManagerAddress resolves the v2 Manager listen address a rollback is
+// decided against. An explicit --manager-addr wins. Otherwise the configured
+// HTTP_ADDR is used, because the Manager may listen on another port than the
+// documented default and the probe comparison, the port-collision check and the
+// v2-running proof must all describe the listener it actually holds.
+//
+// A wildcard bind is the normal configuration (0.0.0.0:PORT or [::]:PORT). The
+// service dials it on loopback and treats it as this host, so it is kept exactly
+// as configured and shown to the operator.
+func resolveManagerAddress(override string) (string, error) {
+	if trimmed := strings.TrimSpace(override); trimmed != "" {
+		return trimmed, nil
+	}
+	cfg, err := config.LoadWithoutCreatingDefault()
+	if err != nil {
+		return "", fmt.Errorf("load Manager configuration: %w", err)
+	}
+	return strings.TrimSpace(cfg.HTTPAddr), nil
+}
+
 func runRollbackPrepare(ctx context.Context, stdout, stderr io.Writer, asJSON bool, options upgradeservice.RollbackOptions) error {
 	plan, err := upgradeservice.PrepareRollback(ctx, options)
 	if err != nil {
-		return refuse(stderr, err)
+		return refuseTyped(stderr, err)
 	}
 	if asJSON {
 		return json.NewEncoder(stdout).Encode(plan)

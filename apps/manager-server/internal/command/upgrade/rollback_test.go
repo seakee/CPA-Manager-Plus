@@ -764,6 +764,64 @@ func TestStatusAndPrepareReportATerminalRowWithoutEvidence(t *testing.T) {
 	}
 }
 
+// TestRollbackManagerAddressDefaultsFromConfiguredHTTPAddr is the L5
+// regression: the CLI left --manager-addr empty, so the service assumed port
+// 18317 while the Manager may listen elsewhere. The configured HTTP_ADDR is the
+// address the checks have to compare the probe with and prove stopped.
+func TestRollbackManagerAddressDefaultsFromConfiguredHTTPAddr(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := rollbackReadyTarget(t, source)
+	configuredPort := freePort(t)
+	t.Setenv("HTTP_ADDR", "0.0.0.0:"+strconv.Itoa(configuredPort))
+
+	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--json")
+	if code != 0 {
+		t.Fatalf("prepare exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var plan upgradeservice.Plan
+	if err := json.Unmarshal([]byte(stdout), &plan); err != nil {
+		t.Fatalf("decode plan: %v; output: %s", err, stdout)
+	}
+	if plan.ManagerPort != configuredPort {
+		t.Fatalf("plan ManagerPort = %d, want the configured %d", plan.ManagerPort, configuredPort)
+	}
+	if plan.ManagerAddress != "0.0.0.0:"+strconv.Itoa(configuredPort) {
+		t.Fatalf("plan ManagerAddress = %q, want the configured listen address", plan.ManagerAddress)
+	}
+	// The printed verify command carries the same address, so the verdict is
+	// decided against the port the Manager actually holds.
+	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
+	if code != 0 {
+		t.Fatalf("human prepare exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(human, `--manager-addr "0.0.0.0:`+strconv.Itoa(configuredPort)+`"`) {
+		t.Fatalf("printed verify command does not carry the configured address:\n%s", human)
+	}
+}
+
+// TestRollbackManagerAddressTreatsAWildcardBindAsThisHost keeps the wildcard
+// half honest: a Manager bound to 0.0.0.0 listens on loopback too, so a
+// listener there is the v2 stack and the plan must be refused.
+func TestRollbackManagerAddressTreatsAWildcardBindAsThisHost(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := rollbackReadyTarget(t, source)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+	port := listener.Addr().(*net.TCPAddr).Port
+	t.Setenv("HTTP_ADDR", "0.0.0.0:"+strconv.Itoa(port))
+
+	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
+	if code != 1 {
+		t.Fatalf("prepare against a wildcard-bound v2 stack exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorRollbackV2Running)) {
+		t.Fatalf("refusal did not name %q: %s", upgradeservice.UpgradeErrorRollbackV2Running, stderr)
+	}
+}
+
 // TestRollbackPreparePrintsTheOperatorVerifiedIdentity covers the output half of
 // M6: the console has to say what the plan proves and what the operator has to
 // confirm, and it has to accept the volume forms 1.x installs actually use.

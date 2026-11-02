@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -27,6 +28,57 @@ var (
 	// would land inside a tree the operation must not write to.
 	ErrSnapshotFailed = errors.New("upgrade database snapshot could not be created")
 )
+
+// SnapshotAttempts bounds how often a snapshot of a database a writer may still
+// be serving is retried. A live writer commits in bursts, so a handful of
+// attempts across roughly a second normally finds a quiet window. Only
+// ErrSourceChanged is retried; a writer that never pauses is reported, never
+// read in place.
+const (
+	SnapshotAttempts  = 8
+	SnapshotBaseDelay = 20 * time.Millisecond
+	SnapshotMaxDelay  = 200 * time.Millisecond
+)
+
+// OpenSnapshotWithRetry copies a database with the bounded retry every caller of
+// a possibly-live store uses. The open function is a parameter so a caller can
+// keep its own seam; production passes OpenSnapshot.
+//
+// This is the one retry policy for a store that may still be written. A missing
+// database, an unusable scratch directory or any other failure does not get
+// better by waiting, so only ErrSourceChanged is attempted again.
+func OpenSnapshotWithRetry(ctx context.Context, open func(context.Context, string, string) (*Snapshot, error),
+	databasePath string, scratchBase string) (*Snapshot, error) {
+	delay := SnapshotBaseDelay
+	var lastErr error
+	for attempt := 1; attempt <= SnapshotAttempts; attempt++ {
+		snapshot, err := open(ctx, databasePath, scratchBase)
+		if err == nil {
+			return snapshot, nil
+		}
+		if !errors.Is(err, ErrSourceChanged) {
+			return nil, err
+		}
+		lastErr = err
+		if attempt == SnapshotAttempts {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		if delay < SnapshotMaxDelay {
+			delay *= 2
+			if delay > SnapshotMaxDelay {
+				delay = SnapshotMaxDelay
+			}
+		}
+	}
+	return nil, lastErr
+}
 
 // databaseSidecars are the files SQLite needs to see every committed row of a
 // WAL database: the database, its write-ahead log and the WAL index.
