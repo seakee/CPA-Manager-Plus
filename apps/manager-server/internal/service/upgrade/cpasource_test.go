@@ -351,6 +351,55 @@ func TestCPASourceVersionGateComparesADeclaredReleaseWithTheV8Layout(t *testing.
 	}
 }
 
+// TestCPASourceReadsACanonicalV8Layout covers the file CPA v8 itself writes: the
+// client keys live under `access.api-keys` while `api-keys` holds the provider
+// groups. The reader used to take the first existing spelling, so it read the
+// provider mapping as the client key list, found no string entries and refused a
+// correct v8 source with "holds no client API key". The same wholesale
+// consumption hid every `api-keys.<family>` the table does not map.
+func TestCPASourceReadsACanonicalV8Layout(t *testing.T) {
+	config := `config-version: 8
+access:
+  api-keys:
+    - "v8-client-key-1"
+api-keys:
+  gemini:
+    - name: gemini-1
+      keys:
+        - api-key: "gemini-provider-key"
+  custom-family:
+    - name: custom-1
+      keys:
+        - api-key: "custom-provider-key"
+request-retry: 4
+`
+	legacyRoot, _ := writeCPAFixture(t, config, nil)
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+	if err != nil {
+		t.Fatalf("open a canonical v8 source: %v", err)
+	}
+	if source.layout != cpaLayoutV8Legacy {
+		t.Fatalf("layout = %q, want %q", source.layout, cpaLayoutV8Legacy)
+	}
+	if got := strings.Join(source.clientKeys, ","); got != "v8-client-key-1" {
+		t.Fatalf("client keys = %q, want the access.api-keys entry", got)
+	}
+	if _, presence := lookupDocumentPath(source.document, "api-keys.gemini"); presence != documentPresent {
+		t.Fatal("the v8 provider group was not mapped to its destination path")
+	}
+	// The client key list is staged and proved, never copied as configuration.
+	if _, presence := lookupDocumentPath(source.document, "access.api-keys"); presence == documentPresent {
+		t.Fatal("the client key list was copied into the destination document")
+	}
+	// A provider family the table does not map is manual work, not a silent drop.
+	for _, item := range source.manual {
+		if item.item == "config:api-keys.custom-family" {
+			return
+		}
+	}
+	t.Fatalf("the unknown api-keys family was swallowed; manual items = %+v", source.manual)
+}
+
 // TestCPASourceVersionGateRefusesWhenNoReleaseIsNamed pins the "never guess"
 // rule for the one input a v7 file cannot provide: it has no version of its own.
 func TestCPASourceVersionGateRefusesWhenNoReleaseIsNamed(t *testing.T) {

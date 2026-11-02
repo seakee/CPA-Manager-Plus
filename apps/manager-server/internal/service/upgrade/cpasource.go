@@ -258,10 +258,18 @@ var cpaExcludedSourceSections = map[string]bool{
 	cpaConfigVersionKey: true,
 }
 
-// cpaClientKeyPaths are the two spellings of the client key list. The list is
-// installed by the destination stage and proved by cpa.VerifyV8Adoption, never
-// copied as configuration.
-var cpaClientKeyPaths = []string{"api-keys", "access.api-keys"}
+// cpaClientKeyPathV8 is where a v8 CPA keeps its client API key list, and
+// cpaClientKeyPathV7 is where a v7 CPA keeps the same list as one flat entry per
+// key. The two generations disagree about `api-keys`: a v7 file lists the client
+// keys there, while a v8 file uses `api-keys` for the provider groups
+// (config_v8.go:79 maps the legacy client list onto `access.api-keys`, and
+// config_v8.go:243 declines to read an `api-keys` mapping as that legacy list).
+// The list is installed by the destination stage and proved by
+// cpa.VerifyV8Adoption, never copied as configuration.
+const (
+	cpaClientKeyPathV8 = "access.api-keys"
+	cpaClientKeyPathV7 = "api-keys"
+)
 
 // cpaVersion is a parsed CPA release.
 type cpaVersion struct {
@@ -607,7 +615,7 @@ func (s *cpaManagedSource) mapDocument(document map[string]any) error {
 			roots[firstSegment(path.current)] = true
 		}
 	}
-	for _, key := range cpaClientKeyPaths {
+	for _, key := range []string{cpaClientKeyPathV8, cpaClientKeyPathV7} {
 		roots[firstSegment(key)] = true
 	}
 
@@ -641,18 +649,18 @@ func (s *cpaManagedSource) mapDocument(document map[string]any) error {
 	}
 
 	// The client key list is installed by the destination stage and proved by
-	// cpa.VerifyV8Adoption, so the source spelling is consumed here: it is copied,
-	// just not as configuration.
-	for _, key := range cpaClientKeyPaths {
-		consumed[key] = true
-	}
-	keys, found := lookupFirst(document, cpaClientKeyPaths...)
-	if !found {
+	// cpa.VerifyV8Adoption, so the source spelling that carries it is consumed
+	// here: it is copied, just not as configuration. Only that spelling is
+	// consumed — a canonical v8 `api-keys` mapping is the provider groups, and
+	// consuming it wholesale would hide every family the table does not map.
+	keys, clientKeyPath, found := cpaClientKeyList(document)
+	if found {
+		consumed[clientKeyPath] = true
+		s.clientKeys = keys
+	} else {
 		// No client key is a refusal the caller makes after mapping; leaving the
 		// list empty here keeps the reason in one place.
 		s.clientKeys = nil
-	} else {
-		s.clientKeys = stringList(keys)
 	}
 
 	s.reportUnmapped(document, roots, consumed)
@@ -674,6 +682,25 @@ func (s *cpaManagedSource) sourceValue(document map[string]any, path cpaConfigPa
 		}
 	}
 	return nil, false
+}
+
+// cpaClientKeyList resolves the client key list and the path it was read from.
+//
+// The canonical v8 path wins by presence, exactly like every other alias in this
+// file. The legacy `api-keys` spelling only resolves to the client keys when it
+// is the list: in a v8 document it is the provider-group mapping, and reading a
+// mapping as a string list yields nothing. That distinction is what keeps a
+// correctly written v8 source from being refused as "holds no client API key".
+func cpaClientKeyList(document map[string]any) ([]string, string, bool) {
+	if value, presence := lookupDocumentPath(document, cpaClientKeyPathV8); presence == documentPresent {
+		return stringList(value), cpaClientKeyPathV8, true
+	}
+	if value, presence := lookupDocumentPath(document, cpaClientKeyPathV7); presence == documentPresent {
+		if _, isList := value.([]any); isList {
+			return stringList(value), cpaClientKeyPathV7, true
+		}
+	}
+	return nil, "", false
 }
 
 // reportUnmapped turns every source key this step does not copy into a manual
