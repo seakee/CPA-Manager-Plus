@@ -523,12 +523,26 @@ on both surfaces at once, and no write route exists.
   not a volume to preserve, so `VerifyManagerCredential` reads it in place
   read-only and immutable only when no live WAL can hold rows.
   The credential read returns the credential row and nothing else:
-  no `quick_check`, no schema vocabulary, no parity, bounded to
-  `CredentialVerifyTimeout` (2s). Every authenticated request runs it, including
-  every status poll, so a whole-file scan there would answer 503 on a large
-  source and the result page would never arrive. The integrity check stays in
-  `Preflight`, which is what qualifies a source. `VerifyAdminSource` takes no
-  fence.
+  no `quick_check`, no schema vocabulary, no parity. The first read of one
+  source state is bounded by `CredentialVerifyTimeout` — a 2s base plus 1s per
+  64 MiB of source — and capped by `CredentialVerifyMaxBudget` (20s): the read
+  copies the whole source, so a fixed 2s deadline answered 503 on a healthy
+  512 MiB source before the copy and its digests were done. A proved credential
+  is then remembered in memory for the source state it was proved against: the
+  digest of the presented key bound to the database and WAL device, inode, size
+  and modification time, with an absent WAL as its own state. Every request stats
+  the source; an unchanged identity reuses the verdict, and a write, checkpoint,
+  a replaced file, a new WAL, an eviction or a restart verifies again. No
+  credential and no key is stored and nothing is persisted; a rejected key or a
+  failed read is never cached as a success; at most 64 entries are kept; and
+  concurrent first requests for one state share a single verification. Every
+  authenticated request runs this, including every status poll, so a whole-file
+  scan there would answer 503 on a large source and the result page would never
+  arrive. The integrity check stays in `Preflight`, which is what qualifies a
+  source. `VerifyAdminSource` takes no fence. The Manager store's credential is
+  not cached: it is this process's live database, whose WAL and file change under
+  ordinary traffic, and its credential is one indexed row in an already open
+  store.
   A read that outlives the bound — or a caller whose own deadline had passed —
   is `503 upgrade_credential_timeout`: a slow but healthy volume is a retry, not
   a repair.
@@ -563,6 +577,15 @@ on both surfaces at once, and no write route exists.
   unobservable one; `503 source_unavailable` is reserved for a source this build
   cannot prove a key against, and `409 source_changed` for a presented revision
   that no longer matches.
+- **The entry's own read preserves the source.** The authenticated observation
+  behind the entry leaf (`legacypreflight.WithAuthenticatedInspection`) reads a
+  cold source through a private copy as well: the read-only snapshot branch of
+  the SQLite inspection copies the rollback-mode database into scratch space
+  outside every source directory, re-validates the copy's own journal header and
+  opens only that copy. The source therefore keeps its entries, bytes, sizes and
+  modification times and gains no `-wal`/`-shm`; before this, a writer that
+  switched a cold source to WAL between the header check and the first credential
+  query left the sidecars of a read-only open in the preserved tree.
 - **One file policy on both paths.** The mount lookup applies the same database
   file rules as the preflight and the credential read
   (`processlock.InspectDatabaseFile`, via `upgrade.MountDatabase`): the path must
@@ -588,13 +611,15 @@ on both surfaces at once, and no write route exists.
   holds no mutable state.
   `503 upgrade_source_symlinked` on a leaf therefore means the resolved file
   itself is a link — in practice the Manager store — never the mount the
-  operator mounted through one. SQLite opens lazily on the first query, so
-  the open also pins a descriptor and compares it with the inspected file
-  (`processlock.OpenedDatabase`, the reader's form of `openedMarker`); after the
-  credential row is read the path is compared once more, so a swap between the
+  operator mounted through one. When the read runs, the resolved file is never
+  opened in place: the database and its sidecars are copied into private scratch
+  space and only the copy is opened (`OpenSnapshot`). A swap between the
   inspection and the read is refused (`ErrSourceDatabaseChanged`, reported as
-  `upgrade_source_unreadable`) instead of comparing a credential from a file
-  nothing assessed.
+  `upgrade_source_unreadable`) by the digests taken before the copy, after it and
+  over the copy as it is written, instead of comparing a credential from a file
+  nothing assessed. A verdict served from the remembered state is guarded by the
+  same identity: the source is stat'ed on every request, and any change to the
+  database or its WAL reads again.
 - **Order.** The credential is answered before the path and before the verb, on
   both the entry leaf and these two routes: an unauthenticated caller receives
   `401` whatever its method and whatever the path, so it cannot tell a real
@@ -620,9 +645,11 @@ on both surfaces at once, and no write route exists.
   that marker is the preflight's, and this surface never inspects it — the
   `upgrade_source_lock_unavailable` above is the file policy refusing the file,
   and it is the code the preflight also uses for an uninspectable marker.
-- **Ownership without the fence.** `upgrade.Preflight` observes the source with
-  `processlock.ProbeExisting`: a shared, non-blocking lock on the existing
-  marker. A live writer is `upgrade_source_busy`; a symbolic database link is
+- **Ownership without the fence.** `upgrade.Preflight` fenced the source with
+  `processlock.AcquireExistingReadOnly`: the exclusive ownership lock taken
+  through a read-only descriptor, so a source preserved on a read-only volume
+  still proves exclusivity without the marker being opened for writing. A live
+  writer is `upgrade_source_busy`; a symbolic database link is
   the shared file policy's `upgrade_source_symlinked` (the same code the
   credential read returns); a marker that cannot be inspected at all (missing,
   unreadable, not a regular file, or a hard-linked database) is the distinct
@@ -656,6 +683,16 @@ on both surfaces at once, and no write route exists.
   store, so the mount's own key gets `401` and cannot read the marker that
   explains the refusal. `preflight` still inspects that mount, not the credential
   file the surface fell back to.
+  The projection applies the admission's marker order, not an equivalent one: a
+  `materializing` marker answers `copy_in` with `copy_in_marker` evidence and
+  `nextAction=copy_in` without opening the target, so a status poll cannot
+  rewrite the `-shm` a resumed live-WAL move restored; any other marker state
+  reads the row first, because a committed row outlives its marker. Both readers
+  use one provenance rule (`copyinmarker.SameTarget`): the marker names the
+  database inside its own data root, so a relocated root keeps its in-progress
+  state for the admission and the projection alike, while a marker naming a
+  different database file is a refusal for the admission and no record for the
+  projection.
   Reconciliation travels through the same fixed allow-list (`mismatchDays`,
   `mismatchDaysTotal`, `mismatchDaysTruncated`), never the producer's payload.
   The list is bounded at 366 days — a transport bound, not a judgement about the
