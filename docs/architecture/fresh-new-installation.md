@@ -1327,10 +1327,10 @@ UUID used verbatim as a credential file name has no credential shape, so the
 value is the only rule that catches it. The value rule also replaces every
 prefix of a value, not only the value itself: an overlong name is recorded as a
 bounded prefix, and a key can cross that cut, so a fragment of a source value is
-what a whole-value match would leave behind. The limit it does not cross is
-length — a source credential shorter than eight bytes is not replaced by value,
-because a string that short cannot be told apart inside a name, and this boundary
-does not claim to catch it. The record's free-text `instruction` —
+what a whole-value match would leave behind. The boundary's own limit is a
+value's length: a source credential shorter than eight bytes is not replaced by
+value, because a string that short cannot be told apart inside a name, and this
+boundary does not claim to catch it. The record's free-text `instruction` —
 which interpolates a source name and the destination's own type string — is not
 emitted at all: the page states the next step from the item's `kind` and
 `reason`, so untrusted metadata cannot reach the browser as prose. A staged
