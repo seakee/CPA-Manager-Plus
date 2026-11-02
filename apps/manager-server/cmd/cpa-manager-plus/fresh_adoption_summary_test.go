@@ -590,6 +590,135 @@ func TestAdoptionRedactorPicksTheLongestMatchAtEachPosition(t *testing.T) {
 	}
 }
 
+// Every value's occurrence is covered on the original text, so a shorter match
+// that starts earlier cannot consume the start of another value's longer match
+// and leave that value's own suffix in the reply. A marker in the text is text,
+// not a promise: a source value may begin with the marker's own bytes.
+func TestAdoptionRedactorCoversEveryValueMatchOnTheOriginalText(t *testing.T) {
+	const key = "01234567aaaaaaaaaaaaaaaaaaaaaaaa"
+	cases := []struct {
+		name    string
+		secrets []string
+		input   string
+		want    string
+	}{
+		{
+			// "backup-" opens a value whose match ends before the key's begins;
+			// skipping ahead from its end would print the whole key but eight
+			// bytes.
+			name:    "a shorter value before a longer one",
+			secrets: []string{key, "backup-01234567b"},
+			input:   "credential:backup-" + key + ".json",
+			want:    "credential:" + redactedValue + ".json",
+		},
+		{
+			name:    "the marker's own text inside a value",
+			secrets: []string{redactedValue + "aaaaaaaaaaaaaaaaaaaaaaaa"},
+			input:   "credential:" + redactedValue + "aaaaaaaaaaaaaaaaaaaaaaaa.json",
+			want:    "credential:" + redactedValue + ".json",
+		},
+		{
+			name:    "values whose ranges touch",
+			secrets: []string{"01234567", "abcdefgh"},
+			input:   "01234567abcdefgh",
+			want:    redactedValue,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := adoptionRedactor(tc.secrets)(tc.input); got != tc.want {
+				t.Fatalf("redact(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// The reply's HTTP case of the same rule: one source value starts inside the
+// credential name the other value is written into. No eight-byte window of
+// either value may reach the browser.
+func TestAdoptionSummaryRedactsOverlappingValuesByValue(t *testing.T) {
+	const (
+		key   = "01234567aaaaaaaaaaaaaaaaaaaaaaaa"
+		other = "backup-01234567b"
+	)
+	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key, other)
+	name := "backup-" + key + ".json"
+	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
+	fixture.source.types[name] = "claude"
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	// The record really does hold the name, so the reply's silence below is the
+	// boundary's doing rather than an accident of the run.
+	recorded := false
+	for _, item := range fixture.reload(t).AdoptionSummary.Items {
+		if item.Item == "credential:"+name {
+			recorded = true
+		}
+	}
+	if !recorded {
+		t.Fatalf("the run recorded no overlapping name to redact")
+	}
+
+	reply := readAdoptionJSON(t, fixture.adoption(t))
+	shown := false
+	for _, item := range reply.Items {
+		if item.Item == "credential:"+redactedValue+".json" {
+			shown = true
+		}
+	}
+	if !shown {
+		t.Fatalf("the reply did not redact the overlapping name: %+v", reply.Items)
+	}
+	body := fixture.adoption(t).Body.String()
+	for _, value := range []string{key, other} {
+		for start := 0; start+minRedactedValue <= len(value); start++ {
+			if fragment := value[start : start+minRedactedValue]; strings.Contains(body, fragment) {
+				t.Fatalf("the summary carried a fragment of a source value: %s", body)
+			}
+		}
+	}
+}
+
+// A real source key can begin with the marker's own text. The input is not a
+// place markers are trusted: the whole value is a value, and the reply marks it
+// like any other.
+func TestAdoptionSummaryRedactsAKeyThatBeginsWithTheMarker(t *testing.T) {
+	const key = redactedValue + "aaaaaaaaaaaaaaaaaaaaaaaa"
+	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key)
+	name := key + ".json"
+	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
+	fixture.source.types[name] = "claude"
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	reply := readAdoptionJSON(t, fixture.adoption(t))
+	shown := false
+	for _, item := range reply.Items {
+		if item.Item == "credential:"+name {
+			t.Fatalf("the summary emitted the source key in full: %+v", item)
+		}
+		if item.Item == "credential:"+redactedValue+".json" {
+			shown = true
+		}
+	}
+	if !shown {
+		t.Fatalf("the reply did not mark the key that begins with the marker: %+v", reply.Items)
+	}
+	// The marker itself is expected in the output; the key's tail is not.
+	body := fixture.adoption(t).Body.String()
+	if strings.Contains(body, key) {
+		t.Fatalf("the summary carried the source key: %s", body)
+	}
+	if tail := strings.Repeat("a", minRedactedValue); strings.Contains(body, tail) {
+		t.Fatalf("the summary carried the tail of the source key: %s", body)
+	}
+}
+
 // An overlong name's record identity carries the SHA-256 of the unscrubbed name.
 // The reply must not: a reader who knows the rest of a file name could otherwise
 // confirm a guessed credential offline from the item text.

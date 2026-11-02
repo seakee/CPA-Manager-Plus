@@ -1324,23 +1324,29 @@ cut names apart.
 The reply is also a separate output boundary from the record, because the
 record's text is not all the Manager's: a credential file name is the source
 CPA's metadata and a reason can quote an upstream code. `item` and `reason` pass
-two rules — the project's credential scrubber (`internal/usage`), then the exact
-source Client Keys and management key the migration was staged with, read from
-the protected adoption snapshot and replaced by value. A bare 32-hex key or a
+two rules — the exact source Client Keys and management key the migration was
+staged with, read from the protected adoption snapshot and replaced by value,
+then the project's credential scrubber (`internal/usage`). A bare 32-hex key or a
 UUID used verbatim as a credential file name has no credential shape, so the
-value is the only rule that catches it. The value rule also replaces every
-prefix of a value, not only the value itself: an overlong name is recorded as a
-bounded prefix, and a key can cross that cut, so a fragment of a source value is
-what a whole-value match would leave behind. The scan picks, at each position, the
-longest prefix any source value still matches, so two values that share their
-opening bytes are each replaced whole: a longer value's shared prefix cannot
-consume the shorter value's text and leave its own suffix behind. The boundary's
-own limit is a value's length: a source credential shorter than eight bytes is
-not replaced by value, because a string that short cannot be told apart inside a
-name, and this boundary does not claim to catch it. The record's free-text
-`instruction` — which interpolates a source name and the destination's own type
-string — is not emitted at all: the page states the next step from the item's
-`kind` and `reason`, so untrusted metadata cannot reach the browser as prose. A
+value rule is the one that catches it. The value rule replaces every occurrence
+of every value on the text as recorded, and every prefix of one at least eight
+bytes long, not only the value itself: an overlong name is recorded as a bounded
+prefix, and a key can cross that cut, so a fragment of a source value is what a
+whole-value match would leave behind. All the ranges it finds are merged before
+anything is written, and each merged range is replaced once — so a shorter match
+that starts earlier cannot consume the start of another value's longer match and
+leave that value's own suffix in the reply, whichever order the values were read
+in. The text is never split on `[redacted]` — a real source value can begin with
+that text, and treating it as an already-redacted marker would print the whole
+value. All a marker does is stand for itself: a value match inside one is left as
+it is, so a reply never nests markers, while everything around it is still
+matched by value. The boundary's own limit is a value's length: a source
+credential shorter than eight bytes is not replaced by value, because a string
+that short cannot be told apart inside a name, and this boundary does not claim
+to catch it. The record's free-text `instruction` — which interpolates a source
+name and the destination's own type string — is not emitted at all: the page
+states the next step from the item's `kind` and `reason`, so untrusted metadata
+cannot reach the browser as prose. A
 staged adoption, a non-adoption, an unreadable record and a snapshot that cannot
 be unprotected answer `404 {"code":"adopt_summary_unavailable"}` rather than an
 empty list that reads like a finished run: a reply that cannot be proven free of

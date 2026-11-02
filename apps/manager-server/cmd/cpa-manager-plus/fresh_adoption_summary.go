@@ -186,8 +186,17 @@ const redactedValue = "[redacted]"
 const minRedactedValue = 8
 
 // adoptionRedactor is the summary's output boundary for one string of the
-// record: the project's credential shapes first, then the values the migration
-// read.
+// record: the values the migration read first, then the project's credential
+// shapes.
+//
+// Markers are this function's output, never a claim about its input. A source
+// value can begin with the marker's own text, so an input is never split on a
+// marker: a real credential that starts that way would look already redacted and
+// pass through in full. What a marker does is stand for itself, which is why a
+// value match inside one is left as it is (see insideMarker); everything around
+// it is still matched by value. The value rule therefore reads the text as
+// recorded, and the scrubber runs last, on a result only this function has
+// written.
 //
 // The value rule matches prefixes as well as the whole value. An overlong name
 // is recorded as a bounded prefix, and a value can cross that cut, so the
@@ -195,71 +204,127 @@ const minRedactedValue = 8
 // value. Every prefix of at least minRedactedValue bytes is therefore replaced,
 // not only the value itself.
 func adoptionRedactor(secrets []string) func(string) string {
-	ordered := make([]string, 0, len(secrets))
+	values := make([]string, 0, len(secrets))
 	for _, secret := range secrets {
-		if len(secret) >= minRedactedValue && secret != redactedValue {
-			ordered = append(ordered, secret)
+		if len(secret) >= minRedactedValue {
+			values = append(values, secret)
 		}
 	}
 	return func(value string) string {
 		if value == "" {
 			return ""
 		}
-		// The scrubber's own markers are final: a source value that happens to
-		// begin with the marker's text must not rewrite it.
-		segments := strings.Split(usage.SanitizeCredentialText(value), redactedValue)
-		for index, segment := range segments {
-			segments[index] = redactSourceValues(segment, ordered)
-		}
-		return strings.Join(segments, redactedValue)
+		return usage.SanitizeCredentialText(redactSourceValues(value, values))
 	}
 }
 
-// redactSourceValues replaces the source values in value in one left-to-right
-// pass, writing only text it has not replaced.
+// sourceValueSpan is one covered byte range of a record string.
+type sourceValueSpan struct {
+	start int
+	end   int
+}
+
+// redactSourceValues replaces every source value the text holds, and every
+// fragment of one at least minRedactedValue bytes long.
 //
-// At every position it takes the longest prefix any value still matches. That
-// choice is what keeps one value's short common prefix from consuming the text
-// another value would match whole: two Client Keys may share their opening
-// bytes, and rewriting the text once per value would let the longer value
-// replace that shared prefix first, leaving the shorter value's own suffix
-// behind. Choosing per position keeps the result the same whatever order the
-// values were read in, and the marker it writes is never scanned again.
+// It finds every occurrence of every value on the original text, on rune
+// boundaries, and merges the ranges that overlap or touch before writing
+// anything. Replacing each merged range once is what makes the result independent
+// of the values' order and of any earlier replacement: a shorter partial match can
+// no longer consume the start of another value's longer match, which would leave
+// that value's own suffix in place. A recorded text may hold only a prefix of a
+// value — an overlong name is cut — so a match can end before its value does; the
+// merged range is still replaced as one.
 func redactSourceValues(value string, secrets []string) string {
+	spans := sourceValueSpans(value, secrets)
+	if len(spans) == 0 {
+		return value
+	}
 	var out strings.Builder
+	at := 0
+	for _, span := range spans {
+		out.WriteString(value[at:span.start])
+		if insideMarker(value, span) {
+			// The range is text of a marker, not of a value: it is already the
+			// public marker, and writing it as it is keeps markers un-nested.
+			out.WriteString(value[span.start:span.end])
+		} else {
+			out.WriteString(redactedValue)
+		}
+		at = span.end
+	}
+	out.WriteString(value[at:])
+	return out.String()
+}
+
+// sourceValueSpans is the merged coverage of every value match in value. The scan
+// visits rune boundaries in order, so the ranges are collected by start and the
+// merge can run over them as they are.
+func sourceValueSpans(value string, secrets []string) []sourceValueSpan {
+	var spans []sourceValueSpan
 	for at := 0; at < len(value); {
-		matched := 0
 		for _, secret := range secrets {
-			needle := shortestRedactedPrefix(secret)
-			if needle == "" || !strings.HasPrefix(value[at:], needle) {
-				continue
-			}
-			// The match is at least the needle; it is the part of the value this
-			// text still holds, which is what a recorded truncation leaves.
-			length := len(needle)
-			for length < len(secret) && at+length < len(value) && value[at+length] == secret[length] {
-				length++
-			}
-			// Cut on a rune boundary of the value, so the replacement never splits
-			// a character.
-			for length > len(needle) && at+length < len(value) && !utf8.RuneStart(value[at+length]) {
-				length--
-			}
-			if length > matched {
-				matched = length
+			if length := sourceValueMatchAt(value, at, secret); length > 0 {
+				spans = append(spans, sourceValueSpan{start: at, end: at + length})
 			}
 		}
-		if matched == 0 {
-			// No value starts here: copy one character and keep scanning.
-			_, size := utf8.DecodeRuneInString(value[at:])
-			out.WriteString(value[at : at+size])
-			at += size
+		_, size := utf8.DecodeRuneInString(value[at:])
+		at += size
+	}
+	merged := spans[:0]
+	for _, span := range spans {
+		last := len(merged) - 1
+		if last >= 0 && span.start <= merged[last].end {
+			if span.end > merged[last].end {
+				merged[last].end = span.end
+			}
 			continue
 		}
-		out.WriteString(redactedValue)
-		at += matched
+		merged = append(merged, span)
 	}
-	return out.String()
+	return merged
+}
+
+// insideMarker reports whether span covers only text of a marker occurrence. The
+// marker is public text this boundary writes, so a value match inside one is the
+// marker standing for itself rather than a fragment of a source value. The
+// exception cannot hide a value: a source value that contains the marker is
+// longer than it, so that value's own range reaches outside and is replaced
+// whole.
+func insideMarker(value string, span sourceValueSpan) bool {
+	for at := strings.Index(value, redactedValue); at >= 0; {
+		if at <= span.start && span.end <= at+len(redactedValue) {
+			return true
+		}
+		next := strings.Index(value[at+1:], redactedValue)
+		if next < 0 {
+			return false
+		}
+		at += 1 + next
+	}
+	return false
+}
+
+// sourceValueMatchAt is the length of secret's longest prefix the text holds at
+// at, or zero when the text does not hold the shortest prefix this boundary
+// recognises there. A match never splits a character of the text.
+func sourceValueMatchAt(value string, at int, secret string) int {
+	needle := shortestRedactedPrefix(secret)
+	if needle == "" || !strings.HasPrefix(value[at:], needle) {
+		return 0
+	}
+	// The match is at least the needle; it is the part of the value this text
+	// still holds, which is what a recorded truncation leaves.
+	length := len(needle)
+	for length < len(secret) && at+length < len(value) && value[at+length] == secret[length] {
+		length++
+	}
+	// Cut on a rune boundary of the value, so the replacement never splits a
+	// character.
+	for length > len(needle) && at+length < len(value) && !utf8.RuneStart(value[at+length]) {
+		length--
+	}
+	return length
 }
 
 // shortestRedactedPrefix is the smallest prefix of a source value this boundary
