@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -278,6 +279,82 @@ func TestPutNeverMovesUpdatedAtBackwards(t *testing.T) {
 	}
 	if second.UpdatedAtMS < second.CreatedAtMS {
 		t.Fatalf("updated_at_ms = %d is before created_at_ms = %d", second.UpdatedAtMS, second.CreatedAtMS)
+	}
+}
+
+// TestAdvanceKeepsAFutureDatedRowReadable is the regression for the 2026-11-02
+// review finding that Advance stamped the wall clock unconditionally: a row
+// written while the host clock ran ahead (or restored from a later backup)
+// advanced successfully and was then rejected by Get with ErrInvalidRow, which
+// blocked status and every later advance.
+func TestAdvanceKeepsAFutureDatedRowReadable(t *testing.T) {
+	repository, db := newRepository(t)
+	ctx := context.Background()
+	future := time.Now().Add(time.Hour).UnixMilli()
+	if _, err := db.ExecContext(ctx, `insert into upgrade_operations
+		(id, stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+		values (1, ?, '[]', '{}', '[]', ?, ?)`,
+		string(model.UpgradeStagePreflight), future, future); err != nil {
+		t.Fatalf("seed a future-dated row: %v", err)
+	}
+	before, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get seeded row: found=%t err=%v", found, err)
+	}
+	advanced, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCopyIn)
+	if err != nil {
+		t.Fatalf("advance a future-dated row: %v", err)
+	}
+	if advanced.UpdatedAtMS < before.UpdatedAtMS {
+		t.Fatalf("advance moved updated_at_ms backwards: %d -> %d", before.UpdatedAtMS, advanced.UpdatedAtMS)
+	}
+	stored, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get after advance: found=%t err=%v", found, err)
+	}
+	if stored.UpdatedAtMS < before.UpdatedAtMS {
+		t.Fatalf("updated_at_ms went backwards: %d -> %d", before.UpdatedAtMS, stored.UpdatedAtMS)
+	}
+	if stored.UpdatedAtMS < stored.CreatedAtMS {
+		t.Fatalf("updated_at_ms = %d is before created_at_ms = %d", stored.UpdatedAtMS, stored.CreatedAtMS)
+	}
+	if stored.CreatedAtMS != future {
+		t.Fatalf("created_at_ms = %d, want preserved %d", stored.CreatedAtMS, future)
+	}
+	if stored.Stage != model.UpgradeStageCopyIn || !stored.HasDomain(model.UpgradeDomainSourceCopy) {
+		t.Fatalf("advanced row = %q %v", stored.Stage, stored.DomainsDone)
+	}
+}
+
+// TestPutThenAdvanceNeverMovesUpdatedAtBackwards covers the same finding through
+// the public API: Put stored a caller-supplied time ahead of the clock, and
+// Advance then replaced it with the wall clock.
+func TestPutThenAdvanceNeverMovesUpdatedAtBackwards(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStagePreflight,
+		UpdatedAtMS: time.Now().Add(time.Hour).UnixMilli(),
+	}); err != nil {
+		t.Fatalf("put with a future timestamp: %v", err)
+	}
+	before, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get after put: found=%t err=%v", found, err)
+	}
+	advanced, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCopyIn)
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	if advanced.UpdatedAtMS < before.UpdatedAtMS {
+		t.Fatalf("advance moved updated_at_ms backwards: %d -> %d", before.UpdatedAtMS, advanced.UpdatedAtMS)
+	}
+	stored, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after advance: %v", err)
+	}
+	if stored.UpdatedAtMS < before.UpdatedAtMS {
+		t.Fatalf("updated_at_ms went backwards: %d -> %d", before.UpdatedAtMS, stored.UpdatedAtMS)
 	}
 }
 
