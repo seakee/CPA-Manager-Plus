@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1274,5 +1275,72 @@ func TestVerifyRollbackInstallCountsAnEventOnceAcrossItsRowAndArchiveRef(t *test
 	})
 	if err := verifyRollbackInstall(ctx, volume.root, result.BackupDirectory, recorded); err != nil {
 		t.Fatalf("the same install was refused: %v", err)
+	}
+}
+
+// TestCheckLegacyHealthNeverUsesTheEnvironmentProxy is the regression for M2:
+// the probe used the default transport, so any HTTP_PROXY in the host or the
+// container answered for the v1 and the volume was recorded as proven.
+func TestCheckLegacyHealthNeverUsesTheEnvironmentProxy(t *testing.T) {
+	var hits atomic.Int64
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"service":"`+LegacyServiceID+`"}`)
+	}))
+	t.Cleanup(proxy.Close)
+	for _, name := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		t.Setenv(name, proxy.URL)
+	}
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
+	if _, err := CheckLegacyHealth(context.Background(), "http://legacy-v1.invalid:18318"+LegacyHealthPath, ""); err == nil {
+		t.Fatal("a proxy answer was accepted as the 1.x install")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("the probe used the environment proxy %d times", hits.Load())
+	}
+}
+
+// TestCheckLegacyHealthRefusesARedirect is the second half of M2: the client
+// followed a 302 to a healthy answer, so a redirect could prove a volume the
+// probed address does not serve.
+func TestCheckLegacyHealthRefusesARedirect(t *testing.T) {
+	destination := healthyProbe(t)
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination, http.StatusFound)
+	}))
+	t.Cleanup(redirect.Close)
+	_, err := CheckLegacyHealth(context.Background(), redirect.URL+LegacyHealthPath, "")
+	if err == nil {
+		t.Fatal("a redirected answer was accepted as the 1.x install")
+	}
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorRollbackUnproven {
+		t.Fatalf("redirect refusal = %v (code %q), want %v", err, code, UpgradeErrorRollbackUnproven)
+	}
+}
+
+// TestRecordRollbackNeverPersistsProbeCredentials is the third half of M2: a
+// credential pasted into --status-url was stored in rollback_status_url and
+// printed back. /health needs no credential, so the probe strips it.
+func TestRecordRollbackNeverPersistsProbeCredentials(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	observation := fixture.observation(t)
+	observation.StatusURL = strings.Replace(observation.StatusURL, "http://", "http://operator:s3cr3t@", 1) + "?token=abc123"
+	recorded, err := RecordRollback(context.Background(), observation)
+	if err != nil {
+		t.Fatalf("record the rollback: %v", err)
+	}
+	if recorded.Rollback == nil {
+		t.Fatal("the verdict carries no evidence")
+	}
+	persisted := recorded.Rollback.StatusURL
+	for _, forbidden := range []string{"operator", "s3cr3t", "token", "abc123", "?"} {
+		if strings.Contains(persisted, forbidden) {
+			t.Fatalf("the persisted endpoint carries %q: %s", forbidden, persisted)
+		}
+	}
+	if persisted != LegacyHealthURL() && !strings.HasSuffix(persisted, LegacyHealthPath) {
+		t.Fatalf("the persisted endpoint is not the probed /health endpoint: %s", persisted)
 	}
 }

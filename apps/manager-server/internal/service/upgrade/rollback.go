@@ -1016,11 +1016,25 @@ func CheckLegacyHealth(ctx context.Context, rawURL, managerAddress string) (Lega
 	if err := refuseSelfProbe(parsed, managerAddress); err != nil {
 		return LegacyHealth{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	// The probe endpoint carries no credential and no query: /health needs
+	// neither, and whatever the operator pasted into --status-url must not be
+	// sent, persisted or printed. Only this sanitized endpoint is asked.
+	endpoint := probeEndpoint(parsed)
+	// This probe answers only for a local install, so it must not travel through
+	// a proxy from the environment: a proxy would answer for the v1 and the
+	// volume would be "proven" by whatever that proxy decided to say. Redirects
+	// are refused below instead of being followed by the client.
+	client := &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: probeTransport(),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return LegacyHealth{}, fmt.Errorf("build the 1.x health request: %w", err)
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
 	response, err := client.Do(request)
 	if err != nil {
 		return LegacyHealth{}, newUpgradeError(UpgradeErrorRollbackUnproven,
@@ -1028,7 +1042,15 @@ func CheckLegacyHealth(ctx context.Context, rawURL, managerAddress string) (Lega
 	}
 	defer func() { _ = response.Body.Close() }()
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxHealthBodyBytes))
-	observation := LegacyHealth{URL: parsed.String(), StatusCode: response.StatusCode}
+	observation := LegacyHealth{URL: endpoint, StatusCode: response.StatusCode}
+	// A redirect is refused rather than followed. The answer behind it comes from
+	// wherever the redirect points, and this build would have recorded the URL it
+	// asked, not the one that answered.
+	if response.StatusCode >= 300 && response.StatusCode < 400 {
+		return observation, newUpgradeError(UpgradeErrorRollbackUnproven,
+			fmt.Sprintf("the 1.x health probe answered HTTP %d instead of %s; a redirect would be answered by whatever it points at, so it proves nothing about this volume. Probe the 1.x port the rollback plan printed directly",
+				response.StatusCode, LegacyHealthPath), nil)
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail := ""
 		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
@@ -1060,6 +1082,23 @@ func CheckLegacyHealth(ctx context.Context, rawURL, managerAddress string) (Lega
 				sanitizeIdentity(stated.Service), LegacyServiceID), nil)
 	}
 	return observation, nil
+}
+
+// probeTransport is the transport of the 1.x health probe. It never consults
+// HTTP_PROXY, HTTPS_PROXY or NO_PROXY: the probe answers only for a local
+// install, and a proxy would be the one answering. Everything else about the
+// connection keeps the standard library defaults.
+func probeTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
+}
+
+// probeEndpoint is the address the health probe may ask, persist and print:
+// scheme, host and path. Userinfo and query are dropped, so a credential pasted
+// into --status-url is never sent, recorded as evidence or echoed.
+func probeEndpoint(parsed *url.URL) string {
+	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: parsed.Path}).String()
 }
 
 // refuseSelfProbe refuses a probe that would be answered by this Manager's own
