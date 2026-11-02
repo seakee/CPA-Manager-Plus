@@ -217,11 +217,16 @@ func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) 
 			// --scratch-dir has to learn that the OS temporary directory is the
 			// one that landed inside the root.
 			origin := "scratch directory"
+			// The hint names only the control that every caller has: rollback
+			// and migrate take no --scratch-dir flag, so naming one here would
+			// send the operator to an argument the command cannot accept.
+			hint := "choose a scratch directory on a separate volume"
 			if defaulted {
 				origin = "default scratch directory (the OS temporary directory)"
+				hint = "point TMPDIR at a directory on a separate volume"
 			}
-			return fmt.Errorf("%w: %s is inside %s; pass a --scratch-dir on a separate volume",
-				ErrSnapshotFailed, origin, root.label)
+			return fmt.Errorf("%w: %s is inside %s; %s",
+				ErrSnapshotFailed, origin, root.label, hint)
 		}
 	}
 	return nil

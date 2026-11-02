@@ -976,7 +976,7 @@ func TestCheckLegacyHealthRequiresTheDocumentedIdentity(t *testing.T) {
 func TestRollbackReadsTheVolumeWithoutWritingIt(t *testing.T) {
 	fixture := newRollbackFixture(t)
 	sourceBefore := fingerprintTree(t, fixture.volume.root)
-	if err := verifyRollbackInstall(context.Background(), fixture.volume.root, fixture.bundleDir, fixture.recorded); err != nil {
+	if err := verifyRollbackInstall(context.Background(), fixture.volume.root, fixture.targetRoot, fixture.bundleDir, fixture.recorded); err != nil {
 		t.Fatalf("verify the install: %v", err)
 	}
 	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
@@ -984,6 +984,65 @@ func TestRollbackReadsTheVolumeWithoutWritingIt(t *testing.T) {
 		t.Fatalf("probe the health endpoint: %v", err)
 	}
 	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
+}
+
+// TestVerifyRollbackInstallRefusesAScratchDirectoryInsideTheV2Root is L-n1: the
+// verify snapshot passed an empty target root, so the fence only knew the 1.x
+// source and a TMPDIR inside the v2 data root received a full copy of the 1.x
+// database. The v2 root is the volume this verdict abandons but never deletes,
+// so it is a root the snapshot must not be written into, and the refusal is the
+// typed snapshot failure raised before a directory or a byte is created.
+func TestVerifyRollbackInstallRefusesAScratchDirectoryInsideTheV2Root(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	scratch := filepath.Join(fixture.targetRoot, "tmp")
+	if err := os.Mkdir(scratch, 0o755); err != nil {
+		t.Fatalf("create the scratch directory: %v", err)
+	}
+	setOSTempDir(t, scratch)
+	err := verifyRollbackInstall(context.Background(), fixture.volume.root, fixture.targetRoot, fixture.bundleDir, fixture.recorded)
+	if !errors.Is(err, ErrSnapshotFailed) {
+		t.Fatalf("scratch inside the v2 data root = %v, want %v", err, ErrSnapshotFailed)
+	}
+	if !strings.Contains(err.Error(), "target root") {
+		t.Fatalf("refusal %q does not name the target root", err)
+	}
+	if strings.Contains(err.Error(), "--scratch-dir") {
+		t.Fatalf("refusal %q names a flag rollback does not take", err)
+	}
+	entries, readErr := os.ReadDir(scratch)
+	if readErr != nil {
+		t.Fatalf("read the scratch directory: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("the snapshot copy was written into the v2 data root: %v", entries)
+	}
+}
+
+// TestRecordRollbackRefusesAScratchDirectoryInsideTheV2Root is the same rule on
+// the path the operator runs: the verdict is refused with the typed snapshot
+// failure before any write, and the recorded row is untouched.
+func TestRecordRollbackRefusesAScratchDirectoryInsideTheV2Root(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	scratch := filepath.Join(fixture.targetRoot, "tmp")
+	if err := os.Mkdir(scratch, 0o755); err != nil {
+		t.Fatalf("create the scratch directory: %v", err)
+	}
+	setOSTempDir(t, scratch)
+	observation := fixture.observation(t)
+	if _, err := RecordRollback(context.Background(), observation); !errors.Is(err, ErrSnapshotFailed) {
+		t.Fatalf("scratch inside the v2 data root = %v, want %v", err, ErrSnapshotFailed)
+	}
+	if after := fixture.recordedRow(t); after.Rollback != nil {
+		t.Fatalf("a verdict was recorded under refused scratch: %+v", after.Rollback)
+	}
+	assertNoPlan(t, fixture.targetRoot)
+	entries, readErr := os.ReadDir(scratch)
+	if readErr != nil {
+		t.Fatalf("read the scratch directory: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("the snapshot copy was written into the v2 data root: %v", entries)
+	}
 }
 
 func TestRolledBackIsTerminal(t *testing.T) {
@@ -1328,7 +1387,7 @@ func TestVerifyRollbackInstallCountsAnEventOnceAcrossItsRowAndArchiveRef(t *test
 			t.Fatalf("finish the 1.x raw delete: %v", err)
 		}
 	})
-	if err := verifyRollbackInstall(ctx, volume.root, result.BackupDirectory, recorded); err != nil {
+	if err := verifyRollbackInstall(ctx, volume.root, targetRoot, result.BackupDirectory, recorded); err != nil {
 		t.Fatalf("the same install was refused: %v", err)
 	}
 }
@@ -1367,7 +1426,7 @@ func TestVerifyRollbackInstallReadsTheLiveWAL(t *testing.T) {
 	// The v1 is serving while the verdict is proven: no source lock is taken and
 	// no in-place open is made.
 	sourceBefore := fingerprintTree(t, fixture.volume.root)
-	if err := verifyRollbackInstall(ctx, fixture.volume.root, fixture.bundleDir, fixture.recorded); err != nil {
+	if err := verifyRollbackInstall(ctx, fixture.volume.root, fixture.targetRoot, fixture.bundleDir, fixture.recorded); err != nil {
 		_ = writer.Close()
 		t.Fatalf("the same install was refused: %v", err)
 	}

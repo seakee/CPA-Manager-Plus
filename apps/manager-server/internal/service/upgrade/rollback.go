@@ -1059,7 +1059,7 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	if err := requireV2Stopped(ctx, observation.ManagerAddress); err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	if err := verifyRollbackInstall(ctx, sourceRoot, bundleDir, recorded); err != nil {
+	if err := verifyRollbackInstall(ctx, sourceRoot, targetRoot, bundleDir, recorded); err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	// The observation time is stamped here, after every proof this service
@@ -1413,7 +1413,7 @@ var rollbackRetainedRows = []retainedRowGroup{
 // source is left exactly as v1 left it. Both stores it compares are the same
 // install, so a row that is only committed to the live WAL is an *extra* row it
 // does not count; the retained-row rule is a lower bound, never an equality.
-func verifyRollbackInstall(ctx context.Context, sourceRoot, bundleDir string, recorded model.UpgradeOperation) error {
+func verifyRollbackInstall(ctx context.Context, sourceRoot, targetRoot, bundleDir string, recorded model.UpgradeOperation) error {
 	manifest, digest, err := verifyRecordedBackup(ctx, bundleDir)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorRollbackUnproven,
@@ -1439,12 +1439,14 @@ func verifyRollbackInstall(ctx context.Context, sourceRoot, bundleDir string, re
 	}
 
 	// The live database is read through a private copy, so the copy must land
-	// somewhere the 1.x volume never sees. A default TMPDIR inside the source
-	// tree would write the whole database back into it; refuse before a directory
-	// is made and say why, instead of blaming v1 writes.
-	if err := ValidateScratchDir("", sourceRoot, ""); err != nil {
+	// outside both roots: the 1.x volume v1 still serves, and the v2 data root
+	// this verdict abandons without deleting. A default TMPDIR inside either
+	// would write the whole 1.x database there — and a copy abandoned by a
+	// killed process would stay for good — so it is refused before a directory
+	// is made and before a byte is copied.
+	if err := ValidateScratchDir("", sourceRoot, targetRoot); err != nil {
 		return newUpgradeError(UpgradeErrorSnapshotFailed,
-			"the private snapshot of the live 1.x database would be created inside the 1.x source root, which this operation never writes; point TMPDIR at a directory on a separate volume and record the verdict again", err)
+			"the private snapshot of the live 1.x database would be created inside a root this operation never writes, so the retained rows cannot be counted; point TMPDIR at a directory on a separate volume and record the verdict again", err)
 	}
 	liveSnapshot, err := OpenSnapshotWithRetry(ctx, OpenSnapshot, filepath.Join(sourceRoot, databaseFileName), "")
 	if liveSnapshot != nil {
