@@ -528,18 +528,23 @@ func observeSide(ctx context.Context, db *sql.DB, schema sourceSchema) (sideObse
 			return observation, err
 		}
 	}
-	if schema.tables["usage_pricing_hourly_rollups_v1"] {
-		prices := map[string]model.ModelPrice{}
+	prices := map[string]model.ModelPrice{}
+	if schema.tables["usage_pricing_hourly_rollups_v1"] || schema.tables["usage_monitoring_account_daily_rollups_v1"] {
 		if schema.tables["model_prices"] {
 			if prices, err = modelprice.New(db).LoadAllTx(ctx, tx); err != nil {
 				return observation, fmt.Errorf("read the model prices: %w", err)
 			}
 		}
-		// The pricing read path selects only the revision this store's own price
-		// table defines, so rows an older revision left behind are not part of
-		// what the store reports and must not be compared as if they were.
-		revision := usageidentity.PricingStructureRevision(model.ModelPriceStructureRevision(prices))
-		if observation.pricing, err = readPricingCells(ctx, tx, prices, revision); err != nil {
+	}
+	// Both derived rollups carry the stats structure revision: the pricing read
+	// path selects it for its own table, and the account history read path
+	// selects it through usagemonitoring's statsReadState ->
+	// usagepricing.StructureRevision, which is exactly this string built from the
+	// store's own price table. Rows under any other revision are never read, so
+	// comparing them would certify numbers no consumer can show.
+	statsRevision := usageidentity.PricingStructureRevision(model.ModelPriceStructureRevision(prices))
+	if schema.tables["usage_pricing_hourly_rollups_v1"] {
+		if observation.pricing, err = readPricingCells(ctx, tx, prices, statsRevision); err != nil {
 			return observation, err
 		}
 	}
@@ -549,9 +554,7 @@ func observeSide(ctx context.Context, db *sql.DB, schema sourceSchema) (sideObse
 		}
 	}
 	if schema.tables["usage_monitoring_account_daily_rollups_v1"] {
-		// The history read path compares against the rollup state's revision, and
-		// a rollup whose revision moved is rebuilt rather than reported.
-		if observation.history, err = readHistoryCells(ctx, tx, usageidentity.MonitoringProjectionStructureRevision()); err != nil {
+		if observation.history, err = readHistoryCells(ctx, tx, statsRevision); err != nil {
 			return observation, err
 		}
 	}

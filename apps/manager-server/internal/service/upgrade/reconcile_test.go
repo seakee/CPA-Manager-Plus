@@ -17,6 +17,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
@@ -560,6 +561,11 @@ func seedSourceCoverage(t *testing.T, volume legacyVolume) {
 	) values (%d, 4, %d, %d)`, seededDayIndex, seededDayMS+1000, seededDayMS+2000))
 }
 
+// seedSourceHistory seeds one account history rollup row under the revision the
+// history read path selects: the stats rollup's revision, which
+// usagemonitoring derives from the store's price table, not the projection
+// revision. A fixture seeded under any other revision seeds rows no reader
+// would ever show, so a comparison of them proves nothing.
 func seedSourceHistory(t *testing.T, volume legacyVolume) {
 	t.Helper()
 	execSource(t, volume, fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 (
@@ -569,7 +575,19 @@ func seedSourceHistory(t *testing.T, volume legacyVolume) {
 		context_threshold_tokens, failed, calls, total_tokens, last_seen_ms, updated_at_ms)
 		values (%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', '0', 'source-a', 'hash-a',
 			'file-a', 'key-a', 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
-			0, 0, 2, 100, %d, 1)`, sqlText(usageidentity.MonitoringProjectionStructureRevision()), seededDayMS, seededDayMS))
+			0, 0, 2, 100, %d, 1)`, sqlText(fixturePricingRevision(nil)), seededDayMS, seededDayMS))
+}
+
+// seedHistoryOnTheStatsRevision seeds the rollup and marks the stats rollup
+// state current, so the real analytics read path reads the daily table instead
+// of rebuilding the same numbers from the retained events.
+func seedHistoryOnTheStatsRevision(t *testing.T, volume legacyVolume) {
+	t.Helper()
+	seedSourceHistory(t, volume)
+	execSource(t, volume,
+		`update usage_monitoring_rollup_state set structure_revision = `+
+			sqlText(fixturePricingRevision(nil))+
+			`, status = 'ready', coverage_event_id = 2, target_event_id = 2 where rollup_name = 'stats_v1'`)
 }
 
 // seedSourceRetention adds two events in the same hour and model under two API
@@ -1076,12 +1094,12 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 			(%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
 			 'file-a', null, 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
 			 0, 0, 2, 40, 60, 0, 0, 0, 0, 0, 0, 0, 0, 100, %d, 10, 2)`,
-			sqlText(usageidentity.MonitoringProjectionStructureRevision()), seededDayMS, seededDayMS),
+			sqlText(fixturePricingRevision(nil)), seededDayMS, seededDayMS),
 		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
 			(%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
 			 'file-a', '', 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
 			 0, 0, 5, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 200, %d, 20, 3)`,
-			sqlText(usageidentity.MonitoringProjectionStructureRevision()), seededDayMS, seededDayMS),
+			sqlText(fixturePricingRevision(nil)), seededDayMS, seededDayMS),
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatalf("prepare the history fixture %q: %v", statement, err)
@@ -1092,7 +1110,7 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 		t.Fatalf("begin the history read: %v", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	cells, err := readHistoryCells(context.Background(), tx, usageidentity.MonitoringProjectionStructureRevision())
+	cells, err := readHistoryCells(context.Background(), tx, fixturePricingRevision(nil))
 	if err != nil {
 		t.Fatalf("read the account history: %v", err)
 	}
@@ -1738,6 +1756,67 @@ func TestReconcileSplitsClearedDerivedDaysByRetainedSupport(t *testing.T) {
 	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
 		t.Fatalf("marked days = %v, want none", got)
 	}
+}
+
+// historyConsumerAggregate reads the seeded day through the real account
+// analytics consumer, so a regression can prove that what it mutates is what a
+// running Manager would report instead of assuming it from the SQL.
+func historyConsumerAggregate(t *testing.T, path string) usagemonitoring.Aggregate {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open the store for the analytics read: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	aggregate, _, available, err := usagemonitoring.New(db).LoadAggregate(context.Background(), usagemonitoring.AnalyticsFilter{
+		FromMS: seededDayMS,
+		ToMS:   seededDayMS + utcDayMilliseconds,
+	})
+	if err != nil {
+		t.Fatalf("read the analytics aggregate: %v", err)
+	}
+	if !available {
+		t.Fatal("the analytics aggregate is not available for the seeded day")
+	}
+	return aggregate
+}
+
+// TestReconcileSeesTheHistoryCallsTheConsumerReports reproduces review F1: the
+// history domain filtered the rollup table on the projection revision while the
+// account stats read path filters it on the stats (pricing structure) revision.
+// Both sides therefore read no row at all, so a call count the consumer reported
+// going from 2 to 3 reconciled clean with zero days compared.
+func TestReconcileSeesTheHistoryCallsTheConsumerReports(t *testing.T) {
+	copied := newCopiedVolumeWith(t, seedHistoryOnTheStatsRevision)
+	before := historyConsumerAggregate(t, copied.databasePath())
+	if before.TotalCalls != 2 {
+		t.Fatalf("consumer calls = %d, want the seeded 2: the fixture must feed the real read path", before.TotalCalls)
+	}
+	execTarget(t, copied.databasePath(), `update usage_monitoring_account_daily_rollups_v1 set calls = calls + 1`)
+	after := historyConsumerAggregate(t, copied.databasePath())
+	if after.TotalCalls != before.TotalCalls+1 {
+		t.Fatalf("consumer calls = %d after the mutation, want %d", after.TotalCalls, before.TotalCalls+1)
+	}
+
+	report, err := Reconcile(context.Background(), copied.reconcileOptions())
+	if !errors.Is(err, ErrReconcileMismatch) {
+		t.Fatalf("reconcile error = %v, want the typed mismatch", err)
+	}
+	history := domainReport(t, report, ReconcileDomainHistory)
+	if history.SourceDays != 1 || history.ComparedDays != 1 {
+		t.Fatalf("history days = source %d compared %d, want the seeded day compared",
+			history.SourceDays, history.ComparedDays)
+	}
+	if !holdsMismatch(history.Mismatches, wantedMismatch{mismatchFieldCalls, "account=acct-1"}) {
+		t.Fatalf("history mismatches = %+v, want the calls difference the consumer reported", history.Mismatches)
+	}
+	if report.Recorded {
+		t.Fatal("a measured history change recorded the operation")
+	}
+	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+		t.Fatalf("marked days = %v, want none", got)
+	}
+	assertNoScratch(t, copied.target)
 }
 
 // domainReport returns the one domain report with the wanted name.
