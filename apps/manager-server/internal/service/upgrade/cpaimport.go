@@ -16,7 +16,8 @@ package upgrade
 //     StageDestination and Start capabilities, with the plugin choice the plan
 //     carries;
 //   - copies configuration and credentials through the existing
-//     freshadopt.Executor into the destination CPA;
+//     freshadopt.Executor under the Upgrade surface's own typed authorization,
+//     never under a Fresh capability decision it does not hold;
 //   - proves the target twice: cpa.VerifyV8Adoption over the imported client
 //     keys, and a readback of every copied path through the destination's own
 //     configuration surface.
@@ -608,7 +609,12 @@ func (r *cpaImportRun) runExecutor(ctx context.Context, result *CPAImportResult)
 			"the destination CPA refused the import's management credential", err)
 	}
 	defer destination.Close()
-	run, err := freshadopt.New(r.source, destination, cpaImportDecisions()).Run(ctx, freshstore.AdoptionSummary{}, nil)
+	executor, err := freshadopt.NewUpgrade(r.source, destination, cpaImportAuthorization())
+	if err != nil {
+		return freshstore.AdoptionSummary{}, newUpgradeError(UpgradeErrorCPAImportUnavailable,
+			"the import authorization names a reference the product does not permit an adoption to copy, so nothing was written", err)
+	}
+	run, err := executor.Run(ctx, freshstore.AdoptionSummary{}, nil)
 	if err != nil {
 		if errors.Is(err, freshadopt.ErrInventoryUnavailable) {
 			return run.Summary, newUpgradeError(UpgradeErrorCPAImportUnavailable,
@@ -870,46 +876,29 @@ func requireRecordedSourceRoot(recorded model.UpgradeOperation, legacyRoot strin
 	return nil
 }
 
-// cpaImportDecisions is the record authorization this import runs under.
+// cpaImportAuthorization is the Upgrade-surface authorization this import runs
+// under.
 //
 // An Upgrade import of a Managed 1.x stack is authorized by the operator running
 // the step, not by a Fresh adoption record: there is no Adopt screen in the
-// Upgrade surface and no per-reference decision to look up. It therefore
-// authorizes exactly the references the adoption executor copies — the gateway
-// configuration, the provider sections and the credential files — through the
-// product's own rule table, and nothing else. Every other reference keeps the
-// manual action `bootstrap.FreshAdoptionDecision` derives for it, so an item the
-// executor classifies outside those three references is never written.
-func cpaImportDecisions() []bootstrap.AdoptionResourceDecision {
-	refs := []bootstrap.ResourceRef{
+// Upgrade surface, no capability qualification, and therefore no read/replay/
+// verify evidence references to present. The first version of this step invented
+// `preflight:<ref>-read`-shaped references to satisfy the Fresh decision shape;
+// those references pointed at nothing.
+//
+// It therefore names exactly the references the step copies — the gateway
+// configuration, the provider sections and the credential files — and
+// freshadopt.NewUpgrade refuses any reference outside the product's own
+// migratable set. The step's proof is the copy's readback and VerifyV8Adoption,
+// not a qualification the Upgrade surface never held; an item the executor
+// classifies outside these three references keeps the rule table's manual action
+// and is never written.
+func cpaImportAuthorization() freshadopt.UpgradeAuthorization {
+	return freshadopt.UpgradeAuthorization{Refs: []bootstrap.ResourceRef{
 		bootstrap.AdoptionRefConfigRouting,
 		bootstrap.AdoptionRefProviderStateAPIKeys,
 		bootstrap.AdoptionRefCPAAuthFiles,
-	}
-	decisions := make([]bootstrap.AdoptionResourceDecision, 0, len(refs))
-	for _, ref := range refs {
-		rule, ok := bootstrap.FreshAdoptionRule(ref)
-		if !ok {
-			continue
-		}
-		decision := bootstrap.AdoptionResourceDecision{
-			ResourceRef:       ref,
-			Kind:              rule.Kind,
-			Scope:             rule.Scope,
-			ReadEvidenceRef:   bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-read"),
-			ReplayEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-replay"),
-			VerifyEvidenceRef: bootstrap.CapabilityEvidenceRef("preflight:" + string(ref) + "-verify"),
-			Qualification:     bootstrap.CapabilityQualified,
-			Disposition:       bootstrap.Migrate,
-		}
-		// The rule table is the only thing that may authorize a copy: a decision
-		// the product refuses is dropped rather than forced.
-		if _, ok := bootstrap.FreshAdoptionDecision(ref, decision); !ok {
-			continue
-		}
-		decisions = append(decisions, decision)
-	}
-	return decisions
+	}}
 }
 
 // newCPAImportManagementSecret returns a fresh 64-hex destination management

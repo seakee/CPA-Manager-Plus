@@ -18,12 +18,14 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 )
 
 // importFixture is a stopped 1.x volume with a recorded copy-in and the managed
@@ -1043,21 +1045,35 @@ func TestImportCPARefusesAFailedDestinationStage(t *testing.T) {
 	}
 }
 
-// TestCPAImportDecisionsAuthorizeOnlyTheCopiedReferences pins the authorization
-// the step runs under: exactly the three references the executor copies.
-func TestCPAImportDecisionsAuthorizeOnlyTheCopiedReferences(t *testing.T) {
-	decisions := cpaImportDecisions()
+// TestCPAImportAuthorizationNamesOnlyTheCopiedReferences pins the authority the
+// step runs under. It is an Upgrade authorization: a set of references, with no
+// qualification and no evidence reference to fabricate. Every reference must also
+// be one the product permits an adoption to copy, so the step cannot widen the
+// executor's write surface by naming a section.
+func TestCPAImportAuthorizationNamesOnlyTheCopiedReferences(t *testing.T) {
+	authorization := cpaImportAuthorization()
 	want := []string{"cpa-auth-files", "cpa-config-routing", "provider-state-api-keys"}
-	got := make([]string, 0, len(decisions))
-	for _, decision := range decisions {
-		if decision.Disposition != "migrate" {
-			t.Fatalf("decision %q is %q, want migrate", decision.ResourceRef, decision.Disposition)
+	migratable := map[bootstrap.ResourceRef]bool{}
+	for _, ref := range bootstrap.MigratedAdoptionResourceRefs() {
+		migratable[ref] = true
+	}
+	got := make([]string, 0, len(authorization.Refs))
+	for _, ref := range authorization.Refs {
+		if !migratable[ref] {
+			t.Fatalf("the import authorizes %q, which the product does not permit an adoption to copy", ref)
 		}
-		got = append(got, string(decision.ResourceRef))
+		got = append(got, string(ref))
 	}
 	sort.Strings(got)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("authorized references = %v, want %v", got, want)
+	}
+	// The constructor is the gate: a reference outside the set is refused before
+	// any run, so the authorization cannot carry a Manager-owned section.
+	for _, ref := range []bootstrap.ResourceRef{bootstrap.AdoptionRefConfigServer, bootstrap.AdoptionRefConfigPlugins, ""} {
+		if _, err := freshadopt.NewUpgrade(nil, nil, freshadopt.UpgradeAuthorization{Refs: []bootstrap.ResourceRef{ref}}); err == nil {
+			t.Fatalf("the executor accepted an authorization for %q", ref)
+		}
 	}
 }
 
