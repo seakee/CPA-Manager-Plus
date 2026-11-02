@@ -531,12 +531,15 @@ on both surfaces at once, and no write route exists.
   configured 1.x source root. Both roots are named by every caller that can reach
   that read: the entry leaf carries the root it resolved at startup, and the
   wizard carries the root its per-request mount lookup resolved — a lookup that
-  outlives its bound still hands over the root it published before the lookup
-  that hung, and one that never resolved the root refuses the snapshot with a
-  typed condition instead of staging it in a tree nobody named. A target whose
-  key cannot be proved this way
-  answers the same typed condition as an unreadable source; authentication is
-  never skipped, and a rejected key still answers `401`.
+  outlives its bound still names the root it published before the hung call, but
+  the snapshot then fails closed with `503 upgrade_mount_timeout` instead of
+  resolving that root again: canonicalizing it for the exclusion comparison is
+  the filesystem call the bound exists to stop. A lookup that never resolved the
+  root refuses with the typed unknown-root condition instead of staging a copy in
+  a tree nobody named. A target whose key cannot be proved this way
+  answers the typed condition that stopped the read — the mount's deadline, the
+  unknown-root condition, or the unreadable-source condition of a refused copy;
+  authentication is never skipped, and a rejected key still answers `401`.
   The credential read returns the credential row and nothing else:
   no `quick_check`, no schema vocabulary, no parity. The first read of one
   source state is bounded by `CredentialVerifyTimeout` — a 2s base plus 1s per
@@ -668,10 +671,15 @@ on both surfaces at once, and no write route exists.
   and only when there is no Manager store to fall back to — with one, the
   credential resolves there and the refusal is reported as the `sourceRoot`
   marker instead; a mount lookup that outlives its bound answers
-  `503 upgrade_mount_timeout`; a credential read that exceeds its bound
-  answers `503 upgrade_credential_timeout`; a resolved database that is itself a
-  link answers `503 upgrade_source_symlinked`; a source that exists but cannot be
-  read to verify the key answers `503 upgrade_source_unreadable`. None of these is
+  `503 upgrade_mount_timeout` on every route that still needs the mount — the
+  preflight, and any request whose authentication would have to resolve the
+  source root to keep a private snapshot out of it; a status read whose
+  credential falls back to the live Manager store needs no snapshot and reports
+  the deadline as the `sourceRoot` marker instead; a credential read that exceeds
+  its bound answers `503 upgrade_credential_timeout`; a resolved database that is
+  itself a link answers `503 upgrade_source_symlinked`; a source that exists but
+  cannot be read to verify the key answers `503 upgrade_source_unreadable`.
+  None of these is
   a wrong-password message, and none of them is the ownership marker's verdict:
   that marker is the preflight's, and this surface never inspects it — the
   `upgrade_source_lock_unavailable` above is the file policy refusing the file,

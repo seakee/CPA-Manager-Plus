@@ -734,6 +734,14 @@ type CredentialSnapshotRoots struct {
 	Target      string
 	Source      string
 	SourceKnown bool
+	// SourceTimedOut reports that Source is the root a mount lookup published
+	// before the lookup itself outlived its bound. The root must still be
+	// excluded, but it was never inspected and resolving it for that comparison
+	// would put the filesystem call the bound exists to stop back on the request.
+	// A read that needs a snapshot therefore fails closed with
+	// ErrSnapshotRootTimedOut instead of touching the root again. It is ignored
+	// when SourceKnown is false: an unnamed root already fails closed.
+	SourceTimedOut bool
 }
 
 // VerifyManagerCredential is VerifyAdminSource against the Manager's own store
@@ -788,6 +796,14 @@ func VerifyManagerCredential(ctx context.Context, databasePath string, roots Cre
 			// only answer that keeps the promise; the caller's next poll can
 			// retry once the mount answers.
 			return fmt.Errorf("%w: the configured source root was not resolved", ErrSnapshotRootUnknown)
+		}
+		if roots.SourceTimedOut {
+			// The root is named but was never inspected: the lookup that would
+			// have inspected it outlived its bound, and the bound exists to stop
+			// exactly the filesystem call that resolving the root for the
+			// exclusion check would repeat. The deadline is the answer, and the
+			// operator's next move is a retry once the mount responds.
+			return fmt.Errorf("%w: the configured source root did not answer within its bound", ErrSnapshotRootTimedOut)
 		}
 		return verifyPreservedCredential(ctx, databasePath, key, strings.TrimSpace(roots.Target), strings.TrimSpace(roots.Source))
 	}

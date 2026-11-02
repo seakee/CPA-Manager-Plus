@@ -156,10 +156,12 @@ func waitForMountFlight(t *testing.T, handler *Handler) {
 // TestMountTimeoutKeepsTheSnapshotOutsideTheConfiguredSourceRoot is the
 // mount-timeout half of the two roots' contract. A lookup that outlives its
 // bound has not assessed the mount, so the request falls back to the Manager
-// store — but the configured source root it already resolved still has to be
-// excluded from the private copy that authenticates a materializing target.
-// Before the fix the timeout answer dropped the root and a full database copy was
-// staged inside the source tree.
+// store — but the configured source root it already resolved must never be
+// resolved again to keep the private copy out of it. The route fails closed with
+// the mount's own deadline before the snapshot's exclusion check runs, so even a
+// TMPDIR inside the configured root stages nothing there. Before the fix the
+// timeout answer dropped the root and a full database copy was staged inside the
+// source tree.
 func TestMountTimeoutKeepsTheSnapshotOutsideTheConfiguredSourceRoot(t *testing.T) {
 	target := materializingManagerTarget(t, legacySourceDir(t))
 	before := digestManagerMembers(t, target)
@@ -185,11 +187,65 @@ func TestMountTimeoutKeepsTheSnapshotOutsideTheConfiguredSourceRoot(t *testing.T
 	status, body := snapshotRouteStatus(t, handler, testPrefix+StatusSuffix)
 	names := watch()
 	t.Logf("timed mount status=%d body=%s snapshots inside configured source=%v", status, body, names)
-	if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeSourceUnreadable) {
+	if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeMountTimeout) {
 		t.Fatalf("timed mount answered %d: %s", status, body)
+	}
+	if strings.Contains(body, CodeSourceUnreadable) {
+		t.Fatalf("timed mount reported the deadline as an unreadable source: %s", body)
 	}
 	if len(names) != 0 {
 		t.Fatalf("the timed-out route staged %v inside the configured source root", names)
+	}
+	after := digestManagerMembers(t, target)
+	for suffix, digest := range before {
+		if after[suffix] != digest {
+			t.Fatalf("the refused read rewrote the target member %q", suffix)
+		}
+	}
+}
+
+// TestMountTimeoutFailsClosedBeforeTheMaterializingSnapshot pins the request
+// chain behind the timeout guard. The preflight guard stops that route before the
+// inspection, but authentication runs first, and a materializing Manager target
+// is authenticated from a private copy whose exclusion check canonicalizes the
+// configured source root — the same root whose lookup just timed out. That
+// canonicalization must not run on the request: the route answers the mount's
+// deadline before the credential read resolves the root, and a scratch directory
+// outside both trees (where a read that proceeded would have succeeded) stays
+// empty.
+func TestMountTimeoutFailsClosedBeforeTheMaterializingSnapshot(t *testing.T) {
+	target := materializingManagerTarget(t, legacySourceDir(t))
+	before := digestManagerMembers(t, target)
+	configured := t.TempDir()
+	scratch := t.TempDir() // Outside both roots: a snapshot here would succeed.
+	t.Setenv("TMPDIR", scratch)
+	handler := newHandler(configured, target)
+	handler.MountTimeout = 20 * time.Millisecond
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	stop := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(stop)
+	handler.lookupMount = func(string) mountResolution {
+		<-release
+		return mountResolution{code: CodeSourceMissing}
+	}
+
+	watch := watchSnapshotDirs(t, scratch)
+	for _, resource := range []string{StatusSuffix, PreflightSuffix} {
+		status, body := snapshotRouteStatus(t, handler, testPrefix+resource)
+		t.Logf("timed materializing mount %s status=%d body=%s", resource, status, body)
+		if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeMountTimeout) {
+			t.Fatalf("timed materializing mount %s answered %d: %s", resource, status, body)
+		}
+		if strings.Contains(body, CodeSourceUnreadable) {
+			t.Fatalf("timed materializing mount %s reported the deadline as an unreadable source: %s", resource, body)
+		}
+	}
+	names := watch()
+	stop()
+	waitForMountFlight(t, handler)
+	if len(names) != 0 {
+		t.Fatalf("the timed-out route staged %v outside both roots", names)
 	}
 	after := digestManagerMembers(t, target)
 	for suffix, digest := range before {

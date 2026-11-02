@@ -35,6 +35,15 @@ var (
 	// tree this operation must not write to.
 	ErrSnapshotRootUnknown = errors.New("upgrade credential snapshot root is unknown")
 
+	// ErrSnapshotRootTimedOut reports a read that would have to stage a private
+	// copy while the configured source root is known but was never inspected:
+	// the mount lookup that would have inspected it outlived its bound.
+	// Canonicalizing that root for the exclusion check is the filesystem call the
+	// bound exists to stop, so the read fails closed instead of re-entering the
+	// mount; the caller answers the mount's deadline, which is a retry and never
+	// a verdict on the source or the presented key.
+	ErrSnapshotRootTimedOut = errors.New("upgrade credential snapshot root timed out")
+
 	// afterSnapshotCopy is the package's synchronous test seam. It runs once
 	// between the copy and the source's second digest, so a test can prove that
 	// a source which gains a WAL or a rewrite at exactly that moment is refused
@@ -162,7 +171,7 @@ func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) 
 		if dir == "" {
 			continue
 		}
-		if pathWithin(scratchPath, canonicalPath(dir)) {
+		if pathWithin(scratchPath, canonicalExclusionRoot(dir)) {
 			// The default is named as such: an operator who never passed
 			// --scratch-dir has to learn that the OS temporary directory is the
 			// one that landed inside the root.
@@ -223,6 +232,12 @@ func canonicalPath(path string) string {
 		current = parent
 	}
 }
+
+// canonicalExclusionRoot resolves one root whose subtree the scratch directory
+// must stay out of. It is the package's synchronous seam for that single
+// filesystem call: a test substitutes it to prove that a root whose mount lookup
+// already timed out is never resolved again. Production never sets it.
+var canonicalExclusionRoot = canonicalPath
 
 // DB returns the read-only handle on the private copy.
 func (s *Snapshot) DB() *sql.DB {

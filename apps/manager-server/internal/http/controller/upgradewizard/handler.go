@@ -335,11 +335,16 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 		// are named here, so a mount lookup that timed out still hands over the
 		// root it resolved. A root the flight never resolved arrives with
 		// rootKnown false and the service refuses the snapshot instead of
-		// staging it in a tree this request could not name.
+		// staging it in a tree this request could not name. A root the flight
+		// did resolve is marked with the timeout that stopped the lookup: the
+		// service refuses a snapshot that would have to resolve it again rather
+		// than putting the filesystem call the bound exists to stop back on this
+		// request.
 		verifyErr = upgradeservice.VerifyManagerCredential(r.Context(), database, upgradeservice.CredentialSnapshotRoots{
-			Target:      filepath.Dir(database),
-			Source:      mount.root,
-			SourceKnown: mount.rootKnown,
+			Target:         filepath.Dir(database),
+			Source:         mount.root,
+			SourceKnown:    mount.rootKnown,
+			SourceTimedOut: mount.code == CodeMountTimeout,
 		}, key)
 	}
 	switch {
@@ -347,6 +352,12 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 		return true
 	case errors.Is(verifyErr, upgradeservice.ErrAdminUnauthorized):
 		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
+	case errors.Is(verifyErr, upgradeservice.ErrSnapshotRootTimedOut):
+		// The mount never answered, and the private copy would have had to
+		// resolve that same root to keep out of it. The mount's own deadline is
+		// the answer here, exactly as it is for the preflight: a retry once the
+		// mount responds, not a verdict on the source or on the key.
+		writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
 	case errors.Is(verifyErr, upgradeservice.ErrCredentialVerifyTimeout):
 		// A deadline is not an unreadable source: the volume may be healthy and
 		// only slow, and the operator's next move is to retry, not to repair it.

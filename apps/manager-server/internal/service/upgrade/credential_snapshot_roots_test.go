@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
@@ -169,6 +170,67 @@ func TestVerifyManagerCredentialRefusesSnapshotUnderTheFilesystemSourceRoot(t *t
 	}
 	if names := snapshotDirsIn(t, scratch); len(names) != 0 {
 		t.Fatalf("the refused read staged %v beneath the filesystem source root", names)
+	}
+	requireUnchangedSource(t, before, sourceEntries(t, targetRoot))
+}
+
+// TestVerifyManagerCredentialFailsClosedWithoutResolvingATimedOutSourceRoot is
+// the no-repeat-filesystem-call half of the mount-timeout contract. When the
+// lookup that would have inspected the configured root outlived its bound, the
+// root was published for the exclusion check but never inspected. A private copy
+// must not canonicalize it: that EvalSymlinks is exactly the call the bound
+// exists to stop, and on the mount that hung it would never return. The read
+// fails closed with the typed deadline instead, and the test's substitute for the
+// exclusion resolver counts the calls to prove none were made. The same read
+// with an answered root still resolves the root and proves the key, so the count
+// is not vacuously zero.
+func TestVerifyManagerCredentialFailsClosedWithoutResolvingATimedOutSourceRoot(t *testing.T) {
+	const key = "timed-out-root-credential"
+	targetRoot, target := materializingCredentialTarget(t, key)
+	scratch := t.TempDir()
+	before := sourceEntries(t, targetRoot)
+	t.Setenv("TMPDIR", scratch)
+
+	original := canonicalExclusionRoot
+	t.Cleanup(func() { canonicalExclusionRoot = original })
+	var resolutions int32
+	canonicalExclusionRoot = func(path string) string {
+		atomic.AddInt32(&resolutions, 1)
+		return original(path)
+	}
+
+	timedOutRoot := t.TempDir()
+	err := VerifyManagerCredential(context.Background(), target, CredentialSnapshotRoots{
+		Target:         targetRoot,
+		Source:         timedOutRoot,
+		SourceKnown:    true,
+		SourceTimedOut: true,
+	}, key)
+	if !errors.Is(err, ErrSnapshotRootTimedOut) {
+		t.Fatalf("timed-out source root = %v, want %s", err, ErrSnapshotRootTimedOut)
+	}
+	if got := atomic.LoadInt32(&resolutions); got != 0 {
+		t.Fatalf("the timed-out source root was resolved %d times for the exclusion check", got)
+	}
+	if names := snapshotDirsIn(t, scratch); len(names) != 0 {
+		t.Fatalf("the refused read staged %v in the temporary directory", names)
+	}
+	requireUnchangedSource(t, before, sourceEntries(t, targetRoot))
+
+	// The answered root takes the normal path: the exclusion resolver runs and
+	// the key is proved from a private copy.
+	if err := VerifyManagerCredential(context.Background(), target, CredentialSnapshotRoots{
+		Target:      targetRoot,
+		Source:      timedOutRoot,
+		SourceKnown: true,
+	}, key); err != nil {
+		t.Fatalf("answered source root = %v, want a proved credential", err)
+	}
+	if got := atomic.LoadInt32(&resolutions); got == 0 {
+		t.Fatal("the exclusion resolver was never called for an answered source root")
+	}
+	if names := snapshotDirsIn(t, scratch); len(names) != 0 {
+		t.Fatalf("the proved read left %v in the temporary directory", names)
 	}
 	requireUnchangedSource(t, before, sourceEntries(t, targetRoot))
 }
