@@ -225,19 +225,6 @@ func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sour
 	return db, schema, nil
 }
 
-// openSourceDatabaseFile opens the DSN without touching the file itself: SQLite
-// reads lazily on the first statement, which is why a caller that has to prove
-// the file identity does so around that first read.
-func openSourceDatabaseFile(path string, immutable bool) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, immutable))
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	return db, nil
-}
-
 // inspectSourceDatabase applies the shared database file policy and rejects a
 // file with no content, which is not a readable source. A missing database is
 // ErrSourceDatabaseMissing rather than a host error, because it is the
@@ -256,92 +243,40 @@ func inspectSourceDatabase(path string) (os.FileInfo, error) {
 	return info, nil
 }
 
-// credentialSource is the read-only handle of one credential read. It owns
-// either a private copy of a WAL source or a purely immutable handle on a
-// cleanly stopped source, plus the source descriptor that identifies the file
-// the read was checked against. Nothing is ever opened in place in a way SQLite
-// could write through.
+// credentialSource is the read-only handle of one credential read: a private
+// copy of a preserved source and its sidecars, taken and proved by OpenSnapshot.
+// Nothing is ever opened in place, so SQLite cannot create or update a sidecar
+// beside the source and cannot miss one that appears while the copy is taken.
 type credentialSource struct {
-	// db is the immutable handle on a cleanly stopped source file. The source
-	// has no -wal/-shm beside it, so SQLite neither creates nor updates one.
-	db *sql.DB
-	// snapshot is the private copy of a source that still carries a WAL. The
-	// read joins the WAL in scratch space instead of beside the source.
 	snapshot *Snapshot
-	// file pins the inspected source descriptor, so the read can be checked
-	// against the file it was inspected as instead of a path that may have been
-	// repointed.
-	file      *os.File
-	path      string
-	inspected os.FileInfo
 }
 
 func (s *credentialSource) database() *sql.DB {
-	if s == nil {
+	if s == nil || s.snapshot == nil {
 		return nil
 	}
-	if s.snapshot != nil {
-		return s.snapshot.DB()
-	}
-	return s.db
-}
-
-// verifyUnchanged is the read's closing half of the file policy: it runs after
-// the first real read and refuses a path that no longer names the file that was
-// inspected. Without it a swap between the inspection and the lazy open would
-// compare a credential from a file this step never assessed. A private snapshot
-// proves its own copy against the source digests while it is taken, so there is
-// nothing left to re-check afterwards.
-func (s *credentialSource) verifyUnchanged() error {
-	if s == nil {
-		return ErrSourceDatabaseChanged
-	}
-	if s.snapshot != nil {
-		return nil
-	}
-	if s.file == nil {
-		return ErrSourceDatabaseChanged
-	}
-	if err := processlock.OpenedDatabase(s.file, s.inspected); err != nil {
-		return err
-	}
-	current, err := os.Lstat(s.path)
-	if err != nil {
-		return err
-	}
-	if !current.Mode().IsRegular() || !os.SameFile(s.inspected, current) {
-		return ErrSourceDatabaseChanged
-	}
-	return nil
+	return s.snapshot.DB()
 }
 
 func (s *credentialSource) close() error {
 	if s == nil {
 		return nil
 	}
-	var err error
-	if s.db != nil {
-		err = s.db.Close()
-	}
-	if s.file != nil {
-		err = errors.Join(err, s.file.Close())
-	}
-	if s.snapshot != nil {
-		err = errors.Join(err, s.snapshot.Close())
-	}
-	return err
+	return s.snapshot.Close()
 }
 
 // openCredentialSource opens the one row a credential check reads without ever
 // opening the 1.x source in place.
 //
-// A plain mode=ro open of a WAL database still creates a -wal/-shm beside it and
-// can update the WAL index, which writes into a source this step must preserve
-// byte for byte. A cleanly stopped source — no -wal beside the database — is
-// therefore opened with immutable=1, which SQLite treats as "no sidecars, no
-// writes at all", and a source that still carries a WAL is read through the same
-// private snapshot the preflight takes. Neither path creates or modifies a
-// source file.
+// Every open of the source is a write risk, not only a WAL one. `mode=ro` plus
+// query_only forbids SQL writes but still lets SQLite create a -wal/-shm beside
+// the database, and an immutable handle on a file that was cold when it was
+// inspected reads a state that a writer may already have replaced with a newer
+// one (the new WAL is simply not seen). The source is therefore always read
+// through the same private snapshot the preflight takes: the copy is digested
+// before and after it is made, so a source that gains a WAL, a checkpoint or a
+// rewrite while the read is being set up is refused with ErrSourceDatabaseChanged
+// instead of answering from a stale or mixed state.
 //
 // It deliberately runs no quick_check: that read scans every page of the file,
 // and every authenticated request — including every status poll — proves the
@@ -349,51 +284,21 @@ func (s *credentialSource) close() error {
 // route that never sees the database otherwise. The full preflight keeps the
 // check where the source is actually being qualified.
 func openCredentialSource(ctx context.Context, path string) (*credentialSource, error) {
-	inspected, err := inspectSourceDatabase(path)
+	if _, err := inspectSourceDatabase(path); err != nil {
+		return nil, err
+	}
+	// The private copy must never land in the tree this step preserves, whichever
+	// state the source is in: the default scratch directory is checked too,
+	// because a host whose TMPDIR points into the source root would otherwise
+	// hide a full database copy there.
+	if err := ValidateScratchDir("", filepath.Dir(path), ""); err != nil {
+		return nil, credentialSourceError(err)
+	}
+	snapshot, err := OpenSnapshot(ctx, path, "")
 	if err != nil {
-		return nil, err
+		return nil, credentialSourceError(err)
 	}
-	carriesWAL := sourceCarriesWAL(path)
-	if carriesWAL {
-		// A private copy is the only read-only way to join a live WAL, and it
-		// must never land in the source tree this step preserves.
-		if err := ValidateScratchDir("", filepath.Dir(path), ""); err != nil {
-			return nil, credentialSourceError(err)
-		}
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := processlock.OpenedDatabase(file, inspected); err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	source := &credentialSource{file: file, path: path, inspected: inspected}
-	if carriesWAL {
-		snapshot, snapshotErr := OpenSnapshot(ctx, path, "")
-		if snapshotErr != nil {
-			_ = source.close()
-			return nil, credentialSourceError(snapshotErr)
-		}
-		source.snapshot = snapshot
-		return source, nil
-	}
-	db, err := openSourceDatabaseFile(path, true)
-	if err != nil {
-		_ = source.close()
-		return nil, err
-	}
-	source.db = db
-	return source, nil
-}
-
-// sourceCarriesWAL reports whether a WAL beside the database can still hold
-// committed rows. An empty WAL holds nothing: SQLite cannot need it, and an
-// immutable read never looks at it.
-func sourceCarriesWAL(path string) bool {
-	info, err := os.Lstat(path + "-wal")
-	return err == nil && info.Size() > 0
+	return &credentialSource{snapshot: snapshot}, nil
 }
 
 // credentialSourceError translates the shared readers' verdicts into the

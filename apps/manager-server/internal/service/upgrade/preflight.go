@@ -541,12 +541,14 @@ func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 // the operator did not mount the source. Naming the file directly keeps the
 // verified file and the resolved file the same one.
 //
-// It reads a 1.x source without opening it in place: a cleanly stopped source
-// (no -wal beside it) is opened immutable, and a source that still carries a WAL
-// is read through a private snapshot. A plain mode=ro open would create a
-// -wal/-shm beside a preserved source and write into it. Callers passing the
-// Manager's own store use VerifyManagerCredential instead: that store is this
-// process's live database, not a source volume to preserve.
+// It reads a 1.x source without ever opening it in place: the database and its
+// sidecars are copied into private scratch space by OpenSnapshot, the source is
+// digested before and after the copy, and only the copy is opened. `mode=ro`
+// would still create a -wal/-shm beside a preserved source, and an immutable
+// handle on a source that was cold when it was inspected would silently miss a
+// WAL that appears while the read is being set up. Callers passing the Manager's
+// own store use VerifyManagerCredential instead: that store is this process's
+// live database, not a source volume to preserve.
 func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
@@ -562,6 +564,12 @@ func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
 	defer cancel()
 	source, openErr := openCredentialSource(ctx, databasePath)
 	if openErr != nil {
+		// The bound is placed before and during the snapshot, so a read that
+		// outlives it fails here instead of in the query. That is a deadline, not
+		// an unreadable source and never a verdict on the key.
+		if ctx.Err() != nil {
+			return credentialTimeout(openErr)
+		}
 		return openErr
 	}
 	defer func() { _ = source.close() }()
@@ -651,19 +659,16 @@ func CredentialDatabase(legacyRoot, managerDatabase string) string {
 	return CredentialDatabaseFrom(database, managerDatabase)
 }
 
-// verifyAdminCredential reads the one credential row from an opened source,
-// proves the read came from the file that was inspected, and compares the key.
-// The read and the identity check are one function so nothing can be compared
-// from an uninspected file even if the caller's open raced a swap.
+// verifyAdminCredential reads the one credential row from the private copy,
+// proves the copy was taken from one stable source state (OpenSnapshot does that
+// while it copies), and compares the key. The copy and the comparison are one
+// path so nothing can be compared from a file this step never inspected.
 func verifyAdminCredential(ctx context.Context, source *credentialSource, key string) error {
 	credential, found, err := setting.New(source.database()).LoadAdminCredential(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return credentialTimeout(err)
 		}
-		return err
-	}
-	if err := source.verifyUnchanged(); err != nil {
 		return err
 	}
 	if !found || !security.VerifyAdminKey(credential, key) {

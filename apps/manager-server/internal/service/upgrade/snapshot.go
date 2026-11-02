@@ -26,6 +26,13 @@ var (
 	// inspect a WAL database. It is also the code for a scratch directory that
 	// would land inside a tree the operation must not write to.
 	ErrSnapshotFailed = errors.New("upgrade database snapshot could not be created")
+
+	// afterSnapshotCopy is the package's synchronous test seam. It runs once
+	// between the copy and the source's second digest, so a test can prove that
+	// a source which gains a WAL or a rewrite at exactly that moment is refused
+	// instead of answering from the state it held before. Production never sets
+	// it.
+	afterSnapshotCopy func()
 )
 
 // databaseSidecars are the files SQLite needs to see every committed row of a
@@ -73,6 +80,14 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	snapshot := &Snapshot{dir: dir, path: filepath.Join(dir, filepath.Base(databasePath))}
 	copied, err := copyDatabaseFiles(ctx, databasePath, dir)
 	if err == nil {
+		// A source that starts writing while its private copy is being taken
+		// must be refused, not read as the state it held before the write. The
+		// second digest is what proves it, so a test places the write between the
+		// copy and that digest through this synchronous seam. Production never
+		// sets it.
+		if afterSnapshotCopy != nil {
+			afterSnapshotCopy()
+		}
 		var after map[string]databaseFileDigest
 		if after, err = digestDatabaseFiles(databasePath); err == nil {
 			if !sameDigests(before, after) || !sameDigests(before, copied) {

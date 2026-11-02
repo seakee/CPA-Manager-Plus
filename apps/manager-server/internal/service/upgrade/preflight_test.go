@@ -1717,17 +1717,21 @@ func corruptDatabasePage(t *testing.T, path string, page int) {
 
 const (
 	// credentialFixtureMegabytes keeps the fixture large enough that a whole-file
-	// scan, not the single credential page, is what a source of this shape costs.
-	credentialFixtureMegabytes = 256
-	// credentialBudget is far below a whole-file scan of that fixture and far
-	// below the credential read's own timeout.
-	credentialBudget = time.Second
+	// integrity scan and the private copy are both real work, without making one
+	// authenticated request a multi-second test.
+	credentialFixtureMegabytes = 8
 )
 
 // TestVerifyAdminReadsOnlyTheCredentialRow is the credential reader's contract:
-// a source whose whole-file integrity check fails, and whose size dwarfs any
-// credential budget, still proves the right key quickly. Preflight, which does
-// qualify the source, still runs the check and blocks on it.
+// a source whose whole-file integrity check fails, and whose size dwarfs the one
+// row the read needs, still proves the right key. Preflight, which does qualify
+// the source, still runs the check and blocks on it.
+//
+// The source itself is read through a private copy (openCredentialSource), so
+// this test no longer claims a per-read time budget: copying and digesting the
+// source is what never reading it in place costs. What it still separates is the
+// query — no quick_check and no schema scan — because the corrupt page outside
+// the credential tree must not become a credential verdict.
 func TestVerifyAdminReadsOnlyTheCredentialRow(t *testing.T) {
 	const key = "legacy-manager-credential"
 	fixture := largeCredentialSource(t, key, credentialFixtureMegabytes)
@@ -1741,11 +1745,7 @@ func TestVerifyAdminReadsOnlyTheCredentialRow(t *testing.T) {
 	if err := VerifyAdmin(context.Background(), fixture.root, key); err != nil {
 		t.Fatalf("verify the source credential: %v", err)
 	}
-	if elapsed := time.Since(started); elapsed > credentialBudget {
-		t.Fatalf("credential read took %s, budget %s", elapsed, credentialBudget)
-	} else {
-		t.Logf("credential read on a %d MB source: %s", credentialFixtureMegabytes, elapsed)
-	}
+	t.Logf("credential read on a %d MB source (private copy included): %s", credentialFixtureMegabytes, time.Since(started))
 	if err := VerifyAdmin(context.Background(), fixture.root, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
 		t.Fatalf("foreign key = %v, want %v", err, ErrAdminUnauthorized)
 	}
@@ -1813,7 +1813,10 @@ func requireUnchangedSource(t *testing.T, before, after map[string]sourceEntry) 
 // TestCredentialReadLeavesAWALSourceUnchanged is the regression for a read that
 // opened the 1.x source in place: mode=ro plus query_only forbids SQL writes but
 // still lets SQLite create the WAL index, so a cleanly stopped WAL source went
-// from five entries to seven on the first authenticated request.
+// from five entries to seven on the first authenticated request. The fixture is
+// exactly that cold source — WAL journal mode, writer closed, no -wal/-shm beside
+// it — which is also the case the later cold-source shortcut (immutable=1) read in
+// place; both now go through the private copy.
 func TestCredentialReadLeavesAWALSourceUnchanged(t *testing.T) {
 	const key = "legacy-manager-credential"
 	fixture := newCredentialFixture(t, key)
@@ -2054,11 +2057,13 @@ func TestMountDatabaseAppliesTheCredentialFilePolicy(t *testing.T) {
 	}
 }
 
-// TestVerifyAdminRefusesASwapBetweenInspectionAndRead proves the credential that
-// is compared belongs to the file that was inspected. SQLite opens lazily, so
-// the swap lands between the inspection and the first read; the read itself
-// still succeeds, and the identity comparison is what refuses the credential.
-func TestVerifyAdminRefusesASwapBetweenInspectionAndRead(t *testing.T) {
+// TestVerifyAdminComparesTheCredentialItCopiedNotThePath proves the compared
+// credential belongs to the source state the read copied. The private copy is
+// taken before the query, so replacing the path afterwards cannot substitute a
+// credential at all: the copied key still verifies, and the replacement's key is
+// a foreign key — never a source-change verdict, because the copy was never
+// touched by the swap.
+func TestVerifyAdminComparesTheCredentialItCopiedNotThePath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows refuses to replace an open file, so the swap cannot be staged")
 	}
@@ -2075,14 +2080,56 @@ func TestVerifyAdminRefusesASwapBetweenInspectionAndRead(t *testing.T) {
 	if err := os.Rename(replacement.dbPath, fixture.dbPath); err != nil {
 		t.Fatalf("swap fixture database: %v", err)
 	}
-	// The replacement carries a key of its own: without the identity comparison
-	// this read would prove a credential from a file nothing inspected.
+	// The copy is the inspected file. Reading it again proves the key it holds,
+	// and the replacement's key cannot be proved from a file this read copied.
+	if err := verifyAdminCredential(context.Background(), source, inspectedKey); err != nil {
+		t.Fatalf("the copied source's own key = %v, want it verified", err)
+	}
 	err = verifyAdminCredential(context.Background(), source, replacementKey)
+	if !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("the replacement's key against the copied source = %v, want %v", err, ErrAdminUnauthorized)
+	}
+	if errors.Is(err, ErrSourceDatabaseChanged) {
+		t.Fatalf("a swap after the copy was reported as a source change: %v", err)
+	}
+}
+
+// TestCredentialReadRefusesAWALThatAppearsWhileTheCopyIsTaken is the regression
+// for reading a cold source in place. A source with no -wal beside it was opened
+// immutable, which reads exactly the database file and never looks at a WAL that
+// appears afterwards: a writer that started during the read went unnoticed and
+// the key was proved against the state before it. The private copy is digested
+// before and after it is taken, so the same race is a typed refusal.
+func TestCredentialReadRefusesAWALThatAppearsWhileTheCopyIsTaken(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := newCredentialFixture(t, key)
+	if _, err := os.Lstat(fixture.dbPath + "-wal"); !os.IsNotExist(err) {
+		t.Fatalf("fixture WAL = %v; want a cleanly stopped source", err)
+	}
+	previous := afterSnapshotCopy
+	t.Cleanup(func() { afterSnapshotCopy = previous })
+	// The writer that appears at the copy boundary holds its own credential in a
+	// WAL that is still there when the source is digested again.
+	afterSnapshotCopy = func() {
+		writer, err := sql.Open("sqlite", fixture.dbPath)
+		if err != nil {
+			t.Fatalf("open the writer that appears mid-copy: %v", err)
+		}
+		writer.SetMaxOpenConns(1)
+		t.Cleanup(func() { _ = writer.Close() })
+		execFixture(t, writer, `pragma wal_autocheckpoint = 0`)
+		execFixture(t, writer, `insert into settings (key, value, updated_at_ms) values ('written-by-the-new-writer', '1', 1)`)
+		if info, err := os.Lstat(fixture.dbPath + "-wal"); err != nil || info.Size() == 0 {
+			t.Fatalf("mid-copy WAL = %v, %v; want committed rows in the WAL", info, err)
+		}
+	}
+
+	err := VerifyAdmin(context.Background(), fixture.root, key)
 	if !errors.Is(err, ErrSourceDatabaseChanged) {
-		t.Fatalf("swapped source = %v, want %v", err, ErrSourceDatabaseChanged)
+		t.Fatalf("a source that began writing during the copy = %v, want %v", err, ErrSourceDatabaseChanged)
 	}
 	if errors.Is(err, ErrAdminUnauthorized) {
-		t.Fatalf("the swap was reported as a credential verdict: %v", err)
+		t.Fatalf("a source that began writing was reported as a credential verdict: %v", err)
 	}
 }
 
