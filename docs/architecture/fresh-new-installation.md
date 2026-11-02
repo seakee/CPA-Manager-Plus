@@ -1384,7 +1384,12 @@ Both wizards render one shared `FreshAdoptFlow`:
   committed silently. The body a previous read built stops being confirmable
   before that rebuild: the rebuild observes the destination, and a read that
   fails leaves its failure on screen with the confirmation unavailable, until a
-  later read rebuilds a body again. The durable staged record answers a lost
+  later read rebuilds a body again. The address and key fields are closed while an
+  action runs, and a rebuilt body is checked against the inputs it was built from
+  once the observation returns: a body whose inputs the screen has moved past is
+  discarded with its own message instead of becoming confirmable, so no path
+  offers a confirmation of anything but the values the operator can still see.
+  The durable staged record answers a lost
   reply, never a failed read: it does not bring back a body the screen no longer
   matches. The plugin opt-in is locked to the recorded value as soon as
   a read finds the record staged, with its own explanation, because the

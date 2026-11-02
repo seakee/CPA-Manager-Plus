@@ -193,6 +193,13 @@ export function FreshAdoptFlow({
   // it reads the latest one through a ref instead of a dependency.
   const carrierRef = useRef(carrier);
   carrierRef.current = carrier;
+  // The operator's own inputs as the screen holds them. A rebuilt body is only
+  // confirmable while these are still the inputs it was built from: the rebuild
+  // awaits the destination read with the fields on screen, so a value typed in
+  // that window would otherwise leave the page showing one address and holding a
+  // body built from the one before it.
+  const screenInputs = useRef({ baseUrl, managementKey });
+  screenInputs.current = { baseUrl, managementKey };
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -469,27 +476,49 @@ export function FreshAdoptFlow({
   // and key are the operator's, and the destination observation is a read:
   // rebuilding a body never writes. The caller passes the recorded choice because
   // a read of the record may have just replaced this render's checkpoint.
+  //
+  // A rebuilt body belongs to the inputs it was built from. Nothing else in this
+  // flow may make a body confirmable, so this is where the page proves it: the
+  // inputs are checked once the observation returns, and a body whose inputs the
+  // screen has moved past is discarded instead of offered for confirmation.
   async function recordedBody(pluginsEnabled: boolean): Promise<Record<string, unknown> | null> {
+    // Everything up to the observation is synchronous, so these are the values
+    // the operator sees at the click that started this rebuild.
+    const inputs = { baseUrl, managementKey };
     let normalized: string;
     try {
-      normalized = normalizeCPAAddress(baseUrl);
+      normalized = normalizeCPAAddress(inputs.baseUrl);
     } catch {
       setError(adoptBlockerText('management_connection_invalid'));
       return null;
     }
-    if (!validManagementKey(managementKey)) {
+    if (!validManagementKey(inputs.managementKey)) {
       setError(adoptBlockerText('adoption_source_read_unavailable'));
       return null;
     }
-    return adoptStrategyBody(
+    const next = adoptStrategyBody(
       {
         baseUrl: normalized,
-        managementKey,
+        managementKey: inputs.managementKey,
         // The recorded choice is the only one this attempt accepts.
         pluginsEnabled,
       },
       await carrier.observeTarget()
     );
+    if (!alive.current) return null;
+    // The observation is this rebuild's only await, and the fields stay on screen
+    // for it. A body built from inputs the screen no longer holds is not the
+    // attempt the operator is looking at, so it is dropped instead of becoming
+    // confirmable: the fields stay open and the next click rebuilds from what
+    // they show.
+    if (
+      screenInputs.current.baseUrl !== inputs.baseUrl ||
+      screenInputs.current.managementKey !== inputs.managementKey
+    ) {
+      setError(adoptText('inputsChanged'));
+      return null;
+    }
+    return next;
   }
 
   // A resume is a committed replay: the server skips every item the record
@@ -675,6 +704,12 @@ export function FreshAdoptFlow({
                 autoComplete="off"
                 spellCheck={false}
                 value={baseUrl}
+                // The body a confirmation sends is built from these fields, and
+                // building it awaits the destination read. Editing while that
+                // read runs would leave the page showing one address and holding
+                // another, so the fields are closed for the duration of an
+                // action, exactly like the buttons that start one.
+                disabled={busy}
                 onChange={(event) => setBaseUrl(event.target.value)}
               />
               <p className="journey-help">{adoptText('baseURLHelp')}</p>
@@ -691,6 +726,10 @@ export function FreshAdoptFlow({
                 autoComplete="off"
                 spellCheck={false}
                 value={managementKey}
+                // Same rule as the address: the key in the body being built is
+                // this field's value, and a value typed into a field that is
+                // already being read is not the one that would be sent.
+                disabled={busy}
                 onChange={(event) => setManagementKey(event.target.value)}
               />
               <p className="journey-help">{adoptText('managementKeyHelp')}</p>
@@ -704,7 +743,7 @@ export function FreshAdoptFlow({
                   checked={
                     pluginsLocked ? checkpoint?.pluginsEnabled === true : plugins
                   }
-                  disabled={pluginsLocked}
+                  disabled={pluginsLocked || busy}
                   onChange={(event) => setPlugins(event.target.checked)}
                 />
                 <span>{adoptText('plugins')}</span>

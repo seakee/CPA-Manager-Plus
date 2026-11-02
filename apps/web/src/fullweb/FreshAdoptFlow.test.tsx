@@ -651,6 +651,68 @@ it('offers no confirmation when the staged body cannot be rebuilt from the input
   expect(maybe('adopt-migration')).toHaveLength(1);
 });
 
+it('does not let a staged rebuild become confirmable from inputs the screen has moved past', async () => {
+  // The first POST's reply is lost and its staging lands later, so the next read
+  // finds the attempt staged and rebuilds the confirmation body from the inputs
+  // on screen. That rebuild reads the destination, and the fields are on screen
+  // while it does: the body must belong to the inputs it was built from, never to
+  // a value the operator typed after it started.
+  const server = await adoptServer({ lateStage: 2 });
+  await click('adopt-read-inventory');
+  await settle();
+  expect(maybe('adopt-read-inventory')).toHaveLength(1);
+
+  const original = server.fetcher.getMockImplementation()!;
+  const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+  let entered = false;
+  server.fetcher.mockImplementation(async (url, init) => {
+    if (String(url).endsWith('/installation/runtime')) {
+      entered = true;
+      await gate;
+    }
+    return original(url, init);
+  });
+  await click('adopt-read-inventory');
+  await settle();
+  expect(entered).toBe(true);
+  // The rebuild is reading the destination: every field it reads and every
+  // action that would start another one is closed for the duration.
+  expect(byID('adopt-source-url').props.disabled).toBe(true);
+  expect(byID('adopt-management-key').props.disabled).toBe(true);
+  expect(byID('adopt-plugin-optin').props.disabled).toBe(true);
+  expect(byID('adopt-use-key').props.disabled).toBe(true);
+  expect(byID('adopt-confirm-migrate').props.disabled).toBe(true);
+
+  // A change that still reaches the screen state in that window is what the
+  // rebuild's own check is for: its body was built from the address before it.
+  await input('adopt-source-url', 'http://source-cpa-2:8317');
+  release();
+  await settle();
+
+  // The rebuilt body is discarded rather than offered: the page says so, and
+  // there is still nothing to confirm.
+  expect(text()).toContain(adoptText('inputsChanged'));
+  expect(byID('adopt-source-url').props.value).toBe('http://source-cpa-2:8317');
+  expect(byID('adopt-confirm-migrate').props.disabled).toBe(true);
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(1);
+  expect(maybe('adopt-migration')).toHaveLength(0);
+
+  // The next rebuild belongs to the corrected address, and the record's staged
+  // attempt is not it: the server refuses it by code and nothing migrates.
+  await click('adopt-use-key');
+  await settle();
+  expect(text()).not.toContain(adoptText('inputsChanged'));
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(server.strategyBodies.at(-1)?.baseUrl).toBe('http://source-cpa-2:8317');
+  expect(text()).toContain(adoptText('keyMismatch'));
+  expect(maybe('adopt-migration')).toHaveLength(0);
+});
+
 it('does not commit when a lost staging reply lands between two reads', async () => {
   // The first POST's reply is lost while the source read is still running, so the
   // staging lands after the page already decided nothing was staged. The second

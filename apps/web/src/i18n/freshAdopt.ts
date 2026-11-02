@@ -105,6 +105,8 @@ const en = {
     'This attempt recorded a different plugin choice. Reload the page and resume with the recorded choice.',
   keyMismatch:
     'The source key does not match this attempt. Enter the same key you used for the inventory.',
+  inputsChanged:
+    'The source address or key changed while the destination was being read, so this page discarded the confirmation. Check the values and use the key again.',
 };
 
 const zh: typeof en = {
@@ -181,6 +183,8 @@ const zh: typeof en = {
   guidanceFallback: '请在目标 CPA 上检查该项。',
   pluginConflict: '本次操作记录的插件选项不同。请刷新页面并按已记录的选项继续。',
   keyMismatch: '源密钥与本次操作不一致。请填入读取清单时使用的同一个密钥。',
+  inputsChanged:
+    '读取目标时源地址或密钥发生了变化，因此本页已放弃这次确认。请核对填写内容后再次使用该密钥。',
 };
 
 const tw: typeof en = {
@@ -257,6 +261,8 @@ const tw: typeof en = {
   guidanceFallback: '請在目標 CPA 上檢查該項目。',
   pluginConflict: '本次操作記錄的外掛選項不同。請重新整理頁面並依已記錄的選項繼續。',
   keyMismatch: '來源金鑰與本次操作不一致。請填入讀取清單時使用的同一個金鑰。',
+  inputsChanged:
+    '讀取目標時來源位址或金鑰發生變化，因此本頁已捨棄這次確認。請核對填寫內容後再次使用該金鑰。',
 };
 
 const ru: typeof en = {
@@ -355,6 +361,8 @@ const ru: typeof en = {
     'Для этой попытки записан другой выбор плагинов. Перезагрузите страницу и продолжите с записанным выбором.',
   keyMismatch:
     'Ключ источника не совпадает с этой попыткой. Введите тот же ключ, что и при чтении состава.',
+  inputsChanged:
+    'Адрес или ключ источника изменились во время чтения целевого CPA, поэтому страница отменила подтверждение. Проверьте значения и снова используйте этот ключ.',
 };
 
 // The source inventory references. Each one is a closed, product-owned name, so
