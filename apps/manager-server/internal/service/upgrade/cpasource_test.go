@@ -311,6 +311,46 @@ func TestCPASourceVersionGateAcceptsTheFloorAndAbove(t *testing.T) {
 	}
 }
 
+// TestCPASourceVersionGateComparesADeclaredReleaseWithTheV8Layout pins the
+// direction of the v8 declaration check. A file that declares `config-version: 8`
+// was written by a v8 release, so the operator's declared release is accepted
+// only when it is a v8 one: the earlier comparison ran from the v8 constant
+// towards the declaration, which accepted every release at or below v8 and
+// refused the v8 releases the file actually came from.
+func TestCPASourceVersionGateComparesADeclaredReleaseWithTheV8Layout(t *testing.T) {
+	config := "config-version: 8\napi-keys:\n  - \"legacy-client-key-1\"\n"
+	cases := []struct {
+		declared string
+		accepted bool
+	}{
+		{declared: "v8.0.13", accepted: true},
+		{declared: "8.0.0", accepted: true},
+		{declared: "9.0.0", accepted: false},
+		{declared: "7.3.4", accepted: false},
+		{declared: "7.0.12", accepted: false},
+		{declared: "6.9.0", accepted: false},
+	}
+	for _, testCase := range cases {
+		legacyRoot, _ := writeCPAFixture(t, config, nil)
+		source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: testCase.declared})
+		if testCase.accepted {
+			if err != nil {
+				t.Fatalf("a config-version: 8 source declared as %s was refused: %v", testCase.declared, err)
+			}
+			if source.version != testCase.declared {
+				t.Fatalf("source version = %q, want the declared %q", source.version, testCase.declared)
+			}
+			continue
+		}
+		if err == nil {
+			t.Fatalf("a config-version: 8 source declared as %s was accepted", testCase.declared)
+		}
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+			t.Fatalf("%s produced %v (code %q), want %s", testCase.declared, err, code, UpgradeErrorCPAVersionUnsupported)
+		}
+	}
+}
+
 // TestCPASourceVersionGateRefusesWhenNoReleaseIsNamed pins the "never guess"
 // rule for the one input a v7 file cannot provide: it has no version of its own.
 func TestCPASourceVersionGateRefusesWhenNoReleaseIsNamed(t *testing.T) {

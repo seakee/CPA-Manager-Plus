@@ -536,7 +536,12 @@ func (s *cpaManagedSource) gateVersion(document map[string]any, declared string)
 			s.version = "v8"
 			return nil
 		}
-		if parsed, ok := parseCPAVersion(declaredVersion); !ok || !(cpaVersion{major: 8}).atLeast(parsed) {
+		// A file declaring config-version 8 is a v8 document whatever release
+		// wrote it, so the operator's declared release has to be a v8 one. The
+		// comparison runs from the declared release, not the other way round: a
+		// declaration below v8 contradicts the layout, and a declaration above v8
+		// (9.x) describes a generation whose file shape this import has not read.
+		if parsed, ok := parseCPAVersion(declaredVersion); !ok || parsed.major != 8 {
 			return newUpgradeError(UpgradeErrorCPAVersionUnsupported,
 				"the declared CPA version does not describe the v8 configuration this source holds, so it was not imported", nil)
 		}
