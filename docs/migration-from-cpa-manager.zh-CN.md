@@ -141,6 +141,7 @@ Plus 会把 CPA Management Key 加密存储到 SQLite。默认数据密钥位于
 - 先停止 Manager Server：该命令持有 v2 数据根进程锁，锁被占用时会以 `upgrade_store_locked`（退出码 1）拒绝。
 - 只有当 `--legacy` 目录就是 `copy-in` 步骤记录的那个目录时才会读取它；换成另一棵树会在任何读取之前以 `upgrade_cpa_source_root_mismatch` 拒绝。
 - 目标自己的路径永远不会被复制：目标的管理密钥、监听地址、端口、插件根目录、凭证目录和客户端密钥列表都保留目标自身的值。
+- 来源版本取 `--cpa-version` 指定的确切版本，或 stack 声明的 `cli-proxy-api` 镜像 tag。1.x 安装在 `compose.yaml` 里写的是 `image: ${CPA_IMAGE}`，因此读取器只从旁边的 `.env` 解析这一个变量；`.env` 里的其他值不会被读取、保留或报告。移动 tag、digest 或无法解析的引用都不构成版本，导入会以 `upgrade_cpa_version_required` 拒绝，而不是猜测。
 - 目标请求一旦记录就不可变。本步骤自行创建目标时，会在创建之前记录生成的密钥（用 `/data/data.key` 加密）、插件选择、客户端密钥集合和 operation ID，重试会原样重放该请求。已记录的尝试不会重新生成密钥；Supervisor 报告 stage/start 终态失败后，下一次运行才按 Supervisor 的 supersede 约定用新的 operation ID 取代它。试图改变插件选择、客户端密钥集合或目标 URL 的重试会以 `upgrade_cpa_destination_request_changed` 拒绝。
 - 目标在任何写入之前完成绑定：已处于 ready 的目标会先用本次导入的客户端密钥验证，携带其他密钥的 CPA 会以 `upgrade_cpa_import_target_foreign` 拒绝，且不会收到任何配置或凭证。既没有记录也没有提供密钥的 ready 目标需要 `--destination-management-key-file`，否则以 `upgrade_cpa_destination_key_required` 拒绝。
 - 成功后，目标 URL 和同一个管理密钥会写入 Manager 自身的 CPA 连接（`manager_config_v1` 及其 legacy setup 镜像），重启后控制台仍能连上目标；其他 Manager 设置保持不变。若 Manager 已持有指向另一个 CPA 的连接，本步骤会以 `upgrade_cpa_connection_conflict` 拒绝而不是改指；请在停止 Manager Server 后显式重绑该连接（`store-cpa-connection --repair-conflict`）再重跑，已记录的目标密钥会被复用。

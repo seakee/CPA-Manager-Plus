@@ -488,6 +488,90 @@ func TestCPASourceVersionComesFromTheStackFile(t *testing.T) {
 	}
 }
 
+// TestCPASourceVersionComesFromTheInstallerStack is the Low finding: a real v1
+// install writes compose.yaml with `image: ${CPA_IMAGE}` and the release in
+// .env, so a reader that only accepts a literal docker-compose.yml image never
+// sees a version. The release must come from the installer's own files.
+func TestCPASourceVersionComesFromTheInstallerStack(t *testing.T) {
+	legacyRoot, cpaDirectory := writeCPAFixture(t, v7FixtureConfig, nil)
+	installDir := filepath.Dir(cpaDirectory)
+	compose := "services:\n" +
+		"  cli-proxy-api:\n" +
+		"    image: ${CPA_IMAGE}\n" +
+		"    restart: unless-stopped\n" +
+		"  cpa-manager-plus:\n" +
+		"    image: ${CPAMP_IMAGE}\n"
+	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"), []byte(compose), 0o600); err != nil {
+		t.Fatalf("write the installer compose file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(installDir, ".env"),
+		[]byte("COMPOSE_PROJECT_NAME=cpamp\nCPAMP_ADMIN_KEY=cpamp-admin-secret-value\nCPA_IMAGE=eceasy/cli-proxy-api:v7.0.12\n"), 0o600); err != nil {
+		t.Fatalf("write the installer environment file: %v", err)
+	}
+	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionUnsupported {
+		t.Fatalf("the installer's v7.0.12 produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionUnsupported)
+	}
+	// The file holds the admin key; a refusal must never echo a value from it.
+	if strings.Contains(err.Error(), "cpamp-admin-secret-value") {
+		t.Fatalf("the refusal leaks a value from .env: %v", err)
+	}
+
+	// The floor release is accepted from the same two files.
+	if err := os.WriteFile(filepath.Join(installDir, ".env"),
+		[]byte("CPA_IMAGE=eceasy/cli-proxy-api:v7.3.4\n"), 0o600); err != nil {
+		t.Fatalf("rewrite the installer environment file: %v", err)
+	}
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+	if err != nil {
+		t.Fatalf("the installer's v7.3.4 was refused: %v", err)
+	}
+	if source.version != "7.3.4" {
+		t.Fatalf("source version = %q, want 7.3.4", source.version)
+	}
+}
+
+// TestCPASourceVersionStaysUndeterminedWhenTheStackCannotNameIt pins the
+// fail-closed side of the same reader: an unresolvable reference is not a
+// release, and a file that cannot be read is not a declaration.
+func TestCPASourceVersionStaysUndeterminedWhenTheStackCannotNameIt(t *testing.T) {
+	legacyRoot, cpaDirectory := writeCPAFixture(t, v7FixtureConfig, nil)
+	installDir := filepath.Dir(cpaDirectory)
+	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"),
+		[]byte("services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n"), 0o600); err != nil {
+		t.Fatalf("write the installer compose file: %v", err)
+	}
+	// No .env at all: the reference names no release.
+	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
+		t.Fatalf("an unresolved reference produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
+	}
+	// A default in the compose reference is a declaration compose itself makes.
+	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"),
+		[]byte("services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE:-eceasy/cli-proxy-api:v7.3.4}\n"), 0o600); err != nil {
+		t.Fatalf("rewrite the installer compose file: %v", err)
+	}
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+	if err != nil {
+		t.Fatalf("the compose default was refused: %v", err)
+	}
+	if source.version != "7.3.4" {
+		t.Fatalf("source version = %q, want 7.3.4 from the compose default", source.version)
+	}
+	// A required reference that has no value is not a release either.
+	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"),
+		[]byte("services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE:?set CPA_IMAGE}\n"), 0o600); err != nil {
+		t.Fatalf("rewrite the installer compose file: %v", err)
+	}
+	_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
+		t.Fatalf("an unset required reference produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
+	}
+	if strings.Contains(err.Error(), "set CPA_IMAGE") {
+		t.Fatalf("the refusal echoes the compose error message: %v", err)
+	}
+}
+
 // TestCPASourceRefusesAnUnusableConfiguration pins the typed refusal of a file
 // this import cannot read at all.
 func TestCPASourceRefusesAnUnusableConfiguration(t *testing.T) {

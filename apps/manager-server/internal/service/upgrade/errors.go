@@ -109,9 +109,9 @@ const (
 	// load. Nothing was written.
 	UpgradeErrorCPAConfigInvalid UpgradeErrorCode = "upgrade_cpa_config_invalid"
 	// UpgradeErrorCPAVersionRequired reports that the source uses the v7 layout
-	// and neither the operator nor the stack file names its CPA release. A v7
-	// file carries no version of its own, and this import never infers one from
-	// the file's shape. Nothing was written.
+	// and neither the operator nor the stack's compose/environment files name an
+	// exact CPA release. A v7 file carries no version of its own, and this import
+	// never infers one from the file's shape. Nothing was written.
 	UpgradeErrorCPAVersionRequired UpgradeErrorCode = "upgrade_cpa_version_required"
 	// UpgradeErrorCPAVersionUnsupported reports that the source CPA release is
 	// below the accepted floor, is not an exact release, or does not describe the

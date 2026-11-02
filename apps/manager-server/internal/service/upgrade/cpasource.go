@@ -84,10 +84,22 @@ const (
 	// CPA's `/root/.cli-proxy-api` (`install-cpamp.sh:2948-2995`), so it is the
 	// auth directory beside a stopped source's config.yaml.
 	cpaAuthDirectoryName = "auths"
-	// cpaStackComposeFiles are the stack files the v1 installer writes beside the
-	// CPA directory. The image tag of the `cli-proxy-api` service they name is the
-	// only on-disk statement of which CPA release a stopped stack ran.
-	cpaStackComposeFiles = "docker-compose.yml,docker-compose.yaml"
+	// cpaStackComposeFiles are the stack files a managed install may keep beside
+	// the CPA directory. The v1 installer writes compose.yaml; the docker-compose
+	// names are accepted for a stack created under the older name or maintained
+	// by hand. The image of the `cli-proxy-api` service is the only on-disk
+	// statement of which CPA release the stack ran.
+	cpaStackComposeFiles = "compose.yaml,compose.yml,docker-compose.yml,docker-compose.yaml"
+	// cpaStackEnvFileName is the environment file the v1 installer writes beside
+	// compose.yaml. The service declares `image: ${CPA_IMAGE}`, so the release is
+	// the CPA_IMAGE value there, not a literal in the compose file.
+	cpaStackEnvFileName = ".env"
+	// cpaStackEnvVariable is the one variable this reader takes from .env. Every
+	// other value in that file is ignored and never retained: it may hold the
+	// admin key and other secrets.
+	cpaStackEnvVariable = "CPA_IMAGE"
+	// cpaStackFileBytes bounds one stack file this reader parses.
+	cpaStackFileBytes = 256 << 10
 	// cpaMaxConfigBytes bounds the source configuration this reader accepts,
 	// matching the destination's own configuration body bound.
 	cpaMaxConfigBytes = 8 << 20
@@ -319,48 +331,160 @@ func parseCPAVersion(raw string) (cpaVersion, bool) {
 	return cpaVersion{major: numbers[0], minor: numbers[1], patch: numbers[2]}, true
 }
 
-// cpaStackImagePattern finds the CPA image reference in a stack compose file.
-var cpaStackImagePattern = regexp.MustCompile(`^\s*(?:-\s*)?image:\s*"?([^\s"#]+)"?\s*(?:#.*)?$`)
-
 // cpaSourceVersion resolves the CPA release a stopped stack ran.
 //
 // There is no version anywhere else: no v7 configuration file carries a
 // `version` key (verified across every v7 release), and the 1.x Manager never
 // stored one. Two inputs remain, and both are declarations rather than guesses:
-// the operator's own `--cpa-version`, and the image tag of the `cli-proxy-api`
-// service in the stack file beside the CPA directory. When neither names an exact
-// release the gate refuses; it never infers one from the shape of the file.
+// the operator's own `--cpa-version`, and the image the stack declares for its
+// `cli-proxy-api` service. The v1 installer writes `image: ${CPA_IMAGE}` in
+// compose.yaml and the release in `.env`, so a `${...}` reference is resolved
+// from that file — only the CPA_IMAGE value is read, and no other value is
+// retained or reported. When neither input names an exact release the gate
+// refuses; it never infers one from the shape of the file.
 func cpaSourceVersion(cpaDirectory, declared string) (string, bool) {
 	if trimmed := strings.TrimSpace(declared); trimmed != "" {
 		return trimmed, true
 	}
+	directory := filepath.Dir(cpaDirectory)
+	environment := cpaStackEnvironment(directory)
 	for _, name := range strings.Split(cpaStackComposeFiles, ",") {
-		path := filepath.Join(filepath.Dir(cpaDirectory), name)
+		path := filepath.Join(directory, name)
 		info, err := os.Stat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Size() > 256<<10 {
+		if err != nil || !info.Mode().IsRegular() || info.Size() > cpaStackFileBytes {
 			continue
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(data), "\n") {
-			matches := cpaStackImagePattern.FindStringSubmatch(line)
-			if matches == nil {
-				continue
-			}
-			reference := matches[1]
-			digestTrimmed, _, _ := strings.Cut(reference, "@")
-			slash := strings.LastIndex(digestTrimmed, "/")
-			last := digestTrimmed[slash+1:]
-			repository, tag, tagged := strings.Cut(last, ":")
-			if !tagged || repository != "cli-proxy-api" || tag == "" || tag == "latest" {
-				continue
-			}
-			return tag, true
+		reference, ok := cpaStackServiceImage(data, environment)
+		if !ok {
+			continue
 		}
+		digestTrimmed, _, _ := strings.Cut(reference, "@")
+		slash := strings.LastIndex(digestTrimmed, "/")
+		last := digestTrimmed[slash+1:]
+		repository, tag, tagged := strings.Cut(last, ":")
+		if !tagged || repository != "cli-proxy-api" || tag == "" || tag == "latest" {
+			continue
+		}
+		return tag, true
 	}
 	return "", false
+}
+
+// cpaStackServiceImage reads the image of the `cli-proxy-api` service from one
+// compose document and resolves its environment reference.
+//
+// A file this reader cannot parse, a stack with no such service and an image
+// whose reference does not resolve are all "no statement", never a guess: the
+// caller keeps looking and finally refuses with the version-required code.
+func cpaStackServiceImage(data []byte, environment map[string]string) (string, bool) {
+	var document struct {
+		Services map[string]struct {
+			Image string `yaml:"image"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return "", false
+	}
+	service, ok := document.Services["cli-proxy-api"]
+	if !ok || strings.TrimSpace(service.Image) == "" {
+		return "", false
+	}
+	return resolveComposeReference(service.Image, environment)
+}
+
+// cpaStackEnvironment returns the CPA_IMAGE declaration of the .env file beside
+// the stack, and nothing else. The file can hold the admin key and other
+// secrets, so every other line is skipped before it becomes a value: nothing
+// this function does not return can reach a log, an error or the operation row.
+func cpaStackEnvironment(directory string) map[string]string {
+	path := filepath.Join(directory, cpaStackEnvFileName)
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > cpaStackFileBytes {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	environment := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		name, value, found := strings.Cut(line, "=")
+		if !found || strings.TrimSpace(name) != cpaStackEnvVariable {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		environment[cpaStackEnvVariable] = value
+	}
+	return environment
+}
+
+// cpaComposeVariablePattern finds one `$NAME` reference compose would expand.
+var cpaComposeVariablePattern = regexp.MustCompile(`\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// resolveComposeReference expands the environment references of one image
+// value, with the forms compose accepts in a service image: `${NAME}`,
+// `${NAME:-default}`, `${NAME-default}`, `${NAME:?message}` and `$NAME`.
+//
+// An unset variable without a default, or an explicitly required one, is not a
+// release: it yields "no statement" instead of an empty or partial reference.
+// The `${NAME:?message}` message is never reported, because a message can name
+// a secret.
+func resolveComposeReference(raw string, environment map[string]string) (string, bool) {
+	value := strings.TrimSpace(raw)
+	for range 8 {
+		start := strings.Index(value, "${")
+		if start < 0 {
+			break
+		}
+		end := strings.Index(value[start:], "}")
+		if end < 0 {
+			return "", false
+		}
+		expression := value[start+2 : start+end]
+		name := expression
+		fallback := ""
+		hasFallback := false
+		for _, separator := range []string{":-", ":?", "-"} {
+			if prefix, suffix, found := strings.Cut(expression, separator); found {
+				name = prefix
+				hasFallback = separator != ":?"
+				fallback = suffix
+				break
+			}
+		}
+		resolved, set := environment[strings.TrimSpace(name)]
+		if !set || strings.TrimSpace(resolved) == "" {
+			if !hasFallback {
+				return "", false
+			}
+			resolved = fallback
+		}
+		value = value[:start] + resolved + value[start+end+1:]
+	}
+	if strings.Contains(value, "${") {
+		return "", false
+	}
+	value = cpaComposeVariablePattern.ReplaceAllStringFunc(value, func(reference string) string {
+		return environment[strings.TrimPrefix(reference, "$")]
+	})
+	if strings.Contains(value, "$") || strings.TrimSpace(value) == "" {
+		return "", false
+	}
+	return strings.TrimSpace(value), true
 }
 
 // cpaManualItem is one source item the import cannot copy. It carries the
@@ -525,7 +649,7 @@ func normalizeDocumentValue(value any) any {
 // A file that declares `config-version: 8` is a v8 CPA serving the old layout:
 // v8 is above the floor whatever the file's spelling is, so no declared version
 // is needed. Any other file is the v7 layout, and its release has to be named by
-// the operator or the stack file; below v7.3.4 the operator is stopped here,
+// the operator or the stack's compose/environment files; below v7.3.4 the operator is stopped here,
 // before a single write.
 func (s *cpaManagedSource) gateVersion(document map[string]any, declared string) error {
 	rawConfigVersion, present := document[cpaConfigVersionKey]
@@ -559,7 +683,7 @@ func (s *cpaManagedSource) gateVersion(document map[string]any, declared string)
 	version, ok := cpaSourceVersion(s.directory, declared)
 	if !ok {
 		return newUpgradeError(UpgradeErrorCPAVersionRequired,
-			"the managed CPA source is the v7 layout and neither --cpa-version nor the stack file names its release; a v7 layout has no version of its own, and this import never guesses one", nil)
+			"the managed CPA source is the v7 layout and neither --cpa-version nor the stack's compose/environment files name an exact release; a v7 layout has no version of its own, and this import never guesses one", nil)
 	}
 	parsed, ok := parseCPAVersion(version)
 	if !ok {
