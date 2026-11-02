@@ -122,6 +122,32 @@ func TestCredentialCacheRunsOneVerificationForConcurrentRequests(t *testing.T) {
 	}
 }
 
+// TestCredentialCacheCompletesAFlightThatPanics proves a panicking read cannot
+// wedge the cache: the flight is removed, the panic is not remembered as a
+// success, and the next request verifies normally.
+func TestCredentialCacheCompletesAFlightThatPanics(t *testing.T) {
+	cache := newCredentialCache()
+	func() {
+		defer func() { _ = recover() }()
+		_ = cache.verify(context.Background(), "panics", func() error { panic("the read exploded") })
+	}()
+	cache.mu.Lock()
+	_, wedged := cache.flights["panics"]
+	cache.mu.Unlock()
+	if wedged {
+		t.Fatal("a panicking verification left its flight in place")
+	}
+	if err := cache.verify(context.Background(), "panics", func() error { return nil }); err != nil {
+		t.Fatalf("verify after a panic = %v", err)
+	}
+	if err := cache.verify(context.Background(), "panics", func() error {
+		t.Error("the post-panic success was not remembered")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestCredentialCacheReportsTheWaitersOwnDeadline proves a joined request keeps
 // its own bound instead of inheriting the flight's.
 func TestCredentialCacheReportsTheWaitersOwnDeadline(t *testing.T) {

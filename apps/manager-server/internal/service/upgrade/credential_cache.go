@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -177,6 +178,11 @@ func newCredentialCache() *credentialCache {
 // entry is a key digest and a source identity, and both are dropped on restart.
 var sourceCredentialCache = newCredentialCache()
 
+// errCredentialVerificationAborted reports a shared verification that ended
+// without a verdict. It exists so a panicking read cannot leave the flight
+// unfinished: waiters fail closed instead of waiting for their own deadline.
+var errCredentialVerificationAborted = errors.New("source credential verification did not complete")
+
 // verify returns a remembered success, joins an identical verification already in
 // flight, or runs fn. Only a success is remembered; a rejected key and a failed
 // read are returned and forgotten.
@@ -193,17 +199,29 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 	flight := &credentialFlight{done: make(chan struct{})}
 	c.flights[key] = flight
 	c.mu.Unlock()
+	return c.runFlight(key, flight, run)
+}
 
-	err := run()
-
-	c.mu.Lock()
-	flight.err = err
-	delete(c.flights, key)
-	if err == nil {
-		c.rememberLocked(key)
-	}
-	c.mu.Unlock()
-	close(flight.done)
+// runFlight publishes the verdict exactly once, including when the read panics:
+// the flight is always completed and removed, so a concurrent request can never
+// wait on a flight nobody will finish, and a panic is never recorded as a
+// success.
+func (c *credentialCache) runFlight(key string, flight *credentialFlight, run func() error) (err error) {
+	completed := false
+	defer func() {
+		c.mu.Lock()
+		flight.err = err
+		if !completed {
+			flight.err = errCredentialVerificationAborted
+		} else if err == nil {
+			c.rememberLocked(key)
+		}
+		delete(c.flights, key)
+		c.mu.Unlock()
+		close(flight.done)
+	}()
+	err = run()
+	completed = true
 	return err
 }
 
