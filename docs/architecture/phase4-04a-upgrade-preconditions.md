@@ -715,12 +715,22 @@ code says why. The `--bundle` default is the recorded copy-in's backup
 destination, and the recorded copy-in is re-verified against it before anything
 is compared.
 
-**Known limit (U1-1b).** The accepted source contract is pinned to v1.14.4, and
-`usage_archive_deleted_coverage_daily` arrived in v1.14.6. A source the CLI
-accepts therefore never holds the coverage table, so the `coverage` domain is
-reported `not applicable` on every real pinned source and is never established;
-its comparison is exercised by fixtures that carry the table, and it becomes
-live when the pin moves. The same applies to the parity detection, which is
-`not-applicable` for a source without `usage_archive_event_refs`. This is a
-property of the pin, not of reconciliation, and this slice does not change the
-pinned bootstrap contract.
+**Coverage and parity applicability.** An earlier draft of this section recorded
+that a pinned v1.14.4 source never holds
+`usage_archive_deleted_coverage_daily` because the table "arrived in v1.14.6",
+and that the `coverage` domain was therefore never applicable outside fixtures.
+That premise is wrong for the schema this step requires: `requiredLegacyTables`
+in `service/upgrade/schema.go` lists both
+`usage_archive_deleted_coverage_daily` and `usage_archive_event_refs`, and the
+coverage table is part of the v1.14.0 schema itself — the 1.14.x DDL creates it
+in every release from v1.14.0 to v1.14.10. A source preflight accepts therefore
+always carries the tables the `coverage` domain and the parity detection read.
+The parity question is `not-applicable` only when one of
+`usage_archive_event_refs`, `usage_archive_deleted_coverage_daily` or
+`usage_events` is absent, which preflight already refuses as a structural lower
+bound; it is not a property of the pinned release. The CLI-level regression
+`TestReconcileReportsTheCopiedStoreAndRecordsTheStage` runs `upgrade run` and
+`upgrade reconcile` against that pinned release and asserts the `coverage`
+domain is among the recorded domains, so this applicability is real for the
+documented CLI path, not something only a service fixture can reach. This slice
+still does not change the pinned bootstrap contract.
