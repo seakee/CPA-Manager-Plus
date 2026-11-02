@@ -23,7 +23,21 @@ import (
 )
 
 // Version is the marker contract. An unknown version is refused, never guessed.
-const Version = 1
+const Version = 2
+
+// Phases of an in-flight copy-in. The marker is published before the first
+// target member is moved and republished once every member is in place, so a
+// resume knows whether an interrupted run may still hold members in its staging
+// tree without opening the database it is resuming.
+const (
+	// PhaseMaterializing means the run may still be moving members into the v2
+	// layout. A resume continues the move from its own staging tree.
+	PhaseMaterializing = "materializing"
+	// PhaseMigrating means every member is in place and the migration may have
+	// started rewriting the copied database. A resume adopts the target instead
+	// of restoring again.
+	PhaseMigrating = "migrating"
+)
 
 const (
 	// WorkDirectoryName is the reserved scratch area inside the v2 data root. It
@@ -38,19 +52,43 @@ const (
 )
 
 // Marker is what the copy-in placed in the v2 layout and where it came from.
-// Every field except SourceVersion is required: a marker that cannot name its
-// own target and backup describes nothing and is refused.
+// It always names its phase, target, source kind, the source fingerprint the
+// copy started from and the backup manifest digest; a marker that cannot do so
+// describes nothing and is refused.
+//
+// Phase says how far the materialization got, and TargetDatabaseIdentity names
+// the database file this copy-in moved. Both are what let a resume decide
+// whether the target is the store a previous run placed: a relocated path and a
+// database swapped in beside the marker are the two cases a name and a SQLite
+// header cannot tell apart.
 type Marker struct {
-	Version                 int    `json:"version"`
-	TargetDatabase          string `json:"targetDatabase"`
-	SourceKind              string `json:"sourceKind"`
-	SourceVersion           string `json:"sourceVersion,omitempty"`
-	SourceFingerprintBefore string `json:"sourceFingerprintBefore"`
-	SourceFingerprintAfter  string `json:"sourceFingerprintAfter"`
-	BackupManifestSHA256    string `json:"backupManifestSha256"`
-	BackupDirectory         string `json:"backupDirectory,omitempty"`
-	WrittenAtMS             int64  `json:"writtenAtMs"`
+	Version                int          `json:"version"`
+	Phase                  string       `json:"phase"`
+	TargetDatabase         string       `json:"targetDatabase"`
+	TargetDatabaseIdentity FileIdentity `json:"targetDatabaseIdentity"`
+	SourceKind             string       `json:"sourceKind"`
+	SourceVersion          string       `json:"sourceVersion,omitempty"`
+	SourceFingerprintBefore string      `json:"sourceFingerprintBefore"`
+	SourceFingerprintAfter  string      `json:"sourceFingerprintAfter,omitempty"`
+	BackupManifestSHA256    string      `json:"backupManifestSha256"`
+	BackupDirectory         string      `json:"backupDirectory,omitempty"`
+	WrittenAtMS             int64       `json:"writtenAtMs"`
 }
+
+// FileIdentity names one file by the volume and inode the filesystem assigned
+// it. A rename keeps both, so it survives a member being moved into the v2
+// layout and the migration rewriting that file in place; a different file left
+// under the same name has a different identity.
+type FileIdentity struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+}
+
+// Valid reports whether the identity names a file.
+func (i FileIdentity) Valid() bool { return i.Inode != 0 }
+
+// Identity reads the identity of the file at path.
+func Identity(path string) (FileIdentity, error) { return identity(path) }
 
 // Directory is the reserved work directory of a v2 data root.
 func Directory(targetRoot string) string {
@@ -67,14 +105,29 @@ func (m Marker) Validate() error {
 	if m.Version != Version {
 		return fmt.Errorf("copy-in marker version %d is not supported", m.Version)
 	}
+	switch m.Phase {
+	case PhaseMaterializing, PhaseMigrating:
+	case "":
+		return errors.New("copy-in marker must name its phase")
+	default:
+		return fmt.Errorf("copy-in marker phase %q is not supported", m.Phase)
+	}
 	if !filepath.IsAbs(m.TargetDatabase) {
 		return errors.New("copy-in marker must name an absolute target database")
+	}
+	if m.Phase == PhaseMigrating {
+		// A migrating marker claims the database beside it is the one this
+		// copy-in moved. Without that identity the claim is only a file name and
+		// a SQLite header, which any v2 store satisfies.
+		if !m.TargetDatabaseIdentity.Valid() {
+			return errors.New("a migrating copy-in marker must name the database it materialized")
+		}
 	}
 	if m.SourceKind == "" {
 		return errors.New("copy-in marker must name the source kind")
 	}
-	if m.SourceFingerprintBefore == "" || m.SourceFingerprintAfter == "" {
-		return errors.New("copy-in marker must name both source fingerprints")
+	if m.SourceFingerprintBefore == "" {
+		return errors.New("copy-in marker must name the source fingerprint before the copy")
 	}
 	if m.BackupManifestSHA256 == "" {
 		return errors.New("copy-in marker must name the backup manifest digest")

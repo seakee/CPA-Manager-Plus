@@ -56,6 +56,37 @@ func AcquireExisting(databasePath string) (*Lock, error) {
 	return lock, nil
 }
 
+// AcquireExistingReadOnly takes the same exclusive ownership lock through a
+// read-only descriptor, so a stopped source that is preserved on a read-only
+// mount still proves exclusivity. It never creates or modifies the marker, and
+// it excludes exactly the same writers as AcquireExisting. It is the same file
+// policy as AcquireExisting and ProbeExisting — one validated target, one
+// identity check on the opened marker.
+func AcquireExistingReadOnly(databasePath string) (*Lock, error) {
+	absolutePath, lockPath, marker, err := existingLockTarget(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	file, err := openLockFile(lockPath, os.O_RDONLY)
+	if err != nil {
+		return nil, err
+	}
+	if err := openedMarker(file, marker); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if err := lockFile(file); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	lock := &Lock{file: file, databasePath: absolutePath, lockPath: lockPath}
+	if err := lock.Validate(); err != nil {
+		_ = errors.Join(unlockFile(file), file.Close())
+		return nil, err
+	}
+	return lock, nil
+}
+
 // ProbeExisting observes the source ownership marker without taking the fence:
 // a shared, non-blocking lock proves that no writer holds it and is released
 // before returning. A read-only caller must not use AcquireExisting, which needs

@@ -239,8 +239,18 @@ func copyInMarkerStage(databasePath string) (UpgradeStage, error) {
 	if err != nil {
 		return UpgradeStageNone, fmt.Errorf("read the copy-in provenance marker: %w", err)
 	}
-	if !found || !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
+	if !found {
 		return UpgradeStageNone, nil
+	}
+	// The marker sits in this data root's own reserved work directory, so it
+	// describes this root even when the root is mounted at another absolute
+	// path: a host that runs the CLI and a container that runs the server agree
+	// on the bytes, not on the path. Reporting "no record" there would fail open
+	// on an unfinished store, so a relocated root stays in progress. A marker
+	// naming a different database file is evidence for some other run, and
+	// admitting this store on it would be guessing: it fails closed instead.
+	if filepath.Base(marker.TargetDatabase) != filepath.Base(databasePath) {
+		return UpgradeStageNone, fmt.Errorf("the copy-in marker in this data root describes another database")
 	}
 	return UpgradeStageInProgress, nil
 }
