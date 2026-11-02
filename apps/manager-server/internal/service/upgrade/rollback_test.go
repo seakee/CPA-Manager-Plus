@@ -21,6 +21,7 @@ import (
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 )
@@ -1342,5 +1343,46 @@ func TestRecordRollbackNeverPersistsProbeCredentials(t *testing.T) {
 	}
 	if persisted != LegacyHealthURL() && !strings.HasSuffix(persisted, LegacyHealthPath) {
 		t.Fatalf("the persisted endpoint is not the probed /health endpoint: %s", persisted)
+	}
+}
+
+// TestRecordRollbackRefusesWhileTheV2StoreIsLocked is the regression for M3: the
+// verdict was written while the v2 Manager still held the data-root lock, so a
+// store in use was migrated and marked abandoned.
+func TestRecordRollbackRefusesWhileTheV2StoreIsLocked(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	lock, err := processlock.Acquire(filepath.Join(fixture.targetRoot, databaseFileName))
+	if err != nil {
+		t.Fatalf("hold the v2 process lock: %v", err)
+	}
+	defer func() { _ = lock.Close() }()
+	before := fixture.recordedRow(t)
+	_, err = RecordRollback(context.Background(), fixture.observation(t))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorRollbackV2Running {
+		t.Fatalf("record under a held v2 lock = %v (code %q), want %v", err, code, UpgradeErrorRollbackV2Running)
+	}
+	after := fixture.recordedRow(t)
+	if after.Stage != before.Stage || after.Rollback != nil || after.UpdatedAtMS != before.UpdatedAtMS {
+		t.Fatalf("a refused verdict changed the row: before=%+v after=%+v", before, after)
+	}
+}
+
+// TestPrepareRollbackRefusesToBackfillUnderAHeldV2Lock is the second half of M3:
+// the binding writes the row, so it needs the same lock as the verdict.
+func TestPrepareRollbackRefusesToBackfillUnderAHeldV2Lock(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	fixture.writeRow(t, func(row *model.UpgradeOperation) { row.SourceRoot = "" })
+	lock, err := processlock.Acquire(filepath.Join(fixture.targetRoot, databaseFileName))
+	if err != nil {
+		t.Fatalf("hold the v2 process lock: %v", err)
+	}
+	defer func() { _ = lock.Close() }()
+	_, err = PrepareRollback(context.Background(), fixture.options())
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorRollbackV2Running {
+		t.Fatalf("prepare under a held v2 lock = %v (code %q), want %v", err, code, UpgradeErrorRollbackV2Running)
+	}
+	assertNoPlan(t, fixture.targetRoot)
+	if root := fixture.recordedRow(t).SourceRoot; root != "" {
+		t.Fatalf("a refused prepare backfilled the row: %q", root)
 	}
 }

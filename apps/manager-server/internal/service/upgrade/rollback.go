@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/maintenancebundle"
@@ -365,22 +366,47 @@ func bindSourceRoot(ctx context.Context, recorded model.UpgradeOperation, target
 	if sourceRootRecorded(recorded) {
 		return recorded, nil
 	}
-	backfilled, err := backfillRecordedSourceRoot(ctx, targetRoot, sourceRoot)
+	lock, err := acquireTargetLock(targetRoot)
+	if err != nil {
+		return recorded, err
+	}
+	defer func() { _ = lock.Close() }()
+	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
+	if err != nil {
+		return recorded, fmt.Errorf("record the 1.x data directory this operation copied: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	return bindSourceRootWithDB(ctx, db, recorded, sourceRoot)
+}
+
+// bindSourceRootWithDB records the directory once through an open the caller
+// already holds the v2 process lock and opened writable, so the store's own
+// migration is what adds the column if it is missing.
+func bindSourceRootWithDB(ctx context.Context, db *sql.DB, recorded model.UpgradeOperation, sourceRoot string) (model.UpgradeOperation, error) {
+	if sourceRootRecorded(recorded) {
+		return recorded, nil
+	}
+	backfilled, err := upgradeoperation.New(db).RecordSourceRoot(ctx, sourceRoot)
 	if err != nil {
 		return recorded, fmt.Errorf("record the 1.x data directory this operation copied: %w", err)
 	}
 	return backfilled, nil
 }
 
-// backfillRecordedSourceRoot writes the directory once, through a writable open
-// so the store's own migration is what adds the column if it is missing.
-func backfillRecordedSourceRoot(ctx context.Context, targetRoot, sourceRoot string) (model.UpgradeOperation, error) {
-	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
-	if err != nil {
-		return model.UpgradeOperation{}, err
+// acquireTargetLock takes the v2 data-root process lock for an offline write.
+// The Manager holds this lock for its whole writable lifetime, so a held lock is
+// the proof that v2 is still running and that the store may not be migrated or
+// rewritten. The refusal is typed and nothing is written.
+func acquireTargetLock(targetRoot string) (*processlock.Lock, error) {
+	lock, err := processlock.Acquire(filepath.Join(targetRoot, databaseFileName))
+	if err == nil {
+		return lock, nil
 	}
-	defer func() { _ = db.Close() }()
-	return upgradeoperation.New(db).RecordSourceRoot(ctx, sourceRoot)
+	if errors.Is(err, processlock.ErrLocked) {
+		return nil, newUpgradeError(UpgradeErrorRollbackV2Running,
+			"the v2 Manager still holds its database process lock, so it has not been stopped; stop the v2 stack before preparing or recording a rollback", err)
+	}
+	return nil, fmt.Errorf("take the v2 database process lock: %w", err)
 }
 
 // refuseRootOverlap keeps every rollback write inside the v2 data root. The 1.x
@@ -887,22 +913,30 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	if err := verifyRollbackInstall(ctx, sourceRoot, bundleDir, recorded); err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	// The binding may write a backfill, so it comes after every refusal: the only
-	// step left is the verdict itself.
-	recorded, err = bindSourceRoot(ctx, recorded, targetRoot, sourceRoot)
-	if err != nil {
-		return model.UpgradeOperation{}, err
-	}
 	// The observation time is stamped here, after every proof this service
 	// derives itself, so the recorded moment describes these proofs rather than
 	// the caller's claim about them.
 	observedAtMS := time.Now().UnixMilli()
 
+	// Every refusal above wrote nothing. From here on this service writes the v2
+	// store, so it takes the v2 data-root process lock for the whole write: a
+	// Manager that still holds it is still serving, and a verdict recorded under
+	// its live writer would claim an abandonment that has not happened.
+	lock, err := acquireTargetLock(targetRoot)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = lock.Close() }()
+	// The binding may write a backfill, and it is still the only write before the
+	// verdict: it happens under the same lock, through the same writable open.
 	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("open the v2 database to record the rollback: %w", err)
 	}
 	defer func() { _ = db.Close() }()
+	if recorded, err = bindSourceRootWithDB(ctx, db, recorded, sourceRoot); err != nil {
+		return model.UpgradeOperation{}, err
+	}
 	advanced, err := upgradeoperation.New(db).RecordRollback(ctx, model.RollbackEvidence{
 		Image:             image,
 		StatusURL:         health.URL,
