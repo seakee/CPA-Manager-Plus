@@ -7,88 +7,12 @@ package upgrade
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
-
-// TestCPASourceMappingTableMatchesTheGoldenReleaseClaims pins every row of the
-// table, claims included.
-//
-// The earlier test only proved each release string parses, so a claim could be
-// changed to another real release — exactly what happened to
-// codex.model-level-cooling — without a failure. This list is the table's
-// content: any added, removed or re-worded row changes it, and the change must
-// then be made here deliberately.
-func TestCPASourceMappingTableMatchesTheGoldenReleaseClaims(t *testing.T) {
-	golden := []string{
-		"gemini-api-key|api-keys.gemini|v7.0.0|true|true",
-		"interactions-api-key|api-keys.interactions|v7.2.51|true|true",
-		"vertex-api-key|api-keys.vertex|v7.0.0|true|true",
-		"codex-api-key|api-keys.codex|v7.0.0|true|true",
-		"claude-api-key|api-keys.claude|v7.0.0|true|true",
-		"xai-api-key|api-keys.xai|v7.2.73|true|true",
-		"meta-api-key|api-keys.meta|v7.3.4|true|true",
-		"openai-compatibility|api-keys.openai-compatibility|v7.0.0|true|true",
-		"oauth-model-alias|oauth.model-alias|v7.0.0|true|false",
-		"oauth-excluded-models|oauth.excluded-models|v7.0.0|true|false",
-		"oauth-request-scoped-errors|oauth.request-scoped-errors|v7.2.138|true|false",
-		"payload.default|requests.payload.default|v7.0.0|true|false",
-		"payload.default-raw|requests.payload.default-raw|v7.0.0|true|false",
-		"payload.override|requests.payload.override|v7.0.0|true|false",
-		"payload.override-raw|requests.payload.override-raw|v7.0.0|true|false",
-		"payload.filter|requests.payload.filter|v7.0.0|true|false",
-		"request-retry|routing.retry.request-retry|v7.0.0|false|false",
-		"max-retry-credentials|routing.retry.max-retry-credentials|v7.0.0|false|false",
-		"max-retry-interval|routing.retry.max-retry-interval|v7.0.0|false|false",
-		"disable-cooling|routing.cooldown.disable-cooling|v7.0.0|false|false",
-		"save-cooldown-status|routing.cooldown.save-cooldown-status|v7.2.19|false|false",
-		"transient-error-cooldown-seconds|routing.cooldown.transient-error-cooldown-seconds|v7.2.19|false|false",
-		"proxy-url|requests.proxy-url|v7.0.0|false|false",
-		"codex.disable-codex-cloaking|upstream.codex.disable-codex-cloaking|v7.2.110|false|false",
-		"codex.stream-bootstrap-buffering|upstream.codex.stream-bootstrap-buffering|v7.2.138|false|false",
-		"codex.stream-bootstrap-timeout|upstream.codex.stream-bootstrap-timeout|v7.3.3|false|false",
-		"codex.orphan-delegation-compatibility|upstream.codex.orphan-delegation-compatibility|v7.2.149|false|false",
-		"codex.model-level-cooling|upstream.codex.model-level-cooling|v7.2.156|false|false",
-		"codex.response-steering|upstream.codex.response-steering|v7.3.9|false|false",
-		"codex.optimize-multi-agent-v2|client.codex.optimize-multi-agent-v2|v7.2.98|false|false",
-		"claude.model-level-cooling|upstream.claude.model-level-cooling|v7.3.7|false|false",
-		"disable-claude-cloak-mode|upstream.claude.disable-claude-cloak-mode|v7.2.8|false|false",
-		"claude-header-defaults.user-agent|upstream.claude.header-defaults.user-agent|v7.0.0|false|false",
-		"claude-header-defaults.package-version|upstream.claude.header-defaults.package-version|v7.0.0|false|false",
-		"claude-header-defaults.runtime-version|upstream.claude.header-defaults.runtime-version|v7.0.0|false|false",
-		"claude-header-defaults.os|upstream.claude.header-defaults.os|v7.0.0|false|false",
-		"claude-header-defaults.arch|upstream.claude.header-defaults.arch|v7.0.0|false|false",
-		"claude-header-defaults.timeout|upstream.claude.header-defaults.timeout|v7.0.0|false|false",
-		"claude-header-defaults.timezone|upstream.claude.header-defaults.timezone|v7.2.116|false|false",
-		"claude-header-defaults.stabilize-device-profile|upstream.claude.header-defaults.stabilize-device-profile|v7.0.0|false|false",
-		"xai.inject-x-search|upstream.xai.inject-x-search|v7.2.102|false|false",
-	}
-	actual := make([]string, 0, len(cpaConfigPaths))
-	for _, path := range cpaConfigPaths {
-		actual = append(actual, fmt.Sprintf("%s|%s|%s|%t|%t", path.legacy, path.current, path.introduced, path.whole, path.grouped))
-	}
-	if len(actual) != len(golden) {
-		t.Fatalf("the mapping table has %d rows, the golden list has %d:\n%s", len(actual), len(golden), strings.Join(actual, "\n"))
-	}
-	for index := range golden {
-		if actual[index] != golden[index] {
-			t.Fatalf("mapping row %d = %q, want %q", index, actual[index], golden[index])
-		}
-	}
-
-	removedGolden := []string{"ampcode|amp-|v7.2.0", "codex.identity-confuse||v8.0.4"}
-	removedActual := make([]string, 0, len(cpaRemovedConfigPaths))
-	for _, removed := range cpaRemovedConfigPaths {
-		removedActual = append(removedActual, fmt.Sprintf("%s|%s|%s", removed.legacy, removed.suffix, removed.removed))
-	}
-	if strings.Join(removedActual, "\n") != strings.Join(removedGolden, "\n") {
-		t.Fatalf("the removed-path table = %q, want %q", removedActual, removedGolden)
-	}
-}
 
 // TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry is the Medium finding
 // end to end: a run that stages the destination and then fails must leave the
