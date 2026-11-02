@@ -135,11 +135,19 @@ Plus 会把 CPA Management Key 加密存储到 SQLite。默认数据密钥位于
 
 ## Managed CPA 导入
 
-`cpa-manager-plus upgrade cpa-import` 会通过 adoption 执行器，把已停止的 1.x 实例中受管 CPA 的配置与凭证文件复制到 v2 目标。规划迁移时有三条规则：
+`cpa-manager-plus upgrade cpa-import` 会通过 adoption 执行器，把已停止的 1.x 实例中受管 CPA 的配置与凭证文件复制到 v2 目标。规划迁移时以下规则很重要：
 
+- 它只在对账之后运行：记录的操作必须处于 `reconcile`（或处于自身未记录 `cpa_config` 域的 `cpa_import`，即重试位置），否则会在读取来源之前以 `upgrade_cpa_stage_conflict` 拒绝。创建目标阶段发生的拒绝不会改动已记录的位置。
+- 先停止 Manager Server：该命令持有 v2 数据根进程锁，锁被占用时会以 `upgrade_store_locked`（退出码 1）拒绝。
 - 只有当 `--legacy` 目录就是 `copy-in` 步骤记录的那个目录时才会读取它；换成另一棵树会在任何读取之前以 `upgrade_cpa_source_root_mismatch` 拒绝。
-- 目标自己的路径永远不会被复制：目标的管理密钥、监听地址、端口、插件根目录、凭证目录和客户端密钥列表都保留目标自身的值。本步骤自行创建目标时会先生成管理密钥并用 `/data/data.key` 加密记录，然后才创建目标，因此目标是已运行状态时重试仍可继续；导入成功后该记录会被删除。
-- 目标已在运行且没有记录过密钥时，需要 `--destination-management-key-file`。本步骤会拒绝，而不会凭空再生成一个密钥（`upgrade_cpa_destination_key_required`）。
+- 目标自己的路径永远不会被复制：目标的管理密钥、监听地址、端口、插件根目录、凭证目录和客户端密钥列表都保留目标自身的值。
+- 目标请求一旦记录就不可变。本步骤自行创建目标时，会在创建之前记录生成的密钥（用 `/data/data.key` 加密）、插件选择、客户端密钥集合和 operation ID，重试会原样重放该请求。已记录的尝试不会重新生成密钥；Supervisor 报告 stage/start 终态失败后，下一次运行才按 Supervisor 的 supersede 约定用新的 operation ID 取代它。试图改变插件选择、客户端密钥集合或目标 URL 的重试会以 `upgrade_cpa_destination_request_changed` 拒绝。
+- 目标在任何写入之前完成绑定：已处于 ready 的目标会先用本次导入的客户端密钥验证，携带其他密钥的 CPA 会以 `upgrade_cpa_import_target_foreign` 拒绝，且不会收到任何配置或凭证。既没有记录也没有提供密钥的 ready 目标需要 `--destination-management-key-file`，否则以 `upgrade_cpa_destination_key_required` 拒绝。
+- 成功后，目标 URL 和同一个管理密钥会写入 Manager 自身的 CPA 连接（`manager_config_v1` 及其 legacy setup 镜像），重启后控制台仍能连上目标；其他 Manager 设置保持不变。若 Manager 已持有指向另一个 CPA 的连接，本步骤会以 `upgrade_cpa_connection_conflict` 拒绝而不是改指；请在停止 Manager Server 后显式重绑该连接（`store-cpa-connection --repair-conflict`）再重跑，已记录的目标密钥会被复用。
+- 无法上传的凭证会成为明确的手动项，而不是被静默丢弃：符号链接（`credential_not_regular`）、超过 1 MiB 的文件（`credential_too_large`）、无法读取的条目（`credential_unreadable`）。请自行把这些文件复制到目标凭证目录。
+- 声明 `config-version: 8` 的来源只接受 v8 版本的声明；其客户端密钥从 `access.api-keys` 读取，映射表未覆盖的 `api-keys.<family>` 会被报告而不是丢弃。
+
+本步骤不会推广安装派生权威：它复制配置与凭证并保存目标连接，但不会创建 Fresh 安装记录、策略检查点或资格。现有消费者明确拒绝升级派生（`legacy_managed`）来源，因此目标只作为连接来管理，而不是 New Managed 安装。该缺口仍然开放。
 
 **已知限制：`codex-header-defaults`。** CPA v8 仍会加载该配置段（`codex-header-defaults` 加载为 `oauth.providers.codex.header-defaults`），但 v2 目标没有可写入的 `upstream.codex.header-defaults` 叶子，因此导入不会复制它。操作行会把它记为手动项 `section:codex-header-defaults`；如仍需这些请求头默认值，请在目标 CPA 配置中重新设置。同类的 `claude-header-defaults.*` 在目标有对应路径，会被正常复制。
 
