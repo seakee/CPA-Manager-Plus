@@ -166,6 +166,15 @@ const (
 	// not the target this operation staged. The import refuses before writing any
 	// configuration or credential to it.
 	UpgradeErrorCPAImportTargetForeign UpgradeErrorCode = "upgrade_cpa_import_target_foreign"
+	// UpgradeErrorCPAImportTargetUnreachable reports that nothing answered at the
+	// destination URL: the connection was refused, the name did not resolve, or no
+	// answer arrived within the probe budget. That is not a statement about whether
+	// the URL is right — a destination this run just started, or a 1.x CPA that has
+	// not come up yet, is unreachable too — so the operator starts the CPA and
+	// re-runs instead of editing a correct URL. Nothing was written, the attempt
+	// keeps no URL, and a retry with the same or a corrected URL can still prove
+	// the destination.
+	UpgradeErrorCPAImportTargetUnreachable UpgradeErrorCode = "upgrade_cpa_import_target_unreachable"
 	// UpgradeErrorStoreLocked reports that another process holds the v2 Manager
 	// store lock, so this offline write path did not open or change the store.
 	// Manager Server must be stopped before the import runs.
@@ -249,6 +258,7 @@ var (
 	ErrCPASourceRootMismatch = &UpgradeError{Code: UpgradeErrorCPASourceRootMismatch}
 	ErrCPADestinationChanged = &UpgradeError{Code: UpgradeErrorCPADestinationRequestChanged}
 	ErrCPATargetForeign      = &UpgradeError{Code: UpgradeErrorCPAImportTargetForeign}
+	ErrCPATargetUnreachable  = &UpgradeError{Code: UpgradeErrorCPAImportTargetUnreachable}
 	ErrCPAConnectionConflict = &UpgradeError{Code: UpgradeErrorCPAConnectionConflict}
 	ErrCPADestinationKey     = &UpgradeError{Code: UpgradeErrorCPADestinationKeyRequired}
 )

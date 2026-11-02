@@ -605,13 +605,37 @@ func (r *cpaImportRun) recordProvedDestination(
 // this operation's destination, so the refusal names a foreign target and the
 // recorded operation stays where it was: no configuration or credential is
 // written, and no CPA other than the staged destination is mutated.
+//
+// A URL that does not answer at all is a different outcome and is reported as
+// one: the proof's read collapses a transport failure into the same refusal as a
+// wrong key set, so it is classified by one unauthenticated probe before it is
+// named. A just-staged destination that is not listening yet, or a stopped 1.x CPA
+// at the URL the CLI defaulted to, is then not described as a foreign CPA: the
+// operator is told the URL may still be right, and the attempt stays unbound so a
+// retry can prove it.
 func (r *cpaImportRun) requireStagedDestinationIdentity(ctx context.Context, baseURL, managementKey string, clientKeys []string) error {
 	if err := cpa.VerifyV8Adoption(ctx, baseURL, managementKey, clientKeys); err != nil {
-		return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
-			"the CPA at the destination URL does not answer with the management secret and client keys this run staged, so it is not the destination this operation staged; nothing was written to it", err)
+		return classifyDestinationProofFailure(ctx, baseURL, err)
 	}
 	r.managementKey = managementKey
 	return nil
+}
+
+// classifyDestinationProofFailure names what a failed proof actually observed.
+//
+// The probe that decides it presents no credential, so it can only distinguish
+// silence from an answer; everything that answered is a foreign target, exactly
+// as the proof's own verdict says. Both refusals leave the recorded operation and
+// the attempt where they were.
+func classifyDestinationProofFailure(ctx context.Context, baseURL string, proofErr error) error {
+	probe, probeErr := probeDestinationListener(ctx, baseURL)
+	if probe == destinationListenerSilent {
+		return newUpgradeError(UpgradeErrorCPAImportTargetUnreachable,
+			"nothing answered at the destination URL, so this run could not prove it is the destination the Supervisor staged; an unreachable CPA is not a foreign one — the destination may still be starting, or the URL may name a 1.x CPA that is already stopped — so start that CPA (or wait for it to listen) and re-run with the same or a corrected URL, which is accepted until a run proves one; nothing was written to it and the attempt keeps no URL",
+			errors.Join(proofErr, probeErr))
+	}
+	return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
+		"the CPA at the destination URL does not answer with the management secret and client keys this run staged, so it is not the destination this operation staged; nothing was written to it", proofErr)
 }
 
 // submitDestination sends the recorded attempt to the Runtime and refuses a

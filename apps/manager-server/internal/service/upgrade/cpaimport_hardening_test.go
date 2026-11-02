@@ -8,10 +8,12 @@ package upgrade
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -354,6 +356,90 @@ func TestImportCPAAllowsACorrectedDestinationURLAfterAForeignRefusal(t *testing.
 	}
 	if requests := other.requests(); len(requests) != 0 {
 		t.Fatalf("the other CPA answered %v, want no request", requests)
+	}
+}
+
+// TestImportCPAReportsAnUnreachableDestinationAsUnreachable is the Low finding:
+// every failure of the authenticated proof used to be reported as
+// upgrade_cpa_import_target_foreign with "it is not the destination this operation
+// staged", so a connection refused — a destination that is still starting, or the
+// stopped 1.x CPA the CLI's default URL usually names — told the operator to edit
+// a correct URL. A transport failure is now its own typed outcome, and the URL is
+// still replaceable on retry.
+func TestImportCPAReportsAnUnreachableDestinationAsUnreachable(t *testing.T) {
+	// A reserved and released port refuses the connection.
+	refusedURL := func(t *testing.T) string {
+		t.Helper()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve a loopback port: %v", err)
+		}
+		address := listener.Addr().String()
+		if err := listener.Close(); err != nil {
+			t.Fatalf("release the loopback port: %v", err)
+		}
+		return "http://" + address
+	}
+	// A listener that accepts and never answers is the timeout half.
+	silentURL := func(t *testing.T) string {
+		t.Helper()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen on a loopback port: %v", err)
+		}
+		var mu sync.Mutex
+		held := []net.Conn{}
+		go func() {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				mu.Lock()
+				held = append(held, conn)
+				mu.Unlock()
+			}
+		}()
+		t.Cleanup(func() {
+			_ = listener.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			for _, conn := range held {
+				_ = conn.Close()
+			}
+		})
+		return "http://" + listener.Addr().String()
+	}
+	for name, targetURL := range map[string]string{"connection refused": refusedURL(t), "no answer": silentURL(t)} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+			staged := newFakeDestinationCPA(t, "")
+			runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+			runtime.staged = staged
+			_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, targetURL, boolPointer(true)))
+			code, ok := UpgradeErrorCodeOf(err)
+			if !ok || code != UpgradeErrorCPAImportTargetUnreachable {
+				t.Fatalf("an unreachable destination produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetUnreachable)
+			}
+			if strings.Contains(err.Error(), "not the destination this operation staged") {
+				t.Fatalf("an unreachable destination was reported as a foreign one: %v", err)
+			}
+			if !strings.Contains(err.Error(), "nothing answered") {
+				t.Fatalf("the refusal does not say that nothing answered: %v", err)
+			}
+			if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
+				t.Fatalf("an unreachable destination moved the recorded stage to %q, want %q", recorded.Stage, model.UpgradeStageReconcile)
+			}
+			// The refused URL was never bound, so the retry still names the staged
+			// destination and completes.
+			result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, staged.url(), boolPointer(true)))
+			if err != nil {
+				t.Fatalf("the retry with the staged destination's URL was refused: %v", err)
+			}
+			if result.Stage != model.UpgradeStageCPAImport {
+				t.Fatalf("the retry recorded stage %q, want %q", result.Stage, model.UpgradeStageCPAImport)
+			}
+		})
 	}
 }
 
