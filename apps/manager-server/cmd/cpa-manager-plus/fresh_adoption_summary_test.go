@@ -128,8 +128,8 @@ func TestAdoptionSummaryReportsTheRecordedItems(t *testing.T) {
 		if item.Item == "" || item.Kind == "" || item.Outcome == "" {
 			t.Fatalf("item without identity, kind or outcome: %+v", item)
 		}
-		if item.Outcome == string(freshstore.AdoptionManual) && item.Reason == "" && item.Instruction == "" {
-			t.Fatalf("a manual item carries neither reason nor instruction: %+v", item)
+		if item.Outcome == string(freshstore.AdoptionManual) && item.Reason == "" {
+			t.Fatalf("a manual item carries no reason: %+v", item)
 		}
 	}
 }
@@ -317,6 +317,52 @@ func TestAdoptionSummaryLeaksNoSecretOrDigest(t *testing.T) {
 		if strings.Contains(body, field) {
 			t.Fatalf("the summary carried %q: %s", field, body)
 		}
+	}
+}
+
+// The summary route is the read face of text the Manager did not author: a
+// credential file name is the source CPA's metadata, and the type string is the
+// destination's. Both travel through the migration record, and neither may be
+// echoed to the browser as free text — the reply is a projection of typed codes
+// and scrubbed identifiers, not the record's prose.
+func TestAdoptionSummaryRedactsUntrustedMetadata(t *testing.T) {
+	// A Client Key and a credential token in the shapes CPA issues, placed where
+	// the run reads names and types rather than values.
+	const (
+		untrustedKey   = "sk-proj-m3taDatakeyValue0011223344556677"
+		untrustedToken = "sk-ant-credentialTokenValue889900112233"
+	)
+	fixture := newAdoptMigrationFixture(t)
+	name := untrustedKey + ".json"
+	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"` + untrustedToken + `"}`)
+	fixture.source.types[name] = "claude"
+	// The destination classifies the copied file under the token, which makes the
+	// type string the instruction's own interpolation: arbitrary upstream text.
+	fixture.destination.types[name] = untrustedToken
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	// The fixture really did put both values into recorded metadata: the reply's
+	// silence below is the boundary's doing, not an accident of the run.
+	record := fixture.reload(t)
+	named, diverged := false, false
+	for _, item := range record.AdoptionSummary.Items {
+		named = named || strings.Contains(item.Item, untrustedKey)
+		diverged = diverged ||
+			(item.Reason == "type_diverged" && strings.Contains(item.Instruction, untrustedToken))
+	}
+	if !named || !diverged {
+		t.Fatalf("the run did not record the metadata these assertions are about: %+v", record.AdoptionSummary.Items)
+	}
+
+	body := fixture.adoption(t).Body.String()
+	if strings.Contains(body, untrustedKey) {
+		t.Errorf("the summary echoed the Client Key from a credential name: %s", body)
+	}
+	if strings.Contains(body, untrustedToken) || strings.Contains(body, "classifies it as") {
+		t.Errorf("the summary carried the destination's type metadata: %s", body)
 	}
 }
 

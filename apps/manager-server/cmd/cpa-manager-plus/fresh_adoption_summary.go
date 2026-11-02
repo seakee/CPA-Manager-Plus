@@ -5,6 +5,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 // adoptionSummaryUnavailable is the only code the read route answers with when
@@ -20,14 +21,20 @@ const adoptionSummaryUnavailable = "adopt_summary_unavailable"
 // record also carries the source and destination SHA-256 digests, and those are
 // evidence for the Manager's own bookkeeping rather than something a browser
 // needs. Dropping them here is what makes the reply a statement about progress
-// only — it can never leak a credential byte, because the record never holds one
-// and the digests are not emitted either.
+// only.
+//
+// The reply is also a separate output boundary from the record, because the
+// record's text is not all the Manager's: a credential file name is the source
+// CPA's metadata, and a reason can quote an upstream code. Both are scrubbed with
+// the project's own credential scrubber here, and the record's free-text
+// instruction — which interpolates a source name and a destination type string —
+// is not emitted at all. The page states the next step from the item's own kind,
+// so untrusted metadata cannot reach the browser as prose.
 type adoptionSummaryItem struct {
-	Item        string `json:"item"`
-	Kind        string `json:"kind"`
-	Outcome     string `json:"outcome"`
-	Reason      string `json:"reason,omitempty"`
-	Instruction string `json:"instruction,omitempty"`
+	Item    string `json:"item"`
+	Kind    string `json:"kind"`
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason,omitempty"`
 	// Retryable is the record's own rule, not a second opinion: an item failed
 	// before anything was written, so only a replay can copy it.
 	Retryable bool `json:"retryable"`
@@ -121,12 +128,14 @@ func adoptionSummaryFrom(summary *freshstore.AdoptionSummary) adoptionSummaryRep
 			reply.Counts.AbsentAtSource++
 		}
 		reply.Items = append(reply.Items, adoptionSummaryItem{
-			Item:        item.Item,
-			Kind:        string(item.Kind),
-			Outcome:     string(item.Outcome),
-			Reason:      item.Reason,
-			Instruction: item.Instruction,
-			Retryable:   retryable,
+			Item:    usage.SanitizeCredentialText(item.Item),
+			Kind:    string(item.Kind),
+			Outcome: string(item.Outcome),
+			Reason:  usage.SanitizeCredentialText(item.Reason),
+			// The record's free-text instruction stays behind: it interpolates a
+			// source name and a destination type string, and neither is text this
+			// Manager wrote.
+			Retryable: retryable,
 		})
 	}
 	return reply
