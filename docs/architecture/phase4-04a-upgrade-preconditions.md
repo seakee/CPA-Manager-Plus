@@ -534,7 +534,10 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   image the operator started. The verdict persists the same two fields beside
   the reference (`rollback_image_source`, `rollback_image_form`), so a reader of
   the row can still tell an operator tag from a derived one and a release tag
-  from a digest. Refusals write nothing at all.
+  from a digest. The plan is written while holding the v2 data-root process
+  lock, so a Manager that still serves the store refuses the plan with
+  `upgrade_rollback_v2_running` even when the CLI runs in another network
+  namespace and cannot reach its listener. Refusals write nothing at all.
 - **An unfinished copy-in is resumed, never read.** Before `--prepare` or
   `--verify` reads the operation row, it reads the copy-in marker. A marker
   means the v2 data root may still hold members an interrupted copy-in is

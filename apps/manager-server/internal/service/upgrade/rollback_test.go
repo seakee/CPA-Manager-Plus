@@ -1462,6 +1462,28 @@ func TestPrepareRollbackRefusesToBackfillUnderAHeldV2Lock(t *testing.T) {
 	}
 }
 
+// TestPrepareRollbackRefusesUnderAHeldV2LockEvenWhenBound is L-a: the plan was
+// written under a held v2 process lock whenever the row already named its source
+// root, because only the backfill took the lock. The plan is evidence the
+// operator applies, and its digest names the recorded row, so the same lock the
+// verdict takes now covers the plan write.
+func TestPrepareRollbackRefusesUnderAHeldV2LockEvenWhenBound(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	if !sourceRootRecorded(fixture.recordedRow(t)) {
+		t.Fatal("the fixture does not record a source root")
+	}
+	lock, err := processlock.Acquire(filepath.Join(fixture.targetRoot, databaseFileName))
+	if err != nil {
+		t.Fatalf("hold the v2 process lock: %v", err)
+	}
+	defer func() { _ = lock.Close() }()
+	_, err = PrepareRollback(context.Background(), fixture.options())
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorRollbackV2Running {
+		t.Fatalf("prepare under a held v2 lock = %v (code %q), want %v", err, code, UpgradeErrorRollbackV2Running)
+	}
+	assertNoPlan(t, fixture.targetRoot)
+}
+
 // TestPrepareRollbackPlansTheUnprefixedNamedVolume is the first half of M6: a
 // 1.x install started with `docker run -v cpa-manager-plus-data:/data` uses a
 // volume with no compose-project prefix, which the generated plan could not

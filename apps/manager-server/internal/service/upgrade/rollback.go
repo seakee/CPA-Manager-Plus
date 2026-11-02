@@ -341,10 +341,17 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 	if err != nil {
 		return Plan{}, err
 	}
-	// Every refusal above wrote nothing. Binding the recorded root may backfill a
-	// row written before the column existed, which is a write to the v2 store, so
-	// it happens last.
-	recorded, err = bindSourceRoot(ctx, recorded, targetRoot, sourceRoot)
+	// Every refusal above wrote nothing. The plan is written while holding the
+	// same v2 data-root process lock the verdict takes: a Manager that still
+	// holds it is still serving, and a dial from another network namespace is not
+	// the proof that it stopped. The lock also covers the optional source-root
+	// backfill and its writable open.
+	lock, err := acquireTargetLock(targetRoot)
+	if err != nil {
+		return Plan{}, err
+	}
+	defer func() { _ = lock.Close() }()
+	recorded, err = bindSourceRootLocked(ctx, recorded, targetRoot, sourceRoot)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -448,18 +455,13 @@ func requireBoundedSourceRoot(recorded model.UpgradeOperation, sourceRoot, finge
 		"the recorded operation names no 1.x data directory, and the directory given here does not reproduce the fingerprint the copy-in recorded, so nothing can bind this rollback to a volume; point --legacy at the mounted 1.x volume (docker volume inspect) whose contents reproduce that fingerprint, or run --prepare while that volume is still stopped and unchanged", nil)
 }
 
-// bindSourceRoot records the directory of a row that names none. It is the one
-// write a binding may make, so callers run it after every refusal and before
-// their own write.
-func bindSourceRoot(ctx context.Context, recorded model.UpgradeOperation, targetRoot, sourceRoot string) (model.UpgradeOperation, error) {
+// bindSourceRootLocked records the directory of a row that names none, through
+// a writable open of a store whose v2 process lock the caller already holds. A
+// row that names one is returned without opening anything.
+func bindSourceRootLocked(ctx context.Context, recorded model.UpgradeOperation, targetRoot, sourceRoot string) (model.UpgradeOperation, error) {
 	if sourceRootRecorded(recorded) {
 		return recorded, nil
 	}
-	lock, err := acquireTargetLock(targetRoot)
-	if err != nil {
-		return recorded, err
-	}
-	defer func() { _ = lock.Close() }()
 	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
 		return recorded, fmt.Errorf("record the 1.x data directory this operation copied: %w", err)
