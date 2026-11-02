@@ -52,6 +52,8 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory")
 	legacyImage := flags.String("legacy-image", "", "exact 1.x image reference to pin; defaults to v<source version>")
 	project := flags.String("project", "", "1.x compose project that names the data volume; defaults to cpamp")
+	volume := flags.String("volume", "",
+		"1.x data volume name (including the unprefixed cpa-manager-plus-data) or absolute bind source; defaults to <project>"+upgradeservice.LegacyVolumeSuffix)
 	backup := flags.String("backup", "", "recorded backup snapshot; defaults to the v2 backup directory")
 	statusURL := flags.String("status-url", "",
 		"1.x health endpoint probed by --verify; defaults to "+upgradeservice.LegacyHealthURL())
@@ -77,6 +79,9 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if *verify && *rollbackPort != upgradeservice.LegacyRollbackPort {
 		return fmt.Errorf("%w: --port belongs to --prepare; --verify proves the endpoint the plan printed", ErrUsage)
 	}
+	if *verify && strings.TrimSpace(*volume) != "" {
+		return fmt.Errorf("%w: --volume belongs to --prepare; --verify proves the volume the plan named", ErrUsage)
+	}
 	if trimmed := strings.TrimSpace(*managerAddr); trimmed != "" {
 		// The address is compared with the probe target and dialled to prove the
 		// v2 stack is down, so it has to name a port.
@@ -95,6 +100,7 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			BackupDir:                *backup,
 			TagOverride:              *legacyImage,
 			Project:                  *project,
+			Volume:                   *volume,
 			Port:                     *rollbackPort,
 			ManagerAddress:           *managerAddr,
 			AllowImageFamilyMismatch: *allowFamily,
@@ -129,7 +135,7 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	_, _ = fmt.Fprintf(w, "  stage: %s\n", plan.Stage)
 	_, _ = fmt.Fprintf(w, "  source version: %s\n", plan.SourceVersion)
 	_, _ = fmt.Fprintf(w, "  image: %s\n", plan.Image)
-	_, _ = fmt.Fprintf(w, "  volume: %s\n", plan.Volume)
+	_, _ = fmt.Fprintf(w, "  volume: %s (%s)\n", plan.Volume, plan.VolumeKind)
 	_, _ = fmt.Fprintf(w, "  volume mountpoint (v1 container): %s\n", plan.VolumeMountPoint)
 	_, _ = fmt.Fprintf(w, "  published port (v1 host): %d\n", plan.Port)
 	_, _ = fmt.Fprintf(w, "  v2 Manager port: %d\n", plan.ManagerPort)
@@ -138,6 +144,8 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	_, _ = fmt.Fprintf(w, "  source fingerprint: %s\n", plan.SourceFingerprint)
 	_, _ = fmt.Fprintf(w, "  backup directory: %s\n", plan.BackupDirectory)
 	_, _ = fmt.Fprintf(w, "  backup manifest sha256: %s\n", plan.BackupManifestSHA256)
+	_, _ = fmt.Fprintf(w, "  v1 identity: %s\n", plan.IdentityProof)
+	_, _ = fmt.Fprintf(w, "  identity statement: %s\n", plan.IdentityStatement)
 	_, _ = fmt.Fprintf(w, "  compose project: %s\n", plan.ComposeProject)
 	_, _ = fmt.Fprintf(w, "  invocation: %s\n", plan.ComposeInvocation)
 	_, _ = fmt.Fprintln(w, "  compose file (stdin):")

@@ -721,3 +721,21 @@ func TestStatusAndPrepareReportATerminalRowWithoutEvidence(t *testing.T) {
 		t.Fatalf("a refused prepare wrote a plan (err=%v)", err)
 	}
 }
+
+// TestRollbackPreparePrintsTheOperatorVerifiedIdentity covers the output half of
+// M6: the console has to say what the plan proves and what the operator has to
+// confirm, and it has to accept the volume forms 1.x installs actually use.
+func TestRollbackPreparePrintsTheOperatorVerifiedIdentity(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := rollbackReadyTarget(t, source)
+	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target,
+		"--volume", "cpa-manager-plus-data")
+	if code != 0 {
+		t.Fatalf("prepare exit code = %d; stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"cpa-manager-plus-data (named)", "v1 identity: operator-verified", "cannot reach the Docker socket"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("prepare output does not contain %q:\n%s", want, stdout)
+		}
+	}
+}

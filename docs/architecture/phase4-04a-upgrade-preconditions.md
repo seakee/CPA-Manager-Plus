@@ -487,10 +487,29 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   and both wildcards, so a listener on any interface is found); with
   `--manager-addr` the plan also refuses while the v2 stack still answers there
   (`upgrade_rollback_v2_running`). A refusal writes nothing.
+- **The volume is the one the install used, and the identity half is the
+  operator's.** `--volume` names either a Docker volume (including the
+  unprefixed `cpa-manager-plus-data` a `docker run -v` install uses) or the
+  absolute path of the original bind mount; without it the plan derives
+  `<project>_cpa-manager-plus-data` as before. `volumeKind` says which form the
+  plan generated: a named volume stays `external: true` (compose refuses a
+  missing one instead of creating an empty replacement), a bind mount is written
+  as `<host directory>:/data` with no top-level `volumes:` key. A bind source
+  that is not the directory the operation recorded is
+  `upgrade_rollback_volume_unbound`. The plan proves the *directory* (data key,
+  backup manifest, archived bytes) and that a v1 answers `/health`. It cannot
+  prove that the answering process mounts that directory: the Manager runs in a
+  container and must not reach the Docker socket. `identityProof` is therefore
+  `operator-verified`, `identityStatement` says so in words, and the CLI prints
+  both; the preconditions list the host-side checks (mount source, volume
+  mountpoint, port) the operator reproduces. When the CLI itself runs under
+  `docker compose run --rm`, it sees its own network namespace and paths, so
+  those checks are stated as host-side checks rather than observations.
 - **The plan** (`<v2 data root>/.upgrade-rollback/plan.json`, canonical-JSON
-  SHA-256 in `digest`) names the pinned image, the volume derived from the
-  compose project and the mountpoint the 1.x container uses, the recorded source
-  root, the published `port` and the v2 Manager `managerPort` beside it, the
+  SHA-256 in `digest`) names the pinned image, the volume and its kind
+  (`volume`/`volumeKind`), the mountpoint the 1.x container uses, the recorded
+  source root, the published `port` and the v2 Manager `managerPort` beside it,
+  the
   recorded `backupDirectory`, the exact `docker compose -p cpamp -f - up - d
   cpa-manager-plus` invocation, the 1.x compose file to feed on stdin (publishing
   and binding the plan's own port), the preconditions and the health proof:
@@ -537,7 +556,8 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   informational: the restarted 1.x manager keeps writing rows, so byte equality
   with the recorded before-fingerprint is neither required nor recorded as one.
 - **CLI.** `upgrade rollback --prepare --legacy <dir> [--legacy-image <ref>]
-  [--project <name>] [--port N] [--manager-addr HOST:PORT] [--backup <dir>]
+  [--project <name>] [--volume <name|host-directory>] [--port N]
+  [--manager-addr HOST:PORT] [--backup <dir>]
   [--allow-image-family-mismatch] [--json]` prints the plan and exits 0, or 1
   with the typed refusal written to stderr; the printed verify command is
   quoted, names `--target`, `--backup`, `--legacy-image` and `--status-url` at the

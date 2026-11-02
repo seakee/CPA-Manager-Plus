@@ -88,11 +88,27 @@ const (
 	maxHealthBodyBytes = 4 * 1024
 	// maxReportedIdentity bounds an identity echoed back in a refusal.
 	maxReportedIdentity = 64
+
+	// RollbackVolumeNamed is a plan that restarts v1 against a Docker volume;
+	// RollbackVolumeBind is one that restarts it against the original host
+	// directory. The generated compose file differs between the two.
+	RollbackVolumeNamed = "named"
+	RollbackVolumeBind  = "bind"
+	// RollbackIdentityOperatorVerified is the only identity proof a rollback can
+	// state: the Manager cannot reach the Docker socket, so the process that
+	// answers /health is bound to the directory by the operator's own check.
+	RollbackIdentityOperatorVerified = "operator-verified"
+	// rollbackIdentityStatement says exactly that, beside every plan.
+	rollbackIdentityStatement = "the v1 now serving this directory is operator-verified: this Manager cannot reach the Docker socket, so it proves the directory is the one the operation copied and that a v1 answers /health, but not that the answering process mounts that directory. Confirm the compose file in this plan mounts the volume below at " + LegacyVolumeMountPoint + " and that the container answering the health probe is that stack"
 )
 
 // composeProjectPattern is the compose project name alphabet. A name outside it
 // cannot name a volume, so it is refused instead of being turned into one.
 var composeProjectPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// dockerVolumeNamePattern is the Docker volume name alphabet: a 1.x install run
+// with `docker run -v` uses the unprefixed `cpa-manager-plus-data`.
+var dockerVolumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
 // rollbackApplicableStages are the recorded stages a rollback may start from.
 // A rolled-back row is deliberately absent: the verdict is recorded once.
@@ -122,6 +138,11 @@ type RollbackOptions struct {
 	// Project is the compose project the 1.x stack ran under; it names the
 	// volume. Empty uses the default 1.x project.
 	Project string
+	// Volume overrides the data volume the plan restarts v1 against. It is either
+	// the Docker volume name (the unprefixed `cpa-manager-plus-data` of a 1.x
+	// `docker run -v` install, or any name the operator created) or the absolute
+	// path of the original bind mount. Empty derives <project>_cpa-manager-plus-data.
+	Volume string
 	// Port is the port the plan publishes the restarted 1.x manager on. Empty
 	// uses LegacyRollbackPort, which never collides with the v2 Manager's own
 	// port.
@@ -152,7 +173,10 @@ type Plan struct {
 	// recorded source's family because the operator asked for it, so the verify
 	// command printed with the plan stays exact.
 	ImageFamilyOverride bool   `json:"imageFamilyOverride,omitempty"`
+	// Volume is the Docker volume name or the bind source the plan restarts v1
+	// against; VolumeKind says which of the two it is.
 	Volume              string `json:"volume"`
+	VolumeKind          string `json:"volumeKind"`
 	VolumeMountPoint    string `json:"volumeMountPoint"`
 	ComposeProject      string `json:"composeProject"`
 	ComposeService      string `json:"composeService"`
@@ -178,8 +202,14 @@ type Plan struct {
 	HealthChecks         []string           `json:"healthChecks"`
 	SourceFingerprint    string             `json:"sourceFingerprint"`
 	BackupManifestSHA256 string             `json:"backupManifestSha256"`
-	Stage                model.UpgradeStage `json:"stage"`
-	ReportPath           string             `json:"reportPath"`
+	// IdentityProof states what the plan does and does not prove about the v1
+	// that answered /health. The Manager cannot reach the Docker socket, so it
+	// cannot bind the answering process to the directory; that half is the
+	// operator's check and the plan says so instead of claiming a proof.
+	IdentityProof     string             `json:"identityProof"`
+	IdentityStatement string             `json:"identityStatement"`
+	Stage             model.UpgradeStage `json:"stage"`
+	ReportPath        string             `json:"reportPath"`
 	Digest               string             `json:"digest"`
 }
 
@@ -258,7 +288,7 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 	if err != nil {
 		return Plan{}, err
 	}
-	project, volume, err := rollbackVolume(options.Project)
+	project, volume, volumeKind, err := rollbackVolume(options.Project, options.Volume, sourceRoot)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -291,17 +321,20 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		Image:               image,
 		ImageFamilyOverride: options.AllowImageFamilyMismatch,
 		Volume:              volume,
+		VolumeKind:          volumeKind,
 		VolumeMountPoint:    LegacyVolumeMountPoint,
 		ComposeProject:      project,
 		ComposeService:      LegacyComposeService,
 		ComposeInvocation: fmt.Sprintf("docker compose -p %s -f - up -d %s",
 			project, LegacyComposeService),
-		ComposeFile:          rollbackComposeFile(image, volume, port),
+		ComposeFile:          rollbackComposeFile(image, volume, volumeKind, port),
 		Port:                 port,
 		ManagerPort:          managerAddressPort(options.ManagerAddress),
 		ManagerAddress:       strings.TrimSpace(options.ManagerAddress),
 		BackupDirectory:      bundleDir,
-		Preconditions:        rollbackPreconditions(project, volume, image, recorded.SourceRoot, bundleDir, port, managerAddressPort(options.ManagerAddress)),
+		Preconditions:        rollbackPreconditions(project, volume, volumeKind, image, recorded.SourceRoot, bundleDir, port, managerAddressPort(options.ManagerAddress)),
+		IdentityProof:        RollbackIdentityOperatorVerified,
+		IdentityStatement:    rollbackIdentityStatement,
 		HealthChecks:         rollbackHealthChecks(port),
 		SourceFingerprint:    observation.Digest,
 		BackupManifestSHA256: recorded.BackupManifestSHA256,
@@ -428,18 +461,48 @@ func rootsOverlap(sourceRoot, targetRoot string) bool {
 	return within(sourceRoot, targetRoot) || within(targetRoot, sourceRoot)
 }
 
-// rollbackVolume derives the 1.x volume name from the compose project the stack
-// restarts under, and refuses a project name that cannot name a volume.
-func rollbackVolume(project string) (string, string, error) {
-	trimmed := strings.TrimSpace(project)
-	if trimmed == "" {
-		trimmed = LegacyComposeProject
+// rollbackVolume derives the volume the plan restarts v1 against. An explicit
+// volume is either a Docker volume name or the absolute path of the original
+// bind mount; both are accepted because 1.x installs use both forms (a named
+// volume under a compose project, the unprefixed `cpa-manager-plus-data` of a
+// `docker run -v`, or a host directory). A bind mount is only accepted when it
+// is the directory this operation recorded, because that is the one binding the
+// plan can check. Without an override the volume is derived from the compose
+// project the stack restarts under.
+func rollbackVolume(project, override, sourceRoot string) (string, string, string, error) {
+	trimmed := strings.TrimSpace(override)
+	if trimmed != "" {
+		if filepath.IsAbs(trimmed) || strings.HasPrefix(trimmed, ".") {
+			bind := canonicalPath(trimmed)
+			if filepath.Clean(sourceRoot) != bind {
+				return "", "", "", newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
+					"the bind mount given here is not the 1.x data directory this operation recorded; a v1 restarted against another directory is not the original volume", nil)
+			}
+			return LegacyComposeProject, bind, RollbackVolumeBind, nil
+		}
+		if !dockerVolumeNamePattern.MatchString(trimmed) {
+			return "", "", "", newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
+				fmt.Sprintf("%q is neither a Docker volume name nor an absolute bind source; pass the volume name or the host directory the 1.x stack mounts", trimmed), nil)
+		}
+		derived := strings.TrimSpace(project)
+		if derived == "" {
+			derived = LegacyComposeProject
+		}
+		if !composeProjectPattern.MatchString(derived) {
+			return "", "", "", newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
+				"the compose project must be a lowercase alphanumeric name with - or _, because it names the 1.x volume", nil)
+		}
+		return derived, trimmed, RollbackVolumeNamed, nil
 	}
-	if !composeProjectPattern.MatchString(trimmed) {
-		return "", "", newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
+	derived := strings.TrimSpace(project)
+	if derived == "" {
+		derived = LegacyComposeProject
+	}
+	if !composeProjectPattern.MatchString(derived) {
+		return "", "", "", newUpgradeError(UpgradeErrorRollbackVolumeUnbound,
 			"the compose project must be a lowercase alphanumeric name with - or _, because it names the 1.x volume", nil)
 	}
-	return trimmed, trimmed + LegacyVolumeSuffix, nil
+	return derived, derived + LegacyVolumeSuffix, RollbackVolumeNamed, nil
 }
 
 // rollbackPlanPort resolves the port the plan publishes the restarted 1.x
@@ -683,12 +746,15 @@ func releaseFamilyText(release releaseRank) string {
 }
 
 // rollbackComposeFile is the 1.x service definition with the image pinned, the
-// volume bound and the published port one the v2 stack does not use. It is fed
-// to `docker compose -f -` on stdin, so no file is written outside the v2 data
-// root and the operator's checkout is never edited.
-func rollbackComposeFile(image, volume string, port int) string {
+// original data location bound and the published port one the v2 stack does not
+// use. A named volume is declared external so compose refuses a missing one
+// instead of creating an empty replacement; a bind mount is written as the host
+// directory the operation recorded. It is fed to `docker compose -f -` on stdin,
+// so no file is written outside the v2 data root and the operator's checkout is
+// never edited.
+func rollbackComposeFile(image, volume, volumeKind string, port int) string {
 	published := strconv.Itoa(port)
-	return strings.Join([]string{
+	lines := []string{
 		"services:",
 		"  " + LegacyComposeService + ":",
 		"    image: " + image,
@@ -707,34 +773,52 @@ func rollbackComposeFile(image, volume string, port int) string {
 		"      retries: 3",
 		"    volumes:",
 		"      - " + volume + ":" + LegacyVolumeMountPoint,
-		"volumes:",
-		"  " + volume + ":",
-		"    external: true",
-		"    name: " + volume,
-	}, "\n") + "\n"
+	}
+	if volumeKind == RollbackVolumeNamed {
+		lines = append(lines,
+			"volumes:",
+			"  "+volume+":",
+			"    external: true",
+			"    name: "+volume,
+		)
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // rollbackPreconditions are the checks the operator runs before applying the
 // plan. The v2 stack must be down and the plan's port free, or the restarted 1.x
-// cannot be the one that answers. The volume must already exist: an external
-// volume makes compose refuse rather than create one. The mountpoint check is
-// the binding: the volume must be the directory the operation recorded, or the
-// restart is not a rollback. Every path is quoted, so a directory with a space
-// is still one argument.
-func rollbackPreconditions(project, volume, image, sourceRoot, backupDir string, port, managerPort int) []string {
+// cannot be the one that answers. A named volume must already exist (declared
+// external, so compose refuses rather than creating one); a bind mount must be
+// the host directory the operation recorded. The port checks see the namespace
+// this command runs in, so they are stated as host-side checks. Every path is
+// quoted, so a directory with a space is still one argument.
+func rollbackPreconditions(project, volume, volumeKind, image, sourceRoot, backupDir string, port, managerPort int) []string {
 	published := strconv.Itoa(port)
 	held := strconv.Itoa(managerPort)
-	return []string{
+	preconditions := []string{
+		"run these checks on the Docker host, not inside `docker compose run --rm`: the CLI container sees its own network namespace and paths",
 		"stop the v2 stack first: while it runs it publishes port " + held + " and holds the v2 data root this plan was derived from",
 		"confirm the plan's port is free on the Docker host: docker ps --filter publish=" + published + " --format '{{.Names}}' must print nothing",
 		"confirm nothing else listens on it: lsof -nP -iTCP:" + published + " -sTCP:LISTEN must print nothing",
-		"docker volume inspect " + strconv.Quote(volume) + " --format '{{ .Mountpoint }}'",
-		"that mountpoint must be the 1.x data directory this operation recorded: " + strconv.Quote(sourceRoot),
-		"the v1 stack restarts under compose project " + project + ", because that project names the volume",
-		"pull the pinned 1.x image before restarting: docker pull " + image,
-		"the v1 stack publishes " + published + " rather than the v2 port " + held + ", so a /health answer can only come from v1",
-		"the recorded backup this verdict is checked against is " + strconv.Quote(backupDir),
 	}
+	if volumeKind == RollbackVolumeBind {
+		preconditions = append(preconditions,
+			"the v1 stack binds the host directory the operation recorded: "+strconv.Quote(volume)+" -> "+LegacyVolumeMountPoint,
+			"confirm it there: stat "+strconv.Quote(sourceRoot)+" must describe the 1.x data directory this operation copied",
+			"the v1 stack restarts under compose project "+project+".")
+	} else {
+		preconditions = append(preconditions,
+			"docker volume inspect "+strconv.Quote(volume)+" --format '{{ .Mountpoint }}'",
+			"that mountpoint must be the 1.x data directory this operation recorded: "+strconv.Quote(sourceRoot),
+			"the v1 stack restarts under compose project "+project+", because that project names the volume")
+	}
+	preconditions = append(preconditions,
+		"pull the pinned 1.x image before restarting: docker pull "+image,
+		"the v1 stack publishes "+published+" rather than the v2 port "+held+", so a /health answer can only come from v1",
+		"the recorded backup this verdict is checked against is "+strconv.Quote(backupDir),
+		"the v1 process that answers /health is operator-verified to be the stack above: this Manager cannot reach the Docker socket to bind it",
+	)
+	return preconditions
 }
 
 // rollbackHealthChecks are the two proofs the operator can reproduce by hand.

@@ -1399,3 +1399,68 @@ func TestPrepareRollbackRefusesToBackfillUnderAHeldV2Lock(t *testing.T) {
 		t.Fatalf("a refused prepare backfilled the row: %q", root)
 	}
 }
+
+// TestPrepareRollbackPlansTheUnprefixedNamedVolume is the first half of M6: a
+// 1.x install started with `docker run -v cpa-manager-plus-data:/data` uses a
+// volume with no compose-project prefix, which the generated plan could not
+// express.
+func TestPrepareRollbackPlansTheUnprefixedNamedVolume(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	options := fixture.options()
+	options.Volume = "cpa-manager-plus-data"
+	plan, err := PrepareRollback(context.Background(), options)
+	if err != nil {
+		t.Fatalf("prepare a plan for the unprefixed volume: %v", err)
+	}
+	if plan.Volume != "cpa-manager-plus-data" || plan.VolumeKind != RollbackVolumeNamed {
+		t.Fatalf("plan volume = %q/%q, want the unprefixed named volume", plan.Volume, plan.VolumeKind)
+	}
+	for _, want := range []string{"external: true", "name: cpa-manager-plus-data", "cpa-manager-plus-data:" + LegacyVolumeMountPoint} {
+		if !strings.Contains(plan.ComposeFile, want) {
+			t.Fatalf("compose file does not contain %q:\n%s", want, plan.ComposeFile)
+		}
+	}
+	// The plan states the half it does not prove.
+	if plan.IdentityProof != RollbackIdentityOperatorVerified {
+		t.Fatalf("identity proof = %q, want %q", plan.IdentityProof, RollbackIdentityOperatorVerified)
+	}
+	for _, want := range []string{"operator-verified", "cannot reach the Docker socket"} {
+		if !strings.Contains(plan.IdentityStatement, want) {
+			t.Fatalf("identity statement does not say %q: %s", want, plan.IdentityStatement)
+		}
+	}
+}
+
+// TestPrepareRollbackPlansTheOriginalBindMount is the second half of M6: 1.x
+// installs documented as `-v ./cpa-manager-plus-data:/data` use a bind mount,
+// and the plan only knew external named volumes.
+func TestPrepareRollbackPlansTheOriginalBindMount(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	options := fixture.options()
+	options.Volume = fixture.volume.root
+	plan, err := PrepareRollback(context.Background(), options)
+	if err != nil {
+		t.Fatalf("prepare a plan for the bind mount: %v", err)
+	}
+	if plan.Volume != fixture.volume.root || plan.VolumeKind != RollbackVolumeBind {
+		t.Fatalf("plan volume = %q/%q, want the recorded bind source", plan.Volume, plan.VolumeKind)
+	}
+	if !strings.Contains(plan.ComposeFile, fixture.volume.root+":"+LegacyVolumeMountPoint) {
+		t.Fatalf("compose file does not bind the recorded directory:\n%s", plan.ComposeFile)
+	}
+	if strings.Contains(plan.ComposeFile, "external: true") {
+		t.Fatalf("a bind mount was declared as an external volume:\n%s", plan.ComposeFile)
+	}
+}
+
+// TestPrepareRollbackRefusesABindMountThatIsNotTheRecordedRoot keeps the bind
+// form honest: another directory is another volume.
+func TestPrepareRollbackRefusesABindMountThatIsNotTheRecordedRoot(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	options := fixture.options()
+	options.Volume = canonicalTempDir(t)
+	if _, err := PrepareRollback(context.Background(), options); !errors.Is(err, ErrRollbackVolumeUnbound) {
+		t.Fatalf("another bind source = %v, want %v", err, ErrRollbackVolumeUnbound)
+	}
+	assertNoPlan(t, fixture.targetRoot)
+}
