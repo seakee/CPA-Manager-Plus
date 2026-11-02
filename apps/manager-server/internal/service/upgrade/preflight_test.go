@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1692,15 +1693,25 @@ func TestSourceDatabaseFilePolicyIsSharedByBothPaths(t *testing.T) {
 
 	report := preflight(t, fixture.root, Options{DeclaredVersion: pinnedSourceVersion()})
 	// The credential read names the link with the shared file policy's code. The
-	// preflight opens the source through its own ownership probe and snapshot, so
-	// it only has to agree on the decision: a linked database is never ready and
-	// its ownership check is never a pass.
+	// preflight opens the source through its own ownership probe and snapshot,
+	// and both refusals are the same policy decision, so it reports that code
+	// too: a linked database is never ready, its ownership check is blocked with
+	// upgrade_source_symlinked, and neither refusal is misreported as a busy or
+	// merely unreadable source.
 	if report.Ready {
 		t.Fatalf("preflight accepted a symlinked source: %v", report.Blocked)
 	}
 	check, found := checkByName(report, CheckSourceOwnership)
-	if !found || check.Status != StatusBlocked || check.Code == "" {
-		t.Fatalf("ownership check = %+v, want a blocked check with a code", check)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceSymlinked {
+		t.Fatalf("ownership check = %+v, want a blocked %q check", check, CodeSourceSymlinked)
+	}
+	if !slices.Contains(report.Blocked, CodeSourceSymlinked) {
+		t.Fatalf("preflight blocked %v, want %q", report.Blocked, CodeSourceSymlinked)
+	}
+	for _, misreported := range []string{CodeSourceBusy, CodeSourceUnreadable} {
+		if slices.Contains(report.Blocked, misreported) {
+			t.Fatalf("preflight misreported a symlinked source as %q: %v", misreported, report.Blocked)
+		}
 	}
 }
 

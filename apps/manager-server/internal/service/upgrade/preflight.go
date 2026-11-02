@@ -353,11 +353,12 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	// 3. Deterministic source fingerprint. The reported value is the state the
 	// snapshot was taken from.
 	if fingerprintErr != nil {
+		code, detail := fingerprintFailure(fingerprintErr, "source files could not be read: ")
 		report.Checks = append(report.Checks, Check{
-			Name: CheckFingerprint, Status: StatusBlocked, Code: CodeSourceUnreadable,
-			Detail: "source files could not be read: " + rootCause(fingerprintErr),
+			Name: CheckFingerprint, Status: StatusBlocked, Code: code,
+			Detail: detail,
 		})
-		block(CodeSourceUnreadable)
+		block(code)
 	} else {
 		report.Fingerprint = before.Digest
 		check := Check{
@@ -375,9 +376,8 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 			// reported state. Without it there is no evidence, so it blocks
 			// instead of passing on the pre-copy value alone.
 			check.Status = StatusBlocked
-			check.Code = CodeSourceUnreadable
-			check.Detail = "source files could not be read after the snapshot: " + rootCause(afterFingerprintErr)
-			block(CodeSourceUnreadable)
+			check.Code, check.Detail = fingerprintFailure(afterFingerprintErr, "source files could not be read after the snapshot: ")
+			block(check.Code)
 		}
 		report.Checks = append(report.Checks, check)
 	}
@@ -443,7 +443,7 @@ func ownershipCheck(lockErr, openErr error) Check {
 	switch {
 	case lockErr != nil:
 		check.Status = StatusBlocked
-		check.Code = CodeSourceBusy
+		check.Code = lockFailureCode(lockErr)
 		check.Detail = ownershipDetail(lockErr)
 	case openErr != nil:
 		check.Status = StatusBlocked
@@ -457,13 +457,24 @@ func ownershipCheck(lockErr, openErr error) Check {
 func ownershipCode(lockErr, openErr error) string {
 	switch {
 	case lockErr != nil:
-		return CodeSourceBusy
+		return lockFailureCode(lockErr)
 	case openErr != nil:
 		code, _ := ownershipFailure(openErr)
 		return code
 	default:
 		return ""
 	}
+}
+
+// lockFailureCode names why the ownership fence was not taken. A database
+// reached through a link is the shared database file policy's refusal, decided
+// before any lock is attempted, and it is the same code the mount lookup and
+// the credential read report; everything else is the source a writer holds.
+func lockFailureCode(err error) string {
+	if errors.Is(err, ErrSourceSymlinked) {
+		return CodeSourceSymlinked
+	}
+	return CodeSourceBusy
 }
 
 func ownershipFailure(err error) (string, string) {
@@ -479,6 +490,17 @@ func ownershipFailure(err error) (string, string) {
 	default:
 		return CodeSourceUnreadable, "source database could not be read through a private snapshot"
 	}
+}
+
+// fingerprintFailure names why the source manifest could not be taken. A file
+// reached through a link is the shared database file policy's refusal, not an
+// unreadable file, so it carries the same code as the mount lookup and the
+// credential read; the detail keeps the file name and the policy's sentence.
+func fingerprintFailure(err error, prefix string) (string, string) {
+	if errors.Is(err, ErrSourceSymlinked) {
+		return CodeSourceSymlinked, prefix + strings.TrimPrefix(err.Error(), "source file ")
+	}
+	return CodeSourceUnreadable, prefix + rootCause(err)
 }
 
 // ErrAdminUnauthorized is VerifyAdmin's negative verdict: the source was
@@ -699,6 +721,8 @@ func ownershipDetail(err error) string {
 		return "source lock file is missing; the source ownership marker cannot prove exclusivity"
 	case errors.Is(err, processlock.ErrHardLinked):
 		return "source database has multiple hard links"
+	case errors.Is(err, ErrSourceSymlinked):
+		return "source database is a symbolic link, which the database file policy refuses"
 	default:
 		return "source lock could not be taken"
 	}

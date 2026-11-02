@@ -72,6 +72,13 @@ func fingerprintSource(root string) (sourceFingerprint, error) {
 			return sourceFingerprint{}, err
 		}
 		if !info.Mode().IsRegular() {
+			// A link is refused by the shared database file policy, not merely
+			// unreadable: the file inspected and the file read have to be the
+			// same one. The preflight names that as its own code so the report
+			// never calls a policy refusal an unreadable database.
+			if info.Mode()&os.ModeSymlink != 0 {
+				return sourceFingerprint{}, fmt.Errorf("source file %s: %w", name, ErrSourceSymlinked)
+			}
 			return sourceFingerprint{}, fmt.Errorf("source file %s is not a regular file", name)
 		}
 		entries = append(entries, manifestEntry{relative: name, size: info.Size()})
