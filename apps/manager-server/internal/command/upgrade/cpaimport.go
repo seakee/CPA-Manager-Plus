@@ -204,7 +204,11 @@ func writeCPAImportOutput(w io.Writer, asJSON bool, output cpaImportOutput) {
 		_, _ = fmt.Fprintf(w, "  source identity: %s\n", result.SourceIdentity)
 		_, _ = fmt.Fprintf(w, "  destination: %s\n", result.DestinationURL)
 		_, _ = fmt.Fprintf(w, "  plugins enabled: %t\n", result.PluginsEnabled)
-		_, _ = fmt.Fprintf(w, "  client keys proved: %d\n", result.ClientKeys)
+		// The proved count is a result only when the run got that far: a refusal
+		// proved nothing, and printing a count beside it is the claim that it did.
+		if output.Error == "" {
+			_, _ = fmt.Fprintf(w, "  client keys proved: %d\n", result.ClientKeys)
+		}
 		_, _ = fmt.Fprintf(w, "  manual items: %d\n", len(result.ManualItems))
 		for _, item := range result.ManualItems {
 			_, _ = fmt.Fprintf(w, "    %s %s\n", item.Item, item.Reason)

@@ -230,3 +230,38 @@ func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
 		}
 	}
 }
+
+// TestCPAImportRefusalDoesNotClaimProvedClientKeys is the Low finding: the text
+// output printed "client keys proved: N" from the source's key count, so a refused
+// import told the operator that keys had been proved against a destination it had
+// already refused. The count is only printed for a run whose proof succeeded, and
+// a refused result carries zero anyway.
+func TestCPAImportRefusalDoesNotClaimProvedClientKeys(t *testing.T) {
+	result := upgradeservice.CPAImportResult{
+		SourceVersion:  "7.3.4",
+		SourceLayout:   "v7",
+		DestinationURL: "http://127.0.0.1:8317",
+		ClientKeys:     3,
+	}
+	output := cpaImportOutput{
+		Result:    &result,
+		Error:     "upgrade_cpa_import_target_foreign: the CPA at the destination URL does not answer",
+		ErrorCode: string(upgradeservice.UpgradeErrorCPAImportTargetForeign),
+	}
+	buffer := &bytes.Buffer{}
+	writeCPAImportOutput(buffer, false, output)
+	written := buffer.String()
+	if strings.Contains(written, "client keys proved") {
+		t.Fatalf("a refusal claimed proved client keys:\n%s", written)
+	}
+	if !strings.Contains(written, "cpa import error:") {
+		t.Fatalf("the refusal is not printed:\n%s", written)
+	}
+
+	// The successful run still reports the count it proved.
+	buffer.Reset()
+	writeCPAImportOutput(buffer, false, cpaImportOutput{Result: &result})
+	if !strings.Contains(buffer.String(), "client keys proved: 3") {
+		t.Fatalf("a successful run did not report the proved count:\n%s", buffer.String())
+	}
+}

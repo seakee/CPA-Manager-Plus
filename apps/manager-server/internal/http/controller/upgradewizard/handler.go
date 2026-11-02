@@ -124,13 +124,17 @@ const (
 
 // NextAction is the single next decision the wizard may offer.
 const (
-	ActionPreflight  = "preflight"
-	ActionCopyIn     = "copy_in"
-	ActionReconcile  = "reconcile"
-	ActionCPAImport  = "cpa_import"
-	ActionVerify     = "verify"
-	ActionComplete   = "complete"
-	ActionRolledBack = "rolled_back"
+	ActionPreflight = "preflight"
+	ActionCopyIn    = "copy_in"
+	ActionReconcile = "reconcile"
+	ActionCPAImport = "cpa_import"
+	// ActionManualItems is the decision after an import that deferred every item:
+	// this build copies nothing, so repeating the step writes nothing and cannot
+	// finish the copy. The decision it can offer is the manual work the row names.
+	ActionManualItems = "manual_items"
+	ActionVerify      = "verify"
+	ActionComplete    = "complete"
+	ActionRolledBack  = "rolled_back"
 )
 
 // SourceRoot states whether the 1.x source the later steps need is still
@@ -746,11 +750,14 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 	document.Stage = row.Stage
 	document.StageKnown = knownStage(row.Stage)
 	document.DomainsDone = decodeStrings(row.Domains)
-	document.NextAction = nextAction(row.Stage, document.DomainsDone)
 	// Manual items are operator instructions written by another step, so they
 	// pass the same content scrubber as the error detail: a copy-pasted command
 	// can carry a credential, and a path in an instruction is still a path.
 	document.ManualItems = scrubList(decodeStrings(row.ManualItems))
+	// The next decision reads the recorded items as well as the domains: this
+	// build's import records no cpa_config domain, so the items it wrote are the
+	// record that the step ran and deferred its work.
+	document.NextAction = nextAction(row.Stage, document.DomainsDone, document.ManualItems)
 	document.SourceKind = row.SourceKind.String
 	document.SourceVersion = row.SourceVersion.String
 	document.ErrorCode = row.ErrorCode.String
@@ -782,7 +789,7 @@ func withCopyInMarker(databasePath string, document statusDocument) (statusDocum
 	// The marker is written after the target was materialized, which is exactly
 	// the domain the recorded copy_in row names.
 	document.DomainsDone = []string{domainSourceCopy}
-	document.NextAction = nextAction(StageCopyIn, document.DomainsDone)
+	document.NextAction = nextAction(StageCopyIn, document.DomainsDone, document.ManualItems)
 	document.SourceKind = marker.SourceKind
 	document.SourceVersion = marker.SourceVersion
 	document.UpdatedAtMS = marker.WrittenAtMS
@@ -803,18 +810,22 @@ func knownStage(stage string) bool {
 	}
 }
 
-// nextAction maps the recorded stage and domains onto the wizard's next
-// decision.
+// nextAction maps the recorded stage, domains and manual items onto the wizard's
+// next decision.
 //
 // A stage is a checkpoint, not a pending step: recording `reconcile` means the
 // comparison finished, so the next decision is the import that follows it.
 // Recording `cpa_import` with the `cpa_config` domain means the destination was
 // copied and proved, so the next decision is verification — repeating the
-// import would ask the operator to redo work the row already proves. A failed
-// operation resumes at reconciliation, and a stage this build does not know
-// keeps the empty string: the caller must show the recorded stage verbatim
-// rather than claim a step that may not be the real position.
-func nextAction(stage string, domains []string) string {
+// import would ask the operator to redo work the row already proves. Recording
+// `cpa_import` without that domain only means the step ran: this build copies
+// nothing and defers every item, so the row's manual items carry the import's
+// typed reason, and the decision is the manual work they name instead of an
+// import that would write nothing again. A failed operation resumes at
+// reconciliation, and a stage this build does not know keeps the empty string:
+// the caller must show the recorded stage verbatim rather than claim a step that
+// may not be the real position.
+func nextAction(stage string, domains, manualItems []string) string {
 	switch stage {
 	case "":
 		return ActionPreflight
@@ -827,6 +838,9 @@ func nextAction(stage string, domains []string) string {
 	case StageCPAImport:
 		if slices.Contains(domains, domainCPAConfig) {
 			return ActionVerify
+		}
+		if cpaImportDeferred(manualItems) {
+			return ActionManualItems
 		}
 		return ActionCPAImport
 	case StageExternal:
@@ -845,6 +859,25 @@ func nextAction(stage string, domains []string) string {
 	default:
 		return ""
 	}
+}
+
+// cpaImportDeferred reports whether the recorded manual items carry the reason
+// the Managed CPA import writes for every item it did not copy.
+//
+// This build records no `cpa_config` domain, because it copies nothing, so the
+// domain cannot say whether the step has run. The items it appended are the
+// record of the run itself, and their typed reason is the part the projection
+// reads: an item line is bounded, and the reason is written so it survives that
+// bound. A row with any other manual item — a reconciliation instruction, say —
+// is not a deferred import and still offers the step.
+func cpaImportDeferred(manualItems []string) bool {
+	marker := "(" + upgradeservice.CPAImportRequiresQualification + ")"
+	for _, item := range manualItems {
+		if strings.Contains(item, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // reconciliationSummary projects the operation's reconciliation output through

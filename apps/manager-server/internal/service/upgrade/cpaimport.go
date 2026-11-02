@@ -116,13 +116,15 @@ type CPAImportOptions struct {
 	// DestinationURL is the destination CPA's base URL, as the Runtime serves it.
 	DestinationURL string
 	// DestinationManagementKey is the destination's management secret when the
-	// destination is already running. It wins over any secret an earlier run of
-	// this step recorded. A run that stages the destination itself uses it for the
-	// stage when supplied, and otherwise generates one and records it in the
-	// Manager store before staging, so the run that has to retry against a ready
-	// destination finds that same secret. A run that finds the destination ready
-	// with neither refuses: the import never invents a second secret for a
-	// destination it did not stage.
+	// destination is already running. A run that finds a recorded attempt must
+	// supply the same secret or none at all: the Supervisor replays the journalled
+	// request, so a different secret would be a different request and is refused
+	// with upgrade_cpa_destination_request_changed instead of being adopted. A run
+	// that stages the destination itself uses it for the stage when supplied, and
+	// otherwise generates one and records it in the Manager store before staging,
+	// so the run that has to retry against a ready destination finds that same
+	// secret. A run that finds the destination ready with neither refuses: the
+	// import never invents a second secret for a destination it did not stage.
 	DestinationManagementKey string
 	// PluginsEnabled is v2's explicit "enable plugin runtime" choice. It is
 	// never inherited from the source and has no default: a run that does not say
@@ -157,8 +159,10 @@ type CPAImportResult struct {
 	SourceIdentity string             `json:"sourceIdentity"`
 	DestinationURL string             `json:"destinationUrl"`
 	PluginsEnabled bool               `json:"pluginsEnabled"`
-	// ClientKeys counts the client keys the destination was proved with. The keys
-	// themselves never leave this process.
+	// ClientKeys counts the client keys the destination was proved to hold. It is
+	// reported only after that proof: a run refused before it reports zero,
+	// because reading the source's list is not proving the destination holds it.
+	// The keys themselves never leave this process.
 	ClientKeys int `json:"clientKeys"`
 	// ManualItems are the source items this build did not copy. Until the trusted
 	// re-pin step exists, that is every provider-configuration and credential item
@@ -274,7 +278,6 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	result.SourceVersion = source.version
 	result.SourceLayout = source.layout
 	result.SourceIdentity = source.sourceIdentity()
-	result.ClientKeys = len(source.clientKeys)
 	for _, item := range source.manual {
 		result.ManualItems = append(result.ManualItems, CPAImportManualItem{Item: item.item, Reason: item.reason, Instruction: item.instruction})
 	}
@@ -287,6 +290,10 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	if err := run.stageDestination(ctx, &result); err != nil {
 		return result, err
 	}
+	// The destination was proved with this key list, so the count is a fact about
+	// this run only now. A refused proof reports zero: this step read the list from
+	// the source, and reading it is not proving the destination holds it.
+	result.ClientKeys = len(source.clientKeys)
 	// From here the step owns the position: a failure below leaves the operation
 	// at cpa_import — the position the operator retries from — instead of
 	// pretending the step never started.
@@ -924,22 +931,32 @@ func recordCPAImportDeferral(ctx context.Context, databasePath string, result CP
 
 // boundedManualItem renders one manual item for the operation row: bounded, in
 // the same one-line shape the other steps write.
+//
+// Only the instruction is bounded. The item name and the typed reason are short
+// and are the machine-readable half — the wizard reads the reason back to tell a
+// deferred import from one that never ran — so cutting them would make the row's
+// own record unusable. The cut is still on a rune boundary: the instruction names
+// a source path, which may be non-ASCII, and slicing bytes would put an invalid
+// UTF-8 sequence in the operation row.
 func boundedManualItem(item CPAImportManualItem) string {
-	line := item.Item + ": " + item.Instruction
+	head := item.Item + ": "
+	tail := ""
 	if item.Reason != "" {
-		line += " (" + item.Reason + ")"
+		tail = " (" + item.Reason + ")"
 	}
-	// Cut on a rune boundary. The item names a source path, which may be
-	// non-ASCII, and slicing bytes would put an invalid UTF-8 sequence in the
-	// operation row.
-	if len(line) > cpaImportManualItemLimit {
-		cut := cpaImportManualItemLimit
-		for cut > 0 && !utf8.RuneStart(line[cut]) {
+	instruction := item.Instruction
+	room := cpaImportManualItemLimit - len(head) - len(tail)
+	if room < 0 {
+		room = 0
+	}
+	if len(instruction) > room {
+		cut := room
+		for cut > 0 && !utf8.RuneStart(instruction[cut]) {
 			cut--
 		}
-		line = line[:cut]
+		instruction = instruction[:cut]
 	}
-	return line
+	return head + instruction + tail
 }
 
 // cpaImportDestinationKeySetting is the settings row that carries the destination

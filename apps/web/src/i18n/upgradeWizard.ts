@@ -146,6 +146,7 @@ const en = {
   stageCopyIn: 'Copy-in',
   stageReconcile: 'Reconciliation',
   stageCpaImport: 'CPA import',
+  stageManualItems: 'Manual items',
   stageExternalConnect: 'CPA connection',
   stageVerify: 'Verification',
   stageComplete: 'Complete',
@@ -288,6 +289,7 @@ const zh: typeof en = {
   stageCopyIn: '复制入库',
   stageReconcile: '对账',
   stageCpaImport: 'CPA 导入',
+  stageManualItems: '手动项',
   stageExternalConnect: 'CPA 连接',
   stageVerify: '验证',
   stageComplete: '完成',
@@ -428,6 +430,7 @@ const tw: typeof en = {
   stageCopyIn: '複製寫入',
   stageReconcile: '對帳',
   stageCpaImport: 'CPA 匯入',
+  stageManualItems: '手動項目',
   stageExternalConnect: 'CPA 連線',
   stageVerify: '驗證',
   stageComplete: '完成',
@@ -582,6 +585,7 @@ const ru: typeof en = {
   stageCopyIn: 'Копирование',
   stageReconcile: 'Сверка',
   stageCpaImport: 'Импорт CPA',
+  stageManualItems: 'Ручные пункты',
   stageExternalConnect: 'Подключение CPA',
   stageVerify: 'Проверка результата',
   stageComplete: 'Завершено',
@@ -698,6 +702,8 @@ export function stageText(stage: string, language = fullWebLanguage()): string {
       return upgradeWizardText('stageReconcile', language);
     case 'cpa_import':
       return upgradeWizardText('stageCpaImport', language);
+    case 'manual_items':
+      return upgradeWizardText('stageManualItems', language);
     case 'external_connect':
       return upgradeWizardText('stageExternalConnect', language);
     case 'verify':

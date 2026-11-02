@@ -592,8 +592,12 @@ func TestImportCPARefusesASourceRootOtherThanTheRecordedOne(t *testing.T) {
 	}
 }
 
-// TestBoundedManualItemTruncatesOnARuneBoundary pins the non-ASCII case: a long
-// item must stay valid UTF-8 when it is bounded.
+// TestBoundedManualItemTruncatesOnARuneBoundary pins the non-ASCII case and the
+// half that must survive it: a long instruction must stay valid UTF-8 when it is
+// bounded, and the item name and typed reason are never what gets cut. The reason
+// is what the wizard reads back to tell a deferred import from one that never ran,
+// so a bounded line is not a prefix of the full line — it is the full head and
+// tail with the instruction shortened between them.
 func TestBoundedManualItemTruncatesOnARuneBoundary(t *testing.T) {
 	instruction := strings.Repeat("配置路径", 120)
 	line := boundedManualItem(CPAImportManualItem{Item: "section:café", Reason: "not_in_import_scope", Instruction: instruction})
@@ -603,11 +607,23 @@ func TestBoundedManualItemTruncatesOnARuneBoundary(t *testing.T) {
 	if len(line) > cpaImportManualItemLimit {
 		t.Fatalf("the bounded manual item is %d bytes, want at most %d", len(line), cpaImportManualItemLimit)
 	}
-	if !strings.HasPrefix("section:café: "+instruction+" (not_in_import_scope)", line) {
-		t.Fatal("the bounded manual item is not a prefix of the full line")
-	}
 	if !strings.HasPrefix(line, "section:café: ") {
 		t.Fatalf("the bounded manual item lost its item name: %q", line)
+	}
+	if !strings.HasSuffix(line, " (not_in_import_scope)") {
+		t.Fatalf("the bounded manual item lost its reason: %q", line)
+	}
+	kept := strings.TrimSuffix(strings.TrimPrefix(line, "section:café: "), " (not_in_import_scope)")
+	if !strings.HasPrefix(instruction, kept) {
+		t.Fatalf("the bounded instruction %q is not a prefix of the full one", kept)
+	}
+	// The import's own deferral reason is preserved for a full-size instruction,
+	// which is what the wizard's next decision depends on.
+	deferred := boundedManualItem(CPAImportManualItem{
+		Item: "section:ampcode", Reason: CPAImportRequiresQualification, Instruction: instruction,
+	})
+	if !strings.HasSuffix(deferred, "("+CPAImportRequiresQualification+")") {
+		t.Fatalf("the bounded deferral lost its reason: %q", deferred)
 	}
 }
 

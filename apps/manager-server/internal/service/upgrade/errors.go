@@ -135,10 +135,11 @@ const (
 	// UpgradeErrorCPADestinationUnready reports that the destination could not be
 	// observed, staged or started, so no configuration was written to it.
 	UpgradeErrorCPADestinationUnready UpgradeErrorCode = "upgrade_cpa_destination_unready"
-	// UpgradeErrorCPAImportUnproven reports that a copied item does not read back
-	// from the destination as it was written, or that an item's effect is
-	// unknown. The import stops, the operation stays at cpa_import and the
-	// cpa_config domain is not recorded.
+	// UpgradeErrorCPAImportUnproven reports that the inventory is not the clean
+	// deferral this build records: the executor copied an item without a migration
+	// decision, or left an item's outcome unknown or the inventory partial. The
+	// import stops, the operation stays at cpa_import and the cpa_config domain is
+	// not recorded.
 	UpgradeErrorCPAImportUnproven UpgradeErrorCode = "upgrade_cpa_import_unproven"
 	// UpgradeErrorCPAImportUnavailable reports that the source inventory could not
 	// be read, so this run settled no item. Nothing was written to the
@@ -157,9 +158,12 @@ const (
 	UpgradeErrorCPASourceRootMismatch UpgradeErrorCode = "upgrade_cpa_source_root_mismatch"
 	// UpgradeErrorCPADestinationRequestChanged reports that an earlier run of this
 	// step already submitted a different request to this destination — another
-	// secret, plugin choice or client key set — and the Supervisor replays the
-	// journalled attempt as it was submitted. The run refuses instead of
-	// overwriting the record, and it wrote nothing to the destination.
+	// secret, plugin choice or client key set, a changed source identity or class,
+	// a Runtime identity, generation or active artifact the recorded authority no
+	// longer matches, or a destination URL that an earlier run proved to be the
+	// staged destination — and the Supervisor replays the journalled attempt as it
+	// was submitted. The run refuses instead of overwriting the record, and it
+	// wrote nothing to the destination.
 	UpgradeErrorCPADestinationRequestChanged UpgradeErrorCode = "upgrade_cpa_destination_request_changed"
 	// UpgradeErrorCPAImportTargetForeign reports that the CPA answering at the
 	// destination URL does not hold the client keys this import stages, so it is

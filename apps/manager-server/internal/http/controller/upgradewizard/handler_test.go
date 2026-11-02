@@ -22,6 +22,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
@@ -762,16 +763,26 @@ func TestStatusScrubsRecordedTextByContent(t *testing.T) {
 // checkpoint, so the next action never repeats the stage that just completed.
 func TestStatusStageToNextAction(t *testing.T) {
 	cases := []struct {
-		stage      string
-		domains    []string
-		action     string
-		stageKnown bool
+		stage       string
+		domains     []string
+		manualItems []string
+		action      string
+		stageKnown  bool
 	}{
 		{stage: "", action: ActionPreflight, stageKnown: true},
 		{stage: StagePreflight, action: ActionPreflight, stageKnown: true},
 		{stage: StageCopyIn, action: ActionCopyIn, stageKnown: true},
 		{stage: StageReconcile, domains: []string{domainSourceCopy}, action: ActionCPAImport, stageKnown: true},
 		{stage: StageCPAImport, domains: []string{domainSourceCopy}, action: ActionCPAImport, stageKnown: true},
+		// The deferral is read from the items the import wrote: this build never
+		// records cpa_config, so an item with its typed reason is the record that
+		// the step ran and copied nothing.
+		{
+			stage: StageCPAImport, domains: []string{domainSourceCopy},
+			manualItems: []string{"section:ampcode: re-create it (" + upgradeservice.CPAImportRequiresQualification + ")"},
+			action:      ActionManualItems, stageKnown: true,
+		},
+		{stage: StageCPAImport, domains: []string{domainSourceCopy}, manualItems: []string{"reimport_cpa_keys"}, action: ActionCPAImport, stageKnown: true},
 		{stage: StageCPAImport, domains: []string{domainSourceCopy, domainCPAConfig}, action: ActionVerify, stageKnown: true},
 		{stage: StageExternal, action: ActionVerify, stageKnown: true},
 		{stage: StageVerify, action: ActionComplete, stageKnown: true},
@@ -781,8 +792,8 @@ func TestStatusStageToNextAction(t *testing.T) {
 		{stage: "quantum", action: "", stageKnown: false},
 	}
 	for _, testCase := range cases {
-		if got := nextAction(testCase.stage, testCase.domains); got != testCase.action {
-			t.Fatalf("nextAction(%q, %v) = %q, want %q", testCase.stage, testCase.domains, got, testCase.action)
+		if got := nextAction(testCase.stage, testCase.domains, testCase.manualItems); got != testCase.action {
+			t.Fatalf("nextAction(%q, %v, %v) = %q, want %q", testCase.stage, testCase.domains, testCase.manualItems, got, testCase.action)
 		}
 		if got := knownStage(testCase.stage); got != testCase.stageKnown {
 			t.Fatalf("knownStage(%q) = %t, want %t", testCase.stage, got, testCase.stageKnown)
@@ -796,10 +807,11 @@ func TestStatusStageToNextAction(t *testing.T) {
 // repeat the stage they had just finished.
 func TestStatusRecordedStageGuidesTheNextStep(t *testing.T) {
 	cases := []struct {
-		name    string
-		stage   model.UpgradeStage
-		domains []string
-		action  string
+		name        string
+		stage       model.UpgradeStage
+		domains     []string
+		manualItems []string
+		action      string
 	}{
 		{
 			name: "reconciled", stage: model.UpgradeStageReconcile,
@@ -811,12 +823,19 @@ func TestStatusRecordedStageGuidesTheNextStep(t *testing.T) {
 			domains: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig},
 			action:  ActionVerify,
 		},
+		{
+			name: "deferred", stage: model.UpgradeStageCPAImport,
+			domains:     []string{model.UpgradeDomainSourceCopy},
+			manualItems: []string{"section:ampcode: re-create it (" + upgradeservice.CPAImportRequiresQualification + ")"},
+			action:      ActionManualItems,
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{
 				Stage:       testCase.stage,
 				DomainsDone: testCase.domains,
+				ManualItems: testCase.manualItems,
 			})
 			_, body := request(t, newHandler(legacySourceDir(t), database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
 			var status statusDocument
