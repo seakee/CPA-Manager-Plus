@@ -447,17 +447,26 @@ never re-runs the copy-in.
 
 The source fingerprint recorded by the copy-in is re-checked first, before and
 after the comparison; a source that moved fails with `upgrade_source_changed`
-and nothing is compared. The database and its `-wal`/`-shm`/`-journal` sidecars
-are then copied into `<TargetRoot>/.upgrade-reconcile` and the *copy* is opened
-read-write with `query_only`, so SQLite joins a WAL there. Opening the original,
-even read-only, would create a WAL index beside it and change the fingerprint
-the copy-in recorded. The scratch area is `<ScratchDir>/.upgrade-reconcile`
-(the v2 data root by default): only that tool-owned subdirectory is created and
-removed, so the directory the caller named is never the path the step deletes.
-The named root must not be, sit inside, or contain the source root, and the copy
-itself is removed on every return path — a clean comparison, a mismatch, or a
-failure before the comparison finished — so nothing but the report (counts and
-days, never rows) survives the step.
+and nothing is compared. The database is read through the same private snapshot
+preflight and status use (`upgrade.OpenSnapshot`): the database and its
+`-wal`/`-shm` sidecars are copied into `<ScratchDir>/.upgrade-reconcile` and the
+*snapshot* digests the source before and after taking the copy, so a source that
+was written while it was being copied is refused instead of compared. Opening
+the original, even read-only, would create a WAL index beside it and change the
+fingerprint the copy-in recorded. The scratch area is
+`<ScratchDir>/.upgrade-reconcile` (the v2 data root by default): only that
+tool-owned subdirectory is created and removed, so the directory the caller
+named is never the path the step deletes. The named root must not be, sit inside,
+or contain the source root, and the copy is removed on every return path — a
+clean comparison, a mismatch, or a failure before the comparison finished — so
+nothing but the report survives the step.
+
+The report carries no credential and no raw failure body, but it is not
+row-free: a mismatch names the dimension that moved, which for a retained bucket
+is the hour, model and `api_key_hash` and for a rollup is the row identity
+(account, label, file, key hash, auth index, source hash, …), because the
+operator has to be able to find the row. Those values already live in the same
+v2 store the report is recorded in, and the key is a hash rather than a key.
 
 ### The four compared domains
 
@@ -466,12 +475,19 @@ days, never rows) survives the step.
 | `retained` | `usage_events` grouped by UTC hour, `model` and `coalesce(api_key_hash, '')`: `count(*)`, `sum(total_tokens)`, `sum(failed)` | every hour bucket and every per-key, per-model total equal |
 | `pricing` | `usage_pricing_hourly_rollups_v1` per stored row (hour bucket and the whole identity, `failed` included): calls, every token class and cost | every row and every column equal; cost is recomputed per side |
 | `coverage` | `usage_archive_deleted_coverage_daily`: per-day `deleted_event_count`, `min_timestamp_ms`, `max_timestamp_ms` | all three equal per day |
-| `history` | `usage_monitoring_account_daily_rollups_v1` per day, `account_snapshot`, `auth_label_snapshot`, `auth_file_snapshot`, `provider`, `coalesce(api_key_hash, '')`, `executor_type` and `model` | calls and tokens equal per identity |
+| `history` | `usage_monitoring_account_daily_rollups_v1` per stored row: the table's whole primary key (hour bucket, account and auth snapshots, provider, auth index and account id, source and source hash, file, key hash, executor, model, billing/pricing model, service tier, context threshold, `failed`) | calls, every token class, `total_tokens`, `last_seen_ms` and the latency aggregates equal per identity |
 
 Each query groups by exactly the expression it selects, so one reported key is
 one row: a NULL and an empty `api_key_hash` are the same "no key" and are summed
 into one bucket instead of returning two groups that overwrite each other in the
 cell map.
+
+`pricing` and `history` are read only for the `structure_revision` the store's
+own read path selects — the pricing revision the model price table defines, the
+account-history revision the rollup contract names. Rows an older revision left
+behind are not what the reader shows, so they are not compared as if they were;
+a row moved to an inactive revision therefore shows up as the row the active
+revision lost.
 
 The pricing table stores no cost, so cost is recomputed on both sides with
 `pricing.CostForModelCandidatesWithServiceTier`; a price change between the two
@@ -480,9 +496,13 @@ same inputs produce the same integer micro sum, so every difference is a
 difference and no relative tolerance may hide one. Comparing at the granularity
 each read path exposes is what makes a permutation inside a day visible instead
 of cancelling out in a day sum: a bucket that moved an hour, two `failed` rows
-trading their calls, a rewritten API key, provider or model, or rewritten
-coverage edges are reported in the column that moved (`bucket_ms`, `calls`,
-`api_key_hash`, `min_timestamp_ms`, …), on the row they moved on.
+trading their calls, a rewritten API key, provider or model, a history row whose
+`failed` flag, auth index, account id, source hash or pricing model changed, or a
+row that reallocated input tokens to output tokens inside an unchanged total, is
+reported in the column that moved (`bucket_ms`, `calls`, `api_key_hash`,
+`failed`, `auth_index`, `input_tokens`, `min_timestamp_ms`, …), on the row it
+moved on. The read path exposes those columns, so a change a reader would show
+must not reconcile clean.
 
 Each side is read inside one read-only transaction. A day present on only one
 side is reported as a `presence` mismatch, never as a skip, and `comparedDays`
@@ -509,7 +529,10 @@ from:
 - A missing derived table, and any day of `retained` or `coverage` the store
   cannot show, stays unwaivable: the retained events are the log itself and the
   deleted coverage table records what an archive run removed, so neither can be
-  recomputed from anything else.
+  recomputed from anything else. The boundary is per day, not per domain: one
+  lost day blocks the step even when every other day of the same domain
+  compares, because a day the store cannot show is lost data and not a
+  disagreement.
 
 A run that established no operation domain at all — the source holds none of the
 compared tables — compared nothing, so it is not recorded: it fails with the
@@ -524,8 +547,12 @@ coverage table that disagrees with the archive refs) must be acknowledged:
 
 - `--acknowledge <YYYY-MM-DD>`, repeatable; anything that is not a calendar day
   is a usage error, so a typo cannot acknowledge another day.
-- `--acknowledge-parity-gaps` accepts whatever the parity detection reports. The
-  days it accepted are still written into the evidence.
+- `--acknowledge-parity-gaps` accepts the days whose *only* problem is the
+  parity detection. It is not a bulk acknowledgement: a day that also carries a
+  measured mismatch, or a cleared derived rollup the store lost, still blocks
+  until it is named with `--acknowledge`, because the switch says nothing about
+  the data difference on that day. The days it accepted are still written into
+  the evidence.
 
 An unacknowledged day blocks with the typed `upgrade_reconcile_mismatch`, marks
 nothing, records nothing and leaves the stage at `copy_in`; the report still
@@ -538,17 +565,37 @@ disagreement always keeps the stronger reason.
 Each derived day is acknowledged individually. `--acknowledge <YYYY-MM-DD>` names
 one calendar day per flag and has to be repeated for every day the report lists,
 because there is no bulk switch for a cleared derived rollup:
-`--acknowledge-parity-gaps` covers only what the parity detection reports. The
+`--acknowledge-parity-gaps` covers only a day whose sole problem is what the
+parity detection reports. The
 report lists the days under the domain's `recoverableDays` and repeats them in
 `unacknowledgedDays`, so the operator acknowledges exactly the days the run
 measured, and a day listed in `unrecoverableDays` cannot be acknowledged at all.
+
+### Locks
+
+The step reads a stopped 1.x source and writes the v2 store, so the command
+holds two fences for the whole run: the 1.x ownership lock on the source
+(`processlock.AcquireExisting`, as `upgrade run` does) and the v2 data-root
+process lock on the Manager store (`processlock.Acquire`, as `adminreset` and
+`derivedmaintenance` do). The service refuses before it reads anything unless
+both locks belong to the paths it is about to use, so a programmatic caller
+cannot skip them. A fence another process holds is a typed refusal:
+`upgrade_source_busy` for the source and `upgrade_target_locked` for the store,
+both exit 1. A live Manager and a second reconciliation therefore cannot write
+the same store or share the same scratch directory.
+
+### Recording
 
 The marks, the evidence JSON in `upgrade_operations.reconciliation` and the
 `Advance` over the operation domains the comparison actually established —
 `retained_projection` for the retained events and the account rollups derived
 from them, `pricing`, `coverage` — to stage `reconcile` are written in one
 transaction, always with `Advance`, never `Put`: `Put` rebuilds the row and would
-clear the provenance `complete` requires. A reader therefore never sees marks
+clear the provenance `complete` requires. Both writers own `updated_at_ms`
+through the operation repository's `nextUpdatedAtMS`, and validate the row they
+are about to write in the same transaction, so a row whose clock ran ahead
+during an earlier copy-in is recorded instead of rejected until the wall clock
+catches up. A reader therefore never sees marks
 without the evidence that explains them, and an interruption leaves the store
 exactly as it was; because every write is idempotent, running the step again
 writes the whole result. A domain that was not applicable is never recorded, so
@@ -603,15 +650,30 @@ marked day as complete, and none of them changes the numbers:
 
 ### CLI
 
-`cpa-manager-plus upgrade reconcile --legacy <dir> [--target <dir>]
-[--bundle <dir>] [--json] [--acknowledge <day>]… [--acknowledge-parity-gaps]`
-runs the preflight gate first, then the reconciliation. Exit 0 reconciled; exit 1
-is a refusal the operator has to look at — a blocked preflight, an
-unacknowledged mismatch (`upgrade_reconcile_mismatch`), a store that cannot show
-what the source holds (`upgrade_reconcile_target_incomplete`), or a run that
-compared nothing (`upgrade_reconcile_nothing_compared`); exit 2 is a usage or
-environment error. Every refusal prints the report with its typed `errorCode`
-first (the report is printed either way), so the exit code only says the
-migration did not advance and the code says why. The `--bundle` default is the
-recorded copy-in's backup destination, and the recorded copy-in is re-verified
-against it before anything is compared.
+`cpa-manager-plus upgrade reconcile --legacy <dir> --source-version <release>
+[--target <dir>] [--bundle <dir>] [--scratch-dir DIR] [--json]
+[--acknowledge <day>]… [--acknowledge-parity-gaps]` runs the preflight gate
+first, then the reconciliation. The declaration is required for the same reason
+`upgrade run` requires it: a 1.x database does not record its release.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | reconciled: the marks, the evidence and the stage were recorded |
+| 1 | a refusal the operator has to look at: a blocked preflight (`upgrade_source_busy` among others), a fence another process holds (`upgrade_source_busy`, `upgrade_target_locked`), no recorded copy-in (`upgrade_reconcile_not_copied_in`), a stage that can no longer enter the step (`upgrade_reconcile_stage_closed`), a record without the copied source fingerprint (`upgrade_reconcile_record_incomplete`), an unacknowledged day (`upgrade_reconcile_mismatch`), a day the store cannot show (`upgrade_reconcile_target_incomplete`), or a run that compared nothing (`upgrade_reconcile_nothing_compared`) |
+| 2 | usage, environment, or a retryable condition: `upgrade_source_changed` is retryable and keeps exit 2 |
+
+Every refusal prints the report with its typed `errorCode` (the report is printed
+either way), so the exit code only says the migration did not advance and the
+code says why. The `--bundle` default is the recorded copy-in's backup
+destination, and the recorded copy-in is re-verified against it before anything
+is compared.
+
+**Known limit (U1-1b).** The accepted source contract is pinned to v1.14.4, and
+`usage_archive_deleted_coverage_daily` arrived in v1.14.6. A source the CLI
+accepts therefore never holds the coverage table, so the `coverage` domain is
+reported `not applicable` on every real pinned source and is never established;
+its comparison is exercised by fixtures that carry the table, and it becomes
+live when the pin moves. The same applies to the parity detection, which is
+`not-applicable` for a source without `usage_archive_event_refs`. This is a
+property of the pin, not of reconciliation, and this slice does not change the
+pinned bootstrap contract.
