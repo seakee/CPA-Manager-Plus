@@ -75,7 +75,10 @@ node --test bin/ci/upgrade-docker.test.mjs     # the harness's own logic, no Doc
   admission), while `stableDigest` covers only the stable facts two runs of the
   same build are expected to agree on.
   `node bin/ci/upgrade-docker.mjs --verify-evidence <file> [--expect-head <sha>]`
-  re-checks that hash, the verdict and the head binding without Docker. CI runs
+  re-checks that hash, the verdict, the head binding, the built binary digest and
+  a clean tree without Docker: a document from a dirty tree or one that never
+  built a binary fails verification instead of passing as a binding to the
+  commit. CI runs
   it on the file the run published to `GITHUB_OUTPUT` and uploads exactly that
   file, so an artifact can never be a committed historical record; the harness
   also refuses to reuse a fixture image that does not carry the provenance

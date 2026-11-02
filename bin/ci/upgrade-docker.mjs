@@ -46,7 +46,8 @@
 // writes when it builds it, and its rollback alias must resolve to the same
 // image ID; an image that does not is refused instead of being rebuilt over.
 // `--verify-evidence` re-checks one evidence document without Docker: the
-// canonical hash, the verdict and the implementation binding.
+// canonical hash, the verdict, the implementation binding, the built binary
+// digest and a clean tree.
 // `SKIP_UPGRADE_DOCKER=1` is the only way to skip the run, and it says so.
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -552,8 +553,10 @@ export function createImplementationIdentity({ headSha, harnessSha256, binarySha
 }
 
 // verifyEvidenceDocument re-checks a document the way CI does: the canonical
-// hash, a recorded verdict, and the implementation binding (optionally pinned to
-// the commit the workflow ran).
+// hash, a recorded verdict, the implementation binding (optionally pinned to the
+// commit the workflow ran), the digest of the binary that ran, and a clean tree.
+// The last two are required: a run that did not build a binary or that ran over
+// uncommitted changes cannot be presented as a binding to the commit.
 export function verifyEvidenceDocument(document, { expectHead = null } = {}) {
   const problems = [];
   const expected = evidenceHash(document);
@@ -561,6 +564,8 @@ export function verifyEvidenceDocument(document, { expectHead = null } = {}) {
   if (!UPGRADE_DOCKER_CONTRACT.evidenceVerdicts.includes(document?.verdict)) problems.push('verdict is not pass, fail or aborted');
   if (!SHA1_PATTERN.test(String(document?.implementation?.headSha ?? ''))) problems.push('implementation.headSha is missing');
   if (!SHA256_PATTERN.test(String(document?.implementation?.harnessSha256 ?? ''))) problems.push('implementation.harnessSha256 is missing');
+  if (!SHA256_PATTERN.test(String(document?.implementation?.binarySha256 ?? ''))) problems.push('implementation.binarySha256 is missing');
+  if (document?.implementation?.treeClean !== true) problems.push('implementation.treeClean is not true');
   if (typeof document?.startedAt !== 'string' || document.startedAt === '') problems.push('startedAt is missing');
   if (expectHead && document?.implementation?.headSha !== expectHead) problems.push('implementation.headSha is not the expected commit');
   return { ok: problems.length === 0, problems, expected, actual: document?.sha256 ?? null };
@@ -1420,14 +1425,26 @@ function chain(binary, sourceRoot, targetRoot, label, { sourceDays = null, domai
   assertValue(runReport.result?.stage === 'copy_in', `${label}: run stage=${runReport.result?.stage}`);
   assertValue(runReport.result?.restored === true, `${label}: run restored=${runReport.result?.restored}`);
   // The next command the run prints is the reconciliation the operator can
-  // actually run, and it must carry the same declared release as this harness.
+  // actually run. Exact tokens, not a substring: the source, the target and the
+  // declared release are each one argument, and no extra word can hide in them.
   assertValue(
-    typeof runReport.next === 'string' && runReport.next.includes('upgrade reconcile'),
+    typeof runReport.next === 'string' && runReport.next !== '',
     `${label}: run printed no reconcile next step: ${JSON.stringify(runReport.next)}`,
   );
   assertValue(
-    runReport.next.includes('--source-version') && runReport.next.includes(acceptedRelease),
-    `${label}: the printed next step does not declare ${acceptedRelease}: ${JSON.stringify(runReport.next)}`,
+    JSON.stringify(shellTokens(runReport.next)) ===
+      JSON.stringify([
+        'cpa-manager-plus',
+        'upgrade',
+        'reconcile',
+        '--legacy',
+        sourceRoot,
+        '--target',
+        targetRoot,
+        '--source-version',
+        acceptedRelease,
+      ]),
+    `${label}: the printed next step is not the exact reconcile command for this source and release: ${JSON.stringify(runReport.next)}`,
   );
 
   const reconcile = runCli(binary, ['upgrade', 'reconcile', '--legacy', sourceRoot, '--target', targetRoot, '--json'], `${label}:reconcile`, { expectExit: 0 });
@@ -3085,6 +3102,48 @@ export function withDeclaredSourceVersion(cliArgs, release) {
     );
   }
   return [declared[0], declared[1], '--source-version', release, ...declared.slice(2)];
+}
+
+// shellTokens splits a printed command the way a shell reads the quoting
+// ShellQuote produces: single-quoted runs (including the '\'' escape) and
+// backslash escapes outside them. The harness asserts the exact argv of the next
+// command it prints, so a substring match cannot accept a different flag value
+// or an extra word.
+export function shellTokens(command) {
+  const text = String(command ?? '');
+  const tokens = [];
+  let current = '';
+  let started = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "'") {
+      started = true;
+      index += 1;
+      while (index < text.length && text[index] !== "'") {
+        current += text[index];
+        index += 1;
+      }
+      continue;
+    }
+    if (char === '\\' && index + 1 < text.length) {
+      current += text[index + 1];
+      started = true;
+      index += 1;
+      continue;
+    }
+    if (char === ' ' || char === '\t' || char === '\n') {
+      if (started) {
+        tokens.push(current);
+        current = '';
+        started = false;
+      }
+      continue;
+    }
+    current += char;
+    started = true;
+  }
+  if (started) tokens.push(current);
+  return tokens;
 }
 
 function runCli(binary, cliArgs, name, { expectExit = null, allowMissingBinary = false } = {}) {

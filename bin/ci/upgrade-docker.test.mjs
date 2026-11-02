@@ -27,6 +27,7 @@ import {
   imageRepository,
   isOwnedImageAlias,
   rollbackAliasReference,
+  shellTokens,
   withDeclaredSourceVersion,
   assertNoSecretInBody,
   canonicalEvidenceDocument,
@@ -57,6 +58,7 @@ const evidenceDocument = (overrides = {}) =>
       headSha: HEAD,
       harnessSha256: HARNESS_SHA,
       binarySha256: 'b'.repeat(64),
+      treeClean: true,
       valid: true,
     },
     rollback: { writtenRowInLiveDirectory: 1 },
@@ -398,6 +400,43 @@ test('a document without a verdict or a head binding is refused', () => {
 
   const withoutHead = withEvidenceHash({ ...document, implementation: { harnessSha256: HARNESS_SHA } });
   assert.match(verifyEvidenceDocument(withoutHead).problems.join('; '), /headSha/);
+});
+
+test('a document without a binary digest or a clean tree is refused', () => {
+  const document = evidenceDocument();
+  for (const [name, implementation, problem] of [
+    ['no binary digest', { ...document.implementation, binarySha256: null }, /binarySha256/],
+    ['an unknown tree state', { ...document.implementation, treeClean: null }, /treeClean/],
+    ['a dirty tree', { ...document.implementation, treeClean: false }, /treeClean/],
+  ]) {
+    const verdict = verifyEvidenceDocument(withEvidenceHash({ ...document, implementation }));
+    assert.equal(verdict.ok, false, name);
+    assert.match(verdict.problems.join('; '), problem, name);
+  }
+});
+
+test('the printed next command is compared as exact shell tokens', () => {
+  assert.deepEqual(shellTokens("cpa-manager-plus upgrade reconcile --legacy '/srv/a b' --source-version 'v1.14.4'"), [
+    'cpa-manager-plus',
+    'upgrade',
+    'reconcile',
+    '--legacy',
+    '/srv/a b',
+    '--source-version',
+    'v1.14.4',
+  ]);
+  // The ShellQuote escape for a literal quote must not split the argument.
+  assert.deepEqual(shellTokens(`'it'\\''s'`), ["it's"]);
+  // A substring check would accept this; the tokens are what the test asserts.
+  assert.notDeepEqual(shellTokens("cpa-manager-plus upgrade reconcile --legacy '/srv/source'"), [
+    'cpa-manager-plus',
+    'upgrade',
+    'reconcile',
+    '--legacy',
+    '/srv/source',
+    '--target',
+    '/srv/target',
+  ]);
 });
 
 test('the canonical hash ignores only the hash field itself', () => {
