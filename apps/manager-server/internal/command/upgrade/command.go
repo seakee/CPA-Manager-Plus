@@ -401,7 +401,8 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	scratchDir := flags.String("scratch-dir", "", "directory for the transient preflight and reconciliation copies; defaults to the OS temporary directory")
 	asJSON := flags.Bool("json", false, "print the preflight report and the reconciliation as JSON")
 	acknowledgeParityGaps := flags.Bool("acknowledge-parity-gaps", false,
-		"accept every day the parity check reports as lost before v1.14.6")
+		"accept the days the parity check reports as lost before v1.14.6 when nothing else disagrees on them; "+
+			"a day with a measured mismatch or a lost rollup still needs --acknowledge")
 	acknowledged := make([]string, 0, 1)
 	flags.Func("acknowledge", "accept one UTC day (YYYY-MM-DD) as permanently incomplete; repeat for each day",
 		func(value string) error {

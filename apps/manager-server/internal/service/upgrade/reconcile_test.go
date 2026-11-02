@@ -323,6 +323,58 @@ func TestReconcileRequiresAcknowledgementForAParityGap(t *testing.T) {
 	}
 }
 
+// TestReconcileDoesNotWaiveAMeasuredMismatchWithTheParitySwitch reproduces
+// review M1/P1: a retained total that disagreed on a day the parity detection
+// also flagged was accepted by --acknowledge-parity-gaps alone, so a real
+// copy-in difference was recorded and marked without the operator naming it.
+func TestReconcileDoesNotWaiveAMeasuredMismatchWithTheParitySwitch(t *testing.T) {
+	volume := newLegacyVolume(t)
+	// Both the parity gap and the events the fixture seeds sit on 1970-01-01, so
+	// the measured disagreement and the gap share one day.
+	seedParityGap(t, volume)
+	targetRoot := canonicalTempDir(t)
+	options := copyInOptions(volume, targetRoot)
+	options.Lock = volume.lock(t)
+	if _, err := CopyIn(context.Background(), options); err != nil {
+		t.Fatalf("copy in: %v", err)
+	}
+	copied := copiedVolume{volume: volume, target: targetRoot, options: options}
+	execTarget(t, copied.databasePath(),
+		`update usage_events set total_tokens = total_tokens + 999 where event_hash = 'legacy-event-1'`)
+
+	parityOnly := copied.reconcileOptions()
+	parityOnly.AcknowledgeParityGaps = true
+	report, err := Reconcile(context.Background(), parityOnly)
+	if !errors.Is(err, ErrReconcileMismatch) {
+		t.Fatalf("reconcile error = %v, want the typed mismatch", err)
+	}
+	if report.Recorded {
+		t.Fatal("the parity switch recorded a measured disagreement")
+	}
+	if len(report.ParityGapDays) != 1 || report.ParityGapDays[0] != "1970-01-01" {
+		t.Fatalf("parity gap days = %v, want the shared day", report.ParityGapDays)
+	}
+	if len(report.UnacknowledgedDays) != 1 || report.UnacknowledgedDays[0] != "1970-01-01" {
+		t.Fatalf("unacknowledged days = %v, want the shared day still blocking", report.UnacknowledgedDays)
+	}
+	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+		t.Fatalf("marked days = %v, want none", got)
+	}
+
+	// The day still moves the stage once it is named. A measured disagreement
+	// keeps its own reason over the parity gap.
+	named := copied.reconcileOptions()
+	named.Acknowledged = []string{"1970-01-01"}
+	acknowledged, err := Reconcile(context.Background(), named)
+	if err != nil {
+		t.Fatalf("reconcile with the day acknowledged: %v", err)
+	}
+	if len(acknowledged.IncompleteDays) != 1 ||
+		acknowledged.IncompleteDays[0].Reason != coverageincomplete.ReasonReconcileMismatch {
+		t.Fatalf("incomplete days = %+v, want the measured disagreement", acknowledged.IncompleteDays)
+	}
+}
+
 func TestReconcileReportsADayOnlyOneSideHolds(t *testing.T) {
 	copied := newCopiedVolume(t)
 	execTarget(t, copied.databasePath(), `insert into usage_events

@@ -331,14 +331,17 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{ReconcileEvidence: evidence}, newUpgradeError(UpgradeErrorReconcileNothingCompared,
 			"no compared domain could be established: this run compared no day of any domain, so nothing was marked and the operation did not advance", nil)
 	}
+	measured := measuredMismatchDays(domains)
+	derived := derivedLossDays(domains)
 	evidence.AcknowledgedDays, evidence.UnacknowledgedDays = decideAcknowledged(
-		unionDays(evidence.MismatchDays, parityDays), acknowledged, options.AcknowledgeParityGaps, parityDays)
+		unionDays(evidence.MismatchDays, parityDays), acknowledged, options.AcknowledgeParityGaps,
+		parityDays, unionDays(measured, derived))
 	if len(evidence.UnacknowledgedDays) > 0 {
 		return ReconcileReport{ReconcileEvidence: evidence}, newUpgradeError(UpgradeErrorReconcileMismatch,
 			fmt.Sprintf("%s must be acknowledged before they can be marked incomplete; nothing was marked: %s",
 				plural(len(evidence.UnacknowledgedDays), "day", "days"), strings.Join(evidence.UnacknowledgedDays, ", ")), nil)
 	}
-	evidence.IncompleteDays = incompleteDays(evidence.AcknowledgedDays, measuredMismatchDays(domains), derivedLossDays(domains))
+	evidence.IncompleteDays = incompleteDays(evidence.AcknowledgedDays, measured, derived)
 
 	operation, inserted, err := recordReconciliation(ctx, paths.Database, evidence, established)
 	if err != nil {
@@ -1313,15 +1316,27 @@ func newReconcileEvidence(sourceFingerprint string, domains []ReconcileDomainRep
 // operator accepted and the ones still blocking. An acknowledgement of a day
 // with nothing wrong is not an error and marks nothing: the returned accepted
 // set only ever names days that need it.
-func decideAcknowledged(candidates []string, acknowledged map[string]bool, acknowledgeParityGaps bool, parityDays []string) ([]string, []string) {
+//
+// The parity switch is not a bulk acknowledgement. It waives only the days whose
+// sole problem is the parity detection: a day that also carries a measured
+// disagreement, or a cleared derived rollup the store lost, needs its own
+// --acknowledge. Anything else would let the switch accept a copy-in that lost
+// data on a day the parity check happened to flag.
+func decideAcknowledged(candidates []string, acknowledged map[string]bool, acknowledgeParityGaps bool,
+	parityDays, nonParityDays []string) ([]string, []string) {
 	parity := make(map[string]bool, len(parityDays))
 	for _, day := range parityDays {
 		parity[day] = true
 	}
+	nonParity := make(map[string]bool, len(nonParityDays))
+	for _, day := range nonParityDays {
+		nonParity[day] = true
+	}
 	accepted := []string{}
 	blocked := []string{}
 	for _, day := range candidates {
-		if acknowledged[day] || (acknowledgeParityGaps && parity[day]) {
+		waived := acknowledgeParityGaps && parity[day] && !nonParity[day]
+		if acknowledged[day] || waived {
 			accepted = append(accepted, day)
 			continue
 		}
