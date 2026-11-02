@@ -239,26 +239,20 @@ func copyInMarkerStage(databasePath string) (UpgradeStage, error) {
 	if err != nil {
 		return UpgradeStageNone, fmt.Errorf("read the copy-in provenance marker: %w", err)
 	}
-	if !found || !sameDatabaseFile(marker.TargetDatabase, databasePath) {
+	if !found {
 		return UpgradeStageNone, nil
 	}
-	return UpgradeStageInProgress, nil
-}
-
-// sameDatabaseFile compares a marker's target with the database being admitted,
-// resolving symlinks in the parent so a canonical path and its alias agree.
-func sameDatabaseFile(recorded, actual string) bool {
-	canonical := func(path string) string {
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			return filepath.Clean(path)
-		}
-		if resolved, err := filepath.EvalSymlinks(filepath.Dir(absolute)); err == nil {
-			absolute = filepath.Join(resolved, filepath.Base(absolute))
-		}
-		return filepath.Clean(absolute)
+	// The marker sits in this data root's own reserved work directory, so it
+	// describes this root even when the root is mounted at another absolute
+	// path: a host that runs the CLI and a container that runs the server agree
+	// on the bytes, not on the path. Reporting "no record" there would fail open
+	// on an unfinished store, so a relocated root stays in progress. A marker
+	// naming a different database file is evidence for some other run, and
+	// admitting this store on it would be guessing: it fails closed instead.
+	if filepath.Base(marker.TargetDatabase) != filepath.Base(databasePath) {
+		return UpgradeStageNone, fmt.Errorf("the copy-in marker in this data root describes another database")
 	}
-	return canonical(recorded) == canonical(actual)
+	return UpgradeStageInProgress, nil
 }
 
 // upgradeRecord is the row half of the admission decision. The admission never

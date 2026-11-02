@@ -77,10 +77,26 @@ func WithSourceRuntime(source SourceRuntime) Option {
 	return func(s *Service) { s.source = source }
 }
 
+// WithClock replaces the wall clock that stamps a new Key's creation instant.
+// The default is the real clock, so nothing changes for production callers; a
+// fixed clock lets a test reason about the exact creation instant, which the
+// usage buckets are aligned to. A nil clock is ignored.
+func WithClock(now func() int64) Option {
+	return func(s *Service) {
+		if now != nil {
+			s.now = now
+		}
+	}
+}
+
 type Service struct {
 	repo      *repo.Repository
 	protector *security.Protector
 	source    SourceRuntime
+	// now stamps the creation instant of a new Key. It is a field, not a direct
+	// time.Now call, because that instant becomes the key's attribution window
+	// and a test cannot reason about it against a moving clock.
+	now func() int64
 	// installMu serializes this process's install-key resolution. The origin
 	// unique index remains the durable cross-process fence; the lock only stops
 	// concurrent callers from racing a redundant mint attempt.
@@ -88,7 +104,7 @@ type Service struct {
 }
 
 func New(r *repo.Repository, p *security.Protector, options ...Option) *Service {
-	s := &Service{repo: r, protector: p}
+	s := &Service{repo: r, protector: p, now: func() int64 { return time.Now().UnixMilli() }}
 	for _, option := range options {
 		option(s)
 	}
@@ -238,7 +254,7 @@ func (s *Service) Create(ctx context.Context, requestID string) (Result, bool, e
 	if err != nil {
 		return Result{}, false, err
 	}
-	now := time.Now().UnixMilli()
+	now := s.now()
 	v := repo.Record{RequestID: requestID, Identity: identity.APIKeyIdentity{ID: id, Revision: identity.InitialRevision, Lifecycle: identity.LifecycleActive, CreatedAtMS: now, UpdatedAtMS: now}, Ciphertext: ciphertext, Hash: digest(secret), Preview: model.MaskedClientKey(secret), NameRevision: 1, Origin: repo.OriginWorkspace}
 	created, err := s.repo.Create(ctx, v, s.runtimeIdentity(ctx))
 	if err != nil {
@@ -285,7 +301,7 @@ func (s *Service) EnsureInitialKey(ctx context.Context) (InitialKey, error) {
 	if err != nil {
 		return InitialKey{}, err
 	}
-	now := time.Now().UnixMilli()
+	now := s.now()
 	record = &repo.Record{
 		RequestID:  string(requestID),
 		Identity:   identity.APIKeyIdentity{ID: id, Revision: identity.InitialRevision, Lifecycle: identity.LifecycleActive, CreatedAtMS: now, UpdatedAtMS: now},

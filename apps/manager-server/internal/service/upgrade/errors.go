@@ -20,6 +20,12 @@ const (
 	// copy-in held its fence. The members this run moved were rolled back and
 	// nothing was recorded.
 	UpgradeErrorSourceChanged UpgradeErrorCode = "upgrade_source_changed"
+	// UpgradeErrorTargetConflict reports that the v2 data root cannot be resumed:
+	// a copy-in marker describes it, but the marker and the members beside it
+	// disagree, or the members no longer match the backup the marker names.
+	// Nothing was deleted or overwritten; the marker is the evidence that the
+	// store is unfinished, so it stays exactly where it is.
+	UpgradeErrorTargetConflict UpgradeErrorCode = "upgrade_target_conflict"
 	// UpgradeErrorRollbackNotApplicable reports that the recorded operation is
 	// not in a stage a rollback can start from, or that it has already been
 	// rolled back. Nothing was written.
@@ -117,6 +123,7 @@ func (e *UpgradeError) Is(target error) bool {
 var (
 	ErrTargetModified        = &UpgradeError{Code: UpgradeErrorTargetModified}
 	ErrSourceChanged         = &UpgradeError{Code: UpgradeErrorSourceChanged}
+	ErrTargetConflict        = &UpgradeError{Code: UpgradeErrorTargetConflict}
 	ErrRollbackNotApplicable = &UpgradeError{Code: UpgradeErrorRollbackNotApplicable}
 	ErrRollbackUnproven      = &UpgradeError{Code: UpgradeErrorRollbackUnproven}
 	ErrRollbackImageUnpinned = &UpgradeError{Code: UpgradeErrorRollbackImageUnpinned}
@@ -135,6 +142,13 @@ var (
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {
 	return &UpgradeError{Code: code, Message: message, err: err}
+}
+
+// unresumable reports a v2 data root a copy-in may not continue from. The
+// message names no host path: it is operator text, and the code is what a script
+// acts on.
+func unresumable(message string, err error) error {
+	return newUpgradeError(UpgradeErrorTargetConflict, message, err)
 }
 
 // UpgradeErrorCodeOf reports the code of the first typed Upgrade failure in

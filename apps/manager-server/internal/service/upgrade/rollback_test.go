@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -37,6 +38,7 @@ func newRollbackFixture(t *testing.T) rollbackFixture {
 	volume := newLegacyVolume(t)
 	targetRoot := canonicalTempDir(t)
 	options := copyInOptions(volume, targetRoot)
+	options.DeclaredVersion = bootstrap.PlannedDirectRelease
 	options.Lock = volume.lock(t)
 	result, err := CopyIn(context.Background(), options)
 	if err != nil {
@@ -430,11 +432,11 @@ func TestPrepareRollbackKeepsTheImageInTheSourceFamily(t *testing.T) {
 	}
 }
 
-func releaseOf(t *testing.T, version string) int {
+func releaseOf(t *testing.T, version string) releaseRank {
 	t.Helper()
-	release, ok := parseRelease(version)
-	if !ok {
-		t.Fatalf("recorded source version %q is not an exact release", version)
+	release, err := parseRelease(version)
+	if err != nil {
+		t.Fatalf("recorded source version %q is not an exact release: %v", version, err)
 	}
 	return release
 }
@@ -463,7 +465,8 @@ func TestRecordRollbackAcceptsAVolumeThatKeptWriting(t *testing.T) {
 	if recorded.Rollback == nil {
 		t.Fatal("the verdict carries no evidence")
 	}
-	observedFingerprint, _, err := fingerprintSource(fixture.volume.root)
+	observed, err := fingerprintSource(fixture.volume.root)
+	observedFingerprint := observed.Digest
 	if err != nil {
 		t.Fatalf("fingerprint the written 1.x volume: %v", err)
 	}

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -26,7 +27,7 @@ import (
 func rollbackReadyTarget(t *testing.T, source string) string {
 	t.Helper()
 	target := t.TempDir()
-	code, _, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
 	if code != 0 {
 		t.Fatalf("prepare the copy-in target: exit %d; stderr: %s", code, stderr)
 	}
@@ -57,7 +58,7 @@ func healthyProbe(t *testing.T) string {
 }
 
 func TestRollbackPreparePrintsAPinnedPlan(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--json")
 	if code != 0 {
@@ -116,7 +117,7 @@ func TestRollbackPreparePrintsAPinnedPlan(t *testing.T) {
 }
 
 func TestRollbackPrepareRefusesAndWritesNothing(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := t.TempDir()
 	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
 	if code != 1 {
@@ -135,7 +136,7 @@ func TestRollbackPrepareRefusesAndWritesNothing(t *testing.T) {
 }
 
 func TestRollbackVerifyRecordsAProvenVerdict(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	code, stdout, stderr := run(t, "rollback", "--verify", "--legacy", source, "--target", target,
 		"--status-url", healthyProbe(t), "--json")
@@ -182,7 +183,7 @@ func TestRollbackVerifyRecordsAProvenVerdict(t *testing.T) {
 }
 
 func TestRollbackVerifyRefusesUnprovenEvidence(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	for _, test := range []struct {
 		name   string
@@ -269,7 +270,7 @@ func TestRollbackVerifyRefusesUnprovenEvidence(t *testing.T) {
 // another version family needs the explicit override, and the override refuses
 // to be passed without an image.
 func TestRollbackVerifyKeepsTheImageInTheSourceFamily(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	databasePath := filepath.Join(target, "usage.sqlite")
 	operation, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
@@ -301,7 +302,7 @@ func TestRollbackVerifyKeepsTheImageInTheSourceFamily(t *testing.T) {
 // runnable as-is: it names the image the plan pinned, and the family override
 // when the plan needed one.
 func TestRollbackPreparePrintsAnExactVerifyCommand(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target,
 		"--legacy-image", "v1.13.0", "--allow-image-family-mismatch")
@@ -323,7 +324,7 @@ func TestRollbackPreparePrintsAnExactVerifyCommand(t *testing.T) {
 }
 
 func TestRollbackUsageErrors(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := t.TempDir()
 	for name, args := range map[string][]string{
 		"no mode":    {"rollback", "--legacy", source, "--target", target},
@@ -342,9 +343,9 @@ func TestRollbackUsageErrors(t *testing.T) {
 }
 
 func TestRunStopsAfterTheCopyInAndPrintsTheNextCommand(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := t.TempDir()
-	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
 	if code != 0 {
 		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -372,7 +373,7 @@ func TestRunStopsAfterTheCopyInAndPrintsTheNextCommand(t *testing.T) {
 		t.Fatalf("the copy-in recorded no source root: %+v", operation)
 	}
 	// The human form carries the same next step.
-	code, human, stderr := run(t, "run", "--legacy", source, "--target", target)
+	code, human, stderr := run(t, "run", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
 	if code != 0 {
 		t.Fatalf("human run exit code = %d; stderr: %s", code, stderr)
 	}
@@ -382,7 +383,7 @@ func TestRunStopsAfterTheCopyInAndPrintsTheNextCommand(t *testing.T) {
 }
 
 func TestRunReportsALaterStageWithoutTouchingIt(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	databasePath := filepath.Join(target, "usage.sqlite")
 	db, err := sqliterepo.Open(databasePath)
@@ -401,7 +402,7 @@ func TestRunReportsALaterStageWithoutTouchingIt(t *testing.T) {
 		t.Fatalf("read the recorded operation: found=%t err=%v", found, err)
 	}
 
-	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -429,7 +430,7 @@ func TestRunReportsALaterStageWithoutTouchingIt(t *testing.T) {
 // `upgrade run` must neither copy again nor print a reconciliation command that
 // would resume an abandoned upgrade.
 func TestRunAfterARollbackReportsTheTerminalStage(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	databasePath := filepath.Join(target, "usage.sqlite")
 	db, err := sqliterepo.Open(databasePath)
@@ -453,7 +454,7 @@ func TestRunAfterARollbackReportsTheTerminalStage(t *testing.T) {
 		t.Fatalf("read the recorded operation: found=%t err=%v", found, err)
 	}
 
-	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -512,7 +513,7 @@ func freePort(t *testing.T) int {
 // plan is not rollback-ready while the v2 stack still answers on the address the
 // operator named, and nothing is written.
 func TestRollbackPrepareRefusesARunningV2Stack(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	address, _ := managerAnswer(t)
 
@@ -533,7 +534,7 @@ func TestRollbackPrepareRefusesARunningV2Stack(t *testing.T) {
 // answers /health with the 1.x identity, so a probe of the Manager's own
 // listener is refused and no stage is written.
 func TestRollbackVerifyRefusesAProbeOfThisManager(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	address, statusURL := managerAnswer(t)
 
@@ -574,7 +575,7 @@ func TestStatusAndPrepareReportAnOutdatedStore(t *testing.T) {
 		t.Fatalf("status surfaced raw SQL: %s", stderr)
 	}
 
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	code, stdout, stderr = run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
 	if code != 1 {
 		t.Fatalf("prepare exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
@@ -634,7 +635,7 @@ func writeOutdatedStore(t *testing.T, databasePath string) {
 // open repairs nothing, so both read paths have to report the same typed code,
 // the same copy and the same exit status, without promising a repair.
 func TestStatusAndPrepareReportATerminalRowWithoutEvidence(t *testing.T) {
-	source := copyReadySource(t)
+	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	databasePath := filepath.Join(target, "usage.sqlite")
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath))

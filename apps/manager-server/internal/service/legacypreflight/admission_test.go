@@ -418,10 +418,10 @@ func TestCopyInMarkerKeepsAnUnfinishedCopyInInProgress(t *testing.T) {
 
 	marker := copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
 		TargetDatabase:          paths.Database,
 		SourceKind:              SourceKindUpgradedLegacy,
 		SourceFingerprintBefore: "source-fingerprint",
-		SourceFingerprintAfter:  "source-fingerprint",
 		BackupManifestSHA256:    "backup-manifest-sha256",
 		WrittenAtMS:             1,
 	}
@@ -430,14 +430,26 @@ func TestCopyInMarkerKeepsAnUnfinishedCopyInInProgress(t *testing.T) {
 	}
 	assertUpgradeAdmission(t, paths.Database, UpgradeStageInProgress, SurfaceUpgradeOnly)
 
-	// A marker that names another database describes nothing here.
+	// The marker belongs to the data root it sits in, so a relocated root — the
+	// host running the CLI, a container running the server — is still a store
+	// with an unfinished copy-in. Reading it as "no record" used to fail open on
+	// a store whose migration ran and whose row did not.
+	relocated := marker
+	relocated.TargetDatabase = filepath.Join(t.TempDir(), "mounted-data", filepath.Base(paths.Database))
+	if err := copyinmarker.Write(filepath.Dir(paths.Database), relocated); err != nil {
+		t.Fatalf("write a relocated copy-in marker: %v", err)
+	}
+	assertUpgradeAdmission(t, paths.Database, UpgradeStageInProgress, SurfaceUpgradeOnly)
+
+	// A marker that names a different database file is evidence for some other
+	// run, and admitting this store on it would be guessing: it fails closed.
 	other := marker
-	other.TargetDatabase = filepath.Join(t.TempDir(), "usage.sqlite")
+	other.TargetDatabase = filepath.Join(t.TempDir(), "other.sqlite")
 	if err := copyinmarker.Write(filepath.Dir(paths.Database), other); err != nil {
 		t.Fatalf("write a foreign copy-in marker: %v", err)
 	}
-	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: paths.Database}).Admitted(context.Background()); err != nil || stage != UpgradeStageNone {
-		t.Fatalf("marker for another database = %q/%v, want none", stage, err)
+	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: paths.Database}).Admitted(context.Background()); err == nil {
+		t.Fatalf("marker for another database was read as %q, want a refusal", stage)
 	}
 
 	// An unreadable marker fails closed.
