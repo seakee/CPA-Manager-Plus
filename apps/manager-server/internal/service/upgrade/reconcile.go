@@ -1525,9 +1525,11 @@ func recordReconciliation(ctx context.Context, databasePath string, evidence Rec
 
 // recordInterrupted says what an interrupted recording left behind. The marks,
 // the evidence and the stage travel in one transaction, so the answer is always
-// the same: nothing.
+// the same: nothing. A rerun writes the same result. That is not a promise that
+// every rerun succeeds: a row the operation repository rejects is rejected the
+// same way next time, so the error above, not a retry, is what has to be fixed.
 func recordInterrupted(err error) error {
-	return fmt.Errorf("record the reconciliation: %w; the marks, the evidence and the stage commit together, so the store is unchanged and a rerun records all of them", err)
+	return fmt.Errorf("record the reconciliation: %w; the marks, the evidence and the stage commit together, so the store is unchanged, and a rerun writes the same result unless the operation row itself is refused", err)
 }
 
 // establishedDomains names the operation domains the compared domains actually

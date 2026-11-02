@@ -353,7 +353,10 @@ func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMe
 
 // RecordReconciliationTx stores the report inside the caller's transaction, so
 // the evidence commits together with the marks it explains and the stage it
-// authorizes.
+// authorizes. The repository owns updated_at_ms here too: it is recomputed from
+// the stored row with nextUpdatedAtMS, and the row is validated before it is
+// written, in this transaction, so a clock that ran ahead cannot make the next
+// reader reject the row.
 func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) error {
 	if len(report) == 0 {
 		report = json.RawMessage("{}")
@@ -362,8 +365,20 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 	if err := json.Unmarshal(report, &object); err != nil {
 		return fmt.Errorf("%w: reconciliation must be a JSON object", ErrInvalidRow)
 	}
+	row := tx.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`)
+	current, found, err := scanOperation(row)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(time.Now().UnixMilli(), current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
 	result, err := tx.ExecContext(ctx, `update `+tableName+`
-		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(report), time.Now().UnixMilli())
+		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(report), current.UpdatedAtMS)
 	if err != nil {
 		return err
 	}

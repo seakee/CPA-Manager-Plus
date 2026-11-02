@@ -1221,6 +1221,36 @@ func TestReconcileRepairsAnInterruptedRecording(t *testing.T) {
 	}
 }
 
+// TestReconcileRecordsARowWhoseClockRanAhead reproduces review L2/P4: a recorded
+// operation whose timestamps sit in the future (the clock moved back after the
+// copy-in) made the recording fail on the row validation until the wall clock
+// caught up, and the error told the operator to rerun it.
+func TestReconcileRecordsARowWhoseClockRanAhead(t *testing.T) {
+	copied := newCopiedVolume(t)
+	future := time.Now().Add(time.Hour).UnixMilli()
+	execTarget(t, copied.databasePath(), fmt.Sprintf(
+		`update upgrade_operations set created_at_ms = %d, updated_at_ms = %d`, future, future))
+
+	report, err := Reconcile(context.Background(), copied.reconcileOptions())
+	if err != nil {
+		t.Fatalf("reconcile over a row whose clock ran ahead: %v", err)
+	}
+	if !report.Recorded || report.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("report = %+v, want a recorded reconciliation", report)
+	}
+	row := operationRow(t, copied.databasePath())
+	if row.UpdatedAtMS < row.CreatedAtMS {
+		t.Fatalf("row updated_at_ms = %d precedes created_at_ms = %d", row.UpdatedAtMS, row.CreatedAtMS)
+	}
+	if row.CreatedAtMS != future || row.UpdatedAtMS != future {
+		t.Fatalf("row timestamps = created %d updated %d, want both clamped to the stored %d",
+			row.CreatedAtMS, row.UpdatedAtMS, future)
+	}
+	if updated := report.UpdatedAtMS; updated != row.UpdatedAtMS {
+		t.Fatalf("report updated_at_ms = %d, want the stored %d", updated, row.UpdatedAtMS)
+	}
+}
+
 // TestReconcileRejectsAScratchAreaThatOverlapsTheSource reproduces the round
 // three review's M6: only a scratch area inside the source was refused, while
 // the message claimed "inside or above".
