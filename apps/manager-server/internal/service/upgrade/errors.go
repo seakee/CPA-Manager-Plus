@@ -61,6 +61,11 @@ const (
 	// Nothing was deleted or overwritten; the marker is the evidence that the
 	// store is unfinished, so it stays exactly where it is.
 	UpgradeErrorTargetConflict UpgradeErrorCode = "upgrade_target_conflict"
+	// UpgradeErrorV2Running reports that another Manager process owns the v2
+	// data root: its process lock is held, so the copy-in refuses before it
+	// creates, backs up, restores, migrates or records anything. Stop the
+	// process and rerun; nothing this run intended was written.
+	UpgradeErrorV2Running UpgradeErrorCode = "upgrade_copy_in_v2_running"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -94,6 +99,7 @@ var (
 	ErrTargetModified            = &UpgradeError{Code: UpgradeErrorTargetModified}
 	ErrSourceChanged             = &UpgradeError{Code: UpgradeErrorSourceChanged}
 	ErrTargetConflict            = &UpgradeError{Code: UpgradeErrorTargetConflict}
+	ErrV2Running                 = &UpgradeError{Code: UpgradeErrorV2Running}
 	ErrTargetLocked              = &UpgradeError{Code: UpgradeErrorTargetLocked}
 	ErrReconcileMismatch         = &UpgradeError{Code: UpgradeErrorReconcileMismatch}
 	ErrReconcileTargetIncomplete = &UpgradeError{Code: UpgradeErrorReconcileTargetIncomplete}

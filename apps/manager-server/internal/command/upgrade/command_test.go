@@ -1236,3 +1236,76 @@ func TestTargetRefusesAManagerLayoutTheCopyCannotPopulate(t *testing.T) {
 		})
 	}
 }
+
+// TestRunHonorsTheV2DataRootFence is the CLI half of the shared-target
+// regression. `upgrade run` used to take only the 1.x source fence, so it
+// created, restored and migrated the v2 data root while another Manager process
+// held that root's process lock. The refusal is typed and exits 1, and nothing
+// the copy-in would write appears in the held root.
+func TestRunHonorsTheV2DataRootFence(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := canonicalFixtureRoot(t)
+	owner, err := processlock.Acquire(filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("take the v2 data root fence: %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+	before := treeDigests(t, target)
+	sourceBefore := treeDigests(t, source)
+
+	err = Run(context.Background(), []string{"run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target},
+		&bytes.Buffer{}, &bytes.Buffer{})
+	if !errors.Is(err, upgradeservice.ErrV2Running) {
+		t.Fatalf("run under a held v2 data root = %v, want %s", err, upgradeservice.ErrV2Running)
+	}
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); !ok || code != upgradeservice.UpgradeErrorV2Running {
+		t.Fatalf("run error code = %q/%t, want %s", code, ok, upgradeservice.UpgradeErrorV2Running)
+	}
+	if exit := ExitCode(err); exit != 1 {
+		t.Fatalf("exit code = %d, want 1", exit)
+	}
+	after := treeDigests(t, target)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("the refused run changed the held v2 data root: %v -> %v", before, after)
+	}
+	for _, absent := range []string{"usage.sqlite", "data.key", "upgrade-backup", ".upgrade-copy-in"} {
+		if _, statErr := os.Lstat(filepath.Join(target, absent)); !os.IsNotExist(statErr) {
+			t.Fatalf("the refused run wrote %s (err=%v)", absent, statErr)
+		}
+	}
+	if sourceAfter := treeDigests(t, source); !reflect.DeepEqual(sourceBefore, sourceAfter) {
+		t.Fatalf("the refused run changed the 1.x source: %v -> %v", sourceBefore, sourceAfter)
+	}
+}
+
+// TestRunTakesTheSourceFenceReadOnly proves the 1.x source is opened for its
+// ownership lock without write access: the marker is a stopped source's own
+// file, and a source preserved on a read-only mount must still prove
+// exclusivity. The check is the marker's own mode — an O_RDWR open of a 0400
+// file fails for its owner, so this run could not complete through the old
+// descriptor. A read-only mount itself (EROFS) is only qualified on Linux; the
+// Darwin test host has no such mount.
+func TestRunTakesTheSourceFenceReadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not restrict root")
+	}
+	source := copyReadyRunSource(t)
+	marker := filepath.Join(source, "usage.sqlite.manager.lock")
+	if err := os.Chmod(marker, 0o400); err != nil {
+		t.Fatalf("make the source fence read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+	before := treeDigests(t, source)
+	target := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "backup")
+
+	code, _, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the copy-in changed the source volume: %v -> %v", before, after)
+	}
+}

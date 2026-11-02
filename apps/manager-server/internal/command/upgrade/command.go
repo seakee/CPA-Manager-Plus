@@ -91,6 +91,7 @@ func ExitCode(err error) int {
 // 2 like every other retryable failure.
 var refusalCodes = []upgradeservice.UpgradeErrorCode{
 	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy),
+	upgradeservice.UpgradeErrorV2Running,
 	upgradeservice.UpgradeErrorTargetLocked,
 	upgradeservice.UpgradeErrorReconcileMismatch,
 	upgradeservice.UpgradeErrorReconcileTargetIncomplete,
@@ -140,7 +141,7 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                     read the persisted upgrade operation")
 	_, _ = fmt.Fprintln(w, "  --scratch-dir must be outside the legacy source root and the target root.")
 	_, _ = fmt.Fprintln(w, "                                     the default OS temporary directory is checked the same way")
-	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked or a reconciliation that needs a decision, 2 usage, environment or retryable error.")
+	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked or a refusal that needs a decision (the v2 data root in use, an unacknowledged day), 2 usage, environment or retryable error.")
 }
 
 func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -352,7 +353,12 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		writeRunOutput(stdout, *asJSON, output)
 		return ErrBlocked
 	}
-	lock, err := processlock.AcquireExisting(upgradeservice.SourceDatabasePath(legacyRoot))
+	// The 1.x source is documented read-only for this command, so its fence is
+	// taken through a read-only descriptor: the same exclusive marker, the same
+	// exclusion of cooperating writers, but the source volume is never opened
+	// for writing and a stopped source preserved on a read-only mount still
+	// proves exclusivity.
+	lock, err := processlock.AcquireExistingReadOnly(upgradeservice.SourceDatabasePath(legacyRoot))
 	if err != nil {
 		return fmt.Errorf("take the 1.x ownership lock: %w", err)
 	}
