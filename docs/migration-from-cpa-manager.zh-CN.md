@@ -135,23 +135,25 @@ Plus 会把 CPA Management Key 加密存储到 SQLite。默认数据密钥位于
 
 ## Managed CPA 导入
 
-`cpa-manager-plus upgrade cpa-import` 会通过 adoption 执行器，把已停止的 1.x 实例中受管 CPA 的配置与凭证文件复制到 v2 目标。规划迁移时以下规则很重要：
+`cpa-manager-plus upgrade cpa-import` 会为已停止的 1.x 实例中受管 CPA 的状态创建、绑定并连接 v2 目标。**本次构建不会复制 provider 配置或 OAuth 凭证。** 该步骤以不带任何迁移决策的方式运行 adoption 执行器——Upgrade 界面没有资格证明记录——因此每个配置项与凭证项都会以 `upgrade_cpa_import_requires_qualification` 的原因记录为手动项，不会向目标 CPA 写入任何内容。自动复制推迟到受信任的 re-pin 步骤（U1-1b）；在它落地之前请手动完成这些项。操作会停在 `cpa_import` 且不记录 `cpa_config` 域，因为该域的含义是目标已持有复制后的状态，只有真正完成复制才能声明。
+
+规划迁移时以下规则很重要：
 
 - 它只在对账之后运行：记录的操作必须处于 `reconcile`（或处于自身未记录 `cpa_config` 域的 `cpa_import`，即重试位置），否则会在读取来源之前以 `upgrade_cpa_stage_conflict` 拒绝。创建目标阶段发生的拒绝不会改动已记录的位置。
-- 先停止 1.x Manager 和受管 CPA，再停止 Manager Server：该命令持有 v2 数据根进程锁，锁被占用时会以 `upgrade_store_locked`（退出码 1）拒绝。它还会持有 1.x 来源的 ownership marker（与 copy-in 相同的栅栏），并在整个读写路径中保持；若 marker 被其他进程持有，或来源根本没有 marker，会在读取 CPA 目录之前以 `upgrade_cpa_source_locked` 拒绝。
-- **该 marker 的残余限制。** marker 只能证明 1.x Manager 已停止，不能证明受管 CPA 容器已停止：CPA 本身不持有这个 marker，命令也无法观察运行中的容器。导入前请先停止 `cli-proxy-api` 服务（`docker compose stop cli-proxy-api`）。运行中的 CPA 会刷新凭证目录里的凭证，导入可能上传一个随后被来源轮换的 token；同一 refresh token 的两份活跃副本也可能互相作废。
+- 先停止 1.x Manager 和受管 CPA，再停止 Manager Server：该命令持有 v2 数据根进程锁，锁被占用时会以 `upgrade_store_locked`（退出码 1）拒绝。它还会以只读描述符持有 1.x 来源的 ownership marker——与 copy-in 相同的排他栅栏，因此只读挂载的来源也能证明独占——并在整个运行期间保持；若 marker 被其他进程持有，或来源根本没有 marker，会在读取 CPA 目录之前以 `upgrade_cpa_source_locked` 拒绝。
+- **该 marker 的残余限制。** marker 只能证明 1.x Manager 已停止，不能证明受管 CPA 容器已停止：CPA 本身不持有这个 marker，命令也无法观察运行中的容器。导入前请先停止 `cli-proxy-api` 服务（`docker compose stop cli-proxy-api`）。
 - 只有当 `--legacy` 目录就是 `copy-in` 步骤记录的那个目录时才会读取它；换成另一棵树会在任何读取之前以 `upgrade_cpa_source_root_mismatch` 拒绝。
 - 目标自己的路径永远不会被复制：目标的管理密钥、监听地址、端口、插件根目录、凭证目录和客户端密钥列表都保留目标自身的值。
-- 来源版本取 `--cpa-version` 指定的确切版本，或 stack 声明的 `cli-proxy-api` 镜像 tag。1.x 安装在 `compose.yaml` 里写的是 `image: ${CPA_IMAGE}`，因此读取器只从旁边的 `.env` 解析这一个变量；`.env` 里的其他变量不会被解析、保留或报告。移动 tag、digest 或无法解析的引用都不构成版本，导入会以 `upgrade_cpa_version_required` 拒绝，而不是猜测。这两个输入都是声明：命令不会运行或检查来源镜像，因此写错的 `--cpa-version` 不会被与运行中的 CPA 比对发现。
-- 目标请求一旦记录就不可变。本步骤自行创建目标时，会在创建之前记录生成的密钥（用 `/data/data.key` 加密）、插件选择、客户端密钥集合和 operation ID，重试会原样重放该请求。已记录的尝试不会重新生成密钥；Supervisor 报告 stage/start 终态失败后，下一次运行才按 Supervisor 的 supersede 约定用新的 operation ID 取代它。试图改变插件选择、客户端密钥集合或目标 URL 的重试会以 `upgrade_cpa_destination_request_changed` 拒绝。
-- 目标在任何写入之前完成绑定：已处于 ready 的目标会先用本次导入的客户端密钥验证，携带其他密钥的 CPA 会以 `upgrade_cpa_import_target_foreign` 拒绝，且不会收到任何配置或凭证。既没有记录也没有提供密钥的 ready 目标需要 `--destination-management-key-file`，否则以 `upgrade_cpa_destination_key_required` 拒绝。
-- 成功后，目标 URL 和同一个管理密钥会写入 Manager 自身的 CPA 连接（`manager_config_v1` 及其 legacy setup 镜像），重启后控制台仍能连上目标；其他 Manager 设置保持不变。若 Manager 已持有指向另一个 CPA 的连接，本步骤会以 `upgrade_cpa_connection_conflict` 拒绝而不是改指；请在停止 Manager Server 后显式重绑该连接（`store-cpa-connection --repair-conflict`）再重跑，已记录的目标密钥会被复用。
-- 无法上传的凭证会成为明确的手动项，而不是被静默丢弃：符号链接（`credential_not_regular`）、超过 1 MiB 的文件（`credential_too_large`）、无法读取的条目（`credential_unreadable`）。请自行把这些文件复制到目标凭证目录。
+- 来源版本取 `--cpa-version` 指定的确切版本，或 stack 声明的 `cli-proxy-api` 镜像 tag。1.x 安装在 `compose.yaml` 里写的是 `image: ${CPA_IMAGE}`，因此读取器只从旁边的 `.env` 解析这一个变量；`.env` 里的其他变量不会被解析、保留或报告。移动 tag、digest（包括 `repo:v7.3.4@sha256:...`）或无法解析的引用都不构成版本，导入会以 `upgrade_cpa_version_required` 拒绝，而不是猜测。这两个输入都是声明：命令不会运行或检查来源镜像，因此写错的 `--cpa-version` 不会被与运行中的 CPA 比对发现。
+- 目标请求一旦记录就不可变。本步骤自行创建目标时，会在创建之前记录生成的密钥（用 `/data/data.key` 加密）、Supervisor 实际发布的完整请求（期望的 Runtime identity、generation 与 active artifact、来源 identity 与来源类型、有序客户端密钥列表、插件选择）以及 operation ID。重试会在改动任何东西之前把当前输入与这条记录比较：来源、目标 URL、插件选择、客户端密钥集合或密钥发生变化时，会以 `upgrade_cpa_destination_request_changed` 拒绝，已记录的尝试保持不变。Supervisor 报告 stage/start 终态失败后，下一次运行才按它的 supersede 约定用新的 operation ID 重放完全相同的请求；Supervisor 重启会发布新的 generation，同样会被拒绝；而已经处于 ready 的目标会直接验证并续跑，不会重新提交。已记录的尝试不会重新生成密钥。
+- 目标在任何其他访问之前完成绑定：每个创建分支最后都会用本次运行创建的密钥做一次客户端密钥列表的认证读取；若 CPA 不能同时以该密钥和该密钥集合应答，会以 `upgrade_cpa_import_target_foreign` 拒绝，且不会收到任何配置或凭证。既没有记录也没有提供密钥的 ready 目标需要 `--destination-management-key-file`，否则以 `upgrade_cpa_destination_key_required` 拒绝。
+- 当前工作完成后，目标 URL 和同一个管理密钥会写入 Manager 自身的 CPA 连接（`manager_config_v1` 及其 legacy setup 镜像），重启后控制台仍能连上目标；其他 Manager 设置保持不变。若 Manager 已持有指向另一个 CPA 的连接，本步骤会以 `upgrade_cpa_connection_conflict` 拒绝而不是改指；请在停止 Manager Server 后显式重绑该连接（`store-cpa-connection --repair-conflict`）再重跑，已记录的目标密钥会被复用。目标尝试行会保留，因为本次构建不记录 `cpa_config`，重跑仍需重放它。
+- 每个 provider 配置项与凭证项都是明确的手动项，而不是被静默丢弃：每项都带有 `upgrade_cpa_import_requires_qualification` 和执行器自己的操作说明。规则本身就归为手动的项保留各自的具体原因，例如符号链接（`credential_not_regular`）、超过 1 MiB 的文件（`credential_too_large`）、无法读取的条目（`credential_unreadable`）；请自行复制这些文件。
 - 声明 `config-version: 8` 的来源只接受 v8 版本的声明；其客户端密钥从 `access.api-keys` 读取，映射表未覆盖的 `api-keys.<family>` 会被报告而不是丢弃。
 
-本步骤不会推广安装派生权威：它复制配置与凭证并保存目标连接，但不会创建 Fresh 安装记录、策略检查点或资格。现有消费者明确拒绝升级派生（`legacy_managed`）来源，因此目标只作为连接来管理，而不是 New Managed 安装。该缺口仍然开放。
+本步骤不会推广安装派生权威：它创建、绑定目标并保存目标连接，同时把配置与凭证复制记录为推迟的手动工作；但不会创建 Fresh 安装记录、策略检查点或资格。现有消费者明确拒绝升级派生（`legacy_managed`）来源，因此目标只作为连接来管理，而不是 New Managed 安装。该缺口仍然开放，自动复制要等待受信任的 re-pin 步骤。
 
-**已知限制：`codex-header-defaults`。** CPA v8 仍会加载该配置段（`codex-header-defaults` 加载为 `oauth.providers.codex.header-defaults`），但 v2 目标没有可写入的 `upstream.codex.header-defaults` 叶子，因此导入不会复制它。操作行会把它记为手动项 `section:codex-header-defaults`；如仍需这些请求头默认值，请在目标 CPA 配置中重新设置。同类的 `claude-header-defaults.*` 在目标有对应路径，会被正常复制。
+**已知限制：`codex-header-defaults`。** CPA v8 仍会加载该配置段（`codex-header-defaults` 加载为 `oauth.providers.codex.header-defaults`），但 v2 目标没有可写入的 `upstream.codex.header-defaults` 叶子，因此推迟的复制不包含它。操作行会把它记为手动项 `section:codex-header-defaults`；如仍需这些请求头默认值，请在目标 CPA 配置中重新设置。同类的 `claude-header-defaults.*` 在目标有对应路径，属于推迟复制集合。
 
 ## 回滚
 

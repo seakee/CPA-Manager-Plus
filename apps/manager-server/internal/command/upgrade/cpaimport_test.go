@@ -181,18 +181,18 @@ func TestCPAImportCommandTakesAReadOnlySourceMarker(t *testing.T) {
 // has to be justified instead of silently passing.
 func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
 	result := upgradeservice.CPAImportResult{
-		Stage:             "cpa_import",
-		DomainsDone:       []string{"source_copy", "cpa_config"},
-		SourceVersion:     "7.3.4",
-		SourceLayout:      "v7",
-		SourceIdentity:    "legacy-managed:sha256:fixture",
-		DestinationURL:    "http://127.0.0.1:8317",
-		PluginsEnabled:    true,
-		ClientKeys:        1,
-		CopiedConfig:      []string{"routing.retry.request-retry"},
-		CopiedCredentials: []string{"codex-user.json"},
-		ManualItems:       []upgradeservice.CPAImportManualItem{{Item: "section:ampcode", Reason: "removed_upstream", Instruction: "re-create it"}},
-		UpdatedAtMS:       1700000000000,
+		Stage:          "cpa_import",
+		DomainsDone:    []string{"source_copy"},
+		SourceVersion:  "7.3.4",
+		SourceLayout:   "v7",
+		SourceIdentity: "legacy-managed:sha256:fixture",
+		DestinationURL: "http://127.0.0.1:8317",
+		PluginsEnabled: true,
+		ClientKeys:     1,
+		ManualItems: []upgradeservice.CPAImportManualItem{
+			{Item: "section:ampcode", Reason: upgradeservice.CPAImportRequiresQualification, Instruction: "re-create it"},
+		},
+		UpdatedAtMS: 1700000000000,
 	}
 	output := cpaImportOutput{Result: &result, Error: "refused", ErrorCode: "upgrade_cpa_version_unsupported", Next: "run status"}
 	buffer := &bytes.Buffer{}
@@ -214,8 +214,7 @@ func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
 	allowedResult := map[string]bool{
 		"stage": true, "domainsDone": true, "sourceVersion": true, "sourceLayout": true,
 		"sourceIdentity": true, "destinationUrl": true, "pluginsEnabled": true,
-		"clientKeys": true, "copiedConfig": true, "copiedCredentials": true,
-		"manualItems": true, "alreadyComplete": true, "updatedAtMs": true,
+		"clientKeys": true, "manualItems": true, "alreadyComplete": true, "updatedAtMs": true,
 	}
 	for key := range encodedResult {
 		if !allowedResult[key] {

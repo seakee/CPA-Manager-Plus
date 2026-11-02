@@ -2,11 +2,13 @@ package upgrade
 
 // "upgrade cpa-import" is the Managed CPA import step at the command line.
 //
-// It is the one Upgrade step that writes to a CPA, so it shares the refusals
-// contract of the other steps instead of inventing one: a typed refusal the
-// operator has to act on exits 1, a usage or environment failure exits 2, and
-// success exits 0. Nothing here reaches a CPA before the service layer's version
-// gate has passed.
+// It is the Upgrade step that stages, binds and connects the destination, so it
+// shares the refusals contract of the other steps instead of inventing one: a
+// typed refusal the operator has to act on exits 1, a usage or environment
+// failure exits 2, and success exits 0. This build copies no provider
+// configuration or OAuth credential; the source is inventoried and every item is
+// reported as deferred manual work. Nothing here reaches a CPA before the service
+// layer's version gate has passed.
 
 import (
 	"context"
@@ -130,11 +132,13 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		writeCPAImportOutput(stdout, *asJSON, output)
 		return refuseTyped(stderr, err)
 	}
-	// The import stops at cpa_import by contract. The External connection is a
-	// separate, authorized step, so the exact command that continues is printed
-	// rather than run.
+	// The import stops at cpa_import by contract. This build copies no
+	// configuration or credential: every item is recorded as manual work with a
+	// typed reason, and the automatic copy belongs to the trusted re-pin step. The
+	// External connection is a separate, authorized step, so the exact command that
+	// continues is printed rather than run.
 	if string(result.Stage) == cpaImportStage() {
-		output.Next = "the destination connection is stored with the import; run `cpa-manager-plus upgrade status` to confirm the recorded stage, and verify the migrated surface before completing the Upgrade"
+		output.Next = "the destination is staged, bound and stored in the Manager connection; provider configuration and OAuth credentials are not copied by this build — every item is recorded in manualItems with reason " + upgradeservice.CPAImportRequiresQualification + ", and the automatic copy is deferred to the trusted re-pin step. Apply those items by hand for now; the operation stays at cpa_import until that step can copy and prove them"
 	}
 	writeCPAImportOutput(stdout, *asJSON, output)
 	return nil
@@ -201,14 +205,6 @@ func writeCPAImportOutput(w io.Writer, asJSON bool, output cpaImportOutput) {
 		_, _ = fmt.Fprintf(w, "  destination: %s\n", result.DestinationURL)
 		_, _ = fmt.Fprintf(w, "  plugins enabled: %t\n", result.PluginsEnabled)
 		_, _ = fmt.Fprintf(w, "  client keys proved: %d\n", result.ClientKeys)
-		_, _ = fmt.Fprintf(w, "  copied config paths: %d\n", len(result.CopiedConfig))
-		for _, path := range result.CopiedConfig {
-			_, _ = fmt.Fprintf(w, "    %s\n", path)
-		}
-		_, _ = fmt.Fprintf(w, "  copied credentials: %d\n", len(result.CopiedCredentials))
-		for _, name := range result.CopiedCredentials {
-			_, _ = fmt.Fprintf(w, "    %s\n", name)
-		}
 		_, _ = fmt.Fprintf(w, "  manual items: %d\n", len(result.ManualItems))
 		for _, item := range result.ManualItems {
 			_, _ = fmt.Fprintf(w, "    %s %s\n", item.Item, item.Reason)

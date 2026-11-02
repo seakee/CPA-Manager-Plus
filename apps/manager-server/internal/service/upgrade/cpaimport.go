@@ -1,8 +1,8 @@
 package upgrade
 
-// This file is the Managed CPA import: the Upgrade step that carries a 1.x
-// stack's CPA state into the v2 destination while holding the source's
-// ownership marker.
+// This file is the Managed CPA import: the Upgrade step that prepares the v2
+// destination for a 1.x stack's CPA state while holding the source's ownership
+// marker.
 //
 // # The shape of the step
 //
@@ -15,29 +15,45 @@ package upgrade
 //   - stages and starts the destination through the Runtime client's existing
 //     StageDestination and Start capabilities, with the plugin choice the plan
 //     carries;
-//   - copies configuration and credentials through the existing
-//     freshadopt.Executor under the Upgrade surface's own typed authorization,
-//     never under a Fresh capability decision it does not hold;
-//   - proves the target twice: cpa.VerifyV8Adoption over the imported client
-//     keys, and a readback of every copied path through the destination's own
-//     configuration surface.
+//   - binds the caller's destination URL to that staged destination with an
+//     authenticated read of the client key list, before anything else addresses
+//     it;
+//   - inventories the source through the existing freshadopt.Executor with no
+//     migration decision, so every provider-configuration and credential item is
+//     recorded as deferred manual work and nothing is written;
+//   - hands the Manager's own connection the destination URL and the secret the
+//     destination was staged with.
+//
+// # Why nothing is copied
+//
+// Provider configuration and OAuth credentials may only be copied on a trusted
+// qualification proof, and the Upgrade surface has no qualification record. The
+// previous version of this step invented an Upgrade authorization that named the
+// references to copy and ran the executor under it; that made a bare reference set
+// the authority for unproven migration. The executor now serves exactly one
+// authority — the Fresh decisions a qualification produced — and this step passes
+// none, so every item is recorded with CPAImportRequiresQualification and the
+// automatic copy is deferred to the trusted re-pin step (U1-1b).
 //
 // # What is never inherited
 //
 // The destination keeps v2's own management secret, listener, plugin root, auth
-// directory and client key list. This step writes configuration and credential
-// files; it never writes the destination's identity, and it never copies a source
-// key under one of the excluded sections.
+// directory and client key list. This step writes the operation row, the
+// destination attempt and the Manager's connection; it never writes the
+// destination's identity.
 //
 // # Fail-closed rules
 //
 //   - the 1.x ownership marker is required, must belong to the recorded source,
-//     and is held for the whole read/write path;
+//     and is held for the whole read path through a read-only descriptor;
 //   - the version gate runs before anything is written;
 //   - an absent plugin choice refuses the run — it is never defaulted;
-//   - an item that does not read back fails the step and leaves the operation at
-//     cpa_import, with the cpa_config domain unrecorded;
-//   - an unknown source key becomes a manual item, never a silent drop.
+//   - a destination URL that does not prove itself as the staged destination is
+//     refused before the executor reads or writes anything;
+//   - an unknown source key becomes a manual item, never a silent drop;
+//   - the cpa_config domain is not recorded, because this build copies nothing:
+//     the operation stays at cpa_import and the manual items are the operator's
+//     work until the re-pin step copies them.
 
 import (
 	"context"
@@ -50,7 +66,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
@@ -62,6 +77,13 @@ import (
 
 // cpaImportManualItemLimit bounds one manual item line in the operation row.
 const cpaImportManualItemLimit = 400
+
+// CPAImportRequiresQualification is the stable reason every source item this
+// build defers carries. Provider configuration and OAuth credentials may only be
+// copied on a trusted qualification proof, which the Upgrade surface does not
+// hold, so the item is recorded as manual work with this code instead of being
+// written. The trusted re-pin step (U1-1b) is the step that will copy it.
+const CPAImportRequiresQualification = "upgrade_cpa_import_requires_qualification"
 
 // CPAImportOptions is the input of one Managed CPA import. The three arms of the
 // run — the source and its ownership marker, the destination and the choice —
@@ -138,13 +160,9 @@ type CPAImportResult struct {
 	// ClientKeys counts the client keys the destination was proved with. The keys
 	// themselves never leave this process.
 	ClientKeys int `json:"clientKeys"`
-	// CopiedConfig names every destination path this run wrote and read back:
-	// the provider sections, the rule families and the gateway leaves.
-	CopiedConfig []string `json:"copiedConfig"`
-	// CopiedCredentials names every credential file the destination holds with the
-	// bytes the source held.
-	CopiedCredentials []string `json:"copiedCredentials"`
-	// ManualItems are the source items the import deliberately did not copy.
+	// ManualItems are the source items this build did not copy. Until the trusted
+	// re-pin step exists, that is every provider-configuration and credential item
+	// the source holds, each recorded with CPAImportRequiresQualification.
 	ManualItems []CPAImportManualItem `json:"manualItems"`
 	// AlreadyComplete reports that the recorded operation already held this
 	// import, so nothing was read from the source or written to the destination.
@@ -153,35 +171,35 @@ type CPAImportResult struct {
 }
 
 // cpaImportRun is the state one run needs beyond its reported result. It holds
-// the destination management secret and the source client keys, which the result
-// must never carry.
+// the destination management secret, which the result must never carry.
 type cpaImportRun struct {
 	options       CPAImportOptions
 	source        *cpaManagedSource
 	databasePath  string
 	dataKeyPath   string
 	managementKey string
-	copiedConfig  []string
-	copiedCreds   []string
 }
 
-// ImportCPA carries a 1.x stack's managed CPA state into the v2 destination
+// ImportCPA prepares the v2 destination for a 1.x stack's managed CPA state
 // while the caller holds the 1.x ownership marker.
 //
 // The order is fixed: refuse a recorded position that cannot enter the import,
 // read the source and gate its version, refuse a missing choice, prove the
-// destination is observable, stage and start it, and only then enter the
-// cpa_import stage. The configuration and credentials are imported through the
-// adoption executor, the target is proved with the imported keys, every copied
-// path is read back, and the cpa_config domain is recorded last. A refusal before
-// the destination is staged leaves the operation at the position it was entered
-// from; a failure after the stage entry leaves it at cpa_import without the
-// domain, which is the position the next run resumes from.
+// destination is observable, stage and start it, bind the caller's URL to that
+// destination, and only then enter the cpa_import stage. The source is then
+// inventoried through the adoption executor with no migration decision, so every
+// configuration and credential item is recorded as deferred manual work and
+// nothing is written; the Manager's connection takes the destination and the
+// secret it was staged with. The cpa_config domain is never recorded, because
+// this build copies nothing: a refusal before the destination is staged leaves
+// the operation at the position it was entered from, and a failure after the
+// stage entry leaves it at cpa_import without the domain, which is the position
+// the next run resumes from.
 func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, error) {
 	if err := ctx.Err(); err != nil {
 		return CPAImportResult{}, err
 	}
-	result := CPAImportResult{DomainsDone: []string{}, CopiedConfig: []string{}, CopiedCredentials: []string{}, ManualItems: []CPAImportManualItem{}}
+	result := CPAImportResult{DomainsDone: []string{}, ManualItems: []CPAImportManualItem{}}
 	if options.PluginsEnabled == nil {
 		return result, newUpgradeError(UpgradeErrorCPAPluginChoiceRequired,
 			"the CPA import requires v2's explicit plugin-runtime choice; it is never inherited from the 1.x source and never defaulted", nil)
@@ -282,21 +300,17 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	if err := requireCPAImportSettled(summary); err != nil {
 		return result, err
 	}
-	if err := run.proveTarget(ctx, &result); err != nil {
-		return result, err
-	}
-	result.CopiedConfig = slices.Clone(run.copiedConfig)
-	result.CopiedCredentials = slices.Clone(run.copiedCreds)
 
 	// The Manager's own connection takes the destination and the same secret this
-	// run staged with, before the operation row claims the work. A crash between
-	// this write and the next one leaves both the connection and the recorded
-	// attempt, so a rerun finishes; the attempt row is only cleared together with
-	// the recorded stage, at which point the connection holds the secret.
+	// run staged with, before the operation row records the deferral. A crash
+	// between this write and the next one leaves both the connection and the
+	// recorded attempt, so a rerun finishes. The attempt row stays for the same
+	// reason: this build never records cpa_config, so a rerun must replay the
+	// recorded request and the recorded secret rather than mint a new one.
 	if err := handDestinationConnection(ctx, paths.Database, paths.DataKey, result.DestinationURL, run.managementKey); err != nil {
 		return result, err
 	}
-	recorded, err = recordCPAImport(ctx, paths.Database, result)
+	recorded, err = recordCPAImportDeferral(ctx, paths.Database, result)
 	if err != nil {
 		return result, err
 	}
@@ -684,8 +698,17 @@ func requireSameDestinationRequest(
 	return nil
 }
 
-// runExecutor copies the mapped configuration and credentials into the
-// destination and records one outcome per item.
+// runExecutor inventories the source and records every item as deferred manual
+// work.
+//
+// The executor is built with no migration decision at all. That is the only
+// authority it serves: a Fresh adoption's qualification produces per-reference
+// decisions, and the Upgrade surface holds none, so passing none makes every
+// configuration and credential item resolve to the rule table's manual action and
+// nothing is written. The item identity and the executor's own instruction are
+// kept, so the operator still sees exactly what has to be copied; the reason is
+// replaced with CPAImportRequiresQualification, which is the typed statement that
+// the automatic copy waits for the trusted re-pin step.
 func (r *cpaImportRun) runExecutor(ctx context.Context, result *CPAImportResult) (freshstore.AdoptionSummary, error) {
 	destination, err := freshadopt.NewDestination(ctx, freshadopt.Endpoint{BaseURL: r.options.DestinationURL, ManagementKey: r.managementKey})
 	if err != nil {
@@ -693,129 +716,56 @@ func (r *cpaImportRun) runExecutor(ctx context.Context, result *CPAImportResult)
 			"the destination CPA refused the import's management credential", err)
 	}
 	defer destination.Close()
-	executor, err := freshadopt.NewUpgrade(r.source, destination, cpaImportAuthorization())
-	if err != nil {
-		return freshstore.AdoptionSummary{}, newUpgradeError(UpgradeErrorCPAImportUnavailable,
-			"the import authorization names a reference the product does not permit an adoption to copy, so nothing was written", err)
-	}
-	run, err := executor.Run(ctx, freshstore.AdoptionSummary{}, nil)
+	run, err := freshadopt.New(r.source, destination, nil).Run(ctx, freshstore.AdoptionSummary{}, nil)
 	if err != nil {
 		if errors.Is(err, freshadopt.ErrInventoryUnavailable) {
 			return run.Summary, newUpgradeError(UpgradeErrorCPAImportUnavailable,
-				"the 1.x CPA inventory could not be read, so this run settled no item and the operation did not advance", err)
+				"the 1.x CPA inventory could not be read, so this run settled no item", err)
 		}
 		return run.Summary, newUpgradeError(UpgradeErrorCPAImportUnavailable, "the CPA import stopped before it settled every item", err)
 	}
 	for _, item := range run.Summary.Items {
 		switch item.Outcome {
 		case freshstore.AdoptionMigrated:
-			if name, ok := strings.CutPrefix(item.Item, "credential:"); ok {
-				r.copiedCreds = append(r.copiedCreds, name)
-				continue
-			}
-			if path, ok := cpaImportConfigPathOf(item.Item); ok && !slices.Contains(r.copiedConfig, path) {
-				r.copiedConfig = append(r.copiedConfig, path)
-			}
+			// With no decision the executor copies nothing; a migrated item would
+			// mean it wrote without an authority, which this step must never report
+			// as a successful inventory.
+			return run.Summary, newUpgradeError(UpgradeErrorCPAImportUnproven,
+				"the executor copied an item without a migration decision, so the import cannot claim it wrote nothing", nil)
 		case freshstore.AdoptionManual:
 			result.ManualItems = append(result.ManualItems, CPAImportManualItem{
-				Item: item.Item, Reason: item.Reason, Instruction: item.Instruction,
+				Item: item.Item, Reason: CPAImportRequiresQualification, Instruction: item.Instruction,
 			})
 		}
 	}
 	return run.Summary, nil
 }
 
-// cpaImportConfigPathOf resolves the destination configuration path of one
-// migrated item identity.
-func cpaImportConfigPathOf(item string) (string, bool) {
-	for _, prefix := range []string{"config:", "section:"} {
-		if path, ok := strings.CutPrefix(item, prefix); ok {
-			return path, true
-		}
-	}
-	if family, ok := strings.CutPrefix(item, "rules:"); ok {
-		if entry, found := cpa.LookupConfigRuleFamily(family); found {
-			return entry.Path, true
-		}
-		return "", false
-	}
-	return "", false
-}
-
-// requireCPAImportSettled refuses a run that left an item's effect unknown. A
-// failed item is an unknown destination state: resolving it needs the next run's
-// readback, and claiming the stage while it stands would record a copy nobody
-// observed.
+// requireCPAImportSettled refuses a summary that is not a complete inventory.
+// Nothing is written by this step, so an item with a failed outcome can only mean
+// the executor attempted work it had no authority for: the run stops and the
+// operation stays at cpa_import.
 func requireCPAImportSettled(summary freshstore.AdoptionSummary) error {
 	for _, item := range summary.Items {
 		if item.Outcome != freshstore.AdoptionFailed {
 			continue
 		}
 		return newUpgradeError(UpgradeErrorCPAImportUnproven, fmt.Sprintf(
-			"the destination did not confirm the copy of %s (%s); the import stopped and the operation stays at %s",
+			"the inventory left the outcome of %s unknown (%s); the import stopped and the operation stays at %s",
 			item.Item, item.Reason, model.UpgradeStageCPAImport), nil)
 	}
 	if !summary.Finished {
 		return newUpgradeError(UpgradeErrorCPAImportUnproven,
-			"the import recorded a partial plan, so it did not finish; the operation stays at cpa_import", nil)
+			"the import recorded a partial inventory, so it did not finish; the operation stays at cpa_import", nil)
 	}
 	return nil
-}
-
-// proveTarget reads the target back: the imported client keys through
-// cpa.VerifyV8Adoption, then every copied path and credential through the
-// destination's own surface.
-func (r *cpaImportRun) proveTarget(ctx context.Context, result *CPAImportResult) error {
-	if err := cpa.VerifyV8Adoption(ctx, result.DestinationURL, r.managementKey, r.source.clientKeys); err != nil {
-		return newUpgradeError(UpgradeErrorCPAImportUnproven,
-			"the destination CPA does not answer with the imported client keys, so the import is not proven", err)
-	}
-	destination, err := freshadopt.NewDestination(ctx, freshadopt.Endpoint{BaseURL: result.DestinationURL, ManagementKey: r.managementKey})
-	if err != nil {
-		return newUpgradeError(UpgradeErrorCPADestinationUnready,
-			"the destination CPA refused the import's management credential", err)
-	}
-	defer destination.Close()
-	for _, path := range r.copiedConfig {
-		expected, sourcePresence := lookupDocumentPath(r.source.document, path)
-		if sourcePresence != documentPresent {
-			return newUpgradeError(UpgradeErrorCPAImportUnproven,
-				"the source no longer holds a path this run recorded as copied", nil)
-		}
-		observed, destinationPresence, err := destination.ReadConfigValue(ctx, path)
-		if err != nil || destinationPresence != cpa.ConfigPresent || !cpaImportValuesEqual(expected, observed) {
-			return newUpgradeError(UpgradeErrorCPAImportUnproven, fmt.Sprintf(
-				"the destination does not read %s back as it was written, so the import is not proven", path), err)
-		}
-	}
-	for _, name := range r.copiedCreds {
-		readBack, err := destination.DownloadCredential(ctx, name)
-		if err != nil {
-			return newUpgradeError(UpgradeErrorCPAImportUnproven, fmt.Sprintf(
-				"the destination does not hold the credential file %s this run copied", name), err)
-		}
-		if digestBytes(readBack) != digestBytes(r.source.credentialData[name]) {
-			return newUpgradeError(UpgradeErrorCPAImportUnproven, fmt.Sprintf(
-				"the credential file %s does not read back byte-identical from the destination", name), nil)
-		}
-	}
-	return nil
-}
-
-// cpaImportValuesEqual compares a source value with a destination read-back by
-// canonical JSON, so a value that crossed the YAML and JSON boundaries still
-// equals itself.
-func cpaImportValuesEqual(source, destination any) bool {
-	left, leftErr := json.Marshal(normalizeDocumentValue(source))
-	right, rightErr := json.Marshal(normalizeDocumentValue(destination))
-	return leftErr == nil && rightErr == nil && string(left) == string(right)
 }
 
 // enterCPAImportStage records the stage entry alone. It runs after the
-// destination is staged and started, because a refusal while staging must leave
-// the recorded position untouched. It carries no domain: the cpa_config domain is
-// the step's claim that the destination holds the copied state, and only the proof
-// below may make that claim.
+// destination is staged, started and bound, because a refusal while staging must
+// leave the recorded position untouched. It carries no domain: the cpa_config
+// domain is the claim that the destination holds the copied state, and this build
+// does not copy, so it never records that domain.
 func enterCPAImportStage(ctx context.Context, databasePath string) error {
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {
@@ -836,10 +786,18 @@ func enterCPAImportStage(ctx context.Context, databasePath string) error {
 	return nil
 }
 
-// recordCPAImport writes the manual items, the cpa_config domain and the
-// cpa_import stage in one transaction, so a reader never sees the stage without
-// the work it names.
-func recordCPAImport(ctx context.Context, databasePath string, result CPAImportResult) (model.UpgradeOperation, error) {
+// recordCPAImportDeferral writes the manual items and the cpa_import stage in one
+// transaction, so a reader never sees the stage without the work it names.
+//
+// It records no domain. The step staged and bound the destination and inventoried
+// the source, but it copied nothing, and cpa_config is the claim that the
+// destination holds the copied state — a claim only a copy can make. Keeping the
+// operation at cpa_import without the domain is what makes the next run resume the
+// same attempt instead of advancing a pipeline on work nothing performed. The
+// destination attempt row is kept for the same reason: a rerun replays the
+// recorded request and secret, and clearing it would let the run mint a second
+// secret for a destination that already holds the first.
+func recordCPAImportDeferral(ctx context.Context, databasePath string, result CPAImportResult) (model.UpgradeOperation, error) {
 	// The earlier steps' manual items keep their place: this step appends its own
 	// instructions and replaces nothing. The read happens before the write
 	// transaction opens, so one connection never waits on another in the same file.
@@ -871,19 +829,12 @@ func recordCPAImport(ctx context.Context, databasePath string, result CPAImportR
 		return model.UpgradeOperation{}, fmt.Errorf("begin the CPA import transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	advanced, err := upgradeoperation.AdvanceTx(ctx, tx, model.UpgradeDomainCPAConfig, model.UpgradeStageCPAImport)
+	advanced, err := upgradeoperation.AdvanceTx(ctx, tx, "", model.UpgradeStageCPAImport)
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the CPA import: %w; the manual items and the stage commit together, so the store is unchanged and a rerun records all of them", err)
 	}
 	if _, err := tx.ExecContext(ctx, `update upgrade_operations set manual_items = ? where id = 1`, string(payload)); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the CPA import's manual items: %w", err)
-	}
-	// The imported destination is now recorded, so the secret this step minted for
-	// it has served its purpose: from here the Manager's own connection holds it.
-	// Clearing it in the same transaction keeps the row's lifetime exactly the
-	// window in which a retry still needs it.
-	if _, err := tx.ExecContext(ctx, `delete from settings where key = ?`, cpaImportDestinationKeySetting); err != nil {
-		return model.UpgradeOperation{}, fmt.Errorf("clear the recorded destination management secret: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the CPA import: %w", err)
@@ -917,10 +868,12 @@ func boundedManualItem(item CPAImportManualItem) string {
 //
 // The stage hands the destination the only copy of its management secret it will
 // ever hold, so the run records the attempt in the same Manager store that holds
-// the operation row, before the stage: the secret, the plugin choice, the client
-// key set the destination was staged with and the operation ID it was staged
-// under. A retry replays that exact request. The successful record deletes the
-// row, because from then on the Manager's own connection holds the secret.
+// the operation row, before the stage: the secret, the full request the
+// Supervisor published, the client key list and the operation ID it was staged
+// under. A retry replays that exact request. The row is kept because this build
+// never records cpa_config: a rerun still has to replay the recorded secret, and
+// clearing the row would let it mint a second secret for a destination that
+// already holds the first.
 const cpaImportDestinationKeySetting = "upgrade_cpa_import_destination_v1"
 
 // requireRecordedSourceRoot binds this run to the 1.x tree the copy-in read.
@@ -958,31 +911,6 @@ func requireRecordedSourceRoot(recorded model.UpgradeOperation, legacyRoot strin
 			"the named 1.x source root is not the directory this operation's copy-in read, so its CPA state belongs to another installation; nothing was read or written", nil)
 	}
 	return nil
-}
-
-// cpaImportAuthorization is the Upgrade-surface authorization this import runs
-// under.
-//
-// An Upgrade import of a Managed 1.x stack is authorized by the operator running
-// the step, not by a Fresh adoption record: there is no Adopt screen in the
-// Upgrade surface, no capability qualification, and therefore no read/replay/
-// verify evidence references to present. The first version of this step invented
-// `preflight:<ref>-read`-shaped references to satisfy the Fresh decision shape;
-// those references pointed at nothing.
-//
-// It therefore names exactly the references the step copies — the gateway
-// configuration, the provider sections and the credential files — and
-// freshadopt.NewUpgrade refuses any reference outside the product's own
-// migratable set. The step's proof is the copy's readback and VerifyV8Adoption,
-// not a qualification the Upgrade surface never held; an item the executor
-// classifies outside these three references keeps the rule table's manual action
-// and is never written.
-func cpaImportAuthorization() freshadopt.UpgradeAuthorization {
-	return freshadopt.UpgradeAuthorization{Refs: []bootstrap.ResourceRef{
-		bootstrap.AdoptionRefConfigRouting,
-		bootstrap.AdoptionRefProviderStateAPIKeys,
-		bootstrap.AdoptionRefCPAAuthFiles,
-	}}
 }
 
 // newCPAImportManagementSecret returns a fresh 64-hex destination management

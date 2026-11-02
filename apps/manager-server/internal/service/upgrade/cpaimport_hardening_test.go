@@ -70,15 +70,17 @@ func TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the retry against a ready destination was refused: %v", err)
 	}
-	if result.Stage != model.UpgradeStageCPAImport || !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
-		t.Fatalf("the retry recorded stage %q with domains %v", result.Stage, result.DomainsDone)
+	if result.Stage != model.UpgradeStageCPAImport || containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the retry recorded stage %q with domains %v, want cpa_import and no cpa_config", result.Stage, result.DomainsDone)
 	}
 	if runtime.stageCall != first {
 		t.Fatal("the retry staged the destination again")
 	}
-	// The successful record releases the attempt: it is no longer a retry's to use.
-	if _, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey); err != nil || found {
-		t.Fatalf("the recorded attempt survived the successful import (found %t): %v", found, err)
+	// The attempt stays recorded: this build records no cpa_config, so a rerun
+	// must still replay the same request and the same secret.
+	_, keptKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found || keptKey != first.ManagementKey {
+		t.Fatalf("the recorded attempt (found %t) no longer holds the staged secret: %v", found, err)
 	}
 }
 
@@ -124,8 +126,8 @@ func TestImportCPASupersedesATerminallyFailedAttempt(t *testing.T) {
 	if record.Attempt != 1 || !record.TerminalFailure || record.OperationID != first.OperationID {
 		t.Fatalf("recorded attempt = %+v, want attempt 1, terminal, under %q", record, first.OperationID)
 	}
-	if result.Stage != model.UpgradeStageCPAImport || !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
-		t.Fatalf("the retry recorded stage %q with domains %v", result.Stage, result.DomainsDone)
+	if result.Stage != model.UpgradeStageCPAImport || containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the retry recorded stage %q with domains %v, want cpa_import and no cpa_config", result.Stage, result.DomainsDone)
 	}
 	retried := runtime.stageCall
 	if retried == nil || retried.OperationID == first.OperationID {

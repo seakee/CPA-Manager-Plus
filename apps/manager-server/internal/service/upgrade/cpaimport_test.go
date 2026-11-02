@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,9 +19,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -81,23 +80,16 @@ type fakeDestinationCPA struct {
 	credentials map[string][]byte
 	types       map[string]string
 	config      map[string]any
-	// silentDropPath accepts one configuration write and does not keep it, which
-	// is the destination state the readback proof exists to catch.
-	silentDropPath string
-	// dropCredentials makes the download of these files answer 404 after the
-	// upload, which is the readback mismatch a test needs.
-	dropCredentials map[string]bool
-	server          *httptest.Server
+	server      *httptest.Server
 }
 
 func newFakeDestinationCPA(t *testing.T, management string) *fakeDestinationCPA {
 	t.Helper()
 	fake := &fakeDestinationCPA{
-		management:      management,
-		credentials:     map[string][]byte{},
-		types:           map[string]string{},
-		config:          map[string]any{"config-version": 8, "server": map[string]any{"port": 8317}, "oauth": map[string]any{"auth-dir": "/root/.cli-proxy-api"}},
-		dropCredentials: map[string]bool{},
+		management:  management,
+		credentials: map[string][]byte{},
+		types:       map[string]string{},
+		config:      map[string]any{"config-version": 8, "server": map[string]any{"port": 8317}, "oauth": map[string]any{"auth-dir": "/root/.cli-proxy-api"}},
 	}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
 	t.Cleanup(fake.server.Close)
@@ -225,9 +217,8 @@ func (c *fakeDestinationCPA) downloadCredential(w http.ResponseWriter, r *http.R
 	name := r.URL.Query().Get("name")
 	c.mu.Lock()
 	data, ok := c.credentials[name]
-	drop := c.dropCredentials[name]
 	c.mu.Unlock()
-	if !ok || drop {
+	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -235,7 +226,7 @@ func (c *fakeDestinationCPA) downloadCredential(w http.ResponseWriter, r *http.R
 }
 
 // writeConfig merges one PATCH body or replaces one PUT value, exactly as CPA
-// does, so the readback below is an observation of the destination's own state.
+// does, so a test can observe the destination's own state.
 func (c *fakeDestinationCPA) writeConfig(w http.ResponseWriter, r *http.Request, slashPath string) {
 	dotted := strings.ReplaceAll(strings.Trim(slashPath, "/"), "/", ".")
 	var value any
@@ -252,9 +243,6 @@ func (c *fakeDestinationCPA) writeConfig(w http.ResponseWriter, r *http.Request,
 		patchConfig(c.config, strings.Split(dotted, "."), value)
 	} else {
 		mergeConfig(c.config, strings.Split(dotted, "."), value)
-	}
-	if c.silentDropPath != "" {
-		dropConfigPath(c.config, strings.Split(c.silentDropPath, "."))
 	}
 	c.mu.Unlock()
 	_, _ = w.Write([]byte(`{"status":"ok","config-version":8}`))
@@ -300,20 +288,6 @@ func patchConfig(document map[string]any, parts []string, value any) {
 		}
 		current[key] = item
 	}
-}
-
-// dropConfigPath removes one leaf, so the destination accepts a write and does
-// not hold it.
-func dropConfigPath(document map[string]any, parts []string) {
-	current := document
-	for _, part := range parts[:len(parts)-1] {
-		next, ok := current[part].(map[string]any)
-		if !ok {
-			return
-		}
-		current = next
-	}
-	delete(current, parts[len(parts)-1])
 }
 
 // mergeMapping deep-merges one mapping into another.
@@ -651,10 +625,12 @@ func TestImportCPARequiresTheHeldSourceOwnershipLock(t *testing.T) {
 	}
 }
 
-// TestImportCPAImportsAV734FixtureAndRecordsTheStage is the acceptance case: the
-// configuration and the credentials land, the destination verifies, and the row
-// advances to cpa_import carrying the cpa_config domain.
-func TestImportCPAImportsAV734FixtureAndRecordsTheStage(t *testing.T) {
+// TestImportCPAStagesAndDefersAV734Fixture is the acceptance case for this build:
+// the destination is staged with the plugin choice and the source client keys, the
+// caller's URL is bound to it, every configuration and credential item is recorded
+// as deferred manual work with the typed reason, nothing lands on the CPA, and the
+// row advances to cpa_import without the cpa_config domain.
+func TestImportCPAStagesAndDefersAV734Fixture(t *testing.T) {
 	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
 		"codex-user.json":  `{"type":"codex","access_token":"token"}`,
 		"gemini-user.json": `{"type":"gemini","access_token":"token"}`,
@@ -669,8 +645,8 @@ func TestImportCPAImportsAV734FixtureAndRecordsTheStage(t *testing.T) {
 	if result.Stage != model.UpgradeStageCPAImport {
 		t.Fatalf("stage = %q, want %q", result.Stage, model.UpgradeStageCPAImport)
 	}
-	if !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
-		t.Fatalf("domains = %v, want the cpa_config domain", result.DomainsDone)
+	if containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("domains = %v, want no cpa_config for a run that copied nothing", result.DomainsDone)
 	}
 	// The plugin choice reached the destination request and the result.
 	if runtime.stageCall == nil || !runtime.stageCall.PluginsEnabled || !result.PluginsEnabled {
@@ -679,47 +655,42 @@ func TestImportCPAImportsAV734FixtureAndRecordsTheStage(t *testing.T) {
 	if runtime.stageCall.SourceClass != "legacy_managed" {
 		t.Fatalf("source class = %q, want legacy_managed", runtime.stageCall.SourceClass)
 	}
-	// The configuration landed.
+	// Nothing landed on the destination: no configuration leaf, no provider
+	// section, no credential file.
 	destination.mu.Lock()
-	config, _ := configValueAt(destination.config, []string{"routing", "retry", "request-retry"})
-	codexCloak, _ := configValueAt(destination.config, []string{"upstream", "codex", "disable-codex-cloaking"})
-	geminiGroup, geminiFound := configValueAt(destination.config, []string{"api-keys", "gemini"})
-	_, managementCopied := configValueAt(destination.config, []string{"management"})
-	_, accessKeysCopied := configValueAt(destination.config, []string{"access", "api-keys"})
+	_, routingFound := configValueAt(destination.config, []string{"routing"})
+	_, providerFound := configValueAt(destination.config, []string{"api-keys", "gemini"})
 	credentials := append([]string(nil), mapKeys(destination.credentials)...)
 	destination.mu.Unlock()
-	if fmt.Sprint(config) != "3" {
-		t.Fatalf("routing.retry.request-retry = %#v, want 3", config)
+	if routingFound || providerFound {
+		t.Fatal("the destination received configuration the run must defer")
 	}
-	if fmt.Sprint(codexCloak) != "true" {
-		t.Fatalf("upstream.codex.disable-codex-cloaking = %#v, want true", codexCloak)
+	if len(credentials) != 0 {
+		t.Fatalf("the destination received credentials the run must defer: %v", credentials)
 	}
-	if !geminiFound {
-		t.Fatal("the gemini provider group did not land")
+	for _, request := range destination.requests() {
+		for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodPost, http.MethodDelete} {
+			if strings.HasPrefix(request, method+" ") {
+				t.Fatalf("the destination received a mutation: %s", request)
+			}
+		}
 	}
-	if groups, ok := geminiGroup.([]any); !ok || len(groups) != 1 {
-		t.Fatalf("api-keys.gemini = %#v, want one group", geminiGroup)
-	}
-	if managementCopied {
-		t.Fatal("the source management block was copied into the destination")
-	}
-	if accessKeysCopied {
-		t.Fatal("the source client key list was written as configuration")
-	}
-	// Only the uploadable credential landed; the gemini one is a manual item.
-	if len(credentials) != 1 || credentials[0] != "codex-user.json" {
-		t.Fatalf("destination credentials = %v, want only the codex file", credentials)
-	}
-	// The recorded row carries the manual items, and the source secrets are gone.
+	// The recorded row carries the deferred items with the typed reason, and the
+	// source secrets are gone.
 	recorded := readOperation(t, fixture.targetRoot)
 	if recorded.Stage != model.UpgradeStageCPAImport {
 		t.Fatalf("recorded stage = %q, want %q", recorded.Stage, model.UpgradeStageCPAImport)
 	}
-	if !containsValue(recorded.DomainsDone, model.UpgradeDomainCPAConfig) {
-		t.Fatalf("recorded domains = %v, want cpa_config", recorded.DomainsDone)
+	if recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
 	}
 	joined := strings.Join(recorded.ManualItems, "\n")
-	for _, want := range []string{"gemini-user.json", "section:ampcode", "config:codex.identity-confuse", "section:something-new"} {
+	for _, want := range []string{
+		"credential:codex-user.json", "credential:gemini-user.json",
+		"config:routing.retry.request-retry", "section:ampcode",
+		"config:codex.identity-confuse", "section:something-new",
+		CPAImportRequiresQualification,
+	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("recorded manual items do not name %q: %s", want, joined)
 		}
@@ -774,48 +745,6 @@ func TestImportCPARequiresThePluginChoice(t *testing.T) {
 	}
 	if runtime.stageCall != nil || len(destination.requests()) != 0 {
 		t.Fatal("a run without a plugin choice reached the destination")
-	}
-}
-
-// TestImportCPAFailsTheStepWhenACopiedLeafDoesNotReadBack is the target proof's
-// negative case: the destination accepts the write and does not hold it, so the
-// step fails and the operation stays at cpa_import.
-func TestImportCPAFailsTheStepWhenACopiedLeafDoesNotReadBack(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
-	destination := newFakeDestinationCPA(t, "")
-	destination.silentDropPath = "routing.retry.request-retry"
-	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
-	runtime.staged = destination
-	_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
-	code, ok := UpgradeErrorCodeOf(err)
-	if !ok || code != UpgradeErrorCPAImportUnproven {
-		t.Fatalf("an unproven copy produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportUnproven)
-	}
-	// The step entered its stage before it wrote, so the retry point is the
-	// import; the domain is what the proof alone may claim.
-	recorded := readOperation(t, fixture.targetRoot)
-	if recorded.Stage != model.UpgradeStageCPAImport {
-		t.Fatalf("recorded stage = %q, want %q", recorded.Stage, model.UpgradeStageCPAImport)
-	}
-	if recorded.HasDomain(model.UpgradeDomainCPAConfig) {
-		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
-	}
-}
-
-// TestImportCPAFailsTheStepWhenACredentialDoesNotReadBack covers the credential
-// half of the proof.
-func TestImportCPAFailsTheStepWhenACredentialDoesNotReadBack(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
-	destination := newFakeDestinationCPA(t, "")
-	destination.dropCredentials["codex-user.json"] = true
-	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
-	runtime.staged = destination
-	_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportUnproven {
-		t.Fatalf("an unproven credential produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportUnproven)
-	}
-	if recorded := readOperation(t, fixture.targetRoot); recorded.HasDomain(model.UpgradeDomainCPAConfig) {
-		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
 	}
 }
 
@@ -904,19 +833,16 @@ func TestImportCPALeavesTheStageAloneWhenTheDestinationCannotBeUsed(t *testing.T
 func TestImportCPARefusesARetryThatChangesTheStagedRequest(t *testing.T) {
 	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "")
-	destination.silentDropPath = "routing.retry.request-retry"
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
+	runtime.failStart = true
 	if _, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true))); err == nil {
-		t.Fatal("a dropped configuration write was proved")
+		t.Fatal("a failed destination start was recorded as success")
 	}
 	stagedCall := runtime.stageCall
 	if stagedCall == nil {
 		t.Fatal("the first run did not stage the destination")
 	}
-	destination.mu.Lock()
-	destination.silentDropPath = ""
-	destination.mu.Unlock()
 
 	// The other plugin choice is a different request, not a retry.
 	_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
@@ -1057,6 +983,9 @@ func TestImportCPAIsIdempotentOnceRecorded(t *testing.T) {
 	if _, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true))); err != nil {
 		t.Fatalf("first import: %v", err)
 	}
+	// A build that can copy records cpa_config; this build cannot, so the row is
+	// completed by hand here to pin the resume rule for that recorded position.
+	writeOperationStage(t, fixture.targetRoot, model.UpgradeStageCPAImport, []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig})
 	before := len(destination.requests())
 	result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true)))
 	if err != nil {
@@ -1111,10 +1040,11 @@ func TestImportCPAHoldsTheDestinationConnectionInTheManagerConfig(t *testing.T) 
 	if cfg.CodexInspection.Enabled == nil || !*cfg.CodexInspection.Enabled {
 		t.Fatalf("the import rewrote the codex inspection settings: %+v", cfg.CodexInspection)
 	}
-	// The attempt row is released only because the connection now holds the same
-	// secret, so nothing this step minted is left without an owner.
-	if _, _, found, err := loadCPAImportDestinationRecord(context.Background(), newTargetPaths(fixture.targetRoot).Database, newTargetPaths(fixture.targetRoot).DataKey); err != nil || found {
-		t.Fatalf("the destination attempt survived the successful import (found %t): %v", found, err)
+	// The attempt row is kept: this build records no cpa_config, so a rerun must
+	// replay the recorded request and the recorded secret.
+	_, keptKey, found, err := loadCPAImportDestinationRecord(context.Background(), newTargetPaths(fixture.targetRoot).Database, newTargetPaths(fixture.targetRoot).DataKey)
+	if err != nil || !found || keptKey != staged.ManagementKey {
+		t.Fatalf("the recorded attempt (found %t) no longer holds the staged secret: %v", found, err)
 	}
 }
 
@@ -1162,15 +1092,15 @@ func TestImportCPARefusesToRepointAnExistingManagerConnection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the retry after rebinding the connection was refused: %v", err)
 	}
-	if result.Stage != model.UpgradeStageCPAImport || !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
-		t.Fatalf("the retry recorded stage %q with domains %v", result.Stage, result.DomainsDone)
+	if result.Stage != model.UpgradeStageCPAImport || containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the retry recorded stage %q with domains %v, want cpa_import and no cpa_config", result.Stage, result.DomainsDone)
 	}
 	repaired := managerConfig(t, fixture.targetRoot)
 	if repaired.CPAConnection.CPABaseURL != destination.url() || repaired.CPAConnection.ManagementKey != recordedSecret {
 		t.Fatalf("the rebuilt connection = %+v, want the staged destination", repaired.CPAConnection)
 	}
-	if _, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey); err != nil || found {
-		t.Fatalf("the destination attempt survived the successful import (found %t): %v", found, err)
+	if _, keptKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey); err != nil || !found || keptKey != recordedSecret {
+		t.Fatalf("the recorded attempt (found %t) no longer holds the staged secret: %v", found, err)
 	}
 }
 
@@ -1201,12 +1131,13 @@ func TestImportCPAReportsAManualItemForAnUnknownSectionAndStillSucceeds(t *testi
 	if recorded := readOperation(t, fixture.targetRoot); !containsValue(recorded.ManualItems, manualItemFor(t, result, "section:some-future-section")) {
 		t.Fatalf("the recorded manual items do not carry the unknown section: %v", recorded.ManualItems)
 	}
-	// The mapped leaf still landed.
+	// The mapped leaf is deferred too: this build copies nothing, so the
+	// destination holds no routing configuration.
 	destination.mu.Lock()
 	value, found := configValueAt(destination.config, []string{"routing", "retry", "request-retry"})
 	destination.mu.Unlock()
-	if !found || fmt.Sprint(value) != "4" {
-		t.Fatalf("routing.retry.request-retry = %#v, present = %t", value, found)
+	if found {
+		t.Fatalf("routing.retry.request-retry = %#v, want the item deferred", value)
 	}
 }
 
@@ -1227,36 +1158,84 @@ func TestImportCPARefusesAFailedDestinationStage(t *testing.T) {
 	}
 }
 
-// TestCPAImportAuthorizationNamesOnlyTheCopiedReferences pins the authority the
-// step runs under. It is an Upgrade authorization: a set of references, with no
-// qualification and no evidence reference to fabricate. Every reference must also
-// be one the product permits an adoption to copy, so the step cannot widen the
-// executor's write surface by naming a section.
-func TestCPAImportAuthorizationNamesOnlyTheCopiedReferences(t *testing.T) {
-	authorization := cpaImportAuthorization()
-	want := []string{"cpa-auth-files", "cpa-config-routing", "provider-state-api-keys"}
-	migratable := map[bootstrap.ResourceRef]bool{}
-	for _, ref := range bootstrap.MigratedAdoptionResourceRefs() {
-		migratable[ref] = true
+// TestImportCPADefersEveryItemAnUnqualifiedSourceCannotProve is the High finding
+// end to end: a source that carries no qualification proof may not have its
+// provider configuration or OAuth credentials copied, and the previous Upgrade
+// authorization let a bare reference set authorize exactly that. The import now
+// passes no migration decision to the executor, so the inventory it records is
+// the same manual inventory Fresh New() produces for the same source, every item
+// carries the typed deferral reason, and the destination receives no mutation.
+func TestImportCPADefersEveryItemAnUnqualifiedSourceCannotProve(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
+		"codex-user.json": `{"type":"codex","access_token":"token"}`,
+	})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true)))
+	if err != nil {
+		t.Fatalf("import the fixture CPA: %v", err)
 	}
-	got := make([]string, 0, len(authorization.Refs))
-	for _, ref := range authorization.Refs {
-		if !migratable[ref] {
-			t.Fatalf("the import authorizes %q, which the product does not permit an adoption to copy", ref)
+	deferred := map[string]bool{}
+	for _, item := range result.ManualItems {
+		if item.Reason != CPAImportRequiresQualification {
+			continue
 		}
-		got = append(got, string(ref))
+		deferred[item.Item] = true
 	}
-	sort.Strings(got)
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("authorized references = %v, want %v", got, want)
+	if len(deferred) == 0 {
+		t.Fatalf("the import deferred no item: %+v", result.ManualItems)
 	}
-	// The constructor is the gate: a reference outside the set is refused before
-	// any run, so the authorization cannot carry a Manager-owned section.
-	for _, ref := range []bootstrap.ResourceRef{bootstrap.AdoptionRefConfigServer, bootstrap.AdoptionRefConfigPlugins, ""} {
-		if _, err := freshadopt.NewUpgrade(nil, nil, freshadopt.UpgradeAuthorization{Refs: []bootstrap.ResourceRef{ref}}); err == nil {
-			t.Fatalf("the executor accepted an authorization for %q", ref)
+	// The same source through the Fresh authority with no decision at all: every
+	// item the Fresh record would mark manual is manual here too.
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: fixture.legacyRoot, CPAVersion: "7.3.4"})
+	if err != nil {
+		t.Fatalf("open the same source for the Fresh comparison: %v", err)
+	}
+	destination.mu.Lock()
+	key := destination.management
+	destination.mu.Unlock()
+	wire, err := freshadopt.NewDestination(context.Background(), freshadopt.Endpoint{BaseURL: destination.url(), ManagementKey: key})
+	if err != nil {
+		t.Fatalf("build the destination client: %v", err)
+	}
+	defer wire.Close()
+	freshRun, err := freshadopt.New(source, wire, nil).Run(context.Background(), freshstore.AdoptionSummary{}, nil)
+	if err != nil {
+		t.Fatalf("run the unqualified Fresh inventory: %v", err)
+	}
+	freshManual := map[string]bool{}
+	for _, item := range freshRun.Summary.Items {
+		if item.Outcome == freshstore.AdoptionManual {
+			freshManual[item.Item] = true
 		}
 	}
+	if !reflect.DeepEqual(freshManual, deferred) {
+		t.Fatalf("the import deferred %v but the unqualified Fresh inventory marks %v manual", deferred, freshManual)
+	}
+	for _, item := range result.ManualItems {
+		if item.Item == "credential:codex-user.json" && item.Reason != CPAImportRequiresQualification {
+			t.Fatalf("the credential was not deferred with the typed reason: %+v", item)
+		}
+	}
+	// Nothing was uploaded and no configuration was written, by either run.
+	for _, request := range destination.requests() {
+		for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodPost, http.MethodDelete} {
+			if strings.HasPrefix(request, method+" ") {
+				t.Fatalf("the destination received a mutation: %s", request)
+			}
+		}
+	}
+	destination.mu.Lock()
+	credentials := len(destination.credentials)
+	destination.mu.Unlock()
+	if credentials != 0 {
+		t.Fatalf("the destination holds %d credentials", credentials)
+	}
+	if recorded := readOperation(t, fixture.targetRoot); recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
+	}
+	t.Logf("P-L3 deferred_items=%d fresh_manual_items=%d destination_mutations=0 credentials=0", len(deferred), len(freshManual))
 }
 
 // manualItemFor renders the one recorded line for one manual item, so a test can

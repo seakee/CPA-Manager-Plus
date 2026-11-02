@@ -21,12 +21,12 @@
 // StageDestination/VerifyV8Adoption path. ManagerOwned reports that exclusion and
 // the executor refuses an excluded item even if a caller asks for it.
 //
-// Two authorities can drive a run. A Fresh adoption passes the per-reference
-// decisions its qualification produced, and an unbacked decision never copies. An
-// Upgrade step passes an explicit UpgradeAuthorization naming the references it
-// copies, because the Upgrade surface holds no qualification record and must not
-// present evidence references it does not have. Neither authority can name a
-// reference outside the product's migratable set.
+// One authority drives a run: the per-reference decisions a Fresh adoption's
+// qualification produced. A reference without a migrate verdict from that chain is
+// recorded with the rule table's manual action and never written, so an unproven
+// source cannot copy anything. A caller that holds no decisions at all — the
+// Upgrade surface holds no qualification record, so it passes none — gets a run in
+// which every item is recorded as manual work and nothing is written.
 package freshadopt
 
 import (
@@ -113,31 +113,6 @@ type Executor struct {
 	// reference missing from it has no migrate verdict, which the rules resolve
 	// to that reference's manual action.
 	decisions map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision
-	// upgrade is the Upgrade surface's own authorization, nil for a Fresh
-	// adoption. It is a set rather than a decision on purpose: the Upgrade
-	// surface has no capability qualification record and therefore no evidence
-	// references to present. See UpgradeAuthorization.
-	upgrade map[bootstrap.ResourceRef]bool
-}
-
-// UpgradeAuthorization is the Upgrade surface's authorization for one bounded
-// copy.
-//
-// It is deliberately not an AdoptionResourceDecision. A Fresh adoption's
-// decision carries the read/replay/verify evidence references its qualification
-// produced, and bootstrap.FreshAdoptionDecision refuses to mark a kind migrate
-// without them. The Upgrade surface has no such record: an operator runs the
-// Upgrade step against a source it has bound and a destination it proves after
-// the copy. Presenting preflight-shaped references there, as the first version of
-// the CPA import did, claimed evidence that pointed at nothing.
-//
-// The authorization names exactly the references the step copies. Each one still
-// has to be a member of bootstrap.MigratedAdoptionResourceRefs, the product's
-// closed set of references an adoption may copy, so the Upgrade surface cannot
-// widen what the executor writes. Every item outside the named set keeps the
-// rule table's manual action and is never written.
-type UpgradeAuthorization struct {
-	Refs []bootstrap.ResourceRef
 }
 
 // New builds an executor over an already-authenticated source and destination
@@ -148,30 +123,6 @@ func New(source Source, destination Destination, decisions []bootstrap.AdoptionR
 		indexed[decision.ResourceRef] = decision
 	}
 	return &Executor{source: source, destination: destination, decisions: indexed}
-}
-
-// NewUpgrade builds an executor for a step the Upgrade surface owns.
-//
-// The authorization must name at least one reference, and every reference must
-// be one the product permits an adoption to copy. Anything else is refused at
-// construction, so an Upgrade caller cannot authorize a Manager-owned section or
-// an unknown reference by naming it.
-func NewUpgrade(source Source, destination Destination, authorization UpgradeAuthorization) (*Executor, error) {
-	if len(authorization.Refs) == 0 {
-		return nil, errors.New("freshadopt: an Upgrade authorization must name the references it copies")
-	}
-	migratable := make(map[bootstrap.ResourceRef]bool, len(bootstrap.MigratedAdoptionResourceRefs()))
-	for _, ref := range bootstrap.MigratedAdoptionResourceRefs() {
-		migratable[ref] = true
-	}
-	authorized := make(map[bootstrap.ResourceRef]bool, len(authorization.Refs))
-	for _, ref := range authorization.Refs {
-		if !migratable[ref] {
-			return nil, fmt.Errorf("freshadopt: %q is not a reference the product permits an adoption to copy", ref)
-		}
-		authorized[ref] = true
-	}
-	return &Executor{source: source, destination: destination, upgrade: authorized}, nil
 }
 
 // ItemRef is the stable adoption reference one bounded item belongs to. It is
@@ -220,12 +171,6 @@ func ItemRef(item freshstore.AdoptionItem) bootstrap.ResourceRef {
 // the decision's own manual action is what the operator is told to do.
 func (e *Executor) gated(item freshstore.AdoptionItem, name string) (freshstore.AdoptionItem, bool) {
 	ref := ItemRef(item)
-	if e.upgrade != nil {
-		if e.upgrade[ref] {
-			return freshstore.AdoptionItem{}, false
-		}
-		return e.manual(item, name, ref), true
-	}
 	decision, ok := bootstrap.FreshAdoptionDecision(ref, e.decisions[ref])
 	if ok && decision.Disposition == bootstrap.Migrate {
 		return freshstore.AdoptionItem{}, false
