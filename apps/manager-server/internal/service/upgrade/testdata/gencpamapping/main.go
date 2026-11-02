@@ -61,10 +61,9 @@ const (
 type fixture struct {
 	Contract string `json:"contract"`
 	Upstream struct {
-		Repository   string `json:"repository"`
-		ScanCheckout string `json:"scanCheckout"`
-		Generator    string `json:"generator"`
-		Regenerate   string `json:"regenerate"`
+		Repository string `json:"repository"`
+		Generator  string `json:"generator"`
+		Regenerate string `json:"regenerate"`
 	} `json:"upstream"`
 	Sources []source `json:"sources"`
 	// Versions is the scan order, oldest first. The presence transitions are
@@ -145,7 +144,6 @@ func run(upstream, tagsFile, out string) error {
 		Presence:   map[string]presence{},
 	}
 	built.Upstream.Repository = "https://github.com/router-for-me/CLIProxyAPI"
-	built.Upstream.ScanCheckout = upstream
 	built.Upstream.Generator = "internal/service/upgrade/testdata/gencpamapping"
 	built.Upstream.Regenerate = "cd apps/manager-server && go run ./internal/service/upgrade/testdata/gencpamapping -upstream <checkout> [-tags <tag-commits.txt>] -out internal/service/upgrade/testdata/cpa_mapping_upstream.json"
 

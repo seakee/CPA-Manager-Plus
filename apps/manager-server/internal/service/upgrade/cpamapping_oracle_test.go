@@ -34,10 +34,9 @@ const (
 type cpaMappingFixture struct {
 	Contract string `json:"contract"`
 	Upstream struct {
-		Repository   string `json:"repository"`
-		ScanCheckout string `json:"scanCheckout"`
-		Generator    string `json:"generator"`
-		Regenerate   string `json:"regenerate"`
+		Repository string `json:"repository"`
+		Generator  string `json:"generator"`
+		Regenerate string `json:"regenerate"`
 	} `json:"upstream"`
 	Sources []struct {
 		Role   string `json:"role"`
