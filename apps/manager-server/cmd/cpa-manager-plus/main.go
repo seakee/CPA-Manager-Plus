@@ -157,7 +157,10 @@ func main() {
 					return
 				}
 				code := upgradecommand.ExitCode(err)
-				if !errors.Is(err, upgradecommand.ErrBlocked) {
+				// A subcommand that wrote its own failure to stderr marks it
+				// reported; printing it here too would show the operator the same
+				// reason twice.
+				if !errors.Is(err, upgradecommand.ErrBlocked) && !errors.Is(err, upgradecommand.ErrReported) {
 					log.Printf("upgrade: %v", err)
 				}
 				os.Exit(code)

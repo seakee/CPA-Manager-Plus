@@ -3,6 +3,7 @@ package upgrade
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -54,10 +55,43 @@ func runExternalConnect(ctx context.Context, args []string, stdout, stderr io.Wr
 		}
 		output.Error = err.Error()
 		writeExternalConnectOutput(stdout, *asJSON, output)
-		return refuseTyped(stderr, err)
+		return reportExternalConnectFailure(stderr, err)
 	}
 	writeExternalConnectOutput(stdout, *asJSON, output)
 	return nil
+}
+
+// externalConnectDecision reports whether a typed failure is a decision about the
+// operator's CPA — its version, its document, its credential, the address it was
+// recorded at, or the process that owns the store — rather than an environment or
+// prerequisite condition.
+func externalConnectDecision(err error) bool {
+	switch {
+	case errors.Is(err, upgradeservice.ErrExternalVersionUnsupported),
+		errors.Is(err, upgradeservice.ErrExternalConfigDocumentInvalid),
+		errors.Is(err, upgradeservice.ErrExternalManagementRejected),
+		errors.Is(err, upgradeservice.ErrExternalTargetMoved),
+		errors.Is(err, upgradeservice.ErrExternalV2Running):
+		return true
+	}
+	return false
+}
+
+// reportExternalConnectFailure writes the step's failure to stderr once and
+// classifies it for the exit contract: only a decision about the CPA is a refusal
+// (exit 1), while an unreachable target, a store the step cannot run from or a
+// root without a copy-in keeps its own typed error (exit 2).
+//
+// The failure is marked reported because it has just been written: the process
+// entry point prints what a subcommand did not, so wrapping every typed error as a
+// refusal used to report exit 1 for environment failures and print the reason
+// twice.
+func reportExternalConnectFailure(stderr io.Writer, err error) error {
+	_, _ = fmt.Fprintln(stderr, err)
+	if externalConnectDecision(err) {
+		return fmt.Errorf("%w: %w: %w", ErrReported, ErrRefused, err)
+	}
+	return fmt.Errorf("%w: %w", ErrReported, err)
 }
 
 type externalConnectOutput struct {

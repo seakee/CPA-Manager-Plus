@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
@@ -153,6 +154,11 @@ func TestExternalConnectCLIExitsOneOnAV7CPA(t *testing.T) {
 	if !strings.Contains(output.Error, "v7.2.1") || !strings.Contains(output.Error, "upgrade the CPA") {
 		t.Fatalf("refusal = %q", output.Error)
 	}
+	// The refusal reaches stderr exactly once: the command writes it and the
+	// process entry point must not print it again.
+	if got := strings.Count(stderr, string(upgradeservice.UpgradeErrorExternalVersionUnsupported)); got != 1 {
+		t.Fatalf("stderr carries the refusal %d time(s), want 1: %s", got, stderr)
+	}
 	// The stop is before any write to the CPA: only the version read happened.
 	for _, request := range server.requests {
 		if strings.HasPrefix(request, "PUT ") || strings.HasPrefix(request, "POST ") {
@@ -261,6 +267,107 @@ func TestExternalConnectCLIRequiresItsInputs(t *testing.T) {
 	}
 }
 
+// TestExternalConnectCLIExitsTwoWhenTheCPADoesNotAnswer proves an unreachable
+// target is an environment failure, not a refusal.
+//
+// The step reported every typed failure as a refusal, so a CPA that never
+// answered exited 1 — the status the contract reserves for a decision the owner
+// has to look at — and a wrapper could not tell "your CPA is v7" from "the
+// address is wrong". The real Run is exercised here, not the exit-code table,
+// because the table cannot see the wrapping.
+func TestExternalConnectCLIExitsTwoWhenTheCPADoesNotAnswer(t *testing.T) {
+	target := copiedTarget(t)
+	server := newExternalCPAServer(t, "v8.0.13")
+	address := server.URL
+	server.Close()
+
+	code, stdout, stderr := run(t, "external-connect", "--json",
+		"--target", target, "--cpa-base-url", address,
+		"--management-key-file", managementKeyFile(t, cliManagementKey))
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 (an unreachable CPA is an environment failure); stderr: %s", code, stderr)
+	}
+	refusal := string(upgradeservice.UpgradeErrorExternalAuthorityUnavailable)
+	var output externalConnectOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output: %v; output: %s", err, stdout)
+	}
+	if output.ErrorCode != refusal {
+		t.Fatalf("error code = %q, want %q", output.ErrorCode, refusal)
+	}
+	// The reason reaches stderr exactly once: the command writes it and the
+	// process entry point must not print it again.
+	if got := strings.Count(stderr, refusal); got != 1 {
+		t.Fatalf("stderr carries the failure %d time(s), want 1: %s", got, stderr)
+	}
+	// An environment failure is not durable: the operation keeps its stage and
+	// carries no refusal.
+	statusCode, statusJSON, statusStderr := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite"))
+	if statusCode != 0 {
+		t.Fatalf("status exit code = %d; stderr: %s", statusCode, statusStderr)
+	}
+	var status statusOutput
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.Operation == nil || status.Operation.Stage != "copy_in" || status.Operation.ErrorCode != "" {
+		t.Fatalf("an unreachable CPA was recorded: %+v", status.Operation)
+	}
+}
+
+// TestExternalConnectCLIExitsTwoWithoutACopyIn proves a root the step cannot run
+// from is also an environment/prerequisite failure, not a refusal.
+func TestExternalConnectCLIExitsTwoWithoutACopyIn(t *testing.T) {
+	target := t.TempDir()
+	code, stdout, stderr := run(t, "external-connect", "--json",
+		"--target", target, "--cpa-base-url", "https://cpa.example",
+		"--management-key-file", managementKeyFile(t, cliManagementKey))
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2; stderr: %s", code, stderr)
+	}
+	notApplicable := string(upgradeservice.UpgradeErrorExternalNotApplicable)
+	var output externalConnectOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output: %v; output: %s", err, stdout)
+	}
+	if output.ErrorCode != notApplicable {
+		t.Fatalf("error code = %q, want %q", output.ErrorCode, notApplicable)
+	}
+	if got := strings.Count(stderr, notApplicable); got != 1 {
+		t.Fatalf("stderr carries the failure %d time(s), want 1: %s", got, stderr)
+	}
+}
+
+// TestExternalConnectCLIExitsOneWhenTheStoreIsOwned proves the "in use" half of
+// the contract: a v2 store another process owns is blocked, so the step exits 1
+// rather than 2, and it says so once.
+func TestExternalConnectCLIExitsOneWhenTheStoreIsOwned(t *testing.T) {
+	target := copiedTarget(t)
+	fence, err := processlock.Acquire(filepath.Join(target, upgradeservice.SourceDatabaseName))
+	if err != nil {
+		t.Fatalf("take the ownership fence the step is supposed to respect: %v", err)
+	}
+	defer func() { _ = fence.Close() }()
+
+	code, stdout, stderr := run(t, "external-connect", "--json",
+		"--target", target, "--cpa-base-url", "https://cpa.example",
+		"--management-key-file", managementKeyFile(t, cliManagementKey))
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (a store another process owns is blocked); stderr: %s", code, stderr)
+	}
+	owned := string(upgradeservice.UpgradeErrorExternalV2Running)
+	var output externalConnectOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output: %v; output: %s", err, stdout)
+	}
+	if output.ErrorCode != owned {
+		t.Fatalf("error code = %q, want %q", output.ErrorCode, owned)
+	}
+	if got := strings.Count(stderr, owned); got != 1 {
+		t.Fatalf("stderr carries the failure %d time(s), want 1: %s", got, stderr)
+	}
+}
+
 // TestExitCodePinsTheExternalRefusals adds the External stop to the exit-code
 // table: a decision about the user's CPA exits 1, an unreachable one exits 2.
 func TestExitCodePinsTheExternalRefusals(t *testing.T) {
@@ -283,6 +390,7 @@ func TestExitCodePinsTheExternalRefusals(t *testing.T) {
 		},
 		{name: "rejected key", err: upgradeservice.ErrExternalManagementRejected, want: 1},
 		{name: "moved target", err: upgradeservice.ErrExternalTargetMoved, want: 1},
+		{name: "store owned by another process", err: upgradeservice.ErrExternalV2Running, want: 1},
 		{name: "unreachable cpa", err: typed(upgradeservice.UpgradeErrorExternalAuthorityUnavailable), want: 2},
 		{name: "wrong stage", err: typed(upgradeservice.UpgradeErrorExternalNotApplicable), want: 2},
 	}
