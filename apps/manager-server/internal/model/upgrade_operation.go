@@ -137,6 +137,13 @@ type RollbackEvidence struct {
 	// from the recorded source version. It is a description of the plan, not an
 	// observation that this image was the process the operator started.
 	Image string `json:"image"`
+	// ImageSource says who chose the reference: "operator" when the operator
+	// named it, "derived" when it was derived from the recorded source version.
+	// ImageForm says which accepted form it is: "release-tag" or "digest".
+	// Both are persisted so a reader can tell a reference the operator started
+	// from one this build inferred; the plan carried them, the row did not.
+	ImageSource string `json:"imageSource"`
+	ImageForm   string `json:"imageForm"`
 	// StatusURL is the 1.x health endpoint that answered for this install.
 	StatusURL string `json:"statusUrl"`
 	// SourceFingerprint is the fingerprint observed on the live 1.x volume. It
@@ -152,7 +159,8 @@ type RollbackEvidence struct {
 // only the shape of an observation: a reader can neither re-check it nor name
 // the moment it belonged to.
 func (e RollbackEvidence) Complete() bool {
-	return e.Image != "" && e.StatusURL != "" && e.SourceFingerprint != "" && e.ObservedAtMS > 0
+	return e.Image != "" && e.ImageSource != "" && e.ImageForm != "" &&
+		e.StatusURL != "" && e.SourceFingerprint != "" && e.ObservedAtMS > 0
 }
 
 // UpgradeOperation is the whole persistent state of the v2 Upgrade operation:
@@ -260,7 +268,7 @@ func (o UpgradeOperation) Validate() error {
 	// Evidence is written whole or not at all. A partial record would let a
 	// reader believe a verdict was observed when only its shape survived.
 	if o.Rollback != nil && !o.Rollback.Complete() {
-		return errors.New("upgrade operation rollback evidence must name the image, the health endpoint, the observed fingerprint and when it was observed")
+		return errors.New("upgrade operation rollback evidence must name the image, its source and form, the health endpoint, the observed fingerprint and when it was observed")
 	}
 	return nil
 }

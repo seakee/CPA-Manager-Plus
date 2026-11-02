@@ -28,6 +28,8 @@ func newRepository(t *testing.T) (*upgradeoperation.Repository, *sql.DB) {
 func rollbackEvidence() model.RollbackEvidence {
 	return model.RollbackEvidence{
 		Image:             "seakee/cpa-manager-plus:v1.14.7",
+		ImageSource:       "operator",
+		ImageForm:         "release-tag",
 		StatusURL:         "http://127.0.0.1:18317/health",
 		SourceFingerprint: "observed-after-the-v1-restart",
 		ObservedAtMS:      1_700_000_000_000,
@@ -637,10 +639,12 @@ func TestRecordRollbackRefusesIncompleteEvidence(t *testing.T) {
 	recordedCopyIn(t, repository)
 	complete := rollbackEvidence()
 	for name, mutate := range map[string]func(*model.RollbackEvidence){
-		"no image":       func(e *model.RollbackEvidence) { e.Image = "" },
-		"no endpoint":    func(e *model.RollbackEvidence) { e.StatusURL = "" },
-		"no fingerprint": func(e *model.RollbackEvidence) { e.SourceFingerprint = "" },
-		"no observation": func(e *model.RollbackEvidence) { e.ObservedAtMS = 0 },
+		"no image":        func(e *model.RollbackEvidence) { e.Image = "" },
+		"no image source": func(e *model.RollbackEvidence) { e.ImageSource = "" },
+		"no image form":   func(e *model.RollbackEvidence) { e.ImageForm = "" },
+		"no endpoint":     func(e *model.RollbackEvidence) { e.StatusURL = "" },
+		"no fingerprint":  func(e *model.RollbackEvidence) { e.SourceFingerprint = "" },
+		"no observation":  func(e *model.RollbackEvidence) { e.ObservedAtMS = 0 },
 	} {
 		evidence := complete
 		mutate(&evidence)

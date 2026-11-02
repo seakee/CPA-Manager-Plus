@@ -132,8 +132,11 @@ const (
 var releaseTagPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
 // digestReferencePattern is the other accepted form: a repository pinned to an
-// immutable sha256 digest.
-var digestReferencePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(?::[0-9]+)?@sha256:[0-9a-f]{64}$`)
+// immutable sha256 digest. The repository follows the Docker reference grammar:
+// an optional registry host with an optional port, then one or more lowercase
+// path components. A tag beside the digest is not that grammar and never
+// matches, so `repo:v1@sha256:...` is refused like any other moving reference.
+var digestReferencePattern = regexp.MustCompile(`^(?:[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]{1,5})?/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*@sha256:[0-9a-f]{64}$`)
 
 // dockerVolumeNamePattern is the Docker volume name alphabet: a 1.x install run
 // with `docker run -v` uses the unprefixed `cpa-manager-plus-data`.
@@ -186,7 +189,7 @@ type Plan struct {
 	// was derived from. The volume claim rests on it.
 	SourceRoot    string `json:"sourceRoot"`
 	SourceVersion string `json:"sourceVersion"`
-	Image string `json:"image"`
+	Image         string `json:"image"`
 	// ImageSource is "operator" when the operator named the reference and
 	// "derived" when it was derived from the recorded source version; ImageForm
 	// is "release-tag" or "digest". A derived reference is never presented as the
@@ -196,16 +199,16 @@ type Plan struct {
 	// ImageFamilyOverride records that the plan pins a release outside the
 	// recorded source's family because the operator asked for it, so the verify
 	// command printed with the plan stays exact.
-	ImageFamilyOverride bool   `json:"imageFamilyOverride,omitempty"`
+	ImageFamilyOverride bool `json:"imageFamilyOverride,omitempty"`
 	// Volume is the Docker volume name or the bind source the plan restarts v1
 	// against; VolumeKind says which of the two it is.
-	Volume              string `json:"volume"`
-	VolumeKind          string `json:"volumeKind"`
-	VolumeMountPoint    string `json:"volumeMountPoint"`
-	ComposeProject      string `json:"composeProject"`
-	ComposeService      string `json:"composeService"`
-	ComposeInvocation   string `json:"composeInvocation"`
-	ComposeFile         string `json:"composeFile"`
+	Volume            string `json:"volume"`
+	VolumeKind        string `json:"volumeKind"`
+	VolumeMountPoint  string `json:"volumeMountPoint"`
+	ComposeProject    string `json:"composeProject"`
+	ComposeService    string `json:"composeService"`
+	ComposeInvocation string `json:"composeInvocation"`
+	ComposeFile       string `json:"composeFile"`
 	// Port is the host port the plan publishes the 1.x manager on. It never
 	// collides with the port the v2 Manager holds, so an answer there cannot be
 	// the v2 stack describing itself.
@@ -221,11 +224,11 @@ type Plan struct {
 	// BackupDirectory is the recorded snapshot the verdict re-verifies. The
 	// printed verify command names it, so the operator cannot record against a
 	// different copy.
-	BackupDirectory      string             `json:"backupDirectory"`
-	Preconditions        []string           `json:"preconditions"`
-	HealthChecks         []string           `json:"healthChecks"`
-	SourceFingerprint    string             `json:"sourceFingerprint"`
-	BackupManifestSHA256 string             `json:"backupManifestSha256"`
+	BackupDirectory      string   `json:"backupDirectory"`
+	Preconditions        []string `json:"preconditions"`
+	HealthChecks         []string `json:"healthChecks"`
+	SourceFingerprint    string   `json:"sourceFingerprint"`
+	BackupManifestSHA256 string   `json:"backupManifestSha256"`
 	// IdentityProof states what the plan does and does not prove about the v1
 	// that answered /health. The Manager cannot reach the Docker socket, so it
 	// cannot bind the answering process to the directory; that half is the
@@ -234,7 +237,7 @@ type Plan struct {
 	IdentityStatement string             `json:"identityStatement"`
 	Stage             model.UpgradeStage `json:"stage"`
 	ReportPath        string             `json:"reportPath"`
-	Digest               string             `json:"digest"`
+	Digest            string             `json:"digest"`
 }
 
 // PrepareRollback derives the rollback plan from the recorded operation and the
@@ -741,7 +744,7 @@ func rollbackImage(recorded model.UpgradeOperation, override string, allowFamily
 	if strings.Contains(trimmed, "@") {
 		if !digestReferencePattern.MatchString(trimmed) {
 			return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-				"a rollback accepts a digest only as <repository>@sha256:<64 lowercase hex characters>; the reference given is not that form", nil)
+				"a rollback accepts a digest only as [registry[:port]/]<repository>@sha256:<64 lowercase hex characters>; the reference given is not that form", nil)
 		}
 		// A digest names immutable bytes, so there is no moving tag to refuse and
 		// no version family to compare.
@@ -1083,6 +1086,8 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	}
 	advanced, err := upgradeoperation.New(db).RecordRollback(ctx, model.RollbackEvidence{
 		Image:             image.Reference,
+		ImageSource:       image.Source,
+		ImageForm:         image.Form,
 		StatusURL:         health.URL,
 		SourceFingerprint: liveFingerprint.Digest,
 		ObservedAtMS:      observedAtMS,

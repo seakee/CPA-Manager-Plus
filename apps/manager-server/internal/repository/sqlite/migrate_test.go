@@ -2533,8 +2533,8 @@ func TestEnsureUpgradeOperationRollbackColumnsKeepsTheRecordedRow(t *testing.T) 
 	}
 	columns := migrationTableColumns(t, db, "upgrade_operations")
 	for _, column := range []string{
-		"source_root", "rollback_image", "rollback_status_url",
-		"rollback_source_fingerprint", "rollback_observed_at_ms",
+		"source_root", "rollback_image", "rollback_image_source", "rollback_image_form",
+		"rollback_status_url", "rollback_source_fingerprint", "rollback_observed_at_ms",
 	} {
 		if !columns[column] {
 			t.Fatalf("missing rollback column %s", column)

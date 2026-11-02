@@ -31,10 +31,10 @@ var (
 	// is recorded once, with its evidence, and never as a bare stage.
 	ErrRollbackEvidenceRequired = errors.New("a rolled_back operation requires recorded evidence")
 	// ErrDomainCleared reports an attempt to drop a recorded domain.
-	ErrDomainCleared   = errors.New("upgrade operation domain cannot be removed")
-	ErrUnknownDomain   = errors.New("upgrade operation domain is not supported")
-	ErrUnknownStage    = errors.New("upgrade operation stage is not supported")
-	ErrInvalidRow      = errors.New("upgrade operation row is invalid")
+	ErrDomainCleared = errors.New("upgrade operation domain cannot be removed")
+	ErrUnknownDomain = errors.New("upgrade operation domain is not supported")
+	ErrUnknownStage  = errors.New("upgrade operation stage is not supported")
+	ErrInvalidRow    = errors.New("upgrade operation row is invalid")
 	// ErrRollbackEvidenceMissing reports a stored rolled_back row that carries
 	// none of, or only part of, the observation that justified it. Both write
 	// paths refuse such a row before it reaches the table, so a store that holds
@@ -51,7 +51,8 @@ func New(db *sql.DB) *Repository { return &Repository{db: db} }
 const selectColumns = `stage, domains_done, source_kind, source_version, source_root,
 	source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
 	reconciliation, manual_items, error_code, error_detail,
-	rollback_image, rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
+	rollback_image, rollback_image_source, rollback_image_form,
+	rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
 	created_at_ms, updated_at_ms`
 
 // requiredColumns are the columns selectColumns reads. The table is created by a
@@ -62,7 +63,8 @@ var requiredColumns = []string{
 	"stage", "domains_done", "source_kind", "source_version", "source_root",
 	"source_fingerprint_before", "source_fingerprint_after", "backup_manifest_sha256",
 	"reconciliation", "manual_items", "error_code", "error_detail",
-	"rollback_image", "rollback_status_url", "rollback_source_fingerprint", "rollback_observed_at_ms",
+	"rollback_image", "rollback_image_source", "rollback_image_form",
+	"rollback_status_url", "rollback_source_fingerprint", "rollback_observed_at_ms",
 	"created_at_ms", "updated_at_ms",
 }
 
@@ -109,19 +111,21 @@ type rowScanner interface {
 
 func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	var (
-		op                                            model.UpgradeOperation
-		stage, domains, reconciliation                string
-		manualItems                                   string
-		sourceKind, sourceVersion, sourceRoot         sql.NullString
-		fingerprintBefore, fingerprintAfter           sql.NullString
-		backupManifest, errorCode, errorDetail        sql.NullString
-		rollbackImage, rollbackStatusURL, rollbackFpr sql.NullString
-		rollbackObservedAtMS                          sql.NullInt64
+		op                                                    model.UpgradeOperation
+		stage, domains, reconciliation                        string
+		manualItems                                           string
+		sourceKind, sourceVersion, sourceRoot                 sql.NullString
+		fingerprintBefore, fingerprintAfter                   sql.NullString
+		backupManifest, errorCode, errorDetail                sql.NullString
+		rollbackImage, rollbackImageSource, rollbackImageForm sql.NullString
+		rollbackStatusURL, rollbackFpr                        sql.NullString
+		rollbackObservedAtMS                                  sql.NullInt64
 	)
 	err := row.Scan(&stage, &domains, &sourceKind, &sourceVersion, &sourceRoot,
 		&fingerprintBefore, &fingerprintAfter, &backupManifest,
 		&reconciliation, &manualItems, &errorCode, &errorDetail,
-		&rollbackImage, &rollbackStatusURL, &rollbackFpr, &rollbackObservedAtMS,
+		&rollbackImage, &rollbackImageSource, &rollbackImageForm,
+		&rollbackStatusURL, &rollbackFpr, &rollbackObservedAtMS,
 		&op.CreatedAtMS, &op.UpdatedAtMS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.UpgradeOperation{}, false, nil
@@ -138,9 +142,12 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	op.BackupManifestSHA256 = backupManifest.String
 	op.ErrorCode = errorCode.String
 	op.ErrorDetail = errorDetail.String
-	if rollbackImage.String != "" || rollbackStatusURL.String != "" || rollbackFpr.String != "" || rollbackObservedAtMS.Int64 > 0 {
+	if rollbackImage.String != "" || rollbackImageSource.String != "" || rollbackImageForm.String != "" ||
+		rollbackStatusURL.String != "" || rollbackFpr.String != "" || rollbackObservedAtMS.Int64 > 0 {
 		op.Rollback = &model.RollbackEvidence{
 			Image:             rollbackImage.String,
+			ImageSource:       rollbackImageSource.String,
+			ImageForm:         rollbackImageForm.String,
 			StatusURL:         rollbackStatusURL.String,
 			SourceFingerprint: rollbackFpr.String,
 			ObservedAtMS:      rollbackObservedAtMS.Int64,
@@ -274,10 +281,13 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 	if err != nil {
 		return err
 	}
-	var rollbackImage, rollbackStatusURL, rollbackFingerprint any
+	var rollbackImage, rollbackImageSource, rollbackImageForm any
+	var rollbackStatusURL, rollbackFingerprint any
 	var rollbackObservedAtMS any
 	if op.Rollback != nil {
 		rollbackImage = nullString(op.Rollback.Image)
+		rollbackImageSource = nullString(op.Rollback.ImageSource)
+		rollbackImageForm = nullString(op.Rollback.ImageForm)
 		rollbackStatusURL = nullString(op.Rollback.StatusURL)
 		rollbackFingerprint = nullString(op.Rollback.SourceFingerprint)
 		if op.Rollback.ObservedAtMS > 0 {
@@ -288,9 +298,10 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 		id, stage, domains_done, source_kind, source_version, source_root,
 		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
 		reconciliation, manual_items, error_code, error_detail,
-		rollback_image, rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
+		rollback_image, rollback_image_source, rollback_image_form,
+		rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
 		created_at_ms, updated_at_ms
-	) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	on conflict(id) do update set
 		stage = excluded.stage,
 		domains_done = excluded.domains_done,
@@ -305,6 +316,8 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 		error_code = excluded.error_code,
 		error_detail = excluded.error_detail,
 		rollback_image = excluded.rollback_image,
+		rollback_image_source = excluded.rollback_image_source,
+		rollback_image_form = excluded.rollback_image_form,
 		rollback_status_url = excluded.rollback_status_url,
 		rollback_source_fingerprint = excluded.rollback_source_fingerprint,
 		rollback_observed_at_ms = excluded.rollback_observed_at_ms,
@@ -315,7 +328,8 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 		nullString(op.SourceFingerprintBefore), nullString(op.SourceFingerprintAfter),
 		nullString(op.BackupManifestSHA256), string(op.Reconciliation), string(manualItems),
 		nullString(op.ErrorCode), nullString(op.ErrorDetail),
-		rollbackImage, rollbackStatusURL, rollbackFingerprint, rollbackObservedAtMS,
+		rollbackImage, rollbackImageSource, rollbackImageForm,
+		rollbackStatusURL, rollbackFingerprint, rollbackObservedAtMS,
 		op.CreatedAtMS, op.UpdatedAtMS)
 	return err
 }
@@ -537,12 +551,12 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
 	if _, err := tx.ExecContext(ctx, `update `+tableName+`
-		set stage = ?, rollback_image = ?, rollback_status_url = ?,
-			rollback_source_fingerprint = ?, rollback_observed_at_ms = ?,
+		set stage = ?, rollback_image = ?, rollback_image_source = ?, rollback_image_form = ?,
+			rollback_status_url = ?, rollback_source_fingerprint = ?, rollback_observed_at_ms = ?,
 			created_at_ms = ?, updated_at_ms = ?
 		where id = 1`,
-		string(current.Stage), evidence.Image, evidence.StatusURL,
-		evidence.SourceFingerprint, evidence.ObservedAtMS,
+		string(current.Stage), evidence.Image, evidence.ImageSource, evidence.ImageForm,
+		evidence.StatusURL, evidence.SourceFingerprint, evidence.ObservedAtMS,
 		current.CreatedAtMS, current.UpdatedAtMS); err != nil {
 		return model.UpgradeOperation{}, err
 	}

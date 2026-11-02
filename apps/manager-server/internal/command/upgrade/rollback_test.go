@@ -178,6 +178,10 @@ func TestRollbackVerifyRecordsAProvenVerdict(t *testing.T) {
 	if !strings.Contains(evidence.Image, ":v") || strings.Contains(evidence.Image, ":latest") {
 		t.Fatalf("recorded image = %q, want an exact release", evidence.Image)
 	}
+	if evidence.ImageSource != upgradeservice.RollbackImageSourceDerived ||
+		evidence.ImageForm != upgradeservice.RollbackImageFormReleaseTag {
+		t.Fatalf("recorded image provenance = %q/%q, want a derived release tag", evidence.ImageSource, evidence.ImageForm)
+	}
 	if !strings.HasSuffix(evidence.StatusURL, upgradeservice.LegacyHealthPath) {
 		t.Fatalf("recorded health endpoint = %q, want %q", evidence.StatusURL, upgradeservice.LegacyHealthPath)
 	}
@@ -479,6 +483,8 @@ func TestRunAfterARollbackReportsTheTerminalStage(t *testing.T) {
 	}
 	if _, err := upgradeoperation.New(db).RecordRollback(context.Background(), model.RollbackEvidence{
 		Image:             upgradeservice.LegacyImageRepository + ":v1.14.7",
+		ImageSource:       upgradeservice.RollbackImageSourceOperator,
+		ImageForm:         upgradeservice.RollbackImageFormReleaseTag,
 		StatusURL:         upgradeservice.LegacyHealthURL(),
 		SourceFingerprint: "observed",
 		ObservedAtMS:      time.Now().UnixMilli(),
@@ -533,6 +539,8 @@ func TestRunReportsARolledBackRowWithASurvivingMarkerWithoutWriting(t *testing.T
 	}
 	if _, err := upgradeoperation.New(db).RecordRollback(context.Background(), model.RollbackEvidence{
 		Image:             upgradeservice.LegacyImageRepository + ":v1.14.7",
+		ImageSource:       upgradeservice.RollbackImageSourceOperator,
+		ImageForm:         upgradeservice.RollbackImageFormReleaseTag,
 		StatusURL:         upgradeservice.LegacyHealthURL(),
 		SourceFingerprint: "observed",
 		ObservedAtMS:      time.Now().UnixMilli(),

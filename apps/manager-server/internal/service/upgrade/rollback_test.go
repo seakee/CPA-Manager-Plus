@@ -152,6 +152,8 @@ func TestPrepareRollbackRefusesAStageItCannotStartFrom(t *testing.T) {
 	}
 	if _, err := upgradeoperation.New(db).RecordRollback(context.Background(), model.RollbackEvidence{
 		Image:             LegacyImageRepository + ":v1.14.7",
+		ImageSource:       RollbackImageSourceOperator,
+		ImageForm:         RollbackImageFormReleaseTag,
 		StatusURL:         LegacyHealthURL(),
 		SourceFingerprint: "observed",
 		ObservedAtMS:      time.Now().UnixMilli(),
@@ -1550,23 +1552,91 @@ func TestPrepareRollbackRejectsAFloatingTagEvenWithTheFamilyOverride(t *testing.
 // form has to be accepted and the plan has to say which one it recorded.
 func TestPrepareRollbackAcceptsADigestAndRecordsItsForm(t *testing.T) {
 	fixture := newRollbackFixture(t)
-	digest := LegacyImageRepository + "@sha256:" + strings.Repeat("ab", 32)
-	options := fixture.options()
-	options.TagOverride = digest
-	plan, err := PrepareRollback(context.Background(), options)
-	if err != nil {
-		t.Fatalf("prepare with a digest reference: %v", err)
+	pinned := "sha256:" + strings.Repeat("ab", 32)
+	for _, digest := range []string{
+		LegacyImageRepository + "@" + pinned,
+		"registry.example.com:5000/team/cpamp@" + pinned,
+		"localhost:5000/cpamp@" + pinned,
+	} {
+		options := fixture.options()
+		options.TagOverride = digest
+		plan, err := PrepareRollback(context.Background(), options)
+		if err != nil {
+			t.Fatalf("prepare with digest %q: %v", digest, err)
+		}
+		if plan.Image != digest || plan.ImageSource != RollbackImageSourceOperator || plan.ImageForm != RollbackImageFormDigest {
+			t.Fatalf("plan image = %q/%q/%q, want the operator digest", plan.Image, plan.ImageSource, plan.ImageForm)
+		}
+		if !strings.Contains(plan.ComposeFile, "image: "+digest) {
+			t.Fatalf("compose file does not pin the digest:\n%s", plan.ComposeFile)
+		}
+		// A digest is immutable, so the version-family check does not apply to it
+		// and the override flag is not needed.
+		if _, err := PrepareRollback(context.Background(), options); err != nil {
+			t.Fatalf("digest without the family override: %v", err)
+		}
 	}
-	if plan.Image != digest || plan.ImageSource != RollbackImageSourceOperator || plan.ImageForm != RollbackImageFormDigest {
-		t.Fatalf("plan image = %q/%q/%q, want the operator digest", plan.Image, plan.ImageSource, plan.ImageForm)
+	// A tag beside the digest is not the accepted grammar: the reference still
+	// names a moving tag, so it is refused like any other unpinned form.
+	refused := newRollbackFixture(t)
+	options := refused.options()
+	options.TagOverride = "registry.example.com:5000/team/cpamp:v1.14.10@" + pinned
+	if _, err := PrepareRollback(context.Background(), options); !errors.Is(err, ErrRollbackImageUnpinned) {
+		t.Fatalf("tag plus digest = %v, want %v", err, ErrRollbackImageUnpinned)
 	}
-	if !strings.Contains(plan.ComposeFile, "image: "+digest) {
-		t.Fatalf("compose file does not pin the digest:\n%s", plan.ComposeFile)
-	}
-	// A digest is immutable, so the version-family check does not apply to it and
-	// the override flag is not needed.
-	if _, err := PrepareRollback(context.Background(), options); err != nil {
-		t.Fatalf("digest without the family override: %v", err)
+	assertNoPlan(t, refused.targetRoot)
+}
+
+// TestRecordRollbackPersistsTheImageSourceAndForm is the persistence half of
+// L7: the plan carried who chose the image and which form it is, while the
+// durable evidence kept only the rendered reference, so an operator tag and a
+// derived tag were indistinguishable after the verdict. Both fields are now
+// written with the stage and read back from the persisted row.
+func TestRecordRollbackPersistsTheImageSourceAndForm(t *testing.T) {
+	pinned := "sha256:" + strings.Repeat("ab", 32)
+	for name, tc := range map[string]struct {
+		image      string
+		wantSource string
+		wantForm   string
+	}{
+		"derived release": {
+			image:      "",
+			wantSource: RollbackImageSourceDerived,
+			wantForm:   RollbackImageFormReleaseTag,
+		},
+		"operator release": {
+			image:      LegacyImageRepository + ":v1.14.7",
+			wantSource: RollbackImageSourceOperator,
+			wantForm:   RollbackImageFormReleaseTag,
+		},
+		"operator digest with a registry port": {
+			image:      "registry.example.com:5000/team/cpamp@" + pinned,
+			wantSource: RollbackImageSourceOperator,
+			wantForm:   RollbackImageFormDigest,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newRollbackFixture(t)
+			observation := fixture.observation(t)
+			observation.Image = tc.image
+			recorded, err := RecordRollback(context.Background(), observation)
+			if err != nil {
+				t.Fatalf("record the rollback: %v", err)
+			}
+			if recorded.Rollback == nil {
+				t.Fatal("the recorded verdict carries no evidence")
+			}
+			if recorded.Rollback.ImageSource != tc.wantSource || recorded.Rollback.ImageForm != tc.wantForm {
+				t.Fatalf("recorded provenance = %q/%q, want %q/%q",
+					recorded.Rollback.ImageSource, recorded.Rollback.ImageForm, tc.wantSource, tc.wantForm)
+			}
+			// The evidence is read back from the store, not only from the write.
+			persisted := fixture.recordedRow(t)
+			if persisted.Rollback == nil || persisted.Rollback.ImageSource != tc.wantSource ||
+				persisted.Rollback.ImageForm != tc.wantForm {
+				t.Fatalf("persisted provenance = %+v, want %q/%q", persisted.Rollback, tc.wantSource, tc.wantForm)
+			}
+		})
 	}
 }
 

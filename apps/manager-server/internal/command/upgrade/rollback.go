@@ -242,11 +242,11 @@ func runRollbackVerify(ctx context.Context, stdout, stderr io.Writer, asJSON boo
 	_, _ = fmt.Fprintf(stdout, "  source fingerprint after: %s\n", operation.SourceFingerprintAfter)
 	_, _ = fmt.Fprintf(stdout, "  backup manifest sha256: %s\n", operation.BackupManifestSHA256)
 	if evidence := operation.Rollback; evidence != nil {
-		if strings.TrimSpace(observation.Image) == "" {
-			_, _ = fmt.Fprintf(stdout, "  rollback image: %s (derived from the recorded source version; not an image the operator named)\n", evidence.Image)
-		} else {
-			_, _ = fmt.Fprintf(stdout, "  rollback image: %s (the reference the operator gave)\n", evidence.Image)
+		origin := "the reference the operator gave"
+		if evidence.ImageSource == upgradeservice.RollbackImageSourceDerived {
+			origin = "derived from the recorded source version; not an image the operator named"
 		}
+		_, _ = fmt.Fprintf(stdout, "  rollback image: %s (%s; %s)\n", evidence.Image, evidence.ImageForm, origin)
 		_, _ = fmt.Fprintf(stdout, "  rollback health endpoint: %s\n", evidence.StatusURL)
 		_, _ = fmt.Fprintf(stdout, "  observed source fingerprint: %s\n", evidence.SourceFingerprint)
 		_, _ = fmt.Fprintf(stdout, "  observed at ms: %d\n", evidence.ObservedAtMS)

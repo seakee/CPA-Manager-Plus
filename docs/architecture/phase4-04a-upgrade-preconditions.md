@@ -516,7 +516,12 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   (`upgrade_rollback_unproven`), and pins the 1.x image to an exact reference.
   Two forms are accepted: an exact release tag (`vX.Y.Z`, with or without a
   repository prefix, derived as `seakee/cpa-manager-plus:v<source_version>` when
-  none is given) or an immutable `@sha256:` digest. Everything else — `:latest`,
+  none is given) or an immutable `@sha256:` digest. A digest follows the Docker
+  reference grammar: an optional registry host with an optional port, then one
+  or more lowercase repository components
+  (`[registry[:port]/]<repository>@sha256:<64 lowercase hex>`), so
+  `registry.example.com:5000/team/cpamp@sha256:…` and
+  `localhost:5000/cpamp@sha256:…` are accepted. Everything else — `:latest`,
   `:main`, `:beta`, a bare repository, an empty tag, a partial version, a
   malformed digest — is `upgrade_rollback_image_unpinned`, and the family
   override never changes that: it only relaxes the version-family comparison of
@@ -524,9 +529,12 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   `upgrade_rollback_image_family` unless the operator passes the override; a
   digest is immutable, so no family comparison applies. The plan records
   `imageSource` (`operator` or `derived`) and `imageForm` (`release-tag` or
-  `digest`), and the printed verify command passes `--legacy-image` back only
+  digest`), and the printed verify command passes `--legacy-image` back only
   when the operator named it, so a derived reference is never recorded as the
-  image the operator started. Refusals write nothing at all.
+  image the operator started. The verdict persists the same two fields beside
+  the reference (`rollback_image_source`, `rollback_image_form`), so a reader of
+  the row can still tell an operator tag from a derived one and a release tag
+  from a digest. Refusals write nothing at all.
 - **An unfinished copy-in is resumed, never read.** Before `--prepare` or
   `--verify` reads the operation row, it reads the copy-in marker. A marker
   means the v2 data root may still hold members an interrupted copy-in is
@@ -628,8 +636,8 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   projection — and every archived segment and the data key the backup describes
   (`upgrade_rollback_identity_foreign` on any difference,
   `upgrade_rollback_unproven` when a store cannot be opened). It writes the
-  stage and the evidence (image, health endpoint, observed fingerprint,
-  observation time) in one transaction through
+  stage and the evidence (image, its source and form, health endpoint, observed
+  fingerprint, observation time) in one transaction through
   `upgradeoperation.RecordRollback`, which never rewrites `source_kind`,
   `source_root`, both fingerprints, `backup_manifest_sha256` or the completed
   domains; a second verdict is `upgrade_rollback_not_applicable`. Stage
