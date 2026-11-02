@@ -269,6 +269,14 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	result.CopiedConfig = slices.Clone(run.copiedConfig)
 	result.CopiedCredentials = slices.Clone(run.copiedCreds)
 
+	// The Manager's own connection takes the destination and the same secret this
+	// run staged with, before the operation row claims the work. A crash between
+	// this write and the next one leaves both the connection and the recorded
+	// attempt, so a rerun finishes; the attempt row is only cleared together with
+	// the recorded stage, at which point the connection holds the secret.
+	if err := handDestinationConnection(ctx, paths.Database, paths.DataKey, result.DestinationURL, run.managementKey); err != nil {
+		return result, err
+	}
 	recorded, err = recordCPAImport(ctx, paths.Database, result)
 	if err != nil {
 		return result, err

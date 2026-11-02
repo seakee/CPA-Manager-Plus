@@ -160,6 +160,12 @@ const (
 	// not the target this operation staged. The import refuses before writing any
 	// configuration or credential to it.
 	UpgradeErrorCPAImportTargetForeign UpgradeErrorCode = "upgrade_cpa_import_target_foreign"
+	// UpgradeErrorCPAConnectionConflict reports that the Manager already holds a
+	// complete CPA connection to a different CPA, so handing it this destination
+	// would repoint the Console away from a CPA it manages. The import refuses and
+	// leaves the destination attempt recorded, so a later run completes once the
+	// stored connection is rebound explicitly.
+	UpgradeErrorCPAConnectionConflict UpgradeErrorCode = "upgrade_cpa_connection_conflict"
 	// UpgradeErrorCPADestinationKeyRequired reports that the destination CPA is
 	// already running and this run holds no management secret for it: no earlier
 	// run of this step recorded one and the caller supplied none. The import never
@@ -231,6 +237,7 @@ var (
 	ErrCPASourceRootMismatch = &UpgradeError{Code: UpgradeErrorCPASourceRootMismatch}
 	ErrCPADestinationChanged = &UpgradeError{Code: UpgradeErrorCPADestinationRequestChanged}
 	ErrCPATargetForeign      = &UpgradeError{Code: UpgradeErrorCPAImportTargetForeign}
+	ErrCPAConnectionConflict = &UpgradeError{Code: UpgradeErrorCPAConnectionConflict}
 	ErrCPADestinationKey     = &UpgradeError{Code: UpgradeErrorCPADestinationKeyRequired}
 )
 

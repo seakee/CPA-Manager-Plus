@@ -18,8 +18,10 @@ import (
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
 
 // importFixture is a stopped 1.x volume with a recorded copy-in and the managed
@@ -839,6 +841,110 @@ func TestImportCPAIsIdempotentOnceRecorded(t *testing.T) {
 	}
 }
 
+// TestImportCPAHoldsTheDestinationConnectionInTheManagerConfig pins the High
+// finding's success path: the secret this step minted is the only one the
+// destination will ever accept, so the Manager's own connection has to keep it.
+// The stored configuration reaches the destination after a restart, and the
+// unrelated settings the import does not own survive unchanged.
+func TestImportCPAHoldsTheDestinationConnectionInTheManagerConfig(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
+		Collector: model.ManagerCollectorConfig{
+			CollectorMode: "http", Queue: "custom-usage", PopSide: "left", BatchSize: 7,
+			PollIntervalMS: 900, QueryLimit: 4321, TLSSkipVerify: true,
+		},
+		CodexInspection: model.ManagerCodexInspectionConfig{Enabled: boolPointer(true)},
+	})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true)))
+	if err != nil {
+		t.Fatalf("import the fixture CPA: %v", err)
+	}
+	if result.Stage != model.UpgradeStageCPAImport {
+		t.Fatalf("stage = %q, want %q", result.Stage, model.UpgradeStageCPAImport)
+	}
+	staged := runtime.stageCall
+	if staged == nil || strings.TrimSpace(staged.ManagementKey) == "" {
+		t.Fatalf("the run staged no destination secret: %+v", staged)
+	}
+	cfg := managerConfig(t, fixture.targetRoot)
+	if cfg.CPAConnection.CPABaseURL != destination.url() {
+		t.Fatalf("Manager CPA connection = %q, want the destination %q", cfg.CPAConnection.CPABaseURL, destination.url())
+	}
+	if cfg.CPAConnection.ManagementKey != staged.ManagementKey {
+		t.Fatal("the Manager connection does not hold the secret the destination was staged with")
+	}
+	if cfg.Collector.Queue != "custom-usage" || cfg.Collector.BatchSize != 7 || !cfg.Collector.TLSSkipVerify {
+		t.Fatalf("the import rewrote the collector settings: %+v", cfg.Collector)
+	}
+	if cfg.CodexInspection.Enabled == nil || !*cfg.CodexInspection.Enabled {
+		t.Fatalf("the import rewrote the codex inspection settings: %+v", cfg.CodexInspection)
+	}
+	// The attempt row is released only because the connection now holds the same
+	// secret, so nothing this step minted is left without an owner.
+	if _, _, found, err := loadCPAImportDestinationRecord(context.Background(), newTargetPaths(fixture.targetRoot).Database, newTargetPaths(fixture.targetRoot).DataKey); err != nil || found {
+		t.Fatalf("the destination attempt survived the successful import (found %t): %v", found, err)
+	}
+}
+
+// TestImportCPARefusesToRepointAnExistingManagerConnection pins the other half:
+// a stored connection to a different CPA is not overwritten. The refusal leaves
+// the attempt recorded, so the secret is not lost and the same run completes once
+// the operator rebinds the connection explicitly.
+func TestImportCPARefusesToRepointAnExistingManagerConnection(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	const otherURL = "http://other-cpa.example:8317"
+	const otherKey = "another-cpa-management-key"
+	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{CPABaseURL: otherURL, ManagementKey: otherKey},
+	})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+	_, err := ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAConnectionConflict {
+		t.Fatalf("a connection to another CPA produced %v (code %q), want %s", err, code, UpgradeErrorCPAConnectionConflict)
+	}
+	unchanged := managerConfig(t, fixture.targetRoot)
+	if unchanged.CPAConnection.CPABaseURL != otherURL || unchanged.CPAConnection.ManagementKey != otherKey {
+		t.Fatalf("the refusal rewrote the stored connection: %+v", unchanged.CPAConnection)
+	}
+	if recorded := readOperation(t, fixture.targetRoot); recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
+	}
+	paths := newTargetPaths(fixture.targetRoot)
+	_, recordedSecret, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("the refusal dropped the staged secret (found %t): %v", found, err)
+	}
+	if recordedSecret != runtime.stageCall.ManagementKey {
+		t.Fatal("the recorded secret is not the one the destination was staged with")
+	}
+
+	// The operator rebinds the stored connection while Manager Server is stopped;
+	// the same run then completes and both copies agree.
+	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{CPABaseURL: destination.url(), ManagementKey: recordedSecret},
+	})
+	result, err := ImportCPA(context.Background(), options)
+	if err != nil {
+		t.Fatalf("the retry after rebinding the connection was refused: %v", err)
+	}
+	if result.Stage != model.UpgradeStageCPAImport || !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the retry recorded stage %q with domains %v", result.Stage, result.DomainsDone)
+	}
+	repaired := managerConfig(t, fixture.targetRoot)
+	if repaired.CPAConnection.CPABaseURL != destination.url() || repaired.CPAConnection.ManagementKey != recordedSecret {
+		t.Fatalf("the rebuilt connection = %+v, want the staged destination", repaired.CPAConnection)
+	}
+	if _, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey); err != nil || found {
+		t.Fatalf("the destination attempt survived the successful import (found %t): %v", found, err)
+	}
+}
+
 // TestImportCPAReportsAManualItemForAnUnknownSectionAndStillSucceeds pins the
 // rule that an unknown key never fails the run and never disappears.
 func TestImportCPAReportsAManualItemForAnUnknownSectionAndStillSucceeds(t *testing.T) {
@@ -939,6 +1045,55 @@ func containsValue(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// seedManagerConfig writes the Manager's own encrypted configuration, which is
+// the row the import hands the destination connection to and whose unrelated
+// settings it must preserve.
+func seedManagerConfig(t *testing.T, targetRoot string, cfg model.ManagerConfig) {
+	t.Helper()
+	paths := newTargetPaths(targetRoot)
+	key, _, err := security.LoadOrCreateDataKey("", paths.DataKey)
+	if err != nil {
+		t.Fatalf("load the fixture data key: %v", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		t.Fatalf("initialize the fixture protector: %v", err)
+	}
+	db, err := managersqlite.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("open the v2 database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := setting.New(db, protector).SaveManagerConfig(context.Background(), cfg); err != nil {
+		t.Fatalf("write the fixture manager configuration: %v", err)
+	}
+}
+
+// managerConfig reads the Manager's own configuration through the repository the
+// running server resolves its CPA connection from.
+func managerConfig(t *testing.T, targetRoot string) model.ManagerConfig {
+	t.Helper()
+	paths := newTargetPaths(targetRoot)
+	key, _, err := security.LoadOrCreateDataKey("", paths.DataKey)
+	if err != nil {
+		t.Fatalf("load the fixture data key: %v", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		t.Fatalf("initialize the fixture protector: %v", err)
+	}
+	db, err := managersqlite.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("open the v2 database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	cfg, found, err := setting.New(db, protector).LoadManagerConfig(context.Background())
+	if err != nil || !found {
+		t.Fatalf("read the manager configuration (found %t): %v", found, err)
+	}
+	return cfg
 }
 
 // readOperation reads the recorded operation from a v2 data root.
