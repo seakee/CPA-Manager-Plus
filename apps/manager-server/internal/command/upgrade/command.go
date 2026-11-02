@@ -369,9 +369,16 @@ func writeRunOutput(w io.Writer, asJSON bool, output runOutput) {
 	_, _ = fmt.Fprintf(w, "  archives: %s\n", result.TargetArchives)
 }
 
-// resolveTargetRoot resolves the v2 data root. The Manager configuration is
-// the default only when its database is the canonical usage.sqlite; any other
-// database name would be copied to the wrong file, so it must be explicit.
+// resolveTargetRoot resolves the v2 data root of `upgrade run`.
+//
+// An explicit --target states the layout, so it is used as given. The Manager
+// configuration is a default only when every member the copy-in writes is also
+// the member the service will read: the database must be the canonical
+// usage.sqlite, the data key and the archive tree must resolve inside that same
+// directory, and no environment key may override the copied key. Otherwise the
+// copy lands where nothing reads it — the copied data key would never decrypt
+// the 1.x fields — so the run refuses and asks for --target instead of writing
+// files the service ignores.
 func resolveTargetRoot(override string) (string, error) {
 	if trimmed := strings.TrimSpace(override); trimmed != "" {
 		return trimmed, nil
@@ -380,13 +387,37 @@ func resolveTargetRoot(override string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("load Manager configuration: %w", err)
 	}
+	root := filepath.Dir(strings.TrimSpace(cfg.DBPath))
 	if strings.TrimSpace(cfg.DBPath) == "" {
-		return "", fmt.Errorf("%w: Manager database path is empty; pass --target", ErrUsage)
+		return "", layoutMismatch("the Manager database path is empty")
 	}
 	if filepath.Base(cfg.DBPath) != upgradeservice.SourceDatabaseName {
-		return "", fmt.Errorf("%w: the Manager database is not %s; pass --target", ErrUsage, upgradeservice.SourceDatabaseName)
+		return "", layoutMismatch(fmt.Sprintf("the Manager database is %s, not %s",
+			filepath.Base(cfg.DBPath), upgradeservice.SourceDatabaseName))
 	}
-	return filepath.Dir(cfg.DBPath), nil
+	// An inline key wins over data.key at the service, so a copied data.key would
+	// never be read.
+	if strings.TrimSpace(cfg.DataKey) != "" {
+		return "", layoutMismatch("an environment or file key overrides the copied data key")
+	}
+	layout := upgradeservice.LayoutForRoot(root)
+	if strings.TrimSpace(cfg.DataKeyPath) == "" || !upgradeservice.SamePath(cfg.DataKeyPath, layout.DataKey) {
+		return "", layoutMismatch(fmt.Sprintf("the configured data key %s is not %s",
+			cfg.DataKeyPath, layout.DataKey))
+	}
+	if strings.TrimSpace(cfg.UsageArchiveDir) == "" || !upgradeservice.SamePath(cfg.UsageArchiveDir, layout.Archives) {
+		return "", layoutMismatch(fmt.Sprintf("the configured archive directory %s is not %s",
+			cfg.UsageArchiveDir, layout.Archives))
+	}
+	return root, nil
+}
+
+// layoutMismatch refuses a Manager layout the copy-in cannot populate. The code
+// is shared with the report vocabulary so a script can tell it apart from a
+// blocked source.
+func layoutMismatch(detail string) error {
+	return fmt.Errorf("%w: %s: %s; pass --target with the v2 data directory",
+		ErrUsage, upgradeservice.CodeTargetLayoutMismatch, detail)
 }
 
 // openStatusSnapshot copies the Manager database, retrying a bounded number of

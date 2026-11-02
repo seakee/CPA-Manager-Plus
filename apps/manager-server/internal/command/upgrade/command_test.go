@@ -956,3 +956,67 @@ func TestTargetDefaultsToTheManagerDataDirectory(t *testing.T) {
 		t.Fatalf("default target = %q, want the Manager data directory %q", root, dataDir)
 	}
 }
+
+// TestTargetRefusesAManagerLayoutTheCopyCannotPopulate is the M4 regression. The
+// default target used to be filepath.Dir(cfg.DBPath) and nothing else, while the
+// service reads the data key from cfg.DataKeyPath, the archive tree from
+// cfg.UsageArchiveDir and an inline key from the environment. Copying a data key
+// the service never loads means the 1.x encrypted fields cannot be decrypted, so
+// the run has to refuse a layout it cannot populate and ask for --target.
+func TestTargetRefusesAManagerLayoutTheCopyCannotPopulate(t *testing.T) {
+	dataDir := canonicalFixtureRoot(t)
+	elsewhere := canonicalFixtureRoot(t)
+	t.Setenv("CPA_MANAGER_CONFIG", filepath.Join(t.TempDir(), "absent-config.json"))
+	t.Setenv("CPA_MANAGER_DATA_KEY", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY_PATH", "")
+	t.Setenv("USAGE_DATA_DIR", dataDir)
+
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{
+			name: "manager database beside another key",
+			setup: func(t *testing.T) {
+				t.Setenv("USAGE_DB_PATH", filepath.Join(elsewhere, "usage.sqlite"))
+			},
+		},
+		{
+			name: "inline environment key overrides the copied key",
+			setup: func(t *testing.T) {
+				t.Setenv("USAGE_DB_PATH", "")
+				t.Setenv("CPA_MANAGER_DATA_KEY", "an-inline-key")
+			},
+		},
+		{
+			name: "manager database is not the canonical file name",
+			setup: func(t *testing.T) {
+				t.Setenv("USAGE_DB_PATH", filepath.Join(dataDir, "manager.sqlite"))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.setup(t)
+			root, err := resolveTargetRoot("")
+			if err == nil {
+				t.Fatalf("resolved target %q, want a refusal", root)
+			}
+			if !errors.Is(err, ErrUsage) {
+				t.Fatalf("error = %v, want ErrUsage", err)
+			}
+			if !strings.Contains(err.Error(), upgradeservice.CodeTargetLayoutMismatch) {
+				t.Fatalf("error %q does not carry %s", err, upgradeservice.CodeTargetLayoutMismatch)
+			}
+			if !strings.Contains(err.Error(), "--target") {
+				t.Fatalf("error %q does not ask for --target", err)
+			}
+
+			// An explicit --target states the layout, so it is never second-guessed.
+			explicit := canonicalFixtureRoot(t)
+			root, err = resolveTargetRoot(explicit)
+			if err != nil || root != explicit {
+				t.Fatalf("explicit target = %q/%v, want %q", root, err, explicit)
+			}
+		})
+	}
+}

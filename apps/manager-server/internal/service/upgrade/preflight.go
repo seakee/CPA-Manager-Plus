@@ -71,6 +71,12 @@ const (
 	// CodeDiskProbeFailed means free space could not be measured. An unknown
 	// value is never treated as enough.
 	CodeDiskProbeFailed = "upgrade_disk_probe_failed"
+	// CodeTargetLayoutMismatch means the Manager configuration does not put a
+	// member the copy-in writes where the service reads it: a data key, an
+	// archive tree or the database itself resolves somewhere else, or an
+	// environment key would override the copied key. The default data root is
+	// refused; an explicit --target states the layout.
+	CodeTargetLayoutMismatch = "upgrade_target_layout_mismatch"
 )
 
 // Source kinds reuse the vocabulary of the existing legacy preflight.

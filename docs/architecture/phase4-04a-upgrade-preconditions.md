@@ -11,7 +11,7 @@ Paths below are relative to `apps/manager-server/`.
 
 | Asset | Reuse and actual gap |
 | --- | --- |
-| `internal/service/legacypreflight/service.go`: `inspect`, `AdmitStartup` | Reuse read-before-write classification. Startup remains unchanged and rejects legacy sources. |
+| `internal/service/legacypreflight/service.go`: `inspect`, `AdmitStartup` | Reuse read-before-write classification. Startup rejects legacy sources on the schema alone; the recorded Upgrade operation is the only additional admission input (U1-2 below). |
 | `internal/service/legacyprofile/profile.go`: `Classify` | Reuse exact known capability shapes. Shape is never historical release provenance. |
 | `internal/repository/sqlite/legacy_inspection.go`: `InspectLegacySource` | Reuse immutable cold read or private WAL recovery copy. Add an administrator-protected entry using the same reader before schema/history inspection. |
 | `internal/repository/setting`: `LoadAdminCredential`; `internal/security`: `VerifyAdminKey` | Reuse the existing salt/HMAC credential and verification. No writable Store, Session substitution, CPA credential fallback, administrator initialization or reset. |
@@ -331,55 +331,83 @@ migration authority.
 
 - **Pipeline, fixed order:** fingerprint the 1.x source (`source_fingerprint_before`)
   → `maintenancebundle.Create` into the backup destination → `Verify` → validate
-  the manifest digest → `RestoreNew` into `.upgrade-copy-in/restored` inside the
-  v2 data root → `os.Rename` each restored member into the v2 layout
+  the manifest digest → check the target for members this run did not place →
+  publish `.upgrade-copy-in/copy-in.json` in its `materializing` phase →
+  `RestoreNew` into `.upgrade-copy-in/restored` inside the v2 data root →
+  `os.Rename` each restored member into the v2 layout
   (`database`→`usage.sqlite`, its WAL/SHM/journal, `data-key`→`data.key`,
-  `usage-archives`→`usage-archives/`) → publish `.upgrade-copy-in/copy-in.json`
-  → open the copied store, run the incremental v2 migration and commit `copy_in`
-  → remove the work directory only after that commit. Everything is on one
-  filesystem, so no member is ever copied.
-- **Crash window.** The migration rewrites the copied database in place, so a
-  process death between the migration commit and the operation row leaves a
-  store whose schema says `native-v2` and whose row does not exist. The marker
-  (`internal/service/upgrade/copyinmarker`) closes that window: it is written
-  before the migration starts, names the target database, both source
-  fingerprints and the backup manifest digest, and is removed only once the row
-  commits. Both the admission gate and the copy-in resume read it, so such a
-  store is `in_progress` — never a finished install — and a resume adopts the
-  migrated database instead of refusing to replace it.
-- **Source immutability.** The 1.x volume is opened read-only under the held
-  `processlock` fence; nothing is created, renamed or unlinked beside it. The
-  fingerprint covers the database, its WAL/SHM/journal, `data.key`, every
-  archive file and every other entry of the source root (the ownership marker is
-  the one deliberate exception: it belongs to the holder, not the source). It is
-  recomputed after the copy; a difference rolls back the members this run moved
-  plus the work directory and aborts with `upgrade_source_changed`.
+  `usage-archives`→`usage-archives/`) → republish the marker in its `migrating`
+  phase, naming the database file it moved → open the copied store, run the
+  incremental v2 migration and commit `copy_in` → remove the work directory,
+  marker included, only after that commit. Everything is on one filesystem, so
+  no member is ever copied.
+- **Crash windows.** Two interruptions matter. Inside the move, some members are
+  in the v2 layout and the rest are in the staging tree; the marker's
+  `materializing` phase says so, and the resume continues the move from its own
+  staging tree. Between the migration commit and the operation row, every member
+  is in place and the database has already been rewritten; the marker's
+  `migrating` phase says so, and the resume adopts the target instead of
+  restoring over it. Both markers are removed only once the row commits.
+- **Marker trust.** The marker always names its phase, the target database, the
+  source kind, the source fingerprint the copy started from and the backup
+  manifest digest. A `migrating` marker additionally names the device and inode
+  (`copyinmarker.FileIdentity`, volume serial and file index on Windows) of the
+  database this copy-in moved: a rename and the migration's in-place rewrite both
+  keep that identity, and a database swapped in beside the marker does not. A
+  marker that names a different database file or a different backup does not
+  vouch for this target, and a `migrating` marker whose identity no longer
+  matches — or whose data key, archive tree or archive contents no longer match
+  the backup — fails closed with `upgrade_target_conflict`. Nothing is deleted,
+  restored or moved before that decision: clearing the work directory would take
+  the marker with it, and a migrated store with no row and no marker is admitted
+  as a finished install. A marker that names the same database file under another
+  absolute path is accepted, because a relocated mount changes the path, not the
+  store.
+- **Source immutability.** The 1.x volume is never opened in place. Preflight
+  copies the database and its WAL sidecars into private scratch space, proves the
+  source did not change while the copy was taken and reads only that copy, so a
+  `-shm` is never created or rewritten beside a stopped source; the copy-in reads
+  the source as bytes under the held `processlock` fence. The fingerprint covers
+  the database, its WAL/SHM/journal, `data.key`, every archive file and every
+  other entry of the source root (the ownership marker is the one deliberate
+  exception: it belongs to the holder, not the source). It is recomputed after
+  the copy; a difference rolls back the members this run moved plus the work
+  directory and aborts with `upgrade_source_changed`.
 - **Resumability.** A verified bundle is reused instead of recreated. A target
   whose members already match the manifest is not restored again. A published
   staging tree that still describes the backup is adopted rather than restored
-  twice. An interrupted run is recognized from its marker: the target is
-  already materialized when the database is a copied SQLite store and every
-  member the migration never touches — the data key and the archive tree — still
-  matches the backup. The database and its WAL/SHM/journal are deliberately not
-  compared there: the migration rewrites them in place, so a process killed
-  inside that rewrite leaves neither the backup bytes nor the finished v2
-  schema, and comparing them made exactly that window unresumable. A committed
-  `copy_in` (or later stage) is verified against the v2 layout before it is
-  reported: the data key and the archive tree must still match the backup, the
-  archive tree must hold nothing the backup does not describe, and the database
-  must be the migrated store — otherwise the run fails with
-  `upgrade_target_modified` instead of a false success. A target that
-  holds *different* bytes under a member name is never replaced.
+  twice. The resume never opens the target database before the migration that
+  owns it: a read-only open of a WAL database rewrites or creates its `-shm`,
+  which would make the member the resume has to move disagree with the backup and
+  leave a live-WAL source unresumable forever. A committed `copy_in` (or later
+  stage) is verified against the v2 layout before it is reported: the data key
+  and the archive tree must still match the backup, the archive tree must hold
+  nothing the backup does not describe, and the database must be the migrated
+  store — otherwise the run fails with `upgrade_target_modified` instead of a
+  false success. A target that holds *different* bytes under a member name is
+  never replaced. A rerun that finds its own marker after the row committed
+  reports the recorded outcome and removes the marker.
 - **Recorded fields** in `upgrade_operations`: `stage=copy_in`,
   `domains_done+=[source_copy]`, `source_kind=upgraded-legacy`,
-  `source_version` (release floor read from the backup copy),
+  `source_version` (the operator's declaration; 1.x never recorded it, so an
+  omitted declaration is recorded as `unknown` instead of guessed),
   `source_fingerprint_before`, `source_fingerprint_after` and
   `backup_manifest_sha256` (digest of the published `manifest.json`). The stage
-  only moves forward; a retry after a later stage keeps that later stage.
-- **CLI.** `cpa-manager-plus upgrade run --legacy <dir> [--target <dir>]
-  [--bundle <dir>] [--json]` runs the preflight gate first (a blocked source
-  writes nothing), then the copy-in, and prints the same `Result` that the
-  record holds. `upgrade preflight` and `upgrade status` remain read-only.
+  only moves forward; a retry after a later stage keeps that later stage. Every
+  write goes through `upgradeoperation.Repository`, whose `nextUpdatedAtMS` keeps
+  `updated_at_ms` monotonic; no caller proposes a timestamp.
+- **CLI.** `cpa-manager-plus upgrade run --legacy <dir> --source-version
+  <release> [--target <dir>] [--bundle <dir>] [--scratch-dir DIR] [--json]` runs
+  the preflight gate first (a blocked source writes nothing), then the copy-in,
+  and prints the same `Result` that the record holds. An explicit `--target`
+  states the layout. Without it the Manager configuration is the default only
+  when every member the copy-in writes is the member the service will read: the
+  database must be the canonical `usage.sqlite`, `dataKeyPath` and
+  `usageArchiveDir` must resolve to `data.key` and `usage-archives/` inside it,
+  and no inline environment key may override the copied key. Anything else is
+  refused with `upgrade_target_layout_mismatch`, because a copied data key the
+  service never loads leaves the 1.x encrypted fields undecryptable.
+  `upgrade preflight` and `upgrade status` remain read-only.
 
 ### Admission surface table
 
@@ -393,7 +421,9 @@ database. A reader error fails closed; a `nil` reader keeps the historical rule.
 | Recorded state | Admission | Startup surface |
 | --- | --- | --- |
 | no table, no row and no marker for this database (or `nil` reader) | `none` | unchanged: only `fresh` and `native-v2` are admitted; a 1.x source stays blocked |
-| copy-in marker, no row (the crash window: the migration ran, the row did not) | `in_progress` | Upgrade surface only |
+| copy-in marker, no row (the crash windows: the members moved, the row did not) | `in_progress` | Upgrade surface only |
+| the same marker under another absolute path, or a root relocated to another mount | `in_progress` | Upgrade surface only: the marker belongs to the data root it sits in, so a relocated volume is never read as "no record" |
+| a marker naming a different database file | — | not admitted (fail closed): it is evidence for another run |
 | `preflight`, `copy_in`, `reconcile`, `cpa_import`, `external_connect`, `verify`, `failed` | `in_progress` | Upgrade surface only: fixed Bootstrap discovery status reads, the read-only shell and the Upgrade authentication leaf. Console, Key workspace, gateway configuration, lifecycle and model traffic answer 404; health stays 503 and no writable subsystem starts |
 | `complete` with `source_kind=upgraded-legacy`, both source fingerprints and the backup manifest digest | `complete` | normal v2 surfaces, as for a native store |
 | `complete` missing any of those observations | — | not admitted (fail closed) |
@@ -404,4 +434,3 @@ copy-in always runs the incremental migration before it records anything, so the
 classified kind of a copied-in store is `native-v2`. `legacy-manager` is
 therefore never relabelled — a 1.x schema with a row (complete or not) stays
 blocked and is never admitted to the full surface.
-
