@@ -186,3 +186,28 @@ func TestIdentitySurvivesARenameAndARewriteAndDetectsAnotherFile(t *testing.T) {
 		t.Fatalf("a swapped-in file kept identity %+v", before)
 	}
 }
+
+// TestSameTargetComparesTheRootLocalIdentity is the provenance rule both readers
+// apply: a marker describes the store in the root it sits in, so the same
+// database name at another absolute path is the same store, and a different name
+// is a different store whatever the path says.
+func TestSameTargetComparesTheRootLocalIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		recorded, actual string
+		want             bool
+	}{
+		{"same root", filepath.Join("/data", "usage.sqlite"), filepath.Join("/data", "usage.sqlite"), true},
+		{"relocated root", filepath.Join("/host/data", "usage.sqlite"), filepath.Join("/mnt/volume/data", "usage.sqlite"), true},
+		{"relative actual", filepath.Join("/data", "usage.sqlite"), "usage.sqlite", true},
+		{"another database", filepath.Join("/data", "other.sqlite"), filepath.Join("/data", "usage.sqlite"), false},
+		{"empty record", "", filepath.Join("/data", "usage.sqlite"), false},
+		{"empty actual", filepath.Join("/data", "usage.sqlite"), "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := SameTarget(test.recorded, test.actual); got != test.want {
+				t.Fatalf("SameTarget(%q, %q) = %t, want %t", test.recorded, test.actual, got, test.want)
+			}
+		})
+	}
+}

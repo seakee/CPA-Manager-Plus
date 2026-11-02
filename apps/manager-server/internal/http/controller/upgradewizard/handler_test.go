@@ -1331,8 +1331,11 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
 		t.Fatalf("admission = %q err=%v", stage, err)
 	}
-	// A marker that names another database describes nothing here.
-	foreign := filepath.Join(t.TempDir(), "usage.sqlite")
+	// A marker that names another database file describes nothing here. The
+	// name is what identifies the store inside its data root (see SameTarget), so
+	// a marker whose file name differs is the only foreign evidence: the same
+	// name at another absolute path is a relocated root.
+	foreign := filepath.Join(t.TempDir(), "other.sqlite")
 	if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
 		Phase:                   copyinmarker.PhaseMaterializing,
@@ -1448,6 +1451,73 @@ func targetMemberState(t *testing.T, database string) map[string]string {
 		state[databaseMember(database, suffix)] = fmt.Sprintf("%x/%d", digest, len(data))
 	}
 	return state
+}
+
+// TestRelocatedRootKeepsTheMarkerForTheWizardAndTheAdmission is D4. The marker
+// lives in the data root's own reserved work directory, so a root mounted at a
+// different absolute path — the host that runs the CLI, the container that runs
+// the server — is still the store with an unfinished copy-in. Admission already
+// reads it that way; the wizard's projection used to compare absolute paths and
+// report "no operation", sending the operator to a preflight for a store that is
+// in progress. Both must apply one rule, and a marker naming a different
+// database file must still fail closed for both.
+func TestRelocatedRootKeepsTheMarkerForTheWizardAndTheAdmission(t *testing.T) {
+	root := t.TempDir()
+	database := filepath.Join(root, "usage.sqlite")
+	writeMarker := func(target string) {
+		t.Helper()
+		if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
+			Version:                 copyinmarker.Version,
+			Phase:                   copyinmarker.PhaseMaterializing,
+			TargetDatabase:          target,
+			SourceKind:              "upgraded-legacy",
+			SourceVersion:           "1.14.4",
+			SourceFingerprintBefore: "fingerprint-before",
+			SourceFingerprintAfter:  "fingerprint-after",
+			BackupManifestSHA256:    "manifest",
+			WrittenAtMS:             1717171717000,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMarker(database)
+	relocated := root + "-relocated"
+	if err := os.Rename(root, relocated); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(relocated) }()
+	database = filepath.Join(relocated, "usage.sqlite")
+
+	stage, err := legacypreflight.DatabaseUpgradeAdmission{DatabasePath: database}.Admitted(context.Background())
+	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
+		t.Fatalf("admission on the relocated root = %q/%v, want in progress", stage, err)
+	}
+	document, err := readStatus(context.Background(), database)
+	if err != nil {
+		t.Fatalf("status on the relocated root: %v", err)
+	}
+	if !document.Recorded || document.Evidence != EvidenceCopyInMarker || document.Stage != StageCopyIn ||
+		document.NextAction != ActionCopyIn || !document.StageKnown {
+		t.Fatalf("status lost the relocated provenance the admission keeps: %+v", document)
+	}
+	if document.SourceKind != "upgraded-legacy" || document.SourceVersion != "1.14.4" {
+		t.Fatalf("status lost the recorded source evidence: %+v", document)
+	}
+
+	// A marker that names another database file is evidence for a different run.
+	// The admission refuses it and the projection reads it as no record: neither
+	// guesses that this store is the one that marker describes.
+	writeMarker(filepath.Join(t.TempDir(), "other.sqlite"))
+	if stage, err := (legacypreflight.DatabaseUpgradeAdmission{DatabasePath: database}).Admitted(context.Background()); err == nil {
+		t.Fatalf("a foreign marker was admitted as %q", stage)
+	}
+	document, err = readStatus(context.Background(), database)
+	if err != nil {
+		t.Fatalf("status with a foreign marker: %v", err)
+	}
+	if document.Recorded || document.Evidence != EvidenceNone || document.NextAction != ActionPreflight {
+		t.Fatalf("a foreign marker was read as this operation: %+v", document)
+	}
 }
 
 // TestReadsRefuseCrossSiteOrigins is L4: the entry leaf's cross-site rule is the

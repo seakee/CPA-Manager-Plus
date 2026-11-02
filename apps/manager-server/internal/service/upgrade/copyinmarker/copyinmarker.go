@@ -219,22 +219,24 @@ func Read(targetRoot string) (Marker, bool, error) {
 	return marker, true, nil
 }
 
-// SameTarget reports whether a marker names the database it was read beside.
-// Both the startup admission and the wizard's status projection read the marker,
-// so both have to agree on what "this database" means: parent symlinks are
-// resolved so a canonical path and its alias describe the same file.
+// SameTarget reports whether a marker names the database of the data root it was
+// read beside. Both the startup admission and the wizard's status projection read
+// the marker, so both have to agree on what "this database" means.
+//
+// The marker sits in that root's own reserved work directory, so the store is the
+// same store even when the root is mounted at another absolute path: a host that
+// runs the CLI and a container that runs the server agree on the bytes, not on
+// the path. Comparison therefore uses the file's identity inside its data root —
+// its name — and never the absolute path. A marker naming a different database
+// file is evidence for some other run and stays a refusal for both callers; it is
+// never read as this store.
 func SameTarget(recorded, actual string) bool {
-	canonical := func(path string) string {
-		absolute, err := filepath.Abs(path)
-		if err != nil {
-			return filepath.Clean(path)
-		}
-		if resolved, err := filepath.EvalSymlinks(filepath.Dir(absolute)); err == nil {
-			absolute = filepath.Join(resolved, filepath.Base(absolute))
-		}
-		return filepath.Clean(absolute)
+	recordedName := filepath.Base(filepath.Clean(recorded))
+	actualName := filepath.Base(filepath.Clean(actual))
+	if recordedName == "." || recordedName == string(filepath.Separator) || actualName == "." {
+		return false
 	}
-	return canonical(recorded) == canonical(actual)
+	return recordedName == actualName
 }
 
 func writeAll(file *os.File, data []byte) error {
