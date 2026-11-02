@@ -1102,6 +1102,40 @@ func TestStatusFirstReadOfALargeSourceFitsTheScaledBudgetAndPollsAreCached(t *te
 	}
 }
 
+// TestStatusKeepsTheTypedErrorForARowThatContradictsItself guards the projection
+// refactor: a recorded row that runs backwards, or carries a list column of the
+// wrong shape, is still a typed 503 upgrade_operation_invalid — never a stage the
+// operator can act on and never a 500.
+func TestStatusKeepsTheTypedErrorForARowThatContradictsItself(t *testing.T) {
+	root := legacySourceDir(t)
+	for _, test := range []struct {
+		name   string
+		update string
+	}{
+		{"reversed timestamps", `created_at_ms = 2000, updated_at_ms = 1000`},
+		{"manual items not a string array", `created_at_ms = 1000, updated_at_ms = 2000, manual_items = '[1]'`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+			db, err := sql.Open("sqlite", database)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`update upgrade_operations set ` + test.update + ` where id = 1`); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			_, body := request(t, newHandler(root, database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusServiceUnavailable)
+			if !strings.Contains(body, `"`+CodeOperationInvalid+`"`) {
+				t.Fatalf("a contradictory row = %s", body)
+			}
+		})
+	}
+}
+
 // TestStatusRolledBackIsAnObservation proves a stage written by a build that
 // knows rollback is readable here even though this build's model validator
 // would reject it.
