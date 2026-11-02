@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -39,6 +40,39 @@ func TestCredentialVerifyBudgetScalesWithTheSourceAndCaps(t *testing.T) {
 		if got := credentialVerifyBudget(test.size); got > CredentialVerifyMaxBudget {
 			t.Fatalf("budget for %d bytes = %s, beyond the cap %s", test.size, got, CredentialVerifyMaxBudget)
 		}
+	}
+}
+
+// TestCredentialVerifyBudgetCountsTheWALAndSaturates is the other half of the
+// budget contract: the bytes a first read carries are the database plus a
+// present WAL, and an unrepresentable sum saturates into the capped budget
+// instead of wrapping into a short one.
+func TestCredentialVerifyBudgetCountsTheWALAndSaturates(t *testing.T) {
+	previous := credentialVerifyTimeout
+	credentialVerifyTimeout = 2 * time.Second
+	t.Cleanup(func() { credentialVerifyTimeout = previous })
+	identity := sourceCredentialIdentity{
+		database: credentialFileIdentity{present: true, size: 24 << 10},
+		wal:      credentialFileIdentity{present: true, size: 512 << 20},
+	}
+	want := 2*time.Second + time.Duration((int64(24<<10)+(512<<20))/credentialVerifyBytesPerSecond)*time.Second
+	if got := credentialVerifyBudget(identity.readBytes()); got != want {
+		t.Fatalf("budget for a 24 KiB database with a 512 MiB WAL = %s, want %s", got, want)
+	}
+	absent := identity
+	absent.wal = credentialFileIdentity{}
+	if got := credentialVerifyBudget(absent.readBytes()); got != 2*time.Second {
+		t.Fatalf("an absent WAL added budget: %s", got)
+	}
+	huge := sourceCredentialIdentity{
+		database: credentialFileIdentity{present: true, size: math.MaxInt64 - 1},
+		wal:      credentialFileIdentity{present: true, size: 10},
+	}
+	if got := huge.readBytes(); got != math.MaxInt64 {
+		t.Fatalf("overflowing source size = %d, want saturation at %d", got, int64(math.MaxInt64))
+	}
+	if got := credentialVerifyBudget(huge.readBytes()); got != CredentialVerifyMaxBudget {
+		t.Fatalf("budget for a saturated source = %s, want the cap %s", got, CredentialVerifyMaxBudget)
 	}
 }
 

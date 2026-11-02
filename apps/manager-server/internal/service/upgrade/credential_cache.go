@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -72,6 +73,26 @@ type sourceCredentialIdentity struct {
 	wal      credentialFileIdentity
 }
 
+// readBytes is the size the first verification must read: the database plus a
+// present WAL. A source that has not checkpointed keeps most of its committed
+// data in the WAL, so a budget derived from the database alone timed out a
+// healthy source whose bytes merely lived in the other file. The sum saturates:
+// a size that cannot be represented must ask for the capped budget, never wrap
+// into a short one.
+func (i sourceCredentialIdentity) readBytes() int64 {
+	total := i.database.size
+	if i.wal.present {
+		if total < 0 || i.wal.size > math.MaxInt64-total {
+			return math.MaxInt64
+		}
+		total += i.wal.size
+	}
+	if total < 0 {
+		return math.MaxInt64
+	}
+	return total
+}
+
 // string is the identity's cache representation.
 func (i sourceCredentialIdentity) String() string {
 	file := func(value credentialFileIdentity) string {
@@ -129,8 +150,14 @@ func credentialVerifyBudget(size int64) time.Duration {
 	budget := credentialVerifyTimeout
 	// Divide before multiplying: size*time.Second would overflow a Duration on a
 	// source of about 8 GiB, which is exactly the size that needs the budget.
+	// The seconds are compared with the cap before they are converted, so a huge
+	// (or saturated) size cannot overflow the addition either.
 	if budget > 0 && size > 0 {
-		budget += time.Duration(size/credentialVerifyBytesPerSecond) * time.Second
+		seconds := size / credentialVerifyBytesPerSecond
+		if seconds >= int64(CredentialVerifyMaxBudget/time.Second) {
+			return CredentialVerifyMaxBudget
+		}
+		budget += time.Duration(seconds) * time.Second
 	}
 	if budget > CredentialVerifyMaxBudget {
 		budget = CredentialVerifyMaxBudget

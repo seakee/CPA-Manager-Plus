@@ -1103,6 +1103,84 @@ func TestStatusFirstReadOfALargeSourceFitsTheScaledBudgetAndPollsAreCached(t *te
 	}
 }
 
+// TestStatusFirstReadOfALargeWALSourceFitsTheScaledBudgetAndPollsAreCached is the
+// P2 regression. A 1.x source is qualified with most of its committed data still
+// in the WAL — a small database and a real, non-checkpointed WAL of the same
+// order as a large source. The first authenticated read must budget for the
+// bytes it actually copies and digests, not the database file alone; otherwise a
+// healthy source whose layout differs answers 503 `upgrade_credential_timeout`
+// forever. Every poll after the first is answered from the remembered state.
+func TestStatusFirstReadOfALargeWALSourceFitsTheScaledBudgetAndPollsAreCached(t *testing.T) {
+	root := legacySourceDir(t)
+	source := filepath.Join(root, "usage.sqlite")
+	writer, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = writer.Close() })
+	if _, err := writer.Exec(`pragma journal_mode = wal; pragma wal_autocheckpoint = 0;
+		create table review_wal_padding (payload blob)`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := writer.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 512 {
+		if _, err := tx.Exec(`insert into review_wal_padding values (zeroblob(1048576))`); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	dbInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walInfo, err := os.Stat(source + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if walInfo.Size() < 512<<20 {
+		t.Fatalf("the fixture WAL is %d bytes, want a real committed WAL of at least 512 MiB", walInfo.Size())
+	}
+	if dbInfo.Size() >= walInfo.Size()/4 {
+		t.Fatalf("the fixture database is %d bytes against a %d-byte WAL; the WAL-heavy layout was not exercised", dbInfo.Size(), walInfo.Size())
+	}
+
+	database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+	handler := newHandler(root, database)
+
+	started := time.Now()
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	first := time.Since(started)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Recorded || status.Stage != StageCopyIn {
+		t.Fatalf("status on a WAL-heavy source = %s", body)
+	}
+	t.Logf("first authenticated read: DB=%d WAL=%d elapsed=%s", dbInfo.Size(), walInfo.Size(), first)
+	if first >= upgradeservice.CredentialVerifyMaxBudget {
+		t.Fatalf("the first read of a %d-byte database with a %d-byte WAL took %s, at or beyond the capped budget %s",
+			dbInfo.Size(), walInfo.Size(), first, upgradeservice.CredentialVerifyMaxBudget)
+	}
+	for index := range 3 {
+		pollStarted := time.Now()
+		_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+		poll := time.Since(pollStarted)
+		t.Logf("cached poll %d: %s", index, poll)
+		if poll*4 >= first {
+			t.Fatalf("poll %d after the first read took %s against a %s first read; the verified source state was not reused (%s)",
+				index, poll, first, body)
+		}
+	}
+}
+
 // TestStatusKeepsTheTypedErrorForARowThatContradictsItself guards the projection
 // refactor: a recorded row that runs backwards, or carries a list column of the
 // wrong shape, is still a typed 503 upgrade_operation_invalid — never a stage the

@@ -593,9 +593,11 @@ func verifyPreservedCredential(ctx context.Context, databasePath, key string, ex
 	cacheKey := credentialCacheKey(key, canonicalPath(databasePath), identity)
 	return sourceCredentialCache.verify(ctx, cacheKey, func() error {
 		// The first read of a source state pays for the copy and its digests, so
-		// its budget scales with the source and is capped; a later poll is served
-		// by the cache instead of repeating that cost.
-		ctx, cancel := context.WithTimeout(context.Background(), credentialVerifyBudget(identity.database.size))
+		// its budget scales with every byte that read must carry — the database
+		// and a WAL that still holds committed rows, not the database file alone —
+		// and is capped; a later poll is served by the cache instead of repeating
+		// that cost.
+		ctx, cancel := context.WithTimeout(context.Background(), credentialVerifyBudget(identity.readBytes()))
 		defer cancel()
 		source, openErr := openCredentialSource(ctx, databasePath, extraRoots...)
 		if openErr != nil {
