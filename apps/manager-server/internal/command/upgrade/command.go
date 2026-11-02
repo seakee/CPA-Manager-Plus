@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -70,23 +71,33 @@ var openSnapshot = upgradeservice.OpenSnapshot
 // which one it was. A changed source stays retryable and keeps exit 2: the retry
 // marker is what tells the operator to run it again.
 func ExitCode(err error) int {
-	switch {
-	case err == nil:
+	if err == nil {
 		return 0
-	case errors.Is(err, ErrBlocked),
-		errors.Is(err, upgradeservice.ErrReconcileMismatch),
-		errors.Is(err, upgradeservice.ErrReconcileTargetIncomplete),
-		errors.Is(err, upgradeservice.ErrReconcileNothingCompared),
-		errors.Is(err, upgradeservice.ErrTargetLocked):
+	}
+	if errors.Is(err, ErrBlocked) {
 		return 1
 	}
-	// A source somebody else owns is the same decision as a blocked preflight:
-	// stop the Manager that holds it. It is not a usage or environment error.
-	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok &&
-		code == upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy) {
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok && slices.Contains(refusalCodes, code) {
 		return 1
 	}
 	return 2
+}
+
+// refusalCodes are the typed failures that are a decision about the migration
+// rather than a usage or environment problem: the operator has to look at the
+// source, the store, or the day the report names, so the CLI exits 1 and the
+// code in the report says which. upgrade_source_changed is deliberately absent:
+// a source that moved or is still being written is retryable, so it keeps exit
+// 2 like every other retryable failure.
+var refusalCodes = []upgradeservice.UpgradeErrorCode{
+	upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy),
+	upgradeservice.UpgradeErrorTargetLocked,
+	upgradeservice.UpgradeErrorReconcileMismatch,
+	upgradeservice.UpgradeErrorReconcileTargetIncomplete,
+	upgradeservice.UpgradeErrorReconcileNothingCompared,
+	upgradeservice.UpgradeErrorReconcileNotCopiedIn,
+	upgradeservice.UpgradeErrorReconcileStageClosed,
+	upgradeservice.UpgradeErrorReconcileRecordIncomplete,
 }
 
 func IsHelp(err error) bool { return errors.Is(err, flag.ErrHelp) }

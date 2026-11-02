@@ -989,6 +989,20 @@ func TestReconcileReportsTheCopiedStoreAndRecordsTheStage(t *testing.T) {
 	if len(output.Report.IncompleteDays) != 0 {
 		t.Fatalf("incomplete days = %+v, want none", output.Report.IncompleteDays)
 	}
+	// The fixture source holds the retained event and the derived/coverage
+	// tables with no rows of their own. A table both sides hold is established
+	// even with no source day — there is nothing to lose — while a table the
+	// source does not hold is never recorded, so this is the whole set the step
+	// can claim it compared.
+	want := []string{
+		model.UpgradeDomainSourceCopy,
+		model.UpgradeDomainRetainedProjection,
+		model.UpgradeDomainPricing,
+		model.UpgradeDomainCoverage,
+	}
+	if !reflect.DeepEqual(output.Report.DomainsDone, want) {
+		t.Fatalf("domains done = %v, want %v", output.Report.DomainsDone, want)
+	}
 }
 
 func TestReconcileExitsOneOnAnUnacknowledgedMismatch(t *testing.T) {
@@ -1077,6 +1091,42 @@ func TestReconcileRefusesAStoreAnotherProcessHolds(t *testing.T) {
 	}
 	if code, _, stdout := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite")); code != 0 {
 		t.Fatalf("status exit code = %d; stdout: %s", code, stdout)
+	}
+}
+
+// TestReconcileKeepsAChangedSourceRetryable pins the contract table's split: a
+// source that moved is retryable (exit 2, upgrade_source_changed), while a
+// refusal about the store or a day is exit 1.
+func TestReconcileKeepsAChangedSourceRetryable(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the 1.x source: %v", err)
+	}
+	if _, err := db.Exec(`insert into settings (key, value, updated_at_ms) values ('drifted', '1', 1)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("drift the 1.x source: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the 1.x source: %v", err)
+	}
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle)
+	if code != 2 {
+		t.Fatalf("reconcile exit code = %d, want the retryable 2; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; stderr: %s; output: %s", err, stderr, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorSourceChanged) {
+		t.Fatalf("error code = %q, want %q; output: %s", output.ErrorCode, upgradeservice.UpgradeErrorSourceChanged, stdout)
 	}
 }
 

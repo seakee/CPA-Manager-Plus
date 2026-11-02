@@ -1312,6 +1312,80 @@ func TestReconcileOnlyRemovesItsOwnScratchDirectory(t *testing.T) {
 	}
 }
 
+// TestReconcileTypesItsRecordRefusals reproduces review L6: these refusals were
+// plain errors, so the JSON errorCode was empty and a script could not tell a
+// precondition from a usage mistake.
+func TestReconcileTypesItsRecordRefusals(t *testing.T) {
+	cases := []struct {
+		name   string
+		run    func(*testing.T) (ReconcileReport, error)
+		want   error
+		code   UpgradeErrorCode
+		detail string
+	}{
+		{
+			name: "no recorded copy-in",
+			run: func(t *testing.T) (ReconcileReport, error) {
+				volume := newLegacyVolume(t)
+				targetRoot := canonicalTempDir(t)
+				targetLock, err := processlock.Acquire(filepath.Join(targetRoot, databaseFileName))
+				if err != nil {
+					t.Fatalf("acquire the v2 data-root lock: %v", err)
+				}
+				t.Cleanup(func() { _ = targetLock.Close() })
+				return Reconcile(context.Background(), Options{
+					LegacyRoot: volume.root,
+					TargetRoot: targetRoot,
+					Lock:       volume.lock(t),
+					TargetLock: targetLock,
+				})
+			},
+			want:   ErrReconcileNotCopiedIn,
+			code:   UpgradeErrorReconcileNotCopiedIn,
+			detail: "no recorded copy-in",
+		},
+		{
+			name: "stage already past reconcile",
+			run: func(t *testing.T) (ReconcileReport, error) {
+				copied := newCopiedVolume(t)
+				execTarget(t, copied.databasePath(), `update upgrade_operations set stage = 'cpa_import'`)
+				return Reconcile(context.Background(), copied.reconcileOptions())
+			},
+			want:   ErrReconcileStageClosed,
+			code:   UpgradeErrorReconcileStageClosed,
+			detail: "cannot enter the reconcile step",
+		},
+		{
+			name: "record names no source fingerprint",
+			run: func(t *testing.T) (ReconcileReport, error) {
+				copied := newCopiedVolume(t)
+				execTarget(t, copied.databasePath(), `update upgrade_operations set source_fingerprint_after = ''`)
+				return Reconcile(context.Background(), copied.reconcileOptions())
+			},
+			want:   ErrReconcileRecordIncomplete,
+			code:   UpgradeErrorReconcileRecordIncomplete,
+			detail: "names no source fingerprint",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			report, err := testCase.run(t)
+			if !errors.Is(err, testCase.want) {
+				t.Fatalf("reconcile error = %v, want the typed refusal", err)
+			}
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != testCase.code {
+				t.Fatalf("error code = %q (%t), want %q", code, ok, testCase.code)
+			}
+			if message := err.Error(); !strings.Contains(message, testCase.detail) {
+				t.Fatalf("error %q does not explain %q", message, testCase.detail)
+			}
+			if report.Recorded {
+				t.Fatalf("a refused run recorded the operation: %+v", report)
+			}
+		})
+	}
+}
+
 // TestReconcileRefusesToWriteWithoutItsLocks reproduces review M3/P5: the step
 // wrote the v2 store while another owner held the 1.x lock and the v2 data-root
 // lock, because it never took either.

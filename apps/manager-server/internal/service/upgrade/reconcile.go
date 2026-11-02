@@ -268,7 +268,8 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 	if !found {
-		return ReconcileReport{}, errors.New("the v2 data root holds no recorded copy-in, so there is nothing to reconcile against")
+		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileNotCopiedIn,
+			"the v2 data root holds no recorded copy-in, so there is nothing to reconcile against; nothing was compared and nothing was marked", nil)
 	}
 	// The step may only run where it could still record its result. A store the
 	// operation already carried past "reconcile", or one a rollback closed, can
@@ -277,9 +278,9 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	// record. This is the same monotonicity rule Advance enforces, asked before
 	// anything is read or written.
 	if recorded.Stage != "" && !recorded.Stage.CanAdvanceTo(model.UpgradeStageReconcile) {
-		return ReconcileReport{}, fmt.Errorf(
+		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileStageClosed, fmt.Sprintf(
 			"the recorded operation is at stage %q, which cannot enter the reconcile step; nothing was compared and nothing was marked",
-			recorded.Stage)
+			recorded.Stage), nil)
 	}
 	if err := verifyCompletedTarget(ctx, paths, bundleDir, recorded); err != nil {
 		return ReconcileReport{}, err
@@ -290,7 +291,8 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 	if strings.TrimSpace(recorded.SourceFingerprintAfter) == "" {
-		return ReconcileReport{}, errors.New("the recorded copy-in names no source fingerprint, so the 1.x source cannot be proven to be the one it copied")
+		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileRecordIncomplete,
+			"the recorded copy-in names no source fingerprint, so the 1.x source cannot be proven to be the one it copied; nothing was compared and nothing was marked", nil)
 	}
 	if before.Digest != recorded.SourceFingerprintAfter {
 		return ReconcileReport{}, newUpgradeError(UpgradeErrorSourceChanged,
