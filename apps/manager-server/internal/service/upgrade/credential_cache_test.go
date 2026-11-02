@@ -516,3 +516,61 @@ func waitForCredentialFlights(t *testing.T, cache *credentialCache) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// credentialNotifyingContext reports the checks a read makes on its caller's
+// context. The credential read asks twice before it takes the cache mutex — once
+// on its own entry and once in the cache — so the second check is the point at
+// which this caller is about to wait for that mutex. The test releases the
+// caller from exactly there, which is the window a cancelled request must not
+// answer a success in.
+type credentialNotifyingContext struct {
+	context.Context
+	calls    atomic.Int32
+	notifyAt int32
+	checked  chan struct{}
+}
+
+func (c *credentialNotifyingContext) Err() error {
+	err := c.Context.Err()
+	if c.calls.Add(1) == c.notifyAt {
+		close(c.checked)
+	}
+	return err
+}
+
+// TestCancelledCacheHitDoesNotAuthenticate is the remembered-verdict half of the
+// caller-cancellation contract: a request that is cancelled while it waits for
+// the cache is answered with its own context error, not with the success that
+// was already in the cache. The caller context is checked again after the wait
+// and before the verdict is returned, both on the first lookup and on the one
+// that follows admission.
+func TestCancelledCacheHitDoesNotAuthenticate(t *testing.T) {
+	const key = "cancelled-cache-hit"
+	fixture := newCredentialFixture(t, key)
+	// Warm the cache with a real read of the real source.
+	if err := VerifyAdminSource(context.Background(), fixture.dbPath, key); err != nil {
+		t.Fatalf("warm the credential cache: %v", err)
+	}
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &credentialNotifyingContext{Context: base, notifyAt: 2, checked: make(chan struct{})}
+
+	// Hold the cache, let the request reach it, then cancel the caller. The
+	// request finds a remembered verdict when it is let in; the only correct
+	// answer for a caller that is already gone is its own deadline.
+	sourceCredentialCache.mu.Lock()
+	result := make(chan error, 1)
+	go func() { result <- VerifyAdminSource(ctx, fixture.dbPath, key) }()
+	<-ctx.checked
+	cancel()
+	sourceCredentialCache.mu.Unlock()
+
+	err := <-result
+	t.Logf("cached product read after cancellation: result=%v caller=%v", err, base.Err())
+	if !errors.Is(base.Err(), context.Canceled) {
+		t.Fatalf("the caller was not cancelled: %v", base.Err())
+	}
+	if !errors.Is(err, ErrCredentialVerifyTimeout) {
+		t.Fatalf("cancelled cache hit = %v, want %v", err, ErrCredentialVerifyTimeout)
+	}
+}

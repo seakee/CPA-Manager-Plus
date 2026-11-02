@@ -247,6 +247,14 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 	c.mu.Lock()
 	if _, hit := c.entries[key]; hit {
 		c.mu.Unlock()
+		// The entry may have landed while this caller was waiting for the
+		// mutex, and the caller may have been cancelled meanwhile. Waiting is
+		// this caller's time, not the shared read's: a request abandoned during
+		// it is answered with its own deadline, never with a success that
+		// arrived after it gave up.
+		if err := ctx.Err(); err != nil {
+			return credentialTimeout(err)
+		}
 		return nil
 	}
 	if flight, running := c.flights[key]; running {
@@ -275,6 +283,12 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 	if _, hit := c.entries[key]; hit {
 		c.mu.Unlock()
 		<-c.slots
+		// The same wait, and the same answer: a caller cancelled while it waited
+		// for a slot — or for the slot's mutex — is not handed a verdict that
+		// landed after it stopped waiting.
+		if err := ctx.Err(); err != nil {
+			return credentialTimeout(err)
+		}
 		return nil
 	}
 	if flight, running := c.flights[key]; running {

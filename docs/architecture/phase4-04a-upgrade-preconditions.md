@@ -562,7 +562,9 @@ on both surfaces at once, and no write route exists.
   lifetime — it may finish for another waiter and for the cache — while every
   caller, the one that started it included, waits under its own context and a
   cancelled request returns its deadline rather than a success that landed after
-  it was abandoned. Every
+  it was abandoned. That check covers a remembered verdict too: a caller
+  cancelled while it waited for the cache itself is answered with its context
+  error, not with the entry that was already there when it got in. Every
   authenticated request runs this, including every status poll, so a whole-file
   scan there would answer 503 on a large source and the result page would never
   arrive. The integrity check stays in `Preflight`, which is what qualifies a
