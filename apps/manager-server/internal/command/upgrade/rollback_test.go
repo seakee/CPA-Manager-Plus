@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -26,7 +27,7 @@ import (
 func rollbackReadyTarget(t *testing.T, source string) string {
 	t.Helper()
 	target := t.TempDir()
-	code, _, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	code, _, stderr := run(t, "run", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target)
 	if code != 0 {
 		t.Fatalf("prepare the copy-in target: exit %d; stderr: %s", code, stderr)
 	}
@@ -344,7 +345,7 @@ func TestRollbackUsageErrors(t *testing.T) {
 func TestRunStopsAfterTheCopyInAndPrintsTheNextCommand(t *testing.T) {
 	source := copyReadySource(t)
 	target := t.TempDir()
-	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	code, stdout, stderr := run(t, "run", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target)
 	if code != 0 {
 		t.Fatalf("run exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -372,7 +373,7 @@ func TestRunStopsAfterTheCopyInAndPrintsTheNextCommand(t *testing.T) {
 		t.Fatalf("the copy-in recorded no source root: %+v", operation)
 	}
 	// The human form carries the same next step.
-	code, human, stderr := run(t, "run", "--legacy", source, "--target", target)
+	code, human, stderr := run(t, "run", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target)
 	if code != 0 {
 		t.Fatalf("human run exit code = %d; stderr: %s", code, stderr)
 	}
@@ -401,7 +402,7 @@ func TestRunReportsALaterStageWithoutTouchingIt(t *testing.T) {
 		t.Fatalf("read the recorded operation: found=%t err=%v", found, err)
 	}
 
-	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	code, stdout, stderr := run(t, "run", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}
@@ -453,7 +454,7 @@ func TestRunAfterARollbackReportsTheTerminalStage(t *testing.T) {
 		t.Fatalf("read the recorded operation: found=%t err=%v", found, err)
 	}
 
-	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--target", target)
+	code, stdout, stderr := run(t, "run", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target)
 	if code != 0 {
 		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
 	}

@@ -39,11 +39,7 @@ func (v legacyVolume) archives() []string {
 // maintenancebundle refuses any bundle path below a symbolic link.
 func canonicalTempDir(t *testing.T) string {
 	t.Helper()
-	resolved, err := canonicalPath(t.TempDir())
-	if err != nil {
-		t.Fatalf("resolve temporary directory: %v", err)
-	}
-	return resolved
+	return canonicalPath(t.TempDir())
 }
 
 func newLegacyVolume(t *testing.T) legacyVolume {
@@ -164,9 +160,10 @@ func (v legacyVolume) lock(t *testing.T) *processlock.Lock {
 
 func copyInOptions(volume legacyVolume, targetRoot string) Options {
 	return Options{
-		LegacyRoot: volume.root,
-		TargetRoot: targetRoot,
-		BundleDir:  DefaultBundleDirectory(targetRoot),
+		LegacyRoot:      volume.root,
+		TargetRoot:      targetRoot,
+		BundleDir:       DefaultBundleDirectory(targetRoot),
+		DeclaredVersion: pinnedSourceVersion(),
 	}
 }
 
@@ -553,10 +550,11 @@ func TestCopyInResumesAfterAnInterruptionInsideTheMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("digest backup manifest: %v", err)
 	}
-	fingerprint, _, err := fingerprintSource(volume.root)
+	observedFingerprint, err := fingerprintSource(volume.root)
 	if err != nil {
 		t.Fatalf("fingerprint the 1.x source: %v", err)
 	}
+	fingerprint := observedFingerprint.Digest
 	databasePath := filepath.Join(targetRoot, databaseFileName)
 	if err := copyinmarker.Write(targetRoot, copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
@@ -706,10 +704,11 @@ func materializeMigratedTarget(t *testing.T, volume legacyVolume, targetRoot str
 	if err := db.Close(); err != nil {
 		t.Fatalf("close the migrated database: %v", err)
 	}
-	fingerprint, _, err := fingerprintSource(volume.root)
+	observedFingerprint, err := fingerprintSource(volume.root)
 	if err != nil {
 		t.Fatalf("fingerprint the 1.x source: %v", err)
 	}
+	fingerprint := observedFingerprint.Digest
 	if err := copyinmarker.Write(targetRoot, copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
 		TargetDatabase:          filepath.Join(targetRoot, databaseFileName),

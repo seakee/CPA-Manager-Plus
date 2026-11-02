@@ -430,10 +430,10 @@ func TestPrepareRollbackKeepsTheImageInTheSourceFamily(t *testing.T) {
 	}
 }
 
-func releaseOf(t *testing.T, version string) int {
+func releaseOf(t *testing.T, version string) releaseRank {
 	t.Helper()
-	release, ok := parseRelease(version)
-	if !ok {
+	release, err := parseRelease(version)
+	if err != nil {
 		t.Fatalf("recorded source version %q is not an exact release", version)
 	}
 	return release
@@ -463,10 +463,11 @@ func TestRecordRollbackAcceptsAVolumeThatKeptWriting(t *testing.T) {
 	if recorded.Rollback == nil {
 		t.Fatal("the verdict carries no evidence")
 	}
-	observedFingerprint, _, err := fingerprintSource(fixture.volume.root)
+	observed, err := fingerprintSource(fixture.volume.root)
 	if err != nil {
 		t.Fatalf("fingerprint the written 1.x volume: %v", err)
 	}
+	observedFingerprint := observed.Digest
 	if recorded.Rollback.SourceFingerprint != observedFingerprint {
 		t.Fatalf("recorded observation = %q, want the observed %q", recorded.Rollback.SourceFingerprint, observedFingerprint)
 	}

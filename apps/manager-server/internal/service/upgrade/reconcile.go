@@ -271,10 +271,11 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 
-	before, _, err := fingerprintSource(sourceRoot)
+	beforeFingerprint, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return ReconcileReport{}, err
 	}
+	before := beforeFingerprint.Digest
 	if strings.TrimSpace(recorded.SourceFingerprintAfter) == "" {
 		return ReconcileReport{}, errors.New("the recorded copy-in names no source fingerprint, so the 1.x source cannot be proven to be the one it copied")
 	}
@@ -295,11 +296,11 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{ReconcileEvidence: newReconcileEvidence(before, domains, parityDays)}, compareErr
 	}
 
-	after, _, err := fingerprintSource(sourceRoot)
+	afterFingerprint, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return ReconcileReport{}, err
 	}
-	if after != before {
+	if afterFingerprint != beforeFingerprint {
 		return ReconcileReport{}, newUpgradeError(UpgradeErrorSourceChanged,
 			"the 1.x source changed while it was being compared; nothing was compared further and nothing was marked", nil)
 	}
@@ -356,18 +357,9 @@ func reconcileRoots(options Options) (string, string, string, error) {
 			return "", "", "", err
 		}
 	}
-	canonicalSource, err := canonicalPath(sourceRoot)
-	if err != nil {
-		return "", "", "", err
-	}
-	canonicalTarget, err := canonicalPath(targetRoot)
-	if err != nil {
-		return "", "", "", err
-	}
-	canonicalBundle, err := canonicalPath(bundleDir)
-	if err != nil {
-		return "", "", "", err
-	}
+	canonicalSource := canonicalPath(sourceRoot)
+	canonicalTarget := canonicalPath(targetRoot)
+	canonicalBundle := canonicalPath(bundleDir)
 	if err := rejectOverlap(canonicalSource, canonicalTarget, canonicalBundle); err != nil {
 		return "", "", "", err
 	}
@@ -389,14 +381,8 @@ func reconcileScratchRoot(targetRoot, sourceRoot, configured string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("resolve the reconciliation scratch area: %w", err)
 	}
-	canonicalRoot, err := canonicalPath(absolute)
-	if err != nil {
-		return "", err
-	}
-	canonicalSource, err := canonicalPath(sourceRoot)
-	if err != nil {
-		return "", err
-	}
+	canonicalRoot := canonicalPath(absolute)
+	canonicalSource := canonicalPath(sourceRoot)
 	if within(canonicalSource, canonicalRoot) || within(canonicalRoot, canonicalSource) {
 		return "", errors.New("the reconciliation scratch area must not be the 1.x source root, sit inside it or contain it")
 	}

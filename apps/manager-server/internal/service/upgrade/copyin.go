@@ -119,23 +119,17 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if sourceRoot, err = canonicalPath(sourceRoot); err != nil {
-		return Result{}, fmt.Errorf("resolve the 1.x source root: %w", err)
-	}
+	sourceRoot = canonicalPath(sourceRoot)
 	targetRoot, err := resolveTargetRoot(options.TargetRoot)
 	if err != nil {
 		return Result{}, err
 	}
-	if targetRoot, err = canonicalPath(targetRoot); err != nil {
-		return Result{}, fmt.Errorf("resolve the v2 data root: %w", err)
-	}
+	targetRoot = canonicalPath(targetRoot)
 	bundleDir, err := resolveBundleDir(options.BundleDir)
 	if err != nil {
 		return Result{}, err
 	}
-	if bundleDir, err = canonicalPath(bundleDir); err != nil {
-		return Result{}, fmt.Errorf("resolve the backup destination: %w", err)
-	}
+	bundleDir = canonicalPath(bundleDir)
 	if err := rejectOverlap(sourceRoot, targetRoot, bundleDir); err != nil {
 		return Result{}, err
 	}
@@ -168,11 +162,11 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 		return completedResult(ctx, paths, bundleDir, recorded, result)
 	}
 
-	before, _, err := fingerprintSource(sourceRoot)
+	before, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return Result{}, fmt.Errorf("fingerprint the 1.x source: %w", err)
 	}
-	result.SourceFingerprintBefore = before
+	result.SourceFingerprintBefore = before.Digest
 
 	manifest, digest, err := ensureBackup(ctx, layout, bundleDir, options.Lock)
 	if err != nil {
@@ -180,7 +174,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	}
 	result.BackupManifestSHA256 = digest
 	result.BackupSourceRevision = manifest.SourceRevision
-	result.SourceVersion = bundleSourceRelease(ctx, bundleDir)
+	result.SourceVersion = declaredVersion(options.DeclaredVersion)
 	if err := runCheckpoint(options, "backup-verified"); err != nil {
 		return Result{}, err
 	}
@@ -196,7 +190,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 
 	// The fence was held for the whole run; a different source fingerprint means
 	// the copy has no provenance and nothing may be recorded as complete.
-	after, _, err := fingerprintSource(sourceRoot)
+	after, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return Result{}, fmt.Errorf("fingerprint the 1.x source after the copy: %w", err)
 	}
@@ -208,7 +202,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 		}
 		return Result{}, aborted
 	}
-	result.SourceFingerprintAfter = after
+	result.SourceFingerprintAfter = after.Digest
 
 	// Provenance is published before the migration commits. The migration
 	// rewrites the copied database in place, so a process death between that
@@ -273,11 +267,18 @@ func recordedOperation(ctx context.Context, databasePath string, immutable bool)
 		return model.UpgradeOperation{}, false, err
 	}
 	if len(missing) > 0 {
-		return model.UpgradeOperation{}, false, newUpgradeError(UpgradeErrorStoreSchemaOutdated,
-			fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read without a writable open; open it once with this build before reading it read-only",
-				strings.Join(missing, ", ")), nil)
+		return model.UpgradeOperation{}, false, StoreSchemaOutdatedError(missing)
 	}
 	return repository.Get(ctx)
+}
+
+// StoreSchemaOutdatedError reports a Manager store whose upgrade table predates
+// the columns this build selects. A read-only reader cannot migrate it, so the
+// operator has to open it once with this build instead of meeting raw SQL.
+func StoreSchemaOutdatedError(missing []string) error {
+	return newUpgradeError(UpgradeErrorStoreSchemaOutdated,
+		fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read without a writable open; open it once with this build before reading it read-only",
+			strings.Join(missing, ", ")), nil)
 }
 
 type targetPaths struct {
@@ -323,32 +324,6 @@ func resolveBundleDir(dir string) (string, error) {
 		return "", fmt.Errorf("resolve the backup destination: %w", err)
 	}
 	return absolute, nil
-}
-
-// canonicalPath resolves symlinks in the existing part of a path, so a
-// destination that does not exist yet still compares canonically with its
-// neighbours.
-func canonicalPath(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err == nil {
-		return resolved, nil
-	}
-	if !os.IsNotExist(err) {
-		return "", err
-	}
-	parent := filepath.Dir(absolute)
-	if parent == absolute {
-		return absolute, nil
-	}
-	resolvedParent, err := canonicalPath(parent)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(resolvedParent, filepath.Base(absolute)), nil
 }
 
 // within reports whether child is parent itself or sits below it.
@@ -564,21 +539,6 @@ func ensureBackup(ctx context.Context, layout maintenancebundle.Layout, bundleDi
 
 func manifestDigest(bundleDir string) (string, error) {
 	return fileContentDigest(filepath.Join(bundleDir, "manifest.json"))
-}
-
-// bundleSourceRelease reads the 1.x release floor from the backed-up database
-// copy, never from the source volume. An unreadable copy leaves the recorded
-// version explicitly unknown rather than guessed.
-func bundleSourceRelease(ctx context.Context, bundleDir string) string {
-	path := maintenancebundle.BundleLayout(bundleDir).DatabasePath
-	db, schema, err := openImmutableSource(ctx, path)
-	if db != nil {
-		defer func() { _ = db.Close() }()
-	}
-	if err != nil {
-		return VersionUnknown
-	}
-	return detectSourceVersion(schema, pinnedSourceVersion()).Release
 }
 
 // materializeTarget moves the restored members into the v2 layout. It reports

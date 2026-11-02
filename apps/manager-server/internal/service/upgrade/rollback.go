@@ -210,16 +210,12 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 	if err != nil {
 		return Plan{}, err
 	}
-	if sourceRoot, err = canonicalPath(sourceRoot); err != nil {
-		return Plan{}, fmt.Errorf("resolve the 1.x source root: %w", err)
-	}
+	sourceRoot = canonicalPath(sourceRoot)
 	targetRoot, err := resolveTargetRoot(options.TargetRoot)
 	if err != nil {
 		return Plan{}, err
 	}
-	if targetRoot, err = canonicalPath(targetRoot); err != nil {
-		return Plan{}, fmt.Errorf("resolve the v2 data root: %w", err)
-	}
+	targetRoot = canonicalPath(targetRoot)
 	if err := refuseRootOverlap(sourceRoot, targetRoot); err != nil {
 		return Plan{}, err
 	}
@@ -235,10 +231,11 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		return Plan{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
 			fmt.Sprintf("the operation is recorded at stage %q, which a rollback cannot start from", string(recorded.Stage)), nil)
 	}
-	fingerprint, _, err := fingerprintSource(sourceRoot)
+	observedSource, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return Plan{}, fmt.Errorf("fingerprint the 1.x source: %w", err)
 	}
+	fingerprint := observedSource.Digest
 	if recorded.SourceFingerprintBefore == "" || recorded.SourceFingerprintAfter == "" {
 		return Plan{}, newUpgradeError(UpgradeErrorRollbackUnproven,
 			"the recorded operation carries no before/after source fingerprint, so a rollback cannot be shown safe", nil)
@@ -576,8 +573,8 @@ func localAddressHosts() map[string]bool {
 // belong to the recorded source's version family: a rollback restarts the
 // version the operation copied, not an adjacent one.
 func rollbackImage(recorded model.UpgradeOperation, override string, allowFamilyMismatch bool) (string, error) {
-	sourceRelease, sourceOK := parseRelease(recorded.SourceVersion)
-	image, err := rollbackImageReference(override, sourceOK, recorded.SourceVersion)
+	sourceRank, sourceErr := parseRelease(recorded.SourceVersion)
+	image, err := rollbackImageReference(override, sourceErr == nil, recorded.SourceVersion)
 	if err != nil {
 		return "", err
 	}
@@ -585,19 +582,19 @@ func rollbackImage(recorded model.UpgradeOperation, override string, allowFamily
 		return image, nil
 	}
 	tag := imageTag(image)
-	targetRelease, ok := parseRelease(tag)
-	if !ok {
+	targetRank, targetErr := parseRelease(tag)
+	if targetErr != nil {
 		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
 			"the 1.x image reference does not name an exact release, so it cannot be pinned", nil)
 	}
-	if !sourceOK {
+	if sourceErr != nil {
 		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
 			"the recorded source version is not an exact release, so no 1.x image can be pinned", nil)
 	}
-	if releaseFamily(targetRelease) != releaseFamily(sourceRelease) {
+	if releaseFamily(targetRank) != releaseFamily(sourceRank) {
 		return "", newUpgradeError(UpgradeErrorRollbackImageFamily,
 			fmt.Sprintf("the 1.x image names release family %s but the operation copied %s; pass the family override only after confirming the v1 data is readable by that release",
-				releaseFamilyText(targetRelease), releaseFamilyText(sourceRelease)), nil)
+				releaseFamilyText(targetRank), releaseFamilyText(sourceRank)), nil)
 	}
 	return image, nil
 }
@@ -651,10 +648,10 @@ func imageTag(reference string) string {
 }
 
 // releaseFamily keeps only the major and minor part of a parsed release.
-func releaseFamily(release int) int { return release / 1_000 * 1_000 }
+func releaseFamily(release releaseRank) releaseRank { return release / 1_000 * 1_000 }
 
 // releaseFamilyText renders a parsed release as major.minor.
-func releaseFamilyText(release int) string {
+func releaseFamilyText(release releaseRank) string {
 	return fmt.Sprintf("%d.%d", release/1_000_000, release/1_000%1_000)
 }
 
@@ -824,16 +821,12 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	if sourceRoot, err = canonicalPath(sourceRoot); err != nil {
-		return model.UpgradeOperation{}, fmt.Errorf("resolve the 1.x source root: %w", err)
-	}
+	sourceRoot = canonicalPath(sourceRoot)
 	targetRoot, err := resolveTargetRoot(observation.TargetRoot)
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	if targetRoot, err = canonicalPath(targetRoot); err != nil {
-		return model.UpgradeOperation{}, fmt.Errorf("resolve the v2 data root: %w", err)
-	}
+	targetRoot = canonicalPath(targetRoot)
 	if err := refuseRootOverlap(sourceRoot, targetRoot); err != nil {
 		return model.UpgradeOperation{}, err
 	}
@@ -867,10 +860,11 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	// From here on the checks observe the install rather than the operator's
 	// claim. The fingerprint is informational: the 1.x manager has been serving
 	// again, so its rows may have moved.
-	fingerprint, _, err := fingerprintSource(sourceRoot)
+	observedSource, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("fingerprint the 1.x source: %w", err)
 	}
+	fingerprint := observedSource.Digest
 	// A row written before the source-root column existed is bound as well, so a
 	// verdict is never recorded against a volume nobody described. The live
 	// fingerprint has usually moved by now, so the backfill proof is only
@@ -964,7 +958,7 @@ func rollbackBundleDir(override, targetRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return canonicalPath(absolute)
+	return canonicalPath(absolute), nil
 }
 
 // LegacyHealth is what the 1.x manager answered on its health endpoint.

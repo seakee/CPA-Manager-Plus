@@ -26,12 +26,12 @@ var sourceFingerprintFiles = []string{
 // entry of the root is reported as unexpected, so a new file appearing beside
 // the source changes the fingerprint even when no covered file changed.
 var sourceRootReserved = map[string]bool{
-	databaseFileName:                    true,
-	databaseFileName + "-wal":           true,
-	databaseFileName + "-shm":           true,
-	databaseFileName + "-journal":       true,
-	dataKeyFileName:                     true,
-	archivesDirName:                     true,
+	databaseFileName:              true,
+	databaseFileName + "-wal":     true,
+	databaseFileName + "-shm":     true,
+	databaseFileName + "-journal": true,
+	dataKeyFileName:               true,
+	archivesDirName:               true,
 	// The ownership fence is taken by every reader of this volume and its
 	// content is the holder's, not the source's: including it would make two
 	// consecutive inspections of an unchanged source disagree.
@@ -49,11 +49,18 @@ type manifestEntry struct {
 	uncopied bool
 }
 
-// fingerprintSource hashes a stable manifest of the source tree: relative path,
-// size and content digest of every data file, in lexical order. Repeating it on
+// sourceFingerprint is the deterministic manifest of a source tree: relative
+// path, size and content digest of every data file, in lexical order.
+type sourceFingerprint struct {
+	Digest string
+	Bytes  int64
+}
+
+// fingerprintSource hashes a stable manifest of the source tree. Repeating it on
 // an unchanged stopped source always returns the same value, and any change to
-// a covered file changes it. It reads only.
-func fingerprintSource(root string) (string, int64, error) {
+// a covered file, including a -wal/-shm file appearing, changes it; so does a
+// file the 1.x layout does not own appearing beside them. It reads only.
+func fingerprintSource(root string) (sourceFingerprint, error) {
 	entries := make([]manifestEntry, 0, len(sourceFingerprintFiles)+8)
 	for _, name := range sourceFingerprintFiles {
 		path := filepath.Join(root, name)
@@ -62,22 +69,21 @@ func fingerprintSource(root string) (string, int64, error) {
 			continue
 		}
 		if err != nil {
-			return "", 0, err
+			return sourceFingerprint{}, err
 		}
 		if !info.Mode().IsRegular() {
-			return "", 0, fmt.Errorf("source file %s is not a regular file", name)
+			return sourceFingerprint{}, fmt.Errorf("source file %s is not a regular file", name)
 		}
 		entries = append(entries, manifestEntry{relative: name, size: info.Size()})
 	}
-	archivesRoot := filepath.Join(root, archivesDirName)
-	archives, err := collectArchiveEntries(root, archivesRoot)
+	archives, err := collectArchiveEntries(root, filepath.Join(root, archivesDirName))
 	if err != nil {
-		return "", 0, err
+		return sourceFingerprint{}, err
 	}
 	entries = append(entries, archives...)
 	unexpected, err := collectUnexpectedRootEntries(root)
 	if err != nil {
-		return "", 0, err
+		return sourceFingerprint{}, err
 	}
 	entries = append(entries, unexpected...)
 	sort.Slice(entries, func(i, j int) bool { return entries[i].relative < entries[j].relative })
@@ -89,17 +95,17 @@ func fingerprintSource(root string) (string, int64, error) {
 		if !entry.directory {
 			var err error
 			if content, err = fileContentDigest(filepath.Join(root, filepath.FromSlash(entry.relative))); err != nil {
-				return "", 0, err
+				return sourceFingerprint{}, err
 			}
 		}
 		if _, err := fmt.Fprintf(manifest, "%s\x00%d\x00%s\n", entry.relative, entry.size, content); err != nil {
-			return "", 0, err
+			return sourceFingerprint{}, err
 		}
 		if !entry.uncopied {
 			total += entry.size
 		}
 	}
-	return hex.EncodeToString(manifest.Sum(nil)), total, nil
+	return sourceFingerprint{Digest: hex.EncodeToString(manifest.Sum(nil)), Bytes: total}, nil
 }
 
 // collectUnexpectedRootEntries describes every entry of the source root that the
