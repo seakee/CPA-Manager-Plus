@@ -1130,6 +1130,40 @@ func TestReconcileKeepsAChangedSourceRetryable(t *testing.T) {
 	}
 }
 
+// TestReconcileTakesTheSourceFenceReadOnly proves the reconcile step opens the
+// 1.x source for its ownership lock without write access: the marker belongs to
+// the stopped source, and a source preserved on a read-only mount must still
+// prove exclusivity. The check is the marker's own mode — an O_RDWR open of a
+// 0400 file fails for its owner, so this run could not complete through the old
+// descriptor. A read-only mount itself (EROFS) is only qualified on Linux; the
+// Darwin test host has no such mount.
+func TestReconcileTakesTheSourceFenceReadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not restrict root")
+	}
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	marker := filepath.Join(source, "usage.sqlite.manager.lock")
+	if err := os.Chmod(marker, 0o400); err != nil {
+		t.Fatalf("make the source fence read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+	before := treeDigests(t, source)
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("reconcile exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the reconciliation changed the source volume: %v -> %v", before, after)
+	}
+}
+
 func TestReconcileUsageErrors(t *testing.T) {
 	if code, _, _ := run(t, "reconcile"); code != 2 {
 		t.Fatalf("missing --legacy exit code = %d, want 2", code)

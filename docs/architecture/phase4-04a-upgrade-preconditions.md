@@ -15,7 +15,7 @@ Paths below are relative to `apps/manager-server/`.
 | `internal/service/legacyprofile/profile.go`: `Classify` | Reuse exact known capability shapes. Shape is never historical release provenance. |
 | `internal/repository/sqlite/legacy_inspection.go`: `InspectLegacySource` | Reuse immutable cold read or private WAL recovery copy. Add an administrator-protected entry using the same reader before schema/history inspection. |
 | `internal/repository/setting`: `LoadAdminCredential`; `internal/security`: `VerifyAdminKey` | Reuse the existing salt/HMAC credential and verification. No writable Store, Session substitution, CPA credential fallback, administrator initialization or reset. |
-| `internal/processlock`: `AcquireExisting`, `AcquireExistingReadOnly`, `Validate` | Hold one canonical source fence through authentication, inventory, expensive validation and final rechecks. `AcquireExistingReadOnly` takes the same marker through a read-only descriptor, so a stopped source preserved on a read-only mount still proves exclusivity; it is used by the U1-1a read-only preflight and grants nothing here. No new marker; cooperating Manager writers are excluded. |
+| `internal/processlock`: `AcquireExisting`, `AcquireExistingReadOnly`, `Validate` | Hold one canonical source fence through authentication, inventory, expensive validation and final rechecks. `AcquireExistingReadOnly` takes the same marker through a read-only descriptor, so a stopped source preserved on a read-only mount still proves exclusivity; it is used by the read-only preflight, `upgrade run` and `upgrade reconcile`, and grants nothing beyond the shared exclusivity fence. No new marker; cooperating Manager writers are excluded. |
 | `internal/service/maintenancebundle`: `Inspect`, `Verify`, `ValidateMatchingEvidence`, `RevalidateSource` | Validate the existing bundle and exact current source revision. Preserve DB/WAL/SHM/journal/key/config/archive presence and full-file digests; reuse SQLite/key/config/archive validation and private production-open checks. No second snapshot format or publication journal. |
 | `internal/service/maintenancebundle`: `Create`, `RecoverPublication`, `RestoreNew` | Keep existing host maintenance owners and recovery semantics. The new check does not create, recover, restore or modify any bundle. |
 | `internal/domain/bootstrap`: `UpgradeAdmission`, `ExactV1144Candidate` | Return existing contract-compatible shape/candidate/unverified/blocked evidence. No new public status or persisted operation. |
@@ -381,8 +381,8 @@ migration authority.
   copies the database and its WAL sidecars into private scratch space, proves the
   source did not change while the copy was taken and reads only that copy, so a
   `-shm` is never created or rewritten beside a stopped source; the copy-in reads
-  the source as bytes under the held `processlock` fence. `upgrade run` takes
-  that fence through a read-only descriptor
+  the source as bytes under the held `processlock` fence. `upgrade run` and
+  `upgrade reconcile` take that fence through a read-only descriptor
   (`processlock.AcquireExistingReadOnly`, as preflight does): the same exclusive
   marker and the same excluded writers, but the source is never opened for
   writing and a stopped source preserved on a read-only mount still proves
@@ -619,14 +619,17 @@ measured, and a day listed in `unrecoverableDays` cannot be acknowledged at all.
 
 The step reads a stopped 1.x source and writes the v2 store, so the command
 holds two fences for the whole run: the 1.x ownership lock on the source
-(`processlock.AcquireExisting`, as `upgrade run` does) and the v2 data-root
-process lock on the Manager store (`processlock.Acquire`, as `adminreset` and
-`derivedmaintenance` do). The service refuses before it reads anything unless
-both locks belong to the paths it is about to use, so a programmatic caller
-cannot skip them. A fence another process holds is a typed refusal:
-`upgrade_source_busy` for the source and `upgrade_target_locked` for the store,
-both exit 1. A live Manager and a second reconciliation therefore cannot write
-the same store or share the same scratch directory.
+(`processlock.AcquireExistingReadOnly`, as `upgrade run` and preflight do) and
+the v2 data-root process lock on the Manager store (`processlock.Acquire`, as
+`adminreset` and `derivedmaintenance` do). The source is read-only for this
+step, so its fence never opens the source volume for writing: a stopped source
+preserved on a read-only mount still proves exclusivity, and the refusal for a
+marker another process holds is unchanged. The service refuses before it reads
+anything unless both locks belong to the paths it is about to use, so a
+programmatic caller cannot skip them. A fence another process holds is a typed
+refusal: `upgrade_source_busy` for the source and `upgrade_target_locked` for
+the store, both exit 1. A live Manager and a second reconciliation therefore
+cannot write the same store or share the same scratch directory.
 
 ### Recording
 

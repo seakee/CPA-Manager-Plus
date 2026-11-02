@@ -478,8 +478,12 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	// The step reads a stopped 1.x source and writes the v2 store, so it holds
 	// both fences for the whole run, exactly as the copy-in holds the source one:
 	// a live Manager or another offline step owns one of them, and racing it
-	// would write permanent marks under a reader's feet.
-	sourceLock, err := processlock.AcquireExisting(upgradeservice.SourceDatabasePath(legacyRoot))
+	// would write permanent marks under a reader's feet. The source is read-only
+	// for this step, so its fence is taken through a read-only descriptor: the
+	// same exclusive marker and the same excluded writers, but the source is
+	// never opened for writing and a stopped source preserved on a read-only
+	// mount still proves exclusivity.
+	sourceLock, err := processlock.AcquireExistingReadOnly(upgradeservice.SourceDatabasePath(legacyRoot))
 	if err != nil {
 		return fail(upgradeservice.CodedError(upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy),
 			"the 1.x source is held by another process; stop Manager Server and retry", err))
