@@ -195,7 +195,7 @@ func runRollbackVerify(ctx context.Context, stdout, stderr io.Writer, asJSON boo
 	observation upgradeservice.RollbackObservation) error {
 	operation, err := upgradeservice.RecordRollback(ctx, observation)
 	if err != nil {
-		return refuse(stderr, err)
+		return refuseTyped(stderr, err)
 	}
 	if asJSON {
 		return json.NewEncoder(stdout).Encode(operation)

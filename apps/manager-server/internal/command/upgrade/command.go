@@ -18,12 +18,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	_ "modernc.org/sqlite"
@@ -198,6 +200,10 @@ func writePreflightSummary(w io.Writer, report upgradeservice.Report) {
 type statusOutput struct {
 	Recorded  bool                    `json:"recorded"`
 	Operation *model.UpgradeOperation `json:"operation,omitempty"`
+	// Reason is the typed explanation an admission attaches to a stage that
+	// restricts the surface, so the console can show why the normal surfaces are
+	// closed instead of reading a generic stage.
+	Reason string `json:"reason,omitempty"`
 }
 
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -254,6 +260,9 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if found {
 		output.Recorded = true
 		output.Operation = &operation
+		// The same derivation the startup admission uses, so the console reason
+		// and the log reason can never disagree about one row.
+		output.Reason = string(legacypreflight.ReasonForStage(operation.Stage))
 	}
 	if *asJSON {
 		return json.NewEncoder(stdout).Encode(output)
@@ -297,6 +306,9 @@ func writeStatusSummary(w io.Writer, output statusOutput) {
 	}
 	operation := output.Operation
 	_, _ = fmt.Fprintf(w, "stage: %s\n", operation.Stage)
+	if output.Reason != "" {
+		_, _ = fmt.Fprintf(w, "reason: %s\n", output.Reason)
+	}
 	_, _ = fmt.Fprintf(w, "domains done: %s\n", strings.Join(operation.DomainsDone, ","))
 	if operation.SourceKind != "" {
 		_, _ = fmt.Fprintf(w, "source kind: %s\n", operation.SourceKind)
@@ -353,7 +365,7 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// it is a bounded file, not a database open.
 	if _, markerPresent, markerErr := copyinmarker.Read(targetRoot); markerErr == nil && !markerPresent {
 		if operation, found, err := recordedOperationAt(ctx, targetRoot); err != nil {
-			return err
+			return refuseTyped(stderr, err)
 		} else if found && stagePastCopyIn(operation.Stage) {
 			output := runOutput{Operation: &operation}
 			writeRunOutput(stdout, *asJSON, output)
@@ -367,7 +379,7 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		ScratchDir:      *scratchDir,
 	})
 	if err != nil {
-		return err
+		return refuseTyped(stderr, err)
 	}
 	output := runOutput{Preflight: &report}
 	if !report.Ready {
@@ -392,13 +404,14 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		Lock:            lock,
 	})
 	if err != nil {
-		return err
+		return refuseTyped(stderr, err)
 	}
 	output.Result = &result
 	// The run stops at the copy-in by contract: reconciliation is a separate,
 	// authorized step, so the exact command to continue is printed rather than
 	// executed.
-	output.Next = nextReconcileCommand(legacyRoot, targetRoot, bundleDir, strings.TrimSpace(*bundle) != "")
+	output.Next = nextStepCommand(targetRoot)
+	output.NextNote = nextStepNote
 	writeRunOutput(stdout, *asJSON, output)
 	return nil
 }
@@ -408,6 +421,9 @@ type runOutput struct {
 	Result    *upgradeservice.Result  `json:"result,omitempty"`
 	Operation *model.UpgradeOperation `json:"operation,omitempty"`
 	Next      string                  `json:"next,omitempty"`
+	// NextNote says what remains after Next when the printed step only reports
+	// the recorded state.
+	NextNote string `json:"nextNote,omitempty"`
 }
 
 // recordedOperationAt reads the operation row from a v2 data root that may not
@@ -441,15 +457,20 @@ func stagePastCopyIn(stage model.UpgradeStage) bool {
 	}
 }
 
-// nextReconcileCommand is the command the operator runs to continue past the
-// copy-in. It is printed, never executed: reconciliation is its own step.
-func nextReconcileCommand(legacyRoot, targetRoot, bundleDir string, explicitBundle bool) string {
-	command := fmt.Sprintf("cpa-manager-plus upgrade reconcile --legacy %q --target %q", legacyRoot, targetRoot)
-	if explicitBundle {
-		command += fmt.Sprintf(" --bundle %q", bundleDir)
-	}
-	return command
+// nextStepCommand is the command the operator runs after the copy-in. It is
+// printed, never executed, and it names a subcommand this build dispatches:
+// `upgrade status` reports the recorded operation. Reconciliation is its own
+// authorised step and is not part of this build, so no command for it is
+// invented here.
+func nextStepCommand(targetRoot string) string {
+	return fmt.Sprintf("cpa-manager-plus upgrade status --db-path %s",
+		strconv.Quote(filepath.Join(targetRoot, upgradeservice.SourceDatabaseName)))
 }
+
+// nextStepNote says what is still missing after the printed step. The run owns
+// the preflight and the copy-in only; nothing in this build advances the
+// operation past copy_in.
+const nextStepNote = "reconciliation is a separate authorised step that is not part of this build; the v2 root stays on the Upgrade surface and the 1.x source stays unchanged until it is available"
 
 func writeRunOutput(w io.Writer, asJSON bool, output runOutput) {
 	if asJSON {
@@ -469,6 +490,9 @@ func writeRunOutput(w io.Writer, asJSON bool, output runOutput) {
 		if output.Next != "" {
 			_, _ = fmt.Fprintln(w, "next:")
 			_, _ = fmt.Fprintf(w, "  %s\n", output.Next)
+			if output.NextNote != "" {
+				_, _ = fmt.Fprintf(w, "  %s\n", output.NextNote)
+			}
 		}
 		return
 	}
@@ -488,8 +512,11 @@ func writeRunOutput(w io.Writer, asJSON bool, output runOutput) {
 	_, _ = fmt.Fprintf(w, "  data key: %s\n", result.TargetDataKey)
 	_, _ = fmt.Fprintf(w, "  archives: %s\n", result.TargetArchives)
 	if output.Next != "" {
-		_, _ = fmt.Fprintln(w, "next (reconciliation is a separate step):")
+		_, _ = fmt.Fprintln(w, "next:")
 		_, _ = fmt.Fprintf(w, "  %s\n", output.Next)
+		if output.NextNote != "" {
+			_, _ = fmt.Fprintf(w, "  %s\n", output.NextNote)
+		}
 	}
 }
 

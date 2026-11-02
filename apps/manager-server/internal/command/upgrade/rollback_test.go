@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -359,9 +360,20 @@ func TestRunStopsAfterTheCopyInAndPrintsTheNextCommand(t *testing.T) {
 	if output.Result == nil || output.Result.Stage != model.UpgradeStageCopyIn {
 		t.Fatalf("run result = %+v, want a copy_in", output.Result)
 	}
-	// The run never advances past the copy-in and names the next step.
-	if !strings.Contains(output.Next, "upgrade reconcile") || !strings.Contains(output.Next, "--legacy") {
-		t.Fatalf("next = %q, want the reconcile command", output.Next)
+	// The run never advances past the copy-in and names a next step that exists
+	// on this build. Reconciliation is a separate authorised step that this
+	// build does not ship, so the printed command reports the recorded operation
+	// instead of naming a subcommand that would exit as a usage error.
+	nextArgs, err := printedCommandArgs(output.Next)
+	if err != nil {
+		t.Fatalf("next = %q: %v", output.Next, err)
+	}
+	nextCode, nextStdout, nextStderr := run(t, nextArgs...)
+	if nextCode != 0 {
+		t.Fatalf("the printed next command is not runnable on this build: exit %d; stderr: %s", nextCode, nextStderr)
+	}
+	if !strings.Contains(nextStdout, "stage: "+string(model.UpgradeStageCopyIn)) {
+		t.Fatalf("the printed next command did not report the recorded stage: %s", nextStdout)
 	}
 	operation, found, err := upgradeservice.ReadRecord(context.Background(), filepath.Join(target, "usage.sqlite"))
 	if err != nil || !found {
@@ -375,14 +387,39 @@ func TestRunStopsAfterTheCopyInAndPrintsTheNextCommand(t *testing.T) {
 	if operation.SourceRoot == "" {
 		t.Fatalf("the copy-in recorded no source root: %+v", operation)
 	}
-	// The human form carries the same next step.
+	// The human form carries the same next step and says what remains.
 	code, human, stderr := run(t, "run", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
 	if code != 0 {
 		t.Fatalf("human run exit code = %d; stderr: %s", code, stderr)
 	}
-	if !strings.Contains(human, "reconcile") {
+	if !strings.Contains(human, "upgrade status") {
 		t.Fatalf("human run did not print the next step: %s", human)
 	}
+	if strings.Contains(human, "upgrade reconcile") {
+		t.Fatalf("human run printed a subcommand this build does not ship: %s", human)
+	}
+	if !strings.Contains(human, "not part of this build") {
+		t.Fatalf("human run does not say reconciliation is unavailable: %s", human)
+	}
+}
+
+// printedCommandArgs splits the command `upgrade run` prints into the arguments
+// this build accepts, so a test can execute exactly what the operator would
+// paste. Every quoted token is unquoted.
+func printedCommandArgs(command string) ([]string, error) {
+	fields := strings.Fields(command)
+	if len(fields) < 3 || fields[0] != "cpa-manager-plus" || fields[1] != "upgrade" {
+		return nil, fmt.Errorf("want a `cpa-manager-plus upgrade ...` command, got %q", command)
+	}
+	args := make([]string, 0, len(fields)-2)
+	for _, field := range fields[2:] {
+		if unquoted, err := strconv.Unquote(field); err == nil {
+			args = append(args, unquoted)
+			continue
+		}
+		args = append(args, field)
+	}
+	return args, nil
 }
 
 func TestRunReportsALaterStageWithoutTouchingIt(t *testing.T) {
@@ -745,6 +782,55 @@ func TestRollbackPreparePrintsTheOperatorVerifiedIdentity(t *testing.T) {
 	}
 }
 
+// TestStatusShowsTheRolledBackReason is the L1 regression: a rolled-back
+// operation keeps the Upgrade surface closed, and the typed reason the admission
+// attaches was only in the process log. The operator console reads it from
+// `upgrade status` in both forms; a copy-in row carries no such reason.
+func TestStatusShowsTheRolledBackReason(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := rollbackReadyTarget(t, source)
+	databasePath := filepath.Join(target, "usage.sqlite")
+
+	code, statusJSON, stderr := run(t, "status", "--json", "--db-path", databasePath)
+	if code != 0 {
+		t.Fatalf("status before the verdict exit code = %d; stderr: %s", code, stderr)
+	}
+	var before statusOutput
+	if err := json.Unmarshal([]byte(statusJSON), &before); err != nil {
+		t.Fatalf("decode status: %v; output: %s", err, statusJSON)
+	}
+	if before.Reason != "" {
+		t.Fatalf("a copy-in row reported a reason: %q", before.Reason)
+	}
+
+	if code, stdout, stderr := run(t, "rollback", "--verify", "--legacy", source, "--target", target,
+		"--status-url", healthyProbe(t)); code != 0 {
+		t.Fatalf("verify exit code = %d; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+
+	code, human, stderr := run(t, "status", "--db-path", databasePath)
+	if code != 0 {
+		t.Fatalf("status exit code = %d; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(human, "reason: upgrade_rolled_back") {
+		t.Fatalf("status does not show the typed reason:\n%s", human)
+	}
+	code, statusJSON, stderr = run(t, "status", "--json", "--db-path", databasePath)
+	if code != 0 {
+		t.Fatalf("status --json exit code = %d; stderr: %s", code, stderr)
+	}
+	var after statusOutput
+	if err := json.Unmarshal([]byte(statusJSON), &after); err != nil {
+		t.Fatalf("decode status: %v; output: %s", err, statusJSON)
+	}
+	if after.Reason != "upgrade_rolled_back" {
+		t.Fatalf("status reason = %q, want upgrade_rolled_back", after.Reason)
+	}
+	if after.Operation == nil || after.Operation.Stage != model.UpgradeStageRolledBack {
+		t.Fatalf("status operation = %+v, want the rolled_back row", after.Operation)
+	}
+}
+
 // writeLegacyManagerStore creates the shape a 1.x install has: no
 // upgrade_operations table at all. A writable open of this build would migrate
 // it into a native-v2 store, which is exactly what `upgrade migrate` may not do.
@@ -771,6 +857,26 @@ func writeLegacyManagerStore(t *testing.T, databasePath string) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close the 1.x store: %v", err)
+	}
+}
+
+// TestRunRefusesATypedStoreErrorWithExitOneAndOneStderrLine is the L4
+// regression at the command boundary: an operational refusal is exit 1 and is
+// written to stderr, while an environment or usage failure stays exit 2. It used
+// to return the typed error unwrapped, which reported exit 2 with empty stderr.
+func TestRunRefusesATypedStoreErrorWithExitOneAndOneStderrLine(t *testing.T) {
+	target := t.TempDir()
+	writeOutdatedStore(t, filepath.Join(target, "usage.sqlite"))
+	code, stdout, stderr := run(t, "run", "--legacy", t.TempDir(),
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target)
+	if code != 1 {
+		t.Fatalf("run exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("a refusal printed a report: %s", stdout)
+	}
+	if count := strings.Count(stderr, string(upgradeservice.UpgradeErrorStoreSchemaOutdated)); count != 1 {
+		t.Fatalf("the typed code appears %d times in stderr, want once: %s", count, stderr)
 	}
 }
 

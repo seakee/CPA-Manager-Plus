@@ -79,7 +79,14 @@ func (a DatabaseUpgradeAdmission) AdmittedReason(ctx context.Context) (UpgradeSt
 // upgradeReasonFromRecord is the reason half of the same decision
 // upgradeStageFromRecord makes. It is derived from the durable stage alone.
 func upgradeReasonFromRecord(record upgradeRecord) UpgradeReason {
-	if record.Stage == model.UpgradeStageRolledBack {
+	return ReasonForStage(record.Stage)
+}
+
+// ReasonForStage reports the console reason an admission attaches to a durable
+// stage. Startup admission and `upgrade status` both call it, so the two can
+// never describe the same row differently.
+func ReasonForStage(stage model.UpgradeStage) UpgradeReason {
+	if stage == model.UpgradeStageRolledBack {
 		return ReasonUpgradeRolledBack
 	}
 	return ""

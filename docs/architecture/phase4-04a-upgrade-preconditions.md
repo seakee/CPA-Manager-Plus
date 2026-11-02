@@ -435,10 +435,19 @@ migration authority.
   and no inline environment key may override the copied key. Anything else is
   refused with `upgrade_target_layout_mismatch`, because a copied data key the
   service never loads leaves the 1.x encrypted fields undecryptable.
-  `upgrade preflight` and `upgrade status` remain read-only. The copy-in's exit
-  codes are unchanged in shape: 0 ready, 1 blocked — including a v2 data root
-  owned by another Manager process (`upgrade_copy_in_v2_running`) — and 2 for
-  usage, environment and retryable failures.
+  `upgrade preflight` and `upgrade status` remain read-only. Before the
+  preflight, `run` reports a recorded stage past `copy_in` without changing
+  anything. That guard reads the copy-in marker first and steps aside while a
+  copy-in is in flight (or its marker is unreadable): the marker and the member
+  digests are what a resume compares, never an open of the target, because a
+  read-only open of the materializing database would create its `-shm` and
+  strand the resume. The run stops at the copy-in and prints
+  `cpa-manager-plus upgrade status --db-path <v2 database>` plus a note that
+  reconciliation is a separate authorised step this build does not ship; it
+  prints no command that this build cannot dispatch. Every subcommand shares the
+  exit contract: 0 ready, 1 a blocked preflight or a typed operational refusal
+  (the command writes the reason to stderr exactly once and `main` does not log
+  it again), and 2 for usage, environment and retryable failures.
 
 ### Admission surface table
 
@@ -472,7 +481,7 @@ process serves:
 | the same marker under another absolute path, or a root relocated to another mount | `in_progress` | Upgrade surface only: the marker belongs to the data root it sits in, so a relocated volume is never read as "no record" |
 | a marker naming a different database file | — | not admitted (fail closed): it is evidence for another run |
 | `preflight`, `copy_in`, `reconcile`, `cpa_import`, `external_connect`, `verify`, `failed` | `in_progress` | Upgrade surface only: fixed Bootstrap discovery status reads, the read-only shell and the Upgrade authentication leaf. Console, Key workspace, gateway configuration, lifecycle and model traffic answer 404; health stays 503 and no writable subsystem starts |
-| `rolled_back` | `in_progress` + reason `upgrade_rolled_back` | Upgrade surface only, same as any unfinished operation. The reason is the typed string the console shows; it is never a completion |
+| `rolled_back` | `in_progress` + reason `upgrade_rolled_back` | Upgrade surface only, same as any unfinished operation. The reason is the typed string the console-side `upgrade status` prints as `reason: upgrade_rolled_back` and puts in its `reason` JSON field, derived by the same `legacypreflight.ReasonForStage` the admission log uses; it is never a completion. Unauthenticated discovery cannot carry it: the public projection exposes only mode, authentication and recovery, and its reason vocabulary has no rollback value |
 | `complete` with `source_kind=upgraded-legacy`, both source fingerprints and the backup manifest digest | `complete` | normal v2 surfaces, as for a native store |
 | `complete` missing any of those observations | — | not admitted (fail closed) |
 | reader error, unreadable marker or unsupported stage | — | not admitted (fail closed) |
@@ -610,14 +619,16 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   [--project <name>] [--volume <name|host-directory>] [--port N]
   [--manager-addr HOST:PORT] [--backup <dir>]
   [--allow-image-family-mismatch] [--json]` prints the plan and exits 0, or 1
-  with the typed refusal written to stderr; the printed verify command is
-  quoted, names `--target`, `--backup`, `--legacy-image` and `--status-url` at the
-  plan's own port, and carries `--manager-addr` when the plan was derived against
-  one. `upgrade rollback --verify --legacy <dir> [--backup <dir>]
-  [--status-url <url>] [--manager-addr HOST:PORT] [--legacy-image <ref>]
-  [--json]` passes the observation to the service, which probes the default
-  `http://127.0.0.1:18318/health` unless a URL is given, then records; unproven
-  evidence exits 1, usage errors 2.
+  with the typed refusal written to stderr exactly once; an untyped environment
+  or usage failure exits 2. `--manager-addr` defaults to the configured
+  `HTTP_ADDR`, so the plan's manager port and the probe comparison describe the
+  listener the Manager really holds; the printed verify command is quoted, names
+  `--target`, `--backup`, `--legacy-image` and `--status-url` at the plan's own
+  port, and carries `--manager-addr`. `upgrade rollback --verify --legacy <dir>
+  [--backup <dir>] [--status-url <url>] [--manager-addr HOST:PORT]
+  [--legacy-image <ref>] [--json]` passes the observation to the service, which
+  probes the default `http://127.0.0.1:18318/health` unless a URL is given, then
+  records; unproven evidence exits 1, usage and environment errors 2.
 - **The verdict cannot exist without its evidence.** `model.Validate` requires
   `Rollback` whenever the stage is `rolled_back`, and the repository enforces the
   same invariant at both stage-writing paths: `Put` refuses such a row, and
