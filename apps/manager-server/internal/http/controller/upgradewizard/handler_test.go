@@ -1108,6 +1108,7 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	}
 	if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
 		TargetDatabase:          database,
 		SourceKind:              "upgraded-legacy",
 		SourceVersion:           "1.14.4",
@@ -1145,6 +1146,7 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	foreign := filepath.Join(t.TempDir(), "usage.sqlite")
 	if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
 		TargetDatabase:          foreign,
 		SourceKind:              "upgraded-legacy",
 		SourceFingerprintBefore: "fingerprint-before",
