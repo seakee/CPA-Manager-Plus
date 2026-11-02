@@ -25,6 +25,7 @@ import (
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/maintenancebundle"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // Rollback is modelled, never executed here. The Manager runs inside a
@@ -273,6 +274,14 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 	if err := refuseRootOverlap(sourceRoot, targetRoot); err != nil {
 		return Plan{}, err
 	}
+	// The copy-in marker is decided before the row is read. The marker describes
+	// a target an interrupted copy-in may still be moving members into, and any
+	// SQLite open in place would create or rewrite the WAL index the resume needs
+	// to match. A marker therefore refuses with the resume command instead of
+	// opening the store the resume has to finish.
+	if err := refuseUnfinishedCopyIn(targetRoot); err != nil {
+		return Plan{}, err
+	}
 	recorded, found, err := readRollbackRecord(ctx, targetRoot)
 	if err != nil {
 		return Plan{}, fmt.Errorf("read the recorded upgrade operation: %w", err)
@@ -373,6 +382,25 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		return Plan{}, err
 	}
 	return plan, nil
+}
+
+// refuseUnfinishedCopyIn keeps every rollback decision away from a v2 data root
+// a copy-in has not finished. The marker is a bounded file, so reading it never
+// opens the database the resume still has to adopt; opening that database in
+// place would create or rewrite the WAL index the copy-in compares by file
+// identity and member digest. The refusal names the command that finishes the
+// work instead of leaving the operator without a recoverable path.
+func refuseUnfinishedCopyIn(targetRoot string) error {
+	_, found, err := copyinmarker.Read(targetRoot)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorTargetConflict,
+			"the copy-in marker in this v2 data root is unreadable, so no rollback can decide against the store it describes; inspect the marker and run `cpa-manager-plus upgrade run` to resolve the unfinished copy-in", err)
+	}
+	if !found {
+		return nil
+	}
+	return newUpgradeError(UpgradeErrorRollbackNotApplicable,
+		"a copy-in in this v2 data root has not finished, so there is no recorded state to roll back yet; run `cpa-manager-plus upgrade run --legacy <dir> --target <dir>` to resume it, then prepare or verify the rollback", nil)
 }
 
 // readRollbackRecord reads the operation row from a v2 data root that may not
@@ -968,6 +996,12 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	}
 	targetRoot = canonicalPath(targetRoot)
 	if err := refuseRootOverlap(sourceRoot, targetRoot); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	// Same rule as --prepare: an unfinished copy-in is resumed, never read in
+	// place. Opening its materializing target would strand the very resume the
+	// operator is told to run.
+	if err := refuseUnfinishedCopyIn(targetRoot); err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	recorded, found, err := readRollbackRecord(ctx, targetRoot)

@@ -1100,6 +1100,186 @@ func TestRunLeavesAMaterializingTargetUntouched(t *testing.T) {
 	}
 }
 
+// holdSourceWAL keeps committed frames in the 1.x WAL, exactly as a stopped
+// source preserved on disk may still hold them. A copy-in interrupted before
+// the migration then leaves a target whose database plus WAL is the restored
+// member, which an in-place read would rewrite.
+func holdSourceWAL(t *testing.T, source string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the 1.x fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetMaxOpenConns(1)
+	for _, statement := range []string{
+		`pragma journal_mode = wal`,
+		`pragma wal_autocheckpoint = 0`,
+		`insert into settings (key, value, updated_at_ms) values ('wal_frame_probe', '1', 1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("hold the 1.x WAL: %v", err)
+		}
+	}
+}
+
+// copyTestTree copies a file or directory into destination byte for byte.
+func copyTestTree(t *testing.T, source, destination string) {
+	t.Helper()
+	info, err := os.Stat(source)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("inspect %s: %v", source, err)
+	}
+	if !info.IsDir() {
+		data, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatalf("read %s: %v", source, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			t.Fatalf("create %s: %v", filepath.Dir(destination), err)
+		}
+		if err := os.WriteFile(destination, data, info.Mode().Perm()); err != nil {
+			t.Fatalf("write %s: %v", destination, err)
+		}
+		return
+	}
+	if err := os.MkdirAll(destination, info.Mode().Perm()); err != nil {
+		t.Fatalf("create %s: %v", destination, err)
+	}
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		t.Fatalf("read %s: %v", source, err)
+	}
+	for _, entry := range entries {
+		copyTestTree(t, filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name()))
+	}
+}
+
+// interruptedCopyInTarget rebuilds the v2 data root a copy-in leaves at its
+// target-restored checkpoint: every member restored from the verified backup and
+// the materializing marker published, but no operation row yet. It is built
+// from a real copy-in's backup, so the marker names the backup the resume will
+// verify, which is what makes the following resume a real resume and not a
+// second copy.
+func interruptedCopyInTarget(t *testing.T, source string) (string, model.UpgradeOperation) {
+	t.Helper()
+	reference := rollbackReadyTarget(t, source)
+	recorded, found, err := upgradeservice.ReadRecord(context.Background(), filepath.Join(reference, "usage.sqlite"))
+	if err != nil || !found {
+		t.Fatalf("read the reference copy-in: found=%t err=%v", found, err)
+	}
+	target := t.TempDir()
+	bundle := filepath.Join(reference, "upgrade-backup")
+	copyTestTree(t, bundle, filepath.Join(target, "upgrade-backup"))
+	for _, member := range []struct{ bundle, target string }{
+		{"database", "usage.sqlite"},
+		{"database-wal", "usage.sqlite-wal"},
+		{"database-shm", "usage.sqlite-shm"},
+		{"database-journal", "usage.sqlite-journal"},
+		{"data-key", "data.key"},
+	} {
+		copyTestTree(t, filepath.Join(bundle, member.bundle), filepath.Join(target, member.target))
+	}
+	copyTestTree(t, filepath.Join(bundle, "usage-archives"), filepath.Join(target, "usage-archives"))
+	if err := copyinmarker.Write(target, copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
+		TargetDatabase:          filepath.Join(target, "usage.sqlite"),
+		SourceKind:              recorded.SourceKind,
+		SourceVersion:           recorded.SourceVersion,
+		SourceFingerprintBefore: recorded.SourceFingerprintBefore,
+		SourceFingerprintAfter:  recorded.SourceFingerprintAfter,
+		BackupManifestSHA256:    recorded.BackupManifestSHA256,
+		BackupDirectory:         filepath.Join(target, "upgrade-backup"),
+		WrittenAtMS:             time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("publish the materializing marker: %v", err)
+	}
+	return target, recorded
+}
+
+// TestRollbackRefusesAMaterializingTargetAndTheResumeStillFinishes is the N1
+// regression: --prepare and --verify used to read the operation row first, which
+// opened the interrupted copy-in's target in place, created or rewrote its WAL
+// index, and left `upgrade run` unable to resume. Both commands now decide from
+// the marker, write nothing, and the resume still reaches copy_in.
+func TestRollbackRefusesAMaterializingTargetAndTheResumeStillFinishes(t *testing.T) {
+	for _, liveWAL := range []bool{false, true} {
+		for _, mode := range []string{"prepare", "verify"} {
+			name := fmt.Sprintf("%s/live-wal-%t", mode, liveWAL)
+			t.Run(name, func(t *testing.T) {
+				source := copyReadyRunSource(t)
+				if liveWAL {
+					holdSourceWAL(t, source)
+				}
+				target, _ := interruptedCopyInTarget(t, source)
+				databasePath := filepath.Join(target, "usage.sqlite")
+				shmPath := databasePath + "-shm"
+				walPath := databasePath + "-wal"
+				shmBefore, shmErr := os.Lstat(shmPath)
+				databaseBefore, err := os.ReadFile(databasePath)
+				if err != nil {
+					t.Fatalf("read the target database: %v", err)
+				}
+				walBefore, walErr := os.ReadFile(walPath)
+
+				args := []string{"rollback", "--" + mode, "--legacy", source, "--target", target}
+				if mode == "verify" {
+					args = append(args, "--status-url", healthyProbe(t))
+				}
+				code, stdout, stderr := run(t, args...)
+				if code != 1 {
+					t.Fatalf("rollback --%s exit code = %d, want 1; stdout: %s stderr: %s", mode, code, stdout, stderr)
+				}
+				if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorRollbackNotApplicable)) {
+					t.Fatalf("rollback --%s did not refuse as not applicable: %s", mode, stderr)
+				}
+				if !strings.Contains(stderr, "upgrade run") {
+					t.Fatalf("rollback --%s does not name the resume command: %s", mode, stderr)
+				}
+				if _, err := os.Lstat(filepath.Join(target, ".upgrade-rollback")); !os.IsNotExist(err) {
+					t.Fatalf("a refused rollback --%s wrote a plan (err=%v)", mode, err)
+				}
+				// The refusal must not have opened the target: no WAL index may
+				// appear and the database and WAL bytes must be untouched.
+				shmAfter, afterErr := os.Lstat(shmPath)
+				if (shmErr == nil) != (afterErr == nil) {
+					t.Fatalf("rollback --%s changed the target WAL index presence: before=%v after=%v", mode, shmErr, afterErr)
+				}
+				if shmErr == nil && shmAfter.Size() != shmBefore.Size() {
+					t.Fatalf("rollback --%s rewrote the target WAL index: %d -> %d bytes", mode, shmBefore.Size(), shmAfter.Size())
+				}
+				databaseAfter, err := os.ReadFile(databasePath)
+				if err != nil {
+					t.Fatalf("re-read the target database: %v", err)
+				}
+				if !bytes.Equal(databaseBefore, databaseAfter) {
+					t.Fatalf("rollback --%s rewrote the target database", mode)
+				}
+				walAfter, afterWalErr := os.ReadFile(walPath)
+				if (walErr == nil) != (afterWalErr == nil) || (walErr == nil && !bytes.Equal(walBefore, walAfter)) {
+					t.Fatalf("rollback --%s rewrote the target WAL", mode)
+				}
+
+				code, resumeOut, resumeErr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
+				if code != 0 {
+					t.Fatalf("resume after rollback --%s exit code = %d; stdout: %s stderr: %s", mode, code, resumeOut, resumeErr)
+				}
+				operation, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
+				if err != nil || !found {
+					t.Fatalf("read the resumed operation: found=%t err=%v", found, err)
+				}
+				if operation.Stage != model.UpgradeStageCopyIn {
+					t.Fatalf("resume after rollback --%s stage = %q, want %q", mode, operation.Stage, model.UpgradeStageCopyIn)
+				}
+			})
+		}
+	}
+}
+
 // writeMaterializingTarget leaves the target of an interrupted copy-in: a
 // WAL-mode database with an un-checkpointed WAL and no WAL index, plus the
 // materializing marker that vouches for a backup this run will not hold.

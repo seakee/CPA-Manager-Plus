@@ -527,6 +527,15 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   `digest`), and the printed verify command passes `--legacy-image` back only
   when the operator named it, so a derived reference is never recorded as the
   image the operator started. Refusals write nothing at all.
+- **An unfinished copy-in is resumed, never read.** Before `--prepare` or
+  `--verify` reads the operation row, it reads the copy-in marker. A marker
+  means the v2 data root may still hold members an interrupted copy-in is
+  moving, and any SQLite open in place creates or rewrites the WAL index the
+  resume compares by file identity: the refusal would strand the very recovery
+  the operator needs. Both commands therefore refuse such a root with
+  `upgrade_rollback_not_applicable`, name `upgrade run` as the way to resume,
+  and write no plan and no row; once the resume records `copy_in`, the rollback
+  commands work as documented below.
 - **A row without a source root is bound once, not sent back to the copy-in.**
   When the row names no 1.x directory (a row written before the column existed),
   the plan compares the directory under decision with the before-fingerprint the
