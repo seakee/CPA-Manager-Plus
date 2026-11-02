@@ -63,6 +63,7 @@ func healthyProbe(t *testing.T) string {
 }
 
 func TestRollbackPreparePrintsAPinnedPlan(t *testing.T) {
+	isolateManagerAddress(t)
 	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target, "--json")
@@ -141,6 +142,7 @@ func TestRollbackPrepareRefusesAndWritesNothing(t *testing.T) {
 }
 
 func TestRollbackVerifyRecordsAProvenVerdict(t *testing.T) {
+	isolateManagerAddress(t)
 	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	code, stdout, stderr := run(t, "rollback", "--verify", "--legacy", source, "--target", target,
@@ -311,6 +313,7 @@ func TestRollbackVerifyKeepsTheImageInTheSourceFamily(t *testing.T) {
 // runnable as-is: it names the image the plan pinned, and the family override
 // when the plan needed one.
 func TestRollbackPreparePrintsAnExactVerifyCommand(t *testing.T) {
+	isolateManagerAddress(t)
 	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	code, human, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target,
@@ -702,6 +705,18 @@ func freePort(t *testing.T) int {
 	return port
 }
 
+// isolateManagerAddress pins HTTP_ADDR, the source of an unnamed
+// --manager-addr, to a port this test reserved for itself. Without it the CLI
+// reads the host's configured listen address and falls back to the documented
+// 0.0.0.0:18317, which a live Manager occupies on a developer host; both
+// --prepare and --verify then refuse with upgrade_rollback_v2_running before
+// the behaviour under test runs. The port is free for the rest of the test, so
+// it still reads as a stopped v2 stack, and the assertions are unchanged.
+func isolateManagerAddress(t *testing.T) {
+	t.Helper()
+	t.Setenv("HTTP_ADDR", "0.0.0.0:"+strconv.Itoa(freePort(t)))
+}
+
 // TestRollbackPrepareRefusesARunningV2Stack covers the missing precondition: a
 // plan is not rollback-ready while the v2 stack still answers on the address the
 // operator named, and nothing is written.
@@ -979,6 +994,7 @@ func TestRollbackManagerAddressTreatsAWildcardBindAsThisHost(t *testing.T) {
 // M6: the console has to say what the plan proves and what the operator has to
 // confirm, and it has to accept the volume forms 1.x installs actually use.
 func TestRollbackPreparePrintsTheOperatorVerifiedIdentity(t *testing.T) {
+	isolateManagerAddress(t)
 	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	code, stdout, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target,
@@ -998,6 +1014,7 @@ func TestRollbackPreparePrintsTheOperatorVerifiedIdentity(t *testing.T) {
 // attaches was only in the process log. The operator console reads it from
 // `upgrade status` in both forms; a copy-in row carries no such reason.
 func TestStatusShowsTheRolledBackReason(t *testing.T) {
+	isolateManagerAddress(t)
 	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
 	databasePath := filepath.Join(target, "usage.sqlite")
