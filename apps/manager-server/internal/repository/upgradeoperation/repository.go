@@ -334,23 +334,6 @@ func nullString(value string) any {
 	return value
 }
 
-// RecordReconciliation stores the reconciliation report on the single row
-// without rebuilding it: Put would clear the provenance a completed operation
-// must keep carrying, so this is the only writer for this column. A row must
-// already exist, because a reconciliation only ever describes a recorded
-// copy-in.
-func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMessage) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := RecordReconciliationTx(ctx, tx, report); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 // RecordReconciliationTx stores the report inside the caller's transaction, so
 // the evidence commits together with the marks it explains and the stage it
 // authorizes. The repository owns updated_at_ms here too: it is recomputed from
