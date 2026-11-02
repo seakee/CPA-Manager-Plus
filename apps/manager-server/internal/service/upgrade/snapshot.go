@@ -27,6 +27,14 @@ var (
 	// would land inside a tree the operation must not write to.
 	ErrSnapshotFailed = errors.New("upgrade database snapshot could not be created")
 
+	// ErrSnapshotRootUnknown reports a read that would have to stage a private
+	// copy but cannot name the configured source root it must stay out of — a
+	// mount lookup that outlived its bound before it resolved the root, for
+	// example. It fails closed: the unnamed root may hold the temporary
+	// directory, and a snapshot abandoned by a killed process would stay in a
+	// tree this operation must not write to.
+	ErrSnapshotRootUnknown = errors.New("upgrade credential snapshot root is unknown")
+
 	// afterSnapshotCopy is the package's synchronous test seam. It runs once
 	// between the copy and the source's second digest, so a test can prove that
 	// a source which gains a WAL or a rewrite at exactly that moment is refused

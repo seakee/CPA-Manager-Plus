@@ -715,6 +715,27 @@ func verifyAdminCredential(ctx context.Context, source *credentialSource, key st
 	return nil
 }
 
+// CredentialSnapshotRoots names the trees a credential read's private snapshot
+// must stay out of. The read copies the whole database, and this route
+// authenticates every request, so a copy left behind in either tree is a full
+// database written into a volume the operation promises to preserve or to
+// measure.
+//
+// Target is the v2 data root that owns the database being read; the database
+// file's own directory is always excluded as well, so a caller cannot weaken the
+// target exclusion by naming a different tree. Source is the configured 1.x
+// source root, and SourceKnown separates the two cases an empty Source cannot:
+// no mount is configured at all, and the caller could not resolve the configured
+// root — a hung mount lookup, for example. A snapshot is taken only when the
+// second root is known or known to be absent; otherwise the read fails closed
+// with ErrSnapshotRootUnknown rather than guess, because the unnamed root may
+// hold the operating system's temporary directory.
+type CredentialSnapshotRoots struct {
+	Target      string
+	Source      string
+	SourceKnown bool
+}
+
 // VerifyManagerCredential is VerifyAdminSource against the Manager's own store
 // rather than a 1.x source volume.
 //
@@ -733,9 +754,9 @@ func verifyAdminCredential(ctx context.Context, source *credentialSource, key st
 // rewrites `-shm`. This route authenticates every status poll, so it is the
 // first reader to reach the target; it must leave it exactly as it found it and
 // still prove the administrator key. The key is therefore verified against a
-// private snapshot outside both the target's data root and, when the caller
-// names it, the configured 1.x source root. sourceRoot is that second root; an
-// empty value means the caller knows of none.
+// private snapshot outside both the target's data root and the configured 1.x
+// source root; CredentialSnapshotRoots names both, and a caller that could not
+// resolve the second root does not get a snapshot at all.
 //
 // The Manager store's credential is not cached either. It is the live database:
 // ordinary Manager traffic appends to its WAL and checkpoints it, so a cached
@@ -745,7 +766,7 @@ func verifyAdminCredential(ctx context.Context, source *credentialSource, key st
 // not the whole-file copy that makes a preserved source expensive. Only the
 // materializing target is read as a preserved source, and only it may be
 // answered from that state's remembered verdict.
-func VerifyManagerCredential(ctx context.Context, databasePath, sourceRoot, key string) error {
+func VerifyManagerCredential(ctx context.Context, databasePath string, roots CredentialSnapshotRoots, key string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
 	}
@@ -761,7 +782,14 @@ func VerifyManagerCredential(ctx context.Context, databasePath, sourceRoot, key 
 		return err
 	}
 	if materializing {
-		return verifyPreservedCredential(ctx, databasePath, key, sourceRoot)
+		if !roots.SourceKnown {
+			// A snapshot under a root this process cannot name could land inside
+			// the tree the copy-in is preserving. Refusing before the read is the
+			// only answer that keeps the promise; the caller's next poll can
+			// retry once the mount answers.
+			return fmt.Errorf("%w: the configured source root was not resolved", ErrSnapshotRootUnknown)
+		}
+		return verifyPreservedCredential(ctx, databasePath, key, strings.TrimSpace(roots.Target), strings.TrimSpace(roots.Source))
 	}
 	ctx, cancel := context.WithTimeout(ctx, credentialVerifyTimeout)
 	defer cancel()

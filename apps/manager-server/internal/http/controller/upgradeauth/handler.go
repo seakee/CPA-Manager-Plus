@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -28,7 +29,15 @@ type Handler struct {
 	// rather than the Manager's own store. The two files are read differently:
 	// a source is preserved byte for byte and only ever read through a private
 	// snapshot, while the Manager store is this process's live database.
-	mountSource        bool
+	mountSource bool
+	// sourceRoot is the configured 1.x data directory resolved when this leaf
+	// was built. It is kept even when the mount holds no database the policy
+	// accepts and the credential therefore falls back to the Manager store: the
+	// fallback still stages a private snapshot for a materializing target, and
+	// that copy must not land in the tree the upgrade preserves. It is resolved
+	// once, here, exactly as the surface's credential rule resolved it; the
+	// wizard reads resolve the mount per request.
+	sourceRoot         string
 	instance           [32]byte
 	mu                 sync.Mutex
 	observed           sqlite.LegacyInspection
@@ -44,12 +53,12 @@ type Handler struct {
 // the entry name the source's own conditions.
 const StatusObservationUnavailable = "observation_unavailable"
 
-func New(paths sqlite.InspectionPaths, publicOrigin string, mountSource bool) (*Handler, error) {
+func New(paths sqlite.InspectionPaths, publicOrigin string, mountSource bool, sourceRoot string) (*Handler, error) {
 	normalized, err := upgradesurface.NormalizeOrigin(publicOrigin)
 	if err != nil {
 		return nil, err
 	}
-	h := &Handler{paths: paths, publicOrigin: normalized, mountSource: mountSource}
+	h := &Handler{paths: paths, publicOrigin: normalized, mountSource: mountSource, sourceRoot: strings.TrimSpace(sourceRoot)}
 	if _, err := rand.Read(h.instance[:]); err != nil {
 		return nil, err
 	}
@@ -62,7 +71,17 @@ func (h *Handler) verifyCredential(ctx context.Context, key string) error {
 	if h.mountSource {
 		return upgradeservice.VerifyAdminSource(ctx, h.paths.Database, key)
 	}
-	return upgradeservice.VerifyManagerCredential(ctx, h.paths.Database, "", key)
+	// The Manager-store fallback still snapshots a materializing copy-in target,
+	// so both trees that copy must stay out of travel with the read: the v2 data
+	// root the store lives in, and the configured 1.x source root resolved with
+	// this leaf. The root is known by construction here — it is resolved once at
+	// startup, and an absent mount resolves to no root at all — so an operator's
+	// TMPDIR inside it is refused by the service instead of staging a copy there.
+	return upgradeservice.VerifyManagerCredential(ctx, h.paths.Database, upgradeservice.CredentialSnapshotRoots{
+		Target:      filepath.Dir(h.paths.Database),
+		Source:      h.sourceRoot,
+		SourceKnown: true,
+	}, key)
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

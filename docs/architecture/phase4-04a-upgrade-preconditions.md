@@ -528,7 +528,13 @@ on both surfaces at once, and no write route exists.
   copied WAL and rewrite `-shm`. The marker is therefore read before any open,
   the same order admission and the status projection use, and the key is proved
   against a private snapshot outside both the target's data root and the
-  configured 1.x source root. A target whose key cannot be proved this way
+  configured 1.x source root. Both roots are named by every caller that can reach
+  that read: the entry leaf carries the root it resolved at startup, and the
+  wizard carries the root its per-request mount lookup resolved — a lookup that
+  outlives its bound still hands over the root it published before the lookup
+  that hung, and one that never resolved the root refuses the snapshot with a
+  typed condition instead of staging it in a tree nobody named. A target whose
+  key cannot be proved this way
   answers the same typed condition as an unreadable source; authentication is
   never skipped, and a rejected key still answers `401`.
   The credential read returns the credential row and nothing else:

@@ -499,6 +499,33 @@ func TestMountDeadlineIsATimeoutNotAnUnreadableSource(t *testing.T) {
 	<-finished
 }
 
+// TestTimedOutMountDoesNotRunThePreflight is the preflight half of the same
+// contract, now that a timed-out answer still carries the configured root for the
+// credential snapshot's exclusion. That root is not an inspection result: running
+// the preflight against it would put the hung filesystem call back on the request
+// thread, where the preflight deadline cannot interrupt it. The route answers the
+// mount's deadline, and a root that would otherwise produce a report is never
+// inspected.
+func TestTimedOutMountDoesNotRunThePreflight(t *testing.T) {
+	root := legacySourceDir(t) // A report-producing mount if it were inspected.
+	database := managerCredentialStore(t, testAdminKey)
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	handler := newHandler(root, database)
+	handler.MountTimeout = 20 * time.Millisecond
+	handler.lookupMount = func(string) mountResolution {
+		<-release
+		close(finished)
+		return mountResolution{root: root}
+	}
+	_, body := request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusServiceUnavailable)
+	if !strings.Contains(body, `"`+CodeMountTimeout+`"`) {
+		t.Fatalf("timed-out preflight = %s, want %s", body, CodeMountTimeout)
+	}
+	close(release)
+	<-finished
+}
+
 // TestMountBoundContainsTheConfiguredRootResolution is M4 at the one place the
 // bound lives. The production resolver behind Handler.LegacyRoot stats the
 // configured directory — `/legacy` when the operator set nothing — and a stat on

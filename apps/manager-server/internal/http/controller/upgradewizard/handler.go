@@ -224,6 +224,14 @@ type Handler struct {
 type mountFlight struct {
 	done   chan struct{}
 	answer mountResolution
+	// root and rootKnown publish the configured root as soon as the flight has
+	// resolved it, before the lookup that can hang. A bound that expires while
+	// the lookup is still unanswered can then still name the tree a credential
+	// snapshot must stay out of; a bound that expires before the root is
+	// resolved leaves rootKnown false, and a snapshot is refused rather than
+	// staged under a tree nobody named. Both are written under Handler.mountMu.
+	root      string
+	rootKnown bool
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -323,9 +331,16 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 		// The Manager fallback is normally this process's live store and is read
 		// in place. When it is a copy-in target that was not materialized
 		// completely, the service detects that before opening it and proves the
-		// key against a private snapshot; the configured source root is passed
-		// along so that snapshot never lands in the tree the copy-in is reading.
-		verifyErr = upgradeservice.VerifyManagerCredential(r.Context(), database, mount.root, key)
+		// key against a private snapshot; both trees that copy must stay out of
+		// are named here, so a mount lookup that timed out still hands over the
+		// root it resolved. A root the flight never resolved arrives with
+		// rootKnown false and the service refuses the snapshot instead of
+		// staging it in a tree this request could not name.
+		verifyErr = upgradeservice.VerifyManagerCredential(r.Context(), database, upgradeservice.CredentialSnapshotRoots{
+			Target:      filepath.Dir(database),
+			Source:      mount.root,
+			SourceKnown: mount.rootKnown,
+		}, key)
 	}
 	switch {
 	case verifyErr == nil:
@@ -384,6 +399,12 @@ func (h *Handler) managerDatabase() string {
 type mountResolution struct {
 	// root is the configured 1.x data directory, empty when none is configured.
 	root string
+	// rootKnown reports whether root above is the answer to "what is
+	// configured" or only an empty placeholder. A resolution that never got to
+	// resolve the root — a lookup bound that expired while the root itself was
+	// still being resolved — leaves it false, and the credential read refuses to
+	// snapshot rather than guess the tree it must stay out of.
+	rootKnown bool
 	// database is the mount's database the shared file policy accepts. Empty
 	// when the mount holds no database this build may read.
 	database string
@@ -463,8 +484,15 @@ func (h *Handler) resolveMount(ctx context.Context) mountResolution {
 	case <-timer.C:
 		// The lookup outlived its bound. The goroutine keeps running — its
 		// filesystem calls cannot be cancelled — but it is not replaced: the
-		// flight stays in place and the next poll joins it.
-		return mountResolution{code: CodeMountTimeout}
+		// flight stays in place and the next poll joins it. Whatever the flight
+		// already resolved is carried into the answer, because a credential read
+		// behind this request still has to keep its private snapshot out of the
+		// configured source tree. A root the flight had not published yet stays
+		// unknown rather than being guessed.
+		h.mountMu.Lock()
+		root, known := flight.root, flight.rootKnown
+		h.mountMu.Unlock()
+		return mountResolution{root: root, rootKnown: known, code: CodeMountTimeout}
 	}
 }
 
@@ -481,7 +509,15 @@ func (h *Handler) joinMountFlight() *mountFlight {
 	flight := &mountFlight{done: make(chan struct{})}
 	h.mountFlight = flight
 	go func() {
-		answer := h.inspectConfiguredMount()
+		// Resolve the root first and publish it: on a hung mount the lookup below
+		// never returns, and the request's bound must still know which tree a
+		// credential snapshot cannot land in. The publication is a plain field
+		// assignment under the same mutex the answer uses.
+		root := h.configuredRoot()
+		h.mountMu.Lock()
+		flight.root, flight.rootKnown = root, true
+		h.mountMu.Unlock()
+		answer := h.inspectMountAt(root)
 		h.mountMu.Lock()
 		flight.answer = answer
 		if h.mountFlight == flight {
@@ -493,22 +529,30 @@ func (h *Handler) joinMountFlight() *mountFlight {
 	return flight
 }
 
-// inspectConfiguredMount runs the whole mount question inside the flight: the
-// configured root's resolution, then the shared database file policy on the
-// database inside it. It is a function, not a package variable: a test
-// substitutes the inspection through Handler.lookupMount, so the package holds no
-// mutable state and a substitution cannot leak between tests.
-func (h *Handler) inspectConfiguredMount() mountResolution {
-	root := ""
-	if h.LegacyRoot != nil {
-		root = strings.TrimSpace(h.LegacyRoot())
+// configuredRoot resolves the configured 1.x data directory. A handler with no
+// resolver has no configured root, which is a known answer: the empty string.
+// The call is the filesystem's — the default resolver stats /legacy — so it runs
+// inside the flight, never on the request's own thread.
+func (h *Handler) configuredRoot() string {
+	if h.LegacyRoot == nil {
+		return ""
 	}
+	return strings.TrimSpace(h.LegacyRoot())
+}
+
+// inspectMountAt runs the mount question for a root the flight already resolved:
+// the shared database file policy on the database inside it. It is a function,
+// not a package variable: a test substitutes the inspection through
+// Handler.lookupMount, so the package holds no mutable state and a substitution
+// cannot leak between tests.
+func (h *Handler) inspectMountAt(root string) mountResolution {
 	lookup := inspectMount
 	if h.lookupMount != nil {
 		lookup = h.lookupMount
 	}
 	answer := lookup(root)
 	answer.root = root
+	answer.rootKnown = true
 	return answer
 }
 
@@ -597,10 +641,19 @@ type preflightDocument struct {
 // directory-level conditions short-circuit it, because those leave nothing to
 // inspect.
 func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount mountResolution) {
+	// A lookup that outlived its bound was never assessed. The root such an answer
+	// carries is the tree the credential snapshot must stay out of, not an
+	// inspection result: running the preflight against it would put the very
+	// filesystem call the bound exists to stop back on the request thread. The
+	// preflight's own deadline cannot interrupt that call.
+	if mount.code == CodeMountTimeout {
+		writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
+		return
+	}
 	// Without a configured directory there is nothing to inspect: the mount's own
-	// condition (a missing or unusable root, a lookup that outlived its bound) is
-	// the answer. A file-level refusal keeps its root and is reported by the
-	// preflight itself, with the same code the mount lookup named.
+	// condition (a missing or unusable root) is the answer. A file-level refusal
+	// keeps its root and is reported by the preflight itself, with the same code
+	// the mount lookup named.
 	if mount.root == "" {
 		code := mount.code
 		if code == "" {
@@ -1110,7 +1163,7 @@ var (
 	// an error shown to the administrator is read by a human who can act on a
 	// short fragment, so this surface redacts from the prefix. It is a tighter
 	// threshold on the same vocabulary, not a second one.
-	issuedKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{4,}`)
+	issuedKeyPattern  = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{4,}`)
 	productKeyPattern = regexp.MustCompile(`(?i)\b(?:` + strings.Join(productKeyPrefixes, "|") + `)[A-Za-z0-9_.\-]{` + strconv.Itoa(minProductKeyBody) + `,}`)
 	// urlCredentialPattern is a URL whose authority embeds credentials. The
 	// shared scrubber covers the header and assignment shapes; a userinfo

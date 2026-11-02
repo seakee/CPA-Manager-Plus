@@ -149,8 +149,15 @@ func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.Inspection
 	// refused by all three. The resolution also says which file it landed on,
 	// because a preserved source and this process's own store are read
 	// differently.
-	credentialPaths, mountSource := upgradeCredentialPaths(paths)
-	if handler, err := upgradeauth.New(credentialPaths, os.Getenv("CPAMP_PUBLIC_ORIGIN"), mountSource); err == nil {
+	// The configured 1.x data directory is resolved once and used twice: it is
+	// the surface's credential rule's mount, and it is the second tree the
+	// entry leaf must keep its private snapshot out of when the rule falls back
+	// to the Manager store. Resolving it here, where the leaf is built, is what
+	// lets the entry name the root on every authentication without a
+	// per-request filesystem call it cannot bound.
+	legacyRoot := configuredLegacyRoot()
+	credentialPaths, mountSource := upgradeCredentialPaths(legacyRoot, paths)
+	if handler, err := upgradeauth.New(credentialPaths, os.Getenv("CPAMP_PUBLIC_ORIGIN"), mountSource, legacyRoot); err == nil {
 		h.upgradeAuth = handler
 		// The wizard routes resolve the credential with the surface's one rule
 		// from the mount they inspect and this database, exactly as the entry

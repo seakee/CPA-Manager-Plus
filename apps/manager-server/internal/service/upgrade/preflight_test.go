@@ -1918,14 +1918,20 @@ func TestVerifyManagerCredentialReadsTheOwnStore(t *testing.T) {
 		t.Fatalf("store WAL = %v, %v; want the credential in the WAL", info, err)
 	}
 
-	if err := VerifyManagerCredential(context.Background(), store, "", key); err != nil {
+	liveStore := CredentialSnapshotRoots{SourceKnown: true}
+	if err := VerifyManagerCredential(context.Background(), store, liveStore, key); err != nil {
 		t.Fatalf("verify the store credential: %v", err)
 	}
-	if err := VerifyManagerCredential(context.Background(), store, "", "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
+	if err := VerifyManagerCredential(context.Background(), store, liveStore, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
 		t.Fatalf("foreign key = %v, want %v", err, ErrAdminUnauthorized)
 	}
-	if err := VerifyManagerCredential(context.Background(), filepath.Join(t.TempDir(), "absent.sqlite"), "", key); !errors.Is(err, ErrSourceDatabaseMissing) {
+	if err := VerifyManagerCredential(context.Background(), filepath.Join(t.TempDir(), "absent.sqlite"), liveStore, key); !errors.Is(err, ErrSourceDatabaseMissing) {
 		t.Fatalf("absent store = %v, want %v", err, ErrSourceDatabaseMissing)
+	}
+	// A live store is read in place and needs no snapshot, so an unresolved
+	// source root cannot make it refuse: only the materializing branch can.
+	if err := VerifyManagerCredential(context.Background(), store, CredentialSnapshotRoots{}, key); err != nil {
+		t.Fatalf("live store with an unresolved source root: %v", err)
 	}
 }
 
@@ -1979,10 +1985,13 @@ func TestVerifyManagerCredentialSnapshotsAMaterializingTarget(t *testing.T) {
 	}
 
 	before := sourceEntries(t, targetRoot)
-	if err := VerifyManagerCredential(context.Background(), target, "", key); err != nil {
+	// The source root is known to be absent for this fixture: the snapshot only
+	// has to stay out of the target's own data root.
+	roots := CredentialSnapshotRoots{Target: targetRoot, SourceKnown: true}
+	if err := VerifyManagerCredential(context.Background(), target, roots, key); err != nil {
 		t.Fatalf("verify the materializing target's credential: %v", err)
 	}
-	if err := VerifyManagerCredential(context.Background(), target, "", "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
+	if err := VerifyManagerCredential(context.Background(), target, roots, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
 		t.Fatalf("foreign key on a materializing target = %v, want %v", err, ErrAdminUnauthorized)
 	}
 	requireUnchangedSource(t, before, sourceEntries(t, targetRoot))

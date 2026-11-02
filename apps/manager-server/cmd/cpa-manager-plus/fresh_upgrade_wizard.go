@@ -47,8 +47,8 @@ func (a *freshApplication) newUpgradeWizard() *upgradewizard.Handler {
 // mount that appears, disappears or is repointed after startup is seen by the
 // reads first, and the entry leaf keeps its startup resolution until it is
 // rebuilt.
-func upgradeCredentialDatabase(managerDatabase string) string {
-	return upgradeservice.CredentialDatabase(configuredLegacyRoot(), managerDatabase)
+func upgradeCredentialDatabase(legacyRoot, managerDatabase string) string {
+	return upgradeservice.CredentialDatabase(legacyRoot, managerDatabase)
 }
 
 // upgradeCredentialPaths is the surface's one credential resolution expressed as
@@ -61,8 +61,8 @@ func upgradeCredentialDatabase(managerDatabase string) string {
 // The second result reports which file it is, because the two are read
 // differently: the configured source is preserved byte for byte and is never
 // opened in place, while the Manager store is this process's own live database.
-func upgradeCredentialPaths(manager sqliterepo.InspectionPaths) (sqliterepo.InspectionPaths, bool) {
-	database := upgradeCredentialDatabase(manager.Database)
+func upgradeCredentialPaths(legacyRoot string, manager sqliterepo.InspectionPaths) (sqliterepo.InspectionPaths, bool) {
+	database := upgradeCredentialDatabase(legacyRoot, manager.Database)
 	if strings.TrimSpace(database) == strings.TrimSpace(manager.Database) {
 		return manager, false
 	}
