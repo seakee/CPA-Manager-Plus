@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { useState } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -9,7 +10,7 @@ import {
   type FreshOperation,
   type FreshStrategyCheckpoint,
 } from './bootstrapTransport';
-import type { AdoptionSummary } from './freshAdoption';
+import type { AdoptionItem, AdoptionSummary } from './freshAdoption';
 import type { createPublicApiClient } from './publicApi';
 import { setFullWebLanguage } from '../i18n/fullweb';
 import { adoptGuidanceText, adoptReasonText, adoptText } from '../i18n/freshAdopt';
@@ -24,6 +25,14 @@ const identity = {
 const admin = 'Admin_0123456789-abcdefghijklmnopqrstuvwxyz!';
 const sourceKey = 'adopt-source-management-key';
 const sourceAddress = 'http://source-cpa:8317';
+
+// The record's own identity for one item: the server digests the item name, so a
+// fixture builds the same digest. `withIdentity` is how every recorded item in
+// this file carries the two fields the reply always states.
+const itemID = (name: string) => createHash('sha256').update(name).digest('hex');
+const withIdentity = (
+  items: Array<Omit<AdoptionItem, 'id' | 'left'> & { left?: number }>
+): AdoptionItem[] => items.map((item) => ({ id: itemID(item.item), left: 0, ...item }));
 const artifactId = 'sha256:' + 'a'.repeat(64);
 const runtime = {
   runtimeIdentity: 'runtime',
@@ -71,7 +80,7 @@ const adoptCheckpoint: FreshStrategyCheckpoint = {
 // One recorded run: a copy that needs no retry, with one manual item and one
 // unknown reason, which is what the localization fallback is for.
 const finishedRun: AdoptionSummary = {
-  items: [
+  items: withIdentity([
     { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
     {
       item: 'credential:b.json',
@@ -94,7 +103,7 @@ const finishedRun: AdoptionSummary = {
       reason: 'reason_this_browser_does_not_know',
       retryable: false,
     },
-  ],
+  ]),
   planned: 4,
   finished: true,
   running: false,
@@ -106,11 +115,11 @@ const finishedRun: AdoptionSummary = {
 // and the run is finished, so the old completion rule called this a finished
 // console — the one state whose only working action is a resume.
 const shortfallRun: AdoptionSummary = {
-  items: [
+  items: withIdentity([
     { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
     { item: 'credential:b.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
     { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', retryable: false },
-  ],
+  ]),
   planned: 5,
   finished: true,
   running: false,
@@ -121,7 +130,7 @@ const shortfallRun: AdoptionSummary = {
 // Every outcome at once. The copy count on screen has to be the wire's
 // `counts.migrated`, and a resource the source never had is not a copy.
 const allOutcomes: AdoptionSummary = {
-  items: [
+  items: withIdentity([
     { item: 'credential:copied-a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
     { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', retryable: false },
     {
@@ -134,7 +143,7 @@ const allOutcomes: AdoptionSummary = {
     { item: 'credential:left-1.json', kind: 'credential', outcome: 'absent_at_source', reason: '', retryable: false },
     { item: 'credential:left-2.json', kind: 'credential', outcome: 'absent_at_source', reason: '', retryable: false },
     { item: 'credential:left-3.json', kind: 'credential', outcome: 'absent_at_source', reason: '', retryable: false },
-  ],
+  ]),
   planned: 6,
   finished: true,
   running: false,
@@ -145,10 +154,10 @@ const allOutcomes: AdoptionSummary = {
 // A settled run with nothing left over: the only record that may be called a
 // complete adoption, and only once the installation itself is complete.
 const cleanRun: AdoptionSummary = {
-  items: [
+  items: withIdentity([
     { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
     { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', retryable: false },
-  ],
+  ]),
   planned: 2,
   finished: true,
   running: false,
@@ -633,7 +642,9 @@ it('resumes with the durable revision, not the one the page last read', async ()
 
 it('clears the retryable acknowledgement when the set changes at the same size', async () => {
   const retryableRun = (item: string): AdoptionSummary => ({
-    items: [{ item, kind: 'credential', outcome: 'failed', reason: 'download_failed', retryable: true }],
+    items: withIdentity([
+      { item, kind: 'credential', outcome: 'failed', reason: 'download_failed', retryable: true },
+    ]),
     planned: 1,
     finished: true,
     running: false,
@@ -760,10 +771,12 @@ it('localizes a known reason and falls back to one sentence for an unknown one',
   expect(adoptReasonText('reason_this_browser_does_not_know')).toBe(
     adoptText('reasonFallback')
   );
-  // The next step is the page's own sentence for the item's kind, behind the
-  // disclosure. The record's instruction is not part of the reply at all.
+  // The next step is the page's own sentence for the item's kind and reason,
+  // behind the disclosure. The record's instruction is not part of the reply at
+  // all.
   expect(maybe('adopt-guidance-credential').length).toBeGreaterThan(0);
-  expect(text()).toContain(adoptGuidanceText('credential'));
+  expect(text()).toContain(adoptGuidanceText('credential', 'runtime_only_credential'));
+  expect(text()).toContain(adoptGuidanceText('config_leaf', 'reason_this_browser_does_not_know'));
 });
 
 it('never claims a complete adoption over a settled run with retryable items', async () => {
@@ -888,6 +901,89 @@ it('stops polling and says so when the progress read keeps failing', async () =>
   } finally {
     vi.useRealTimers();
   }
+});
+
+it('states the next step the recorded reason needs and the count it kept', async () => {
+  // One credential exists only inside the source process, so there is no file to
+  // copy; the other stands for files the record could not hold, and the count is
+  // the record's own.
+  const consolidated: AdoptionSummary = {
+    items: [
+      {
+        id: itemID('credential:runtime-only.json'),
+        item: 'credential:runtime-only.json',
+        kind: 'credential',
+        outcome: 'manual',
+        reason: 'runtime_only_credential',
+        retryable: false,
+        left: 0,
+      },
+      {
+        id: itemID('credential-inventory-excess'),
+        item: 'credential-inventory-excess',
+        kind: 'credential',
+        outcome: 'manual',
+        reason: 'adoption_inventory_too_large',
+        retryable: false,
+        left: 4,
+      },
+    ],
+    planned: 2,
+    finished: true,
+    running: false,
+    retryable: 0,
+    counts: { migrated: 0, manual: 2, failed: 0, absent_at_source: 0 },
+  };
+  await adoptServer({ summaries: [consolidated] });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+
+  expect(text()).toContain(adoptGuidanceText('credential', 'runtime_only_credential'));
+  expect(text()).toContain(adoptGuidanceText('credential', 'adoption_inventory_too_large', 4));
+  expect(text()).toContain('4');
+  // The generic "copy this credential file" step is wrong for both of them.
+  expect(text()).not.toContain(adoptText('guidanceCredential'));
+});
+
+it('keeps two items that scrub to the same name apart', async () => {
+  // Two token-shaped file names reach the page as the same text. The
+  // acknowledgement is about the record's items, so a different pair is a
+  // decision the operator has not made even though the text is identical.
+  const scrubbedRun = (first: string, second: string): AdoptionSummary => ({
+    items: [first, second].map((name) => ({
+      id: itemID(name),
+      item: 'credential:[redacted].json',
+      kind: 'credential',
+      outcome: 'failed',
+      reason: 'download_failed',
+      retryable: true,
+      left: 0,
+    })),
+    planned: 2,
+    finished: true,
+    running: false,
+    retryable: 2,
+    counts: { migrated: 0, manual: 0, failed: 2, absent_at_source: 0 },
+  });
+  await adoptServer({
+    summaries: [
+      scrubbedRun('credential:sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json', 'credential:sk-proj-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json'),
+      scrubbedRun('credential:sk-proj-cccccccccccccccccccccccccccccccc.json', 'credential:sk-proj-dddddddddddddddddddddddddddddddd.json'),
+    ],
+    completions: [{ status: 409, body: { code: 'adopt_migration_retryable', retryable: 2 } }],
+  });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  await click('adopt-complete');
+  await input('adopt-accept-retryable', true);
+  expect(byID('adopt-accept-retryable').props.checked).toBe(true);
+  await click('adopt-refresh');
+  await settle();
+  expect(byID('adopt-accept-retryable').props.checked).toBe(false);
 });
 
 // --- the Console carrier ---------------------------------------------------

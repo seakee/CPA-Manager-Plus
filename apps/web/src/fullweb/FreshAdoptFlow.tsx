@@ -74,7 +74,7 @@ function decisions(checkpoint?: FreshStrategyCheckpoint): AdoptionDecision[] {
 function retryableIdentity(summary: AdoptionSummary): string {
   return summary.items
     .filter((item) => item.retryable)
-    .map((item) => item.item)
+    .map((item) => item.id)
     .sort()
     .join('\n');
 }
@@ -801,12 +801,11 @@ export function FreshAdoptFlow({
                             <ul className="adopt-items">
                               {items.map((item, index) => (
                                 <li
-                                  // The item identity is the record's, and a
-                                  // scrubbed name can repeat: the position keeps
-                                  // the list keyed without asking the text to be
-                                  // unique.
-                                  key={`${outcome}:${index}`}
-                                  data-testid={`adopt-item-${item.item}`}
+                                  // The identity is the record's own, not the
+                                  // text this page shows: two scrubbed names can
+                                  // be equal and are still two items.
+                                  key={item.id}
+                                  data-testid={`adopt-item-${item.id}`}
                                 >
                                   <span className="adopt-item-name">{item.item}</span>
                                   <span className="badge badge-neutral">
@@ -828,7 +827,7 @@ export function FreshAdoptFlow({
                                     <details className="journey-disclosure">
                                       <summary>{adoptText('details')}</summary>
                                       <p data-testid={`adopt-guidance-${item.kind}`}>
-                                        {adoptGuidanceText(item.kind)}
+                                        {adoptGuidanceText(item.kind, item.reason, item.left)}
                                       </p>
                                     </details>
                                   )}

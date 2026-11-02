@@ -53,16 +53,30 @@ export type AdoptionKind = 'credential' | 'config_leaf' | 'config_family' | 'pro
 export type AdoptionOutcome = 'migrated' | 'manual' | 'failed' | 'absent_at_source';
 
 /**
- * One recorded per-item result. It never carries a credential or a value, and it
- * never carries the record's free-text instruction: the page states the next step
- * from `kind`, so upstream metadata cannot reach the screen as prose.
+ * One recorded per-item result.
+ *
+ * `item` is the record's item name after the server's output boundary, so it can
+ * still be a credential file name the source CPA chose — the server redacts the
+ * source credentials it read by value, and a name that reaches this page is a
+ * name, never a value. It never carries the record's free-text instruction: the
+ * page states the next step from `kind` and `reason`, so upstream metadata cannot
+ * reach the screen as prose.
+ *
+ * `id` is the record's own identity for the item, independent of that text: two
+ * token-shaped names scrub to the same string, and an acknowledgement has to be
+ * about the record's item rather than about text that happens to be equal.
+ *
+ * `left` is how many source items the record could not hold at all, set on the
+ * aggregate excess marker only.
  */
 export interface AdoptionItem {
+  id: string;
   item: string;
   kind: AdoptionKind;
   outcome: AdoptionOutcome;
   reason: string;
   retryable: boolean;
+  left: number;
 }
 
 /**
@@ -175,20 +189,25 @@ export function parseAdoptionSummary(value: unknown): AdoptionSummary {
     if (
       !item ||
       typeof item !== 'object' ||
+      typeof item.id !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(item.id) ||
       typeof item.item !== 'string' ||
       !item.item ||
       !kinds[item.kind] ||
       !outcomes[item.outcome] ||
       (item.reason !== undefined && typeof item.reason !== 'string') ||
-      typeof item.retryable !== 'boolean'
+      typeof item.retryable !== 'boolean' ||
+      (item.left !== undefined && !count(item.left))
     )
       throw new Error('Invalid adoption item');
     return {
+      id: item.id,
       item: item.item,
       kind: item.kind,
       outcome: item.outcome,
       reason: item.reason || '',
       retryable: item.retryable,
+      left: item.left ?? 0,
     };
   });
   return {

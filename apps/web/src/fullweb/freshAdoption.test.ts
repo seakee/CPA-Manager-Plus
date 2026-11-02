@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { BOOTSTRAP_UI, createBootstrapTransport, type FreshOperation } from './bootstrapTransport';
 import {
@@ -6,6 +7,7 @@ import {
   normalizeCPAAddress,
   parseAdoptionSummary,
   validManagementKey,
+  type AdoptionItem,
 } from './freshAdoption';
 import { createPublicApiClient, type FullWebCredential } from './publicApi';
 import { resolveRoutingContext } from './routingContext';
@@ -36,45 +38,56 @@ const source = {
 };
 const target = { runtimeIdentity: 'owned-runtime', runtimeGeneration: 3, artifactId };
 
+// The record's own identity for one item: the server digests the item name.
+const itemID = (name: string) => createHash('sha256').update(name).digest('hex');
+const recorded = (
+  item: Omit<AdoptionItem, 'id' | 'left'> & { left?: number }
+): AdoptionItem => ({ id: itemID(item.item), left: 0, ...item });
+
 // A real `GET installation/adoption` body: the frozen server shape, including an
 // omitted reason on a migrated item and the reason code the executor records for
 // its manual and retryable ones. The reply carries no instruction text: the page
-// states the next step from the item's kind.
+// states the next step from the item's kind and reason.
 const summary = {
   items: [
-    {
+    recorded({
       item: 'credential:claude-source.json',
       kind: 'credential',
       outcome: 'migrated',
       retryable: false,
-    },
-    {
+    }),
+    recorded({
       item: 'credential:codex-source.json',
       kind: 'credential',
       outcome: 'failed',
       reason: 'download_failed',
       retryable: true,
-    },
-    {
+    }),
+    recorded({
       item: 'credential:plugin-source.json',
       kind: 'credential',
       outcome: 'manual',
       reason: 'runtime_only_credential',
       retryable: false,
-    },
-    {
+    }),
+    recorded({
       item: 'config:routing.session-affinity',
       kind: 'config_leaf',
       outcome: 'absent_at_source',
       retryable: false,
-    },
-    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', retryable: false },
-    {
+    }),
+    recorded({
+      item: 'config:routing.strategy',
+      kind: 'config_leaf',
+      outcome: 'migrated',
+      retryable: false,
+    }),
+    recorded({
       item: 'section:api-keys.claude',
       kind: 'provider_section',
       outcome: 'migrated',
       retryable: false,
-    },
+    }),
   ],
   planned: 6,
   finished: true,
@@ -186,11 +199,13 @@ describe('the Adopt wire contract', () => {
     expect(parsed.counts).toEqual({ migrated: 3, manual: 1, failed: 1, absent_at_source: 1 });
     expect(parsed.retryable).toBe(1);
     expect(parsed.items[0]).toEqual({
+      id: itemID('credential:claude-source.json'),
       item: 'credential:claude-source.json',
       kind: 'credential',
       outcome: 'migrated',
       reason: '',
       retryable: false,
+      left: 0,
     });
     expect(parsed.items[1].retryable).toBe(true);
   });
@@ -205,8 +220,52 @@ describe('the Adopt wire contract', () => {
     { items: [{ item: 'a', kind: 'unknown', outcome: 'migrated', retryable: false }] },
     { items: [{ item: 'a', kind: 'credential', outcome: 'skipped', retryable: false }] },
     { items: [{ item: 'a', kind: 'credential', outcome: 'migrated' }] },
+    // The identity is the record's, so a reply without one is not the record: an
+    // item the page cannot tell apart from another is not an item it can accept.
+    { items: [{ item: 'a', kind: 'credential', outcome: 'migrated', retryable: false }] },
+    {
+      items: [
+        { id: 'not-a-digest', item: 'a', kind: 'credential', outcome: 'migrated', retryable: false },
+      ],
+    },
+    {
+      items: [
+        { ...recorded({ item: 'b', kind: 'credential', outcome: 'migrated', retryable: false }), left: -1 },
+      ],
+    },
   ])('refuses a body that is not the recorded summary: %j', (patch) => {
     expect(() => parseAdoptionSummary({ ...summary, ...patch })).toThrow();
+  });
+
+  it('keeps the identity and the count of the items the record consolidated', () => {
+    const consolidated = parseAdoptionSummary({
+      ...summary,
+      items: [
+        recorded({
+          item: 'credential-inventory-excess',
+          kind: 'credential',
+          outcome: 'manual',
+          reason: 'adoption_inventory_too_large',
+          retryable: false,
+          left: 7,
+        }),
+        recorded({
+          item: 'credential-name-sha256:abc',
+          kind: 'credential',
+          outcome: 'manual',
+          reason: 'adoption_item_name_too_long',
+          retryable: false,
+        }),
+      ],
+      planned: 2,
+    });
+    expect(consolidated.items[0]).toMatchObject({
+      id: itemID('credential-inventory-excess'),
+      left: 7,
+    });
+    // An item without a count is an item with nothing left over, never a missing
+    // number the screen would have to guess.
+    expect(consolidated.items[1].left).toBe(0);
   });
 
   it('builds exactly the body the strict server decoder accepts', () => {

@@ -88,6 +88,12 @@ const en = {
   kindProviderSection: 'Provider sections',
   guidanceCredential:
     'Copy this credential file into the destination CPA’s authentication directory, or re-authenticate the provider in the destination Console.',
+  guidanceRuntimeOnlyCredential:
+    'This credential exists only inside the source CPA process, so there is no file to copy. Re-authenticate the provider in the destination Console.',
+  guidanceCredentialNameTooLong:
+    'This credential file’s name is too long for the migration record, so it was left on the source. Copy it into the destination CPA’s authentication directory by hand.',
+  guidanceCredentialInventoryExcess:
+    'The migration record was full, so {count} credential file(s) were left on the source. Copy them into the destination CPA’s authentication directory by hand.',
   guidanceConfigLeaf:
     'Set this gateway setting on the destination CPA’s gateway configuration page.',
   guidanceConfigFamily:
@@ -166,6 +172,9 @@ const zh: typeof en = {
   kindConfigFamily: '载荷规则',
   kindProviderSection: '提供商配置段',
   guidanceCredential: '请把该凭证文件复制到目标 CPA 的认证目录，或在目标控制台重新认证该提供商。',
+  guidanceRuntimeOnlyCredential: '该凭证只存在于源 CPA 进程中，没有可复制的文件。请在目标控制台重新认证该提供商。',
+  guidanceCredentialNameTooLong: '该凭证文件名超出迁移记录的上限，因此留在了源端。请手动复制到目标 CPA 的认证目录。',
+  guidanceCredentialInventoryExcess: '迁移记录已满，源端有 {count} 个凭证文件未能记录。请手动复制到目标 CPA 的认证目录。',
   guidanceConfigLeaf: '请在目标 CPA 的网关配置页面设置该配置项。',
   guidanceConfigFamily: '请在目标 CPA 的网关配置页面替换该载荷规则列表。',
   guidanceProviderSection: '请把该提供商配置段（含其提供商密钥）复制到目标 CPA 的配置中。',
@@ -239,6 +248,9 @@ const tw: typeof en = {
   kindConfigFamily: '載荷規則',
   kindProviderSection: '供應商設定區段',
   guidanceCredential: '請把該憑證檔案複製到目標 CPA 的認證目錄，或在目標主控台重新認證該供應商。',
+  guidanceRuntimeOnlyCredential: '該憑證只存在於來源 CPA 程序中，沒有可複製的檔案。請在目標主控台重新認證該供應商。',
+  guidanceCredentialNameTooLong: '該憑證檔名超出遷移記錄的上限，因此留在來源端。請手動複製到目標 CPA 的認證目錄。',
+  guidanceCredentialInventoryExcess: '遷移記錄已滿，來源端有 {count} 個憑證檔案未被記錄。請手動複製到目標 CPA 的認證目錄。',
   guidanceConfigLeaf: '請在目標 CPA 的閘道設定頁面設定該項目。',
   guidanceConfigFamily: '請在目標 CPA 的閘道設定頁面取代該載荷規則清單。',
   guidanceProviderSection: '請把該供應商設定區段（含其供應商金鑰）複製到目標 CPA 的設定中。',
@@ -327,6 +339,12 @@ const ru: typeof en = {
   kindProviderSection: 'Разделы провайдеров',
   guidanceCredential:
     'Скопируйте этот файл учётных данных в каталог аутентификации целевого CPA или повторно авторизуйте провайдера в консоли целевого CPA.',
+  guidanceRuntimeOnlyCredential:
+    'Эти учётные данные существуют только в процессе исходного CPA, файла для копирования нет. Повторно авторизуйте провайдера в консоли целевого CPA.',
+  guidanceCredentialNameTooLong:
+    'Имя этого файла учётных данных длиннее, чем принимает запись переноса, поэтому он остался на источнике. Скопируйте его в каталог аутентификации целевого CPA вручную.',
+  guidanceCredentialInventoryExcess:
+    'Запись переноса заполнена, поэтому {count} файл(ов) учётных данных остались на источнике. Скопируйте их в каталог аутентификации целевого CPA вручную.',
   guidanceConfigLeaf: 'Задайте эту настройку шлюза на странице конфигурации шлюза целевого CPA.',
   guidanceConfigFamily:
     'Замените этот список правил нагрузки на странице конфигурации шлюза целевого CPA.',
@@ -701,10 +719,20 @@ const guidanceKeys: Record<string, keyof typeof en> = {
 export const adoptKindText = (kind: string): string =>
   (kindKeys[kind] && copy[locale()][kindKeys[kind]]) || kind;
 
-/** adoptGuidanceText is the operator's next step for one recorded item kind. */
-export const adoptGuidanceText = (kind: string): string => {
-  const key = guidanceKeys[kind];
-  return key ? copy[locale()][key] : copy[locale()].guidanceFallback;
+// A reason that changes what the operator can do is part of the next step: a
+// credential that exists only in the source process has no file to copy, and an
+// item the record could not hold is the operator's to copy by hand.
+const reasonGuidanceKeys: Record<string, keyof typeof en> = {
+  runtime_only_credential: 'guidanceRuntimeOnlyCredential',
+  adoption_item_name_too_long: 'guidanceCredentialNameTooLong',
+  adoption_inventory_too_large: 'guidanceCredentialInventoryExcess',
+};
+
+/** adoptGuidanceText is the operator's next step for one recorded item. */
+export const adoptGuidanceText = (kind: string, reason = '', count = 0): string => {
+  const key =
+    (kind === 'credential' && reasonGuidanceKeys[reason]) || guidanceKeys[kind];
+  return key ? adoptText(key, { count }) : copy[locale()].guidanceFallback;
 };
 
 /** adoptBlockerText explains one strategy refusal. */
