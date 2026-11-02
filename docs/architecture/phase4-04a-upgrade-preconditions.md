@@ -530,7 +530,7 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   `upgrade_rollback_image_family` unless the operator passes the override; a
   digest is immutable, so no family comparison applies. The plan records
   `imageSource` (`operator` or `derived`) and `imageForm` (`release-tag` or
-  digest`), and the printed verify command passes `--legacy-image` back only
+  `digest`), and the printed verify command passes `--legacy-image` back only
   when the operator named it, so a derived reference is never recorded as the
   image the operator started. The verdict persists the same two fields beside
   the reference (`rollback_image_source`, `rollback_image_form`), so a reader of
