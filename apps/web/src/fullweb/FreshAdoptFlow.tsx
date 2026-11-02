@@ -124,6 +124,7 @@ export function FreshAdoptFlow({
   onComplete,
   onPending,
   onStage,
+  onExit,
   embedded = false,
 }: {
   operation: FreshOperation;
@@ -133,6 +134,12 @@ export function FreshAdoptFlow({
   onPending?: (pending: boolean) => void;
   /** Reports the stage so a host wizard can move its own step indicator. */
   onStage?: (stage: Stage) => void;
+  /**
+   * Leaves the journey for the host's strategy choice. Only a host that offered
+   * the choice can take it back, and only while the record holds no attempt: once
+   * the record owns one, the journey is the record's.
+   */
+  onExit?: () => void;
   /**
    * `embedded` renders the body and footer inside a host wizard's own card. The
    * two wizards own different chrome — the bootstrap one has a step list above —
@@ -859,6 +866,18 @@ export function FreshAdoptFlow({
       <footer className="journey-footer">
         {stage === 'source' && (
           <>
+            {onExit && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                data-testid="adopt-exit"
+                disabled={busy}
+                onClick={onExit}
+              >
+                <FullWebIcon name="arrowLeft" size={20} />
+                {s('back')}
+              </button>
+            )}
             <span className="journey-quiet">
               <FullWebIcon name="shield" size={20} />
               {adoptText('scopeKeep')}

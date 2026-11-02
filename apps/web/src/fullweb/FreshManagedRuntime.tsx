@@ -384,6 +384,10 @@ export function FreshManagedRuntime({
         onOperation={onOperation}
         onComplete={onContinue}
         onPending={onPending}
+        // Choosing Adopt must be reversible until the record holds an attempt:
+        // the tile is a choice, and a choice with no way back is a trap. Once an
+        // adopt checkpoint exists the record decides, so no exit is offered.
+        onExit={checkpoint?.strategy ? undefined : () => setAdoptChoice(false)}
       />
     );
   }

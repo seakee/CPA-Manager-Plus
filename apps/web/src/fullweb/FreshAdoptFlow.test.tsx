@@ -1037,6 +1037,8 @@ it('renders the Adopt flow for an adopt checkpoint instead of an empty card', as
   await settle();
   expect(maybe('fresh-adopt-flow').length).toBeGreaterThan(0);
   expect(text()).toContain(adoptText('progress', { settled: 4, planned: 4 }));
+  // The record owns this journey now: there is no other choice to go back to.
+  expect(maybe('adopt-exit')).toHaveLength(0);
   expect(get.mock.calls.map(([resource]) => resource)).toContain('installation/adoption');
 });
 
@@ -1065,6 +1067,35 @@ it('lets the Console wizard choose Adopt instead of a dead tile', async () => {
   // The same shared flow the setup wizard renders, from its source step.
   expect(maybe('fresh-adopt-flow').length).toBeGreaterThan(0);
   expect(maybe('adopt-source-url')).toHaveLength(1);
+});
+
+it('lets the Console take back the Adopt choice before an attempt is staged', async () => {
+  const choosing: FreshOperation = {
+    identity,
+    revision: 2,
+    adminInitialized: true,
+    gatewayPending: true,
+    routing: {
+      operationId: identity.operationId,
+      revision: 1,
+      target: '/console',
+      stage: 'committed',
+      committed: true,
+    },
+  };
+  const get = vi.fn(async (resource: string) =>
+    resource === 'installation/runtime' ? runtime : choosing
+  );
+  await mountManaged(choosing, get);
+  await click('choose-adopt');
+  await settle();
+  expect(maybe('adopt-source-url')).toHaveLength(1);
+
+  // Nothing was written, so the choice is still the operator's to change.
+  await click('adopt-exit');
+  await settle();
+  expect(maybe('adopt-source-url')).toHaveLength(0);
+  expect(maybe('choose-adopt')).toHaveLength(1);
 });
 
 it('sends the durable revision when the Console carrier resumes an adoption', async () => {
