@@ -10,8 +10,11 @@
 //   node --test bin/ci/upgrade-docker.test.mjs
 
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 
@@ -200,6 +203,78 @@ test('a release that throws still exits with the signal code', async () => {
   target.emit('SIGINT');
   await new Promise((resolvePromise) => setImmediate(resolvePromise));
   assert.deepEqual(exits, [130]);
+});
+
+// The EventEmitter tests above cannot see Node's default signal termination: a
+// listener registered with once() is removed after the first signal, so emitting
+// a second one on a stand-in does nothing, while a real process is killed in the
+// middle of the release. This test runs the guard in a real child process and
+// sends SIGTERM twice while its cleanup is asleep, which is what a second Ctrl-C
+// or a repeated supervisor signal does.
+test('a repeated signal cannot kill the process before cleanup finishes', { timeout: 15_000 }, async () => {
+  const harnessURL = new URL('./upgrade-docker.mjs', import.meta.url).href;
+  const directory = mkdtempSync(path.join(tmpdir(), 'upgrade-docker-signal-'));
+  const evidencePath = path.join(directory, 'evidence.json');
+  const childSource = `
+import { writeFileSync } from 'node:fs';
+import { createResourceRegistry, installSignalGuard, UPGRADE_DOCKER_CONTRACT } from ${JSON.stringify(harnessURL)};
+// A lone signal listener does not hold the event loop open on every Node
+// version; the real harness always has an awaited step pending. The interval is
+// the child's stand-in for that work: the guard is what decides the exit.
+setInterval(() => {}, 1000);
+const registry = createResourceRegistry({ prefix: 'cpampd01234567' });
+registry.track('container', 'cpampd01234567-child', async () => {});
+installSignalGuard({
+  onSignal: async (signal) => {
+    process.stdout.write('cleanup-start\\n');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const cleanup = await registry.releaseAll();
+    writeFileSync(${JSON.stringify(evidencePath)}, JSON.stringify({
+      signal,
+      registry: registry.all().map((entry) => entry.name),
+      cleanupOk: cleanup.ok,
+    }));
+    process.stdout.write('cleanup-done\\n');
+    return { exitCode: UPGRADE_DOCKER_CONTRACT.signalExitCodes[signal] };
+  },
+});
+process.stdout.write('ready\\n');
+`;
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', childSource], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  let signalled = false;
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+    if (!signalled && stdout.includes('ready\n')) {
+      signalled = true;
+      child.kill('SIGTERM');
+      // The second signal lands while onSignal is still sleeping: the release is
+      // already running and must be allowed to finish.
+      setTimeout(() => child.kill('SIGTERM'), 60);
+    }
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  try {
+    const [code, signal] = await new Promise((resolvePromise) => {
+      child.on('close', (exitCode, exitSignal) => resolvePromise([exitCode, exitSignal]));
+    });
+    assert.equal(signal, null, `the second SIGTERM killed the process: ${stderr}`);
+    assert.equal(code, 143, `child exit=${code} signal=${signal}; stdout: ${stdout} stderr: ${stderr}`);
+    assert.match(stdout, /cleanup-done/, `cleanup never finished; stdout: ${stdout} stderr: ${stderr}`);
+    const evidence = JSON.parse(readFileSync(evidencePath, 'utf8'));
+    assert.equal(evidence.signal, 'SIGTERM');
+    assert.deepEqual(evidence.registry, [], 'the registry held a resource after cleanup');
+    assert.equal(evidence.cleanupOk, true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

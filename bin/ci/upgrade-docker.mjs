@@ -349,7 +349,11 @@ export function finalExitCode({ runOk, cleanupOk = true, signal = null }) {
 
 // installSignalGuard runs `onSignal` once for SIGINT/SIGTERM, then exits with the
 // signal's code. Node's default signal termination never runs a `finally`, so the
-// release path has to be attached to the signal itself.
+// release path has to be attached to the signal itself. The listener stays
+// attached for the whole handler: the `handled` guard absorbs every later signal
+// instead of letting Node's default kill interrupt the cleanup, which is what a
+// second Ctrl-C or a repeated SIGTERM from a supervisor would otherwise do.
+// detach removes the listeners once the run no longer needs them.
 export function installSignalGuard({
   onSignal,
   exit = (code) => process.exit(code),
@@ -387,7 +391,10 @@ export function installSignalGuard({
       void guard.handle(signal);
     };
     listeners.set(signal, listener);
-    target.once(signal, listener);
+    // on, not once: the handler is the only thing that may decide the process
+    // exit, and a repeat signal has to reach `handle` (which returns without
+    // exiting) instead of Node's default termination in the middle of cleanup.
+    target.on(signal, listener);
   }
   return guard;
 }

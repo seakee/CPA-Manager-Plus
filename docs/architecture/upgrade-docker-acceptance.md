@@ -37,7 +37,10 @@ node --test bin/ci/upgrade-docker.test.mjs     # the harness's own logic, no Doc
   (that release is often what lets an interrupted wait return), then waits for
   the acceptance continuation to settle before it decides the host is clean. A
   failure during an abort is logged and does not change the signal's exit code.
-  A second signal joins the same finalisation instead of releasing again.
+  A second signal — the same kind included — joins the same finalisation
+  instead of releasing again or falling through to Node's default termination,
+  so a repeated Ctrl-C or a supervisor's repeated SIGTERM cannot interrupt the
+  release or skip the evidence.
   `SIGKILL`, a crash or a host power loss cannot run any handler: an object
   created by such a run may survive and must be cleaned from the printed
   `cpampd<runid>` prefix by an operator. This guarantee covers handled signals,
