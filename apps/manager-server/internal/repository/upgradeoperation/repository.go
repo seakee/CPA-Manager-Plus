@@ -110,11 +110,18 @@ func decodeStringList(raw string, column string) ([]string, error) {
 
 // Put replaces the single row without letting recorded progress move
 // backwards. The stage may only advance (or park in failed), every domain that
-// is already recorded must still be present, updated_at_ms only moves forward,
-// and the creation time is fixed by the first write. Observations,
-// reconciliation output and error details may be rewritten freely.
+// is already recorded must still be present, and both timestamps are owned by
+// the repository: created_at_ms is fixed by the first write, updated_at_ms only
+// moves forward (see nextUpdatedAtMS), and whatever timestamp the caller
+// proposed is discarded. Observations, reconciliation output and error details
+// may be rewritten freely.
 func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	op.Normalize()
+	// The repository owns the timestamps, so a caller proposal (a stale value or
+	// a unit mistake such as MaxInt64 from a microsecond value) is dropped before
+	// validation and recomputed from the stored row and the clock below.
+	op.CreatedAtMS = 0
+	op.UpdatedAtMS = 0
 	// A bad stage or domain is reported with the same sentinels Advance uses, so
 	// a caller can classify input errors from either write API with errors.Is.
 	if !op.Stage.Valid() {
@@ -156,12 +163,11 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 			return fmt.Errorf("%w: %q", ErrDomainCleared, domain)
 		}
 	}
-	if current.CreatedAtMS > 0 {
-		op.CreatedAtMS = current.CreatedAtMS
-	} else if op.CreatedAtMS == 0 {
+	op.CreatedAtMS = current.CreatedAtMS
+	if op.CreatedAtMS == 0 {
 		op.CreatedAtMS = now
 	}
-	op.UpdatedAtMS = nextUpdatedAtMS(now, current, op.UpdatedAtMS)
+	op.UpdatedAtMS = nextUpdatedAtMS(now, current)
 	// Revalidate the row this transaction is about to persist, not just the
 	// caller's input: the timestamps above are rewritten here.
 	if err := op.Validate(); err != nil {
@@ -213,19 +219,21 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 }
 
 // nextUpdatedAtMS returns the updated_at_ms the next write must store. nowMS is
-// the wall clock, stored is the row currently on disk (the zero operation before
-// the first write) and proposedMS is the caller-supplied timestamp, or zero when
-// the write has none (Advance).
+// the wall clock and stored is the row currently on disk (the zero operation
+// before the first write).
 //
-// The result is never lower than the stored updated_at_ms or created_at_ms, so a
-// clock that moved backwards, a row restored from a backup written later or a
-// stale caller can never produce a row whose updated_at_ms precedes its
-// created_at_ms. Get rejects such a row with ErrInvalidRow and every later
-// reader (status, the next advance) would be blocked by it. Every writer of
-// updated_at_ms must call this helper instead of stamping its own clock.
-func nextUpdatedAtMS(nowMS int64, stored model.UpgradeOperation, proposedMS int64) int64 {
+// The repository owns this column: the clock and the stored row are the only
+// inputs, so a caller proposal (a stale value or a unit mistake such as
+// MaxInt64 from a microsecond value) can never be pinned onto the row. The
+// result is never lower than the stored updated_at_ms or created_at_ms, so a
+// clock that moved backwards or a row restored from a backup written later can
+// never produce a row whose updated_at_ms precedes its created_at_ms. Get
+// rejects such a row with ErrInvalidRow and every later reader (status, the next
+// advance) would be blocked by it. Every writer of updated_at_ms must call this
+// helper instead of stamping its own clock.
+func nextUpdatedAtMS(nowMS int64, stored model.UpgradeOperation) int64 {
 	next := nowMS
-	for _, candidate := range [...]int64{stored.CreatedAtMS, stored.UpdatedAtMS, proposedMS} {
+	for _, candidate := range [...]int64{stored.CreatedAtMS, stored.UpdatedAtMS} {
 		if candidate > next {
 			next = candidate
 		}
@@ -278,7 +286,7 @@ func (r *Repository) Advance(ctx context.Context, domain string, stage model.Upg
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
 	}
-	current.UpdatedAtMS = nextUpdatedAtMS(now, current, 0)
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
 	// Validate the row this transaction is about to write. A row whose stored
 	// clock ran ahead must stay readable after the advance, and Get rejects any
 	// row that Validate does not accept.

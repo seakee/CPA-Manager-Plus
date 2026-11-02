@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -279,6 +280,45 @@ func TestPutNeverMovesUpdatedAtBackwards(t *testing.T) {
 	}
 	if second.UpdatedAtMS < second.CreatedAtMS {
 		t.Fatalf("updated_at_ms = %d is before created_at_ms = %d", second.UpdatedAtMS, second.CreatedAtMS)
+	}
+}
+
+// TestPutOwnsUpdatedAtMS is the regression for the 2026-11-02 delta review
+// Low-1: Put stored whatever updated_at_ms the caller proposed, so a unit
+// mistake (MaxInt64 from a microsecond value) was accepted and, because Advance
+// no longer resets the column, every later write stayed pinned to it. The
+// repository owns the column: the write clock and the stored row are the only
+// inputs.
+func TestPutOwnsUpdatedAtMS(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	before := time.Now().UnixMilli()
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStagePreflight,
+		UpdatedAtMS: math.MaxInt64,
+	}); err != nil {
+		t.Fatalf("put with an unbounded updated_at_ms: %v", err)
+	}
+	after := time.Now().UnixMilli()
+	stored, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get after put: found=%t err=%v", found, err)
+	}
+	if stored.UpdatedAtMS < before || stored.UpdatedAtMS > after {
+		t.Fatalf("updated_at_ms = %d, want the write clock in [%d, %d]", stored.UpdatedAtMS, before, after)
+	}
+	if stored.UpdatedAtMS != stored.CreatedAtMS {
+		t.Fatalf("timestamps = created %d, updated %d, want equal after the first write", stored.CreatedAtMS, stored.UpdatedAtMS)
+	}
+	advanced, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCopyIn)
+	if err != nil {
+		t.Fatalf("advance after a proposed updated_at_ms: %v", err)
+	}
+	if advanced.UpdatedAtMS < stored.UpdatedAtMS {
+		t.Fatalf("advance moved updated_at_ms backwards: %d -> %d", stored.UpdatedAtMS, advanced.UpdatedAtMS)
+	}
+	if advanced.UpdatedAtMS > time.Now().UnixMilli() {
+		t.Fatalf("advanced updated_at_ms = %d is ahead of the clock", advanced.UpdatedAtMS)
 	}
 }
 
