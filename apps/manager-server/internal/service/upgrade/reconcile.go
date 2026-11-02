@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -271,14 +269,14 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 
-	before, _, err := fingerprintSource(sourceRoot)
+	before, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return ReconcileReport{}, err
 	}
 	if strings.TrimSpace(recorded.SourceFingerprintAfter) == "" {
 		return ReconcileReport{}, errors.New("the recorded copy-in names no source fingerprint, so the 1.x source cannot be proven to be the one it copied")
 	}
-	if before != recorded.SourceFingerprintAfter {
+	if before.Digest != recorded.SourceFingerprintAfter {
 		return ReconcileReport{}, newUpgradeError(UpgradeErrorSourceChanged,
 			"the 1.x source is not the volume the recorded copy-in copied; nothing was compared and nothing was marked", nil)
 	}
@@ -289,13 +287,21 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	}
 	// The copy of the 1.x database is scratch, never evidence: whoever leaves
 	// this function, the area is gone and only the sanitized report survives.
+	// The snapshot makes its own private directory below this one and removes
+	// it on close; this removes the tool-owned directory on every return path.
+	if err := os.RemoveAll(scratch); err != nil {
+		return ReconcileReport{}, fmt.Errorf("clear the reconciliation scratch area: %w", err)
+	}
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		return ReconcileReport{}, fmt.Errorf("create the reconciliation scratch area: %w", err)
+	}
 	defer func() { _ = os.RemoveAll(scratch) }()
 	domains, parityDays, compareErr := compareStores(ctx, sourceRoot, paths.Database, scratch)
 	if compareErr != nil {
-		return ReconcileReport{ReconcileEvidence: newReconcileEvidence(before, domains, parityDays)}, compareErr
+		return ReconcileReport{ReconcileEvidence: newReconcileEvidence(before.Digest, domains, parityDays)}, compareErr
 	}
 
-	after, _, err := fingerprintSource(sourceRoot)
+	after, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return ReconcileReport{}, err
 	}
@@ -304,7 +310,7 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 			"the 1.x source changed while it was being compared; nothing was compared further and nothing was marked", nil)
 	}
 
-	evidence := newReconcileEvidence(before, domains, parityDays)
+	evidence := newReconcileEvidence(before.Digest, domains, parityDays)
 	// A run that established no operation domain compared nothing a result
 	// could describe: either the 1.x source holds none of the compared tables, or
 	// every table it holds was derived and cleared in the store, so not one day
@@ -356,18 +362,9 @@ func reconcileRoots(options Options) (string, string, string, error) {
 			return "", "", "", err
 		}
 	}
-	canonicalSource, err := canonicalPath(sourceRoot)
-	if err != nil {
-		return "", "", "", err
-	}
-	canonicalTarget, err := canonicalPath(targetRoot)
-	if err != nil {
-		return "", "", "", err
-	}
-	canonicalBundle, err := canonicalPath(bundleDir)
-	if err != nil {
-		return "", "", "", err
-	}
+	canonicalSource := canonicalPath(sourceRoot)
+	canonicalTarget := canonicalPath(targetRoot)
+	canonicalBundle := canonicalPath(bundleDir)
 	if err := rejectOverlap(canonicalSource, canonicalTarget, canonicalBundle); err != nil {
 		return "", "", "", err
 	}
@@ -389,14 +386,8 @@ func reconcileScratchRoot(targetRoot, sourceRoot, configured string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("resolve the reconciliation scratch area: %w", err)
 	}
-	canonicalRoot, err := canonicalPath(absolute)
-	if err != nil {
-		return "", err
-	}
-	canonicalSource, err := canonicalPath(sourceRoot)
-	if err != nil {
-		return "", err
-	}
+	canonicalRoot := canonicalPath(absolute)
+	canonicalSource := canonicalPath(sourceRoot)
 	if within(canonicalSource, canonicalRoot) || within(canonicalRoot, canonicalSource) {
 		return "", errors.New("the reconciliation scratch area must not be the 1.x source root, sit inside it or contain it")
 	}
@@ -424,15 +415,28 @@ var ErrUsage = errors.New("invalid upgrade request")
 // compareStores reads both stores and returns the per-domain comparison plus
 // the days the 1.x source can never complete again.
 func compareStores(ctx context.Context, sourceRoot, targetDatabase, scratchRoot string) ([]ReconcileDomainReport, []string, error) {
-	snapshot, err := snapshotSourceDatabase(ctx, sourceRoot, scratchRoot)
+	// The source is read through the package's private snapshot: the database
+	// and its WAL sidecars are copied into the reconciliation scratch area, the
+	// source is digested before and after the copy, and only the copy is opened.
+	// Opening the original, even read-only, would create a WAL index beside it
+	// and change the fingerprint the copy-in recorded.
+	snapshot, err := OpenSnapshot(ctx, SourceDatabasePath(sourceRoot), scratchRoot)
 	if err != nil {
-		return nil, nil, err
+		if errors.Is(err, ErrSourceChanged) {
+			return nil, nil, newUpgradeError(UpgradeErrorSourceChanged,
+				"the 1.x source changed while its database was being copied into the reconciliation scratch area; nothing was compared and nothing was marked", err)
+		}
+		return nil, nil, fmt.Errorf("copy the 1.x database into the reconciliation scratch area: %w", err)
 	}
-	sourceDB, sourceTables, err := openScratchSnapshot(ctx, snapshot)
+	defer func() { _ = snapshot.Close() }()
+	sourceDB := snapshot.DB()
+	if err := quickCheckSource(ctx, sourceDB); err != nil {
+		return nil, nil, fmt.Errorf("read the copied 1.x database: %w", err)
+	}
+	sourceTables, err := readSourceSchema(ctx, sourceDB)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read the copied 1.x database: %w", err)
 	}
-	defer func() { _ = sourceDB.Close() }()
 	gaps, err := detectParityGaps(ctx, sourceDB, sourceTables)
 	if err != nil {
 		return nil, nil, fmt.Errorf("detect the parity gaps of the 1.x source: %w", err)
@@ -453,82 +457,6 @@ func compareStores(ctx context.Context, sourceRoot, targetDatabase, scratchRoot 
 	}
 	domains, err := compareObservations(source, target)
 	return domains, gaps.AffectedDates, err
-}
-
-// snapshotSourceDatabase copies the stopped 1.x database and its sidecars into
-// the scratch area. The copy is what gets read: opening the original, even
-// read-only, makes SQLite create a WAL index beside it and change the source.
-func snapshotSourceDatabase(ctx context.Context, sourceRoot, scratchRoot string) (string, error) {
-	if err := os.RemoveAll(scratchRoot); err != nil {
-		return "", fmt.Errorf("clear the reconciliation scratch area: %w", err)
-	}
-	if err := os.MkdirAll(scratchRoot, 0o700); err != nil {
-		return "", fmt.Errorf("create the reconciliation scratch area: %w", err)
-	}
-	for _, name := range []string{
-		databaseFileName,
-		databaseFileName + "-wal",
-		databaseFileName + "-shm",
-		databaseFileName + "-journal",
-	} {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		source := filepath.Join(sourceRoot, name)
-		info, statErr := os.Lstat(source)
-		if errors.Is(statErr, os.ErrNotExist) {
-			continue
-		}
-		if statErr != nil {
-			return "", fmt.Errorf("inspect the 1.x source member %s: %w", name, statErr)
-		}
-		if !info.Mode().IsRegular() {
-			return "", fmt.Errorf("the 1.x source member %s is not a regular file", name)
-		}
-		if err := copyRegularFile(source, filepath.Join(scratchRoot, name)); err != nil {
-			return "", fmt.Errorf("copy the 1.x source member %s into the scratch area: %w", name, err)
-		}
-	}
-	return filepath.Join(scratchRoot, databaseFileName), nil
-}
-
-func copyRegularFile(source, target string) error {
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
-}
-
-// openScratchSnapshot reads this step's own copy of the 1.x database. The copy
-// can carry a WAL, so it is opened read-write with query_only rather than
-// immutable: SQLite then joins the WAL, and any index it writes lands in the
-// scratch area this step removes.
-func openScratchSnapshot(ctx context.Context, path string) (*sql.DB, sourceSchema, error) {
-	return openSourceWith(ctx, path, scratchDataSourceName(path))
-}
-
-func scratchDataSourceName(path string) string {
-	uriPath := filepath.ToSlash(path)
-	if !strings.HasPrefix(uriPath, "/") {
-		uriPath = "/" + uriPath
-	}
-	dsn := &url.URL{Scheme: "file", Path: uriPath}
-	query := dsn.Query()
-	query.Set("mode", "rw")
-	query.Add("_pragma", "query_only(1)")
-	query.Add("_pragma", "busy_timeout(5000)")
-	dsn.RawQuery = query.Encode()
-	return dsn.String()
 }
 
 // sideObservation is one store read as a single snapshot. Every domain keeps the

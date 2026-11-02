@@ -11,6 +11,7 @@ import (
 func validMarker(root string) Marker {
 	return Marker{
 		Version:                 Version,
+		Phase:                   PhaseMaterializing,
 		TargetDatabase:          filepath.Join(root, "usage.sqlite"),
 		SourceKind:              "upgraded-legacy",
 		SourceFingerprintBefore: "before",
@@ -58,6 +59,12 @@ func TestWriteRefusesAMarkerThatDescribesNothing(t *testing.T) {
 		change func(m *Marker)
 	}{
 		{name: "unknown version", change: func(m *Marker) { m.Version = Version + 1 }},
+		{name: "no phase", change: func(m *Marker) { m.Phase = "" }},
+		{name: "unknown phase", change: func(m *Marker) { m.Phase = "copying" }},
+		{name: "migrating without identity", change: func(m *Marker) {
+			m.Phase = PhaseMigrating
+			m.TargetDatabaseIdentity = FileIdentity{}
+		}},
 		{name: "relative target", change: func(m *Marker) { m.TargetDatabase = "usage.sqlite" }},
 		{name: "no source kind", change: func(m *Marker) { m.SourceKind = "" }},
 		{name: "no fingerprints", change: func(m *Marker) { m.SourceFingerprintBefore = "" }},
@@ -127,5 +134,55 @@ func TestReadAcceptsThePublishedForm(t *testing.T) {
 	stored, found, err := Read(root)
 	if err != nil || !found || stored != marker {
 		t.Fatalf("read = %+v/%t/%v, want the published marker", stored, found, err)
+	}
+}
+
+// TestIdentitySurvivesARenameAndARewriteAndDetectsAnotherFile is the property
+// the marker depends on: moving a member into the v2 layout and rewriting it in
+// place both keep the file the marker recorded, while a different file under the
+// same name does not.
+func TestIdentitySurvivesARenameAndARewriteAndDetectsAnotherFile(t *testing.T) {
+	root := t.TempDir()
+	original := filepath.Join(root, "usage.sqlite")
+	if err := os.WriteFile(original, []byte("copied store"), 0o600); err != nil {
+		t.Fatalf("write the copied store: %v", err)
+	}
+	before, err := Identity(original)
+	if err != nil {
+		t.Fatalf("read the identity: %v", err)
+	}
+	if !before.Valid() {
+		t.Fatalf("identity %+v does not name a file", before)
+	}
+
+	moved := filepath.Join(root, "moved.sqlite")
+	if err := os.Rename(original, moved); err != nil {
+		t.Fatalf("move the copied store: %v", err)
+	}
+	if after, err := Identity(moved); err != nil || after != before {
+		t.Fatalf("identity after the rename = %+v/%v, want %+v", after, err, before)
+	}
+
+	// The migration rewrites the database at its own path; that keeps the file.
+	if err := os.WriteFile(moved, []byte("migrated store, much longer"), 0o600); err != nil {
+		t.Fatalf("rewrite the copied store: %v", err)
+	}
+	if rewritten, err := Identity(moved); err != nil || rewritten != before {
+		t.Fatalf("identity after an in-place rewrite = %+v/%v, want %+v", rewritten, err, before)
+	}
+
+	// A file swapped in under the same name is not the store that was recorded.
+	if err := os.Remove(moved); err != nil {
+		t.Fatalf("remove the copied store: %v", err)
+	}
+	if err := os.WriteFile(moved, []byte("foreign store"), 0o600); err != nil {
+		t.Fatalf("write the foreign store: %v", err)
+	}
+	foreign, err := Identity(moved)
+	if err != nil {
+		t.Fatalf("read the foreign identity: %v", err)
+	}
+	if foreign == before {
+		t.Fatalf("a swapped-in file kept identity %+v", before)
 	}
 }
