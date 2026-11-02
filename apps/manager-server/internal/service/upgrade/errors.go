@@ -20,6 +20,17 @@ const (
 	// copy-in held its fence. The members this run moved were rolled back and
 	// nothing was recorded.
 	UpgradeErrorSourceChanged UpgradeErrorCode = "upgrade_source_changed"
+	// UpgradeErrorTargetConflict reports that the v2 data root cannot be resumed:
+	// a copy-in marker describes it, but the marker and the members beside it
+	// disagree, or the members no longer match the backup the marker names.
+	// Nothing was deleted or overwritten; the marker is the evidence that the
+	// store is unfinished, so it stays exactly where it is.
+	UpgradeErrorTargetConflict UpgradeErrorCode = "upgrade_target_conflict"
+	// UpgradeErrorV2Running reports that another Manager process owns the v2
+	// data root: its process lock is held, so the copy-in refuses before it
+	// creates, backs up, restores, migrates or records anything. Stop the
+	// process and rerun; nothing this run intended was written.
+	UpgradeErrorV2Running UpgradeErrorCode = "upgrade_copy_in_v2_running"
 	// UpgradeErrorReconcileMismatch reports that the copied-in store and the 1.x
 	// source disagree, or that the source can never complete a day again, and
 	// the operator has not acknowledged those days. Nothing was marked and the
@@ -132,6 +143,8 @@ func (e *UpgradeError) Is(target error) bool {
 var (
 	ErrTargetModified            = &UpgradeError{Code: UpgradeErrorTargetModified}
 	ErrSourceChanged             = &UpgradeError{Code: UpgradeErrorSourceChanged}
+	ErrTargetConflict            = &UpgradeError{Code: UpgradeErrorTargetConflict}
+	ErrV2Running                 = &UpgradeError{Code: UpgradeErrorV2Running}
 	ErrReconcileMismatch         = &UpgradeError{Code: UpgradeErrorReconcileMismatch}
 	ErrReconcileTargetIncomplete = &UpgradeError{Code: UpgradeErrorReconcileTargetIncomplete}
 	ErrReconcileNothingCompared  = &UpgradeError{Code: UpgradeErrorReconcileNothingCompared}
@@ -154,6 +167,13 @@ var (
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {
 	return &UpgradeError{Code: code, Message: message, err: err}
+}
+
+// unresumable reports a v2 data root a copy-in may not continue from. The
+// message names no host path: it is operator text, and the code is what a script
+// acts on.
+func unresumable(message string, err error) error {
+	return newUpgradeError(UpgradeErrorTargetConflict, message, err)
 }
 
 // UpgradeErrorCodeOf reports the code of the first typed Upgrade failure in

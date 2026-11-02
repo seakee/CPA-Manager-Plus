@@ -30,6 +30,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	_ "modernc.org/sqlite"
 )
 
 var (
@@ -61,17 +62,24 @@ const (
 var openSnapshot = upgradeservice.OpenSnapshot
 
 // ExitCode maps a Run result to the CLI contract: 0 ready, 1 a refusal the
-// operator has to look at — a blocked preflight, an unacknowledged mismatch, a
-// store that cannot show what the source holds, or a reconciliation that
-// compared nothing — and 2 anything else. A refusal is a decision about the
-// migration, not a usage or environment error, so every reconcile refusal shares
-// exit 1 and the typed code in the report says which one it was.
+// operator has to look at — a blocked preflight, a v2 data root another
+// Manager owns, an unacknowledged mismatch, a store that cannot show what the
+// source holds, or a reconciliation that compared nothing — and 2 anything
+// else. A refusal is a decision about the migration, not a usage or environment
+// error, so every reconcile refusal shares exit 1 and the typed code in the
+// report says which one it was.
+//
+// A held v2 data root lock reports 1, like a blocked preflight: nothing the
+// operator typed was wrong and nothing was written, but the run cannot proceed
+// until the other Manager process is stopped. Usage and environment failures
+// stay 2.
 func ExitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
 	case errors.Is(err, ErrBlocked),
 		errors.Is(err, ErrRefused),
+		errors.Is(err, upgradeservice.ErrV2Running),
 		errors.Is(err, upgradeservice.ErrReconcileMismatch),
 		errors.Is(err, upgradeservice.ErrReconcileTargetIncomplete),
 		errors.Is(err, upgradeservice.ErrReconcileNothingCompared):
@@ -112,7 +120,8 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "Usage: cpa-manager-plus upgrade <subcommand>")
 	_, _ = fmt.Fprintln(w, "  preflight --legacy <dir> --source-version <vX.Y.Z> [--target-dir DIR] [--scratch-dir DIR] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      inspect a stopped 1.x source; writes nothing")
-	_, _ = fmt.Fprintln(w, "  run --legacy <dir> --source-version <vX.Y.Z> [--target <dir>] [--bundle <dir>] [--json]")
+	_, _ = fmt.Fprintln(w, "                                      --target-dir is required when the Manager database path cannot be derived")
+	_, _ = fmt.Fprintln(w, "  run --legacy <dir> --source-version <vX.Y.Z> [--target <dir>] [--bundle <dir>] [--scratch-dir DIR] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      back up and copy a stopped 1.x source into the v2 data root")
 	_, _ = fmt.Fprintln(w, "  reconcile --legacy <dir> --source-version <vX.Y.Z> [--target <dir>] [--bundle <dir>] [--json]")
 	_, _ = fmt.Fprintln(w, "            [--acknowledge <YYYY-MM-DD>]... [--acknowledge-parity-gaps]")
@@ -125,7 +134,7 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
 	_, _ = fmt.Fprintln(w, "The scratch copy is never the source or the target volume: --scratch-dir,")
 	_, _ = fmt.Fprintln(w, "and the default OS temporary directory, are checked the same way.")
-	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, or unacknowledged mismatch, 2 usage, environment or retryable error.")
+	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, unacknowledged mismatch, or the v2 data root is in use; 2 usage, environment or retryable error.")
 }
 
 func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -302,6 +311,142 @@ func writeStatusSummary(w io.Writer, output statusOutput) {
 	_, _ = fmt.Fprintf(w, "updated at ms: %d\n", operation.UpdatedAtMS)
 }
 
+// runCopyIn backs up a stopped 1.x source and copies it into the v2 data root.
+// The preflight gate runs first: a blocked source writes nothing at all, and the
+// preflight itself reads a private snapshot of the source instead of opening it
+// in place.
+func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("upgrade run", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	legacy := flags.String("legacy", "", "1.x source data directory (usage.sqlite, data.key, usage-archives/)")
+	sourceVersion := flags.String("source-version", "", "1.x release the source was running (required; the database does not record it)")
+	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory when every target member lands there")
+	bundle := flags.String("bundle", "", "backup destination; defaults to <target>/upgrade-backup")
+	scratchDir := flags.String("scratch-dir", "", "directory for the transient preflight snapshot; defaults to the OS temporary directory")
+	asJSON := flags.Bool("json", false, "print the preflight report and the copy-in result as JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*legacy) == "" {
+		return fmt.Errorf("%w: --legacy <dir> is required and no positional arguments are accepted", ErrUsage)
+	}
+	targetRoot, err := resolveTargetRoot(*target)
+	if err != nil {
+		return err
+	}
+	legacyRoot, err := filepath.Abs(strings.TrimSpace(*legacy))
+	if err != nil {
+		return fmt.Errorf("resolve the 1.x source root: %w", err)
+	}
+	bundleDir := strings.TrimSpace(*bundle)
+	if bundleDir == "" {
+		bundleDir = upgradeservice.DefaultBundleDirectory(targetRoot)
+	}
+	// A copy-in that already has a successor is not redone. The run only ever
+	// owns preflight and the copy-in, so a later recorded stage is reported and
+	// left alone: re-running the copy would rewrite a store a later step already
+	// advanced.
+	if operation, found, err := recordedOperationAt(ctx, targetRoot); err != nil {
+		return err
+	} else if found && stagePastCopyIn(operation.Stage) {
+		output := runOutput{Operation: &operation}
+		writeRunOutput(stdout, *asJSON, output)
+		return nil
+	}
+	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
+		LegacyRoot:      legacyRoot,
+		DeclaredVersion: *sourceVersion,
+		TargetDir:       targetRoot,
+		ScratchDir:      *scratchDir,
+	})
+	if err != nil {
+		return err
+	}
+	output := runOutput{Preflight: &report}
+	if !report.Ready {
+		writeRunOutput(stdout, *asJSON, output)
+		return ErrBlocked
+	}
+	// The 1.x source is documented read-only for this command, so its fence is
+	// taken through a read-only descriptor: the same exclusive marker, the same
+	// exclusion of cooperating writers, but the source volume is never opened
+	// for writing and a stopped source preserved on a read-only mount still
+	// proves exclusivity.
+	lock, err := processlock.AcquireExistingReadOnly(upgradeservice.SourceDatabasePath(legacyRoot))
+	if err != nil {
+		return fmt.Errorf("take the 1.x ownership lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
+	result, err := upgradeservice.CopyIn(ctx, upgradeservice.Options{
+		LegacyRoot:      legacyRoot,
+		DeclaredVersion: *sourceVersion,
+		TargetRoot:      targetRoot,
+		BundleDir:       bundleDir,
+		Lock:            lock,
+	})
+	if err != nil {
+		return err
+	}
+	output.Result = &result
+	// The run stops at the copy-in by contract: reconciliation is a separate,
+	// authorized step, so the exact command to continue is printed rather than
+	// executed.
+	output.Next = nextReconcileCommand(legacyRoot, targetRoot, bundleDir, strings.TrimSpace(*sourceVersion), strings.TrimSpace(*bundle) != "")
+	writeRunOutput(stdout, *asJSON, output)
+	return nil
+}
+
+// resolveTargetRoot resolves the v2 data root of `upgrade run`.
+//
+// An explicit --target states the layout, so it is used as given. The Manager
+// configuration is a default only when every member the copy-in writes is also
+// the member the service will read: the database must be the canonical
+// usage.sqlite, the data key and the archive tree must resolve inside that same
+// directory, and no environment key may override the copied key. Otherwise the
+// copy lands where nothing reads it — the copied data key would never decrypt
+// the 1.x fields — so the run refuses and asks for --target instead of writing
+// files the service ignores.
+func resolveTargetRoot(override string) (string, error) {
+	if trimmed := strings.TrimSpace(override); trimmed != "" {
+		return trimmed, nil
+	}
+	cfg, err := config.LoadWithoutCreatingDefault()
+	if err != nil {
+		return "", fmt.Errorf("load Manager configuration: %w", err)
+	}
+	root := filepath.Dir(strings.TrimSpace(cfg.DBPath))
+	if strings.TrimSpace(cfg.DBPath) == "" {
+		return "", layoutMismatch("the Manager database path is empty")
+	}
+	if filepath.Base(cfg.DBPath) != upgradeservice.SourceDatabaseName {
+		return "", layoutMismatch(fmt.Sprintf("the Manager database is %s, not %s",
+			filepath.Base(cfg.DBPath), upgradeservice.SourceDatabaseName))
+	}
+	// An inline key wins over data.key at the service, so a copied data.key would
+	// never be read.
+	if strings.TrimSpace(cfg.DataKey) != "" {
+		return "", layoutMismatch("an environment or file key overrides the copied data key")
+	}
+	layout := upgradeservice.LayoutForRoot(root)
+	if strings.TrimSpace(cfg.DataKeyPath) == "" || !upgradeservice.SamePath(cfg.DataKeyPath, layout.DataKey) {
+		return "", layoutMismatch(fmt.Sprintf("the configured data key %s is not %s",
+			cfg.DataKeyPath, layout.DataKey))
+	}
+	if strings.TrimSpace(cfg.UsageArchiveDir) == "" || !upgradeservice.SamePath(cfg.UsageArchiveDir, layout.Archives) {
+		return "", layoutMismatch(fmt.Sprintf("the configured archive directory %s is not %s",
+			cfg.UsageArchiveDir, layout.Archives))
+	}
+	return root, nil
+}
+
+// layoutMismatch refuses a Manager layout the copy-in cannot populate. The code
+// is shared with the report vocabulary so a script can tell it apart from a
+// blocked source.
+func layoutMismatch(detail string) error {
+	return fmt.Errorf("%w: %s: %s; pass --target with the v2 data directory",
+		ErrUsage, upgradeservice.CodeTargetLayoutMismatch, detail)
+}
+
 // openStatusSnapshot copies the Manager database, retrying a bounded number of
 // times when the copy raced a live writer. Every other failure is returned at
 // once: a missing database or an unusable scratch directory does not get better
@@ -368,81 +513,6 @@ func upgradeOperationTablePresent(ctx context.Context, db *sql.DB) (bool, error)
 		return false, err
 	}
 	return count == 1, nil
-}
-
-// runCopyIn backs up a stopped 1.x source and copies it into the v2 data root.
-// The preflight gate runs first: a blocked source writes nothing at all.
-func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	flags := flag.NewFlagSet("upgrade run", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	legacy := flags.String("legacy", "", "1.x source data directory (usage.sqlite, data.key, usage-archives/)")
-	sourceVersion := flags.String("source-version", "", "1.x release the source was running (required; the database does not record it)")
-	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory")
-	bundle := flags.String("bundle", "", "backup destination; defaults to <target>/upgrade-backup")
-	asJSON := flags.Bool("json", false, "print the preflight report and the copy-in result as JSON")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 || strings.TrimSpace(*legacy) == "" {
-		return fmt.Errorf("%w: --legacy <dir> is required and no positional arguments are accepted", ErrUsage)
-	}
-	targetRoot, err := resolveTargetRoot(*target)
-	if err != nil {
-		return err
-	}
-	legacyRoot, err := filepath.Abs(strings.TrimSpace(*legacy))
-	if err != nil {
-		return fmt.Errorf("resolve the 1.x source root: %w", err)
-	}
-	bundleDir := strings.TrimSpace(*bundle)
-	if bundleDir == "" {
-		bundleDir = upgradeservice.DefaultBundleDirectory(targetRoot)
-	}
-	// A copy-in that already has a successor is not redone. The run only ever
-	// owns preflight and the copy-in, so a later recorded stage is reported and
-	// left alone: re-running the copy would rewrite a store a later step already
-	// advanced.
-	if operation, found, err := recordedOperationAt(ctx, targetRoot); err != nil {
-		return err
-	} else if found && stagePastCopyIn(operation.Stage) {
-		output := runOutput{Operation: &operation}
-		writeRunOutput(stdout, *asJSON, output)
-		return nil
-	}
-	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
-		LegacyRoot:      legacyRoot,
-		DeclaredVersion: *sourceVersion,
-	})
-	if err != nil {
-		return err
-	}
-	output := runOutput{Preflight: &report}
-	if !report.Ready {
-		writeRunOutput(stdout, *asJSON, output)
-		return ErrBlocked
-	}
-	lock, err := processlock.AcquireExisting(upgradeservice.SourceDatabasePath(legacyRoot))
-	if err != nil {
-		return fmt.Errorf("take the 1.x ownership lock: %w", err)
-	}
-	defer func() { _ = lock.Close() }()
-	result, err := upgradeservice.CopyIn(ctx, upgradeservice.Options{
-		LegacyRoot:      legacyRoot,
-		TargetRoot:      targetRoot,
-		BundleDir:       bundleDir,
-		DeclaredVersion: *sourceVersion,
-		Lock:            lock,
-	})
-	if err != nil {
-		return err
-	}
-	output.Result = &result
-	// The run stops at the copy-in by contract: reconciliation is a separate,
-	// authorized step, so the exact command to continue is printed rather than
-	// executed.
-	output.Next = nextReconcileCommand(legacyRoot, targetRoot, bundleDir, strings.TrimSpace(*sourceVersion), strings.TrimSpace(*bundle) != "")
-	writeRunOutput(stdout, *asJSON, output)
-	return nil
 }
 
 type runOutput struct {
@@ -668,24 +738,4 @@ func writeReconcileSummary(w io.Writer, report upgradeservice.ReconcileReport) {
 		_, _ = fmt.Fprintf(w, "  stage: %s\n", report.Stage)
 		_, _ = fmt.Fprintf(w, "  domains done: %s\n", strings.Join(report.DomainsDone, ","))
 	}
-}
-
-// resolveTargetRoot resolves the v2 data root. The Manager configuration is
-// the default only when its database is the canonical usage.sqlite; any other
-// database name would be copied to the wrong file, so it must be explicit.
-func resolveTargetRoot(override string) (string, error) {
-	if trimmed := strings.TrimSpace(override); trimmed != "" {
-		return trimmed, nil
-	}
-	cfg, err := config.LoadWithoutCreatingDefault()
-	if err != nil {
-		return "", fmt.Errorf("load Manager configuration: %w", err)
-	}
-	if strings.TrimSpace(cfg.DBPath) == "" {
-		return "", fmt.Errorf("%w: Manager database path is empty; pass --target", ErrUsage)
-	}
-	if filepath.Base(cfg.DBPath) != upgradeservice.SourceDatabaseName {
-		return "", fmt.Errorf("%w: the Manager database is not %s; pass --target", ErrUsage, upgradeservice.SourceDatabaseName)
-	}
-	return filepath.Dir(cfg.DBPath), nil
 }

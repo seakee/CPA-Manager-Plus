@@ -54,8 +54,12 @@ func (a DatabaseUpgradeAdmission) AdmittedReason(ctx context.Context) (UpgradeSt
 	if !found {
 		// No row: an unfinished copy-in may still be described by its marker,
 		// and a marker never carries a rollback.
-		stage, err := copyInMarkerStage(path)
-		return stage, "", err
+		if _, inFlight, err := readCopyInMarker(path); err != nil {
+			return UpgradeStageNone, "", err
+		} else if inFlight {
+			return UpgradeStageInProgress, "", nil
+		}
+		return UpgradeStageNone, "", nil
 	}
 	stage, err := upgradeStageFromRecord(record)
 	if err != nil {

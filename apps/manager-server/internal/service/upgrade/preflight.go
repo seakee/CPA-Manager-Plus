@@ -77,6 +77,12 @@ const (
 	// CodeDiskProbeFailed means free space could not be measured. An unknown
 	// value is never treated as enough.
 	CodeDiskProbeFailed = "upgrade_disk_probe_failed"
+	// CodeTargetLayoutMismatch means the Manager configuration does not put a
+	// member the copy-in writes where the service reads it: a data key, an
+	// archive tree or the database itself resolves somewhere else, or an
+	// environment key would override the copied key. The default data root is
+	// refused; an explicit --target states the layout.
+	CodeTargetLayoutMismatch = "upgrade_target_layout_mismatch"
 )
 
 // CodeCredentialTimeout is the route-level code of ErrCredentialVerifyTimeout.
@@ -129,6 +135,9 @@ type Options struct {
 	// AvailableBytes overrides the free-space probe. Tests inject a requirement
 	// without depending on the host disk. Nil uses the platform probe.
 	AvailableBytes func(targetDir string) (int64, error)
+	// afterCopy runs after the snapshot copy and before the second source
+	// fingerprint. Tests use it to simulate a source that was not stopped.
+	afterCopy func()
 	// TargetRoot is the v2 data directory that receives usage.sqlite, data.key
 	// and usage-archives/. CopyIn only.
 	TargetRoot string
@@ -149,9 +158,6 @@ type Options struct {
 	// checkpoint is a package-private synchronous test seam. Production never
 	// sets it; every returned error aborts the copy-in at that phase.
 	checkpoint func(phase string) error
-	// afterCopy runs after the snapshot copy and before the second source
-	// fingerprint. Tests use it to simulate a source that was not stopped.
-	afterCopy func()
 }
 
 // Check is one preflight observation. Detail is free text for the operator and

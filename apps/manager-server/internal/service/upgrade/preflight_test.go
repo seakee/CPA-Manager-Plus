@@ -522,6 +522,7 @@ func TestPreflightIsReadyOnThePinnedReleaseSchema(t *testing.T) {
 	if report.ParityGaps.any() || len(report.ParityGaps.AffectedDates) != 0 {
 		t.Fatalf("parity gaps = %+v, want none", report.ParityGaps)
 	}
+
 	if !report.ParityGaps.ProjectionStateUsable {
 		t.Fatalf("projection state unusable: %s", report.ParityGaps.ProjectionStateReason)
 	}

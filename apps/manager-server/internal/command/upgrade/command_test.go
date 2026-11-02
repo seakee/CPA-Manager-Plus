@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ import (
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
@@ -330,98 +332,6 @@ func copyReadySource(t *testing.T) string {
 	return root
 }
 
-func TestRunCopiesAStoppedSourceAndRecordsTheStage(t *testing.T) {
-	source := copyReadySource(t)
-	target := t.TempDir()
-	bundle := filepath.Join(t.TempDir(), "backup")
-
-	code, stdout, stderr := run(t, "run", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target, "--bundle", bundle)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
-	}
-	var output runOutput
-	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
-		t.Fatalf("decode run output: %v; output: %s", err, stdout)
-	}
-	if output.Preflight == nil || !output.Preflight.Ready {
-		t.Fatalf("preflight = %+v, want a ready report", output.Preflight)
-	}
-	if output.Result == nil {
-		t.Fatalf("run output has no result: %s", stdout)
-	}
-	if output.Result.Stage != model.UpgradeStageCopyIn || output.Result.SourceKind != upgradeservice.SourceKindUpgradedLegacy {
-		t.Fatalf("result stage/kind = %q/%q", output.Result.Stage, output.Result.SourceKind)
-	}
-	for _, path := range []string{
-		filepath.Join(target, "usage.sqlite"),
-		filepath.Join(target, "data.key"),
-		filepath.Join(target, "usage-archives", "2026-03", "segment-000001.jsonl"),
-		bundle,
-	} {
-		if _, err := os.Lstat(path); err != nil {
-			t.Fatalf("copy-in did not produce %s: %v", path, err)
-		}
-	}
-
-	code, statusJSON, stderr := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite"))
-	if code != 0 {
-		t.Fatalf("status exit code = %d, want 0; stderr: %s", code, stderr)
-	}
-	var status statusOutput
-	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
-		t.Fatalf("decode status: %v; output: %s", err, statusJSON)
-	}
-	if !status.Recorded || status.Operation == nil || status.Operation.Stage != model.UpgradeStageCopyIn {
-		t.Fatalf("status = %+v, want a recorded copy_in", status)
-	}
-	if status.Operation.BackupManifestSHA256 != output.Result.BackupManifestSHA256 {
-		t.Fatalf("recorded manifest = %q, want %q", status.Operation.BackupManifestSHA256, output.Result.BackupManifestSHA256)
-	}
-	if status.Operation.SourceFingerprintBefore != output.Result.SourceFingerprintBefore {
-		t.Fatalf("recorded fingerprint = %q, want %q", status.Operation.SourceFingerprintBefore, output.Result.SourceFingerprintBefore)
-	}
-
-	// A second run reports the recorded copy-in instead of copying again.
-	code, again, stderr := run(t, "run", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target, "--bundle", bundle)
-	if code != 0 {
-		t.Fatalf("second run exit code = %d, want 0; stderr: %s", code, stderr)
-	}
-	var repeated runOutput
-	if err := json.Unmarshal([]byte(again), &repeated); err != nil {
-		t.Fatalf("decode second run: %v", err)
-	}
-	if repeated.Result == nil || !repeated.Result.AlreadyComplete || repeated.Result.Restored {
-		t.Fatalf("second run = %+v, want an already complete copy-in", repeated.Result)
-	}
-}
-
-func TestRunRefusesABlockedSourceAndWritesNothing(t *testing.T) {
-	source := copyReadySource(t)
-	// Removing the ownership marker makes the source unprovably stopped.
-	if err := os.Remove(filepath.Join(source, "usage.sqlite.manager.lock")); err != nil {
-		t.Fatalf("remove source lock: %v", err)
-	}
-	target := t.TempDir()
-	code, stdout, stderr := run(t, "run", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target)
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
-	}
-	var output runOutput
-	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
-		t.Fatalf("decode blocked run: %v; output: %s", err, stdout)
-	}
-	if output.Preflight == nil || output.Preflight.Ready || output.Result != nil {
-		t.Fatalf("blocked run = %+v, want a blocked report and no result", output)
-	}
-	entries, err := os.ReadDir(target)
-	if err != nil {
-		t.Fatalf("read target: %v", err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("blocked run wrote %v into the v2 data root", entries)
-	}
-}
-
 // reconcileRoots returns a v2 data root and a backup destination with every
 // symlink resolved: the bundle verifier refuses a path below a symbolic link,
 // and every macOS temporary directory is one.
@@ -529,32 +439,6 @@ func TestReconcileUsageErrors(t *testing.T) {
 	}
 	if code, _, _ := run(t, "reconcile", "--legacy", filepath.Join(t.TempDir(), "missing")); code != 2 {
 		t.Fatalf("missing source exit code = %d, want 2", code)
-	}
-}
-
-func TestRunUsageErrors(t *testing.T) {
-	if code, _, _ := run(t, "run"); code != 2 {
-		t.Fatalf("missing --legacy exit code = %d, want 2", code)
-	}
-	if code, _, _ := run(t, "run", "--legacy", t.TempDir(), "extra"); code != 2 {
-		t.Fatalf("positional argument exit code = %d, want 2", code)
-	}
-	if code, _, _ := run(t, "run", "--legacy", filepath.Join(t.TempDir(), "missing")); code != 2 {
-		t.Fatalf("missing source exit code = %d, want 2", code)
-	}
-}
-
-func TestTargetDefaultsToTheManagerDataDirectory(t *testing.T) {
-	dataDir := t.TempDir()
-	t.Setenv("USAGE_DATA_DIR", dataDir)
-	t.Setenv("USAGE_DB_PATH", "")
-	t.Setenv("CPA_MANAGER_CONFIG", filepath.Join(t.TempDir(), "absent-config.json"))
-	root, err := resolveTargetRoot("")
-	if err != nil {
-		t.Fatalf("resolve default target: %v", err)
-	}
-	if root != dataDir {
-		t.Fatalf("default target = %q, want the Manager data directory %q", root, dataDir)
 	}
 }
 
@@ -993,5 +877,448 @@ func TestPreflightRequiresTargetDirWhenTheManagerPathCannotBeDerived(t *testing.
 	}
 	if code := ExitCode(runErr); code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
+	}
+}
+
+// copyReadyRunSource builds a stopped 1.x volume the preflight and the backup
+// both accept: the carried-forward usage schema, the v1.14 structure the version
+// check requires, no v2-only tables, a real data key, archives and the v1
+// ownership marker.
+func copyReadyRunSource(t *testing.T) string {
+	t.Helper()
+	root := canonicalFixtureRoot(t)
+	databasePath := filepath.Join(root, "usage.sqlite")
+	db, err := sqliterepo.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open fixture database: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_events (event_hash, timestamp_ms, timestamp, model, requested_model, created_at_ms)
+		values ('legacy-event-1', 1000, '1000', 'gpt-test', 'gpt-test', 1000)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed fixture event: %v", err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("open fixture connection: %v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `pragma foreign_keys = off`); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		t.Fatalf("disable fixture foreign keys: %v", err)
+	}
+	for _, pattern := range []string{`gateway\_%`, `fresh\_%`, `upgrade_operations`} {
+		names, err := fixtureTableNames(conn, pattern)
+		if err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("list v2-only fixture tables: %v", err)
+		}
+		for _, name := range names {
+			if _, err := conn.ExecContext(context.Background(), `drop table `+name); err != nil {
+				_ = conn.Close()
+				_ = db.Close()
+				t.Fatalf("drop v2-only fixture table %s: %v", name, err)
+			}
+		}
+	}
+	// The v1.14.6 and v1.14.7 markers arrived after the pinned release; a source
+	// that carries them is a different source than the one this pin accepts.
+	for _, statement := range []string{
+		`drop index if exists idx_usage_events_ts_latency_ttft_cover`,
+		`delete from settings where key = 'usage_cache_accounting_semantics_revision'`,
+	} {
+		if _, err := conn.ExecContext(context.Background(), statement); err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("strip post-pin marker %q: %v", statement, err)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		_ = db.Close()
+		t.Fatalf("close fixture connection: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture database: %v", err)
+	}
+	if _, _, err := security.LoadOrCreateDataKey("", filepath.Join(root, "data.key")); err != nil {
+		t.Fatalf("create fixture data key: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "usage-archives", "2026-03"), 0o755); err != nil {
+		t.Fatalf("create fixture archives: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "usage-archives", "2026-03", "segment-000001.jsonl"),
+		[]byte(`{"events":1}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write fixture archive: %v", err)
+	}
+	if err := os.WriteFile(databasePath+".manager.lock", nil, 0o600); err != nil {
+		t.Fatalf("write fixture source lock: %v", err)
+	}
+	return root
+}
+
+// canonicalFixtureRoot is a temporary directory with every symlink resolved:
+// maintenancebundle refuses any bundle path below a symbolic link.
+func canonicalFixtureRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve fixture root: %v", err)
+	}
+	return root
+}
+
+func fixtureTableNames(db *sql.Conn, pattern string) ([]string, error) {
+	rows, err := db.QueryContext(context.Background(),
+		`select name from sqlite_master where type = 'table' and name like ? escape '\'`, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	names := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+// startLiveWalWriter leaves the 1.x fixture exactly as a killed 1.x process does:
+// WAL mode, uncheckpointed frames in usage.sqlite-wal and a WAL index on disk.
+// The writer handle stays open so those frames cannot be checkpointed away.
+func startLiveWalWriter(t *testing.T, root string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(root, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the 1.x fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, statement := range []string{
+		`pragma journal_mode = wal`,
+		`pragma wal_autocheckpoint = 0`,
+		`insert into settings (key, value, updated_at_ms) values ('wal_frame_probe', '1', 1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("prepare a live source WAL: %v", err)
+		}
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if info, err := os.Lstat(filepath.Join(root, "usage.sqlite"+suffix)); err != nil || info.Size() == 0 {
+			t.Fatalf("the live source holds no %s (err=%v)", suffix, err)
+		}
+	}
+}
+
+func sourceDatabaseDigests(t *testing.T, root string) map[string]string {
+	t.Helper()
+	digests := map[string]string{}
+	for _, name := range []string{"usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm"} {
+		path := filepath.Join(root, name)
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		digest := sha256.Sum256(data)
+		digests[name] = hex.EncodeToString(digest[:])
+	}
+	return digests
+}
+
+// TestRunPreflightLeavesALiveWALSourceUnchanged is the M3 regression: `upgrade
+// run` used to call the preflight first, and the preflight opened the 1.x
+// database in place with a plain read-only open. SQLite created or rewrote the
+// source's -shm for that read, so a command that promises to write nothing into
+// the 1.x volume had already written into it before the copy ran.
+func TestRunPreflightLeavesALiveWALSourceUnchanged(t *testing.T) {
+	source := copyReadyRunSource(t)
+	startLiveWalWriter(t, source)
+	before := sourceDatabaseDigests(t, source)
+	if before["usage.sqlite-wal"] == "" || before["usage.sqlite-shm"] == "" {
+		t.Fatalf("the fixture is not a live WAL source: %v", before)
+	}
+
+	target := t.TempDir()
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if after := sourceDatabaseDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the run changed the 1.x volume: before %v, after %v", before, after)
+	}
+}
+
+// TestRunCopiesAStoppedSourceAndRecordsTheStage walks the whole CLI path: the
+// preflight runs, the copy-in writes the v2 layout, the stage is recorded and a
+// second run reports the record instead of copying again.
+func TestRunCopiesAStoppedSourceAndRecordsTheStage(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "backup")
+
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var output runOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode run output: %v; output: %s", err, stdout)
+	}
+	if output.Preflight == nil || !output.Preflight.Ready {
+		t.Fatalf("preflight = %+v, want a ready report", output.Preflight)
+	}
+	if output.Result == nil {
+		t.Fatalf("run output has no result: %s", stdout)
+	}
+	if output.Result.Stage != model.UpgradeStageCopyIn || output.Result.SourceKind != upgradeservice.SourceKindUpgradedLegacy {
+		t.Fatalf("result stage/kind = %q/%q", output.Result.Stage, output.Result.SourceKind)
+	}
+	if output.Result.SourceVersion != bootstrap.PlannedDirectRelease {
+		t.Fatalf("recorded source version = %q, want the declaration", output.Result.SourceVersion)
+	}
+	for _, path := range []string{
+		filepath.Join(target, "usage.sqlite"),
+		filepath.Join(target, "data.key"),
+		filepath.Join(target, "usage-archives", "2026-03", "segment-000001.jsonl"),
+		bundle,
+	} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("copy-in did not produce %s: %v", path, err)
+		}
+	}
+
+	code, statusJSON, stderr := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite"))
+	if code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var status statusOutput
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		t.Fatalf("decode status: %v; output: %s", err, statusJSON)
+	}
+	if !status.Recorded || status.Operation == nil || status.Operation.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("status = %+v, want a recorded copy_in", status)
+	}
+	if status.Operation.BackupManifestSHA256 != output.Result.BackupManifestSHA256 {
+		t.Fatalf("recorded manifest = %q, want %q", status.Operation.BackupManifestSHA256, output.Result.BackupManifestSHA256)
+	}
+	if status.Operation.SourceFingerprintBefore != output.Result.SourceFingerprintBefore {
+		t.Fatalf("recorded fingerprint = %q, want %q", status.Operation.SourceFingerprintBefore, output.Result.SourceFingerprintBefore)
+	}
+
+	// A second run reports the recorded copy-in instead of copying again.
+	code, again, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("second run exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var repeated runOutput
+	if err := json.Unmarshal([]byte(again), &repeated); err != nil {
+		t.Fatalf("decode second run: %v", err)
+	}
+	if repeated.Result == nil || !repeated.Result.AlreadyComplete || repeated.Result.Restored {
+		t.Fatalf("second run = %+v, want an already complete copy-in", repeated.Result)
+	}
+}
+
+func TestRunRefusesABlockedSourceAndWritesNothing(t *testing.T) {
+	source := copyReadyRunSource(t)
+	// Removing the ownership marker makes the source unprovably stopped.
+	if err := os.Remove(filepath.Join(source, "usage.sqlite.manager.lock")); err != nil {
+		t.Fatalf("remove source lock: %v", err)
+	}
+	target := t.TempDir()
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	var output runOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode blocked run: %v; output: %s", err, stdout)
+	}
+	if output.Preflight == nil || output.Preflight.Ready || output.Result != nil {
+		t.Fatalf("blocked run = %+v, want a blocked report and no result", output)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("blocked run wrote %v into the v2 data root", entries)
+	}
+}
+
+func TestRunUsageErrors(t *testing.T) {
+	if code, _, _ := run(t, "run"); code != 2 {
+		t.Fatalf("missing --legacy exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "run", "--legacy", t.TempDir(), "extra"); code != 2 {
+		t.Fatalf("positional argument exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "run", "--legacy", filepath.Join(t.TempDir(), "missing")); code != 2 {
+		t.Fatalf("missing source exit code = %d, want 2", code)
+	}
+}
+
+// TestTargetDefaultsToTheManagerDataDirectory covers the default target: a
+// Manager configuration where the database, the data key and the archive tree
+// all resolve to the canonical names inside one directory.
+func TestTargetDefaultsToTheManagerDataDirectory(t *testing.T) {
+	dataDir := canonicalFixtureRoot(t)
+	t.Setenv("USAGE_DATA_DIR", dataDir)
+	t.Setenv("USAGE_DB_PATH", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY_PATH", "")
+	t.Setenv("CPA_MANAGER_CONFIG", filepath.Join(t.TempDir(), "absent-config.json"))
+	root, err := resolveTargetRoot("")
+	if err != nil {
+		t.Fatalf("resolve default target: %v", err)
+	}
+	if root != dataDir {
+		t.Fatalf("default target = %q, want the Manager data directory %q", root, dataDir)
+	}
+}
+
+// TestTargetRefusesAManagerLayoutTheCopyCannotPopulate is the M4 regression. The
+// default target used to be filepath.Dir(cfg.DBPath) and nothing else, while the
+// service reads the data key from cfg.DataKeyPath, the archive tree from
+// cfg.UsageArchiveDir and an inline key from the environment. Copying a data key
+// the service never loads means the 1.x encrypted fields cannot be decrypted, so
+// the run has to refuse a layout it cannot populate and ask for --target.
+func TestTargetRefusesAManagerLayoutTheCopyCannotPopulate(t *testing.T) {
+	dataDir := canonicalFixtureRoot(t)
+	elsewhere := canonicalFixtureRoot(t)
+	t.Setenv("CPA_MANAGER_CONFIG", filepath.Join(t.TempDir(), "absent-config.json"))
+	t.Setenv("CPA_MANAGER_DATA_KEY", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY_PATH", "")
+	t.Setenv("USAGE_DATA_DIR", dataDir)
+
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{
+			name: "manager database beside another key",
+			setup: func(t *testing.T) {
+				t.Setenv("USAGE_DB_PATH", filepath.Join(elsewhere, "usage.sqlite"))
+			},
+		},
+		{
+			name: "inline environment key overrides the copied key",
+			setup: func(t *testing.T) {
+				t.Setenv("USAGE_DB_PATH", "")
+				t.Setenv("CPA_MANAGER_DATA_KEY", "an-inline-key")
+			},
+		},
+		{
+			name: "manager database is not the canonical file name",
+			setup: func(t *testing.T) {
+				t.Setenv("USAGE_DB_PATH", filepath.Join(dataDir, "manager.sqlite"))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.setup(t)
+			root, err := resolveTargetRoot("")
+			if err == nil {
+				t.Fatalf("resolved target %q, want a refusal", root)
+			}
+			if !errors.Is(err, ErrUsage) {
+				t.Fatalf("error = %v, want ErrUsage", err)
+			}
+			if !strings.Contains(err.Error(), upgradeservice.CodeTargetLayoutMismatch) {
+				t.Fatalf("error %q does not carry %s", err, upgradeservice.CodeTargetLayoutMismatch)
+			}
+			if !strings.Contains(err.Error(), "--target") {
+				t.Fatalf("error %q does not ask for --target", err)
+			}
+
+			// An explicit --target states the layout, so it is never second-guessed.
+			explicit := canonicalFixtureRoot(t)
+			root, err = resolveTargetRoot(explicit)
+			if err != nil || root != explicit {
+				t.Fatalf("explicit target = %q/%v, want %q", root, err, explicit)
+			}
+		})
+	}
+}
+
+// TestRunHonorsTheV2DataRootFence is the CLI half of the shared-target
+// regression. `upgrade run` used to take only the 1.x source fence, so it
+// created, restored and migrated the v2 data root while another Manager process
+// held that root's process lock. The refusal is typed and exits 1, and nothing
+// the copy-in would write appears in the held root.
+func TestRunHonorsTheV2DataRootFence(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := canonicalFixtureRoot(t)
+	owner, err := processlock.Acquire(filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("take the v2 data root fence: %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+	before := treeDigests(t, target)
+	sourceBefore := treeDigests(t, source)
+
+	err = Run(context.Background(), []string{"run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target},
+		&bytes.Buffer{}, &bytes.Buffer{})
+	if !errors.Is(err, upgradeservice.ErrV2Running) {
+		t.Fatalf("run under a held v2 data root = %v, want %s", err, upgradeservice.ErrV2Running)
+	}
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); !ok || code != upgradeservice.UpgradeErrorV2Running {
+		t.Fatalf("run error code = %q/%t, want %s", code, ok, upgradeservice.UpgradeErrorV2Running)
+	}
+	if exit := ExitCode(err); exit != 1 {
+		t.Fatalf("exit code = %d, want 1", exit)
+	}
+	after := treeDigests(t, target)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("the refused run changed the held v2 data root: %v -> %v", before, after)
+	}
+	for _, absent := range []string{"usage.sqlite", "data.key", "upgrade-backup", ".upgrade-copy-in"} {
+		if _, statErr := os.Lstat(filepath.Join(target, absent)); !os.IsNotExist(statErr) {
+			t.Fatalf("the refused run wrote %s (err=%v)", absent, statErr)
+		}
+	}
+	if sourceAfter := treeDigests(t, source); !reflect.DeepEqual(sourceBefore, sourceAfter) {
+		t.Fatalf("the refused run changed the 1.x source: %v -> %v", sourceBefore, sourceAfter)
+	}
+}
+
+// TestRunTakesTheSourceFenceReadOnly proves the 1.x source is opened for its
+// ownership lock without write access: the marker is a stopped source's own
+// file, and a source preserved on a read-only mount must still prove
+// exclusivity. The check is the marker's own mode — an O_RDWR open of a 0400
+// file fails for its owner, so this run could not complete through the old
+// descriptor. A read-only mount itself (EROFS) is only qualified on Linux; the
+// Darwin test host has no such mount.
+func TestRunTakesTheSourceFenceReadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not restrict root")
+	}
+	source := copyReadyRunSource(t)
+	marker := filepath.Join(source, "usage.sqlite.manager.lock")
+	if err := os.Chmod(marker, 0o400); err != nil {
+		t.Fatalf("make the source fence read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+	before := treeDigests(t, source)
+	target := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "backup")
+
+	code, _, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the copy-in changed the source volume: %v -> %v", before, after)
 	}
 }

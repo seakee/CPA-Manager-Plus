@@ -418,10 +418,10 @@ func TestCopyInMarkerKeepsAnUnfinishedCopyInInProgress(t *testing.T) {
 
 	marker := copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
 		TargetDatabase:          paths.Database,
 		SourceKind:              SourceKindUpgradedLegacy,
 		SourceFingerprintBefore: "source-fingerprint",
-		SourceFingerprintAfter:  "source-fingerprint",
 		BackupManifestSHA256:    "backup-manifest-sha256",
 		WrittenAtMS:             1,
 	}
@@ -430,14 +430,26 @@ func TestCopyInMarkerKeepsAnUnfinishedCopyInInProgress(t *testing.T) {
 	}
 	assertUpgradeAdmission(t, paths.Database, UpgradeStageInProgress, SurfaceUpgradeOnly)
 
-	// A marker that names another database describes nothing here.
+	// The marker belongs to the data root it sits in, so a relocated root — the
+	// host running the CLI, a container running the server — is still a store
+	// with an unfinished copy-in. Reading it as "no record" used to fail open on
+	// a store whose migration ran and whose row did not.
+	relocated := marker
+	relocated.TargetDatabase = filepath.Join(t.TempDir(), "mounted-data", filepath.Base(paths.Database))
+	if err := copyinmarker.Write(filepath.Dir(paths.Database), relocated); err != nil {
+		t.Fatalf("write a relocated copy-in marker: %v", err)
+	}
+	assertUpgradeAdmission(t, paths.Database, UpgradeStageInProgress, SurfaceUpgradeOnly)
+
+	// A marker that names a different database file is evidence for some other
+	// run, and admitting this store on it would be guessing: it fails closed.
 	other := marker
-	other.TargetDatabase = filepath.Join(t.TempDir(), "usage.sqlite")
+	other.TargetDatabase = filepath.Join(t.TempDir(), "other.sqlite")
 	if err := copyinmarker.Write(filepath.Dir(paths.Database), other); err != nil {
 		t.Fatalf("write a foreign copy-in marker: %v", err)
 	}
-	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: paths.Database}).Admitted(context.Background()); err != nil || stage != UpgradeStageNone {
-		t.Fatalf("marker for another database = %q/%v, want none", stage, err)
+	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: paths.Database}).Admitted(context.Background()); err == nil {
+		t.Fatalf("marker for another database was read as %q, want a refusal", stage)
 	}
 
 	// An unreadable marker fails closed.
@@ -466,4 +478,75 @@ func assertUpgradeAdmission(t *testing.T, databasePath string, wantStage Upgrade
 	if surface := (&Admission{UpgradeStage: stage}).Surface(); surface != wantSurface {
 		t.Fatalf("surface = %q, want %q", surface, wantSurface)
 	}
+}
+
+// TestMaterializingMarkerIsDecidedWithoutReadingTheStore is the H2 regression at
+// the admission seam. Startup used to read the operation row from the copied
+// store before it looked at the marker; in the crash window between the last
+// member rename and the migrating marker, that read joined the copied WAL and
+// rewrote usage.sqlite-shm, which made the resumed move refuse the sidecar it
+// had just restored. A materializing marker is therefore decided from the marker
+// alone: the target cannot hold a committed row (the migration that creates the
+// table has not run), and opening it is what stranded the resume.
+func TestMaterializingMarkerIsDecidedWithoutReadingTheStore(t *testing.T) {
+	paths := fixturePaths(t)
+	// A target no reader can open stands in for "the store was not read at
+	// all": deciding from the marker has to succeed without touching it.
+	if err := os.WriteFile(paths.Database, []byte("the copy-in target is not adopted yet"), 0o600); err != nil {
+		t.Fatalf("write the unadopted target: %v", err)
+	}
+	marker := copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
+		TargetDatabase:          paths.Database,
+		SourceKind:              SourceKindUpgradedLegacy,
+		SourceFingerprintBefore: "source-fingerprint",
+		BackupManifestSHA256:    "backup-manifest-sha256",
+		WrittenAtMS:             1,
+	}
+	if err := copyinmarker.Write(filepath.Dir(paths.Database), marker); err != nil {
+		t.Fatalf("write the materializing marker: %v", err)
+	}
+	stage, err := (DatabaseUpgradeAdmission{DatabasePath: paths.Database}).Admitted(context.Background())
+	if err != nil {
+		t.Fatalf("admission read the unadopted target: %v", err)
+	}
+	if stage != UpgradeStageInProgress {
+		t.Fatalf("admission = %q, want %q", stage, UpgradeStageInProgress)
+	}
+}
+
+// TestCommittedRowOutlivesTheMigratingMarker keeps the other half of the
+// ordering: a valid committed row is stronger evidence than a marker that
+// survived the row's commit, because a process death between the two leaves
+// exactly that pair. The row decides the surface, not the stale marker.
+func TestCommittedRowOutlivesTheMigratingMarker(t *testing.T) {
+	paths := fixturePaths(t)
+	store, err := sqlite.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("create the migrated v2 store: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close the migrated v2 store: %v", err)
+	}
+	recordFixtureStage(t, paths.Database, "complete")
+	identity, err := copyinmarker.Identity(paths.Database)
+	if err != nil {
+		t.Fatalf("read the target database identity: %v", err)
+	}
+	marker := copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMigrating,
+		TargetDatabase:          paths.Database,
+		TargetDatabaseIdentity:  identity,
+		SourceKind:              SourceKindUpgradedLegacy,
+		SourceFingerprintBefore: "source-fingerprint",
+		SourceFingerprintAfter:  "source-fingerprint",
+		BackupManifestSHA256:    "backup-manifest-sha256",
+		WrittenAtMS:             1,
+	}
+	if err := copyinmarker.Write(filepath.Dir(paths.Database), marker); err != nil {
+		t.Fatalf("write the migrating marker: %v", err)
+	}
+	assertUpgradeAdmission(t, paths.Database, UpgradeStageComplete, SurfaceFull)
 }
