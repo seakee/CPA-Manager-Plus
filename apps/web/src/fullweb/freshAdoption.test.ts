@@ -38,7 +38,9 @@ const source = {
 };
 const target = { runtimeIdentity: 'owned-runtime', runtimeGeneration: 3, artifactId };
 
-// The record's own identity for one item: the server digests the item name.
+// A fixture's stable identity for one item. The server binds the digest to the
+// scrubbed text and the item's ordinal, so the fixture only needs an identity
+// that is stable and distinct within one summary.
 const itemID = (name: string) => createHash('sha256').update(name).digest('hex');
 const recorded = (
   item: Omit<AdoptionItem, 'id' | 'left'> & { left?: number }
