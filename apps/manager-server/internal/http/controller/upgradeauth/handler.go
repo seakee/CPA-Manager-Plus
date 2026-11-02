@@ -26,8 +26,8 @@ type Handler struct {
 	paths sqlite.InspectionPaths
 	// mountSource reports whether paths.Database is the configured 1.x source
 	// rather than the Manager's own store. The two files are read differently:
-	// a source is preserved byte for byte (private copy or immutable handle),
-	// while the Manager store is this process's live database.
+	// a source is preserved byte for byte and only ever read through a private
+	// snapshot, while the Manager store is this process's live database.
 	mountSource        bool
 	instance           [32]byte
 	mu                 sync.Mutex

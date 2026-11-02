@@ -313,9 +313,9 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 	}
 	// The credential read bounds itself: this runs on every request, including
 	// every status poll, and reads the credential row only. The file decides how
-	// it is read: a preserved 1.x source is never opened in place (a private copy
-	// when it still carries a WAL, an immutable handle otherwise), while the
-	// Manager's own store is this process's live database.
+	// it is read: a preserved 1.x source is never opened in place and is read
+	// through a private snapshot, while the Manager's own store is this
+	// process's live database.
 	var verifyErr error
 	if mount.database != "" {
 		verifyErr = upgradeservice.VerifyAdminSource(r.Context(), database, key)

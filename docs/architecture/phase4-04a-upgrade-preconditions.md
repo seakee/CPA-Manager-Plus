@@ -510,9 +510,19 @@ on both surfaces at once, and no write route exists.
   handler has no credential input of its own: it applies that rule to the mount
   it inspected for the request, so nothing a caller supplies can point the read
   at a file the policy refused. The handler verifies the resolved file through
-  `upgrade.VerifyAdminSource`, which opens it read-only and runs
-  `setting.LoadAdminCredential` + `security.VerifyAdminKey`.
-  That open reads the credential row and nothing else:
+  `upgrade.VerifyAdminSource` when it is a 1.x source, which reads it through
+  the same private snapshot the preflight takes (`OpenSnapshot`) and runs
+  `setting.LoadAdminCredential` + `security.VerifyAdminKey` on the copy. No
+  source is ever opened in place: `mode=ro` still creates `-wal`/`-shm` beside a
+  WAL database, and an immutable handle on a source that was cold when it was
+  inspected silently misses a WAL that appears while the read is being set up.
+  The source files are digested before the copy, again after it, and the copy is
+  digested as it is written; any difference means the source was not stopped and
+  the read is refused (`upgrade_source_unreadable`) instead of answering from a
+  stale or mixed state. The Manager's own store is this process's live database,
+  not a volume to preserve, so `VerifyManagerCredential` reads it in place
+  read-only and immutable only when no live WAL can hold rows.
+  The credential read returns the credential row and nothing else:
   no `quick_check`, no schema vocabulary, no parity, bounded to
   `CredentialVerifyTimeout` (2s). Every authenticated request runs it, including
   every status poll, so a whole-file scan there would answer 503 on a large
@@ -532,6 +542,27 @@ on both surfaces at once, and no write route exists.
   the other file is refused by both — but a mount that appears, disappears or is
   repointed after startup is seen by the reads first, and the entry leaf keeps its
   startup resolution until it is rebuilt.
+- **Entry statuses.** The authentication leaf
+  (`/.well-known/cpamp-bootstrap/upgrade/authenticate`) answers one of exactly
+  two statuses for a proved credential, and both carry `authenticated: true`,
+  `migration_available: false`, `expires_in_seconds: 60` and an opaque instance
+  revision that is never a session token: `unsupported_upgrade` when the public
+  discovery observation could classify the source, and `observation_unavailable`
+  when it could not describe it — a live WAL source is recovery-owned, so the
+  public observation refuses it. `observation_unavailable` says only that the
+  identity is proved and the public summary is unavailable: it claims no stage,
+  no readiness and no migration permission, and the two read routes prove the
+  key again on their own and name the source's conditions. It is not a credential
+  verdict, so a proved key is never downgraded to `401` because the observation
+  refused the source, and it is not a success claim, so the page does not present
+  it as upgrade-ready. A wrong key cannot open the leaf: it is
+  `401 admin_unauthorized` whenever the credential can be asked and refused, and
+  `503 source_unavailable` when the observation faulted for its own reason and
+  the key could not be proved — rather than blaming a credential the leaf could
+  not check. Every response for a proved credential is `200`, including the
+  unobservable one; `503 source_unavailable` is reserved for a source this build
+  cannot prove a key against, and `409 source_changed` for a presented revision
+  that no longer matches.
 - **One file policy on both paths.** The mount lookup applies the same database
   file rules as the preflight and the credential read
   (`processlock.InspectDatabaseFile`, via `upgrade.MountDatabase`): the path must
@@ -595,10 +626,17 @@ on both surfaces at once, and no write route exists.
   the shared file policy's `upgrade_source_symlinked` (the same code the
   credential read returns); a marker that cannot be inspected at all (missing,
   unreadable, not a regular file, or a hard-linked database) is the distinct
-  `upgrade_source_lock_unavailable`. A read-only source
-  tree therefore yields a real report, two concurrent preflights both reach a
-  verdict, and the before/after fingerprint gate in `upgrade run` — which holds
-  the exclusive lock — remains the write path's guard.
+  `upgrade_source_lock_unavailable`. The same check names the source's own file
+  conditions: an absent or empty database is `upgrade_source_missing`, a
+  database the snapshot cannot decode — including one that fails `quick_check`
+  or cannot be copied at all — is `upgrade_source_unreadable`, a copy that could
+  not be made is `upgrade_snapshot_failed`, and a source that was written while
+  the snapshot was taken is `upgrade_source_changed`. Every one of those reads
+  goes through `OpenSnapshot`; the preflight never opens the source in place, so
+  a stopped source preserved on a read-only volume yields a real report instead
+  of gaining a sidecar file. Two concurrent preflights both reach a verdict, and
+  the before/after fingerprint gate in `upgrade run` — which holds the exclusive
+  lock — remains the write path's guard.
 - **Projection.** The status route selects named columns (stage, domains,
   source kind/version, reconciliation days, manual items, error code/detail,
   updated time) and maps the stage onto `nextAction`. An unknown stage is shown
@@ -618,6 +656,15 @@ on both surfaces at once, and no write route exists.
   store, so the mount's own key gets `401` and cannot read the marker that
   explains the refusal. `preflight` still inspects that mount, not the credential
   file the surface fell back to.
+  Reconciliation travels through the same fixed allow-list (`mismatchDays`,
+  `mismatchDaysTotal`, `mismatchDaysTruncated`), never the producer's payload.
+  The list is bounded at 366 days — a transport bound, not a judgement about the
+  history — so a longer history is reported with its total and the truncation
+  flag: a cut list is a visible window, never silently the whole history, and
+  the wizard refuses a reply whose total is smaller than the list it stands for.
+  The page reads the recorded operation before anything else: a recorded stage
+  resumes where it stands, terminal or not, and the read-only preflight is the
+  first step only when the store answers that nothing is recorded.
 - **Scrubbing.** Operator-visible text is redacted by content, not by path
   shape: `Bearer …` (including a value wrapped onto the next line after a lone
   `Bearer`), `Authorization: Basic …`, `sk-…`, this product's own
