@@ -214,3 +214,52 @@ func TestUpgradeWizardReadRoutesUseTheSourceAdministratorCredential(t *testing.T
 		}
 	}
 }
+
+// TestUpgradeReadNamespaceAnswersTheCredentialBeforeThePath is M3 on both
+// carriers that mount the reader: the fixed Bootstrap API before cutover and the
+// canonical continuation after it. An unknown route inside the Upgrade namespace
+// is not a resource that may describe itself before the credential, so a caller
+// without one cannot map the surface by asking for a path that does not exist.
+func TestUpgradeReadNamespaceAnswersTheCredentialBeforeThePath(t *testing.T) {
+	app, token := setupContinuationApp(t)
+	legacy := upgradeWizardLegacyRoot(t)
+	t.Setenv(legacyRootEnvironment, legacy)
+	app.cfg.DBPath = filepath.Join(t.TempDir(), "manager.sqlite")
+
+	request := func(method, path, authorization string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, nil)
+		if authorization != "" {
+			r.Header.Set("Authorization", authorization)
+		}
+		w := httptest.NewRecorder()
+		app.ServeHTTP(w, r)
+		return w
+	}
+	check := func(phase, target string) {
+		t.Helper()
+		for name, authorization := range map[string]string{
+			"absent":               "",
+			"installation session": "Fresh " + token,
+			"foreign key":          "Bearer another-Manager-key",
+		} {
+			if w := request(http.MethodGet, target, authorization); w.Code != http.StatusUnauthorized {
+				t.Fatalf("%s (%s) with the %s = %d: %s", target, phase, name, w.Code, w.Body.String())
+			}
+		}
+		// Only the proved source credential learns that the route does not exist.
+		if w := request(http.MethodGet, target, "Bearer "+upgradeWizardAdminKey); w.Code != http.StatusNotFound {
+			t.Fatalf("%s (%s) with the proved credential = %d: %s", target, phase, w.Code, w.Body.String())
+		}
+	}
+
+	check("pre-cutover", bootstrap.FixedBootstrapAPIPath+"installation/upgrade/not-a-route")
+	commitInstallationRouting(t, app)
+	check("canonical", "/control/api/v2/installation/upgrade/not-a-route")
+
+	// A completed installation stops serving the whole namespace, credential or
+	// not: there is no Upgrade step left to observe.
+	markFreshProductComplete(t, app)
+	if w := request(http.MethodGet, "/control/api/v2/installation/upgrade/not-a-route", "Bearer "+upgradeWizardAdminKey); w.Code != http.StatusNotFound {
+		t.Fatalf("unknown Upgrade route after completion = %d: %s", w.Code, w.Body.String())
+	}
+}

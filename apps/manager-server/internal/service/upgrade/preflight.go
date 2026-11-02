@@ -53,11 +53,11 @@ const (
 // Blocked codes. Parity gaps are never codes: they are reported for explicit
 // operator confirmation instead of blocking.
 const (
-	CodeSourceMissing            = "upgrade_source_missing"
+	CodeSourceMissing = "upgrade_source_missing"
 	// CodeSourceBusy means the 1.x Manager still owns the source.
-	CodeSourceBusy = "upgrade_source_busy"
-	CodeSourceLockUnavailable    = "upgrade_source_lock_unavailable"
-	CodeSourceSymlinked          = "upgrade_source_symlinked"
+	CodeSourceBusy            = "upgrade_source_busy"
+	CodeSourceLockUnavailable = "upgrade_source_lock_unavailable"
+	CodeSourceSymlinked       = "upgrade_source_symlinked"
 	// CodeSourceUnreadable means the source cannot be used as a 1.x Manager
 	// database: missing, broken, or not a Manager database at all.
 	CodeSourceUnreadable = "upgrade_source_unreadable"
@@ -819,6 +819,7 @@ func unreadableDetail(err error) string {
 	}
 	return "source database could not be opened read-only"
 }
+
 // rootCause is the shortest stable description of a wrapped error.
 func rootCause(err error) string {
 	if err == nil {

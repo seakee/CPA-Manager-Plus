@@ -495,6 +495,109 @@ func TestMountDeadlineIsATimeoutNotAnUnreadableSource(t *testing.T) {
 	<-finished
 }
 
+// TestMountBoundContainsTheConfiguredRootResolution is M4 at the route
+// boundary. The production resolver behind Handler.LegacyRoot stats the
+// configured directory — `/legacy` when the operator set nothing — and a stat on
+// a hung mount waits exactly as long as the database inspection behind it.
+// Resolving the root before the lookup would leave that wait outside the only
+// bound this surface has, so the whole resolution has to run inside the one
+// bounded, one-in-flight lookup.
+func TestMountBoundContainsTheConfiguredRootResolution(t *testing.T) {
+	const managerKey = "manager-store-key-for-a-slow-root"
+	database := managerCredentialStore(t, managerKey)
+	root := t.TempDir()
+	var resolverCalls, lookups, active, peak int32
+	resolved := make(chan struct{})
+	var slow sync.Once
+	handler := &Handler{
+		LegacyRoot: func() string {
+			atomic.AddInt32(&resolverCalls, 1)
+			running := atomic.AddInt32(&active, 1)
+			for {
+				seen := atomic.LoadInt32(&peak)
+				if running <= seen || atomic.CompareAndSwapInt32(&peak, seen, running) {
+					break
+				}
+			}
+			defer atomic.AddInt32(&active, -1)
+			// The first resolution is the hung filesystem call. Every later one
+			// answers immediately, so the handler's recovery is observable.
+			slow.Do(func() {
+				time.Sleep(300 * time.Millisecond)
+				close(resolved)
+			})
+			return ""
+		},
+		Database:     func() string { return database },
+		Timeout:      10 * time.Second,
+		MountTimeout: 20 * time.Millisecond,
+	}
+	handler.lookupMount = func(string) mountResolution {
+		atomic.AddInt32(&lookups, 1)
+		return mountResolution{root: root, code: CodeLegacyRootMissing}
+	}
+
+	// Both routes share the one handler and therefore the one flight: a hung
+	// root still costs exactly one resolution however many polls arrive.
+	const polls = 20
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	codes := make([]int, polls)
+	bodies := make([]string, polls)
+	for index := range polls {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			path := testPrefix + StatusSuffix
+			if index%2 == 0 {
+				path = testPrefix + PreflightSuffix
+			}
+			poll := httptest.NewRequest(http.MethodGet, path, nil)
+			poll.Host = "manager.test"
+			poll.Header.Set("Authorization", bearer(managerKey))
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, poll)
+			codes[index] = recorder.Code
+			bodies[index] = recorder.Body.String()
+		}(index)
+	}
+	started := time.Now()
+	close(start)
+	wait.Wait()
+	elapsed := time.Since(started)
+	if elapsed > 150*time.Millisecond {
+		t.Fatalf("%d polls waited %s on a root resolution bounded to %s", polls, elapsed, handler.MountTimeout)
+	}
+	if got := atomic.LoadInt32(&resolverCalls); got != 1 {
+		t.Fatalf("%d concurrent polls resolved the configured root %d times, want 1", polls, got)
+	}
+	if got := atomic.LoadInt32(&lookups); got != 0 {
+		t.Fatalf("%d root inspections ran before the hung resolution answered", got)
+	}
+	for index := range codes {
+		if codes[index] != http.StatusServiceUnavailable && codes[index] != http.StatusOK {
+			t.Fatalf("poll %d on a hung root = %d: %s", index, codes[index], bodies[index])
+		}
+		if !strings.Contains(bodies[index], `"`+CodeMountTimeout+`"`) {
+			t.Fatalf("poll %d did not name the mount deadline: %s", index, bodies[index])
+		}
+	}
+
+	// The resolution lands after every poll was answered. It must not have
+	// replaced a deadline verdict, and it must not strand the handler: the next
+	// request answers from the resolved root (joining the landing flight or
+	// starting the next one — both read the same resolution).
+	<-resolved
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(managerKey), http.StatusOK)
+	if !strings.Contains(body, `"sourceRoot":"`+CodeLegacyRootMissing+`"`) {
+		t.Fatalf("the request after the late resolution = %s", body)
+	}
+	if got := atomic.LoadInt32(&peak); got != 1 {
+		t.Fatalf("%d root resolutions ran at once, want at most 1", got)
+	}
+}
+
 // managerCredentialStore writes the Manager's own store with an administrator
 // credential and one recorded operation row: everything the surface reads when
 // it is not reading a 1.x mount.
