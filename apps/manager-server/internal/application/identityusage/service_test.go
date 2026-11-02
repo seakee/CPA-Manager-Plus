@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -446,5 +447,26 @@ func TestResponsesCarryNoSecretOrHashField(t *testing.T) {
 		if strings.Contains(lowered, forbidden) {
 			t.Fatalf("usage response leaks %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+// TestDaysWithinKeepsMarksWithAnUpperBoundAtTheLimitOfInt64 reproduces review
+// L4 for the Key workspace: the same day arithmetic hid every mark from a
+// window that ended near the largest int64.
+func TestDaysWithinKeepsMarksWithAnUpperBoundAtTheLimitOfInt64(t *testing.T) {
+	marks := []ports.IncompleteDay{{Day: "2026-03-01", Reason: "reconcile_mismatch"}}
+	for _, upper := range []int64{1 << 42, math.MaxInt64 - utcDayMilliseconds, math.MaxInt64} {
+		if got := daysWithin(marks, 1, upper); len(got) != 1 || got[0].Day != "2026-03-01" {
+			t.Fatalf("daysWithin(1, %d) = %+v, want the mark", upper, got)
+		}
+	}
+	// The window stays half-open, and a window that starts after the last day
+	// the stored form can hold reports nothing.
+	start := time.Date(2026, time.March, 2, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if got := daysWithin(marks, start, math.MaxInt64); len(got) != 0 {
+		t.Fatalf("daysWithin after the mark = %+v, want none", got)
+	}
+	if got := daysWithin(marks, 1<<60, math.MaxInt64); len(got) != 0 {
+		t.Fatalf("daysWithin past the last stored day = %+v, want none", got)
 	}
 }

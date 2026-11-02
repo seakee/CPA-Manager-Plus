@@ -48,6 +48,14 @@ const dayLayout = "2006-01-02"
 
 const utcDayMS = int64(24 * 60 * 60 * 1000)
 
+// The day indexes the stored text form can hold. Below the first, a rendered
+// day would carry a negative year; above the last, a five-digit one, and both
+// sort wrongly against every stored YYYY-MM-DD day.
+const (
+	minStoredDayIndex = int64(-719162) // 0001-01-01
+	maxStoredDayIndex = int64(2932896) // 9999-12-31
+)
+
 // Day is one marked UTC day.
 type Day struct {
 	Day    string `json:"day"`
@@ -167,13 +175,21 @@ func DaysIn(ctx context.Context, q Queryer, fromTimestampMS, toTimestampMS int64
 	if toTimestampMS <= fromTimestampMS {
 		return days, nil
 	}
+	lower, upper, hasUpper := dayBounds(fromTimestampMS, toTimestampMS)
+	if lower == "" {
+		return days, nil
+	}
 	present, err := tablePresent(ctx, q)
 	if err != nil || !present {
 		return days, err
 	}
-	rows, err := q.QueryContext(ctx, `select day, reason from `+TableName+`
-		where day >= ? and day < ? order by day`,
-		Label(fromTimestampMS/utcDayMS), Label((toTimestampMS+utcDayMS-1)/utcDayMS))
+	query := `select day, reason from ` + TableName + ` where day >= ?`
+	args := []any{lower}
+	if hasUpper {
+		query += ` and day < ?`
+		args = append(args, upper)
+	}
+	rows, err := q.QueryContext(ctx, query+` order by day`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read the incomplete coverage days: %w", err)
 	}
@@ -186,6 +202,54 @@ func DaysIn(ctx context.Context, q Queryer, fromTimestampMS, toTimestampMS int64
 		days = append(days, day)
 	}
 	return days, rows.Err()
+}
+
+// dayBounds renders [fromTimestampMS, toTimestampMS) as the inclusive lower day
+// label and the exclusive upper one. The upper label is dropped (hasUpper
+// false) once the window reaches past the last day the stored text form can
+// hold: no mark can sit above it, and adding a day to a timestamp near MaxInt64
+// would wrap into a negative day that sorts before every mark, hiding all of
+// them. The lower label is clamped to the first day the form can hold, which is
+// below every mark, so a pre-year-1 window still means "from the beginning". A
+// lower label of "" means no stored day can fall inside the window.
+func dayBounds(fromTimestampMS, toTimestampMS int64) (string, string, bool) {
+	lower := floorDayIndex(fromTimestampMS)
+	if lower > maxStoredDayIndex {
+		return "", "", false
+	}
+	if lower < minStoredDayIndex {
+		lower = minStoredDayIndex
+	}
+	upper := ceilDayIndex(toTimestampMS)
+	if upper <= lower {
+		return "", "", false
+	}
+	if upper > maxStoredDayIndex {
+		return Label(lower), "", false
+	}
+	return Label(lower), Label(upper), true
+}
+
+// floorDayIndex is the index of the UTC day a timestamp falls in, rounding
+// towards negative infinity so a timestamp before the epoch keeps belonging to
+// the day it was in.
+func floorDayIndex(timestampMS int64) int64 {
+	day := timestampMS / utcDayMS
+	if timestampMS%utcDayMS != 0 && timestampMS < 0 {
+		day--
+	}
+	return day
+}
+
+// ceilDayIndex is the index of the first UTC day at or after a timestamp: the
+// exclusive upper bound of a day range. It never adds to the timestamp, so a
+// value near MaxInt64 cannot overflow.
+func ceilDayIndex(timestampMS int64) int64 {
+	day := timestampMS / utcDayMS
+	if timestampMS%utcDayMS > 0 {
+		day++
+	}
+	return day
 }
 
 func tablePresent(ctx context.Context, q Queryer) (bool, error) {

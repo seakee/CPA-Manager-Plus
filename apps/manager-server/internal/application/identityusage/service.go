@@ -463,24 +463,79 @@ func (s *Service) projection(ctx context.Context) (ports.ProjectionState, bool) 
 }
 
 // daysWithin keeps the marks whose UTC day overlaps [fromMS, toMS). Stored
-// days are YYYY-MM-DD, so the comparison is chronological as text.
+// days are YYYY-MM-DD, so the comparison is chronological as text. The bounds
+// use the same day arithmetic as coverageincomplete.DaysIn: the upper label is
+// computed without adding a day to toMS, because a window that ends near the
+// largest int64 would wrap to a day before every mark and hide all of them.
 func daysWithin(days []ports.IncompleteDay, fromMS, toMS int64) []ports.IncompleteDay {
 	if len(days) == 0 || toMS <= fromMS {
 		return nil
 	}
-	const dayMS = int64(24 * time.Hour / time.Millisecond)
-	from := time.UnixMilli(fromMS / dayMS * dayMS).UTC().Format("2006-01-02")
-	to := time.UnixMilli((toMS + dayMS - 1) / dayMS * dayMS).UTC().Format("2006-01-02")
+	lower, upper, hasUpper := dayLabels(fromMS, toMS)
+	if lower == "" {
+		return nil
+	}
 	within := make([]ports.IncompleteDay, 0, len(days))
 	for _, day := range days {
-		if day.Day >= from && day.Day < to {
-			within = append(within, day)
+		if day.Day < lower || (hasUpper && day.Day >= upper) {
+			continue
 		}
+		within = append(within, day)
 	}
 	if len(within) == 0 {
 		return nil
 	}
 	return within
+}
+
+// The day indexes the stored text form can hold; see coverageincomplete.
+const (
+	utcDayMilliseconds = int64(24 * time.Hour / time.Millisecond)
+	minStoredDayIndex  = int64(-719162) // 0001-01-01
+	maxStoredDayIndex  = int64(2932896) // 9999-12-31
+)
+
+// dayLabels renders [fromMS, toMS) as an inclusive lower day label and an
+// exclusive upper one. The upper label is dropped once the window reaches past
+// the last day the stored form can hold: no mark can sit above it, and the
+// rendered five-digit year would sort before every stored day. A lower label of
+// "" means no stored day can fall inside the window.
+func dayLabels(fromMS, toMS int64) (string, string, bool) {
+	lower := floorDayIndex(fromMS)
+	if lower > maxStoredDayIndex {
+		return "", "", false
+	}
+	if lower < minStoredDayIndex {
+		lower = minStoredDayIndex
+	}
+	upper := ceilDayIndex(toMS)
+	if upper <= lower {
+		return "", "", false
+	}
+	if upper > maxStoredDayIndex {
+		return storedDayLabel(lower), "", false
+	}
+	return storedDayLabel(lower), storedDayLabel(upper), true
+}
+
+func floorDayIndex(timestampMS int64) int64 {
+	day := timestampMS / utcDayMilliseconds
+	if timestampMS%utcDayMilliseconds != 0 && timestampMS < 0 {
+		day--
+	}
+	return day
+}
+
+func ceilDayIndex(timestampMS int64) int64 {
+	day := timestampMS / utcDayMilliseconds
+	if timestampMS%utcDayMilliseconds > 0 {
+		day++
+	}
+	return day
+}
+
+func storedDayLabel(dayIndex int64) string {
+	return time.UnixMilli(dayIndex * utcDayMilliseconds).UTC().Format("2006-01-02")
 }
 
 // incompleteDaysView converts the storage vocabulary into the response one.

@@ -3,6 +3,7 @@ package coverageincomplete
 import (
 	"context"
 	"database/sql"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -192,5 +193,47 @@ func TestParseDayNormalizesAndValidates(t *testing.T) {
 		if _, err := ParseDay(value); err == nil {
 			t.Fatalf("parse %q was accepted", value)
 		}
+	}
+}
+
+// TestDaysInKeepsMarksWithAnUpperBoundAtTheLimitOfInt64 reproduces review L4:
+// the upper bound added a day to the window end, so DaysIn(1, MaxInt64)
+// wrapped into a negative day, compared every mark against a day before the
+// epoch, and reported none.
+func TestDaysInKeepsMarksWithAnUpperBoundAtTheLimitOfInt64(t *testing.T) {
+	ctx := context.Background()
+	db := openMarkDatabase(t)
+	repository := New(db)
+	if _, err := repository.Mark(ctx, []Day{
+		{Day: "2026-03-01", Reason: ReasonReconcileMismatch},
+	}, 1_000); err != nil {
+		t.Fatalf("mark the day: %v", err)
+	}
+	for _, upper := range []int64{1 << 42, math.MaxInt64 - utcDayMS, math.MaxInt64} {
+		days, err := repository.DaysIn(ctx, 1, upper)
+		if err != nil {
+			t.Fatalf("read the window ending at %d: %v", upper, err)
+		}
+		if len(days) != 1 || days[0].Day != "2026-03-01" {
+			t.Fatalf("marks in the window ending at %d = %+v, want the marked day", upper, days)
+		}
+	}
+	// A window that starts after the last day the stored form can hold has no
+	// mark in it, and says so instead of reading a wrapped label.
+	days, err := repository.DaysIn(ctx, 1<<60, math.MaxInt64)
+	if err != nil {
+		t.Fatalf("read a window past the last stored day: %v", err)
+	}
+	if len(days) != 0 {
+		t.Fatalf("marks = %+v, want none", days)
+	}
+	// A window that ends at the start of the seeded day excludes it: the upper
+	// bound stays exclusive even when it is the largest day label.
+	excluded, err := repository.DaysIn(ctx, 1, dayStartMS(2026, time.March, 1))
+	if err != nil {
+		t.Fatalf("read the window before the mark: %v", err)
+	}
+	if len(excluded) != 0 {
+		t.Fatalf("marks = %+v, want the exclusive end to drop the day", excluded)
 	}
 }
