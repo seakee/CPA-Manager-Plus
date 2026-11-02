@@ -138,17 +138,6 @@ var digestReferencePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(?::[0-9]
 // with `docker run -v` uses the unprefixed `cpa-manager-plus-data`.
 var dockerVolumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
-// rollbackApplicableStages are the recorded stages a rollback may start from.
-// A rolled-back row is deliberately absent: the verdict is recorded once.
-var rollbackApplicableStages = map[model.UpgradeStage]bool{
-	model.UpgradeStageCopyIn:          true,
-	model.UpgradeStageReconcile:       true,
-	model.UpgradeStageCPAImport:       true,
-	model.UpgradeStageExternalConnect: true,
-	model.UpgradeStageVerify:          true,
-	model.UpgradeStageComplete:        true,
-}
-
 // RollbackOptions addresses the two roots a rollback decision needs. The
 // operation row is read from the v2 database inside TargetRoot.
 type RollbackOptions struct {
@@ -292,7 +281,7 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		return Plan{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
 			"no upgrade operation is recorded, so there is nothing to roll back", nil)
 	}
-	if !rollbackApplicableStages[recorded.Stage] {
+	if !recorded.Stage.RollbackApplicable() {
 		return Plan{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
 			fmt.Sprintf("the operation is recorded at stage %q, which a rollback cannot start from", string(recorded.Stage)), nil)
 	}
@@ -982,7 +971,7 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
 			"no upgrade operation is recorded, so there is nothing to roll back", nil)
 	}
-	if !rollbackApplicableStages[recorded.Stage] {
+	if !recorded.Stage.RollbackApplicable() {
 		return model.UpgradeOperation{}, newUpgradeError(UpgradeErrorRollbackNotApplicable,
 			fmt.Sprintf("the operation is recorded at stage %q, which a rollback cannot start from", string(recorded.Stage)), nil)
 	}

@@ -596,6 +596,39 @@ func TestRecordRollbackRefusesASecondVerdict(t *testing.T) {
 	}
 }
 
+// TestRecordRollbackRefusesAStageWithNoCopiedRoot is the L10 regression: stage
+// eligibility is decided again inside the write transaction, not only by the
+// service precheck. A row at preflight never copied a root, and a failed row has
+// no position, so it may have failed before the copy-in; neither position can
+// justify a verdict that says the v2 root was abandoned. The stage is changed
+// here behind the service's back, which is exactly the staleness the
+// transaction has to catch.
+func TestRecordRollbackRefusesAStageWithNoCopiedRoot(t *testing.T) {
+	for _, stage := range []model.UpgradeStage{model.UpgradeStagePreflight, model.UpgradeStageFailed} {
+		t.Run(string(stage), func(t *testing.T) {
+			ctx := context.Background()
+			repository, _ := newRepository(t)
+			if _, err := repository.Advance(ctx, "", stage); err != nil {
+				t.Fatalf("record the %s stage: %v", stage, err)
+			}
+			before, found, err := repository.Get(ctx)
+			if err != nil || !found {
+				t.Fatalf("read the recorded stage: found=%t err=%v", found, err)
+			}
+			if _, err := repository.RecordRollback(ctx, rollbackEvidence()); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+				t.Fatalf("rollback from %q error = %v, want %v", stage, err, upgradeoperation.ErrStageRegression)
+			}
+			after, found, err := repository.Get(ctx)
+			if err != nil || !found {
+				t.Fatalf("re-read the refused row: found=%t err=%v", found, err)
+			}
+			if after.Stage != before.Stage || after.UpdatedAtMS != before.UpdatedAtMS || after.Rollback != nil {
+				t.Fatalf("a refused verdict changed the %q row: before=%+v after=%+v", stage, before, after)
+			}
+		})
+	}
+}
+
 // TestRecordRollbackRefusesIncompleteEvidence keeps a half-written observation
 // out of the row.
 func TestRecordRollbackRefusesIncompleteEvidence(t *testing.T) {

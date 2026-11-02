@@ -55,6 +55,23 @@ func (s UpgradeStage) Valid() bool {
 
 func (s UpgradeStage) rank() int { return upgradeStageRanks[s] }
 
+// RollbackApplicable reports whether a rollback may abandon this position.
+//
+// Preflight is excluded: the copy-in has not run, so there is no v2 root to
+// abandon and no backup to compare. Failed is excluded: it has no position, so
+// it may have failed before the copy-in, and a verdict that the v2 root was
+// abandoned cannot be justified from it. Every forward position from copy_in
+// onward copied a root, so any of them can be abandoned.
+func (s UpgradeStage) RollbackApplicable() bool {
+	switch s {
+	case UpgradeStageCopyIn, UpgradeStageReconcile, UpgradeStageCPAImport,
+		UpgradeStageExternalConnect, UpgradeStageVerify, UpgradeStageComplete:
+		return true
+	default:
+		return false
+	}
+}
+
 // CanAdvanceTo reports whether moving from s to next keeps the operation
 // monotonic. A completed operation never moves again; a failed one may resume
 // any stage because it never claimed a position.
@@ -67,10 +84,10 @@ func (s UpgradeStage) CanAdvanceTo(next UpgradeStage) bool {
 	}
 	// A rollback abandons the forward order instead of extending it. It is the
 	// one move a completed operation may still make, so the completion barrier
-	// below does not apply to it; the caller decides which positions may be
-	// abandoned.
+	// below does not apply to it; RollbackApplicable decides which positions
+	// carry a copied root a rollback may abandon.
 	if next == UpgradeStageRolledBack {
-		return s.Valid()
+		return s.RollbackApplicable()
 	}
 	if s == UpgradeStageComplete {
 		return false

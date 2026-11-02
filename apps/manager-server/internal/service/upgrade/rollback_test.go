@@ -978,10 +978,23 @@ func TestRolledBackIsTerminal(t *testing.T) {
 		}
 	}
 	for _, previous := range []model.UpgradeStage{
-		model.UpgradeStageCopyIn, model.UpgradeStageComplete, model.UpgradeStageFailed,
+		model.UpgradeStageCopyIn, model.UpgradeStageComplete,
 	} {
 		if !previous.CanAdvanceTo(model.UpgradeStageRolledBack) {
 			t.Fatalf("%q cannot advance to rolled_back", previous)
+		}
+	}
+	// A preflight row never copied a root, and a failed row has no position, so
+	// it may have failed before the copy-in. Neither can justify a verdict that
+	// the v2 root was abandoned.
+	for _, previous := range []model.UpgradeStage{
+		model.UpgradeStagePreflight, model.UpgradeStageFailed,
+	} {
+		if previous.RollbackApplicable() {
+			t.Fatalf("%q reports a copied root it never had", previous)
+		}
+		if previous.CanAdvanceTo(model.UpgradeStageRolledBack) {
+			t.Fatalf("%q advanced to rolled_back without a copied root", previous)
 		}
 	}
 }

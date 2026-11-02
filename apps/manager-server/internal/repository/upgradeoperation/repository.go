@@ -519,10 +519,10 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 	if !found {
 		return model.UpgradeOperation{}, errors.New("upgrade operation row disappeared during record")
 	}
-	if current.Stage == model.UpgradeStageRolledBack {
-		return current, fmt.Errorf("%w: %q -> %q", ErrStageRegression, current.Stage, model.UpgradeStageRolledBack)
-	}
-	if current.Stage != "" && current.Stage.Valid() && !current.Stage.CanAdvanceTo(model.UpgradeStageRolledBack) {
+	if !current.Stage.RollbackApplicable() {
+		// Stage eligibility is decided here, against the row this transaction
+		// holds, not only by the caller's earlier read: a copy-in retry may have
+		// parked the row at failed, and preflight never copied a root at all.
 		return current, fmt.Errorf("%w: %q -> %q", ErrStageRegression, current.Stage, model.UpgradeStageRolledBack)
 	}
 	current.Stage = model.UpgradeStageRolledBack
