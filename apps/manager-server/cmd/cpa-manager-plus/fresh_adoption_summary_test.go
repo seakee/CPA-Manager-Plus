@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -480,6 +482,92 @@ func TestAdoptionSummaryRedactsTheSourceClientKeysByValue(t *testing.T) {
 	}
 	if !strings.Contains(body, "[redacted]") {
 		t.Errorf("the summary did not mark the redaction: %s", body)
+	}
+}
+
+// An overlong credential name is recorded as a bounded prefix, so a Client Key
+// can straddle that cut: the whole value never reaches the record, and a
+// whole-value match would leave the readable fragment behind. The reply must
+// carry no fragment of a source value either.
+func TestAdoptionSummaryRedactsATruncatedSourceValue(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef"
+	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key)
+	// The record keeps 120 bytes of the name: 100 readable bytes and the first
+	// 20 of the key.
+	name := strings.Repeat("p", 100) + key + strings.Repeat("q", 200) + ".json"
+	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
+	fixture.source.types[name] = "claude"
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	// The record really does hold the fragment, so the reply's silence below is
+	// the boundary's doing rather than an accident of the run.
+	record := fixture.reload(t)
+	truncated := false
+	for _, item := range record.AdoptionSummary.Items {
+		if strings.Contains(item.Item, key[:20]) {
+			truncated = true
+		}
+	}
+	if !truncated {
+		t.Fatalf("the run recorded no truncated value to redact: %+v", record.AdoptionSummary.Items)
+	}
+
+	body := fixture.adoption(t).Body.String()
+	// No window of the value long enough to be a credential may reach the
+	// browser: a truncation leaves exactly such a window.
+	for start := 0; start+minRedactedValue <= len(key); start++ {
+		if fragment := key[start : start+minRedactedValue]; strings.Contains(body, fragment) {
+			t.Fatalf("the summary carried a fragment of the source Client Key: %s", body)
+		}
+	}
+	// The readable part of the name stays: redaction must not make the item
+	// unrecognisable.
+	if !strings.Contains(body, strings.Repeat("p", 100)) {
+		t.Fatalf("the summary dropped the readable part of the name: %s", body)
+	}
+}
+
+// The reply's identity for an item must not turn a candidate credential into
+// something confirmable offline. The record's own name is not what the digest
+// covers, and the identity still keeps a record's items apart and stable.
+func TestAdoptionSummaryIdentityIsNotADigestOfTheRecordName(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef"
+	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key)
+	name := key + ".json"
+	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
+	fixture.source.types[name] = "claude"
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	reply := readAdoptionJSON(t, fixture.adoption(t))
+	// The old identity was exactly this digest of the unredacted name, which is
+	// what made a guessed key confirmable from the reply.
+	raw := sha256.Sum256([]byte("credential:" + key + ".json"))
+	candidate := hex.EncodeToString(raw[:])
+	identities := map[string]bool{}
+	for _, item := range reply.Items {
+		if item.ID == candidate {
+			t.Fatalf("the reply's identity confirms the record's own name: %+v", item)
+		}
+		if strings.Contains(item.Item, key) {
+			t.Fatalf("the reply showed the source Client Key: %+v", item)
+		}
+		if identities[item.ID] {
+			t.Fatalf("two items share one identity: %+v", reply.Items)
+		}
+		identities[item.ID] = true
+	}
+	// The identity is a fact about the record, not about one read of it.
+	again := readAdoptionJSON(t, fixture.adoption(t))
+	for index := range reply.Items {
+		if again.Items[index].ID != reply.Items[index].ID {
+			t.Fatalf("item %d changed identity between two reads", index)
+		}
 	}
 }
 

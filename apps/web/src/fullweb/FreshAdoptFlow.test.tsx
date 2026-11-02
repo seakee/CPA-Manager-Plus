@@ -26,9 +26,10 @@ const admin = 'Admin_0123456789-abcdefghijklmnopqrstuvwxyz!';
 const sourceKey = 'adopt-source-management-key';
 const sourceAddress = 'http://source-cpa:8317';
 
-// The record's own identity for one item: the server digests the item name, so a
-// fixture builds the same digest. `withIdentity` is how every recorded item in
-// this file carries the two fields the reply always states.
+// A fixture's stable identity for one recorded item. The server binds the digest
+// to the scrubbed text and the item's ordinal, so a fixture only needs an identity
+// that is stable and distinct within one summary. `withIdentity` is how every
+// recorded item in this file carries the two fields the reply always states.
 const itemID = (name: string) => createHash('sha256').update(name).digest('hex');
 const withIdentity = (
   items: Array<Omit<AdoptionItem, 'id' | 'left'> & { left?: number }>

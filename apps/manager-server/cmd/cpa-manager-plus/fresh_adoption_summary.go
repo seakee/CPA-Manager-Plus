@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
@@ -42,7 +44,9 @@ type adoptionSummaryItem struct {
 	// the reply may show. Two token-shaped file names scrub to the same `item`,
 	// and a browser that identified them by that text would treat two different
 	// resources as one: an acknowledgement, a list key and a request are about the
-	// record's item, so they are bound to this digest of its own name.
+	// record's item, so they are bound to a digest of the scrubbed text and the
+	// item's ordinal. The digest never covers the record's own name: that name can
+	// be a credential, and a digest of it would confirm a candidate value offline.
 	ID      string `json:"id"`
 	Item    string `json:"item"`
 	Kind    string `json:"kind"`
@@ -173,18 +177,25 @@ func (a *freshApplication) adoptionSummarySourceSecrets(record freshstore.Record
 const redactedValue = "[redacted]"
 
 // minRedactedValue is the shortest source credential this boundary replaces by
-// value. A shorter string cannot be recognised inside a name without damaging
-// every name, and a value that short is not a distinguishable credential.
+// value, and the shortest fragment of one it recognises. A shorter string
+// cannot be told apart inside a name without replacing arbitrary text, so a
+// source credential under eight bytes is the one value this boundary does not
+// claim to catch.
 const minRedactedValue = 8
 
 // adoptionRedactor is the summary's output boundary for one string of the
-// record: the project's credential shapes first, then the exact values the
-// migration read, longest first so a credential that contains another is
-// replaced whole.
+// record: the project's credential shapes first, then the values the migration
+// read, longest first so a credential that contains another is replaced whole.
+//
+// The value rule matches prefixes as well as the whole value. An overlong name
+// is recorded as a bounded prefix, and a value can cross that cut, so the
+// fragment a whole-value match would leave behind is exactly a prefix of the
+// value. Every prefix of at least minRedactedValue bytes is therefore replaced,
+// not only the value itself.
 func adoptionRedactor(secrets []string) func(string) string {
 	ordered := make([]string, 0, len(secrets))
 	for _, secret := range secrets {
-		if len(secret) >= minRedactedValue {
+		if len(secret) >= minRedactedValue && secret != redactedValue {
 			ordered = append(ordered, secret)
 		}
 	}
@@ -193,21 +204,73 @@ func adoptionRedactor(secrets []string) func(string) string {
 		if value == "" {
 			return ""
 		}
-		value = usage.SanitizeCredentialText(value)
-		for _, secret := range ordered {
-			value = strings.ReplaceAll(value, secret, redactedValue)
+		// The scrubber's own markers are final: a source value that happens to
+		// begin with the marker's text must not rewrite it.
+		segments := strings.Split(usage.SanitizeCredentialText(value), redactedValue)
+		for index, segment := range segments {
+			for _, secret := range ordered {
+				segment = redactValueAndPrefixes(segment, secret)
+			}
+			segments[index] = segment
 		}
+		return strings.Join(segments, redactedValue)
+	}
+}
+
+// redactValueAndPrefixes replaces the longest prefix of `secret` found at every
+// position of `value` that starts with the shortest recognisable one. The scan
+// never rescans the marker it writes, so a replacement cannot feed itself.
+func redactValueAndPrefixes(value, secret string) string {
+	needle := shortestRedactedPrefix(secret)
+	if needle == "" || !strings.Contains(value, needle) {
 		return value
 	}
+	var out strings.Builder
+	for {
+		at := strings.Index(value, needle)
+		if at < 0 {
+			out.WriteString(value)
+			return out.String()
+		}
+		// The match is at least the needle; it is the part of the value this
+		// text still holds, which is what a recorded truncation leaves.
+		matched := len(needle)
+		for matched < len(secret) && at+matched < len(value) && value[at+matched] == secret[matched] {
+			matched++
+		}
+		// Cut on a rune boundary of the value, so the replacement never splits a
+		// character.
+		for matched > len(needle) && at+matched < len(value) && !utf8.RuneStart(value[at+matched]) {
+			matched--
+		}
+		out.WriteString(value[:at])
+		out.WriteString(redactedValue)
+		value = value[at+matched:]
+	}
+}
+
+// shortestRedactedPrefix is the smallest prefix of a source value this boundary
+// recognises, cut on a rune boundary so the needle is valid text of its own.
+func shortestRedactedPrefix(secret string) string {
+	cut := minRedactedValue
+	for cut < len(secret) && !utf8.RuneStart(secret[cut]) {
+		cut++
+	}
+	if cut > len(secret) {
+		return ""
+	}
+	return secret[:cut]
 }
 
 // adoptionItemID is the stable, non-secret identity of one recorded item.
 //
-// It digests the record's own item name, which the operator who read the source
-// already knows and which the reply itself is a projection of: a digest of a
-// name is not the name, and nothing here can be turned back into a credential.
-func adoptionItemID(item string) string {
-	sum := sha256.Sum256([]byte(item))
+// It digests the text the reply shows and the item's ordinal in the record,
+// never the record's own name: the record's name can be a credential the reply
+// redacted, and a digest of it would confirm a candidate value offline. The
+// ordinal keeps two items whose text scrubs to the same string apart, and the
+// record's own order keeps the identity stable across reads.
+func adoptionItemID(redactedItem string, ordinal int) string {
+	sum := sha256.Sum256([]byte(redactedItem + "\x00" + strconv.Itoa(ordinal)))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -224,7 +287,7 @@ func adoptionSummaryFrom(summary *freshstore.AdoptionSummary, redact func(string
 	}
 	reply.Planned = summary.Planned
 	reply.Finished = summary.Finished
-	for _, item := range summary.Items {
+	for ordinal, item := range summary.Items {
 		retryable := summary.Retryable(item.Item)
 		if retryable {
 			reply.Retryable++
@@ -239,9 +302,10 @@ func adoptionSummaryFrom(summary *freshstore.AdoptionSummary, redact func(string
 		case freshstore.AdoptionAbsentAtSource:
 			reply.Counts.AbsentAtSource++
 		}
+		itemText := redact(item.Item)
 		reply.Items = append(reply.Items, adoptionSummaryItem{
-			ID:      adoptionItemID(item.Item),
-			Item:    redact(item.Item),
+			ID:      adoptionItemID(itemText, ordinal),
+			Item:    itemText,
 			Kind:    string(item.Kind),
 			Outcome: string(item.Outcome),
 			Reason:  redact(item.Reason),

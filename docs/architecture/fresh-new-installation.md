@@ -1308,10 +1308,14 @@ recorded value, and `counts` tallies the four outcomes. The reply omits the
 record's source and destination digests: they are the Manager's evidence, and
 dropping them keeps the route a statement about progress.
 
-`id` is the record's identity for the item, a SHA-256 of its own name, because
-`item` is scrubbed text: two token-shaped file names both become
-`credential:[redacted].json`, and a browser binding an acknowledgement or a list
-key to that text would treat two resources as one. The name stays display only.
+`id` is the record's identity for the item, a SHA-256 of its scrubbed text and its
+ordinal in the record, because `item` is scrubbed text: two token-shaped file
+names both become `credential:[redacted].json`, and a browser binding an
+acknowledgement or a list key to that text would treat two resources as one. The
+digest never covers the unscrubbed name, so a candidate credential cannot be
+confirmed offline from it; the ordinal keeps two equal scrubbed names apart, and
+the record's own order keeps an item's identity stable across reads. The name
+stays display only.
 
 The reply is also a separate output boundary from the record, because the
 record's text is not all the Manager's: a credential file name is the source
@@ -1320,7 +1324,13 @@ two rules — the project's credential scrubber (`internal/usage`), then the exa
 source Client Keys and management key the migration was staged with, read from
 the protected adoption snapshot and replaced by value. A bare 32-hex key or a
 UUID used verbatim as a credential file name has no credential shape, so the
-value is the only rule that catches it. The record's free-text `instruction` —
+value is the only rule that catches it. The value rule also replaces every
+prefix of a value, not only the value itself: an overlong name is recorded as a
+bounded prefix, and a key can cross that cut, so a fragment of a source value is
+what a whole-value match would leave behind. The limit it does not cross is
+length — a source credential shorter than eight bytes is not replaced by value,
+because a string that short cannot be told apart inside a name, and this boundary
+does not claim to catch it. The record's free-text `instruction` —
 which interpolates a source name and the destination's own type string — is not
 emitted at all: the page states the next step from the item's `kind` and
 `reason`, so untrusted metadata cannot reach the browser as prose. A staged

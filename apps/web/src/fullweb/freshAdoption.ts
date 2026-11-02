@@ -56,15 +56,20 @@ export type AdoptionOutcome = 'migrated' | 'manual' | 'failed' | 'absent_at_sour
  * One recorded per-item result.
  *
  * `item` is the record's item name after the server's output boundary, so it can
- * still be a credential file name the source CPA chose — the server redacts the
- * source credentials it read by value, and a name that reaches this page is a
- * name, never a value. It never carries the record's free-text instruction: the
- * page states the next step from `kind` and `reason`, so upstream metadata cannot
- * reach the screen as prose.
+ * still be a credential file name the source CPA chose. The server scrubs the
+ * credential shapes it knows and replaces the source values it read — and every
+ * recognisable fragment of one, because a truncated name can carry half a value.
+ * A source credential shorter than eight bytes is not replaced: that is the
+ * boundary's documented limit, so this text is scrubbed, not proven value-free.
+ * It never carries the record's free-text instruction: the page states the next
+ * step from `kind` and `reason`, so upstream metadata cannot reach the screen as
+ * prose.
  *
- * `id` is the record's own identity for the item, independent of that text: two
- * token-shaped names scrub to the same string, and an acknowledgement has to be
- * about the record's item rather than about text that happens to be equal.
+ * `id` is the record's identity for the item, a digest of this scrubbed text and
+ * the item's ordinal in the record: two token-shaped names scrub to the same
+ * string, and an acknowledgement has to be about the record's item rather than
+ * about text that happens to be equal. It is not a digest of the record's own
+ * name, so it cannot be used to confirm a guessed credential offline.
  *
  * `left` is how many source items the record could not hold at all, set on the
  * aggregate excess marker only.
