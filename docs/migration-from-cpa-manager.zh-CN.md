@@ -138,7 +138,8 @@ Plus 会把 CPA Management Key 加密存储到 SQLite。默认数据密钥位于
 `cpa-manager-plus upgrade cpa-import` 会通过 adoption 执行器，把已停止的 1.x 实例中受管 CPA 的配置与凭证文件复制到 v2 目标。规划迁移时以下规则很重要：
 
 - 它只在对账之后运行：记录的操作必须处于 `reconcile`（或处于自身未记录 `cpa_config` 域的 `cpa_import`，即重试位置），否则会在读取来源之前以 `upgrade_cpa_stage_conflict` 拒绝。创建目标阶段发生的拒绝不会改动已记录的位置。
-- 先停止 Manager Server：该命令持有 v2 数据根进程锁，锁被占用时会以 `upgrade_store_locked`（退出码 1）拒绝。
+- 先停止 1.x Manager 和受管 CPA，再停止 Manager Server：该命令持有 v2 数据根进程锁，锁被占用时会以 `upgrade_store_locked`（退出码 1）拒绝。它还会持有 1.x 来源的 ownership marker（与 copy-in 相同的栅栏），并在整个读写路径中保持；若 marker 被其他进程持有，或来源根本没有 marker，会在读取 CPA 目录之前以 `upgrade_cpa_source_locked` 拒绝。
+- **该 marker 的残余限制。** marker 只能证明 1.x Manager 已停止，不能证明受管 CPA 容器已停止：CPA 本身不持有这个 marker，命令也无法观察运行中的容器。导入前请先停止 `cli-proxy-api` 服务（`docker compose stop cli-proxy-api`）。运行中的 CPA 会刷新凭证目录里的凭证，导入可能上传一个随后被来源轮换的 token；同一 refresh token 的两份活跃副本也可能互相作废。
 - 只有当 `--legacy` 目录就是 `copy-in` 步骤记录的那个目录时才会读取它；换成另一棵树会在任何读取之前以 `upgrade_cpa_source_root_mismatch` 拒绝。
 - 目标自己的路径永远不会被复制：目标的管理密钥、监听地址、端口、插件根目录、凭证目录和客户端密钥列表都保留目标自身的值。
 - 来源版本取 `--cpa-version` 指定的确切版本，或 stack 声明的 `cli-proxy-api` 镜像 tag。1.x 安装在 `compose.yaml` 里写的是 `image: ${CPA_IMAGE}`，因此读取器只从旁边的 `.env` 解析这一个变量；`.env` 里的其他值不会被读取、保留或报告。移动 tag、digest 或无法解析的引用都不构成版本，导入会以 `upgrade_cpa_version_required` 拒绝，而不是猜测。

@@ -1,8 +1,10 @@
 package upgrade
 
 // This file is the source side of the Managed CPA import: a file-backed reader of
-// the stopped 1.x CPA directory that presents the tree through the existing
-// freshadopt.Source interface. It is deliberately not a general configuration
+// the 1.x CPA directory that presents the tree through the existing
+// freshadopt.Source interface. The step reads it only while it holds the 1.x
+// ownership marker (see ImportCPA); the marker proves the 1.x Manager is stopped,
+// never that the managed CPA container is. It is deliberately not a general configuration
 // converter. It maps exactly the paths this step copies and reports everything
 // else the source holds as manual work, so no key is ever dropped silently.
 //
@@ -82,7 +84,7 @@ const (
 	cpaSiblingDirectoryName = "legacy-cpa"
 	// cpaAuthDirectoryName is the directory the v1 installer bind-mounts as the
 	// CPA's `/root/.cli-proxy-api` (`install-cpamp.sh:2948-2995`), so it is the
-	// auth directory beside a stopped source's config.yaml.
+	// auth directory beside the source's config.yaml.
 	cpaAuthDirectoryName = "auths"
 	// cpaStackComposeFiles are the stack files a managed install may keep beside
 	// the CPA directory. The v1 installer writes compose.yaml; the docker-compose
@@ -496,8 +498,8 @@ type cpaManualItem struct {
 	instruction string
 }
 
-// cpaManagedSource is the file-backed freshadopt.Source of one stopped 1.x CPA
-// directory.
+// cpaManagedSource is the file-backed freshadopt.Source of one 1.x CPA
+// directory, resolved while the step holds the source's ownership marker.
 type cpaManagedSource struct {
 	directory   string
 	layout      string
@@ -521,8 +523,9 @@ type cpaSourceOptions struct {
 	CPAVersion       string
 }
 
-// openManagedCPASource reads the stopped source. Every refusal it returns is
-// typed and happens before anything is written, because it only ever reads.
+// openManagedCPASource reads the source while the caller holds its ownership
+// marker. Every refusal it returns is typed and happens before anything is
+// written, because it only ever reads.
 func openManagedCPASource(options cpaSourceOptions) (*cpaManagedSource, error) {
 	directory, err := resolveCPADirectory(options)
 	if err != nil {
@@ -1135,8 +1138,9 @@ func (s *cpaManagedSource) DownloadCredential(_ context.Context, name string) ([
 }
 
 // ReadConfigDocument returns the mapped v8 document. It is the source's resolved
-// value, never a second read: the source is a stopped directory, so two reads
-// could not observe two states.
+// value, never a second read: the configuration bytes and the credential bytes
+// were read once while the ownership marker was held, and every later question
+// is answered from that resolution.
 func (s *cpaManagedSource) ReadConfigDocument(_ context.Context) (map[string]any, error) {
 	return s.document, nil
 }

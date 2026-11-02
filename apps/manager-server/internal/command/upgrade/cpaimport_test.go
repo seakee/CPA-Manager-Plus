@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,6 +92,55 @@ func TestCPAImportCommandRefusesWhileTheStoreIsLocked(t *testing.T) {
 	}
 	if code := ExitCode(err); code != 1 {
 		t.Fatalf("a held store lock exited %d, want 1 (%v)", code, err)
+	}
+}
+
+// TestCPAImportCommandRefusesWhileTheSourceIsHeld pins the other fence: the
+// import reads a source it assumes is stopped, so it holds the 1.x ownership
+// marker for the whole run. A live holder, or a source with no marker at all,
+// refuses with its own typed code and exit status 1 before the CPA directory is
+// read.
+func TestCPAImportCommandRefusesWhileTheSourceIsHeld(t *testing.T) {
+	source := copyReadySource(t)
+	held, err := processlock.AcquireExisting(filepath.Join(source, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("hold the 1.x ownership marker: %v", err)
+	}
+	defer func() { _ = held.Close() }()
+	targetRoot := t.TempDir()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err = Run(context.Background(), []string{
+		"cpa-import",
+		"--legacy", source,
+		"--plugins", "true",
+		"--target", targetRoot,
+		"--destination-url", "http://127.0.0.1:8317",
+	}, stdout, stderr)
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); !ok || code != upgradeservice.UpgradeErrorCPASourceLocked {
+		t.Fatalf("a held source marker produced %v (code %q), want %s", err, code, upgradeservice.UpgradeErrorCPASourceLocked)
+	}
+	if code := ExitCode(err); code != 1 {
+		t.Fatalf("a held source marker exited %d, want 1 (%v)", code, err)
+	}
+	// The marker is closed; a source that carries none cannot be proven stopped.
+	if err := held.Close(); err != nil {
+		t.Fatalf("release the 1.x ownership marker: %v", err)
+	}
+	if err := os.Remove(filepath.Join(source, "usage.sqlite.manager.lock")); err != nil {
+		t.Fatalf("remove the fixture ownership marker: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	err = Run(context.Background(), []string{
+		"cpa-import",
+		"--legacy", source,
+		"--plugins", "true",
+		"--target", t.TempDir(),
+		"--destination-url", "http://127.0.0.1:8317",
+	}, stdout, stderr)
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); !ok || code != upgradeservice.UpgradeErrorCPASourceLocked {
+		t.Fatalf("a source without a marker produced %v (code %q), want %s", err, code, upgradeservice.UpgradeErrorCPASourceLocked)
 	}
 }
 

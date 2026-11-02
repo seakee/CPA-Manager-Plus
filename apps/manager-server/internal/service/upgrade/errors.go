@@ -144,6 +144,12 @@ const (
 	// be read, so this run settled no item. Nothing was written to the
 	// destination by this run and the cpa_config domain is not recorded.
 	UpgradeErrorCPAImportUnavailable UpgradeErrorCode = "upgrade_cpa_import_unavailable"
+	// UpgradeErrorCPASourceLocked reports that the 1.x source ownership marker
+	// this step holds for its whole read/write path could not be taken: another
+	// process holds it, or the source carries no marker at all. The source is
+	// then not provably stopped, so nothing was read from it and nothing was
+	// written.
+	UpgradeErrorCPASourceLocked UpgradeErrorCode = "upgrade_cpa_source_locked"
 	// UpgradeErrorCPASourceRootMismatch reports that the 1.x directory the run
 	// named is not the one the recorded copy-in read, so the CPA directory beside
 	// it belongs to another installation. Nothing was read from it and nothing
@@ -239,6 +245,7 @@ var (
 	ErrCPADestinationUnready = &UpgradeError{Code: UpgradeErrorCPADestinationUnready}
 	ErrCPAImportUnproven     = &UpgradeError{Code: UpgradeErrorCPAImportUnproven}
 	ErrCPAImportUnavailable  = &UpgradeError{Code: UpgradeErrorCPAImportUnavailable}
+	ErrCPASourceLocked       = &UpgradeError{Code: UpgradeErrorCPASourceLocked}
 	ErrCPASourceRootMismatch = &UpgradeError{Code: UpgradeErrorCPASourceRootMismatch}
 	ErrCPADestinationChanged = &UpgradeError{Code: UpgradeErrorCPADestinationRequestChanged}
 	ErrCPATargetForeign      = &UpgradeError{Code: UpgradeErrorCPAImportTargetForeign}

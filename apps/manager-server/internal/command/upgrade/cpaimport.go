@@ -11,6 +11,7 @@ package upgrade
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -72,6 +73,20 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		return refuseTyped(stderr, fmt.Errorf("%w: another process holds the v2 Manager store; stop Manager Server and re-run the import: %v", upgradeservice.ErrStoreLocked, err))
 	}
 	defer func() { _ = storeLock.Close() }()
+	// The import reads a source it assumes is stopped and writes a destination,
+	// so it takes the same 1.x ownership marker the copy-in took and keeps it for
+	// the whole run. A live 1.x Manager holds that marker; a source with no
+	// marker cannot be proven stopped at all. Either way this refuses before the
+	// CPA directory is read.
+	sourceLock, err := processlock.AcquireExisting(upgradeservice.SourceDatabasePath(*legacy))
+	if err != nil {
+		reason := "the 1.x source carries no ownership marker, so it cannot be proven stopped"
+		if errors.Is(err, processlock.ErrLocked) {
+			reason = "another process holds the 1.x source ownership marker; stop the 1.x Manager and the managed CPA before importing"
+		}
+		return refuseTyped(stderr, fmt.Errorf("%w: %s: %v", upgradeservice.ErrCPASourceLocked, reason, err))
+	}
+	defer func() { _ = sourceLock.Close() }()
 	destinationURL := strings.TrimSpace(*destination)
 	if destinationURL == "" {
 		cfg, err := config.LoadWithoutCreatingDefault()
@@ -94,6 +109,7 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	output := cpaImportOutput{}
 	result, err := upgradeservice.ImportCPA(ctx, upgradeservice.CPAImportOptions{
 		LegacyRoot:               *legacy,
+		SourceLock:               sourceLock,
 		CPADirectory:             strings.TrimSpace(*cpaDirectory),
 		CPAAuthDirectory:         strings.TrimSpace(*cpaAuthDirectory),
 		CPAVersion:               strings.TrimSpace(*cpaVersion),

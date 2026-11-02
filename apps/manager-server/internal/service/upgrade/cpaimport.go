@@ -1,7 +1,8 @@
 package upgrade
 
-// This file is the Managed CPA import: the Upgrade step that carries a stopped
-// 1.x stack's CPA state into the v2 destination.
+// This file is the Managed CPA import: the Upgrade step that carries a 1.x
+// stack's CPA state into the v2 destination while holding the source's
+// ownership marker.
 //
 // # The shape of the step
 //
@@ -29,6 +30,8 @@ package upgrade
 //
 // # Fail-closed rules
 //
+//   - the 1.x ownership marker is required, must belong to the recorded source,
+//     and is held for the whole read/write path;
 //   - the version gate runs before anything is written;
 //   - an absent plugin choice refuses the run — it is never defaulted;
 //   - an item that does not read back fails the step and leaves the operation at
@@ -48,6 +51,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -59,12 +63,18 @@ import (
 const cpaImportManualItemLimit = 400
 
 // CPAImportOptions is the input of one Managed CPA import. The three arms of the
-// run — the stopped source, the destination and the choice — are explicit,
-// because none of them has a correct default.
+// run — the source and its ownership marker, the destination and the choice —
+// are explicit, because none of them has a correct default.
 type CPAImportOptions struct {
 	// LegacyRoot is the 1.x data directory the copy-in read. It locates the
 	// managed CPA directory beside it and must already hold a recorded copy-in.
 	LegacyRoot string
+	// SourceLock is the held 1.x ownership marker of LegacyRoot. The step reads
+	// the CPA tree and writes the destination, so it requires the same fence the
+	// copy-in took and keeps it for the whole run: a held marker refuses before
+	// the CPA directory is touched. It never substitutes for stopping the CPA
+	// container, which this marker cannot observe.
+	SourceLock *processlock.Lock
 	// CPADirectory overrides the managed CPA directory. Empty uses the sibling
 	// `legacy-cpa` directory of LegacyRoot.
 	CPADirectory string
@@ -154,8 +164,8 @@ type cpaImportRun struct {
 	copiedCreds   []string
 }
 
-// ImportCPA carries a stopped 1.x stack's managed CPA state into the v2
-// destination.
+// ImportCPA carries a 1.x stack's managed CPA state into the v2 destination
+// while the caller holds the 1.x ownership marker.
 //
 // The order is fixed: refuse a recorded position that cannot enter the import,
 // read the source and gate its version, refuse a missing choice, prove the
@@ -219,6 +229,14 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	// comparison is canonical and runs before the CPA directory is touched, so a
 	// run pointed at another installation's tree is refused without reading it.
 	if err := requireRecordedSourceRoot(recorded, options.LegacyRoot); err != nil {
+		return result, err
+	}
+	// The source is read on the assumption that it is stopped. The 1.x ownership
+	// marker is the only fence that assumption has, so it is held before the CPA
+	// directory is opened and, at the command line, for the whole read/write
+	// path. A caller that did not take it, or took it for another database, is
+	// refused here without a read.
+	if err := requireCPAImportSourceLock(options.SourceLock, options.LegacyRoot); err != nil {
 		return result, err
 	}
 
@@ -285,6 +303,25 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	result.DomainsDone = recorded.DomainsDone
 	result.UpdatedAtMS = recorded.UpdatedAtMS
 	return result, nil
+}
+
+// requireCPAImportSourceLock proves the caller holds the 1.x ownership marker of
+// the source this run binds to.
+//
+// AcquireExisting is the accepted fence for a command that assumes the source is
+// stopped; the marker itself is opened, never the source database. The marker
+// proves the 1.x Manager is not running. It does not prove the managed CPA
+// container is stopped, which is why the operator instruction says so.
+func requireCPAImportSourceLock(lock *processlock.Lock, legacyRoot string) error {
+	if lock == nil {
+		return newUpgradeError(UpgradeErrorCPASourceLocked,
+			"the CPA import requires the held 1.x ownership lock, so the source cannot be assumed stopped; nothing was read from the source and nothing was written", nil)
+	}
+	if err := requireSourceLock(lock, SourceDatabasePath(legacyRoot)); err != nil {
+		return newUpgradeError(UpgradeErrorCPASourceLocked,
+			"the held ownership lock does not belong to the 1.x source this operation recorded, so the source is not provably stopped; nothing was read from it and nothing was written", err)
+	}
+	return nil
 }
 
 // requireCPAImportEntry reports whether the recorded operation stands where this

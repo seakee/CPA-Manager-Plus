@@ -12,12 +12,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -31,6 +33,9 @@ type importFixture struct {
 	targetRoot  string
 	cpaDir      string
 	credentials map[string]string
+	// sourceLock is the 1.x ownership marker this fixture holds for the whole
+	// test, exactly as the command does for a whole run.
+	sourceLock *processlock.Lock
 }
 
 // newImportFixture performs the copy-in a real run performs and writes the CPA
@@ -57,6 +62,7 @@ func newImportFixture(t *testing.T, config string, credentials map[string]string
 		targetRoot:  targetRoot,
 		cpaDir:      writeCPABeside(t, volume.root, config, credentials),
 		credentials: credentials,
+		sourceLock:  lock,
 	}
 }
 
@@ -468,6 +474,7 @@ func (f *fakeImportRuntime) Start(_ context.Context, request model.RuntimeMutati
 func importOptions(fixture importFixture, runtime CPAImportRuntime, destinationURL string, plugins *bool) CPAImportOptions {
 	return CPAImportOptions{
 		LegacyRoot:     fixture.legacyRoot,
+		SourceLock:     fixture.sourceLock,
 		CPAVersion:     "7.3.4",
 		TargetRoot:     fixture.targetRoot,
 		Runtime:        runtime,
@@ -477,6 +484,44 @@ func importOptions(fixture importFixture, runtime CPAImportRuntime, destinationU
 }
 
 func boolPointer(value bool) *bool { return &value }
+
+// TestImportCPARequiresTheHeldSourceOwnershipLock is the Low finding: the step
+// reads a source it assumes is stopped, so it must hold the 1.x ownership marker
+// rather than only saying so in a comment. A caller without the marker is
+// refused before the CPA directory is read, and a marker for another database
+// does not authorize this source.
+func TestImportCPARequiresTheHeldSourceOwnershipLock(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+	// A missing CPA directory would be reported as a missing source if the run
+	// reached the read. The source-locked code proves the fence is asked for
+	// first.
+	if err := os.RemoveAll(fixture.cpaDir); err != nil {
+		t.Fatalf("remove the fixture CPA directory: %v", err)
+	}
+	options.SourceLock = nil
+	_, err := ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPASourceLocked {
+		t.Fatalf("a run without the source lock produced %v (code %q), want %s", err, code, UpgradeErrorCPASourceLocked)
+	}
+	if runtime.stageCall != nil || len(destination.requests()) != 0 {
+		t.Fatal("a run without the source lock still wrote to the destination")
+	}
+	if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageReconcile)
+	}
+
+	// The marker has to be the one for this source database.
+	other := newLegacyVolume(t)
+	options.SourceLock = other.lock(t)
+	_, err = ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPASourceLocked {
+		t.Fatalf("a lock for another database produced %v (code %q), want %s", err, code, UpgradeErrorCPASourceLocked)
+	}
+}
 
 // TestImportCPAImportsAV734FixtureAndRecordsTheStage is the acceptance case: the
 // configuration and the credentials land, the destination verifies, and the row
