@@ -694,6 +694,56 @@ func TestReconcileReportsEveryPermutationInsideADay(t *testing.T) {
 			want:   []wantedMismatch{{mismatchFieldExecutorType, "claude"}},
 		},
 		{
+			// The failed flag is part of the row key: a success row rewritten as
+			// failed is a different row, and the totals of the two rows must never
+			// answer for each other.
+			name:   "history failed flag rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set failed = 1`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldFailed, "1"}},
+		},
+		{
+			name:   "history auth index rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set auth_index = '9'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldAuthIndex, "9"}},
+		},
+		{
+			name:   "history source hash rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set source_hash = 'hash-b'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldSourceHash, "hash-b"}},
+		},
+		{
+			name:   "history pricing model rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set pricing_model = 'pricing-b'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldPricingModel, "pricing-b"}},
+		},
+		{
+			name:   "history auth account id rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set auth_account_id_snapshot = 'account-2'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldAuthAccountIDSnapshot, "account-2"}},
+		},
+		{
+			// The token total is unchanged: input and output trade places inside
+			// the same row, which a total-only comparison certified clean.
+			name:   "history token classes reallocated",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set input_tokens = 60, output_tokens = 40`},
+			domain: ReconcileDomainHistory,
+			want: []wantedMismatch{
+				{mismatchFieldInputTokens, "account=acct-1"},
+				{mismatchFieldOutputTokens, "account=acct-1"},
+			},
+		},
+		{
 			name: "retained api_key_hash swapped between events",
 			seed: seedSourceRetention,
 			mutate: []string{`update usage_events
@@ -883,12 +933,24 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 	for _, statement := range []string{
 		`create table usage_monitoring_account_daily_rollups_v1 (
 			bucket_ms integer, account_snapshot text, auth_label_snapshot text,
-			auth_file_snapshot text, provider text, api_key_hash text, executor_type text,
-			model text, calls integer, total_tokens integer)`,
+			provider text, auth_provider_snapshot text, auth_account_id_snapshot text,
+			auth_index text, source text, source_hash text,
+			auth_file_snapshot text, api_key_hash text, executor_type text,
+			model text, billing_model text, pricing_model text, service_tier text,
+			context_threshold_tokens integer, failed integer,
+			calls integer, input_tokens integer, output_tokens integer, cached_tokens integer,
+			cache_read_tokens integer, cache_creation_tokens integer,
+			long_input_tokens integer, long_output_tokens integer, long_cached_tokens integer,
+			long_cache_read_tokens integer, long_cache_creation_tokens integer,
+			total_tokens integer, last_seen_ms integer, latency_sum_ms integer, latency_samples integer)`,
 		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
-			(%d, 'acct-1', 'label-1', 'file-a', 'openai', null, 'codex', 'gpt-test', 2, 100)`, seededDayMS),
+			(%d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
+			 'file-a', null, 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
+			 0, 0, 2, 40, 60, 0, 0, 0, 0, 0, 0, 0, 0, 100, %d, 10, 2)`, seededDayMS, seededDayMS),
 		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
-			(%d, 'acct-1', 'label-1', 'file-a', 'openai', '', 'codex', 'gpt-test', 5, 200)`, seededDayMS),
+			(%d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
+			 'file-a', '', 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
+			 0, 0, 5, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 200, %d, 20, 3)`, seededDayMS, seededDayMS),
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatalf("prepare the history fixture %q: %v", statement, err)

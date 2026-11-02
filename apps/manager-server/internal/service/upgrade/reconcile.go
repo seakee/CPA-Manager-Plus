@@ -77,10 +77,18 @@ const (
 	mismatchFieldThreshold               = "context_threshold_tokens"
 	mismatchFieldAPIKeyHash              = "api_key_hash"
 	mismatchFieldProvider                = "provider"
+	mismatchFieldAuthProviderSnapshot    = "auth_provider_snapshot"
+	mismatchFieldAuthAccountIDSnapshot   = "auth_account_id_snapshot"
+	mismatchFieldAuthIndex               = "auth_index"
+	mismatchFieldSource                  = "source"
+	mismatchFieldSourceHash              = "source_hash"
 	mismatchFieldAccountSnapshot         = "account_snapshot"
 	mismatchFieldAuthLabelSnapshot       = "auth_label_snapshot"
 	mismatchFieldAuthFileSnapshot        = "auth_file_snapshot"
 	mismatchFieldExecutorType            = "executor_type"
+	mismatchFieldLastSeen                = "last_seen_ms"
+	mismatchFieldLatencySum              = "latency_sum_ms"
+	mismatchFieldLatencySamples          = "latency_samples"
 	mismatchFieldInputTokens             = "input_tokens"
 	mismatchFieldOutputTokens            = "output_tokens"
 	mismatchFieldCachedTokens            = "cached_tokens"
@@ -555,25 +563,55 @@ type pricingCell struct {
 	costMicros        int64
 }
 
-// historyCellKey is one account history rollup: the hour bucket and the identity
-// columns the history read path exposes. The credential identity is part of it
-// because two accounts can run the same model under the same key with different
-// labels, files or executors, and a key that ignored them would let one row's
-// totals answer for another's.
+// historyCellKey is one account history rollup: the hour bucket and the whole
+// identity the store table keys on. It repeats the table's primary key (minus
+// the structure revision, which only the active one is read) because the read
+// path exposes each of these columns: two accounts can run the same model under
+// the same key with different labels, files, executors or auth metadata, and a
+// key that ignored them would let one row's totals answer for another's. Failed
+// is part of the key, so a success call is never compared against a failed one.
 type historyCellKey struct {
-	hourMS   int64
-	account  string
-	label    string
-	file     string
-	provider string
-	apiKey   string
-	executor string
-	model    string
+	hourMS       int64
+	account      string
+	label        string
+	provider     string
+	authProvider string
+	accountID    string
+	authIndex    string
+	source       string
+	sourceHash   string
+	file         string
+	apiKey       string
+	executor     string
+	model        string
+	billing      string
+	pricing      string
+	tier         string
+	threshold    int64
+	failed       int64
 }
 
+// historyCell is every value column the account history read path shows for one
+// row identity: the call count, each token class the rollout stores and the
+// latency and last-seen aggregates the analytics response carries. Two rows of
+// the same identity that trade input for output tokens change the totals of
+// nothing, so every class is compared on its own.
 type historyCell struct {
-	calls  int64
-	tokens int64
+	calls             int64
+	input             int64
+	output            int64
+	cached            int64
+	cacheRead         int64
+	cacheCreation     int64
+	longInput         int64
+	longOutput        int64
+	longCached        int64
+	longCacheRead     int64
+	longCacheCreation int64
+	tokens            int64
+	lastSeen          int64
+	latencySum        int64
+	latencySamples    int64
 }
 
 // coverageCell is one day of the deleted-coverage table, including the edges the
@@ -695,18 +733,33 @@ func readCoverageCells(ctx context.Context, tx *sql.Tx) (map[string]coverageCell
 // raw column would return two groups that overwrite each other in the cell map.
 // The credential columns are coalesced because a 1.x-era table keeps its
 // original nullable shape, so a value the current schema requires can still be
-// absent in the copied source.
+// absent in the copied source. Every token class, the call count and the
+// latency/last-seen aggregates are summed or maxed exactly as the analytics read
+// aggregates them, so a day that moved tokens between classes is visible.
 func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]historyCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
 		bucket_ms,
-		account_snapshot, coalesce(auth_label_snapshot, ''), coalesce(auth_file_snapshot, ''),
-		provider, coalesce(api_key_hash, ''), coalesce(executor_type, ''), model,
+		account_snapshot, coalesce(auth_label_snapshot, ''), provider,
+		coalesce(auth_provider_snapshot, ''), coalesce(auth_account_id_snapshot, ''),
+		coalesce(auth_index, ''), coalesce(source, ''), coalesce(source_hash, ''),
+		coalesce(auth_file_snapshot, ''), coalesce(api_key_hash, ''),
+		coalesce(executor_type, ''), model, coalesce(billing_model, ''),
+		coalesce(pricing_model, ''), coalesce(service_tier, ''),
+		context_threshold_tokens, failed,
 		sum(calls),
-		sum(total_tokens)
+		sum(input_tokens), sum(output_tokens), sum(cached_tokens),
+		sum(cache_read_tokens), sum(cache_creation_tokens),
+		sum(long_input_tokens), sum(long_output_tokens), sum(long_cached_tokens),
+		sum(long_cache_read_tokens), sum(long_cache_creation_tokens),
+		sum(total_tokens), max(last_seen_ms), sum(latency_sum_ms), sum(latency_samples)
 		from usage_monitoring_account_daily_rollups_v1
 		group by bucket_ms, account_snapshot, coalesce(auth_label_snapshot, ''),
-			coalesce(auth_file_snapshot, ''), provider, coalesce(api_key_hash, ''),
-			coalesce(executor_type, ''), model`)
+			provider, coalesce(auth_provider_snapshot, ''), coalesce(auth_account_id_snapshot, ''),
+			coalesce(auth_index, ''), coalesce(source, ''), coalesce(source_hash, ''),
+			coalesce(auth_file_snapshot, ''), coalesce(api_key_hash, ''),
+			coalesce(executor_type, ''), model, coalesce(billing_model, ''),
+			coalesce(pricing_model, ''), coalesce(service_tier, ''),
+			context_threshold_tokens, failed`)
 	if err != nil {
 		return nil, fmt.Errorf("read the account history rollups: %w", err)
 	}
@@ -715,9 +768,16 @@ func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]histo
 	for rows.Next() {
 		var key historyCellKey
 		var cell historyCell
-		if err := rows.Scan(&key.hourMS, &key.account, &key.label, &key.file, &key.provider,
-			&key.apiKey, &key.executor, &key.model,
-			&cell.calls, &cell.tokens); err != nil {
+		if err := rows.Scan(&key.hourMS, &key.account, &key.label, &key.provider,
+			&key.authProvider, &key.accountID, &key.authIndex, &key.source, &key.sourceHash,
+			&key.file, &key.apiKey, &key.executor, &key.model, &key.billing,
+			&key.pricing, &key.tier, &key.threshold, &key.failed,
+			&cell.calls,
+			&cell.input, &cell.output, &cell.cached,
+			&cell.cacheRead, &cell.cacheCreation,
+			&cell.longInput, &cell.longOutput, &cell.longCached,
+			&cell.longCacheRead, &cell.longCacheCreation,
+			&cell.tokens, &cell.lastSeen, &cell.latencySum, &cell.latencySamples); err != nil {
 			return nil, err
 		}
 		cells[key] = cell
@@ -910,8 +970,13 @@ var historySpec = keyedSpec[historyCellKey, historyCell]{
 	day: func(key historyCellKey) string { return utcDayOfHour(key.hourMS) },
 	render: func(key historyCellKey) string {
 		return utcHourLabel(key.hourMS) + " account=" + key.account +
-			" label=" + key.label + " provider=" + key.provider + " key=" + key.apiKey +
-			" file=" + key.file + " executor=" + key.executor + " model=" + key.model
+			" label=" + key.label + " provider=" + key.provider +
+			" auth_provider=" + key.authProvider + " account_id=" + key.accountID +
+			" auth_index=" + key.authIndex + " source=" + key.source + " source_hash=" + key.sourceHash +
+			" key=" + key.apiKey + " file=" + key.file + " executor=" + key.executor +
+			" model=" + key.model + " billing=" + key.billing + " pricing=" + key.pricing +
+			" tier=" + key.tier + " threshold=" + strconv.FormatInt(key.threshold, 10) +
+			" failed=" + strconv.FormatInt(key.failed, 10)
 	},
 	identities: func(key historyCellKey) []identityValue {
 		return []identityValue{
@@ -919,13 +984,39 @@ var historySpec = keyedSpec[historyCellKey, historyCell]{
 			{mismatchFieldAuthLabelSnapshot, key.label},
 			{mismatchFieldAuthFileSnapshot, key.file},
 			{mismatchFieldProvider, key.provider},
+			{mismatchFieldAuthProviderSnapshot, key.authProvider},
+			{mismatchFieldAuthAccountIDSnapshot, key.accountID},
+			{mismatchFieldAuthIndex, key.authIndex},
+			{mismatchFieldSource, key.source},
+			{mismatchFieldSourceHash, key.sourceHash},
 			{mismatchFieldAPIKeyHash, key.apiKey},
 			{mismatchFieldExecutorType, key.executor},
 			{mismatchFieldModel, key.model},
+			{mismatchFieldBillingModel, key.billing},
+			{mismatchFieldPricingModel, key.pricing},
+			{mismatchFieldServiceTier, key.tier},
+			{mismatchFieldThreshold, strconv.FormatInt(key.threshold, 10)},
+			{mismatchFieldFailed, strconv.FormatInt(key.failed, 10)},
 		}
 	},
-	fields: []string{mismatchFieldCalls, mismatchFieldTokens},
-	values: func(cell historyCell) []int64 { return []int64{cell.calls, cell.tokens} },
+	fields: []string{
+		mismatchFieldCalls,
+		mismatchFieldInputTokens, mismatchFieldOutputTokens, mismatchFieldCachedTokens,
+		mismatchFieldCacheReadTokens, mismatchFieldCacheCreationTokens,
+		mismatchFieldLongInputTokens, mismatchFieldLongOutputTokens, mismatchFieldLongCachedTokens,
+		mismatchFieldLongCacheReadTokens, mismatchFieldLongCacheCreationTokens,
+		mismatchFieldTokens, mismatchFieldLastSeen, mismatchFieldLatencySum, mismatchFieldLatencySamples,
+	},
+	values: func(cell historyCell) []int64 {
+		return []int64{
+			cell.calls,
+			cell.input, cell.output, cell.cached,
+			cell.cacheRead, cell.cacheCreation,
+			cell.longInput, cell.longOutput, cell.longCached,
+			cell.longCacheRead, cell.longCacheCreation,
+			cell.tokens, cell.lastSeen, cell.latencySum, cell.latencySamples,
+		}
+	},
 }
 
 func compareRetainedDomain(source, target sideObservation) ReconcileDomainReport {
