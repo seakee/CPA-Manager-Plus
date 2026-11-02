@@ -679,8 +679,11 @@ func TestStatusProjectionOmitsSecretsAndToleratesUnknownStages(t *testing.T) {
 	if len(status.DomainsDone) != 2 || status.DomainsDone[0] != model.UpgradeDomainSourceCopy {
 		t.Fatalf("domains = %v", status.DomainsDone)
 	}
-	if got := string(status.Reconciliation); got != `{"mismatchDays":["2026-10-01","2026-10-02"]}` {
-		t.Fatalf("reconciliation = %s", got)
+	if got := status.Reconciliation.MismatchDays; len(got) != 2 || got[0] != "2026-10-01" || got[1] != "2026-10-02" {
+		t.Fatalf("reconciliation = %+v", status.Reconciliation)
+	}
+	if status.Reconciliation.MismatchDaysTotal != 2 || status.Reconciliation.MismatchDaysTruncated {
+		t.Fatalf("reconciliation bounds = %+v", status.Reconciliation)
 	}
 	if status.SourceKind != "upgraded-legacy" || status.SourceVersion != "1.14.4" {
 		t.Fatalf("source = %+v", status)
@@ -1010,7 +1013,9 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 	const splitSecret = "eyJhbGciOiJIUzI1NiJ9.c3BsaXQ.c2lnbmF0dXJl"
 	if got := scrubError("upstream refused\nAuthorization: Bearer\n" + splitSecret + "\nretry later"); strings.Contains(got, splitSecret) {
 		t.Fatalf("split bearer survived: %q", got)
-	} else if !strings.Contains(got, "Authorization: Bearer "+redactedText) {
+	} else if !strings.Contains(got, "Authorization: ") || !strings.Contains(got, redactedText) {
+		// The shared content scrubber redacts the whole header value, scheme word
+		// included; the wrap is still resolved, which is what this asserts.
 		t.Fatalf("split bearer is not joined and redacted: %q", got)
 	} else if got := strings.Count(got, "\n"); got != 2 {
 		t.Fatalf("split bearer changed the detail shape: %q", got)
@@ -1108,6 +1113,7 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	}
 	if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
 		TargetDatabase:          database,
 		SourceKind:              "upgraded-legacy",
 		SourceVersion:           "1.14.4",
@@ -1145,6 +1151,7 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	foreign := filepath.Join(t.TempDir(), "usage.sqlite")
 	if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
 		TargetDatabase:          foreign,
 		SourceKind:              "upgraded-legacy",
 		SourceFingerprintBefore: "fingerprint-before",
@@ -1206,5 +1213,32 @@ func TestReadsRefuseCrossSiteOrigins(t *testing.T) {
 		send(resource, bearer(testAdminKey), "", "", http.StatusOK)
 		// An unauthenticated caller learns nothing about the origin rule either.
 		send(resource, "", "https://attacker.test", "", http.StatusUnauthorized)
+	}
+}
+
+// TestStatusScrubsTheShapesTheReviewProvedLeak is the regression for the five
+// shapes a content scrubber missed: a quoted bearer value, a JSON password, a
+// base64 Basic value wrapped onto the next line, an assignment whose value is on
+// the next line, and a bearer token cut by a line break.
+func TestStatusScrubsTheShapesTheReviewProvedLeak(t *testing.T) {
+	for _, secret := range []string{
+		`Authorization: Bearer "opaque-review-key"`,
+		`{"password":"opaque-review-password"}`,
+		"Authorization: Basic\nc2VhcmNoOnNlY3JldA==",
+		"password=\nopaque-review-password",
+		"Bearer opaque-review-\nkeytail",
+	} {
+		got := scrubError(secret)
+		for _, leaked := range []string{
+			"opaque-review-key", "opaque-review-password", "c2VhcmNoOnNlY3JldA==",
+			"opaque-review-password", "keytail",
+		} {
+			if strings.Contains(got, leaked) {
+				t.Fatalf("%q leaked %q: %q", secret, leaked, got)
+			}
+		}
+		if !strings.Contains(got, redactedText) {
+			t.Fatalf("%q has no redaction marker: %q", secret, got)
+		}
 	}
 }

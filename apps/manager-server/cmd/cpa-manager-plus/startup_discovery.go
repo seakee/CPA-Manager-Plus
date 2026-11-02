@@ -108,19 +108,19 @@ func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.
 	h.readOnlyShell.ServeHTTP(w, r)
 }
 
+// upgradeWizardNamespace is the one namespace the wizard reads own on the fixed
+// Bootstrap API. The namespace, not a pair of exact resources, is what the fixed
+// carrier routes to the reader: an unknown route inside it has to meet the same
+// credential gate, so a caller cannot map the surface by asking for a path that
+// does not exist. The reader answers 404 for an unknown route only after the
+// credential and the browser's origin are decided.
+const upgradeWizardNamespace = bootstrap.FixedBootstrapAPIPath + "installation/upgrade/"
+
 // fixedUpgradeSurfaceLeaf reports whether a fixed-surface path belongs to the
-// Upgrade surface: its authentication entry and its two read-only wizard
-// routes, all under the fixed Bootstrap carrier.
+// Upgrade surface: its authentication entry and every route in its read
+// namespace, all under the fixed Bootstrap carrier.
 func fixedUpgradeSurfaceLeaf(value string) bool {
-	if value == upgradeauth.Path {
-		return true
-	}
-	for _, suffix := range []string{upgradewizard.PreflightSuffix, upgradewizard.StatusSuffix} {
-		if value == bootstrap.FixedBootstrapAPIPath+strings.TrimPrefix(suffix, "/") {
-			return true
-		}
-	}
-	return false
+	return value == upgradeauth.Path || strings.HasPrefix(value, upgradeWizardNamespace)
 }
 
 func (h *startupHTTPHandler) serveDiscovery(w http.ResponseWriter, r *http.Request) {
@@ -146,8 +146,11 @@ func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.Inspection
 	// One credential resolution for the whole surface: the entry leaf and both
 	// wizard reads verify the key against the same file, so a key the entry page
 	// accepts is a key the reads accept, and the key kept in the other file is
-	// refused by all three.
-	if handler, err := upgradeauth.New(upgradeCredentialPaths(paths), os.Getenv("CPAMP_PUBLIC_ORIGIN")); err == nil {
+	// refused by all three. The resolution also says which file it landed on,
+	// because a preserved source and this process's own store are read
+	// differently.
+	credentialPaths, mountSource := upgradeCredentialPaths(paths)
+	if handler, err := upgradeauth.New(credentialPaths, os.Getenv("CPAMP_PUBLIC_ORIGIN"), mountSource); err == nil {
 		h.upgradeAuth = handler
 		// The wizard routes resolve the credential with the surface's one rule
 		// from the mount they inspect and this database, exactly as the entry

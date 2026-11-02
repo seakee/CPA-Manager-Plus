@@ -15,6 +15,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/freshbootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradewizard"
 	healthcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/health"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
@@ -107,6 +108,11 @@ type freshApplication struct {
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
 	legacy          http.Handler
+	// upgradeWizard is the one Upgrade reader this application serves. It is
+	// built once: the handler owns the per-request mount flight and the one
+	// bounded lookup a poll joins, so constructing one per request would give
+	// every request its own flight and its own filesystem calls.
+	upgradeWizard *upgradewizard.Handler
 	// legacyCredentialGate serializes the legacy requests that present the saved
 	// management credential. A console page opens several at once, and five
 	// failed authentications ban this address, so the first refusal has to be
@@ -318,9 +324,12 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	if os.Getenv("CPAMP_PRIVATE_A3_PROFILE") != "" {
 		a.externalPermit = privateFreshExternalAdmitted
 	}
+	// One Upgrade reader for the whole application: both carriers serve it, and
+	// its per-handler mount flight is what keeps a hung mount to one lookup.
+	a.upgradeWizard = a.newUpgradeWizard()
 	a.fixed = freshbootstrap.Handler{Authority: a.authority, Routing: a.routing, Current: a.current,
 		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime),
-		Upgrade: http.HandlerFunc(a.newUpgradeWizard().ServeHTTP)}
+		Upgrade: a.upgradeWizard}
 	return a
 }
 
@@ -438,7 +447,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 			http.NotFound(w, r)
 			return
 		}
-		a.newUpgradeWizard().ServeHTTP(w, r)
+		a.upgradeWizard.ServeHTTP(w, r)
 		return
 	}
 	continuation, freshAuth := freshbootstrap.SessionToken(r)

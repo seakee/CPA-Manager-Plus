@@ -1794,6 +1794,11 @@ func sourceEntries(t *testing.T, root string) map[string]sourceEntry {
 // sidecar is named instead of reported as a map difference.
 func requireUnchangedSource(t *testing.T, before, after map[string]sourceEntry) {
 	t.Helper()
+	for path := range after {
+		if _, found := before[path]; !found {
+			t.Fatalf("the read created %s beside the source", filepath.Base(path))
+		}
+	}
 	for path, expected := range before {
 		actual, found := after[path]
 		if !found {
@@ -1801,11 +1806,6 @@ func requireUnchangedSource(t *testing.T, before, after map[string]sourceEntry) 
 		}
 		if actual != expected {
 			t.Fatalf("the read rewrote %s: %+v, want %+v", filepath.Base(path), actual, expected)
-		}
-	}
-	for path := range after {
-		if _, found := before[path]; !found {
-			t.Fatalf("the read created %s", filepath.Base(path))
 		}
 	}
 }
