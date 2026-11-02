@@ -16,6 +16,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 // copiedVolume is a 1.x source that already went through the copy-in: the v2
@@ -456,20 +457,31 @@ func seedSourcePricing(t *testing.T, volume legacyVolume) {
 		fmt.Sprintf(`insert into usage_pricing_hourly_rollups_v1 (
 			structure_revision, bucket_ms, model, billing_model, pricing_model, service_tier,
 			context_threshold_tokens, failed, calls, input_tokens, total_tokens, updated_at_ms)
-			values ('v1', %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 2, 400000, 400000, 1)`,
-			seededHourMS),
+			values (%s, %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 2, 400000, 400000, 1)`,
+			sqlText(fixturePricingRevision(nil)), seededHourMS),
 		fmt.Sprintf(`insert into usage_pricing_hourly_rollups_v1 (
 			structure_revision, bucket_ms, model, billing_model, pricing_model, service_tier,
 			context_threshold_tokens, failed, calls, input_tokens, total_tokens, updated_at_ms)
-			values ('v1', %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 1, 5, 100000, 100000, 1)`,
-			seededHourMS),
+			values (%s, %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 1, 5, 100000, 100000, 1)`,
+			sqlText(fixturePricingRevision(nil)), seededHourMS),
 		fmt.Sprintf(`insert into usage_pricing_hourly_rollups_v1 (
 			structure_revision, bucket_ms, model, billing_model, pricing_model, service_tier,
 			context_threshold_tokens, failed, calls, input_tokens, total_tokens, updated_at_ms)
-			values ('v1', %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 3, 200000, 200000, 1)`,
-			seededHourMS+time.Hour.Milliseconds()),
+			values (%s, %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 3, 200000, 200000, 1)`,
+			sqlText(fixturePricingRevision(nil)), seededHourMS+time.Hour.Milliseconds()),
 	)
 }
+
+// fixturePricingRevision is the pricing structure revision a side computes from
+// its own price table, so seeded rollups are rows the read path actually
+// selects. A fixture that seeds no model prices has the empty table's revision.
+func fixturePricingRevision(prices map[string]model.ModelPrice) string {
+	return usageidentity.PricingStructureRevision(model.ModelPriceStructureRevision(prices))
+}
+
+// sqlText quotes a fixture value as a SQL string literal. The revisions in these
+// tests carry only letters, digits, colons, dots and hyphens.
+func sqlText(value string) string { return "'" + value + "'" }
 
 // seedSourcePricingOnDay adds one pricing rollup row on the hour after the start
 // of the given UTC day, so a test can hold two source rollup days.
@@ -478,8 +490,8 @@ func seedSourcePricingOnDay(t *testing.T, volume legacyVolume, dayMS int64) {
 	execSource(t, volume, fmt.Sprintf(`insert into usage_pricing_hourly_rollups_v1 (
 		structure_revision, bucket_ms, model, billing_model, pricing_model, service_tier,
 		context_threshold_tokens, failed, calls, input_tokens, total_tokens, updated_at_ms)
-		values ('v1', %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 3, 200000, 200000, 1)`,
-		dayMS+time.Hour.Milliseconds()))
+		values (%s, %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 3, 200000, 200000, 1)`,
+		sqlText(fixturePricingRevision(nil)), dayMS+time.Hour.Milliseconds()))
 }
 
 func seedSourceCoverage(t *testing.T, volume legacyVolume) {
@@ -496,9 +508,9 @@ func seedSourceHistory(t *testing.T, volume legacyVolume) {
 		auth_provider_snapshot, auth_index, source, source_hash, auth_file_snapshot,
 		api_key_hash, executor_type, model, billing_model, pricing_model, service_tier,
 		context_threshold_tokens, failed, calls, total_tokens, last_seen_ms, updated_at_ms)
-		values ('v1', %d, 'acct-1', 'label-1', 'openai', 'openai-auth', '0', 'source-a', 'hash-a',
+		values (%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', '0', 'source-a', 'hash-a',
 			'file-a', 'key-a', 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
-			0, 0, 2, 100, %d, 1)`, seededDayMS, seededDayMS))
+			0, 0, 2, 100, %d, 1)`, sqlText(usageidentity.MonitoringProjectionStructureRevision()), seededDayMS, seededDayMS))
 }
 
 // seedSourceRetention adds two events in the same hour and model under two API
@@ -787,6 +799,58 @@ func TestReconcileReportsEveryPermutationInsideADay(t *testing.T) {
 	}
 }
 
+// TestReconcileComparesOnlyTheActiveStructureRevision reproduces review L1/P3:
+// a rollup row moved to a revision the read path does not select still
+// reconciled clean, because the comparison read every revision in the table.
+func TestReconcileComparesOnlyTheActiveStructureRevision(t *testing.T) {
+	cases := []struct {
+		name   string
+		seed   func(*testing.T, legacyVolume)
+		mutate string
+		domain string
+	}{
+		{
+			name:   "pricing row moved to an inactive revision",
+			seed:   seedSourcePricing,
+			mutate: `update usage_pricing_hourly_rollups_v1 set structure_revision = 'stale-v1' where failed = 0`,
+			domain: ReconcileDomainPricing,
+		},
+		{
+			// The retained events on the same day are what make the lost rollup a
+			// waivable loss rather than an unrebuildable one, so the assertion is
+			// about the revision and not about the unwaivable boundary.
+			name: "history row moved to an inactive revision",
+			seed: func(t *testing.T, volume legacyVolume) {
+				seedSourceHistory(t, volume)
+				seedSourceRetention(t, volume)
+			},
+			mutate: `update usage_monitoring_account_daily_rollups_v1 set structure_revision = 'stale-v1'`,
+			domain: ReconcileDomainHistory,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			copied := newCopiedVolumeWith(t, testCase.seed)
+			execTarget(t, copied.databasePath(), testCase.mutate)
+
+			report, err := Reconcile(context.Background(), copied.reconcileOptions())
+			if !errors.Is(err, ErrReconcileMismatch) {
+				t.Fatalf("reconcile error = %v, want the typed mismatch", err)
+			}
+			if report.Recorded {
+				t.Fatal("a mismatched reconcile recorded the operation")
+			}
+			if mismatches := mismatchesOf(t, report, testCase.domain); len(mismatches) == 0 {
+				t.Fatalf("%s mismatches = none, want the row the read path no longer selects", testCase.domain)
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none", got)
+			}
+			assertNoScratch(t, copied.target)
+		})
+	}
+}
+
 // holdsMismatch reports whether one mismatch carries the wanted column on the
 // wanted row of the seeded day, with two different values.
 func holdsMismatch(mismatches []ReconcileMismatch, wanted wantedMismatch) bool {
@@ -839,9 +903,15 @@ func TestReconcileTreatsAOneMicroCostDifferenceAsAMismatch(t *testing.T) {
 func TestReconcileSeesAPriceChangeOfOneMicroPerMillion(t *testing.T) {
 	copied := newCopiedVolumeWith(t, func(t *testing.T, volume legacyVolume) {
 		seedSourcePricing(t, volume)
+		// A price row changes which models the revision covers, so the seeded
+		// rollups move to the revision the read path now selects. The amounts are
+		// not part of the revision, which is what lets the one-micro change below
+		// be compared at all.
 		execSource(t, volume,
 			`insert into model_prices (model, prompt_per_1m, completion_per_1m, cache_per_1m, updated_at_ms)
 				values ('gpt-test', 3.0, 0, 0, 1)`,
+			`update usage_pricing_hourly_rollups_v1 set structure_revision = `+
+				sqlText(fixturePricingRevision(map[string]model.ModelPrice{"gpt-test": {}})),
 			fmt.Sprintf(`update usage_pricing_hourly_rollups_v1
 				set input_tokens = 1000000000, total_tokens = 1000000000
 				where failed = 0 and bucket_ms = %d`, seededHourMS),
@@ -932,7 +1002,7 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	for _, statement := range []string{
 		`create table usage_monitoring_account_daily_rollups_v1 (
-			bucket_ms integer, account_snapshot text, auth_label_snapshot text,
+			structure_revision text, bucket_ms integer, account_snapshot text, auth_label_snapshot text,
 			provider text, auth_provider_snapshot text, auth_account_id_snapshot text,
 			auth_index text, source text, source_hash text,
 			auth_file_snapshot text, api_key_hash text, executor_type text,
@@ -944,13 +1014,15 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 			long_cache_read_tokens integer, long_cache_creation_tokens integer,
 			total_tokens integer, last_seen_ms integer, latency_sum_ms integer, latency_samples integer)`,
 		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
-			(%d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
+			(%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
 			 'file-a', null, 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
-			 0, 0, 2, 40, 60, 0, 0, 0, 0, 0, 0, 0, 0, 100, %d, 10, 2)`, seededDayMS, seededDayMS),
+			 0, 0, 2, 40, 60, 0, 0, 0, 0, 0, 0, 0, 0, 100, %d, 10, 2)`,
+			sqlText(usageidentity.MonitoringProjectionStructureRevision()), seededDayMS, seededDayMS),
 		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
-			(%d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
+			(%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
 			 'file-a', '', 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
-			 0, 0, 5, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 200, %d, 20, 3)`, seededDayMS, seededDayMS),
+			 0, 0, 5, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 200, %d, 20, 3)`,
+			sqlText(usageidentity.MonitoringProjectionStructureRevision()), seededDayMS, seededDayMS),
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatalf("prepare the history fixture %q: %v", statement, err)
@@ -961,7 +1033,7 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 		t.Fatalf("begin the history read: %v", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	cells, err := readHistoryCells(context.Background(), tx)
+	cells, err := readHistoryCells(context.Background(), tx, usageidentity.MonitoringProjectionStructureRevision())
 	if err != nil {
 		t.Fatalf("read the account history: %v", err)
 	}

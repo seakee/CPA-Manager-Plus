@@ -21,6 +21,7 @@ import (
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 // Reconcile compares a copied-in v2 store against the stopped 1.x source it was
@@ -501,7 +502,11 @@ func observeSide(ctx context.Context, db *sql.DB, schema sourceSchema) (sideObse
 				return observation, fmt.Errorf("read the model prices: %w", err)
 			}
 		}
-		if observation.pricing, err = readPricingCells(ctx, tx, prices); err != nil {
+		// The pricing read path selects only the revision this store's own price
+		// table defines, so rows an older revision left behind are not part of
+		// what the store reports and must not be compared as if they were.
+		revision := usageidentity.PricingStructureRevision(model.ModelPriceStructureRevision(prices))
+		if observation.pricing, err = readPricingCells(ctx, tx, prices, revision); err != nil {
 			return observation, err
 		}
 	}
@@ -511,7 +516,9 @@ func observeSide(ctx context.Context, db *sql.DB, schema sourceSchema) (sideObse
 		}
 	}
 	if schema.tables["usage_monitoring_account_daily_rollups_v1"] {
-		if observation.history, err = readHistoryCells(ctx, tx); err != nil {
+		// The history read path compares against the rollup state's revision, and
+		// a rollup whose revision moved is rebuilt rather than reported.
+		if observation.history, err = readHistoryCells(ctx, tx, usageidentity.MonitoringProjectionStructureRevision()); err != nil {
 			return observation, err
 		}
 	}
@@ -658,7 +665,7 @@ func readRetainedCells(ctx context.Context, tx *sql.Tx) (map[retainedCellKey]ret
 // readPricingCells reads every stored pricing rollup row with its token classes
 // and its cost. Cost is not stored: it is recomputed from each side's own price
 // table, which is exactly what makes a price change visible here.
-func readPricingCells(ctx context.Context, tx *sql.Tx, prices map[string]model.ModelPrice) (map[pricingCellKey]pricingCell, error) {
+func readPricingCells(ctx context.Context, tx *sql.Tx, prices map[string]model.ModelPrice, revision string) (map[pricingCellKey]pricingCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
 		bucket_ms,
 		model, billing_model, pricing_model, service_tier, context_threshold_tokens, failed,
@@ -668,7 +675,8 @@ func readPricingCells(ctx context.Context, tx *sql.Tx, prices map[string]model.M
 		sum(long_input_tokens), sum(long_output_tokens), sum(long_cached_tokens),
 		sum(long_cache_read_tokens), sum(long_cache_creation_tokens)
 		from usage_pricing_hourly_rollups_v1
-		group by bucket_ms, model, billing_model, pricing_model, service_tier, context_threshold_tokens, failed`)
+		where structure_revision = ?
+		group by bucket_ms, model, billing_model, pricing_model, service_tier, context_threshold_tokens, failed`, revision)
 	if err != nil {
 		return nil, fmt.Errorf("read the pricing rollups: %w", err)
 	}
@@ -736,7 +744,7 @@ func readCoverageCells(ctx context.Context, tx *sql.Tx) (map[string]coverageCell
 // absent in the copied source. Every token class, the call count and the
 // latency/last-seen aggregates are summed or maxed exactly as the analytics read
 // aggregates them, so a day that moved tokens between classes is visible.
-func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]historyCell, error) {
+func readHistoryCells(ctx context.Context, tx *sql.Tx, revision string) (map[historyCellKey]historyCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
 		bucket_ms,
 		account_snapshot, coalesce(auth_label_snapshot, ''), provider,
@@ -753,13 +761,14 @@ func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]histo
 		sum(long_cache_read_tokens), sum(long_cache_creation_tokens),
 		sum(total_tokens), max(last_seen_ms), sum(latency_sum_ms), sum(latency_samples)
 		from usage_monitoring_account_daily_rollups_v1
+		where structure_revision = ?
 		group by bucket_ms, account_snapshot, coalesce(auth_label_snapshot, ''),
 			provider, coalesce(auth_provider_snapshot, ''), coalesce(auth_account_id_snapshot, ''),
 			coalesce(auth_index, ''), coalesce(source, ''), coalesce(source_hash, ''),
 			coalesce(auth_file_snapshot, ''), coalesce(api_key_hash, ''),
 			coalesce(executor_type, ''), model, coalesce(billing_model, ''),
 			coalesce(pricing_model, ''), coalesce(service_tier, ''),
-			context_threshold_tokens, failed`)
+			context_threshold_tokens, failed`, revision)
 	if err != nil {
 		return nil, fmt.Errorf("read the account history rollups: %w", err)
 	}
