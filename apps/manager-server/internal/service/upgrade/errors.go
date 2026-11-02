@@ -149,6 +149,17 @@ const (
 	// it belongs to another installation. Nothing was read from it and nothing
 	// was written.
 	UpgradeErrorCPASourceRootMismatch UpgradeErrorCode = "upgrade_cpa_source_root_mismatch"
+	// UpgradeErrorCPADestinationRequestChanged reports that an earlier run of this
+	// step already submitted a different request to this destination — another
+	// secret, plugin choice or client key set — and the Supervisor replays the
+	// journalled attempt as it was submitted. The run refuses instead of
+	// overwriting the record, and it wrote nothing to the destination.
+	UpgradeErrorCPADestinationRequestChanged UpgradeErrorCode = "upgrade_cpa_destination_request_changed"
+	// UpgradeErrorCPAImportTargetForeign reports that the CPA answering at the
+	// destination URL does not hold the client keys this import stages, so it is
+	// not the target this operation staged. The import refuses before writing any
+	// configuration or credential to it.
+	UpgradeErrorCPAImportTargetForeign UpgradeErrorCode = "upgrade_cpa_import_target_foreign"
 	// UpgradeErrorCPADestinationKeyRequired reports that the destination CPA is
 	// already running and this run holds no management secret for it: no earlier
 	// run of this step recorded one and the caller supplied none. The import never
@@ -218,6 +229,8 @@ var (
 	ErrCPAImportUnproven     = &UpgradeError{Code: UpgradeErrorCPAImportUnproven}
 	ErrCPAImportUnavailable  = &UpgradeError{Code: UpgradeErrorCPAImportUnavailable}
 	ErrCPASourceRootMismatch = &UpgradeError{Code: UpgradeErrorCPASourceRootMismatch}
+	ErrCPADestinationChanged = &UpgradeError{Code: UpgradeErrorCPADestinationRequestChanged}
+	ErrCPATargetForeign      = &UpgradeError{Code: UpgradeErrorCPAImportTargetForeign}
 	ErrCPADestinationKey     = &UpgradeError{Code: UpgradeErrorCPADestinationKeyRequired}
 )
 

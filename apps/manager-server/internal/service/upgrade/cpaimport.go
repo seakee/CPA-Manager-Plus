@@ -38,15 +38,12 @@ package upgrade
 import (
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -54,7 +51,6 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 )
@@ -335,13 +331,16 @@ func cpaImportReconciledDomainsRecorded(recorded model.UpgradeOperation) bool {
 }
 
 // stageDestination proves the destination is observable, then stages and starts
-// it with this run's keys and plugin choice.
+// it with the attempt this operation already owns.
 //
-// A destination that already reports itself ready is not staged again: the
-// Supervisor journals a terminal destination operation and never resumes it, and a
-// second stage would rewrite the identity proof the first one established. The
-// proof below re-runs either way, so "already staged" is a claim this step still
-// verifies.
+// The destination request is immutable once recorded: the Supervisor replays a
+// journalled operation by ID and never applies a different request under the same
+// one, so a retry reuses the recorded secret, plugin choice and client key set
+// instead of minting a second secret and submitting it into a replay. A
+// destination that already reports itself ready is not staged again; it is proved
+// against this import's client keys before a single write, so a foreign CPA that
+// happens to be running is refused instead of receiving configuration and
+// credentials.
 func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportResult) error {
 	baseURL, err := cpa.NormalizeV8BaseURL(r.options.DestinationURL)
 	if err != nil {
@@ -356,42 +355,122 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		return newUpgradeError(UpgradeErrorCPADestinationUnready,
 			"this Runtime cannot stage a destination CPA, so the import has nowhere to write", nil)
 	}
-	if status.State == model.RuntimeStateReady {
-		// The Supervisor's CPA is already the staged destination. Its management
-		// secret is the one this run recorded when it staged it, or the one the
-		// caller supplies; the run never invents a second secret for a destination
-		// it did not stage.
-		managementKey, resolveErr := r.readyDestinationManagementKey(ctx, baseURL)
-		if resolveErr != nil {
-			return resolveErr
+	clientKeys := slices.Clone(r.source.clientKeys)
+	supplied := strings.TrimSpace(r.options.DestinationManagementKey)
+
+	record, recordedKey, found, err := loadCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorCPADestinationUnready,
+			"the destination attempt an earlier run recorded cannot be read, so this run did not mint a second secret", err)
+	}
+	if found {
+		if record.OperationID == "" {
+			// A record written before the attempt identity existed holds the one
+			// thing that cannot be recovered — the staged secret — and nothing
+			// else needs to change: attempt 1 has the same derived operation ID and
+			// the client keys and plugin choice come from this run's source.
+			record = cpaImportDestinationRecord{
+				BaseURL:          record.BaseURL,
+				PluginsEnabled:   result.PluginsEnabled,
+				ClientKeysDigest: cpaImportClientKeysDigest(clientKeys),
+				OperationID:      cpaImportDestinationOperationID(result.SourceIdentity, 1),
+				Attempt:          1,
+			}
+			if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready,
+					"the recorded destination attempt could not be bound to this import, so nothing was staged", err)
+			}
 		}
-		r.managementKey = managementKey
+		if err := requireSameDestinationRequest(record, recordedKey, baseURL, result.PluginsEnabled, clientKeys, supplied); err != nil {
+			return err
+		}
+		if status.State == model.RuntimeStateReady {
+			if err := cpa.VerifyV8Adoption(ctx, baseURL, recordedKey, clientKeys); err != nil {
+				return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
+					"the running destination CPA does not answer with the client keys this import stages, so it is not the target this operation staged; this run wrote nothing to it", err)
+			}
+			r.managementKey = recordedKey
+			return nil
+		}
+		if record.TerminalFailure {
+			// The Supervisor never resumes a terminal operation, so the only way to
+			// stage the identical destination again is a new attempt ID, and that
+			// is exactly the supersede contract: same request, new ID, after the
+			// old stage/start is known to be terminal.
+			record = nextCPAImportDestinationAttempt(record, result.SourceIdentity)
+			if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready,
+					"the next destination attempt could not be recorded, so nothing was staged", err)
+			}
+		}
+		return r.submitDestination(ctx, status, record, recordedKey, clientKeys)
+	}
+
+	if status.State == model.RuntimeStateReady {
+		// The Supervisor's CPA is already the staged destination and this Manager
+		// did not stage it. Its secret is the caller's to supply — the import never
+		// invents a second secret for a destination it did not stage — and the
+		// target is proved before the executor writes anything.
+		if supplied == "" {
+			return newUpgradeError(UpgradeErrorCPADestinationKeyRequired,
+				"the destination CPA is already running and this run holds no management secret for it; pass the secret the Manager stored with --destination-management-key-file, or stage the destination from a stopped state", nil)
+		}
+		if err := cpa.VerifyV8Adoption(ctx, baseURL, supplied, clientKeys); err != nil {
+			return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
+				"the running destination CPA does not answer with the client keys this import stages, so it is not the target this operation staged; this run wrote nothing to it", err)
+		}
+		r.managementKey = supplied
 		return nil
 	}
-	managementKey := strings.TrimSpace(r.options.DestinationManagementKey)
+
+	managementKey := supplied
 	if managementKey == "" {
 		if managementKey, err = newCPAImportManagementSecret(); err != nil {
 			return newUpgradeError(UpgradeErrorCPADestinationUnready, "a destination management secret could not be generated", err)
 		}
 	}
-	// The secret is durable before the destination is staged. The stage hands the
+	// The attempt is durable before the destination is staged. The stage hands the
 	// destination the only copy it will ever hold, so a run that fails after it
-	// must find the same secret on retry instead of demanding an operator input
-	// the CLI cannot supply.
-	if err := saveCPAImportDestinationKey(ctx, r.databasePath, r.dataKeyPath, baseURL, managementKey); err != nil {
+	// must find the same secret, plugin choice and client keys on retry instead of
+	// demanding an operator input the CLI cannot supply.
+	record = cpaImportDestinationRecord{
+		BaseURL:          baseURL,
+		PluginsEnabled:   result.PluginsEnabled,
+		ClientKeysDigest: cpaImportClientKeysDigest(clientKeys),
+		OperationID:      cpaImportDestinationOperationID(result.SourceIdentity, 1),
+		Attempt:          1,
+	}
+	if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, managementKey); err != nil {
 		return newUpgradeError(UpgradeErrorCPADestinationUnready,
 			"the destination management secret could not be recorded, so the destination was not staged", err)
 	}
+	return r.submitDestination(ctx, status, record, managementKey, clientKeys)
+}
+
+// submitDestination sends the recorded attempt to the Runtime and refuses a
+// result it did not confirm.
+//
+// A terminal failure marks the attempt, so the next run knows it must supersede
+// it with a new attempt ID instead of replaying a failure forever. No other
+// outcome is treated as terminal: a transport error or an unconfirmed result may
+// still belong to an operation the Supervisor is running.
+func (r *cpaImportRun) submitDestination(
+	ctx context.Context,
+	status model.RuntimeObservedStatus,
+	record cpaImportDestinationRecord,
+	managementKey string,
+	clientKeys []string,
+) error {
 	request := model.RuntimeDestinationRequest{
-		OperationID:               "upgrade-cpa-import:" + digestBytes([]byte(result.SourceIdentity))[:32],
+		OperationID:               record.OperationID,
 		ExpectedRuntimeIdentity:   status.Identity,
 		ExpectedRuntimeGeneration: status.Generation,
 		ExpectedActiveArtifactID:  status.ActiveGatewayArtifact.ArtifactID,
-		SourceIdentity:            result.SourceIdentity,
+		SourceIdentity:            r.source.sourceIdentity(),
 		SourceClass:               "legacy_managed",
-		APIKeys:                   slices.Clone(r.source.clientKeys),
+		APIKeys:                   slices.Clone(clientKeys),
 		ManagementKey:             managementKey,
-		PluginsEnabled:            result.PluginsEnabled,
+		PluginsEnabled:            record.PluginsEnabled,
 	}
 	staged, err := r.options.Runtime.StageDestination(ctx, request)
 	if err != nil || staged.Validate() != nil || staged.OperationID != request.OperationID ||
@@ -400,10 +479,13 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		return newUpgradeError(UpgradeErrorCPADestinationUnready, "the destination stage was not confirmed by the Runtime", err)
 	}
 	if staged.State == model.RuntimeOperationFailed {
-		return newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination stage as failed", nil)
+		return errors.Join(
+			r.markDestinationAttemptTerminal(ctx, record, managementKey),
+			newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination stage as failed", nil),
+		)
 	}
 	startRequest := model.RuntimeMutationRequest{
-		OperationID:               request.OperationID + ":start",
+		OperationID:               record.OperationID + ":start",
 		ExpectedRuntimeIdentity:   status.Identity,
 		ExpectedRuntimeGeneration: status.Generation,
 		ExpectedActiveArtifactID:  status.ActiveGatewayArtifact.ArtifactID,
@@ -415,9 +497,60 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		return newUpgradeError(UpgradeErrorCPADestinationUnready, "the destination start was not confirmed by the Runtime", err)
 	}
 	if started.State == model.RuntimeOperationFailed {
-		return newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination start as failed", nil)
+		return errors.Join(
+			r.markDestinationAttemptTerminal(ctx, record, managementKey),
+			newUpgradeError(UpgradeErrorCPADestinationUnready, "the Runtime reported the destination start as failed", nil),
+		)
 	}
 	r.managementKey = managementKey
+	return nil
+}
+
+// markDestinationAttemptTerminal records that the attempt reached a terminal
+// failure, so the next run supersedes it instead of replaying it.
+func (r *cpaImportRun) markDestinationAttemptTerminal(
+	ctx context.Context,
+	record cpaImportDestinationRecord,
+	managementKey string,
+) error {
+	record.TerminalFailure = true
+	if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, managementKey); err != nil {
+		return newUpgradeError(UpgradeErrorCPADestinationUnready,
+			"the terminal destination failure could not be recorded, so the next run cannot supersede this attempt", err)
+	}
+	return nil
+}
+
+// requireSameDestinationRequest refuses a run that would change the request the
+// recorded attempt already submitted. The Supervisor replays the journalled
+// operation by ID and never applies a different request under the same one, so a
+// drifted retry would silently keep the old destination while reporting the new
+// choice.
+func requireSameDestinationRequest(
+	record cpaImportDestinationRecord,
+	managementKey string,
+	baseURL string,
+	pluginsEnabled bool,
+	clientKeys []string,
+	supplied string,
+) error {
+	refuse := func(what string) error {
+		return newUpgradeError(UpgradeErrorCPADestinationRequestChanged, fmt.Sprintf(
+			"an earlier run already staged this destination with a different %s; the recorded attempt is replayed as it was submitted, so re-run with the recorded values instead of changing them; this run wrote nothing",
+			what), nil)
+	}
+	if record.BaseURL != baseURL {
+		return refuse("destination URL")
+	}
+	if record.PluginsEnabled != pluginsEnabled {
+		return refuse("plugin choice")
+	}
+	if record.ClientKeysDigest != cpaImportClientKeysDigest(clientKeys) {
+		return refuse("client key set")
+	}
+	if supplied != "" && supplied != managementKey {
+		return refuse("management secret")
+	}
 	return nil
 }
 
@@ -644,141 +777,16 @@ func boundedManualItem(item CPAImportManualItem) string {
 	return line
 }
 
-// cpaImportDestinationKeySetting is the settings row that carries the management
-// secret this step staged a destination with.
+// cpaImportDestinationKeySetting is the settings row that carries the destination
+// attempt this step already submitted.
 //
-// The stage hands the destination the only copy of that secret it will ever
-// hold, so the run records it in the same Manager store that holds the operation
-// row, before the stage. A run that fails after staging — and therefore finds a
-// ready destination on retry, which the CLI cannot supply a secret for — reads it
-// back instead of minting a second one. The successful record deletes the row:
-// it exists exactly while the destination identity this step created is still
-// unclaimed.
+// The stage hands the destination the only copy of its management secret it will
+// ever hold, so the run records the attempt in the same Manager store that holds
+// the operation row, before the stage: the secret, the plugin choice, the client
+// key set the destination was staged with and the operation ID it was staged
+// under. A retry replays that exact request. The successful record deletes the
+// row, because from then on the Manager's own connection holds the secret.
 const cpaImportDestinationKeySetting = "upgrade_cpa_import_destination_v1"
-
-// cpaImportDestinationKeyRecord is that row. BaseURL binds the secret to the
-// destination it was staged for: a Manager pointed at another CPA must never
-// present a secret minted for a different one.
-type cpaImportDestinationKeyRecord struct {
-	BaseURL       string `json:"baseUrl"`
-	ManagementKey string `json:"managementKey"`
-	UpdatedAtMS   int64  `json:"updatedAtMs"`
-}
-
-// readyDestinationManagementKey resolves the secret of a destination this run did
-// not stage. The caller's explicit value wins; otherwise the secret an earlier
-// run recorded for this destination is used. With neither, the run is refused: it
-// never invents a secret for a destination it did not stage, because the
-// destination would then hold a credential no Manager knows.
-func (r *cpaImportRun) readyDestinationManagementKey(ctx context.Context, baseURL string) (string, error) {
-	if supplied := strings.TrimSpace(r.options.DestinationManagementKey); supplied != "" {
-		return supplied, nil
-	}
-	recorded, found, err := loadCPAImportDestinationKey(ctx, r.databasePath, r.dataKeyPath, baseURL)
-	if err != nil {
-		return "", newUpgradeError(UpgradeErrorCPADestinationKeyRequired,
-			"the destination management secret an earlier run recorded cannot be read with this store's data key; pass the destination's management secret with --destination-management-key-file", err)
-	}
-	if !found {
-		return "", newUpgradeError(UpgradeErrorCPADestinationKeyRequired,
-			"the destination CPA is already running and this run holds no management secret for it; pass the secret the Manager stored with --destination-management-key-file, or stage the destination from a stopped state", nil)
-	}
-	return recorded, nil
-}
-
-// saveCPAImportDestinationKey records the secret before the destination is
-// staged, protected with the store's data key like every other persisted secret.
-func saveCPAImportDestinationKey(ctx context.Context, databasePath, dataKeyPath, baseURL, managementKey string) error {
-	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
-	if err != nil {
-		return fmt.Errorf("load the Manager data key: %w", err)
-	}
-	protector, err := security.NewProtector(key)
-	if err != nil {
-		return fmt.Errorf("initialize the secret protector: %w", err)
-	}
-	protected, err := protector.ProtectString(managementKey)
-	if err != nil {
-		return fmt.Errorf("protect the destination management secret: %w", err)
-	}
-	updatedAtMS := time.Now().UnixMilli()
-	payload, err := json.Marshal(cpaImportDestinationKeyRecord{
-		BaseURL:       baseURL,
-		ManagementKey: protected,
-		UpdatedAtMS:   updatedAtMS,
-	})
-	if err != nil {
-		return fmt.Errorf("encode the destination management secret: %w", err)
-	}
-	db, err := managersqlite.Open(databasePath)
-	if err != nil {
-		return fmt.Errorf("open the v2 database to record the destination management secret: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin the destination management secret transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx,
-		`insert into settings (key, value, updated_at_ms) values (?, ?, ?)
-		 on conflict (key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
-		cpaImportDestinationKeySetting, string(payload), updatedAtMS); err != nil {
-		return fmt.Errorf("record the destination management secret: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("record the destination management secret: %w", err)
-	}
-	return nil
-}
-
-// loadCPAImportDestinationKey reads the secret an earlier run recorded for this
-// destination. A row for another destination is not this run's to use: the secret
-// belongs to the CPA at one URL, and presenting it elsewhere would be a different
-// authority.
-func loadCPAImportDestinationKey(ctx context.Context, databasePath, dataKeyPath, baseURL string) (string, bool, error) {
-	db, err := managersqlite.Open(databasePath)
-	if err != nil {
-		return "", false, fmt.Errorf("open the v2 database to read the destination management secret: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-	var raw string
-	err = db.QueryRowContext(ctx, `select value from settings where key = ?`, cpaImportDestinationKeySetting).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("read the destination management secret: %w", err)
-	}
-	var record cpaImportDestinationKeyRecord
-	if err := json.Unmarshal([]byte(raw), &record); err != nil {
-		return "", false, fmt.Errorf("decode the destination management secret: %w", err)
-	}
-	if record.BaseURL != baseURL {
-		return "", false, nil
-	}
-	// The key is never created here: a read that minted a data key could not
-	// decrypt the envelope it is looking at, and would leave a second key behind.
-	if _, err := os.Stat(dataKeyPath); err != nil {
-		return "", false, fmt.Errorf("read the Manager data key: %w", err)
-	}
-	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
-	if err != nil {
-		return "", false, fmt.Errorf("load the Manager data key: %w", err)
-	}
-	protector, err := security.NewProtector(key)
-	if err != nil {
-		return "", false, fmt.Errorf("initialize the secret protector: %w", err)
-	}
-	secret, err := protector.UnprotectString(record.ManagementKey)
-	if err != nil {
-		return "", false, fmt.Errorf("decrypt the destination management secret: %w", err)
-	}
-	if strings.TrimSpace(secret) == "" {
-		return "", false, nil
-	}
-	return secret, true, nil
-}
 
 // requireRecordedSourceRoot binds this run to the 1.x tree the copy-in read.
 //

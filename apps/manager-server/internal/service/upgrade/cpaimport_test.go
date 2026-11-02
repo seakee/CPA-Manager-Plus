@@ -358,6 +358,14 @@ type fakeImportRuntime struct {
 	artifact  model.RuntimeArtifactID
 	// failStage makes the stage answer a terminal failure.
 	failStage bool
+	// failStart makes the start answer a terminal failure and leaves the CPA
+	// offline, which is the state the next run observes.
+	failStart bool
+	// replay makes the Runtime answer a repeated operation ID with the result it
+	// journalled first, without applying the new request: the Supervisor's replay
+	// rule, and the reason a retry must reuse its recorded secret.
+	replay  bool
+	journal map[string]model.RuntimeOperationResult
 }
 
 func newFakeImportRuntime(state model.RuntimeState) *fakeImportRuntime {
@@ -365,6 +373,7 @@ func newFakeImportRuntime(state model.RuntimeState) *fakeImportRuntime {
 		state:    state,
 		identity: model.RuntimeIdentity("runtime-identity-1"),
 		artifact: model.RuntimeArtifactID("sha256:" + strings.Repeat("ab", 32)),
+		journal:  map[string]model.RuntimeOperationResult{},
 	}
 }
 
@@ -383,13 +392,25 @@ func (f *fakeImportRuntime) StageDestination(_ context.Context, request model.Ru
 	f.mu.Lock()
 	f.stageCall = &request
 	fail := f.failStage
+	if f.replay {
+		if stored, ok := f.journal[request.OperationID]; ok && stored.OperationType == model.RuntimeOperationStageDestination {
+			f.mu.Unlock()
+			return stored, nil
+		}
+	}
 	f.mu.Unlock()
-	if fail {
+	result := func(state model.RuntimeOperationState) model.RuntimeOperationResult {
 		return model.RuntimeOperationResult{
 			OperationID: request.OperationID, OperationType: model.RuntimeOperationStageDestination,
 			RuntimeIdentity: request.ExpectedRuntimeIdentity, RuntimeGeneration: request.ExpectedRuntimeGeneration,
-			State: model.RuntimeOperationFailed, Failure: &model.RuntimeOperationFailure{Code: "stage_failed"},
-		}, nil
+			State: state,
+		}
+	}
+	if fail {
+		failed := result(model.RuntimeOperationFailed)
+		failed.Failure = &model.RuntimeOperationFailure{Code: "stage_failed"}
+		f.recordJournal(failed)
+		return failed, nil
 	}
 	// The destination CPA the Supervisor publishes carries the request's keys and
 	// management secret, which is what the proof reads.
@@ -397,25 +418,48 @@ func (f *fakeImportRuntime) StageDestination(_ context.Context, request model.Ru
 	f.staged.management = request.ManagementKey
 	f.staged.clientKeys = append([]string(nil), request.APIKeys...)
 	f.staged.mu.Unlock()
+	succeeded := result(model.RuntimeOperationSucceeded)
 	f.mu.Lock()
 	f.state = model.RuntimeStateReady
 	f.mu.Unlock()
-	return model.RuntimeOperationResult{
-		OperationID: request.OperationID, OperationType: model.RuntimeOperationStageDestination,
-		RuntimeIdentity: request.ExpectedRuntimeIdentity, RuntimeGeneration: request.ExpectedRuntimeGeneration,
-		State: model.RuntimeOperationSucceeded,
-	}, nil
+	f.recordJournal(succeeded)
+	return succeeded, nil
+}
+
+// recordJournal stores one operation result when the test runs the Runtime in
+// replay mode, so a repeated ID returns it instead of applying the request.
+func (f *fakeImportRuntime) recordJournal(result model.RuntimeOperationResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.replay {
+		f.journal[result.OperationID] = result
+	}
 }
 
 func (f *fakeImportRuntime) Start(_ context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
 	f.mu.Lock()
 	f.startCall = &request
-	f.mu.Unlock()
-	return model.RuntimeOperationResult{
+	if f.replay {
+		if stored, ok := f.journal[request.OperationID]; ok && stored.OperationType == model.RuntimeOperationStart {
+			f.mu.Unlock()
+			return stored, nil
+		}
+	}
+	result := model.RuntimeOperationResult{
 		OperationID: request.OperationID, OperationType: model.RuntimeOperationStart,
 		RuntimeIdentity: request.ExpectedRuntimeIdentity, RuntimeGeneration: request.ExpectedRuntimeGeneration,
 		State: model.RuntimeOperationSucceeded,
-	}, nil
+	}
+	if f.failStart {
+		result.State = model.RuntimeOperationFailed
+		result.Failure = &model.RuntimeOperationFailure{Code: "start_failed"}
+		f.state = model.RuntimeStateOffline
+	}
+	if f.replay {
+		f.journal[request.OperationID] = result
+	}
+	f.mu.Unlock()
+	return result, nil
 }
 
 // importOptions builds the step's input for one fixture and one destination.
@@ -674,6 +718,79 @@ func TestImportCPALeavesTheStageAloneWhenTheDestinationCannotBeUsed(t *testing.T
 	}
 	if recorded := readOperation(t, unusableFixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
 		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageReconcile)
+	}
+}
+
+// TestImportCPARefusesARetryThatChangesTheStagedRequest pins the immutability of
+// the recorded attempt. The Supervisor replays a journalled stage by operation ID
+// and never applies a different request under the same one, so a retry with the
+// other plugin choice, a different destination URL or another client key set would
+// keep the destination it staged while reporting the new choice.
+func TestImportCPARefusesARetryThatChangesTheStagedRequest(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	destination := newFakeDestinationCPA(t, "")
+	destination.silentDropPath = "routing.retry.request-retry"
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	if _, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true))); err == nil {
+		t.Fatal("a dropped configuration write was proved")
+	}
+	stagedCall := runtime.stageCall
+	if stagedCall == nil {
+		t.Fatal("the first run did not stage the destination")
+	}
+	destination.mu.Lock()
+	destination.silentDropPath = ""
+	destination.mu.Unlock()
+
+	// The other plugin choice is a different request, not a retry.
+	_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(false)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+		t.Fatalf("a changed plugin choice produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
+	}
+	if runtime.stageCall != stagedCall {
+		t.Fatal("a changed plugin choice submitted a second destination request")
+	}
+
+	// Another destination is not this attempt's to reuse either.
+	other := newFakeDestinationCPA(t, "")
+	_, err = ImportCPA(context.Background(), importOptions(fixture, runtime, other.url(), boolPointer(true)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+		t.Fatalf("a changed destination URL produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
+	}
+	if requests := other.requests(); len(requests) != 0 {
+		t.Fatalf("the other destination answered %v, want no request", requests)
+	}
+	if recorded := readOperation(t, fixture.targetRoot); recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
+	}
+}
+
+// TestImportCPARefusesAReadyDestinationThatIsNotThisImportsTarget pins the
+// binding of a destination this run did not stage. A ready CPA carrying another
+// installation's client keys is not the target of this import; it used to receive
+// every configuration mutation and credential upload and only then fail the proof,
+// leaving another CPA's configuration rewritten by an operation that never
+// recorded the work.
+func TestImportCPARefusesAReadyDestinationThatIsNotThisImportsTarget(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	destination := newFakeDestinationCPA(t, "foreign-management-secret-value-0123456789")
+	destination.clientKeys = []string{"another-installation-client-key"}
+	runtime := newFakeImportRuntime(model.RuntimeStateReady)
+	runtime.staged = destination
+	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+	options.DestinationManagementKey = destination.management
+	_, err := ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetForeign {
+		t.Fatalf("a foreign ready destination produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetForeign)
+	}
+	for _, request := range destination.requests() {
+		if strings.HasPrefix(request, http.MethodPatch+" ") || strings.HasPrefix(request, http.MethodPut+" ") || strings.HasPrefix(request, http.MethodPost+" ") {
+			t.Fatalf("a foreign target received a write: %s", request)
+		}
+	}
+	if recorded := readOperation(t, fixture.targetRoot); recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
 	}
 }
 
