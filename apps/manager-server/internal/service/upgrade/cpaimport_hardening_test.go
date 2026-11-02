@@ -293,6 +293,70 @@ func TestImportCPAProvesAReadyDestinationAfterTheSupervisorRestarts(t *testing.T
 	}
 }
 
+// TestImportCPAAllowsACorrectedDestinationURLAfterAForeignRefusal is the Medium
+// finding: the attempt used to record the caller's URL before the authenticated
+// proof ran, so one mistyped address — the CLI's default is CPA_UPSTREAM_URL,
+// which usually still names the stopped 1.x CPA — was refused as a foreign target
+// and then refused every later run as a changed request. The URL is not part of
+// the Supervisor's request, so only a proved URL may bind the attempt: a run that
+// proved nothing leaves the URL replaceable, and the retry with the staged
+// destination's address resumes the same attempt.
+func TestImportCPAAllowsACorrectedDestinationURLAfterAForeignRefusal(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	staged := newFakeDestinationCPA(t, "")
+	foreign := newFakeDestinationCPA(t, "foreign-management-secret-value-0123456789")
+	foreign.clientKeys = []string{"another-installation-client-key"}
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = staged
+
+	_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, foreign.url(), boolPointer(true)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetForeign {
+		t.Fatalf("a foreign URL produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetForeign)
+	}
+	if runtime.stageCall == nil {
+		t.Fatal("the test did not stage the destination, so it proves nothing about the binding")
+	}
+	if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("a refused URL moved the recorded stage to %q, want %q", recorded.Stage, model.UpgradeStageReconcile)
+	}
+	paths := newTargetPaths(fixture.targetRoot)
+	attempt, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("the destination attempt was not recorded (found %t): %v", found, err)
+	}
+	if attempt.urlProved() {
+		t.Fatalf("an unproved URL was recorded as the attempt's destination: %+v", attempt)
+	}
+
+	// The corrected URL is the destination the Supervisor staged: the retry proves
+	// it, records it and finishes the step.
+	result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, staged.url(), boolPointer(true)))
+	if err != nil {
+		t.Fatalf("the retry with the staged destination's URL was refused: %v", err)
+	}
+	if result.Stage != model.UpgradeStageCPAImport {
+		t.Fatalf("the retry recorded stage %q, want %q", result.Stage, model.UpgradeStageCPAImport)
+	}
+	attempt, _, found, err = loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("the proved attempt could not be read (found %t): %v", found, err)
+	}
+	if !attempt.urlProved() || attempt.BaseURL != staged.url() {
+		t.Fatalf("the proved URL was not recorded: %+v", attempt)
+	}
+
+	// A proved URL is as immutable as the request: swapping it afterwards would
+	// send another CPA the secret this destination was staged with.
+	other := newFakeDestinationCPA(t, "")
+	_, err = ImportCPA(context.Background(), importOptions(fixture, runtime, other.url(), boolPointer(true)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+		t.Fatalf("a swapped URL after the proof produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
+	}
+	if requests := other.requests(); len(requests) != 0 {
+		t.Fatalf("the other CPA answered %v, want no request", requests)
+	}
+}
+
 // TestImportCPADestinationAttemptNeverMovesItsTimestampBackwards is the Low
 // finding: the attempt's JSON updatedAtMs and its settings column were both
 // stamped from the wall clock on every write, so a store restored from a backup

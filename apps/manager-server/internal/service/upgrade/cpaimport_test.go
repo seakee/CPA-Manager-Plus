@@ -853,14 +853,22 @@ func TestImportCPARefusesARetryThatChangesTheStagedRequest(t *testing.T) {
 		t.Fatal("a changed plugin choice submitted a second destination request")
 	}
 
-	// Another destination is not this attempt's to reuse either.
+	// Another destination URL is not this attempt's to reuse while nothing proved
+	// the recorded URL — a URL no run proved stays replaceable — but the retry
+	// then supersedes the terminal attempt, starts the destination and proves the
+	// URL it was given, and that CPA is not the staged one.
+	runtime.mu.Lock()
+	runtime.failStart = false
+	runtime.mu.Unlock()
 	other := newFakeDestinationCPA(t, "")
 	_, err = ImportCPA(context.Background(), importOptions(fixture, runtime, other.url(), boolPointer(true)))
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
-		t.Fatalf("a changed destination URL produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetForeign {
+		t.Fatalf("a changed destination URL produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetForeign)
 	}
-	if requests := other.requests(); len(requests) != 0 {
-		t.Fatalf("the other destination answered %v, want no request", requests)
+	for _, request := range other.requests() {
+		if strings.HasPrefix(request, http.MethodPatch+" ") || strings.HasPrefix(request, http.MethodPut+" ") || strings.HasPrefix(request, http.MethodPost+" ") {
+			t.Fatalf("the other destination received a write: %s", request)
+		}
 	}
 	if recorded := readOperation(t, fixture.targetRoot); recorded.HasDomain(model.UpgradeDomainCPAConfig) {
 		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)

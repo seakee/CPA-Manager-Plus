@@ -35,6 +35,12 @@ import (
 //
 // BaseURL binds the attempt to the destination it was staged for: a Manager
 // pointed at another CPA must never present a secret minted for a different one.
+// It is written only by a run whose authenticated proof passed, and URLProved is
+// that statement: a URL the caller supplied but no run proved is never recorded,
+// because it is not part of the Supervisor's request and one mistyped address
+// would otherwise refuse every later run that names the staged destination. A
+// record written before URLProved existed carries a URL but not the proof, so it
+// is treated as unproved.
 // Intent is the whole request the Supervisor published, minus its operation ID,
 // and ManagementKey is the secret that request carried. OperationID and Attempt
 // are the Supervisor's replay identity. TerminalFailure records that the attempt
@@ -42,12 +48,19 @@ import (
 // run may submit a new attempt ID.
 type cpaImportDestinationRecord struct {
 	BaseURL         string                     `json:"baseUrl"`
+	URLProved       bool                       `json:"urlProved"`
 	ManagementKey   string                     `json:"managementKey"`
 	Intent          cpaImportDestinationIntent `json:"intent"`
 	OperationID     string                     `json:"operationId"`
 	Attempt         int                        `json:"attempt"`
 	TerminalFailure bool                       `json:"terminalFailure"`
 	UpdatedAtMS     int64                      `json:"updatedAtMs"`
+}
+
+// urlProved reports whether an earlier run proved BaseURL to be the destination
+// this attempt staged. Only a proved URL is immutable across retries.
+func (r cpaImportDestinationRecord) urlProved() bool {
+	return r.URLProved && r.BaseURL != ""
 }
 
 // cpaImportDestinationIntent is the Supervisor's destination request without its

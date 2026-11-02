@@ -407,6 +407,14 @@ func cpaImportReconciledDomainsRecorded(recorded model.UpgradeOperation) bool {
 // destination with this import's client keys before the executor is built; a
 // foreign CPA is refused instead of receiving source configuration and
 // credentials.
+//
+// The URL is not part of the request the Supervisor journals, so it is the one
+// input a retry may still change — but only while no run proved it. A refused URL
+// is therefore never recorded as the attempt's destination: the attempt keeps the
+// request and the secret, and a later run that names the staged destination
+// instead proves that URL and records it. Once a URL is proved it is as immutable
+// as the request, because swapping it afterwards would silently address another
+// CPA with a secret minted for this one.
 func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportResult) error {
 	baseURL, err := cpa.NormalizeV8BaseURL(r.options.DestinationURL)
 	if err != nil {
@@ -449,7 +457,9 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			// A record written before the attempt identity existed holds the one
 			// thing that cannot be recovered — the staged secret — and nothing
 			// else needs to change: attempt 1 has the same derived operation ID and
-			// this run's source supplies the request.
+			// this run's source supplies the request. Its URL is carried over but
+			// never as proved: that build recorded the caller's URL before proving
+			// it, so only a run that proves one may bind the attempt to it.
 			record = cpaImportDestinationRecord{
 				BaseURL:     record.BaseURL,
 				Intent:      intent,
@@ -481,7 +491,10 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			return err
 		}
 		if status.State == model.RuntimeStateReady {
-			return r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys)
+			if err := r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys); err != nil {
+				return err
+			}
+			return r.recordProvedDestination(ctx, record, baseURL, recordedKey)
 		}
 		if record.TerminalFailure {
 			// The Supervisor never resumes a terminal operation, so the only way to
@@ -498,7 +511,10 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		if err := r.submitDestination(ctx, record, recordedKey); err != nil {
 			return err
 		}
-		return r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys)
+		if err := r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys); err != nil {
+			return err
+		}
+		return r.recordProvedDestination(ctx, record, baseURL, recordedKey)
 	}
 
 	if status.State == model.RuntimeStateReady {
@@ -522,9 +538,12 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 	// The attempt is durable before the destination is staged. The stage hands the
 	// destination the only copy it will ever hold, so a run that fails after it
 	// must find the same secret, plugin choice, client keys and request on retry
-	// instead of demanding an operator input the CLI cannot supply.
+	// instead of demanding an operator input the CLI cannot supply. The caller's
+	// URL is deliberately not part of it: it is not part of the Supervisor's
+	// request, and a URL this run has not proved must stay replaceable, or one
+	// mistyped address would refuse every later run that names the destination
+	// the Supervisor actually staged.
 	record = cpaImportDestinationRecord{
-		BaseURL:     baseURL,
 		Intent:      intent,
 		OperationID: cpaImportDestinationOperationID(intent.SourceIdentity, 1),
 		Attempt:     1,
@@ -540,8 +559,39 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 	// address is the destination it staged: the caller supplies that URL, and a
 	// Manager pointed at another CPA would otherwise hand it the source's
 	// configuration and credentials and only notice at the final proof. The
-	// authenticated key-list read binds the two before the executor is built.
-	return r.requireStagedDestinationIdentity(ctx, baseURL, managementKey, clientKeys)
+	// authenticated key-list read binds the two before the executor is built, and
+	// only that read records the URL on the attempt.
+	if err := r.requireStagedDestinationIdentity(ctx, baseURL, managementKey, clientKeys); err != nil {
+		return err
+	}
+	return r.recordProvedDestination(ctx, record, baseURL, managementKey)
+}
+
+// recordProvedDestination records that the caller's URL answered as the
+// destination this attempt staged.
+//
+// It runs after the authenticated proof and never before it. The URL is the one
+// attempt field the Supervisor's request does not carry, so a run that has not
+// proved one must still be able to name the staged destination on retry; once a
+// URL is proved, this record makes it as immutable as the request itself. The
+// write is required, not best effort: an unrecorded proof would let the next run
+// address a different CPA at this attempt's boundary.
+func (r *cpaImportRun) recordProvedDestination(
+	ctx context.Context,
+	record cpaImportDestinationRecord,
+	baseURL string,
+	managementKey string,
+) error {
+	if record.urlProved() && record.BaseURL == baseURL {
+		return nil
+	}
+	record.BaseURL = baseURL
+	record.URLProved = true
+	if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, managementKey); err != nil {
+		return newUpgradeError(UpgradeErrorCPADestinationUnready,
+			"the destination URL was proved to be the staged destination but could not be recorded, so this run stopped before reading or writing it", err)
+	}
+	return nil
 }
 
 // requireStagedDestinationIdentity binds the URL this run addresses to the
@@ -644,10 +694,10 @@ func (r *cpaImportRun) markDestinationAttemptTerminal(
 // recorded and before a stage is submitted. A run that would drift is therefore
 // refused with its operation, attempt and destination exactly as they were, and
 // the Supervisor is never asked to reconcile a request it would reject. A ready
-// destination is compared only on the inputs a staged destination owns — URL,
-// secret, source identity, key set and plugin choice — because it is proved, not
-// resubmitted, and a restarted Supervisor must not turn a resumable destination
-// into a refusal.
+// destination is compared only on the inputs a staged destination owns — the
+// proved URL, secret, source identity, key set and plugin choice — because it is
+// proved, not resubmitted, and a restarted Supervisor must not turn a resumable
+// destination into a refusal.
 func requireSameDestinationRequest(
 	record cpaImportDestinationRecord,
 	intent cpaImportDestinationIntent,
@@ -661,8 +711,13 @@ func requireSameDestinationRequest(
 			"an earlier run already staged this destination with %s; the Supervisor never applies a different request under a recorded operation, so this run refused before changing the attempt and wrote nothing",
 			what), nil)
 	}
-	if record.BaseURL != baseURL {
-		return refuse("a different destination URL")
+	if record.urlProved() && record.BaseURL != baseURL {
+		// The URL is not part of the Supervisor's request, so only a URL this
+		// operation already proved to be the staged destination is immutable.
+		// A URL that no run proved — including one recorded by a build that wrote
+		// it before proving it — stays replaceable, so a corrected address can
+		// still be bound instead of refusing the recovery forever.
+		return refuse("a different destination URL: an earlier run proved this attempt is the CPA at another URL")
 	}
 	if supplied != "" && supplied != managementKey {
 		return refuse("a different management secret")
