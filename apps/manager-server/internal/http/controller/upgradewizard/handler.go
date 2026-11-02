@@ -828,8 +828,8 @@ func emptyStatusDocument() statusDocument {
 	}
 }
 
-// readStatusRow reads the operation row from the Manager store. found is false
-// when the store holds no operation yet: the file is absent, empty or not a
+// readRecordedStatus reads the operation row from the Manager store. found is
+// false when the store holds no operation yet: the file is absent, empty or not a
 // database this build can read, the table is absent, or no row exists.
 func readRecordedStatus(ctx context.Context, databasePath string, document statusDocument) (statusDocument, bool, error) {
 	info, err := os.Stat(databasePath)
