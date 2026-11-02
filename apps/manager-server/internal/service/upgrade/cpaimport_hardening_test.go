@@ -9,6 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -438,6 +440,94 @@ func TestImportCPAReportsAnUnreachableDestinationAsUnreachable(t *testing.T) {
 			}
 			if result.Stage != model.UpgradeStageCPAImport {
 				t.Fatalf("the retry recorded stage %q, want %q", result.Stage, model.UpgradeStageCPAImport)
+			}
+		})
+	}
+}
+
+// unprovenEndpoint answers the unauthenticated probe without being the staged
+// destination. It records every Authorization value it was sent, so a test can
+// prove which credentials crossed to it.
+type unprovenEndpoint struct {
+	mu             sync.Mutex
+	requests       int
+	authorizations []string
+	server         *httptest.Server
+}
+
+// newUnprovenEndpoint serves `/v1/models` with one status for an absent
+// credential and another for any presented one.
+func newUnprovenEndpoint(t *testing.T, anonymous, credential int) *unprovenEndpoint {
+	t.Helper()
+	endpoint := &unprovenEndpoint{}
+	endpoint.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		endpoint.mu.Lock()
+		endpoint.requests++
+		endpoint.authorizations = append(endpoint.authorizations, r.Header.Get("Authorization"))
+		endpoint.mu.Unlock()
+		if r.URL.Path != "/v1/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(anonymous)
+			return
+		}
+		w.WriteHeader(credential)
+	}))
+	t.Cleanup(endpoint.server.Close)
+	return endpoint
+}
+
+// TestImportCPANeverSendsTheStagedSecretToAnUnprovenURL is the Low finding: the
+// authenticated proof reads the destination's configuration with the management
+// secret this run minted, so running it first handed that secret to whatever
+// answered the caller's URL — and the URL is the operator's input. The proof now
+// runs only behind an unauthenticated probe that requires the endpoint to reject
+// both an absent and an unknown credential; an endpoint that does neither is
+// refused as foreign without ever receiving the secret or a client key.
+func TestImportCPANeverSendsTheStagedSecretToAnUnprovenURL(t *testing.T) {
+	cases := []struct {
+		name       string
+		anonymous  int
+		credential int
+	}{
+		{name: "does not gate credentials", anonymous: http.StatusOK, credential: http.StatusOK},
+		{name: "accepts unknown credentials", anonymous: http.StatusUnauthorized, credential: http.StatusOK},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+			endpoint := newUnprovenEndpoint(t, testCase.anonymous, testCase.credential)
+			staged := newFakeDestinationCPA(t, "")
+			runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+			runtime.staged = staged
+			_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, endpoint.server.URL, boolPointer(true)))
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetForeign {
+				t.Fatalf("an endpoint that is not the staged destination produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetForeign)
+			}
+			if runtime.stageCall == nil || strings.TrimSpace(runtime.stageCall.ManagementKey) == "" {
+				t.Fatal("the run did not stage a destination, so it proves nothing about the secret")
+			}
+			secret := runtime.stageCall.ManagementKey
+			clientKeys := append([]string(nil), runtime.stageCall.APIKeys...)
+			endpoint.mu.Lock()
+			defer endpoint.mu.Unlock()
+			if endpoint.requests == 0 {
+				t.Fatal("the probe never reached the endpoint, so the test proves nothing")
+			}
+			for _, authorization := range endpoint.authorizations {
+				if strings.Contains(authorization, secret) {
+					t.Fatalf("the unproven endpoint received the staged management secret: %q", authorization)
+				}
+				for _, key := range clientKeys {
+					if key != "" && strings.Contains(authorization, key) {
+						t.Fatalf("the unproven endpoint received a client key: %q", authorization)
+					}
+				}
+			}
+			if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
+				t.Fatalf("an unproven endpoint moved the recorded stage to %q, want %q", recorded.Stage, model.UpgradeStageReconcile)
 			}
 		})
 	}

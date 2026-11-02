@@ -1,35 +1,51 @@
 package upgrade
 
 // This file is the unauthenticated half of the destination binding: what may be
-// learned about the caller's URL before any credential of this import is sent to
-// it.
+// learned about the caller's URL — and what must be true of it — before the
+// secret this run minted is sent anywhere.
 //
 // # Why a separate probe exists
 //
 // cpa.VerifyV8Adoption is the authenticated proof: it reads the destination's
 // configuration with the staged management secret and only then checks that an
-// absent or unknown client key is rejected. A transport failure inside that read
-// is indistinguishable from a wrong key set when it is collapsed into one
-// refusal, so a CPA that is simply not listening yet — the state a just-staged
-// destination is in for a moment, and the state of the stopped 1.x CPA the CLI's
-// default `CPA_UPSTREAM_URL` usually names — used to be reported as "not the
-// destination this operation staged". An operator following that message edits a
-// correct URL.
+// absent or unknown client key is rejected. Two problems follow from its order
+// and its verdicts when it is the first thing a run does:
 //
-// This probe asks only whether anything answers at the URL. It presents no
-// credential, so the classification it enables cannot leak one, and it is the
-// order the authenticated proof runs in: a silent URL is refused as unreachable
-// and a URL that answered is refused as foreign.
+//   - the secret is presented before anything is known about the URL, and the
+//     caller supplies that URL;
+//   - a transport failure inside the read is collapsed into one refusal, so a CPA
+//     that is simply not listening yet — the state a just-staged destination is in
+//     for a moment, and the state of the stopped 1.x CPA the CLI's default
+//     `CPA_UPSTREAM_URL` usually names — used to be reported as "not the
+//     destination this operation staged".
+//
+// # What the probe can and cannot prove
+//
+// The probe presents no credential of this import. It asks whether something
+// answers at all, and whether it answers the way a CPA gateway answers an absent
+// or unknown credential: a rejection. A silent endpoint is classified as
+// unreachable and an endpoint that does not reject is classified as not this
+// destination, and neither ever receives the management secret. What the probe
+// cannot do is name the destination — only the staged secret does that, which is
+// what the authenticated proof reads — so the probe gates the proof instead of
+// replacing it, and the URL is recorded as proved only after the proof passes.
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"time"
 )
 
+// destinationProbeUnknownCredentialPrefix marks the random value the probe
+// presents to learn whether the endpoint rejects credentials it does not know. The
+// value is generated per probe and reveals nothing.
+const destinationProbeUnknownCredentialPrefix = "upgrade-cpa-import-probe-"
+
 const (
-	// destinationProbeBudget bounds one unauthenticated probe. It is the budget
+	// destinationProbeBudget bounds one probe request. It is the budget
 	// cpa.VerifyV8Adoption gives its own read, so a URL that is merely slow is
 	// classified the same way by both.
 	destinationProbeBudget = 5 * time.Second
@@ -38,7 +54,7 @@ const (
 	destinationProbeBodyLimit = 64 << 10
 )
 
-// destinationListener is what one unauthenticated probe of the destination URL
+// destinationListener is what the unauthenticated probe of the destination URL
 // observed.
 type destinationListener int
 
@@ -47,40 +63,86 @@ const (
 	// refused, the name did not resolve, or no answer arrived within the budget.
 	// It is the only outcome that says nothing about whether the URL is right.
 	destinationListenerSilent destinationListener = iota
-	// destinationListenerAnswered means the endpoint returned an HTTP answer. It
-	// may still be a foreign CPA or not a CPA at all; that is settled by the
-	// authenticated proof or by the shape probe, never by reachability alone.
-	destinationListenerAnswered
+	// destinationListenerNotCPA means something answered, but not as the CPA
+	// gateway this import stages: it either accepted an absent or unknown
+	// credential or answered something other than a rejection, so it is not the
+	// destination and must never be given this run's credential.
+	destinationListenerNotCPA
+	// destinationListenerCredentialGatingCPA means every unauthenticated and
+	// unknown-credential request was rejected exactly as a CPA rejects them. That
+	// is the precondition the authenticated proof may run under; it is not itself
+	// proof that this is the staged destination.
+	destinationListenerCredentialGatingCPA
 )
 
-// probeDestinationListener reports whether anything answers the destination URL
-// without presenting a credential.
+// probeDestinationListener asks the caller's URL the two questions that need no
+// credential: does anything answer, and does it reject an absent and an unknown
+// credential.
 //
-// The request is the same read-only `GET /v1/models` the authenticated proof
-// begins with, sent over a transport of its own: no proxy, no redirect, no
-// retry, keep-alives off and one five-second budget. It never mutates a CPA.
+// Both requests are read-only `GET /v1/models`, the same read the authenticated
+// proof begins with, over a transport of its own: no proxy, no redirect, no retry
+// and one five-second budget per request. It never mutates a CPA.
 func probeDestinationListener(ctx context.Context, baseURL string) (destinationListener, error) {
+	status, err := probeModelsStatus(ctx, baseURL, "")
+	if err != nil {
+		return destinationListenerSilent, err
+	}
+	if status != http.StatusUnauthorized {
+		return destinationListenerNotCPA, nil
+	}
+	nonce, err := newDestinationProbeNonce()
+	if err != nil {
+		return destinationListenerSilent, err
+	}
+	status, err = probeModelsStatus(ctx, baseURL, nonce)
+	if err != nil {
+		return destinationListenerSilent, err
+	}
+	if status != http.StatusUnauthorized {
+		return destinationListenerNotCPA, nil
+	}
+	return destinationListenerCredentialGatingCPA, nil
+}
+
+// probeModelsStatus performs one `GET /v1/models` with the given credential and
+// returns the status it answered. An empty credential sends no Authorization
+// header at all.
+func probeModelsStatus(ctx context.Context, baseURL, credential string) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, destinationProbeBudget)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1/models", nil)
 	if err != nil {
-		return destinationListenerSilent, err
+		return 0, err
 	}
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Cache-Control", "no-store")
+	if credential != "" {
+		request.Header.Set("Authorization", "Bearer "+credential)
+	}
 	response, err := destinationProbeClient().Do(request)
 	if err != nil {
-		return destinationListenerSilent, err
+		return 0, err
 	}
 	_, copyErr := io.Copy(io.Discard, io.LimitReader(response.Body, destinationProbeBodyLimit))
 	closeErr := response.Body.Close()
 	if copyErr != nil {
-		return destinationListenerSilent, copyErr
+		return 0, copyErr
 	}
 	if closeErr != nil {
-		return destinationListenerSilent, closeErr
+		return 0, closeErr
 	}
-	return destinationListenerAnswered, nil
+	return response.StatusCode, nil
+}
+
+// newDestinationProbeNonce returns a fresh, valueless credential for the
+// unknown-credential question. It is never persisted and never derived from this
+// import's secrets.
+func newDestinationProbeNonce() (string, error) {
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	return destinationProbeUnknownCredentialPrefix + hex.EncodeToString(buffer), nil
 }
 
 // destinationProbeClient is the probe's transport: the same direct, bounded shape
