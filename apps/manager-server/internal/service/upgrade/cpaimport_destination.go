@@ -108,6 +108,12 @@ func nextCPAImportDestinationAttempt(record cpaImportDestinationRecord) cpaImpor
 // saveCPAImportDestinationRecord writes the attempt before it is submitted,
 // protecting the management secret with the store's data key like every other
 // persisted secret.
+//
+// The timestamp is owned here, like the operation row's: the wall clock and the
+// stored value are the only inputs, so a host clock that moved back or a store
+// restored from a backup written later cannot move the attempt backwards. The
+// JSON field and the settings column are written from that one value, so they
+// always agree, and a caller's proposed time is discarded.
 func saveCPAImportDestinationRecord(ctx context.Context, databasePath, dataKeyPath string, record cpaImportDestinationRecord, managementKey string) error {
 	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
 	if err != nil {
@@ -122,11 +128,6 @@ func saveCPAImportDestinationRecord(ctx context.Context, databasePath, dataKeyPa
 		return fmt.Errorf("protect the destination management secret: %w", err)
 	}
 	record.ManagementKey = protected
-	record.UpdatedAtMS = time.Now().UnixMilli()
-	payload, err := json.Marshal(record)
-	if err != nil {
-		return fmt.Errorf("encode the destination attempt: %w", err)
-	}
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {
 		return fmt.Errorf("open the v2 database to record the destination attempt: %w", err)
@@ -137,6 +138,28 @@ func saveCPAImportDestinationRecord(ctx context.Context, databasePath, dataKeyPa
 		return fmt.Errorf("begin the destination attempt transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var storedValue string
+	var storedColumnMS int64
+	switch err := tx.QueryRowContext(ctx,
+		`select value, updated_at_ms from settings where key = ?`, cpaImportDestinationKeySetting).Scan(&storedValue, &storedColumnMS); {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		storedColumnMS = 0
+	default:
+		return fmt.Errorf("read the recorded destination attempt timestamp: %w", err)
+	}
+	var storedJSONMS int64
+	if storedValue != "" {
+		var previous cpaImportDestinationRecord
+		if err := json.Unmarshal([]byte(storedValue), &previous); err == nil {
+			storedJSONMS = previous.UpdatedAtMS
+		}
+	}
+	record.UpdatedAtMS = nextDestinationUpdatedAtMS(time.Now().UnixMilli(), storedColumnMS, storedJSONMS)
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("encode the destination attempt: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx,
 		`insert into settings (key, value, updated_at_ms) values (?, ?, ?)
 		 on conflict (key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
@@ -147,6 +170,22 @@ func saveCPAImportDestinationRecord(ctx context.Context, databasePath, dataKeyPa
 		return fmt.Errorf("record the destination attempt: %w", err)
 	}
 	return nil
+}
+
+// nextDestinationUpdatedAtMS returns the timestamp the attempt's next write must
+// store. It is the operation row's rule without a creation time, because the
+// settings row has none: never lower than the wall clock, the stored column or
+// the stored JSON value, so the two representations cannot disagree and a clock
+// that moved backwards cannot make the attempt older than what was already
+// recorded.
+func nextDestinationUpdatedAtMS(nowMS, storedColumnMS, storedJSONMS int64) int64 {
+	next := nowMS
+	for _, candidate := range [...]int64{storedColumnMS, storedJSONMS} {
+		if candidate > next {
+			next = candidate
+		}
+	}
+	return next
 }
 
 // loadCPAImportDestinationRecord reads the attempt an earlier run recorded,

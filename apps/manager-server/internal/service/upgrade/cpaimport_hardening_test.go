@@ -7,14 +7,17 @@ package upgrade
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 )
 
 // TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry is the Medium finding
@@ -286,6 +289,113 @@ func TestImportCPAProvesAReadyDestinationAfterTheSupervisorRestarts(t *testing.T
 	if runtime.stageCall != first {
 		t.Fatal("the restart recovery staged the destination again")
 	}
+}
+
+// TestImportCPADestinationAttemptNeverMovesItsTimestampBackwards is the Low
+// finding: the attempt's JSON updatedAtMs and its settings column were both
+// stamped from the wall clock on every write, so a store restored from a backup
+// written later, or a host clock that moved back, rewrote the attempt as older
+// than what was already recorded. Both representations now move forward from the
+// stored value and are written from one value, so they cannot disagree.
+func TestImportCPADestinationAttemptNeverMovesItsTimestampBackwards(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, nil)
+	paths := newTargetPaths(fixture.targetRoot)
+	const secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	record := cpaImportDestinationRecord{
+		BaseURL: "http://127.0.0.1:8317",
+		Intent: cpaImportDestinationIntent{
+			SourceIdentity: "legacy-managed:sha256:fixture", SourceClass: "legacy_managed",
+			APIKeys: []string{"legacy-client-key-1"}, PluginsEnabled: true,
+		},
+		OperationID: "upgrade-cpa-import:fixture", Attempt: 1,
+	}
+	if err := saveCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey, record, secret); err != nil {
+		t.Fatalf("record the attempt: %v", err)
+	}
+	future := time.Now().Add(time.Hour).UnixMilli()
+	for _, testCase := range []struct {
+		name   string
+		column int64
+		json   int64
+	}{
+		{name: "column ahead of the clock", column: future},
+		{name: "json ahead of the clock", json: future},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			seedDestinationUpdatedAt(t, paths.Database, testCase.column, testCase.json)
+			stored, key, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+			if err != nil || !found {
+				t.Fatalf("read the seeded attempt (found %t): %v", found, err)
+			}
+			if err := saveCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey, stored, key); err != nil {
+				t.Fatalf("rewrite the attempt: %v", err)
+			}
+			reloaded, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+			if err != nil || !found {
+				t.Fatalf("read the rewritten attempt (found %t): %v", found, err)
+			}
+			column := destinationUpdatedAtColumn(t, paths.Database)
+			if reloaded.UpdatedAtMS < future {
+				t.Fatalf("attempt updatedAtMs = %d, want at least the seeded %d", reloaded.UpdatedAtMS, future)
+			}
+			if column < future {
+				t.Fatalf("settings updated_at_ms = %d, want at least the seeded %d", column, future)
+			}
+			if column != reloaded.UpdatedAtMS {
+				t.Fatalf("settings updated_at_ms = %d and attempt updatedAtMs = %d disagree", column, reloaded.UpdatedAtMS)
+			}
+		})
+	}
+}
+
+// seedDestinationUpdatedAt moves one representation of the attempt's timestamp
+// ahead of the wall clock, which is the state a restored store or a rolled-back
+// clock leaves behind.
+func seedDestinationUpdatedAt(t *testing.T, databasePath string, columnMS, jsonMS int64) {
+	t.Helper()
+	db, err := managersqlite.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open the store to seed the attempt timestamp: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var raw string
+	var column int64
+	if err := db.QueryRow(`select value, updated_at_ms from settings where key = ?`, cpaImportDestinationKeySetting).Scan(&raw, &column); err != nil {
+		t.Fatalf("read the seeded attempt: %v", err)
+	}
+	var record cpaImportDestinationRecord
+	if err := json.Unmarshal([]byte(raw), &record); err != nil {
+		t.Fatalf("decode the seeded attempt: %v", err)
+	}
+	if jsonMS != 0 {
+		record.UpdatedAtMS = jsonMS
+	}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("encode the seeded attempt: %v", err)
+	}
+	if columnMS == 0 {
+		columnMS = column
+	}
+	if _, err := db.Exec(`update settings set value = ?, updated_at_ms = ? where key = ?`,
+		string(payload), columnMS, cpaImportDestinationKeySetting); err != nil {
+		t.Fatalf("seed the attempt timestamp: %v", err)
+	}
+}
+
+// destinationUpdatedAtColumn reads the settings column the attempt was written to.
+func destinationUpdatedAtColumn(t *testing.T, databasePath string) int64 {
+	t.Helper()
+	db, err := managersqlite.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open the store to read the attempt timestamp: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var column int64
+	if err := db.QueryRow(`select updated_at_ms from settings where key = ?`, cpaImportDestinationKeySetting).Scan(&column); err != nil {
+		t.Fatalf("read the attempt timestamp: %v", err)
+	}
+	return column
 }
 
 // TestImportCPARequiresTheDestinationSecretWhenNoneWasRecorded pins the refusal
