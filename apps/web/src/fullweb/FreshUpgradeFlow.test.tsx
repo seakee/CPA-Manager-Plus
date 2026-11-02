@@ -4,6 +4,7 @@ import {
   createUpgradeWizardRead,
   FreshUpgradeFlow,
   type UpgradeStatus,
+  UpgradeWizardError,
   type UpgradeWizardRead,
   type UpgradeWizardResource,
 } from './FreshUpgradeFlow';
@@ -45,9 +46,11 @@ function preflightDocument(overrides: Record<string, unknown> = {}) {
 }
 
 // The route's own shape: mismatch days travel inside `reconciliation`, never as
-// a top-level field, so the fixture mirrors that projection.
+// a top-level field, so the fixture mirrors that projection — including the
+// total and the truncation flag that bound the list.
 function statusDocument(overrides: Partial<UpgradeStatus> = {}) {
-  const { mismatchDays = [], ...rest } = overrides;
+  const { mismatchDays = [], mismatchDaysTotal, mismatchDaysTruncated, ...rest } = overrides;
+  const total = mismatchDaysTotal ?? mismatchDays.length;
   return {
     contractVersion: CONTRACT,
     recorded: true,
@@ -61,8 +64,18 @@ function statusDocument(overrides: Partial<UpgradeStatus> = {}) {
     errorCode: '',
     errorDetail: '',
     ...rest,
-    reconciliation: { mismatchDays },
+    reconciliation: {
+      mismatchDays,
+      mismatchDaysTotal: total,
+      mismatchDaysTruncated: mismatchDaysTruncated ?? total > mismatchDays.length,
+    },
   };
+}
+
+// Nothing recorded yet: the store answered, and its answer is the precondition
+// for the preflight step.
+function unrecordedStatus() {
+  return statusDocument({ recorded: false, stage: '', nextAction: 'preflight', domainsDone: [] });
 }
 
 describe('Full Web upgrade wizard', () => {
@@ -118,32 +131,66 @@ describe('Full Web upgrade wizard', () => {
     );
   }
 
+  // The ordinary path: the boot read reports no operation, so the wizard walks
+  // the preflight and only projects `recorded` once the operator reaches
+  // progress. A test that starts from an existing operation uses `resumeRead`.
+  function wizardRead(
+    options: { preflight?: () => unknown; recorded?: () => unknown } = {}
+  ): UpgradeWizardRead {
+    let booted = false;
+    return vi.fn(async (resource: UpgradeWizardResource) => {
+      if (resource === 'installation/upgrade/preflight') {
+        return options.preflight ? options.preflight() : preflightDocument();
+      }
+      if (!booted) {
+        booted = true;
+        return unrecordedStatus();
+      }
+      if (!options.recorded) throw new Error('status was read before an operation was recorded');
+      return options.recorded();
+    });
+  }
+
+  // An operation recorded before the page opened: the first status read is the
+  // resume. The preflight is never asked for, so asking for it fails the test.
+  function resumeRead(recorded: () => unknown): UpgradeWizardRead {
+    return vi.fn(async (resource: UpgradeWizardResource) => {
+      if (resource !== 'installation/upgrade/status') {
+        throw new Error(`a resumed operation asked for ${resource}`);
+      }
+      return recorded();
+    });
+  }
+
   it('renders every check and names each blocking code, holding Continue disabled', async () => {
     const blocked = ['upgrade_source_busy', 'upgrade_disk_insufficient'];
-    await mount(async () =>
-      preflightDocument({
-        checks: [
-          {
-            name: 'source_ownership',
-            status: 'blocked',
-            code: 'upgrade_source_busy',
-            detail: 'source lock is held',
-          },
-          {
-            name: 'disk',
-            status: 'blocked',
-            code: 'upgrade_disk_insufficient',
-            detail: 'needs 12 GiB, has 3 GiB',
-          },
-          {
-            name: 'cpa_classification',
-            status: 'pass',
-            code: '',
-            detail: 'kind=external',
-          },
-        ],
-        blocked,
-        ready: false,
+    await mount(
+      wizardRead({
+        preflight: () =>
+          preflightDocument({
+            checks: [
+              {
+                name: 'source_ownership',
+                status: 'blocked',
+                code: 'upgrade_source_busy',
+                detail: 'source lock is held',
+              },
+              {
+                name: 'disk',
+                status: 'blocked',
+                code: 'upgrade_disk_insufficient',
+                detail: 'needs 12 GiB, has 3 GiB',
+              },
+              {
+                name: 'cpa_classification',
+                status: 'pass',
+                code: '',
+                detail: 'kind=external',
+              },
+            ],
+            blocked,
+            ready: false,
+          }),
       })
     );
 
@@ -161,7 +208,7 @@ describe('Full Web upgrade wizard', () => {
   });
 
   it('continues from a ready preflight only after an explicit acknowledgement', async () => {
-    await mount(reader(() => statusDocument()));
+    await mount(wizardRead({ recorded: () => statusDocument() }));
 
     expect(byTestId('upgrade-preflight-ready')).toBeTruthy();
     expect(byTestId('upgrade-continue').props.disabled).toBe(false);
@@ -179,7 +226,7 @@ describe('Full Web upgrade wizard', () => {
 
   it('reports a stage in progress without claiming the operation is over', async () => {
     await reachProgress(
-      reader(() => statusDocument({ domainsDone: ['source_copy', 'usage_events'] }))
+      wizardRead({ recorded: () => statusDocument({ domainsDone: ['source_copy', 'usage_events'] }) })
     );
 
     expect(byTestId('upgrade-progress-stage')).toBeTruthy();
@@ -192,11 +239,14 @@ describe('Full Web upgrade wizard', () => {
 
   it('stalls after three consecutive read failures and retries on demand', async () => {
     let calls = 0;
-    const read: UpgradeWizardRead = vi.fn(async (resource: UpgradeWizardResource) => {
-      if (resource === 'installation/upgrade/preflight') return preflightDocument();
-      calls += 1;
-      if (calls <= 3) throw new Error('lost');
-      return statusDocument({ stage: 'complete', nextAction: 'complete' });
+    // The boot read answered "nothing recorded"; every later status read fails
+    // three times before the operation is complete.
+    const read = wizardRead({
+      recorded: () => {
+        calls += 1;
+        if (calls <= 3) throw new Error('lost');
+        return statusDocument({ stage: 'complete', nextAction: 'complete' });
+      },
     });
     await reachProgress(read);
 
@@ -220,15 +270,16 @@ describe('Full Web upgrade wizard', () => {
 
   it('never claims completion for a rolled-back operation and shows its reason', async () => {
     await reachProgress(
-      reader(() =>
-        statusDocument({
-          stage: 'rolled_back',
-          nextAction: 'rolled_back',
-          domainsDone: ['source_copy'],
-          errorCode: 'upgrade_target_modified',
-          errorDetail: 'the target store changed during the copy',
-        })
-      )
+      wizardRead({
+        recorded: () =>
+          statusDocument({
+            stage: 'rolled_back',
+            nextAction: 'rolled_back',
+            domainsDone: ['source_copy'],
+            errorCode: 'upgrade_target_modified',
+            errorDetail: 'the target store changed during the copy',
+          }),
+      })
     );
 
     expect(byTestId('upgrade-result')).toBeTruthy();
@@ -241,13 +292,14 @@ describe('Full Web upgrade wizard', () => {
 
   it('lists the reconciliation mismatch days it was given', async () => {
     await reachProgress(
-      reader(() =>
-        statusDocument({
-          stage: 'complete',
-          nextAction: 'complete',
-          mismatchDays: ['2026-10-01', '2026-10-02'],
-        })
-      )
+      wizardRead({
+        recorded: () =>
+          statusDocument({
+            stage: 'complete',
+            nextAction: 'complete',
+            mismatchDays: ['2026-10-01', '2026-10-02'],
+          }),
+      })
     );
 
     expect(byTestId('upgrade-mismatch-2026-10-01')).toBeTruthy();
@@ -266,7 +318,7 @@ describe('Full Web upgrade wizard', () => {
       [{ stage: 'verify', nextAction: 'reconcile' }, 'progress'],
     ];
     for (const [overrides, expected] of stages) {
-      await reachProgress(reader(() => statusDocument(overrides)));
+      await reachProgress(wizardRead({ recorded: () => statusDocument(overrides) }));
       expect({ expected, complete: allByTestId('upgrade-result-complete').length }).toEqual({
         expected,
         complete: expected === 'complete' ? 1 : 0,
@@ -339,10 +391,107 @@ describe('Full Web upgrade wizard', () => {
   });
 
   it('treats a contradictory preflight report as a typed read failure', async () => {
-    await mount(async () => preflightDocument({ blocked: ['upgrade_source_busy'], ready: true }));
+    await mount(
+      wizardRead({
+        preflight: () => preflightDocument({ blocked: ['upgrade_source_busy'], ready: true }),
+      })
+    );
 
     expect(byTestId('upgrade-preflight-error')).toBeTruthy();
     expect(allByTestId('upgrade-check-source_ownership')).toHaveLength(0);
     expect(byTestId('upgrade-continue').props.disabled).toBe(true);
+  });
+
+  it('resumes a recorded operation without a preflight, for every recorded stage', async () => {
+    const stages: Array<[Partial<UpgradeStatus>, 'progress' | 'result']> = [
+      [{ stage: 'copy_in', nextAction: 'copy_in' }, 'progress'],
+      [{ stage: 'reconcile', nextAction: 'reconcile' }, 'progress'],
+      [{ stage: 'rolled_back', nextAction: 'rolled_back' }, 'result'],
+      [{ stage: 'verify', nextAction: 'reconcile' }, 'progress'],
+    ];
+    for (const [overrides, expected] of stages) {
+      const read = resumeRead(() => statusDocument(overrides));
+      await mount(read);
+      // The recorded operation is the page's first read, and the preflight is
+      // never asked for: an unmounted source must not hide an existing stage.
+      expect(byTestId('upgrade-resumed')).toBeTruthy();
+      expect(allByTestId('upgrade-preflight')).toHaveLength(0);
+      expect(vi.mocked(read).mock.calls.map(([resource]) => resource)).not.toContain(
+        'installation/upgrade/preflight'
+      );
+      expect(allByTestId('upgrade-progress')).toHaveLength(expected === 'progress' ? 1 : 0);
+      expect(allByTestId('upgrade-result')).toHaveLength(expected === 'result' ? 1 : 0);
+      if (overrides.stage === 'verify') {
+        expect(view()).toContain(t('stageVerify', 'en'));
+      }
+      if (overrides.stage === 'rolled_back') {
+        expect(byTestId('upgrade-result-rollback')).toBeTruthy();
+        expect(byTestId('upgrade-result-incomplete')).toBeTruthy();
+      }
+      await act(async () => renderer!.unmount());
+      renderer = undefined;
+    }
+  });
+
+  it('reports a status read failure instead of assuming no operation exists', async () => {
+    let first = true;
+    const read: UpgradeWizardRead = vi.fn(async (resource: UpgradeWizardResource) => {
+      if (resource === 'installation/upgrade/preflight') return preflightDocument();
+      if (first) {
+        first = false;
+        throw new UpgradeWizardError('unavailable', 'upgrade_operation_unreadable', 503);
+      }
+      return unrecordedStatus();
+    });
+    await mount(read);
+
+    expect(byTestId('upgrade-boot-failed')).toBeTruthy();
+    expect(view()).toContain(blockedCodeText('upgrade_operation_unreadable', 'en'));
+    expect(allByTestId('upgrade-preflight')).toHaveLength(0);
+
+    // The retry reads the record again. Only then, with nothing recorded, does
+    // the preflight step open.
+    await press('upgrade-boot-retry');
+    expect(byTestId('upgrade-preflight')).toBeTruthy();
+  });
+
+  it('renders the recorded mismatch total and claims only the bounded window', async () => {
+    const shown = Array.from({ length: 366 }, (_, index) =>
+      new Date(Date.UTC(2024, 0, 1 + index)).toISOString().slice(0, 10)
+    );
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          stage: 'complete',
+          nextAction: 'complete',
+          mismatchDays: shown,
+          mismatchDaysTotal: 400,
+        })
+      )
+    );
+
+    // The total is the recorded history; the list is a window of it.
+    expect(byTestId('upgrade-reconciliation-total').children.join('')).toContain('400');
+    expect(byTestId('upgrade-reconciliation-bound').children.join('')).toContain('366');
+    expect(byTestId('upgrade-mismatch-days').findAllByType('li')).toHaveLength(366);
+    expect(byTestId('upgrade-result-complete')).toBeTruthy();
+  });
+
+  it('refuses a mismatch window whose total contradicts the list', async () => {
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          stage: 'copy_in',
+          mismatchDays: ['2026-10-01', '2026-10-02'],
+          mismatchDaysTotal: 1,
+        })
+      )
+    );
+
+    // A reply this build cannot reconcile is a read failure, never a page that
+    // silently shows fewer days than the server named.
+    expect(byTestId('upgrade-boot-failed')).toBeTruthy();
+    expect(view()).toContain(t('errorResponse', 'en'));
+    expect(allByTestId('upgrade-reconciliation-total')).toHaveLength(0);
   });
 });

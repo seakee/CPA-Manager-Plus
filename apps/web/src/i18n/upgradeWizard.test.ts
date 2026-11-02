@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { blockedCodeText, upgradeWizardText } from './upgradeWizard';
+import {
+  blockedCodeText,
+  reconciliationBoundText,
+  reconciliationTotalText,
+  upgradeWizardText,
+} from './upgradeWizard';
 
 // Every blocking code the two read routes can write. The copy they map onto is
 // operator-facing, so a code without a sentence — or a sentence that never
@@ -93,6 +98,45 @@ describe('upgrade wizard blocked codes', () => {
     const english = blockedCodeText('upgrade_source_missing', 'en-US');
     for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
       expect(blockedCodeText('upgrade_source_missing', language)).not.toBe(english);
+    }
+  });
+});
+
+// The wizard now boots on the recorded operation and lists a bounded mismatch
+// window. Both states are operator-facing, so every revised sentence has to exist
+// in all four locales, and the window's total must never be replaced by the
+// length of the list.
+describe('upgrade wizard resume and bounded history copy', () => {
+  const REVISED = [
+    'bootTitle',
+    'bootHelp',
+    'bootReading',
+    'bootFailedTitle',
+    'bootRetry',
+    'resumeNotice',
+    'resultReconciliationTotal',
+    'resultReconciliationBound',
+  ] as const;
+
+  it('translates every revised state in all four locales', () => {
+    for (const key of REVISED) {
+      expect(upgradeWizardText(key, 'en-US'), key).not.toBe('');
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        expect(upgradeWizardText(key, language), `${key} in ${language}`).not.toBe('');
+        expect(upgradeWizardText(key, language), `${key} in ${language}`).not.toBe(
+          upgradeWizardText(key, 'en-US')
+        );
+      }
+    }
+  });
+
+  it('keeps the recorded total separate from the shown window', () => {
+    for (const language of LOCALES) {
+      const total = reconciliationTotalText(400, language);
+      const bound = reconciliationBoundText(366, language);
+      expect(total, language).toContain('400');
+      expect(bound, language).toContain('366');
+      expect(total, language).not.toBe(bound);
     }
   });
 });

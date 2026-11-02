@@ -94,7 +94,10 @@ describe('existing Manager credential provenance', () => {
     );
     vi.stubGlobal('fetch', fetcher);
     const signal = new AbortController().signal;
-    await expect(verifyUpgradeCredential('old-key', signal)).resolves.toBe('a'.repeat(64));
+    await expect(verifyUpgradeCredential('old-key', signal)).resolves.toEqual({
+      revision: 'a'.repeat(64),
+      observation: 'unsupported_upgrade',
+    });
     expect(fetcher).toHaveBeenCalledWith(
       UPGRADE_AUTH_PATH,
       expect.objectContaining({
@@ -104,6 +107,37 @@ describe('existing Manager credential provenance', () => {
         signal,
       })
     );
+    // A proved key whose public observation was refused still authenticates; the
+    // status is carried through instead of being read as a success or a refusal.
+    fetcher.mockResolvedValue(
+      Response.json({
+        contract_version: 'cpamp.upgrade-auth.v1',
+        authenticated: true,
+        source_revision: 'b'.repeat(64),
+        status: 'observation_unavailable',
+        migration_available: false,
+        expires_in_seconds: 60,
+      })
+    );
+    await expect(verifyUpgradeCredential('old-key', signal)).resolves.toEqual({
+      revision: 'b'.repeat(64),
+      observation: 'observation_unavailable',
+    });
+    // An entry status this build cannot read is a reply it cannot read, never a
+    // status it guesses at.
+    fetcher.mockResolvedValue(
+      Response.json({
+        contract_version: 'cpamp.upgrade-auth.v1',
+        authenticated: true,
+        source_revision: 'b'.repeat(64),
+        status: 'migration_ready',
+        migration_available: false,
+        expires_in_seconds: 60,
+      })
+    );
+    await expect(verifyUpgradeCredential('old-key', signal)).rejects.toMatchObject({
+      reason: 'network',
+    });
     fetcher.mockResolvedValue(Response.json({ authenticated: true, migration_available: true }));
     await expect(verifyUpgradeCredential('old-key', signal)).rejects.toMatchObject({
       reason: 'network',

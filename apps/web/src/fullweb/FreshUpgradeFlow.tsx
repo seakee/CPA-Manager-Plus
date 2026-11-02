@@ -6,6 +6,8 @@ import {
   checkOutcomeText,
   domainText,
   nextActionText,
+  reconciliationBoundText,
+  reconciliationTotalText,
   stageText,
   upgradeWizardText as t,
 } from '../i18n/upgradeWizard';
@@ -79,7 +81,11 @@ export interface UpgradeStatus {
   domainsDone: string[];
   sourceKind: string;
   sourceVersion: string;
+  // The listed days are a window: total counts every recorded mismatch day, so a
+  // cut list is rendered as a window instead of reading as the whole history.
   mismatchDays: string[];
+  mismatchDaysTotal: number;
+  mismatchDaysTruncated: boolean;
   manualItems: string[];
   errorCode: string;
   errorDetail: string;
@@ -157,6 +163,14 @@ export function parseUpgradeStatus(value: unknown): UpgradeStatus | null {
   if (typeof document.stage !== 'string' || typeof document.stageKnown !== 'boolean') return null;
   if (typeof document.nextAction !== 'string') return null;
   const reconciliation = (document.reconciliation ?? {}) as Record<string, unknown>;
+  const mismatchDays = strings(reconciliation.mismatchDays);
+  const mismatchDaysTotal = count(reconciliation.mismatchDaysTotal);
+  const mismatchDaysTruncated = reconciliation.mismatchDaysTruncated === true;
+  // The bound is part of the document: the total can never be smaller than the
+  // list it stands for, and the flag is exactly the difference between them. A
+  // reply that contradicts this is not a history this build can present.
+  if (mismatchDaysTotal < mismatchDays.length) return null;
+  if (mismatchDaysTruncated !== mismatchDaysTotal > mismatchDays.length) return null;
   return {
     recorded: document.recorded,
     stage: document.stage,
@@ -165,7 +179,9 @@ export function parseUpgradeStatus(value: unknown): UpgradeStatus | null {
     domainsDone: strings(document.domainsDone),
     sourceKind: text(document.sourceKind),
     sourceVersion: text(document.sourceVersion),
-    mismatchDays: strings(reconciliation.mismatchDays),
+    mismatchDays,
+    mismatchDaysTotal,
+    mismatchDaysTruncated,
     manualItems: strings(document.manualItems),
     errorCode: text(document.errorCode),
     errorDetail: text(document.errorDetail),
@@ -303,11 +319,28 @@ type StatusState = {
   failures: number;
 };
 
+// The wizard boots on the recorded operation, not on the preflight. An operation
+// that already recorded a stage must stay readable after a refresh, after the
+// 1.x volume was unmounted, and after a rollback handed the source back to its
+// old writer; requiring a ready preflight before the status could be read is what
+// stranded exactly those cases. The preflight therefore runs only when the store
+// says there is no operation to resume.
+type BootState =
+  | { phase: 'reading' }
+  | { phase: 'failed'; error: UpgradeWizardError }
+  | { phase: 'ready'; resumed: boolean };
+
 /**
  * The Full Web Upgrade wizard. Four steps over the two read-only routes:
  * preflight, confirm, progress and result. Every sentence about what the
  * upgrade does is written as a description of the operation, because this page
  * can only read it.
+ *
+ * It reads the recorded operation before anything else. An operation that has
+ * already recorded a stage resumes at that stage (progress, or the result when it
+ * is terminal) without a preflight; the preflight is the first step only when the
+ * store says nothing is recorded. A status read that fails is a typed failure
+ * with its own retry — it is not evidence that no operation exists.
  */
 export function FreshUpgradeFlow({
   read,
@@ -319,6 +352,7 @@ export function FreshUpgradeFlow({
   pollDelays?: number[];
 }) {
   const [step, setStep] = useState<Step>('preflight');
+  const [boot, setBoot] = useState<BootState>({ phase: 'reading' });
   const [preflight, setPreflight] = useState<PreflightState>({ phase: 'idle' });
   const [acknowledged, setAcknowledged] = useState(false);
   const [status, setStatus] = useState<StatusState>({ phase: 'idle', failures: 0 });
@@ -329,10 +363,42 @@ export function FreshUpgradeFlow({
     [pollDelays]
   );
 
-  // Step 1 reads the preflight once. A retry resets the observation to `idle`,
-  // which is what re-runs this effect.
+  // Boot reads the recorded operation once, before any preflight. A recorded
+  // operation is resumed where it stands; only an empty record asks for
+  // preflight. The read is left in `reading` until it answers, so a retry is one
+  // state change and a failure is never mistaken for "nothing recorded".
   useEffect(() => {
-    if (step !== 'preflight' || preflight.phase !== 'idle') return;
+    if (boot.phase !== 'reading') return;
+    const controller = new AbortController();
+    let stopped = false;
+    void (async () => {
+      try {
+        const raw = await read('installation/upgrade/status', controller.signal);
+        const parsed = parseUpgradeStatus(raw);
+        if (stopped) return;
+        if (!parsed) throw new UpgradeWizardError('response');
+        if (parsed.recorded) {
+          // The first answer is the resume: the poll effect continues from it
+          // instead of asking the operator to qualify the source again.
+          setStatus({ phase: 'live', value: parsed, failures: 0 });
+          setStep('progress');
+        }
+        setBoot({ phase: 'ready', resumed: parsed.recorded });
+      } catch (error) {
+        if (stopped) return;
+        setBoot({ phase: 'failed', error: asWizardError(error) });
+      }
+    })();
+    return () => {
+      stopped = true;
+      controller.abort();
+    };
+  }, [boot.phase, read]);
+
+  // The preflight runs for a source that has no operation yet, and only then. A
+  // retry resets the observation to `idle`, which is what re-runs this effect.
+  useEffect(() => {
+    if (boot.phase !== 'ready' || step !== 'preflight' || preflight.phase !== 'idle') return;
     const controller = new AbortController();
     void (async () => {
       try {
@@ -347,7 +413,7 @@ export function FreshUpgradeFlow({
       }
     })();
     return () => controller.abort();
-  }, [preflight.phase, read, step]);
+  }, [boot.phase, preflight.phase, read, step]);
 
   // Step 3 polls the operation row with a growing delay. It stops when the
   // operation settles, when this build cannot name the stage, or after three
@@ -404,26 +470,68 @@ export function FreshUpgradeFlow({
 
   return (
     <section className="upgrade-flow" data-testid="upgrade-flow" aria-label={t('flowLabel', language)}>
-      <ol className="upgrade-steps" data-testid="upgrade-flow-steps">
-        {STEP_ORDER.map((key, index) => {
-          const current = STEP_ORDER.indexOf(shownStep);
-          return (
-            <li
-              key={key}
-              data-testid={`upgrade-step-${key}`}
-              data-state={index < current ? 'done' : key === shownStep ? 'current' : 'pending'}
-              aria-current={key === shownStep ? 'step' : undefined}
+      {boot.phase === 'reading' && (
+        <div className="upgrade-step-body" data-testid="upgrade-boot">
+          <h2>{t('bootTitle', language)}</h2>
+          <p className="upgrade-step-help">{t('bootHelp', language)}</p>
+          <p className="upgrade-step-status" role="status" data-testid="upgrade-boot-reading">
+            <FullWebIcon name="refresh" size={18} />
+            {t('bootReading', language)}
+          </p>
+        </div>
+      )}
+      {boot.phase === 'failed' && (
+        <div className="upgrade-step-body" data-testid="upgrade-boot-failed">
+          <h2>{t('bootTitle', language)}</h2>
+          <p className="upgrade-step-help">{t('bootHelp', language)}</p>
+          <div className="upgrade-notice" role="alert">
+            <FullWebIcon name="alert" size={24} />
+            <div>
+              <h3>{t('bootFailedTitle', language)}</h3>
+              <p>{errorText(boot.error, language)}</p>
+              {boot.error.code && <code>{boot.error.code}</code>}
+            </div>
+          </div>
+          <div className="upgrade-actions">
+            <button
+              className="btn btn-primary"
+              data-testid="upgrade-boot-retry"
+              onClick={() => setBoot({ phase: 'reading' })}
             >
-              <span className="upgrade-step-index" aria-hidden="true">
-                {index + 1}
-              </span>
-              <span>{t(STEP_TEXT[key], language)}</span>
-            </li>
-          );
-        })}
-      </ol>
+              <FullWebIcon name="refresh" size={18} /> {t('bootRetry', language)}
+            </button>
+          </div>
+        </div>
+      )}
+      {boot.phase === 'ready' && (
+        <>
+          <ol className="upgrade-steps" data-testid="upgrade-flow-steps">
+            {STEP_ORDER.map((key, index) => {
+              const current = STEP_ORDER.indexOf(shownStep);
+              return (
+                <li
+                  key={key}
+                  data-testid={`upgrade-step-${key}`}
+                  data-state={index < current ? 'done' : key === shownStep ? 'current' : 'pending'}
+                  aria-current={key === shownStep ? 'step' : undefined}
+                >
+                  <span className="upgrade-step-index" aria-hidden="true">
+                    {index + 1}
+                  </span>
+                  <span>{t(STEP_TEXT[key], language)}</span>
+                </li>
+              );
+            })}
+          </ol>
+          {boot.resumed && (
+            <p className="upgrade-step-help" data-testid="upgrade-resumed">
+              {t('resumeNotice', language)}
+            </p>
+          )}
+        </>
+      )}
 
-      {shownStep === 'preflight' && (
+      {boot.phase === 'ready' && shownStep === 'preflight' && (
         <div className="upgrade-step-body" data-testid="upgrade-preflight">
           <h2>{t('preflightTitle', language)}</h2>
           <p className="upgrade-step-help">{t('preflightHelp', language)}</p>
@@ -535,7 +643,7 @@ export function FreshUpgradeFlow({
         </div>
       )}
 
-      {shownStep === 'confirm' && (
+      {boot.phase === 'ready' && shownStep === 'confirm' && (
         <div className="upgrade-step-body" data-testid="upgrade-confirm">
           <h2>{t('confirmTitle', language)}</h2>
           <p className="upgrade-step-help">{t('confirmHelp', language)}</p>
@@ -603,7 +711,7 @@ export function FreshUpgradeFlow({
         </div>
       )}
 
-      {shownStep === 'progress' && (
+      {boot.phase === 'ready' && shownStep === 'progress' && (
         <div className="upgrade-step-body" data-testid="upgrade-progress">
           <h2>{t('progressTitle', language)}</h2>
           <p className="upgrade-step-help">{t('progressHelp', language)}</p>
@@ -668,7 +776,7 @@ export function FreshUpgradeFlow({
         </div>
       )}
 
-      {shownStep === 'result' && (
+      {boot.phase === 'ready' && shownStep === 'result' && (
         <div className="upgrade-step-body" data-testid="upgrade-result">
           <ResultHeadline status={record} language={language} />
           <p className="upgrade-step-help">
@@ -819,13 +927,25 @@ function Reconciliation({ status, language }: { status: UpgradeStatus; language:
       {status.mismatchDays.length === 0 ? (
         <p data-testid="upgrade-reconciliation-none">{t('resultReconciliationNone', language)}</p>
       ) : (
-        <ul className="upgrade-days" data-testid="upgrade-mismatch-days">
-          {status.mismatchDays.map((day) => (
-            <li key={day} data-testid={`upgrade-mismatch-${day}`}>
-              <code>{day}</code>
-            </li>
-          ))}
-        </ul>
+        <>
+          {/* The total is rendered independently of the list: a window is never
+              presented as the whole history. */}
+          <p className="upgrade-step-help" data-testid="upgrade-reconciliation-total">
+            {reconciliationTotalText(status.mismatchDaysTotal, language)}
+          </p>
+          {status.mismatchDaysTruncated && (
+            <p className="upgrade-step-help" data-testid="upgrade-reconciliation-bound">
+              {reconciliationBoundText(status.mismatchDays.length, language)}
+            </p>
+          )}
+          <ul className="upgrade-days" data-testid="upgrade-mismatch-days">
+            {status.mismatchDays.map((day) => (
+              <li key={day} data-testid={`upgrade-mismatch-${day}`}>
+                <code>{day}</code>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </div>
   );

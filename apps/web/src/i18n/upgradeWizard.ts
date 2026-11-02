@@ -14,6 +14,12 @@ const en = {
   stepResult: 'Result',
   back: 'Back',
   continue: 'Continue',
+  bootTitle: 'Reading the recorded operation',
+  bootHelp:
+    'The wizard reads what this installation already recorded before it offers a preflight. An operation that is already recorded resumes where it stands, and that needs no mounted source.',
+  bootReading: 'Reading the recorded operation…',
+  bootFailedTitle: 'The recorded operation could not be read',
+  bootRetry: 'Read the recorded operation again',
 
   preflightTitle: 'Read-only preflight',
   preflightHelp:
@@ -106,6 +112,8 @@ const en = {
   progressReading: 'Reading the operation…',
   progressUnrecorded: 'No upgrade operation is recorded yet. Start it from the Manager host.',
   progressWaiting: 'Waiting for the next recorded change…',
+  resumeNotice:
+    'This installation already recorded an upgrade operation, so this page resumes at its recorded stage. The read-only preflight is required only when no operation is recorded.',
   progressStageNote:
     'The recorded stage is the last position the operation wrote. It is not proof that the work behind it finished.',
   progressStalledTitle: 'The operation status could not be read',
@@ -138,6 +146,9 @@ const en = {
   resultReconciliationHelp:
     'These days cannot be reported as complete. Each one is listed; none is repaired silently.',
   resultReconciliationNone: 'No mismatch day is recorded.',
+  resultReconciliationTotal: '{count} mismatch days are recorded.',
+  resultReconciliationBound:
+    'The newest {shown} of them are listed; the list is a bounded window, not the whole history.',
   resultManualTitle: 'Manual items',
   resultManualNone: 'No manual item is recorded.',
   resultReread: 'Read the operation again',
@@ -175,6 +186,12 @@ const zh: typeof en = {
   stepResult: '结果',
   back: '返回',
   continue: '继续',
+  bootTitle: '读取已记录的操作',
+  bootHelp:
+    '向导会先读取本安装已记录的操作，再决定是否提供预检。已记录的操作会从原阶段继续，这不需要挂载来源。',
+  bootReading: '正在读取已记录的操作…',
+  bootFailedTitle: '无法读取已记录的操作',
+  bootRetry: '重新读取已记录的操作',
 
   preflightTitle: '只读预检',
   preflightHelp:
@@ -255,6 +272,7 @@ const zh: typeof en = {
   progressReading: '正在读取操作状态…',
   progressUnrecorded: '尚未记录升级操作。请在 Manager 宿主机上启动它。',
   progressWaiting: '正在等待下一次记录到的变化…',
+  resumeNotice: '本安装已记录升级操作，本页从记录的阶段继续。只有在没有任何操作记录时才需要只读预检。',
   progressStageNote: '记录到的阶段是该操作最后写入的位置，并不证明其背后的工作已经完成。',
   progressStalledTitle: '无法读取操作状态',
   progressStalledHelp: '连续三次读取失败。下方保留最后一次观测结果，可能已过期。',
@@ -280,6 +298,8 @@ const zh: typeof en = {
   resultReconciliationTitle: '对账差异',
   resultReconciliationHelp: '这些日期不能被报告为完整。逐条列出，且不会静默修补。',
   resultReconciliationNone: '没有记录任何差异日期。',
+  resultReconciliationTotal: '共记录 {count} 个不一致日期。',
+  resultReconciliationBound: '此处列出其中最新的 {shown} 个；该列表是有界窗口，并不代表全部历史。',
   resultManualTitle: '手工项',
   resultManualNone: '没有记录手工项。',
   resultReread: '重新读取操作状态',
@@ -316,6 +336,12 @@ const tw: typeof en = {
   stepResult: '結果',
   back: '返回',
   continue: '繼續',
+  bootTitle: '讀取已記錄的操作',
+  bootHelp:
+    '精靈會先讀取本安裝已記錄的操作，再決定是否提供預檢。已記錄的操作會從原階段繼續，這不需要掛載來源。',
+  bootReading: '正在讀取已記錄的操作…',
+  bootFailedTitle: '無法讀取已記錄的操作',
+  bootRetry: '重新讀取已記錄的操作',
 
   preflightTitle: '唯讀預檢',
   preflightHelp:
@@ -396,6 +422,7 @@ const tw: typeof en = {
   progressReading: '正在讀取操作狀態…',
   progressUnrecorded: '尚未記錄升級操作。請在 Manager 主機上啟動它。',
   progressWaiting: '正在等待下一次記錄到的變化…',
+  resumeNotice: '本安裝已記錄升級操作，本頁從記錄的階段繼續。只有在沒有任何操作記錄時才需要唯讀預檢。',
   progressStageNote: '記錄到的階段是該操作最後寫入的位置，並不證明其背後的工作已經完成。',
   progressStalledTitle: '無法讀取操作狀態',
   progressStalledHelp: '連續三次讀取失敗。下方保留最後一次觀測結果，可能已過期。',
@@ -420,6 +447,8 @@ const tw: typeof en = {
   resultReconciliationTitle: '對帳差異',
   resultReconciliationHelp: '這些日期不能被回報為完整。逐條列出，且不會靜默修補。',
   resultReconciliationNone: '沒有記錄任何差異日期。',
+  resultReconciliationTotal: '共記錄 {count} 個不一致日期。',
+  resultReconciliationBound: '此處列出其中最新的 {shown} 個；該清單是有界視窗，並不代表全部歷史。',
   resultManualTitle: '手動項目',
   resultManualNone: '沒有記錄手動項目。',
   resultReread: '重新讀取操作狀態',
@@ -456,6 +485,12 @@ const ru: typeof en = {
   stepResult: 'Итог',
   back: 'Назад',
   continue: 'Продолжить',
+  bootTitle: 'Чтение записанной операции',
+  bootHelp:
+    'Мастер сначала читает то, что эта установка уже записала, и только затем предлагает предполётную проверку. Записанная операция продолжается с сохранённого этапа; для этого источник не нужно монтировать.',
+  bootReading: 'Чтение записанной операции…',
+  bootFailedTitle: 'Не удалось прочитать записанную операцию',
+  bootRetry: 'Прочитать записанную операцию ещё раз',
 
   preflightTitle: 'Проверка только для чтения',
   preflightHelp:
@@ -544,6 +579,8 @@ const ru: typeof en = {
   progressReading: 'Чтение операции…',
   progressUnrecorded: 'Операция обновления ещё не записана. Запустите её на хосте Manager.',
   progressWaiting: 'Ожидание следующего записанного изменения…',
+  resumeNotice:
+    'Эта установка уже записала операцию обновления, поэтому страница продолжает с записанного этапа. Проверка только для чтения нужна, только когда операций нет.',
   progressStageNote:
     'Записанный этап — последняя позиция, которую записала операция. Это не доказывает, что работа за ним завершена.',
   progressStalledTitle: 'Состояние операции не читается',
@@ -574,6 +611,9 @@ const ru: typeof en = {
   resultReconciliationHelp:
     'Эти дни нельзя считать полными. Каждый перечислен; ни один не исправляется молча.',
   resultReconciliationNone: 'Расхождения по дням не записаны.',
+  resultReconciliationTotal: 'Записано дней с расхождениями: {count}.',
+  resultReconciliationBound:
+    'Показаны последние {shown} из них; это ограниченное окно, а не вся история.',
   resultManualTitle: 'Ручные пункты',
   resultManualNone: 'Ручные пункты не записаны.',
   resultReread: 'Прочитать операцию снова',
@@ -736,4 +776,15 @@ export function domainText(domain: string, language = fullWebLanguage()): string
 
 export function nextActionText(action: string, language = fullWebLanguage()): string {
   return action ? stageText(action, language) : '';
+}
+
+// The reconciliation list travels as a bounded window with its own total. These
+// two sentences keep the recorded total and the shown length separate, so a cut
+// list can never read as the whole history.
+export function reconciliationTotalText(total: number, language = fullWebLanguage()): string {
+  return upgradeWizardText('resultReconciliationTotal', language).replace('{count}', String(total));
+}
+
+export function reconciliationBoundText(shown: number, language = fullWebLanguage()): string {
+  return upgradeWizardText('resultReconciliationBound', language).replace('{shown}', String(shown));
 }
