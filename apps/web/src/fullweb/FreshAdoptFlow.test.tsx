@@ -167,8 +167,13 @@ const cleanRun: AdoptionSummary = {
 };
 
 let renderer: ReactTestRenderer;
+// The fake route's body-contract violations for the current test. An expectation
+// inside the fetcher is swallowed by the carrier as a transport failure, so the
+// harness asserts these after the test instead.
+let serverViolations: string[] = [];
 beforeEach(() => {
   setFullWebLanguage('en');
+  serverViolations = [];
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('window', { location: new URL('https://manager.example' + BOOTSTRAP_UI) });
   vi.stubGlobal('localStorage', {
@@ -185,6 +190,7 @@ beforeEach(() => {
 afterEach(async () => {
   if (renderer) await act(async () => renderer.unmount());
   vi.unstubAllGlobals();
+  expect(serverViolations).toEqual([]);
 });
 function byID(id: string) {
   return renderer.root.findByProps({ 'data-testid': id });
@@ -235,6 +241,9 @@ async function adoptServer(options: {
   // operation is read for the Nth time afterwards: a slow source read whose
   // staging lands between two of the page's own reads.
   lateStage?: number;
+  // The lost first POST's staging lands on the next destination observation,
+  // i.e. strictly between the page's decision read and its staging POST.
+  stageOnRuntime?: boolean;
 } = {}) {
   // A resume is a browser that reloaded a committed adoption: the checkpoint is
   // durable and the source key is not.
@@ -267,11 +276,21 @@ async function adoptServer(options: {
   const summaries = [...(options.summaries ?? [finishedRun])];
   const completions = [...(options.completions ?? [])];
   const strategyBodies: Record<string, unknown>[] = [];
+  const operationReads: number[] = [];
+  const staleRefusals: { sent: unknown; current: number }[] = [];
+  // Facts the route's own decode and preflight read. They are collected here and
+  // asserted by the harness: an expectation inside the fetcher would be swallowed
+  // by the carrier and reported as a transport failure, which is exactly how a
+  // stale fence used to pass unnoticed.
+  const violations: string[] = [];
+  serverViolations = violations;
   let summaryReads = 0;
   let readFailures = options.readFailures ?? 0;
   let lostReply = false;
   let lateLost = false;
   let pendingStage = 0;
+  let runtimeStage = false;
+  let stagedPlugins = false;
   const fetcher = vi.fn<typeof fetch>(async (url, init) => {
     const resource = new URL(String(url)).pathname.split('/api/v2/')[1];
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
@@ -289,10 +308,23 @@ async function adoptServer(options: {
         },
         { headers: { 'X-CPAMP-Route-Owner': 'manager' } }
       );
-    expect(String((init?.headers as Record<string, string>).Authorization)).toMatch(/^Fresh /);
-    if (resource === 'installation/runtime') return Response.json(runtime);
+    if (!/^Fresh /.test(String((init?.headers as Record<string, string>).Authorization)))
+      return new Response(null, { status: 401 });
+    if (resource === 'installation/runtime') {
+      if (runtimeStage) {
+        // The lost first POST's staging lands here: between the page's decision
+        // read and its staging POST.
+        runtimeStage = false;
+        operation = {
+          ...operation,
+          revision: operation.revision + 1,
+          strategy: { ...adoptCheckpoint, pluginsEnabled: stagedPlugins },
+        };
+      }
+      return Response.json(runtime);
+    }
     if (resource === 'admin/commit') {
-      expect(body.key).toBe(admin);
+      if (body.key !== admin) violations.push('admin key');
       operation = { ...operation, adminInitialized: true, revision: operation.revision + 1 };
       return Response.json(operation);
     }
@@ -300,20 +332,41 @@ async function adoptServer(options: {
       if (pendingStage > 0) {
         pendingStage -= 1;
         if (pendingStage === 0)
-          operation = { ...operation, revision: operation.revision + 1, strategy: { ...adoptCheckpoint } };
+          operation = {
+            ...operation,
+            revision: operation.revision + 1,
+            strategy: { ...adoptCheckpoint, pluginsEnabled: stagedPlugins },
+          };
       }
+      operationReads.push(operation.revision);
       return Response.json(operation);
     }
     if (resource === 'strategy') {
-      expect(body.identity).toEqual(identity);
-      expect(body.expectedRevision).toBe(operation.revision);
-      expect(body.strategy).toBe('adopt_existing');
-      expect(body.adoptSourceClass).toBe('network_existing');
-      expect(body.expectedRuntimeIdentity).toBe(runtime.runtimeIdentity);
-      expect(body.expectedRuntimeGeneration).toBe(runtime.runtimeGeneration);
-      expect(body.expectedArtifactId).toBe(artifactId);
-      expect(typeof body.pluginsEnabled).toBe('boolean');
+      // The route's own decode: another installation's identity or a missing
+      // fence is a bad request.
+      if (JSON.stringify(body.identity) !== JSON.stringify(identity) ||
+          typeof body.expectedRevision !== 'number')
+        return new Response(null, { status: 400 });
       strategyBodies.push(body);
+      // The route's preflight reads these fields; a mismatch would be a blocker,
+      // never a silent success, so the harness asserts none of them was wrong.
+      for (const [field, want] of [
+        ['strategy', 'adopt_existing'],
+        ['adoptSourceClass', 'network_existing'],
+        ['expectedRuntimeIdentity', runtime.runtimeIdentity],
+        ['expectedRuntimeGeneration', runtime.runtimeGeneration],
+        ['expectedArtifactId', artifactId],
+      ] as const) {
+        if (body[field] !== want) violations.push(`${field}=${String(body[field])}`);
+      }
+      if (typeof body.pluginsEnabled !== 'boolean') violations.push('pluginsEnabled');
+      // The revision CAS of the real route: a fence that no longer matches the
+      // record is refused with 400 before any strategy runs. A fake that threw
+      // here would let a stale write look like a lost reply.
+      if (body.expectedRevision !== operation.revision) {
+        staleRefusals.push({ sent: body.expectedRevision, current: operation.revision });
+        return new Response(null, { status: 400 });
+      }
       // A staged record is this attempt: the route refuses another plugin choice,
       // address or key by code, before it stages or commits anything.
       if (operation.strategy?.stage) {
@@ -326,13 +379,19 @@ async function adoptServer(options: {
         // The reply is lost while the source read is still running; the staging
         // itself lands on a later read.
         lateLost = true;
-        pendingStage = options.lateStage;
+        stagedPlugins = body.pluginsEnabled === true;
+        if (options.stageOnRuntime) runtimeStage = true;
+        else pendingStage = options.lateStage;
         throw new TypeError('Failed to fetch');
       }
       if (options.loseStrategyReply && !lostReply && !operation.strategy) {
         // The server staged the attempt and the reply is what was lost.
         lostReply = true;
-        operation = { ...operation, revision: operation.revision + 1, strategy: { ...adoptCheckpoint } };
+        operation = {
+          ...operation,
+          revision: operation.revision + 1,
+          strategy: { ...adoptCheckpoint, pluginsEnabled: body.pluginsEnabled === true },
+        };
         throw new TypeError('Failed to fetch');
       }
       if (operation.strategy?.stage === 'committed') {
@@ -350,7 +409,7 @@ async function adoptServer(options: {
       operation = {
         ...operation,
         revision: operation.revision + 1,
-        strategy: { ...adoptCheckpoint },
+        strategy: { ...adoptCheckpoint, pluginsEnabled: body.pluginsEnabled === true },
       };
       return Response.json(operation);
     }
@@ -421,6 +480,8 @@ async function adoptServer(options: {
   return {
     fetcher,
     strategyBodies,
+    operationReads,
+    staleRefusals,
     summaryReads: () => summaryReads,
     posts: (name: string) =>
       fetcher.mock.calls.filter(([url, init]) => init?.method === 'POST' && String(url).endsWith('/' + name)),
@@ -531,7 +592,7 @@ it('sends the inputs on screen, not the pre-staging body, after a lost first rep
 
   // What the operator confirmed is what left the page: the corrected address,
   // and the plugin value the checkbox showed.
-  const posted = server.strategyBodies.at(-1)!;
+  const posted = server.strategyBodies[server.strategyBodies.length - 1];
   expect(posted.baseUrl).toBe('http://source-cpa-2:8317');
   expect(posted.pluginsEnabled).toBe(false);
   // The corrected address is not this record's attempt, so the server refuses it
@@ -557,6 +618,42 @@ it('does not commit when a lost staging reply lands between two reads', async ()
   expect(maybe('adopt-migration')).toHaveLength(0);
   expect(maybe('adopt-inventory')).toHaveLength(1);
   expect(server.strategyBodies.length).toBeGreaterThanOrEqual(1);
+});
+
+it('refuses the staging POST whose fence went stale between the decision read and the write', async () => {
+  // The first POST's reply is lost while the source read is still running, and
+  // the staging lands on the destination observation of the next read: strictly
+  // after the decision read and before the POST that decision authorized.
+  const server = await adoptServer({ lateStage: 1, stageOnRuntime: true });
+  await click('adopt-read-inventory');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(1);
+  const readsBefore = server.operationReads.length;
+
+  await click('adopt-read-inventory');
+  await settle();
+  const decision = server.operationReads[readsBefore];
+  const second = server.strategyBodies[server.strategyBodies.length - 1];
+  // The write is fenced on the read that decided "nothing staged", so the
+  // staging that landed after it makes the server refuse the POST with its own
+  // CAS status — it is not turned into the commit of an unconfirmed attempt.
+  expect(second.expectedRevision).toBe(decision);
+  expect(server.staleRefusals).toEqual([{ sent: decision, current: decision + 1 }]);
+  expect(maybe('adopt-migration')).toHaveLength(0);
+
+  // The refusal is answered by the record: the inventory it staged is shown and
+  // the confirmation is still the operator's click.
+  expect(maybe('adopt-inventory')).toHaveLength(1);
+  expect(byID('adopt-confirm-inventory').props.checked).toBe(false);
+
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(maybe('adopt-migration')).toHaveLength(1);
+  // The commit is the same attempt the record staged.
+  const committed = server.strategyBodies[server.strategyBodies.length - 1];
+  expect(committed.baseUrl).toBe(sourceAddress);
+  expect(committed.managementKey).toBe(sourceKey);
 });
 
 it('lets a refused source key be corrected without reloading the page', async () => {
