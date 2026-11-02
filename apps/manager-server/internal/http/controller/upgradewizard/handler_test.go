@@ -1095,6 +1095,7 @@ func TestStatusFirstReadOfALargeSourceFitsTheScaledBudgetAndPollsAreCached(t *te
 		pollStarted := time.Now()
 		_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
 		poll := time.Since(pollStarted)
+		t.Logf("cached poll %d on the %d-byte source: %s", index, info.Size(), poll)
 		if poll*4 >= first {
 			t.Fatalf("poll %d after the first read took %s against a %s first read; the verified source was not reused (%s)",
 				index, poll, first, body)
