@@ -17,6 +17,7 @@ import (
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
@@ -575,19 +576,58 @@ func TestStatusAndPrepareReportAnOutdatedStore(t *testing.T) {
 		t.Fatalf("status surfaced raw SQL: %s", stderr)
 	}
 
+	// The refusal names the command that can actually add the columns.
+	if !strings.Contains(stderr, "upgrade migrate") {
+		t.Fatalf("status does not name a reachable remedy: %s", stderr)
+	}
+	// Running that command is the remedy: the same store becomes readable.
+	if code, stdout, stderr := run(t, "migrate", "--db-path", databasePath); code != 0 {
+		t.Fatalf("migrate exit code = %d; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if code, statusOut, statusErr := run(t, "status", "--db-path", databasePath); code != 0 {
+		t.Fatalf("status after migrate exit code = %d; stdout: %s stderr: %s", code, statusOut, statusErr)
+	}
+
 	source := copyReadyRunSource(t)
 	code, stdout, stderr = run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
 	if code != 1 {
 		t.Fatalf("prepare exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
 	}
-	if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorStoreSchemaOutdated)) {
-		t.Fatalf("prepare did not name the typed code: %s", stderr)
+	// The synthetic row names no fingerprints, so the plan is refused as
+	// unproven; what matters is that the dead end is gone.
+	if strings.Contains(stderr, string(upgradeservice.UpgradeErrorStoreSchemaOutdated)) {
+		t.Fatalf("prepare still reports an outdated store after migrate: %s", stderr)
 	}
 	if strings.Contains(stderr, "no such column") {
 		t.Fatalf("prepare surfaced raw SQL: %s", stderr)
 	}
 	if _, err := os.Lstat(filepath.Join(target, ".upgrade-rollback")); !os.IsNotExist(err) {
 		t.Fatalf("a refused prepare wrote a plan (err=%v)", err)
+	}
+}
+
+// TestUpgradeMigrateRefusesWhileTheV2StoreIsLocked keeps the remedy honest: the
+// migration is a write, so a running Manager blocks it with a typed code and the
+// columns stay missing.
+func TestUpgradeMigrateRefusesWhileTheV2StoreIsLocked(t *testing.T) {
+	target := t.TempDir()
+	databasePath := filepath.Join(target, "usage.sqlite")
+	writeOutdatedStore(t, databasePath)
+	lock, err := processlock.Acquire(databasePath)
+	if err != nil {
+		t.Fatalf("hold the v2 process lock: %v", err)
+	}
+	defer func() { _ = lock.Close() }()
+	code, stdout, stderr := run(t, "migrate", "--db-path", databasePath)
+	if code != 1 {
+		t.Fatalf("migrate exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, string(upgradeservice.UpgradeErrorStoreLocked)) {
+		t.Fatalf("migrate did not name the typed code: %s", stderr)
+	}
+	if code, _, stderr := run(t, "status", "--db-path", databasePath); code != 1 ||
+		!strings.Contains(stderr, string(upgradeservice.UpgradeErrorStoreSchemaOutdated)) {
+		t.Fatalf("a refused migrate added the columns anyway: code=%d stderr=%s", code, stderr)
 	}
 }
 

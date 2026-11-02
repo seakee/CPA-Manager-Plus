@@ -307,7 +307,10 @@ hard `false`; the new surface grants no migration authority.
   `--target-dir` is required when the Manager database path cannot be derived;
   the command never substitutes the working directory. `cpa-manager-plus upgrade
   status [--json] [--db-path PATH] [--scratch-dir DIR]` reads the operation row
-  from a private snapshot, so both work on non-writable volumes. That snapshot is
+  from a private snapshot, so both work on non-writable volumes.
+  `cpa-manager-plus upgrade migrate [--json] [--db-path PATH]` is the one command
+  that adds upgrade columns an older store lacks; it needs the v2 Manager
+  stopped and holds the same process lock for its single writable open. That snapshot is
   a full copy of the Manager database and its sidecars: the read costs time and
   scratch space proportional to the database size, not to the single row it
   returns, so `status` is not a cheap poll and should not be looped tightly on a
@@ -551,12 +554,17 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   (`upgradeoperation.ErrRollbackEvidenceRequired`) because it carries no
   observation. The verdict is only ever written by
   `upgradeoperation.RecordRollback`, stage and evidence in one transaction.
-- **A store this build has not opened says so.** `upgrade status` and `upgrade
-  rollback --prepare` read the operation row through a read-only open, which
-  cannot migrate. A store whose `upgrade_operations` table predates the current
-  columns is reported as `upgrade_store_schema_outdated` (naming the missing
-  columns and the writable open that adds them) instead of surfacing raw SQL, and
-  the command exits 1.
+- **A store this build has not opened says so, and names a command that works.**
+  `upgrade status` and `upgrade rollback --prepare` read the operation row through
+  a read-only open, which cannot migrate, and a Manager admitted only for the
+  Upgrade surface never opens the store writable. A store whose
+  `upgrade_operations` table predates the current columns is therefore reported as
+  `upgrade_store_schema_outdated` (naming the missing columns) instead of
+  surfacing raw SQL, and the command exits 1. The remedy the refusal prints is
+  `cpa-manager-plus upgrade migrate [--db-path PATH]`: it takes the v2 data-root
+  process lock, opens the store writable once, adds the columns, and is
+  idempotent. With the v2 Manager still running it refuses as
+  `upgrade_store_locked`, because the writable Manager holds that same lock.
 - **A verdict without its evidence is the same outdated store.** A row that
   names `rolled_back` and none — or only part — of its evidence is reported as
   `upgrade_store_schema_outdated` too, with the same code and the same exit 1

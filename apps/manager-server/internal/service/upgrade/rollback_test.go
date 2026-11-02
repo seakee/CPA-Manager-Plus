@@ -1031,13 +1031,26 @@ func TestReadRecordReportsAnOutdatedStore(t *testing.T) {
 	if !errors.Is(err, ErrStoreSchemaOutdated) {
 		t.Fatalf("an outdated store = %v (found=%t), want %v", err, found, ErrStoreSchemaOutdated)
 	}
-	for _, want := range []string{"source_root", "rollback_image", "open it once with this build"} {
+	for _, want := range []string{"source_root", "rollback_image", "upgrade migrate"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the refusal does not say %q: %s", want, err)
 		}
 	}
 	if strings.Contains(err.Error(), "SQL logic error") || strings.Contains(err.Error(), "no such column") {
 		t.Fatalf("the refusal surfaced raw SQL: %s", err)
+	}
+	// The named remedy is reachable and works on this exact store, twice.
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := MigrateOperationStore(context.Background(), databasePath); err != nil {
+			t.Fatalf("run the named remedy (attempt %d): %v", attempt, err)
+		}
+	}
+	operation, found, err := ReadRecord(context.Background(), databasePath)
+	if err != nil || !found {
+		t.Fatalf("read the migrated store: found=%t err=%v", found, err)
+	}
+	if operation.Stage != model.UpgradeStageCopyIn || operation.SourceKind != "upgraded-legacy" {
+		t.Fatalf("migrated row = %+v, want the recorded copy_in row", operation)
 	}
 }
 

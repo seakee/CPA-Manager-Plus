@@ -91,6 +91,10 @@ const (
 	// only a build that recorded the two separately could write. Both commands that
 	// read the row report it with this code and exit 1; nothing was written.
 	UpgradeErrorStoreSchemaOutdated UpgradeErrorCode = "upgrade_store_schema_outdated"
+	// UpgradeErrorStoreLocked reports that the Manager store's process lock is
+	// held, so an offline migration cannot run. The lock is the proof that the
+	// writable Manager is still serving the store.
+	UpgradeErrorStoreLocked UpgradeErrorCode = "upgrade_store_locked"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -138,6 +142,7 @@ var (
 	ErrRollbackPortBusy      = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
 	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
 	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
+	ErrStoreLocked           = &UpgradeError{Code: UpgradeErrorStoreLocked}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

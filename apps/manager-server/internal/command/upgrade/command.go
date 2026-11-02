@@ -81,6 +81,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runPreflight(ctx, args[1:], stdout, stderr)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, stderr)
+	case "migrate":
+		return runMigrate(ctx, args[1:], stdout, stderr)
 	case "run":
 		return runCopyIn(ctx, args[1:], stdout, stderr)
 	case "rollback":
@@ -103,6 +105,8 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                     back up and copy a stopped 1.x source into the v2 data root")
 	_, _ = fmt.Fprintln(w, "  status [--json] [--db-path PATH] [--scratch-dir DIR]")
 	_, _ = fmt.Fprintln(w, "                                     read the persisted upgrade operation")
+	_, _ = fmt.Fprintln(w, "  migrate [--json] [--db-path PATH]  add the current upgrade columns to an older store")
+	_, _ = fmt.Fprintln(w, "                                     (the v2 Manager must be stopped; it holds the store lock)")
 	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--legacy-image <ref>] [--project <name>] [--port N] [--manager-addr HOST:PORT] [--json]")
 	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--backup <dir>] [--status-url <url>] [--legacy-image <ref>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                     plan a 1.x restart, or record a proven one")
@@ -249,6 +253,34 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return json.NewEncoder(stdout).Encode(output)
 	}
 	writeStatusSummary(stdout, output)
+	return nil
+}
+
+// runMigrate is the one command that adds the upgrade columns an older store
+// lacks. The read-only commands name it because neither a read-only open nor
+// the Upgrade-only admission can migrate the store.
+func runMigrate(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("upgrade migrate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dbPath := flags.String("db-path", "", "Manager SQLite path; defaults to the Manager configuration")
+	asJSON := flags.Bool("json", false, "print the migration result as JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("%w: no positional arguments are accepted", ErrUsage)
+	}
+	path, err := resolveManagerDatabasePath(*dbPath)
+	if err != nil {
+		return err
+	}
+	if err := upgradeservice.MigrateOperationStore(ctx, path); err != nil {
+		return refuseTyped(stderr, err)
+	}
+	if *asJSON {
+		return json.NewEncoder(stdout).Encode(map[string]string{"database": path, "schema": "current"})
+	}
+	_, _ = fmt.Fprintf(stdout, "Manager store schema is current: %s\n", path)
 	return nil
 }
 

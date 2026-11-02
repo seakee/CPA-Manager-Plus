@@ -279,6 +279,41 @@ func recordedOperation(ctx context.Context, databasePath string, immutable bool)
 	return ReadRecordFrom(ctx, db)
 }
 
+// MigrateOperationStore brings an outdated Manager store up to this build's
+// upgrade table. It is the remedy the read paths name: a read-only reader cannot
+// add a column, and a Manager admitted only for the Upgrade surface never opens
+// the store writable, so without this command an operation recorded by an older
+// build could not be read at all.
+//
+// The migration is a write, so it holds the v2 data-root process lock for the
+// whole writable open. A held lock means the writable Manager is still serving
+// the store and the command refuses with upgrade_store_locked.
+func MigrateOperationStore(ctx context.Context, databasePath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(databasePath); err != nil {
+		return fmt.Errorf("the Manager store cannot be migrated: %w", err)
+	}
+	lock, err := processlock.Acquire(databasePath)
+	if err != nil {
+		if errors.Is(err, processlock.ErrLocked) {
+			return newUpgradeError(UpgradeErrorStoreLocked,
+				"the v2 Manager still holds its database process lock, so it has not been stopped; stop the v2 stack and run `upgrade migrate` again", err)
+		}
+		return fmt.Errorf("take the v2 database process lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
+	db, err := managersqlite.Open(databasePath)
+	if err != nil {
+		return fmt.Errorf("open the Manager store writable to migrate it: %w", err)
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close the migrated Manager store: %w", err)
+	}
+	return nil
+}
+
 // ReadRecordFrom reads the single recorded operation from an already-open
 // read-only handle. It maps the two shapes a read-only reader cannot repair to
 // the shared store-schema code, so every reader reports the same thing instead
@@ -298,7 +333,7 @@ func ReadRecordFrom(ctx context.Context, db *sql.DB) (model.UpgradeOperation, bo
 	}
 	if len(missing) > 0 {
 		return model.UpgradeOperation{}, false, newUpgradeError(UpgradeErrorStoreSchemaOutdated,
-			fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read without a writable open; open it once with this build before reading it read-only",
+			fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read read-only; stop the v2 Manager and run `cpa-manager-plus upgrade migrate`, which opens the store writable under the v2 process lock and adds them",
 				strings.Join(missing, ", ")), nil)
 	}
 	operation, found, err := repository.Get(ctx)
