@@ -126,8 +126,10 @@ func identifyCredentialFile(path string) (credentialFileIdentity, error) {
 // cache instead of paying for the copy again.
 func credentialVerifyBudget(size int64) time.Duration {
 	budget := credentialVerifyTimeout
+	// Divide before multiplying: size*time.Second would overflow a Duration on a
+	// source of about 8 GiB, which is exactly the size that needs the budget.
 	if budget > 0 && size > 0 {
-		budget += time.Duration(size) * time.Second / credentialVerifyBytesPerSecond
+		budget += time.Duration(size/credentialVerifyBytesPerSecond) * time.Second
 	}
 	if budget > CredentialVerifyMaxBudget {
 		budget = CredentialVerifyMaxBudget
@@ -218,12 +220,6 @@ func (c *credentialCache) rememberLocked(key string) {
 		c.order = c.order[1:]
 		delete(c.entries, oldest)
 	}
-}
-
-// resetCredentialCache drops every remembered success. Tests use it when they
-// need a known state; production never does.
-func resetCredentialCache() {
-	sourceCredentialCache = newCredentialCache()
 }
 
 // credentialCacheKey is the digest of the presented key bound to the source

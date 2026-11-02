@@ -9,9 +9,38 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
+
+// TestCredentialVerifyBudgetScalesWithTheSourceAndCaps is the budget contract:
+// the first read of a source gets time in proportion to the bytes it must copy,
+// and no source gets more than the cap.
+func TestCredentialVerifyBudgetScalesWithTheSourceAndCaps(t *testing.T) {
+	previous := credentialVerifyTimeout
+	credentialVerifyTimeout = 2 * time.Second
+	t.Cleanup(func() { credentialVerifyTimeout = previous })
+	for _, test := range []struct {
+		size int64
+		want time.Duration
+	}{
+		{size: 0, want: 2 * time.Second},
+		{size: 64<<20 - 1, want: 2 * time.Second},
+		{size: 64 << 20, want: 3 * time.Second},
+		{size: 512 << 20, want: 10 * time.Second},
+		{size: 1 << 30, want: 18 * time.Second},
+		{size: 4 << 30, want: CredentialVerifyMaxBudget},
+		{size: 1 << 40, want: CredentialVerifyMaxBudget},
+	} {
+		if got := credentialVerifyBudget(test.size); got != test.want {
+			t.Fatalf("budget for %d bytes = %s, want %s", test.size, got, test.want)
+		}
+		if got := credentialVerifyBudget(test.size); got > CredentialVerifyMaxBudget {
+			t.Fatalf("budget for %d bytes = %s, beyond the cap %s", test.size, got, CredentialVerifyMaxBudget)
+		}
+	}
+}
 
 // TestCredentialCacheRemembersOnlySuccesses is the cache's verdict contract. A
 // proved credential is remembered; a rejected key and a failed read are not, so
