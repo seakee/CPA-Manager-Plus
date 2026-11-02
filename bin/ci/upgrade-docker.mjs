@@ -94,9 +94,11 @@ const TABLES = {
 };
 
 const IMAGE_REPOSITORY = 'cpamp-d-fixture-v1';
-// Rollback pins a reference that names a repository, so the fixture is also
-// tagged this way; the bytes are the same image.
-const ROLLBACK_IMAGE_REPOSITORY = 'cpampd-fixture/upgrade';
+// The shared rollback repository older harness builds wrote to. Its tags are
+// READ-ONLY inputs for this run: unlabeled images already occupy them, so this
+// harness never retags, removes or reuses them. It only inspects them, to prove
+// this run left them unchanged.
+const SHARED_ROLLBACK_IMAGE_REPOSITORY = 'cpampd-fixture/upgrade';
 const REDACTED = '[redacted]';
 
 const isEntryPoint = (() => {
@@ -114,6 +116,21 @@ const runId = crypto.randomBytes(4).toString('hex');
 const PREFIX = `cpampd${runId}`;
 const SCRATCH = path.join(ROOT, 'bin', 'tmp', 'u1-8', runId);
 const EVIDENCE_DIR = path.join(ROOT, 'bin', 'ci', 'evidence', 'upgrade-d');
+// This run's own rollback alias. The accepted rollback grammar needs a
+// repository-qualified reference at an exact `vX.Y.Z` tag, and the shared
+// `cpampd-fixture/upgrade` names are occupied by images this run cannot
+// account for. The alias is derived from the run prefix, carries the fixture
+// bytes (and therefore this build's provenance labels), is tracked in the
+// registry before it is created, and is the only image reference the run
+// removes.
+const ROLLBACK_ALIAS_REPOSITORY = `${PREFIX}/upgrade`;
+const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+$/;
+
+// The release every source-reading command declares. The probe declares the
+// fixture tag it is inspecting; once the product's own preflight report names
+// the accepted release, that value replaces it, so the harness holds no second
+// copy of the pin.
+let acceptedRelease = null;
 
 // The harness contract this file and its test both read. It names what the
 // evidence claim rests on, not merely the file locations.
@@ -141,7 +158,7 @@ export const UPGRADE_DOCKER_CONTRACT = Object.freeze({
 
 // Release order: a process first, then the stack that holds containers and
 // networks, then the containers, then what they may still reference.
-export const RESOURCE_RELEASE_ORDER = Object.freeze(['hostProcess', 'composeProject', 'container', 'network', 'volume', 'worktree']);
+export const RESOURCE_RELEASE_ORDER = Object.freeze(['hostProcess', 'composeProject', 'container', 'network', 'volume', 'image', 'worktree']);
 
 function isWithin(root, value) {
   const target = path.resolve(String(value ?? ''));
@@ -160,6 +177,34 @@ export function isOwnedResourceName(prefix, name) {
   if (UPGRADE_DOCKER_CONTRACT.protectedResources.includes(value)) return false;
   if (UPGRADE_DOCKER_CONTRACT.protectedPrefixes.some((protectedPrefix) => value.startsWith(protectedPrefix))) return false;
   return value === prefix || value.startsWith(`${prefix}-`) || value.startsWith(`${prefix}_`);
+}
+
+// isOwnedImageAlias accepts only the run-owned rollback alias: a repository
+// under the run prefix, at a release tag the accepted rollback grammar reads as
+// `vX.Y.Z`. The shared `cpampd-fixture/upgrade` repository and a bare
+// `1.14.10` tag are never this run's to tag or remove.
+export function isOwnedImageAlias(prefix, reference) {
+  if (!UPGRADE_DOCKER_CONTRACT.prefixPattern.test(String(prefix ?? ''))) return false;
+  const value = String(reference ?? '');
+  const separator = value.lastIndexOf(':');
+  if (separator <= 0) return false;
+  const repository = value.slice(0, separator);
+  const tag = value.slice(separator + 1);
+  return repository === `${prefix}/upgrade` && RELEASE_TAG_PATTERN.test(tag);
+}
+
+// rollbackAliasReference derives this run's rollback alias from the release
+// tag under test. The fixture bytes stay where they are; only the run-owned
+// reference is created, tracked and removed.
+export function rollbackAliasReference(tag, prefix = PREFIX) {
+  if (!UPGRADE_DOCKER_CONTRACT.prefixPattern.test(String(prefix ?? ''))) {
+    throw new Error(`a rollback alias needs a cpampd<8 hex> prefix, got ${JSON.stringify(prefix)}`);
+  }
+  const value = String(tag ?? '');
+  if (!RELEASE_TAG_PATTERN.test(value)) {
+    throw new Error(`a rollback alias tag must be an exact vX.Y.Z release, got ${JSON.stringify(value)}`);
+  }
+  return `${prefix}/upgrade:${value}`;
 }
 
 // shutdownRefusal is the error a producer gets once the registry is fenced. Its
@@ -192,6 +237,9 @@ export function createResourceRegistry({ prefix, root = null } = {}) {
 
   const owns = (kind, name) => {
     if (!RESOURCE_RELEASE_ORDER.includes(kind)) return false;
+    // An image is only ever this run's own rollback alias. A container-style
+    // `${prefix}-…` name is not an image this run may remove.
+    if (kind === 'image') return isOwnedImageAlias(prefix, name);
     if (isOwnedResourceName(prefix, name)) return true;
     // A worktree checkout is owned by this run's scratch root, not by a Docker
     // name, and never by a protected object.
@@ -589,13 +637,19 @@ async function runAcceptance() {
   const nextSource = await acceptanceStep('seed', () => seedSource(nextFixture));
 
   // Read the release the running contract accepts from the product itself, so
-  // no second copy of the pinned version lives in this harness.
+  // no second copy of the pinned version lives in this harness. The probe is a
+  // preflight, so it declares the tag it actually reads; the report's
+  // `expected=` value is then the single declared version every later command
+  // receives.
+  acceptedRelease = args.v1Tag;
   const probe = runCli(binary, ['upgrade', 'preflight', '--legacy', nextSource.sourceRoot, '--json'], 'preflight(next-fixture)');
   const expected = expectedReleaseOf(probe) || args.sourceTag;
-  if (!expected) {
-    throw new Error('could not read the release the contract accepts from the preflight report');
+  if (!RELEASE_TAG_PATTERN.test(String(expected ?? ''))) {
+    throw new Error(`could not read the release the contract accepts from the preflight report (got ${JSON.stringify(expected)})`);
   }
+  acceptedRelease = expected;
   evidence.mode.acceptedRelease = expected;
+  evidence.mode.declaredSourceVersion = acceptedRelease;
 
   let sourceFixture = nextFixture;
   let source = nextSource;
@@ -767,6 +821,7 @@ function refusePrefixCollision() {
     ['container', dockerJson(['ps', '-a', '--format', '{{.Names}}'])],
     ['volume', dockerJson(['volume', 'ls', '--format', '{{.Name}}'])],
     ['network', dockerJson(['network', 'ls', '--format', '{{.Name}}'])],
+    ['image', dockerJson(['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'])],
   ]) {
     const collision = list.find((name) => name.startsWith(PREFIX));
     if (collision) {
@@ -775,11 +830,57 @@ function refusePrefixCollision() {
   }
 }
 
+// sharedImageReferences names the pre-existing image tags this harness must
+// leave alone: the shared rollback repository older builds wrote to. The fixture
+// repository may be rebuilt (that is what a non-reuse run is for) and the
+// run-owned alias is this run's own, so neither belongs here.
+function sharedImageReferences(tags) {
+  const references = new Set();
+  for (const tag of tags) {
+    const value = String(tag ?? '').trim();
+    if (!RELEASE_TAG_PATTERN.test(value)) continue;
+    const version = value.slice(1);
+    references.add(`${SHARED_ROLLBACK_IMAGE_REPOSITORY}:${version}`);
+  }
+  return [...references].sort();
+}
+
+// sharedImageSnapshot records the image ID behind each shared reference, or
+// null when the tag does not exist on this host. Only the non-null entries can
+// be asserted unchanged: a fixture this run builds did not exist before it.
+function sharedImageSnapshot(references) {
+  return references.map((reference) => ({ reference, imageId: imageId(reference) }));
+}
+
+// assertSharedImagesUnchanged proves two things by inspect, never by a tag
+// command: every pre-existing shared image still resolves to the same ID, and
+// no run-owned alias survived cleanup.
+function assertSharedImagesUnchanged(before) {
+  const changed = [];
+  let checked = 0;
+  for (const entry of before) {
+    if (!entry.imageId) continue;
+    checked += 1;
+    const now = imageId(entry.reference);
+    if (now !== entry.imageId) {
+      changed.push(`image ${entry.reference} changed: was ${entry.imageId}, now ${now ?? 'missing'}`);
+    }
+  }
+  const references = dockerNames(['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}']);
+  if (references === null) {
+    throw new Error("cannot list the host's images after cleanup, so the pre-existing images cannot be shown unchanged");
+  }
+  const leftovers = references.filter((reference) => isOwnedImageAlias(PREFIX, reference));
+  for (const reference of leftovers) changed.push(`image ${reference} survived the release boundary`);
+  return { changed, checked, leftovers };
+}
+
 function hostSnapshot() {
   return {
     containers: dockerJson(['ps', '-a', '--format', '{{.Names}}']).sort(),
     volumes: dockerJson(['volume', 'ls', '--format', '{{.Name}}']).sort(),
     networks: dockerJson(['network', 'ls', '--format', '{{.Name}}']).sort(),
+    images: sharedImageSnapshot(sharedImageReferences([args.v1Tag, args.sourceTag])),
   };
 }
 
@@ -801,8 +902,15 @@ function assertHostUntouched(before) {
       [kind]: listedBefore.length,
     };
   }
+  const images = assertSharedImagesUnchanged(before.images ?? []);
+  evidence.hostUntouched = {
+    ...(evidence.hostUntouched ?? {}),
+    images: images.checked,
+    runOwnedImageAliases: images.leftovers.length,
+  };
+  changed.push(...images.changed);
   if (changed.length) throw new Error(changed.join('; '));
-  stableFacts.push('host-untouched');
+  stableFacts.push(`host-untouched:images=${images.checked}`);
 }
 
 function diff(before, after) {
@@ -903,26 +1011,41 @@ function resolveTagCommit(tag) {
   return commit;
 }
 
-// connectRollbackAlias makes the rollback reference resolve to exactly the
-// fixture bytes. An alias that already points elsewhere is refused rather than
-// repointed: an image whose provenance this run cannot show must not be pinned.
+// connectRollbackAlias makes this run's rollback reference resolve to exactly
+// the fixture bytes. An alias that already resolves elsewhere is refused rather
+// than repointed: an image whose provenance this run cannot show must not be
+// pinned. The alias is tracked before it is created, so shutdown refuses the tag
+// and cleanup removes only this run's reference.
 function connectRollbackAlias(fixture) {
-  const existing = imageId(fixture.rollbackImage);
+  const alias = fixture.rollbackImage;
+  if (!isOwnedImageAlias(PREFIX, alias)) {
+    throw new Error(`refusing to create ${alias}: it is not this run's rollback alias under ${PREFIX}/upgrade`);
+  }
+  registry.assertCreationAllowed('image', alias);
+  const existing = imageId(alias);
   if (existing && existing !== fixture.imageId) {
     throw new Error(
-      `the rollback alias ${fixture.rollbackImage} resolves to ${existing}, not to the fixture ${fixture.imageId}; refusing to retag an image this run cannot account for`,
+      `the rollback alias ${alias} resolves to ${existing}, not to the fixture ${fixture.imageId}; refusing to retag an image this run cannot account for`,
     );
   }
   if (!existing) {
-    const tagged = sh('docker', ['tag', fixture.image, fixture.rollbackImage]);
-    assertValue(tagged.code === 0, `tag ${fixture.rollbackImage}: ${redactor.redact(tagged.stderr.trim())}`);
+    const tagged = sh('docker', ['tag', fixture.image, alias]);
+    assertValue(tagged.code === 0, `tag ${alias}: ${redactor.redact(tagged.stderr.trim())}`);
+    evidence.commands.push(commandRecord(`docker tag ${fixture.image} ${alias}`, tagged.code));
   }
-  const resolved = imageId(fixture.rollbackImage);
-  assertValue(resolved === fixture.imageId, `the rollback alias ${fixture.rollbackImage} resolves to ${resolved}, not to ${fixture.imageId}`);
+  const resolved = imageId(alias);
+  assertValue(resolved === fixture.imageId, `the rollback alias ${alias} resolves to ${resolved}, not to ${fixture.imageId}`);
+  // The alias resolves to the fixture bytes, so it must carry the same labels;
+  // checking them here is what makes "this run's provenance" an observed fact
+  // instead of a claim about the tag name.
+  const labels = imageLabels(alias);
+  assertFixtureProvenance(fixture.tag, fixture.commit, labels);
+  registry.track('image', alias, () => releaseImageAlias(alias, fixture.imageId), { imageId: fixture.imageId });
   return {
     ...fixture,
     rollbackImageId: resolved,
     provenance: { labels: fixtureLabels(fixture.tag, fixture.commit), aliasResolvesToFixture: true },
+    rollbackAlias: { reference: alias, repository: ROLLBACK_ALIAS_REPOSITORY, tag: alias.slice(alias.lastIndexOf(':') + 1) },
   };
 }
 
@@ -932,9 +1055,10 @@ function connectRollbackAlias(fixture) {
 async function ensureFixture(tag) {
   const version = tag.replace(/^v/, '');
   const image = `${IMAGE_REPOSITORY}:${version}`;
-  // The rollback plan pins a published-style reference and refuses a name with
-  // no repository part, so the same local bytes are also tagged that way.
-  const rollbackImage = `${ROLLBACK_IMAGE_REPOSITORY}:${version}`;
+  // The rollback plan pins a repository-qualified reference at an exact
+  // vX.Y.Z tag. The alias is run-owned, so the pre-existing shared tags stay
+  // untouched even when they already hold an old image.
+  const rollbackImage = rollbackAliasReference(tag);
   const commit = resolveTagCommit(tag);
   const known = imageId(image);
   if (args.reuseFixture) {
@@ -1226,6 +1350,16 @@ function chain(binary, sourceRoot, targetRoot, label, { sourceDays = null, domai
   const runReport = parseJson(run.stdout, `${label}:run`);
   assertValue(runReport.result?.stage === 'copy_in', `${label}: run stage=${runReport.result?.stage}`);
   assertValue(runReport.result?.restored === true, `${label}: run restored=${runReport.result?.restored}`);
+  // The next command the run prints is the reconciliation the operator can
+  // actually run, and it must carry the same declared release as this harness.
+  assertValue(
+    typeof runReport.next === 'string' && runReport.next.includes('upgrade reconcile'),
+    `${label}: run printed no reconcile next step: ${JSON.stringify(runReport.next)}`,
+  );
+  assertValue(
+    runReport.next.includes('--source-version') && runReport.next.includes(acceptedRelease),
+    `${label}: the printed next step does not declare ${acceptedRelease}: ${JSON.stringify(runReport.next)}`,
+  );
 
   const reconcile = runCli(binary, ['upgrade', 'reconcile', '--legacy', sourceRoot, '--target', targetRoot, '--json'], `${label}:reconcile`, { expectExit: 0 });
   const reconcileReport = parseJson(reconcile.stdout, `${label}:reconcile`);
@@ -1941,9 +2075,11 @@ async function faultInterruptedCopyIn(binary, workspace) {
   const markerPath = path.join(target, '.upgrade-copy-in', 'copy-in.json');
 
   await new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(binary, ['upgrade', 'run', '--legacy', source, '--target', target, '--json'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const child = spawn(
+      binary,
+      withDeclaredSourceVersion(['upgrade', 'run', '--legacy', source, '--target', target, '--json'], acceptedRelease),
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    );
     let killed = false;
     const timer = setInterval(() => {
       if (!killed && fs.existsSync(markerPath)) {
@@ -2508,6 +2644,28 @@ function releaseComposeProject(project, composeFile) {
   }
 }
 
+// releaseImageAlias removes this run's rollback tag, never the image bytes and
+// never a shared reference. The inspect before the removal is the ownership
+// proof: a tag that resolves to another image is not this run's to remove, and a
+// tag that is already gone is already released.
+function releaseImageAlias(reference, expectedImageId) {
+  const current = imageId(reference);
+  if (!current) return;
+  if (!expectedImageId || current !== expectedImageId) {
+    throw new Error(
+      `refusing to remove ${reference}: it resolves to ${current}, not to this run's fixture ${expectedImageId ?? 'unknown'}`,
+    );
+  }
+  const removed = sh('docker', ['image', 'rm', reference]);
+  if (removed.code !== 0) {
+    throw new Error(`docker image rm ${reference}: ${redactor.redact(tail(removed.stderr, 400))}`);
+  }
+  const after = imageId(reference);
+  if (after) {
+    throw new Error(`docker image rm ${reference} left the tag resolving to ${after}`);
+  }
+}
+
 // releaseDockerResource removes one object this run tracked. A missing object is
 // already released; anything else that fails is thrown so the registry reports
 // it instead of dropping the entry.
@@ -2842,8 +3000,24 @@ function httpJson(method, url, { headers = {}, body } = {}) {
 // CLI
 // ---------------------------------------------------------------------------
 
+// withDeclaredSourceVersion keeps one rule for every source-reading command:
+// preflight, run and reconcile always declare the pinned accepted release. A
+// caller cannot forget the flag, and a flag the caller already passed is kept.
+export function withDeclaredSourceVersion(cliArgs, release) {
+  const declared = [...cliArgs];
+  if (declared[0] !== 'upgrade' || !['preflight', 'run', 'reconcile'].includes(declared[1])) return declared;
+  if (declared.includes('--source-version')) return declared;
+  if (!RELEASE_TAG_PATTERN.test(String(release ?? ''))) {
+    throw new Error(
+      `the harness must know the pinned accepted release before it runs upgrade ${declared[1]}, got ${JSON.stringify(release)}`,
+    );
+  }
+  return [declared[0], declared[1], '--source-version', release, ...declared.slice(2)];
+}
+
 function runCli(binary, cliArgs, name, { expectExit = null, allowMissingBinary = false } = {}) {
-  const result = sh(binary, cliArgs, { timeout: 600_000 });
+  const effectiveArgs = withDeclaredSourceVersion(cliArgs, acceptedRelease);
+  const result = sh(binary, effectiveArgs, { timeout: 600_000 });
   evidence.commands.push(commandRecord(name, result.code, result.stdout, result.stderr));
   if (result.code === null && !allowMissingBinary) {
     throw new Error(`${name}: the command did not run: ${redactor.redact(result.stderr.trim())}`);

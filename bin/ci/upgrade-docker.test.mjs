@@ -19,6 +19,9 @@ import {
   PORT_RANGE,
   RESOURCE_RELEASE_ORDER,
   UPGRADE_DOCKER_CONTRACT,
+  isOwnedImageAlias,
+  rollbackAliasReference,
+  withDeclaredSourceVersion,
   assertNoSecretInBody,
   canonicalEvidenceDocument,
   createImplementationIdentity,
@@ -100,8 +103,9 @@ test('releaseAll frees what this run created, in the order the kinds require', a
   const released = [];
   for (const kind of RESOURCE_RELEASE_ORDER) {
     // Track in reverse so the assertion is about the release order, not insertion.
-    const names = { hostProcess: 'manager', composeProject: PREFIX, container: 'box', network: 'net', volume: 'vol', worktree: 'tree' };
-    registry.track(kind, kind === 'composeProject' ? PREFIX : `${PREFIX}-${names[kind]}`, async () => {
+    const names = { hostProcess: 'manager', composeProject: PREFIX, container: 'box', network: 'net', volume: 'vol', image: 'upgrade:v1.14.10', worktree: 'tree' };
+    const name = kind === 'composeProject' ? PREFIX : kind === 'image' ? `${PREFIX}/${names[kind]}` : `${PREFIX}-${names[kind]}`;
+    registry.track(kind, name, async () => {
       released.push(kind);
     }, { root: '/tmp/u1-8' });
   }
@@ -332,6 +336,154 @@ test('an implementation identity is invalid until the commit and harness digest 
 });
 
 // ---------------------------------------------------------------------------
+// declared source version: every source-reading command names the pinned release
+// ---------------------------------------------------------------------------
+
+test('preflight, run and reconcile always declare the pinned accepted release', () => {
+  for (const subcommand of ['preflight', 'run', 'reconcile']) {
+    const declared = withDeclaredSourceVersion(['upgrade', subcommand, '--legacy', '/source', '--json'], 'v1.14.4');
+    assert.deepEqual(declared, ['upgrade', subcommand, '--source-version', 'v1.14.4', '--legacy', '/source', '--json']);
+  }
+  // A caller that already declared a version keeps exactly what it passed.
+  const explicit = ['upgrade', 'run', '--source-version', 'v1.14.10', '--legacy', '/source'];
+  assert.deepEqual(withDeclaredSourceVersion(explicit, 'v1.14.4'), explicit);
+  // Commands that read the recorded row rather than a source are untouched.
+  for (const command of [['upgrade', 'status', '--json'], ['upgrade', 'rollback', '--prepare'], ['initialize']]) {
+    assert.deepEqual(withDeclaredSourceVersion(command, 'v1.14.4'), command);
+  }
+  // There is no implicit version: the harness fails closed instead of calling
+  // the product without the declaration the accepted copy-in requires.
+  assert.throws(
+    () => withDeclaredSourceVersion(['upgrade', 'run', '--legacy', '/source'], null),
+    /must know the pinned accepted release/,
+  );
+  assert.throws(
+    () => withDeclaredSourceVersion(['upgrade', 'reconcile'], '1.14.4'),
+    /must know the pinned accepted release/,
+  );
+});
+
+test('every source-reading invocation in the harness runs through the declaration', () => {
+  // The declaration is applied once, in runCli, so a new call site cannot
+  // silently omit it. This pins that wiring: both the helper call and the
+  // subcommand list live in the shipped source, and the only direct spawn of
+  // `upgrade run` (the interrupted-copy-in fault) opts in explicitly.
+  assert.match(HARNESS_SOURCE, /const effectiveArgs = withDeclaredSourceVersion\(cliArgs, acceptedRelease\);/);
+  assert.match(HARNESS_SOURCE, /\[.*'upgrade', 'preflight'.*\]/);
+  assert.match(HARNESS_SOURCE, /\[.*'upgrade', 'run'.*\]/);
+  assert.match(HARNESS_SOURCE, /\[.*'upgrade', 'reconcile'.*\]/);
+  const directSpawns = [...HARNESS_SOURCE.matchAll(/spawn\(binary, (\[[^\]]*\])/g)].map((match) => match[1]);
+  const sourceSpawns = directSpawns.filter((args) => args.includes("'upgrade', 'run'"));
+  assert.deepEqual(sourceSpawns.length, 0, 'a direct spawn of upgrade run must pass the declared release through the helper');
+  assert.match(HARNESS_SOURCE, /withDeclaredSourceVersion\(\['upgrade', 'run'/);
+});
+
+// ---------------------------------------------------------------------------
+// rollback alias: run-owned, vX.Y.Z, removed with the run
+// ---------------------------------------------------------------------------
+
+test('the rollback alias is derived from the run prefix at an exact vX.Y.Z tag', () => {
+  assert.equal(rollbackAliasReference('v1.14.10', PREFIX), `${PREFIX}/upgrade:v1.14.10`);
+  assert.equal(rollbackAliasReference('v1.14.4', PREFIX), `${PREFIX}/upgrade:v1.14.4`);
+  for (const bad of ['1.14.10', 'v1.14', 'v1.14.10-rc1', 'latest', '']) {
+    assert.throws(() => rollbackAliasReference(bad, PREFIX), /exact vX\.Y\.Z release/, `${bad} must be refused`);
+  }
+  assert.throws(() => rollbackAliasReference('v1.14.10', 'cpampd-fixture'), /cpampd<8 hex> prefix/);
+});
+
+test('only the run-owned image alias is an owned image reference', () => {
+  assert.equal(isOwnedImageAlias(PREFIX, `${PREFIX}/upgrade:v1.14.10`), true);
+  for (const foreign of [
+    // The shared repository older runs left behind: read-only, never ours.
+    'cpampd-fixture/upgrade:v1.14.10',
+    'cpampd-fixture/upgrade:1.14.10',
+    // Same repository, but not a release tag the accepted grammar reads.
+    `${PREFIX}/upgrade:1.14.10`,
+    `${PREFIX}/upgrade:latest`,
+    // Not the alias repository, or not this run's prefix.
+    `${PREFIX}/other:v1.14.10`,
+    `${PREFIX}-upgrade:v1.14.10`,
+    'cpampd0123456f/upgrade:v1.14.10',
+    'someone-else/upgrade:v1.14.10',
+  ]) {
+    assert.equal(isOwnedImageAlias(PREFIX, foreign), false, `${foreign} must not be an owned alias`);
+  }
+});
+
+test('the registry tracks the run alias and refuses the shared image names', () => {
+  const registry = createResourceRegistry({ prefix: PREFIX });
+  const alias = `${PREFIX}/upgrade:v1.14.10`;
+  const entry = registry.track('image', alias, async () => {});
+  assert.equal(entry.kind, 'image');
+  assert.deepEqual(registry.list('image').map((item) => item.name), [alias]);
+  for (const foreign of ['cpampd-fixture/upgrade:v1.14.10', `${PREFIX}-upgrade:v1.14.10`, `${PREFIX}/upgrade:1.14.10`]) {
+    assert.throws(() => registry.track('image', foreign, async () => {}), /own resources/);
+  }
+});
+
+test('releasing the alias removes only this run tag and refuses another image', async () => {
+  const { context, calls } = aliasHarness({
+    ids: { [`${PREFIX}/upgrade:v1.14.10`]: 'sha256:fixture' },
+  });
+  await context.releaseImageAlias(`${PREFIX}/upgrade:v1.14.10`, 'sha256:fixture');
+  assert.deepEqual(calls, [
+    ['docker', 'image', 'inspect', '-f', '{{.Id}}', `${PREFIX}/upgrade:v1.14.10`],
+    ['docker', 'image', 'rm', `${PREFIX}/upgrade:v1.14.10`],
+    ['docker', 'image', 'inspect', '-f', '{{.Id}}', `${PREFIX}/upgrade:v1.14.10`],
+  ]);
+
+  // A tag that resolves to somebody else's image is inspected, never removed.
+  const foreign = aliasHarness({ ids: { [`${PREFIX}/upgrade:v1.14.10`]: 'sha256:old-unlabeled' } });
+  assert.throws(
+    () => foreign.context.releaseImageAlias(`${PREFIX}/upgrade:v1.14.10`, 'sha256:fixture'),
+    /refusing to remove/,
+  );
+  assert.deepEqual(foreign.calls.filter((command) => command[1] === 'image' && command[2] === 'rm'), []);
+
+  // A tag that is already gone is already released.
+  const gone = aliasHarness({ ids: {} });
+  await gone.context.releaseImageAlias(`${PREFIX}/upgrade:v1.14.10`, 'sha256:fixture');
+  assert.deepEqual(gone.calls.filter((command) => command[1] === 'image' && command[2] === 'rm'), []);
+});
+
+test('the cleanup proof keeps pre-existing shared images by ID and rejects a surviving alias', () => {
+  const before = [
+    { reference: 'cpampd-fixture/upgrade:1.14.10', imageId: 'sha256:old-unlabeled' },
+    { reference: 'cpampd-fixture/upgrade:1.14.4', imageId: 'sha256:older-unlabeled' },
+    { reference: 'cpampd-fixture/upgrade:1.14.11', imageId: null },
+  ];
+  const clean = imageGuardHarness({
+    ids: {
+      'cpampd-fixture/upgrade:1.14.10': 'sha256:old-unlabeled',
+      'cpampd-fixture/upgrade:1.14.4': 'sha256:older-unlabeled',
+    },
+    listed: ['cpampd-fixture/upgrade:1.14.10', 'cpampd-fixture/upgrade:1.14.4', 'cpamp-d-fixture-v1:1.14.10'],
+  });
+  const cleanResult = clean.context.assertSharedImagesUnchanged(before);
+  assert.equal(cleanResult.checked, 2);
+  assert.deepEqual([...cleanResult.changed], []);
+  assert.deepEqual([...cleanResult.leftovers], []);
+
+  const changed = imageGuardHarness({
+    ids: { 'cpampd-fixture/upgrade:1.14.10': 'sha256:repointed' },
+    listed: [],
+  });
+  assert.match(
+    changed.context.assertSharedImagesUnchanged(before).changed.join('; '),
+    /cpampd-fixture\/upgrade:1\.14\.10 changed: was sha256:old-unlabeled, now sha256:repointed/,
+  );
+
+  const leaked = imageGuardHarness({
+    ids: { 'cpampd-fixture/upgrade:1.14.10': 'sha256:old-unlabeled' },
+    listed: [`${PREFIX}/upgrade:v1.14.10`],
+  });
+  assert.deepEqual([...leaked.context.assertSharedImagesUnchanged(before).leftovers], [`${PREFIX}/upgrade:v1.14.10`]);
+
+  const blind = imageGuardHarness({ ids: {}, listed: null });
+  assert.throws(() => blind.context.assertSharedImagesUnchanged(before), /cannot list the host's images/);
+});
+
+// ---------------------------------------------------------------------------
 // shutdown interleaving: the real main -> runAcceptance -> abortRun -> finalize
 // -> cleanupResources flow, with stand-ins only at the Docker, product and
 // process boundaries
@@ -361,6 +513,56 @@ function harnessFunction(name) {
   const end = HARNESS_SOURCE.indexOf('\n}', start);
   assert.ok(end > start, `cannot find the end of ${name}`);
   return HARNESS_SOURCE.slice(start, end + 2);
+}
+
+// aliasHarness extracts the shipped release function and supplies the Docker
+// and inspect boundaries, so the test drives the real cleanup code without a
+// daemon.
+function aliasHarness({ ids = {} } = {}) {
+  const calls = [];
+  const state = { ids: { ...ids } };
+  const sh = (command, commandArgs) => {
+    calls.push([command, ...commandArgs]);
+    if (command !== 'docker') throw new Error(`unexpected command ${command}`);
+    const verb = commandArgs.slice(0, 2).join(' ');
+    if (verb === 'image inspect') {
+      const reference = commandArgs[commandArgs.length - 1];
+      const id = state.ids[reference];
+      return id ? { code: 0, stdout: id + '\n', stderr: '' } : { code: 1, stdout: '', stderr: 'no such image' };
+    }
+    if (verb === 'image rm') {
+      const reference = commandArgs[commandArgs.length - 1];
+      if (!state.ids[reference]) return { code: 1, stdout: '', stderr: 'no such image' };
+      delete state.ids[reference];
+      return { code: 0, stdout: `Untagged: ${reference}\n`, stderr: '' };
+    }
+    throw new Error(`unexpected docker command ${commandArgs.join(' ')}`);
+  };
+  // imageId goes through the same inspect command the harness uses, so the
+  // test observes the real inspect-before-remove sequence.
+  const imageId = (reference) => {
+    const result = sh('docker', ['image', 'inspect', '-f', '{{.Id}}', reference]);
+    return result.code === 0 ? result.stdout.trim() : null;
+  };
+  const context = vm.createContext({
+    sh,
+    imageId,
+    redactor: createRedactor([]),
+    tail: (text, limit = 2_000) => String(text ?? '').slice(-limit),
+  });
+  vm.runInContext(harnessFunction('releaseImageAlias'), context);
+  return { context, calls, state };
+}
+
+function imageGuardHarness({ ids = {}, listed = [] } = {}) {
+  const context = vm.createContext({
+    PREFIX,
+    imageId: (reference) => ids[reference] ?? null,
+    dockerNames: () => (listed === null ? null : listed),
+    isOwnedImageAlias,
+  });
+  vm.runInContext(harnessFunction('assertSharedImagesUnchanged'), context);
+  return { context };
 }
 
 function createLifecycleHarness({ failWizardRelease = false } = {}) {
@@ -489,6 +691,8 @@ function createLifecycleHarness({ failWizardRelease = false } = {}) {
       return [];
     },
     PREFIX,
+    RELEASE_TAG_PATTERN: /^v\d+\.\d+\.\d+$/,
+    acceptedRelease: null,
     writeEvidence: () => {
       state.written = {
         verdict: evidence.verdict,

@@ -42,6 +42,21 @@ node --test bin/ci/upgrade-docker.test.mjs     # the harness's own logic, no Doc
   created by such a run may survive and must be cleaned from the printed
   `cpampd<runid>` prefix by an operator. This guarantee covers handled signals,
   not unhandled termination.
+* Every source-reading command (`preflight`, `run`, `reconcile`) declares the
+  pinned accepted release with `--source-version`. The value is not a second pin
+  in the harness: the probe preflight reads the fixture it inspects, the
+  product's report names the accepted release, and every later invocation —
+  including the `next` command `upgrade run` prints — carries that exact value.
+  A command that would run without a declaration fails the harness before the
+  product sees it.
+* The rollback alias is run-owned: `cpampd<runid>/upgrade:vX.Y.Z`, tagged from
+  the fixture bytes, recorded in the resource registry before it is created, and
+  removed only at cleanup (the tag, never the image the fixture repository
+  holds). The shared `cpampd-fixture/upgrade` tags are read-only inputs; older,
+  unlabeled images already occupy `:1.14.10` and `:1.14.4`, so the harness never
+  retags, removes or reuses them. Cleanup inspects those shared references and
+  fails when a pre-existing image ID changed or any `cpampd<runid>/upgrade` tag
+  survived.
 * Evidence lands in `bin/ci/evidence/upgrade-d/<runid>.json` and is bound to the
   run that wrote it: `implementation` records the HEAD commit, the harness file
   digest, the built binary digest and whether the tree was clean; `verdict` and
@@ -65,8 +80,12 @@ node --test bin/ci/upgrade-docker.test.mjs     # the harness's own logic, no Doc
 
 `node --test bin/ci/upgrade-docker.test.mjs` exercises the parts that decide what
 the real-Docker run may touch, without Docker: the resource registry (ownership
-refusals, release order, a failed release staying owned and failing the run, the
-exit-code verdict), the signal guard (one release, exit 130/143, no second
+refusals, release order including the run-owned image alias, a failed release
+staying owned and failing the run, the exit-code verdict), the declared source
+version (injected for preflight/run/reconcile, never invented, the printed next
+command carries it), the rollback alias (prefix-derived `vX.Y.Z` reference,
+shared names refused, release removing only this run's tag after an ownership
+inspect, pre-existing images compared by ID), the signal guard (one release, exit 130/143, no second
 release), port allocation (two ports of a run are never equal, busy and reserved
 ports are skipped, exhaustion refuses), redaction (a registered secret never
 survives a message and the leak assertion never reprints it) and the evidence
@@ -86,7 +105,7 @@ for the real-Docker run below.
 
 | Step | Assertion |
 | --- | --- |
-| fixture | `git worktree` of the 1.x tag, `docker build` with the provenance labels (`io.cpamp.upgrade.fixture.{contract,tag,commit}`), image id and commit recorded; `--reuse-fixture` verifies those labels and the tag's commit before accepting the image, and the rollback alias must resolve to the same image ID |
+| fixture | `git worktree` of the 1.x tag, `docker build` with the provenance labels (`io.cpamp.upgrade.fixture.{contract,tag,commit}`), image id and commit recorded; `--reuse-fixture` verifies those labels and the tag's commit before accepting the image; the rollback alias is this run's `cpampd<runid>/upgrade:vX.Y.Z`, resolves to the same image ID, carries the same labels, and is the only image reference cleanup removes |
 | seed | three UTC days of usage events, two models, two client keys, model prices and key aliases, one archive run that is verified and whose raw rows are deleted — all through the 1.x HTTP API |
 | `upgrade preflight` | exit 0, `ready`, no blocked check, the source version the contract accepts |
 | `upgrade run` | exit 0, stage `copy_in`, `restored`, both source fingerprints and the backup manifest digest recorded |
