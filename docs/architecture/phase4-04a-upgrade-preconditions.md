@@ -722,11 +722,16 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   removes it. A blocked preflight still writes nothing.
 - **The 1.x volume is never written** by any path above: both the health probe
   and the database probe are read-only, the live database is read through a
-  private snapshot copied beside it (database plus WAL sidecars) so not even a
-  WAL index appears beside it, and the source manifest is unchanged by prepare,
-  verify and every refusal. The copy costs scratch space and time proportional
-  to the database size, and it is retried the shared bounded number of times
-  when it races v1 writes.
+  private snapshot copied into validated scratch space outside both the 1.x
+  source and the v2 data root (the OS temporary directory by default), so not
+  even a WAL index appears beside it, and the source manifest is unchanged by
+  prepare, verify and every refusal. A scratch directory inside either root —
+  including a default `TMPDIR` that points there — is refused with
+  `upgrade_snapshot_failed` before a directory is created, because the snapshot
+  copies the whole database. The same check covers the private snapshot
+  `upgrade migrate` uses to prove the store was copied in. The copy costs
+  scratch space and time proportional to the database size, and it is retried
+  the shared bounded number of times when it races v1 writes.
 - **Known limits of the rollback evidence.** These are stated here so no reader
   infers a proof the code does not make:
   - A probe that reaches this Manager through a reverse proxy or tunnel in front

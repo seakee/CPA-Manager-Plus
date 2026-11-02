@@ -1442,6 +1442,57 @@ func TestRecordRollbackRefusesWhileTheV2StoreIsLocked(t *testing.T) {
 	}
 }
 
+// TestRecordRollbackRefusesASnapshotInsideTheLegacySource is L-b: the private
+// snapshot of the live 1.x database used the OS temporary directory without
+// asking whether it lies inside the source tree, so a TMPDIR pointing there
+// wrote a full copy of the database into the volume every path promises to
+// preserve. The same scratch check preflight uses now refuses it before a
+// directory is made, with the shared upgrade_snapshot_failed code.
+func TestRecordRollbackRefusesASnapshotInsideTheLegacySource(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	sourceBefore := fingerprintTree(t, fixture.volume.root)
+	t.Setenv("TMPDIR", fixture.volume.root)
+	_, err := RecordRollback(context.Background(), fixture.observation(t))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+		t.Fatalf("record with TMPDIR inside the source = %v (code %q), want %v", err, code, UpgradeErrorSnapshotFailed)
+	}
+	assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, fixture.volume.root))
+}
+
+// TestMigrateOperationStoreRefusesASnapshotInsideTheStoreRoot is the migrate
+// half of L-b: the copy-in proof snapshotted the store into the OS temporary
+// directory even when that directory was the Manager data root, leaving a full
+// database copy in the volume the command is about to rewrite.
+func TestMigrateOperationStoreRefusesASnapshotInsideTheStoreRoot(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	databasePath := filepath.Join(fixture.targetRoot, databaseFileName)
+	before, err := fileContentDigest(databasePath)
+	if err != nil {
+		t.Fatalf("digest the store: %v", err)
+	}
+	t.Setenv("TMPDIR", fixture.targetRoot)
+	err = MigrateOperationStore(context.Background(), databasePath)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+		t.Fatalf("migrate with TMPDIR inside the store root = %v (code %q), want %v", err, code, UpgradeErrorSnapshotFailed)
+	}
+	after, err := fileContentDigest(databasePath)
+	if err != nil {
+		t.Fatalf("re-digest the store: %v", err)
+	}
+	if before != after {
+		t.Fatal("a refused migrate rewrote the store")
+	}
+	entries, err := os.ReadDir(fixture.targetRoot)
+	if err != nil {
+		t.Fatalf("read the store root: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), snapshotDirPrefix) {
+			t.Fatalf("a refused migrate left its snapshot in the store root: %s", entry.Name())
+		}
+	}
+}
+
 // TestPrepareRollbackRefusesToBackfillUnderAHeldV2Lock is the second half of M3:
 // the binding writes the row, so it needs the same lock as the verdict.
 func TestPrepareRollbackRefusesToBackfillUnderAHeldV2Lock(t *testing.T) {

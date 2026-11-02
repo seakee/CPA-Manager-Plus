@@ -89,6 +89,12 @@ const (
 	// the address the operator named, so it was not stopped before the plan was
 	// derived. Nothing was written.
 	UpgradeErrorRollbackV2Running UpgradeErrorCode = "upgrade_rollback_v2_running"
+	// UpgradeErrorSnapshotFailed reports that a private snapshot could not be
+	// created, or would have to be created inside a root this operation must not
+	// write to. The snapshot copies the whole database, so a scratch directory
+	// under the 1.x source or the Manager data root is refused before a directory
+	// is made; nothing was written.
+	UpgradeErrorSnapshotFailed UpgradeErrorCode = "upgrade_snapshot_failed"
 	// UpgradeErrorStoreSchemaOutdated reports that the Manager store predates the
 	// current build's upgrade table, so its operation row cannot be read without
 	// the columns a writable open adds. It also reports the related row a writable
@@ -153,6 +159,7 @@ var (
 	ErrRollbackPortCollision = &UpgradeError{Code: UpgradeErrorRollbackPortCollision}
 	ErrRollbackPortBusy      = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
 	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
+	ErrSnapshotScratch       = &UpgradeError{Code: UpgradeErrorSnapshotFailed}
 	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
 	ErrStoreLocked           = &UpgradeError{Code: UpgradeErrorStoreLocked}
 	ErrMigrateNotCopiedIn    = &UpgradeError{Code: UpgradeErrorMigrateNotCopiedIn}

@@ -339,6 +339,13 @@ func MigrateOperationStore(ctx context.Context, databasePath string) error {
 // product of an Upgrade copy-in. The snapshot is a copy, so a store this build
 // must not open still answers the question with its bytes unchanged.
 func requireCopiedInStore(ctx context.Context, databasePath string) error {
+	// The proof reads a private copy of the database, so it must not write that
+	// copy back into the Manager data root it is measuring. A default TMPDIR
+	// inside that volume is refused before a directory is made.
+	if err := ValidateScratchDir("", "", filepath.Dir(databasePath)); err != nil {
+		return newUpgradeError(UpgradeErrorSnapshotFailed,
+			"the private snapshot of the Manager store would be created inside the Manager data root; point TMPDIR at a directory on a separate volume and run `upgrade migrate` again", err)
+	}
 	snapshot, err := OpenSnapshot(ctx, databasePath, "")
 	if err != nil {
 		return fmt.Errorf("read the Manager store before migrating it: %w", err)

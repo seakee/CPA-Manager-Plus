@@ -1438,11 +1438,23 @@ func verifyRollbackInstall(ctx context.Context, sourceRoot, bundleDir string, re
 			"the retained rows of the backup snapshot cannot be counted", err)
 	}
 
+	// The live database is read through a private copy, so the copy must land
+	// somewhere the 1.x volume never sees. A default TMPDIR inside the source
+	// tree would write the whole database back into it; refuse before a directory
+	// is made and say why, instead of blaming v1 writes.
+	if err := ValidateScratchDir("", sourceRoot, ""); err != nil {
+		return newUpgradeError(UpgradeErrorSnapshotFailed,
+			"the private snapshot of the live 1.x database would be created inside the 1.x source root, which this operation never writes; point TMPDIR at a directory on a separate volume and record the verdict again", err)
+	}
 	liveSnapshot, err := OpenSnapshotWithRetry(ctx, OpenSnapshot, filepath.Join(sourceRoot, databaseFileName), "")
 	if liveSnapshot != nil {
 		defer func() { _ = liveSnapshot.Close() }()
 	}
 	if err != nil {
+		if errors.Is(err, ErrSnapshotFailed) {
+			return newUpgradeError(UpgradeErrorSnapshotFailed,
+				"the private snapshot of the live 1.x database could not be created, so the retained rows cannot be counted", err)
+		}
 		return newUpgradeError(UpgradeErrorRollbackUnproven,
 			"the live 1.x database could not be read through a private snapshot, so the retained rows cannot be counted; v1 may still be writing, so record the verdict again", err)
 	}
