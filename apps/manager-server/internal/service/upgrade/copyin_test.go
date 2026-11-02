@@ -1347,3 +1347,140 @@ func TestCopyInCleansUpASurvivingMarkerOnceTheRecordIsCommitted(t *testing.T) {
 		t.Fatal("the rerun replaced the committed database instead of adopting it")
 	}
 }
+
+// TestCopyInAdmissionBeforeResumeKeepsTheLiveWALTargetResumable is the H2
+// regression. Startup admission used to read the operation row from the copied
+// store before it looked at the provenance marker. In the crash window this
+// test reproduces — every member renamed into the v2 layout, the migrating
+// marker not yet published — that read joined the copied WAL and rewrote
+// usage.sqlite-shm, so the resumed move no longer found the sidecar it had
+// restored and refused to continue. Admission now decides the materializing
+// phase from the marker alone and never opens the unadopted target.
+func TestCopyInAdmissionBeforeResumeKeepsTheLiveWALTargetResumable(t *testing.T) {
+	for _, phase := range []string{copyinmarker.PhaseMaterializing, copyinmarker.PhaseMigrating} {
+		t.Run(phase, func(t *testing.T) {
+			volume := newLegacyVolume(t)
+			startLiveWalSource(t, volume)
+			targetRoot := canonicalTempDir(t)
+			options := copyInOptions(volume, targetRoot)
+			options.Lock = volume.lock(t)
+			injected := errors.New("injected interruption after the members were moved")
+			options.checkpoint = func(current string) error {
+				if current == "target-restored" {
+					return injected
+				}
+				return nil
+			}
+			if _, err := CopyIn(context.Background(), options); !errors.Is(err, injected) {
+				t.Fatalf("interrupted copy in = %v, want the injected error", err)
+			}
+			// The bytes are exactly what the interrupted run moved. The
+			// materializing case sets only the phase back to the state the last
+			// rename left behind, because no checkpoint runs between that
+			// rename and the migrating publication.
+			marker, found, err := copyinmarker.Read(targetRoot)
+			if err != nil || !found {
+				t.Fatalf("the interrupted run left no marker: found=%t err=%v", found, err)
+			}
+			if marker.Phase != copyinmarker.PhaseMigrating {
+				t.Fatalf("interrupted marker phase = %q, want %q", marker.Phase, copyinmarker.PhaseMigrating)
+			}
+			if phase == copyinmarker.PhaseMaterializing {
+				marker.Phase = phase
+				marker.TargetDatabaseIdentity = copyinmarker.FileIdentity{}
+				if err := copyinmarker.Write(targetRoot, marker); err != nil {
+					t.Fatalf("write the materializing marker: %v", err)
+				}
+			}
+
+			before := databaseDigests(t, targetRoot)
+			if before[databaseFileName+"-shm"] == "" {
+				t.Fatalf("the interrupted run restored no WAL index: %v", before)
+			}
+			stage, admissionErr := (legacypreflight.DatabaseUpgradeAdmission{
+				DatabasePath: filepath.Join(targetRoot, databaseFileName),
+			}).Admitted(context.Background())
+			if admissionErr != nil || stage != legacypreflight.UpgradeStageInProgress {
+				t.Fatalf("admission before the resume = %q/%v, want %q", stage, admissionErr, legacypreflight.UpgradeStageInProgress)
+			}
+			after := databaseDigests(t, targetRoot)
+			if after[databaseFileName] != before[databaseFileName] {
+				t.Fatalf("admission rewrote the copied database: %q -> %q", before[databaseFileName], after[databaseFileName])
+			}
+			admissionRewroteTarget := phase == copyinmarker.PhaseMaterializing && !reflect.DeepEqual(before, after)
+
+			options.checkpoint = nil
+			result, err := CopyIn(context.Background(), options)
+			if err != nil {
+				// The recorded symptom, reported together with its cause so the
+				// regression is recognizable: admission's WAL-sensitive read
+				// rewrote the sidecar the resumed move compares with the backup.
+				t.Fatalf("resume after admission = %v (admission rewrote the unadopted target: %t)", err, admissionRewroteTarget)
+			}
+			if admissionRewroteTarget {
+				t.Fatalf("admission rewrote the unadopted target: %v -> %v", before, after)
+			}
+			if result.Stage != model.UpgradeStageCopyIn {
+				t.Fatalf("resumed stage = %q, want %q", result.Stage, model.UpgradeStageCopyIn)
+			}
+			assertMigratedStore(t, result.TargetDatabase)
+		})
+	}
+}
+
+// TestCopyInRefusesAHeldV2DataRoot is the shared-target regression. The copy-in
+// used to take only the 1.x source fence, so it created, restored, migrated and
+// recorded inside a v2 data root that another Manager process owned; the real
+// CLI did exactly that under a held target lock. The service now takes the
+// target's own process lock before its first write, so two writers cannot share
+// the root and the refusal is typed, leaves the root untouched and reports exit
+// 1 with a code instead of a generic failure.
+func TestCopyInRefusesAHeldV2DataRoot(t *testing.T) {
+	targetRoot := canonicalTempDir(t)
+	owner, err := processlock.Acquire(filepath.Join(targetRoot, databaseFileName))
+	if err != nil {
+		t.Fatalf("take the v2 data root fence: %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+
+	first := newLegacyVolume(t)
+	second := newLegacyVolume(t)
+	if reflect.DeepEqual(fingerprintTree(t, first.root), fingerprintTree(t, second.root)) {
+		t.Fatal("the two sources are the same volume, so the shared-target case proves nothing")
+	}
+	firstLock := first.lock(t)
+	secondLock := second.lock(t)
+	for _, attempt := range []struct {
+		volume legacyVolume
+		lock   *processlock.Lock
+	}{{first, firstLock}, {second, secondLock}} {
+		options := copyInOptions(attempt.volume, targetRoot)
+		options.Lock = attempt.lock
+		before := fingerprintTree(t, targetRoot)
+		_, err := CopyIn(context.Background(), options)
+		if !errors.Is(err, ErrV2Running) {
+			t.Fatalf("copy-in into a held v2 data root = %v, want %s", err, ErrV2Running)
+		}
+		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorV2Running {
+			t.Fatalf("copy-in error code = %q/%t, want %s", code, ok, UpgradeErrorV2Running)
+		}
+		assertTreeUnchanged(t, "held v2 data root", before, fingerprintTree(t, targetRoot))
+		for _, absent := range []string{databaseFileName, DefaultBundleDirectory(targetRoot)} {
+			if _, statErr := os.Lstat(filepath.Join(targetRoot, absent)); !os.IsNotExist(statErr) {
+				t.Fatalf("a refused copy-in wrote %s (err=%v)", absent, statErr)
+			}
+		}
+	}
+
+	// The same run succeeds once the other owner releases the fence: the refusal
+	// is the lock, not a copy-in that can never write this root.
+	options := copyInOptions(second, targetRoot)
+	options.Lock = secondLock
+	if err := owner.Close(); err != nil {
+		t.Fatalf("release the v2 data root fence: %v", err)
+	}
+	if _, err := CopyIn(context.Background(), options); err != nil {
+		t.Fatalf("copy-in after the fence was released = %v", err)
+	}
+}
+
