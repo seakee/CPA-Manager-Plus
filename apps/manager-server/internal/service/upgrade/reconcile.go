@@ -92,6 +92,8 @@ const (
 	mismatchFieldLatencySamples          = "latency_samples"
 	mismatchFieldInputTokens             = "input_tokens"
 	mismatchFieldOutputTokens            = "output_tokens"
+	mismatchFieldReasoningTokens         = "reasoning_tokens"
+	mismatchFieldZeroTokenCalls          = "zero_token_calls"
 	mismatchFieldCachedTokens            = "cached_tokens"
 	mismatchFieldCacheReadTokens         = "cache_read_tokens"
 	mismatchFieldCacheCreationTokens     = "cache_creation_tokens"
@@ -635,14 +637,18 @@ type historyCellKey struct {
 }
 
 // historyCell is every value column the account history read path shows for one
-// row identity: the call count, each token class the rollout stores and the
-// latency and last-seen aggregates the analytics response carries. Two rows of
-// the same identity that trade input for output tokens change the totals of
-// nothing, so every class is compared on its own.
+// row identity: the call count, each token class the rollout stores — including
+// the reasoning split and the zero-token call count the analytics aggregate and
+// the model statistics sum — and the latency and last-seen aggregates the
+// analytics response carries. Two rows of the same identity that trade input
+// for output tokens change the totals of nothing, so every class is compared on
+// its own.
 type historyCell struct {
 	calls             int64
 	input             int64
 	output            int64
+	reasoning         int64
+	zeroTokenCalls    int64
 	cached            int64
 	cacheRead         int64
 	cacheCreation     int64
@@ -791,11 +797,11 @@ func readHistoryCells(ctx context.Context, tx *sql.Tx, revision string) (map[his
 		coalesce(pricing_model, ''), coalesce(service_tier, ''),
 		context_threshold_tokens, failed,
 		sum(calls),
-		sum(input_tokens), sum(output_tokens), sum(cached_tokens),
+		sum(input_tokens), sum(output_tokens), sum(reasoning_tokens), sum(cached_tokens),
 		sum(cache_read_tokens), sum(cache_creation_tokens),
 		sum(long_input_tokens), sum(long_output_tokens), sum(long_cached_tokens),
 		sum(long_cache_read_tokens), sum(long_cache_creation_tokens),
-		sum(total_tokens), max(last_seen_ms), sum(latency_sum_ms), sum(latency_samples)
+		sum(total_tokens), sum(zero_token_calls), max(last_seen_ms), sum(latency_sum_ms), sum(latency_samples)
 		from usage_monitoring_account_daily_rollups_v1
 		where structure_revision = ?
 		group by bucket_ms, account_snapshot, coalesce(auth_label_snapshot, ''),
@@ -818,11 +824,11 @@ func readHistoryCells(ctx context.Context, tx *sql.Tx, revision string) (map[his
 			&key.file, &key.apiKey, &key.executor, &key.model, &key.billing,
 			&key.pricing, &key.tier, &key.threshold, &key.failed,
 			&cell.calls,
-			&cell.input, &cell.output, &cell.cached,
+			&cell.input, &cell.output, &cell.reasoning, &cell.cached,
 			&cell.cacheRead, &cell.cacheCreation,
 			&cell.longInput, &cell.longOutput, &cell.longCached,
 			&cell.longCacheRead, &cell.longCacheCreation,
-			&cell.tokens, &cell.lastSeen, &cell.latencySum, &cell.latencySamples); err != nil {
+			&cell.tokens, &cell.zeroTokenCalls, &cell.lastSeen, &cell.latencySum, &cell.latencySamples); err != nil {
 			return nil, err
 		}
 		cells[key] = cell
@@ -1059,20 +1065,20 @@ var historySpec = keyedSpec[historyCellKey, historyCell]{
 	},
 	fields: []string{
 		mismatchFieldCalls,
-		mismatchFieldInputTokens, mismatchFieldOutputTokens, mismatchFieldCachedTokens,
+		mismatchFieldInputTokens, mismatchFieldOutputTokens, mismatchFieldReasoningTokens, mismatchFieldCachedTokens,
 		mismatchFieldCacheReadTokens, mismatchFieldCacheCreationTokens,
 		mismatchFieldLongInputTokens, mismatchFieldLongOutputTokens, mismatchFieldLongCachedTokens,
 		mismatchFieldLongCacheReadTokens, mismatchFieldLongCacheCreationTokens,
-		mismatchFieldTokens, mismatchFieldLastSeen, mismatchFieldLatencySum, mismatchFieldLatencySamples,
+		mismatchFieldTokens, mismatchFieldZeroTokenCalls, mismatchFieldLastSeen, mismatchFieldLatencySum, mismatchFieldLatencySamples,
 	},
 	values: func(cell historyCell) []int64 {
 		return []int64{
 			cell.calls,
-			cell.input, cell.output, cell.cached,
+			cell.input, cell.output, cell.reasoning, cell.cached,
 			cell.cacheRead, cell.cacheCreation,
 			cell.longInput, cell.longOutput, cell.longCached,
 			cell.longCacheRead, cell.longCacheCreation,
-			cell.tokens, cell.lastSeen, cell.latencySum, cell.latencySamples,
+			cell.tokens, cell.zeroTokenCalls, cell.lastSeen, cell.latencySum, cell.latencySamples,
 		}
 	},
 }

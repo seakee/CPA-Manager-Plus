@@ -1085,20 +1085,20 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 			auth_file_snapshot text, api_key_hash text, executor_type text,
 			model text, billing_model text, pricing_model text, service_tier text,
 			context_threshold_tokens integer, failed integer,
-			calls integer, input_tokens integer, output_tokens integer, cached_tokens integer,
+			calls integer, input_tokens integer, output_tokens integer, reasoning_tokens integer, cached_tokens integer,
 			cache_read_tokens integer, cache_creation_tokens integer,
 			long_input_tokens integer, long_output_tokens integer, long_cached_tokens integer,
 			long_cache_read_tokens integer, long_cache_creation_tokens integer,
-			total_tokens integer, last_seen_ms integer, latency_sum_ms integer, latency_samples integer)`,
+			total_tokens integer, zero_token_calls integer, last_seen_ms integer, latency_sum_ms integer, latency_samples integer)`,
 		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
 			(%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
 			 'file-a', null, 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
-			 0, 0, 2, 40, 60, 0, 0, 0, 0, 0, 0, 0, 0, 100, %d, 10, 2)`,
+			 0, 0, 2, 40, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, %d, 10, 2)`,
 			sqlText(fixturePricingRevision(nil)), seededDayMS, seededDayMS),
 		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
 			(%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
 			 'file-a', '', 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
-			 0, 0, 5, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 200, %d, 20, 3)`,
+			 0, 0, 5, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 200, 0, %d, 20, 3)`,
 			sqlText(fixturePricingRevision(nil)), seededDayMS, seededDayMS),
 	} {
 		if _, err := db.Exec(statement); err != nil {
@@ -1817,6 +1817,48 @@ func TestReconcileSeesTheHistoryCallsTheConsumerReports(t *testing.T) {
 		t.Fatalf("marked days = %v, want none", got)
 	}
 	assertNoScratch(t, copied.target)
+}
+
+// TestReconcileSeesTheHistoryTokenClassesTheConsumerReports reproduces review
+// F2: the account history comparison covered every token class except
+// reasoning_tokens and zero_token_calls, both of which the analytics aggregate
+// and the model statistics sum and report. Changing either one alone left every
+// compared cell equal, so reconcile certified a change the consumer shows.
+func TestReconcileSeesTheHistoryTokenClassesTheConsumerReports(t *testing.T) {
+	cases := []struct {
+		field string
+		read  func(usagemonitoring.Aggregate) int64
+	}{
+		{"reasoning_tokens", func(aggregate usagemonitoring.Aggregate) int64 { return aggregate.ReasoningTokens }},
+		{"zero_token_calls", func(aggregate usagemonitoring.Aggregate) int64 { return aggregate.ZeroTokenCalls }},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.field, func(t *testing.T) {
+			copied := newCopiedVolumeWith(t, seedHistoryOnTheStatsRevision)
+			before := historyConsumerAggregate(t, copied.databasePath())
+			execTarget(t, copied.databasePath(), fmt.Sprintf(
+				`update usage_monitoring_account_daily_rollups_v1 set %s = %s + 1`, testCase.field, testCase.field))
+			after := historyConsumerAggregate(t, copied.databasePath())
+			if testCase.read(after) != testCase.read(before)+1 {
+				t.Fatalf("consumer %s = %d after the mutation, want %d",
+					testCase.field, testCase.read(after), testCase.read(before)+1)
+			}
+
+			report, err := Reconcile(context.Background(), copied.reconcileOptions())
+			if !errors.Is(err, ErrReconcileMismatch) {
+				t.Fatalf("reconcile error = %v, want the typed mismatch", err)
+			}
+			history := domainReport(t, report, ReconcileDomainHistory)
+			if !holdsMismatch(history.Mismatches, wantedMismatch{testCase.field, "account=acct-1"}) {
+				t.Fatalf("history mismatches = %+v, want the %s difference the consumer reported",
+					history.Mismatches, testCase.field)
+			}
+			if report.Recorded {
+				t.Fatal("a measured history change recorded the operation")
+			}
+			assertNoScratch(t, copied.target)
+		})
+	}
 }
 
 // domainReport returns the one domain report with the wanted name.
