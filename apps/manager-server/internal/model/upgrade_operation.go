@@ -115,7 +115,10 @@ func ValidUpgradeDomain(domain string) bool { return upgradeDomains[domain] }
 // produced it are not recorded here: they are re-derived when the verdict is
 // written, and this value is the report of that run.
 type RollbackEvidence struct {
-	// Image is the exact 1.x image the operator started.
+	// Image is the exact 1.x reference the rollback restarted: the operator's
+	// release tag or digest when one was named, otherwise the release derived
+	// from the recorded source version. It is a description of the plan, not an
+	// observation that this image was the process the operator started.
 	Image string `json:"image"`
 	// StatusURL is the 1.x health endpoint that answered for this install.
 	StatusURL string `json:"statusUrl"`

@@ -134,7 +134,11 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	_, _ = fmt.Fprintln(w, "rollback plan:")
 	_, _ = fmt.Fprintf(w, "  stage: %s\n", plan.Stage)
 	_, _ = fmt.Fprintf(w, "  source version: %s\n", plan.SourceVersion)
-	_, _ = fmt.Fprintf(w, "  image: %s\n", plan.Image)
+	_, _ = fmt.Fprintf(w, "  image: %s (%s %s)\n", plan.Image, plan.ImageSource, plan.ImageForm)
+	if plan.ImageSource == upgradeservice.RollbackImageSourceDerived {
+		_, _ = fmt.Fprintln(w, "    derived from the recorded source version, not an image the operator named;")
+		_, _ = fmt.Fprintln(w, "    pass --legacy-image with the exact tag or digest you started to record that instead")
+	}
 	_, _ = fmt.Fprintf(w, "  volume: %s (%s)\n", plan.Volume, plan.VolumeKind)
 	_, _ = fmt.Fprintf(w, "  volume mountpoint (v1 container): %s\n", plan.VolumeMountPoint)
 	_, _ = fmt.Fprintf(w, "  published port (v1 host): %d\n", plan.Port)
@@ -166,9 +170,15 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	// The command is printed to be pasted as-is: every path is quoted, and the
 	// recorded bundle and the plan's own port are named so the verdict cannot be
 	// recorded against a different copy or endpoint.
-	verifyCommand := fmt.Sprintf("  cpa-manager-plus upgrade rollback --verify --legacy %s --target %s --backup %s --legacy-image %s --status-url %s",
+	verifyCommand := fmt.Sprintf("  cpa-manager-plus upgrade rollback --verify --legacy %s --target %s --backup %s --status-url %s",
 		strconv.Quote(plan.SourceRoot), strconv.Quote(plan.TargetRoot), strconv.Quote(plan.BackupDirectory),
-		strconv.Quote(plan.Image), strconv.Quote(upgradeservice.RollbackHealthURL(plan.Port)))
+		strconv.Quote(upgradeservice.RollbackHealthURL(plan.Port)))
+	// Only an operator-named reference is passed back as one. Repeating a derived
+	// reference as --legacy-image would record it as the image the operator
+	// started, which nobody stated.
+	if plan.ImageSource == upgradeservice.RollbackImageSourceOperator {
+		verifyCommand += " --legacy-image " + strconv.Quote(plan.Image)
+	}
 	if plan.ImageFamilyOverride {
 		verifyCommand += " --allow-image-family-mismatch"
 	}
@@ -199,7 +209,11 @@ func runRollbackVerify(ctx context.Context, stdout, stderr io.Writer, asJSON boo
 	_, _ = fmt.Fprintf(stdout, "  source fingerprint after: %s\n", operation.SourceFingerprintAfter)
 	_, _ = fmt.Fprintf(stdout, "  backup manifest sha256: %s\n", operation.BackupManifestSHA256)
 	if evidence := operation.Rollback; evidence != nil {
-		_, _ = fmt.Fprintf(stdout, "  rollback image: %s\n", evidence.Image)
+		if strings.TrimSpace(observation.Image) == "" {
+			_, _ = fmt.Fprintf(stdout, "  rollback image: %s (derived from the recorded source version; not an image the operator named)\n", evidence.Image)
+		} else {
+			_, _ = fmt.Fprintf(stdout, "  rollback image: %s (the reference the operator gave)\n", evidence.Image)
+		}
 		_, _ = fmt.Fprintf(stdout, "  rollback health endpoint: %s\n", evidence.StatusURL)
 		_, _ = fmt.Fprintf(stdout, "  observed source fingerprint: %s\n", evidence.SourceFingerprint)
 		_, _ = fmt.Fprintf(stdout, "  observed at ms: %d\n", evidence.ObservedAtMS)

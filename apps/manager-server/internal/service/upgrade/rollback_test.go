@@ -368,13 +368,13 @@ func TestPrepareRollbackRefusesAnUnpinnableImage(t *testing.T) {
 	}
 	assertNoPlan(t, fixture.targetRoot)
 
-	// A repository without a version, an empty tag, a digest reference and a
-	// partial version are all refused instead of being turned into a moving or
-	// inexact reference.
+	// A repository without a version, an empty tag, a malformed digest, a
+	// floating tag and a partial version are all refused instead of being turned
+	// into a moving or inexact reference.
 	for _, override := range []string{
 		LegacyImageRepository,
 		LegacyImageRepository + ":",
-		LegacyImageRepository + "@sha256:" + strings.Repeat("a", 64),
+		LegacyImageRepository + "@sha256:short",
 		LegacyImageRepository + ":latest",
 		"latest",
 		LegacyImageRepository + ":v1.14",
@@ -1463,4 +1463,66 @@ func TestPrepareRollbackRefusesABindMountThatIsNotTheRecordedRoot(t *testing.T) 
 		t.Fatalf("another bind source = %v, want %v", err, ErrRollbackVolumeUnbound)
 	}
 	assertNoPlan(t, fixture.targetRoot)
+}
+
+// TestPrepareRollbackRejectsAFloatingTagEvenWithTheFamilyOverride is the first
+// half of L7: the family override returned any non-latest tag unchanged, so
+// :main and :beta came back as "pinned".
+func TestPrepareRollbackRejectsAFloatingTagEvenWithTheFamilyOverride(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	for _, override := range []string{
+		LegacyImageRepository + ":main",
+		LegacyImageRepository + ":beta",
+		"registry.example.com/cpamp/cpamp:main",
+	} {
+		options := fixture.options()
+		options.TagOverride = override
+		options.AllowImageFamilyMismatch = true
+		if _, err := PrepareRollback(context.Background(), options); !errors.Is(err, ErrRollbackImageUnpinned) {
+			t.Fatalf("floating override %q = %v, want %v", override, err, ErrRollbackImageUnpinned)
+		}
+		assertNoPlan(t, fixture.targetRoot)
+	}
+}
+
+// TestPrepareRollbackAcceptsADigestAndRecordsItsForm is the second half of L7:
+// the plan asked for a digest pin while the code refused every digest; either
+// form has to be accepted and the plan has to say which one it recorded.
+func TestPrepareRollbackAcceptsADigestAndRecordsItsForm(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	digest := LegacyImageRepository + "@sha256:" + strings.Repeat("ab", 32)
+	options := fixture.options()
+	options.TagOverride = digest
+	plan, err := PrepareRollback(context.Background(), options)
+	if err != nil {
+		t.Fatalf("prepare with a digest reference: %v", err)
+	}
+	if plan.Image != digest || plan.ImageSource != RollbackImageSourceOperator || plan.ImageForm != RollbackImageFormDigest {
+		t.Fatalf("plan image = %q/%q/%q, want the operator digest", plan.Image, plan.ImageSource, plan.ImageForm)
+	}
+	if !strings.Contains(plan.ComposeFile, "image: "+digest) {
+		t.Fatalf("compose file does not pin the digest:\n%s", plan.ComposeFile)
+	}
+	// A digest is immutable, so the version-family check does not apply to it and
+	// the override flag is not needed.
+	if _, err := PrepareRollback(context.Background(), options); err != nil {
+		t.Fatalf("digest without the family override: %v", err)
+	}
+}
+
+// TestPrepareRollbackMarksADerivedImageAsDerived is the third half of L7: the
+// plan recorded a derived reference in the field that promises the image the
+// operator started.
+func TestPrepareRollbackMarksADerivedImageAsDerived(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	plan, err := PrepareRollback(context.Background(), fixture.options())
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if plan.ImageSource != RollbackImageSourceDerived || plan.ImageForm != RollbackImageFormReleaseTag {
+		t.Fatalf("plan image source = %q/%q, want a derived release tag", plan.ImageSource, plan.ImageForm)
+	}
+	if !strings.Contains(plan.IdentityStatement, "operator-verified") {
+		t.Fatalf("plan lost its identity statement: %s", plan.IdentityStatement)
+	}
 }

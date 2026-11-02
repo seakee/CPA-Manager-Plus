@@ -460,13 +460,20 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   copy-in does (`upgrade_rollback_roots_overlap`), recomputes the 1.x source
   fingerprint and refuses a difference (`upgrade_source_changed`), refuses a row
   without both fingerprints or the backup manifest digest
-  (`upgrade_rollback_unproven`), and pins the 1.x image to
-  `seakee/cpa-manager-plus:v<source_version>`. A recorded version that is not an
-  exact release, or an explicit reference that names no version — `:latest`, a
-  bare repository, an empty tag, a partial version or a `@sha256:` digest — is
-  `upgrade_rollback_image_unpinned`; an explicit release outside the recorded
-  source's version family is `upgrade_rollback_image_family` unless the operator
-  passes the family override. Refusals write nothing at all.
+  (`upgrade_rollback_unproven`), and pins the 1.x image to an exact reference.
+  Two forms are accepted: an exact release tag (`vX.Y.Z`, with or without a
+  repository prefix, derived as `seakee/cpa-manager-plus:v<source_version>` when
+  none is given) or an immutable `@sha256:` digest. Everything else — `:latest`,
+  `:main`, `:beta`, a bare repository, an empty tag, a partial version, a
+  malformed digest — is `upgrade_rollback_image_unpinned`, and the family
+  override never changes that: it only relaxes the version-family comparison of
+  an exact tag. An exact tag outside the recorded source's family is
+  `upgrade_rollback_image_family` unless the operator passes the override; a
+  digest is immutable, so no family comparison applies. The plan records
+  `imageSource` (`operator` or `derived`) and `imageForm` (`release-tag` or
+  `digest`), and the printed verify command passes `--legacy-image` back only
+  when the operator named it, so a derived reference is never recorded as the
+  image the operator started. Refusals write nothing at all.
 - **A row without a source root is bound once, not sent back to the copy-in.**
   When the row names no 1.x directory (a row written before the column existed),
   the plan compares the directory under decision with the before-fingerprint the

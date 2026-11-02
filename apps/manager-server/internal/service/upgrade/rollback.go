@@ -106,6 +106,34 @@ const (
 // cannot name a volume, so it is refused instead of being turned into one.
 var composeProjectPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 
+// rollbackImage is the exact 1.x reference a rollback restarts, and where it
+// came from: the operator named it, or it was derived from the recorded source
+// version. The distinction is recorded because only an operator reference is a
+// statement about the image that was started.
+type rollbackImageReference struct {
+	Reference string
+	Source    string
+	Form      string
+}
+
+// RollbackImageSourceOperator / RollbackImageSourceDerived say who chose the
+// image reference; RollbackImageFormReleaseTag / RollbackImageFormDigest say
+// which accepted form it is.
+const (
+	RollbackImageSourceOperator = "operator"
+	RollbackImageSourceDerived  = "derived"
+	RollbackImageFormReleaseTag = "release-tag"
+	RollbackImageFormDigest     = "digest"
+)
+
+// releaseTagPattern is the only tag a rollback accepts: an exact vX.Y.Z release
+// with no suffix. A floating tag (:main, :beta, :latest) never matches.
+var releaseTagPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+
+// digestReferencePattern is the other accepted form: a repository pinned to an
+// immutable sha256 digest.
+var digestReferencePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(?::[0-9]+)?@sha256:[0-9a-f]{64}$`)
+
 // dockerVolumeNamePattern is the Docker volume name alphabet: a 1.x install run
 // with `docker run -v` uses the unprefixed `cpa-manager-plus-data`.
 var dockerVolumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
@@ -168,7 +196,13 @@ type Plan struct {
 	// was derived from. The volume claim rests on it.
 	SourceRoot    string `json:"sourceRoot"`
 	SourceVersion string `json:"sourceVersion"`
-	Image         string `json:"image"`
+	Image string `json:"image"`
+	// ImageSource is "operator" when the operator named the reference and
+	// "derived" when it was derived from the recorded source version; ImageForm
+	// is "release-tag" or "digest". A derived reference is never presented as the
+	// image the operator started.
+	ImageSource string `json:"imageSource"`
+	ImageForm   string `json:"imageForm"`
 	// ImageFamilyOverride records that the plan pins a release outside the
 	// recorded source's family because the operator asked for it, so the verify
 	// command printed with the plan stays exact.
@@ -318,7 +352,9 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		TargetRoot:          targetRoot,
 		SourceRoot:          recorded.SourceRoot,
 		SourceVersion:       recorded.SourceVersion,
-		Image:               image,
+		Image:               image.Reference,
+		ImageSource:         image.Source,
+		ImageForm:           image.Form,
 		ImageFamilyOverride: options.AllowImageFamilyMismatch,
 		Volume:              volume,
 		VolumeKind:          volumeKind,
@@ -327,12 +363,12 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 		ComposeService:      LegacyComposeService,
 		ComposeInvocation: fmt.Sprintf("docker compose -p %s -f - up -d %s",
 			project, LegacyComposeService),
-		ComposeFile:          rollbackComposeFile(image, volume, volumeKind, port),
+		ComposeFile:          rollbackComposeFile(image.Reference, volume, volumeKind, port),
 		Port:                 port,
 		ManagerPort:          managerAddressPort(options.ManagerAddress),
 		ManagerAddress:       strings.TrimSpace(options.ManagerAddress),
 		BackupDirectory:      bundleDir,
-		Preconditions:        rollbackPreconditions(project, volume, volumeKind, image, recorded.SourceRoot, bundleDir, port, managerAddressPort(options.ManagerAddress)),
+		Preconditions:        rollbackPreconditions(project, volume, volumeKind, image.Reference, recorded.SourceRoot, bundleDir, port, managerAddressPort(options.ManagerAddress)),
 		IdentityProof:        RollbackIdentityOperatorVerified,
 		IdentityStatement:    rollbackIdentityStatement,
 		HealthChecks:         rollbackHealthChecks(port),
@@ -656,75 +692,69 @@ func localAddressHosts() map[string]bool {
 	return hosts
 }
 
-// rollbackImage resolves the exact 1.x release to pin. An explicit reference
-// must name a full release, and unless the caller overrides it that release must
-// belong to the recorded source's version family: a rollback restarts the
-// version the operation copied, not an adjacent one.
-func rollbackImage(recorded model.UpgradeOperation, override string, allowFamilyMismatch bool) (string, error) {
-	sourceRelease, sourceErr := parseRelease(recorded.SourceVersion)
-	sourceOK := sourceErr == nil
-	image, err := rollbackImageReference(override, sourceOK, recorded.SourceVersion)
-	if err != nil {
-		return "", err
+// rollbackImage resolves the exact 1.x reference to pin. A rollback accepts two
+// forms only: an immutable digest (repo@sha256:<64 hex>) or an exact release tag
+// (vX.Y.Z, with any registry/repository prefix). Every other reference — a
+// floating tag such as :latest, :main or :beta, a partial version, a bare
+// repository — is refused, and the family override never bypasses that: it only
+// relaxes the version-family comparison of an exact tag. Without an override the
+// reference is derived from the recorded source version; the plan records that
+// it was derived, so a derived reference is never presented as the image the
+// operator started.
+func rollbackImage(recorded model.UpgradeOperation, override string, allowFamilyMismatch bool) (rollbackImageReference, error) {
+	trimmed := strings.TrimSpace(override)
+	if trimmed == "" {
+		if _, err := parseRelease(recorded.SourceVersion); err != nil {
+			return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+				"the recorded source version is not an exact vX.Y.Z release, so no 1.x image can be pinned; pass --legacy-image with an exact release tag or an @sha256 digest", nil)
+		}
+		return rollbackImageReference{
+			Reference: LegacyImageRepository + ":v" + strings.TrimPrefix(strings.TrimSpace(recorded.SourceVersion), "v"),
+			Source:    RollbackImageSourceDerived,
+			Form:      RollbackImageFormReleaseTag,
+		}, nil
 	}
-	if allowFamilyMismatch {
-		return image, nil
+	if strings.Contains(trimmed, "@") {
+		if !digestReferencePattern.MatchString(trimmed) {
+			return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+				"a rollback accepts a digest only as <repository>@sha256:<64 lowercase hex characters>; the reference given is not that form", nil)
+		}
+		// A digest names immutable bytes, so there is no moving tag to refuse and
+		// no version family to compare.
+		return rollbackImageReference{Reference: trimmed, Source: RollbackImageSourceOperator, Form: RollbackImageFormDigest}, nil
 	}
-	tag := imageTag(image)
-	targetRelease, targetErr := parseRelease(tag)
-	if targetErr != nil {
-		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-			"the 1.x image reference does not name an exact release, so it cannot be pinned", nil)
-	}
-	if !sourceOK {
-		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-			"the recorded source version is not an exact release, so no 1.x image can be pinned", nil)
-	}
-	if releaseFamily(targetRelease) != releaseFamily(sourceRelease) {
-		return "", newUpgradeError(UpgradeErrorRollbackImageFamily,
-			fmt.Sprintf("the 1.x image names release family %s but the operation copied %s; pass the family override only after confirming the v1 data is readable by that release",
-				releaseFamilyText(targetRelease), releaseFamilyText(sourceRelease)), nil)
-	}
-	return image, nil
-}
-
-// rollbackImageReference turns the operator's reference or the recorded version
-// into a pinned image. A moving tag, an empty tag and a digest-only reference
-// are refused rather than turned into a reference the operator did not ask for.
-func rollbackImageReference(override string, sourceOK bool, sourceVersion string) (string, error) {
-	tag := strings.TrimSpace(override)
+	reference := trimmed
+	tag := imageTag(reference)
 	if tag == "" {
-		if !sourceOK {
-			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+		if !releaseTagPattern.MatchString(reference) {
+			return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+				"the 1.x image reference names no exact release tag; pass <repository>:vX.Y.Z, vX.Y.Z, or an @sha256 digest", nil)
+		}
+		tag = reference
+		reference = LegacyImageRepository + ":" + tag
+	}
+	if !releaseTagPattern.MatchString(tag) {
+		return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+			fmt.Sprintf("a rollback pins an exact vX.Y.Z release tag or an @sha256 digest; %q is a moving, partial or non-release tag", tag), nil)
+	}
+	targetRelease, err := parseRelease(tag)
+	if err != nil {
+		return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+			"the 1.x image reference does not name an exact release, so it cannot be pinned", err)
+	}
+	if !allowFamilyMismatch {
+		sourceRelease, err := parseRelease(recorded.SourceVersion)
+		if err != nil {
+			return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
 				"the recorded source version is not an exact release, so no 1.x image can be pinned", nil)
 		}
-		return LegacyImageRepository + ":v" + strings.TrimPrefix(strings.TrimSpace(sourceVersion), "v"), nil
-	}
-	if tag == "latest" || strings.HasSuffix(tag, ":latest") {
-		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-			"a rollback may not pin a moving tag; pass an exact version", nil)
-	}
-	if strings.Contains(tag, "@") {
-		return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-			"a rollback pins a published version tag, not a digest reference", nil)
-	}
-	if strings.HasPrefix(tag, LegacyImageRepository+":") {
-		if imageTag(tag) == "" {
-			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-				"the 1.x image reference names an empty tag; pass an exact version", nil)
+		if releaseFamily(targetRelease) != releaseFamily(sourceRelease) {
+			return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageFamily,
+				fmt.Sprintf("the 1.x image names release family %s but the operation copied %s; pass the family override only after confirming the v1 data is readable by that release",
+					releaseFamilyText(targetRelease), releaseFamilyText(sourceRelease)), nil)
 		}
-		return tag, nil
 	}
-	// A reference that names a repository (a slash) without a tag of its own is
-	// a floating reference, not a version.
-	if strings.Contains(tag, "/") {
-		if imageTag(tag) == "" {
-			return "", newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-				"the 1.x image reference names no version tag; pass an exact version", nil)
-		}
-		return tag, nil
-	}
-	return LegacyImageRepository + ":" + tag, nil
+	return rollbackImageReference{Reference: reference, Source: RollbackImageSourceOperator, Form: RollbackImageFormReleaseTag}, nil
 }
 
 // imageTag returns the tag of a reference, or "" when it names none.
@@ -1022,7 +1052,7 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 		return model.UpgradeOperation{}, err
 	}
 	advanced, err := upgradeoperation.New(db).RecordRollback(ctx, model.RollbackEvidence{
-		Image:             image,
+		Image:             image.Reference,
 		StatusURL:         health.URL,
 		SourceFingerprint: liveFingerprint.Digest,
 		ObservedAtMS:      observedAtMS,
