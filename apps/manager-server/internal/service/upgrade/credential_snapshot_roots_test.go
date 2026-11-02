@@ -143,3 +143,32 @@ func TestVerifyManagerCredentialRefusesSnapshotWithoutAResolvedSourceRoot(t *tes
 	}
 	requireUnchangedSource(t, before, sourceEntries(t, targetRoot))
 }
+
+// TestVerifyManagerCredentialRefusesSnapshotUnderTheFilesystemSourceRoot is the
+// filesystem-root boundary of the same rule. "/" is the canonical parent of every
+// absolute path, and every scratch directory — the operating system's temporary
+// directory included — therefore lies inside a source root configured as "/".
+// The containment check used to build its prefix by appending a separator, which
+// turned the root into "//" and reported every descendant as outside it; the
+// whole database copy then landed inside the tree the operation promises to
+// preserve. The refusal must happen before anything is staged.
+func TestVerifyManagerCredentialRefusesSnapshotUnderTheFilesystemSourceRoot(t *testing.T) {
+	const key = "filesystem-root-credential"
+	targetRoot, target := materializingCredentialTarget(t, key)
+	scratch := t.TempDir()
+	before := sourceEntries(t, targetRoot)
+	t.Setenv("TMPDIR", scratch)
+
+	err := VerifyManagerCredential(context.Background(), target, CredentialSnapshotRoots{
+		Target:      targetRoot,
+		Source:      string(filepath.Separator),
+		SourceKnown: true,
+	}, key)
+	if !errors.Is(err, ErrSnapshotFailed) {
+		t.Fatalf("source root %q = %v, want %s", string(filepath.Separator), err, ErrSnapshotFailed)
+	}
+	if names := snapshotDirsIn(t, scratch); len(names) != 0 {
+		t.Fatalf("the refused read staged %v beneath the filesystem source root", names)
+	}
+	requireUnchangedSource(t, before, sourceEntries(t, targetRoot))
+}

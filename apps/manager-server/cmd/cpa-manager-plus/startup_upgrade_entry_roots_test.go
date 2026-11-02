@@ -169,3 +169,58 @@ func TestStartupEntrySnapshotStaysOutsideConfiguredSourceRoot(t *testing.T) {
 		}
 	}
 }
+
+// TestStartupEntryRefusesSnapshotUnderTheFilesystemSourceRoot is the real
+// startup path of the same boundary. CPAMP_LEGACY_ROOT=/ is accepted by the
+// configuration and resolves to a mount that holds no database the shared file
+// policy accepts, so the entry falls back to the Manager store — but "/" is still
+// the tree a recording operation preserves, and every absolute scratch directory
+// lies inside it. The containment check used to turn that root into "//", miss
+// every descendant, and stage the whole database copy beneath the source root
+// while the entry answered authenticated. The entry must instead refuse the
+// private copy, leave no cpamp-* directory behind, and keep the materializing
+// target's three members byte for byte.
+func TestStartupEntryRefusesSnapshotUnderTheFilesystemSourceRoot(t *testing.T) {
+	const key = "entry-filesystem-root-credential"
+	_, paths := upgradeAuthSource(t, key)
+	target, before := materializingManagerStore(t, paths.Database)
+
+	root := string(filepath.Separator)
+	if _, err := os.Lstat(filepath.Join(root, "usage.sqlite")); !os.IsNotExist(err) {
+		t.Skipf("the host already has %s, so %q is not the absent mount this test needs", filepath.Join(root, "usage.sqlite"), root)
+	}
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	t.Setenv(legacyRootEnvironment, root)
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(legacypreflight.DefaultPaths(target), legacypreflight.Options{}, 5*time.Second)
+	if h.upgradeAuth == nil {
+		t.Fatal("the Upgrade entry was not mounted")
+	}
+
+	watch := watchSnapshots(t, scratch)
+	r := httptest.NewRequest(http.MethodPost, upgradeauth.Path, nil)
+	r.Host = "manager.test"
+	r.Header.Set("Authorization", "Bearer "+key)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	names := watch()
+	t.Logf("CPAMP_LEGACY_ROOT=%s entry=%d body=%s snapshots beneath source root=%v", root, w.Code, w.Body.String(), names)
+
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), `"source_unavailable"`) {
+		t.Fatalf("entry answered %d: %s", w.Code, w.Body.String())
+	}
+	if len(names) != 0 {
+		t.Fatalf("the entry staged %v beneath the filesystem source root", names)
+	}
+	for suffix, digest := range before {
+		data, err := os.ReadFile(target + suffix)
+		if err != nil {
+			t.Fatalf("read target member %q: %v", suffix, err)
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != digest {
+			t.Fatalf("the refused entry read rewrote the target member %q", suffix)
+		}
+	}
+}

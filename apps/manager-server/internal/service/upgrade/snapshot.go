@@ -179,11 +179,25 @@ func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) 
 
 // pathWithin reports whether child is parent itself or lies underneath it. Both
 // paths must already be canonical.
+//
+// The separator is added only when the parent does not already end in one. The
+// filesystem root is a parent of every absolute path, and appending a separator
+// to "/" would build the "//" prefix that no cleaned path starts with — so an
+// operator who set the source root to "/" (or to any aliased spelling of it)
+// would pass the exclusion check and stage the whole database copy inside that
+// root. A parent with a trailing separator, such as "/a/", names the same tree
+// as "/a" and is handled by cleaning both sides first.
 func pathWithin(child string, parent string) bool {
+	child = filepath.Clean(child)
+	parent = filepath.Clean(parent)
 	if child == parent {
 		return true
 	}
-	return strings.HasPrefix(child, parent+string(filepath.Separator))
+	prefix := parent
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	return strings.HasPrefix(child, prefix)
 }
 
 // canonicalPath makes a path absolute and resolves the symlinks of the deepest
