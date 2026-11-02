@@ -459,9 +459,14 @@ func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (m
 	}
 	now := time.Now().UnixMilli()
 	current.SourceRoot = sourceRoot
-	current.UpdatedAtMS = now
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
+	}
+	// Validate the row this transaction is about to persist: the clock above is
+	// rewritten here, and a row whose stored clock ran ahead must stay readable.
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
 	if _, err := tx.ExecContext(ctx, `update `+tableName+`
 		set source_root = ?, updated_at_ms = ? where id = 1`,
@@ -522,9 +527,14 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 	}
 	current.Stage = model.UpgradeStageRolledBack
 	current.Rollback = &evidence
-	current.UpdatedAtMS = now
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
+	}
+	// Validate the row this transaction is about to persist, not just the
+	// caller's evidence: the clock above is rewritten here.
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
 	if _, err := tx.ExecContext(ctx, `update `+tableName+`
 		set stage = ?, rollback_image = ?, rollback_status_url = ?,

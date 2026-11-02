@@ -786,3 +786,67 @@ func TestGetReportsATerminalRowWithoutEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestRecordRollbackKeepsAFutureDatedRowReadable is the regression for M4 at the
+// verdict writer: updated_at_ms was stamped from the wall clock, so a row whose
+// clock ran ahead (or was restored from a later backup) was written with
+// updated_at_ms below created_at_ms and every later reader rejected it.
+func TestRecordRollbackKeepsAFutureDatedRowReadable(t *testing.T) {
+	repository, db := newRepository(t)
+	ctx := context.Background()
+	future := time.Now().Add(time.Hour).UnixMilli()
+	if _, err := db.ExecContext(ctx, `insert into upgrade_operations
+		(id, stage, domains_done, reconciliation, manual_items, source_kind, source_version,
+		 source_root, source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
+		 created_at_ms, updated_at_ms)
+		values (1, ?, '[]', '{}', '[]', 'upgraded-legacy', 'v1.14.7', '/srv/cpamp/data',
+		 'before', 'after', 'manifest', ?, ?)`,
+		string(model.UpgradeStageCopyIn), future, future); err != nil {
+		t.Fatalf("seed a future-dated row: %v", err)
+	}
+	recorded, err := repository.RecordRollback(ctx, rollbackEvidence())
+	if err != nil {
+		t.Fatalf("record a verdict on a future-dated row: %v", err)
+	}
+	if recorded.UpdatedAtMS < future {
+		t.Fatalf("updated_at_ms = %d moved before the stored %d", recorded.UpdatedAtMS, future)
+	}
+	stored, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("read the verdict back: found=%t err=%v", found, err)
+	}
+	if stored.Stage != model.UpgradeStageRolledBack || stored.Rollback == nil {
+		t.Fatalf("stored row = %+v, want the verdict with evidence", stored)
+	}
+	if stored.UpdatedAtMS < stored.CreatedAtMS {
+		t.Fatalf("updated_at_ms = %d is before created_at_ms = %d", stored.UpdatedAtMS, stored.CreatedAtMS)
+	}
+}
+
+// TestRecordSourceRootKeepsAFutureDatedRowReadable is the same invariant at the
+// backfill writer.
+func TestRecordSourceRootKeepsAFutureDatedRowReadable(t *testing.T) {
+	repository, db := newRepository(t)
+	ctx := context.Background()
+	future := time.Now().Add(time.Hour).UnixMilli()
+	if _, err := db.ExecContext(ctx, `insert into upgrade_operations
+		(id, stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+		values (1, ?, '[]', '{}', '[]', ?, ?)`,
+		string(model.UpgradeStageCopyIn), future, future); err != nil {
+		t.Fatalf("seed a future-dated row: %v", err)
+	}
+	backfilled, err := repository.RecordSourceRoot(ctx, "/srv/cpamp/data")
+	if err != nil {
+		t.Fatalf("backfill a future-dated row: %v", err)
+	}
+	if backfilled.UpdatedAtMS < future {
+		t.Fatalf("updated_at_ms = %d moved before the stored %d", backfilled.UpdatedAtMS, future)
+	}
+	stored, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("read the backfilled row: found=%t err=%v", found, err)
+	}
+	if stored.SourceRoot != "/srv/cpamp/data" || stored.UpdatedAtMS < stored.CreatedAtMS {
+		t.Fatalf("stored row = %+v", stored)
+	}
+}
