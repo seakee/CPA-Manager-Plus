@@ -40,6 +40,7 @@ type MonitoringFiltersPanelProps = {
 };
 
 const TIME_RANGE_OPTIONS: Array<{ value: MonitoringTimeRange; labelKey: string }> = [
+  { value: '24h', labelKey: 'monitoring.range_24h' },
   { value: 'today', labelKey: 'monitoring.range_today' },
   { value: 'yesterday', labelKey: 'monitoring.range_yesterday' },
   { value: '7d', labelKey: 'monitoring.range_7d' },

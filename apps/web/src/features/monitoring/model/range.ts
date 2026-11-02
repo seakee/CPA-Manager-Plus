@@ -1,5 +1,14 @@
 import type { MonitoringCustomTimeRange, MonitoringTimeRange } from './types';
 
+export const HOUR_MS = 60 * 60 * 1000;
+
+// Subtract the local minute portion instead of mutating Date: setMinutes can
+// jump back to the first occurrence of a repeated hour at a DST transition.
+export const startOfLocalHourMs = (nowMs: number) => {
+  const now = new Date(nowMs);
+  return nowMs - now.getMinutes() * 60_000 - now.getSeconds() * 1000 - now.getMilliseconds();
+};
+
 export const padNumber = (value: number) => String(value).padStart(2, '0');
 
 export const buildLocalDayKey = (timestampMs: number) => {
@@ -9,6 +18,11 @@ export const buildLocalDayKey = (timestampMs: number) => {
 
 export const buildHourLabel = (timestampMs: number) =>
   `${padNumber(new Date(timestampMs).getHours())}:00`;
+
+export const formatHourOffset = (timestampMs: number) => {
+  const offset = -new Date(timestampMs).getTimezoneOffset();
+  return `${offset >= 0 ? '+' : '-'}${padNumber(Math.floor(Math.abs(offset) / 60))}:${padNumber(Math.abs(offset) % 60)}`;
+};
 
 export const buildDayLabel = (dayKey: string) => dayKey.slice(5).replace('-', '/');
 
@@ -29,9 +43,9 @@ const isValidCustomTimeRange = (
 ): range is MonitoringCustomTimeRange =>
   Boolean(
     range &&
-      Number.isFinite(range.startMs) &&
-      Number.isFinite(range.endMs) &&
-      range.startMs <= range.endMs
+    Number.isFinite(range.startMs) &&
+    Number.isFinite(range.endMs) &&
+    range.startMs <= range.endMs
   );
 
 export const getRangeBounds = (
@@ -48,6 +62,10 @@ export const getRangeBounds = (
   const todayStart = startOfTodayMs(nowMs);
 
   switch (range) {
+    case '24h': {
+      const startMs = startOfLocalHourMs(nowMs) - 24 * HOUR_MS;
+      return { startMs, endMs: nowMs };
+    }
     case 'today':
       return { startMs: todayStart, endMs: nowMs };
     case 'yesterday':
@@ -64,11 +82,19 @@ export const getRangeBounds = (
   }
 };
 
+// Display the last included instant, without altering the API's exclusive end.
+export const getRangeDisplayBounds = (
+  range: MonitoringTimeRange,
+  bounds: MonitoringCustomTimeRange | null
+) => (bounds && range === 'yesterday' ? { ...bounds, endMs: bounds.endMs - 1 } : bounds);
+
 export const shouldUseHourlyTimeline = (
   range: MonitoringTimeRange,
   customRange?: MonitoringCustomTimeRange | null
 ) =>
-  (range === 'today' || range === 'yesterday') ||
+  range === '24h' ||
+  range === 'today' ||
+  range === 'yesterday' ||
   (range === 'custom' &&
     isValidCustomTimeRange(customRange) &&
     buildLocalDayKey(customRange.startMs) === buildLocalDayKey(customRange.endMs));
