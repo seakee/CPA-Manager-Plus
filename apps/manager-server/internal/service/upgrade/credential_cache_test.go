@@ -157,14 +157,14 @@ func TestCredentialCacheRunsOneVerificationForConcurrentRequests(t *testing.T) {
 }
 
 // TestCredentialCacheCompletesAFlightThatPanics proves a panicking read cannot
-// wedge the cache: the flight is removed, the panic is not remembered as a
-// success, and the next request verifies normally.
+// wedge the cache: the shared work is recovered, the flight is removed, the
+// panic is not remembered as a success, and the next request verifies normally.
 func TestCredentialCacheCompletesAFlightThatPanics(t *testing.T) {
 	cache := newCredentialCache()
-	func() {
-		defer func() { _ = recover() }()
-		_ = cache.verify(context.Background(), "panics", func() error { panic("the read exploded") })
-	}()
+	err := cache.verify(context.Background(), "panics", func() error { panic("the read exploded") })
+	if !errors.Is(err, errCredentialVerificationAborted) {
+		t.Fatalf("a panicking verification = %v, want %v", err, errCredentialVerificationAborted)
+	}
 	cache.mu.Lock()
 	_, wedged := cache.flights["panics"]
 	cache.mu.Unlock()
@@ -176,6 +176,81 @@ func TestCredentialCacheCompletesAFlightThatPanics(t *testing.T) {
 	}
 	if err := cache.verify(context.Background(), "panics", func() error {
 		t.Error("the post-panic success was not remembered")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCredentialCacheOwnerCancellationReturnsPromptly proves the caller that
+// started a verification is cancellable exactly like a joiner. The shared read
+// has its own lifetime and may finish for other requests, but the owner must not
+// wait for it after its own context ends, and a verdict that lands afterwards is
+// never returned as that cancelled request's success.
+func TestCredentialCacheOwnerCancellationReturnsPromptly(t *testing.T) {
+	cache := newCredentialCache()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- cache.verify(ctx, "owner-cancel", func() error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	cancel()
+	// The verdict lands after the cancellation: the owner must still report its
+	// own deadline, not the shared read's later success.
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrCredentialVerifyTimeout) {
+			t.Fatalf("a cancelled owner = %v, want %v", err, ErrCredentialVerifyTimeout)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a cancelled owner kept waiting for the shared read")
+	}
+}
+
+// TestCredentialCacheOwnerCancellationLetsAJoinerFinish proves the two waiters
+// do not share a lifetime: the owner leaves on its own cancellation while a
+// concurrent request for the same key still receives the shared verdict, which
+// is then remembered for the source state it describes.
+func TestCredentialCacheOwnerCancellationLetsAJoinerFinish(t *testing.T) {
+	cache := newCredentialCache()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	owner := make(chan error, 1)
+	go func() {
+		owner <- cache.verify(ctx, "shared", func() error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	joiner := make(chan error, 1)
+	go func() {
+		joiner <- cache.verify(context.Background(), "shared", func() error {
+			t.Error("the joiner ran its own verification")
+			return nil
+		})
+	}()
+	cancel()
+	if err := <-owner; !errors.Is(err, ErrCredentialVerifyTimeout) {
+		t.Fatalf("cancelled owner = %v, want %v", err, ErrCredentialVerifyTimeout)
+	}
+	close(release)
+	if err := <-joiner; err != nil {
+		t.Fatalf("the joiner = %v, want the shared success", err)
+	}
+	if err := cache.verify(context.Background(), "shared", func() error {
+		t.Error("the joiner's success was not remembered")
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -276,5 +351,55 @@ func TestVerifyAdminReadsAgainAfterTheSourceChanges(t *testing.T) {
 	}
 	if err := VerifyAdmin(context.Background(), fixture.root, rotated); err != nil {
 		t.Fatalf("verify the rotated credential: %v", err)
+	}
+}
+
+// TestVerifyAdminOwnerCancellationReturnsPromptly is P3 at the product read. The
+// caller that started the shared snapshot is cancelled in the middle of it. The
+// snapshot may finish for another request and for the cache, but this caller's
+// request must return its own deadline instead of waiting out the read or
+// claiming its success.
+func TestVerifyAdminOwnerCancellationReturnsPromptly(t *testing.T) {
+	const key = "owner-cancellation-credential"
+	fixture := newCredentialFixture(t, key)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	previous := afterSnapshotCopy
+	t.Cleanup(func() { afterSnapshotCopy = previous })
+	afterSnapshotCopy = func() {
+		cancel()
+		// The shared work keeps its own lifetime: it is still running when the
+		// owner's request has already been answered.
+		time.Sleep(80 * time.Millisecond)
+	}
+	started := time.Now()
+	err := VerifyAdminSource(ctx, fixture.dbPath, key)
+	elapsed := time.Since(started)
+	waitForCredentialFlights(t, sourceCredentialCache)
+	if !errors.Is(err, ErrCredentialVerifyTimeout) {
+		t.Fatalf("a cancelled owner = %v, want %v", err, ErrCredentialVerifyTimeout)
+	}
+	if elapsed >= 80*time.Millisecond {
+		t.Fatalf("a cancelled owner held the request for %s; the caller's cancellation did not end its wait", elapsed)
+	}
+}
+
+// waitForCredentialFlights waits for the shared reads a test deliberately left
+// running after their callers returned. It keeps a test's temporary directory
+// from being removed under a still-running snapshot.
+func waitForCredentialFlights(t *testing.T, cache *credentialCache) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cache.mu.Lock()
+		live := len(cache.flights)
+		cache.mu.Unlock()
+		if live == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("shared verification work did not finish: %d flights", live)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

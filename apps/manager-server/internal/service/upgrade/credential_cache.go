@@ -175,10 +175,19 @@ type credentialFlight struct {
 
 // wait returns the flight's verdict, or this caller's own deadline. A caller that
 // gives up does not cancel the shared read: another request is waiting for it,
-// and the verdict is cached for the source state it describes.
+// and the verdict is cached for the source state it describes. The shared read
+// therefore has its own lifetime, while every caller — the owner included —
+// waits under its own context. A verdict that lands after this caller was
+// cancelled is never returned as its success: a request that was abandoned does
+// not get to claim an authenticated answer.
 func (f *credentialFlight) wait(ctx context.Context) error {
 	select {
 	case <-f.done:
+		if f.err == nil {
+			if err := ctx.Err(); err != nil {
+				return credentialTimeout(err)
+			}
+		}
 		return f.err
 	case <-ctx.Done():
 		return credentialTimeout(ctx.Err())
@@ -213,7 +222,14 @@ var errCredentialVerificationAborted = errors.New("source credential verificatio
 // verify returns a remembered success, joins an identical verification already in
 // flight, or runs fn. Only a success is remembered; a rejected key and a failed
 // read are returned and forgotten.
+//
+// The work runs on its own goroutine with its own lifetime, so the caller that
+// started it can stop waiting without abandoning the verdict other requests on
+// the same key are waiting for.
 func (c *credentialCache) verify(ctx context.Context, key string, run func() error) error {
+	if err := ctx.Err(); err != nil {
+		return credentialTimeout(err)
+	}
 	c.mu.Lock()
 	if _, hit := c.entries[key]; hit {
 		c.mu.Unlock()
@@ -226,7 +242,9 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 	flight := &credentialFlight{done: make(chan struct{})}
 	c.flights[key] = flight
 	c.mu.Unlock()
-	return c.runFlight(key, flight, run)
+
+	go c.runFlight(key, flight, run)
+	return flight.wait(ctx)
 }
 
 // runFlight publishes the verdict exactly once, including when the read panics:
@@ -236,6 +254,10 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 func (c *credentialCache) runFlight(key string, flight *credentialFlight, run func() error) (err error) {
 	completed := false
 	defer func() {
+		if recovered := recover(); recovered != nil {
+			completed = false
+			err = errCredentialVerificationAborted
+		}
 		c.mu.Lock()
 		flight.err = err
 		if !completed {
