@@ -400,6 +400,59 @@ request-retry: 4
 	t.Fatalf("the unknown api-keys family was swallowed; manual items = %+v", source.manual)
 }
 
+// TestCPASourceReportsCredentialFilesItCannotUpload pins the auth directory half
+// of "never a silently dropped key": a symbolic link, a file above the upload
+// bound and an entry that cannot be read become manual items. They used to be
+// skipped without a trace, so the run reported a complete copy while the
+// operator's credential was simply absent from both the count and the record.
+func TestCPASourceReportsCredentialFilesItCannotUpload(t *testing.T) {
+	config := "api-keys:\n  - \"legacy-client-key-1\"\n"
+	legacyRoot, cpaDirectory := writeCPAFixture(t, config, map[string]string{"codex-a.json": `{"type":"codex"}`})
+	authDir := filepath.Join(cpaDirectory, cpaAuthDirectoryName)
+	target := filepath.Join(cpaDirectory, "outside-target.json")
+	if err := os.WriteFile(target, []byte(`{"type":"claude"}`), 0o600); err != nil {
+		t.Fatalf("write the symlink target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(authDir, "claude-link.json")); err != nil {
+		t.Skipf("this platform does not create symbolic links: %v", err)
+	}
+	oversized := filepath.Join(authDir, "codex-big.json")
+	if err := os.WriteFile(oversized, []byte(strings.Repeat("x", cpaMaxAuthFileBytes+1)), 0o600); err != nil {
+		t.Fatalf("write the oversized credential: %v", err)
+	}
+	source, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot, CPAVersion: "7.3.4"})
+	if err != nil {
+		t.Fatalf("open the source: %v", err)
+	}
+	uploadable := make([]string, 0, len(source.credentials))
+	for _, credential := range source.credentials {
+		uploadable = append(uploadable, credential.Name)
+	}
+	if strings.Join(uploadable, ",") != "codex-a.json" {
+		t.Fatalf("uploadable credentials = %v, want only the regular file", uploadable)
+	}
+	want := map[string]string{
+		"credential:claude-link.json": "credential_not_regular",
+		"credential:codex-big.json":   "credential_too_large",
+	}
+	for _, item := range source.manual {
+		reason, ok := want[item.item]
+		if !ok {
+			continue
+		}
+		if item.reason != reason {
+			t.Fatalf("%s reason = %q, want %q", item.item, item.reason, reason)
+		}
+		delete(want, item.item)
+	}
+	if len(want) != 0 {
+		t.Fatalf("credential files were dropped without a manual item: %v (manual items %+v)", want, source.manual)
+	}
+	if _, followed := source.credentialData["claude-link.json"]; followed {
+		t.Fatal("the import read through a symbolic link")
+	}
+}
+
 // TestCPASourceVersionGateRefusesWhenNoReleaseIsNamed pins the "never guess"
 // rule for the one input a v7 file cannot provide: it has no version of its own.
 func TestCPASourceVersionGateRefusesWhenNoReleaseIsNamed(t *testing.T) {

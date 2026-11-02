@@ -880,13 +880,51 @@ func (s *cpaManagedSource) readCredentials(override string) error {
 		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
 			continue
 		}
-		path := filepath.Join(directory, entry.Name())
+		name := entry.Name()
+		path := filepath.Join(directory, name)
+		// Every entry that cannot be uploaded becomes a manual item. A skipped
+		// file would otherwise be a credential neither the copy count nor the
+		// manual list mentions — the silent drop this step exists to avoid.
 		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() || info.Size() > cpaMaxAuthFileBytes {
+		if err != nil {
+			s.addManual(cpaManualItem{
+				item:        "credential:" + name,
+				reason:      "credential_unreadable",
+				instruction: "The credential file " + name + " could not be inspected, so it was not uploaded. Copy it into the destination CPA auth directory yourself.",
+			})
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			s.addManual(cpaManualItem{
+				item:        "credential:" + name,
+				reason:      "credential_not_regular",
+				instruction: "The credential file " + name + " is a symbolic link. This import never follows a link out of the auth directory, so it was not uploaded; copy the file it points at into the destination CPA auth directory yourself.",
+			})
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			s.addManual(cpaManualItem{
+				item:        "credential:" + name,
+				reason:      "credential_not_regular",
+				instruction: "The credential file " + name + " is not a regular file, so it was not uploaded. Copy it into the destination CPA auth directory yourself.",
+			})
+			continue
+		}
+		if info.Size() > cpaMaxAuthFileBytes {
+			s.addManual(cpaManualItem{
+				item:        "credential:" + name,
+				reason:      "credential_too_large",
+				instruction: fmt.Sprintf("The credential file %s is %d bytes and this import uploads at most %d bytes per file, so it was not uploaded. Copy it into the destination CPA auth directory yourself.", name, info.Size(), cpaMaxAuthFileBytes),
+			})
 			continue
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
+			s.addManual(cpaManualItem{
+				item:        "credential:" + name,
+				reason:      "credential_unreadable",
+				instruction: "The credential file " + name + " could not be read, so it was not uploaded. Copy it into the destination CPA auth directory yourself.",
+			})
 			continue
 		}
 		credential := freshadopt.CredentialFile{Name: entry.Name()}
