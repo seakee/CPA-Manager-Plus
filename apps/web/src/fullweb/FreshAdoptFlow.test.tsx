@@ -23,6 +23,7 @@ const identity = {
 };
 const admin = 'Admin_0123456789-abcdefghijklmnopqrstuvwxyz!';
 const sourceKey = 'adopt-source-management-key';
+const sourceAddress = 'http://source-cpa:8317';
 const artifactId = 'sha256:' + 'a'.repeat(64);
 const runtime = {
   runtimeIdentity: 'runtime',
@@ -220,6 +221,10 @@ async function adoptServer(options: {
   // The revision the migration checkpoints wrote after the page last read the
   // operation.
   checkpointAdvance?: number;
+  // The first POST's reply is lost and the server finishes staging only when the
+  // operation is read for the Nth time afterwards: a slow source read whose
+  // staging lands between two of the page's own reads.
+  lateStage?: number;
 } = {}) {
   // A resume is a browser that reloaded a committed adoption: the checkpoint is
   // durable and the source key is not.
@@ -255,6 +260,8 @@ async function adoptServer(options: {
   let summaryReads = 0;
   let readFailures = options.readFailures ?? 0;
   let lostReply = false;
+  let lateLost = false;
+  let pendingStage = 0;
   const fetcher = vi.fn<typeof fetch>(async (url, init) => {
     const resource = new URL(String(url)).pathname.split('/api/v2/')[1];
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
@@ -279,19 +286,39 @@ async function adoptServer(options: {
       operation = { ...operation, adminInitialized: true, revision: operation.revision + 1 };
       return Response.json(operation);
     }
-    if (resource === 'operation') return Response.json(operation);
+    if (resource === 'operation') {
+      if (pendingStage > 0) {
+        pendingStage -= 1;
+        if (pendingStage === 0)
+          operation = { ...operation, revision: operation.revision + 1, strategy: { ...adoptCheckpoint } };
+      }
+      return Response.json(operation);
+    }
     if (resource === 'strategy') {
       expect(body.identity).toEqual(identity);
       expect(body.expectedRevision).toBe(operation.revision);
       expect(body.strategy).toBe('adopt_existing');
       expect(body.adoptSourceClass).toBe('network_existing');
-      expect(body.baseUrl).toBe('http://source-cpa:8317');
-      expect(body.managementKey).toBe(sourceKey);
       expect(body.expectedRuntimeIdentity).toBe(runtime.runtimeIdentity);
       expect(body.expectedRuntimeGeneration).toBe(runtime.runtimeGeneration);
       expect(body.expectedArtifactId).toBe(artifactId);
       expect(typeof body.pluginsEnabled).toBe('boolean');
       strategyBodies.push(body);
+      // A staged record is this attempt: the route refuses another plugin choice,
+      // address or key by code, before it stages or commits anything.
+      if (operation.strategy?.stage) {
+        if (body.pluginsEnabled !== operation.strategy.pluginsEnabled)
+          return Response.json({ Code: 'adopt_plugin_optin_conflict' }, { status: 409 });
+        if (body.managementKey !== sourceKey || body.baseUrl !== sourceAddress)
+          return Response.json({ Code: 'fresh_strategy_owner_conflict' }, { status: 409 });
+      }
+      if (options.lateStage && !lateLost) {
+        // The reply is lost while the source read is still running; the staging
+        // itself lands on a later read.
+        lateLost = true;
+        pendingStage = options.lateStage;
+        throw new TypeError('Failed to fetch');
+      }
       if (options.loseStrategyReply && !lostReply && !operation.strategy) {
         // The server staged the attempt and the reply is what was lost.
         lostReply = true;
@@ -377,7 +404,7 @@ async function adoptServer(options: {
     await input('admin-key-input', admin);
     await input('route-target-input', '/console');
     await click('setup-review');
-    await input('adopt-source-url', 'http://source-cpa:8317');
+    await input('adopt-source-url', sourceAddress);
     await input('adopt-management-key', sourceKey);
     if (options.pluginChecked) await input('adopt-plugin-optin', true);
   }
@@ -460,6 +487,94 @@ it('lands on the confirmation when the inventory reply was lost', async () => {
   expect(maybe('adopt-migration')).toHaveLength(1);
 });
 
+it('does not commit when a lost staging reply lands between two reads', async () => {
+  // The first POST's reply is lost while the source read is still running, so the
+  // staging lands after the page already decided nothing was staged. The second
+  // POST must therefore be refused as stale or land as a staging — never be
+  // accepted as the commit of an attempt the operator has not confirmed.
+  const server = await adoptServer({ lateStage: 3 });
+  await click('adopt-read-inventory');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(1);
+  expect(maybe('adopt-migration')).toHaveLength(0);
+
+  await click('adopt-read-inventory');
+  await settle();
+  // The record answers the run, and the confirmation is still the operator's.
+  expect(maybe('adopt-migration')).toHaveLength(0);
+  expect(maybe('adopt-inventory')).toHaveLength(1);
+  expect(server.strategyBodies.length).toBeGreaterThanOrEqual(1);
+});
+
+it('lets a refused source key be corrected without reloading the page', async () => {
+  // A staged reload: the inventory is durable, the key is not, and the operator
+  // types the wrong one.
+  const server = await adoptServer({ staged: true });
+  await settle();
+  await input('adopt-source-url', sourceAddress);
+  await input('adopt-management-key', 'a-mistyped-source-key-000000000000');
+  await click('adopt-use-key');
+  await settle();
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  // The server refuses this attempt as another one. The body it refused is gone,
+  // so the source form is back and the confirmation has nothing to offer.
+  expect(text()).toContain(adoptText('keyMismatch'));
+  expect(maybe('adopt-management-key')).toHaveLength(1);
+  expect(byID('adopt-confirm-migrate').props.disabled).toBe(true);
+  expect(maybe('adopt-migration')).toHaveLength(0);
+
+  // Correcting the key is the whole recovery: the recorded inventory is reused.
+  await input('adopt-management-key', sourceKey);
+  await click('adopt-use-key');
+  await settle();
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(server.strategyBodies.at(-1)?.managementKey).toBe(sourceKey);
+  expect(maybe('adopt-migration')).toHaveLength(1);
+});
+
+it('locks the recorded plugin choice after Back instead of committing an old one', async () => {
+  const server = await adoptServer();
+  await click('adopt-read-inventory');
+  expect(server.strategyBodies[0].pluginsEnabled).toBe(false);
+  await click('adopt-inventory-back');
+  // The record owns the opt-in from the staging write on: the checkbox shows the
+  // recorded value, cannot be changed, and says why.
+  expect(byID('adopt-plugin-optin').props.checked).toBe(false);
+  expect(byID('adopt-plugin-optin').props.disabled).toBe(true);
+  expect(text()).toContain(adoptText('pluginsLocked'));
+
+  await click('adopt-read-inventory');
+  await settle();
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  // The commit sends the value the screen showed.
+  expect(server.strategyBodies[1].pluginsEnabled).toBe(false);
+  expect(maybe('adopt-migration')).toHaveLength(1);
+});
+
+it('sends the address the operator corrected after Back', async () => {
+  // The same attempt is staged, so a corrected address is not silently dropped:
+  // it is what the confirmation sends, and the server's own refusal is what the
+  // operator sees.
+  const server = await adoptServer();
+  await click('adopt-read-inventory');
+  await click('adopt-inventory-back');
+  await input('adopt-source-url', 'http://source-cpa-2:8317');
+  await click('adopt-read-inventory');
+  await settle();
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(server.strategyBodies.at(-1)?.baseUrl).toBe('http://source-cpa-2:8317');
+  expect(text()).toContain(adoptText('keyMismatch'));
+  expect(maybe('adopt-migration')).toHaveLength(0);
+});
+
 it('asks for the key again before a staged inventory can be confirmed', async () => {
   // A reload on a staged checkpoint: the inventory is durable, the body that
   // would commit it is not, and the key was never stored anywhere.
@@ -473,7 +588,7 @@ it('asks for the key again before a staged inventory can be confirmed', async ()
   expect(byID('adopt-confirm-migrate').props.disabled).toBe(true);
   expect(server.strategyBodies).toHaveLength(0);
 
-  await input('adopt-source-url', 'http://source-cpa:8317');
+  await input('adopt-source-url', sourceAddress);
   await input('adopt-management-key', sourceKey);
   await click('adopt-use-key');
   await settle();
@@ -508,7 +623,7 @@ it('resumes with the durable revision, not the one the page last read', async ()
   await settle();
   // The migration checkpoints moved the record forward while this page was only
   // reading progress, so the replay's fence has to be the durable revision.
-  await input('adopt-source-url', 'http://source-cpa:8317');
+  await input('adopt-source-url', sourceAddress);
   await input('adopt-management-key', sourceKey);
   await click('adopt-resume');
   await settle();
@@ -576,7 +691,7 @@ it('asks for the source key again after a reload and resumes from the recorded p
   // it cannot be changed here.
   expect(maybe('adopt-source-url')).toHaveLength(1);
   expect(byID('adopt-plugin-optin').props.disabled).toBe(true);
-  await input('adopt-source-url', 'http://source-cpa:8317');
+  await input('adopt-source-url', sourceAddress);
   await input('adopt-management-key', sourceKey);
   await click('adopt-resume');
   await settle();
@@ -890,7 +1005,7 @@ it('sends the durable revision when the Console carrier resumes an adoption', as
   const { post } = await mountManaged(committed, get);
   post.mockResolvedValue(advanced);
   await settle();
-  await input('adopt-source-url', 'http://source-cpa:8317');
+  await input('adopt-source-url', sourceAddress);
   await input('adopt-management-key', sourceKey);
   await click('adopt-resume');
   await settle();

@@ -74,6 +74,23 @@ export interface FreshOperation {
   strategy?: FreshStrategyCheckpoint;
 }
 
+/**
+ * The durable read a write is fenced by.
+ *
+ * An adoption is two POSTs of one body, and only the record decides which of
+ * them a POST is: a body matching a staged attempt commits it. A write that
+ * must stay a staging therefore carries the revision of the read that decided
+ * there was nothing to commit, so a staging that landed after that read — a
+ * slow source, a lost reply — makes the CAS refuse it instead of turning it
+ * into the commit nobody confirmed. A write with no such decision behind it (a
+ * resume, the confirmation itself) passes no fence and the carrier reads the
+ * durable revision, because a migration checkpoint is its own durable write.
+ */
+export interface AdoptionFence {
+  identity: FreshIdentity;
+  revision: number;
+}
+
 export interface Handoff {
   identity: FreshIdentity;
   claimGeneration: number;
@@ -680,7 +697,8 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       return verified;
     },
     async executeStrategy(
-      body: Record<string, unknown>
+      body: Record<string, unknown>,
+      fence?: AdoptionFence
     ): Promise<{ operation: FreshOperation; initialClientKey: string }> {
       if (!operation?.adminInitialized) {
         throw new BootstrapTransportError('Installation authority unavailable', 'authority');
@@ -703,21 +721,33 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
         )
           throw new BootstrapTransportError('Adoption request unavailable', 'bad_request');
       }
-      // The fence is the durable revision, not the one this page last read: a
-      // migration checkpoint is its own durable write, so a cached revision
-      // fails the CAS on exactly the replay that would continue the run.
-      const current = await request<FreshOperation>('operation');
-      if (
-        !sameIdentity(current?.identity, operation.identity) ||
-        !validOperationState(current, operation)
-      ) {
-        throw new BootstrapTransportError('Installation response unavailable', 'response');
+      // A caller that read the record to decide what to send passes that read's
+      // revision: the POST then either lands on exactly the state it decided
+      // about or is refused as stale, which is what keeps an adoption's staging
+      // POST from committing a staging that landed in between. A caller with no
+      // such decision (a resume, or the confirmation itself) fences on the
+      // durable revision instead, because a migration checkpoint is its own
+      // durable write and the cached revision is stale exactly when the run
+      // stopped between items.
+      let expected = fence;
+      if (!expected) {
+        const current = await request<FreshOperation>('operation');
+        if (
+          !sameIdentity(current?.identity, operation.identity) ||
+          !validOperationState(current, operation)
+        ) {
+          throw new BootstrapTransportError('Installation response unavailable', 'response');
+        }
+        operation = current;
+        expected = { identity: current.identity, revision: current.revision };
+      } else if (!sameIdentity(expected.identity, operation.identity)) {
+        // A fence of another installation is not this operation's fact.
+        throw new BootstrapTransportError('Installation response unavailable', 'authority');
       }
-      operation = current;
       const next = await request<FreshOperation & { initialClientKey?: unknown }>('strategy', {
         ...body,
-        identity: current.identity,
-        expectedRevision: current.revision,
+        identity: expected.identity,
+        expectedRevision: expected.revision,
       });
       if (
         !sameIdentity(next?.identity, operation.identity) ||

@@ -349,17 +349,24 @@ export function FreshManagedRuntime({
         };
       },
       // The canonical carrier adds the fence the bootstrap carrier adds: the
-      // operation's identity and its durable revision. It reads them per write
-      // because a migration checkpoint is its own durable write — the revision
-      // this page last saw is stale exactly when a run stopped between items.
-      writeStrategy: async (body) => {
-        const current = await guarded(() => client.get<FreshOperation>('operation', auth));
-        if (!sameIdentity(current?.identity, operation.identity))
+      // operation's identity and its durable revision. A write the flow fenced
+      // on its own decision read sends that revision and is refused as stale if
+      // a staging landed after it — the staging POST can never be re-fenced
+      // onto the commit. A write with no fence (a resume, the confirmation)
+      // reads the revision per write, because a migration checkpoint is its own
+      // durable write — the revision this page last saw is stale exactly when a
+      // run stopped between items.
+      writeStrategy: async (body, fence) => {
+        // A fenced write already carries the read it was decided on; anything
+        // else reads the record now, once.
+        const read = fence ? undefined : (await guarded(() => client.get<FreshOperation>('operation', auth)));
+        const identity = fence?.identity ?? read!.identity;
+        if (!sameIdentity(identity, operation.identity))
           throw new Error('Invalid installation response');
         return guarded(() =>
           client.post<FreshOperation>(
             'strategy',
-            { identity: current.identity, expectedRevision: current.revision, ...body },
+            { identity, expectedRevision: fence?.revision ?? read!.revision, ...body },
             auth
           )
         );

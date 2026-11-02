@@ -346,7 +346,7 @@ export function FreshSetupWizard({
         artifactId: observed.activeGatewayArtifact.artifactId,
       } satisfies AdoptRuntimeTarget;
     },
-    writeStrategy: async (body) => (await transport.executeStrategy(body)).operation,
+    writeStrategy: async (body, fence) => (await transport.executeStrategy(body, fence)).operation,
     prepareRoute: async () => {
       // The canonical route is committed before completion, exactly as the New
       // Managed path does, so the console the operator enters is the one this

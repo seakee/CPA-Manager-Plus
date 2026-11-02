@@ -10,6 +10,7 @@ import {
 import { shellText as s } from '../i18n/consoleShell';
 import {
   BootstrapTransportError,
+  type AdoptionFence,
   type FreshOperation,
   type FreshStrategyCheckpoint,
 } from './bootstrapTransport';
@@ -33,8 +34,14 @@ export interface AdoptCarrier {
   readOperation(): Promise<FreshOperation>;
   /** Observe the CPA this Manager runs: the destination of the adoption. */
   observeTarget(): Promise<AdoptRuntimeTarget>;
-  /** The two-POST inventory: staged first, committed second. */
-  writeStrategy(body: Record<string, unknown>): Promise<FreshOperation>;
+  /**
+   * The two-POST inventory: staged first, committed second.
+   *
+   * `fence` is the durable read that decided the body, and only a write that
+   * must not commit has one: the revision makes the staging POST stale instead
+   * of turning it into the confirmation's commit.
+   */
+  writeStrategy(body: Record<string, unknown>, fence?: AdoptionFence): Promise<FreshOperation>;
   /** Commit the canonical route before completion. Bootstrap-only. */
   prepareRoute?(): Promise<FreshOperation>;
   complete(body: { acceptRetryable?: true }): Promise<FreshOperation>;
@@ -277,6 +284,15 @@ export function FreshAdoptFlow({
       setError(coded.code ? adoptBlockerText(coded.code) : adoptText('failure'));
       if (coded.code === 'adopt_plugin_optin_conflict') setNote(adoptText('pluginConflict'));
       if (coded.code === 'fresh_strategy_owner_conflict') setNote(adoptText('keyMismatch'));
+      // A refusal that says "this body is not this record's attempt" can never
+      // succeed as it stands: the key, the address or the choice the record owns
+      // has to be corrected, so the confirmation stops offering that body and the
+      // source form comes back instead.
+      if (
+        coded.code === 'fresh_strategy_owner_conflict' ||
+        coded.code === 'adopt_plugin_optin_conflict'
+      )
+        setBody(null);
       try {
         const truth = await carrier.readOperation();
         if (alive.current) {
@@ -313,8 +329,10 @@ export function FreshAdoptFlow({
   //
   // The record is read first because the two POSTs are one request: a second
   // identical POST of an attempt the server already staged is taken as the
-  // commit. Reading the inventory is a read, so it can only land on the
-  // confirmation the record already holds — the commit stays the operator's.
+  // commit. That read is also the POST's fence, so the write it authorizes is the
+  // staging of the state it saw and nothing else: a staging that landed in
+  // between makes the server refuse it as stale instead of accepting it as the
+  // commit. Only the confirmation sends an unfenced write.
   async function readInventory() {
     await run(async () => {
       const durable = await carrier.readOperation();
@@ -324,6 +342,14 @@ export function FreshAdoptFlow({
       if (adopt?.stage === 'staged') {
         setStage('inventory');
         setConfirmed(false);
+        // The commit sends this page's body, and the record already holds the
+        // attempt. Rebuild it from the inputs on screen so the confirmation
+        // always sends what the operator last saw; an address or key the page
+        // cannot use leaves the form that asks for it instead.
+        if (!body && sourceUsable()) {
+          const rebuilt = await recordedBody();
+          if (rebuilt && alive.current) setBody(rebuilt);
+        }
         return;
       }
       if (adopt?.stage === 'committed') {
@@ -353,7 +379,14 @@ export function FreshAdoptFlow({
       // The body is kept before the write, so a reply lost on the way back still
       // leaves this page holding the exact attempt the server may have staged.
       setBody(next);
-      const result = await carrier.writeStrategy(next);
+      // The fence is this decision read, never a fresher one: a staging that
+      // landed between the read above and this write — a slow source, a reply
+      // lost on the way back — must make the CAS refuse the POST, not turn it
+      // into the commit of an attempt this operator has not confirmed.
+      const result = await carrier.writeStrategy(next, {
+        identity: durable.identity,
+        revision: durable.revision,
+      });
       if (!alive.current) return;
       onOperation(result);
       setConfirmed(false);
@@ -392,9 +425,23 @@ export function FreshAdoptFlow({
     });
   }
 
+  // A source form a body can be built from: an address that would be sent and a
+  // key that would be used. It is a shape check only — whether the source accepts
+  // the key is the server's answer, not this page's guess.
+  function sourceUsable(): boolean {
+    if (!validManagementKey(managementKey)) return false;
+    try {
+      normalizeCPAAddress(baseUrl);
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
   // The exact body of an attempt that is not the first read. The plugin choice is
-  // the one the record holds, the address and key are the operator's, and the
-  // destination observation is a read: rebuilding a body never writes.
+  // the one the record holds and the source screen shows as locked, the address
+  // and key are the operator's, and the destination observation is a read:
+  // rebuilding a body never writes.
   async function recordedBody(): Promise<Record<string, unknown> | null> {
     let normalized: string;
     try {
@@ -538,6 +585,11 @@ export function FreshAdoptFlow({
   // first reply. The commit sends that exact body, so the key is asked for here
   // and the confirmation is only offered once there is one to send.
   const inventoryKeyForm = stage === 'inventory' && !body;
+  // The record owns the plugin choice from the moment it holds this attempt: the
+  // opt-in was written into the destination template with the checkpoint, so a
+  // screen that let it be edited again would offer a decision the server refuses
+  // and the operator cannot see. It is shown, locked, with the reason.
+  const pluginsLocked = staged || committed;
   const headline =
     stage === 'inventory'
       ? { title: adoptText('inventoryTitle'), help: adoptText('inventoryHelp') }
@@ -623,16 +675,16 @@ export function FreshAdoptFlow({
                   data-testid="adopt-plugin-optin"
                   type="checkbox"
                   checked={
-                    resumeForm || inventoryKeyForm
-                      ? checkpoint?.pluginsEnabled === true
-                      : plugins
+                    pluginsLocked ? checkpoint?.pluginsEnabled === true : plugins
                   }
-                  disabled={resumeForm || inventoryKeyForm}
+                  disabled={pluginsLocked}
                   onChange={(event) => setPlugins(event.target.checked)}
                 />
                 <span>{adoptText('plugins')}</span>
               </label>
-              <p className="journey-help">{adoptText('pluginsHelp')}</p>
+              <p className="journey-help">
+                {adoptText(pluginsLocked ? 'pluginsLocked' : 'pluginsHelp')}
+              </p>
             </div>
             <div className="journey-preview">
               <FullWebIcon name="info" size={22} />
@@ -834,6 +886,11 @@ export function FreshAdoptFlow({
               onClick={() => {
                 setStage('source');
                 setConfirmed(false);
+                // Back is the operator saying the attempt is not settled: the
+                // body built for it is dropped with it, so a changed address or
+                // key is what the next attempt sends instead of a decision this
+                // page made for them.
+                setBody(null);
               }}
             >
               <FullWebIcon name="arrowLeft" size={20} />

@@ -20,6 +20,8 @@ const en = {
   plugins: 'Enable the plugin runtime on the destination',
   pluginsHelp:
     'Off by default. The source plugin configuration is never copied; this only decides whether the new CPA runs plugins.',
+  pluginsLocked:
+    'Recorded with this attempt when the source inventory was written. The destination either runs plugins or it does not, and this page can no longer change that choice.',
   scopeTitle: 'What migrates',
   scopeMigrate:
     'Credentials, gateway configuration, provider sections and client keys are copied to the destination.',
@@ -111,6 +113,7 @@ const zh: typeof en = {
   managementKeyHelp: '仅用于读取源 CPA 与校验本次操作。只保留在当前页面内存中，不会被保存。',
   plugins: '在目标启用插件运行时',
   pluginsHelp: '默认关闭。源的插件配置不会被复制，此项只决定新 CPA 是否运行插件。',
+  pluginsLocked: '读取源清单时已随本次操作记录，本页不能再更改目标是否运行插件。',
   scopeTitle: '迁移范围',
   scopeMigrate: '凭证、网关配置、提供商配置段与客户端密钥会复制到目标。',
   scopeKeep: '用量历史、日志和插件不会迁移。源 CPA 不会被修改。',
@@ -183,6 +186,7 @@ const tw: typeof en = {
   managementKeyHelp: '僅用於讀取來源 CPA 與驗證本次操作。只保留在目前頁面的記憶體中，不會被儲存。',
   plugins: '在目標啟用外掛執行環境',
   pluginsHelp: '預設關閉。來源的外掛設定不會被複製，此選項只決定新 CPA 是否執行外掛。',
+  pluginsLocked: '讀取來源清單時已隨本次操作記錄，本頁不能再變更目標是否執行外掛。',
   scopeTitle: '遷移範圍',
   scopeMigrate: '憑證、閘道設定、供應商設定區段與用戶端金鑰會複製到目標。',
   scopeKeep: '用量歷史、日誌和外掛不會遷移。來源 CPA 不會被修改。',
@@ -257,6 +261,8 @@ const ru: typeof en = {
   plugins: 'Включить среду плагинов на целевом CPA',
   pluginsHelp:
     'По умолчанию выключено. Конфигурация плагинов источника не копируется; это только решает, запускать ли плагины на новом CPA.',
+  pluginsLocked:
+    'Записано вместе с попыткой при чтении описи источника. Целевой CPA либо запускает плагины, либо нет, и эта страница больше не меняет этот выбор.',
   scopeTitle: 'Что переносится',
   scopeMigrate:
     'Учётные данные, конфигурация шлюза, разделы провайдеров и клиентские ключи копируются в целевой CPA.',
