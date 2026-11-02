@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
@@ -369,12 +370,27 @@ func configFamilyItemName(family string) string { return "rules:" + family }
 
 func providerSectionItemName(section string) string { return "section:" + section }
 
+// overlongNamePrefixBytes is how much of a name an overlong identity keeps. The
+// identity itself has the store's own bound, so the prefix leaves room for the
+// item prefix, the ellipsis, the digest label and the digest.
+const overlongNamePrefixBytes = 120
+
 // overlongCredentialItem is the stable identity of a credential whose own name
-// cannot be an item identity because it is longer than the store accepts. It is
-// the digest of the name, so it is stable across replays and carries no name
-// byte beyond its own bounded prefix.
+// cannot be an item identity because it is longer than the store accepts. It
+// keeps a readable prefix of the name — an opaque digest alone tells the
+// operator nothing to look for — and the digest of the whole name, which is what
+// keeps the identity stable across replays.
 func overlongCredentialItem(name string) string {
-	return "credential-name-sha256:" + digestSHA256([]byte(name))
+	prefix := name
+	if len(prefix) > overlongNamePrefixBytes {
+		// Cut on a rune boundary: this identity is text a browser renders.
+		cut := overlongNamePrefixBytes
+		for cut > 0 && !utf8.RuneStart(name[cut]) {
+			cut--
+		}
+		prefix = name[:cut]
+	}
+	return "credential:" + prefix + "…#sha256:" + digestSHA256([]byte(name))
 }
 
 // boundedName quotes a credential name inside an instruction without letting an
@@ -489,6 +505,7 @@ func (e *Executor) preflightInventory(ctx context.Context, summary *freshstore.A
 		if err := e.record(ctx, summary, freshstore.AdoptionItem{
 			Item: excessCredentialItem, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionManual,
 			Reason:      "adoption_inventory_too_large",
+			Left:        excess,
 			Instruction: fmt.Sprintf("%d credential files were left behind because the migration record is full. Copy them into the destination CPA's auth directory by hand.", excess),
 		}, checkpoint); err != nil {
 			return nil, err

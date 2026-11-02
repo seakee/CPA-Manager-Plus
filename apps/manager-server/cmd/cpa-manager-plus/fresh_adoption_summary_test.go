@@ -399,3 +399,169 @@ func TestAdoptionSummaryIsAServedResourceOnTheFixedCarrier(t *testing.T) {
 		t.Fatalf("an unknown resource was not refused: %d", response.Code)
 	}
 }
+
+// summaryItemJSON and summaryJSON decode the reply as it reaches the browser.
+// They are deliberately separate from the reply type the route builds: these
+// assertions are about what was written to the wire, and they have to be the same
+// assertions against any version of the projection.
+type summaryItemJSON struct {
+	ID        string `json:"id"`
+	Item      string `json:"item"`
+	Kind      string `json:"kind"`
+	Outcome   string `json:"outcome"`
+	Reason    string `json:"reason"`
+	Retryable bool   `json:"retryable"`
+	Left      int    `json:"left"`
+}
+
+type summaryJSON struct {
+	Items     []summaryItemJSON `json:"items"`
+	Planned   int               `json:"planned"`
+	Finished  bool              `json:"finished"`
+	Running   bool              `json:"running"`
+	Retryable int               `json:"retryable"`
+}
+
+func readAdoptionJSON(t *testing.T, response *httptest.ResponseRecorder) summaryJSON {
+	t.Helper()
+	if response.Code != http.StatusOK {
+		t.Fatalf("summary read answered %d: %s", response.Code, response.Body.String())
+	}
+	var reply summaryJSON
+	if err := json.Unmarshal(response.Body.Bytes(), &reply); err != nil {
+		t.Fatalf("summary read did not answer the recorded shape: %s", response.Body.String())
+	}
+	return reply
+}
+
+// A Client Key used verbatim as a credential file name is the one credential
+// shape the project's scrubber cannot see: a bare digest or a UUID has no prefix
+// to recognise. The reply is therefore redacted by value as well, from the source
+// keys the migration itself read.
+func TestAdoptionSummaryRedactsTheSourceClientKeysByValue(t *testing.T) {
+	const (
+		hexKey  = "d41d8cd98f00b204e9800998ecf8427e"
+		uuidKey = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+	)
+	keys := []string{migrationSourceClientValue, hexKey, uuidKey}
+	// The source presents all three shapes, and the destination was staged from
+	// that inventory, so verification compares the same list.
+	fixture := newAdoptMigrationFixtureWithClientKeys(t, keys...)
+	for _, key := range keys {
+		name := key + ".json"
+		fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"value-` + key + `"}`)
+		fixture.source.types[name] = "claude"
+	}
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	// The record really does hold the names, so the reply's silence below is the
+	// boundary's doing rather than an accident of the run.
+	record := fixture.reload(t)
+	named := 0
+	for _, item := range record.AdoptionSummary.Items {
+		for _, key := range keys {
+			if strings.Contains(item.Item, key) {
+				named++
+			}
+		}
+	}
+	if named != len(keys) {
+		t.Fatalf("the run recorded %d of %d client-key names: %+v", named, len(keys), record.AdoptionSummary.Items)
+	}
+
+	body := fixture.adoption(t).Body.String()
+	for _, key := range keys {
+		if strings.Contains(body, key) {
+			t.Errorf("the summary echoed the source Client Key %q: %s", key, body)
+		}
+	}
+	if !strings.Contains(body, "[redacted]") {
+		t.Errorf("the summary did not mark the redaction: %s", body)
+	}
+}
+
+// Two token-shaped file names scrub to the same text. The browser binds an
+// acknowledgement to the record's item, not to text that happens to be equal, so
+// the reply carries a stable identity that keeps them distinct.
+func TestAdoptionSummaryKeepsScrubbedNamesDistinct(t *testing.T) {
+	const (
+		first  = "sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		second = "sk-proj-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	fixture := newAdoptMigrationFixture(t)
+	for _, key := range []string{first, second} {
+		name := key + ".json"
+		fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"shared-token-"` + key + `"}`)
+		fixture.source.types[name] = "claude"
+	}
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	reply := readAdoptionJSON(t, fixture.adoption(t))
+	byItem := map[string][]string{}
+	for _, item := range reply.Items {
+		if len(item.ID) != 64 {
+			t.Fatalf("item %q carries no stable identity: %+v", item.Item, item)
+		}
+		byItem[item.Item] = append(byItem[item.Item], item.ID)
+	}
+	collided := 0
+	for _, named := range byItem {
+		if len(named) < 2 {
+			continue
+		}
+		collided++
+		distinct := map[string]bool{}
+		for _, id := range named {
+			if distinct[id] {
+				t.Fatalf("two items share one identity: %v", named)
+			}
+			distinct[id] = true
+		}
+	}
+	if collided == 0 {
+		t.Fatalf("the fixtures did not collapse into one name: %+v", byItem)
+	}
+}
+
+// A credential whose name cannot be an item identity keeps enough of the name to
+// be actionable, plus the digest that makes the identity stable.
+func TestAdoptionSummaryKeepsAnOverlongNameReadable(t *testing.T) {
+	overlong := strings.Repeat("overlong-credential-name-", 12) + ".json"
+	fixture := newAdoptMigrationFixture(t)
+	fixture.source.credentials[overlong] = []byte(`{"type":"claude","access_token":"overlong"}`)
+	fixture.source.types[overlong] = "claude"
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	reply := readAdoptionJSON(t, fixture.adoption(t))
+	var item *summaryItemJSON
+	for index := range reply.Items {
+		if reply.Items[index].Reason == "adoption_item_name_too_long" {
+			item = &reply.Items[index]
+		}
+	}
+	if item == nil {
+		t.Fatalf("the overlong name was not recorded as manual work: %+v", reply.Items)
+	}
+	if len(item.Item) > freshstore.MaxAdoptionItemName() {
+		t.Fatalf("the item identity exceeds the store's bound: %d", len(item.Item))
+	}
+	if !strings.HasPrefix(item.Item, "credential:"+overlong[:100]) {
+		t.Fatalf("the item identity kept no readable prefix: %q", item.Item)
+	}
+	if !strings.Contains(item.Item, "…#sha256:") {
+		t.Fatalf("the item identity carries no digest: %q", item.Item)
+	}
+	// The identity is the record's, so a second read states the same item.
+	if again := readAdoptionJSON(t, fixture.adoption(t)); again.Items[0].ID != reply.Items[0].ID {
+		t.Fatalf("the item identity changed between two reads")
+	}
+}

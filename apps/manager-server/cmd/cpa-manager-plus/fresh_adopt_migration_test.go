@@ -378,6 +378,14 @@ type adoptMigrationFixture struct {
 
 func newAdoptMigrationFixture(t *testing.T) *adoptMigrationFixture {
 	t.Helper()
+	return newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue)
+}
+
+// newAdoptMigrationFixtureWithClientKeys is the same fixture with the source CPA
+// presenting these client keys. They are read while the attempt is staged, so a
+// test that is about the keys has to declare them here rather than afterwards.
+func newAdoptMigrationFixtureWithClientKeys(t *testing.T, clientKeys ...string) *adoptMigrationFixture {
+	t.Helper()
 	ctx := t.Context()
 	dir := t.TempDir()
 	paths := legacypreflight.DefaultPaths(filepath.Join(dir, "manager.sqlite"))
@@ -414,7 +422,11 @@ func newAdoptMigrationFixture(t *testing.T) *adoptMigrationFixture {
 	}}}
 	source.config["management"] = map[string]any{"secret-key": migrationSourceKey}
 	source.config["server"] = map[string]any{"host": "203.0.113.9", "port": json.Number("9999")}
-	source.config["access"] = map[string]any{"api-keys": []any{migrationSourceClientValue}}
+	sourceKeys := make([]any, 0, len(clientKeys))
+	for _, key := range clientKeys {
+		sourceKeys = append(sourceKeys, key)
+	}
+	source.config["access"] = map[string]any{"api-keys": sourceKeys}
 	source.config["plugins"] = map[string]any{"enabled": true, "dir": "/source/plugins"}
 	source.config["oauth"] = map[string]any{"auth-dir": "/source/auth"}
 	fixture.source = source
@@ -435,7 +447,11 @@ func newAdoptMigrationFixture(t *testing.T) *adoptMigrationFixture {
 	// StageDestination installs the source's client keys on the destination, so
 	// the committed destination must already answer with them for
 	// cpa.VerifyV8Adoption to accept the takeover.
-	destination.config["access"] = map[string]any{"api-keys": []any{migrationSourceClientValue}}
+	destinationKeys := make([]any, 0, len(clientKeys))
+	for _, key := range clientKeys {
+		destinationKeys = append(destinationKeys, key)
+	}
+	destination.config["access"] = map[string]any{"api-keys": destinationKeys}
 	destination.authFn = func() string { return runtime.stagedKey }
 	fixture.destination = destination
 

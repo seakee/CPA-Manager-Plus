@@ -52,6 +52,11 @@ type AdoptionItem struct {
 	Instruction       string           `json:"instruction,omitempty"`
 	SourceSHA256      string           `json:"sourceSha256,omitempty"`
 	DestinationSHA256 string           `json:"destinationSha256,omitempty"`
+	// Left is how many source items the record could not hold at all. Only the
+	// aggregate "inventory too large" marker sets it: the count is the one fact
+	// about those items the record can keep without keeping them, and without it
+	// the operator is told to copy "some files" by hand.
+	Left int `json:"left,omitempty"`
 }
 
 // AdoptionSummary is what the executor checkpointed so far, in migration order.
@@ -237,6 +242,9 @@ func validAdoptionSummary(summary AdoptionSummary) error {
 		}
 		if !validAdoptionDigest(item.SourceSHA256) || !validAdoptionDigest(item.DestinationSHA256) {
 			return errors.New("invalid adoption item digest")
+		}
+		if item.Left < 0 || item.Left > maxAdoptionItems {
+			return errors.New("adoption item remainder exceeds its bound")
 		}
 		if item.Outcome == AdoptionMigrated && (item.Instruction != "" || item.Reason != "") {
 			return errors.New("migrated adoption item cannot carry a reason or instruction")

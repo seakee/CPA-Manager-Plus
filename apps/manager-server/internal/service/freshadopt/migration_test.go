@@ -1100,6 +1100,17 @@ func TestOversizedInventoryIsRecordedAsManualAndTheRunCompletes(t *testing.T) {
 	if excess.Outcome != freshstore.AdoptionManual || excess.Reason != "adoption_inventory_too_large" || excess.Instruction == "" {
 		t.Fatalf("the excess must be one manual item with an instruction: %+v", excess)
 	}
+	// The marker carries how many files it stands for, so the operator is told
+	// how much work is left instead of "some files".
+	omitted := 0
+	for name := range source.credentials {
+		if summary.Index("credential:"+name) < 0 {
+			omitted++
+		}
+	}
+	if omitted == 0 || excess.Left != omitted {
+		t.Fatalf("the excess marker reports %d left behind, the record omits %d", excess.Left, omitted)
+	}
 	// The credentials that did fit were still copied, so the excess is a bound on
 	// the record and not on the migration.
 	migrated, manual, failed := summary.Counts()
