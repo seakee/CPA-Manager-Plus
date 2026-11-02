@@ -701,9 +701,14 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   reconciliation is a separate authorised step this build does not ship; it
   names no subcommand this build cannot dispatch. A recorded stage beyond
   `copy_in` — including a terminal `rolled_back` — is reported as-is with no
-  write and no next-step hint, and the guard that reads that row runs only when
-  no copy-in marker is in flight, so a materializing target is never opened. A
-  blocked preflight still writes nothing.
+  write and no next-step hint. The guard that reads that row never opens the
+  data root in place: it skips the read only for a materializing marker (that
+  target belongs to the resume, which compares members by file digest), and
+  reads every other state — no marker, a migrating marker, or a marker that
+  outlived its committed row — through a private snapshot. A terminal row is
+  therefore reported without a writable open even when a stale marker survives
+  it, and that marker is left in place: only the run that finishes the copy-in
+  removes it. A blocked preflight still writes nothing.
 - **The 1.x volume is never written** by any path above: both the health probe
   and the database probe are read-only, the live database is read through a
   private snapshot copied beside it (database plus WAL sidecars) so not even a

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	_ "modernc.org/sqlite"
 )
 
@@ -157,6 +158,26 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	}
 	snapshot.db = db
 	return snapshot, nil
+}
+
+// ReadRecordFromSnapshot reads the recorded operation row from a private copy of
+// the Manager database. It exists for the resume guard: a target a copy-in has
+// not finished must never be opened in place, because that open creates or
+// rewrites the WAL index the resume compares by file identity. A missing
+// database is "no record", not a failure.
+func ReadRecordFromSnapshot(ctx context.Context, databasePath string, scratchBase string) (model.UpgradeOperation, bool, error) {
+	if _, err := os.Lstat(databasePath); err != nil {
+		if os.IsNotExist(err) {
+			return model.UpgradeOperation{}, false, nil
+		}
+		return model.UpgradeOperation{}, false, err
+	}
+	snapshot, err := OpenSnapshotWithRetry(ctx, OpenSnapshot, databasePath, scratchBase)
+	if err != nil {
+		return model.UpgradeOperation{}, false, err
+	}
+	defer func() { _ = snapshot.Close() }()
+	return ReadRecordFrom(ctx, snapshot.DB())
 }
 
 // ValidateScratchDir refuses a scratch directory that lies inside a root this

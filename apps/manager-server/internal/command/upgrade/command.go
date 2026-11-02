@@ -16,7 +16,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -358,14 +357,17 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// owns preflight and the copy-in, so a later recorded stage is reported and
 	// left alone: re-running the copy would rewrite a store a later step already
 	// advanced.
-	// A copy-in that is still in flight is resumed by CopyIn, which reads the
-	// marker and compares the members beside it by file digest, never by opening
-	// the database. Reading the operation row first would open the materializing
-	// target's WAL and create its WAL index, so the resume would no longer find
-	// the target the interrupted run left. The marker is therefore read first:
-	// it is a bounded file, not a database open.
-	if _, markerPresent, markerErr := copyinmarker.Read(targetRoot); markerErr == nil && !markerPresent {
-		if operation, found, err := recordedOperationAt(ctx, targetRoot); err != nil {
+	// A materializing marker is the one state that must not read the row first:
+	// CopyIn resumes it from the marker and the members beside it by file
+	// digest, and an in-place open would create or rewrite the WAL index the
+	// resume compares. Every other state (no marker, a migrating marker, or a
+	// marker that outlived its committed row) is read through a private
+	// snapshot: a terminal row is reported without any write, and a copy_in row
+	// reaches CopyIn, which owns the resume.
+	marker, markerPresent, markerErr := copyinmarker.Read(targetRoot)
+	materializing := markerErr == nil && markerPresent && marker.Phase == copyinmarker.PhaseMaterializing
+	if !materializing && upgradeservice.ValidateScratchDir(*scratchDir, legacyRoot, targetRoot) == nil {
+		if operation, found, err := recordedOperationAt(ctx, targetRoot, *scratchDir); err != nil {
 			return refuseTyped(stderr, err)
 		} else if found && stagePastCopyIn(operation.Stage) {
 			output := runOutput{Operation: &operation}
@@ -428,17 +430,12 @@ type runOutput struct {
 }
 
 // recordedOperationAt reads the operation row from a v2 data root that may not
-// hold a database yet. A missing store is not an error: it simply has no
-// recorded operation.
-func recordedOperationAt(ctx context.Context, targetRoot string) (model.UpgradeOperation, bool, error) {
-	databasePath := filepath.Join(targetRoot, upgradeservice.SourceDatabaseName)
-	if _, err := os.Lstat(databasePath); err != nil {
-		if os.IsNotExist(err) {
-			return model.UpgradeOperation{}, false, nil
-		}
-		return model.UpgradeOperation{}, false, err
-	}
-	return upgradeservice.ReadRecord(ctx, databasePath)
+// hold a database yet. It reads a private snapshot, never the store in place: a
+// target a copy-in has not finished must keep the WAL index and members its
+// resume compares. A missing store is not an error: it simply has no recorded
+// operation.
+func recordedOperationAt(ctx context.Context, targetRoot string, scratchDir string) (model.UpgradeOperation, bool, error) {
+	return upgradeservice.ReadRecordFromSnapshot(ctx, filepath.Join(targetRoot, upgradeservice.SourceDatabaseName), scratchDir)
 }
 
 // stagePastCopyIn reports whether the recorded operation already moved beyond

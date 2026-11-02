@@ -517,6 +517,87 @@ func TestRunAfterARollbackReportsTheTerminalStage(t *testing.T) {
 	}
 }
 
+// TestRunReportsARolledBackRowWithASurvivingMarkerWithoutWriting is the N2
+// regression: a marker that outlived its committed row used to skip the
+// preflight guard entirely, so `upgrade run` reopened the abandoned store,
+// migrated it once more and rewrote the terminal row. The guard now skips only a
+// materializing marker; every other state is read through a private snapshot and
+// a later stage is reported with no write.
+func TestRunReportsARolledBackRowWithASurvivingMarkerWithoutWriting(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := rollbackReadyTarget(t, source)
+	databasePath := filepath.Join(target, "usage.sqlite")
+	db, err := sqliterepo.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open the v2 store: %v", err)
+	}
+	if _, err := upgradeoperation.New(db).RecordRollback(context.Background(), model.RollbackEvidence{
+		Image:             upgradeservice.LegacyImageRepository + ":v1.14.7",
+		StatusURL:         upgradeservice.LegacyHealthURL(),
+		SourceFingerprint: "observed",
+		ObservedAtMS:      time.Now().UnixMilli(),
+	}); err != nil {
+		_ = db.Close()
+		t.Fatalf("record the rolled_back stage: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the v2 store: %v", err)
+	}
+	rolled, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
+	if err != nil || !found {
+		t.Fatalf("read the rolled-back row: found=%t err=%v", found, err)
+	}
+	identity, err := copyinmarker.Identity(databasePath)
+	if err != nil {
+		t.Fatalf("identity the v2 database: %v", err)
+	}
+	// The marker a crash between the record commit and the work-directory
+	// removal can leave: migrating, and naming exactly this database and backup.
+	if err := copyinmarker.Write(target, copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMigrating,
+		TargetDatabase:          databasePath,
+		TargetDatabaseIdentity:  identity,
+		SourceKind:              rolled.SourceKind,
+		SourceVersion:           rolled.SourceVersion,
+		SourceFingerprintBefore: rolled.SourceFingerprintBefore,
+		SourceFingerprintAfter:  rolled.SourceFingerprintAfter,
+		BackupManifestSHA256:    rolled.BackupManifestSHA256,
+		BackupDirectory:         filepath.Join(target, "upgrade-backup"),
+		WrittenAtMS:             time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("publish the surviving marker: %v", err)
+	}
+
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
+	if code != 0 {
+		t.Fatalf("run exit code = %d, want 0; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	var output runOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode run output: %v; output: %s", err, stdout)
+	}
+	if output.Operation == nil || output.Operation.Stage != model.UpgradeStageRolledBack {
+		t.Fatalf("run = %+v, want the rolled_back stage reported", output.Operation)
+	}
+	if output.Result != nil || output.Next != "" {
+		t.Fatalf("run resumed a rolled-back operation: result=%+v next=%q", output.Result, output.Next)
+	}
+	after, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
+	if err != nil || !found {
+		t.Fatalf("re-read the rolled-back row: found=%t err=%v", found, err)
+	}
+	if after.Stage != rolled.Stage || after.UpdatedAtMS != rolled.UpdatedAtMS {
+		t.Fatalf("run touched a rolled-back row: before=%+v after=%+v", rolled, after)
+	}
+	if after.Rollback == nil || rolled.Rollback == nil || *after.Rollback != *rolled.Rollback {
+		t.Fatalf("run rewrote the recorded evidence: before=%+v after=%+v", rolled.Rollback, after.Rollback)
+	}
+	if _, found, err := copyinmarker.Read(target); err != nil || !found {
+		t.Fatalf("run removed the marker the resume owns: found=%t err=%v", found, err)
+	}
+}
+
 // managerAnswer is a listener that answers exactly as the Manager does on
 // GET /health. The 1.x and the v2 Manager serve the same body, so a test can
 // prove the refusal is about the listener and not about the identity.
