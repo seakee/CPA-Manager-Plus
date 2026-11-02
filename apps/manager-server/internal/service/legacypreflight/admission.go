@@ -171,6 +171,25 @@ func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, e
 	if path == "" {
 		return UpgradeStageNone, errors.New("upgrade admission requires the Manager database path")
 	}
+	// The marker is read before the store. A `materializing` marker was
+	// published before the first member was moved and before the migration that
+	// creates the operation table, so no row can be committed in such a target:
+	// reading it decides nothing and costs the resume everything. A read-only
+	// open of a target that still holds the copied WAL joins that WAL and
+	// rewrites `-shm`, the member the resumed move is about to compare with the
+	// backup. Admission would then be the reason an interrupted copy-in can
+	// never be resumed, so that phase is decided from the marker alone.
+	marker, inFlight, err := readCopyInMarker(path)
+	if err != nil {
+		return UpgradeStageNone, err
+	}
+	if inFlight && marker.Phase == copyinmarker.PhaseMaterializing {
+		return UpgradeStageInProgress, nil
+	}
+	// The row is read next, so a committed row outlives its marker: the marker
+	// is republished `migrating` before the migration and removed only after
+	// the row commits, so a process death in between leaves a valid row beside
+	// a valid marker and the row is the stronger evidence.
 	record, found, err := readRecordedUpgrade(ctx, path)
 	if err != nil {
 		return UpgradeStageNone, err
@@ -178,8 +197,12 @@ func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, e
 	if found {
 		return upgradeStageFromRecord(record)
 	}
-	// No row: an unfinished copy-in may still be described by its marker.
-	return copyInMarkerStage(path)
+	if inFlight {
+		// A `migrating` marker with no row: every member is in place and the
+		// migration may have committed, but nothing recorded it yet.
+		return UpgradeStageInProgress, nil
+	}
+	return UpgradeStageNone, nil
 }
 
 // readRecordedUpgrade reads the row the admission decides on. Before the
@@ -209,7 +232,7 @@ func readRecordedUpgrade(ctx context.Context, path string) (upgradeRecord, bool,
 		return upgradeRecord{}, false, nil
 	}
 	var (
-		stage                                     string
+		stage                                                           string
 		sourceKind, fingerprintBefore, fingerprintAfter, backupManifest sql.NullString
 	)
 	err = db.QueryRowContext(ctx, `select stage, source_kind, source_fingerprint_before,
@@ -230,17 +253,17 @@ func readRecordedUpgrade(ctx context.Context, path string) (upgradeRecord, bool,
 	}, true, nil
 }
 
-// copyInMarkerStage reads the provenance marker of an in-flight copy-in. The
-// copy-in writes it before the migration commits and removes it only after the
-// operation row commits, so its presence means the v2 store is unfinished: the
-// schema already says "native-v2" while no row describes the copy.
-func copyInMarkerStage(databasePath string) (UpgradeStage, error) {
+// readCopyInMarker reads the provenance marker of an in-flight copy-in. The
+// copy-in writes it before the first member is moved and removes it only after
+// the operation row commits, so its presence means the v2 store is unfinished:
+// the schema may already say "native-v2" while no row describes the copy.
+func readCopyInMarker(databasePath string) (copyinmarker.Marker, bool, error) {
 	marker, found, err := copyinmarker.Read(filepath.Dir(databasePath))
 	if err != nil {
-		return UpgradeStageNone, fmt.Errorf("read the copy-in provenance marker: %w", err)
+		return copyinmarker.Marker{}, false, fmt.Errorf("read the copy-in provenance marker: %w", err)
 	}
 	if !found {
-		return UpgradeStageNone, nil
+		return copyinmarker.Marker{}, false, nil
 	}
 	// The marker sits in this data root's own reserved work directory, so it
 	// describes this root even when the root is mounted at another absolute
@@ -250,9 +273,9 @@ func copyInMarkerStage(databasePath string) (UpgradeStage, error) {
 	// naming a different database file is evidence for some other run, and
 	// admitting this store on it would be guessing: it fails closed instead.
 	if filepath.Base(marker.TargetDatabase) != filepath.Base(databasePath) {
-		return UpgradeStageNone, fmt.Errorf("the copy-in marker in this data root describes another database")
+		return copyinmarker.Marker{}, false, errors.New("the copy-in marker in this data root describes another database")
 	}
-	return UpgradeStageInProgress, nil
+	return marker, true, nil
 }
 
 // upgradeRecord is the row half of the admission decision. The admission never
