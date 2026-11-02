@@ -1301,13 +1301,20 @@ installation/runtime` is — it is the progress read of the session that committ
 the adoption.
 
 It answers `{items[], planned, finished, running, retryable, counts}`, where each
-item carries `item`, `kind`, `outcome`, `reason`, `instruction` and the store's own
-`retryable` rule, `running` is the live single-flight flag rather than a recorded
-value, and `counts` tallies the four outcomes. The reply omits the record's source
-and destination digests: they are the Manager's evidence, and dropping them keeps
-the route a statement about progress. A staged adoption, a non-adoption and an
-unreadable record answer `404 {"code":"adopt_summary_unavailable"}` rather than an
-empty list that reads like a finished run. The session branch is bounded by
+item carries `item`, `kind`, `outcome`, `reason` and the store's own `retryable`
+rule, `running` is the live single-flight flag rather than a recorded value, and
+`counts` tallies the four outcomes. The reply omits the record's source and
+destination digests: they are the Manager's evidence, and dropping them keeps the
+route a statement about progress. The reply is also a separate output boundary
+from the record, because the record's text is not all the Manager's: a credential
+file name is the source CPA's metadata and a reason can quote an upstream code, so
+`item` and `reason` are scrubbed with the project's own credential scrubber
+(`internal/usage`). The record's free-text `instruction` — which interpolates a
+source name and the destination's own type string — is not emitted at all: the
+page states the next step from the item's `kind`, so untrusted metadata cannot
+reach the browser as prose. A staged adoption, a non-adoption and an unreadable
+record answer `404 {"code":"adopt_summary_unavailable"}` rather than an empty list
+that reads like a finished run. The session branch is bounded by
 `ProductComplete`: the claim that committed the adoption reads its own progress
 until the installation completes, and afterwards the route is an Admin resource
 and the same session is answered `401`.
@@ -1326,16 +1333,26 @@ Both wizards render one shared `FreshAdoptFlow`:
   `adoptionDecisions` — PascalCase fields the pinned domain type has no JSON tags
   for, read as they are — and the flow groups them into what copies and what needs
   manual work. Nothing is copied until the operator confirms, and the second POST
-  sends the identical body;
+  sends the identical body. Because the two POSTs are the same request, reading
+  the inventory reads the durable operation first: an attempt the record already
+  staged can only land on the confirmation, so a Back-and-retry or a lost first
+  reply never turns a read into the commit;
+- a staged checkpoint whose body the page no longer holds — a reload, or a lost
+  first reply — asks for the source key again before it offers the confirmation,
+  and the confirm button stays disabled until there is a body to send instead of
+  accepting a click that cannot do anything;
 - the committed run is polled every two seconds with a bounded backoff until the
   record says `finished` and not `running`, then the per-item results are grouped
   by their own outcome — migrated, manual, failed and `absent_at_source` — so the
   number beside "Migrated" is `counts.migrated` and a resource the source never had
-  is never counted as a copy. Each reason code has a localized sentence and the
-  server's English `instruction` stays behind a "details" disclosure;
+  is never counted as a copy. Each reason code has a localized sentence, and a
+  manual or failed item's next step is the page's own sentence for its `kind`
+  behind a "what to do" disclosure;
 - the progress read is bounded: three consecutive failures stop the loop and show
   a typed state with an explicit retry, so a refused or lost route cannot leave
-  "reading the migration record" spinning forever;
+  "reading the migration record" spinning forever. A read that never answers is
+  one of those failures — the fixed carrier gives it the same 15 s deadline the
+  canonical carrier gives every read — so a hung request cannot outlast the rule;
 - the success headline is a claim about the installation, so it requires the run to
   be settled, no retryable item to remain, and the installation itself to be
   complete. A settled run missing any of the three shows the settled state and
@@ -1343,15 +1360,19 @@ Both wizards render one shared `FreshAdoptFlow`:
 - a run that stopped, a page reloaded mid-run, or a finished run that never
   processed its own plan resumes from the durable prefix with the same `baseUrl`,
   key and `pluginsEnabled`. The key is not kept anywhere, so the resume form asks
-  for it again and pins the recorded plugin choice. Completion is refused over an
-  unprocessed plan, because the server cannot accept it either;
+  for it again and pins the recorded plugin choice. A replay reads the durable
+  operation and sends its current revision, because a migration checkpoint is its
+  own durable write: the revision the page last saw is stale exactly when a run
+  stopped between items. Completion is refused over an unprocessed plan, because
+  the server cannot accept it either;
 - the completion's coded refusals each have their own next action:
   `adopt_migration_running` keeps polling, `adopt_migration_incomplete` offers
   Resume, `adopt_migration_retryable` shows the count plus an explicit
   "finish anyway" checkbox that sends `acceptRetryable`, and
   `adopt_destination_unproven` names the specific failure. The acknowledgement is
-  bound to the retryable set the operator was shown: a new run, or a new set, asks
-  again instead of carrying the old answer into a decision nobody made.
+  bound to the retryable items the operator was shown, not to their count: a new
+  run, or a different set of the same size, asks again instead of carrying the old
+  answer into a decision nobody made.
 
 The strategy body and both refusal envelopes are read by both carriers: the
 bootstrap transport parses `Code` and `Unsupported` for a blocker and lowercase
