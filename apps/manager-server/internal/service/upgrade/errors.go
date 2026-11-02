@@ -160,6 +160,10 @@ const (
 	// not the target this operation staged. The import refuses before writing any
 	// configuration or credential to it.
 	UpgradeErrorCPAImportTargetForeign UpgradeErrorCode = "upgrade_cpa_import_target_foreign"
+	// UpgradeErrorStoreLocked reports that another process holds the v2 Manager
+	// store lock, so this offline write path did not open or change the store.
+	// Manager Server must be stopped before the import runs.
+	UpgradeErrorStoreLocked UpgradeErrorCode = "upgrade_store_locked"
 	// UpgradeErrorCPAConnectionConflict reports that the Manager already holds a
 	// complete CPA connection to a different CPA, so handing it this destination
 	// would repoint the Console away from a CPA it manages. The import refuses and
@@ -223,6 +227,7 @@ var (
 	ErrRollbackPortBusy      = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
 	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
 	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
+	ErrStoreLocked           = &UpgradeError{Code: UpgradeErrorStoreLocked}
 
 	ErrCPASourceMissing      = &UpgradeError{Code: UpgradeErrorCPASourceMissing}
 	ErrCPAConfigInvalid      = &UpgradeError{Code: UpgradeErrorCPAConfigInvalid}

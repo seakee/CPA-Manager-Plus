@@ -9,8 +9,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
 func TestCPAImportCommandRequiresLegacyAndAPluginChoice(t *testing.T) {
@@ -59,6 +63,34 @@ func TestCPAImportCommandIsListedInUsage(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("help wrote to stderr: %s", stderr.String())
+	}
+}
+
+// TestCPAImportCommandRefusesWhileTheStoreIsLocked pins the writer fence: the
+// subcommand writes the operation row, the destination attempt and the Manager
+// connection, so a held v2 data-root lock must stop it with a typed refusal and
+// the operator exit status 1, not race a live Manager Server.
+func TestCPAImportCommandRefusesWhileTheStoreIsLocked(t *testing.T) {
+	targetRoot := t.TempDir()
+	held, err := processlock.Acquire(filepath.Join(targetRoot, upgradeservice.SourceDatabaseName))
+	if err != nil {
+		t.Fatalf("hold the v2 store lock: %v", err)
+	}
+	defer func() { _ = held.Close() }()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err = Run(context.Background(), []string{
+		"cpa-import",
+		"--legacy", filepath.Join(targetRoot, "legacy"),
+		"--plugins", "true",
+		"--target", targetRoot,
+		"--destination-url", "http://127.0.0.1:8317",
+	}, stdout, stderr)
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); !ok || code != upgradeservice.UpgradeErrorStoreLocked {
+		t.Fatalf("a held store lock produced %v (code %q), want %s", err, code, upgradeservice.UpgradeErrorStoreLocked)
+	}
+	if code := ExitCode(err); code != 1 {
+		t.Fatalf("a held store lock exited %d, want 1 (%v)", code, err)
 	}
 }
 

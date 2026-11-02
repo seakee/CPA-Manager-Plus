@@ -15,10 +15,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
@@ -60,6 +62,16 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if err != nil {
 		return err
 	}
+	// This subcommand writes the operation row, the destination attempt and the
+	// Manager's own connection, so it holds the v2 data-root process lock for the
+	// whole write path. A held lock means Manager Server is still running: the
+	// run refuses with its own code and exit status 1 instead of racing a live
+	// writer, and it has read and written nothing yet.
+	storeLock, err := processlock.Acquire(filepath.Join(targetRoot, upgradeservice.SourceDatabaseName))
+	if err != nil {
+		return refuseTyped(stderr, fmt.Errorf("%w: another process holds the v2 Manager store; stop Manager Server and re-run the import: %v", upgradeservice.ErrStoreLocked, err))
+	}
+	defer func() { _ = storeLock.Close() }()
 	destinationURL := strings.TrimSpace(*destination)
 	if destinationURL == "" {
 		cfg, err := config.LoadWithoutCreatingDefault()
