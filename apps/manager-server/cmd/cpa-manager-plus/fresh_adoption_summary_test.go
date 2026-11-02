@@ -571,6 +571,21 @@ func TestAdoptionSummaryIdentityIsNotADigestOfTheRecordName(t *testing.T) {
 	}
 }
 
+// A source value can begin with the marker's own text. The prefix rule must
+// terminate and must not rewrite a marker the scrubber already wrote.
+func TestAdoptionRedactorDoesNotRewrapItsOwnMarker(t *testing.T) {
+	redact := adoptionRedactor([]string{"redactedValue123", "x-redacted-value"})
+	for value, want := range map[string]string{
+		"credential:redactedValue123.json": "credential:[redacted].json",
+		"credential:[redacted].json":       "credential:[redacted].json",
+		"redactedValue123-backup.json":     "[redacted]-backup.json",
+	} {
+		if got := redact(value); got != want {
+			t.Fatalf("redact(%q) = %q, want %q", value, got, want)
+		}
+	}
+}
+
 // Two token-shaped file names scrub to the same text. The browser binds an
 // acknowledgement to the record's item, not to text that happens to be equal, so
 // the reply carries a stable identity that keeps them distinct.
