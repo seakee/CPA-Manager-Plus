@@ -9,13 +9,16 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 )
 
 // TestExternalConnectNeverRewindsAConcurrentAdvance proves the recording write is
@@ -91,6 +94,97 @@ func TestExternalConnectRefusesATranslatedV7Document(t *testing.T) {
 	}
 	if _, found, evidenceErr := readExternalConnectEvidence(target.copied.target); evidenceErr != nil || found {
 		t.Fatalf("a refused document recorded evidence: found %t, err %v", found, evidenceErr)
+	}
+}
+
+// TestExternalConnectRefusesATargetOwnedByAnotherWriter proves the step holds the
+// v2 data root's ownership fence.
+//
+// The store is not only SQLite: the decision spans a read of the recorded
+// binding, a network proof and two writes. Another Manager process holding the
+// marker owns that whole path, so this step must refuse before it migrates,
+// probes or records anything — a second writer would let the two disagree about
+// which CPA the operation connected.
+func TestExternalConnectRefusesATargetOwnedByAnotherWriter(t *testing.T) {
+	target := newExternalTarget(t)
+	fence, err := processlock.Acquire(target.databasePath())
+	if err != nil {
+		t.Fatalf("take the ownership fence the step is supposed to respect: %v", err)
+	}
+	defer func() { _ = fence.Close() }()
+
+	_, err = target.connect(t)
+	if !errors.Is(err, ErrExternalV2Running) {
+		t.Fatalf("err = %v, want the owned-store refusal", err)
+	}
+	if target.probes != 0 {
+		t.Fatalf("the step probed the CPA %d time(s) while another writer owned the store", target.probes)
+	}
+	recorded := operationRow(t, target.databasePath())
+	if recorded.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("an owned store advanced to %q", recorded.Stage)
+	}
+	if recorded.ErrorCode != "" {
+		t.Fatalf("an owned store recorded the refusal durably: %q", recorded.ErrorCode)
+	}
+	if _, found, evidenceErr := readExternalConnectEvidence(target.copied.target); evidenceErr != nil || found {
+		t.Fatalf("an owned store recorded evidence: found %t, err %v", found, evidenceErr)
+	}
+}
+
+// TestExternalConnectSerializesTwoTargets proves two concurrent connects cannot
+// both succeed.
+//
+// The first connect is held inside its model-surface proof, after the point
+// where it has read the binding and before it records anything. A second connect
+// to another address starts there: without the fence it reads the same
+// uncommitted state, proves its own CPA and records its own target, so both runs
+// report success and the last one silently decides what the operation connected.
+// With the fence the second run is refused, and the recording that lands is the
+// one that held the store.
+func TestExternalConnectSerializesTwoTargets(t *testing.T) {
+	target := newExternalTarget(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	first := target.options
+	first.proveModelSurface = func(context.Context, string, string) error {
+		once.Do(func() { close(entered) })
+		<-release
+		return nil
+	}
+	second := target.options
+	second.BaseURL = "https://other.example"
+	second.proveModelSurface = func(context.Context, string, string) error { return nil }
+
+	type outcome struct {
+		result ExternalConnectResult
+		err    error
+	}
+	firstDone := make(chan outcome, 1)
+	go func() {
+		result, err := ExternalConnect(context.Background(), first)
+		firstDone <- outcome{result: result, err: err}
+	}()
+	<-entered
+	_, secondErr := ExternalConnect(context.Background(), second)
+	close(release)
+	firstOutcome := <-firstDone
+	if firstOutcome.err != nil {
+		t.Fatalf("the connect that held the store failed: %v", firstOutcome.err)
+	}
+	if secondErr == nil {
+		t.Fatal("a second connect against another target succeeded while the first held the store")
+	}
+	if !errors.Is(secondErr, ErrExternalV2Running) {
+		t.Fatalf("the second connect refused with %v, want the owned-store refusal", secondErr)
+	}
+	evidence, found, err := readExternalConnectEvidence(target.copied.target)
+	if err != nil || !found {
+		t.Fatalf("evidence = %+v, found %t, err %v", evidence, found, err)
+	}
+	if evidence.Identity != freshkeyapply.ExternalIdentity("https://cpa.example") {
+		t.Fatalf("the operation recorded %q, want the target that held the store", evidence.Identity)
 	}
 }
 

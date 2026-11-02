@@ -146,6 +146,12 @@ const (
 	// not at a position the External connect step can run from, or that the v2
 	// data root holds no recorded copy-in. Nothing was written.
 	UpgradeErrorExternalNotApplicable UpgradeErrorCode = "upgrade_external_connect_not_applicable"
+	// UpgradeErrorExternalV2Running reports that another Manager process owns the
+	// v2 data root: the step holds that process's ownership fence across its whole
+	// write path, and it refuses before it migrates, probes or records anything
+	// rather than writing a store two processes would then disagree about. Stop
+	// the process and run the step again.
+	UpgradeErrorExternalV2Running UpgradeErrorCode = "upgrade_external_connect_v2_running"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -206,6 +212,9 @@ var (
 	ErrExternalTargetMoved           = &UpgradeError{Code: UpgradeErrorExternalTargetMoved}
 	ErrExternalAuthorityUnavailable  = &UpgradeError{Code: UpgradeErrorExternalAuthorityUnavailable}
 	ErrExternalNotApplicable         = &UpgradeError{Code: UpgradeErrorExternalNotApplicable}
+	// ErrExternalV2Running is a refusal, not a transient failure: the operator
+	// stops the process that owns the store and reruns the step.
+	ErrExternalV2Running = &UpgradeError{Code: UpgradeErrorExternalV2Running}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

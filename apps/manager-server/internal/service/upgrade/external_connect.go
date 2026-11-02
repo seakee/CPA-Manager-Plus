@@ -12,6 +12,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -189,6 +190,18 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalNotApplicable,
 			fmt.Sprintf("the recorded operation is at stage %q, which cannot enter the External connect step; nothing was written", recorded.Stage), nil)
 	}
+	// This step writes the v2 store, so it holds the same ownership fence a
+	// running Manager holds, for everything below: the binding it reads, the
+	// network proof it takes, the row it records and the evidence it publishes.
+	// The fence is taken after the two reads above only because those decide that
+	// the step cannot run here at all; taking it first would create a lock marker
+	// in a root that holds no operation. A store another process owns is a typed
+	// refusal, never a second writer.
+	fence, err := acquireExternalTargetFence(paths.Database)
+	if err != nil {
+		return ExternalConnectResult{}, err
+	}
+	defer func() { _ = fence.Close() }()
 
 	identity := externalConnectIdentity(options, baseURL)
 	evidence, hasEvidence, err := readExternalConnectEvidence(targetRoot)
@@ -535,6 +548,29 @@ func redactExternalAddress(baseURL string) string {
 		return trimmed[:index+3] + strings.SplitN(trimmed[index+3:], "/", 2)[0]
 	}
 	return trimmed
+}
+
+// acquireExternalTargetFence takes the v2 data root's ownership lock, the same
+// marker a running Manager process holds. It mirrors the copy-in's
+// acquireTargetFence: the marker is created when the store has none yet, which
+// is not this step's first write because a root this step may run against always
+// holds a recorded copy-in.
+//
+// A held lock is a typed refusal, not a generic environment failure: another
+// Manager process is serving or writing this store, and migrating, probing and
+// recording under it would make two writers disagree about the same bytes. The
+// message names no host path; the code and exit status are what an operator acts
+// on.
+func acquireExternalTargetFence(databasePath string) (*processlock.Lock, error) {
+	lock, err := processlock.Acquire(databasePath)
+	if err == nil {
+		return lock, nil
+	}
+	if errors.Is(err, processlock.ErrLocked) {
+		return nil, newUpgradeError(UpgradeErrorExternalV2Running,
+			"the v2 data root is owned by a running Manager process; stop it before the External connect step, then run the step again", nil)
+	}
+	return nil, fmt.Errorf("take the v2 data root ownership lock: %w", err)
 }
 
 // externalConnectEvidencePath is the evidence file of a v2 data root. It shares

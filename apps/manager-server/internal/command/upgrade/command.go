@@ -58,7 +58,10 @@ func ExitCode(err error) int {
 		errors.Is(err, upgradeservice.ErrExternalVersionUnsupported),
 		errors.Is(err, upgradeservice.ErrExternalConfigDocumentInvalid),
 		errors.Is(err, upgradeservice.ErrExternalManagementRejected),
-		errors.Is(err, upgradeservice.ErrExternalTargetMoved):
+		errors.Is(err, upgradeservice.ErrExternalTargetMoved),
+		// A store another process owns is blocked, not broken: the operator stops
+		// that process, so it is the same "in use" decision as a blocked preflight.
+		errors.Is(err, upgradeservice.ErrExternalV2Running):
 		return 1
 	default:
 		return 2
