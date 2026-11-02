@@ -1,5 +1,6 @@
 export type MonitoringDataTab = 'accounts' | 'apiKeys' | 'realtime';
 export type MonitoringCenterTimeRange =
+  | '24h'
   | 'today'
   | 'yesterday'
   | '7d'
@@ -43,6 +44,7 @@ export type MonitoringCenterUiState = {
 
 const TAB_SET = new Set<MonitoringDataTab>(MONITORING_DATA_TABS);
 const TIME_RANGE_SET = new Set<MonitoringCenterTimeRange>([
+  '24h',
   'today',
   'yesterday',
   '7d',

@@ -27,6 +27,12 @@ If the page says request monitoring is disabled, enable it in [Configuration](./
 
 Failure summaries are sanitized. Raw failure bodies stay in local SQLite and are not exposed through normal APIs or JSONL exports.
 
+## Time Ranges
+
+The **24 hours** preset shows the last 24 complete hours, excluding the hour still in progress. At 10:32, the window is yesterday 10:00 (included) through today 10:00 (excluded). The window advances at every local hour boundary, even when auto-refresh is off, and catches up when you return to the tab. The selected preset is remembered in this browser.
+
+Account/API key/request views, summaries, filter selectors, and hourly charts share this window. The local fallback hourly timeline runs chronologically and keeps repeated daylight-saving hours separate. Manager Server-provided charts retain the server's existing daylight-saving bucketing behavior. Today, yesterday, and the existing longer presets keep their current calendar-day behavior. Current-hour traffic appears after that hour completes; use Today for an active incident.
+
 ## Common Investigation Flow
 
 1. Select the time range first. Use a short range for active incidents and a larger range for trend review.

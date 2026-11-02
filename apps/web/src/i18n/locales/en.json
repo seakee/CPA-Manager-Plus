@@ -3097,6 +3097,7 @@
     "toolbar_title": "Live Filters & Refresh",
     "realtime_console_eyebrow": "Realtime Runtime Monitor",
     "console_subtitle": "Track call volume, success and failure, token structure, and spend by account within the selected time range, with a live table that behaves more like a request log console.",
+    "range_24h": "24 hours",
     "range_today": "Today",
     "range_yesterday": "Yesterday",
     "range_7d": "7d",

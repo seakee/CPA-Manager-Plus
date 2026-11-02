@@ -65,7 +65,13 @@ describe('monitoringCenterUiState', () => {
     expect(normalizeMonitoringDataTab('realtime')).toBe('realtime');
   });
 
+  it('persists the 24 hour preset with automatic refresh disabled', () => {
+    writeMonitoringCenterUiState({ ...getDefaultMonitoringCenterUiState(), timeRange: '24h', autoRefreshMs: '0' });
+    expect(readMonitoringCenterUiState()).toMatchObject({ timeRange: '24h', autoRefreshMs: '0' });
+  });
+
   it('normalizes persisted filter fields', () => {
+    expect(normalizeMonitoringTimeRange('24h')).toBe('24h');
     expect(normalizeMonitoringTimeRange('30d')).toBe('30d');
     expect(normalizeMonitoringTimeRange('yesterday')).toBe('yesterday');
     expect(normalizeMonitoringTimeRange('bad')).toBe('today');

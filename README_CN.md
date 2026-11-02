@@ -93,6 +93,7 @@ CPA / CLIProxyAPI 可以在 `:8317` 直接托管官方 Management Center，也�
 
 - 将 CPA usage queue 中的请求持久化到本地 SQLite，并按账号、调用方 API Key 查看实时请求。
 - 查看状态、延迟、Token、缓存、Trace 和脱敏失败证据，不暴露原始失败体。
+- 选择 **24 小时**查看最近 24 个完整小时；即使关闭自动刷新，窗口也会在本地整点推进，今天和昨天仍按自然日计算。
 - 使用 JSONL 导入或导出请求历史。
 - 打开 [请求监控演示](https://seakee.github.io/CPA-Manager-Plus/#/demo/monitoring)。
 

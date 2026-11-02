@@ -8,6 +8,7 @@ import { readString } from '../model/base';
 import { buildApiKeyDisplayMap } from '../model/apiKeys';
 import { buildMonitoringAuthMetaMap } from '../model/authMeta';
 import { getRangeBounds, shouldUseHourlyTimeline } from '../model/range';
+import { subscribeHourlyClock } from '../model/hourlyClock';
 import {
   buildChannelRows,
   buildFailureRows,
@@ -119,6 +120,7 @@ interface MonitoringEventsPageState {
 
 export type MonitoringPresentationSnapshot = Pick<
   UseMonitoringDataReturn,
+  | 'rangeBounds'
   | 'summary'
   | 'coverage'
   | 'timeline'
@@ -189,7 +191,7 @@ export const buildMonitoringEventsScopeKey = (
   JSON.stringify({
     range: timeRange,
     bounds:
-      timeRange === 'custom'
+      timeRange === 'custom' || timeRange === '24h'
         ? analyticsBounds
         : analyticsBounds
           ? { startMs: analyticsBounds.startMs }
@@ -352,6 +354,28 @@ export function useMonitoringData({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [analyticsNowMs, setAnalyticsNowMs] = useState(() => Date.now());
+  const [clockRange, setClockRange] = useState(timeRange);
+  useEffect(() => {
+    let cancelled = false;
+    // Until captured, bounds are disabled: never request a newly selected 24h
+    // preset with the clock sample from an hours-old natural-day selection.
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setClockRange(timeRange);
+      if (timeRange === '24h') setAnalyticsNowMs(Date.now());
+    });
+    if (timeRange !== '24h') {
+      return () => { cancelled = true; };
+    }
+    const unsubscribe = subscribeHourlyClock(
+      setAnalyticsNowMs,
+      typeof document === 'undefined' ? undefined : document
+    );
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [timeRange]);
   const [eventsPageState, setEventsPageState] = useState<MonitoringEventsPageState>(() =>
     createEventsPageState()
   );
@@ -363,13 +387,14 @@ export function useMonitoringData({
   const metaRequestGenerationRef = useRef(0);
 
   const analyticsBounds = useMemo(() => {
+    if (timeRange === '24h' && clockRange !== timeRange) return null;
     const bounds = getRangeBounds(timeRange, analyticsNowMs, customTimeRange);
     if (!bounds) return null;
     return {
       startMs: Number.isFinite(bounds.startMs) && bounds.startMs > 0 ? bounds.startMs : 1,
       endMs: Math.max(bounds.endMs, 1),
     };
-  }, [analyticsNowMs, customTimeRange, timeRange]);
+  }, [analyticsNowMs, clockRange, customTimeRange, timeRange]);
 
   const refreshMeta = useCallback(
     async (showLoading: boolean = true): Promise<MonitoringMetaPayload | null> => {
@@ -742,8 +767,8 @@ export function useMonitoringData({
 
   const rangeFilteredRows = useMemo(
     () =>
-      buildRangeFilteredRows(allRows, timeRange, customTimeRange, searchQuery, searchApiKeyHash),
-    [allRows, customTimeRange, searchApiKeyHash, searchQuery, timeRange]
+      buildRangeFilteredRows(allRows, timeRange, customTimeRange, searchQuery, searchApiKeyHash, analyticsNowMs),
+    [allRows, analyticsNowMs, customTimeRange, searchApiKeyHash, searchQuery, timeRange]
   );
   const filteredRows = useMemo(
     () => buildScopeFilteredRows(rangeFilteredRows, scopeFilters),
@@ -769,8 +794,8 @@ export function useMonitoringData({
               currentAnalyticsData.granularity
             ),
           }
-        : buildTimeline(statsRows, timeRange, customTimeRange),
-    [currentAnalyticsData, customTimeRange, statsRows, timeRange]
+        : buildTimeline(statsRows, timeRange, customTimeRange, analyticsNowMs),
+    [analyticsNowMs, currentAnalyticsData, customTimeRange, statsRows, timeRange]
   );
   const hourlyDistribution = useMemo(
     () =>
@@ -967,6 +992,7 @@ export function useMonitoringData({
 
   const computedPresentationSnapshot = useMemo<MonitoringPresentationSnapshot>(
     () => ({
+      rangeBounds: analyticsBounds,
       summary,
       coverage: currentAnalyticsData?.coverage,
       timeline: timelineData.points,
@@ -991,6 +1017,7 @@ export function useMonitoringData({
     }),
     [
       analytics.lastRefreshedAt,
+      analyticsBounds,
       accountRows,
       apiKeyRows,
       channelRows,
@@ -1089,6 +1116,7 @@ export function useMonitoringData({
   const statusChips = useMemo(() => buildStatusChips(metadata), [metadata]);
 
   return {
+    rangeBounds: presentationSnapshot.rangeBounds,
     loading: loading || analytics.loading,
     error: [error, analytics.error, filterSelectorsAnalytics.error].filter(Boolean).join('；'),
     authFiles,

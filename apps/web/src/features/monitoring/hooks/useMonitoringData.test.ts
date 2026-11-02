@@ -83,6 +83,7 @@ const createMonitoringEventRow = (
 const createPresentationSnapshot = (id: string): MonitoringPresentationSnapshot => {
   const row = createMonitoringEventRow({ id });
   return {
+    rangeBounds: null,
     summary: buildMonitoringSummary([row]),
     coverage: {
       scope: 'time_range',
