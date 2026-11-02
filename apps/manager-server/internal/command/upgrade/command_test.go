@@ -1164,6 +1164,38 @@ func TestReconcileTakesTheSourceFenceReadOnly(t *testing.T) {
 	}
 }
 
+// TestReconcileRefusesATargetInsideTheSourceBeforeItTouchesIt reproduces review
+// F3: the CLI took the v2 data-root fence before the service rejected a target
+// inside the source, so the fence created the child directory and its marker
+// inside the source tree it promises not to touch. That new entry also entered
+// the source fingerprint, so the next run with a correct target refused with
+// upgrade_source_changed until the child was removed by hand.
+func TestReconcileRefusesATargetInsideTheSourceBeforeItTouchesIt(t *testing.T) {
+	source := readySource(t)
+	before := treeDigests(t, source)
+	child := filepath.Join(source, "new-child")
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err := Run(context.Background(), []string{"reconcile", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", child}, stdout, stderr)
+	if err == nil {
+		t.Fatalf("reconcile succeeded, want a refusal; stdout: %s", stdout)
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Fatalf("reconcile exit code = %d, want the usage 2; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(err.Error(), "must not contain each other") {
+		t.Fatalf("refusal %q does not name the containment rule", err)
+	}
+	if _, statErr := os.Stat(child); !os.IsNotExist(statErr) {
+		t.Fatalf("the refused run created the target inside the source: %v", statErr)
+	}
+	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the refused run changed the source volume: %v -> %v", before, after)
+	}
+}
+
 func TestReconcileUsageErrors(t *testing.T) {
 	if code, _, _ := run(t, "reconcile"); code != 2 {
 		t.Fatalf("missing --legacy exit code = %d, want 2", code)

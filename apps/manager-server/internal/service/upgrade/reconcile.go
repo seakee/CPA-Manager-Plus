@@ -406,10 +406,7 @@ func reconcileRoots(options Options) (string, string, string, error) {
 			return "", "", "", err
 		}
 	}
-	canonicalSource := canonicalPath(sourceRoot)
-	canonicalTarget := canonicalPath(targetRoot)
-	canonicalBundle := canonicalPath(bundleDir)
-	if err := rejectOverlap(canonicalSource, canonicalTarget, canonicalBundle); err != nil {
+	if err := RefuseOverlappingRoots(sourceRoot, targetRoot, bundleDir); err != nil {
 		return "", "", "", err
 	}
 	return sourceRoot, targetRoot, bundleDir, nil

@@ -391,6 +391,27 @@ func rejectOverlap(sourceRoot, targetRoot, bundleDir string) error {
 	return nil
 }
 
+// RefuseOverlappingRoots refuses a 1.x source, a v2 data root and a backup
+// destination where one contains another. It resolves the three the way
+// Reconcile does but reads no content and creates nothing, so a caller can
+// refuse a mistaken target before it takes a fence or materializes a directory
+// and marker inside the source tree it promises not to touch.
+func RefuseOverlappingRoots(sourceRoot, targetRoot, bundleDir string) error {
+	absoluteSource, err := filepath.Abs(sourceRoot)
+	if err != nil {
+		return fmt.Errorf("resolve the 1.x source root: %w", err)
+	}
+	absoluteTarget, err := filepath.Abs(targetRoot)
+	if err != nil {
+		return fmt.Errorf("resolve the v2 data root: %w", err)
+	}
+	absoluteBundle, err := filepath.Abs(bundleDir)
+	if err != nil {
+		return fmt.Errorf("resolve the backup destination: %w", err)
+	}
+	return rejectOverlap(canonicalPath(absoluteSource), canonicalPath(absoluteTarget), canonicalPath(absoluteBundle))
+}
+
 // sourceBundleLayout describes the 1.x data volume for maintenancebundle. The
 // archive root is required: a 1.x volume without it is not a complete source.
 func sourceBundleLayout(root string) maintenancebundle.Layout {

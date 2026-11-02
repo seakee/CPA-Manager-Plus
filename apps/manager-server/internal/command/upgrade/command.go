@@ -451,6 +451,15 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	if bundleDir == "" {
 		bundleDir = upgradeservice.DefaultBundleDirectory(targetRoot)
 	}
+	// The 1.x source is a read-only input, so a target or backup destination
+	// that contains it, or sits inside it, is refused here: before the preflight
+	// probe, before either fence, and before anything can create a directory or
+	// a lock marker below the source. A fence takes a target that does not exist
+	// by creating it, which would write into the tree this step promises not to
+	// change and would make the next run refuse with upgrade_source_changed.
+	if err := upgradeservice.RefuseOverlappingRoots(legacyRoot, targetRoot, bundleDir); err != nil {
+		return fmt.Errorf("%w: %v", ErrUsage, err)
+	}
 	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
 		LegacyRoot:      legacyRoot,
 		DeclaredVersion: *sourceVersion,
