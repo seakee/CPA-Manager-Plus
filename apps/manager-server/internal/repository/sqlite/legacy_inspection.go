@@ -209,34 +209,36 @@ func inspectLegacySource(ctx context.Context, paths InspectionPaths, options Ins
 		}
 		// Existing single-Manager authority establishes quiescence. Matching
 		// copied hashes alone would not establish a consistent live snapshot.
-		tempDir, tempErr := inspectionTempDirectory(paths)
-		if tempErr != nil {
-			return result, tempErr
-		}
-		staging, makeErr := os.MkdirTemp(tempDir, "cpamp-native-inspection-")
-		if makeErr != nil {
-			return result, errors.New("inspection staging unavailable")
+		staging, copyErr := copyInspectionSnapshot(ctx, paths, result.Files, "cpamp-native-inspection-", "-wal")
+		if copyErr != nil {
+			return result, copyErr
 		}
 		defer os.RemoveAll(staging)
 		databasePath = filepath.Join(staging, "source.sqlite")
-		if err := copyInspectionFile(ctx, paths.Database, databasePath); err != nil {
-			return result, err
-		}
-		if err := copyInspectionFile(ctx, paths.Database+"-wal", databasePath+"-wal"); err != nil {
-			return result, err
-		}
-		copied, copyErr := inspectFiles(paths)
-		if copyErr != nil || !sameInspectionFiles(result.Files, copied) {
-			return result, errors.New("source changed during inspection copy")
-		}
 		immutable = false
 		result.Consistency = "manager-fenced-recovery-copy"
 	} else if locked {
 		result.Consistency = "manager-fenced-cold"
 	} else if readOnlySnapshot {
-		// A real SQLite read transaction is the consistency boundary. Do not use
-		// immutable=1 here: WAL readers must participate in normal WAL locking.
-		immutable = false
+		// Read the snapshot copy, never the source in place. `mode=ro` forbids
+		// SQL writes but a plain open of a database whose header says WAL still
+		// creates -wal/-shm beside it, and this leaf authenticates on a tree it
+		// promises to preserve. The source is digested only by the inventory
+		// comparison below; the connection is opened on the private copy.
+		staging, copyErr := copyInspectionSnapshot(ctx, paths, result.Files, "cpamp-readonly-snapshot-")
+		if copyErr != nil {
+			return result, copyErr
+		}
+		defer os.RemoveAll(staging)
+		databasePath = filepath.Join(staging, "source.sqlite")
+		// The copy is the state that will be read, so its own header — not the
+		// source's, which a writer may have switched after that check — has to
+		// still name a rollback journal. This is also what makes the immutable
+		// open below safe: nothing can gain a WAL while the copy is read.
+		if err := validateInspectionCopyHeader(databasePath); err != nil {
+			result.Issues = append(result.Issues, "sqlite-snapshot-mode-unavailable")
+			return result, err
+		}
 		result.Consistency = "sqlite-read-snapshot"
 	} else {
 		result.Consistency = "operator-asserted-cold"
@@ -647,6 +649,66 @@ func validateReadOnlySnapshotSource(databasePath string, files []InspectionFile)
 	}
 	if files[1].State == "present" && files[1].Size > 0 {
 		return errors.New("rollback source has unexpected WAL content")
+	}
+	return nil
+}
+
+// copyInspectionSnapshot copies the database and the named sidecars into a
+// private staging directory outside every source directory, and proves the
+// source inventory did not change while the copy was taken. The returned
+// directory belongs to the caller, which removes it when the read finishes.
+//
+// Every read-only source read opens this copy instead of the source: an open in
+// place writes SQLite coordination files beside the database even under
+// mode=ro, and this inspection promises to preserve the tree byte for byte.
+func copyInspectionSnapshot(ctx context.Context, paths InspectionPaths, files []InspectionFile, prefix string, sidecars ...string) (string, error) {
+	tempDir, err := inspectionTempDirectory(paths)
+	if err != nil {
+		return "", err
+	}
+	staging, err := os.MkdirTemp(tempDir, prefix)
+	if err != nil {
+		return "", errors.New("inspection staging unavailable")
+	}
+	databasePath := filepath.Join(staging, "source.sqlite")
+	discard := func(copyErr error) (string, error) {
+		_ = os.RemoveAll(staging)
+		return "", copyErr
+	}
+	if err := copyInspectionFile(ctx, paths.Database, databasePath); err != nil {
+		return discard(err)
+	}
+	for _, suffix := range sidecars {
+		if err := copyInspectionFile(ctx, paths.Database+suffix, databasePath+suffix); err != nil {
+			return discard(err)
+		}
+	}
+	copied, copyErr := inspectFiles(paths)
+	if copyErr != nil || !sameInspectionFiles(files, copied) {
+		return discard(errors.New("source changed during inspection copy"))
+	}
+	return staging, nil
+}
+
+// validateInspectionCopyHeader proves the copy being read is a rollback-mode
+// database, which is what lets it be opened immutable. A writer that switched
+// the source to WAL after the source header check must be refused instead of
+// being read as the cold database it no longer is.
+func validateInspectionCopyHeader(databasePath string) error {
+	file, err := os.Open(databasePath)
+	if err != nil {
+		return errors.New("SQLite header unavailable")
+	}
+	defer file.Close()
+	header := make([]byte, 20)
+	if _, err := io.ReadFull(file, header); err != nil {
+		return errors.New("SQLite header unavailable")
+	}
+	if string(header[:16]) != "SQLite format 3\x00" {
+		return errors.New("SQLite header invalid")
+	}
+	if header[18] != 1 || header[19] != 1 {
+		return errors.New("WAL or unsupported journal mode requires later recovery ownership")
 	}
 	return nil
 }
