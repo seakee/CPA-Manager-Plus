@@ -22,11 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"slices"
-	"sort"
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 )
@@ -36,21 +35,48 @@ import (
 //
 // BaseURL binds the attempt to the destination it was staged for: a Manager
 // pointed at another CPA must never present a secret minted for a different one.
-// OperationID and Attempt are the Supervisor's replay identity; the plugin choice
-// and client key digest make the request immutable, because the Supervisor
-// replays a journalled operation by ID and never applies a different request
-// under the same one. TerminalFailure records that the attempt reached a terminal
-// failure, which is the only condition under which the next run may submit a new
-// attempt ID.
+// Intent is the whole request the Supervisor published, minus its operation ID,
+// and ManagementKey is the secret that request carried. OperationID and Attempt
+// are the Supervisor's replay identity. TerminalFailure records that the attempt
+// reached a terminal failure, which is the only condition under which the next
+// run may submit a new attempt ID.
 type cpaImportDestinationRecord struct {
-	BaseURL          string `json:"baseUrl"`
-	ManagementKey    string `json:"managementKey"`
-	PluginsEnabled   bool   `json:"pluginsEnabled"`
-	ClientKeysDigest string `json:"clientKeysDigest"`
-	OperationID      string `json:"operationId"`
-	Attempt          int    `json:"attempt"`
-	TerminalFailure  bool   `json:"terminalFailure"`
-	UpdatedAtMS      int64  `json:"updatedAtMs"`
+	BaseURL         string                     `json:"baseUrl"`
+	ManagementKey   string                     `json:"managementKey"`
+	Intent          cpaImportDestinationIntent `json:"intent"`
+	OperationID     string                     `json:"operationId"`
+	Attempt         int                        `json:"attempt"`
+	TerminalFailure bool                       `json:"terminalFailure"`
+	UpdatedAtMS     int64                      `json:"updatedAtMs"`
+}
+
+// cpaImportDestinationIntent is the Supervisor's destination request without its
+// operation ID.
+//
+// The Supervisor admits a replacement attempt only when it differs from the
+// published destination in that ID and nothing else: supersedeDestination
+// substitutes the new ID into the stored request and requires reflect.DeepEqual
+// against the new one (apps/runtime-supervisor/internal/lifecycle/
+// destination.go:237-247,314-345). Every field it compares is held here, so a
+// retry can prove it is submitting the identical request instead of discovering
+// the difference at the Runtime. The management secret travels beside the
+// intent, encrypted, because the published request carries it too.
+type cpaImportDestinationIntent struct {
+	ExpectedRuntimeIdentity   model.RuntimeIdentity   `json:"expectedRuntimeIdentity"`
+	ExpectedRuntimeGeneration model.RuntimeGeneration `json:"expectedRuntimeGeneration"`
+	ExpectedActiveArtifactID  model.RuntimeArtifactID `json:"expectedActiveArtifactId"`
+	SourceIdentity            string                  `json:"sourceIdentity"`
+	SourceClass               string                  `json:"sourceClass"`
+	APIKeys                   []string                `json:"apiKeys"`
+	PluginsEnabled            bool                    `json:"pluginsEnabled"`
+}
+
+// complete reports whether this record holds the request it submitted. A record
+// written before the full intent was kept has only its secret and operation ID,
+// and can be replayed under that ID but never superseded: superseding it would
+// have to assert an equality nothing recorded.
+func (r cpaImportDestinationRecord) complete() bool {
+	return r.Intent.SourceIdentity != ""
 }
 
 // cpaImportDestinationOperationID is the Supervisor operation ID of one attempt.
@@ -69,20 +95,14 @@ func cpaImportDestinationOperationID(sourceIdentity string, attempt int) string 
 // nextCPAImportDestinationAttempt returns the same request under the next attempt
 // identity. It is only called after a recorded terminal failure: the Supervisor
 // refuses to supersede a stage or start that is still live, and it requires the
-// replacement request to differ from the stored one only in its operation ID.
-func nextCPAImportDestinationAttempt(record cpaImportDestinationRecord, sourceIdentity string) cpaImportDestinationRecord {
+// replacement request to differ from the stored one only in its operation ID. The
+// intent is copied unchanged, and the ID keeps the source identity the request was
+// published under, so the derivation itself cannot drift.
+func nextCPAImportDestinationAttempt(record cpaImportDestinationRecord) cpaImportDestinationRecord {
 	record.Attempt++
-	record.OperationID = cpaImportDestinationOperationID(sourceIdentity, record.Attempt)
+	record.OperationID = cpaImportDestinationOperationID(record.Intent.SourceIdentity, record.Attempt)
 	record.TerminalFailure = false
 	return record
-}
-
-// cpaImportClientKeysDigest names the exact client key set a request carried
-// without storing the keys themselves.
-func cpaImportClientKeysDigest(keys []string) string {
-	sorted := slices.Clone(keys)
-	sort.Strings(sorted)
-	return digestBytes([]byte(strings.Join(sorted, "\n")))
 }
 
 // saveCPAImportDestinationRecord writes the attempt before it is submitted,

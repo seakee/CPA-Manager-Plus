@@ -8,11 +8,13 @@ package upgrade
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -355,105 +357,190 @@ func configValueAt(document map[string]any, parts []string) (any, bool) {
 	return current, true
 }
 
-// fakeImportRuntime is the Runtime the import stages the destination through. It
-// records the two mutations, so a test can prove the plugin choice reached the
-// destination request.
+// fakeImportRuntime mirrors the Supervisor's destination admission rather than a
+// map of canned answers.
+//
+// Its rules are the ones the real Executor applies: a submission whose expected
+// Runtime identity or generation is not the current authority is refused; a
+// journalled operation ID replays its recorded result and never applies a new
+// request; and a replacement attempt is admitted only when the published
+// destination request is identical after the operation ID is substituted, with a
+// terminal stage and an absent or terminally failed start. A fake that keyed
+// answers by operation ID alone could not observe a changed request, which is how
+// a drifted retry stayed invisible to the lane's own test.
 type fakeImportRuntime struct {
-	mu        sync.Mutex
-	state     model.RuntimeState
-	stageCall *model.RuntimeDestinationRequest
-	startCall *model.RuntimeMutationRequest
-	staged    *fakeDestinationCPA
-	identity  model.RuntimeIdentity
-	artifact  model.RuntimeArtifactID
+	mu         sync.Mutex
+	state      model.RuntimeState
+	generation model.RuntimeGeneration
+	stageCall  *model.RuntimeDestinationRequest
+	startCall  *model.RuntimeMutationRequest
+	staged     *fakeDestinationCPA
+	identity   model.RuntimeIdentity
+	artifact   model.RuntimeArtifactID
 	// failStage makes the stage answer a terminal failure.
 	failStage bool
 	// failStart makes the start answer a terminal failure and leaves the CPA
 	// offline, which is the state the next run observes.
 	failStart bool
-	// replay makes the Runtime answer a repeated operation ID with the result it
-	// journalled first, without applying the new request: the Supervisor's replay
-	// rule, and the reason a retry must reuse its recorded secret.
-	replay  bool
+	// journal holds the answer of every operation the Supervisor recorded.
 	journal map[string]model.RuntimeOperationResult
+	// submitted holds the request fingerprint of every journalled operation, so a
+	// repeated ID with another source or artifact is refused as the journal's
+	// Resolve refuses it.
+	submitted map[string]model.RuntimeDestinationRequest
+	// published is the destination request the Supervisor actually staged, the
+	// object supersedeDestination compares against.
+	published *model.RuntimeDestinationRequest
+	// refusal names the Runtime rule that refused the last submission.
+	refusal string
 }
 
 func newFakeImportRuntime(state model.RuntimeState) *fakeImportRuntime {
 	return &fakeImportRuntime{
-		state:    state,
-		identity: model.RuntimeIdentity("runtime-identity-1"),
-		artifact: model.RuntimeArtifactID("sha256:" + strings.Repeat("ab", 32)),
-		journal:  map[string]model.RuntimeOperationResult{},
+		state:      state,
+		generation: 4,
+		identity:   model.RuntimeIdentity("runtime-identity-1"),
+		artifact:   model.RuntimeArtifactID("sha256:" + strings.Repeat("ab", 32)),
+		journal:    map[string]model.RuntimeOperationResult{},
+		submitted:  map[string]model.RuntimeDestinationRequest{},
 	}
+}
+
+// restart makes the next observation report a new generation, which is what a
+// Supervisor process restart looks like to the Manager.
+func (f *fakeImportRuntime) restart() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.generation++
+}
+
+// lastRefusal reports the Runtime rule that refused the last submission, so a
+// test can prove the rule applied instead of a fixture being silently ignored.
+func (f *fakeImportRuntime) lastRefusal() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refusal
 }
 
 func (f *fakeImportRuntime) Status(context.Context) (model.RuntimeObservedStatus, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return model.RuntimeObservedStatus{
-		Identity: f.identity, Generation: 4, ProtocolVersion: "v1", State: f.state,
+		Identity: f.identity, Generation: f.generation, ProtocolVersion: "v1", State: f.state,
 		CPAObservedVersion:    "8.0.13",
 		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: f.artifact, Version: "8.0.13"},
 		Capabilities:          model.RuntimeCapabilities{model.RuntimeCapabilityStageDestination, model.RuntimeCapabilityStart},
 	}, nil
 }
 
-func (f *fakeImportRuntime) StageDestination(_ context.Context, request model.RuntimeDestinationRequest) (model.RuntimeOperationResult, error) {
-	f.mu.Lock()
-	f.stageCall = &request
-	fail := f.failStage
-	if f.replay {
-		if stored, ok := f.journal[request.OperationID]; ok && stored.OperationType == model.RuntimeOperationStageDestination {
-			f.mu.Unlock()
-			return stored, nil
-		}
+// validateSubmission mirrors journal.validateSubmission: the expected authority
+// must be the current one before an operation is even resolved.
+func (f *fakeImportRuntime) validateSubmissionLocked(identity model.RuntimeIdentity, generation model.RuntimeGeneration) error {
+	switch {
+	case identity != f.identity:
+		f.refusal = "runtime identity mismatch"
+	case generation != f.generation:
+		f.refusal = "stale runtime generation"
+	default:
+		return nil
 	}
-	f.mu.Unlock()
-	result := func(state model.RuntimeOperationState) model.RuntimeOperationResult {
-		return model.RuntimeOperationResult{
-			OperationID: request.OperationID, OperationType: model.RuntimeOperationStageDestination,
-			RuntimeIdentity: request.ExpectedRuntimeIdentity, RuntimeGeneration: request.ExpectedRuntimeGeneration,
-			State: state,
-		}
-	}
-	if fail {
-		failed := result(model.RuntimeOperationFailed)
-		failed.Failure = &model.RuntimeOperationFailure{Code: "stage_failed"}
-		f.recordJournal(failed)
-		return failed, nil
-	}
-	// The destination CPA the Supervisor publishes carries the request's keys and
-	// management secret, which is what the proof reads.
-	f.staged.mu.Lock()
-	f.staged.management = request.ManagementKey
-	f.staged.clientKeys = append([]string(nil), request.APIKeys...)
-	f.staged.mu.Unlock()
-	succeeded := result(model.RuntimeOperationSucceeded)
-	f.mu.Lock()
-	f.state = model.RuntimeStateReady
-	f.mu.Unlock()
-	f.recordJournal(succeeded)
-	return succeeded, nil
+	return errors.New(f.refusal)
 }
 
-// recordJournal stores one operation result when the test runs the Runtime in
-// replay mode, so a repeated ID returns it instead of applying the request.
-func (f *fakeImportRuntime) recordJournal(result model.RuntimeOperationResult) {
+func (f *fakeImportRuntime) StageDestination(_ context.Context, request model.RuntimeDestinationRequest) (model.RuntimeOperationResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.replay {
-		f.journal[result.OperationID] = result
+	f.stageCall = &request
+	if err := f.validateSubmissionLocked(request.ExpectedRuntimeIdentity, request.ExpectedRuntimeGeneration); err != nil {
+		return model.RuntimeOperationResult{}, err
 	}
+	// Resolve first, exactly as the journal does: an existing ID answers with its
+	// journalled operation, but only when the request fingerprint is the same one.
+	journalled, found := f.journal[request.OperationID]
+	if found {
+		submitted := f.submitted[request.OperationID]
+		if submitted.ExpectedActiveArtifactID != request.ExpectedActiveArtifactID ||
+			submitted.SourceIdentity != request.SourceIdentity || submitted.SourceClass != request.SourceClass {
+			f.refusal = "operation ID conflict"
+			return model.RuntimeOperationResult{}, errors.New(f.refusal)
+		}
+	}
+	// A stored destination is compared before the replay, and a replacement is
+	// admitted only under supersedeDestination's rule.
+	supersedes := ""
+	if f.published != nil && !reflect.DeepEqual(*f.published, request) {
+		previous := *f.published
+		previous.OperationID = request.OperationID
+		if f.published.OperationID == request.OperationID || !reflect.DeepEqual(previous, request) {
+			f.refusal = "operation ID conflict (request changed)"
+			return model.RuntimeOperationResult{}, errors.New(f.refusal)
+		}
+		if err := f.admitSupersedeLocked(*f.published); err != nil {
+			return model.RuntimeOperationResult{}, err
+		}
+		supersedes = f.published.OperationID
+	}
+	if found {
+		return journalled, nil
+	}
+	if f.published != nil && supersedes == "" {
+		f.refusal = "operation state conflict"
+		return model.RuntimeOperationResult{}, errors.New(f.refusal)
+	}
+	result := model.RuntimeOperationResult{
+		OperationID: request.OperationID, OperationType: model.RuntimeOperationStageDestination,
+		RuntimeIdentity: request.ExpectedRuntimeIdentity, RuntimeGeneration: request.ExpectedRuntimeGeneration,
+		State: model.RuntimeOperationSucceeded,
+	}
+	if f.failStage {
+		result.State = model.RuntimeOperationFailed
+		result.Failure = &model.RuntimeOperationFailure{Code: "stage_failed"}
+	} else {
+		// The destination CPA the Supervisor publishes carries the request's keys
+		// and management secret, which is what the binding reads.
+		f.staged.mu.Lock()
+		f.staged.management = request.ManagementKey
+		f.staged.clientKeys = append([]string(nil), request.APIKeys...)
+		f.staged.mu.Unlock()
+		published := request
+		f.published = &published
+	}
+	f.journal[request.OperationID] = result
+	f.submitted[request.OperationID] = request
+	return result, nil
+}
+
+// admitSupersedeLocked applies supersedeDestination's terminal-evidence rule: the
+// replaced stage must be terminal, and its start absent or terminally failed.
+func (f *fakeImportRuntime) admitSupersedeLocked(stored model.RuntimeDestinationRequest) error {
+	stage, ok := f.journal[stored.OperationID]
+	if !ok || stage.OperationType != model.RuntimeOperationStageDestination ||
+		(stage.State != model.RuntimeOperationFailed && stage.State != model.RuntimeOperationSucceeded) {
+		f.refusal = "operation state conflict"
+		return errors.New(f.refusal)
+	}
+	start, startFound := f.journal[stored.OperationID+":start"]
+	if startFound && start.OperationType != model.RuntimeOperationStart {
+		f.refusal = "operation state conflict"
+		return errors.New(f.refusal)
+	}
+	startFailed := startFound && start.State == model.RuntimeOperationFailed
+	if stage.State == model.RuntimeOperationSucceeded && !startFailed {
+		f.refusal = "operation state conflict"
+		return errors.New(f.refusal)
+	}
+	return nil
 }
 
 func (f *fakeImportRuntime) Start(_ context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.startCall = &request
-	if f.replay {
-		if stored, ok := f.journal[request.OperationID]; ok && stored.OperationType == model.RuntimeOperationStart {
-			f.mu.Unlock()
-			return stored, nil
-		}
+	if err := f.validateSubmissionLocked(request.ExpectedRuntimeIdentity, request.ExpectedRuntimeGeneration); err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	if journalled, ok := f.journal[request.OperationID]; ok {
+		return journalled, nil
 	}
 	result := model.RuntimeOperationResult{
 		OperationID: request.OperationID, OperationType: model.RuntimeOperationStart,
@@ -464,11 +551,10 @@ func (f *fakeImportRuntime) Start(_ context.Context, request model.RuntimeMutati
 		result.State = model.RuntimeOperationFailed
 		result.Failure = &model.RuntimeOperationFailure{Code: "start_failed"}
 		f.state = model.RuntimeStateOffline
+	} else {
+		f.state = model.RuntimeStateReady
 	}
-	if f.replay {
-		f.journal[request.OperationID] = result
-	}
-	f.mu.Unlock()
+	f.journal[request.OperationID] = result
 	return result, nil
 }
 

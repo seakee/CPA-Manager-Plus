@@ -7,6 +7,9 @@ package upgrade
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -20,17 +23,18 @@ import (
 // operator input the CLI cannot supply.
 func TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry(t *testing.T) {
 	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	// The stored connection names another CPA, so the run stages and starts this
+	// destination and is then refused at the handoff: the attempt has to survive.
+	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{CPABaseURL: "http://another-cpa.example:8317", ManagementKey: "another-cpa-management-key"},
+	})
 	destination := newFakeDestinationCPA(t, "")
-	destination.silentDropPath = "routing.retry.request-retry"
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
 	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
-	if _, err := ImportCPA(context.Background(), options); err != nil {
-		if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportUnproven {
-			t.Fatalf("the first run produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportUnproven)
-		}
-	} else {
-		t.Fatal("a dropped configuration write was proved")
+	_, err := ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAConnectionConflict {
+		t.Fatalf("the first run produced %v (code %q), want %s", err, code, UpgradeErrorCPAConnectionConflict)
 	}
 	first := runtime.stageCall
 	if first == nil || strings.TrimSpace(first.ManagementKey) == "" {
@@ -44,16 +48,21 @@ func TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry(t *testing.T) {
 	if recorded != first.ManagementKey {
 		t.Fatal("the recorded secret is not the one the destination was staged with")
 	}
-	if record.BaseURL != destination.url() || record.PluginsEnabled != true {
+	if record.BaseURL != destination.url() || !record.Intent.PluginsEnabled {
 		t.Fatalf("the recorded attempt = %+v, want the staged destination and plugin choice", record)
 	}
+	if !reflect.DeepEqual(record.Intent.APIKeys, first.APIKeys) {
+		t.Fatalf("the recorded client key list = %v, want the staged one %v", record.Intent.APIKeys, first.APIKeys)
+	}
 
-	// The retry has no operator input: the destination is ready now, and the only
-	// secret that can prove it is the recorded one.
-	destination.silentDropPath = ""
+	// The retry has no operator input: the destination is ready now, its secret is
+	// the recorded one, and the connection is rebound to it.
 	destination.mu.Lock()
 	destination.management = first.ManagementKey
 	destination.mu.Unlock()
+	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{CPABaseURL: destination.url(), ManagementKey: first.ManagementKey},
+	})
 	result, err := ImportCPA(context.Background(), options)
 	if err != nil {
 		t.Fatalf("the retry against a ready destination was refused: %v", err)
@@ -81,7 +90,6 @@ func TestImportCPASupersedesATerminallyFailedAttempt(t *testing.T) {
 	destination := newFakeDestinationCPA(t, "")
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = destination
-	runtime.replay = true
 	runtime.failStart = true
 	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
 	_, err := ImportCPA(context.Background(), options)
@@ -123,6 +131,19 @@ func TestImportCPASupersedesATerminallyFailedAttempt(t *testing.T) {
 	if !strings.HasSuffix(retried.OperationID, ":attempt:2") {
 		t.Fatalf("the retry operation ID = %q, want attempt 2", retried.OperationID)
 	}
+	if !strings.HasPrefix(retried.OperationID, first.OperationID) {
+		t.Fatalf("the retry operation ID = %q, want it derived from the recorded one %q", retried.OperationID, first.OperationID)
+	}
+	// The supersede contract the Supervisor enforces: the request may differ in
+	// its operation ID and nothing else.
+	previous := *first
+	previous.OperationID = retried.OperationID
+	if !reflect.DeepEqual(previous, *retried) {
+		t.Fatalf("the retry changed the request, not only the operation ID:\n first=%+v\nretry=%+v", previous, *retried)
+	}
+	if refusal := runtime.lastRefusal(); refusal != "" {
+		t.Fatalf("the Runtime refused the supersede: %s", refusal)
+	}
 	if retried.ManagementKey != first.ManagementKey {
 		t.Fatal("the retry minted a second destination secret instead of reusing the recorded one")
 	}
@@ -131,6 +152,139 @@ func TestImportCPASupersedesATerminallyFailedAttempt(t *testing.T) {
 	destination.mu.Unlock()
 	if installed != first.ManagementKey {
 		t.Fatal("the destination does not hold the recorded secret, so the Manager could never reach it")
+	}
+	t.Logf("P-H2-supersede attempt=%d operation_id=%q secret_reused=%t intent_unchanged=%t",
+		record.Attempt, retried.OperationID, retried.ManagementKey == first.ManagementKey, reflect.DeepEqual(previous, *retried))
+}
+
+// TestImportCPARefusesARetryAfterTheSourceChanges is the Medium finding: the
+// Supervisor admits a replacement attempt only when it is the published request
+// with a new operation ID, and the source identity is part of that request. A
+// source edited between a terminal failure and the retry used to produce a new
+// attempt the Supervisor refused, leaving the recorded attempt pointing at a
+// request it would never accept. The drift is now refused before the attempt is
+// touched, and nothing is submitted.
+func TestImportCPARefusesARetryAfterTheSourceChanges(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	runtime.failStart = true
+	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+	if _, err := ImportCPA(context.Background(), options); err == nil {
+		t.Fatal("the first run should have recorded a terminal destination failure")
+	}
+	first := runtime.stageCall
+	if first == nil {
+		t.Fatal("the first run did not stage the destination")
+	}
+	// A comment is enough: the source identity is the digest of the source file,
+	// so any byte changes the request the Supervisor would compare.
+	configPath := filepath.Join(fixture.cpaDir, "config.yaml")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read the fixture config: %v", err)
+	}
+	if err := os.WriteFile(configPath, append(append([]byte(nil), data...), []byte("\n# operator note\n")...), 0o600); err != nil {
+		t.Fatalf("edit the fixture config: %v", err)
+	}
+	runtime.mu.Lock()
+	runtime.failStart = false
+	runtime.mu.Unlock()
+	_, err = ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+		t.Fatalf("a retry after the source changed produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
+	}
+	if !strings.Contains(err.Error(), "source identity") {
+		t.Fatalf("the refusal does not name the input that changed: %v", err)
+	}
+	if runtime.stageCall != first {
+		t.Fatal("a drifted retry submitted a second destination request")
+	}
+	paths := newTargetPaths(fixture.targetRoot)
+	record, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("the recorded attempt could not be read (found %t): %v", found, err)
+	}
+	if record.Attempt != 1 || !record.TerminalFailure || record.OperationID != first.OperationID {
+		t.Fatalf("the drifted retry changed the attempt: %+v, want attempt 1 terminal under %q", record, first.OperationID)
+	}
+	t.Logf("P-H2-drift error_code=%s attempt=%d terminal=%t submitted_again=%t", UpgradeErrorCPADestinationRequestChanged, record.Attempt, record.TerminalFailure, runtime.stageCall != first)
+}
+
+// TestImportCPARefusesARetryAfterTheSupervisorRestarts is the restart half of the
+// same finding. A Supervisor restart publishes a new generation, so the recorded
+// attempt's generation is no longer the authority the journal validates against.
+// The retry is refused as a changed request before the attempt moves; it is never
+// submitted under an authority that would answer "stale runtime generation".
+func TestImportCPARefusesARetryAfterTheSupervisorRestarts(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	runtime.failStart = true
+	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+	if _, err := ImportCPA(context.Background(), options); err == nil {
+		t.Fatal("the first run should have recorded a terminal destination failure")
+	}
+	first := runtime.stageCall
+	runtime.mu.Lock()
+	runtime.failStart = false
+	runtime.mu.Unlock()
+	runtime.restart()
+	_, err := ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+		t.Fatalf("a retry after a Supervisor restart produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
+	}
+	if !strings.Contains(err.Error(), "Supervisor restarted") {
+		t.Fatalf("the refusal does not state that the Supervisor restarted: %v", err)
+	}
+	if runtime.stageCall != first {
+		t.Fatal("a retry after a restart submitted a second destination request")
+	}
+	paths := newTargetPaths(fixture.targetRoot)
+	record, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("the recorded attempt could not be read (found %t): %v", found, err)
+	}
+	if record.Attempt != 1 || !record.TerminalFailure {
+		t.Fatalf("the restart refusal changed the attempt: %+v", record)
+	}
+	t.Logf("P-H2-restart error_code=%s attempt=%d submitted_again=%t", UpgradeErrorCPADestinationRequestChanged, record.Attempt, runtime.stageCall != first)
+}
+
+// TestImportCPAProvesAReadyDestinationAfterTheSupervisorRestarts is the recovery
+// half: a destination that is already answering is proved by its own key list, not
+// resubmitted, so a restarted Supervisor does not turn a resumable destination
+// into a refusal. Nothing is staged again.
+func TestImportCPAProvesAReadyDestinationAfterTheSupervisorRestarts(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{CPABaseURL: "http://another-cpa.example:8317", ManagementKey: "another-cpa-management-key"},
+	})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
+	if _, err := ImportCPA(context.Background(), options); err == nil {
+		t.Fatal("the first run should have been refused at the connection handoff")
+	}
+	first := runtime.stageCall
+	if first == nil {
+		t.Fatal("the first run did not stage the destination")
+	}
+	destination.mu.Lock()
+	destination.management = first.ManagementKey
+	destination.mu.Unlock()
+	seedManagerConfig(t, fixture.targetRoot, model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{CPABaseURL: destination.url(), ManagementKey: first.ManagementKey},
+	})
+	runtime.restart()
+	if _, err := ImportCPA(context.Background(), options); err != nil {
+		t.Fatalf("a ready destination was refused after a Supervisor restart: %v", err)
+	}
+	if runtime.stageCall != first {
+		t.Fatal("the restart recovery staged the destination again")
 	}
 }
 

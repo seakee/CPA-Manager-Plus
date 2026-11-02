@@ -406,6 +406,21 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 	}
 	clientKeys := slices.Clone(r.source.clientKeys)
 	supplied := strings.TrimSpace(r.options.DestinationManagementKey)
+	// The whole request this run would submit is fixed here, before the recorded
+	// attempt is read: the Supervisor compares every field of a replacement
+	// attempt against the published one, so the retry has to compare the same set
+	// itself. SourceIdentity is the source's own file digest, so it changes when
+	// the 1.x configuration changes, and the three Runtime fields change when the
+	// Supervisor restarts or is updated.
+	intent := cpaImportDestinationIntent{
+		ExpectedRuntimeIdentity:   status.Identity,
+		ExpectedRuntimeGeneration: status.Generation,
+		ExpectedActiveArtifactID:  status.ActiveGatewayArtifact.ArtifactID,
+		SourceIdentity:            r.source.sourceIdentity(),
+		SourceClass:               "legacy_managed",
+		APIKeys:                   slices.Clone(clientKeys),
+		PluginsEnabled:            result.PluginsEnabled,
+	}
 
 	record, recordedKey, found, err := loadCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath)
 	if err != nil {
@@ -417,20 +432,35 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			// A record written before the attempt identity existed holds the one
 			// thing that cannot be recovered — the staged secret — and nothing
 			// else needs to change: attempt 1 has the same derived operation ID and
-			// the client keys and plugin choice come from this run's source.
+			// this run's source supplies the request.
 			record = cpaImportDestinationRecord{
-				BaseURL:          record.BaseURL,
-				PluginsEnabled:   result.PluginsEnabled,
-				ClientKeysDigest: cpaImportClientKeysDigest(clientKeys),
-				OperationID:      cpaImportDestinationOperationID(result.SourceIdentity, 1),
-				Attempt:          1,
+				BaseURL:     record.BaseURL,
+				Intent:      intent,
+				OperationID: cpaImportDestinationOperationID(intent.SourceIdentity, 1),
+				Attempt:     1,
 			}
 			if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
 				return newUpgradeError(UpgradeErrorCPADestinationUnready,
 					"the recorded destination attempt could not be bound to this import, so nothing was staged", err)
 			}
+		} else if !record.complete() {
+			// An attempt recorded without the request it submitted can only be
+			// replayed under its own operation ID: the Supervisor never applies a
+			// different request under an existing one, and replaying it is what
+			// this run does below. It cannot be superseded, because that requires
+			// proving the replacement is the published request and nothing recorded
+			// that request.
+			if record.TerminalFailure {
+				return newUpgradeError(UpgradeErrorCPADestinationRequestChanged,
+					"the recorded destination attempt predates the full request record, so this build cannot prove a replacement is the identical request; the Supervisor only supersedes a request it can compare, and this run changed nothing", nil)
+			}
+			record.Intent = intent
+			if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
+				return newUpgradeError(UpgradeErrorCPADestinationUnready,
+					"the recorded destination attempt could not be completed with this run's request, so nothing was staged", err)
+			}
 		}
-		if err := requireSameDestinationRequest(record, recordedKey, baseURL, result.PluginsEnabled, clientKeys, supplied); err != nil {
+		if err := requireSameDestinationRequest(record, intent, baseURL, recordedKey, supplied, status.State == model.RuntimeStateReady); err != nil {
 			return err
 		}
 		if status.State == model.RuntimeStateReady {
@@ -440,14 +470,15 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			// The Supervisor never resumes a terminal operation, so the only way to
 			// stage the identical destination again is a new attempt ID, and that
 			// is exactly the supersede contract: same request, new ID, after the
-			// old stage/start is known to be terminal.
-			record = nextCPAImportDestinationAttempt(record, result.SourceIdentity)
+			// old stage/start is known to be terminal. The intent is copied, so the
+			// new ID is the only difference.
+			record = nextCPAImportDestinationAttempt(record)
 			if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
 				return newUpgradeError(UpgradeErrorCPADestinationUnready,
 					"the next destination attempt could not be recorded, so nothing was staged", err)
 			}
 		}
-		if err := r.submitDestination(ctx, status, record, recordedKey, clientKeys); err != nil {
+		if err := r.submitDestination(ctx, record, recordedKey); err != nil {
 			return err
 		}
 		return r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys)
@@ -473,20 +504,19 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 	}
 	// The attempt is durable before the destination is staged. The stage hands the
 	// destination the only copy it will ever hold, so a run that fails after it
-	// must find the same secret, plugin choice and client keys on retry instead of
-	// demanding an operator input the CLI cannot supply.
+	// must find the same secret, plugin choice, client keys and request on retry
+	// instead of demanding an operator input the CLI cannot supply.
 	record = cpaImportDestinationRecord{
-		BaseURL:          baseURL,
-		PluginsEnabled:   result.PluginsEnabled,
-		ClientKeysDigest: cpaImportClientKeysDigest(clientKeys),
-		OperationID:      cpaImportDestinationOperationID(result.SourceIdentity, 1),
-		Attempt:          1,
+		BaseURL:     baseURL,
+		Intent:      intent,
+		OperationID: cpaImportDestinationOperationID(intent.SourceIdentity, 1),
+		Attempt:     1,
 	}
 	if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, managementKey); err != nil {
 		return newUpgradeError(UpgradeErrorCPADestinationUnready,
 			"the destination management secret could not be recorded, so the destination was not staged", err)
 	}
-	if err := r.submitDestination(ctx, status, record, managementKey, clientKeys); err != nil {
+	if err := r.submitDestination(ctx, record, managementKey); err != nil {
 		return err
 	}
 	// The stage is the Supervisor's, not yet proof that the URL this run will
@@ -526,21 +556,20 @@ func (r *cpaImportRun) requireStagedDestinationIdentity(ctx context.Context, bas
 // still belong to an operation the Supervisor is running.
 func (r *cpaImportRun) submitDestination(
 	ctx context.Context,
-	status model.RuntimeObservedStatus,
 	record cpaImportDestinationRecord,
 	managementKey string,
-	clientKeys []string,
 ) error {
+	intent := record.Intent
 	request := model.RuntimeDestinationRequest{
 		OperationID:               record.OperationID,
-		ExpectedRuntimeIdentity:   status.Identity,
-		ExpectedRuntimeGeneration: status.Generation,
-		ExpectedActiveArtifactID:  status.ActiveGatewayArtifact.ArtifactID,
-		SourceIdentity:            r.source.sourceIdentity(),
-		SourceClass:               "legacy_managed",
-		APIKeys:                   slices.Clone(clientKeys),
+		ExpectedRuntimeIdentity:   intent.ExpectedRuntimeIdentity,
+		ExpectedRuntimeGeneration: intent.ExpectedRuntimeGeneration,
+		ExpectedActiveArtifactID:  intent.ExpectedActiveArtifactID,
+		SourceIdentity:            intent.SourceIdentity,
+		SourceClass:               intent.SourceClass,
+		APIKeys:                   slices.Clone(intent.APIKeys),
 		ManagementKey:             managementKey,
-		PluginsEnabled:            record.PluginsEnabled,
+		PluginsEnabled:            intent.PluginsEnabled,
 	}
 	staged, err := r.options.Runtime.StageDestination(ctx, request)
 	if err != nil || staged.Validate() != nil || staged.OperationID != request.OperationID ||
@@ -556,9 +585,9 @@ func (r *cpaImportRun) submitDestination(
 	}
 	startRequest := model.RuntimeMutationRequest{
 		OperationID:               record.OperationID + ":start",
-		ExpectedRuntimeIdentity:   status.Identity,
-		ExpectedRuntimeGeneration: status.Generation,
-		ExpectedActiveArtifactID:  status.ActiveGatewayArtifact.ArtifactID,
+		ExpectedRuntimeIdentity:   intent.ExpectedRuntimeIdentity,
+		ExpectedRuntimeGeneration: intent.ExpectedRuntimeGeneration,
+		ExpectedActiveArtifactID:  intent.ExpectedActiveArtifactID,
 	}
 	started, err := r.options.Runtime.Start(ctx, startRequest)
 	if err != nil || started.Validate() != nil || started.OperationID != startRequest.OperationID ||
@@ -591,35 +620,63 @@ func (r *cpaImportRun) markDestinationAttemptTerminal(
 	return nil
 }
 
-// requireSameDestinationRequest refuses a run that would change the request the
-// recorded attempt already submitted. The Supervisor replays the journalled
-// operation by ID and never applies a different request under the same one, so a
-// drifted retry would silently keep the old destination while reporting the new
-// choice.
+// requireSameDestinationRequest refuses a run whose inputs would change the
+// request the recorded attempt already submitted.
+//
+// The comparison runs before anything changes: before a new attempt ID is
+// recorded and before a stage is submitted. A run that would drift is therefore
+// refused with its operation, attempt and destination exactly as they were, and
+// the Supervisor is never asked to reconcile a request it would reject. A ready
+// destination is compared only on the inputs a staged destination owns — URL,
+// secret, source identity, key set and plugin choice — because it is proved, not
+// resubmitted, and a restarted Supervisor must not turn a resumable destination
+// into a refusal.
 func requireSameDestinationRequest(
 	record cpaImportDestinationRecord,
-	managementKey string,
+	intent cpaImportDestinationIntent,
 	baseURL string,
-	pluginsEnabled bool,
-	clientKeys []string,
+	managementKey string,
 	supplied string,
+	ready bool,
 ) error {
 	refuse := func(what string) error {
 		return newUpgradeError(UpgradeErrorCPADestinationRequestChanged, fmt.Sprintf(
-			"an earlier run already staged this destination with a different %s; the recorded attempt is replayed as it was submitted, so re-run with the recorded values instead of changing them; this run wrote nothing",
+			"an earlier run already staged this destination with %s; the Supervisor never applies a different request under a recorded operation, so this run refused before changing the attempt and wrote nothing",
 			what), nil)
 	}
 	if record.BaseURL != baseURL {
-		return refuse("destination URL")
-	}
-	if record.PluginsEnabled != pluginsEnabled {
-		return refuse("plugin choice")
-	}
-	if record.ClientKeysDigest != cpaImportClientKeysDigest(clientKeys) {
-		return refuse("client key set")
+		return refuse("a different destination URL")
 	}
 	if supplied != "" && supplied != managementKey {
-		return refuse("management secret")
+		return refuse("a different management secret")
+	}
+	if record.Intent.SourceIdentity != intent.SourceIdentity {
+		return refuse("a different source identity: the 1.x configuration changed after the destination was staged")
+	}
+	if record.Intent.SourceClass != intent.SourceClass {
+		return refuse("a different source class")
+	}
+	if !slices.Equal(record.Intent.APIKeys, intent.APIKeys) {
+		return refuse("a different client key set")
+	}
+	if record.Intent.PluginsEnabled != intent.PluginsEnabled {
+		return refuse("a different plugin choice")
+	}
+	if ready {
+		// A destination that is already answering is proved by
+		// requireStagedDestinationIdentity, not resubmitted. A restarted Supervisor
+		// reports a new generation and the destination resumes; that is a recovery
+		// this run can still make because it submits nothing.
+		return nil
+	}
+	if record.Intent.ExpectedRuntimeGeneration != intent.ExpectedRuntimeGeneration {
+		return refuse("a different Runtime generation: the Supervisor restarted after this attempt was recorded, so the journalled operation belongs to an authority this run cannot address")
+	}
+	if record.Intent.ExpectedRuntimeIdentity != intent.ExpectedRuntimeIdentity {
+		return refuse("a different Runtime identity")
+	}
+	if record.Intent.ExpectedActiveArtifactID != intent.ExpectedActiveArtifactID {
+		return refuse("a different active Runtime artifact")
 	}
 	return nil
 }
