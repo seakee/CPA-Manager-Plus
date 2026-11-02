@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -49,6 +50,35 @@ func recordedCopyIn(t *testing.T, repository *upgradeoperation.Repository) model
 		t.Fatalf("record provenance: %v", err)
 	}
 	return recorded
+}
+
+// TestAdvanceAfterAClockRollbackKeepsTheRowReadable pins the repository-owned
+// updated_at_ms. A row whose recorded time lies ahead of the wall clock — the host
+// clock moved back, or the store was restored from a backup written later — used
+// to be advanced with the current clock, which produced a row Get rejects with
+// ErrInvalidRow: status, the next advance and every later reader were blocked
+// until the clock caught up.
+func TestAdvanceAfterAClockRollbackKeepsTheRowReadable(t *testing.T) {
+	repository, db := newRepository(t)
+	recordedCopyIn(t, repository)
+	future := time.Now().Add(time.Hour).UnixMilli()
+	if _, err := db.Exec(`update upgrade_operations set created_at_ms = ?, updated_at_ms = ? where id = 1`, future, future); err != nil {
+		t.Fatalf("seed a future-dated row: %v", err)
+	}
+	advanced, err := repository.Advance(context.Background(), model.UpgradeDomainUsageEvents, model.UpgradeStageReconcile)
+	if err != nil {
+		t.Fatalf("advance a row whose clock ran ahead: %v", err)
+	}
+	if advanced.UpdatedAtMS < future {
+		t.Fatalf("advanced updated_at_ms = %d, want at least the stored %d", advanced.UpdatedAtMS, future)
+	}
+	loaded, found, err := repository.Get(context.Background())
+	if err != nil || !found {
+		t.Fatalf("the advanced row is unreadable (found %t): %v", found, err)
+	}
+	if loaded.UpdatedAtMS < future {
+		t.Fatalf("stored updated_at_ms = %d, want at least the seeded %d", loaded.UpdatedAtMS, future)
+	}
 }
 
 func TestGetBeforeFirstAdvanceReportsNoRow(t *testing.T) {
