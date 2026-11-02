@@ -56,6 +56,16 @@ type sourceFingerprint struct {
 	Bytes  int64
 }
 
+// symlinkedSourceFile is one covered source file the shared file policy refused
+// because it is a link. Carrying the name lets the preflight report data.key or
+// usage.sqlite-wal rather than the lock package's database wording, which would
+// describe a key or a WAL sidecar as the database.
+type symlinkedSourceFile struct{ name string }
+
+func (e *symlinkedSourceFile) Error() string { return "source file " + e.name + " is a symbolic link" }
+
+func (e *symlinkedSourceFile) Unwrap() error { return ErrSourceSymlinked }
+
 // fingerprintSource hashes a stable manifest of the source tree. Repeating it on
 // an unchanged stopped source always returns the same value, and any change to
 // a covered file, including a -wal/-shm file appearing, changes it; so does a
@@ -74,10 +84,11 @@ func fingerprintSource(root string) (sourceFingerprint, error) {
 		if !info.Mode().IsRegular() {
 			// A link is refused by the shared database file policy, not merely
 			// unreadable: the file inspected and the file read have to be the
-			// same one. The preflight names that as its own code so the report
-			// never calls a policy refusal an unreadable database.
+			// same one. The preflight names that as its own code and names this
+			// exact file, so the report never calls a policy refusal an
+			// unreadable database or a different file.
 			if info.Mode()&os.ModeSymlink != 0 {
-				return sourceFingerprint{}, fmt.Errorf("source file %s: %w", name, ErrSourceSymlinked)
+				return sourceFingerprint{}, &symlinkedSourceFile{name: name}
 			}
 			return sourceFingerprint{}, fmt.Errorf("source file %s is not a regular file", name)
 		}

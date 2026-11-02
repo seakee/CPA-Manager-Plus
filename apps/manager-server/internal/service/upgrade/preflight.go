@@ -466,15 +466,23 @@ func ownershipCode(lockErr, openErr error) string {
 	}
 }
 
-// lockFailureCode names why the ownership fence was not taken. A database
-// reached through a link is the shared database file policy's refusal, decided
-// before any lock is attempted, and it is the same code the mount lookup and
-// the credential read report; everything else is the source a writer holds.
+// lockFailureCode names why the ownership fence was not taken, using the codes
+// the mount lookup reports for the same file. A live writer (ErrLocked) or the
+// absent marker a stopped 1.x leaves (ErrNoExistingLock) is the source a writer
+// holds: upgrade_source_busy. A file the shared policy refuses as uninspectable
+// — a hard link, a non-regular marker, a parent that cannot be resolved — is
+// upgrade_source_lock_unavailable, exactly what MountDatabase reports for the
+// same mount, so status and preflight cannot name two conditions for one file.
+// A link reached through the database path is upgrade_source_symlinked.
 func lockFailureCode(err error) string {
-	if errors.Is(err, ErrSourceSymlinked) {
+	switch {
+	case errors.Is(err, ErrSourceSymlinked):
 		return CodeSourceSymlinked
+	case errors.Is(err, processlock.ErrLocked), errors.Is(err, processlock.ErrNoExistingLock):
+		return CodeSourceBusy
+	default:
+		return CodeSourceLockUnavailable
 	}
-	return CodeSourceBusy
 }
 
 func ownershipFailure(err error) (string, string) {
@@ -495,9 +503,15 @@ func ownershipFailure(err error) (string, string) {
 // fingerprintFailure names why the source manifest could not be taken. A file
 // reached through a link is the shared database file policy's refusal, not an
 // unreadable file, so it carries the same code as the mount lookup and the
-// credential read; the detail keeps the file name and the policy's sentence.
+// credential read; the detail names the covered file itself (data.key,
+// usage.sqlite-wal, …) and the policy, never the database wording the lock
+// package uses for the database file alone.
 func fingerprintFailure(err error, prefix string) (string, string) {
 	if errors.Is(err, ErrSourceSymlinked) {
+		var linked *symlinkedSourceFile
+		if errors.As(err, &linked) {
+			return CodeSourceSymlinked, prefix + linked.name + ": a symbolic link is not accepted for this file"
+		}
 		return CodeSourceSymlinked, prefix + strings.TrimPrefix(err.Error(), "source file ")
 	}
 	return CodeSourceUnreadable, prefix + rootCause(err)
@@ -622,8 +636,11 @@ func MountDatabase(legacyRoot string) (string, string) {
 			return "", CodeSourceSymlinked
 		default:
 			// A hard-linked, non-regular or unreadable database is refused by the
-			// ownership probe before anything is opened, which is the preflight's
-			// upgrade_source_lock_unavailable for the same mount.
+			// shared file policy before anything is opened. The preflight's
+			// ownership probe maps the same refusals to upgrade_source_lock_unavailable
+			// (lockFailureCode), so the status marker and the preflight name one
+			// condition for one mount instead of busy on one surface and
+			// lock_unavailable on the other.
 			return "", CodeSourceLockUnavailable
 		}
 	}

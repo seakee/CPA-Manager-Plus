@@ -705,6 +705,28 @@ func TestPreflightReportsMissingLockFile(t *testing.T) {
 	requireBlocked(t, report, CodeSourceBusy)
 }
 
+// TestPreflightReportsAHardLinkedSourceAsLockUnavailable pins L-1: the mount
+// lookup and the preflight name the same condition for the same file. A
+// hard-linked database is the shared file policy refusing an uninspectable file,
+// not a live writer, so both report upgrade_source_lock_unavailable; before the
+// fix the preflight said upgrade_source_busy and told the operator to stop a
+// Manager that was not running.
+func TestPreflightReportsAHardLinkedSourceAsLockUnavailable(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	if err := os.Link(fixture.dbPath, fixture.dbPath+".alias"); err != nil {
+		t.Skipf("create database hard link: %v", err)
+	}
+	report := preflight(t, fixture.root, declared())
+	requireBlocked(t, report, CodeSourceLockUnavailable)
+	check, found := checkByName(report, CheckSourceOwnership)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceLockUnavailable {
+		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceLockUnavailable)
+	}
+	if _, refusal := MountDatabase(fixture.root); refusal != CodeSourceLockUnavailable {
+		t.Fatalf("mount lookup refusal = %q, want the same %q", refusal, CodeSourceLockUnavailable)
+	}
+}
+
 func TestPreflightReportsMissingDatabase(t *testing.T) {
 	root := t.TempDir()
 	report := preflight(t, root, declared())
@@ -1712,6 +1734,49 @@ func TestSourceDatabaseFilePolicyIsSharedByBothPaths(t *testing.T) {
 		if slices.Contains(report.Blocked, misreported) {
 			t.Fatalf("preflight misreported a symlinked source as %q: %v", misreported, report.Blocked)
 		}
+	}
+}
+
+// TestPreflightFingerprintNamesTheSymlinkedFile pins L-2: a covered file that is
+// a link is refused with upgrade_source_symlinked, and the detail names that
+// file instead of reusing the lock package's "database inspection" wording for a
+// key or a WAL sidecar.
+func TestPreflightFingerprintNamesTheSymlinkedFile(t *testing.T) {
+	for _, name := range []string{dataKeyFileName, databaseFileName + "-wal"} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newSourceFixture(t, nil)
+			path := filepath.Join(fixture.root, name)
+			if _, err := os.Lstat(path); os.IsNotExist(err) {
+				if err := os.WriteFile(path, []byte("sidecar\n"), 0o600); err != nil {
+					t.Fatalf("create %s: %v", name, err)
+				}
+			}
+			real := path + ".real"
+			if err := os.Rename(path, real); err != nil {
+				t.Fatalf("move %s: %v", name, err)
+			}
+			if err := os.Symlink(real, path); err != nil {
+				t.Skipf("create %s symlink: %v", name, err)
+			}
+
+			report := preflight(t, fixture.root, Options{DeclaredVersion: pinnedSourceVersion()})
+			if report.Ready {
+				t.Fatalf("preflight accepted a symlinked %s", name)
+			}
+			check, found := checkByName(report, CheckFingerprint)
+			if !found || check.Status != StatusBlocked || check.Code != CodeSourceSymlinked {
+				t.Fatalf("fingerprint check = %+v, want blocked %q", check, CodeSourceSymlinked)
+			}
+			if !strings.Contains(check.Detail, name) {
+				t.Fatalf("fingerprint detail %q does not name %s", check.Detail, name)
+			}
+			if strings.Contains(check.Detail, "database inspection") {
+				t.Fatalf("fingerprint detail %q reuses the database wording for %s", check.Detail, name)
+			}
+			if !slices.Contains(report.Blocked, CodeSourceSymlinked) {
+				t.Fatalf("preflight blocked %v, want %q", report.Blocked, CodeSourceSymlinked)
+			}
+		})
 	}
 }
 
