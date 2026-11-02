@@ -526,7 +526,12 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   or a shell word. A digest is `[registry[:port]/]<repository>` followed by
   `@sha256:` and 64 lowercase hex characters, so
   `registry.example.com:5000/team/cpamp@sha256:…` and
-  `localhost:5000/cpamp@sha256:…` are accepted. Everything else — `:latest`,
+  `localhost:5000/cpamp@sha256:…` and `[::1]:5000/cpamp@sha256:…` (a bracketed
+  IPv6 registry) are accepted, while `Team/cpamp@…` is refused: a first
+  component without a dot or a colon is a repository path, and a path component
+  is lowercase. The registry host itself is case-insensitive, as in Docker. The
+  compose image line is a quoted YAML scalar, so a bracketed registry stays one
+  value. Everything else — `:latest`,
   `:main`, `:beta`, a bare repository, an empty tag, a partial version, a
   malformed digest — is `upgrade_rollback_image_unpinned`, and the family
   override never changes that: it only relaxes the version-family comparison of

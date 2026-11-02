@@ -1741,7 +1741,7 @@ func TestPrepareRollbackAcceptsADigestAndRecordsItsForm(t *testing.T) {
 		if plan.Image != digest || plan.ImageSource != RollbackImageSourceOperator || plan.ImageForm != RollbackImageFormDigest {
 			t.Fatalf("plan image = %q/%q/%q, want the operator digest", plan.Image, plan.ImageSource, plan.ImageForm)
 		}
-		if !strings.Contains(plan.ComposeFile, "image: "+digest) {
+		if !strings.Contains(plan.ComposeFile, "image: "+strconv.Quote(digest)) {
 			t.Fatalf("compose file does not pin the digest:\n%s", plan.ComposeFile)
 		}
 		// A digest is immutable, so the version-family check does not apply to it
@@ -1817,6 +1817,52 @@ func TestPrepareRollbackRejectsAReferenceOutsideTheDockerRepositoryGrammar(t *te
 				t.Fatalf("reference %q = %v, want %v", reference, err, ErrRollbackImageUnpinned)
 			}
 			assertNoPlan(t, fixture.targetRoot)
+		})
+	}
+}
+
+// TestPrepareRollbackAppliesTheRegistryGrammarToDigests is L-n4: the digest
+// regex allowed an uppercase first component and refused a bracketed IPv6
+// registry, so `Team/cpamp@sha256:...` was accepted and `[::1]:5000/x@sha256:...`
+// refused, both against the Docker reference grammar. The repository is now
+// validated by the same split the release-tag form uses, and the compose scalar
+// is quoted so a bracketed IPv6 registry stays one YAML string.
+func TestPrepareRollbackAppliesTheRegistryGrammarToDigests(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	pinned := "sha256:" + strings.Repeat("ab", 32)
+	for _, reference := range []string{
+		"team/cpamp@" + pinned,
+		"Registry.example.com/team/cpamp@" + pinned,
+		"[::1]:5000/cpamp@" + pinned,
+	} {
+		options := fixture.options()
+		options.TagOverride = reference
+		plan, err := PrepareRollback(context.Background(), options)
+		if err != nil {
+			t.Fatalf("prepare with repository %q: %v", reference, err)
+		}
+		if plan.Image != reference || plan.ImageForm != RollbackImageFormDigest {
+			t.Fatalf("plan image = %q/%q, want the digest reference", plan.Image, plan.ImageForm)
+		}
+		if !strings.Contains(plan.ComposeFile, "image: "+strconv.Quote(reference)) {
+			t.Fatalf("compose file does not quote the pinned digest reference:\n%s", plan.ComposeFile)
+		}
+	}
+	refused := newRollbackFixture(t)
+	for name, reference := range map[string]string{
+		"uppercase path component":             "Team/cpamp@" + pinned,
+		"uppercase component below a registry": "registry.example.com/Team/cpamp@" + pinned,
+		"tag beside the digest":                "team/cpamp:v1.14.7@" + pinned,
+		"newline in the repository":            "evil repo\n x@" + pinned,
+		"second at sign":                       "team/cpamp@" + pinned + "@x",
+	} {
+		t.Run(name, func(t *testing.T) {
+			options := refused.options()
+			options.TagOverride = reference
+			if _, err := PrepareRollback(context.Background(), options); !errors.Is(err, ErrRollbackImageUnpinned) {
+				t.Fatalf("reference %q = %v, want %v", reference, err, ErrRollbackImageUnpinned)
+			}
+			assertNoPlan(t, refused.targetRoot)
 		})
 	}
 }

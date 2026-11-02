@@ -175,12 +175,12 @@ func isDockerRegistryComponent(component string) bool {
 	return component == "localhost" || strings.ContainsAny(component, ".:")
 }
 
-// digestReferencePattern is the other accepted form: a repository pinned to an
-// immutable sha256 digest. The repository follows the Docker reference grammar:
-// an optional registry host with an optional port, then one or more lowercase
-// path components. A tag beside the digest is not that grammar and never
-// matches, so `repo:v1@sha256:...` is refused like any other moving reference.
-var digestReferencePattern = regexp.MustCompile(`^(?:[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]{1,5})?/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*@sha256:[0-9a-f]{64}$`)
+// digestPattern is the immutable half of the other accepted form: a sha256
+// digest and nothing else. The repository in front of it is validated by
+// isDockerRepository, the same grammar the release-tag form uses, so
+// `Team/cpamp@sha256:...` is refused (an uppercase path component) while
+// `[::1]:5000/cpamp@sha256:...` is accepted (a bracketed IPv6 registry).
+var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // dockerVolumeNamePattern is the Docker volume name alphabet: a 1.x install run
 // with `docker run -v` uses the unprefixed `cpa-manager-plus-data`.
@@ -787,10 +787,17 @@ func rollbackImage(recorded model.UpgradeOperation, override string, allowFamily
 			Form:      RollbackImageFormReleaseTag,
 		}, nil
 	}
-	if strings.Contains(trimmed, "@") {
-		if !digestReferencePattern.MatchString(trimmed) {
+	if at := strings.Index(trimmed, "@"); at >= 0 {
+		// The digest pins immutable bytes, and the repository in front of it is
+		// the same Docker grammar the release-tag form uses: a registry component
+		// may be a dotted domain or a bracketed IPv6 address with an optional
+		// port, while the path components stay lowercase. A reference that does
+		// not split that way — an uppercase path component, a tag beside the
+		// digest, a second '@' — is refused before it is printed.
+		repository, digest := trimmed[:at], trimmed[at+1:]
+		if !isDockerRepository(repository) || !digestPattern.MatchString(digest) {
 			return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
-				"a rollback accepts a digest only as [registry[:port]/]<repository>@sha256:<64 lowercase hex characters>; the reference given is not that form", nil)
+				"a rollback accepts a digest only as [registry[:port]/]<repository>@sha256:<64 lowercase hex characters>, where the repository follows the Docker reference grammar; the reference given is not that form", nil)
 		}
 		// A digest names immutable bytes, so there is no moving tag to refuse and
 		// no version family to compare.
@@ -869,7 +876,11 @@ func rollbackComposeFile(image, volume, volumeKind string, port int) string {
 	lines := []string{
 		"services:",
 		"  " + LegacyComposeService + ":",
-		"    image: " + image,
+		// The image is a quoted YAML scalar. A bracketed IPv6 registry starts
+		// with '[', which YAML would otherwise read as a flow sequence, and the
+		// validated grammar forbids the quote and backslash characters that
+		// would need escaping.
+		"    image: " + strconv.Quote(image),
 		"    restart: unless-stopped",
 		"    ports:",
 		`      - "` + published + ":" + published + `"`,
