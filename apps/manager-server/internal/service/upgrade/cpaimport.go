@@ -161,12 +161,15 @@ type cpaImportRun struct {
 // ImportCPA carries a stopped 1.x stack's managed CPA state into the v2
 // destination.
 //
-// The order is fixed: read the source and gate its version, refuse a missing
-// choice, prove the destination is observable, stage and start it, import the
-// configuration and credentials through the adoption executor, prove the target
-// with the imported keys, read every copied path back, and only then record the
-// cpa_config domain and the cpa_import stage. Every refusal before the destination
-// is written leaves the operation where it was.
+// The order is fixed: refuse a recorded position that cannot enter the import,
+// read the source and gate its version, refuse a missing choice, prove the
+// destination is observable, stage and start it, and only then enter the
+// cpa_import stage. The configuration and credentials are imported through the
+// adoption executor, the target is proved with the imported keys, every copied
+// path is read back, and the cpa_config domain is recorded last. A refusal before
+// the destination is staged leaves the operation at the position it was entered
+// from; a failure after the stage entry leaves it at cpa_import without the
+// domain, which is the position the next run resumes from.
 func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, error) {
 	if err := ctx.Err(); err != nil {
 		return CPAImportResult{}, err
@@ -196,23 +199,24 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	if !found {
 		return result, errors.New("the v2 data root holds no recorded copy-in, so there is no CPA state to import")
 	}
-	// The step may only run where it could still record its result. A store the
-	// operation already carried past the import cannot take this stage, so
-	// importing into it would write configuration for an operation that can never
-	// record the work.
-	if recorded.Stage != "" && !recorded.Stage.CanAdvanceTo(model.UpgradeStageCPAImport) {
-		return result, newUpgradeError(UpgradeErrorCPAStageConflict, fmt.Sprintf(
-			"the recorded operation is at stage %q, which cannot enter the CPA import; nothing was written", recorded.Stage), nil)
-	}
+	// The import already ran and was recorded. Its result is the row, and
+	// re-running it would rewrite a destination a later step may already have
+	// advanced. It is checked before the entry gate because a recorded import is
+	// not a position to refuse.
 	if recorded.Stage == model.UpgradeStageCPAImport && recorded.HasDomain(model.UpgradeDomainCPAConfig) {
-		// The import already ran and was recorded. Its result is the row, and
-		// re-running it would rewrite a destination a later step may already have
-		// advanced.
 		result.Stage = recorded.Stage
 		result.DomainsDone = slices.Clone(recorded.DomainsDone)
 		result.UpdatedAtMS = recorded.UpdatedAtMS
 		result.AlreadyComplete = true
 		return result, nil
+	}
+	// The step may only run where it could still record its result, and only from
+	// the position the pipeline leaves for it: reconciliation. Entering from
+	// copy_in would move the row past reconcile, and reconcile refuses a stage it
+	// cannot enter, so one misplaced run would make usage reconciliation
+	// permanently unreachable.
+	if err := requireCPAImportEntry(recorded); err != nil {
+		return result, err
 	}
 
 	// The import reads the tree the copy-in recorded and nothing else. The
@@ -242,14 +246,18 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 		result.ManualItems = append(result.ManualItems, CPAImportManualItem{Item: item.item, Reason: item.reason, Instruction: item.instruction})
 	}
 
-	// The stage is entered before the destination is written, so a failure below
-	// leaves the operation at cpa_import — the position the operator retries from
-	// — instead of pretending the step never started. The version gate above has
-	// already passed, so nothing was written for a source this import refuses.
-	if err := enterCPAImportStage(ctx, paths.Database); err != nil {
+	// The destination is staged and started, and its secret is recorded, before
+	// the row moves to cpa_import. A refusal while staging therefore leaves the
+	// recorded position untouched: entering the stage first made every refusal
+	// after the version gate look like a started import, and moved the row past
+	// the reconcile step it still had to complete.
+	if err := run.stageDestination(ctx, &result); err != nil {
 		return result, err
 	}
-	if err := run.stageDestination(ctx, &result); err != nil {
+	// From here the step owns the position: a failure below leaves the operation
+	// at cpa_import — the position the operator retries from — instead of
+	// pretending the step never started.
+	if err := enterCPAImportStage(ctx, paths.Database); err != nil {
 		return result, err
 	}
 	summary, err := run.runExecutor(ctx, &result)
@@ -273,6 +281,57 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	result.DomainsDone = recorded.DomainsDone
 	result.UpdatedAtMS = recorded.UpdatedAtMS
 	return result, nil
+}
+
+// requireCPAImportEntry reports whether the recorded operation stands where this
+// step may be entered from.
+//
+// The import follows the reconciliation: it may be entered from `reconcile`, and
+// it may resume from its own stage while the cpa_config domain is unrecorded.
+// Anything else — a copy-in that never reconciled, a later stage, a rollback — is
+// refused before the source is read, because moving such a row to cpa_import
+// would claim a position the pipeline never granted and make the skipped step
+// permanently unreachable. A `failed` park resumes only when the operation
+// already records a domain reconciliation establishes.
+func requireCPAImportEntry(recorded model.UpgradeOperation) error {
+	refuse := func() error {
+		return newUpgradeError(UpgradeErrorCPAStageConflict, fmt.Sprintf(
+			"the recorded operation is at stage %q, which cannot enter the CPA import; the import runs after reconciliation, and this run read and wrote nothing",
+			recorded.Stage), nil)
+	}
+	switch recorded.Stage {
+	case model.UpgradeStageReconcile:
+		return nil
+	case model.UpgradeStageCPAImport:
+		if !recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+			return nil
+		}
+	case model.UpgradeStageFailed:
+		if cpaImportReconciledDomainsRecorded(recorded) {
+			return nil
+		}
+	}
+	return refuse()
+}
+
+// cpaImportReconciledDomains are the domains the reconciliation step establishes.
+// They are the evidence that a `failed` operation was parked after reconciliation
+// rather than before it, so the import may still resume there.
+var cpaImportReconciledDomains = []string{
+	model.UpgradeDomainUsageEvents,
+	model.UpgradeDomainRetainedProjection,
+	model.UpgradeDomainPricing,
+	model.UpgradeDomainCoverage,
+	model.UpgradeDomainIdentity,
+}
+
+func cpaImportReconciledDomainsRecorded(recorded model.UpgradeOperation) bool {
+	for _, domain := range cpaImportReconciledDomains {
+		if recorded.HasDomain(domain) {
+			return true
+		}
+	}
+	return false
 }
 
 // stageDestination proves the destination is observable, then stages and starts
@@ -484,9 +543,11 @@ func cpaImportValuesEqual(source, destination any) bool {
 	return leftErr == nil && rightErr == nil && string(left) == string(right)
 }
 
-// enterCPAImportStage records the stage entry alone. It carries no domain: the
-// cpa_config domain is the step's claim that the destination holds the copied
-// state, and only the proof below may make that claim.
+// enterCPAImportStage records the stage entry alone. It runs after the
+// destination is staged and started, because a refusal while staging must leave
+// the recorded position untouched. It carries no domain: the cpa_config domain is
+// the step's claim that the destination holds the copied state, and only the proof
+// below may make that claim.
 func enterCPAImportStage(ctx context.Context, databasePath string) error {
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {

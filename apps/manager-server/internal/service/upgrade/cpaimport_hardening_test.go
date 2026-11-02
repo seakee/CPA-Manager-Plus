@@ -180,8 +180,8 @@ func TestImportCPARefusesASourceRootOtherThanTheRecordedOne(t *testing.T) {
 	if runtime.stageCall != nil || len(destination.requests()) != 0 {
 		t.Fatal("a run bound to another source root still wrote to the destination")
 	}
-	if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageCopyIn {
-		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageCopyIn)
+	if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageReconcile)
 	}
 }
 

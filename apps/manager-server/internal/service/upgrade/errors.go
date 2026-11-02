@@ -128,8 +128,9 @@ const (
 	// is never defaulted. Nothing was written.
 	UpgradeErrorCPAPluginChoiceRequired UpgradeErrorCode = "upgrade_cpa_plugin_choice_required"
 	// UpgradeErrorCPAStageConflict reports that the recorded operation is not in a
-	// stage that can enter the import, or is already past it. Nothing was
-	// written.
+	// stage the import may be entered from — it runs after reconciliation and
+	// resumes from its own unrecorded stage — or is already past it. This run
+	// read and wrote nothing; the recorded position did not move.
 	UpgradeErrorCPAStageConflict UpgradeErrorCode = "upgrade_cpa_stage_conflict"
 	// UpgradeErrorCPADestinationUnready reports that the destination could not be
 	// observed, staged or started, so no configuration was written to it.
@@ -152,7 +153,8 @@ const (
 	// already running and this run holds no management secret for it: no earlier
 	// run of this step recorded one and the caller supplied none. The import never
 	// stages or invents a second secret for a destination it did not stage, so the
-	// operator supplies the secret the Manager stored. Nothing was written.
+	// operator supplies the secret the Manager stored. This run wrote nothing to
+	// the destination or the operation row.
 	UpgradeErrorCPADestinationKeyRequired UpgradeErrorCode = "upgrade_cpa_destination_key_required"
 )
 

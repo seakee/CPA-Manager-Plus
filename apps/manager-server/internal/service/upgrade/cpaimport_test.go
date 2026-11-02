@@ -33,7 +33,9 @@ type importFixture struct {
 
 // newImportFixture performs the copy-in a real run performs and writes the CPA
 // directory beside the source, so the import starts from the exact state the
-// previous step leaves behind.
+// previous step leaves behind. The recorded operation is advanced to the
+// reconciliation position the import is entered from, exactly as the reconcile
+// step leaves it.
 func newImportFixture(t *testing.T, config string, credentials map[string]string) importFixture {
 	t.Helper()
 	volume := newLegacyVolume(t)
@@ -47,6 +49,7 @@ func newImportFixture(t *testing.T, config string, credentials map[string]string
 	}); err != nil {
 		t.Fatalf("copy the fixture 1.x volume in: %v", err)
 	}
+	writeOperationStage(t, targetRoot, model.UpgradeStageReconcile, []string{model.UpgradeDomainSourceCopy})
 	return importFixture{
 		legacyRoot:  volume.root,
 		targetRoot:  targetRoot,
@@ -531,7 +534,7 @@ func TestImportCPARefusesAV7012FixtureBeforeWriting(t *testing.T) {
 		t.Fatalf("the destination answered %v for a refused source, want no request", requests)
 	}
 	recorded := readOperation(t, fixture.targetRoot)
-	if recorded.Stage != model.UpgradeStageCopyIn {
+	if recorded.Stage != model.UpgradeStageReconcile {
 		t.Fatalf("recorded stage = %q, want the copy-in the refusal must not move", recorded.Stage)
 	}
 	if recorded.HasDomain(model.UpgradeDomainCPAConfig) {
@@ -611,6 +614,66 @@ func TestImportCPARefusesAStageThatCannotEnterTheImport(t *testing.T) {
 	}
 	if runtime.stageCall != nil {
 		t.Fatal("a stage that cannot enter the import still reached the destination")
+	}
+}
+
+// TestImportCPARefusesToEnterBeforeReconciliation pins the position the import is
+// entered from. The earlier gate only asked whether cpa_import was reachable, and
+// copy_in can reach it: a single misplaced run then moved the row past reconcile,
+// which refuses a stage it can no longer enter, so usage reconciliation was
+// permanently skipped for that operation.
+func TestImportCPARefusesToEnterBeforeReconciliation(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, nil)
+	writeOperationStage(t, fixture.targetRoot, model.UpgradeStageCopyIn, []string{model.UpgradeDomainSourceCopy})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAStageConflict {
+		t.Fatalf("a copy-in position produced %v (code %q), want %s", err, code, UpgradeErrorCPAStageConflict)
+	}
+	if runtime.stageCall != nil || len(destination.requests()) != 0 {
+		t.Fatal("a copy-in position still reached the destination")
+	}
+	if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageCopyIn)
+	}
+}
+
+// TestImportCPALeavesTheStageAloneWhenTheDestinationCannotBeUsed pins the other
+// half of the ordering rule: a refusal after the version gate must not advance the
+// row. A ready destination with no recorded secret and no supplied one used to
+// leave the operation at cpa_import with nothing written, which reported a started
+// import that never started.
+func TestImportCPALeavesTheStageAloneWhenTheDestinationCannotBeUsed(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	destination := newFakeDestinationCPA(t, "destination-management-secret-value-0123456789abcdef")
+	runtime := newFakeImportRuntime(model.RuntimeStateReady)
+	runtime.staged = destination
+	_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationKeyRequired {
+		t.Fatalf("a ready destination without a secret produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationKeyRequired)
+	}
+	if requests := destination.requests(); len(requests) != 0 {
+		t.Fatalf("the destination answered %v, want no request", requests)
+	}
+	if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageReconcile)
+	}
+
+	// The same rule for an unusable destination URL, which is refused before the
+	// Runtime is asked for its status.
+	unusableFixture := newImportFixture(t, v7FixtureConfig, nil)
+	unusableDestination := newFakeDestinationCPA(t, "")
+	unusableRuntime := newFakeImportRuntime(model.RuntimeStateOffline)
+	unusableRuntime.staged = unusableDestination
+	options := importOptions(unusableFixture, unusableRuntime, "http://example.invalid/with space", boolPointer(true))
+	_, err = ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+		t.Fatalf("an unusable destination URL produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationUnready)
+	}
+	if recorded := readOperation(t, unusableFixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageReconcile)
 	}
 }
 
