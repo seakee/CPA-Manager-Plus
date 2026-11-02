@@ -590,3 +590,40 @@ it('bounds a progress read that never answers', async () => {
     vi.useRealTimers();
   }
 });
+
+// A connection that answers the headers and then stalls is the same hang one step
+// later. The deadline has to outlive the headers and cover the body, or the
+// screen waits on a read the carrier already promised to bound.
+it('bounds a progress read whose body stalls after the headers', async () => {
+  vi.useFakeTimers();
+  try {
+    stubBootstrapOrigin();
+    const fetchMock = vi.fn<typeof fetch>();
+    const client = await bootstrapClient(fetchMock);
+    let outcome = '';
+    fetchMock.mockImplementationOnce((_url, init) =>
+      Promise.resolve(
+        // The status line arrives; the body never does. The stream ends only when
+        // the request's own deadline aborts it, which is the behaviour under test.
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              init?.signal?.addEventListener('abort', () =>
+                controller.error(new DOMException('aborted', 'AbortError'))
+              );
+            },
+          }),
+          { status: 200 }
+        )
+      )
+    );
+    void client.readAdoption().then(
+      () => (outcome = 'answered'),
+      () => (outcome = 'failed')
+    );
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(outcome).toBe('failed');
+  } finally {
+    vi.useRealTimers();
+  }
+});

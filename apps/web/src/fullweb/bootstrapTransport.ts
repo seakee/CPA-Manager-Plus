@@ -411,73 +411,79 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
     const controller = bounded ? new AbortController() : undefined;
     const deadline = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT) : undefined;
     let response: Response;
+    // The deadline covers the whole answer, not only its headers: a half-open
+    // connection that sends a status line and then stalls is exactly the hang the
+    // progress loop has to count, and the canonical carrier bounds the body read
+    // the same way. Every exit from this block clears it.
     try {
-      response = await transport(target.href, {
-        method: methods[resource],
-        headers,
-        ...(body === undefined
-          ? {}
-          : { body: resource === 'strategy' ? runtimeRequestJSON(body) : JSON.stringify(body) }),
-        ...(controller ? { signal: controller.signal } : {}),
-        mode: 'same-origin',
-        credentials: 'omit',
-        redirect: 'error',
-        cache: 'no-store',
-      });
-    } catch {
-      throw new BootstrapTransportError('Bootstrap transport unavailable', 'transport');
+      try {
+        response = await transport(target.href, {
+          method: methods[resource],
+          headers,
+          ...(body === undefined
+            ? {}
+            : { body: resource === 'strategy' ? runtimeRequestJSON(body) : JSON.stringify(body) }),
+          ...(controller ? { signal: controller.signal } : {}),
+          mode: 'same-origin',
+          credentials: 'omit',
+          redirect: 'error',
+          cache: 'no-store',
+        });
+      } catch {
+        throw new BootstrapTransportError('Bootstrap transport unavailable', 'transport');
+      }
+      if (!response.ok) {
+        // Two bounded refusal envelopes exist, and they are read by the call that
+        // can act on them:
+        //  - a strategy blocker answers `{"Code": "…", "Unsupported": […]}`;
+        //  - an adoption completion answers `{"code": "…", "retryable": N}`.
+        // Preserving them keeps a typed refusal distinguishable from a reply that
+        // was lost after the server may have acted.
+        let code: string | undefined;
+        let unsupported: readonly string[] | undefined;
+        let retryable: number | undefined;
+        try {
+          const refusal = (await response.json()) as {
+            Code?: unknown;
+            Unsupported?: unknown;
+            code?: unknown;
+            retryable?: unknown;
+          };
+          if (resource === 'complete') {
+            if (typeof refusal?.code === 'string' && COMPLETE_REFUSALS[refusal.code] === true)
+              code = refusal.code;
+            if (code && Number.isSafeInteger(refusal.retryable) && (refusal.retryable as number) > 0)
+              retryable = refusal.retryable as number;
+          } else {
+            if (typeof refusal?.Code === 'string' && refusal.Code) code = refusal.Code;
+            if (Array.isArray(refusal?.Unsupported))
+              unsupported = refusal.Unsupported.filter(
+                (entry): entry is string => typeof entry === 'string' && !!entry && entry.length <= 64
+              );
+          }
+        } catch {
+          /* A refusal without a bounded envelope stays a plain status failure. */
+        }
+        throw new BootstrapTransportError(
+          'Bootstrap request unavailable',
+          classifyStatus(response.status),
+          response.status,
+          code,
+          unsupported,
+          retryable
+        );
+      }
+      try {
+        return parseRuntimeJSON(await response.text()) as T;
+      } catch {
+        throw new BootstrapTransportError(
+          'Bootstrap response unavailable',
+          'response',
+          response.status
+        );
+      }
     } finally {
       clearTimeout(deadline);
-    }
-    if (!response.ok) {
-      // Two bounded refusal envelopes exist, and they are read by the call that
-      // can act on them:
-      //  - a strategy blocker answers `{"Code": "…", "Unsupported": […]}`;
-      //  - an adoption completion answers `{"code": "…", "retryable": N}`.
-      // Preserving them keeps a typed refusal distinguishable from a reply that
-      // was lost after the server may have acted.
-      let code: string | undefined;
-      let unsupported: readonly string[] | undefined;
-      let retryable: number | undefined;
-      try {
-        const refusal = (await response.json()) as {
-          Code?: unknown;
-          Unsupported?: unknown;
-          code?: unknown;
-          retryable?: unknown;
-        };
-        if (resource === 'complete') {
-          if (typeof refusal?.code === 'string' && COMPLETE_REFUSALS[refusal.code] === true)
-            code = refusal.code;
-          if (code && Number.isSafeInteger(refusal.retryable) && (refusal.retryable as number) > 0)
-            retryable = refusal.retryable as number;
-        } else {
-          if (typeof refusal?.Code === 'string' && refusal.Code) code = refusal.Code;
-          if (Array.isArray(refusal?.Unsupported))
-            unsupported = refusal.Unsupported.filter(
-              (entry): entry is string => typeof entry === 'string' && !!entry && entry.length <= 64
-            );
-        }
-      } catch {
-        /* A refusal without a bounded envelope stays a plain status failure. */
-      }
-      throw new BootstrapTransportError(
-        'Bootstrap request unavailable',
-        classifyStatus(response.status),
-        response.status,
-        code,
-        unsupported,
-        retryable
-      );
-    }
-    try {
-      return parseRuntimeJSON(await response.text()) as T;
-    } catch {
-      throw new BootstrapTransportError(
-        'Bootstrap response unavailable',
-        'response',
-        response.status
-      );
     }
   }
   async function verifyCanonical(prepared: FreshOperation): Promise<string> {
