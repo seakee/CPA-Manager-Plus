@@ -377,15 +377,18 @@ func cpaImportReconciledDomainsRecorded(recorded model.UpgradeOperation) bool {
 }
 
 // stageDestination proves the destination is observable, then stages and starts
-// it with the attempt this operation already owns.
+// it with the attempt this operation already owns, and binds the caller's URL to
+// that destination before the run may address it.
 //
 // The destination request is immutable once recorded: the Supervisor replays a
 // journalled operation by ID and never applies a different request under the same
 // one, so a retry reuses the recorded secret, plugin choice and client key set
 // instead of minting a second secret and submitting it into a replay. A
-// destination that already reports itself ready is not staged again; it is proved
-// against this import's client keys before a single write, so a foreign CPA that
-// happens to be running is refused instead of receiving configuration and
+// destination that already reports itself ready is not staged again. Every arm —
+// a ready destination, a resumed attempt, a new stage — ends in
+// requireStagedDestinationIdentity, so the URL is proved to be the staged
+// destination with this import's client keys before the executor is built; a
+// foreign CPA is refused instead of receiving source configuration and
 // credentials.
 func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportResult) error {
 	baseURL, err := cpa.NormalizeV8BaseURL(r.options.DestinationURL)
@@ -431,12 +434,7 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			return err
 		}
 		if status.State == model.RuntimeStateReady {
-			if err := cpa.VerifyV8Adoption(ctx, baseURL, recordedKey, clientKeys); err != nil {
-				return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
-					"the running destination CPA does not answer with the client keys this import stages, so it is not the target this operation staged; this run wrote nothing to it", err)
-			}
-			r.managementKey = recordedKey
-			return nil
+			return r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys)
 		}
 		if record.TerminalFailure {
 			// The Supervisor never resumes a terminal operation, so the only way to
@@ -449,7 +447,10 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 					"the next destination attempt could not be recorded, so nothing was staged", err)
 			}
 		}
-		return r.submitDestination(ctx, status, record, recordedKey, clientKeys)
+		if err := r.submitDestination(ctx, status, record, recordedKey, clientKeys); err != nil {
+			return err
+		}
+		return r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys)
 	}
 
 	if status.State == model.RuntimeStateReady {
@@ -461,12 +462,7 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			return newUpgradeError(UpgradeErrorCPADestinationKeyRequired,
 				"the destination CPA is already running and this run holds no management secret for it; pass the secret the Manager stored with --destination-management-key-file, or stage the destination from a stopped state", nil)
 		}
-		if err := cpa.VerifyV8Adoption(ctx, baseURL, supplied, clientKeys); err != nil {
-			return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
-				"the running destination CPA does not answer with the client keys this import stages, so it is not the target this operation staged; this run wrote nothing to it", err)
-		}
-		r.managementKey = supplied
-		return nil
+		return r.requireStagedDestinationIdentity(ctx, baseURL, supplied, clientKeys)
 	}
 
 	managementKey := supplied
@@ -490,7 +486,35 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		return newUpgradeError(UpgradeErrorCPADestinationUnready,
 			"the destination management secret could not be recorded, so the destination was not staged", err)
 	}
-	return r.submitDestination(ctx, status, record, managementKey, clientKeys)
+	if err := r.submitDestination(ctx, status, record, managementKey, clientKeys); err != nil {
+		return err
+	}
+	// The stage is the Supervisor's, not yet proof that the URL this run will
+	// address is the destination it staged: the caller supplies that URL, and a
+	// Manager pointed at another CPA would otherwise hand it the source's
+	// configuration and credentials and only notice at the final proof. The
+	// authenticated key-list read binds the two before the executor is built.
+	return r.requireStagedDestinationIdentity(ctx, baseURL, managementKey, clientKeys)
+}
+
+// requireStagedDestinationIdentity binds the URL this run addresses to the
+// destination the Supervisor staged, and is the last gate before anything is
+// read from or written to that URL by the executor.
+//
+// cpa.VerifyV8Adoption reads the destination's client key list with the staged
+// management secret and probes the listener without and with it. A CPA that
+// answers is therefore one that accepts this run's staged secret; one that
+// answers with another key set is refused. Either mismatch means the URL is not
+// this operation's destination, so the refusal names a foreign target and the
+// recorded operation stays where it was: no configuration or credential is
+// written, and no CPA other than the staged destination is mutated.
+func (r *cpaImportRun) requireStagedDestinationIdentity(ctx context.Context, baseURL, managementKey string, clientKeys []string) error {
+	if err := cpa.VerifyV8Adoption(ctx, baseURL, managementKey, clientKeys); err != nil {
+		return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
+			"the CPA at the destination URL does not answer with the management secret and client keys this run staged, so it is not the destination this operation staged; nothing was written to it", err)
+	}
+	r.managementKey = managementKey
+	return nil
 }
 
 // submitDestination sends the recorded attempt to the Runtime and refuses a

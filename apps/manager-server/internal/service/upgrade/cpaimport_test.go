@@ -883,6 +883,62 @@ func TestImportCPARefusesAReadyDestinationThatIsNotThisImportsTarget(t *testing.
 	}
 }
 
+// TestImportCPARefusesAForeignDestinationBeforeAnyWrite is the High finding: a
+// run that stages its destination from a stopped state used to submit the stage
+// and then address the URL the caller supplied, so an offline Runtime plus a URL
+// naming another CPA handed that CPA the source's configuration and credentials
+// and only then failed the proof. Every write branch now binds the URL to the
+// staged destination first, so the foreign CPA receives the authenticated read
+// that proves it is not this operation's target and no mutation at all.
+func TestImportCPARefusesAForeignDestinationBeforeAnyWrite(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
+		"codex-user.json": `{"type":"codex","access_token":"token"}`,
+	})
+	const secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	staged := newFakeDestinationCPA(t, "")
+	foreign := newFakeDestinationCPA(t, secret)
+	foreign.clientKeys = []string{"another-installation-client-key"}
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = staged
+	options := importOptions(fixture, runtime, foreign.url(), boolPointer(true))
+	options.DestinationManagementKey = secret
+	_, err := ImportCPA(context.Background(), options)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetForeign {
+		t.Fatalf("an offline stage with a foreign URL produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetForeign)
+	}
+	if runtime.stageCall == nil {
+		t.Fatal("the test did not stage a destination, so it proves nothing about the binding")
+	}
+	for _, request := range foreign.requests() {
+		for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodPost, http.MethodDelete} {
+			if strings.HasPrefix(request, method+" ") {
+				t.Fatalf("the foreign CPA received a mutation: %s", request)
+			}
+		}
+	}
+	foreign.mu.Lock()
+	uploads := len(foreign.credentials)
+	foreign.mu.Unlock()
+	if uploads != 0 {
+		t.Fatalf("the foreign CPA received %d credential uploads", uploads)
+	}
+	// The staged destination is not written either: the executor never ran.
+	for _, request := range staged.requests() {
+		for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodPost, http.MethodDelete} {
+			if strings.HasPrefix(request, method+" ") {
+				t.Fatalf("the staged destination received a mutation before the URL was bound: %s", request)
+			}
+		}
+	}
+	recorded := readOperation(t, fixture.targetRoot)
+	if recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageReconcile)
+	}
+	if recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
+	}
+}
+
 // TestImportCPADoesNotRestageAnAlreadyRunningDestination pins the resume rule: a
 // destination that already answers ready is proved, never staged again.
 func TestImportCPADoesNotRestageAnAlreadyRunningDestination(t *testing.T) {
