@@ -240,7 +240,7 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	// already carries this stage, and a second record would only churn the
 	// generation.
 	if hasBinding && recorded.Stage == model.UpgradeStageExternalConnect {
-		return externalConnectAlreadyConnected(ctx, targetRoot, recorded, binding)
+		return externalConnectAlreadyConnected(ctx, db, targetRoot, recorded, binding)
 	}
 
 	report, err := externalConnectVersion(ctx, options, baseURL, managementKey)
@@ -342,16 +342,68 @@ func readRecordedCopyInFrom(ctx context.Context, repository *upgradeoperation.Re
 // operation recorded: nothing is probed and the row keeps its stage, generation
 // and timestamps.
 //
+// A refusal this step recorded earlier is cleared in the same transaction as the
+// read, because the binding it just re-proved is exactly the fact that refusal
+// said was missing: a target reported moved is not moved when the recorded target
+// answers again, and leaving the code behind tells the console and the wizard to
+// keep blocking a step that already succeeded. Only this step's own codes are
+// cleared; another step's refusal is not this one's to erase.
+//
 // The published evidence is repaired from the row when it is missing or stale,
 // because the row is the record and the file is its projection: a rerun after a
 // lost publication costs this repair, not a second proof of the CPA.
-func externalConnectAlreadyConnected(ctx context.Context, targetRoot string, recorded model.UpgradeOperation, binding upgradeoperation.ExternalBinding) (ExternalConnectResult, error) {
+func externalConnectAlreadyConnected(ctx context.Context, db *sql.DB, targetRoot string, recorded model.UpgradeOperation, binding upgradeoperation.ExternalBinding) (ExternalConnectResult, error) {
 	evidence := externalConnectEvidence(binding)
+	operation := recorded
+	if externalConnectRefusalRecorded(recorded.ErrorCode) {
+		cleared, err := clearExternalConnectRefusal(ctx, db)
+		if err != nil {
+			return ExternalConnectResult{}, err
+		}
+		operation = cleared
+	}
 	if err := ensureExternalConnectEvidence(targetRoot, evidence); err != nil {
 		return ExternalConnectResult{}, fmt.Errorf(
 			"the External connection is recorded and this target is unchanged, but its evidence file could not be refreshed: %w", err)
 	}
-	return externalConnectResult(recorded, evidence, true), nil
+	return externalConnectResult(operation, evidence, true), nil
+}
+
+// clearExternalConnectRefusal removes a stale refusal this step left on the row.
+// It reads the cleared row in the same transaction, so the caller reports the
+// stamp the commit stored instead of a value read around it.
+func clearExternalConnectRefusal(ctx context.Context, db *sql.DB) (model.UpgradeOperation, error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("clear the External refusal: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := upgradeoperation.ClearErrorTx(ctx, tx); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("clear the External refusal: %w", err)
+	}
+	operation, found, err := upgradeoperation.GetTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("read the cleared operation: %w", err)
+	}
+	if !found {
+		return model.UpgradeOperation{}, errors.New("clear the External refusal: no operation row")
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("clear the External refusal: %w", err)
+	}
+	return operation, nil
+}
+
+// externalConnectRefusalRecorded reports whether a recorded error code is this
+// step's own decision about the target, and therefore stale once the binding is
+// re-proven.
+func externalConnectRefusalRecorded(code string) bool {
+	switch UpgradeErrorCode(code) {
+	case UpgradeErrorExternalVersionUnsupported, UpgradeErrorExternalConfigDocumentInvalid,
+		UpgradeErrorExternalManagementRejected, UpgradeErrorExternalTargetMoved:
+		return true
+	}
+	return false
 }
 
 // externalConnectBinding is the durable form of the step's record.

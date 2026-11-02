@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
 // externalBindingTableName is the single-row table holding the External connect
@@ -104,4 +106,12 @@ func RecordExternalBindingTx(ctx context.Context, tx Tx, binding ExternalBinding
 		binding.BaseURL, binding.Identity, binding.Generation, binding.ServerFingerprint,
 		binding.CPAVersion, binding.Support, binding.ClientKeys, binding.ObservedAtMS)
 	return err
+}
+
+// GetTx reads the single operation row inside the caller's transaction, so a
+// writer can return the row it just wrote instead of re-reading it after commit
+// and reporting a stamp another writer has already moved on.
+func GetTx(ctx context.Context, tx Tx) (model.UpgradeOperation, bool, error) {
+	return scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
 }

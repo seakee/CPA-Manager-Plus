@@ -290,6 +290,69 @@ func TestExternalConnectFailsClosedWithoutABinding(t *testing.T) {
 	}
 }
 
+// TestExternalConnectClearsAStaleRefusalWhenTheTargetReconnects proves a repeat
+// against the recorded target stops reporting a refusal that is no longer true.
+//
+// A wrong address is recorded as external_target_moved. Rerunning the step with
+// the recorded address is the documented recovery, and it answers "already
+// connected" from the binding — but the durable refusal stayed on the row, so the
+// CLI reported success while status and the wizard kept showing a moved-target
+// blocker that the successful run had just disproved. Reconnecting the recorded
+// target now clears this step's own refusals in the transaction that reads the
+// row, and leaves another step's refusal alone.
+func TestExternalConnectClearsAStaleRefusalWhenTheTargetReconnects(t *testing.T) {
+	target := newExternalTarget(t)
+	first, err := target.connect(t)
+	if err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	if _, err := newExternalTargetAt(t, target, "https://other.example"); !errors.Is(err, ErrExternalTargetMoved) {
+		t.Fatalf("the wrong address refused with %v, want the moved-target refusal", err)
+	}
+	refused := operationRow(t, target.databasePath())
+	if refused.ErrorCode != string(UpgradeErrorExternalTargetMoved) {
+		t.Fatalf("recorded error code = %q", refused.ErrorCode)
+	}
+
+	recovered, err := newExternalTargetAt(t, target, "https://cpa.example")
+	if err != nil {
+		t.Fatalf("reconnect the recorded target: %v", err)
+	}
+	if !recovered.AlreadyComplete || recovered.Generation != first.Generation {
+		t.Fatalf("the reconnect reported %+v, want the recorded connection", recovered)
+	}
+	after := operationRow(t, target.databasePath())
+	if after.ErrorCode != "" || after.ErrorDetail != "" {
+		t.Fatalf("the stale refusal survived the reconnect: %q / %q", after.ErrorCode, after.ErrorDetail)
+	}
+	if after.UpdatedAtMS < refused.UpdatedAtMS {
+		t.Fatalf("clearing the refusal moved the stamp backwards: %d -> %d", refused.UpdatedAtMS, after.UpdatedAtMS)
+	}
+	if recovered.UpdatedAtMS != after.UpdatedAtMS {
+		t.Fatalf("the result reports %d while the row stores %d", recovered.UpdatedAtMS, after.UpdatedAtMS)
+	}
+	if after.Stage != model.UpgradeStageExternalConnect ||
+		!hasDomains(after.DomainsDone, model.UpgradeDomainCPAConfig, model.UpgradeDomainIdentity) {
+		t.Fatalf("the reconnect changed the record: %+v", after)
+	}
+	if evidence, found, evidenceErr := readExternalConnectEvidence(target.copied.target); evidenceErr != nil || !found {
+		t.Fatalf("evidence = %+v, found %t, err %v", evidence, found, evidenceErr)
+	} else if evidence.Identity != first.Identity {
+		t.Fatalf("the reconnect republished %q, want %q", evidence.Identity, first.Identity)
+	}
+
+	// A refusal recorded by another step is not this step's to erase: only the
+	// codes that describe this CPA are stale once its binding is re-proven.
+	execTarget(t, target.databasePath(),
+		`update upgrade_operations set error_code = 'upgrade_reconcile_mismatch', error_detail = 'another step' where id = 1`)
+	if _, err := newExternalTargetAt(t, target, "https://cpa.example"); err != nil {
+		t.Fatalf("reconnect with a foreign refusal recorded: %v", err)
+	}
+	if got := operationRow(t, target.databasePath()).ErrorCode; got != "upgrade_reconcile_mismatch" {
+		t.Fatalf("the reconnect erased another step's refusal: recorded code = %q", got)
+	}
+}
+
 // TestExternalConnectReadsTheConfigurationStrictly exercises the strict reader
 // itself, against a real CPA-shaped server, because the two refusals it can
 // produce are not interchangeable.
