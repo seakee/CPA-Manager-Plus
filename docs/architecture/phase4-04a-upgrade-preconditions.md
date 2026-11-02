@@ -744,5 +744,18 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   - An evidence-less `rolled_back` row written by an earlier build cannot be
     repaired in place; it reads as an outdated store and the only real path is a
     fresh copy-in into a new v2 data root.
+  - A bind-mode plan records the path the CLI itself sees. `--legacy` and
+    `--volume <host-directory>` are resolved in whatever filesystem namespace
+    the CLI runs in; under `docker compose run --rm` that is the run container,
+    not the host. The plan writes the recorded path as the compose bind source
+    (`<dir>:/data`), so if the CLI container sees the 1.x data at a different
+    absolute path than the host mount, the plan asks the host to bind a
+    directory that may be empty, v1 can start and answer `/health`, and verify
+    reads the CLI container's own copy instead of the host volume. Run
+    `--prepare` and `--verify` with the 1.x data mounted at the same absolute
+    path the host compose will mount, or use the named-volume form. The `stat`
+    precondition checks the recorded directory on the host and remains the
+    operator's proof that this path is the host's 1.x volume; it cannot repair a
+    path mismatch the CLI cannot see.
   - The port and v2-running checks describe the CLI's own network namespace, so
     under `docker compose run --rm` the operator reproduces them on the host.
