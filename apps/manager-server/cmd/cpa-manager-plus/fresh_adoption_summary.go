@@ -37,7 +37,10 @@ const adoptionSummaryUnavailable = "adopt_summary_unavailable"
 // credential shape for the scrubber to recognise. The record's free-text
 // instruction, which interpolates a source name and a destination type string, is
 // not emitted at all: the page states the next step from the item's own kind, so
-// untrusted metadata cannot reach the browser as prose.
+// untrusted metadata cannot reach the browser as prose. An overlong credential
+// name is recorded with a readable prefix and a digest of the unscrubbed name;
+// that digest is dropped here as well, because it would confirm a candidate
+// value offline.
 type adoptionSummaryItem struct {
 	// ID is the record's stable identity for this item, independent of the text
 	// the reply may show. Two token-shaped file names scrub to the same `item`,
@@ -272,6 +275,31 @@ func shortestRedactedPrefix(secret string) string {
 	return secret[:cut]
 }
 
+// overlongNameDigestMarker is how the executor marks a credential identity cut
+// short: the readable prefix, this marker and the SHA-256 of the whole name.
+const overlongNameDigestMarker = "…#sha256:"
+
+// withoutNameDigest drops the record's digest of an overlong credential name
+// from the text the reply shows.
+//
+// That digest is an unsalted SHA-256 of the unscrubbed name, so a reader who
+// knows the rest of the name could confirm a guessed value from it offline. The
+// record keeps it — it is what makes the record's own identity stable across
+// replays — but the reply states progress, not evidence, and a digest that
+// confirms a candidate credential is not something this boundary may emit. The
+// readable prefix and the ellipsis that says the name was cut stay; the item's
+// ordinal in the reply's identity keeps two cut names apart.
+func withoutNameDigest(item string) string {
+	at := strings.LastIndex(item, overlongNameDigestMarker)
+	if at < 0 || len(item) != at+len(overlongNameDigestMarker)+sha256.Size*2 {
+		return item
+	}
+	if _, err := hex.DecodeString(item[at+len(overlongNameDigestMarker):]); err != nil {
+		return item
+	}
+	return item[:at] + "…"
+}
+
 // adoptionItemID is the stable, non-secret identity of one recorded item.
 //
 // It digests the text the reply shows and the item's ordinal in the record,
@@ -312,7 +340,7 @@ func adoptionSummaryFrom(summary *freshstore.AdoptionSummary, redact func(string
 		case freshstore.AdoptionAbsentAtSource:
 			reply.Counts.AbsentAtSource++
 		}
-		itemText := redact(item.Item)
+		itemText := redact(withoutNameDigest(item.Item))
 		reply.Items = append(reply.Items, adoptionSummaryItem{
 			ID:      adoptionItemID(itemText, ordinal),
 			Item:    itemText,

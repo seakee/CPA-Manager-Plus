@@ -1315,7 +1315,11 @@ acknowledgement or a list key to that text would treat two resources as one. The
 digest never covers the unscrubbed name, so a candidate credential cannot be
 confirmed offline from it; the ordinal keeps two equal scrubbed names apart, and
 the record's own order keeps an item's identity stable across reads. The name
-stays display only.
+stays display only. An overlong credential name is recorded with a readable
+prefix and the digest of the whole name; that digest does not reach the reply
+either — the reply keeps the prefix and the ellipsis that says it was cut —
+because it is a digest of the unscrubbed name, and the ordinal is what keeps two
+cut names apart.
 
 The reply is also a separate output boundary from the record, because the
 record's text is not all the Manager's: a credential file name is the source

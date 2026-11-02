@@ -590,6 +590,67 @@ func TestAdoptionRedactorPicksTheLongestMatchAtEachPosition(t *testing.T) {
 	}
 }
 
+// An overlong name's record identity carries the SHA-256 of the unscrubbed name.
+// The reply must not: a reader who knows the rest of a file name could otherwise
+// confirm a guessed credential offline from the item text.
+func TestAdoptionSummaryOverlongNameIsNotAnOfflineOracle(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef"
+	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key)
+	// The record keeps 120 bytes of the name: 100 readable bytes and the first 20
+	// of the key. Only a candidate for the whole name can confirm the digest.
+	name := strings.Repeat("p", 100) + key + strings.Repeat("q", 200) + ".json"
+	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
+	fixture.source.types[name] = "claude"
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	raw := sha256.Sum256([]byte(name))
+	candidate := hex.EncodeToString(raw[:])
+	// The record really does keep the digest, so the reply's silence below is the
+	// boundary's doing rather than an accident of the run.
+	recorded := false
+	for _, recordedItem := range fixture.reload(t).AdoptionSummary.Items {
+		if strings.Contains(recordedItem.Item, candidate) {
+			recorded = true
+		}
+	}
+	if !recorded {
+		t.Fatalf("the record kept no digest of the overlong name")
+	}
+
+	body := fixture.adoption(t).Body.String()
+	if strings.Contains(body, candidate) {
+		t.Fatalf("the summary confirms the candidate file name: %s", body)
+	}
+	if strings.Contains(body, overlongNameDigestMarker) {
+		t.Fatalf("the summary carries the record's name digest marker: %s", body)
+	}
+
+	reply := readAdoptionJSON(t, fixture.adoption(t))
+	index := -1
+	for at := range reply.Items {
+		if strings.Contains(reply.Items[at].Item, strings.Repeat("p", 100)) {
+			index = at
+		}
+	}
+	if index < 0 {
+		t.Fatalf("the reply dropped the readable name: %+v", reply.Items)
+	}
+	item := reply.Items[index]
+	if item.ID == candidate {
+		t.Fatalf("the reply's identity confirms the candidate file name: %+v", item)
+	}
+	if len(item.ID) != 64 {
+		t.Fatalf("the item carries no stable identity: %+v", item)
+	}
+	// The identity is the record's, so a second read states the same item.
+	if again := readAdoptionJSON(t, fixture.adoption(t)); again.Items[index].ID != item.ID {
+		t.Fatalf("the item identity changed between two reads")
+	}
+}
+
 // The reply's identity for an item must not turn a candidate credential into
 // something confirmable offline. The record's own name is not what the digest
 // covers, and the identity still keeps a record's items apart and stable.
@@ -693,7 +754,8 @@ func TestAdoptionSummaryKeepsScrubbedNamesDistinct(t *testing.T) {
 }
 
 // A credential whose name cannot be an item identity keeps enough of the name to
-// be actionable, plus the digest that makes the identity stable.
+// be actionable. The record also keeps a digest of the whole name for its own
+// identity; the reply keeps the prefix and the ellipsis, not the digest.
 func TestAdoptionSummaryKeepsAnOverlongNameReadable(t *testing.T) {
 	overlong := strings.Repeat("overlong-credential-name-", 12) + ".json"
 	fixture := newAdoptMigrationFixture(t)
@@ -720,8 +782,13 @@ func TestAdoptionSummaryKeepsAnOverlongNameReadable(t *testing.T) {
 	if !strings.HasPrefix(item.Item, "credential:"+overlong[:100]) {
 		t.Fatalf("the item identity kept no readable prefix: %q", item.Item)
 	}
-	if !strings.Contains(item.Item, "…#sha256:") {
-		t.Fatalf("the item identity carries no digest: %q", item.Item)
+	if !strings.HasSuffix(item.Item, "…") {
+		t.Fatalf("the cut identity lost its ellipsis: %q", item.Item)
+	}
+	// The record's digest of the whole name is a digest of the unscrubbed name,
+	// so the reply must not carry it.
+	if strings.Contains(item.Item, overlongNameDigestMarker) {
+		t.Fatalf("the reply carries the record's name digest: %q", item.Item)
 	}
 	// The identity is the record's, so a second read states the same item.
 	if again := readAdoptionJSON(t, fixture.adoption(t)); again.Items[0].ID != reply.Items[0].ID {

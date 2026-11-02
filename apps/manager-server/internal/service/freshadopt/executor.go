@@ -380,6 +380,11 @@ const overlongNamePrefixBytes = 120
 // keeps a readable prefix of the name — an opaque digest alone tells the
 // operator nothing to look for — and the digest of the whole name, which is what
 // keeps the identity stable across replays.
+//
+// The digest stays in the record. The summary's output boundary drops it before
+// the text leaves the Manager (fresh_adoption_summary.go's withoutNameDigest),
+// because it is a digest of the unscrubbed name and a browser could confirm a
+// candidate credential from it offline.
 func overlongCredentialItem(name string) string {
 	prefix := name
 	if len(prefix) > overlongNamePrefixBytes {

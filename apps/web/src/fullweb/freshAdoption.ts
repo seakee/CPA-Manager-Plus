@@ -61,6 +61,9 @@ export type AdoptionOutcome = 'migrated' | 'manual' | 'failed' | 'absent_at_sour
  * recognisable fragment of one, because a truncated name can carry half a value.
  * A source credential shorter than eight bytes is not replaced: that is the
  * boundary's documented limit, so this text is scrubbed, not proven value-free.
+ * An overlong name keeps a readable prefix and an ellipsis where it was cut; the
+ * digest the record keeps for the whole name is dropped, so this text cannot
+ * confirm a guessed name either.
  * It never carries the record's free-text instruction: the page states the next
  * step from `kind` and `reason`, so upstream metadata cannot reach the screen as
  * prose.
