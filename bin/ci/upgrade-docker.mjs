@@ -26,10 +26,14 @@
 //
 // Everything it creates is tracked before it is created: containers, volumes,
 // networks, compose projects and `git worktree` checkouts, all under the
-// `cpampd<runid>` prefix. Nothing else on the host is stopped, removed or
-// renamed. The tracked set is released on the normal path, on every error path
-// and on SIGINT/SIGTERM, and a cleanup that could not remove what this run
-// created makes the process exit non-zero instead of reporting PASS.
+// `cpampd<runid>` prefix. Images are built and tagged only in the harness's own
+// `cpampd-` namespaces (`cpampd-fixture/legacy-v1:<version>` and this run's
+// `cpampd<runid>/upgrade` alias); `cpamp-*` images and the shared
+// `cpampd-fixture/upgrade:*` tags are inspect-only. Nothing else on the host is
+// stopped, removed or renamed. The tracked set is released on the normal path,
+// on every error path and on SIGINT/SIGTERM, and a cleanup that could not remove
+// what this run created makes the process exit non-zero instead of reporting
+// PASS.
 //
 // Usage:
 //   node bin/ci/upgrade-docker.mjs [--reuse-fixture] [--keep] [--v1-tag v1.14.10]
@@ -37,9 +41,10 @@
 //   node bin/ci/upgrade-docker.mjs --verify-evidence <file> [--expect-head <sha>]
 //
 // `--reuse-fixture` skips `git worktree` + `docker build` and uses the recorded
-// image, which is what a second run (or the U1-1b re-pin) does. The image must
-// carry the provenance labels this harness writes when it builds it, and its
-// rollback alias must resolve to the same image ID.
+// `cpampd-fixture/legacy-v1:<version>` image, which is what a second run (or the
+// U1-1b re-pin) does. The image must carry the provenance labels this harness
+// writes when it builds it, and its rollback alias must resolve to the same
+// image ID; an image that does not is refused instead of being rebuilt over.
 // `--verify-evidence` re-checks one evidence document without Docker: the
 // canonical hash, the verdict and the implementation binding.
 // `SKIP_UPGRADE_DOCKER=1` is the only way to skip the run, and it says so.
@@ -93,7 +98,11 @@ const TABLES = {
   history: 'usage_monitoring_account_daily_rollups_v1',
 };
 
-const IMAGE_REPOSITORY = 'cpamp-d-fixture-v1';
+// The fixture image this harness builds and reuses. It lives in the harness's
+// own cpampd- namespace: no cpamp-* image is ever built, retagged or removed,
+// because that namespace belongs to the collaborator's stacks and to older
+// harness builds whose images this run only inspects.
+export const IMAGE_REPOSITORY = 'cpampd-fixture/legacy-v1';
 // The shared rollback repository older harness builds wrote to. Its tags are
 // READ-ONLY inputs for this run: unlabeled images already occupy them, so this
 // harness never retags, removes or reuses them. It only inspects them, to prove
@@ -205,6 +214,60 @@ export function rollbackAliasReference(tag, prefix = PREFIX) {
     throw new Error(`a rollback alias tag must be an exact vX.Y.Z release, got ${JSON.stringify(value)}`);
   }
   return `${prefix}/upgrade:${value}`;
+}
+
+// imageRepository is the repository part of a Docker image reference: the tag,
+// the digest and a registry port are not part of it.
+export function imageRepository(reference) {
+  const value = String(reference ?? '');
+  const withoutDigest = value.split('@')[0];
+  const separator = withoutDigest.lastIndexOf(':');
+  return separator > withoutDigest.lastIndexOf('/') ? withoutDigest.slice(0, separator) : withoutDigest;
+}
+
+// assertImageWriteArgv guards the only Docker subcommands this harness may use
+// to create or remove an image reference: build -t/--tag, tag, and image rm.
+// Every reference must sit in the harness's own cpampd- namespace — the fixture
+// repository or this run's rollback alias — so a cpamp-* image (a collaborator's
+// object, or an older harness image whose tag is inspect-only) can never be
+// built over, retagged or removed, whatever argv a future change constructs.
+export function assertImageWriteArgv(argv, { prefix = PREFIX } = {}) {
+  const tokens = Array.isArray(argv) ? argv.map(String) : [];
+  const references = [];
+  switch (tokens[0]) {
+    case 'tag':
+      references.push(tokens[1], tokens[2]);
+      break;
+    case 'build':
+      for (let index = 1; index < tokens.length; index += 1) {
+        const token = tokens[index];
+        if (token === '-t' || token === '--tag') references.push(tokens[index + 1]);
+        else if (token.startsWith('--tag=')) references.push(token.slice('--tag='.length));
+        else if (token.startsWith('-t=')) references.push(token.slice(3));
+      }
+      break;
+    case 'image':
+      if (tokens[1] === 'rm' || tokens[1] === 'rmi') {
+        references.push(...tokens.slice(2).filter((token) => !token.startsWith('-')));
+      }
+      break;
+    case 'rmi':
+      references.push(...tokens.slice(1).filter((token) => !token.startsWith('-')));
+      break;
+    default:
+      throw new Error(`refusing an unsupported image write subcommand ${JSON.stringify(tokens[0])}`);
+  }
+  const allowed = new Set([IMAGE_REPOSITORY, `${prefix}/upgrade`]);
+  for (const reference of references) {
+    if (!reference) throw new Error(`an image write argument is missing from ${JSON.stringify(tokens)}`);
+    const repository = imageRepository(reference);
+    if (!allowed.has(repository)) {
+      throw new Error(
+        `refusing to write image reference ${reference}: ${repository} is not one of this harness's repositories (${[...allowed].join(', ')})`,
+      );
+    }
+  }
+  return tokens;
 }
 
 // shutdownRefusal is the error a producer gets once the registry is fenced. Its
@@ -1005,7 +1068,7 @@ function assertFixtureProvenance(tag, commit, labels) {
   for (const [key, value] of Object.entries(fixtureLabels(tag, commit))) {
     assertValue(
       labels?.[key] === value,
-      `the reused ${IMAGE_REPOSITORY} image for ${tag} does not carry ${key}=${value}; a host image that this harness did not build cannot be presented as the recorded fixture, so rebuild it once without --reuse-fixture`,
+      `the image behind ${IMAGE_REPOSITORY}:${tag} does not carry ${key}=${value}; only this harness's own cpampd- fixture build can be presented as the recorded fixture, so the image is refused instead of being rebuilt over`,
     );
   }
 }
@@ -1036,7 +1099,7 @@ function connectRollbackAlias(fixture) {
     );
   }
   if (!existing) {
-    const tagged = sh('docker', ['tag', fixture.image, alias]);
+    const tagged = dockerImageWrite(['tag', fixture.image, alias]);
     assertValue(tagged.code === 0, `tag ${alias}: ${redactor.redact(tagged.stderr.trim())}`);
     evidence.commands.push(commandRecord(`docker tag ${fixture.image} ${alias}`, tagged.code));
   }
@@ -1085,8 +1148,7 @@ async function ensureFixture(tag) {
   if (add.code !== 0) {
     throw new Error(`check out ${tag}: ${redactor.redact(tail(add.stderr))}`);
   }
-  const build = sh(
-    'docker',
+  const build = dockerImageWrite(
     [
       'build',
       '-f', 'Dockerfile.manager-server',
@@ -2666,7 +2728,7 @@ function releaseImageAlias(reference, expectedImageId) {
       `refusing to remove ${reference}: it resolves to ${current}, not to this run's fixture ${expectedImageId ?? 'unknown'}`,
     );
   }
-  const removed = sh('docker', ['image', 'rm', reference]);
+  const removed = dockerImageWrite(['image', 'rm', reference]);
   if (removed.code !== 0) {
     throw new Error(`docker image rm ${reference}: ${redactor.redact(tail(removed.stderr, 400))}`);
   }
@@ -3142,6 +3204,14 @@ function sh(command, commandArgs, { cwd = ROOT, input, env, timeout = 120_000 } 
 
 function git(commandArgs) {
   return sh('git', commandArgs);
+}
+
+// dockerImageWrite is the only path to a Docker subcommand that creates or
+// removes an image reference. The argv is checked before spawnSync, so a
+// reference outside the harness's repositories never reaches Docker.
+function dockerImageWrite(commandArgs, options = {}) {
+  assertImageWriteArgv(commandArgs);
+  return sh('docker', commandArgs, options);
 }
 
 function dockerJson(commandArgs) {

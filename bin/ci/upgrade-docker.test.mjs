@@ -19,9 +19,12 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 import {
+  IMAGE_REPOSITORY,
   PORT_RANGE,
   RESOURCE_RELEASE_ORDER,
   UPGRADE_DOCKER_CONTRACT,
+  assertImageWriteArgv,
+  imageRepository,
   isOwnedImageAlias,
   rollbackAliasReference,
   withDeclaredSourceVersion,
@@ -496,6 +499,48 @@ test('the registry tracks the run alias and refuses the shared image names', () 
   }
 });
 
+// ---------------------------------------------------------------------------
+// image writes: only the harness's own cpampd- namespace
+// ---------------------------------------------------------------------------
+
+test('every image write the harness plans stays in its own cpampd- namespace', () => {
+  const fixture = `${IMAGE_REPOSITORY}:1.14.10`;
+  const alias = rollbackAliasReference('v1.14.10', PREFIX);
+  assert.equal(IMAGE_REPOSITORY.startsWith('cpampd-'), true, 'the fixture repository must be in the cpampd namespace');
+  assert.equal(IMAGE_REPOSITORY.startsWith('cpamp-'), false, 'the fixture repository must not be a cpamp- object');
+  assert.equal(imageRepository(fixture), IMAGE_REPOSITORY);
+  assert.equal(imageRepository(alias), `${PREFIX}/upgrade`);
+
+  // The three argv shapes the harness actually plans.
+  assert.doesNotThrow(() =>
+    assertImageWriteArgv(
+      ['build', '-f', 'Dockerfile.manager-server', '-t', fixture, '--build-arg', 'VERSION=v1.14.10', '.'],
+      { prefix: PREFIX },
+    ),
+  );
+  assert.doesNotThrow(() => assertImageWriteArgv(['tag', fixture, alias], { prefix: PREFIX }));
+  assert.doesNotThrow(() => assertImageWriteArgv(['image', 'rm', alias], { prefix: PREFIX }));
+  assert.doesNotThrow(() => assertImageWriteArgv(['rmi', alias], { prefix: PREFIX }));
+
+  // No cpamp- (non-cpampd) reference, shared read-only image or bare tag may be
+  // built over, retagged or removed.
+  for (const argv of [
+    ['build', '-t', 'cpamp-d-fixture-v1:1.14.10', '.'],
+    ['build', '--tag=cpamp-d-fixture-v1:1.14.4', '.'],
+    ['build', '-t=cpamp-d-fixture-v1:1.14.4', '.'],
+    ['tag', 'cpamp-d-fixture-v1:1.14.10', alias],
+    ['image', 'rm', 'cpamp-d-fixture-v1:1.14.4'],
+    ['rmi', 'cpamp-d-fixture-v1:1.14.4'],
+    ['tag', 'cpampd-fixture/upgrade:1.14.10', alias],
+    ['image', 'rm', 'cpampd-fixture/upgrade:1.14.10'],
+    ['image', 'rm', '1.14.10'],
+    ['tag', fixture, 'cpampd0123456f/upgrade:v1.14.10'],
+  ]) {
+    assert.throws(() => assertImageWriteArgv(argv, { prefix: PREFIX }), /not one of this harness's repositories/, argv.join(' '));
+  }
+  assert.throws(() => assertImageWriteArgv(['push', fixture], { prefix: PREFIX }), /unsupported image write subcommand/);
+});
+
 test('releasing the alias removes only this run tag and refuses another image', async () => {
   const { context, calls } = aliasHarness({
     ids: { [`${PREFIX}/upgrade:v1.14.10`]: 'sha256:fixture' },
@@ -519,6 +564,14 @@ test('releasing the alias removes only this run tag and refuses another image', 
   const gone = aliasHarness({ ids: {} });
   await gone.context.releaseImageAlias(`${PREFIX}/upgrade:v1.14.10`, 'sha256:fixture');
   assert.deepEqual(gone.calls.filter((command) => command[1] === 'image' && command[2] === 'rm'), []);
+
+  // A cpamp- reference is refused before the remove, even when its ID matches.
+  const protectedImage = aliasHarness({ ids: { 'cpamp-d-fixture-v1:1.14.10': 'sha256:fixture' } });
+  assert.throws(
+    () => protectedImage.context.releaseImageAlias('cpamp-d-fixture-v1:1.14.10', 'sha256:fixture'),
+    /not one of this harness's repositories/,
+  );
+  assert.deepEqual(protectedImage.calls.filter((command) => command[1] === 'image' && command[2] === 'rm'), []);
 });
 
 test('the cleanup proof keeps pre-existing shared images by ID and rejects a surviving alias', () => {
@@ -624,6 +677,13 @@ function aliasHarness({ ids = {} } = {}) {
     imageId,
     redactor: createRedactor([]),
     tail: (text, limit = 2_000) => String(text ?? '').slice(-limit),
+    // The extracted release function writes through the same guard the harness
+    // uses, so the test observes the refused-reference check as well as the
+    // inspect-before-remove sequence.
+    dockerImageWrite: (commandArgs) => {
+      assertImageWriteArgv(commandArgs, { prefix: PREFIX });
+      return sh('docker', commandArgs);
+    },
   });
   vm.runInContext(harnessFunction('releaseImageAlias'), context);
   return { context, calls, state };

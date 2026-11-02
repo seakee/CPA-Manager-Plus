@@ -27,7 +27,13 @@ node --test bin/ci/upgrade-docker.test.mjs     # the harness's own logic, no Doc
   object under its own prefix makes the process exit non-zero: a partial cleanup
   can never read as PASS. Docker listings only name containers, volumes and
   networks, so the registry is checked for every kind whether or not the listings
-  answered. It never addresses `cpamp-*`, `buildx_buildkit_*`,
+  answered. Every image it builds, tags or removes lives in its own `cpampd-`
+  namespace: the fixture is `cpampd-fixture/legacy-v1:<version>` and the only
+  other reference is this run's `cpampd<runid>/upgrade:vX.Y.Z` alias. The three
+  argv shapes that write an image (`build -t`, `tag`, `image rm`) are checked
+  before Docker runs, so it never creates, retags or removes a `cpamp-*` image;
+  the pre-existing `cpamp-d-fixture-v1:*` and `cpampd-fixture/upgrade:*` tags are
+  **inspect-only** inputs. It also never addresses `buildx_buildkit_*`,
   `cpa-manager-plus-cpa-manager-plus-1` or `cpa-usage-keeper`.
 * The handled-signal boundary is **the running JavaScript turn**. The first
   SIGINT/SIGTERM closes the registry fence synchronously: every later `track`
@@ -108,7 +114,7 @@ for the real-Docker run below.
 
 | Step | Assertion |
 | --- | --- |
-| fixture | `git worktree` of the 1.x tag, `docker build` with the provenance labels (`io.cpamp.upgrade.fixture.{contract,tag,commit}`), image id and commit recorded; `--reuse-fixture` verifies those labels and the tag's commit before accepting the image; the rollback alias is this run's `cpampd<runid>/upgrade:vX.Y.Z`, resolves to the same image ID, carries the same labels, and is the only image reference cleanup removes |
+| fixture | `git worktree` of the 1.x tag, `docker build -t cpampd-fixture/legacy-v1:<version>` with the provenance labels (`io.cpamp.upgrade.fixture.{contract,tag,commit}`), image id and commit recorded; `--reuse-fixture` accepts only an image in that namespace carrying those labels and the tag's commit, and refuses an unlabeled one rather than rebuilding over it; the pre-existing `cpamp-d-fixture-v1:*` tags are inspect-only and never a build, tag or remove target; the rollback alias is this run's `cpampd<runid>/upgrade:vX.Y.Z`, resolves to the same image ID, carries the same labels, and is the only image reference cleanup removes |
 | seed | three UTC days of usage events, two models, two client keys, model prices and key aliases, one archive run that is verified and whose raw rows are deleted — all through the 1.x HTTP API |
 | `upgrade preflight` | exit 0, `ready`, no blocked check, the source version the contract accepts |
 | `upgrade run` | exit 0, stage `copy_in`, `restored`, both source fingerprints and the backup manifest digest recorded |
