@@ -366,6 +366,50 @@ func TestAdvanceKeepsAFutureDatedRowReadable(t *testing.T) {
 	}
 }
 
+// TestAdvanceKeepsACreatedOnlyRowReadable is the regression the 2026-11-02 delta
+// review asked for (Low-2): the created_at_ms candidate in nextUpdatedAtMS had
+// no coverage. A row with created_at_ms set and updated_at_ms still zero is
+// valid, so Advance must keep it readable; dropping the created candidate makes
+// Advance stamp the wall clock and write a row Get rejects.
+func TestAdvanceKeepsACreatedOnlyRowReadable(t *testing.T) {
+	repository, db := newRepository(t)
+	ctx := context.Background()
+	created := time.Now().Add(time.Hour).UnixMilli()
+	if _, err := db.ExecContext(ctx, `insert into upgrade_operations
+		(id, stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+		values (1, ?, '[]', '{}', '[]', ?, 0)`,
+		string(model.UpgradeStagePreflight), created); err != nil {
+		t.Fatalf("seed a created-only row: %v", err)
+	}
+	seeded, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get seeded row: found=%t err=%v", found, err)
+	}
+	if seeded.CreatedAtMS != created || seeded.UpdatedAtMS != 0 {
+		t.Fatalf("seeded timestamps = %d/%d, want %d/0", seeded.CreatedAtMS, seeded.UpdatedAtMS, created)
+	}
+	advanced, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCopyIn)
+	if err != nil {
+		t.Fatalf("advance a created-only row: %v", err)
+	}
+	if advanced.UpdatedAtMS < advanced.CreatedAtMS {
+		t.Fatalf("advanced updated_at_ms = %d is before created_at_ms = %d", advanced.UpdatedAtMS, advanced.CreatedAtMS)
+	}
+	stored, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get after advance: found=%t err=%v", found, err)
+	}
+	if stored.CreatedAtMS != created {
+		t.Fatalf("created_at_ms = %d, want preserved %d", stored.CreatedAtMS, created)
+	}
+	if stored.UpdatedAtMS < stored.CreatedAtMS {
+		t.Fatalf("updated_at_ms = %d is before created_at_ms = %d", stored.UpdatedAtMS, stored.CreatedAtMS)
+	}
+	if stored.Stage != model.UpgradeStageCopyIn || !stored.HasDomain(model.UpgradeDomainSourceCopy) {
+		t.Fatalf("advanced row = %q %v", stored.Stage, stored.DomainsDone)
+	}
+}
+
 // TestPutThenAdvanceNeverMovesUpdatedAtBackwards covers the same finding through
 // the public API: Put stored a caller-supplied time ahead of the clock, and
 // Advance then replaced it with the wall clock.
