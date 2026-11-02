@@ -22,6 +22,7 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRedactor, stderrLines } from './fresh-adopt-redaction.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const [runtimeImage, managerImage, ingressImage, output] = process.argv.slice(2);
@@ -168,9 +169,10 @@ const env = { ...process.env, CPAMP_PUBLIC_PORT: `127.0.0.1:${publicPort}` };
 let browser;
 let page;
 
-function redact(text) {
-  return secretValues.reduce((message, value) => message.replaceAll(value, '[REDACTED]'), text);
-}
+// Every value that must never reach a log or the report passes through one
+// boundary. The list is live: the three secrets that only exist at runtime join
+// it the moment they exist.
+const redact = createRedactor(secretValues);
 function run(args, input, check = true) {
   const result = spawnSync(args[0], args.slice(1), {
     cwd: root,
@@ -965,14 +967,21 @@ try {
       'the rendered counts disagree with the route summary'
     );
     // Every seeded kind is reported, and the item the record cannot carry is manual
-    // with the instruction the operator needs. The unclassifiable source file is not
-    // an item at all: the source's own listing never contained it, so the run
-    // neither copied it nor claimed it.
+    // with the next step the operator needs. The reply names the kind and the
+    // reason; the page states the step from its own table, so the assertion reads
+    // the rendered guidance rather than a server sentence. The unclassifiable
+    // source file is not an item at all: the source's own listing never contained
+    // it, so the run neither copied it nor claimed it.
     assert(summary.counts.migrated > 0, 'nothing was migrated');
     assert(summary.counts.manual > 0, 'the item the record cannot carry was not reported as manual');
     const manual = summary.items.filter((item) => item.outcome === 'manual');
     assert(manual.every((item) => item.reason), 'a manual item carries no reason');
-    assert(manual.every((item) => item.instruction), 'a manual item carries no instruction');
+    for (const kind of new Set(manual.map((item) => item.kind))) {
+      assert(
+        (await page.getByTestId('adopt-guidance-' + kind).count()) > 0,
+        'the page stated no next step for a manual ' + kind
+      );
+    }
     assert(
       manual.some((item) => item.reason === 'adoption_item_name_too_long'),
       'the over-long credential was not the manual item: ' + JSON.stringify(manual.map((item) => item.reason))
@@ -1207,6 +1216,11 @@ try {
   try {
     assertNoSecret('the report', JSON.stringify(report));
     assertNoSecret('the run log', printed.join('\n'));
+    // The last place a secret could reach is the stderr this run prints after the
+    // artifact is written, so the assertion covers those lines before they are
+    // printed — redaction is what makes them safe to read, not what makes them
+    // safe.
+    assertNoSecret('the final output', stderrLines(report).join('\n'));
     for (const { name, text } of containerLogs) assertNoSecret('the logs of ' + name, text);
   } catch (error) {
     report.secretAssertion = 'FAIL';
@@ -1224,8 +1238,9 @@ try {
       { mode: 0o600 }
     );
   } catch {}
-  console.log(report.result + ': ' + resolve(out, 'report.json'));
-  if (report.failure) console.error(report.failure);
-  if (report.secretFailure) console.error(report.secretFailure);
+  console.log(redact(report.result + ': ' + resolve(out, 'report.json')));
+  // The failure text is a stack trace that can quote a value this run generated,
+  // so stderr goes through the same redaction as the report and the saved log.
+  for (const line of stderrLines(report)) console.error(redact(line));
   if (report.result !== 'PASS') process.exitCode = 1;
 }
