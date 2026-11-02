@@ -263,50 +263,102 @@ func TestCredentialCacheOwnerCancellationLetsAJoinerFinish(t *testing.T) {
 // unproved keys used to create 80 active flights and 80 whole-source reads. The
 // admission bound is finite, a same-key request joins the running flight instead
 // of taking another slot, and the work that runs never exceeds the bound.
+//
+// The four slots are established explicitly, one named key at a time, so the
+// assertions do not depend on which of a crowd of goroutines won the race. The
+// same-key joiner is one of those named keys, and the afterFlightJoin seam
+// reports its attachment before the owners are released: a failed verification is
+// not cached, so a joiner that arrived after the flight had ended would correctly
+// start its own read, and the test must not manufacture that race.
 func TestCredentialCacheBoundsActiveVerifications(t *testing.T) {
 	cache := newCredentialCache()
-	const calls = 80
-	started := make(chan struct{}, calls)
+	owners := make([]string, credentialFlightLimit)
+	started := make([]chan struct{}, credentialFlightLimit)
 	release := make(chan struct{})
+	for index := range owners {
+		owners[index] = fmt.Sprintf("unproved-key-%d", index)
+		started[index] = make(chan struct{})
+	}
 	var startedCount int32
 	var wg sync.WaitGroup
-	for index := range calls {
+	for index := range owners {
 		wg.Add(1)
-		go func(index int) {
+		go func(key string, ownerStarted chan struct{}) {
 			defer wg.Done()
-			_ = cache.verify(context.Background(), fmt.Sprintf("unproved-key-%d", index), func() error {
+			_ = cache.verify(context.Background(), key, func() error {
 				atomic.AddInt32(&startedCount, 1)
-				started <- struct{}{}
+				close(ownerStarted)
 				<-release
 				return ErrAdminUnauthorized
 			})
-		}(index)
+		}(owners[index], started[index])
 	}
-	for range credentialFlightLimit {
-		<-started
+	// These four keys, and no others, occupy the slots before anything is
+	// asserted about active work.
+	for index := range started {
+		select {
+		case <-started[index]:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the owner for %q never started", owners[index])
+		}
 	}
-	time.Sleep(25 * time.Millisecond)
 	cache.mu.Lock()
 	flights, entries := len(cache.flights), len(cache.entries)
 	cache.mu.Unlock()
-	if flights > credentialFlightLimit {
-		t.Fatalf("active flights = %d, beyond the bound %d", flights, credentialFlightLimit)
+	if flights != credentialFlightLimit {
+		t.Fatalf("active flights = %d, want the four admitted owners %d", flights, credentialFlightLimit)
 	}
 	if got := atomic.LoadInt32(&startedCount); got != credentialFlightLimit {
 		t.Fatalf("%d different unproved keys started verification, want the bound %d", got, credentialFlightLimit)
 	}
 
-	// A same-key request joins the flight and consumes no second slot.
+	// A fifth distinct key cannot start while the four named owners run: the
+	// caller's own deadline expires instead of the bound being exceeded.
+	blocked, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	fifth := make(chan error, 1)
+	go func() {
+		fifth <- cache.verify(blocked, "unproved-key-5", func() error {
+			t.Error("a fifth distinct key started while the bound was saturated")
+			return nil
+		})
+	}()
+	if err := <-fifth; !errors.Is(err, ErrCredentialVerifyTimeout) {
+		t.Fatalf("a fifth key while the bound is saturated = %v, want %v", err, ErrCredentialVerifyTimeout)
+	}
+	if got := atomic.LoadInt32(&startedCount); got != credentialFlightLimit {
+		t.Fatalf("a saturated key raised active work to %d, beyond the bound %d", got, credentialFlightLimit)
+	}
+
+	// A same-key request joins the flight and consumes no second slot. The seam
+	// fires once the joiner is on the flight, so the release below cannot race
+	// ahead of the attachment.
+	original := afterFlightJoin
+	t.Cleanup(func() { afterFlightJoin = original })
+	attached := make(chan struct{})
+	var attachOnce sync.Once
+	afterFlightJoin = func(key string) {
+		if key == owners[0] {
+			attachOnce.Do(func() { close(attached) })
+		}
+	}
 	joined := make(chan error, 1)
 	go func() {
-		joined <- cache.verify(context.Background(), "unproved-key-0", func() error {
+		joined <- cache.verify(context.Background(), owners[0], func() error {
 			t.Error("a same-key joiner started its own verification")
 			return nil
 		})
 	}()
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-attached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the same-key joiner never attached to the running flight")
+	}
 	if got := atomic.LoadInt32(&startedCount); got != credentialFlightLimit {
 		t.Fatalf("a same-key joiner raised active work to %d, beyond the bound %d", got, credentialFlightLimit)
+	}
+	if got := len(cache.slots); got != credentialFlightLimit {
+		t.Fatalf("slots held while a joiner waits = %d, want the four owners %d", got, credentialFlightLimit)
 	}
 	close(release)
 	wg.Wait()

@@ -259,6 +259,7 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 	}
 	if flight, running := c.flights[key]; running {
 		c.mu.Unlock()
+		noteFlightJoin(key)
 		return flight.wait(ctx)
 	}
 	c.mu.Unlock()
@@ -294,6 +295,7 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 	if flight, running := c.flights[key]; running {
 		c.mu.Unlock()
 		<-c.slots
+		noteFlightJoin(key)
 		return flight.wait(ctx)
 	}
 	flight := &credentialFlight{done: make(chan struct{})}
@@ -302,6 +304,19 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 
 	go c.runFlight(key, flight, run)
 	return flight.wait(ctx)
+}
+
+// afterFlightJoin is the package's synchronous test seam: it runs once a caller
+// has joined an in-flight verification, after the cache mutex is released and
+// before the caller waits for the verdict. A test uses it to prove that a
+// same-key joiner attached before the owner was released, instead of sleeping and
+// hoping for the scheduler's order. Production never sets it.
+var afterFlightJoin func(key string)
+
+func noteFlightJoin(key string) {
+	if afterFlightJoin != nil {
+		afterFlightJoin(key)
+	}
 }
 
 // runFlight publishes the verdict exactly once, including when the read panics:
