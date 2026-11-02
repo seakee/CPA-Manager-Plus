@@ -48,6 +48,9 @@ const en = {
     'A run that stops can continue from the items it already recorded. The source key is not kept in this browser, so enter it again.',
   resumeKeyNotice:
     'Enter the source address and the same management key. The plugin choice was recorded with the attempt and cannot change.',
+  inventoryKeyNotice:
+    'The inventory is recorded, but this page no longer holds the source key it was read with. Enter the same address and management key again: nothing is copied until you confirm.',
+  useKey: 'Use this key',
   resume: 'Resume migration',
   complete: 'Complete the installation',
   completeHelp: 'Completion proves the destination CPA and starts the usage collector.',
@@ -76,11 +79,20 @@ const en = {
     'The reply was lost, so the write may or may not have been applied. Check the status before trying again.',
   failure: 'The adoption is paused',
   reasonFallback: 'This item needs attention on the destination CPA.',
-  details: 'Server instruction',
+  details: 'What to do',
   kindCredential: 'Credentials',
   kindConfigLeaf: 'Gateway settings',
   kindConfigFamily: 'Payload rules',
   kindProviderSection: 'Provider sections',
+  guidanceCredential:
+    'Copy this credential file into the destination CPA’s authentication directory, or re-authenticate the provider in the destination Console.',
+  guidanceConfigLeaf:
+    'Set this gateway setting on the destination CPA’s gateway configuration page.',
+  guidanceConfigFamily:
+    'Replace this payload rule list on the destination CPA’s gateway configuration page.',
+  guidanceProviderSection:
+    'Copy this provider section into the destination CPA’s configuration, including its provider keys.',
+  guidanceFallback: 'Review this item on the destination CPA.',
   pluginConflict:
     'This attempt recorded a different plugin choice. Reload the page and resume with the recorded choice.',
   keyMismatch:
@@ -122,6 +134,9 @@ const zh: typeof en = {
   resumeTitle: '继续迁移',
   resumeHelp: '中断的迁移会从已记录的条目继续。源密钥不会保存在浏览器中，请重新输入。',
   resumeKeyNotice: '请重新输入源地址与同一个管理密钥。插件选项已随本次操作记录，不能再更改。',
+  inventoryKeyNotice:
+    '清单已记录，但本页已不再持有读取它时使用的源密钥。请重新输入同一个地址与管理密钥：在确认之前不会复制任何内容。',
+  useKey: '使用该密钥',
   resume: '继续迁移',
   complete: '完成安装',
   completeHelp: '完成时会校验目标 CPA 并启动用量采集。',
@@ -142,11 +157,16 @@ const zh: typeof en = {
   unknownHelp: '响应已丢失，本次写入可能已生效也可能没有。请先检查状态，再决定是否重试。',
   failure: '接管已暂停',
   reasonFallback: '该项需要在目标 CPA 手动处理。',
-  details: '服务端说明',
+  details: '需要做什么',
   kindCredential: '凭证',
   kindConfigLeaf: '网关配置项',
   kindConfigFamily: '载荷规则',
   kindProviderSection: '提供商配置段',
+  guidanceCredential: '请把该凭证文件复制到目标 CPA 的认证目录，或在目标控制台重新认证该提供商。',
+  guidanceConfigLeaf: '请在目标 CPA 的网关配置页面设置该配置项。',
+  guidanceConfigFamily: '请在目标 CPA 的网关配置页面替换该载荷规则列表。',
+  guidanceProviderSection: '请把该提供商配置段（含其提供商密钥）复制到目标 CPA 的配置中。',
+  guidanceFallback: '请在目标 CPA 上检查该项。',
   pluginConflict: '本次操作记录的插件选项不同。请刷新页面并按已记录的选项继续。',
   keyMismatch: '源密钥与本次操作不一致。请填入读取清单时使用的同一个密钥。',
 };
@@ -186,6 +206,9 @@ const tw: typeof en = {
   resumeTitle: '繼續遷移',
   resumeHelp: '中斷的遷移會從已記錄的項目繼續。來源金鑰不會保存在瀏覽器中，請重新輸入。',
   resumeKeyNotice: '請重新輸入來源位址與同一個管理金鑰。外掛選項已隨本次操作記錄，不能再變更。',
+  inventoryKeyNotice:
+    '清單已記錄，但本頁已不再持有讀取它時使用的來源金鑰。請重新輸入同一個位址與管理金鑰：在確認之前不會複製任何內容。',
+  useKey: '使用該金鑰',
   resume: '繼續遷移',
   complete: '完成安裝',
   completeHelp: '完成時會驗證目標 CPA 並啟動用量收集。',
@@ -206,11 +229,16 @@ const tw: typeof en = {
   unknownHelp: '回應已遺失，本次寫入可能已生效也可能沒有。請先檢查狀態，再決定是否重試。',
   failure: '接管已暫停',
   reasonFallback: '該項目需要在目標 CPA 手動處理。',
-  details: '伺服器說明',
+  details: '需要做什麼',
   kindCredential: '憑證',
   kindConfigLeaf: '閘道設定項',
   kindConfigFamily: '載荷規則',
   kindProviderSection: '供應商設定區段',
+  guidanceCredential: '請把該憑證檔案複製到目標 CPA 的認證目錄，或在目標主控台重新認證該供應商。',
+  guidanceConfigLeaf: '請在目標 CPA 的閘道設定頁面設定該項目。',
+  guidanceConfigFamily: '請在目標 CPA 的閘道設定頁面取代該載荷規則清單。',
+  guidanceProviderSection: '請把該供應商設定區段（含其供應商金鑰）複製到目標 CPA 的設定中。',
+  guidanceFallback: '請在目標 CPA 上檢查該項目。',
   pluginConflict: '本次操作記錄的外掛選項不同。請重新整理頁面並依已記錄的選項繼續。',
   keyMismatch: '來源金鑰與本次操作不一致。請填入讀取清單時使用的同一個金鑰。',
 };
@@ -258,6 +286,9 @@ const ru: typeof en = {
     'Прерванный перенос продолжается с уже записанных элементов. Ключ источника не хранится в браузере, поэтому введите его снова.',
   resumeKeyNotice:
     'Введите адрес источника и тот же ключ управления. Выбор плагинов уже записан и не может быть изменён.',
+  inventoryKeyNotice:
+    'Опись записана, но ключа источника, которым её читали, на этой странице больше нет. Введите те же адрес и ключ управления снова: ничего не копируется до подтверждения.',
+  useKey: 'Использовать этот ключ',
   resume: 'Продолжить перенос',
   complete: 'Завершить установку',
   completeHelp: 'При завершении целевой CPA проверяется и запускается сбор статистики.',
@@ -283,11 +314,19 @@ const ru: typeof en = {
     'Ответ потерян: запись могла примениться, а могла и нет. Проверьте состояние, прежде чем повторять.',
   failure: 'Подключение приостановлено',
   reasonFallback: 'Этот элемент требует внимания на целевом CPA.',
-  details: 'Пояснение сервера',
+  details: 'Что делать',
   kindCredential: 'Учётные данные',
   kindConfigLeaf: 'Настройки шлюза',
   kindConfigFamily: 'Правила нагрузки',
   kindProviderSection: 'Разделы провайдеров',
+  guidanceCredential:
+    'Скопируйте этот файл учётных данных в каталог аутентификации целевого CPA или повторно авторизуйте провайдера в консоли целевого CPA.',
+  guidanceConfigLeaf: 'Задайте эту настройку шлюза на странице конфигурации шлюза целевого CPA.',
+  guidanceConfigFamily:
+    'Замените этот список правил нагрузки на странице конфигурации шлюза целевого CPA.',
+  guidanceProviderSection:
+    'Скопируйте этот раздел провайдера, включая его ключи провайдера, в конфигурацию целевого CPA.',
+  guidanceFallback: 'Проверьте этот элемент на целевом CPA.',
   pluginConflict:
     'Для этой попытки записан другой выбор плагинов. Перезагрузите страницу и продолжите с записанным выбором.',
   keyMismatch:
@@ -635,6 +674,32 @@ export const adoptText = (
 /** adoptReasonText names one per-item reason, or the generic line. */
 export const adoptReasonText = (code: string): string =>
   reasons[locale()][code] || copy[locale()].reasonFallback;
+
+// Kinds and next steps are closed sets, so the page maps the record's word to its
+// own sentence instead of rendering text the server wrote: a manual item's next
+// step is the operator's work, and it is stated in their language.
+const kindKeys: Record<string, keyof typeof en> = {
+  credential: 'kindCredential',
+  config_leaf: 'kindConfigLeaf',
+  config_family: 'kindConfigFamily',
+  provider_section: 'kindProviderSection',
+};
+const guidanceKeys: Record<string, keyof typeof en> = {
+  credential: 'guidanceCredential',
+  config_leaf: 'guidanceConfigLeaf',
+  config_family: 'guidanceConfigFamily',
+  provider_section: 'guidanceProviderSection',
+};
+
+/** adoptKindText names one recorded item kind. */
+export const adoptKindText = (kind: string): string =>
+  (kindKeys[kind] && copy[locale()][kindKeys[kind]]) || kind;
+
+/** adoptGuidanceText is the operator's next step for one recorded item kind. */
+export const adoptGuidanceText = (kind: string): string => {
+  const key = guidanceKeys[kind];
+  return key ? copy[locale()][key] : copy[locale()].guidanceFallback;
+};
 
 /** adoptBlockerText explains one strategy refusal. */
 export const adoptBlockerText = (code: string | undefined): string =>

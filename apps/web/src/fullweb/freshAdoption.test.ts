@@ -36,9 +36,10 @@ const source = {
 };
 const target = { runtimeIdentity: 'owned-runtime', runtimeGeneration: 3, artifactId };
 
-// A real `GET installation/adoption` body: the frozen server shape, including the
-// omitted reason/instruction of a migrated item and the instruction the executor
-// emits for its manual and retryable ones.
+// A real `GET installation/adoption` body: the frozen server shape, including an
+// omitted reason on a migrated item and the reason code the executor records for
+// its manual and retryable ones. The reply carries no instruction text: the page
+// states the next step from the item's kind.
 const summary = {
   items: [
     {
@@ -52,8 +53,6 @@ const summary = {
       kind: 'credential',
       outcome: 'failed',
       reason: 'download_failed',
-      instruction:
-        "Copy this credential file into the destination CPA's auth directory, or re-authenticate the provider in the destination Console.",
       retryable: true,
     },
     {
@@ -61,8 +60,6 @@ const summary = {
       kind: 'credential',
       outcome: 'manual',
       reason: 'runtime_only_credential',
-      instruction:
-        'This credential exists only in the source CPA process and has no file. Re-authenticate it in the destination CPA.',
       retryable: false,
     },
     {
@@ -193,7 +190,6 @@ describe('the Adopt wire contract', () => {
       kind: 'credential',
       outcome: 'migrated',
       reason: '',
-      instruction: '',
       retryable: false,
     });
     expect(parsed.items[1].retryable).toBe(true);
@@ -278,8 +274,9 @@ describe('the bootstrap carrier reads and writes the adoption', () => {
     const fetchMock = vi.fn<typeof fetch>();
     const client = await bootstrapClient(fetchMock);
     fetchMock.mockResolvedValueOnce(Response.json(staged));
+    fetchMock.mockResolvedValueOnce(Response.json(staged));
     const result = await client.executeStrategy(adoptStrategyBody(source, target));
-    expect(JSON.parse(fetchMock.mock.calls[1][1]!.body as string)).toEqual({
+    expect(JSON.parse(fetchMock.mock.calls[2][1]!.body as string)).toEqual({
       ...adoptStrategyBody(source, target),
       identity,
       expectedRevision: 7,
@@ -295,16 +292,20 @@ describe('the bootstrap carrier reads and writes the adoption', () => {
       const fetchMock = vi.fn<typeof fetch>();
       const client = await bootstrapClient(fetchMock);
       const reply = { ...staged, revision: 9, strategy: { ...staged.strategy, stage } };
+      fetchMock.mockResolvedValueOnce(Response.json({ ...staged, revision: 9 }));
       fetchMock.mockResolvedValueOnce(Response.json(reply));
       await expect(
         client.executeStrategy(adoptStrategyBody(source, target))
       ).resolves.toMatchObject({ operation: { revision: 9 } });
       const invalid = vi.fn<typeof fetch>();
       const second = await bootstrapClient(invalid);
+      // The durable read is a valid checkpoint; the write's own reply is the one
+      // that cannot be an adoption.
+      invalid.mockResolvedValueOnce(Response.json({ ...staged, revision: 9 }));
       invalid.mockResolvedValueOnce(
         Response.json({
           ...staged,
-          revision: 9,
+          revision: 10,
           strategy: { ...staged.strategy, stage: 'starting' },
         })
       );
@@ -486,10 +487,47 @@ it('accepts the same staged adoption through both carriers', async () => {
   stubBootstrapOrigin();
   const fetchMock = vi.fn<typeof fetch>();
   const client = await bootstrapClient(fetchMock);
+  // The write reads the durable operation first, so the fence is the revision
+  // that is current rather than the one this page last saw.
+  fetchMock.mockResolvedValueOnce(Response.json(staged));
   fetchMock.mockResolvedValueOnce(Response.json(staged));
   const bootstrapOperation = await client.executeStrategy(adoptStrategyBody(source, target));
   const canonicalFetch = vi.fn<typeof fetch>().mockResolvedValue(Response.json(staged));
   const canonical = canonicalClient(canonicalFetch);
   const canonicalOperation = (await canonical.get('operation', credential)) as FreshOperation;
   expect(bootstrapOperation.operation.strategy).toEqual(canonicalOperation.strategy);
+});
+
+// The fixed carrier's progress read is the flow's only source of facts, and the
+// flow stops after three failed reads. A request that never answers must count as
+// one of those failures instead of leaving "reading the migration record" up
+// forever; the canonical carrier already bounds every read the same way.
+it('bounds a progress read that never answers', async () => {
+  vi.useFakeTimers();
+  try {
+    stubBootstrapOrigin();
+    const fetchMock = vi.fn<typeof fetch>();
+    const client = await bootstrapClient(fetchMock);
+    let outcome = '';
+    fetchMock.mockImplementationOnce((_url, init) => {
+      // A request that answers nothing but can still be cancelled: the only way a
+      // hung read is distinguishable from a slow one.
+      let abort: (reason: unknown) => void = () => undefined;
+      const pending = new Promise<Response>((_resolve, reject) => {
+        abort = reject;
+      });
+      init?.signal?.addEventListener('abort', () =>
+        abort(new DOMException('aborted', 'AbortError'))
+      );
+      return pending;
+    });
+    void client.readAdoption().then(
+      () => (outcome = 'answered'),
+      () => (outcome = 'failed')
+    );
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(outcome).toBe('failed');
+  } finally {
+    vi.useRealTimers();
+  }
 });

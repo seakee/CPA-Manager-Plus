@@ -12,7 +12,7 @@ import {
 import type { AdoptionSummary } from './freshAdoption';
 import type { createPublicApiClient } from './publicApi';
 import { setFullWebLanguage } from '../i18n/fullweb';
-import { adoptReasonText, adoptText } from '../i18n/freshAdopt';
+import { adoptGuidanceText, adoptReasonText, adoptText } from '../i18n/freshAdopt';
 
 const identity = {
   admissionId: 'admission',
@@ -71,13 +71,12 @@ const adoptCheckpoint: FreshStrategyCheckpoint = {
 // unknown reason, which is what the localization fallback is for.
 const finishedRun: AdoptionSummary = {
   items: [
-    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
     {
       item: 'credential:b.json',
       kind: 'credential',
       outcome: 'manual',
       reason: 'runtime_only_credential',
-      instruction: 'This credential exists only in the source CPA process and has no file.',
       retryable: false,
     },
     {
@@ -85,7 +84,6 @@ const finishedRun: AdoptionSummary = {
       kind: 'config_leaf',
       outcome: 'failed',
       reason: 'download_failed',
-      instruction: 'Copy this credential file into the destination CPA.',
       retryable: true,
     },
     {
@@ -93,7 +91,6 @@ const finishedRun: AdoptionSummary = {
       kind: 'config_leaf',
       outcome: 'manual',
       reason: 'reason_this_browser_does_not_know',
-      instruction: '',
       retryable: false,
     },
   ],
@@ -109,9 +106,9 @@ const finishedRun: AdoptionSummary = {
 // console — the one state whose only working action is a resume.
 const shortfallRun: AdoptionSummary = {
   items: [
-    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', instruction: '', retryable: false },
-    { item: 'credential:b.json', kind: 'credential', outcome: 'migrated', reason: '', instruction: '', retryable: false },
-    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
+    { item: 'credential:b.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
+    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', retryable: false },
   ],
   planned: 5,
   finished: true,
@@ -124,19 +121,18 @@ const shortfallRun: AdoptionSummary = {
 // `counts.migrated`, and a resource the source never had is not a copy.
 const allOutcomes: AdoptionSummary = {
   items: [
-    { item: 'credential:copied-a.json', kind: 'credential', outcome: 'migrated', reason: '', instruction: '', retryable: false },
-    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+    { item: 'credential:copied-a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
+    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', retryable: false },
     {
       item: 'credential:runtime-only.json',
       kind: 'credential',
       outcome: 'manual',
       reason: 'runtime_only_credential',
-      instruction: 'This credential exists only in the source CPA process.',
       retryable: false,
     },
-    { item: 'credential:left-1.json', kind: 'credential', outcome: 'absent_at_source', reason: '', instruction: '', retryable: false },
-    { item: 'credential:left-2.json', kind: 'credential', outcome: 'absent_at_source', reason: '', instruction: '', retryable: false },
-    { item: 'credential:left-3.json', kind: 'credential', outcome: 'absent_at_source', reason: '', instruction: '', retryable: false },
+    { item: 'credential:left-1.json', kind: 'credential', outcome: 'absent_at_source', reason: '', retryable: false },
+    { item: 'credential:left-2.json', kind: 'credential', outcome: 'absent_at_source', reason: '', retryable: false },
+    { item: 'credential:left-3.json', kind: 'credential', outcome: 'absent_at_source', reason: '', retryable: false },
   ],
   planned: 6,
   finished: true,
@@ -149,8 +145,8 @@ const allOutcomes: AdoptionSummary = {
 // complete adoption, and only once the installation itself is complete.
 const cleanRun: AdoptionSummary = {
   items: [
-    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', instruction: '', retryable: false },
-    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', instruction: '', retryable: false },
+    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
+    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', retryable: false },
   ],
   planned: 2,
   finished: true,
@@ -209,16 +205,25 @@ function text() {
  */
 async function adoptServer(options: {
   resume?: boolean;
+  // A browser that reloaded a staged adoption: the inventory is durable, the body
+  // the page would commit is not.
+  staged?: boolean;
   pluginChecked?: boolean;
   summaries?: AdoptionSummary[];
   completions?: { status: number; body: Record<string, unknown> }[];
   // The next N progress reads answer a plain 500, which is what a lost route or a
   // refused credential looks like to the page: no bounded refusal envelope.
   readFailures?: number;
+  // The inventory POST is staged by the server and its reply is lost on the way
+  // back: the ambiguous write the page has to reconcile.
+  loseStrategyReply?: boolean;
+  // The revision the migration checkpoints wrote after the page last read the
+  // operation.
+  checkpointAdvance?: number;
 } = {}) {
   // A resume is a browser that reloaded a committed adoption: the checkpoint is
   // durable and the source key is not.
-  let operation: FreshOperation = options.resume
+  let operation: FreshOperation = options.resume || options.staged
     ? {
         version: 1,
         identity,
@@ -233,7 +238,7 @@ async function adoptServer(options: {
           stage: 'committed',
           committed: true,
         },
-        strategy: { ...adoptCheckpoint, stage: 'committed' },
+        strategy: { ...adoptCheckpoint, stage: options.staged ? 'staged' : 'committed' },
       }
     : {
         version: 1,
@@ -249,6 +254,7 @@ async function adoptServer(options: {
   const strategyBodies: Record<string, unknown>[] = [];
   let summaryReads = 0;
   let readFailures = options.readFailures ?? 0;
+  let lostReply = false;
   const fetcher = vi.fn<typeof fetch>(async (url, init) => {
     const resource = new URL(String(url)).pathname.split('/api/v2/')[1];
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
@@ -286,6 +292,12 @@ async function adoptServer(options: {
       expect(body.expectedArtifactId).toBe(artifactId);
       expect(typeof body.pluginsEnabled).toBe('boolean');
       strategyBodies.push(body);
+      if (options.loseStrategyReply && !lostReply && !operation.strategy) {
+        // The server staged the attempt and the reply is what was lost.
+        lostReply = true;
+        operation = { ...operation, revision: operation.revision + 1, strategy: { ...adoptCheckpoint } };
+        throw new TypeError('Failed to fetch');
+      }
       if (operation.strategy?.stage === 'committed') {
         // A committed replay is the resume path: nothing is rewritten.
         return Response.json({ ...operation, migrationState: 'running' });
@@ -310,6 +322,11 @@ async function adoptServer(options: {
       if (readFailures > 0) {
         readFailures -= 1;
         return new Response('unavailable', { status: 500 });
+      }
+      if (options.checkpointAdvance && summaryReads === 1) {
+        // A migration checkpoint is a durable write: the record's revision moves
+        // while the page is only reading progress.
+        operation = { ...operation, revision: operation.revision + options.checkpointAdvance };
       }
       const summary = summaries.length > 1 ? summaries.shift()! : summaries[0];
       return Response.json(summary);
@@ -354,7 +371,7 @@ async function adoptServer(options: {
   await act(async () => {
     renderer = create(<FreshSetupWizard initialOperation={initialOperation} transport={client} />);
   });
-  if (!options.resume) {
+  if (!options.resume && !options.staged) {
     await click('choose-adopt_existing');
     await click('setup-next');
     await input('admin-key-input', admin);
@@ -404,6 +421,126 @@ it('walks source, inventory, migration and completion without writing the commit
   expect(byID('enter-console').props.href).toBe('/console');
   expect(localStorage.setItem).not.toHaveBeenCalled();
   expect(sessionStorage.setItem).not.toHaveBeenCalled();
+});
+
+it('never turns a re-read of a staged inventory into the committing POST', async () => {
+  const server = await adoptServer();
+  await click('adopt-read-inventory');
+  expect(server.strategyBodies).toHaveLength(1);
+  // Back is a read of the page, not a new attempt. The durable inventory is still
+  // there, so reading it again states it instead of sending the second POST the
+  // server would take as the commit.
+  await click('adopt-inventory-back');
+  await click('adopt-read-inventory');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(1);
+  expect(maybe('adopt-inventory')).toHaveLength(1);
+  expect(maybe('adopt-migration')).toHaveLength(0);
+  // Only the explicit confirmation commits.
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(2);
+  expect(maybe('adopt-migration')).toHaveLength(1);
+});
+
+it('lands on the confirmation when the inventory reply was lost', async () => {
+  // The server staged the attempt; the reply never arrived. The page cannot claim
+  // the read failed — the next read of the record shows the inventory it wrote.
+  const server = await adoptServer({ loseStrategyReply: true });
+  await click('adopt-read-inventory');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(1);
+  expect(maybe('adopt-inventory')).toHaveLength(1);
+  expect(maybe('adopt-migration')).toHaveLength(0);
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(2);
+  expect(maybe('adopt-migration')).toHaveLength(1);
+});
+
+it('asks for the key again before a staged inventory can be confirmed', async () => {
+  // A reload on a staged checkpoint: the inventory is durable, the body that
+  // would commit it is not, and the key was never stored anywhere.
+  const server = await adoptServer({ staged: true });
+  await settle();
+  expect(maybe('adopt-inventory')).toHaveLength(1);
+  expect(maybe('adopt-source-url')).toHaveLength(1);
+  await input('adopt-confirm-inventory', true);
+  // The confirmation cannot be offered until there is a body to send, and it is
+  // disabled rather than clickable and inert.
+  expect(byID('adopt-confirm-migrate').props.disabled).toBe(true);
+  expect(server.strategyBodies).toHaveLength(0);
+
+  await input('adopt-source-url', 'http://source-cpa:8317');
+  await input('adopt-management-key', sourceKey);
+  await click('adopt-use-key');
+  await settle();
+  // Rebuilding the body observes the destination; the commit is still the
+  // operator's confirmation and nothing was written here.
+  expect(server.strategyBodies).toHaveLength(0);
+  expect(byID('adopt-confirm-migrate').props.disabled).toBe(false);
+
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(1);
+  expect(server.strategyBodies[0].pluginsEnabled).toBe(false);
+  expect(maybe('adopt-migration')).toHaveLength(1);
+});
+
+it('resumes with the durable revision, not the one the page last read', async () => {
+  const server = await adoptServer({
+    resume: true,
+    checkpointAdvance: 2,
+    summaries: [
+      {
+        items: [],
+        planned: 2,
+        finished: false,
+        running: false,
+        retryable: 0,
+        counts: { migrated: 0, manual: 0, failed: 0, absent_at_source: 0 },
+      },
+      finishedRun,
+    ],
+  });
+  await settle();
+  // The migration checkpoints moved the record forward while this page was only
+  // reading progress, so the replay's fence has to be the durable revision.
+  await input('adopt-source-url', 'http://source-cpa:8317');
+  await input('adopt-management-key', sourceKey);
+  await click('adopt-resume');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(1);
+  expect(server.strategyBodies[0].expectedRevision).toBe(7);
+});
+
+it('clears the retryable acknowledgement when the set changes at the same size', async () => {
+  const retryableRun = (item: string): AdoptionSummary => ({
+    items: [{ item, kind: 'credential', outcome: 'failed', reason: 'download_failed', retryable: true }],
+    planned: 1,
+    finished: true,
+    running: false,
+    retryable: 1,
+    counts: { migrated: 0, manual: 0, failed: 1, absent_at_source: 0 },
+  });
+  await adoptServer({
+    summaries: [retryableRun('credential:a.json'), retryableRun('credential:b.json')],
+    completions: [{ status: 409, body: { code: 'adopt_migration_retryable', retryable: 1 } }],
+  });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  await click('adopt-complete');
+  await input('adopt-accept-retryable', true);
+  expect(byID('adopt-accept-retryable').props.checked).toBe(true);
+  // The next read answers a different failed item with the same count. The
+  // acknowledgement was given for the set that was on screen, not for a number.
+  await click('adopt-refresh');
+  await settle();
+  expect(byID('adopt-accept-retryable').props.checked).toBe(false);
 });
 
 it('sends the plugin opt-in the operator chose, not the default', async () => {
@@ -508,8 +645,10 @@ it('localizes a known reason and falls back to one sentence for an unknown one',
   expect(adoptReasonText('reason_this_browser_does_not_know')).toBe(
     adoptText('reasonFallback')
   );
-  // The server's English instruction is still available, behind the disclosure.
-  expect(text()).toContain('This credential exists only in the source CPA process');
+  // The next step is the page's own sentence for the item's kind, behind the
+  // disclosure. The record's instruction is not part of the reply at all.
+  expect(maybe('adopt-guidance-credential').length).toBeGreaterThan(0);
+  expect(text()).toContain(adoptGuidanceText('credential'));
 });
 
 it('never claims a complete adoption over a settled run with retryable items', async () => {
@@ -688,6 +827,75 @@ it('renders the Adopt flow for an adopt checkpoint instead of an empty card', as
   expect(maybe('fresh-adopt-flow').length).toBeGreaterThan(0);
   expect(text()).toContain(adoptText('progress', { settled: 4, planned: 4 }));
   expect(get.mock.calls.map(([resource]) => resource)).toContain('installation/adoption');
+});
+
+it('lets the Console wizard choose Adopt instead of a dead tile', async () => {
+  // A guided Runtime page with no stored strategy: all three journeys are the
+  // operator's to choose, and Adopt is one of them.
+  const choosing: FreshOperation = {
+    identity,
+    revision: 2,
+    adminInitialized: true,
+    gatewayPending: true,
+    routing: {
+      operationId: identity.operationId,
+      revision: 1,
+      target: '/console',
+      stage: 'committed',
+      committed: true,
+    },
+  };
+  const get = vi.fn(async (resource: string) =>
+    resource === 'installation/runtime' ? runtime : choosing
+  );
+  await mountManaged(choosing, get);
+  await click('choose-adopt');
+  await settle();
+  // The same shared flow the setup wizard renders, from its source step.
+  expect(maybe('fresh-adopt-flow').length).toBeGreaterThan(0);
+  expect(maybe('adopt-source-url')).toHaveLength(1);
+});
+
+it('sends the durable revision when the Console carrier resumes an adoption', async () => {
+  const committed: FreshOperation = {
+    identity,
+    revision: 9,
+    adminInitialized: true,
+    gatewayPending: true,
+    routing: {
+      operationId: identity.operationId,
+      revision: 1,
+      target: '/console',
+      stage: 'committed',
+      committed: true,
+    },
+    strategy: { ...adoptCheckpoint, stage: 'committed' },
+  };
+  // The record moved on after this page read it: the migration checkpoints are
+  // their own durable writes.
+  const advanced: FreshOperation = { ...committed, revision: 12 };
+  const stopped: AdoptionSummary = {
+    items: [],
+    planned: 2,
+    finished: false,
+    running: false,
+    retryable: 0,
+    counts: { migrated: 0, manual: 0, failed: 0, absent_at_source: 0 },
+  };
+  const get = vi.fn(async (resource: string) => {
+    if (resource === 'installation/adoption') return stopped;
+    if (resource === 'operation') return advanced;
+    return runtime;
+  });
+  const { post } = await mountManaged(committed, get);
+  post.mockResolvedValue(advanced);
+  await settle();
+  await input('adopt-source-url', 'http://source-cpa:8317');
+  await input('adopt-management-key', sourceKey);
+  await click('adopt-resume');
+  await settle();
+  expect(post.mock.calls[0][0]).toBe('strategy');
+  expect(post.mock.calls[0][1]).toMatchObject({ expectedRevision: 12 });
 });
 
 it('sends the New Managed plugin opt-in from the Console path', async () => {

@@ -52,13 +52,16 @@ export type AdoptionKind = 'credential' | 'config_leaf' | 'config_family' | 'pro
 
 export type AdoptionOutcome = 'migrated' | 'manual' | 'failed' | 'absent_at_source';
 
-/** One recorded per-item result. It never carries a credential or a value. */
+/**
+ * One recorded per-item result. It never carries a credential or a value, and it
+ * never carries the record's free-text instruction: the page states the next step
+ * from `kind`, so upstream metadata cannot reach the screen as prose.
+ */
 export interface AdoptionItem {
   item: string;
   kind: AdoptionKind;
   outcome: AdoptionOutcome;
   reason: string;
-  instruction: string;
   retryable: boolean;
 }
 
@@ -177,7 +180,6 @@ export function parseAdoptionSummary(value: unknown): AdoptionSummary {
       !kinds[item.kind] ||
       !outcomes[item.outcome] ||
       (item.reason !== undefined && typeof item.reason !== 'string') ||
-      (item.instruction !== undefined && typeof item.instruction !== 'string') ||
       typeof item.retryable !== 'boolean'
     )
       throw new Error('Invalid adoption item');
@@ -186,7 +188,6 @@ export function parseAdoptionSummary(value: unknown): AdoptionSummary {
       kind: item.kind,
       outcome: item.outcome,
       reason: item.reason || '',
-      instruction: item.instruction || '',
       retryable: item.retryable,
     };
   });

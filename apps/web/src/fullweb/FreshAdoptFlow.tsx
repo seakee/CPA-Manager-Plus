@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   adoptBlockerText,
+  adoptGuidanceText,
+  adoptKindText,
   adoptReasonText,
   adoptResourceText,
   adoptText,
@@ -55,6 +57,19 @@ const POLL_FAILURE_LIMIT = 3;
 function decisions(checkpoint?: FreshStrategyCheckpoint): AdoptionDecision[] {
   const value = checkpoint?.adoptionDecisions;
   return Array.isArray(value) ? value : [];
+}
+
+// retryableIdentity is the set of items a retryable acknowledgement is given
+// for. The count is not the set: a different run can fail the same number of
+// items, and those are items nobody has accepted yet. Both the poll and the
+// checkbox go through it, because an acknowledgement that means two different
+// things is an acknowledgement of nothing.
+function retryableIdentity(summary: AdoptionSummary): string {
+  return summary.items
+    .filter((item) => item.retryable)
+    .map((item) => item.item)
+    .sort()
+    .join('\n');
 }
 
 function groupDecisions(list: AdoptionDecision[]) {
@@ -146,10 +161,10 @@ export function FreshAdoptFlow({
     null
   );
   const [pollEpoch, setPollEpoch] = useState(0);
-  // The retryable count the acknowledgement was given for. It is a ref because
-  // the poll loop reads it without being restarted by it, and because clearing
-  // it must not re-render.
-  const acceptedRetryable = useRef<number | null>(null);
+  // The retryable set the acknowledgement was given for, as the stable identity
+  // of its items. It is a ref because the poll loop reads it without being
+  // restarted by it, and because clearing it must not re-render.
+  const acceptedRetryable = useRef<string | null>(null);
   const inflight = useRef(false);
   const alive = useRef(true);
   // The carrier is built by the host on every render, because it closes over the
@@ -195,8 +210,12 @@ export function FreshAdoptFlow({
         setProgressFailure(null);
         setSummary(next);
         // The acknowledgement belongs to the retryable set the operator was
-        // shown. A different set is a decision they have not made yet.
-        if (acceptedRetryable.current !== null && acceptedRetryable.current !== next.retryable) {
+        // shown, item for item. A different set is a decision they have not made
+        // yet, even when it has the same size.
+        if (
+          acceptedRetryable.current !== null &&
+          acceptedRetryable.current !== retryableIdentity(next)
+        ) {
           acceptedRetryable.current = null;
           setAcceptRetryable(false);
         }
@@ -260,7 +279,23 @@ export function FreshAdoptFlow({
       if (coded.code === 'fresh_strategy_owner_conflict') setNote(adoptText('keyMismatch'));
       try {
         const truth = await carrier.readOperation();
-        if (alive.current) onOperation(truth);
+        if (alive.current) {
+          onOperation(truth);
+          // A durable staged attempt answers a lost reply: the inventory the
+          // server wrote is what the operator has to see, and this page has no
+          // business claiming the read failed. A typed refusal keeps its own
+          // message — it explained itself, and the page is still on that step.
+          if (
+            !coded.code &&
+            stage === 'source' &&
+            truth.strategy?.strategy === 'adopt_existing' &&
+            truth.strategy.stage === 'staged'
+          ) {
+            setStage('inventory');
+            setConfirmed(false);
+            setError('');
+          }
+        }
       } catch {
         if (alive.current) setUnknown(true);
       }
@@ -275,8 +310,31 @@ export function FreshAdoptFlow({
 
   // The first POST. It reads the source and persists the staged inventory, so a
   // confirmation always has something durable to confirm.
+  //
+  // The record is read first because the two POSTs are one request: a second
+  // identical POST of an attempt the server already staged is taken as the
+  // commit. Reading the inventory is a read, so it can only land on the
+  // confirmation the record already holds — the commit stays the operator's.
   async function readInventory() {
     await run(async () => {
+      const durable = await carrier.readOperation();
+      if (!alive.current) return;
+      onOperation(durable);
+      const adopt = durable.strategy?.strategy === 'adopt_existing' ? durable.strategy : undefined;
+      if (adopt?.stage === 'staged') {
+        setStage('inventory');
+        setConfirmed(false);
+        return;
+      }
+      if (adopt?.stage === 'committed') {
+        // The record, not this page, decides where the journey is.
+        setManagementKey('');
+        setStage('migration');
+        setSummary(null);
+        beginRun();
+        poll();
+        return;
+      }
       let normalized: string;
       try {
         normalized = normalizeCPAAddress(baseUrl);
@@ -292,10 +350,12 @@ export function FreshAdoptFlow({
         { baseUrl: normalized, managementKey, pluginsEnabled: plugins },
         await carrier.observeTarget()
       );
+      // The body is kept before the write, so a reply lost on the way back still
+      // leaves this page holding the exact attempt the server may have staged.
+      setBody(next);
       const result = await carrier.writeStrategy(next);
       if (!alive.current) return;
       onOperation(result);
-      setBody(next);
       setConfirmed(false);
       if (result.strategy?.stage === 'committed') {
         // The server may have committed the same attempt already; the record,
@@ -332,6 +392,32 @@ export function FreshAdoptFlow({
     });
   }
 
+  // The exact body of an attempt that is not the first read. The plugin choice is
+  // the one the record holds, the address and key are the operator's, and the
+  // destination observation is a read: rebuilding a body never writes.
+  async function recordedBody(): Promise<Record<string, unknown> | null> {
+    let normalized: string;
+    try {
+      normalized = normalizeCPAAddress(baseUrl);
+    } catch {
+      setError(adoptBlockerText('management_connection_invalid'));
+      return null;
+    }
+    if (!validManagementKey(managementKey)) {
+      setError(adoptBlockerText('adoption_source_read_unavailable'));
+      return null;
+    }
+    return adoptStrategyBody(
+      {
+        baseUrl: normalized,
+        managementKey,
+        // The recorded choice is the only one this attempt accepts.
+        pluginsEnabled: checkpoint?.pluginsEnabled === true,
+      },
+      await carrier.observeTarget()
+    );
+  }
+
   // A resume is a committed replay: the server skips every item the record
   // already settled. It needs the source again because the key lives in memory.
   async function resume() {
@@ -340,26 +426,8 @@ export function FreshAdoptFlow({
       return;
     }
     await run(async () => {
-      let normalized: string;
-      try {
-        normalized = normalizeCPAAddress(baseUrl);
-      } catch {
-        setError(adoptBlockerText('management_connection_invalid'));
-        return;
-      }
-      if (!validManagementKey(managementKey)) {
-        setError(adoptBlockerText('adoption_source_read_unavailable'));
-        return;
-      }
-      const next = adoptStrategyBody(
-        {
-          baseUrl: normalized,
-          managementKey,
-          // The recorded choice is the only one this attempt accepts.
-          pluginsEnabled: checkpoint?.pluginsEnabled === true,
-        },
-        await carrier.observeTarget()
-      );
+      const next = await recordedBody();
+      if (!next || !alive.current) return;
       const result = await carrier.writeStrategy(next);
       if (!alive.current) return;
       onOperation(result);
@@ -369,6 +437,18 @@ export function FreshAdoptFlow({
       setSummary(null);
       beginRun();
       poll();
+    });
+  }
+
+  // A staged attempt whose body this page no longer holds: rebuild the identical
+  // body from the operator's own inputs. Nothing here writes — the destination
+  // observation is a read — so the commit is still only the confirmation's POST.
+  async function rebuildConfirmBody() {
+    await run(async () => {
+      const next = await recordedBody();
+      if (!next || !alive.current) return;
+      setBody(next);
+      setManagementKey('');
     });
   }
 
@@ -454,6 +534,10 @@ export function FreshAdoptFlow({
   const needingResume =
     !!summary && !summary.running && (!summary.finished || summary.retryable > 0 || remaining > 0);
   const resumeForm = needingResume && !body;
+  // A staged inventory whose body this page no longer holds: a reload, or a lost
+  // first reply. The commit sends that exact body, so the key is asked for here
+  // and the confirmation is only offered once there is one to send.
+  const inventoryKeyForm = stage === 'inventory' && !body;
   const headline =
     stage === 'inventory'
       ? { title: adoptText('inventoryTitle'), help: adoptText('inventoryHelp') }
@@ -492,10 +576,12 @@ export function FreshAdoptFlow({
             {adoptText('unknownHelp')}
           </p>
         )}
-        {(stage === 'source' || resumeForm) && (
+        {(stage === 'source' || resumeForm || inventoryKeyForm) && (
           <div className="journey-configuration">
             {resumeForm ? (
               <p className="journey-help">{adoptText('resumeKeyNotice')}</p>
+            ) : inventoryKeyForm ? (
+              <p className="journey-help">{adoptText('inventoryKeyNotice')}</p>
             ) : (
               <p className="journey-help">{adoptText('sourceHelp')}</p>
             )}
@@ -536,8 +622,12 @@ export function FreshAdoptFlow({
                   id="adopt-plugin-optin"
                   data-testid="adopt-plugin-optin"
                   type="checkbox"
-                  checked={resumeForm ? checkpoint?.pluginsEnabled === true : plugins}
-                  disabled={resumeForm}
+                  checked={
+                    resumeForm || inventoryKeyForm
+                      ? checkpoint?.pluginsEnabled === true
+                      : plugins
+                  }
+                  disabled={resumeForm || inventoryKeyForm}
                   onChange={(event) => setPlugins(event.target.checked)}
                 />
                 <span>{adoptText('plugins')}</span>
@@ -552,6 +642,18 @@ export function FreshAdoptFlow({
                 <p>{adoptText('scopeKeep')}</p>
               </div>
             </div>
+            {inventoryKeyForm && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                data-testid="adopt-use-key"
+                disabled={busy}
+                onClick={() => void rebuildConfirmBody()}
+              >
+                {adoptText('useKey')}
+                <FullWebIcon name="check" size={20} />
+              </button>
+            )}
           </div>
         )}
         {stage === 'inventory' && (
@@ -645,20 +747,18 @@ export function FreshAdoptFlow({
                           </p>
                           {items.length > 0 && (
                             <ul className="adopt-items">
-                              {items.map((item) => (
-                                <li key={item.item} data-testid={`adopt-item-${item.item}`}>
+                              {items.map((item, index) => (
+                                <li
+                                  // The item identity is the record's, and a
+                                  // scrubbed name can repeat: the position keeps
+                                  // the list keyed without asking the text to be
+                                  // unique.
+                                  key={`${outcome}:${index}`}
+                                  data-testid={`adopt-item-${item.item}`}
+                                >
                                   <span className="adopt-item-name">{item.item}</span>
                                   <span className="badge badge-neutral">
-                                    {adoptText(
-                                      (
-                                        {
-                                          credential: 'kindCredential',
-                                          config_leaf: 'kindConfigLeaf',
-                                          config_family: 'kindConfigFamily',
-                                          provider_section: 'kindProviderSection',
-                                        } as const
-                                      )[item.kind]
-                                    )}
+                                    {adoptKindText(item.kind)}
                                   </span>
                                   {item.reason && (
                                     <span className="adopt-item-reason">
@@ -672,10 +772,12 @@ export function FreshAdoptFlow({
                                       {adoptText(item.retryable ? 'retryableBadge' : 'failedGroup')}
                                     </span>
                                   )}
-                                  {item.instruction && (
+                                  {(item.outcome === 'manual' || item.outcome === 'failed') && (
                                     <details className="journey-disclosure">
                                       <summary>{adoptText('details')}</summary>
-                                      <p>{item.instruction}</p>
+                                      <p data-testid={`adopt-guidance-${item.kind}`}>
+                                        {adoptGuidanceText(item.kind)}
+                                      </p>
                                     </details>
                                   )}
                                 </li>
@@ -727,6 +829,7 @@ export function FreshAdoptFlow({
             <button
               type="button"
               className="btn btn-secondary"
+              data-testid="adopt-inventory-back"
               disabled={busy}
               onClick={() => {
                 setStage('source');
@@ -740,7 +843,10 @@ export function FreshAdoptFlow({
               type="button"
               className="btn btn-primary"
               data-testid="adopt-confirm-migrate"
-              disabled={busy || !confirmed}
+              // The commit sends this page's body, so there is nothing to offer
+              // until the key has been entered again: a clickable button that
+              // did nothing would state the opposite.
+              disabled={busy || !confirmed || !body}
               onClick={() => void commit()}
             >
               {adoptText('confirmAndMigrate')}
@@ -781,10 +887,9 @@ export function FreshAdoptFlow({
                   onChange={(event) => {
                     setAcceptRetryable(event.target.checked);
                     // The acknowledgement covers the set on screen right now,
-                    // and only that set.
-                    acceptedRetryable.current = event.target.checked
-                      ? (summary?.retryable ?? 0)
-                      : null;
+                    // item for item, and only that set.
+                    acceptedRetryable.current =
+                      event.target.checked && summary ? retryableIdentity(summary) : null;
                   }}
                 />
                 {adoptText('acceptRetryable')}

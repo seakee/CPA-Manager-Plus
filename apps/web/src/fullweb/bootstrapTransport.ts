@@ -16,6 +16,9 @@ import {
 export const BOOTSTRAP_ROOT = '/.well-known/cpamp-bootstrap';
 export const BOOTSTRAP_UI = `${BOOTSTRAP_ROOT}/ui`;
 const API = `${BOOTSTRAP_ROOT}/api/v2/`;
+// The same deadline every canonical read carries: a request that never answers
+// has to become a failure the screen can state.
+const REQUEST_TIMEOUT = 15000;
 
 // The completion refusals an adoption's operator can act on. A code outside this
 // set never reaches the UI: the completion screen shows a message for a cause it
@@ -380,6 +383,16 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (token) headers.Authorization = `Fresh ${token}`;
+    // A read that never answers is not a read that succeeds: the progress loop
+    // only counts answers, so a hung request would spin forever behind a screen
+    // that states nothing. Reads get the same 15 s the canonical carrier gives
+    // every request, which turns a hang into the failure the loop can count.
+    const bounded =
+      resource === 'operation' ||
+      resource === 'installation/runtime' ||
+      resource === 'installation/adoption';
+    const controller = bounded ? new AbortController() : undefined;
+    const deadline = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT) : undefined;
     let response: Response;
     try {
       response = await transport(target.href, {
@@ -388,6 +401,7 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
         ...(body === undefined
           ? {}
           : { body: resource === 'strategy' ? runtimeRequestJSON(body) : JSON.stringify(body) }),
+        ...(controller ? { signal: controller.signal } : {}),
         mode: 'same-origin',
         credentials: 'omit',
         redirect: 'error',
@@ -395,6 +409,8 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       });
     } catch {
       throw new BootstrapTransportError('Bootstrap transport unavailable', 'transport');
+    } finally {
+      clearTimeout(deadline);
     }
     if (!response.ok) {
       // Two bounded refusal envelopes exist, and they are read by the call that
@@ -687,10 +703,21 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
         )
           throw new BootstrapTransportError('Adoption request unavailable', 'bad_request');
       }
+      // The fence is the durable revision, not the one this page last read: a
+      // migration checkpoint is its own durable write, so a cached revision
+      // fails the CAS on exactly the replay that would continue the run.
+      const current = await request<FreshOperation>('operation');
+      if (
+        !sameIdentity(current?.identity, operation.identity) ||
+        !validOperationState(current, operation)
+      ) {
+        throw new BootstrapTransportError('Installation response unavailable', 'response');
+      }
+      operation = current;
       const next = await request<FreshOperation & { initialClientKey?: unknown }>('strategy', {
         ...body,
-        identity: operation.identity,
-        expectedRevision: operation.revision,
+        identity: current.identity,
+        expectedRevision: current.revision,
       });
       if (
         !sameIdentity(next?.identity, operation.identity) ||

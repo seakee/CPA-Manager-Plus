@@ -87,6 +87,10 @@ export function FreshManagedRuntime({
   const [unknown, setUnknown] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState('');
+  // The journey is the operator's to choose. An adoption has no managed stage of
+  // its own, so the choice itself is what renders the shared flow; from then on
+  // the record owns it.
+  const [adoptChoice, setAdoptChoice] = useState(false);
   const [step, setStep] = useState(operation.strategy?.strategy ? 3 : 0);
   const [acknowledged, setAcknowledged] = useState(false);
   const [running, setRunning] = useState(false);
@@ -323,7 +327,7 @@ export function FreshManagedRuntime({
   // An adopted installation is a journey of its own. It is never `null`: an
   // adopt checkpoint used to fall into the foreign branch and render nothing, so
   // a browser that had committed an adoption showed an empty card.
-  if (checkpoint?.strategy === 'adopt_existing') {
+  if (checkpoint?.strategy === 'adopt_existing' || adoptChoice) {
     const guarded = async <T,>(call: () => Promise<T>): Promise<T> => {
       try {
         return await call();
@@ -344,16 +348,22 @@ export function FreshManagedRuntime({
           artifactId: observed.expectedArtifactId,
         };
       },
-      // The canonical carrier sends no identity of its own, so the flow's body
-      // gets the operation's fence exactly where the bootstrap carrier adds it.
-      writeStrategy: (body) =>
-        guarded(() =>
+      // The canonical carrier adds the fence the bootstrap carrier adds: the
+      // operation's identity and its durable revision. It reads them per write
+      // because a migration checkpoint is its own durable write — the revision
+      // this page last saw is stale exactly when a run stopped between items.
+      writeStrategy: async (body) => {
+        const current = await guarded(() => client.get<FreshOperation>('operation', auth));
+        if (!sameIdentity(current?.identity, operation.identity))
+          throw new Error('Invalid installation response');
+        return guarded(() =>
           client.post<FreshOperation>(
             'strategy',
-            { identity: operation.identity, expectedRevision: operation.revision, ...body },
+            { identity: current.identity, expectedRevision: current.revision, ...body },
             auth
           )
-        ),
+        );
+      },
       complete: (body) => guarded(() => client.post<FreshOperation>('complete', body, auth)),
       readAdoption: async () =>
         parseAdoptionSummary(
@@ -489,19 +499,23 @@ export function FreshManagedRuntime({
                     <p>{s('newDetail')}</p>
                   </div>
                 </div>
-                <div className="journey-choice is-unavailable" aria-disabled="true">
+                <button
+                  type="button"
+                  className={`journey-choice ${adoptChoice ? 'selected' : ''}`}
+                  data-testid="choose-adopt"
+                  aria-pressed={adoptChoice}
+                  disabled={!!checkpoint?.strategy}
+                  onClick={() => setAdoptChoice(true)}
+                >
                   <span className="journey-radio" aria-hidden="true" />
                   <span className="journey-tile-icon">
                     <FullWebIcon name="copy" size={34} />
                   </span>
                   <div>
-                    <h2>
-                      {s('adopt')}
-                      <span className="badge badge-neutral">{journey('unavailable')}</span>
-                    </h2>
+                    <h2>{s('adopt')}</h2>
                     <p>{s('adoptHelp')}</p>
                   </div>
-                </div>
+                </button>
                 <details className="journey-disclosure">
                   <summary>{journey('advanced')}</summary>
                   <button
