@@ -13,17 +13,22 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/usagemonitoring"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 // copiedVolume is a 1.x source that already went through the copy-in: the v2
 // data root holds the migrated store the recorded operation describes.
 type copiedVolume struct {
-	volume  legacyVolume
-	target  string
-	options Options
+	volume     legacyVolume
+	target     string
+	options    Options
+	sourceLock *processlock.Lock
+	targetLock *processlock.Lock
 }
 
 func newCopiedVolume(t *testing.T) copiedVolume {
@@ -41,7 +46,9 @@ func newCopiedVolumeWith(t *testing.T, seed func(*testing.T, legacyVolume)) copi
 	return copyVolume(t, volume)
 }
 
-// copyVolume copies an already prepared 1.x volume into a fresh v2 data root.
+// copyVolume copies an already prepared 1.x volume into a fresh v2 data root
+// and holds the two fences a reconciliation writes under, exactly as the CLI
+// does, so every later Reconcile on this volume runs the way production does.
 func copyVolume(t *testing.T, volume legacyVolume) copiedVolume {
 	t.Helper()
 	targetRoot := canonicalTempDir(t)
@@ -50,13 +57,27 @@ func copyVolume(t *testing.T, volume legacyVolume) copiedVolume {
 	if _, err := CopyIn(context.Background(), options); err != nil {
 		t.Fatalf("copy in: %v", err)
 	}
-	return copiedVolume{volume: volume, target: targetRoot, options: options}
+	targetLock, err := processlock.Acquire(filepath.Join(targetRoot, databaseFileName))
+	if err != nil {
+		t.Fatalf("acquire the v2 data-root lock: %v", err)
+	}
+	t.Cleanup(func() { _ = targetLock.Close() })
+	return copiedVolume{
+		volume: volume, target: targetRoot, options: options,
+		sourceLock: options.Lock, targetLock: targetLock,
+	}
 }
 
 // reconcileOptions is the copy-in options plus what this step needs: the same
 // source and target, and no acknowledgement yet.
 func (c copiedVolume) reconcileOptions() Options {
-	return Options{LegacyRoot: c.volume.root, TargetRoot: c.target, BundleDir: c.options.BundleDir}
+	return Options{
+		LegacyRoot: c.volume.root,
+		TargetRoot: c.target,
+		BundleDir:  c.options.BundleDir,
+		Lock:       c.sourceLock,
+		TargetLock: c.targetLock,
+	}
 }
 
 func (c copiedVolume) databasePath() string { return filepath.Join(c.target, databaseFileName) }
@@ -283,13 +304,7 @@ func TestReconcileRequiresAcknowledgementForAParityGap(t *testing.T) {
 	// The gap has to exist in the source before the copy-in: reconciliation
 	// refuses a source whose fingerprint is not the one the copy-in recorded.
 	seedParityGap(t, volume)
-	targetRoot := canonicalTempDir(t)
-	options := copyInOptions(volume, targetRoot)
-	options.Lock = volume.lock(t)
-	if _, err := CopyIn(context.Background(), options); err != nil {
-		t.Fatalf("copy in: %v", err)
-	}
-	copied := copiedVolume{volume: volume, target: targetRoot, options: options}
+	copied := copyVolume(t, volume)
 
 	report, err := Reconcile(context.Background(), copied.reconcileOptions())
 	if !errors.Is(err, ErrReconcileMismatch) {
@@ -319,6 +334,52 @@ func TestReconcileRequiresAcknowledgementForAParityGap(t *testing.T) {
 	if got := markedDays(t, copied.databasePath()); len(got) != 1 ||
 		got["1970-01-01"] != coverageincomplete.ReasonProjectionLostBeforeV1146 {
 		t.Fatalf("marked days = %v, want one %q mark", got, coverageincomplete.ReasonProjectionLostBeforeV1146)
+	}
+}
+
+// TestReconcileDoesNotWaiveAMeasuredMismatchWithTheParitySwitch reproduces
+// review M1/P1: a retained total that disagreed on a day the parity detection
+// also flagged was accepted by --acknowledge-parity-gaps alone, so a real
+// copy-in difference was recorded and marked without the operator naming it.
+func TestReconcileDoesNotWaiveAMeasuredMismatchWithTheParitySwitch(t *testing.T) {
+	volume := newLegacyVolume(t)
+	// Both the parity gap and the events the fixture seeds sit on 1970-01-01, so
+	// the measured disagreement and the gap share one day.
+	seedParityGap(t, volume)
+	copied := copyVolume(t, volume)
+	execTarget(t, copied.databasePath(),
+		`update usage_events set total_tokens = total_tokens + 999 where event_hash = 'legacy-event-1'`)
+
+	parityOnly := copied.reconcileOptions()
+	parityOnly.AcknowledgeParityGaps = true
+	report, err := Reconcile(context.Background(), parityOnly)
+	if !errors.Is(err, ErrReconcileMismatch) {
+		t.Fatalf("reconcile error = %v, want the typed mismatch", err)
+	}
+	if report.Recorded {
+		t.Fatal("the parity switch recorded a measured disagreement")
+	}
+	if len(report.ParityGapDays) != 1 || report.ParityGapDays[0] != "1970-01-01" {
+		t.Fatalf("parity gap days = %v, want the shared day", report.ParityGapDays)
+	}
+	if len(report.UnacknowledgedDays) != 1 || report.UnacknowledgedDays[0] != "1970-01-01" {
+		t.Fatalf("unacknowledged days = %v, want the shared day still blocking", report.UnacknowledgedDays)
+	}
+	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+		t.Fatalf("marked days = %v, want none", got)
+	}
+
+	// The day still moves the stage once it is named. A measured disagreement
+	// keeps its own reason over the parity gap.
+	named := copied.reconcileOptions()
+	named.Acknowledged = []string{"1970-01-01"}
+	acknowledged, err := Reconcile(context.Background(), named)
+	if err != nil {
+		t.Fatalf("reconcile with the day acknowledged: %v", err)
+	}
+	if len(acknowledged.IncompleteDays) != 1 ||
+		acknowledged.IncompleteDays[0].Reason != coverageincomplete.ReasonReconcileMismatch {
+		t.Fatalf("incomplete days = %+v, want the measured disagreement", acknowledged.IncompleteDays)
 	}
 }
 
@@ -456,20 +517,31 @@ func seedSourcePricing(t *testing.T, volume legacyVolume) {
 		fmt.Sprintf(`insert into usage_pricing_hourly_rollups_v1 (
 			structure_revision, bucket_ms, model, billing_model, pricing_model, service_tier,
 			context_threshold_tokens, failed, calls, input_tokens, total_tokens, updated_at_ms)
-			values ('v1', %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 2, 400000, 400000, 1)`,
-			seededHourMS),
+			values (%s, %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 2, 400000, 400000, 1)`,
+			sqlText(fixturePricingRevision(nil)), seededHourMS),
 		fmt.Sprintf(`insert into usage_pricing_hourly_rollups_v1 (
 			structure_revision, bucket_ms, model, billing_model, pricing_model, service_tier,
 			context_threshold_tokens, failed, calls, input_tokens, total_tokens, updated_at_ms)
-			values ('v1', %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 1, 5, 100000, 100000, 1)`,
-			seededHourMS),
+			values (%s, %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 1, 5, 100000, 100000, 1)`,
+			sqlText(fixturePricingRevision(nil)), seededHourMS),
 		fmt.Sprintf(`insert into usage_pricing_hourly_rollups_v1 (
 			structure_revision, bucket_ms, model, billing_model, pricing_model, service_tier,
 			context_threshold_tokens, failed, calls, input_tokens, total_tokens, updated_at_ms)
-			values ('v1', %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 3, 200000, 200000, 1)`,
-			seededHourMS+time.Hour.Milliseconds()),
+			values (%s, %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 3, 200000, 200000, 1)`,
+			sqlText(fixturePricingRevision(nil)), seededHourMS+time.Hour.Milliseconds()),
 	)
 }
+
+// fixturePricingRevision is the pricing structure revision a side computes from
+// its own price table, so seeded rollups are rows the read path actually
+// selects. A fixture that seeds no model prices has the empty table's revision.
+func fixturePricingRevision(prices map[string]model.ModelPrice) string {
+	return usageidentity.PricingStructureRevision(model.ModelPriceStructureRevision(prices))
+}
+
+// sqlText quotes a fixture value as a SQL string literal. The revisions in these
+// tests carry only letters, digits, colons, dots and hyphens.
+func sqlText(value string) string { return "'" + value + "'" }
 
 // seedSourcePricingOnDay adds one pricing rollup row on the hour after the start
 // of the given UTC day, so a test can hold two source rollup days.
@@ -478,8 +550,8 @@ func seedSourcePricingOnDay(t *testing.T, volume legacyVolume, dayMS int64) {
 	execSource(t, volume, fmt.Sprintf(`insert into usage_pricing_hourly_rollups_v1 (
 		structure_revision, bucket_ms, model, billing_model, pricing_model, service_tier,
 		context_threshold_tokens, failed, calls, input_tokens, total_tokens, updated_at_ms)
-		values ('v1', %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 3, 200000, 200000, 1)`,
-		dayMS+time.Hour.Milliseconds()))
+		values (%s, %d, 'gpt-test', 'gpt-test', 'gpt-test', 'default', 0, 0, 3, 200000, 200000, 1)`,
+		sqlText(fixturePricingRevision(nil)), dayMS+time.Hour.Milliseconds()))
 }
 
 func seedSourceCoverage(t *testing.T, volume legacyVolume) {
@@ -489,6 +561,11 @@ func seedSourceCoverage(t *testing.T, volume legacyVolume) {
 	) values (%d, 4, %d, %d)`, seededDayIndex, seededDayMS+1000, seededDayMS+2000))
 }
 
+// seedSourceHistory seeds one account history rollup row under the revision the
+// history read path selects: the stats rollup's revision, which
+// usagemonitoring derives from the store's price table, not the projection
+// revision. A fixture seeded under any other revision seeds rows no reader
+// would ever show, so a comparison of them proves nothing.
 func seedSourceHistory(t *testing.T, volume legacyVolume) {
 	t.Helper()
 	execSource(t, volume, fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 (
@@ -496,9 +573,21 @@ func seedSourceHistory(t *testing.T, volume legacyVolume) {
 		auth_provider_snapshot, auth_index, source, source_hash, auth_file_snapshot,
 		api_key_hash, executor_type, model, billing_model, pricing_model, service_tier,
 		context_threshold_tokens, failed, calls, total_tokens, last_seen_ms, updated_at_ms)
-		values ('v1', %d, 'acct-1', 'label-1', 'openai', 'openai-auth', '0', 'source-a', 'hash-a',
+		values (%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', '0', 'source-a', 'hash-a',
 			'file-a', 'key-a', 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
-			0, 0, 2, 100, %d, 1)`, seededDayMS, seededDayMS))
+			0, 0, 2, 100, %d, 1)`, sqlText(fixturePricingRevision(nil)), seededDayMS, seededDayMS))
+}
+
+// seedHistoryOnTheStatsRevision seeds the rollup and marks the stats rollup
+// state current, so the real analytics read path reads the daily table instead
+// of rebuilding the same numbers from the retained events.
+func seedHistoryOnTheStatsRevision(t *testing.T, volume legacyVolume) {
+	t.Helper()
+	seedSourceHistory(t, volume)
+	execSource(t, volume,
+		`update usage_monitoring_rollup_state set structure_revision = `+
+			sqlText(fixturePricingRevision(nil))+
+			`, status = 'ready', coverage_event_id = 2, target_event_id = 2 where rollup_name = 'stats_v1'`)
 }
 
 // seedSourceRetention adds two events in the same hour and model under two API
@@ -694,6 +783,56 @@ func TestReconcileReportsEveryPermutationInsideADay(t *testing.T) {
 			want:   []wantedMismatch{{mismatchFieldExecutorType, "claude"}},
 		},
 		{
+			// The failed flag is part of the row key: a success row rewritten as
+			// failed is a different row, and the totals of the two rows must never
+			// answer for each other.
+			name:   "history failed flag rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set failed = 1`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldFailed, "1"}},
+		},
+		{
+			name:   "history auth index rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set auth_index = '9'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldAuthIndex, "9"}},
+		},
+		{
+			name:   "history source hash rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set source_hash = 'hash-b'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldSourceHash, "hash-b"}},
+		},
+		{
+			name:   "history pricing model rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set pricing_model = 'pricing-b'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldPricingModel, "pricing-b"}},
+		},
+		{
+			name:   "history auth account id rewritten",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set auth_account_id_snapshot = 'account-2'`},
+			domain: ReconcileDomainHistory,
+			want:   []wantedMismatch{{mismatchFieldAuthAccountIDSnapshot, "account-2"}},
+		},
+		{
+			// The token total is unchanged: input and output trade places inside
+			// the same row, which a total-only comparison certified clean.
+			name:   "history token classes reallocated",
+			seed:   seedSourceHistory,
+			mutate: []string{`update usage_monitoring_account_daily_rollups_v1 set input_tokens = 60, output_tokens = 40`},
+			domain: ReconcileDomainHistory,
+			want: []wantedMismatch{
+				{mismatchFieldInputTokens, "account=acct-1"},
+				{mismatchFieldOutputTokens, "account=acct-1"},
+			},
+		},
+		{
 			name: "retained api_key_hash swapped between events",
 			seed: seedSourceRetention,
 			mutate: []string{`update usage_events
@@ -728,6 +867,58 @@ func TestReconcileReportsEveryPermutationInsideADay(t *testing.T) {
 				if mismatch.Day == "" || mismatch.Field == "" || mismatch.Source == "" || mismatch.Target == "" {
 					t.Fatalf("mismatch = %+v, want a day, a field and both values", mismatch)
 				}
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none", got)
+			}
+			assertNoScratch(t, copied.target)
+		})
+	}
+}
+
+// TestReconcileComparesOnlyTheActiveStructureRevision reproduces review L1/P3:
+// a rollup row moved to a revision the read path does not select still
+// reconciled clean, because the comparison read every revision in the table.
+func TestReconcileComparesOnlyTheActiveStructureRevision(t *testing.T) {
+	cases := []struct {
+		name   string
+		seed   func(*testing.T, legacyVolume)
+		mutate string
+		domain string
+	}{
+		{
+			name:   "pricing row moved to an inactive revision",
+			seed:   seedSourcePricing,
+			mutate: `update usage_pricing_hourly_rollups_v1 set structure_revision = 'stale-v1' where failed = 0`,
+			domain: ReconcileDomainPricing,
+		},
+		{
+			// The retained events on the same day are what make the lost rollup a
+			// waivable loss rather than an unrebuildable one, so the assertion is
+			// about the revision and not about the unwaivable boundary.
+			name: "history row moved to an inactive revision",
+			seed: func(t *testing.T, volume legacyVolume) {
+				seedSourceHistory(t, volume)
+				seedSourceRetention(t, volume)
+			},
+			mutate: `update usage_monitoring_account_daily_rollups_v1 set structure_revision = 'stale-v1'`,
+			domain: ReconcileDomainHistory,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			copied := newCopiedVolumeWith(t, testCase.seed)
+			execTarget(t, copied.databasePath(), testCase.mutate)
+
+			report, err := Reconcile(context.Background(), copied.reconcileOptions())
+			if !errors.Is(err, ErrReconcileMismatch) {
+				t.Fatalf("reconcile error = %v, want the typed mismatch", err)
+			}
+			if report.Recorded {
+				t.Fatal("a mismatched reconcile recorded the operation")
+			}
+			if mismatches := mismatchesOf(t, report, testCase.domain); len(mismatches) == 0 {
+				t.Fatalf("%s mismatches = none, want the row the read path no longer selects", testCase.domain)
 			}
 			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
 				t.Fatalf("marked days = %v, want none", got)
@@ -789,9 +980,15 @@ func TestReconcileTreatsAOneMicroCostDifferenceAsAMismatch(t *testing.T) {
 func TestReconcileSeesAPriceChangeOfOneMicroPerMillion(t *testing.T) {
 	copied := newCopiedVolumeWith(t, func(t *testing.T, volume legacyVolume) {
 		seedSourcePricing(t, volume)
+		// A price row changes which models the revision covers, so the seeded
+		// rollups move to the revision the read path now selects. The amounts are
+		// not part of the revision, which is what lets the one-micro change below
+		// be compared at all.
 		execSource(t, volume,
 			`insert into model_prices (model, prompt_per_1m, completion_per_1m, cache_per_1m, updated_at_ms)
 				values ('gpt-test', 3.0, 0, 0, 1)`,
+			`update usage_pricing_hourly_rollups_v1 set structure_revision = `+
+				sqlText(fixturePricingRevision(map[string]model.ModelPrice{"gpt-test": {}})),
 			fmt.Sprintf(`update usage_pricing_hourly_rollups_v1
 				set input_tokens = 1000000000, total_tokens = 1000000000
 				where failed = 0 and bucket_ms = %d`, seededHourMS),
@@ -882,13 +1079,27 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	for _, statement := range []string{
 		`create table usage_monitoring_account_daily_rollups_v1 (
-			bucket_ms integer, account_snapshot text, auth_label_snapshot text,
-			auth_file_snapshot text, provider text, api_key_hash text, executor_type text,
-			model text, calls integer, total_tokens integer)`,
+			structure_revision text, bucket_ms integer, account_snapshot text, auth_label_snapshot text,
+			provider text, auth_provider_snapshot text, auth_account_id_snapshot text,
+			auth_index text, source text, source_hash text,
+			auth_file_snapshot text, api_key_hash text, executor_type text,
+			model text, billing_model text, pricing_model text, service_tier text,
+			context_threshold_tokens integer, failed integer,
+			calls integer, input_tokens integer, output_tokens integer, reasoning_tokens integer, cached_tokens integer,
+			cache_read_tokens integer, cache_creation_tokens integer,
+			long_input_tokens integer, long_output_tokens integer, long_cached_tokens integer,
+			long_cache_read_tokens integer, long_cache_creation_tokens integer,
+			total_tokens integer, zero_token_calls integer, last_seen_ms integer, latency_sum_ms integer, latency_samples integer)`,
 		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
-			(%d, 'acct-1', 'label-1', 'file-a', 'openai', null, 'codex', 'gpt-test', 2, 100)`, seededDayMS),
+			(%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
+			 'file-a', null, 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
+			 0, 0, 2, 40, 60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, %d, 10, 2)`,
+			sqlText(fixturePricingRevision(nil)), seededDayMS, seededDayMS),
 		fmt.Sprintf(`insert into usage_monitoring_account_daily_rollups_v1 values
-			(%d, 'acct-1', 'label-1', 'file-a', 'openai', '', 'codex', 'gpt-test', 5, 200)`, seededDayMS),
+			(%s, %d, 'acct-1', 'label-1', 'openai', 'openai-auth', 'account-1', '0', 'source-a', 'hash-a',
+			 'file-a', '', 'codex', 'gpt-test', 'gpt-test', 'gpt-test', 'default',
+			 0, 0, 5, 100, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 200, 0, %d, 20, 3)`,
+			sqlText(fixturePricingRevision(nil)), seededDayMS, seededDayMS),
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatalf("prepare the history fixture %q: %v", statement, err)
@@ -899,7 +1110,7 @@ func TestReadHistoryCellsGroupsANullAndAnEmptyKey(t *testing.T) {
 		t.Fatalf("begin the history read: %v", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	cells, err := readHistoryCells(context.Background(), tx)
+	cells, err := readHistoryCells(context.Background(), tx, fixturePricingRevision(nil))
 	if err != nil {
 		t.Fatalf("read the account history: %v", err)
 	}
@@ -1028,6 +1239,36 @@ func TestReconcileRepairsAnInterruptedRecording(t *testing.T) {
 	}
 }
 
+// TestReconcileRecordsARowWhoseClockRanAhead reproduces review L2/P4: a recorded
+// operation whose timestamps sit in the future (the clock moved back after the
+// copy-in) made the recording fail on the row validation until the wall clock
+// caught up, and the error told the operator to rerun it.
+func TestReconcileRecordsARowWhoseClockRanAhead(t *testing.T) {
+	copied := newCopiedVolume(t)
+	future := time.Now().Add(time.Hour).UnixMilli()
+	execTarget(t, copied.databasePath(), fmt.Sprintf(
+		`update upgrade_operations set created_at_ms = %d, updated_at_ms = %d`, future, future))
+
+	report, err := Reconcile(context.Background(), copied.reconcileOptions())
+	if err != nil {
+		t.Fatalf("reconcile over a row whose clock ran ahead: %v", err)
+	}
+	if !report.Recorded || report.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("report = %+v, want a recorded reconciliation", report)
+	}
+	row := operationRow(t, copied.databasePath())
+	if row.UpdatedAtMS < row.CreatedAtMS {
+		t.Fatalf("row updated_at_ms = %d precedes created_at_ms = %d", row.UpdatedAtMS, row.CreatedAtMS)
+	}
+	if row.CreatedAtMS != future || row.UpdatedAtMS != future {
+		t.Fatalf("row timestamps = created %d updated %d, want both clamped to the stored %d",
+			row.CreatedAtMS, row.UpdatedAtMS, future)
+	}
+	if updated := report.UpdatedAtMS; updated != row.UpdatedAtMS {
+		t.Fatalf("report updated_at_ms = %d, want the stored %d", updated, row.UpdatedAtMS)
+	}
+}
+
 // TestReconcileRejectsAScratchAreaThatOverlapsTheSource reproduces the round
 // three review's M6: only a scratch area inside the source was refused, while
 // the message claimed "inside or above".
@@ -1086,6 +1327,239 @@ func TestReconcileOnlyRemovesItsOwnScratchDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(scratchRoot, reconcileScratchDirectory)); !os.IsNotExist(err) {
 		t.Fatalf("the tool-owned subdirectory survived: %v", err)
+	}
+}
+
+// TestReconcileTypesItsRecordRefusals reproduces review L6: these refusals were
+// plain errors, so the JSON errorCode was empty and a script could not tell a
+// precondition from a usage mistake.
+func TestReconcileTypesItsRecordRefusals(t *testing.T) {
+	cases := []struct {
+		name   string
+		run    func(*testing.T) (ReconcileReport, error)
+		want   error
+		code   UpgradeErrorCode
+		detail string
+	}{
+		{
+			name: "no recorded copy-in",
+			run: func(t *testing.T) (ReconcileReport, error) {
+				volume := newLegacyVolume(t)
+				targetRoot := canonicalTempDir(t)
+				targetLock, err := processlock.Acquire(filepath.Join(targetRoot, databaseFileName))
+				if err != nil {
+					t.Fatalf("acquire the v2 data-root lock: %v", err)
+				}
+				t.Cleanup(func() { _ = targetLock.Close() })
+				return Reconcile(context.Background(), Options{
+					LegacyRoot: volume.root,
+					TargetRoot: targetRoot,
+					Lock:       volume.lock(t),
+					TargetLock: targetLock,
+				})
+			},
+			want:   ErrReconcileNotCopiedIn,
+			code:   UpgradeErrorReconcileNotCopiedIn,
+			detail: "no recorded copy-in",
+		},
+		{
+			name: "stage already past reconcile",
+			run: func(t *testing.T) (ReconcileReport, error) {
+				copied := newCopiedVolume(t)
+				execTarget(t, copied.databasePath(), `update upgrade_operations set stage = 'cpa_import'`)
+				return Reconcile(context.Background(), copied.reconcileOptions())
+			},
+			want:   ErrReconcileStageClosed,
+			code:   UpgradeErrorReconcileStageClosed,
+			detail: "cannot enter the reconcile step",
+		},
+		{
+			name: "record names no source fingerprint",
+			run: func(t *testing.T) (ReconcileReport, error) {
+				copied := newCopiedVolume(t)
+				execTarget(t, copied.databasePath(), `update upgrade_operations set source_fingerprint_after = ''`)
+				return Reconcile(context.Background(), copied.reconcileOptions())
+			},
+			want:   ErrReconcileRecordIncomplete,
+			code:   UpgradeErrorReconcileRecordIncomplete,
+			detail: "names no source fingerprint",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			report, err := testCase.run(t)
+			if !errors.Is(err, testCase.want) {
+				t.Fatalf("reconcile error = %v, want the typed refusal", err)
+			}
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != testCase.code {
+				t.Fatalf("error code = %q (%t), want %q", code, ok, testCase.code)
+			}
+			if message := err.Error(); !strings.Contains(message, testCase.detail) {
+				t.Fatalf("error %q does not explain %q", message, testCase.detail)
+			}
+			if report.Recorded {
+				t.Fatalf("a refused run recorded the operation: %+v", report)
+			}
+		})
+	}
+}
+
+// TestReconcileRefusesToWriteWithoutItsLocks reproduces review M3/P5: the step
+// wrote the v2 store while another owner held the 1.x lock and the v2 data-root
+// lock, because it never took either.
+func TestReconcileRefusesToWriteWithoutItsLocks(t *testing.T) {
+	cases := []struct {
+		name   string
+		drop   func(copiedVolume) Options
+		want   error
+		code   UpgradeErrorCode
+		detail string
+	}{
+		{
+			name: "no v2 data-root lock",
+			drop: func(copied copiedVolume) Options {
+				options := copied.reconcileOptions()
+				options.TargetLock = nil
+				return options
+			},
+			want:   ErrTargetLocked,
+			code:   UpgradeErrorTargetLocked,
+			detail: "v2 data-root lock",
+		},
+		{
+			name: "no 1.x ownership lock",
+			drop: func(copied copiedVolume) Options {
+				options := copied.reconcileOptions()
+				options.Lock = nil
+				return options
+			},
+			want:   nil,
+			code:   UpgradeErrorCode(CodeSourceBusy),
+			detail: "1.x ownership lock",
+		},
+		{
+			name: "a v2 lock taken for another database",
+			drop: func(copied copiedVolume) Options {
+				options := copied.reconcileOptions()
+				other, err := processlock.Acquire(filepath.Join(canonicalTempDir(t), "other.sqlite"))
+				if err != nil {
+					t.Fatalf("acquire an unrelated lock: %v", err)
+				}
+				t.Cleanup(func() { _ = other.Close() })
+				options.TargetLock = other
+				return options
+			},
+			want:   ErrTargetLocked,
+			code:   UpgradeErrorTargetLocked,
+			detail: "v2 data-root lock",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			copied := newCopiedVolume(t)
+			report, err := Reconcile(context.Background(), testCase.drop(copied))
+			if err == nil {
+				t.Fatalf("reconcile wrote without its locks: %+v", report)
+			}
+			if testCase.want != nil && !errors.Is(err, testCase.want) {
+				t.Fatalf("reconcile error = %v, want %v", err, testCase.want)
+			}
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != testCase.code {
+				t.Fatalf("error code = %q (%t), want %q", code, ok, testCase.code)
+			}
+			if message := err.Error(); !strings.Contains(message, testCase.detail) {
+				t.Fatalf("error %q does not name the %s it is missing", message, testCase.detail)
+			}
+			if report.Recorded {
+				t.Fatal("a run without its locks recorded the operation")
+			}
+			if recorded := operationRow(t, copied.databasePath()); recorded.Stage != model.UpgradeStageCopyIn {
+				t.Fatalf("stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageCopyIn)
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none", got)
+			}
+		})
+	}
+}
+
+// TestReconcileRefusesALostDayEvenWhenOtherDaysCompare reproduces review M2/P8
+// and P9: the unwaivable boundary was decided for the domain as a whole, so once
+// any day compared, a single lost day — a derived day with no retained support,
+// or a retained/coverage day the store cannot show at all — became an ordinary
+// mismatch an acknowledgement could waive.
+func TestReconcileRefusesALostDayEvenWhenOtherDaysCompare(t *testing.T) {
+	nextDayMS := seededDayMS + utcDayMilliseconds
+	cases := []struct {
+		name    string
+		seed    func(*testing.T, legacyVolume)
+		mutate  string
+		domain  string
+		lostDay string
+	}{
+		{
+			name: "a derived day the store cannot rebuild",
+			seed: func(t *testing.T, volume legacyVolume) {
+				seedSourcePricing(t, volume)
+				seedSourcePricingOnDay(t, volume, nextDayMS)
+			},
+			mutate:  fmt.Sprintf(`delete from usage_pricing_hourly_rollups_v1 where bucket_ms >= %d`, nextDayMS),
+			domain:  ReconcileDomainPricing,
+			lostDay: "2026-03-02",
+		},
+		{
+			name:    "a retained day the store lost",
+			seed:    seedSourceRetention,
+			mutate:  `delete from usage_events where timestamp_ms < 86400000`,
+			domain:  ReconcileDomainRetained,
+			lostDay: "1970-01-01",
+		},
+		{
+			name: "a coverage day the store lost",
+			seed: func(t *testing.T, volume legacyVolume) {
+				seedSourceCoverage(t, volume)
+				execSource(t, volume, fmt.Sprintf(`insert into usage_archive_deleted_coverage_daily (
+					utc_day, deleted_event_count, min_timestamp_ms, max_timestamp_ms)
+					values (%d, 2, %d, %d)`, seededDayIndex+1, nextDayMS+1000, nextDayMS+2000))
+			},
+			mutate:  fmt.Sprintf(`delete from usage_archive_deleted_coverage_daily where utc_day = %d`, seededDayIndex+1),
+			domain:  ReconcileDomainCoverage,
+			lostDay: "2026-03-02",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			copied := newCopiedVolumeWith(t, testCase.seed)
+			execTarget(t, copied.databasePath(), testCase.mutate)
+
+			options := copied.reconcileOptions()
+			options.Acknowledged = []string{testCase.lostDay}
+			report, err := Reconcile(context.Background(), options)
+			if !errors.Is(err, ErrReconcileTargetIncomplete) {
+				t.Fatalf("reconcile error = %v, want the lost-day refusal even when acknowledged", err)
+			}
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorReconcileTargetIncomplete {
+				t.Fatalf("error code = %q (%t), want %q", code, ok, UpgradeErrorReconcileTargetIncomplete)
+			}
+			if message := err.Error(); !strings.Contains(message, testCase.lostDay) {
+				t.Fatalf("error %q does not name the lost day %s", message, testCase.lostDay)
+			}
+			lost := domainReport(t, report, testCase.domain)
+			if lost.ComparedDays == 0 {
+				t.Fatalf("%s report = %+v, want another day still compared", testCase.domain, lost)
+			}
+			if testCase.domain == ReconcileDomainPricing &&
+				!reflect.DeepEqual(lost.UnrecoverableDays, []string{testCase.lostDay}) {
+				t.Fatalf("unrecoverable days = %v, want the lost day", lost.UnrecoverableDays)
+			}
+			if report.Recorded {
+				t.Fatal("a lost day recorded the operation")
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none", got)
+			}
+			assertNoScratch(t, copied.target)
+		})
 	}
 }
 
@@ -1281,6 +1755,109 @@ func TestReconcileSplitsClearedDerivedDaysByRetainedSupport(t *testing.T) {
 	}
 	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
 		t.Fatalf("marked days = %v, want none", got)
+	}
+}
+
+// historyConsumerAggregate reads the seeded day through the real account
+// analytics consumer, so a regression can prove that what it mutates is what a
+// running Manager would report instead of assuming it from the SQL.
+func historyConsumerAggregate(t *testing.T, path string) usagemonitoring.Aggregate {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open the store for the analytics read: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	aggregate, _, available, err := usagemonitoring.New(db).LoadAggregate(context.Background(), usagemonitoring.AnalyticsFilter{
+		FromMS: seededDayMS,
+		ToMS:   seededDayMS + utcDayMilliseconds,
+	})
+	if err != nil {
+		t.Fatalf("read the analytics aggregate: %v", err)
+	}
+	if !available {
+		t.Fatal("the analytics aggregate is not available for the seeded day")
+	}
+	return aggregate
+}
+
+// TestReconcileSeesTheHistoryCallsTheConsumerReports reproduces review F1: the
+// history domain filtered the rollup table on the projection revision while the
+// account stats read path filters it on the stats (pricing structure) revision.
+// Both sides therefore read no row at all, so a call count the consumer reported
+// going from 2 to 3 reconciled clean with zero days compared.
+func TestReconcileSeesTheHistoryCallsTheConsumerReports(t *testing.T) {
+	copied := newCopiedVolumeWith(t, seedHistoryOnTheStatsRevision)
+	before := historyConsumerAggregate(t, copied.databasePath())
+	if before.TotalCalls != 2 {
+		t.Fatalf("consumer calls = %d, want the seeded 2: the fixture must feed the real read path", before.TotalCalls)
+	}
+	execTarget(t, copied.databasePath(), `update usage_monitoring_account_daily_rollups_v1 set calls = calls + 1`)
+	after := historyConsumerAggregate(t, copied.databasePath())
+	if after.TotalCalls != before.TotalCalls+1 {
+		t.Fatalf("consumer calls = %d after the mutation, want %d", after.TotalCalls, before.TotalCalls+1)
+	}
+
+	report, err := Reconcile(context.Background(), copied.reconcileOptions())
+	if !errors.Is(err, ErrReconcileMismatch) {
+		t.Fatalf("reconcile error = %v, want the typed mismatch", err)
+	}
+	history := domainReport(t, report, ReconcileDomainHistory)
+	if history.SourceDays != 1 || history.ComparedDays != 1 {
+		t.Fatalf("history days = source %d compared %d, want the seeded day compared",
+			history.SourceDays, history.ComparedDays)
+	}
+	if !holdsMismatch(history.Mismatches, wantedMismatch{mismatchFieldCalls, "account=acct-1"}) {
+		t.Fatalf("history mismatches = %+v, want the calls difference the consumer reported", history.Mismatches)
+	}
+	if report.Recorded {
+		t.Fatal("a measured history change recorded the operation")
+	}
+	if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+		t.Fatalf("marked days = %v, want none", got)
+	}
+	assertNoScratch(t, copied.target)
+}
+
+// TestReconcileSeesTheHistoryTokenClassesTheConsumerReports reproduces review
+// F2: the account history comparison covered every token class except
+// reasoning_tokens and zero_token_calls, both of which the analytics aggregate
+// and the model statistics sum and report. Changing either one alone left every
+// compared cell equal, so reconcile certified a change the consumer shows.
+func TestReconcileSeesTheHistoryTokenClassesTheConsumerReports(t *testing.T) {
+	cases := []struct {
+		field string
+		read  func(usagemonitoring.Aggregate) int64
+	}{
+		{"reasoning_tokens", func(aggregate usagemonitoring.Aggregate) int64 { return aggregate.ReasoningTokens }},
+		{"zero_token_calls", func(aggregate usagemonitoring.Aggregate) int64 { return aggregate.ZeroTokenCalls }},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.field, func(t *testing.T) {
+			copied := newCopiedVolumeWith(t, seedHistoryOnTheStatsRevision)
+			before := historyConsumerAggregate(t, copied.databasePath())
+			execTarget(t, copied.databasePath(), fmt.Sprintf(
+				`update usage_monitoring_account_daily_rollups_v1 set %s = %s + 1`, testCase.field, testCase.field))
+			after := historyConsumerAggregate(t, copied.databasePath())
+			if testCase.read(after) != testCase.read(before)+1 {
+				t.Fatalf("consumer %s = %d after the mutation, want %d",
+					testCase.field, testCase.read(after), testCase.read(before)+1)
+			}
+
+			report, err := Reconcile(context.Background(), copied.reconcileOptions())
+			if !errors.Is(err, ErrReconcileMismatch) {
+				t.Fatalf("reconcile error = %v, want the typed mismatch", err)
+			}
+			history := domainReport(t, report, ReconcileDomainHistory)
+			if !holdsMismatch(history.Mismatches, wantedMismatch{testCase.field, "account=acct-1"}) {
+				t.Fatalf("history mismatches = %+v, want the %s difference the consumer reported",
+					history.Mismatches, testCase.field)
+			}
+			if report.Recorded {
+				t.Fatal("a measured history change recorded the operation")
+			}
+			assertNoScratch(t, copied.target)
+		})
 	}
 }
 

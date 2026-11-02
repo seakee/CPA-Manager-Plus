@@ -332,116 +332,6 @@ func copyReadySource(t *testing.T) string {
 	return root
 }
 
-// reconcileRoots returns a v2 data root and a backup destination with every
-// symlink resolved: the bundle verifier refuses a path below a symbolic link,
-// and every macOS temporary directory is one.
-func reconcileRoots(t *testing.T) (string, string) {
-	t.Helper()
-	target, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("resolve the v2 data root: %v", err)
-	}
-	bundle, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatalf("resolve the backup destination: %v", err)
-	}
-	return target, filepath.Join(bundle, "backup")
-}
-
-func TestReconcileReportsTheCopiedStoreAndRecordsTheStage(t *testing.T) {
-	source := copyReadySource(t)
-	target, bundle := reconcileRoots(t)
-	if code, _, stderr := run(t, "run", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target, "--bundle", bundle); code != 0 {
-		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
-	}
-
-	code, stdout, stderr := run(t, "reconcile", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target, "--bundle", bundle)
-	if code != 0 {
-		t.Fatalf("reconcile exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
-	}
-	var output reconcileOutput
-	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
-		t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
-	}
-	if output.Preflight == nil || !output.Preflight.Ready {
-		t.Fatalf("preflight = %+v, want a ready report", output.Preflight)
-	}
-	if output.Report == nil || !output.Report.Recorded {
-		t.Fatalf("reconcile output = %+v, want a recorded report", output)
-	}
-	if output.Report.Stage != model.UpgradeStageReconcile {
-		t.Fatalf("stage = %q, want %q", output.Report.Stage, model.UpgradeStageReconcile)
-	}
-	if len(output.Report.IncompleteDays) != 0 {
-		t.Fatalf("incomplete days = %+v, want none", output.Report.IncompleteDays)
-	}
-}
-
-func TestReconcileExitsOneOnAnUnacknowledgedMismatch(t *testing.T) {
-	source := copyReadySource(t)
-	target, bundle := reconcileRoots(t)
-	if code, _, stderr := run(t, "run", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target, "--bundle", bundle); code != 0 {
-		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
-	}
-	// A token total that no longer matches the source: the day has to be
-	// acknowledged before anything may be marked.
-	db, err := sql.Open("sqlite", filepath.Join(target, "usage.sqlite"))
-	if err != nil {
-		t.Fatalf("open the copied store: %v", err)
-	}
-	if _, err := db.Exec(`update usage_events set total_tokens = total_tokens + 1`); err != nil {
-		_ = db.Close()
-		t.Fatalf("change one token total: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close the copied store: %v", err)
-	}
-
-	code, stdout, stderr := run(t, "reconcile", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target, "--bundle", bundle)
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1; stderr: %s; stdout: %s", code, stderr, stdout)
-	}
-	var output reconcileOutput
-	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
-		t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
-	}
-	if output.ErrorCode != string(upgradeservice.UpgradeErrorReconcileMismatch) {
-		t.Fatalf("error code = %q, want %q", output.ErrorCode, upgradeservice.UpgradeErrorReconcileMismatch)
-	}
-	if output.Report == nil || output.Report.Recorded || len(output.Report.UnacknowledgedDays) != 1 {
-		t.Fatalf("reconcile output = %+v, want one unacknowledged day and no record", output)
-	}
-
-	// Acknowledging the reported day marks it and completes the step.
-	day := output.Report.UnacknowledgedDays[0]
-	code, stdout, stderr = run(t, "reconcile", "--json", "--source-version", bootstrap.PlannedDirectRelease, "--legacy", source, "--target", target,
-		"--bundle", bundle, "--acknowledge", day)
-	if code != 0 {
-		t.Fatalf("acknowledged exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
-	}
-	var acknowledged reconcileOutput
-	if err := json.Unmarshal([]byte(stdout), &acknowledged); err != nil {
-		t.Fatalf("decode acknowledged output: %v; output: %s", err, stdout)
-	}
-	if acknowledged.Report == nil || !acknowledged.Report.Recorded ||
-		acknowledged.Report.NewlyMarkedDays != 1 ||
-		acknowledged.Report.IncompleteDays[0].Day != day {
-		t.Fatalf("acknowledged reconcile = %+v, want the day marked once", acknowledged.Report)
-	}
-}
-
-func TestReconcileUsageErrors(t *testing.T) {
-	if code, _, _ := run(t, "reconcile"); code != 2 {
-		t.Fatalf("missing --legacy exit code = %d, want 2", code)
-	}
-	if code, _, _ := run(t, "reconcile", "--legacy", t.TempDir(), "extra"); code != 2 {
-		t.Fatalf("positional argument exit code = %d, want 2", code)
-	}
-	if code, _, _ := run(t, "reconcile", "--legacy", filepath.Join(t.TempDir(), "missing")); code != 2 {
-		t.Fatalf("missing source exit code = %d, want 2", code)
-	}
-}
-
 func TestPreflightBlocksWithoutADeclaredSourceVersion(t *testing.T) {
 	root := readySource(t)
 	code, stdout, stderr := run(t, "preflight", "--legacy", root, "--target-dir", t.TempDir(), "--json")
@@ -1152,6 +1042,268 @@ func TestRunRefusesABlockedSourceAndWritesNothing(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("blocked run wrote %v into the v2 data root", entries)
+	}
+}
+
+// reconcileRoots returns a v2 data root and a backup destination with every
+// symlink resolved: the bundle verifier refuses a path below a symbolic link,
+// and every macOS temporary directory is one.
+func reconcileRoots(t *testing.T) (string, string) {
+	t.Helper()
+	target, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve the v2 data root: %v", err)
+	}
+	bundle, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve the backup destination: %v", err)
+	}
+	return target, filepath.Join(bundle, "backup")
+}
+
+func TestReconcileReportsTheCopiedStoreAndRecordsTheStage(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("reconcile exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
+	}
+	if output.Preflight == nil || !output.Preflight.Ready {
+		t.Fatalf("preflight = %+v, want a ready report", output.Preflight)
+	}
+	if output.Report == nil || !output.Report.Recorded {
+		t.Fatalf("reconcile output = %+v, want a recorded report", output)
+	}
+	if output.Report.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("stage = %q, want %q", output.Report.Stage, model.UpgradeStageReconcile)
+	}
+	if len(output.Report.IncompleteDays) != 0 {
+		t.Fatalf("incomplete days = %+v, want none", output.Report.IncompleteDays)
+	}
+	// The fixture source holds the retained event and the derived/coverage
+	// tables with no rows of their own. A table both sides hold is established
+	// even with no source day — there is nothing to lose — while a table the
+	// source does not hold is never recorded, so this is the whole set the step
+	// can claim it compared.
+	want := []string{
+		model.UpgradeDomainSourceCopy,
+		model.UpgradeDomainRetainedProjection,
+		model.UpgradeDomainPricing,
+		model.UpgradeDomainCoverage,
+	}
+	if !reflect.DeepEqual(output.Report.DomainsDone, want) {
+		t.Fatalf("domains done = %v, want %v", output.Report.DomainsDone, want)
+	}
+}
+
+func TestReconcileExitsOneOnAnUnacknowledgedMismatch(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	// A token total that no longer matches the source: the day has to be
+	// acknowledged before anything may be marked.
+	db, err := sql.Open("sqlite", filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the copied store: %v", err)
+	}
+	if _, err := db.Exec(`update usage_events set total_tokens = total_tokens + 1`); err != nil {
+		_ = db.Close()
+		t.Fatalf("change one token total: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the copied store: %v", err)
+	}
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorReconcileMismatch) {
+		t.Fatalf("error code = %q, want %q", output.ErrorCode, upgradeservice.UpgradeErrorReconcileMismatch)
+	}
+	if output.Report == nil || output.Report.Recorded || len(output.Report.UnacknowledgedDays) != 1 {
+		t.Fatalf("reconcile output = %+v, want one unacknowledged day and no record", output)
+	}
+
+	// Acknowledging the reported day marks it and completes the step.
+	day := output.Report.UnacknowledgedDays[0]
+	code, stdout, stderr = run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle, "--acknowledge", day)
+	if code != 0 {
+		t.Fatalf("acknowledged exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var acknowledged reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &acknowledged); err != nil {
+		t.Fatalf("decode acknowledged output: %v; output: %s", err, stdout)
+	}
+	if acknowledged.Report == nil || !acknowledged.Report.Recorded ||
+		acknowledged.Report.NewlyMarkedDays != 1 ||
+		acknowledged.Report.IncompleteDays[0].Day != day {
+		t.Fatalf("acknowledged reconcile = %+v, want the day marked once", acknowledged.Report)
+	}
+}
+
+// TestReconcileRefusesAStoreAnotherProcessHolds reproduces review M3/P5 at the
+// CLI: a v2 data root another owner had locked was written anyway, because the
+// command took no lock at all.
+func TestReconcileRefusesAStoreAnotherProcessHolds(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	holder, err := processlock.Acquire(filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("take the v2 data-root lock as another owner: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle)
+	if code != 1 {
+		t.Fatalf("reconcile exit code = %d, want 1; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; stderr: %s; output: %s", err, stderr, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorTargetLocked) {
+		t.Fatalf("error code = %q, want %q; output: %s", output.ErrorCode, upgradeservice.UpgradeErrorTargetLocked, stdout)
+	}
+	if output.Report != nil && output.Report.Recorded {
+		t.Fatalf("reconcile recorded under another owner's lock: %+v", output.Report)
+	}
+	if code, _, stdout := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite")); code != 0 {
+		t.Fatalf("status exit code = %d; stdout: %s", code, stdout)
+	}
+}
+
+// TestReconcileKeepsAChangedSourceRetryable pins the contract table's split: a
+// source that moved is retryable (exit 2, upgrade_source_changed), while a
+// refusal about the store or a day is exit 1.
+func TestReconcileKeepsAChangedSourceRetryable(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the 1.x source: %v", err)
+	}
+	if _, err := db.Exec(`insert into settings (key, value, updated_at_ms) values ('drifted', '1', 1)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("drift the 1.x source: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the 1.x source: %v", err)
+	}
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle)
+	if code != 2 {
+		t.Fatalf("reconcile exit code = %d, want the retryable 2; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; stderr: %s; output: %s", err, stderr, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorSourceChanged) {
+		t.Fatalf("error code = %q, want %q; output: %s", output.ErrorCode, upgradeservice.UpgradeErrorSourceChanged, stdout)
+	}
+}
+
+// TestReconcileTakesTheSourceFenceReadOnly proves the reconcile step opens the
+// 1.x source for its ownership lock without write access: the marker belongs to
+// the stopped source, and a source preserved on a read-only mount must still
+// prove exclusivity. The check is the marker's own mode — an O_RDWR open of a
+// 0400 file fails for its owner, so this run could not complete through the old
+// descriptor. A read-only mount itself (EROFS) is only qualified on Linux; the
+// Darwin test host has no such mount.
+func TestReconcileTakesTheSourceFenceReadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not restrict root")
+	}
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	marker := filepath.Join(source, "usage.sqlite.manager.lock")
+	if err := os.Chmod(marker, 0o400); err != nil {
+		t.Fatalf("make the source fence read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+	before := treeDigests(t, source)
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("reconcile exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the reconciliation changed the source volume: %v -> %v", before, after)
+	}
+}
+
+// TestReconcileRefusesATargetInsideTheSourceBeforeItTouchesIt reproduces review
+// F3: the CLI took the v2 data-root fence before the service rejected a target
+// inside the source, so the fence created the child directory and its marker
+// inside the source tree it promises not to touch. That new entry also entered
+// the source fingerprint, so the next run with a correct target refused with
+// upgrade_source_changed until the child was removed by hand.
+func TestReconcileRefusesATargetInsideTheSourceBeforeItTouchesIt(t *testing.T) {
+	source := readySource(t)
+	before := treeDigests(t, source)
+	child := filepath.Join(source, "new-child")
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err := Run(context.Background(), []string{"reconcile", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", child}, stdout, stderr)
+	if err == nil {
+		t.Fatalf("reconcile succeeded, want a refusal; stdout: %s", stdout)
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Fatalf("reconcile exit code = %d, want the usage 2; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(err.Error(), "must not contain each other") {
+		t.Fatalf("refusal %q does not name the containment rule", err)
+	}
+	if _, statErr := os.Stat(child); !os.IsNotExist(statErr) {
+		t.Fatalf("the refused run created the target inside the source: %v", statErr)
+	}
+	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the refused run changed the source volume: %v -> %v", before, after)
+	}
+}
+
+func TestReconcileUsageErrors(t *testing.T) {
+	if code, _, _ := run(t, "reconcile"); code != 2 {
+		t.Fatalf("missing --legacy exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "reconcile", "--legacy", t.TempDir(), "extra"); code != 2 {
+		t.Fatalf("positional argument exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "reconcile", "--legacy", filepath.Join(t.TempDir(), "missing")); code != 2 {
+		t.Fatalf("missing source exit code = %d, want 2", code)
 	}
 }
 

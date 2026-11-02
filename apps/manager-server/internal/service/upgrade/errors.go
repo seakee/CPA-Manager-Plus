@@ -31,6 +31,10 @@ const (
 	// creates, backs up, restores, migrates or records anything. Stop the
 	// process and rerun; nothing this run intended was written.
 	UpgradeErrorV2Running UpgradeErrorCode = "upgrade_copy_in_v2_running"
+	// UpgradeErrorTargetLocked reports that another process holds the v2
+	// data-root lock, so this run cannot write the store. Nothing was compared
+	// and nothing was marked.
+	UpgradeErrorTargetLocked UpgradeErrorCode = "upgrade_target_locked"
 	// UpgradeErrorReconcileMismatch reports that the copied-in store and the 1.x
 	// source disagree, or that the source can never complete a day again, and
 	// the operator has not acknowledged those days. Nothing was marked and the
@@ -42,6 +46,20 @@ const (
 	// acknowledgement can waive it. Nothing was marked and the operation row did
 	// not advance.
 	UpgradeErrorReconcileTargetIncomplete UpgradeErrorCode = "upgrade_reconcile_target_incomplete"
+	// UpgradeErrorReconcileNotCopiedIn reports that the v2 data root holds no
+	// recorded copy-in, so there is nothing to reconcile against. Nothing was
+	// compared and nothing was marked.
+	UpgradeErrorReconcileNotCopiedIn UpgradeErrorCode = "upgrade_reconcile_not_copied_in"
+	// UpgradeErrorReconcileStageClosed reports that the recorded operation
+	// already moved past the reconcile step, or a rollback closed it, so this
+	// step could never record its result. Nothing was compared and nothing was
+	// marked.
+	UpgradeErrorReconcileStageClosed UpgradeErrorCode = "upgrade_reconcile_stage_closed"
+	// UpgradeErrorReconcileRecordIncomplete reports that the recorded copy-in
+	// does not name the source fingerprint it copied, so the 1.x volume cannot be
+	// proven to be the one that was copied. Nothing was compared and nothing was
+	// marked.
+	UpgradeErrorReconcileRecordIncomplete UpgradeErrorCode = "upgrade_reconcile_record_incomplete"
 	// UpgradeErrorReconcileNothingCompared reports that the run established no
 	// operation domain at all: the 1.x source holds none of the compared tables,
 	// so nothing was compared. A run without a comparison has no result to
@@ -145,8 +163,12 @@ var (
 	ErrSourceChanged             = &UpgradeError{Code: UpgradeErrorSourceChanged}
 	ErrTargetConflict            = &UpgradeError{Code: UpgradeErrorTargetConflict}
 	ErrV2Running                 = &UpgradeError{Code: UpgradeErrorV2Running}
+	ErrTargetLocked              = &UpgradeError{Code: UpgradeErrorTargetLocked}
 	ErrReconcileMismatch         = &UpgradeError{Code: UpgradeErrorReconcileMismatch}
 	ErrReconcileTargetIncomplete = &UpgradeError{Code: UpgradeErrorReconcileTargetIncomplete}
+	ErrReconcileNotCopiedIn      = &UpgradeError{Code: UpgradeErrorReconcileNotCopiedIn}
+	ErrReconcileStageClosed      = &UpgradeError{Code: UpgradeErrorReconcileStageClosed}
+	ErrReconcileRecordIncomplete = &UpgradeError{Code: UpgradeErrorReconcileRecordIncomplete}
 	ErrReconcileNothingCompared  = &UpgradeError{Code: UpgradeErrorReconcileNothingCompared}
 
 	ErrRollbackNotApplicable = &UpgradeError{Code: UpgradeErrorRollbackNotApplicable}
@@ -167,6 +189,13 @@ var (
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {
 	return &UpgradeError{Code: code, Message: message, err: err}
+}
+
+// CodedError builds a typed failure for a refusal the command layer has to
+// report itself, such as a lock another process holds. The code reaches the
+// CLI's JSON errorCode and its exit code through UpgradeErrorCodeOf.
+func CodedError(code UpgradeErrorCode, message string, err error) error {
+	return newUpgradeError(code, message, err)
 }
 
 // unresumable reports a v2 data root a copy-in may not continue from. The

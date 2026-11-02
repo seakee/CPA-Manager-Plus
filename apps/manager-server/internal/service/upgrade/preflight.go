@@ -126,6 +126,11 @@ type Options struct {
 	// Reconcile also refuses one that is, sits inside, or contains the 1.x
 	// source root: the transient copy must never land in a tree that is supposed
 	// to stay untouched or that will receive the upgrade.
+	//
+	// Reconcile reads the source through the same snapshot and works in
+	// <ScratchDir>/.upgrade-reconcile (the v2 data root when this is unset), so
+	// the directory named here is never itself removed. The named directory must
+	// not be, sit inside, or contain the 1.x source root.
 	ScratchDir string
 	// TargetDir is the directory on the volume that will receive the upgrade
 	// copy. The disk probe measures free space there. Empty probes the scratch
@@ -144,9 +149,14 @@ type Options struct {
 	// BundleDir is the backup destination. CopyIn only; an existing verified
 	// bundle is reused instead of recreated.
 	BundleDir string
-	// Lock is the caller's held 1.x ownership fence. CopyIn requires the lock
-	// bound to the source database; Preflight acquires its own.
+	// Lock is the caller's held 1.x ownership fence. CopyIn and Reconcile
+	// require the lock bound to the source database; Preflight acquires its own.
 	Lock *processlock.Lock
+	// TargetLock is the caller's held v2 data-root process lock, bound to the
+	// store under TargetRoot. Reconcile requires it for the whole run: the step
+	// writes the store, and a live Manager or a second reconciliation must not
+	// share it. CopyIn does not use it.
+	TargetLock *processlock.Lock
 	// Acknowledged lists the UTC days (YYYY-MM-DD) the operator explicitly
 	// accepts as permanently incomplete. Reconcile only.
 	Acknowledged []string

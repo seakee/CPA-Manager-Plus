@@ -416,6 +416,27 @@ func rejectOverlap(sourceRoot, targetRoot, bundleDir string) error {
 	return nil
 }
 
+// RefuseOverlappingRoots refuses a 1.x source, a v2 data root and a backup
+// destination where one contains another. It resolves the three the way
+// Reconcile does but reads no content and creates nothing, so a caller can
+// refuse a mistaken target before it takes a fence or materializes a directory
+// and marker inside the source tree it promises not to touch.
+func RefuseOverlappingRoots(sourceRoot, targetRoot, bundleDir string) error {
+	absoluteSource, err := filepath.Abs(sourceRoot)
+	if err != nil {
+		return fmt.Errorf("resolve the 1.x source root: %w", err)
+	}
+	absoluteTarget, err := filepath.Abs(targetRoot)
+	if err != nil {
+		return fmt.Errorf("resolve the v2 data root: %w", err)
+	}
+	absoluteBundle, err := filepath.Abs(bundleDir)
+	if err != nil {
+		return fmt.Errorf("resolve the backup destination: %w", err)
+	}
+	return rejectOverlap(canonicalPath(absoluteSource), canonicalPath(absoluteTarget), canonicalPath(absoluteBundle))
+}
+
 // sourceBundleLayout describes the 1.x data volume for maintenancebundle. The
 // archive root is required: a 1.x volume without it is not a complete source.
 func sourceBundleLayout(root string) maintenancebundle.Layout {
@@ -432,12 +453,21 @@ func sourceBundleLayout(root string) maintenancebundle.Layout {
 // requireSourceLock proves the caller's fence is the one for this database, so
 // a lock taken for another path can never authorize this copy.
 func requireSourceLock(lock *processlock.Lock, databasePath string) error {
+	return requireLock(lock, databasePath, "1.x source database")
+}
+
+// requireLock proves the caller's held fence belongs to this database and is
+// still valid, so a lock taken for another path can never authorize a write.
+// Every offline writer holds a processlock on the store it writes; the role
+// names which one, because the same fence guards the 1.x source and the v2 data
+// root in different steps.
+func requireLock(lock *processlock.Lock, databasePath, role string) error {
 	resolved := databasePath
 	if dir, err := filepath.EvalSymlinks(filepath.Dir(databasePath)); err == nil {
 		resolved = filepath.Join(dir, filepath.Base(databasePath))
 	}
 	if filepath.Clean(resolved) != filepath.Clean(lock.DatabasePath()) {
-		return errors.New("the held ownership lock does not belong to the 1.x source database")
+		return fmt.Errorf("the held ownership lock does not belong to the %s", role)
 	}
 	return lock.Validate()
 }

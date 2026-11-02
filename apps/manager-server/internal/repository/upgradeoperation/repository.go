@@ -426,26 +426,12 @@ func nullString(value string) any {
 	return value
 }
 
-// RecordReconciliation stores the reconciliation report on the single row
-// without rebuilding it: Put would clear the provenance a completed operation
-// must keep carrying, so this is the only writer for this column. A row must
-// already exist, because a reconciliation only ever describes a recorded
-// copy-in.
-func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMessage) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := RecordReconciliationTx(ctx, tx, report); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 // RecordReconciliationTx stores the report inside the caller's transaction, so
 // the evidence commits together with the marks it explains and the stage it
-// authorizes.
+// authorizes. The repository owns updated_at_ms here too: it is recomputed from
+// the stored row with nextUpdatedAtMS, and the row is validated before it is
+// written, in this transaction, so a clock that ran ahead cannot make the next
+// reader reject the row.
 func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) error {
 	if len(report) == 0 {
 		report = json.RawMessage("{}")
@@ -454,8 +440,20 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 	if err := json.Unmarshal(report, &object); err != nil {
 		return fmt.Errorf("%w: reconciliation must be a JSON object", ErrInvalidRow)
 	}
+	row := tx.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`)
+	current, found, err := scanOperation(row)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(time.Now().UnixMilli(), current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
 	result, err := tx.ExecContext(ctx, `update `+tableName+`
-		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(report), time.Now().UnixMilli())
+		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(report), current.UpdatedAtMS)
 	if err != nil {
 		return err
 	}
@@ -467,6 +465,22 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
 	}
 	return nil
+}
+
+// RecordReconciliation stores the report in its own transaction. Reconcile calls
+// the Tx variant so the evidence commits with the marks and the stage it
+// authorizes; this wrapper keeps the single-statement helper available to
+// callers that hold no transaction of their own.
+func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMessage) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := RecordReconciliationTx(ctx, tx, report); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // requireVerdictEvidence keeps the terminal verdict and its observation

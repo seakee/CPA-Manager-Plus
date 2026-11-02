@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -446,5 +447,46 @@ func TestResponsesCarryNoSecretOrHashField(t *testing.T) {
 		if strings.Contains(lowered, forbidden) {
 			t.Fatalf("usage response leaks %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+// TestDaysWithinKeepsAYearZeroMark reproduces review F4 for the Key workspace:
+// the mark writer accepts 0000-12-31, but the calendar clamp started at
+// 0001-01-01, so a key window that covered that day reported complete while the
+// persisted mark existed.
+func TestDaysWithinKeepsAYearZeroMark(t *testing.T) {
+	marks := []ports.IncompleteDay{{Day: "0000-12-31", Reason: "reconcile_mismatch"}}
+	start := time.Date(0, time.December, 31, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if got := daysWithin(marks, start, start+utcDayMilliseconds); len(got) != 1 || got[0].Day != "0000-12-31" {
+		t.Fatalf("daysWithin(year zero) = %+v, want the persisted mark", got)
+	}
+	if got := daysWithin(marks, math.MinInt64, math.MaxInt64); len(got) != 1 {
+		t.Fatalf("daysWithin(whole range) = %+v, want the persisted mark", got)
+	}
+	// The clamp is still a lower bound, not a blanket: a window that starts
+	// after year zero does not report the year-zero mark.
+	if got := daysWithin(marks, 1, math.MaxInt64); len(got) != 0 {
+		t.Fatalf("daysWithin(after year zero) = %+v, want none", got)
+	}
+}
+
+// TestDaysWithinKeepsMarksWithAnUpperBoundAtTheLimitOfInt64 reproduces review
+// L4 for the Key workspace: the same day arithmetic hid every mark from a
+// window that ended near the largest int64.
+func TestDaysWithinKeepsMarksWithAnUpperBoundAtTheLimitOfInt64(t *testing.T) {
+	marks := []ports.IncompleteDay{{Day: "2026-03-01", Reason: "reconcile_mismatch"}}
+	for _, upper := range []int64{1 << 42, math.MaxInt64 - utcDayMilliseconds, math.MaxInt64} {
+		if got := daysWithin(marks, 1, upper); len(got) != 1 || got[0].Day != "2026-03-01" {
+			t.Fatalf("daysWithin(1, %d) = %+v, want the mark", upper, got)
+		}
+	}
+	// The window stays half-open, and a window that starts after the last day
+	// the stored form can hold reports nothing.
+	start := time.Date(2026, time.March, 2, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if got := daysWithin(marks, start, math.MaxInt64); len(got) != 0 {
+		t.Fatalf("daysWithin after the mark = %+v, want none", got)
+	}
+	if got := daysWithin(marks, 1<<60, math.MaxInt64); len(got) != 0 {
+		t.Fatalf("daysWithin past the last stored day = %+v, want none", got)
 	}
 }

@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +21,7 @@ import (
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/pricing"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
 // Reconcile compares a copied-in v2 store against the stopped 1.x source it was
@@ -79,12 +78,22 @@ const (
 	mismatchFieldThreshold               = "context_threshold_tokens"
 	mismatchFieldAPIKeyHash              = "api_key_hash"
 	mismatchFieldProvider                = "provider"
+	mismatchFieldAuthProviderSnapshot    = "auth_provider_snapshot"
+	mismatchFieldAuthAccountIDSnapshot   = "auth_account_id_snapshot"
+	mismatchFieldAuthIndex               = "auth_index"
+	mismatchFieldSource                  = "source"
+	mismatchFieldSourceHash              = "source_hash"
 	mismatchFieldAccountSnapshot         = "account_snapshot"
 	mismatchFieldAuthLabelSnapshot       = "auth_label_snapshot"
 	mismatchFieldAuthFileSnapshot        = "auth_file_snapshot"
 	mismatchFieldExecutorType            = "executor_type"
+	mismatchFieldLastSeen                = "last_seen_ms"
+	mismatchFieldLatencySum              = "latency_sum_ms"
+	mismatchFieldLatencySamples          = "latency_samples"
 	mismatchFieldInputTokens             = "input_tokens"
 	mismatchFieldOutputTokens            = "output_tokens"
+	mismatchFieldReasoningTokens         = "reasoning_tokens"
+	mismatchFieldZeroTokenCalls          = "zero_token_calls"
 	mismatchFieldCachedTokens            = "cached_tokens"
 	mismatchFieldCacheReadTokens         = "cache_read_tokens"
 	mismatchFieldCacheCreationTokens     = "cache_creation_tokens"
@@ -248,13 +257,21 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 	paths := newTargetPaths(targetRoot)
+	// The step reads a stopped 1.x source and writes the v2 store, so the caller
+	// must hold both fences for the whole run. Refusing here keeps a programmatic
+	// caller from marking a store a live Manager or a second reconciliation is
+	// writing at the same time.
+	if err := requireReconcileLocks(options, sourceRoot, paths); err != nil {
+		return ReconcileReport{}, err
+	}
 
 	recorded, found, err := readRecordedCopyIn(ctx, paths.Database)
 	if err != nil {
 		return ReconcileReport{}, err
 	}
 	if !found {
-		return ReconcileReport{}, errors.New("the v2 data root holds no recorded copy-in, so there is nothing to reconcile against")
+		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileNotCopiedIn,
+			"the v2 data root holds no recorded copy-in, so there is nothing to reconcile against; nothing was compared and nothing was marked", nil)
 	}
 	// The step may only run where it could still record its result. A store the
 	// operation already carried past "reconcile", or one a rollback closed, can
@@ -263,23 +280,23 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	// record. This is the same monotonicity rule Advance enforces, asked before
 	// anything is read or written.
 	if recorded.Stage != "" && !recorded.Stage.CanAdvanceTo(model.UpgradeStageReconcile) {
-		return ReconcileReport{}, fmt.Errorf(
+		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileStageClosed, fmt.Sprintf(
 			"the recorded operation is at stage %q, which cannot enter the reconcile step; nothing was compared and nothing was marked",
-			recorded.Stage)
+			recorded.Stage), nil)
 	}
 	if err := verifyCompletedTarget(ctx, paths, bundleDir, recorded); err != nil {
 		return ReconcileReport{}, err
 	}
 
-	beforeFingerprint, err := fingerprintSource(sourceRoot)
+	before, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return ReconcileReport{}, err
 	}
-	before := beforeFingerprint.Digest
 	if strings.TrimSpace(recorded.SourceFingerprintAfter) == "" {
-		return ReconcileReport{}, errors.New("the recorded copy-in names no source fingerprint, so the 1.x source cannot be proven to be the one it copied")
+		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileRecordIncomplete,
+			"the recorded copy-in names no source fingerprint, so the 1.x source cannot be proven to be the one it copied; nothing was compared and nothing was marked", nil)
 	}
-	if before != recorded.SourceFingerprintAfter {
+	if before.Digest != recorded.SourceFingerprintAfter {
 		return ReconcileReport{}, newUpgradeError(UpgradeErrorSourceChanged,
 			"the 1.x source is not the volume the recorded copy-in copied; nothing was compared and nothing was marked", nil)
 	}
@@ -290,22 +307,30 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	}
 	// The copy of the 1.x database is scratch, never evidence: whoever leaves
 	// this function, the area is gone and only the sanitized report survives.
+	// The snapshot makes its own private directory below this one and removes
+	// it on close; this removes the tool-owned directory on every return path.
+	if err := os.RemoveAll(scratch); err != nil {
+		return ReconcileReport{}, fmt.Errorf("clear the reconciliation scratch area: %w", err)
+	}
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		return ReconcileReport{}, fmt.Errorf("create the reconciliation scratch area: %w", err)
+	}
 	defer func() { _ = os.RemoveAll(scratch) }()
 	domains, parityDays, compareErr := compareStores(ctx, sourceRoot, paths.Database, scratch)
 	if compareErr != nil {
-		return ReconcileReport{ReconcileEvidence: newReconcileEvidence(before, domains, parityDays)}, compareErr
+		return ReconcileReport{ReconcileEvidence: newReconcileEvidence(before.Digest, domains, parityDays)}, compareErr
 	}
 
-	afterFingerprint, err := fingerprintSource(sourceRoot)
+	after, err := fingerprintSource(sourceRoot)
 	if err != nil {
 		return ReconcileReport{}, err
 	}
-	if afterFingerprint != beforeFingerprint {
+	if after != before {
 		return ReconcileReport{}, newUpgradeError(UpgradeErrorSourceChanged,
 			"the 1.x source changed while it was being compared; nothing was compared further and nothing was marked", nil)
 	}
 
-	evidence := newReconcileEvidence(before, domains, parityDays)
+	evidence := newReconcileEvidence(before.Digest, domains, parityDays)
 	// A run that established no operation domain compared nothing a result
 	// could describe: either the 1.x source holds none of the compared tables, or
 	// every table it holds was derived and cleared in the store, so not one day
@@ -317,14 +342,17 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{ReconcileEvidence: evidence}, newUpgradeError(UpgradeErrorReconcileNothingCompared,
 			"no compared domain could be established: this run compared no day of any domain, so nothing was marked and the operation did not advance", nil)
 	}
+	measured := measuredMismatchDays(domains)
+	derived := derivedLossDays(domains)
 	evidence.AcknowledgedDays, evidence.UnacknowledgedDays = decideAcknowledged(
-		unionDays(evidence.MismatchDays, parityDays), acknowledged, options.AcknowledgeParityGaps, parityDays)
+		unionDays(evidence.MismatchDays, parityDays), acknowledged, options.AcknowledgeParityGaps,
+		parityDays, unionDays(measured, derived))
 	if len(evidence.UnacknowledgedDays) > 0 {
 		return ReconcileReport{ReconcileEvidence: evidence}, newUpgradeError(UpgradeErrorReconcileMismatch,
 			fmt.Sprintf("%s must be acknowledged before they can be marked incomplete; nothing was marked: %s",
 				plural(len(evidence.UnacknowledgedDays), "day", "days"), strings.Join(evidence.UnacknowledgedDays, ", ")), nil)
 	}
-	evidence.IncompleteDays = incompleteDays(evidence.AcknowledgedDays, measuredMismatchDays(domains), derivedLossDays(domains))
+	evidence.IncompleteDays = incompleteDays(evidence.AcknowledgedDays, measured, derived)
 
 	operation, inserted, err := recordReconciliation(ctx, paths.Database, evidence, established)
 	if err != nil {
@@ -339,6 +367,27 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		UpdatedAtMS:       operation.UpdatedAtMS,
 	}, nil
 }
+
+// requireReconcileLocks proves the caller holds the two fences this step writes
+// under: the 1.x ownership lock for the source it reads and the v2 data-root
+// lock for the store it marks. A lock taken for another path is refused, and so
+// is a closed one: the fence has to be valid for the whole run, not just at the
+// moment it was taken.
+func requireReconcileLocks(options Options, sourceRoot string, paths targetPaths) error {
+	if err := requireLock(options.Lock, SourceDatabasePath(sourceRoot), "1.x source database"); err != nil {
+		return newUpgradeError(UpgradeErrorCode(CodeSourceBusy),
+			"the run does not hold the 1.x ownership lock of the source it compares; nothing was compared and nothing was marked", err)
+	}
+	if err := requireLock(options.TargetLock, paths.Database, "v2 data root"); err != nil {
+		return newUpgradeError(UpgradeErrorTargetLocked,
+			"the run does not hold the v2 data-root lock of the store it marks; nothing was compared and nothing was marked", err)
+	}
+	return nil
+}
+
+// TargetDatabasePath names the migrated store inside a v2 data root. The CLI
+// locks this path before a write, so the name is not duplicated there.
+func TargetDatabasePath(root string) string { return filepath.Join(root, databaseFileName) }
 
 // reconcileRoots resolves and fences the three roots. The 1.x volume is a
 // source, never a destination, so no root may contain another.
@@ -357,10 +406,7 @@ func reconcileRoots(options Options) (string, string, string, error) {
 			return "", "", "", err
 		}
 	}
-	canonicalSource := canonicalPath(sourceRoot)
-	canonicalTarget := canonicalPath(targetRoot)
-	canonicalBundle := canonicalPath(bundleDir)
-	if err := rejectOverlap(canonicalSource, canonicalTarget, canonicalBundle); err != nil {
+	if err := RefuseOverlappingRoots(sourceRoot, targetRoot, bundleDir); err != nil {
 		return "", "", "", err
 	}
 	return sourceRoot, targetRoot, bundleDir, nil
@@ -410,15 +456,28 @@ var ErrUsage = errors.New("invalid upgrade request")
 // compareStores reads both stores and returns the per-domain comparison plus
 // the days the 1.x source can never complete again.
 func compareStores(ctx context.Context, sourceRoot, targetDatabase, scratchRoot string) ([]ReconcileDomainReport, []string, error) {
-	snapshot, err := snapshotSourceDatabase(ctx, sourceRoot, scratchRoot)
+	// The source is read through the package's private snapshot: the database
+	// and its WAL sidecars are copied into the reconciliation scratch area, the
+	// source is digested before and after the copy, and only the copy is opened.
+	// Opening the original, even read-only, would create a WAL index beside it
+	// and change the fingerprint the copy-in recorded.
+	snapshot, err := OpenSnapshot(ctx, SourceDatabasePath(sourceRoot), scratchRoot)
 	if err != nil {
-		return nil, nil, err
+		if errors.Is(err, ErrSourceChanged) {
+			return nil, nil, newUpgradeError(UpgradeErrorSourceChanged,
+				"the 1.x source changed while its database was being copied into the reconciliation scratch area; nothing was compared and nothing was marked", err)
+		}
+		return nil, nil, fmt.Errorf("copy the 1.x database into the reconciliation scratch area: %w", err)
 	}
-	sourceDB, sourceTables, err := openScratchSnapshot(ctx, snapshot)
+	defer func() { _ = snapshot.Close() }()
+	sourceDB := snapshot.DB()
+	if err := quickCheckSource(ctx, sourceDB); err != nil {
+		return nil, nil, fmt.Errorf("read the copied 1.x database: %w", err)
+	}
+	sourceTables, err := readSourceSchema(ctx, sourceDB)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read the copied 1.x database: %w", err)
 	}
-	defer func() { _ = sourceDB.Close() }()
 	gaps, err := detectParityGaps(ctx, sourceDB, sourceTables)
 	if err != nil {
 		return nil, nil, fmt.Errorf("detect the parity gaps of the 1.x source: %w", err)
@@ -439,82 +498,6 @@ func compareStores(ctx context.Context, sourceRoot, targetDatabase, scratchRoot 
 	}
 	domains, err := compareObservations(source, target)
 	return domains, gaps.AffectedDates, err
-}
-
-// snapshotSourceDatabase copies the stopped 1.x database and its sidecars into
-// the scratch area. The copy is what gets read: opening the original, even
-// read-only, makes SQLite create a WAL index beside it and change the source.
-func snapshotSourceDatabase(ctx context.Context, sourceRoot, scratchRoot string) (string, error) {
-	if err := os.RemoveAll(scratchRoot); err != nil {
-		return "", fmt.Errorf("clear the reconciliation scratch area: %w", err)
-	}
-	if err := os.MkdirAll(scratchRoot, 0o700); err != nil {
-		return "", fmt.Errorf("create the reconciliation scratch area: %w", err)
-	}
-	for _, name := range []string{
-		databaseFileName,
-		databaseFileName + "-wal",
-		databaseFileName + "-shm",
-		databaseFileName + "-journal",
-	} {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		source := filepath.Join(sourceRoot, name)
-		info, statErr := os.Lstat(source)
-		if errors.Is(statErr, os.ErrNotExist) {
-			continue
-		}
-		if statErr != nil {
-			return "", fmt.Errorf("inspect the 1.x source member %s: %w", name, statErr)
-		}
-		if !info.Mode().IsRegular() {
-			return "", fmt.Errorf("the 1.x source member %s is not a regular file", name)
-		}
-		if err := copyRegularFile(source, filepath.Join(scratchRoot, name)); err != nil {
-			return "", fmt.Errorf("copy the 1.x source member %s into the scratch area: %w", name, err)
-		}
-	}
-	return filepath.Join(scratchRoot, databaseFileName), nil
-}
-
-func copyRegularFile(source, target string) error {
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		return err
-	}
-	return out.Close()
-}
-
-// openScratchSnapshot reads this step's own copy of the 1.x database. The copy
-// can carry a WAL, so it is opened read-write with query_only rather than
-// immutable: SQLite then joins the WAL, and any index it writes lands in the
-// scratch area this step removes.
-func openScratchSnapshot(ctx context.Context, path string) (*sql.DB, sourceSchema, error) {
-	return openSourceWith(ctx, path, scratchDataSourceName(path))
-}
-
-func scratchDataSourceName(path string) string {
-	uriPath := filepath.ToSlash(path)
-	if !strings.HasPrefix(uriPath, "/") {
-		uriPath = "/" + uriPath
-	}
-	dsn := &url.URL{Scheme: "file", Path: uriPath}
-	query := dsn.Query()
-	query.Set("mode", "rw")
-	query.Add("_pragma", "query_only(1)")
-	query.Add("_pragma", "busy_timeout(5000)")
-	dsn.RawQuery = query.Encode()
-	return dsn.String()
 }
 
 // sideObservation is one store read as a single snapshot. Every domain keeps the
@@ -544,14 +527,23 @@ func observeSide(ctx context.Context, db *sql.DB, schema sourceSchema) (sideObse
 			return observation, err
 		}
 	}
-	if schema.tables["usage_pricing_hourly_rollups_v1"] {
-		prices := map[string]model.ModelPrice{}
+	prices := map[string]model.ModelPrice{}
+	if schema.tables["usage_pricing_hourly_rollups_v1"] || schema.tables["usage_monitoring_account_daily_rollups_v1"] {
 		if schema.tables["model_prices"] {
 			if prices, err = modelprice.New(db).LoadAllTx(ctx, tx); err != nil {
 				return observation, fmt.Errorf("read the model prices: %w", err)
 			}
 		}
-		if observation.pricing, err = readPricingCells(ctx, tx, prices); err != nil {
+	}
+	// Both derived rollups carry the stats structure revision: the pricing read
+	// path selects it for its own table, and the account history read path
+	// selects it through usagemonitoring's statsReadState ->
+	// usagepricing.StructureRevision, which is exactly this string built from the
+	// store's own price table. Rows under any other revision are never read, so
+	// comparing them would certify numbers no consumer can show.
+	statsRevision := usageidentity.PricingStructureRevision(model.ModelPriceStructureRevision(prices))
+	if schema.tables["usage_pricing_hourly_rollups_v1"] {
+		if observation.pricing, err = readPricingCells(ctx, tx, prices, statsRevision); err != nil {
 			return observation, err
 		}
 	}
@@ -561,7 +553,7 @@ func observeSide(ctx context.Context, db *sql.DB, schema sourceSchema) (sideObse
 		}
 	}
 	if schema.tables["usage_monitoring_account_daily_rollups_v1"] {
-		if observation.history, err = readHistoryCells(ctx, tx); err != nil {
+		if observation.history, err = readHistoryCells(ctx, tx, statsRevision); err != nil {
 			return observation, err
 		}
 	}
@@ -613,25 +605,59 @@ type pricingCell struct {
 	costMicros        int64
 }
 
-// historyCellKey is one account history rollup: the hour bucket and the identity
-// columns the history read path exposes. The credential identity is part of it
-// because two accounts can run the same model under the same key with different
-// labels, files or executors, and a key that ignored them would let one row's
-// totals answer for another's.
+// historyCellKey is one account history rollup: the hour bucket and the whole
+// identity the store table keys on. It repeats the table's primary key (minus
+// the structure revision, which only the active one is read) because the read
+// path exposes each of these columns: two accounts can run the same model under
+// the same key with different labels, files, executors or auth metadata, and a
+// key that ignored them would let one row's totals answer for another's. Failed
+// is part of the key, so a success call is never compared against a failed one.
 type historyCellKey struct {
-	hourMS   int64
-	account  string
-	label    string
-	file     string
-	provider string
-	apiKey   string
-	executor string
-	model    string
+	hourMS       int64
+	account      string
+	label        string
+	provider     string
+	authProvider string
+	accountID    string
+	authIndex    string
+	source       string
+	sourceHash   string
+	file         string
+	apiKey       string
+	executor     string
+	model        string
+	billing      string
+	pricing      string
+	tier         string
+	threshold    int64
+	failed       int64
 }
 
+// historyCell is every value column the account history read path shows for one
+// row identity: the call count, each token class the rollout stores — including
+// the reasoning split and the zero-token call count the analytics aggregate and
+// the model statistics sum — and the latency and last-seen aggregates the
+// analytics response carries. Two rows of the same identity that trade input
+// for output tokens change the totals of nothing, so every class is compared on
+// its own.
 type historyCell struct {
-	calls  int64
-	tokens int64
+	calls             int64
+	input             int64
+	output            int64
+	reasoning         int64
+	zeroTokenCalls    int64
+	cached            int64
+	cacheRead         int64
+	cacheCreation     int64
+	longInput         int64
+	longOutput        int64
+	longCached        int64
+	longCacheRead     int64
+	longCacheCreation int64
+	tokens            int64
+	lastSeen          int64
+	latencySum        int64
+	latencySamples    int64
 }
 
 // coverageCell is one day of the deleted-coverage table, including the edges the
@@ -678,7 +704,7 @@ func readRetainedCells(ctx context.Context, tx *sql.Tx) (map[retainedCellKey]ret
 // readPricingCells reads every stored pricing rollup row with its token classes
 // and its cost. Cost is not stored: it is recomputed from each side's own price
 // table, which is exactly what makes a price change visible here.
-func readPricingCells(ctx context.Context, tx *sql.Tx, prices map[string]model.ModelPrice) (map[pricingCellKey]pricingCell, error) {
+func readPricingCells(ctx context.Context, tx *sql.Tx, prices map[string]model.ModelPrice, revision string) (map[pricingCellKey]pricingCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
 		bucket_ms,
 		model, billing_model, pricing_model, service_tier, context_threshold_tokens, failed,
@@ -688,7 +714,8 @@ func readPricingCells(ctx context.Context, tx *sql.Tx, prices map[string]model.M
 		sum(long_input_tokens), sum(long_output_tokens), sum(long_cached_tokens),
 		sum(long_cache_read_tokens), sum(long_cache_creation_tokens)
 		from usage_pricing_hourly_rollups_v1
-		group by bucket_ms, model, billing_model, pricing_model, service_tier, context_threshold_tokens, failed`)
+		where structure_revision = ?
+		group by bucket_ms, model, billing_model, pricing_model, service_tier, context_threshold_tokens, failed`, revision)
 	if err != nil {
 		return nil, fmt.Errorf("read the pricing rollups: %w", err)
 	}
@@ -753,18 +780,34 @@ func readCoverageCells(ctx context.Context, tx *sql.Tx) (map[string]coverageCell
 // raw column would return two groups that overwrite each other in the cell map.
 // The credential columns are coalesced because a 1.x-era table keeps its
 // original nullable shape, so a value the current schema requires can still be
-// absent in the copied source.
-func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]historyCell, error) {
+// absent in the copied source. Every token class, the call count and the
+// latency/last-seen aggregates are summed or maxed exactly as the analytics read
+// aggregates them, so a day that moved tokens between classes is visible.
+func readHistoryCells(ctx context.Context, tx *sql.Tx, revision string) (map[historyCellKey]historyCell, error) {
 	rows, err := tx.QueryContext(ctx, `select
 		bucket_ms,
-		account_snapshot, coalesce(auth_label_snapshot, ''), coalesce(auth_file_snapshot, ''),
-		provider, coalesce(api_key_hash, ''), coalesce(executor_type, ''), model,
+		account_snapshot, coalesce(auth_label_snapshot, ''), provider,
+		coalesce(auth_provider_snapshot, ''), coalesce(auth_account_id_snapshot, ''),
+		coalesce(auth_index, ''), coalesce(source, ''), coalesce(source_hash, ''),
+		coalesce(auth_file_snapshot, ''), coalesce(api_key_hash, ''),
+		coalesce(executor_type, ''), model, coalesce(billing_model, ''),
+		coalesce(pricing_model, ''), coalesce(service_tier, ''),
+		context_threshold_tokens, failed,
 		sum(calls),
-		sum(total_tokens)
+		sum(input_tokens), sum(output_tokens), sum(reasoning_tokens), sum(cached_tokens),
+		sum(cache_read_tokens), sum(cache_creation_tokens),
+		sum(long_input_tokens), sum(long_output_tokens), sum(long_cached_tokens),
+		sum(long_cache_read_tokens), sum(long_cache_creation_tokens),
+		sum(total_tokens), sum(zero_token_calls), max(last_seen_ms), sum(latency_sum_ms), sum(latency_samples)
 		from usage_monitoring_account_daily_rollups_v1
+		where structure_revision = ?
 		group by bucket_ms, account_snapshot, coalesce(auth_label_snapshot, ''),
-			coalesce(auth_file_snapshot, ''), provider, coalesce(api_key_hash, ''),
-			coalesce(executor_type, ''), model`)
+			provider, coalesce(auth_provider_snapshot, ''), coalesce(auth_account_id_snapshot, ''),
+			coalesce(auth_index, ''), coalesce(source, ''), coalesce(source_hash, ''),
+			coalesce(auth_file_snapshot, ''), coalesce(api_key_hash, ''),
+			coalesce(executor_type, ''), model, coalesce(billing_model, ''),
+			coalesce(pricing_model, ''), coalesce(service_tier, ''),
+			context_threshold_tokens, failed`, revision)
 	if err != nil {
 		return nil, fmt.Errorf("read the account history rollups: %w", err)
 	}
@@ -773,9 +816,16 @@ func readHistoryCells(ctx context.Context, tx *sql.Tx) (map[historyCellKey]histo
 	for rows.Next() {
 		var key historyCellKey
 		var cell historyCell
-		if err := rows.Scan(&key.hourMS, &key.account, &key.label, &key.file, &key.provider,
-			&key.apiKey, &key.executor, &key.model,
-			&cell.calls, &cell.tokens); err != nil {
+		if err := rows.Scan(&key.hourMS, &key.account, &key.label, &key.provider,
+			&key.authProvider, &key.accountID, &key.authIndex, &key.source, &key.sourceHash,
+			&key.file, &key.apiKey, &key.executor, &key.model, &key.billing,
+			&key.pricing, &key.tier, &key.threshold, &key.failed,
+			&cell.calls,
+			&cell.input, &cell.output, &cell.reasoning, &cell.cached,
+			&cell.cacheRead, &cell.cacheCreation,
+			&cell.longInput, &cell.longOutput, &cell.longCached,
+			&cell.longCacheRead, &cell.longCacheCreation,
+			&cell.tokens, &cell.zeroTokenCalls, &cell.lastSeen, &cell.latencySum, &cell.latencySamples); err != nil {
 			return nil, err
 		}
 		cells[key] = cell
@@ -811,22 +861,23 @@ func compareObservations(source, target sideObservation) ([]ReconcileDomainRepor
 	return domains, nil
 }
 
-// classifyDerivedLoss splits the days a cleared derived rollup lost by whether a
+// classifyDerivedLoss splits the days a derived rollup lost by whether a
 // rebuild could still read them. The rollup's rows are recomputed from the
 // retained event log, so a lost day is recoverable only when the store still
 // holds at least one retained event on that day; a day the store holds no such
-// event of has nothing to recompute it from and stays unwaivable. A domain that
-// is not a derived rollup, is not applicable, has no source day or was compared
-// on at least one day is left alone: this only decides the days a cleared
-// rollup lost. Nothing here rebuilds anything, so a recoverable day is still
-// marked; the split only decides which days an acknowledgement may waive.
+// event of has nothing to recompute it from and stays unwaivable. The split is
+// made day by day, never for the domain as a whole: a domain that lost one day
+// and compared another still has to answer for the lost day. A domain that is
+// not a derived rollup, is not applicable or has no source day is left alone.
+// Nothing here rebuilds anything, so a recoverable day is still marked; the
+// split only decides which days an acknowledgement may waive.
 func (r *ReconcileDomainReport) classifyDerivedLoss(retainedDays map[string][]retainedCellKey) {
-	if !reconcileDerivedDomains[r.Domain] || !r.Applicable || r.SourceDays == 0 || r.ComparedDays != 0 {
+	if !reconcileDerivedDomains[r.Domain] || !r.Applicable || r.SourceDays == 0 {
 		return
 	}
 	recoverable := []string{}
 	unrecoverable := []string{}
-	for _, day := range lostDerivedDays(*r) {
+	for _, day := range lostDays(*r) {
 		if len(retainedDays[day]) > 0 {
 			recoverable = append(recoverable, day)
 			continue
@@ -837,9 +888,10 @@ func (r *ReconcileDomainReport) classifyDerivedLoss(retainedDays map[string][]re
 	r.UnrecoverableDays = unrecoverable
 }
 
-// lostDerivedDays names the days a cleared derived rollup lost: every presence
-// mismatch that says the 1.x source holds the day and the store does not, sorted.
-func lostDerivedDays(report ReconcileDomainReport) []string {
+// lostDays names every day the 1.x source holds and the store does not: a
+// presence mismatch that says the day is in the source and absent from the
+// store, sorted. A day only the store holds is not lost data.
+func lostDays(report ReconcileDomainReport) []string {
 	days := []string{}
 	for _, mismatch := range report.Mismatches {
 		if mismatch.Field == mismatchFieldPresence && mismatch.Source == presenceValue(true) {
@@ -849,14 +901,16 @@ func lostDerivedDays(report ReconcileDomainReport) []string {
 	return unionDays(days, nil)
 }
 
-// targetIncompleteError reports a domain the 1.x source holds days of but the v2
-// store cannot show at all. That is lost data, not a measured disagreement, so
-// no acknowledgement may waive it. The one exception is a derived domain whose
-// table is still there: a cleared rollup is rebuildable from the retained
-// events, so its lost days are marked under their own reason and may be
-// acknowledged — but only the days the store still holds those events for. A day
-// with no retained support has nothing to rebuild it from, and a missing table
-// has no such way back at all, so both stay unwaivable.
+// targetIncompleteError reports a day, or a whole domain, the 1.x source holds
+// and the v2 store cannot show. That is lost data, not a measured disagreement,
+// so no acknowledgement may waive it, and the rule is per day: one lost day is
+// unwaivable while the rest of the domain compares. The one exception is a
+// derived rollup whose table is still there: its rows are rebuilt from the
+// retained events, so a lost day the store still holds those events for is
+// marked under its own reason and may be acknowledged. A derived day with no
+// retained support has nothing to rebuild it from, and a non-derived table
+// (retained events, deleted coverage) holds data that exists nowhere else, so
+// both stay unwaivable.
 func (r ReconcileDomainReport) targetIncompleteError() error {
 	if r.SourceDays == 0 {
 		return nil
@@ -872,6 +926,15 @@ func (r ReconcileDomainReport) targetIncompleteError() error {
 			"the cleared %s rollup lost %s the v2 store holds no retained events for, so nothing can rebuild %s and no acknowledgement can waive %s: %s; nothing was compared and nothing was marked",
 			r.Table, plural(count, "day", "days"), plural(count, "it", "them"), plural(count, "it", "them"),
 			strings.Join(r.UnrecoverableDays, ", ")), nil)
+	}
+	if !reconcileDerivedDomains[r.Domain] {
+		if lost := lostDays(r); len(lost) > 0 {
+			count := len(lost)
+			return newUpgradeError(UpgradeErrorReconcileTargetIncomplete, fmt.Sprintf(
+				"the v2 store holds no %s rows for %s the 1.x source holds; that table is the data itself, so nothing can rebuild the lost %s and no acknowledgement can waive %s: %s; nothing was compared and nothing was marked",
+				r.Table, plural(count, "day", "days"), plural(count, "day", "days"), plural(count, "it", "them"),
+				strings.Join(lost, ", ")), nil)
+		}
 	}
 	if r.ComparedDays == 0 && len(r.RecoverableDays) == 0 {
 		return newUpgradeError(UpgradeErrorReconcileTargetIncomplete, fmt.Sprintf(
@@ -968,8 +1031,13 @@ var historySpec = keyedSpec[historyCellKey, historyCell]{
 	day: func(key historyCellKey) string { return utcDayOfHour(key.hourMS) },
 	render: func(key historyCellKey) string {
 		return utcHourLabel(key.hourMS) + " account=" + key.account +
-			" label=" + key.label + " provider=" + key.provider + " key=" + key.apiKey +
-			" file=" + key.file + " executor=" + key.executor + " model=" + key.model
+			" label=" + key.label + " provider=" + key.provider +
+			" auth_provider=" + key.authProvider + " account_id=" + key.accountID +
+			" auth_index=" + key.authIndex + " source=" + key.source + " source_hash=" + key.sourceHash +
+			" key=" + key.apiKey + " file=" + key.file + " executor=" + key.executor +
+			" model=" + key.model + " billing=" + key.billing + " pricing=" + key.pricing +
+			" tier=" + key.tier + " threshold=" + strconv.FormatInt(key.threshold, 10) +
+			" failed=" + strconv.FormatInt(key.failed, 10)
 	},
 	identities: func(key historyCellKey) []identityValue {
 		return []identityValue{
@@ -977,13 +1045,39 @@ var historySpec = keyedSpec[historyCellKey, historyCell]{
 			{mismatchFieldAuthLabelSnapshot, key.label},
 			{mismatchFieldAuthFileSnapshot, key.file},
 			{mismatchFieldProvider, key.provider},
+			{mismatchFieldAuthProviderSnapshot, key.authProvider},
+			{mismatchFieldAuthAccountIDSnapshot, key.accountID},
+			{mismatchFieldAuthIndex, key.authIndex},
+			{mismatchFieldSource, key.source},
+			{mismatchFieldSourceHash, key.sourceHash},
 			{mismatchFieldAPIKeyHash, key.apiKey},
 			{mismatchFieldExecutorType, key.executor},
 			{mismatchFieldModel, key.model},
+			{mismatchFieldBillingModel, key.billing},
+			{mismatchFieldPricingModel, key.pricing},
+			{mismatchFieldServiceTier, key.tier},
+			{mismatchFieldThreshold, strconv.FormatInt(key.threshold, 10)},
+			{mismatchFieldFailed, strconv.FormatInt(key.failed, 10)},
 		}
 	},
-	fields: []string{mismatchFieldCalls, mismatchFieldTokens},
-	values: func(cell historyCell) []int64 { return []int64{cell.calls, cell.tokens} },
+	fields: []string{
+		mismatchFieldCalls,
+		mismatchFieldInputTokens, mismatchFieldOutputTokens, mismatchFieldReasoningTokens, mismatchFieldCachedTokens,
+		mismatchFieldCacheReadTokens, mismatchFieldCacheCreationTokens,
+		mismatchFieldLongInputTokens, mismatchFieldLongOutputTokens, mismatchFieldLongCachedTokens,
+		mismatchFieldLongCacheReadTokens, mismatchFieldLongCacheCreationTokens,
+		mismatchFieldTokens, mismatchFieldZeroTokenCalls, mismatchFieldLastSeen, mismatchFieldLatencySum, mismatchFieldLatencySamples,
+	},
+	values: func(cell historyCell) []int64 {
+		return []int64{
+			cell.calls,
+			cell.input, cell.output, cell.reasoning, cell.cached,
+			cell.cacheRead, cell.cacheCreation,
+			cell.longInput, cell.longOutput, cell.longCached,
+			cell.longCacheRead, cell.longCacheCreation,
+			cell.tokens, cell.zeroTokenCalls, cell.lastSeen, cell.latencySum, cell.latencySamples,
+		}
+	},
 }
 
 func compareRetainedDomain(source, target sideObservation) ReconcileDomainReport {
@@ -1271,15 +1365,27 @@ func newReconcileEvidence(sourceFingerprint string, domains []ReconcileDomainRep
 // operator accepted and the ones still blocking. An acknowledgement of a day
 // with nothing wrong is not an error and marks nothing: the returned accepted
 // set only ever names days that need it.
-func decideAcknowledged(candidates []string, acknowledged map[string]bool, acknowledgeParityGaps bool, parityDays []string) ([]string, []string) {
+//
+// The parity switch is not a bulk acknowledgement. It waives only the days whose
+// sole problem is the parity detection: a day that also carries a measured
+// disagreement, or a cleared derived rollup the store lost, needs its own
+// --acknowledge. Anything else would let the switch accept a copy-in that lost
+// data on a day the parity check happened to flag.
+func decideAcknowledged(candidates []string, acknowledged map[string]bool, acknowledgeParityGaps bool,
+	parityDays, nonParityDays []string) ([]string, []string) {
 	parity := make(map[string]bool, len(parityDays))
 	for _, day := range parityDays {
 		parity[day] = true
 	}
+	nonParity := make(map[string]bool, len(nonParityDays))
+	for _, day := range nonParityDays {
+		nonParity[day] = true
+	}
 	accepted := []string{}
 	blocked := []string{}
 	for _, day := range candidates {
-		if acknowledged[day] || (acknowledgeParityGaps && parity[day]) {
+		waived := acknowledgeParityGaps && parity[day] && !nonParity[day]
+		if acknowledged[day] || waived {
 			accepted = append(accepted, day)
 			continue
 		}
@@ -1427,9 +1533,11 @@ func recordReconciliation(ctx context.Context, databasePath string, evidence Rec
 
 // recordInterrupted says what an interrupted recording left behind. The marks,
 // the evidence and the stage travel in one transaction, so the answer is always
-// the same: nothing.
+// the same: nothing. A rerun writes the same result. That is not a promise that
+// every rerun succeeds: a row the operation repository rejects is rejected the
+// same way next time, so the error above, not a retry, is what has to be fixed.
 func recordInterrupted(err error) error {
-	return fmt.Errorf("record the reconciliation: %w; the marks, the evidence and the stage commit together, so the store is unchanged and a rerun records all of them", err)
+	return fmt.Errorf("record the reconciliation: %w; the marks, the evidence and the stage commit together, so the store is unchanged, and a rerun writes the same result unless the operation row itself is refused", err)
 }
 
 // establishedDomains names the operation domains the compared domains actually
