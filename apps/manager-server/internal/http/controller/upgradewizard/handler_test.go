@@ -499,16 +499,21 @@ func TestMountDeadlineIsATimeoutNotAnUnreadableSource(t *testing.T) {
 	<-finished
 }
 
-// TestMountBoundContainsTheConfiguredRootResolution is M4 at the route
-// boundary. The production resolver behind Handler.LegacyRoot stats the
+// TestMountBoundContainsTheConfiguredRootResolution is M4 at the one place the
+// bound lives. The production resolver behind Handler.LegacyRoot stats the
 // configured directory — `/legacy` when the operator set nothing — and a stat on
 // a hung mount waits exactly as long as the database inspection behind it.
 // Resolving the root before the lookup would leave that wait outside the only
 // bound this surface has, so the whole resolution has to run inside the one
 // bounded, one-in-flight lookup.
+//
+// The measurement is that bounded lookup and nothing else. A full request also
+// pays the credential read and the projection; placing those under the mount's
+// bound would fail this test for a cost it does not describe, and for a rate that
+// belongs to the machine. The deadline verdict at the route boundary and the
+// one-lookup rule are covered by TestMountDeadlineIsATimeoutNotAnUnreadableSource
+// and TestMountLookupRunsOncePerRequestInsideItsBound.
 func TestMountBoundContainsTheConfiguredRootResolution(t *testing.T) {
-	const managerKey = "manager-store-key-for-a-slow-root"
-	database := managerCredentialStore(t, managerKey)
 	root := t.TempDir()
 	var resolverCalls, lookups, active, peak int32
 	resolved := make(chan struct{})
@@ -532,8 +537,6 @@ func TestMountBoundContainsTheConfiguredRootResolution(t *testing.T) {
 			})
 			return ""
 		},
-		Database:     func() string { return database },
-		Timeout:      10 * time.Second,
 		MountTimeout: 20 * time.Millisecond,
 	}
 	handler.lookupMount = func(string) mountResolution {
@@ -541,61 +544,48 @@ func TestMountBoundContainsTheConfiguredRootResolution(t *testing.T) {
 		return mountResolution{root: root, code: CodeLegacyRootMissing}
 	}
 
-	// Both routes share the one handler and therefore the one flight: a hung
-	// root still costs exactly one resolution however many polls arrive.
+	// Every waiter joins the one flight: a hung root costs exactly one resolution
+	// however many lookups arrive, and each of them stops at the bound.
 	const polls = 20
 	start := make(chan struct{})
 	var wait sync.WaitGroup
-	codes := make([]int, polls)
-	bodies := make([]string, polls)
+	answers := make([]mountResolution, polls)
 	for index := range polls {
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()
 			<-start
-			path := testPrefix + StatusSuffix
-			if index%2 == 0 {
-				path = testPrefix + PreflightSuffix
-			}
-			poll := httptest.NewRequest(http.MethodGet, path, nil)
-			poll.Host = "manager.test"
-			poll.Header.Set("Authorization", bearer(managerKey))
-			recorder := httptest.NewRecorder()
-			handler.ServeHTTP(recorder, poll)
-			codes[index] = recorder.Code
-			bodies[index] = recorder.Body.String()
+			answers[index] = handler.resolveMount(context.Background())
 		}(index)
 	}
 	started := time.Now()
 	close(start)
 	wait.Wait()
 	elapsed := time.Since(started)
-	if elapsed > 150*time.Millisecond {
-		t.Fatalf("%d polls waited %s on a root resolution bounded to %s", polls, elapsed, handler.MountTimeout)
+	// Five times the bound separates a lookup that stops at the timer from one
+	// that waits the hung resolution out (300 ms) without measuring scheduling.
+	if budget := handler.MountTimeout * 5; elapsed > budget {
+		t.Fatalf("%d lookups waited %s on a root resolution bounded to %s (allowed %s)",
+			polls, elapsed, handler.MountTimeout, budget)
 	}
 	if got := atomic.LoadInt32(&resolverCalls); got != 1 {
-		t.Fatalf("%d concurrent polls resolved the configured root %d times, want 1", polls, got)
+		t.Fatalf("%d concurrent lookups resolved the configured root %d times, want 1", polls, got)
 	}
 	if got := atomic.LoadInt32(&lookups); got != 0 {
 		t.Fatalf("%d root inspections ran before the hung resolution answered", got)
 	}
-	for index := range codes {
-		if codes[index] != http.StatusServiceUnavailable && codes[index] != http.StatusOK {
-			t.Fatalf("poll %d on a hung root = %d: %s", index, codes[index], bodies[index])
-		}
-		if !strings.Contains(bodies[index], `"`+CodeMountTimeout+`"`) {
-			t.Fatalf("poll %d did not name the mount deadline: %s", index, bodies[index])
+	for index, answer := range answers {
+		if answer.expired || answer.code != CodeMountTimeout {
+			t.Fatalf("lookup %d on a hung root = %+v, want %q", index, answer, CodeMountTimeout)
 		}
 	}
 
-	// The resolution lands after every poll was answered. It must not have
-	// replaced a deadline verdict, and it must not strand the handler: the next
-	// request answers from the resolved root (joining the landing flight or
-	// starting the next one — both read the same resolution).
+	// The resolution lands after every waiter was answered. It must not replace a
+	// deadline verdict, and it must not strand the handler: the next lookup reads
+	// the landed answer (joining that flight or starting the next one).
 	<-resolved
-	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(managerKey), http.StatusOK)
-	if !strings.Contains(body, `"sourceRoot":"`+CodeLegacyRootMissing+`"`) {
-		t.Fatalf("the request after the late resolution = %s", body)
+	if landed := handler.resolveMount(context.Background()); landed.code != CodeLegacyRootMissing {
+		t.Fatalf("the lookup after the late resolution = %+v", landed)
 	}
 	if got := atomic.LoadInt32(&peak); got != 1 {
 		t.Fatalf("%d root resolutions ran at once, want at most 1", got)
