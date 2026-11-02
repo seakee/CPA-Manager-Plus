@@ -356,11 +356,43 @@ func setOSTempDir(t *testing.T, dir string) {
 	t.Setenv("TEMP", dir)
 }
 
-// TestStatusSucceedsAgainstALiveWriterWithinItsRetryBudget is the regression for
-// N1: `upgrade status` used to fail every time it raced a Manager that was
-// writing, because one snapshot attempt was all it made. A live Manager writes
-// in bursts, so a bounded retry finds a quiet window.
-func TestStatusSucceedsAgainstALiveWriterWithinItsRetryBudget(t *testing.T) {
+// liveWriterStopLimit bounds how long the status live-writer test waits for its
+// writer goroutine. A writer that never stops must fail that one test with a
+// message instead of consuming the whole binary's timeout.
+const liveWriterStopLimit = 10 * time.Second
+
+// waitForStop waits for ch to be closed and fails the test after
+// liveWriterStopLimit, so a goroutine that never stops is reported here.
+func waitForStop(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(liveWriterStopLimit):
+		t.Errorf("%s did not stop within %s", what, liveWriterStopLimit)
+	}
+}
+
+// liveWriterRun is the observable outcome of one `upgrade status` run against a
+// live writer. A failing run is returned as data, so the caller decides how to
+// fail and the harness itself never blocks on its writer.
+type liveWriterRun struct {
+	runErr   error
+	stdout   string
+	stderr   string
+	attempts int
+	raced    int
+}
+
+// runStatusAgainstALiveWriter keeps a Manager database busy from one goroutine
+// and runs `upgrade status` against it. A non-nil failWith makes every snapshot
+// attempt fail with that error, which drives the exit path that never races the
+// writer.
+//
+// The writer is released and joined on every path, including the one where
+// status fails, so a failure is returned as runErr instead of leaving the caller
+// blocked on a goroutine that stops only after a race.
+func runStatusAgainstALiveWriter(t *testing.T, failWith error) liveWriterRun {
+	t.Helper()
 	_, databasePath := newManagerDatabase(t)
 	writer, err := sql.Open("sqlite", databasePath)
 	if err != nil {
@@ -381,16 +413,22 @@ func TestStatusSucceedsAgainstALiveWriterWithinItsRetryBudget(t *testing.T) {
 	stop := make(chan struct{})
 	stopped := make(chan struct{})
 	var stopOnce sync.Once
+	// halt releases the writer exactly once. Every exit path calls it, so a run
+	// that fails before a snapshot ever races still ends the goroutine.
+	halt := func() { stopOnce.Do(func() { close(stop) }) }
 	attempts, raced := 0, 0
 	original := openSnapshot
 	openSnapshot = func(ctx context.Context, path string, scratch string) (*upgradeservice.Snapshot, error) {
 		attempts++
+		if failWith != nil {
+			return nil, failWith
+		}
 		snapshot, err := original(ctx, path, scratch)
 		if err != nil && errors.Is(err, upgradeservice.ErrSourceChanged) {
 			raced++
 			// The writer was live through this attempt. Let it go quiet, like a
 			// Manager between bursts, so a retry sees a stopped writer.
-			stopOnce.Do(func() { close(stop) })
+			halt()
 		}
 		return snapshot, err
 	}
@@ -408,29 +446,73 @@ func TestStatusSucceedsAgainstALiveWriterWithinItsRetryBudget(t *testing.T) {
 			time.Sleep(50 * time.Microsecond)
 		}
 	}()
+	// Close the writer connection however this harness ends, including an early
+	// t.Fatalf, and keep the join bounded so a stuck writer is reported here
+	// instead of consuming the whole binary's timeout.
+	t.Cleanup(func() {
+		halt()
+		waitForStop(t, stopped, "the status live writer")
+		if err := writer.Close(); err != nil {
+			t.Errorf("close writer: %v", err)
+		}
+	})
 
 	runErr, stdout, stderr := runError(t, "status", "--json", "--db-path", databasePath)
-	<-stopped
-	if err := writer.Close(); err != nil {
-		t.Fatalf("close writer: %v", err)
+	// Release the writer on every outcome and capture the result before joining
+	// it, so a broken retry path surfaces as runErr rather than as a wait.
+	halt()
+	result := liveWriterRun{runErr: runErr, stdout: stdout, stderr: stderr, attempts: attempts, raced: raced}
+	waitForStop(t, stopped, "the status live writer")
+	return result
+}
+
+// TestStatusSucceedsAgainstALiveWriterWithinItsRetryBudget is the regression for
+// N1: `upgrade status` used to fail every time it raced a Manager that was
+// writing, because one snapshot attempt was all it made. A live Manager writes
+// in bursts, so a bounded retry finds a quiet window.
+func TestStatusSucceedsAgainstALiveWriterWithinItsRetryBudget(t *testing.T) {
+	run := runStatusAgainstALiveWriter(t, nil)
+	if run.runErr != nil {
+		t.Fatalf("status against a live writer: %v; stderr: %s", run.runErr, run.stderr)
 	}
-	if runErr != nil {
-		t.Fatalf("status against a live writer: %v; stderr: %s", runErr, stderr)
-	}
-	if raced == 0 {
+	if run.raced == 0 {
 		t.Fatal("no snapshot attempt raced the live writer; the retry was never exercised")
 	}
-	if attempts > statusSnapshotAttempts {
-		t.Fatalf("snapshot attempts = %d, want at most %d", attempts, statusSnapshotAttempts)
+	if run.attempts > statusSnapshotAttempts {
+		t.Fatalf("snapshot attempts = %d, want at most %d", run.attempts, statusSnapshotAttempts)
 	}
 	var output statusOutput
-	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
-		t.Fatalf("decode status: %v; output: %s", err, stdout)
+	if err := json.Unmarshal([]byte(run.stdout), &output); err != nil {
+		t.Fatalf("decode status: %v; output: %s", err, run.stdout)
 	}
 	if !output.Recorded || output.Operation == nil || output.Operation.Stage != model.UpgradeStageCopyIn {
 		t.Fatalf("status = %+v, want the recorded operation", output)
 	}
-	t.Logf("snapshot attempts against a live writer: %d (raced %d)", attempts, raced)
+	t.Logf("snapshot attempts against a live writer: %d (raced %d)", run.attempts, run.raced)
+}
+
+// TestStatusAgainstALiveWriterReportsANonRaceFailure is the regression for the
+// 2026-11-02 review finding that the live-writer test released its writer only
+// on ErrSourceChanged: any other status failure left the join blocked, so a real
+// regression became a global test timeout. The harness must return the status
+// error on a path that never races the writer.
+func TestStatusAgainstALiveWriterReportsANonRaceFailure(t *testing.T) {
+	run := runStatusAgainstALiveWriter(t, fmt.Errorf("%w: scratch directory is not writable", upgradeservice.ErrSnapshotFailed))
+	if run.runErr == nil {
+		t.Fatalf("status succeeded while every snapshot attempt failed; stdout: %s", run.stdout)
+	}
+	if !strings.Contains(run.runErr.Error(), upgradeservice.CodeSnapshotFailed) {
+		t.Fatalf("error %q does not carry %s", run.runErr, upgradeservice.CodeSnapshotFailed)
+	}
+	if code := ExitCode(run.runErr); code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if run.raced != 0 {
+		t.Fatalf("raced = %d, want 0: the writer must be released even when nothing raced", run.raced)
+	}
+	if run.attempts != 1 {
+		t.Fatalf("snapshot attempts = %d, want 1: an unusable scratch directory is not retried", run.attempts)
+	}
 }
 
 // TestStatusReportsARetryableCodeWhenTheWriterNeverStops covers the exhausted
