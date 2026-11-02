@@ -75,10 +75,12 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	defer func() { _ = storeLock.Close() }()
 	// The import reads a source it assumes is stopped and writes a destination,
 	// so it takes the same 1.x ownership marker the copy-in took and keeps it for
-	// the whole run. A live 1.x Manager holds that marker; a source with no
-	// marker cannot be proven stopped at all. Either way this refuses before the
-	// CPA directory is read.
-	sourceLock, err := processlock.AcquireExisting(upgradeservice.SourceDatabasePath(*legacy))
+	// the whole run. The descriptor is read-only: the source may be preserved on a
+	// read-only mount, and proving exclusivity must not require write access to a
+	// marker the import never modifies. A live 1.x Manager holds that marker; a
+	// source with no marker cannot be proven stopped at all. Either way this
+	// refuses before the CPA directory is read.
+	sourceLock, err := processlock.AcquireExistingReadOnly(upgradeservice.SourceDatabasePath(*legacy))
 	if err != nil {
 		reason := "the 1.x source carries no ownership marker, so it cannot be proven stopped"
 		if errors.Is(err, processlock.ErrLocked) {

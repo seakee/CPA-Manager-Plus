@@ -309,10 +309,13 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 // requireCPAImportSourceLock proves the caller holds the 1.x ownership marker of
 // the source this run binds to.
 //
-// AcquireExisting is the accepted fence for a command that assumes the source is
-// stopped; the marker itself is opened, never the source database. The marker
-// proves the 1.x Manager is not running. It does not prove the managed CPA
-// container is stopped, which is why the operator instruction says so.
+// AcquireExistingReadOnly is the accepted fence for a command that assumes the
+// source is stopped: it takes the same exclusive marker through a read-only
+// descriptor, so a source preserved on a read-only mount still proves exclusivity
+// and the import never modifies a marker it may not own. The marker itself is
+// opened, never the source database. It proves the 1.x Manager is not running. It
+// does not prove the managed CPA container is stopped, which is why the operator
+// instruction says so.
 func requireCPAImportSourceLock(lock *processlock.Lock, legacyRoot string) error {
 	if lock == nil {
 		return newUpgradeError(UpgradeErrorCPASourceLocked,

@@ -212,6 +212,68 @@ func TestAcquireExistingNeverCreatesSourceAndRetainsNormalOwnership(t *testing.T
 	}
 }
 
+// TestAcquireExistingReadOnlyTakesAReadOnlyMarkerAndRefusesALiveHolder is the
+// Medium finding: the 1.x source is preserved read-only, so a fence that opens the
+// marker O_RDWR cannot prove exclusivity there. The read-only descriptor is the
+// same exclusive fence — it still excludes a live holder — and it works on a
+// marker the caller may read but not write.
+func TestAcquireExistingReadOnlyTakesAReadOnlyMarkerAndRefusesALiveHolder(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a 0400 marker for writing, so the read-only case is not observable")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.sqlite")
+	if err := os.WriteFile(path, []byte("sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := path + ".manager.lock"
+	if err := os.WriteFile(marker, nil, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(marker, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture models the read-only source: the marker is readable and not
+	// writable, so the accepted read-write fence cannot open it.
+	if writable, err := os.OpenFile(marker, os.O_RDWR, 0); err == nil {
+		_ = writable.Close()
+		t.Fatal("the fixture marker is writable, so it does not model a read-only source")
+	}
+	if lock, err := AcquireExisting(path); lock != nil || err == nil {
+		if lock != nil {
+			_ = lock.Close()
+		}
+		t.Fatalf("the read-write fence opened a 0400 marker: lock=%v err=%v", lock, err)
+	}
+	lock, err := AcquireExistingReadOnly(path)
+	if err != nil {
+		t.Fatalf("the read-only fence refused a readable read-only marker: %v", err)
+	}
+	if err := lock.Validate(); err != nil {
+		t.Fatalf("the read-only fence does not validate: %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatalf("close the read-only fence: %v", err)
+	}
+	// A live holder excludes the read-only fence exactly as it excludes the
+	// writable one, so the fence is still exclusive.
+	holder, err := os.OpenFile(marker, os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Close() }()
+	if err := lockFile(holder); err != nil {
+		t.Fatalf("hold the marker: %v", err)
+	}
+	defer func() { _ = unlockFile(holder) }()
+	if second, err := AcquireExistingReadOnly(path); second != nil || !errors.Is(err, ErrLocked) {
+		if second != nil {
+			_ = second.Close()
+		}
+		t.Fatalf("a live holder was not excluded: lock=%v err=%v", second, err)
+	}
+}
+
 func TestAcquireExistingRejectsLockSymlinksWithoutFollowingThem(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "usage.sqlite")

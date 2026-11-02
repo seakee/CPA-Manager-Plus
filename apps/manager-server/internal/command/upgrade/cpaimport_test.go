@@ -144,6 +144,36 @@ func TestCPAImportCommandRefusesWhileTheSourceIsHeld(t *testing.T) {
 	}
 }
 
+// TestCPAImportCommandTakesAReadOnlySourceMarker pins the caller migration: the
+// 1.x source may be preserved on a read-only mount, so the command's fence must
+// open the ownership marker read-only. A 0400 marker is readable and not writable,
+// and the run has to get past the fence; the writable open would have refused it
+// with upgrade_cpa_source_locked before anything else.
+func TestCPAImportCommandTakesAReadOnlySourceMarker(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a 0400 marker for writing, so the read-only case is not observable")
+	}
+	source := copyReadySource(t)
+	if err := os.Chmod(filepath.Join(source, "usage.sqlite.manager.lock"), 0o400); err != nil {
+		t.Fatalf("make the source marker read-only: %v", err)
+	}
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err := Run(context.Background(), []string{
+		"cpa-import",
+		"--legacy", source,
+		"--plugins", "true",
+		"--target", t.TempDir(),
+		"--destination-url", "http://127.0.0.1:8317",
+	}, stdout, stderr)
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok && code == upgradeservice.UpgradeErrorCPASourceLocked {
+		t.Fatalf("a read-only source marker was refused by the fence: %v", err)
+	}
+	if err == nil {
+		t.Fatal("the run completed without a recorded copy-in or a configured Runtime")
+	}
+}
+
 // TestCPAImportOutputCarriesOnlyTheContract is the earlier output test, fixed:
 // it used to send an output with no Result at all, so the only keys that could
 // appear were the ones it forbade. A populated result is now written and every
