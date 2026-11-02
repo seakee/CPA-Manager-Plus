@@ -426,6 +426,103 @@ func nullString(value string) any {
 	return value
 }
 
+// RecordError records the typed refusal a step stopped on, without touching the
+// stage or the completed domains: the step did not advance, and no path may make
+// a refusal look like progress. Only the error columns and the update time move,
+// so the provenance a later rollback relies on is left exactly as it was.
+//
+// The stamp is computed from the stored row inside the transaction, so a refusal
+// written by a process whose clock lags the store cannot move updated_at_ms
+// backwards, and the row is validated before it is written.
+func (r *Repository) RecordError(ctx context.Context, code, detail string) error {
+	if strings.TrimSpace(code) == "" {
+		return fmt.Errorf("%w: the refusal code is empty", ErrInvalidRow)
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UnixMilli()
+	// Take the write lock before reading, so the stamp this refusal advances is
+	// the one on disk. The placeholder carries no stage, and a refusal may not
+	// create an operation: a row of zero rows affected means there is none.
+	inserted, err := tx.ExecContext(ctx, `insert into `+tableName+`
+		(id, stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?)
+		on conflict(id) do nothing`, "", now, now)
+	if err != nil {
+		return err
+	}
+	if created, err := inserted.RowsAffected(); err == nil && created > 0 {
+		return fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
+	}
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
+	}
+	current.ErrorCode = code
+	current.ErrorDetail = strings.TrimSpace(detail)
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	if _, err := tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = ?, error_detail = ?, updated_at_ms = ? where id = 1`,
+		current.ErrorCode, nullString(current.ErrorDetail), current.UpdatedAtMS); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ClearErrorTx clears a refusal inside the caller's transaction, so a step that
+// succeeded can commit the cleared refusal beside the stage it advanced to. The
+// refusal is the durable statement that the step did not advance; leaving it
+// behind after a successful run would keep telling the wizard a stop is still
+// standing. Only the error columns and the update time move, and the stamp is
+// computed from the row as this transaction sees it.
+func ClearErrorTx(ctx context.Context, tx Tx) error {
+	now := time.Now().UnixMilli()
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: no operation row to clear the refusal on", ErrInvalidRow)
+	}
+	current.ErrorCode = ""
+	current.ErrorDetail = ""
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	_, err = tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = null, error_detail = null, updated_at_ms = ? where id = 1`,
+		current.UpdatedAtMS)
+	return err
+}
+
+// RecordReconciliation stores the reconciliation report on the single row
+// without rebuilding it: Put would clear the provenance a completed operation
+// must keep carrying, so this is the only writer for this column. A row must
+// already exist, because a reconciliation only ever describes a recorded
+// copy-in.
+func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMessage) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := RecordReconciliationTx(ctx, tx, report); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // RecordReconciliationTx stores the report inside the caller's transaction, so
 // the evidence commits together with the marks it explains and the stage it
 // authorizes. The repository owns updated_at_ms here too: it is recomputed from
@@ -467,22 +564,6 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 	return nil
 }
 
-// RecordReconciliation stores the report in its own transaction. Reconcile calls
-// the Tx variant so the evidence commits with the marks and the stage it
-// authorizes; this wrapper keeps the single-statement helper available to
-// callers that hold no transaction of their own.
-func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMessage) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := RecordReconciliationTx(ctx, tx, report); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 // requireVerdictEvidence keeps the terminal verdict and its observation
 // inseparable: rolled_back is never resumed, so a row without its evidence could
 // never be re-proven.
@@ -520,9 +601,12 @@ func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (m
 	}
 	now := time.Now().UnixMilli()
 	current.SourceRoot = sourceRoot
-	current.UpdatedAtMS = now
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
 	if _, err := tx.ExecContext(ctx, `update `+tableName+`
 		set source_root = ?, updated_at_ms = ? where id = 1`,
@@ -583,9 +667,14 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 	}
 	current.Stage = model.UpgradeStageRolledBack
 	current.Rollback = &evidence
-	current.UpdatedAtMS = now
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	// The verdict and the observation this transaction is about to write must
+	// both still be acceptable, and a stored clock that ran ahead stays readable.
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
 	if _, err := tx.ExecContext(ctx, `update `+tableName+`
 		set stage = ?, rollback_image = ?, rollback_status_url = ?,

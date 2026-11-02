@@ -82,6 +82,19 @@ func ExitCode(err error) int {
 	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok && slices.Contains(refusalCodes, code) {
 		return 1
 	}
+	// The External connect stop is a decision about the user's CPA: a v7
+	// target, a rejected management key, a target that moved, or a document
+	// that is not the v8 contract. The owner has to act, so it shares exit 1
+	// and never reads as a transient error. A store another process owns is
+	// blocked, not broken: the operator stops that process, so it is the same
+	// "in use" decision as a blocked preflight.
+	if errors.Is(err, upgradeservice.ErrExternalVersionUnsupported) ||
+		errors.Is(err, upgradeservice.ErrExternalConfigDocumentInvalid) ||
+		errors.Is(err, upgradeservice.ErrExternalManagementRejected) ||
+		errors.Is(err, upgradeservice.ErrExternalTargetMoved) ||
+		errors.Is(err, upgradeservice.ErrExternalV2Running) {
+		return 1
+	}
 	return 2
 }
 
@@ -121,6 +134,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runReconcile(ctx, args[1:], stdout, stderr)
 	case "rollback":
 		return runRollback(ctx, args[1:], stdout, stderr)
+	case "external-connect":
+		return runExternalConnect(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		writeUsage(stdout)
 		return nil
@@ -146,9 +161,11 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--legacy-image <ref>] [--project <name>] [--port N] [--manager-addr HOST:PORT] [--json]")
 	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--backup <dir>] [--status-url <url>] [--legacy-image <ref>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
+	_, _ = fmt.Fprintln(w, "  external-connect --cpa-base-url <url> --management-key-file <path> [--target <dir>] [--cpa-version <v>] [--json]")
+	_, _ = fmt.Fprintln(w, "                                      connect the External CPA and record its identity; a v7 CPA stops")
 	_, _ = fmt.Fprintln(w, "The scratch copy is never the source or the target volume: --scratch-dir,")
 	_, _ = fmt.Fprintln(w, "and the default OS temporary directory, are checked the same way.")
-	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, an unacknowledged day, or a held fence (1.x source or v2 data root); 2 usage, environment or retryable error.")
+	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, an unacknowledged day, a held fence (1.x source or v2 data root), or a decision about the External CPA; 2 usage, environment or retryable error.")
 }
 
 func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) error {

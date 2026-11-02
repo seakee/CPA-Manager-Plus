@@ -36,6 +36,15 @@ func newCopiedVolume(t *testing.T) copiedVolume {
 	return newCopiedVolumeWith(t, func(*testing.T, legacyVolume) {})
 }
 
+// newCopiedVolumeUnlocked is the same recorded copy-in without the v2 data-root
+// fence held. The External connect step takes that fence itself, so a fixture
+// that kept it would present every target as a store another writer owns and the
+// step would refuse before it probed anything.
+func newCopiedVolumeUnlocked(t *testing.T) copiedVolume {
+	t.Helper()
+	return copyVolumeInto(t, newLegacyVolume(t), false)
+}
+
 // newCopiedVolumeWith seeds the stopped source before the copy-in and then
 // copies it in. The seed has to run first: the reconciliation refuses a source
 // that is not the volume the recorded copy-in copied.
@@ -51,17 +60,29 @@ func newCopiedVolumeWith(t *testing.T, seed func(*testing.T, legacyVolume)) copi
 // does, so every later Reconcile on this volume runs the way production does.
 func copyVolume(t *testing.T, volume legacyVolume) copiedVolume {
 	t.Helper()
+	return copyVolumeInto(t, volume, true)
+}
+
+// copyVolumeInto performs the copy-in and only takes the v2 data-root fence when
+// the caller's step expects to find it held. CopyIn releases the fence it takes
+// for itself, so the only lock that can survive it is the one taken here.
+func copyVolumeInto(t *testing.T, volume legacyVolume, holdTargetFence bool) copiedVolume {
+	t.Helper()
 	targetRoot := canonicalTempDir(t)
 	options := copyInOptions(volume, targetRoot)
 	options.Lock = volume.lock(t)
 	if _, err := CopyIn(context.Background(), options); err != nil {
 		t.Fatalf("copy in: %v", err)
 	}
-	targetLock, err := processlock.Acquire(filepath.Join(targetRoot, databaseFileName))
-	if err != nil {
-		t.Fatalf("acquire the v2 data-root lock: %v", err)
+	var targetLock *processlock.Lock
+	if holdTargetFence {
+		var err error
+		targetLock, err = processlock.Acquire(filepath.Join(targetRoot, databaseFileName))
+		if err != nil {
+			t.Fatalf("acquire the v2 data-root lock: %v", err)
+		}
+		t.Cleanup(func() { _ = targetLock.Close() })
 	}
-	t.Cleanup(func() { _ = targetLock.Close() })
 	return copiedVolume{
 		volume: volume, target: targetRoot, options: options,
 		sourceLock: options.Lock, targetLock: targetLock,

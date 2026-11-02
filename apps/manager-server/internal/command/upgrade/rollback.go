@@ -20,6 +20,10 @@ import (
 // than the usage error 2.
 var ErrRefused = errors.New("upgrade: refused")
 
+// ErrReported marks a failure whose operator text a subcommand already wrote to
+// stderr, so the process entry point does not print it a second time.
+var ErrReported = errors.New("upgrade: reported")
+
 // refuse keeps the typed service failure in the chain so a caller can match both
 // the CLI refusal and the machine code, while the exit code stays 1. The reason
 // is written to stderr: an exit code alone does not tell the operator what the

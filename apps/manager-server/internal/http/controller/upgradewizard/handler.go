@@ -123,12 +123,51 @@ const (
 
 // NextAction is the single next decision the wizard may offer.
 const (
-	ActionPreflight  = "preflight"
-	ActionCopyIn     = "copy_in"
-	ActionReconcile  = "reconcile"
-	ActionComplete   = "complete"
-	ActionRolledBack = "rolled_back"
+	ActionPreflight       = "preflight"
+	ActionCopyIn          = "copy_in"
+	ActionReconcile       = "reconcile"
+	ActionExternalConnect = "external_connect"
+	ActionComplete        = "complete"
+	ActionRolledBack      = "rolled_back"
 )
+
+// externalConnectRefusals are the typed codes the External connect step records
+// when it stopped on the CPA itself. They are the same strings the upgrade
+// service and the live External flow use; they are repeated here because this
+// projection deliberately depends on no service vocabulary beyond the codes it
+// reports. A row that carries one of them has not advanced, so the wizard offers
+// the step that resolves it rather than the reconciliation that follows it.
+var externalConnectRefusals = map[string]bool{
+	"external_cpa_version_unsupported":     true,
+	"external_cpa_config_document_invalid": true,
+	"external_management_key_rejected":     true,
+	"external_target_moved":                true,
+}
+
+// externalConnectStages are the stages a recorded External refusal can be sitting
+// on. The step legitimately runs from the three of them — the copy-in of a legacy
+// second volume finished, reconciliation finished, or the CPA import finished —
+// and it never advances the row, so a refusal is found on whichever stage the
+// operator ran it from. Offering reconciliation from any of them would send the
+// operator to a step that is already finished and has nothing to do with the
+// standing stop.
+var externalConnectStages = map[string]bool{
+	StageCopyIn:    true,
+	StageReconcile: true,
+	StageCPAImport: true,
+}
+
+// nextActionForRecordedStage refines the stage table with the refusal the row
+// recorded. An operation parked on any stage the External connect step runs from
+// by an External CPA it could not connect to must offer that step:
+// reconciliation is not what resolves a v7 CPA or a rejected key, and offering it
+// would send the operator past a stop that is still standing.
+func nextActionForRecordedStage(stage, errorCode string) string {
+	if externalConnectStages[stage] && externalConnectRefusals[errorCode] {
+		return ActionExternalConnect
+	}
+	return nextAction(stage)
+}
 
 // SourceRoot states whether the 1.x source the later steps need is still
 // mounted. A recorded operation is readable without it — the row and the copy-in
@@ -737,7 +776,7 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 	document.Evidence = EvidenceOperationRow
 	document.Stage = row.Stage
 	document.StageKnown = knownStage(row.Stage)
-	document.NextAction = nextAction(row.Stage)
+	document.NextAction = nextActionForRecordedStage(row.Stage, row.ErrorCode.String)
 	document.DomainsDone = decodeStrings(row.Domains)
 	// Manual items are operator instructions written by another step, so they
 	// pass the same content scrubber as the error detail: a copy-pasted command

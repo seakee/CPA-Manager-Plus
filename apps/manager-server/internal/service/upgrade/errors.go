@@ -3,6 +3,9 @@ package upgrade
 import (
 	"errors"
 	"fmt"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 )
 
 // UpgradeErrorCode is the stable, machine-readable half of an Upgrade failure.
@@ -129,6 +132,55 @@ const (
 	// the columns a writable open adds. The store must be opened once by this
 	// build; nothing was written.
 	UpgradeErrorStoreSchemaOutdated UpgradeErrorCode = "upgrade_store_schema_outdated"
+
+	// --- External Connect (U1-5) ---
+	//
+	// This group is the External connect step's own vocabulary. Every value is
+	// the same string the Fresh External flow and the external/rebind route
+	// already use, so an upgrade refusal and a live External refusal say the
+	// same words about the same CPA.
+	//
+	// UpgradeErrorExternalVersionUnsupported reports a user's CPA that did not
+	// advertise the v8 contract this Manager writes (a v7 CPA, or one whose
+	// version could not be read). The step stops: the operation row keeps its
+	// stage, carries this code, and the owner upgrades the CPA first. There is
+	// no continue-anyway path.
+	UpgradeErrorExternalVersionUnsupported UpgradeErrorCode = cpa.ReasonExternalVersionUnsupported
+	// UpgradeErrorExternalConfigDocumentInvalid reports that the CPA at the
+	// address answered, but what it served on the v8 read cannot be a v8
+	// configuration document: not JSON, truncated, a port outside the TCP range,
+	// or a client-key list that is not a list of strings. It is deliberately
+	// apart from UpgradeErrorExternalVersionUnsupported, because that one tells
+	// the operator to upgrade a CPA that is already v8: here the CPA may be v8
+	// and the document, or a proxy rewriting it, is what failed. Nothing was
+	// connected and the operation did not advance.
+	UpgradeErrorExternalConfigDocumentInvalid UpgradeErrorCode = "external_cpa_config_document_invalid"
+	// UpgradeErrorExternalManagementRejected reports the user's CPA refusing the
+	// management credential — a 401, or the 403 it answers when it bans this
+	// client — so the key is the problem, never the version. Only rebinding the
+	// connection resolves it.
+	UpgradeErrorExternalManagementRejected UpgradeErrorCode = freshconfig.ReasonManagementRejected
+	// UpgradeErrorExternalTargetMoved reports that the recorded External target
+	// no longer names the connection this operation connected: the address
+	// changed after it was committed. The identity and generation recorded by
+	// the successful connect are the comparison, so a moved target is refused
+	// instead of silently reconnected.
+	UpgradeErrorExternalTargetMoved UpgradeErrorCode = freshconfig.ReasonTargetMoved
+	// UpgradeErrorExternalAuthorityUnavailable reports a target that could not
+	// be reached, or one that answered without proving the surface the step
+	// needs (the model surface, or the client-key list). It is an environment
+	// or target condition, not a decision about the migration.
+	UpgradeErrorExternalAuthorityUnavailable UpgradeErrorCode = "external_cpa_authority_unavailable"
+	// UpgradeErrorExternalNotApplicable reports that the recorded operation is
+	// not at a position the External connect step can run from, or that the v2
+	// data root holds no recorded copy-in. Nothing was written.
+	UpgradeErrorExternalNotApplicable UpgradeErrorCode = "upgrade_external_connect_not_applicable"
+	// UpgradeErrorExternalV2Running reports that another Manager process owns the
+	// v2 data root: the step holds that process's ownership fence across its whole
+	// write path, and it refuses before it migrates, probes or records anything
+	// rather than writing a store two processes would then disagree about. Stop
+	// the process and run the step again.
+	UpgradeErrorExternalV2Running UpgradeErrorCode = "upgrade_external_connect_v2_running"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -185,6 +237,19 @@ var (
 	ErrRollbackPortBusy      = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
 	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
 	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
+
+	// External Connect (U1-5). A v7 CPA, a rejected management credential and a
+	// moved target are decisions the owner has to look at; an unreachable target
+	// is an environment condition.
+	ErrExternalVersionUnsupported    = &UpgradeError{Code: UpgradeErrorExternalVersionUnsupported}
+	ErrExternalConfigDocumentInvalid = &UpgradeError{Code: UpgradeErrorExternalConfigDocumentInvalid}
+	ErrExternalManagementRejected    = &UpgradeError{Code: UpgradeErrorExternalManagementRejected}
+	ErrExternalTargetMoved           = &UpgradeError{Code: UpgradeErrorExternalTargetMoved}
+	ErrExternalAuthorityUnavailable  = &UpgradeError{Code: UpgradeErrorExternalAuthorityUnavailable}
+	ErrExternalNotApplicable         = &UpgradeError{Code: UpgradeErrorExternalNotApplicable}
+	// ErrExternalV2Running is a refusal, not a transient failure: the operator
+	// stops the process that owns the store and reruns the step.
+	ErrExternalV2Running = &UpgradeError{Code: UpgradeErrorExternalV2Running}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {
