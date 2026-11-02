@@ -48,11 +48,14 @@ const dayLayout = "2006-01-02"
 
 const utcDayMS = int64(24 * 60 * 60 * 1000)
 
-// The day indexes the stored text form can hold. Below the first, a rendered
-// day would carry a negative year; above the last, a five-digit one, and both
-// sort wrongly against every stored YYYY-MM-DD day.
+// The day indexes the stored text form can hold. They are the same bounds
+// ParseDay accepts: a four-digit year reaches from 0000 to 9999, both render as
+// YYYY-MM-DD and sort correctly against every stored day, and anything outside
+// them would render a negative or five-digit year and sort wrongly. The lower
+// bound is year zero rather than year one because the writer accepts it, and a
+// day the writer accepts must stay readable.
 const (
-	minStoredDayIndex = int64(-719162) // 0001-01-01
+	minStoredDayIndex = int64(-719528) // 0000-01-01
 	maxStoredDayIndex = int64(2932896) // 9999-12-31
 )
 
@@ -209,9 +212,10 @@ func DaysIn(ctx context.Context, q Queryer, fromTimestampMS, toTimestampMS int64
 // false) once the window reaches past the last day the stored text form can
 // hold: no mark can sit above it, and adding a day to a timestamp near MaxInt64
 // would wrap into a negative day that sorts before every mark, hiding all of
-// them. The lower label is clamped to the first day the form can hold, which is
-// below every mark, so a pre-year-1 window still means "from the beginning". A
-// lower label of "" means no stored day can fall inside the window.
+// them. The lower label is clamped to the first day ParseDay accepts, the
+// earliest day a mark can be stored under, so a window that starts before year
+// zero still means "from the beginning". A lower label of "" means no stored day
+// can fall inside the window.
 func dayBounds(fromTimestampMS, toTimestampMS int64) (string, string, bool) {
 	lower := floorDayIndex(fromTimestampMS)
 	if lower > maxStoredDayIndex {

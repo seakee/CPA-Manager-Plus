@@ -196,6 +196,60 @@ func TestParseDayNormalizesAndValidates(t *testing.T) {
 	}
 }
 
+// TestDaysInReadsBackAYearZeroMarkItAccepted reproduces review F4: ParseDay and
+// Mark accept 0000-12-31, but the calendar clamp started at 0001-01-01, so the
+// persisted mark was invisible to every window that covered it. The write range
+// and the read clamp now share one lower bound.
+func TestDaysInReadsBackAYearZeroMarkItAccepted(t *testing.T) {
+	ctx := context.Background()
+	db := openMarkDatabase(t)
+	repository := New(db)
+	for _, label := range []string{"0000-01-01", "0000-12-31"} {
+		day, err := ParseDay(label)
+		if err != nil || day != label {
+			t.Fatalf("parse %q = %q, %v; want the accepted calendar day", label, day, err)
+		}
+	}
+	if _, err := repository.Mark(ctx, []Day{
+		{Day: "0000-01-01", Reason: ReasonReconcileMismatch},
+		{Day: "0000-12-31", Reason: ReasonReconcileMismatch},
+	}, 1_000); err != nil {
+		t.Fatalf("mark the year-zero days: %v", err)
+	}
+
+	// The exact day each mark names is the day a reader must return.
+	for _, testCase := range []struct {
+		label   string
+		startMS int64
+	}{
+		{"0000-01-01", dayStartMS(0, time.January, 1)},
+		{"0000-12-31", dayStartMS(0, time.December, 31)},
+	} {
+		days, err := repository.DaysIn(ctx, testCase.startMS, testCase.startMS+utcDayMS)
+		if err != nil {
+			t.Fatalf("read the window covering %s: %v", testCase.label, err)
+		}
+		if len(days) != 1 || days[0].Day != testCase.label {
+			t.Fatalf("marks in the window covering %s = %+v, want the stored mark", testCase.label, days)
+		}
+	}
+	// Year zero as a whole and the widest possible window both hold them.
+	days, err := repository.DaysIn(ctx, dayStartMS(0, time.January, 1), dayStartMS(1, time.January, 1))
+	if err != nil {
+		t.Fatalf("read year zero: %v", err)
+	}
+	if len(days) != 2 || days[0].Day != "0000-01-01" || days[1].Day != "0000-12-31" {
+		t.Fatalf("year-zero marks = %+v, want both stored days in order", days)
+	}
+	whole, err := repository.DaysIn(ctx, math.MinInt64, math.MaxInt64)
+	if err != nil {
+		t.Fatalf("read the whole range: %v", err)
+	}
+	if len(whole) != 2 {
+		t.Fatalf("whole-range marks = %+v, want both stored days", whole)
+	}
+}
+
 // TestDaysInKeepsMarksWithAnUpperBoundAtTheLimitOfInt64 reproduces review L4:
 // the upper bound added a day to the window end, so DaysIn(1, MaxInt64)
 // wrapped into a negative day, compared every mark against a day before the

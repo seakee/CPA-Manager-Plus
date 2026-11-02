@@ -450,6 +450,26 @@ func TestResponsesCarryNoSecretOrHashField(t *testing.T) {
 	}
 }
 
+// TestDaysWithinKeepsAYearZeroMark reproduces review F4 for the Key workspace:
+// the mark writer accepts 0000-12-31, but the calendar clamp started at
+// 0001-01-01, so a key window that covered that day reported complete while the
+// persisted mark existed.
+func TestDaysWithinKeepsAYearZeroMark(t *testing.T) {
+	marks := []ports.IncompleteDay{{Day: "0000-12-31", Reason: "reconcile_mismatch"}}
+	start := time.Date(0, time.December, 31, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if got := daysWithin(marks, start, start+utcDayMilliseconds); len(got) != 1 || got[0].Day != "0000-12-31" {
+		t.Fatalf("daysWithin(year zero) = %+v, want the persisted mark", got)
+	}
+	if got := daysWithin(marks, math.MinInt64, math.MaxInt64); len(got) != 1 {
+		t.Fatalf("daysWithin(whole range) = %+v, want the persisted mark", got)
+	}
+	// The clamp is still a lower bound, not a blanket: a window that starts
+	// after year zero does not report the year-zero mark.
+	if got := daysWithin(marks, 1, math.MaxInt64); len(got) != 0 {
+		t.Fatalf("daysWithin(after year zero) = %+v, want none", got)
+	}
+}
+
 // TestDaysWithinKeepsMarksWithAnUpperBoundAtTheLimitOfInt64 reproduces review
 // L4 for the Key workspace: the same day arithmetic hid every mark from a
 // window that ended near the largest int64.

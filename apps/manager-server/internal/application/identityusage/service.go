@@ -488,10 +488,12 @@ func daysWithin(days []ports.IncompleteDay, fromMS, toMS int64) []ports.Incomple
 	return within
 }
 
-// The day indexes the stored text form can hold; see coverageincomplete.
+// The day indexes the stored text form can hold; see coverageincomplete. They
+// are the bounds ParseDay accepts, including year zero, so a mark the writer
+// accepted stays readable by a window that covers its day.
 const (
 	utcDayMilliseconds = int64(24 * time.Hour / time.Millisecond)
-	minStoredDayIndex  = int64(-719162) // 0001-01-01
+	minStoredDayIndex  = int64(-719528) // 0000-01-01
 	maxStoredDayIndex  = int64(2932896) // 9999-12-31
 )
 
