@@ -144,17 +144,60 @@ func TestCPAImportCommandRefusesWhileTheSourceIsHeld(t *testing.T) {
 	}
 }
 
-func TestCPAImportOutputNeverCarriesSecrets(t *testing.T) {
-	output := cpaImportOutput{Error: "refused", ErrorCode: "upgrade_cpa_version_unsupported"}
+// TestCPAImportOutputCarriesOnlyTheContract is the earlier output test, fixed:
+// it used to send an output with no Result at all, so the only keys that could
+// appear were the ones it forbade. A populated result is now written and every
+// key is compared with the contract, so a field added later that carries a secret
+// has to be justified instead of silently passing.
+func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
+	result := upgradeservice.CPAImportResult{
+		Stage:             "cpa_import",
+		DomainsDone:       []string{"source_copy", "cpa_config"},
+		SourceVersion:     "7.3.4",
+		SourceLayout:      "v7",
+		SourceIdentity:    "legacy-managed:sha256:fixture",
+		DestinationURL:    "http://127.0.0.1:8317",
+		PluginsEnabled:    true,
+		ClientKeys:        1,
+		CopiedConfig:      []string{"routing.retry.request-retry"},
+		CopiedCredentials: []string{"codex-user.json"},
+		ManualItems:       []upgradeservice.CPAImportManualItem{{Item: "section:ampcode", Reason: "removed_upstream", Instruction: "re-create it"}},
+		UpdatedAtMS:       1700000000000,
+	}
+	output := cpaImportOutput{Result: &result, Error: "refused", ErrorCode: "upgrade_cpa_version_unsupported", Next: "run status"}
 	buffer := &bytes.Buffer{}
 	writeCPAImportOutput(buffer, true, output)
 	var decoded map[string]any
 	if err := json.Unmarshal(buffer.Bytes(), &decoded); err != nil {
 		t.Fatalf("the JSON output is not valid JSON: %v", err)
 	}
-	for _, forbidden := range []string{"managementKey", "apiKeys", "clientKeys", "accessToken"} {
-		if _, present := decoded[forbidden]; present {
-			t.Fatalf("the output carries %q", forbidden)
+	allowedTop := map[string]bool{"result": true, "error": true, "errorCode": true, "next": true}
+	for key := range decoded {
+		if !allowedTop[key] {
+			t.Fatalf("the output carries the unplanned key %q", key)
+		}
+	}
+	encodedResult, ok := decoded["result"].(map[string]any)
+	if !ok || len(encodedResult) == 0 {
+		t.Fatalf("the output did not encode the result: %s", buffer.String())
+	}
+	allowedResult := map[string]bool{
+		"stage": true, "domainsDone": true, "sourceVersion": true, "sourceLayout": true,
+		"sourceIdentity": true, "destinationUrl": true, "pluginsEnabled": true,
+		"clientKeys": true, "copiedConfig": true, "copiedCredentials": true,
+		"manualItems": true, "alreadyComplete": true, "updatedAtMs": true,
+	}
+	for key := range encodedResult {
+		if !allowedResult[key] {
+			t.Fatalf("the result carries the unplanned key %q", key)
+		}
+	}
+	// The two names an operator could mistake for the destination secret are
+	// absent even though the result is populated: the client key count is a
+	// count, and the management secret has no field at all.
+	for _, forbidden := range []string{"managementKey", "apiKeys", "accessToken"} {
+		if _, present := encodedResult[forbidden]; present {
+			t.Fatalf("the result carries %q", forbidden)
 		}
 	}
 }

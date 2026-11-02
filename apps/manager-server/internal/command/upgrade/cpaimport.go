@@ -132,7 +132,7 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	// separate, authorized step, so the exact command that continues is printed
 	// rather than run.
 	if string(result.Stage) == cpaImportStage() {
-		output.Next = "connect the destination CPA through the Console, or run `cpa-manager-plus upgrade status` to confirm the recorded stage"
+		output.Next = "the destination connection is stored with the import; run `cpa-manager-plus upgrade status` to confirm the recorded stage, and verify the migrated surface before completing the Upgrade"
 	}
 	writeCPAImportOutput(stdout, *asJSON, output)
 	return nil

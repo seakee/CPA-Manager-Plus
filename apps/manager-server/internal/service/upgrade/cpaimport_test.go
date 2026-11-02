@@ -487,6 +487,46 @@ func importOptions(fixture importFixture, runtime CPAImportRuntime, destinationU
 
 func boolPointer(value bool) *bool { return &value }
 
+// TestSuccessfulImportNeverReportsSecrets is the contract the CLI's output test
+// claims to prove. It runs a real import and compares the reported result and the
+// recorded operation row with the destination management secret and a credential
+// token that crossed the run, so the claim is about bytes those structures hold,
+// not about the absence of a field name.
+func TestSuccessfulImportNeverReportsSecrets(t *testing.T) {
+	const credentialToken = "credential-access-token-secret-value"
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
+		"codex-user.json": `{"type":"codex","access_token":"` + credentialToken + `"}`,
+	})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	result, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true)))
+	if err != nil {
+		t.Fatalf("import the fixture CPA: %v", err)
+	}
+	secret := runtime.stageCall.ManagementKey
+	if strings.TrimSpace(secret) == "" {
+		t.Fatal("the import staged no management secret, so the test proves nothing")
+	}
+	encodedResult, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedResult), secret) {
+		t.Fatal("the import result carries the destination management secret")
+	}
+	if strings.Contains(string(encodedResult), credentialToken) {
+		t.Fatal("the import result carries a credential token")
+	}
+	encodedRow, err := json.Marshal(readOperation(t, fixture.targetRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedRow), secret) || strings.Contains(string(encodedRow), credentialToken) {
+		t.Fatal("the recorded operation row carries a secret")
+	}
+}
+
 // TestImportCPARequiresTheHeldSourceOwnershipLock is the Low finding: the step
 // reads a source it assumes is stopped, so it must hold the 1.x ownership marker
 // rather than only saying so in a comment. A caller without the marker is
