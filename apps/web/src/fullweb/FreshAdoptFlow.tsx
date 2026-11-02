@@ -347,15 +347,30 @@ export function FreshAdoptFlow({
       onOperation(durable);
       const adopt = durable.strategy?.strategy === 'adopt_existing' ? durable.strategy : undefined;
       if (adopt?.stage === 'staged') {
+        // The record owns the plugin choice from the moment it staged this
+        // attempt, and this page only learns that here: a first reply lost on
+        // the way back leaves the checkbox editable while the record already
+        // holds the attempt. A choice the record did not record is stated on
+        // this step — the help under the locked checkbox — instead of advancing
+        // to a confirmation the operator would read as their own change. The
+        // recorded value is adopted here, so the next read sends it.
+        if (plugins !== (adopt.pluginsEnabled === true)) {
+          setPlugins(adopt.pluginsEnabled === true);
+          return;
+        }
         setStage('inventory');
         setConfirmed(false);
         // The commit sends this page's body, and the record already holds the
-        // attempt. Rebuild it from the inputs on screen so the confirmation
-        // always sends what the operator last saw; an address or key the page
-        // cannot use leaves the form that asks for it instead.
-        if (!body && sourceUsable()) {
-          const rebuilt = await recordedBody();
+        // attempt. Rebuild it on every entry — not only when the page holds no
+        // body — from the inputs on screen and the choice the record owns, so a
+        // corrected address or key is what the confirmation sends instead of a
+        // body built before the record owned the attempt. An address or key the
+        // page cannot use leaves the form that asks for it instead.
+        if (sourceUsable()) {
+          const rebuilt = await recordedBody(adopt.pluginsEnabled === true);
           if (rebuilt && alive.current) setBody(rebuilt);
+        } else if (alive.current) {
+          setBody(null);
         }
         return;
       }
@@ -448,8 +463,9 @@ export function FreshAdoptFlow({
   // The exact body of an attempt that is not the first read. The plugin choice is
   // the one the record holds and the source screen shows as locked, the address
   // and key are the operator's, and the destination observation is a read:
-  // rebuilding a body never writes.
-  async function recordedBody(): Promise<Record<string, unknown> | null> {
+  // rebuilding a body never writes. The caller passes the recorded choice because
+  // a read of the record may have just replaced this render's checkpoint.
+  async function recordedBody(pluginsEnabled: boolean): Promise<Record<string, unknown> | null> {
     let normalized: string;
     try {
       normalized = normalizeCPAAddress(baseUrl);
@@ -466,7 +482,7 @@ export function FreshAdoptFlow({
         baseUrl: normalized,
         managementKey,
         // The recorded choice is the only one this attempt accepts.
-        pluginsEnabled: checkpoint?.pluginsEnabled === true,
+        pluginsEnabled,
       },
       await carrier.observeTarget()
     );
@@ -480,7 +496,7 @@ export function FreshAdoptFlow({
       return;
     }
     await run(async () => {
-      const next = await recordedBody();
+      const next = await recordedBody(checkpoint?.pluginsEnabled === true);
       if (!next || !alive.current) return;
       const result = await carrier.writeStrategy(next);
       if (!alive.current) return;
@@ -499,7 +515,7 @@ export function FreshAdoptFlow({
   // observation is a read — so the commit is still only the confirmation's POST.
   async function rebuildConfirmBody() {
     await run(async () => {
-      const next = await recordedBody();
+      const next = await recordedBody(checkpoint?.pluginsEnabled === true);
       if (!next || !alive.current) return;
       setBody(next);
       setManagementKey('');

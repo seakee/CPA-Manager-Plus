@@ -496,6 +496,49 @@ it('lands on the confirmation when the inventory reply was lost', async () => {
   expect(maybe('adopt-migration')).toHaveLength(1);
 });
 
+it('sends the inputs on screen, not the pre-staging body, after a lost first reply', async () => {
+  // The first POST's reply is lost and the staging lands after the page's own
+  // reconciliation read, so the page stays on the source step still holding the
+  // body it built before the record owned the attempt. The operator reads the
+  // failure as a mistyped address and opts in to plugins.
+  const server = await adoptServer({ lateStage: 2 });
+  await click('adopt-read-inventory');
+  await settle();
+  expect(maybe('adopt-read-inventory')).toHaveLength(1);
+  expect(byID('adopt-plugin-optin').props.disabled).toBe(false);
+
+  await input('adopt-source-url', 'http://source-cpa-2:8317');
+  await input('adopt-plugin-optin', true);
+  await click('adopt-read-inventory');
+  await settle();
+
+  // The read found the record already staged: the choice the record holds is the
+  // one the attempt accepts, so the page states it locked, with its own
+  // explanation, instead of carrying the tick that was never recorded.
+  expect(maybe('adopt-inventory')).toHaveLength(0);
+  expect(byID('adopt-plugin-optin').props.disabled).toBe(true);
+  expect(byID('adopt-plugin-optin').props.checked).toBe(false);
+  expect(text()).toContain(adoptText('pluginsLocked'));
+
+  await click('adopt-read-inventory');
+  await settle();
+  expect(maybe('adopt-inventory')).toHaveLength(1);
+
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+
+  // What the operator confirmed is what left the page: the corrected address,
+  // and the plugin value the checkbox showed.
+  const posted = server.strategyBodies.at(-1)!;
+  expect(posted.baseUrl).toBe('http://source-cpa-2:8317');
+  expect(posted.pluginsEnabled).toBe(false);
+  // The corrected address is not this record's attempt, so the server refuses it
+  // by code: the page names the refusal and claims no migration.
+  expect(text()).toContain(adoptText('keyMismatch'));
+  expect(maybe('adopt-migration')).toHaveLength(0);
+});
+
 it('does not commit when a lost staging reply lands between two reads', async () => {
   // The first POST's reply is lost while the source read is still running, so the
   // staging lands after the page already decided nothing was staged. The second

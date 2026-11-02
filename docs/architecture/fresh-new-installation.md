@@ -1356,18 +1356,22 @@ Both wizards render one shared `FreshAdoptFlow`:
   instead of accepting it as the commit. Only the confirmation (and a resume)
   sends a write fenced on the durable revision, which is what lets a replay
   succeed after the migration's own checkpoints;
-- a staged checkpoint whose body the page no longer holds — a reload, or a lost
-  first reply — asks for the source key again before it offers the confirmation,
-  and the confirm button stays disabled until there is a body to send instead of
-  accepting a click that cannot do anything. Reading the inventory again rebuilds
-  that body from the inputs on screen, so Back does not silently re-send the
-  attempt the page built before the operator changed them. A refusal that says the
-  body is not this record's attempt (`fresh_strategy_owner_conflict`,
-  `adopt_plugin_optin_conflict`) drops the body again: the source form returns, a
-  mistyped key is corrected without a reload, and the recorded inventory is
-  reused. The plugin opt-in is locked to the recorded value once the record holds
-  the attempt, with its own explanation, because the destination template already
-  carries that decision;
+- a staged checkpoint whose body the page no longer holds — a reload — asks for
+  the source key again before it offers the confirmation, and the confirm button
+  stays disabled until there is a body to send instead of accepting a click that
+  cannot do anything. Every read that finds the record staged rebuilds that body
+  from the inputs on screen and the plugin choice the record holds, so a lost
+  first reply, a corrected address or a key typed after Back is what the
+  confirmation sends instead of a body built before the record owned the attempt;
+  a corrected address is then refused by the server as another attempt, not
+  committed silently. The plugin opt-in is locked to the recorded value as soon as
+  a read finds the record staged, with its own explanation, because the
+  destination template already carries that decision: a choice the record did not
+  record is stated on the source step instead of being carried into a
+  confirmation. A refusal that says the body is not this record's attempt
+  (`fresh_strategy_owner_conflict`, `adopt_plugin_optin_conflict`) drops the body
+  again: the source form returns, a mistyped key is corrected without a reload,
+  and the recorded inventory is reused;
 - the committed run is polled every two seconds with a bounded backoff until the
   record says `finished` and not `running`, then the per-item results are grouped
   by their own outcome — migrated, manual, failed and `absent_at_source` — so the
