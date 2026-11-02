@@ -615,6 +615,13 @@ func managerAddressDialTarget(address string) string {
 // a dial probe is unreliable when a local proxy answers connections. So the port
 // is bound on every address of this host and on both wildcards, and only an
 // address-in-use failure counts as occupied.
+//
+// "This host" is the network namespace of the process that runs the command.
+// Under `docker compose run --rm` the Manager's CLI sees the run container, not
+// the machine that publishes the stack, so a port held outside this namespace is
+// invisible here. The plan therefore states the host-side checks for the
+// operator to reproduce where the stack really runs; this function is never
+// claimed to be a host observation.
 func portFree(port int) bool {
 	for _, host := range localBindHosts() {
 		listener, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))

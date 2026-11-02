@@ -582,7 +582,7 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   (`volume`/`volumeKind`), the mountpoint the 1.x container uses, the recorded
   source root, the published `port` and the v2 Manager `managerPort` beside it,
   the
-  recorded `backupDirectory`, the exact `docker compose -p cpamp -f - up - d
+  recorded `backupDirectory`, the exact `docker compose -p cpamp -f - up -d
   cpa-manager-plus` invocation, the 1.x compose file to feed on stdin (publishing
   and binding the plan's own port), the preconditions and the health proof:
   `GET /health` on the plan's port with the documented
@@ -623,7 +623,12 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   observation time) in one transaction through
   `upgradeoperation.RecordRollback`, which never rewrites `source_kind`,
   `source_root`, both fingerprints, `backup_manifest_sha256` or the completed
-  domains; a second verdict is `upgrade_rollback_not_applicable`. The recorded
+  domains; a second verdict is `upgrade_rollback_not_applicable`. Stage
+  eligibility is decided again inside that transaction, against the row the
+  transaction holds: `preflight` and `failed` are refused as
+  `upgrade_rollback_not_applicable` even if the service precheck saw a later
+  stage, because a copy-in retry can park a row at `failed` after that read and
+  a preflight row never copied a root. The recorded
   observation time is the service's own clock reading after its proofs, not the
   caller's label; a supplied time outside the freshness window is still
   refused (`upgrade_rollback_evidence_stale`), and a zero `observedAtMs` leaves
@@ -682,12 +687,30 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   store writable and re-reads it to keep that claim true.
 - **`upgrade run` stops at the copy-in.** It performs preflight plus copy-in,
   never reconciliation, and records the 1.x data directory it read so a later
-  rollback can bind its volume. It prints the exact
-  `upgrade reconcile --legacy … --target …` command (with `--bundle` only when
-  the operator passed one). A recorded stage beyond `copy_in` — including a
-  terminal `rolled_back` — is reported as-is with no write and no reconciliation
-  hint, and a blocked preflight still writes nothing.
+  rollback can bind its volume. It prints exactly
+  `cpa-manager-plus upgrade status --db-path <v2 database>` and says that
+  reconciliation is a separate authorised step this build does not ship; it
+  names no subcommand this build cannot dispatch. A recorded stage beyond
+  `copy_in` — including a terminal `rolled_back` — is reported as-is with no
+  write and no next-step hint, and the guard that reads that row runs only when
+  no copy-in marker is in flight, so a materializing target is never opened. A
+  blocked preflight still writes nothing.
 - **The 1.x volume is never written** by any path above: both the health probe
-  and the database probe are read-only, the database is opened immutable so not
-  even a WAL index appears beside it, and the source manifest is unchanged by
-  prepare, verify and every refusal.
+  and the database probe are read-only, the live database is read through a
+  private snapshot copied beside it (database plus WAL sidecars) so not even a
+  WAL index appears beside it, and the source manifest is unchanged by prepare,
+  verify and every refusal. The copy costs scratch space and time proportional
+  to the database size, and it is retried the shared bounded number of times
+  when it races v1 writes.
+- **Known limits of the rollback evidence.** These are stated here so no reader
+  infers a proof the code does not make:
+  - A probe that reaches this Manager through a reverse proxy or tunnel in front
+    of the 1.x port is not detected. The self-probe refusal compares the probe
+    address and port with this Manager's listener; a proxy that forwards the
+    health path to v2 defeats that comparison. Point `--status-url` at the 1.x
+    container port directly, with no proxy between.
+  - An evidence-less `rolled_back` row written by an earlier build cannot be
+    repaired in place; it reads as an outdated store and the only real path is a
+    fresh copy-in into a new v2 data root.
+  - The port and v2-running checks describe the CLI's own network namespace, so
+    under `docker compose run --rm` the operator reproduces them on the host.
