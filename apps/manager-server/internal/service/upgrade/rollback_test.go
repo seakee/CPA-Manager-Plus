@@ -1761,6 +1761,66 @@ func TestPrepareRollbackAcceptsADigestAndRecordsItsForm(t *testing.T) {
 	assertNoPlan(t, refused.targetRoot)
 }
 
+// TestPrepareRollbackAcceptsDockerRepositories is the acceptance half of L-n3:
+// the release-tag form validated only the tag, so the new repository grammar
+// must still take every prefix the Docker reference grammar takes, and the
+// printed pull must name it as one quoted shell word.
+func TestPrepareRollbackAcceptsDockerRepositories(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	for _, reference := range []string{
+		"team/cpamp:v1.14.7",
+		"localhost:5000/cpamp:v1.14.7",
+		"registry.example.com:5000/team/cpamp:v1.14.7",
+	} {
+		options := fixture.options()
+		options.TagOverride = reference
+		plan, err := PrepareRollback(context.Background(), options)
+		if err != nil {
+			t.Fatalf("prepare with repository %q: %v", reference, err)
+		}
+		if plan.Image != reference {
+			t.Fatalf("plan image = %q, want %q", plan.Image, reference)
+		}
+		quoted := "docker pull " + ShellQuote(reference)
+		quotedPull := false
+		for _, precondition := range plan.Preconditions {
+			if strings.Contains(precondition, quoted) {
+				quotedPull = true
+			}
+		}
+		if !quotedPull {
+			t.Fatalf("preconditions do not pull %q as one quoted word: %v", reference, plan.Preconditions)
+		}
+	}
+}
+
+// TestPrepareRollbackRejectsAReferenceOutsideTheDockerRepositoryGrammar is L-n3:
+// the release-tag form took everything before the last colon as a repository, so
+// a newline became a privileged compose service and a $(...)
+// reached the printed docker pull. The repository part is now the Docker
+// reference grammar, validated before anything is printed.
+func TestPrepareRollbackRejectsAReferenceOutsideTheDockerRepositoryGrammar(t *testing.T) {
+	fixture := newRollbackFixture(t)
+	for name, reference := range map[string]string{
+		"newline that would add a compose line": "evil repo\n    privileged: true\n    x:v1.14.7",
+		"shell substitution":                    "$(touch /tmp/pwn):v1.14.10",
+		"uppercase path component":              "team/Cpamp:v1.14.7",
+		"empty path component":                  "team//cpamp:v1.14.7",
+		"space in the repository":               "team/cpamp :v1.14.7",
+		"shell metacharacter in the tag path":   "team;rm -rf/:v1.14.7",
+	} {
+		t.Run(name, func(t *testing.T) {
+			options := fixture.options()
+			options.TagOverride = reference
+			options.AllowImageFamilyMismatch = true
+			if _, err := PrepareRollback(context.Background(), options); !errors.Is(err, ErrRollbackImageUnpinned) {
+				t.Fatalf("reference %q = %v, want %v", reference, err, ErrRollbackImageUnpinned)
+			}
+			assertNoPlan(t, fixture.targetRoot)
+		})
+	}
+}
+
 // TestRecordRollbackPersistsTheImageSourceAndForm is the persistence half of
 // L7: the plan carried who chose the image and which form it is, while the
 // durable evidence kept only the rendered reference, so an operator tag and a

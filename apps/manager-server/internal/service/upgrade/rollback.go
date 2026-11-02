@@ -131,6 +131,50 @@ const (
 // with no suffix. A floating tag (:main, :beta, :latest) never matches.
 var releaseTagPattern = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 
+// dockerRegistryPattern is the registry half of the Docker reference grammar
+// (distribution/reference): a dotted domain name or a bracketed IPv6 address,
+// with an optional port. The domain is case-insensitive there, which is why the
+// path below it is checked separately: `Team/cpamp` is a path component, not a
+// registry, and a path component is lowercase.
+var dockerRegistryPattern = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*|\[[A-Fa-f0-9:]+\])(?::[0-9]{1,5})?$`)
+
+// dockerPathComponentPattern is one lowercase repository path component:
+// alphanumerics separated by a single '.', a '_', '__' or a run of '-'.
+var dockerPathComponentPattern = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
+
+// isDockerRepository validates the repository half of a reference, so a
+// reference cannot carry a newline, whitespace or a shell metacharacter into
+// the printed compose file and the printed `docker pull`. Docker splits at the
+// first component only when that component looks like a registry (it contains a
+// dot or a colon, or is "localhost"); otherwise the whole name is a path and
+// every component is lowercase. That is the difference between
+// `Team.example.com/cpamp` (a registry, accepted) and `Team/cpamp` (a path with
+// an uppercase component, refused).
+func isDockerRepository(repository string) bool {
+	components := strings.Split(repository, "/")
+	if len(components) > 1 && isDockerRegistryComponent(components[0]) {
+		if !dockerRegistryPattern.MatchString(components[0]) {
+			return false
+		}
+		components = components[1:]
+	}
+	if len(components) == 0 {
+		return false
+	}
+	for _, component := range components {
+		if !dockerPathComponentPattern.MatchString(component) {
+			return false
+		}
+	}
+	return true
+}
+
+// isDockerRegistryComponent reports whether the first component of a reference
+// names a registry rather than the first repository path component.
+func isDockerRegistryComponent(component string) bool {
+	return component == "localhost" || strings.ContainsAny(component, ".:")
+}
+
 // digestReferencePattern is the other accepted form: a repository pinned to an
 // immutable sha256 digest. The repository follows the Docker reference grammar:
 // an optional registry host with an optional port, then one or more lowercase
@@ -766,6 +810,15 @@ func rollbackImage(recorded model.UpgradeOperation, override string, allowFamily
 		return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
 			fmt.Sprintf("a rollback pins an exact vX.Y.Z release tag or an @sha256 digest; %q is a moving, partial or non-release tag", tag), nil)
 	}
+	// The repository prefix is validated before anything is printed: the plan
+	// embeds this reference in a compose file and in a `docker pull`, so a
+	// newline, whitespace or a shell metacharacter would become another compose
+	// line or another shell word rather than a repository name.
+	repository := strings.TrimSuffix(reference, ":"+tag)
+	if !isDockerRepository(repository) {
+		return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
+			fmt.Sprintf("the repository in %q is not a Docker repository: pass [registry[:port]/]<lowercase path>:vX.Y.Z, with no whitespace or shell metacharacters", repository), nil)
+	}
 	targetRelease, err := parseRelease(tag)
 	if err != nil {
 		return rollbackImageReference{}, newUpgradeError(UpgradeErrorRollbackImageUnpinned,
@@ -872,7 +925,7 @@ func rollbackPreconditions(project, volume, volumeKind, image, sourceRoot, backu
 			"the v1 stack restarts under compose project "+project+", because that project names the volume")
 	}
 	preconditions = append(preconditions,
-		"pull the pinned 1.x image before restarting: docker pull "+image,
+		"pull the pinned 1.x image before restarting: docker pull "+ShellQuote(image),
 		"the v1 stack publishes "+published+" rather than the v2 port "+held+", so a /health answer can only come from v1",
 		"the recorded backup this verdict is checked against is "+ShellQuote(backupDir),
 		"the v1 process that answers /health is operator-verified to be the stack above: this Manager cannot reach the Docker socket to bind it",

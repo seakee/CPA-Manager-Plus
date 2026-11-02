@@ -517,10 +517,14 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   (`upgrade_rollback_unproven`), and pins the 1.x image to an exact reference.
   Two forms are accepted: an exact release tag (`vX.Y.Z`, with or without a
   repository prefix, derived as `seakee/cpa-manager-plus:v<source_version>` when
-  none is given) or an immutable `@sha256:` digest. A digest follows the Docker
-  reference grammar: an optional registry host with an optional port, then one
-  or more lowercase repository components
-  (`[registry[:port]/]<repository>@sha256:<64 lowercase hex>`), so
+  none is given) or an immutable `@sha256:` digest. Both forms follow the Docker
+  reference grammar for the repository part: an optional registry host with an
+  optional port, then one or more lowercase repository components. A reference
+  whose repository part carries whitespace, a newline or a shell metacharacter is
+  `upgrade_rollback_image_unpinned` instead of text that reaches the compose file
+  or the printed `docker pull`, so `$(…)` and a newline cannot add a compose line
+  or a shell word. A digest is `[registry[:port]/]<repository>` followed by
+  `@sha256:` and 64 lowercase hex characters, so
   `registry.example.com:5000/team/cpamp@sha256:…` and
   `localhost:5000/cpamp@sha256:…` are accepted. Everything else — `:latest`,
   `:main`, `:beta`, a bare repository, an empty tag, a partial version, a
