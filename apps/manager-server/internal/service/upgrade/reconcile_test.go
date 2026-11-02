@@ -1275,6 +1275,86 @@ func TestReconcileOnlyRemovesItsOwnScratchDirectory(t *testing.T) {
 	}
 }
 
+// TestReconcileRefusesALostDayEvenWhenOtherDaysCompare reproduces review M2/P8
+// and P9: the unwaivable boundary was decided for the domain as a whole, so once
+// any day compared, a single lost day — a derived day with no retained support,
+// or a retained/coverage day the store cannot show at all — became an ordinary
+// mismatch an acknowledgement could waive.
+func TestReconcileRefusesALostDayEvenWhenOtherDaysCompare(t *testing.T) {
+	nextDayMS := seededDayMS + utcDayMilliseconds
+	cases := []struct {
+		name    string
+		seed    func(*testing.T, legacyVolume)
+		mutate  string
+		domain  string
+		lostDay string
+	}{
+		{
+			name: "a derived day the store cannot rebuild",
+			seed: func(t *testing.T, volume legacyVolume) {
+				seedSourcePricing(t, volume)
+				seedSourcePricingOnDay(t, volume, nextDayMS)
+			},
+			mutate:  fmt.Sprintf(`delete from usage_pricing_hourly_rollups_v1 where bucket_ms >= %d`, nextDayMS),
+			domain:  ReconcileDomainPricing,
+			lostDay: "2026-03-02",
+		},
+		{
+			name:    "a retained day the store lost",
+			seed:    seedSourceRetention,
+			mutate:  `delete from usage_events where timestamp_ms < 86400000`,
+			domain:  ReconcileDomainRetained,
+			lostDay: "1970-01-01",
+		},
+		{
+			name: "a coverage day the store lost",
+			seed: func(t *testing.T, volume legacyVolume) {
+				seedSourceCoverage(t, volume)
+				execSource(t, volume, fmt.Sprintf(`insert into usage_archive_deleted_coverage_daily (
+					utc_day, deleted_event_count, min_timestamp_ms, max_timestamp_ms)
+					values (%d, 2, %d, %d)`, seededDayIndex+1, nextDayMS+1000, nextDayMS+2000))
+			},
+			mutate:  fmt.Sprintf(`delete from usage_archive_deleted_coverage_daily where utc_day = %d`, seededDayIndex+1),
+			domain:  ReconcileDomainCoverage,
+			lostDay: "2026-03-02",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			copied := newCopiedVolumeWith(t, testCase.seed)
+			execTarget(t, copied.databasePath(), testCase.mutate)
+
+			options := copied.reconcileOptions()
+			options.Acknowledged = []string{testCase.lostDay}
+			report, err := Reconcile(context.Background(), options)
+			if !errors.Is(err, ErrReconcileTargetIncomplete) {
+				t.Fatalf("reconcile error = %v, want the lost-day refusal even when acknowledged", err)
+			}
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorReconcileTargetIncomplete {
+				t.Fatalf("error code = %q (%t), want %q", code, ok, UpgradeErrorReconcileTargetIncomplete)
+			}
+			if message := err.Error(); !strings.Contains(message, testCase.lostDay) {
+				t.Fatalf("error %q does not name the lost day %s", message, testCase.lostDay)
+			}
+			lost := domainReport(t, report, testCase.domain)
+			if lost.ComparedDays == 0 {
+				t.Fatalf("%s report = %+v, want another day still compared", testCase.domain, lost)
+			}
+			if testCase.domain == ReconcileDomainPricing &&
+				!reflect.DeepEqual(lost.UnrecoverableDays, []string{testCase.lostDay}) {
+				t.Fatalf("unrecoverable days = %v, want the lost day", lost.UnrecoverableDays)
+			}
+			if report.Recorded {
+				t.Fatal("a lost day recorded the operation")
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none", got)
+			}
+			assertNoScratch(t, copied.target)
+		})
+	}
+}
+
 // TestReconcileMarksAClearedDerivedTableAsARecoverableLoss covers the round three
 // decision about the derived-domain boundary: a rollup table that is still there
 // but holds none of the source's days is recoverable, because its rows can be
