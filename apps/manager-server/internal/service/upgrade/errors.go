@@ -26,6 +26,11 @@ const (
 	// Nothing was deleted or overwritten; the marker is the evidence that the
 	// store is unfinished, so it stays exactly where it is.
 	UpgradeErrorTargetConflict UpgradeErrorCode = "upgrade_target_conflict"
+	// UpgradeErrorV2Running reports that another Manager process owns the v2
+	// data root: its process lock is held, so the copy-in refuses before it
+	// creates, backs up, restores, migrates or records anything. Stop the
+	// process and rerun; nothing this run intended was written.
+	UpgradeErrorV2Running UpgradeErrorCode = "upgrade_copy_in_v2_running"
 	// UpgradeErrorRollbackNotApplicable reports that the recorded operation is
 	// not in a stage a rollback can start from, or that it has already been
 	// rolled back. Nothing was written.
@@ -143,6 +148,7 @@ var (
 	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
 	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
 	ErrStoreLocked           = &UpgradeError{Code: UpgradeErrorStoreLocked}
+	ErrV2Running             = &UpgradeError{Code: UpgradeErrorV2Running}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

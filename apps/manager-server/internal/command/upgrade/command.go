@@ -56,13 +56,18 @@ const (
 // exhaustion without depending on a real race.
 var openSnapshot = upgradeservice.OpenSnapshot
 
-// ExitCode maps a Run result to the CLI contract: 0 ready, 1 blocked,
-// 2 anything else.
+// ExitCode maps a Run result to the CLI contract: 0 ready, 1 blocked by a
+// precondition outside this run's control, 2 anything else.
+//
+// A held v2 data root lock reports 1, like a blocked preflight: nothing the
+// operator typed was wrong and nothing was written, but the run cannot proceed
+// until the other Manager process is stopped. Usage and environment failures
+// stay 2.
 func ExitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
-	case errors.Is(err, ErrBlocked), errors.Is(err, ErrRefused):
+	case errors.Is(err, ErrBlocked), errors.Is(err, ErrRefused), errors.Is(err, upgradeservice.ErrV2Running):
 		return 1
 	default:
 		return 2
@@ -112,7 +117,7 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                     plan a 1.x restart, or record a proven one")
 	_, _ = fmt.Fprintln(w, "  --scratch-dir must be outside the legacy source root and the target root.")
 	_, _ = fmt.Fprintln(w, "                                     the default OS temporary directory is checked the same way")
-	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked or refused, 2 usage, environment or retryable error.")
+	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused or the v2 data root is in use, 2 usage, environment or retryable error.")
 }
 
 func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -360,7 +365,12 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		writeRunOutput(stdout, *asJSON, output)
 		return ErrBlocked
 	}
-	lock, err := processlock.AcquireExisting(upgradeservice.SourceDatabasePath(legacyRoot))
+	// The 1.x source is documented read-only for this command, so its fence is
+	// taken through a read-only descriptor: the same exclusive marker, the same
+	// exclusion of cooperating writers, but the source volume is never opened
+	// for writing and a stopped source preserved on a read-only mount still
+	// proves exclusivity.
+	lock, err := processlock.AcquireExistingReadOnly(upgradeservice.SourceDatabasePath(legacyRoot))
 	if err != nil {
 		return fmt.Errorf("take the 1.x ownership lock: %w", err)
 	}

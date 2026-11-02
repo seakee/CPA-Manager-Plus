@@ -140,6 +140,17 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	if err := requireSourceLock(options.Lock, layout.DatabasePath); err != nil {
 		return Result{}, err
 	}
+	// The v2 data root is written by this run alone. The fence is taken here,
+	// in the service, so the CLI and any future caller cannot bypass it, and it
+	// covers the whole mutating path: target creation, backup, staging, the
+	// member renames, the migration, the row and the marker cleanup. It is
+	// taken before the first target or backup write, and the source fence the
+	// caller already holds is a different lock on a different directory.
+	targetLock, err := acquireTargetFence(targetRoot)
+	if err != nil {
+		return Result{}, err
+	}
+	defer func() { _ = targetLock.Close() }()
 	if err := os.MkdirAll(targetRoot, 0o755); err != nil {
 		return Result{}, fmt.Errorf("create the v2 data root: %w", err)
 	}
@@ -474,6 +485,26 @@ func requireSourceLock(lock *processlock.Lock, databasePath string) error {
 		return errors.New("the held ownership lock does not belong to the 1.x source database")
 	}
 	return lock.Validate()
+}
+
+// acquireTargetFence takes the v2 data root's ownership lock, the same marker a
+// running Manager holds. It creates the marker (and the data root) when they do
+// not exist yet, which is the copy-in's own first write to the target.
+//
+// A held lock is a typed refusal, not a generic environment failure: another
+// Manager process is serving or writing this store, and copying into it would
+// make two writers disagree about the same bytes. The message names no host
+// path; the code and exit status are what an operator acts on.
+func acquireTargetFence(targetRoot string) (*processlock.Lock, error) {
+	lock, err := processlock.Acquire(filepath.Join(targetRoot, databaseFileName))
+	if err == nil {
+		return lock, nil
+	}
+	if errors.Is(err, processlock.ErrLocked) {
+		return nil, newUpgradeError(UpgradeErrorV2Running,
+			"the v2 data root is owned by a running Manager process; stop it before the copy-in", nil)
+	}
+	return nil, fmt.Errorf("take the v2 data root ownership lock: %w", err)
 }
 
 func readRecordedCopyIn(ctx context.Context, databasePath string) (model.UpgradeOperation, bool, error) {
@@ -1151,7 +1182,19 @@ func migrateAndRecord(ctx context.Context, paths targetPaths, result Result) (mo
 	if err := repository.Put(ctx, recorded); err != nil {
 		return model.UpgradeOperation{}, false, fmt.Errorf("record the copy_in stage: %w", err)
 	}
-	return recorded, alreadyRecorded, nil
+	// The repository owns created_at_ms and updated_at_ms: it discards the
+	// caller's proposal, and on the first write the returned struct still holds
+	// no timestamp at all. Reporting this run's result from the local struct
+	// would then show updated_at_ms=0 while the durable row holds the time the
+	// write happened, so the persisted row is read back and is the result.
+	persisted, found, err := repository.Get(ctx)
+	if err != nil {
+		return model.UpgradeOperation{}, false, fmt.Errorf("read the recorded copy_in stage: %w", err)
+	}
+	if !found {
+		return model.UpgradeOperation{}, false, errors.New("the copy_in stage is missing from the v2 database after it was recorded")
+	}
+	return persisted, alreadyRecorded, nil
 }
 
 // readOnlySnapshotName reads a store nobody else writes. It joins a live WAL

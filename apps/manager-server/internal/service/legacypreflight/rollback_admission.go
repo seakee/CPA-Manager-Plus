@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // UpgradeReason is the typed, operator-facing explanation attached to an
@@ -47,21 +48,32 @@ func (a DatabaseUpgradeAdmission) AdmittedReason(ctx context.Context) (UpgradeSt
 	if path == "" {
 		return UpgradeStageNone, "", errors.New("upgrade admission requires the Manager database path")
 	}
+	// The marker is read first, exactly as Admitted does: a `materializing`
+	// marker must be decided without opening the target read-only, or admission
+	// itself rewrites `-shm` and strands the resume. That phase carries no
+	// rollback reason.
+	marker, inFlight, err := readCopyInMarker(path)
+	if err != nil {
+		return UpgradeStageNone, "", err
+	}
+	if inFlight && marker.Phase == copyinmarker.PhaseMaterializing {
+		return UpgradeStageInProgress, "", nil
+	}
 	record, found, err := readRecordedUpgrade(ctx, path)
 	if err != nil {
 		return UpgradeStageNone, "", err
 	}
-	if !found {
-		// No row: an unfinished copy-in may still be described by its marker,
-		// and a marker never carries a rollback.
-		stage, err := copyInMarkerStage(path)
-		return stage, "", err
+	if found {
+		stage, err := upgradeStageFromRecord(record)
+		if err != nil {
+			return UpgradeStageNone, "", err
+		}
+		return stage, upgradeReasonFromRecord(record), nil
 	}
-	stage, err := upgradeStageFromRecord(record)
-	if err != nil {
-		return UpgradeStageNone, "", err
+	if inFlight {
+		return UpgradeStageInProgress, "", nil
 	}
-	return stage, upgradeReasonFromRecord(record), nil
+	return UpgradeStageNone, "", nil
 }
 
 // upgradeReasonFromRecord is the reason half of the same decision
