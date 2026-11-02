@@ -3,9 +3,11 @@ package upgradeoperation_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -418,6 +420,121 @@ func TestRecordSourceRootNeedsARecordedOperation(t *testing.T) {
 	}
 	if _, found, err := repository.Get(ctx); err != nil || found {
 		t.Fatalf("a refused backfill created a row: found=%t err=%v", found, err)
+	}
+}
+
+// TestEveryWriterKeepsUpdatedAtMonotonic pins the shared invariant: the
+// repository owns updated_at_ms, so no writer may stamp a clock that is behind
+// the stored row.
+//
+// The fixture moves the stamp two hours ahead, which is what a backwards clock
+// looks like from here: a host whose clock ran fast, a row restored from a backup
+// written later, or a process that started before the stored value was recorded.
+// Every writer that touches the row — including the refusal and clear paths the
+// External step added — must keep the stamp at least where it was instead of
+// overwriting it with its own now.
+func TestEveryWriterKeepsUpdatedAtMonotonic(t *testing.T) {
+	ctx := context.Background()
+	repository, db := newRepository(t)
+	recordedCopyIn(t, repository)
+	future := time.Now().Add(2 * time.Hour).UnixMilli()
+
+	storedStamp := func() int64 {
+		var stamp int64
+		if err := db.QueryRowContext(ctx,
+			`select updated_at_ms from upgrade_operations where id = 1`).Scan(&stamp); err != nil {
+			t.Fatalf("read the stamp: %v", err)
+		}
+		return stamp
+	}
+	// moveAhead rewrites the row the way a clock that ran fast would have, and
+	// keeps it valid: created_at_ms stays before the stamp it owns.
+	moveAhead := func() {
+		if _, err := db.ExecContext(ctx,
+			`update upgrade_operations set created_at_ms = ?, updated_at_ms = ? where id = 1`,
+			future-1000, future); err != nil {
+			t.Fatalf("move the stamp ahead: %v", err)
+		}
+	}
+	inTransaction := func(run func(tx *sql.Tx) error) {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := run(tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("write: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+	writers := []struct {
+		name string
+		run  func()
+	}{
+		{name: "RecordError", run: func() {
+			if err := repository.RecordError(ctx, "external_target_moved", "stale refusal"); err != nil {
+				t.Fatalf("record the refusal: %v", err)
+			}
+		}},
+		{name: "ClearErrorTx", run: func() {
+			inTransaction(func(tx *sql.Tx) error {
+				return upgradeoperation.ClearErrorTx(ctx, tx)
+			})
+		}},
+		{name: "Advance", run: func() {
+			if _, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageReconcile); err != nil {
+				t.Fatalf("advance: %v", err)
+			}
+		}},
+		{name: "RecordReconciliationTx", run: func() {
+			inTransaction(func(tx *sql.Tx) error {
+				return upgradeoperation.RecordReconciliationTx(ctx, tx, json.RawMessage(`{"days":{}}`))
+			})
+		}},
+		{name: "Put", run: func() {
+			stored, found, err := repository.Get(ctx)
+			if err != nil || !found {
+				t.Fatalf("read the row: found=%t err=%v", found, err)
+			}
+			// A caller proposal older than the stored stamp, but still after
+			// created_at_ms: the repository must not pin it onto the row.
+			stored.UpdatedAtMS = future - 500
+			if err := repository.Put(ctx, stored); err != nil {
+				t.Fatalf("put: %v", err)
+			}
+		}},
+		{name: "RecordRollback", run: func() {
+			if _, err := repository.RecordRollback(ctx, rollbackEvidence()); err != nil {
+				t.Fatalf("record the rollback: %v", err)
+			}
+		}},
+	}
+	for _, writer := range writers {
+		moveAhead()
+		writer.run()
+		// Every writer is reported independently: the invariant is per writer, and
+		// one that rewinds must not hide the others.
+		if got := storedStamp(); got < future {
+			t.Errorf("%s moved updated_at_ms backwards: %d < %d", writer.name, got, future)
+		}
+		if _, _, err := repository.Get(ctx); err != nil {
+			t.Errorf("%s left a row Get rejects: %v", writer.name, err)
+		}
+	}
+}
+
+// TestRecordErrorNeedsARecordedOperation keeps a refusal inside an existing
+// operation: recording one never creates a row.
+func TestRecordErrorNeedsARecordedOperation(t *testing.T) {
+	ctx := context.Background()
+	repository, _ := newRepository(t)
+	if err := repository.RecordError(ctx, "external_target_moved", "stale refusal"); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+		t.Fatalf("err = %v, want ErrInvalidRow", err)
+	}
+	if _, found, err := repository.Get(ctx); err != nil || found {
+		t.Fatalf("a refused refusal created a row: found=%t err=%v", found, err)
 	}
 }
 

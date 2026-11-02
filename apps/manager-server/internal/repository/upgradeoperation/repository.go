@@ -168,10 +168,39 @@ func decodeStringList(raw string, column string) ([]string, error) {
 	return values, nil
 }
 
+// nextUpdatedAtMS returns the updated_at_ms the next write must store. nowMS is
+// the wall clock and stored is the row currently on disk (the zero operation
+// before the first write).
+//
+// The repository owns this column: the clock and the stored row are the only
+// inputs, so a caller proposal (a stale value or a unit mistake such as MaxInt64
+// from a microsecond value) can never be pinned onto the row, and a clock that
+// moved backwards — or a row restored from a backup written later — can never
+// make updated_at_ms precede the value already stored. Get rejects a row whose
+// updated_at_ms precedes created_at_ms, so a backward stamp would block every
+// later reader (status, the next advance). Every writer of updated_at_ms calls
+// this helper instead of stamping its own clock.
+func nextUpdatedAtMS(nowMS int64, stored model.UpgradeOperation) int64 {
+	next := nowMS
+	for _, candidate := range [...]int64{stored.CreatedAtMS, stored.UpdatedAtMS} {
+		if candidate > next {
+			next = candidate
+		}
+	}
+	return next
+}
+
 // Put replaces the single row. A zero CreatedAtMS keeps the recorded creation
-// time of an existing row, so re-writing progress never rewrites history.
+// time of an existing row, so re-writing progress never rewrites history; the
+// two timestamps are recomputed from the stored row in the write transaction, so
+// a caller proposal cannot pin or rewind them.
 func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	op.Normalize()
+	// The repository owns both timestamps, so a caller proposal (a stale value or
+	// a unit mistake such as a microsecond value) is dropped before validation and
+	// recomputed from the stored row and the clock below.
+	op.CreatedAtMS = 0
+	op.UpdatedAtMS = 0
 	// This is one of the two paths that write a stage, so the terminal verdict's
 	// evidence invariant is enforced here, before the model's shape check turns
 	// it into a plain error.
@@ -182,32 +211,43 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 		return err
 	}
 	now := time.Now().UnixMilli()
-	if op.UpdatedAtMS == 0 {
-		op.UpdatedAtMS = now
+	// Resolve both timestamps in the same transaction as the write, so a
+	// concurrent advance cannot be overwritten with a later creation time or a
+	// lower stamp.
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = tx.Rollback() }()
+	// Take the write lock before reading so the stored row this write compares
+	// against is the one it replaces.
+	if _, err := tx.ExecContext(ctx, `insert into `+tableName+`
+		(id, stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?)
+		on conflict(id) do nothing`, string(op.Stage), now, now); err != nil {
+		return err
+	}
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("upgrade operation row disappeared during put")
+	}
+	op.CreatedAtMS = current.CreatedAtMS
 	if op.CreatedAtMS == 0 {
-		// Resolve the creation time in the same transaction as the write so a
-		// concurrent advance cannot be overwritten with a later creation time.
-		tx, err := r.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-		var existing int64
-		switch err := tx.QueryRowContext(ctx, `select created_at_ms from `+tableName+` where id = 1`).Scan(&existing); {
-		case errors.Is(err, sql.ErrNoRows), err == nil && existing <= 0:
-			op.CreatedAtMS = now
-		case err != nil:
-			return err
-		default:
-			op.CreatedAtMS = existing
-		}
-		if err := writeOperation(ctx, tx, op); err != nil {
-			return err
-		}
-		return tx.Commit()
+		op.CreatedAtMS = now
 	}
-	return writeOperation(ctx, r.db, op)
+	op.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	// Revalidate the row this transaction is about to persist: the timestamps
+	// above were recomputed here, not by the caller.
+	if err := op.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	if err := writeOperation(ctx, tx, op); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type operationWriter interface {
@@ -335,9 +375,15 @@ func AdvanceTx(ctx context.Context, tx Tx, domain string, stage model.UpgradeSta
 	if domain != "" {
 		current.MarkDomain(domain)
 	}
-	current.UpdatedAtMS = now
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	// Validate the row this transaction is about to write. A stored clock that
+	// ran ahead must stay readable after the advance, and Get rejects any row
+	// Validate does not accept.
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
 	domains, err := json.Marshal(current.DomainsDone)
 	if err != nil {
@@ -362,46 +408,80 @@ func nullString(value string) any {
 // stage or the completed domains: the step did not advance, and no path may make
 // a refusal look like progress. Only the error columns and the update time move,
 // so the provenance a later rollback relies on is left exactly as it was.
+//
+// The stamp is computed from the stored row inside the transaction, so a refusal
+// written by a process whose clock lags the store cannot move updated_at_ms
+// backwards, and the row is validated before it is written.
 func (r *Repository) RecordError(ctx context.Context, code, detail string) error {
 	if strings.TrimSpace(code) == "" {
 		return fmt.Errorf("%w: the refusal code is empty", ErrInvalidRow)
 	}
-	result, err := r.db.ExecContext(ctx, `update `+tableName+`
-		set error_code = ?, error_detail = ?, updated_at_ms = ? where id = 1`,
-		code, nullString(strings.TrimSpace(detail)), time.Now().UnixMilli())
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UnixMilli()
+	// Take the write lock before reading, so the stamp this refusal advances is
+	// the one on disk. The placeholder carries no stage, and a refusal may not
+	// create an operation: a row of zero rows affected means there is none.
+	inserted, err := tx.ExecContext(ctx, `insert into `+tableName+`
+		(id, stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?)
+		on conflict(id) do nothing`, "", now, now)
 	if err != nil {
 		return err
 	}
-	if affected == 0 {
+	if created, err := inserted.RowsAffected(); err == nil && created > 0 {
 		return fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
 	}
-	return nil
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
+	}
+	current.ErrorCode = code
+	current.ErrorDetail = strings.TrimSpace(detail)
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	if _, err := tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = ?, error_detail = ?, updated_at_ms = ? where id = 1`,
+		current.ErrorCode, nullString(current.ErrorDetail), current.UpdatedAtMS); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ClearErrorTx clears a refusal inside the caller's transaction, so a step that
 // succeeded can commit the cleared refusal beside the stage it advanced to. The
 // refusal is the durable statement that the step did not advance; leaving it
 // behind after a successful run would keep telling the wizard a stop is still
-// standing. Only the error columns and the update time move.
+// standing. Only the error columns and the update time move, and the stamp is
+// computed from the row as this transaction sees it.
 func ClearErrorTx(ctx context.Context, tx Tx) error {
-	result, err := tx.ExecContext(ctx, `update `+tableName+`
-		set error_code = null, error_detail = null, updated_at_ms = ? where id = 1`,
-		time.Now().UnixMilli())
+	now := time.Now().UnixMilli()
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
+	if !found {
 		return fmt.Errorf("%w: no operation row to clear the refusal on", ErrInvalidRow)
 	}
-	return nil
+	current.ErrorCode = ""
+	current.ErrorDetail = ""
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	_, err = tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = null, error_detail = null, updated_at_ms = ? where id = 1`,
+		current.UpdatedAtMS)
+	return err
 }
 
 // RecordReconciliation stores the reconciliation report on the single row
@@ -432,19 +512,22 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 	if err := json.Unmarshal(report, &object); err != nil {
 		return fmt.Errorf("%w: reconciliation must be a JSON object", ErrInvalidRow)
 	}
-	result, err := tx.ExecContext(ctx, `update `+tableName+`
-		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(report), time.Now().UnixMilli())
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
+	if !found {
 		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
 	}
-	return nil
+	current.Reconciliation = report
+	current.UpdatedAtMS = nextUpdatedAtMS(time.Now().UnixMilli(), current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	_, err = tx.ExecContext(ctx, `update `+tableName+`
+		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(current.Reconciliation), current.UpdatedAtMS)
+	return err
 }
 
 // requireVerdictEvidence keeps the terminal verdict and its observation
@@ -484,9 +567,12 @@ func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (m
 	}
 	now := time.Now().UnixMilli()
 	current.SourceRoot = sourceRoot
-	current.UpdatedAtMS = now
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
 	if _, err := tx.ExecContext(ctx, `update `+tableName+`
 		set source_root = ?, updated_at_ms = ? where id = 1`,
@@ -547,9 +633,14 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 	}
 	current.Stage = model.UpgradeStageRolledBack
 	current.Rollback = &evidence
-	current.UpdatedAtMS = now
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	// The verdict and the observation this transaction is about to write must
+	// both still be acceptable, and a stored clock that ran ahead stays readable.
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
 	if _, err := tx.ExecContext(ctx, `update `+tableName+`
 		set stage = ?, rollback_image = ?, rollback_status_url = ?,

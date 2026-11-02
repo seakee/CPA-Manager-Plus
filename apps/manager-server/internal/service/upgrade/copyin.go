@@ -982,7 +982,17 @@ func migrateAndRecord(ctx context.Context, paths targetPaths, result Result) (mo
 	if err := repository.Put(ctx, recorded); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the copy_in stage: %w", err)
 	}
-	return recorded, nil
+	// Put owns both timestamps and recomputes them from the stored row, so the
+	// row it wrote is read back instead of reporting the snapshot this call
+	// carried in.
+	stored, found, err := repository.Get(ctx)
+	if err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("read the recorded copy_in stage: %w", err)
+	}
+	if !found {
+		return model.UpgradeOperation{}, errors.New("record the copy_in stage: the operation row disappeared")
+	}
+	return stored, nil
 }
 
 // readOnlySnapshotName reads a store nobody else writes. It joins a live WAL
