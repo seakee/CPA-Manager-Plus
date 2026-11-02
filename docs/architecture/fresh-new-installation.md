@@ -1301,20 +1301,33 @@ installation/runtime` is — it is the progress read of the session that committ
 the adoption.
 
 It answers `{items[], planned, finished, running, retryable, counts}`, where each
-item carries `item`, `kind`, `outcome`, `reason` and the store's own `retryable`
-rule, `running` is the live single-flight flag rather than a recorded value, and
-`counts` tallies the four outcomes. The reply omits the record's source and
-destination digests: they are the Manager's evidence, and dropping them keeps the
-route a statement about progress. The reply is also a separate output boundary
-from the record, because the record's text is not all the Manager's: a credential
-file name is the source CPA's metadata and a reason can quote an upstream code, so
-`item` and `reason` are scrubbed with the project's own credential scrubber
-(`internal/usage`). The record's free-text `instruction` — which interpolates a
-source name and the destination's own type string — is not emitted at all: the
-page states the next step from the item's `kind`, so untrusted metadata cannot
-reach the browser as prose. A staged adoption, a non-adoption and an unreadable
-record answer `404 {"code":"adopt_summary_unavailable"}` rather than an empty list
-that reads like a finished run. The session branch is bounded by
+item carries `id`, `item`, `kind`, `outcome`, `reason`, the store's own
+`retryable` rule and — on the one item that stands for credentials the record
+could not hold — `left`, `running` is the live single-flight flag rather than a
+recorded value, and `counts` tallies the four outcomes. The reply omits the
+record's source and destination digests: they are the Manager's evidence, and
+dropping them keeps the route a statement about progress.
+
+`id` is the record's identity for the item, a SHA-256 of its own name, because
+`item` is scrubbed text: two token-shaped file names both become
+`credential:[redacted].json`, and a browser binding an acknowledgement or a list
+key to that text would treat two resources as one. The name stays display only.
+
+The reply is also a separate output boundary from the record, because the
+record's text is not all the Manager's: a credential file name is the source
+CPA's metadata and a reason can quote an upstream code. `item` and `reason` pass
+two rules — the project's credential scrubber (`internal/usage`), then the exact
+source Client Keys and management key the migration was staged with, read from
+the protected adoption snapshot and replaced by value. A bare 32-hex key or a
+UUID used verbatim as a credential file name has no credential shape, so the
+value is the only rule that catches it. The record's free-text `instruction` —
+which interpolates a source name and the destination's own type string — is not
+emitted at all: the page states the next step from the item's `kind` and
+`reason`, so untrusted metadata cannot reach the browser as prose. A staged
+adoption, a non-adoption, an unreadable record and a snapshot that cannot be
+unprotected answer `404 {"code":"adopt_summary_unavailable"}` rather than an empty
+list that reads like a finished run: a reply that cannot be proven free of a
+source value is not a reply. The session branch is bounded by
 `ProductComplete`: the claim that committed the adoption reads its own progress
 until the installation completes, and afterwards the route is an Admin resource
 and the same session is answered `401`.
@@ -1322,8 +1335,10 @@ and the same session is answered `401`.
 Both wizards render one shared `FreshAdoptFlow`:
 
 - the Adopt tile in the setup wizard and in the Console's guided Runtime page is a
-  real choice, and an `adopt_existing` checkpoint renders the flow instead of an
-  empty card;
+  real choice, an `adopt_existing` checkpoint renders the flow instead of an empty
+  card, and the Console's source step offers a way back to the strategy choice
+  until the record holds an attempt (after that the record decides, and no exit is
+  rendered);
 - the source stage asks for the address, the management key (a password input held
   in component memory, never persisted or logged) and the plugin opt-in, and
   states the scope: credentials, gateway configuration, provider sections and
@@ -1334,25 +1349,42 @@ Both wizards render one shared `FreshAdoptFlow`:
   for, read as they are — and the flow groups them into what copies and what needs
   manual work. Nothing is copied until the operator confirms, and the second POST
   sends the identical body. Because the two POSTs are the same request, reading
-  the inventory reads the durable operation first: an attempt the record already
-  staged can only land on the confirmation, so a Back-and-retry or a lost first
-  reply never turns a read into the commit;
+  the inventory reads the durable operation first, and that read is also the
+  staging write's fence: the POST carries the revision of the read that decided
+  "nothing staged", so a staging that lands between that read and the write — a
+  slow source, a lost first reply — makes the server refuse the POST as stale
+  instead of accepting it as the commit. Only the confirmation (and a resume)
+  sends a write fenced on the durable revision, which is what lets a replay
+  succeed after the migration's own checkpoints;
 - a staged checkpoint whose body the page no longer holds — a reload, or a lost
   first reply — asks for the source key again before it offers the confirmation,
   and the confirm button stays disabled until there is a body to send instead of
-  accepting a click that cannot do anything;
+  accepting a click that cannot do anything. Reading the inventory again rebuilds
+  that body from the inputs on screen, so Back does not silently re-send the
+  attempt the page built before the operator changed them. A refusal that says the
+  body is not this record's attempt (`fresh_strategy_owner_conflict`,
+  `adopt_plugin_optin_conflict`) drops the body again: the source form returns, a
+  mistyped key is corrected without a reload, and the recorded inventory is
+  reused. The plugin opt-in is locked to the recorded value once the record holds
+  the attempt, with its own explanation, because the destination template already
+  carries that decision;
 - the committed run is polled every two seconds with a bounded backoff until the
   record says `finished` and not `running`, then the per-item results are grouped
   by their own outcome — migrated, manual, failed and `absent_at_source` — so the
   number beside "Migrated" is `counts.migrated` and a resource the source never had
   is never counted as a copy. Each reason code has a localized sentence, and a
-  manual or failed item's next step is the page's own sentence for its `kind`
-  behind a "what to do" disclosure;
+  manual or failed item's next step is the page's own sentence for its `kind` and
+  `reason` behind a "what to do" disclosure — a credential that exists only in the
+  source process is told to re-authenticate rather than to copy a file that does
+  not exist, and the item standing for credentials the record could not hold
+  carries the count it kept;
 - the progress read is bounded: three consecutive failures stop the loop and show
   a typed state with an explicit retry, so a refused or lost route cannot leave
   "reading the migration record" spinning forever. A read that never answers is
-  one of those failures — the fixed carrier gives it the same 15 s deadline the
-  canonical carrier gives every read — so a hung request cannot outlast the rule;
+  one of those failures — the fixed carrier bounds the whole answer, body
+  included, by the same 15 s the canonical carrier gives a request — so neither a
+  request that never answers nor a half-open connection that stalls after its
+  headers can outlast the rule;
 - the success headline is a claim about the installation, so it requires the run to
   be settled, no retryable item to remain, and the installation itself to be
   complete. A settled run missing any of the three shows the settled state and

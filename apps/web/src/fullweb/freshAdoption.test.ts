@@ -250,7 +250,7 @@ describe('the Adopt wire contract', () => {
           left: 7,
         }),
         recorded({
-          item: 'credential-name-sha256:abc',
+          item: 'credential:sk-proj-aaaaaaaaaaaaaaaaaaaaaaaa…#sha256:' + 'a'.repeat(64),
           kind: 'credential',
           outcome: 'manual',
           reason: 'adoption_item_name_too_long',
