@@ -104,8 +104,8 @@ const (
 	// the CPA_IMAGE value there, not a literal in the compose file.
 	cpaStackEnvFileName = ".env"
 	// cpaStackEnvVariable is the one variable this reader takes from .env. Every
-	// other value in that file is ignored and never retained: it may hold the
-	// admin key and other secrets.
+	// other variable in that file is not parsed, retained or reported: it may hold
+	// the admin key and other secrets.
 	cpaStackEnvVariable = "CPA_IMAGE"
 	// cpaStackFileBytes bounds one stack file this reader parses.
 	cpaStackFileBytes = 256 << 10
@@ -348,7 +348,7 @@ func parseCPAVersion(raw string) (cpaVersion, bool) {
 // the operator's own `--cpa-version`, and the image the stack declares for its
 // `cli-proxy-api` service. The v1 installer writes `image: ${CPA_IMAGE}` in
 // compose.yaml and the release in `.env`, so a `${...}` reference is resolved
-// from that file — only the CPA_IMAGE value is read, and no other value is
+// from that file — only the CPA_IMAGE value is parsed, and no other variable is
 // retained or reported. When neither input names an exact release the gate
 // refuses; it never infers one from the shape of the file. A reference that
 // carries a digest (`repo:v7.3.4@sha256:…`) names bytes rather than a release and
