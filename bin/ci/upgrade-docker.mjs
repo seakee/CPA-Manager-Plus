@@ -162,16 +162,33 @@ export function isOwnedResourceName(prefix, name) {
   return value === prefix || value.startsWith(`${prefix}-`) || value.startsWith(`${prefix}_`);
 }
 
+// shutdownRefusal is the error a producer gets once the registry is fenced. Its
+// code lets the acceptance path tell "the run is stopping" apart from a real
+// failure without parsing the message.
+function shutdownRefusal(kind, name, reason) {
+  const error = new Error(`refusing to track ${kind} ${String(name)}: the run is shutting down (${reason})`);
+  error.code = 'run_shutting_down';
+  error.resourceKind = kind;
+  return error;
+}
+
 // createResourceRegistry tracks what this run created, before it is created. A
 // tracked entry owns its own release; a release that throws stays tracked and is
 // reported, so a partial cleanup can never be mistaken for a clean one. Nothing
 // is released twice and nothing outside the prefix is ever tracked.
+//
+// The registry is also the run's creation boundary: once `fence` is called it
+// refuses every new `track`, synchronously and for good. A shutdown that only
+// set a flag would still let an already-awaited step resume and create after
+// the release snapshot was taken; a fenced registry cannot.
 export function createResourceRegistry({ prefix, root = null } = {}) {
   if (!UPGRADE_DOCKER_CONTRACT.prefixPattern.test(String(prefix ?? ''))) {
     throw new Error(`a resource registry needs a cpampd<8 hex> prefix, got ${JSON.stringify(prefix)}`);
   }
   const entries = new Map();
+  const inFlight = new Map();
   const keyOf = (kind, name) => `${kind}:${name}`;
+  let shutdownReason = null;
 
   const owns = (kind, name) => {
     if (!RESOURCE_RELEASE_ORDER.includes(kind)) return false;
@@ -183,13 +200,30 @@ export function createResourceRegistry({ prefix, root = null } = {}) {
 
   const registry = {
     prefix,
+    get shutdownReason() {
+      return shutdownReason;
+    },
     has: (kind, name) => entries.has(keyOf(kind, name)),
     entry: (kind, name) => entries.get(keyOf(kind, name)) ?? null,
     list: (kind) => [...entries.values()].filter((entry) => entry.kind === kind),
     all: () => [...entries.values()],
+    // fence closes the creation boundary. It is synchronous on purpose: a
+    // signal handler calls it before its first await, so a step that resumes
+    // later cannot race a release snapshot.
+    fence(reason = 'shutdown requested') {
+      if (!shutdownReason) shutdownReason = String(reason);
+      return shutdownReason;
+    },
+    // assertCreationAllowed is what a producer calls before spawning something
+    // it will then track; track itself refuses too, but a spawn that happens
+    // first would already have escaped the registry.
+    assertCreationAllowed(kind = 'resource', name = '') {
+      if (shutdownReason) throw shutdownRefusal(kind, name, shutdownReason);
+    },
     track(kind, name, release, extra = {}) {
       if (!RESOURCE_RELEASE_ORDER.includes(kind)) throw new Error(`unknown resource kind ${kind}`);
       if (typeof release !== 'function') throw new Error(`a tracked ${kind} needs a release function`);
+      if (shutdownReason) throw shutdownRefusal(kind, name, shutdownReason);
       if (!owns(kind, name)) {
         throw new Error(`refusing to track ${kind} ${String(name)}: it is not one of this run's own resources`);
       }
@@ -203,15 +237,26 @@ export function createResourceRegistry({ prefix, root = null } = {}) {
       return entries.delete(keyOf(kind, name));
     },
     async releaseEntry(kind, name) {
-      const entry = entries.get(keyOf(kind, name));
+      const key = keyOf(kind, name);
+      const entry = entries.get(key);
       if (!entry) return { kind, name, released: false, skipped: true };
-      try {
-        await entry.release();
-        entries.delete(keyOf(kind, name));
-        return { kind, name, released: true, skipped: false };
-      } catch (error) {
-        return { kind, name, released: false, skipped: false, error: error?.message || String(error) };
-      }
+      // A cleanup and a step's `finally` can release the same entry at the same
+      // time. Both callers observe one release instead of signalling a process
+      // twice or removing a container that the first call already removed.
+      if (inFlight.has(key)) return inFlight.get(key);
+      const releasing = (async () => {
+        try {
+          await entry.release();
+          entries.delete(key);
+          return { kind, name, released: true, skipped: false };
+        } catch (error) {
+          return { kind, name, released: false, skipped: false, error: error?.message || String(error) };
+        } finally {
+          inFlight.delete(key);
+        }
+      })();
+      inFlight.set(key, releasing);
+      return releasing;
     },
     async releaseKind(kind, result = newCleanupResult()) {
       for (const entry of registry.list(kind)) {
@@ -437,6 +482,33 @@ const hostManagers = new Map();
 const ports = createPortAllocator();
 let evidenceFile = null;
 let finalizing = null;
+let acceptanceSettled = null;
+
+// abortError marks a step that stopped because the run is shutting down. It is
+// not a product failure, so main never records it as one.
+function abortError(stage) {
+  const error = new Error(`acceptance stopped at ${stage} after ${abortedSignal ?? 'shutdown'}`);
+  error.code = 'run_aborted';
+  error.stage = stage;
+  return error;
+}
+
+function assertAcceptanceRunning(stage) {
+  if (abortedSignal) throw abortError(stage);
+}
+
+// acceptanceStep is the continuation boundary. Checking only before a step is
+// not enough: an abort can arrive while the step is awaited (a process being
+// stopped, a container going away), and without the check after the await the
+// next step would start its own resources after cleanup already snapshotted the
+// registry. Both checks are synchronous with the step, so no producer between
+// them can slip past the registry fence.
+async function acceptanceStep(stage, run) {
+  assertAcceptanceRunning(stage);
+  const value = await run();
+  assertAcceptanceRunning(stage);
+  return value;
+}
 
 // ---------------------------------------------------------------------------
 // entry point
@@ -480,11 +552,26 @@ async function main() {
   const guard = installSignalGuard({ onSignal: (signal) => abortRun(signal) });
   let runOk = false;
   try {
-    runOk = await runAcceptance();
+    const acceptance = runAcceptance();
+    // Cleanup releases what the in-flight step may be waiting on; this barrier
+    // is what lets it wait for that step to stop before it calls the host clean.
+    // The promise never rejects: main below is the one that reports the error.
+    acceptanceSettled = acceptance.then(
+      () => null,
+      (error) => ({ code: error?.code ?? null, stage: error?.stage ?? null }),
+    );
+    runOk = await acceptance;
   } catch (error) {
-    runFailure = `${error?.message || error}`;
-    console.error(`upgrade-docker: ${redactor.redact(runFailure)}`);
-    if (error?.stack) console.error(redactor.redact(error.stack));
+    if (abortedSignal) {
+      const stage = error?.stage ? ` at ${error.stage}` : '';
+      const detail = error?.code === 'run_aborted' ? '' : `: ${redactor.redact(error?.message || String(error))}`;
+      console.log(`upgrade-docker: acceptance stopped by ${abortedSignal}${stage}${detail}`);
+      if (error?.code !== 'run_aborted') evidence.abortedError = redactor.redact(error?.message || String(error));
+    } else {
+      runFailure = `${error?.message || error}`;
+      console.error(`upgrade-docker: ${redactor.redact(runFailure)}`);
+      if (error?.stack) console.error(redactor.redact(error.stack));
+    }
   }
   const outcome = await finalize({ runOk });
   guard.detach();
@@ -498,8 +585,8 @@ async function runAcceptance() {
   recordProductFixes();
 
   const binary = buildManagerBinary();
-  const nextFixture = await ensureFixture(args.v1Tag);
-  const nextSource = await seedSource(nextFixture);
+  const nextFixture = await acceptanceStep('fixture', () => ensureFixture(args.v1Tag));
+  const nextSource = await acceptanceStep('seed', () => seedSource(nextFixture));
 
   // Read the release the running contract accepts from the product itself, so
   // no second copy of the pinned version lives in this harness.
@@ -518,8 +605,8 @@ async function runAcceptance() {
     // refusal and proves the chain against the accepted release instead of
     // pretending the planned one works.
     assertVersionGap(binary, probe, expected, nextFixture, nextSource);
-    sourceFixture = await ensureFixture(expected);
-    source = await seedSource(sourceFixture);
+    sourceFixture = await acceptanceStep('accepted-fixture', () => ensureFixture(expected));
+    source = await acceptanceStep('accepted-seed', () => seedSource(sourceFixture));
     stableFacts.push(`version-gap:${args.v1Tag}>${expected}`);
   } else {
     evidence.mode.sourceFixture = 'same';
@@ -538,6 +625,7 @@ async function runAcceptance() {
   // The seeded shape: the archived day's raw rows are deleted, so the retained
   // domain holds two days, coverage names the one deleted day, and the two
   // derived domains cover all three.
+  assertAcceptanceRunning('chain');
   const primary = chain(binary, workspace.main.source, workspace.main.target, 'main', {
     sourceDays: {
       retained: DATASET_DAYS.length - 1,
@@ -548,18 +636,19 @@ async function runAcceptance() {
     domainsDone: CHAIN_DOMAINS_DONE,
   });
   evidence.chains.main = primary;
+  assertAcceptanceRunning('chain');
 
-  await assertWizard(binary, workspace.main.source);
-  await assertAdmission(binary, workspace);
+  await acceptanceStep('wizard', () => assertWizard(binary, workspace.main.source));
+  await acceptanceStep('admission', () => assertAdmission(binary, workspace));
 
-  await faultSourceTouched(binary, workspace);
-  await faultInterruptedCopyIn(binary, workspace);
-  await faultClearedRollupRecoverable(binary, workspace);
-  await faultClearedRollupUnrecoverable(binary, workspace);
-  await faultDroppedTable(binary, workspace);
-  await faultBusySource(binary, workspace);
+  await acceptanceStep('fault:source-touched', () => faultSourceTouched(binary, workspace));
+  await acceptanceStep('fault:interrupted-copy-in', () => faultInterruptedCopyIn(binary, workspace));
+  await acceptanceStep('fault:rollup-recoverable', () => faultClearedRollupRecoverable(binary, workspace));
+  await acceptanceStep('fault:rollup-unrecoverable', () => faultClearedRollupUnrecoverable(binary, workspace));
+  await acceptanceStep('fault:dropped-table', () => faultDroppedTable(binary, workspace));
+  await acceptanceStep('fault:busy-source', () => faultBusySource(binary, workspace));
 
-  await proveRollback(binary, workspace, sourceFixture);
+  await acceptanceStep('rollback', () => proveRollback(binary, workspace, sourceFixture));
 
   return true;
 }
@@ -569,19 +658,33 @@ async function runAcceptance() {
 // ---------------------------------------------------------------------------
 
 async function abortRun(signal) {
-  abortedSignal = signal;
+  // Everything before the first await is the synchronous part of shutdown: the
+  // fence must be closed in the signal's own turn, not after a log write or a
+  // lock, so no resumed step can create between the signal and the release.
+  if (!abortedSignal) abortedSignal = signal;
+  registry.fence(`aborted by ${abortedSignal}`);
   console.log(`upgrade-docker: received ${signal}; releasing this run's resources before exiting`);
-  return finalize({ runOk: false, signal });
+  return finalize({ runOk: false, signal: abortedSignal });
 }
 
 function finalize({ runOk, signal = null }) {
-  if (!finalizing) finalizing = runFinalize({ runOk, signal });
+  if (!finalizing) {
+    if (signal) abortedSignal = signal;
+    // The normal and failure paths cross the same creation boundary. A signal
+    // that arrives later joins this promise instead of releasing twice.
+    registry.fence(abortedSignal ? `aborted by ${abortedSignal}` : 'finalizing the run');
+    finalizing = runFinalize({ runOk, signal });
+  }
   return finalizing;
 }
 
 async function runFinalize({ runOk, signal }) {
   if (signal) abortedSignal = signal;
-  const cleanup = await cleanupResources();
+  // Releases run first: stopping a process or a container is often what lets an
+  // interrupted step return. cleanupResources then waits for that continuation
+  // before it decides the host is clean. The fence is already closed, so the
+  // wait cannot be extended by fresh creation.
+  const cleanup = await cleanupResources(acceptanceSettled);
   // The comparison belongs after the release: "this run created nothing that
   // survives, and nothing outside the prefix moved" is only true then.
   if (hostBeforeRun && evidence.host.docker) {
@@ -2525,6 +2628,9 @@ async function proveRolledBackSurface(binary, target, sourceRoot) {
 // ---------------------------------------------------------------------------
 
 function startHostManager({ name, binary, dataDir, port, adminKey, legacyRoot }) {
+  // The only producer that spawns before it tracks; without this check a fence
+  // hit between the spawn and `track` would leave an untracked process behind.
+  registry.assertCreationAllowed('hostProcess', name);
   const logFile = path.join(SCRATCH, `${name}.log`);
   const env = {
     ...process.env,
@@ -2913,6 +3019,10 @@ function sleep(ms) {
 async function waitFor(predicate, label, timeout, interval = 100) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
+    // A shutdown must not leave the run waiting out a predicate that only a
+    // resource release would satisfy; the release runs in finalize and the
+    // barrier there waits for this rejection.
+    if (abortedSignal) throw abortError(label);
     if (await predicate()) return;
     await sleep(interval);
   }
@@ -2996,9 +3106,16 @@ function sqliteCount(dbPath, sql) {
 // host holds nothing else under this run's prefix. A release that failed, a
 // listing that could not be read, a surviving object or a scratch tree that
 // could not be removed all leave `ok` false, which fails the run.
-async function cleanupResources() {
+//
+// `continuation` is the acceptance promise. Releases happen first because they
+// are often the thing an interrupted step is waiting on; waiting for the step
+// afterwards is what makes the registry check describe the final set, not a
+// snapshot taken while a step could still resume. The fence was closed before
+// this function ran, so the wait cannot grow new work.
+async function cleanupResources(continuation = null) {
   const result = newCleanupResult();
   await registry.releaseAll(result);
+  if (continuation) await continuation;
   if (evidence.host.docker) {
     const listings = {
       containers: dockerNames(['ps', '-a', '--format', '{{.Names}}']),
@@ -3019,6 +3136,21 @@ async function cleanupResources() {
     }
     result.leftovers = leftovers;
   }
+  // Docker listings only cover containers, volumes and networks. Host processes
+  // and worktree checkouts are invisible there, so the registry is checked for
+  // every kind, whether or not Docker answered: a successful listing is not
+  // evidence that a process was released.
+  const remaining = registry.all();
+  if (remaining.length > 0) {
+    result.ok = false;
+    result.unreleased = remaining.map((entry) => `${entry.kind}:${entry.name}`);
+    for (const entry of remaining) {
+      const prefix = `${entry.kind}:${entry.name}:`;
+      if (!result.errors.some((message) => message.startsWith(prefix))) {
+        result.errors.push(`${prefix} still owned after the release boundary`);
+      }
+    }
+  }
   if (args.keep) {
     result.scratchKept = SCRATCH;
   } else {
@@ -3030,10 +3162,6 @@ async function cleanupResources() {
       result.scratchRemoved = false;
       result.errors.push(`remove the scratch tree: ${redactor.redact(error?.message || error)}`);
     }
-  }
-  if (!evidence.host.docker && registry.all().length > 0) {
-    result.ok = false;
-    result.errors.push('docker never answered, so the objects this run created cannot be shown released');
   }
   result.ok = result.ok && result.errors.length === 0;
   console.log(`cleanup: ${JSON.stringify({ ok: result.ok, released: result.released.length, errors: result.errors })}`);

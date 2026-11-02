@@ -11,7 +11,9 @@
 
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 
 import {
   PORT_RANGE,
@@ -27,6 +29,7 @@ import {
   finalExitCode,
   installSignalGuard,
   isOwnedResourceName,
+  newCleanupResult,
   verifyEvidenceDocument,
   withEvidenceHash,
 } from './upgrade-docker.mjs';
@@ -326,4 +329,270 @@ test('an implementation identity is invalid until the commit and harness digest 
   const incomplete = createImplementationIdentity({ headSha: 'not-a-sha', harnessSha256: '' });
   assert.equal(incomplete.valid, false);
   assert.deepEqual(incomplete.invalid.sort(), ['harnessSha256', 'headSha']);
+});
+
+// ---------------------------------------------------------------------------
+// shutdown interleaving: the real main -> runAcceptance -> abortRun -> finalize
+// -> cleanupResources flow, with stand-ins only at the Docker, product and
+// process boundaries
+// ---------------------------------------------------------------------------
+
+// main, runAcceptance and cleanupResources own module globals because exactly
+// one real run mutates them. Extracting these declarations into a fresh context
+// exercises that same control flow with controlled boundaries; a second copy of
+// the sequencing in this file could drift from what the harness actually does.
+const HARNESS_SOURCE = readFileSync(new URL('./upgrade-docker.mjs', import.meta.url), 'utf8');
+const LIFECYCLE_FUNCTIONS = [
+  'main',
+  'runAcceptance',
+  'abortRun',
+  'finalize',
+  'runFinalize',
+  'cleanupResources',
+  'acceptanceStep',
+  'assertAcceptanceRunning',
+  'abortError',
+];
+
+function harnessFunction(name) {
+  const match = HARNESS_SOURCE.match(new RegExp(`(?:^|\\n)(?:async )?function ${name}\\(`));
+  assert.ok(match, `upgrade-docker.mjs has no function ${name}`);
+  const start = match.index + (match[0].startsWith('\n') ? 1 : 0);
+  const end = HARNESS_SOURCE.indexOf('\n}', start);
+  assert.ok(end > start, `cannot find the end of ${name}`);
+  return HARNESS_SOURCE.slice(start, end + 2);
+}
+
+function createLifecycleHarness({ failWizardRelease = false } = {}) {
+  const registry = createResourceRegistry({ prefix: PREFIX, root: '/owned/scratch' });
+  const events = [];
+  const logs = [];
+  const exits = [];
+  const listings = [];
+  const noop = () => {};
+  const signalTarget = new EventEmitter();
+  const state = {
+    admissionEntered: false,
+    admissionStarted: false,
+    faultsStarted: 0,
+    lateAlive: false,
+    releaseCalls: 0,
+    released: [],
+    written: null,
+  };
+  const wizardGate = new Promise((resolvePromise) => {
+    state.resumeWizard = resolvePromise;
+  });
+  state.wizardStarted = new Promise((resolvePromise) => {
+    state.resolveWizardStarted = resolvePromise;
+  });
+  const evidence = {
+    contract: UPGRADE_DOCKER_CONTRACT.contract,
+    mode: {},
+    host: { docker: 'stand-in' },
+    fixtures: [],
+    chains: {},
+    faults: [],
+    rollback: {},
+    wizard: {},
+    admission: {},
+    cleanup: {},
+    findings: [],
+  };
+
+  // The release is what the interrupted wizard is waiting on, exactly like a
+  // host manager whose process goes away under an in-flight HTTP wait.
+  const releaseWizard = async () => {
+    state.releaseCalls += 1;
+    events.push('release-wizard');
+    state.released.push('wizard');
+    state.resumeWizard();
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    if (failWizardRelease) throw new Error('the wizard host process still holds its port');
+  };
+
+  const step = () => {
+    state.faultsStarted += 1;
+  };
+  const context = vm.createContext({
+    console: {
+      log: (...parts) => logs.push(parts.join(' ')),
+      error: (...parts) => logs.push(parts.join(' ')),
+    },
+    Date,
+    process: { env: {} },
+    fs: { mkdirSync: noop, rmSync: noop },
+    SCRATCH: '/owned/scratch',
+    EVIDENCE_DIR: '/owned/evidence',
+    args: { reuseFixture: false, keep: false, v1Tag: 'v1.14.10', sourceTag: 'v1.14.10' },
+    started: 0,
+    abortedSignal: null,
+    runFailure: null,
+    hostBeforeRun: null,
+    finalizing: null,
+    acceptanceSettled: null,
+    evidence,
+    stableFacts: [],
+    registry,
+    newCleanupResult,
+    finalExitCode,
+    UPGRADE_DOCKER_CONTRACT,
+    redactor: createRedactor([]),
+    captureImplementationIdentity: () => ({ valid: true }),
+    installSignalGuard: (options) =>
+      installSignalGuard({ ...options, target: signalTarget, exit: (code) => exits.push(code) }),
+    requireDocker: noop,
+    hostSnapshot: () => ({ docker: 'stand-in' }),
+    refusePrefixCollision: noop,
+    recordProductFixes: noop,
+    buildManagerBinary: () => '/fake/binary',
+    ensureFixture: async (tag) => ({ tag }),
+    seedSource: async () => ({ sourceRoot: '/fake/source', dataset: {} }),
+    runCli: () => ({}),
+    expectedReleaseOf: () => 'v1.14.10',
+    createWorkspace: () => ({ main: { source: '/fake/source', target: '/fake/target' }, snapshots: {} }),
+    DATASET_DAYS: [1, 2, 3],
+    CHAIN_DOMAINS_DONE: [],
+    chain: () => ({}),
+    assertWizard: async () => {
+      registry.track('hostProcess', `${PREFIX}-wizard`, releaseWizard);
+      state.resolveWizardStarted();
+      await wizardGate;
+      events.push('wizard-returned');
+    },
+    assertAdmission: async () => {
+      // The step must never be entered after the cancellation point. Entering
+      // it is observable separately from the fence refusing the spawn, so the
+      // test can tell "the continuation stopped" from "the producer refused".
+      state.admissionEntered = true;
+      // startHostManager's order: refuse a fenced run before spawning, then
+      // track. A late admission can therefore neither start nor survive.
+      registry.assertCreationAllowed('hostProcess', `${PREFIX}-admission`);
+      state.admissionStarted = true;
+      state.lateAlive = true;
+      registry.track('hostProcess', `${PREFIX}-admission`, async () => {
+        state.lateAlive = false;
+      });
+    },
+    faultSourceTouched: step,
+    faultInterruptedCopyIn: step,
+    faultClearedRollupRecoverable: step,
+    faultClearedRollupUnrecoverable: step,
+    faultDroppedTable: step,
+    faultBusySource: step,
+    proveRollback: async () => {
+      state.faultsStarted += 1;
+    },
+    assertHostUntouched: noop,
+    dockerNames: (...command) => {
+      listings.push(command.join(' '));
+      return [];
+    },
+    PREFIX,
+    writeEvidence: () => {
+      state.written = {
+        verdict: evidence.verdict,
+        exitCode: evidence.exitCode,
+        abortedBy: evidence.abortedBy,
+        cleanup: evidence.cleanup,
+      };
+    },
+  });
+  for (const name of LIFECYCLE_FUNCTIONS) vm.runInContext(harnessFunction(name), context);
+  return { context, registry, state, events, logs, exits, listings, signalTarget };
+}
+
+test('a signal during an awaited step fences creation and stops the continuation before it starts the next step', async () => {
+  const harness = createLifecycleHarness();
+  const { context, registry, state, events, exits, signalTarget } = harness;
+
+  const running = context.main();
+  await state.wizardStarted;
+
+  // The signal arrives while the wizard step is awaited. A second signal during
+  // that same cleanup must not start a second release.
+  signalTarget.emit('SIGTERM');
+  signalTarget.emit('SIGINT');
+
+  const outcome = await running;
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+
+  assert.equal(outcome.exitCode, 143);
+  assert.deepEqual(exits, [143], 'the handled signal exited once with its own code');
+  assert.equal(state.admissionEntered, false, 'the admission step was entered after the signal');
+  assert.equal(state.admissionStarted, false, 'the admission step started after the signal');
+  assert.equal(state.faultsStarted, 0, 'a fault step started after the signal');
+  assert.equal(state.lateAlive, false, 'a host process created after the release survived');
+  assert.deepEqual(events, ['release-wizard', 'wizard-returned'], 'the wizard had to finish, and nothing new started');
+  assert.equal(state.releaseCalls, 1, 'the existing resource was not released exactly once');
+  assert.deepEqual(registry.all(), [], 'the registry held a resource after cleanup');
+  assert.match(registry.shutdownReason, /SIGTERM/);
+
+  // The fence is the backstop even if a future step forgets its checkpoint.
+  assert.throws(() => registry.track('hostProcess', `${PREFIX}-late`, async () => {}), /shutting down/);
+  assert.throws(() => registry.assertCreationAllowed('hostProcess', `${PREFIX}-late`), /shutting down/);
+
+  assert.ok(state.written, 'the aborted run wrote no evidence');
+  assert.equal(state.written.verdict, 'aborted');
+  assert.equal(state.written.exitCode, 143);
+  assert.equal(state.written.abortedBy, 'SIGTERM');
+  assert.equal(state.written.cleanup.ok, true);
+  assert.deepEqual(state.written.cleanup.errors, []);
+  assert.deepEqual(state.written.cleanup.released, [`hostProcess:${PREFIX}-wizard`]);
+
+  const repeated = await context.abortRun('SIGTERM');
+  assert.equal(repeated.exitCode, 143);
+  assert.deepEqual(repeated.cleanup.released, [`hostProcess:${PREFIX}-wizard`]);
+  assert.equal(state.releaseCalls, 1, 'a repeated signal released the wizard process again');
+});
+
+test('a successful Docker listing cannot hide a resource the release pass did not reach', async () => {
+  const harness = createLifecycleHarness();
+  const { context, registry, state, listings, signalTarget } = harness;
+
+  // Model the pre-fix timing bug directly: the release pass runs before the
+  // resource is in its snapshot, so it reports no error and the three Docker
+  // listings answer normally (host processes are not in them). Only the
+  // registry check can tell that a process is still owned.
+  registry.releaseAll = async (result = newCleanupResult()) => result;
+  signalTarget.once('SIGTERM', () => {
+    queueMicrotask(() => state.resumeWizard());
+  });
+
+  const running = context.main();
+  await state.wizardStarted;
+  signalTarget.emit('SIGTERM');
+  const outcome = await running;
+
+  assert.equal(outcome.exitCode, 143);
+  assert.equal(state.admissionEntered, false);
+  assert.equal(listings.length, 3, 'the containers, volumes and networks listings were read successfully');
+  assert.ok(state.written, 'the aborted run wrote no evidence');
+  assert.equal(state.written.cleanup.ok, false, 'a surviving host process was reported as a clean host');
+  assert.deepEqual(state.written.cleanup.unreleased, [`hostProcess:${PREFIX}-wizard`]);
+  assert.match(state.written.cleanup.errors.join('; '), /still owned after the release boundary/);
+  assert.equal(registry.all().length, 1);
+  assert.equal(state.releaseCalls, 0, 'the test deliberately skipped the release pass');
+});
+
+test('a release that fails stays owned, fails cleanup and keeps the signal code', async () => {
+  const harness = createLifecycleHarness({ failWizardRelease: true });
+  const { context, registry, state, listings, signalTarget } = harness;
+
+  const running = context.main();
+  await state.wizardStarted;
+  signalTarget.emit('SIGTERM');
+  const outcome = await running;
+
+  assert.equal(outcome.exitCode, 143, 'an aborted run keeps its signal code even when cleanup failed');
+  assert.equal(state.admissionEntered, false);
+  assert.equal(state.admissionStarted, false);
+  assert.equal(listings.length, 3, 'the containers, volumes and networks listings were read successfully');
+  assert.ok(state.written, 'the aborted run wrote no evidence');
+  assert.equal(state.written.verdict, 'aborted');
+  assert.equal(state.written.cleanup.ok, false, 'a surviving host process was reported as a clean host');
+  assert.deepEqual(state.written.cleanup.unreleased, [`hostProcess:${PREFIX}-wizard`]);
+  assert.match(state.written.cleanup.errors.join('; '), /still holds its port/);
+  assert.equal(registry.all().length, 1, 'the failed release stayed owned for a later attempt');
+  assert.equal(state.releaseCalls, 1);
 });

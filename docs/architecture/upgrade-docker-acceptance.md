@@ -23,10 +23,25 @@ node --test bin/ci/upgrade-docker.test.mjs     # the harness's own logic, no Doc
   `git worktree` checkout **before** creating it, and it releases them on the
   normal path, on every error path and on SIGINT/SIGTERM (a handled signal runs
   the same release and exits 130/143). A release that fails, a listing it cannot
-  read, or any surviving object under its own prefix makes the process exit
-  non-zero: a partial cleanup can never read as PASS. It never addresses
-  `cpamp-*`, `buildx_buildkit_*`, `cpa-manager-plus-cpa-manager-plus-1` or
-  `cpa-usage-keeper`.
+  read, a registry entry for any kind that survives the release, or any surviving
+  object under its own prefix makes the process exit non-zero: a partial cleanup
+  can never read as PASS. Docker listings only name containers, volumes and
+  networks, so the registry is checked for every kind whether or not the listings
+  answered. It never addresses `cpamp-*`, `buildx_buildkit_*`,
+  `cpa-manager-plus-cpa-manager-plus-1` or `cpa-usage-keeper`.
+* The handled-signal boundary is **the running JavaScript turn**. The first
+  SIGINT/SIGTERM closes the registry fence synchronously: every later `track`
+  and every host-process spawn is refused, so a step that was awaiting when the
+  signal arrived cannot start the next step or register a new resource after
+  cleanup has taken its release set. Finalisation releases the tracked set first
+  (that release is often what lets an interrupted wait return), then waits for
+  the acceptance continuation to settle before it decides the host is clean. A
+  failure during an abort is logged and does not change the signal's exit code.
+  A second signal joins the same finalisation instead of releasing again.
+  `SIGKILL`, a crash or a host power loss cannot run any handler: an object
+  created by such a run may survive and must be cleaned from the printed
+  `cpampd<runid>` prefix by an operator. This guarantee covers handled signals,
+  not unhandled termination.
 * Evidence lands in `bin/ci/evidence/upgrade-d/<runid>.json` and is bound to the
   run that wrote it: `implementation` records the HEAD commit, the harness file
   digest, the built binary digest and whether the tree was clean; `verdict` and
@@ -57,8 +72,15 @@ ports are skipped, exhaustion refuses), redaction (a registered secret never
 survives a message and the leak assertion never reprints it) and the evidence
 binding (untouched document verifies, an unrehashed edit fails, a rehashed edit
 still fails the head binding, a document without a verdict/head is refused).
-These are unit-level contracts over controlled stand-ins; they are not a
-substitute for the real-Docker run below.
+Three interleaving tests drive the real `main` → `runAcceptance` → `abortRun` →
+`finalize` → `cleanupResources` flow with stand-ins only at the Docker, product
+and process boundaries: a SIGTERM during an awaited wizard step must let that
+step finish while refusing the next admission step and every later `track` or
+spawn; a release pass that missed a tracked resource while all three Docker
+listings answer must still fail cleanup through the registry; and a release that
+throws must stay owned, fail cleanup and still exit with the signal code. These
+are unit-level contracts over controlled stand-ins; they are not a substitute
+for the real-Docker run below.
 
 ## What it proves
 
