@@ -1268,6 +1268,22 @@ func Migrate(db *sql.DB) error {
 			created_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
+		// The External connect step's durable target binding. It lives beside the
+		// operation row and is written in the same transaction as the stage and
+		// the domains it proves, so a row can never claim external_connect
+		// without naming the CPA it connected. The evidence file under the data
+		// root is a projection of this row, never the record a rerun decides on.
+		`create table if not exists upgrade_external_connect (
+			id integer primary key check(id = 1),
+			base_url text not null,
+			identity text not null,
+			generation text not null,
+			server_fingerprint text not null default '',
+			cpa_version text not null default '',
+			support text not null default '',
+			client_keys integer not null default 0,
+			observed_at_ms integer not null
+		)`,
 		// A UTC day the v2 Upgrade reconciliation permanently marked incomplete:
 		// the source can never be read again for it, so its covered numbers stay
 		// a lower bound for the life of this store. The row is evidence, not a

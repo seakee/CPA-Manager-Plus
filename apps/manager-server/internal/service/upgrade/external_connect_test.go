@@ -87,12 +87,16 @@ func (e *externalTarget) connectWith(t *testing.T, options ExternalConnectOption
 }
 
 // newExternalTargetAt reconnects the same recorded copy-in to another address.
+// The configuration read travels through the harness's seam as well, so an
+// address that names no server is still decided on the recorded binding instead
+// of failing on the network.
 func newExternalTargetAt(t *testing.T, target *externalTarget, address string) (ExternalConnectResult, error) {
 	t.Helper()
 	return target.connectWith(t, ExternalConnectOptions{
 		TargetRoot:    target.copied.target,
 		BaseURL:       address,
 		ManagementKey: externalTestKey,
+		readV8Config:  target.options.readV8Config,
 	})
 }
 

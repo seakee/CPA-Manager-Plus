@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,11 +45,12 @@ import (
 // same words about the same CPA.
 
 const (
-	// externalConnectEvidenceFile is the durable record of one successful
-	// connect, written inside the copy-in work directory. It is evidence, not
-	// authority: the operation row's stage is what authorizes later steps, and
-	// this file only lets a rerun answer "already connected to this target"
-	// without contacting the CPA or rewriting the row.
+	// externalConnectEvidenceFile is the published record of one successful
+	// connect, written inside the copy-in work directory. It is a projection of
+	// the operation row's target binding, not the record: the row is written
+	// first and in the same transaction as the stage, so a rerun that finds the
+	// file missing, stale or unwritable still decides "same target" or "moved
+	// target" from the durable row and republishes the file.
 	externalConnectEvidenceFile = "external-connect.json"
 	// externalConnectEvidenceVersion is the evidence contract. An unknown
 	// version is refused rather than guessed.
@@ -179,16 +181,8 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	if err != nil {
 		return ExternalConnectResult{}, err
 	}
-	if !found {
-		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalNotApplicable,
-			"the v2 data root holds no recorded copy-in, so there is no operation for the External connect step to continue; nothing was written", nil)
-	}
-	// The step may only run where it could still record its result: a store the
-	// operation already carried past this stage, or one a rollback closed, can
-	// never take it.
-	if !recorded.Stage.CanAdvanceTo(model.UpgradeStageExternalConnect) {
-		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalNotApplicable,
-			fmt.Sprintf("the recorded operation is at stage %q, which cannot enter the External connect step; nothing was written", recorded.Stage), nil)
+	if err := externalConnectEntry(recorded, found); err != nil {
+		return ExternalConnectResult{}, err
 	}
 	// This step writes the v2 store, so it holds the same ownership fence a
 	// running Manager holds, for everything below: the binding it reads, the
@@ -203,35 +197,62 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	}
 	defer func() { _ = fence.Close() }()
 
-	identity := externalConnectIdentity(options, baseURL)
-	evidence, hasEvidence, err := readExternalConnectEvidence(targetRoot)
+	// The row and its binding are one durable record, so both are read through
+	// the same writable connection: the store is migrated once and the state the
+	// step decides on is the one its transaction will write into. Nothing else
+	// can write it while the fence is held.
+	db, err := managersqlite.Open(paths.Database)
+	if err != nil {
+		return ExternalConnectResult{}, fmt.Errorf("open the v2 database for the External connect step: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	repository := upgradeoperation.New(db)
+	recorded, found, err = readRecordedCopyInFrom(ctx, repository)
 	if err != nil {
 		return ExternalConnectResult{}, err
 	}
+	if err := externalConnectEntry(recorded, found); err != nil {
+		return ExternalConnectResult{}, err
+	}
+
+	identity := externalConnectIdentity(options, baseURL)
+	binding, hasBinding, err := repository.ExternalBinding(ctx)
+	if err != nil {
+		return ExternalConnectResult{}, fmt.Errorf("read the External connect binding: %w", err)
+	}
 	// A recorded target that is not this address is a moved target, not a new
 	// connection: the owner's CPA changed behind a committed pointer, and only an
-	// explicit rebind may reach it again.
-	if hasEvidence && evidence.Identity != identity {
-		return ExternalConnectResult{}, externalConnectRefused(ctx, paths.Database, newUpgradeError(UpgradeErrorExternalTargetMoved,
+	// explicit rebind may reach it again. The binding is the comparison, never the
+	// evidence file, so a lost or stale projection cannot reach another CPA.
+	if hasBinding && binding.Identity != identity {
+		return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(UpgradeErrorExternalTargetMoved,
 			fmt.Sprintf("the CPA at %s is not the target this operation recorded; nothing was connected and the operation did not advance", redactExternalAddress(baseURL)), nil))
+	}
+	// A row that carries the stage but not the target it connected is a record
+	// nobody can check: the step wrote the stage before the binding was durable.
+	// Fail closed instead of treating it as "never connected", which is what would
+	// let a retry silently bind this operation to another CPA.
+	if !hasBinding && recorded.Stage == model.UpgradeStageExternalConnect {
+		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalNotApplicable,
+			"the recorded operation is at external_connect but carries no target binding, so the CPA it connected cannot be proven; restore the v2 store from its backup and run the step again, and nothing was written", nil)
 	}
 	// Repeating the step against the same target records nothing new: the row
 	// already carries this stage, and a second record would only churn the
 	// generation.
-	if hasEvidence && recorded.Stage == model.UpgradeStageExternalConnect {
-		return externalConnectResult(recorded, evidence, true), nil
+	if hasBinding && recorded.Stage == model.UpgradeStageExternalConnect {
+		return externalConnectAlreadyConnected(ctx, targetRoot, recorded, binding)
 	}
 
 	report, err := externalConnectVersion(ctx, options, baseURL, managementKey)
 	if err != nil {
-		return ExternalConnectResult{}, externalConnectRefused(ctx, paths.Database, err)
+		return ExternalConnectResult{}, externalConnectRefused(ctx, db, err)
 	}
 	if report.WriteBlocked {
 		version := strings.TrimSpace(report.Version)
 		if version == "" {
 			version = externalConnectUnknownVersion
 		}
-		return ExternalConnectResult{}, externalConnectRefused(ctx, paths.Database, newUpgradeError(
+		return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(
 			UpgradeErrorExternalVersionUnsupported,
 			fmt.Sprintf("the CPA at %s answered version %s, which is not the v8 management contract this Manager writes; nothing was connected and the operation did not advance. %s",
 				redactExternalAddress(baseURL), version, externalConnectAction),
@@ -239,12 +260,12 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	}
 
 	if err := externalConnectConfig(ctx, options, baseURL, managementKey); err != nil {
-		return ExternalConnectResult{}, externalConnectRefused(ctx, paths.Database, err)
+		return ExternalConnectResult{}, externalConnectRefused(ctx, db, err)
 	}
 
 	snapshot, err := externalConnectKeys(ctx, options, baseURL, managementKey)
 	if err != nil {
-		return ExternalConnectResult{}, externalConnectRefused(ctx, paths.Database, err)
+		return ExternalConnectResult{}, externalConnectRefused(ctx, db, err)
 	}
 	clientKey := ""
 	if len(snapshot.Keys) > 0 {
@@ -255,11 +276,11 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	// answer is not connected: the key would install into a target no request
 	// can reach.
 	if err := externalConnectModelSurface(ctx, options, baseURL, clientKey); err != nil {
-		return ExternalConnectResult{}, externalConnectRefused(ctx, paths.Database, newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
+		return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
 			fmt.Sprintf("the CPA at %s authenticated but its model surface did not answer; nothing was connected and the operation did not advance", redactExternalAddress(baseURL)), err))
 	}
 
-	evidence = ExternalConnectEvidence{
+	evidence := ExternalConnectEvidence{
 		Version:           externalConnectEvidenceVersion,
 		BaseURL:           baseURL,
 		Identity:          identity,
@@ -270,15 +291,12 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 		ClientKeys:        len(snapshot.Keys),
 		ObservedAtMS:      time.Now().UnixMilli(),
 	}
-	// The row is recorded first and the evidence file second, because the row is
-	// the authority and the file is not: writing the file first left a "connected"
-	// evidence record behind whenever the guarded write below refused (a stage
-	// that moved while the probes ran), so a rerun would have read a connection
-	// the operation never took. With this order a refusal leaves neither, and a
-	// failed evidence write after a committed record only costs a repeated proof —
-	// the row already says the step happened, so the rerun reaches the same
-	// place without contacting a CPA the operation no longer depends on.
-	operation, err := recordExternalConnect(ctx, paths.Database)
+	// The stage, the domains and the target they connected commit in one
+	// transaction, so the record can never claim the step without naming its
+	// target. The evidence file is published afterwards as a projection: a lost
+	// reply or a failed publication costs a rerun that repairs the file from the
+	// row, while a changed target is refused before anything is written.
+	operation, err := recordExternalConnect(ctx, db, externalConnectBinding(evidence))
 	if err != nil {
 		return ExternalConnectResult{}, err
 	}
@@ -287,6 +305,84 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 			"the External connection was recorded, but its evidence file could not be written: %w", err)
 	}
 	return externalConnectResult(operation, evidence, false), nil
+}
+
+// externalConnectEntry proves the recorded operation can still take this step:
+// it is a recorded copy-in and its stage has not moved past the one this step
+// records. It is asked once before the fence, so a root that holds no operation
+// never gets a lock marker, and once under it, because the authoritative state is
+// the one the transaction will write into.
+func externalConnectEntry(recorded model.UpgradeOperation, found bool) error {
+	if !found {
+		return newUpgradeError(UpgradeErrorExternalNotApplicable,
+			"the v2 data root holds no recorded copy-in, so there is no operation for the External connect step to continue; nothing was written", nil)
+	}
+	if !recorded.Stage.CanAdvanceTo(model.UpgradeStageExternalConnect) {
+		return newUpgradeError(UpgradeErrorExternalNotApplicable,
+			fmt.Sprintf("the recorded operation is at stage %q, which cannot enter the External connect step; nothing was written", recorded.Stage), nil)
+	}
+	return nil
+}
+
+// readRecordedCopyInFrom reads the operation row through an open connection and
+// applies the copy-in gate, so the fenced read and the pre-fence read answer the
+// same question.
+func readRecordedCopyInFrom(ctx context.Context, repository *upgradeoperation.Repository) (model.UpgradeOperation, bool, error) {
+	recorded, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		return model.UpgradeOperation{}, false, err
+	}
+	if !copyInRecorded(recorded) {
+		return model.UpgradeOperation{}, false, nil
+	}
+	return recorded, true, nil
+}
+
+// externalConnectAlreadyConnected answers a repeat against the target the
+// operation recorded: nothing is probed and the row keeps its stage, generation
+// and timestamps.
+//
+// The published evidence is repaired from the row when it is missing or stale,
+// because the row is the record and the file is its projection: a rerun after a
+// lost publication costs this repair, not a second proof of the CPA.
+func externalConnectAlreadyConnected(ctx context.Context, targetRoot string, recorded model.UpgradeOperation, binding upgradeoperation.ExternalBinding) (ExternalConnectResult, error) {
+	evidence := externalConnectEvidence(binding)
+	if err := ensureExternalConnectEvidence(targetRoot, evidence); err != nil {
+		return ExternalConnectResult{}, fmt.Errorf(
+			"the External connection is recorded and this target is unchanged, but its evidence file could not be refreshed: %w", err)
+	}
+	return externalConnectResult(recorded, evidence, true), nil
+}
+
+// externalConnectBinding is the durable form of the step's record.
+func externalConnectBinding(evidence ExternalConnectEvidence) upgradeoperation.ExternalBinding {
+	return upgradeoperation.ExternalBinding{
+		BaseURL:           evidence.BaseURL,
+		Identity:          evidence.Identity,
+		Generation:        evidence.Generation,
+		ServerFingerprint: evidence.ServerFingerprint,
+		CPAVersion:        evidence.CPAVersion,
+		Support:           evidence.Support,
+		ClientKeys:        evidence.ClientKeys,
+		ObservedAtMS:      evidence.ObservedAtMS,
+	}
+}
+
+// externalConnectEvidence is the published form of the durable binding. Every
+// field comes from the row, so the file can never describe a target the
+// operation did not record.
+func externalConnectEvidence(binding upgradeoperation.ExternalBinding) ExternalConnectEvidence {
+	return ExternalConnectEvidence{
+		Version:           externalConnectEvidenceVersion,
+		BaseURL:           binding.BaseURL,
+		Identity:          binding.Identity,
+		Generation:        binding.Generation,
+		ServerFingerprint: binding.ServerFingerprint,
+		CPAVersion:        binding.CPAVersion,
+		Support:           binding.Support,
+		ClientKeys:        binding.ClientKeys,
+		ObservedAtMS:      binding.ObservedAtMS,
+	}
 }
 
 // externalConnectVersion asks the version probe once and maps its failures. A
@@ -431,7 +527,7 @@ func externalConnectProbeError(err error) error {
 // read as progress. An environment failure is returned unrecorded — the operator
 // retries it — while a decision about the CPA (its version, its key, its
 // identity) is durable, because the wizard has to show it until it is resolved.
-func externalConnectRefused(ctx context.Context, databasePath string, err error) error {
+func externalConnectRefused(ctx context.Context, db *sql.DB, err error) error {
 	code, ok := UpgradeErrorCodeOf(err)
 	if !ok {
 		return err
@@ -442,11 +538,6 @@ func externalConnectRefused(ctx context.Context, databasePath string, err error)
 	default:
 		return err
 	}
-	db, openErr := managersqlite.Open(databasePath)
-	if openErr != nil {
-		return fmt.Errorf("%w; the refusal could not be recorded: %v", err, openErr)
-	}
-	defer func() { _ = db.Close() }()
 	if recordErr := upgradeoperation.New(db).RecordError(ctx, string(code), externalConnectRefusalDetail(err)); recordErr != nil {
 		return fmt.Errorf("%w; the refusal could not be recorded: %v", err, recordErr)
 	}
@@ -464,22 +555,19 @@ func externalConnectRefusalDetail(err error) string {
 	return typed.Message
 }
 
-// recordExternalConnect writes the two domains this step proved and the stage
-// that authorizes them in one transaction.
+// recordExternalConnect writes the two domains this step proved, the stage that
+// authorizes them and the target they connect in one transaction.
 //
 // It must not rebuild the row from the snapshot the step read: the three network
 // probes above are unbounded in time, and anything that advanced the operation
 // while they ran — the verify step, a rollback — would be erased by writing that
 // snapshot back, including the domains it proves. The transaction therefore
 // re-reads the row under the write lock, and the forward-only rule refuses a stage
-// that moved past this one rather than rewinding it. The cleared refusal commits
-// beside the marks for the same reason.
-func recordExternalConnect(ctx context.Context, databasePath string) (model.UpgradeOperation, error) {
-	db, err := managersqlite.Open(databasePath)
-	if err != nil {
-		return model.UpgradeOperation{}, fmt.Errorf("open the v2 database to record the External connection: %w", err)
-	}
-	defer func() { _ = db.Close() }()
+// that moved past this one rather than rewinding it. The cleared refusal and the
+// target binding commit beside the marks for the same reason: a row that carries
+// external_connect always names the CPA it connected, and no later run has to
+// trust a file for that fact.
+func recordExternalConnect(ctx context.Context, db *sql.DB, binding upgradeoperation.ExternalBinding) (model.UpgradeOperation, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("begin recording the External connection: %w", err)
@@ -492,6 +580,9 @@ func recordExternalConnect(ctx context.Context, databasePath string) (model.Upgr
 	operation, err = upgradeoperation.AdvanceTx(ctx, tx, model.UpgradeDomainIdentity, model.UpgradeStageExternalConnect)
 	if err != nil {
 		return model.UpgradeOperation{}, mapExternalConnectRecordError(err)
+	}
+	if err := upgradeoperation.RecordExternalBindingTx(ctx, tx, binding); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("record the External connection target: %w", err)
 	}
 	if err := upgradeoperation.ClearErrorTx(ctx, tx); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("record the External connection: %w", err)
@@ -631,9 +722,21 @@ func writeExternalConnectEvidence(targetRoot string, evidence ExternalConnectEvi
 	return nil
 }
 
-// readExternalConnectEvidence returns the record of a previous connect. A record
-// that exists but does not validate is an error: refusing the step is the only
-// safe reading of an unreadable provenance file.
+// ensureExternalConnectEvidence republishes the evidence file when it is missing
+// or no longer describes the durable binding. A rerun that found its target
+// unchanged repairs the projection from the row instead of treating the file as
+// the record, so a publication lost to a crash costs nothing but this repair.
+func ensureExternalConnectEvidence(targetRoot string, evidence ExternalConnectEvidence) error {
+	current, found, err := readExternalConnectEvidence(targetRoot)
+	if err == nil && found && current == evidence {
+		return nil
+	}
+	return writeExternalConnectEvidence(targetRoot, evidence)
+}
+
+// readExternalConnectEvidence returns the published record of a previous
+// connect. It is the projection a reader of the data root can inspect; the
+// binding on the operation row is what a rerun compares against.
 func readExternalConnectEvidence(targetRoot string) (ExternalConnectEvidence, bool, error) {
 	path := externalConnectEvidencePath(targetRoot)
 	data, err := os.ReadFile(path)

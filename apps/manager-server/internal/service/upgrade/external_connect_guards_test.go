@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -185,6 +186,107 @@ func TestExternalConnectSerializesTwoTargets(t *testing.T) {
 	}
 	if evidence.Identity != freshkeyapply.ExternalIdentity("https://cpa.example") {
 		t.Fatalf("the operation recorded %q, want the target that held the store", evidence.Identity)
+	}
+}
+
+// TestExternalConnectKeepsTheTargetBindingWhenItsEvidenceIsLost proves the
+// operation row, not the evidence file, is what a rerun compares against.
+//
+// The step's last write is the evidence publication, and a process death between
+// the commit and that publication leaves a connected operation with no file. If
+// the file were the record, the next run would treat the operation as never
+// connected: it would prove another CPA and bind the operation to it, erasing
+// the target the row already committed.
+//
+// The publication failure is forced deterministically by occupying the staging
+// name with a non-empty directory, which is exactly the state a crash leaves
+// behind: the row is committed, the projection is not.
+func TestExternalConnectKeepsTheTargetBindingWhenItsEvidenceIsLost(t *testing.T) {
+	target := newExternalTarget(t)
+	staging := filepath.Join(copyinmarkerDirectory(target.copied.target), externalConnectEvidenceFile+".next")
+	if err := os.MkdirAll(staging, 0o700); err != nil {
+		t.Fatalf("prepare the occupied staging name: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "occupied"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("occupy the staging name: %v", err)
+	}
+
+	_, err := target.connect(t)
+	if err == nil || !strings.Contains(err.Error(), "evidence file could not be written") {
+		t.Fatalf("err = %v, want the publication failure", err)
+	}
+	recorded := operationRow(t, target.databasePath())
+	if recorded.Stage != model.UpgradeStageExternalConnect {
+		t.Fatalf("the committed row is at %q, want external_connect", recorded.Stage)
+	}
+	if !hasDomains(recorded.DomainsDone, model.UpgradeDomainCPAConfig, model.UpgradeDomainIdentity) {
+		t.Fatalf("the committed row marked %v", recorded.DomainsDone)
+	}
+	if _, found, evidenceErr := readExternalConnectEvidence(target.copied.target); evidenceErr != nil || found {
+		t.Fatalf("the failed publication left evidence behind: found %t, err %v", found, evidenceErr)
+	}
+	// Release the occupied staging name, so the next run's publication is not the
+	// thing being tested: what has to refuse is the recorded target.
+	if err := os.RemoveAll(staging); err != nil {
+		t.Fatalf("release the staging name: %v", err)
+	}
+
+	// A lost reply: the operator runs the step again and names another CPA. The
+	// row already connects the first one, so the second may not replace it.
+	if _, err := newExternalTargetAt(t, target, "https://other.example"); !errors.Is(err, ErrExternalTargetMoved) {
+		t.Fatalf("a retry against another target refused with %v, want the moved-target refusal", err)
+	}
+	if _, found, evidenceErr := readExternalConnectEvidence(target.copied.target); evidenceErr != nil || found {
+		t.Fatalf("the moved-target refusal published evidence: found %t, err %v", found, evidenceErr)
+	}
+
+	// Retrying the recorded target is the repair: the row already proves it, so
+	// nothing is probed and the projection is republished from the row.
+	probes := target.probes
+	result, err := newExternalTargetAt(t, target, "https://cpa.example")
+	if err != nil {
+		t.Fatalf("retry the recorded target: %v", err)
+	}
+	if !result.AlreadyComplete {
+		t.Fatalf("the retry reported a fresh connection: %+v", result)
+	}
+	if target.probes != probes {
+		t.Fatalf("the retry probed the CPA %d more time(s)", target.probes-probes)
+	}
+	evidence, found, err := readExternalConnectEvidence(target.copied.target)
+	if err != nil || !found {
+		t.Fatalf("evidence = %+v, found %t, err %v", evidence, found, err)
+	}
+	if evidence.Identity != freshkeyapply.ExternalIdentity("https://cpa.example") {
+		t.Fatalf("the repaired evidence names %q, want the recorded target", evidence.Identity)
+	}
+}
+
+// TestExternalConnectFailsClosedWithoutABinding proves a row that claims the
+// stage but names no target is refused instead of read as "never connected".
+//
+// A store written by the build that recorded the stage before the binding existed
+// is in exactly this state. Treating it as a fresh step is what lets a retry bind
+// the operation to a different CPA; there is no way to prove which one it
+// connected, so the step stops and says so.
+func TestExternalConnectFailsClosedWithoutABinding(t *testing.T) {
+	target := newExternalTarget(t)
+	execTarget(t, target.databasePath(), `update upgrade_operations set stage = 'external_connect' where id = 1`)
+	if got := operationRow(t, target.databasePath()).Stage; got != model.UpgradeStageExternalConnect {
+		t.Fatalf("the fixture stage = %q", got)
+	}
+	_, err := target.connect(t)
+	if !errors.Is(err, ErrExternalNotApplicable) {
+		t.Fatalf("err = %v, want the not-applicable refusal", err)
+	}
+	if target.probes != 0 {
+		t.Fatalf("a row without a binding was probed %d time(s)", target.probes)
+	}
+	if got := operationRow(t, target.databasePath()).Stage; got != model.UpgradeStageExternalConnect {
+		t.Fatalf("the refusal moved the stage to %q", got)
+	}
+	if _, found, evidenceErr := readExternalConnectEvidence(target.copied.target); evidenceErr != nil || found {
+		t.Fatalf("a row without a binding published evidence: found %t, err %v", found, evidenceErr)
 	}
 }
 
