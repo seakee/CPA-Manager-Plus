@@ -25,6 +25,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	_ "modernc.org/sqlite"
 )
 
@@ -344,12 +345,20 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// owns preflight and the copy-in, so a later recorded stage is reported and
 	// left alone: re-running the copy would rewrite a store a later step already
 	// advanced.
-	if operation, found, err := recordedOperationAt(ctx, targetRoot); err != nil {
-		return err
-	} else if found && stagePastCopyIn(operation.Stage) {
-		output := runOutput{Operation: &operation}
-		writeRunOutput(stdout, *asJSON, output)
-		return nil
+	// A copy-in that is still in flight is resumed by CopyIn, which reads the
+	// marker and compares the members beside it by file digest, never by opening
+	// the database. Reading the operation row first would open the materializing
+	// target's WAL and create its WAL index, so the resume would no longer find
+	// the target the interrupted run left. The marker is therefore read first:
+	// it is a bounded file, not a database open.
+	if _, markerPresent, markerErr := copyinmarker.Read(targetRoot); markerErr == nil && !markerPresent {
+		if operation, found, err := recordedOperationAt(ctx, targetRoot); err != nil {
+			return err
+		} else if found && stagePastCopyIn(operation.Stage) {
+			output := runOutput{Operation: &operation}
+			writeRunOutput(stdout, *asJSON, output)
+			return nil
+		}
 	}
 	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
 		LegacyRoot:      legacyRoot,

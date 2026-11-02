@@ -1028,8 +1028,11 @@ func TestReadRecordReportsAnOutdatedStore(t *testing.T) {
 			created_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
-		`insert into upgrade_operations (id, stage, domains_done, source_kind, created_at_ms, updated_at_ms)
-			values (1, 'copy_in', '[]', 'upgraded-legacy', 1, 1)`,
+		`insert into upgrade_operations (id, stage, domains_done, source_kind, source_version,
+			source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
+			created_at_ms, updated_at_ms)
+			values (1, 'copy_in', '["source_copy"]', 'upgraded-legacy', 'v1.14.4',
+				'before', 'after', 'manifest', 1, 1)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			_ = db.Close()

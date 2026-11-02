@@ -100,6 +100,13 @@ const (
 	// held, so an offline migration cannot run. The lock is the proof that the
 	// writable Manager is still serving the store.
 	UpgradeErrorStoreLocked UpgradeErrorCode = "upgrade_store_locked"
+	// UpgradeErrorMigrateNotCopiedIn reports that `upgrade migrate` was asked to
+	// open a store that carries no recorded Upgrade copy-in. A 1.x store or a
+	// native v2 store without that row would be migrated into a store this build
+	// admits as native, without the copy evidence the Upgrade admission
+	// requires, so the command refuses before any writable open and nothing is
+	// written.
+	UpgradeErrorMigrateNotCopiedIn UpgradeErrorCode = "upgrade_migrate_not_copied_in"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -148,6 +155,7 @@ var (
 	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
 	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
 	ErrStoreLocked           = &UpgradeError{Code: UpgradeErrorStoreLocked}
+	ErrMigrateNotCopiedIn    = &UpgradeError{Code: UpgradeErrorMigrateNotCopiedIn}
 	ErrV2Running             = &UpgradeError{Code: UpgradeErrorV2Running}
 )
 

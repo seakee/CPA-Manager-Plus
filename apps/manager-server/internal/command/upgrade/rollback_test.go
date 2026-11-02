@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // rollbackReadyTarget copies a stopped 1.x source into a v2 data root, which is
@@ -656,8 +658,11 @@ func writeOutdatedStore(t *testing.T, databasePath string) {
 			created_at_ms integer not null,
 			updated_at_ms integer not null
 		)`,
-		`insert into upgrade_operations (id, stage, domains_done, source_kind, created_at_ms, updated_at_ms)
-			values (1, 'copy_in', '[]', 'upgraded-legacy', 1, 1)`,
+		`insert into upgrade_operations (id, stage, domains_done, source_kind, source_version,
+			source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
+			created_at_ms, updated_at_ms)
+			values (1, 'copy_in', '["source_copy"]', 'upgraded-legacy', 'v1.14.4',
+				'before', 'after', 'manifest', 1, 1)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			_ = db.Close()
@@ -737,5 +742,256 @@ func TestRollbackPreparePrintsTheOperatorVerifiedIdentity(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("prepare output does not contain %q:\n%s", want, stdout)
 		}
+	}
+}
+
+// writeLegacyManagerStore creates the shape a 1.x install has: no
+// upgrade_operations table at all. A writable open of this build would migrate
+// it into a native-v2 store, which is exactly what `upgrade migrate` may not do.
+func writeLegacyManagerStore(t *testing.T, databasePath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath))
+	if err != nil {
+		t.Fatalf("create the 1.x store: %v", err)
+	}
+	for _, statement := range []string{
+		`create table settings (key text primary key, value text not null, updated_at_ms integer not null)`,
+		`insert into settings (key, value, updated_at_ms) values ('legacy_fixture_marker', 'kept', 1)`,
+		`create table usage_events (
+			id integer primary key autoincrement,
+			event_hash text not null unique,
+			timestamp_ms integer not null
+		)`,
+		`insert into usage_events (event_hash, timestamp_ms) values ('legacy-event-1', 1000)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatalf("write the 1.x store: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the 1.x store: %v", err)
+	}
+}
+
+// TestUpgradeMigrateRefusesAStoreItDidNotCopyIn is the regression for the
+// migration gate: `upgrade migrate` is the remedy for a copied-in store whose
+// upgrade table predates this build's columns. A 1.x store or a native store
+// without a recorded copy-in has no such row, and opening it writable would
+// migrate it into a store this build admits as native - without the copy
+// evidence the Upgrade admission requires. Such a store is refused before any
+// writable open, so its bytes do not change.
+func TestUpgradeMigrateRefusesAStoreItDidNotCopyIn(t *testing.T) {
+	refusal := string(upgradeservice.UpgradeErrorMigrateNotCopiedIn)
+	t.Run("a 1.x store", func(t *testing.T) {
+		databasePath := filepath.Join(t.TempDir(), "usage.sqlite")
+		writeLegacyManagerStore(t, databasePath)
+		before, err := os.ReadFile(databasePath)
+		if err != nil {
+			t.Fatalf("read the 1.x store before migrate: %v", err)
+		}
+		code, stdout, stderr := run(t, "migrate", "--db-path", databasePath)
+		if code != 1 {
+			t.Fatalf("migrate exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+		}
+		if !strings.Contains(stderr, refusal) {
+			t.Fatalf("migrate did not name %q: %s", refusal, stderr)
+		}
+		after, err := os.ReadFile(databasePath)
+		if err != nil {
+			t.Fatalf("read the 1.x store after migrate: %v", err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatal("a refused migrate opened the 1.x store writable and rewrote its bytes")
+		}
+	})
+	t.Run("a native v2 store without a recorded operation", func(t *testing.T) {
+		databasePath := filepath.Join(t.TempDir(), "usage.sqlite")
+		db, err := sqliterepo.Open(databasePath)
+		if err != nil {
+			t.Fatalf("create the native v2 store: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close the native v2 store: %v", err)
+		}
+		code, stdout, stderr := run(t, "migrate", "--db-path", databasePath)
+		if code != 1 {
+			t.Fatalf("migrate exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+		}
+		if !strings.Contains(stderr, refusal) {
+			t.Fatalf("migrate did not name %q: %s", refusal, stderr)
+		}
+	})
+}
+
+// TestUpgradeMigrateStillAddsColumnsToACopiedInStore keeps the remedy reachable:
+// a store whose row records the copy-in may have its upgrade table brought up to
+// this build's columns.
+func TestUpgradeMigrateStillAddsColumnsToACopiedInStore(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := rollbackReadyTarget(t, source)
+	databasePath := filepath.Join(target, "usage.sqlite")
+	downgradeRollbackColumns(t, databasePath)
+
+	if code, _, stderr := run(t, "status", "--db-path", databasePath); code != 1 ||
+		!strings.Contains(stderr, string(upgradeservice.UpgradeErrorStoreSchemaOutdated)) {
+		t.Fatalf("status on the copied-in store exit code = %d, want 1; stderr: %s", code, stderr)
+	}
+	if code, stdout, stderr := run(t, "migrate", "--db-path", databasePath); code != 0 {
+		t.Fatalf("migrate of the copied-in store exit code = %d; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	code, stdout, stderr := run(t, "status", "--json", "--db-path", databasePath)
+	if code != 0 {
+		t.Fatalf("status after migrate exit code = %d; stderr: %s", code, stderr)
+	}
+	var status statusOutput
+	if err := json.Unmarshal([]byte(stdout), &status); err != nil {
+		t.Fatalf("decode status: %v; output: %s", err, stdout)
+	}
+	if status.Operation == nil || status.Operation.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("status after migrate = %+v, want the recorded copy_in", status.Operation)
+	}
+}
+
+// downgradeRollbackColumns rewrites the copied-in store's upgrade table into the
+// shape an earlier build wrote: the table and its row survive, the columns a
+// rollback records do not exist.
+func downgradeRollbackColumns(t *testing.T, databasePath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath))
+	if err != nil {
+		t.Fatalf("open the copied-in store: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, statement := range []string{
+		`pragma foreign_keys = off`,
+		`create table upgrade_operations_previous (
+			id integer primary key check(id = 1),
+			stage text not null default '',
+			domains_done text not null default '[]',
+			source_kind text,
+			source_version text,
+			source_fingerprint_before text,
+			source_fingerprint_after text,
+			backup_manifest_sha256 text,
+			reconciliation text not null default '{}',
+			manual_items text not null default '[]',
+			error_code text,
+			error_detail text,
+			created_at_ms integer not null,
+			updated_at_ms integer not null
+		)`,
+		`insert into upgrade_operations_previous (
+			id, stage, domains_done, source_kind, source_version,
+			source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
+			reconciliation, manual_items, error_code, error_detail, created_at_ms, updated_at_ms)
+		select id, stage, domains_done, source_kind, source_version,
+			source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
+			reconciliation, manual_items, error_code, error_detail, created_at_ms, updated_at_ms
+		from upgrade_operations`,
+		`drop table upgrade_operations`,
+		`alter table upgrade_operations_previous rename to upgrade_operations`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatalf("downgrade the copied-in store: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the downgraded store: %v", err)
+	}
+}
+
+// TestRunLeavesAMaterializingTargetUntouched is the regression for the copy-in
+// pre-guard: a resume reads the marker and the members beside it with file
+// digests, never the database. The CLI read the operation row first, which
+// opened the materializing target's WAL and created its WAL index, so the run
+// the operator was resuming could no longer match the marker.
+func TestRunLeavesAMaterializingTargetUntouched(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := t.TempDir()
+	writeMaterializingTarget(t, target, source)
+	databasePath := filepath.Join(target, "usage.sqlite")
+	walPath := databasePath + "-wal"
+	shmPath := databasePath + "-shm"
+	if _, err := os.Lstat(shmPath); !os.IsNotExist(err) {
+		t.Fatalf("the fixture already has a WAL index (err=%v)", err)
+	}
+	walBefore, err := os.ReadFile(walPath)
+	if err != nil {
+		t.Fatalf("read the target WAL before the run: %v", err)
+	}
+
+	run(t, "run", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
+
+	if _, err := os.Lstat(shmPath); !os.IsNotExist(err) {
+		t.Fatalf("the pre-guard opened the materializing target and created its WAL index (err=%v)", err)
+	}
+	walAfter, err := os.ReadFile(walPath)
+	if err != nil {
+		t.Fatalf("read the target WAL after the run: %v", err)
+	}
+	if !bytes.Equal(walBefore, walAfter) {
+		t.Fatal("the pre-guard opened the materializing target and rewrote its WAL")
+	}
+}
+
+// writeMaterializingTarget leaves the target of an interrupted copy-in: a
+// WAL-mode database with an un-checkpointed WAL and no WAL index, plus the
+// materializing marker that vouches for a backup this run will not hold.
+func writeMaterializingTarget(t *testing.T, targetRoot, sourceRoot string) {
+	t.Helper()
+	staging := t.TempDir()
+	stagedPath := filepath.Join(staging, "usage.sqlite")
+	source, err := os.ReadFile(filepath.Join(sourceRoot, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("read the 1.x fixture database: %v", err)
+	}
+	if err := os.WriteFile(stagedPath, source, 0o600); err != nil {
+		t.Fatalf("stage the target database: %v", err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(stagedPath))
+	if err != nil {
+		t.Fatalf("open the staged target: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, statement := range []string{
+		`pragma journal_mode = wal`,
+		`create table if not exists copy_in_probe (id integer primary key)`,
+		`insert into copy_in_probe (id) values (1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			_ = db.Close()
+			t.Fatalf("write the staged target: %v", err)
+		}
+	}
+	// Copy the database and its WAL while the writer is still open, so the WAL
+	// holds committed pages the main file does not. The WAL index is deliberately
+	// not copied, exactly as a killed process leaves it.
+	for _, suffix := range []string{"", "-wal"} {
+		data, err := os.ReadFile(stagedPath + suffix)
+		if err != nil {
+			_ = db.Close()
+			t.Fatalf("read the staged target %s: %v", suffix, err)
+		}
+		if err := os.WriteFile(filepath.Join(targetRoot, "usage.sqlite"+suffix), data, 0o600); err != nil {
+			_ = db.Close()
+			t.Fatalf("write the materializing target %s: %v", suffix, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the staged target: %v", err)
+	}
+	if err := copyinmarker.Write(targetRoot, copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
+		TargetDatabase:          filepath.Join(targetRoot, "usage.sqlite"),
+		SourceKind:              upgradeservice.SourceKindUpgradedLegacy,
+		SourceVersion:           bootstrap.PlannedDirectRelease,
+		SourceFingerprintBefore: "before",
+		BackupManifestSHA256:    "0000000000000000000000000000000000000000000000000000000000000000",
+		WrittenAtMS:             time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("publish the materializing marker: %v", err)
 	}
 }

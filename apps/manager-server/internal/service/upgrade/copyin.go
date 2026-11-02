@@ -3,6 +3,7 @@ package upgrade
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -296,6 +297,12 @@ func recordedOperation(ctx context.Context, databasePath string, immutable bool)
 // the store writable, so without this command an operation recorded by an older
 // build could not be read at all.
 //
+// The command only serves a store the Upgrade copy-in recorded. The writable
+// open also runs the full schema migration, so opening any other store would
+// turn a 1.x or native store into one this build serves as native-v2, without
+// the copy evidence the Upgrade admission requires. That store is refused from a
+// private snapshot before any writable open, so its bytes do not change.
+//
 // The migration is a write, so it holds the v2 data-root process lock for the
 // whole writable open. A held lock means the writable Manager is still serving
 // the store and the command refuses with upgrade_store_locked.
@@ -305,6 +312,9 @@ func MigrateOperationStore(ctx context.Context, databasePath string) error {
 	}
 	if _, err := os.Lstat(databasePath); err != nil {
 		return fmt.Errorf("the Manager store cannot be migrated: %w", err)
+	}
+	if err := requireCopiedInStore(ctx, databasePath); err != nil {
+		return err
 	}
 	lock, err := processlock.Acquire(databasePath)
 	if err != nil {
@@ -323,6 +333,69 @@ func MigrateOperationStore(ctx context.Context, databasePath string) error {
 		return fmt.Errorf("close the migrated Manager store: %w", err)
 	}
 	return nil
+}
+
+// requireCopiedInStore proves from a private snapshot that this store is the
+// product of an Upgrade copy-in. The snapshot is a copy, so a store this build
+// must not open still answers the question with its bytes unchanged.
+func requireCopiedInStore(ctx context.Context, databasePath string) error {
+	snapshot, err := OpenSnapshot(ctx, databasePath, "")
+	if err != nil {
+		return fmt.Errorf("read the Manager store before migrating it: %w", err)
+	}
+	defer func() { _ = snapshot.Close() }()
+	copiedIn, err := recordsCopyIn(ctx, snapshot.DB())
+	if err != nil {
+		return fmt.Errorf("read the recorded Upgrade operation: %w", err)
+	}
+	if !copiedIn {
+		return newUpgradeError(UpgradeErrorMigrateNotCopiedIn,
+			"this Manager store carries no recorded Upgrade copy-in, so it is not the store this command serves: opening it writable would migrate a 1.x or native store into one this build serves as native without the Upgrade admission. Copy the 1.x source in with `upgrade run`, or keep using the Manager build that wrote this store", nil)
+	}
+	return nil
+}
+
+// recordsCopyIn reports whether the store holds the row the copy-in records: a
+// copied-in source kind, the source-copy domain, both fingerprints and the
+// backup manifest. Only columns every version of the table has are read, so the
+// proof also works on the older schema this command exists to migrate.
+func recordsCopyIn(ctx context.Context, db *sql.DB) (bool, error) {
+	present, err := tablePresent(ctx, db, "upgrade_operations")
+	if err != nil || !present {
+		return false, err
+	}
+	var stage, sourceKind, domains, before, after, manifest sql.NullString
+	err = db.QueryRowContext(ctx, `select stage, source_kind, domains_done,
+		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256
+		from upgrade_operations where id = 1`).
+		Scan(&stage, &sourceKind, &domains, &before, &after, &manifest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	recordedStage := model.UpgradeStage(stage.String)
+	if !recordedStage.RollbackApplicable() {
+		return false, nil
+	}
+	if sourceKind.String != SourceKindUpgradedLegacy {
+		return false, nil
+	}
+	if strings.TrimSpace(before.String) == "" || strings.TrimSpace(after.String) == "" ||
+		strings.TrimSpace(manifest.String) == "" {
+		return false, nil
+	}
+	var completed []string
+	if err := json.Unmarshal([]byte(domains.String), &completed); err != nil {
+		return false, err
+	}
+	for _, domain := range completed {
+		if domain == model.UpgradeDomainSourceCopy {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ReadRecordFrom reads the single recorded operation from an already-open
@@ -344,7 +417,7 @@ func ReadRecordFrom(ctx context.Context, db *sql.DB) (model.UpgradeOperation, bo
 	}
 	if len(missing) > 0 {
 		return model.UpgradeOperation{}, false, newUpgradeError(UpgradeErrorStoreSchemaOutdated,
-			fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read read-only; stop the v2 Manager and run `cpa-manager-plus upgrade migrate`, which opens the store writable under the v2 process lock and adds them",
+			fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read read-only; stop the v2 Manager and run `cpa-manager-plus upgrade migrate`, which opens the store writable under the v2 process lock and adds them (it refuses a store that carries no recorded copy-in)",
 				strings.Join(missing, ", ")), nil)
 	}
 	operation, found, err := repository.Get(ctx)
