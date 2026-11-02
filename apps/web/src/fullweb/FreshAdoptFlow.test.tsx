@@ -601,6 +601,56 @@ it('sends the inputs on screen, not the pre-staging body, after a lost first rep
   expect(maybe('adopt-migration')).toHaveLength(0);
 });
 
+it('offers no confirmation when the staged body cannot be rebuilt from the inputs on screen', async () => {
+  // The first POST's reply is lost and the staging lands later, so the operator
+  // stays on the source step and corrects the address. The next read finds the
+  // record staged and rebuilds the body from the inputs on screen — and that
+  // rebuild reads the destination. A failed read must not leave the body built
+  // before the correction confirmable, and it must not be answered as a lost
+  // reply: the operator would confirm an address the screen no longer shows.
+  const server = await adoptServer({ lateStage: 2 });
+  await click('adopt-read-inventory');
+  await settle();
+  expect(maybe('adopt-read-inventory')).toHaveLength(1);
+  await input('adopt-source-url', 'http://source-cpa-2:8317');
+
+  const original = server.fetcher.getMockImplementation()!;
+  let failRuntime = true;
+  server.fetcher.mockImplementation(async (url, init) => {
+    if (failRuntime && String(url).endsWith('/installation/runtime')) {
+      failRuntime = false;
+      return new Response(null, { status: 503 });
+    }
+    return original(url, init);
+  });
+  await click('adopt-read-inventory');
+  await settle();
+
+  // The failure is stated, and nothing on this screen can be committed: the old
+  // body was dropped before the rebuild that failed.
+  expect(text()).toContain(adoptText('failure'));
+  await input('adopt-confirm-inventory', true);
+  expect(byID('adopt-confirm-migrate').props.disabled).toBe(true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  expect(server.strategyBodies).toHaveLength(1);
+  expect(maybe('adopt-migration')).toHaveLength(0);
+
+  // The retry is the operator's own action on the same inputs: once the
+  // destination read answers, the rebuild makes the body confirmable again and
+  // the commit sends what the screen shows.
+  await input('adopt-source-url', sourceAddress);
+  await click('adopt-use-key');
+  await settle();
+  expect(text()).not.toContain(adoptText('failure'));
+  expect(byID('adopt-confirm-migrate').props.disabled).toBe(false);
+  await click('adopt-confirm-migrate');
+  await settle();
+  const posted = server.strategyBodies[server.strategyBodies.length - 1];
+  expect(posted.baseUrl).toBe(sourceAddress);
+  expect(maybe('adopt-migration')).toHaveLength(1);
+});
+
 it('does not commit when a lost staging reply lands between two reads', async () => {
   // The first POST's reply is lost while the source read is still running, so the
   // staging lands after the page already decided nothing was staged. The second

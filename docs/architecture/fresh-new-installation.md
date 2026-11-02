@@ -1374,7 +1374,12 @@ Both wizards render one shared `FreshAdoptFlow`:
   first reply, a corrected address or a key typed after Back is what the
   confirmation sends instead of a body built before the record owned the attempt;
   a corrected address is then refused by the server as another attempt, not
-  committed silently. The plugin opt-in is locked to the recorded value as soon as
+  committed silently. The body a previous read built stops being confirmable
+  before that rebuild: the rebuild observes the destination, and a read that
+  fails leaves its failure on screen with the confirmation unavailable, until a
+  later read rebuilds a body again. The durable staged record answers a lost
+  reply, never a failed read: it does not bring back a body the screen no longer
+  matches. The plugin opt-in is locked to the recorded value as soon as
   a read finds the record staged, with its own explanation, because the
   destination template already carries that decision: a choice the record did not
   record is stated on the source step instead of being carried into a

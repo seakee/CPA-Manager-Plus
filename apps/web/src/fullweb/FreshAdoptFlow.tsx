@@ -181,6 +181,13 @@ export function FreshAdoptFlow({
   const acceptedRetryable = useRef<string | null>(null);
   const inflight = useRef(false);
   const alive = useRef(true);
+  // The staging POST is the one write whose failure can still mean the record
+  // holds the attempt: the server can stage it and lose the reply on the way
+  // back. Every other failure in this flow — a read of the record, the
+  // destination observation a rebuild performs — leaves the record where it was,
+  // so it must leave its own failure on screen instead of being answered with
+  // "the record already staged this".
+  const stagingMayHaveLanded = useRef(false);
   // The carrier is built by the host on every render, because it closes over the
   // operation the host just accepted. The poll loop must not restart for that, so
   // it reads the latest one through a ref instead of a dependency.
@@ -279,6 +286,9 @@ export function FreshAdoptFlow({
     if (inflight.current || !alive.current) return;
     inflight.current = true;
     setBusy(true);
+    // Each action starts from "no write has left this page": only the staging
+    // POST of this action can decide that the record already holds the attempt.
+    stagingMayHaveLanded.current = false;
     setError('');
     setNote('');
     onPending?.(true);
@@ -306,9 +316,12 @@ export function FreshAdoptFlow({
           onOperation(truth);
           // A durable staged attempt answers a lost reply: the inventory the
           // server wrote is what the operator has to see, and this page has no
-          // business claiming the read failed. A typed refusal keeps its own
-          // message — it explained itself, and the page is still on that step.
+          // business claiming the read failed. Only the staging POST's own
+          // failure can be that lost reply — a failed read or rebuild staged
+          // nothing — and a typed refusal keeps its own message, because it
+          // explained itself and the page is still on that step.
           if (
+            stagingMayHaveLanded.current &&
             !coded.code &&
             stage === 'source' &&
             truth.strategy?.strategy === 'adopt_existing' &&
@@ -364,14 +377,13 @@ export function FreshAdoptFlow({
         // attempt. Rebuild it on every entry — not only when the page holds no
         // body — from the inputs on screen and the choice the record owns, so a
         // corrected address or key is what the confirmation sends instead of a
-        // body built before the record owned the attempt. An address or key the
-        // page cannot use leaves the form that asks for it instead.
-        if (sourceUsable()) {
-          const rebuilt = await recordedBody(adopt.pluginsEnabled === true);
-          if (rebuilt && alive.current) setBody(rebuilt);
-        } else if (alive.current) {
-          setBody(null);
-        }
+        // body built before the record owned the attempt. The old body stops
+        // being confirmable before the rebuild starts: the rebuild reads the
+        // destination, and a read that fails must leave nothing this page could
+        // still commit. Only a body this read rebuilt becomes confirmable again.
+        setBody(null);
+        const rebuilt = await recordedBody(adopt.pluginsEnabled === true);
+        if (rebuilt && alive.current) setBody(rebuilt);
         return;
       }
       if (adopt?.stage === 'committed') {
@@ -405,6 +417,11 @@ export function FreshAdoptFlow({
       // landed between the read above and this write — a slow source, a reply
       // lost on the way back — must make the CAS refuse the POST, not turn it
       // into the commit of an attempt this operator has not confirmed.
+      //
+      // From here until the reply arrives this write may have reached the
+      // record, so a failure is answered by reading the record; no earlier step
+      // of this action could have staged anything.
+      stagingMayHaveLanded.current = true;
       const result = await carrier.writeStrategy(next, {
         identity: durable.identity,
         revision: durable.revision,
@@ -445,19 +462,6 @@ export function FreshAdoptFlow({
       beginRun();
       poll();
     });
-  }
-
-  // A source form a body can be built from: an address that would be sent and a
-  // key that would be used. It is a shape check only — whether the source accepts
-  // the key is the server's answer, not this page's guess.
-  function sourceUsable(): boolean {
-    if (!validManagementKey(managementKey)) return false;
-    try {
-      normalizeCPAAddress(baseUrl);
-    } catch {
-      return false;
-    }
-    return true;
   }
 
   // The exact body of an attempt that is not the first read. The plugin choice is
