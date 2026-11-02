@@ -2,8 +2,10 @@ name: Upgrade Docker Acceptance
 
 # The real-Docker Upgrade chain (U1-8). It builds the 1.x fixture image from the
 # release tag, seeds a real 1.x data volume through the 1.x API, runs the v2
-# upgrade chain, injects the five faults and proves the rollback. It is
-# deliberately not skippable but by an explicit SKIP_UPGRADE_DOCKER=1.
+# upgrade chain, injects the five faults and proves the rollback on the volume
+# the verdict fingerprints. The job is created for every pull request and every
+# push to the branches below; it is skippable only by an explicit
+# SKIP_UPGRADE_DOCKER=1, never by a path filter.
 
 on:
   pull_request:
@@ -11,18 +13,10 @@ on:
       - main
       - dev
       - v2
-    paths:
-      - 'apps/manager-server/**'
-      - 'bin/ci/upgrade-docker.mjs'
-      - 'bin/ci/evidence/upgrade-d/**'
-      - '.github/workflows/upgrade-docker.yml'
   push:
     branches:
       - dev
       - v2
-    paths:
-      - 'apps/manager-server/**'
-      - 'bin/ci/upgrade-docker.mjs'
   workflow_dispatch:
 
 permissions:
@@ -83,15 +77,33 @@ jobs:
           docker version
           docker compose version
 
+      # The harness publishes the one evidence file it wrote to GITHUB_OUTPUT, so
+      # the upload below can name that file instead of a directory glob that also
+      # matches the committed historical records.
       - name: Run the real-Docker Upgrade acceptance
+        id: run
         if: steps.skip.outputs.skipped != 'true'
         shell: bash
         run: npm run test:upgrade-docker
 
-      - name: Upload the evidence
+      # A document is only an artifact of this run when it passes its own
+      # canonical hash and names the commit this workflow checked out.
+      - name: Verify this run's evidence
         if: always() && steps.skip.outputs.skipped != 'true'
+        shell: bash
+        env:
+          EVIDENCE_PATH: ${{ steps.run.outputs.evidence_path }}
+        run: |
+          if [ -z "${EVIDENCE_PATH}" ]; then
+            echo "::error::The harness did not publish an evidence file for this run"
+            exit 1
+          fi
+          node bin/ci/upgrade-docker.mjs --verify-evidence "${EVIDENCE_PATH}" --expect-head "${GITHUB_SHA}"
+
+      - name: Upload this run's evidence
+        if: always() && steps.skip.outputs.skipped != 'true' && steps.run.outputs.evidence_path != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: upgrade-docker-evidence
-          path: bin/ci/evidence/upgrade-d/*.json
-          if-no-files-found: warn
+          name: upgrade-docker-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.run.outputs.evidence_path }}
+          if-no-files-found: error

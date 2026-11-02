@@ -10,47 +10,87 @@ the real v2 binary, instead of a hand-written SQLite fixture.
 npm run test:upgrade-docker                    # build the fixture image, then run
 node bin/ci/upgrade-docker.mjs --reuse-fixture # reuse the recorded image
 node bin/ci/upgrade-docker.mjs --keep          # keep the scratch tree
+node --test bin/ci/upgrade-docker.test.mjs     # the harness's own logic, no Docker
 ```
 
 * `SKIP_UPGRADE_DOCKER=1` is the **only** way to skip it, and it says so in the
-  log and in CI (`::warning`). A missing Docker daemon is a failure, not a skip.
+  log and in CI (`::warning`). There is no path filter: every pull request and
+  every push to the gated branches creates the job. A missing Docker daemon is a
+  failure, not a skip.
 * Every object it creates is named `cpampd<runid>-…` and every volume
-  `cpampd<runid>_…`. It refuses to start when that prefix is already taken, and
-  it fails when a container or volume outside the prefix changed, so it can run
-  on a host that also runs other stacks.
-* Evidence lands in `bin/ci/evidence/upgrade-d/<runid>.json`: the fixture image
-  ids and source commits, the seeded dataset shape, every command with its exit
-  code and output digests, the chain reports, each fault's exit code and typed
-  code, the rollback plan and verdict, the wizard contracts, the findings, the
-  cleanup result and a `sha256` of the document itself. `stableDigest` covers the
-  run's stable facts only, so two runs of the same build agree.
+  `cpampd<runid>_…`. It refuses to start when that prefix is already taken, it
+  tracks each container, volume, network, compose project, host process and
+  `git worktree` checkout **before** creating it, and it releases them on the
+  normal path, on every error path and on SIGINT/SIGTERM (a handled signal runs
+  the same release and exits 130/143). A release that fails, a listing it cannot
+  read, or any surviving object under its own prefix makes the process exit
+  non-zero: a partial cleanup can never read as PASS. It never addresses
+  `cpamp-*`, `buildx_buildkit_*`, `cpa-manager-plus-cpa-manager-plus-1` or
+  `cpa-usage-keeper`.
+* Evidence lands in `bin/ci/evidence/upgrade-d/<runid>.json` and is bound to the
+  run that wrote it: `implementation` records the HEAD commit, the harness file
+  digest, the built binary digest and whether the tree was clean; `verdict` and
+  `exitCode` record the outcome; `hashRule` states the canonical rule
+  (`sha256` of the document without its own `sha256`, `JSON.stringify(…, null, 2)`);
+  `resultsDigest` covers what the run observed (chain reports, faults, rollback,
+  admission), while `stableDigest` covers only the stable facts two runs of the
+  same build are expected to agree on.
+  `node bin/ci/upgrade-docker.mjs --verify-evidence <file> [--expect-head <sha>]`
+  re-checks that hash, the verdict and the head binding without Docker. CI runs
+  it on the file the run published to `GITHUB_OUTPUT` and uploads exactly that
+  file, so an artifact can never be a committed historical record; the harness
+  also refuses to reuse a fixture image that does not carry the provenance
+  labels its build writes.
+* The `sha256` is an integrity check, not an authenticity proof: a document can
+  be edited and rehashed. What an edited document cannot do is name a commit the
+  harness did not run at, which is why the head binding and the CI verification
+  step exist.
+
+## Harness logic tests
+
+`node --test bin/ci/upgrade-docker.test.mjs` exercises the parts that decide what
+the real-Docker run may touch, without Docker: the resource registry (ownership
+refusals, release order, a failed release staying owned and failing the run, the
+exit-code verdict), the signal guard (one release, exit 130/143, no second
+release), port allocation (two ports of a run are never equal, busy and reserved
+ports are skipped, exhaustion refuses), redaction (a registered secret never
+survives a message and the leak assertion never reprints it) and the evidence
+binding (untouched document verifies, an unrehashed edit fails, a rehashed edit
+still fails the head binding, a document without a verdict/head is refused).
+These are unit-level contracts over controlled stand-ins; they are not a
+substitute for the real-Docker run below.
 
 ## What it proves
 
 | Step | Assertion |
 | --- | --- |
-| fixture | `git worktree` of the 1.x tag, `docker build`, image id and commit recorded; `--reuse-fixture` skips the build and still passes |
+| fixture | `git worktree` of the 1.x tag, `docker build` with the provenance labels (`io.cpamp.upgrade.fixture.{contract,tag,commit}`), image id and commit recorded; `--reuse-fixture` verifies those labels and the tag's commit before accepting the image, and the rollback alias must resolve to the same image ID |
 | seed | three UTC days of usage events, two models, two client keys, model prices and key aliases, one archive run that is verified and whose raw rows are deleted — all through the 1.x HTTP API |
 | `upgrade preflight` | exit 0, `ready`, no blocked check, the source version the contract accepts |
 | `upgrade run` | exit 0, stage `copy_in`, `restored`, both source fingerprints and the backup manifest digest recorded |
-| `upgrade reconcile` | exit 0, stage `reconcile`, every applicable domain compared with no mismatch and no unacknowledged day |
-| `upgrade status` | the persisted row reads back at stage `reconcile` read-only |
+| `upgrade reconcile` | exit 0, stage `reconcile`, all four comparison domains (`retained`, `pricing`, `coverage`, `history`) present on the table each names, applicable, every source day compared (`comparedDays === sourceDays`), zero mismatches, zero marked days; on the main chain the seeded day counts (2/3/1/3) and the recorded `domainsDone` are pinned |
+| `upgrade status` | the persisted row reads back at stage `reconcile` with the same `domainsDone` the reconcile report compared |
 | wizard routes | on a real Fresh installation, `GET …/installation/upgrade/{preflight,status}` answer 200 to the 1.x administrator key only, project `ready` and `nextAction`, and contain no credential, path, full digest or data-key material; a write is 405 |
 | fault: source touched after copy-in | a second `run` reports the recorded operation and writes nothing; `rollback --prepare` refuses with `upgrade_source_changed` |
-| fault: copy-in interrupted before the row | the provenance marker is caught and the process killed; `status` shows no row; the resume adopts the materialized store (`restored:false`) and records `copy_in`; over HTTP the same window reads `recorded` with `evidence: copy_in_marker`, stage and `nextAction` `copy_in` (`sourceRoot: available`), never the `preflight` step before any work started |
+| fault: copy-in interrupted before the row | the provenance marker is caught and the process killed; `status` shows no row; the resume adopts the materialized store (`restored:false`) and records `copy_in`; over HTTP the same window reads `recorded` with `evidence: copy_in_marker`, stage and `nextAction` `copy_in` (`sourceRoot: available`), never the `preflight` step before any work started. This case is a **successful resume**: the target changes, so `targetRootUnchanged` is `false` and the code is `resumed_copy_in` |
 | fault: cleared derived rollup with retained support | reconcile refuses with `upgrade_reconcile_mismatch` naming the days; after `--acknowledge` it marks them as `derived_rollup_lost` |
 | fault: cleared derived rollup without support | `upgrade_reconcile_target_incomplete`, unwaivable even with `--acknowledge` |
 | fault: dropped table on the target | `upgrade_reconcile_target_incomplete` naming the missing table |
-| fault: natively busy source | `upgrade_source_busy` from `flock` held on `usage.sqlite.manager.lock` |
-| rollback | plan → real compose apply on the plan's volume and port → the restarted 1.x accepts a new row → probe of the manager's own listener refused with `upgrade_rollback_probe_self` → `--verify` records `rolled_back` with the image, endpoint and observed fingerprint |
-| admission, unfinished | with the recorded row at `copy_in` and at `reconcile` the manager answers `/health` 503 and serves both wizard reads on the fixed Bootstrap carrier: 200 to the 1.x administrator key only (status shows the recorded stage and `nextAction`), 401 to no credential or a foreign one, and 405 with `Allow: GET` only after the key is proved; the canonical continuation stays 404 because a copied root carries no Fresh record |
+| fault: natively busy source | `upgrade_source_busy` from `flock` held on `usage.sqlite.manager.lock`; the **write path** (`upgrade run` against a real v2 store) refuses, the store stays byte-identical and the recorded stage does not move — a preflight on a directory the command never receives is not the proof |
+| rollback | plan → the plan's named volume is created as a Docker local volume **bound to the 1.x directory itself**, and a probe write through it is observed on that host directory → real compose apply of the printed document on the plan's port → the restarted 1.x accepts a new row (the actual HTTP status is recorded, not a constant) → probe of the manager's own listener refused with `upgrade_rollback_probe_self` and the recorded row's `stage`/`updated_at_ms` unchanged → `--verify --legacy` points at the **same directory**, and its observed fingerprint differs from the plan's pre-rollback fingerprint and equals a product fingerprint of that live directory taken just before and just after the verdict (a still-serving 1.x may touch its WAL index) → after the stack is released, the persisted `rolled_back` root is restarted and admits only the Upgrade surface, and the written row is counted in that same directory from the host |
+| admission, unfinished | with the recorded row at `copy_in` and at `reconcile` the manager answers `/health` 503 and serves both wizard reads on the fixed Bootstrap carrier: 200 to the 1.x administrator key only (status shows the recorded stage and `nextAction`), 401 to no credential or a foreign one, and 405 with `Allow: GET` only after the key is proved; the canonical continuation stays 404 because a copied root carries no Fresh record, and the console (`/management.html`), the key/pricing API (`/v0/management/model-prices`), the gateway/model route (`/v0/management/models`) and `/usage-service/info` all answer 404 |
 | admission, mountless | with the source mount absent, the same two roots still answer `status` 200 from the Manager store — `evidence: operation_row`, the recorded stage and a typed `sourceRoot: upgrade_legacy_root_missing` — to the key the mount accepted, while the v2 Admin key stays 401 and the preflight keeps its typed 503 with the same code |
 | admission, refused mount | with the source mounted but its `usage.sqlite` a symbolic link — a file the shared database file policy refuses on both the mount lookup and the credential read — the same two roots keep answering `status` 200 from the Manager store with the recorded stage and a typed `sourceRoot: upgrade_source_symlinked` to the key the mount accepted, the v2 Admin key stays 401, and the preflight still inspects the mount the operator supplied: 200, `ready: false`, `source_ownership` blocked with `upgrade_source_symlinked`. Before the fix this state answered 503 on the entry page and both reads, so the operator could not reach the page that names the condition |
 | origin rule, both reads | on both surfaces a cross-site `Origin` is 403 `origin_rejected` and `Sec-Fetch-Site: cross-site` is 403 (the surface's code on the fixed carrier, the transport's fetch-metadata refusal on the Fresh admin surface), this very origin is served 200, and an anonymous cross-site caller is still 401 first, because the credential's shape is decided from the request alone before the origin verdict |
 | admission, complete | the terminal `complete` row admits the full writable surface (`/health` 200) and both reads answer 404 to every caller, the source key included |
+| admission, `rolled_back` | after the verdict the manager is restarted on that root: `/health` is 503, the wizard `status` answers 200 to the source key with `stage` and `nextAction` `rolled_back`, the v2 Admin key stays 401, and the console, key/pricing, gateway/model and `/usage-service/info` routes all answer 404 |
 
-Every fault case also asserts that the target root is byte-identical across the
-refused command (`targetRootUnchanged`).
+A **refusal** case asserts that the refused command wrote nothing: the target
+root is byte-identical before and after (`targetRootUnchanged: true`). A
+**successful** case is the opposite: the interrupted copy-in resumes and does
+write its target (`targetRootUnchanged: false`, recorded code `resumed_copy_in`),
+which is what a resume is supposed to do. The two are separate claims and are
+recorded separately.
 
 ## Defects this harness found and closed
 
@@ -93,6 +133,13 @@ refused command (`targetRootUnchanged`).
    `TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere`.
 
 ## Gaps the harness records but cannot close inside this slice
+
+* **Same-volume rollback needs a bindable local volume.** The proof that the
+  restarted 1.x writes where `--verify` reads uses a Docker local volume created
+  with `--opt o=bind --opt device=<1.x directory>`. The harness proves the binding
+  with a probe write observed on the host before it prepares the plan; if a host's
+  Docker cannot bind that directory (or the tag cannot be resolved), it fails
+  there instead of recording a verdict against a different directory.
 
 * **Source release pin.** The contract accepts `v1.14.4`
   (`internal/domain/bootstrap/contract.go:12`), so the planned `v1.14.10`
