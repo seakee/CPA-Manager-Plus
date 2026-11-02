@@ -780,8 +780,44 @@ func validateStatusRow(row statusRow) error {
 // future-dated row is a typed read error, never a fabricated stage. A store with
 // no row is not the same as no operation: the copy-in publishes its provenance
 // before the row commits, and that window must not read "preflight".
+//
+// The marker is read before the store, exactly like the startup admission. A
+// `materializing` marker was published before the first member was moved and
+// before the migration that creates the operation table, so no row can be
+// committed in such a target: reading it decides nothing and costs the resume
+// everything. A read-only open of a target that still holds the copied WAL joins
+// that WAL and rewrites `-shm`, the member the resumed move compares with the
+// backup. This route is a status poll: it must not be the reason an interrupted
+// copy-in can never be resumed.
 func readStatus(ctx context.Context, databasePath string) (statusDocument, error) {
-	document := statusDocument{
+	document := emptyStatusDocument()
+	marker, inFlight, err := readCopyInMarker(databasePath)
+	if err != nil {
+		return statusDocument{}, err
+	}
+	if inFlight && marker.Phase == copyinmarker.PhaseMaterializing {
+		return withCopyInMarker(document, marker), nil
+	}
+	// A `migrating` marker leaves the possibility that the row committed, and
+	// the row is the stronger evidence, so it is read first — the same order the
+	// admission uses.
+	recorded, found, err := readRecordedStatus(ctx, databasePath, document)
+	if err != nil {
+		return statusDocument{}, err
+	}
+	if found {
+		return recorded, nil
+	}
+	if inFlight {
+		return withCopyInMarker(recorded, marker), nil
+	}
+	return recorded, nil
+}
+
+// emptyStatusDocument is the unrecorded projection: no operation has started,
+// and the next action is the preflight.
+func emptyStatusDocument() statusDocument {
+	return statusDocument{
 		ContractVersion: Contract,
 		Evidence:        EvidenceNone,
 		StageKnown:      true,
@@ -790,26 +826,32 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 		ManualItems:     []string{},
 		Reconciliation:  emptyReconciliation(),
 	}
+}
+
+// readStatusRow reads the operation row from the Manager store. found is false
+// when the store holds no operation yet: the file is absent, empty or not a
+// database this build can read, the table is absent, or no row exists.
+func readRecordedStatus(ctx context.Context, databasePath string, document statusDocument) (statusDocument, bool, error) {
 	info, err := os.Stat(databasePath)
 	if os.IsNotExist(err) {
-		return withCopyInMarker(databasePath, document)
+		return document, false, nil
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-		return withCopyInMarker(databasePath, document)
+		return document, false, nil
 	}
 	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath))
 	if err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
 	var present int
 	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
 	}
 	if present == 0 {
-		return withCopyInMarker(databasePath, document)
+		return document, false, nil
 	}
 	var row statusRow
 	err = db.QueryRowContext(ctx, `select stage, domains_done, source_kind, source_version,
@@ -817,25 +859,25 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 		from upgrade_operations where id = 1`).Scan(&row.Stage, &row.Domains, &row.SourceKind, &row.SourceVersion,
 		&row.Reconciled, &row.ManualItems, &row.ErrorCode, &row.ErrorDetail, &row.CreatedAtMS, &row.UpdatedAtMS)
 	if errors.Is(err, sql.ErrNoRows) {
-		return withCopyInMarker(databasePath, document)
+		return document, false, nil
 	}
 	if err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
 	}
 	if err := validateStatusRow(row); err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
 	}
 	domains, err := decodeStringColumn(row.Domains, "domains_done")
 	if err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
 	}
 	manualItems, err := decodeStringColumn(row.ManualItems, "manual_items")
 	if err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
 	}
 	reconciliation, err := reconciliationSummary(row.Reconciled)
 	if err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
 	}
 	document.Recorded = true
 	document.Evidence = EvidenceOperationRow
@@ -853,7 +895,23 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 	document.ErrorDetail = scrubError(row.ErrorDetail.String)
 	document.UpdatedAtMS = row.UpdatedAtMS
 	document.Reconciliation = reconciliation
-	return document, nil
+	return document, true, nil
+}
+
+// readCopyInMarker reads the provenance marker that describes this database.
+// The marker sits in this data root's own reserved work directory, so it
+// describes this root even when the root is mounted at another absolute path;
+// a marker naming a different database file is evidence for some other run and
+// is not applied here, the same rule the startup admission applies.
+func readCopyInMarker(databasePath string) (copyinmarker.Marker, bool, error) {
+	marker, found, err := copyinmarker.Read(filepath.Dir(databasePath))
+	if err != nil {
+		return copyinmarker.Marker{}, false, fmt.Errorf("read the copy-in provenance marker: %w", err)
+	}
+	if !found || !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
+		return copyinmarker.Marker{}, false, nil
+	}
+	return marker, true, nil
 }
 
 // withCopyInMarker answers the window the row cannot. The copy-in publishes its
@@ -863,14 +921,7 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 // stage is reported with the marker as its evidence, and the next action is the
 // copy-in the operator has to resume; "preflight" would claim nothing had
 // started while admission refuses every normal surface.
-func withCopyInMarker(databasePath string, document statusDocument) (statusDocument, error) {
-	marker, found, err := copyinmarker.Read(filepath.Dir(databasePath))
-	if err != nil {
-		return statusDocument{}, fmt.Errorf("read the copy-in provenance marker: %w", err)
-	}
-	if !found || !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
-		return document, nil
-	}
+func withCopyInMarker(document statusDocument, marker copyinmarker.Marker) statusDocument {
 	document.Recorded = true
 	document.Evidence = EvidenceCopyInMarker
 	document.Stage = StageCopyIn
@@ -882,7 +933,7 @@ func withCopyInMarker(databasePath string, document statusDocument) (statusDocum
 	document.SourceKind = marker.SourceKind
 	document.SourceVersion = marker.SourceVersion
 	document.UpdatedAtMS = marker.WrittenAtMS
-	return document, nil
+	return document
 }
 
 // knownStage reports whether this build can name the recorded stage. An empty

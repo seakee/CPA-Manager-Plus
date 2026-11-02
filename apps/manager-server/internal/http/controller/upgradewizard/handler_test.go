@@ -2,13 +2,16 @@ package upgradewizard
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1272,6 +1275,103 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	if status.Recorded || status.Stage != "" || status.NextAction != ActionPreflight || status.Evidence != EvidenceNone {
 		t.Fatalf("a foreign marker was read as this operation: %+v", status)
 	}
+}
+
+// TestStatusDecidesFromTheMarkerBeforeOpeningAMaterializingTarget is the D2
+// regression. The copy-in publishes a `materializing` marker before the first
+// member is moved and before the migration that creates the operation table, so
+// a target holding restored members cannot have a committed row. Reading the
+// operation table first — as status used to — joins the restored live WAL and
+// rewrites `-shm`, the member the resumed move compares with the backup, which
+// makes the accepted admission's marker-first protection pointless.
+func TestStatusDecidesFromTheMarkerBeforeOpeningAMaterializingTarget(t *testing.T) {
+	source := legacySourceDir(t)
+	writer, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	// Committed rows stay in the WAL: the writer is kept open and auto-checkpoint
+	// is off, so the copied target holds a live WAL and a real WAL index.
+	if _, err := writer.Exec(`pragma journal_mode = wal; pragma wal_autocheckpoint = 0;
+		create table wal_payload (value text);
+		insert into wal_payload values ('committed-in-wal')`); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "usage.sqlite")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		data, err := os.ReadFile(filepath.Join(source, "usage.sqlite") + suffix)
+		if err != nil {
+			t.Fatalf("read the restored member %q: %v", suffix, err)
+		}
+		if err := os.WriteFile(target+suffix, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyinmarker.Write(filepath.Dir(target), copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
+		TargetDatabase:          target,
+		SourceKind:              "upgraded-legacy",
+		SourceVersion:           "1.14.4",
+		SourceFingerprintBefore: "fingerprint-before",
+		SourceFingerprintAfter:  "fingerprint-after",
+		BackupManifestSHA256:    "manifest",
+		WrittenAtMS:             1717171717000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restored := targetMemberState(t, target)
+	if restored[databaseMember(target, "-shm")] == "" {
+		t.Fatalf("the restored target holds no WAL index: %v", restored)
+	}
+
+	// The accepted admission decides this phase from the marker alone.
+	stage, err := legacypreflight.DatabaseUpgradeAdmission{DatabasePath: target}.Admitted(context.Background())
+	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
+		t.Fatalf("admission before status = %q err=%v", stage, err)
+	}
+	if after := targetMemberState(t, target); !reflect.DeepEqual(restored, after) {
+		t.Fatalf("admission rewrote the materializing target: before=%v after=%v", restored, after)
+	}
+
+	// The real status route, with the source's own credential, so the Manager
+	// credential open cannot be the writer.
+	_, body := request(t, newHandler(source, target), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Recorded || status.Evidence != EvidenceCopyInMarker || status.Stage != StageCopyIn ||
+		!status.StageKnown || status.NextAction != ActionCopyIn {
+		t.Fatalf("status on a materializing target = %s", body)
+	}
+	if after := targetMemberState(t, target); !reflect.DeepEqual(restored, after) {
+		t.Fatalf("status rewrote the materializing target: before=%v after=%v", restored, after)
+	}
+}
+
+// databaseMember names one member of the target database.
+func databaseMember(database, suffix string) string {
+	return filepath.Base(database) + suffix
+}
+
+// targetMemberState is the byte identity of a copied-in target's members.
+func targetMemberState(t *testing.T, database string) map[string]string {
+	t.Helper()
+	state := map[string]string{}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		data, err := os.ReadFile(database + suffix)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(data)
+		state[databaseMember(database, suffix)] = fmt.Sprintf("%x/%d", digest, len(data))
+	}
+	return state
 }
 
 // TestReadsRefuseCrossSiteOrigins is L4: the entry leaf's cross-site rule is the
