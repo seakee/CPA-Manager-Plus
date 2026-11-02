@@ -10,7 +10,9 @@
 //     cross-site `Origin` refused on each of them;
 //   * six isolated fault cases, each asserted by exit code, typed code and an
 //     unchanged target root;
-//   * a rollback recorded against a real 1.x stack that wrote after the copy;
+//   * a rollback recorded against a real 1.x stack that wrote after the copy,
+//     restarted on the very directory `--verify` fingerprints, so the row that
+//     stack wrote is what the verdict observed;
 //   * that the manager admits only the Upgrade surface while the operation is
 //     unfinished — both wizard reads included, from the copied root alone —
 //     that those reads keep answering from the Manager store with a typed
@@ -22,16 +24,24 @@
 //     operation is complete, and that a probe answered by the manager itself is
 //     refused.
 //
-// Everything it creates is named `<prefix>-*` where the prefix is
-// `cpampd<runid>`; nothing else on the host is stopped, removed or renamed, and
-// the cleanup in `finally` only ever addresses that prefix.
+// Everything it creates is tracked before it is created: containers, volumes,
+// networks, compose projects and `git worktree` checkouts, all under the
+// `cpampd<runid>` prefix. Nothing else on the host is stopped, removed or
+// renamed. The tracked set is released on the normal path, on every error path
+// and on SIGINT/SIGTERM, and a cleanup that could not remove what this run
+// created makes the process exit non-zero instead of reporting PASS.
 //
 // Usage:
 //   node bin/ci/upgrade-docker.mjs [--reuse-fixture] [--keep] [--v1-tag v1.14.10]
-//                                  [--source-tag v1.14.4] [--evidence <path>]
+//                                  [--source-tag v1.14.4]
+//   node bin/ci/upgrade-docker.mjs --verify-evidence <file> [--expect-head <sha>]
 //
 // `--reuse-fixture` skips `git worktree` + `docker build` and uses the recorded
-// image, which is what a second run (or the U1-1b re-pin) does.
+// image, which is what a second run (or the U1-1b re-pin) does. The image must
+// carry the provenance labels this harness writes when it builds it, and its
+// rollback alias must resolve to the same image ID.
+// `--verify-evidence` re-checks one evidence document without Docker: the
+// canonical hash, the verdict and the implementation binding.
 // `SKIP_UPGRADE_DOCKER=1` is the only way to skip the run, and it says so.
 
 import { spawn, spawnSync } from 'node:child_process';
@@ -83,18 +93,320 @@ const TABLES = {
   history: 'usage_monitoring_account_daily_rollups_v1',
 };
 
-const args = parseArgs(process.argv.slice(2));
-const runId = crypto.randomBytes(4).toString('hex');
-const PREFIX = `cpampd${runId}`;
-const SCRATCH = path.join(ROOT, 'bin', 'tmp', 'u1-8', runId);
-const EVIDENCE_DIR = path.join(ROOT, 'bin', 'ci', 'evidence', 'upgrade-d');
 const IMAGE_REPOSITORY = 'cpamp-d-fixture-v1';
 // Rollback pins a reference that names a repository, so the fixture is also
 // tagged this way; the bytes are the same image.
 const ROLLBACK_IMAGE_REPOSITORY = 'cpampd-fixture/upgrade';
+const REDACTED = '[redacted]';
+
+const isEntryPoint = (() => {
+  try {
+    return Boolean(process.argv[1]) && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+
+const args = isEntryPoint
+  ? parseArgs(process.argv.slice(2))
+  : { reuseFixture: false, keep: false, v1Tag: DEFAULT_V1_TAG, sourceTag: DEFAULT_SOURCE_TAG, verifyEvidence: null, expectHead: null };
+const runId = crypto.randomBytes(4).toString('hex');
+const PREFIX = `cpampd${runId}`;
+const SCRATCH = path.join(ROOT, 'bin', 'tmp', 'u1-8', runId);
+const EVIDENCE_DIR = path.join(ROOT, 'bin', 'ci', 'evidence', 'upgrade-d');
+
+// The harness contract this file and its test both read. It names what the
+// evidence claim rests on, not merely the file locations.
+export const UPGRADE_DOCKER_CONTRACT = Object.freeze({
+  contract: 'cpamp.upgrade-docker.v1',
+  prefixPattern: /^cpampd[0-9a-f]{8}$/,
+  resourceNamePattern: /^cpampd[0-9a-f]{8}(?:[-_].+)?$/,
+  skipVariable: 'SKIP_UPGRADE_DOCKER',
+  evidenceDirectory: path.join('bin', 'ci', 'evidence', 'upgrade-d'),
+  // The labels a build writes onto the fixture image. A reused image without
+  // them cannot be shown to come from this harness's build of that tag.
+  fixtureContract: 'cpamp.upgrade-docker.fixture.v1',
+  evidenceHashRule: 'sha256(JSON.stringify(document without its "sha256" field, null, 2))',
+  // Objects outside this run's ownership. They never carry the prefix, so this
+  // is a second refusal rather than the only one.
+  protectedResources: Object.freeze(['cpa-manager-plus-cpa-manager-plus-1', 'cpa-usage-keeper']),
+  protectedPrefixes: Object.freeze(['cpamp-', 'buildx_buildkit_']),
+  signalExitCodes: Object.freeze({ SIGINT: 130, SIGTERM: 143 }),
+  evidenceVerdicts: Object.freeze(['pass', 'fail', 'aborted']),
+});
+
+// ---------------------------------------------------------------------------
+// owned resources: one registry for every object this run creates
+// ---------------------------------------------------------------------------
+
+// Release order: a process first, then the stack that holds containers and
+// networks, then the containers, then what they may still reference.
+export const RESOURCE_RELEASE_ORDER = Object.freeze(['hostProcess', 'composeProject', 'container', 'network', 'volume', 'worktree']);
+
+function isWithin(root, value) {
+  const target = path.resolve(String(value ?? ''));
+  const base = path.resolve(String(root ?? ''));
+  return target === base || target.startsWith(`${base}${path.sep}`);
+}
+
+// isOwnedResourceName reports whether a Docker object name belongs to this run.
+// Only `<prefix>`, `<prefix>-…` and `<prefix>_…` are accepted, the protected
+// names are refused explicitly, and a collaborator's stack (`cpamp-*`) can never
+// match, whatever a future prefix looks like.
+export function isOwnedResourceName(prefix, name) {
+  const value = String(name ?? '');
+  if (!UPGRADE_DOCKER_CONTRACT.prefixPattern.test(String(prefix ?? ''))) return false;
+  if (!UPGRADE_DOCKER_CONTRACT.resourceNamePattern.test(value)) return false;
+  if (UPGRADE_DOCKER_CONTRACT.protectedResources.includes(value)) return false;
+  if (UPGRADE_DOCKER_CONTRACT.protectedPrefixes.some((protectedPrefix) => value.startsWith(protectedPrefix))) return false;
+  return value === prefix || value.startsWith(`${prefix}-`) || value.startsWith(`${prefix}_`);
+}
+
+// createResourceRegistry tracks what this run created, before it is created. A
+// tracked entry owns its own release; a release that throws stays tracked and is
+// reported, so a partial cleanup can never be mistaken for a clean one. Nothing
+// is released twice and nothing outside the prefix is ever tracked.
+export function createResourceRegistry({ prefix, root = null } = {}) {
+  if (!UPGRADE_DOCKER_CONTRACT.prefixPattern.test(String(prefix ?? ''))) {
+    throw new Error(`a resource registry needs a cpampd<8 hex> prefix, got ${JSON.stringify(prefix)}`);
+  }
+  const entries = new Map();
+  const keyOf = (kind, name) => `${kind}:${name}`;
+
+  const owns = (kind, name) => {
+    if (!RESOURCE_RELEASE_ORDER.includes(kind)) return false;
+    if (isOwnedResourceName(prefix, name)) return true;
+    // A worktree checkout is owned by this run's scratch root, not by a Docker
+    // name, and never by a protected object.
+    return kind === 'worktree' && root !== null && isWithin(root, name);
+  };
+
+  const registry = {
+    prefix,
+    has: (kind, name) => entries.has(keyOf(kind, name)),
+    entry: (kind, name) => entries.get(keyOf(kind, name)) ?? null,
+    list: (kind) => [...entries.values()].filter((entry) => entry.kind === kind),
+    all: () => [...entries.values()],
+    track(kind, name, release, extra = {}) {
+      if (!RESOURCE_RELEASE_ORDER.includes(kind)) throw new Error(`unknown resource kind ${kind}`);
+      if (typeof release !== 'function') throw new Error(`a tracked ${kind} needs a release function`);
+      if (!owns(kind, name)) {
+        throw new Error(`refusing to track ${kind} ${String(name)}: it is not one of this run's own resources`);
+      }
+      const existing = entries.get(keyOf(kind, name));
+      if (existing) return existing;
+      const entry = { kind, name: String(name), release, ...extra, trackedAt: Date.now() };
+      entries.set(keyOf(kind, name), entry);
+      return entry;
+    },
+    untrack(kind, name) {
+      return entries.delete(keyOf(kind, name));
+    },
+    async releaseEntry(kind, name) {
+      const entry = entries.get(keyOf(kind, name));
+      if (!entry) return { kind, name, released: false, skipped: true };
+      try {
+        await entry.release();
+        entries.delete(keyOf(kind, name));
+        return { kind, name, released: true, skipped: false };
+      } catch (error) {
+        return { kind, name, released: false, skipped: false, error: error?.message || String(error) };
+      }
+    },
+    async releaseKind(kind, result = newCleanupResult()) {
+      for (const entry of registry.list(kind)) {
+        recordRelease(result, await registry.releaseEntry(entry.kind, entry.name));
+      }
+      return result;
+    },
+    async releaseAll(result = newCleanupResult()) {
+      for (const kind of RESOURCE_RELEASE_ORDER) {
+        await registry.releaseKind(kind, result);
+      }
+      return result;
+    },
+  };
+  return registry;
+}
+
+export function newCleanupResult() {
+  return { ok: true, released: [], errors: [] };
+}
+
+function recordRelease(result, outcome) {
+  if (outcome.skipped) return;
+  if (outcome.released) {
+    result.released.push(`${outcome.kind}:${outcome.name}`);
+    return;
+  }
+  result.ok = false;
+  result.errors.push(`${outcome.kind}:${outcome.name}: ${outcome.error ?? 'release failed'}`);
+}
+
+// finalExitCode is the one verdict: a failed run and a run whose cleanup left
+// anything behind both fail, and an abort is the signal's own code.
+export function finalExitCode({ runOk, cleanupOk = true, signal = null }) {
+  if (signal) return UPGRADE_DOCKER_CONTRACT.signalExitCodes[signal] ?? 1;
+  return runOk && cleanupOk ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// cancellation: a handled signal runs the same cleanup as the normal path
+// ---------------------------------------------------------------------------
+
+// installSignalGuard runs `onSignal` once for SIGINT/SIGTERM, then exits with the
+// signal's code. Node's default signal termination never runs a `finally`, so the
+// release path has to be attached to the signal itself.
+export function installSignalGuard({
+  onSignal,
+  exit = (code) => process.exit(code),
+  target = process,
+  signals = Object.keys(UPGRADE_DOCKER_CONTRACT.signalExitCodes),
+} = {}) {
+  if (typeof onSignal !== 'function') throw new Error('a signal guard needs an onSignal handler');
+  let handled = null;
+  const listeners = new Map();
+  const guard = {
+    get signal() {
+      return handled;
+    },
+    async handle(signal) {
+      if (handled) return UPGRADE_DOCKER_CONTRACT.signalExitCodes[handled] ?? 1;
+      handled = signal;
+      let exitCode = UPGRADE_DOCKER_CONTRACT.signalExitCodes[signal] ?? 1;
+      try {
+        const outcome = await onSignal(signal);
+        if (outcome && Number.isInteger(outcome.exitCode) && outcome.exitCode !== 0) exitCode = outcome.exitCode;
+      } catch {
+        // The run was aborted either way; the signal's own code still says so.
+      }
+      exit(exitCode);
+      return exitCode;
+    },
+    detach() {
+      for (const [signal, listener] of listeners) target.removeListener(signal, listener);
+      listeners.clear();
+      return guard;
+    },
+  };
+  for (const signal of signals) {
+    const listener = () => {
+      void guard.handle(signal);
+    };
+    listeners.set(signal, listener);
+    target.once(signal, listener);
+  }
+  return guard;
+}
+
+// ---------------------------------------------------------------------------
+// ports: one allocator per run, so two ports of the same run are never equal
+// ---------------------------------------------------------------------------
+
+export const PORT_RANGE = Object.freeze({ min: 18_900, max: 19_799 });
+
+export function createPortAllocator({ probe = probePortAvailable, random = Math.random, reserved = [], range = PORT_RANGE } = {}) {
+  const used = new Set(reserved);
+  const span = range.max - range.min + 1;
+  return {
+    used,
+    take() {
+      const start = range.min + Math.floor(random() * span);
+      for (let offset = 0; offset < span; offset += 1) {
+        const candidate = range.min + ((start - range.min + offset) % span);
+        if (used.has(candidate)) continue;
+        if (!probe(candidate)) continue;
+        used.add(candidate);
+        return candidate;
+      }
+      throw new Error(`no free port in ${range.min}-${range.max} could be reserved`);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// secrets: one redactor for every log line, tail and evidence field
+// ---------------------------------------------------------------------------
+
+// createRedactor removes every registered secret from a text before it is
+// printed or written. The registration is what makes the redaction complete: a
+// value the harness knows (its admin keys, the source data key, the handoff
+// fragment) is added when it becomes known.
+export function createRedactor(initial = []) {
+  const secrets = new Set();
+  const add = (value) => {
+    const text = value === null || value === undefined ? '' : String(value);
+    if (text.length >= 4) secrets.add(text);
+  };
+  for (const secret of initial) add(secret);
+  const ordered = () => [...secrets].sort((left, right) => right.length - left.length);
+  const redact = (value) => {
+    let text = value === null || value === undefined ? '' : String(value);
+    for (const secret of ordered()) {
+      if (text.includes(secret)) text = text.split(secret).join(REDACTED);
+    }
+    return text;
+  };
+  return {
+    add,
+    redact,
+    has: (value) => secrets.has(String(value ?? '')),
+    size: () => secrets.size,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// evidence: canonical hash, implementation binding, verdict
+// ---------------------------------------------------------------------------
+
+// canonicalEvidenceDocument is the document a hash covers: the evidence itself,
+// without the field that carries the hash.
+export function canonicalEvidenceDocument(document) {
+  const { sha256: _hash, ...rest } = document ?? {};
+  void _hash;
+  return rest;
+}
+
+export function evidenceHash(document) {
+  return sha256(JSON.stringify(canonicalEvidenceDocument(document), null, 2));
+}
+
+export function withEvidenceHash(document) {
+  return { ...document, sha256: evidenceHash(document) };
+}
+
+const SHA1_PATTERN = /^[0-9a-f]{40}$/;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+// createImplementationIdentity is the binding an evidence document carries: which
+// commit, which harness bytes, which binary. It is invalid rather than incomplete
+// when a digest is missing, so a document cannot claim a binding it does not have.
+export function createImplementationIdentity({ headSha, harnessSha256, binarySha256 = null, branch = null, treeClean = null } = {}) {
+  const invalid = [];
+  if (!SHA1_PATTERN.test(String(headSha ?? ''))) invalid.push('headSha');
+  if (!SHA256_PATTERN.test(String(harnessSha256 ?? ''))) invalid.push('harnessSha256');
+  return { headSha, harnessSha256, binarySha256, branch, treeClean, valid: invalid.length === 0, invalid };
+}
+
+// verifyEvidenceDocument re-checks a document the way CI does: the canonical
+// hash, a recorded verdict, and the implementation binding (optionally pinned to
+// the commit the workflow ran).
+export function verifyEvidenceDocument(document, { expectHead = null } = {}) {
+  const problems = [];
+  const expected = evidenceHash(document);
+  if (document?.sha256 !== expected) problems.push('sha256 does not match the canonical hash');
+  if (!UPGRADE_DOCKER_CONTRACT.evidenceVerdicts.includes(document?.verdict)) problems.push('verdict is not pass, fail or aborted');
+  if (!SHA1_PATTERN.test(String(document?.implementation?.headSha ?? ''))) problems.push('implementation.headSha is missing');
+  if (!SHA256_PATTERN.test(String(document?.implementation?.harnessSha256 ?? ''))) problems.push('implementation.harnessSha256 is missing');
+  if (typeof document?.startedAt !== 'string' || document.startedAt === '') problems.push('startedAt is missing');
+  if (expectHead && document?.implementation?.headSha !== expectHead) problems.push('implementation.headSha is not the expected commit');
+  return { ok: problems.length === 0, problems, expected, actual: document?.sha256 ?? null };
+}
+
+const redactor = createRedactor([ADMIN_V1, ADMIN_V2]);
 
 const evidence = {
-  contract: 'cpamp.upgrade-docker.v1',
+  contract: UPGRADE_DOCKER_CONTRACT.contract,
   runId,
   prefix: PREFIX,
   mode: { reuseFixture: args.reuseFixture, v1Tag: args.v1Tag, sourceTagOverride: args.sourceTag },
@@ -117,103 +429,211 @@ const evidence = {
 const stableFacts = [];
 
 let started = 0;
-const created = { containers: new Set(), volumes: new Set(), worktrees: new Set(), networks: new Set() };
+let abortedSignal = null;
+let runFailure = null;
+let hostBeforeRun = null;
+const registry = createResourceRegistry({ prefix: PREFIX, root: SCRATCH });
 const hostManagers = new Map();
+const ports = createPortAllocator();
 let evidenceFile = null;
+let finalizing = null;
 
 // ---------------------------------------------------------------------------
 // entry point
 // ---------------------------------------------------------------------------
 
-main().then(
-  (result) => {
-    console.log(result.exitCode === 0 ? 'upgrade-docker: PASS' : 'upgrade-docker: FAIL');
-    process.exit(result.exitCode);
-  },
-  (error) => {
-    console.error(`upgrade-docker: ${error?.message || error}`);
-    if (error?.stack) console.error(error.stack);
-    process.exit(1);
-  },
-);
+if (isEntryPoint) {
+  if (args.verifyEvidence) {
+    process.exitCode = verifyEvidenceCli(args);
+  } else {
+    main().then(
+      (result) => {
+        console.log(result.exitCode === 0 ? 'upgrade-docker: PASS' : 'upgrade-docker: FAIL');
+        process.exit(result.exitCode);
+      },
+      (error) => {
+        console.error(`upgrade-docker: ${redactor.redact(error?.message || error)}`);
+        if (error?.stack) console.error(redactor.redact(error.stack));
+        process.exit(1);
+      },
+    );
+  }
+}
 
 async function main() {
-  if (process.env.SKIP_UPGRADE_DOCKER === '1') {
-    console.log('SKIP: SKIP_UPGRADE_DOCKER=1 was set explicitly; the real-Docker Upgrade acceptance did not run');
+  if (process.env[UPGRADE_DOCKER_CONTRACT.skipVariable] === '1') {
+    console.log(`SKIP: ${UPGRADE_DOCKER_CONTRACT.skipVariable}=1 was set explicitly; the real-Docker Upgrade acceptance did not run`);
     return { exitCode: 0 };
   }
   started = Date.now();
   evidence.startedAt = new Date(started).toISOString();
   fs.mkdirSync(SCRATCH, { recursive: true });
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
-
-  const hostBefore = hostSnapshot();
-  try {
-    requireDocker();
-    refusePrefixCollision();
-    recordProductFixes();
-
-    const binary = buildManagerBinary();
-    const nextFixture = await ensureFixture(args.v1Tag);
-    const nextSource = await seedSource(nextFixture);
-
-    // Read the release the running contract accepts from the product itself, so
-    // no second copy of the pinned version lives in this harness.
-    const probe = runCli(binary, ['upgrade', 'preflight', '--legacy', nextSource.sourceRoot, '--json'], 'preflight(next-fixture)');
-    const expected = expectedReleaseOf(probe) || args.sourceTag;
-    if (!expected) {
-      throw new Error('could not read the release the contract accepts from the preflight report');
-    }
-    evidence.mode.acceptedRelease = expected;
-
-    let sourceFixture = nextFixture;
-    let source = nextSource;
-    if (expected !== args.v1Tag) {
-      // The planned fixture is newer than what the contract accepts. The next
-      // re-pin (U1-1b) is what closes this, so the harness records the typed
-      // refusal and proves the chain against the accepted release instead of
-      // pretending the planned one works.
-      assertVersionGap(binary, probe, expected, nextFixture, nextSource);
-      sourceFixture = await ensureFixture(expected);
-      source = await seedSource(sourceFixture);
-      stableFacts.push(`version-gap:${args.v1Tag}>${expected}`);
-    } else {
-      evidence.mode.sourceFixture = 'same';
-    }
-    evidence.fixtures.push({ role: 'source', ...sourceFixture, dataset: source.dataset });
-    if (sourceFixture.tag !== nextFixture.tag) {
-      evidence.fixtures.push({ role: 'next', ...nextFixture, dataset: nextSource.dataset });
-    }
-
-    const workspace = createWorkspace(source);
-    for (const [name, dir] of Object.entries(workspace.snapshots)) {
-      stableFacts.push(`snapshot:${name}`);
-      evidence[`snapshot_${name}`] = dir;
-    }
-
-    const primary = chain(binary, workspace.main.source, workspace.main.target, 'main');
-    evidence.chains.main = primary;
-
-    await assertWizard(binary, workspace.main.source);
-    await assertAdmission(binary, workspace);
-
-    await faultSourceTouched(binary, workspace);
-    await faultInterruptedCopyIn(binary, workspace);
-    await faultClearedRollupRecoverable(binary, workspace);
-    await faultClearedRollupUnrecoverable(binary, workspace);
-    await faultDroppedTable(binary, workspace);
-    await faultBusySource(binary, workspace, sourceFixture);
-
-    await proveRollback(binary, workspace, sourceFixture);
-
-    assertHostUntouched(hostBefore);
-    return { exitCode: 0 };
-  } finally {
-    evidence.endedAt = new Date().toISOString();
-    evidence.durationMs = Date.now() - started;
-    cleanup();
-    writeEvidence();
+  evidence.implementation = captureImplementationIdentity();
+  if (!evidence.implementation.valid) {
+    throw new Error(`the implementation binding is incomplete: ${evidence.implementation.invalid.join(', ')}`);
   }
+  // The signal handler has to exist before the first object is created, so an
+  // interrupt during the build or the seed still releases what exists. It stays
+  // attached through finalisation: a signal while the evidence is being written
+  // joins that same release instead of terminating without one.
+  const guard = installSignalGuard({ onSignal: (signal) => abortRun(signal) });
+  let runOk = false;
+  try {
+    runOk = await runAcceptance();
+  } catch (error) {
+    runFailure = `${error?.message || error}`;
+    console.error(`upgrade-docker: ${redactor.redact(runFailure)}`);
+    if (error?.stack) console.error(redactor.redact(error.stack));
+  }
+  const outcome = await finalize({ runOk });
+  guard.detach();
+  return { exitCode: outcome.exitCode };
+}
+
+async function runAcceptance() {
+  requireDocker();
+  hostBeforeRun = hostSnapshot();
+  refusePrefixCollision();
+  recordProductFixes();
+
+  const binary = buildManagerBinary();
+  const nextFixture = await ensureFixture(args.v1Tag);
+  const nextSource = await seedSource(nextFixture);
+
+  // Read the release the running contract accepts from the product itself, so
+  // no second copy of the pinned version lives in this harness.
+  const probe = runCli(binary, ['upgrade', 'preflight', '--legacy', nextSource.sourceRoot, '--json'], 'preflight(next-fixture)');
+  const expected = expectedReleaseOf(probe) || args.sourceTag;
+  if (!expected) {
+    throw new Error('could not read the release the contract accepts from the preflight report');
+  }
+  evidence.mode.acceptedRelease = expected;
+
+  let sourceFixture = nextFixture;
+  let source = nextSource;
+  if (expected !== args.v1Tag) {
+    // The planned fixture is newer than what the contract accepts. The next
+    // re-pin (U1-1b) is what closes this, so the harness records the typed
+    // refusal and proves the chain against the accepted release instead of
+    // pretending the planned one works.
+    assertVersionGap(binary, probe, expected, nextFixture, nextSource);
+    sourceFixture = await ensureFixture(expected);
+    source = await seedSource(sourceFixture);
+    stableFacts.push(`version-gap:${args.v1Tag}>${expected}`);
+  } else {
+    evidence.mode.sourceFixture = 'same';
+  }
+  evidence.fixtures.push({ role: 'source', ...sourceFixture, dataset: source.dataset });
+  if (sourceFixture.tag !== nextFixture.tag) {
+    evidence.fixtures.push({ role: 'next', ...nextFixture, dataset: nextSource.dataset });
+  }
+
+  const workspace = createWorkspace(source);
+  for (const [name, dir] of Object.entries(workspace.snapshots)) {
+    stableFacts.push(`snapshot:${name}`);
+    evidence[`snapshot_${name}`] = dir;
+  }
+
+  // The seeded shape: the archived day's raw rows are deleted, so the retained
+  // domain holds two days, coverage names the one deleted day, and the two
+  // derived domains cover all three.
+  const primary = chain(binary, workspace.main.source, workspace.main.target, 'main', {
+    sourceDays: {
+      retained: DATASET_DAYS.length - 1,
+      pricing: DATASET_DAYS.length,
+      coverage: 1,
+      history: DATASET_DAYS.length,
+    },
+    domainsDone: CHAIN_DOMAINS_DONE,
+  });
+  evidence.chains.main = primary;
+
+  await assertWizard(binary, workspace.main.source);
+  await assertAdmission(binary, workspace);
+
+  await faultSourceTouched(binary, workspace);
+  await faultInterruptedCopyIn(binary, workspace);
+  await faultClearedRollupRecoverable(binary, workspace);
+  await faultClearedRollupUnrecoverable(binary, workspace);
+  await faultDroppedTable(binary, workspace);
+  await faultBusySource(binary, workspace);
+
+  await proveRollback(binary, workspace, sourceFixture);
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// finalisation: cleanup, evidence, verdict
+// ---------------------------------------------------------------------------
+
+async function abortRun(signal) {
+  abortedSignal = signal;
+  console.log(`upgrade-docker: received ${signal}; releasing this run's resources before exiting`);
+  return finalize({ runOk: false, signal });
+}
+
+function finalize({ runOk, signal = null }) {
+  if (!finalizing) finalizing = runFinalize({ runOk, signal });
+  return finalizing;
+}
+
+async function runFinalize({ runOk, signal }) {
+  if (signal) abortedSignal = signal;
+  const cleanup = await cleanupResources();
+  // The comparison belongs after the release: "this run created nothing that
+  // survives, and nothing outside the prefix moved" is only true then.
+  if (hostBeforeRun && evidence.host.docker) {
+    try {
+      assertHostUntouched(hostBeforeRun);
+    } catch (error) {
+      cleanup.ok = false;
+      cleanup.errors.push(redactor.redact(error?.message || error));
+    }
+  }
+  evidence.cleanup = cleanup;
+  if (runFailure) evidence.failure = redactor.redact(runFailure);
+  evidence.verdict = abortedSignal ? 'aborted' : runOk && cleanup.ok ? 'pass' : 'fail';
+  if (abortedSignal) evidence.abortedBy = abortedSignal;
+  evidence.exitCode = finalExitCode({ runOk, cleanupOk: cleanup.ok, signal: abortedSignal });
+  evidence.endedAt = new Date().toISOString();
+  evidence.durationMs = started ? Date.now() - started : 0;
+  try {
+    writeEvidence();
+  } catch (error) {
+    console.error(`upgrade-docker: writing the evidence failed: ${redactor.redact(error?.message || error)}`);
+    evidence.exitCode = abortedSignal ? evidence.exitCode : Math.max(1, evidence.exitCode);
+  }
+  return { exitCode: evidence.exitCode, cleanup };
+}
+
+// captureImplementationIdentity binds the document to the bytes that produced it:
+// the commit, the harness file, the built binary and whether the tree was clean.
+function captureImplementationIdentity() {
+  const head = git(['rev-parse', 'HEAD']);
+  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const status = git(['status', '--porcelain']);
+  let harnessSha256 = null;
+  try {
+    harnessSha256 = sha256(fs.readFileSync(fileURLToPath(import.meta.url)));
+  } catch {
+    harnessSha256 = null;
+  }
+  const binaryPath = managerBinary();
+  let binarySha256 = null;
+  try {
+    binarySha256 = fs.existsSync(binaryPath) ? sha256(fs.readFileSync(binaryPath)) : null;
+  } catch {
+    binarySha256 = null;
+  }
+  return createImplementationIdentity({
+    headSha: head.code === 0 ? head.stdout.trim() : null,
+    branch: branch.code === 0 ? branch.stdout.trim() : null,
+    harnessSha256,
+    binarySha256,
+    treeClean: status.code === 0 ? status.stdout.trim() === '' : null,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -228,10 +648,22 @@ function requireDocker() {
   evidence.host.docker = version.stdout.trim();
 }
 
+// dockerNames lists one kind of Docker object, or null when the listing itself
+// failed: a cleanup that cannot see the host cannot claim the host is clean.
+function dockerNames(commandArgs) {
+  const result = sh('docker', commandArgs);
+  if (result.code !== 0) return null;
+  return result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 function refusePrefixCollision() {
   for (const [kind, list] of [
     ['container', dockerJson(['ps', '-a', '--format', '{{.Names}}'])],
     ['volume', dockerJson(['volume', 'ls', '--format', '{{.Name}}'])],
+    ['network', dockerJson(['network', 'ls', '--format', '{{.Name}}'])],
   ]) {
     const collision = list.find((name) => name.startsWith(PREFIX));
     if (collision) {
@@ -244,26 +676,29 @@ function hostSnapshot() {
   return {
     containers: dockerJson(['ps', '-a', '--format', '{{.Names}}']).sort(),
     volumes: dockerJson(['volume', 'ls', '--format', '{{.Name}}']).sort(),
+    networks: dockerJson(['network', 'ls', '--format', '{{.Name}}']).sort(),
   };
 }
 
 // assertHostUntouched proves the harness only ever addressed its own prefix: the
-// containers and volumes that existed before the run are exactly the ones that
-// exist after it, and the ones it created are gone.
+// containers, volumes and networks that existed before the run are exactly the
+// ones that exist after it.
 function assertHostUntouched(before) {
   const after = hostSnapshot();
   const outside = (list) => list.filter((name) => !name.startsWith(PREFIX));
-  const containersBefore = outside(before.containers);
-  const containersAfter = outside(after.containers);
-  const volumesBefore = outside(before.volumes);
-  const volumesAfter = outside(after.volumes);
-  if (containersBefore.join('\n') !== containersAfter.join('\n')) {
-    throw new Error(`containers outside ${PREFIX} changed: ${diff(containersBefore, containersAfter)}`);
+  const changed = [];
+  for (const kind of ['containers', 'volumes', 'networks']) {
+    const listedBefore = outside(before[kind] ?? []);
+    const listedAfter = outside(after[kind] ?? []);
+    if (listedBefore.join('\n') !== listedAfter.join('\n')) {
+      changed.push(`${kind} outside ${PREFIX} changed: ${diff(listedBefore, listedAfter)}`);
+    }
+    evidence.hostUntouched = {
+      ...(evidence.hostUntouched ?? {}),
+      [kind]: listedBefore.length,
+    };
   }
-  if (volumesBefore.join('\n') !== volumesAfter.join('\n')) {
-    throw new Error(`volumes outside ${PREFIX} changed: ${diff(volumesBefore, volumesAfter)}`);
-  }
-  evidence.hostUntouched = { containers: containersBefore.length, volumes: volumesBefore.length };
+  if (changed.length) throw new Error(changed.join('; '));
   stableFacts.push('host-untouched');
 }
 
@@ -319,43 +754,103 @@ function buildManagerBinary() {
   const out = path.join(SCRATCH, 'cpa-manager-plus');
   const build = sh('go', ['build', '-o', out, './cmd/cpa-manager-plus'], { cwd: MANAGER_SERVER });
   if (build.code !== 0) {
-    throw new Error(`build the v2 binary: ${build.stderr.trim()}`);
+    throw new Error(`build the v2 binary: ${redactor.redact(tail(build.stderr))}`);
   }
   evidence.commands.push(commandRecord('go build ./cmd/cpa-manager-plus', build.code));
+  // The binary is half the implementation binding: it is the thing that ran.
+  evidence.implementation = captureImplementationIdentity();
   return out;
 }
 
+// A fixture image is reusable only when it can be shown to be the image this
+// harness built from that tag: the labels are written at build time and cover
+// the contract, the tag and the commit the image was built from.
+function fixtureLabels(tag, commit) {
+  return {
+    'io.cpamp.upgrade.fixture.contract': UPGRADE_DOCKER_CONTRACT.fixtureContract,
+    'io.cpamp.upgrade.fixture.tag': tag,
+    'io.cpamp.upgrade.fixture.commit': commit,
+  };
+}
+
+function imageLabels(image) {
+  const result = sh('docker', ['image', 'inspect', '-f', '{{json .Config.Labels}}', image]);
+  if (result.code !== 0) return null;
+  try {
+    return JSON.parse(result.stdout.trim() || 'null') ?? {};
+  } catch {
+    return null;
+  }
+}
+
+function assertFixtureProvenance(tag, commit, labels) {
+  for (const [key, value] of Object.entries(fixtureLabels(tag, commit))) {
+    assertValue(
+      labels?.[key] === value,
+      `the reused ${IMAGE_REPOSITORY} image for ${tag} does not carry ${key}=${value}; a host image that this harness did not build cannot be presented as the recorded fixture, so rebuild it once without --reuse-fixture`,
+    );
+  }
+}
+
+function resolveTagCommit(tag) {
+  const resolved = git(['rev-parse', `${tag}^{commit}`]);
+  assertValue(resolved.code === 0, `resolve ${tag} to a commit: ${redactor.redact(resolved.stderr.trim())}`);
+  const commit = resolved.stdout.trim();
+  assertValue(SHA1_PATTERN.test(commit), `resolve ${tag} to a commit: got ${JSON.stringify(commit)}`);
+  return commit;
+}
+
+// connectRollbackAlias makes the rollback reference resolve to exactly the
+// fixture bytes. An alias that already points elsewhere is refused rather than
+// repointed: an image whose provenance this run cannot show must not be pinned.
+function connectRollbackAlias(fixture) {
+  const existing = imageId(fixture.rollbackImage);
+  if (existing && existing !== fixture.imageId) {
+    throw new Error(
+      `the rollback alias ${fixture.rollbackImage} resolves to ${existing}, not to the fixture ${fixture.imageId}; refusing to retag an image this run cannot account for`,
+    );
+  }
+  if (!existing) {
+    const tagged = sh('docker', ['tag', fixture.image, fixture.rollbackImage]);
+    assertValue(tagged.code === 0, `tag ${fixture.rollbackImage}: ${redactor.redact(tagged.stderr.trim())}`);
+  }
+  const resolved = imageId(fixture.rollbackImage);
+  assertValue(resolved === fixture.imageId, `the rollback alias ${fixture.rollbackImage} resolves to ${resolved}, not to ${fixture.imageId}`);
+  return {
+    ...fixture,
+    rollbackImageId: resolved,
+    provenance: { labels: fixtureLabels(fixture.tag, fixture.commit), aliasResolvesToFixture: true },
+  };
+}
+
 // ensureFixture builds the 1.x image from the tag once and records its id and
-// source commit, so the same fixture is reused instead of rebuilt per test.
+// source commit, so the same fixture is reused instead of rebuilt per test. A
+// reuse verifies the recorded provenance instead of trusting the local tag.
 async function ensureFixture(tag) {
   const version = tag.replace(/^v/, '');
   const image = `${IMAGE_REPOSITORY}:${version}`;
   // The rollback plan pins a published-style reference and refuses a name with
   // no repository part, so the same local bytes are also tagged that way.
   const rollbackImage = `${ROLLBACK_IMAGE_REPOSITORY}:${version}`;
+  const commit = resolveTagCommit(tag);
   const known = imageId(image);
-  if (args.reuseFixture && known) {
-    if (!imageId(rollbackImage)) {
-      const tagged = sh('docker', ['tag', image, rollbackImage]);
-      assertValue(tagged.code === 0, `tag ${rollbackImage}: ${tagged.stderr.trim()}`);
+  if (args.reuseFixture) {
+    if (!known) {
+      throw new Error(
+        `--reuse-fixture was asked for but ${image} is not on this host; build it once without the flag so its provenance is recorded`,
+      );
     }
-    return {
-      tag,
-      commit: git(['rev-parse', `${tag}^{commit}`]).stdout.trim(),
-      image,
-      rollbackImage,
-      imageId: known,
-      built: false,
-    };
+    const labels = imageLabels(image);
+    assertFixtureProvenance(tag, commit, labels);
+    return connectRollbackAlias({ tag, commit, image, rollbackImage, imageId: known, built: false });
   }
   const source = path.join(SCRATCH, `fixture-${tag}`);
   fs.rmSync(source, { recursive: true, force: true });
+  registry.track('worktree', source, () => releaseWorktree(source));
   const add = git(['worktree', 'add', '--detach', source, tag]);
-  created.worktrees.add(source);
   if (add.code !== 0) {
-    throw new Error(`check out ${tag}: ${add.stderr.trim()}`);
+    throw new Error(`check out ${tag}: ${redactor.redact(tail(add.stderr))}`);
   }
-  const commit = git(['rev-parse', `${tag}^{commit}`]).stdout.trim();
   const build = sh(
     'docker',
     [
@@ -364,17 +859,30 @@ async function ensureFixture(tag) {
       '-t', image,
       '--build-arg', `VERSION=${tag}`,
       '--build-arg', `SOURCE_COMMIT=${commit}`,
+      ...Object.entries(fixtureLabels(tag, commit)).flatMap(([key, value]) => ['--label', `${key}=${value}`]),
       '.',
     ],
     { cwd: source, timeout: 1_800_000 },
   );
   evidence.commands.push(commandRecord(`docker build ${image}`, build.code));
   if (build.code !== 0) {
-    throw new Error(`build the ${tag} fixture image: ${tail(build.stderr)}`);
+    throw new Error(`build the ${tag} fixture image: ${redactor.redact(tail(build.stderr))}`);
   }
-  const tagged = sh('docker', ['tag', image, rollbackImage]);
-  assertValue(tagged.code === 0, `tag ${rollbackImage}: ${tagged.stderr.trim()}`);
-  return { tag, commit, image, rollbackImage, imageId: imageId(image), built: true };
+  const builtImageId = imageId(image);
+  assertValue(Boolean(builtImageId), `the ${tag} fixture build did not produce ${image} on this host`);
+  return connectRollbackAlias({ tag, commit, image, rollbackImage, imageId: builtImageId, built: true });
+}
+
+function releaseWorktree(directory) {
+  if (!fs.existsSync(directory)) {
+    sh('git', ['worktree', 'prune']);
+    return;
+  }
+  const removal = sh('git', ['worktree', 'remove', '--force', directory]);
+  if (removal.code !== 0) {
+    throw new Error(`git worktree remove ${directory}: ${redactor.redact(removal.stderr.trim())}`);
+  }
+  sh('git', ['worktree', 'prune']);
 }
 
 // seedSource starts the fixture on an isolated port with a data directory this
@@ -384,7 +892,7 @@ async function seedSource(fixture) {
   const root = path.join(SCRATCH, `source-${fixture.tag}`);
   fs.rmSync(root, { recursive: true, force: true });
   fs.mkdirSync(root, { recursive: true });
-  const port = freePort();
+  const port = ports.take();
   const name = `${PREFIX}-seed-${fixture.tag.replace(/[^a-z0-9]/gi, '')}`;
   startContainer({
     name,
@@ -412,7 +920,7 @@ async function seedSource(fixture) {
     cutoff_timestamp_ms: dayStartMS(DATASET_DAYS[1]),
   });
   const runIdValue = run.body?.run?.id;
-  assertValue(Boolean(runIdValue), `archive run id: ${JSON.stringify(run.body).slice(0, 200)}`);
+  assertValue(Boolean(runIdValue), `archive run id: ${preview(run.body)}`);
   const archived = await v1Json(port, 'POST', `/v0/management/usage/archives/${runIdValue}/resume?expected_stage=archiving&wait=true`);
   assertValue(archived.body?.run?.status === 'archived', `archive run status: ${archived.body?.run?.status}`);
 
@@ -420,7 +928,7 @@ async function seedSource(fixture) {
   stopContainer(name);
   await waitForContainerExit(name);
   copyTree(root, archivedSnapshot);
-  removeContainer(name);
+  await removeContainer(name);
 
   startContainer({ name, image: fixture.image, port, dataDir: root, adminKey: ADMIN_V1 });
   await waitForHealth(port, `${name} /health`);
@@ -432,7 +940,7 @@ async function seedSource(fixture) {
   const counts = v1Counts(port, events.length);
   stopContainer(name);
   await waitForContainerExit(name);
-  removeContainer(name);
+  await removeContainer(name);
 
   const dataset = {
     events: events.length,
@@ -529,8 +1037,83 @@ function createWorkspace(source) {
   };
 }
 
+// The four comparison domains, in report order, and the store table each one
+// compares. A report that does not name all four did not compare what the copy
+// claims to preserve.
+const RECONCILE_DOMAINS = Object.freeze(['retained', 'pricing', 'coverage', 'history']);
+const RECONCILE_DOMAIN_TABLE = Object.freeze({
+  retained: TABLES.retained,
+  pricing: TABLES.pricing,
+  coverage: TABLES.coverage,
+  history: TABLES.history,
+});
+// The operation-domain vocabulary a full chain records. The row is the
+// authority here: a reconcile that compared nothing leaves it untouched.
+const CHAIN_DOMAINS_DONE = Object.freeze(['source_copy', 'retained_projection', 'pricing', 'coverage']);
+
+// assertReconcileReport proves the comparison really happened: all four domains
+// present on the table each one names, each applicable, every source day
+// compared and zero mismatches. `sourceDays` pins the seeded shape where the
+// caller knows it; `domainsDone` pins the recorded operation vocabulary where the
+// caller knows the whole chain. Without it, every domain with a compared day has
+// to be recorded, and the two copy-in domains are always required: a run that
+// compared nothing must not read as a completed comparison.
+function assertReconcileReport(label, report, { sourceDays = null, domainsDone = null } = {}) {
+  assertValue(report?.stage === 'reconcile', `${label}: reconcile stage=${report?.stage}`);
+  assertValue((report?.unacknowledgedDays ?? []).length === 0, `${label}: reconcile left unacknowledged days`);
+  const domains = report?.domains ?? [];
+  const names = domains.map((domain) => domain.domain);
+  assertValue(
+    names.join(',') === RECONCILE_DOMAINS.join(','),
+    `${label}: reconcile compared ${JSON.stringify(names)}; ${JSON.stringify(RECONCILE_DOMAINS)} is required, in report order`,
+  );
+  for (const domain of domains) {
+    assertValue(
+      domain.table === RECONCILE_DOMAIN_TABLE[domain.domain],
+      `${label}: ${domain.domain} compared ${domain.table} instead of ${RECONCILE_DOMAIN_TABLE[domain.domain]}`,
+    );
+    assertValue(
+      domain.applicable === true,
+      `${label}: ${domain.domain} is not applicable (${domain.reason ?? 'no reason'}); a seeded domain has to be compared`,
+    );
+    assertValue(
+      domain.comparedDays === domain.sourceDays,
+      `${label}: ${domain.domain} compared ${domain.comparedDays} of ${domain.sourceDays} source days`,
+    );
+    assertValue(
+      domain.mismatches.length === 0,
+      `${label}: ${domain.domain} reported ${domain.mismatches.length} mismatch(es) instead of none`,
+    );
+    if (sourceDays) {
+      assertValue(
+        domain.sourceDays === sourceDays[domain.domain],
+        `${label}: ${domain.domain} sourceDays=${domain.sourceDays} want ${sourceDays[domain.domain]} from the seed`,
+      );
+    }
+  }
+  const recorded = report?.domainsDone ?? [];
+  if (domainsDone) {
+    assertValue(
+      recorded.join(',') === domainsDone.join(','),
+      `${label}: domainsDone=${JSON.stringify(recorded)} want ${JSON.stringify(domainsDone)}`,
+    );
+  } else {
+    for (const required of ['source_copy', 'retained_projection']) {
+      assertValue(recorded.includes(required), `${label}: the recorded row does not name the ${required} domain`);
+    }
+    for (const comparison of ['pricing', 'coverage']) {
+      const domain = domains.find((entry) => entry.domain === comparison);
+      if ((domain?.comparedDays ?? 0) > 0) {
+        assertValue(recorded.includes(comparison), `${label}: the recorded row does not name the ${comparison} domain it compared`);
+      }
+    }
+  }
+  assertValue((report?.incompleteDays ?? []).length === 0, `${label}: reconcile marked an incomplete day`);
+  return { domains, domainsDone: recorded };
+}
+
 // chain runs the whole CLI chain and asserts each exit code and report.
-function chain(binary, sourceRoot, targetRoot, label) {
+function chain(binary, sourceRoot, targetRoot, label, { sourceDays = null, domainsDone = null } = {}) {
   const preflight = runCli(binary, ['upgrade', 'preflight', '--legacy', sourceRoot, '--json'], `${label}:preflight`, { expectExit: 0 });
   const preflightReport = parseJson(preflight.stdout, `${label}:preflight`);
   assertValue(preflightReport.ready === true, `${label}: preflight ready=false (blocked=${JSON.stringify(preflightReport.blocked)})`);
@@ -543,13 +1126,16 @@ function chain(binary, sourceRoot, targetRoot, label) {
 
   const reconcile = runCli(binary, ['upgrade', 'reconcile', '--legacy', sourceRoot, '--target', targetRoot, '--json'], `${label}:reconcile`, { expectExit: 0 });
   const reconcileReport = parseJson(reconcile.stdout, `${label}:reconcile`);
-  assertValue(reconcileReport.report?.stage === 'reconcile', `${label}: reconcile stage=${reconcileReport.report?.stage}`);
-  assertValue((reconcileReport.report?.unacknowledgedDays ?? []).length === 0, `${label}: reconcile left unacknowledged days`);
+  assertReconcileReport(`${label}:reconcile`, reconcileReport.report, { sourceDays, domainsDone });
 
   const status = runCli(binary, ['upgrade', 'status', '--db-path', path.join(targetRoot, 'usage.sqlite'), '--json'], `${label}:status`, { expectExit: 0 });
   const statusReport = parseJson(status.stdout, `${label}:status`);
   assertValue(statusReport.recorded === true, `${label}: status recorded=false`);
   assertValue(statusReport.operation?.stage === 'reconcile', `${label}: status stage=${statusReport.operation?.stage}`);
+  assertValue(
+    (statusReport.operation?.domainsDone ?? []).join(',') === (reconcileReport.report?.domainsDone ?? []).join(','),
+    `${label}: the persisted row records ${JSON.stringify(statusReport.operation?.domainsDone)} but the reconcile report compared ${JSON.stringify(reconcileReport.report?.domainsDone)}`,
+  );
 
   stableFacts.push(`chain:${label}:${preflightReport.sourceVersion}:${statusReport.operation.stage}`);
   return {
@@ -603,7 +1189,10 @@ function assertVersionGap(binary, probe, expected, fixture, source) {
   assertValue(probe.code === 1, `preflight of ${fixture.tag}: exit=${probe.code} want 1`);
   assertValue(versionCheck?.code === 'upgrade_source_version_unsupported', `preflight of ${fixture.tag}: code=${versionCheck?.code}`);
   assertValue(report.ready === false, `preflight of ${fixture.tag}: ready=${report.ready}`);
-  assertValue(!/observed=/.test(versionCheck.detail) || versionCheck.detail.includes(`expected=${expected}`), `preflight of ${fixture.tag}: accepted release not named (${versionCheck.detail})`);
+  assertValue(
+    !/observed=/.test(versionCheck.detail) || versionCheck.detail.includes(`expected=${expected}`),
+    `preflight of ${fixture.tag}: accepted release not named (${preview(versionCheck.detail)})`,
+  );
 
   // The target root was never created: a blocked preflight writes nothing.
   const target = path.join(SCRATCH, 'work', `next-${fixture.tag}`, 'target');
@@ -652,17 +1241,26 @@ function expectedReleaseOf(command) {
 // ---------------------------------------------------------------------------
 
 // assertNoSecretInBody refuses a read body that publishes a credential, the
-// configured source path, the harness's own paths or a full digest.
-function assertNoSecretInBody(label, body, secrets) {
+// configured source path, the harness's own paths or a full digest. The failure
+// names what leaked and never repeats it: this assertion runs precisely when a
+// credential regression happened, so its own output must not spread the secret
+// into the log or the evidence.
+function secretLabel(secret) {
+  if (secret === ADMIN_V1) return 'the source administrator key';
+  if (secret === ADMIN_V2) return 'the v2 administrator key';
+  if (redactor.has(secret)) return 'registered credential material';
+  return 'a source path or the data key';
+}
+
+export function assertNoSecretInBody(label, body, secrets) {
   const text = JSON.stringify(body);
   for (const secret of secrets) {
     if (secret && text.includes(secret)) {
-      throw new Error(`${label} leaked ${JSON.stringify(String(secret).slice(0, 24))}: ${text.slice(0, 200)}`);
+      throw new Error(`${label} published ${secretLabel(secret)}; the body is withheld from this message`);
     }
   }
-  const fullDigest = /[0-9a-f]{64}/.exec(text);
-  if (fullDigest) {
-    throw new Error(`${label} published a full digest (${fullDigest[0].slice(0, 12)}…): ${text.slice(0, 200)}`);
+  if (/[0-9a-f]{64}/.test(text)) {
+    throw new Error(`${label} published a full digest; the body is withheld from this message`);
   }
 }
 
@@ -691,14 +1289,14 @@ function assertOriginRule(port, base, resources, label, { fetchVerdict = 'origin
     });
     assertValue(
       crossSite.status === 403 && surfaceCode(crossSite) === 'origin_rejected',
-      `${label}: GET ${resource} from a cross-site Origin = ${crossSite.status} ${JSON.stringify(crossSite.body).slice(0, 160)} want 403 origin_rejected`,
+      `${label}: GET ${resource} from a cross-site Origin = ${crossSite.status} ${preview(crossSite.body)} want 403 origin_rejected`,
     );
     const crossSiteFetch = httpJson('GET', target, {
       headers: { Authorization: `Bearer ${ADMIN_V1}`, 'Sec-Fetch-Site': 'cross-site' },
     });
     assertValue(
       crossSiteFetch.status === 403 && owesVerdict(crossSiteFetch, fetchVerdict),
-      `${label}: GET ${resource} with Sec-Fetch-Site: cross-site = ${crossSiteFetch.status} ${JSON.stringify(crossSiteFetch.body).slice(0, 160)} want 403 ${fetchVerdict}`,
+      `${label}: GET ${resource} with Sec-Fetch-Site: cross-site = ${crossSiteFetch.status} ${preview(crossSiteFetch.body)} want 403 ${fetchVerdict}`,
     );
     const sameOrigin = httpJson('GET', target, {
       headers: { Authorization: `Bearer ${ADMIN_V1}`, Origin: `http://127.0.0.1:${port}` },
@@ -737,11 +1335,16 @@ async function assertWizard(binary, sourceRoot) {
   const init = sh(binary, ['initialize'], { env });
   evidence.commands.push(commandRecord('cpa-manager-plus initialize', init.code));
   if (init.code !== 0) {
-    throw new Error(`initialize a Fresh installation: ${tail(init.stderr)}`);
+    throw new Error(`initialize a Fresh installation: ${redactor.redact(tail(init.stderr))}`);
   }
   const fragment = init.stdout.trim().split('\n').filter(Boolean).pop() ?? '';
+  // The handoff fragment carries a one-time credential: register it before any
+  // later failure can print or record it.
+  const handoff = fragment.includes('#') ? fragment.slice(fragment.indexOf('#') + 1) : fragment;
+  redactor.add(fragment);
+  redactor.add(handoff);
 
-  const port = freePort();
+  const port = ports.take();
   const name = `${PREFIX}-wizard`;
   startHostManager({ name, binary, dataDir: root, port, adminKey: ADMIN_V2, legacyRoot: sourceRoot });
   await waitForHealth(port, `${name} /health`, 200);
@@ -755,7 +1358,7 @@ async function assertWizard(binary, sourceRoot) {
   assertValue(write.status === 405, `wizard status write = ${write.status}`);
 
   const preflight = httpJson('GET', `${base}/preflight`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
-  assertValue(preflight.status === 200, `wizard preflight = ${preflight.status}: ${JSON.stringify(preflight.body).slice(0, 200)}`);
+  assertValue(preflight.status === 200, `wizard preflight = ${preflight.status}: ${preview(preflight.body)}`);
   assertValue(preflight.body?.contractVersion === 'cpamp.upgrade-wizard.v1', `wizard contract = ${preflight.body?.contractVersion}`);
   assertValue(preflight.body?.sourceKind === 'legacy-manager', `wizard source kind = ${preflight.body?.sourceKind}`);
   assertValue(preflight.body?.ready === true, `wizard preflight ready = ${preflight.body?.ready}`);
@@ -773,6 +1376,7 @@ async function assertWizard(binary, sourceRoot) {
   // No secret in either body: the source administrator key, the data key
   // material, any absolute path, the full fingerprint or the v2 Admin key.
   const dataKey = fs.readFileSync(path.join(sourceRoot, 'data.key'), 'utf8').trim();
+  redactor.add(dataKey);
   for (const body of [preflight.body, status.body]) {
     assertNoSecretInBody('wizard', body, [ADMIN_V1, ADMIN_V2, dataKey, sourceRoot, SCRATCH, root]);
   }
@@ -797,7 +1401,7 @@ async function assertWizard(binary, sourceRoot) {
   stableFacts.push(`wizard:${preflight.body.ready}:${status.body.nextAction}`);
   stableFacts.push(`wizard:origin:${origin.preflight.crossSiteOrigin}:${origin.preflight.sameOrigin}:${origin.status.crossSiteOrigin}:${origin.status.sameOrigin}`);
 
-  stopHostManager(name);
+  await stopHostManager(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -827,7 +1431,7 @@ function proveWizardReadContract(port, label, expectedStage, sourceRoot) {
       `${label}: POST ${resource} with the source Admin key = ${write.status} Allow=${write.allow} want 405 with Allow: GET`,
     );
     const proved = httpJson('GET', target, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
-    assertValue(proved.status === 200, `${label}: GET ${resource} with the source Admin key = ${proved.status}: ${JSON.stringify(proved.body).slice(0, 200)}`);
+    assertValue(proved.status === 200, `${label}: GET ${resource} with the source Admin key = ${proved.status}: ${preview(proved.body)}`);
     assertValue(proved.body?.contractVersion === 'cpamp.upgrade-wizard.v1', `${label}: GET ${resource} contract = ${proved.body?.contractVersion}`);
     assertNoSecretInBody(`${label}: GET ${resource}`, proved.body, [ADMIN_V1, ADMIN_V2, sourceRoot, SCRATCH]);
     if (resource === 'preflight') {
@@ -860,9 +1464,14 @@ function proveWizardReadContract(port, label, expectedStage, sourceRoot) {
     const probe = httpJson('GET', shape, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
     assertValue(probe.status === 404, `${label}: ${shape} = ${probe.status} want 404: only the two exact leaves are mounted`);
   }
+  // The rest of the product is not admitted either: the console, the key/pricing
+  // API and the gateway/model traffic each answer 404 even to the key that reads
+  // the wizard, which is what "only the Upgrade surface" means.
+  const closedSurfaces = probeClosedSurfaces(port, label, { Authorization: `Bearer ${ADMIN_V1}` });
   return {
     credential: { anonymous: 401, v2AdminKey: 401, write: 405, allow: 'GET' },
     pathShapes: 404,
+    closedSurfaces,
     origin,
     ...read,
   };
@@ -873,7 +1482,7 @@ function proveWizardReadContract(port, label, expectedStage, sourceRoot) {
 // on /health, both reads answering 200 to the 1.x administrator key alone, and
 // no canonical continuation, because the copy-in target carries no Fresh record.
 async function proveUnfinishedAdmission(binary, root, sourceRoot, stage) {
-  const port = freePort();
+  const port = ports.take();
   const name = `${PREFIX}-admission-${stage.replace(/_/g, '')}`;
   startHostManager({ name, binary, dataDir: root, port, adminKey: ADMIN_V2, legacyRoot: sourceRoot });
   try {
@@ -887,7 +1496,7 @@ async function proveUnfinishedAdmission(binary, root, sourceRoot, stage) {
     assertValue(canonical.status === 404, `admission(${stage}): canonical wizard status = ${canonical.status} want 404: the copied root carries no Fresh record`);
     return { health: health.status, surface: 'upgrade-only', ...reads, canonicalWizardStatus: canonical.status };
   } finally {
-    stopHostManager(name);
+    await stopHostManager(name);
   }
 }
 
@@ -899,7 +1508,7 @@ async function proveUnfinishedAdmission(binary, root, sourceRoot, stage) {
 // credential is the store's own, which is the key the mount accepted, so the key
 // kept in the other file stays refused.
 async function proveMountlessStatus(binary, root, stage) {
-  const port = freePort();
+  const port = ports.take();
   const name = `${PREFIX}-mountless-${stage.replace(/_/g, '')}`;
   // An explicit absent mount, so the case does not depend on the host's /legacy.
   const absentRoot = path.join(SCRATCH, 'work', 'mountless', `${stage}-absent`);
@@ -910,7 +1519,7 @@ async function proveMountlessStatus(binary, root, stage) {
     await waitForHealth(port, `${name} /health`, 503);
     const base = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
     const status = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
-    assertValue(status.status === 200, `${label}: status without the source mount = ${status.status}: ${JSON.stringify(status.body).slice(0, 200)} want 200`);
+    assertValue(status.status === 200, `${label}: status without the source mount = ${status.status}: ${preview(status.body)} want 200`);
     assertValue(status.body?.recorded === true, `${label}: status recorded without the source mount = ${status.body?.recorded}`);
     assertValue(status.body?.evidence === 'operation_row', `${label}: status evidence = ${status.body?.evidence} want operation_row`);
     assertValue(status.body?.stage === stage, `${label}: status stage without the source mount = ${status.body?.stage} want ${stage}`);
@@ -929,7 +1538,7 @@ async function proveMountlessStatus(binary, root, stage) {
     const preflight = httpJson('GET', `${base}/preflight`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
     assertValue(
       preflight.status === 503 && preflight.body?.error?.code === 'upgrade_legacy_root_missing',
-      `${label}: preflight without the source mount = ${preflight.status} ${JSON.stringify(preflight.body).slice(0, 160)} want 503 upgrade_legacy_root_missing`,
+      `${label}: preflight without the source mount = ${preflight.status} ${preview(preflight.body)} want 503 upgrade_legacy_root_missing`,
     );
     return {
       mount: 'absent',
@@ -946,7 +1555,7 @@ async function proveMountlessStatus(binary, root, stage) {
       credential: { storeAdminKey: status.status, v2AdminKey: foreign.status },
     };
   } finally {
-    stopHostManager(name);
+    await stopHostManager(name);
   }
 }
 
@@ -973,7 +1582,7 @@ async function proveRefusedMountStatus(binary, root, stage, sourceRoot) {
     `${label}: the mount's usage.sqlite is not a symbolic link to a file`,
   );
 
-  const port = freePort();
+  const port = ports.take();
   const name = `${PREFIX}-refusedmount-${stage.replace(/_/g, '')}`;
   startHostManager({ name, binary, dataDir: root, port, adminKey: ADMIN_V2, legacyRoot: mountRoot });
   try {
@@ -984,7 +1593,7 @@ async function proveRefusedMountStatus(binary, root, stage, sourceRoot) {
     const status = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
     assertValue(
       status.status === 200,
-      `${label}: status with a symlinked mount database = ${status.status}: ${JSON.stringify(status.body).slice(0, 200)} want 200 from the Manager store`,
+      `${label}: status with a symlinked mount database = ${status.status}: ${preview(status.body)} want 200 from the Manager store`,
     );
     assertValue(status.body?.recorded === true, `${label}: status recorded with a symlinked mount database = ${status.body?.recorded}`);
     assertValue(status.body?.evidence === 'operation_row', `${label}: status evidence = ${status.body?.evidence} want operation_row`);
@@ -1004,7 +1613,7 @@ async function proveRefusedMountStatus(binary, root, stage, sourceRoot) {
     // The preflight inspects the mount the operator supplied, never the file the
     // credential fell back to, so it names the link itself.
     const preflight = httpJson('GET', `${base}/preflight`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
-    assertValue(preflight.status === 200, `${label}: preflight = ${preflight.status}: ${JSON.stringify(preflight.body).slice(0, 200)} want 200`);
+    assertValue(preflight.status === 200, `${label}: preflight = ${preflight.status}: ${preview(preflight.body)} want 200`);
     assertValue(preflight.body?.ready === false, `${label}: preflight ready with a symlinked mount database = ${preflight.body?.ready} want false`);
     const ownership = (preflight.body?.checks ?? []).find((check) => check.name === 'source_ownership');
     assertValue(
@@ -1031,7 +1640,7 @@ async function proveRefusedMountStatus(binary, root, stage, sourceRoot) {
       credential: { storeAdminKey: status.status, v2AdminKey: foreign.status },
     };
   } finally {
-    stopHostManager(name);
+    await stopHostManager(name);
   }
 }
 
@@ -1040,7 +1649,7 @@ async function proveRefusedMountStatus(binary, root, stage, sourceRoot) {
 // surface — /health 200 — and both fixed-surface reads answer 404 to every
 // caller, including the key they accepted a moment earlier.
 async function proveCompletedAdmission(binary, completedRoot, sourceRoot) {
-  const port = freePort();
+  const port = ports.take();
   const name = `${PREFIX}-admission-complete`;
   startHostManager({ name, binary, dataDir: completedRoot, port, adminKey: ADMIN_V2, legacyRoot: sourceRoot });
   try {
@@ -1059,7 +1668,7 @@ async function proveCompletedAdmission(binary, completedRoot, sourceRoot) {
     }
     return { health: 200, surface: 'full', preflight: reads.preflight, status: reads.status };
   } finally {
-    stopHostManager(name);
+    await stopHostManager(name);
   }
 }
 
@@ -1186,7 +1795,7 @@ function faultSourceTouched(binary, workspace) {
 // as its evidence, and offer copy_in as the next action instead of claiming that
 // nothing had started.
 async function proveCopyInMarkerWindow(binary, target, sourceRoot) {
-  const port = freePort();
+  const port = ports.take();
   const name = `${PREFIX}-marker-window`;
   const label = 'marker-window';
   startHostManager({ name, binary, dataDir: target, port, adminKey: ADMIN_V2, legacyRoot: sourceRoot });
@@ -1194,7 +1803,7 @@ async function proveCopyInMarkerWindow(binary, target, sourceRoot) {
     await waitForHealth(port, `${name} /health`, 503);
     const base = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
     const status = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
-    assertValue(status.status === 200, `${label}: status = ${status.status}: ${JSON.stringify(status.body).slice(0, 200)} want 200`);
+    assertValue(status.status === 200, `${label}: status = ${status.status}: ${preview(status.body)} want 200`);
     assertValue(status.body?.recorded === true, `${label}: status recorded = ${status.body?.recorded} want true: the marker records an operation in progress`);
     assertValue(status.body?.evidence === 'copy_in_marker', `${label}: status evidence = ${status.body?.evidence} want copy_in_marker`);
     assertValue(status.body?.stage === 'copy_in', `${label}: status stage = ${status.body?.stage} want copy_in`);
@@ -1214,7 +1823,7 @@ async function proveCopyInMarkerWindow(binary, target, sourceRoot) {
       domainsDone: status.body.domainsDone,
     };
   } finally {
-    stopHostManager(name);
+    await stopHostManager(name);
   }
 }
 
@@ -1389,7 +1998,9 @@ async function faultBusySource(binary, workspace) {
   const source = path.join(SCRATCH, 'work', 'busy', 'source');
   const target = path.join(SCRATCH, 'work', 'busy', 'target');
   copyTree(workspace.main.source, source);
-  fs.mkdirSync(target, { recursive: true });
+  // A real v2 store on the target, so "the blocked write changed nothing" is a
+  // claim about data, not about an empty directory.
+  copyTree(workspace.main.target, target);
   const holder = spawn(
     'python3',
     [
@@ -1419,8 +2030,23 @@ async function faultBusySource(binary, workspace) {
     const check = (report.checks ?? []).find((entry) => entry.name === 'source_ownership');
     assertValue(report.ready === false, 'busy: preflight ready=true while a 1.x writer holds the source');
     assertValue(check?.code === 'upgrade_source_busy', `busy: code=${check?.code}`);
-    assertValue(dirDigest(target) === digestBefore, 'busy: the blocked preflight wrote the v2 data root');
-    recordFault('natively-busy-source', blocked, check.code, true, { fence: 'flock(LOCK_EX) on usage.sqlite.manager.lock' });
+
+    // The actual write path, not a preflight on a target it never receives: the
+    // copy-in must refuse the fenced source and leave the v2 store byte-identical.
+    const run = runCli(binary, ['upgrade', 'run', '--legacy', source, '--target', target, '--json'], 'busy:run', {
+      expectExit: 1,
+    });
+    const runReport = parseJson(run.stdout, 'busy:run');
+    assertValue(runReport.preflight?.ready === false, 'busy: copy-in ran a blocked preflight');
+    assertValue(dirDigest(target) === digestBefore, 'busy: the refused copy-in wrote the v2 data root');
+    const recorded = readCliOperation(binary, target, 'busy:status');
+    assertValue(recorded.operation?.stage === 'reconcile', `busy: the refused copy-in changed the recorded stage to ${recorded.operation?.stage}`);
+    recordFault('natively-busy-source', run, check.code, true, {
+      fence: 'flock(LOCK_EX) on usage.sqlite.manager.lock',
+      writePath: 'upgrade run --legacy <busy source> --target <v2 root>',
+      preflightExitCode: blocked.code,
+      persistedStage: recorded.operation?.stage,
+    });
   } finally {
     holder.kill('SIGKILL');
   }
@@ -1435,15 +2061,27 @@ function recordFault(name, command, code, targetRootUnchanged, extra = {}) {
 // rollback
 // ---------------------------------------------------------------------------
 
-// proveRollback prepares a plan, applies it against a real 1.x stack on a real
-// volume, lets that stack write, records the verdict, and proves the manager
-// refuses a probe of its own listener.
+// proveRollback prepares a plan, applies it exactly as printed against a real
+// 1.x stack that runs on the very directory `--verify` fingerprints, lets that
+// stack write, records the verdict, and proves the manager refuses a probe of
+// its own listener. It then proves the recorded `rolled_back` root still admits
+// only the Upgrade surface.
 async function proveRollback(binary, workspace, fixture) {
-  const source = workspace.main.source;
+  const source = fs.realpathSync(workspace.main.source);
   const target = workspace.main.target;
   const project = PREFIX;
-  const port = freePort();
-  const managerPort = freePort();
+  const port = ports.take();
+  const managerPort = ports.take();
+  assertValue(port !== managerPort, 'rollback: the plan port and the manager port must be two different ports');
+
+  // The volume the plan will name is decided here, from the plan's own naming
+  // rule, and bound to the 1.x directory before anything is prepared: a Docker
+  // local volume bound to that directory makes the container's writes land in
+  // the very files `--verify` reads. The probe write proves the binding on the
+  // host, so a host whose Docker cannot bind the directory fails here instead of
+  // recording a verdict against another directory.
+  const expectedVolume = `${project}_cpa-manager-plus-data`;
+  const sameVolume = createSameVolumeDirectory(expectedVolume, source);
 
   const prepare = runCli(
     binary,
@@ -1461,38 +2099,30 @@ async function proveRollback(binary, workspace, fixture) {
     { expectExit: 0 },
   );
   const plan = parseJson(prepare.stdout, 'rollback:prepare');
-  assertValue(plan.volume === `${project}_cpa-manager-plus-data`, `rollback: plan volume=${plan.volume}`);
-  assertValue(plan.port === port, `rollback: plan port=${plan.port}`);
+  assertValue(plan.volume === expectedVolume, `rollback: plan volume=${plan.volume} but this run bound ${expectedVolume} to the 1.x directory`);
+  assertValue(path.resolve(plan.sourceRoot) === source, `rollback: the plan names ${plan.sourceRoot} as the 1.x root, not the directory --verify reads (${source})`);
+  assertValue(plan.port === port && plan.port !== managerPort, `rollback: plan port=${plan.port} manager port=${plan.managerPort}`);
+  assertValue(plan.managerPort === managerPort, `rollback: plan manager port=${plan.managerPort} want ${managerPort}`);
   assertValue(plan.image === fixture.rollbackImage, `rollback: plan image=${plan.image}`);
   assertValue(typeof plan.composeFile === 'string' && plan.composeFile.includes(plan.volume), 'rollback: the plan carries no compose file');
 
-  // The plan's volume must exist before compose is applied.
-  const volume = plan.volume;
-  const created2 = sh('docker', ['volume', 'create', volume]);
-  assertValue(created2.code === 0, `rollback: docker volume create ${volume}: ${created2.stderr.trim()}`);
-  created.volumes.add(volume);
-  const seed = sh('docker', [
-    'run', '--rm', '--name', `${PREFIX}-volume-seed`,
-    '-v', `${source}:/from:ro`,
-    '-v', `${volume}:/to`,
-    'alpine:3.21', 'sh', '-c', 'cp -a /from/. /to/',
-  ]);
-  assertValue(seed.code === 0, `rollback: seed ${volume}: ${seed.stderr.trim()}`);
-
   // Apply the plan exactly as printed: the compose file on stdin.
+  trackComposeProject(project, plan.composeFile);
   const up = sh('docker', ['compose', '-p', project, '-f', '-', 'up', '-d'], { input: plan.composeFile, timeout: 300_000 });
   evidence.commands.push(commandRecord(`docker compose -p ${project} -f - up -d`, up.code));
+  const composeResources = trackComposeResources(project);
   if (up.code !== 0) {
-    throw new Error(`rollback: apply the plan: ${tail(up.stderr)}`);
+    throw new Error(`rollback: apply the plan: ${redactor.redact(tail(up.stderr))}`);
   }
   await waitForHealth(port, 'restarted 1.x /health');
 
-  // The restarted 1.x writes after the copy-in: the recorded fingerprint no
-  // longer describes the live data, which is exactly the state a rollback
-  // verdict has to tolerate.
+  // The restarted 1.x writes after the copy-in, into the volume that is the
+  // directory --verify fingerprints. The response is recorded as it happened: a
+  // hard-coded status is not evidence about this run.
+  const writtenRowHash = sha256(Buffer.from('u1d:rollback:written-after-copy-in'));
   const written = await v1JsonAt(port, 'POST', '/v0/management/usage/import', [
     {
-      event_hash: sha256(Buffer.from('u1d:rollback:written-after-copy-in')),
+      event_hash: writtenRowHash,
       timestamp_ms: dayStartMS(DATASET_DAYS[2]) + 6 * 3_600_000,
       timestamp: new Date(dayStartMS(DATASET_DAYS[2]) + 6 * 3_600_000).toISOString(),
       model: DATASET_MODELS[0].model,
@@ -1505,10 +2135,34 @@ async function proveRollback(binary, workspace, fixture) {
       failed: false,
     },
   ]);
-  assertValue(written.body?.added === 1, `rollback: the restarted 1.x did not accept the new row: ${JSON.stringify(written.body)}`);
+  assertValue(
+    written.status >= 200 && written.status < 300,
+    `rollback: the restarted 1.x answered HTTP ${written.status} for the new row: ${redactor.redact(JSON.stringify(written.body))}`,
+  );
+  assertValue(written.body?.added === 1, `rollback: the restarted 1.x did not accept the new row: ${redactor.redact(JSON.stringify(written.body))}`);
 
-  // A probe answered by the manager itself is refused, and the refusal leaves
-  // the recorded row untouched.
+  // The live directory's own fingerprint, read by the product while the 1.x is
+  // serving. The verdict below has to observe this value, not the stopped source.
+  const liveProbe = runCli(
+    binary,
+    ['upgrade', 'preflight', '--legacy', source, '--json'],
+    'rollback:live-directory-fingerprint',
+    { expectExit: null },
+  );
+  const liveReport = parseJson(liveProbe.stdout, 'rollback:live-directory-fingerprint');
+  const liveFingerprint = liveReport.fingerprint;
+  assertValue(
+    SHA256_PATTERN.test(String(liveFingerprint ?? '')),
+    `rollback: the live directory has no fingerprint, so the write cannot be shown to have moved it (${redactor.redact(JSON.stringify(liveReport.checks ?? []).slice(0, 300))})`,
+  );
+  assertValue(
+    liveFingerprint !== plan.sourceFingerprint,
+    'rollback: the restarted 1.x write did not change the fingerprint of the directory verify reads',
+  );
+
+  // A probe answered by the manager itself is refused, and the refusal must
+  // leave the recorded row exactly as it was.
+  const beforeSelfProbe = readCliOperation(binary, target, 'rollback:status-before-self-probe');
   const managerName = `${PREFIX}-selfprobe`;
   startHostManager({ name: managerName, binary, dataDir: target, port: managerPort, adminKey: ADMIN_V2, legacyRoot: '' });
   await waitForHealth(managerPort, `${managerName} /health`, 503);
@@ -1529,7 +2183,13 @@ async function proveRollback(binary, workspace, fixture) {
   );
   const selfProbeCode = typedCode(selfProbe);
   assertValue(selfProbeCode === 'upgrade_rollback_probe_self', `rollback: self-probe code=${selfProbeCode}`);
-  stopHostManager(managerName);
+  await stopHostManager(managerName);
+  const afterSelfProbe = readCliOperation(binary, target, 'rollback:status-after-self-probe');
+  assertValue(
+    afterSelfProbe.operation?.stage === beforeSelfProbe.operation?.stage &&
+      afterSelfProbe.operation?.updatedAtMs === beforeSelfProbe.operation?.updatedAtMs,
+    `rollback: the refused self-probe changed the recorded row (stage ${beforeSelfProbe.operation?.stage}→${afterSelfProbe.operation?.stage}, updatedAtMs ${beforeSelfProbe.operation?.updatedAtMs}→${afterSelfProbe.operation?.updatedAtMs})`,
+  );
 
   // The v2 stack is down, so the probe can only be answered by the restarted 1.x.
   const verify = runCli(
@@ -1550,10 +2210,59 @@ async function proveRollback(binary, workspace, fixture) {
   const operation = parseJson(verify.stdout, 'rollback:verify');
   assertValue(operation.stage === 'rolled_back', `rollback: recorded stage=${operation.stage}`);
   assertValue(operation.rollback?.image === plan.image, `rollback: recorded image=${operation.rollback?.image}`);
-  assertValue(Boolean(operation.rollback?.sourceFingerprint), 'rollback: no observed fingerprint was recorded');
 
-  const status = runCli(binary, ['upgrade', 'status', '--db-path', path.join(target, 'usage.sqlite'), '--json'], 'rollback:status', { expectExit: 0 });
-  assertValue(parseJson(status.stdout, 'rollback:status').operation?.stage === 'rolled_back', 'rollback: the persisted stage is not rolled_back');
+  // The same product fingerprint of the same live directory, read again right
+  // after the verdict. A 1.x that is still serving may touch its WAL index, so
+  // the verdict has to match one of the two readings that bracket it; both
+  // readings describe the directory the restarted 1.x wrote into.
+  const liveAfter = runCli(
+    binary,
+    ['upgrade', 'preflight', '--legacy', source, '--json'],
+    'rollback:live-directory-fingerprint-after-verify',
+    { expectExit: null },
+  );
+  const liveAfterReport = parseJson(liveAfter.stdout, 'rollback:live-directory-fingerprint-after-verify');
+  const liveFingerprintAfter = liveAfterReport.fingerprint;
+  assertValue(SHA256_PATTERN.test(String(liveFingerprintAfter ?? '')), 'rollback: the live directory has no fingerprint after the verdict');
+
+  const observed = operation.rollback?.sourceFingerprint;
+  assertValue(SHA256_PATTERN.test(String(observed ?? '')), 'rollback: no observed fingerprint was recorded');
+  // The proof H1 asks for: the verdict's fingerprint is the post-write state of
+  // the same directory the 1.x wrote into, never the pre-rollback copy.
+  assertValue(
+    observed !== plan.sourceFingerprint,
+    `rollback: verify observed ${observed}, the pre-rollback source fingerprint; the verdict did not read the volume the restarted 1.x wrote`,
+  );
+  const matchedLiveReading = observed === liveFingerprint ? 'before' : observed === liveFingerprintAfter ? 'after' : null;
+  assertValue(
+    matchedLiveReading !== null,
+    `rollback: verify observed ${observed}, which is neither the live directory's fingerprint before the verdict (${liveFingerprint}) nor after it (${liveFingerprintAfter}); the verdict did not describe the directory the restarted 1.x wrote`,
+  );
+
+  const persisted = readCliOperation(binary, target, 'rollback:status');
+  assertValue(persisted.operation?.stage === 'rolled_back', 'rollback: the persisted stage is not rolled_back');
+
+  // Release the restarted stack before reading the volume from the host and
+  // before the manager restart: the source mount must be free for the surface
+  // to resolve its credential from it, exactly as an operator's restart is.
+  const composeRelease = await registry.releaseKind('composeProject');
+  assertValue(
+    composeRelease.ok,
+    `rollback: releasing the restarted 1.x stack failed: ${composeRelease.errors.join('; ')}`,
+  );
+  assertValue(await waitForPortClosed(port), 'rollback: the restarted 1.x still holds its port after the stack was released');
+
+  // The recorded `rolled_back` root still admits only the Upgrade surface: this
+  // is a manager restart on that root, not an inference from the CLI status.
+  const rolledBackSurface = await proveRolledBackSurface(binary, target, source);
+
+  // The row that 1.x wrote is in the directory the verdict fingerprinted, read
+  // outside the container from the host path itself.
+  const rowsInLiveDirectory = countSeededEventRow(source, writtenRowHash);
+  assertValue(
+    rowsInLiveDirectory === 1,
+    `rollback: the row the restarted 1.x wrote is not in ${source} (found ${rowsInLiveDirectory}); verify's evidence did not describe this directory`,
+  );
 
   evidence.rollback = {
     plan: {
@@ -1565,30 +2274,250 @@ async function proveRollback(binary, workspace, fixture) {
       managerPort: plan.managerPort,
       backupDirectory: plan.backupDirectory,
       backupManifestSha256: plan.backupManifestSha256,
+      sourceRoot: plan.sourceRoot,
       sourceFingerprint: plan.sourceFingerprint,
       reportSha256: sha256(prepare.stdout),
     },
-    applied: { exitCode: up.code, health: 'ok' },
-    v1WroteAfterCopyIn: { exitCode: 201, added: written.body.added },
-    selfProbe: { exitCode: selfProbe.code, code: selfProbeCode },
+    sameVolumeDirectory: {
+      volume: plan.volume,
+      directory: source,
+      mountpoint: sameVolume.mountpoint,
+      probeWrittenInContainer: true,
+      probeObservedOnHost: true,
+    },
+    applied: { exitCode: up.code, health: 'ok', containers: composeResources.containers, networks: composeResources.networks },
+    v1WroteAfterCopyIn: { status: written.status, added: written.body.added },
+    liveFingerprint: {
+      beforeVerdict: { exitCode: liveProbe.code, fingerprint: liveFingerprint },
+      afterVerdict: { exitCode: liveAfter.code, fingerprint: liveFingerprintAfter },
+      stableAcrossVerdict: liveFingerprint === liveFingerprintAfter,
+    },
+    selfProbe: {
+      exitCode: selfProbe.code,
+      code: selfProbeCode,
+      operationRowUnchanged: {
+        stage: beforeSelfProbe.operation?.stage,
+        updatedAtMs: beforeSelfProbe.operation?.updatedAtMs,
+      },
+    },
     verify: {
       exitCode: verify.code,
       stage: operation.stage,
       image: operation.rollback?.image,
       statusUrl: operation.rollback?.statusUrl,
-      observedFingerprint: operation.rollback?.sourceFingerprint,
+      observedFingerprint: observed,
+      observedFingerprintMatchedLiveReading: matchedLiveReading,
+      observedFingerprintDiffersFromPlan: observed !== plan.sourceFingerprint,
       reportSha256: sha256(verify.stdout),
     },
-    persistedStage: parseJson(status.stdout, 'rollback:status').operation?.stage,
+    writtenRowInLiveDirectory: rowsInLiveDirectory,
+    persistedStage: persisted.operation?.stage,
+    rolledBackSurface,
   };
   stableFacts.push(`rollback:${operation.stage}:${operation.rollback?.image}`);
-
-  stopCompose(project);
-  await waitForPortClosed(port);
+  stableFacts.push('rollback:same-volume-write-observed');
 }
 
 function planHealthURL(plan) {
   return `http://127.0.0.1:${plan.port}/health`;
+}
+
+// createSameVolumeDirectory creates the plan's named volume as a Docker local
+// volume bound to the 1.x directory itself. The compose document the plan prints
+// then mounts that name, so the restarted container writes into the very files
+// `--verify --legacy <directory>` fingerprints. A probe write through the volume
+// proves the binding with the host's own filesystem, not with inspect metadata.
+function createSameVolumeDirectory(volume, directory) {
+  registry.track('volume', volume, () => releaseDockerResource('volume', volume));
+  const createdVolume = sh('docker', [
+    'volume', 'create',
+    '--driver', 'local',
+    '--opt', 'type=none',
+    '--opt', 'o=bind',
+    '--opt', `device=${directory}`,
+    volume,
+  ]);
+  evidence.commands.push(commandRecord(`docker volume create ${volume} (bind ${directory})`, createdVolume.code));
+  if (createdVolume.code !== 0) {
+    throw new Error(`rollback: create ${volume} bound to ${directory}: ${redactor.redact(tail(createdVolume.stderr))}`);
+  }
+  const inspected = sh('docker', ['volume', 'inspect', '-f', '{{.Mountpoint}}', volume]);
+  assertValue(inspected.code === 0, `rollback: inspect ${volume}: ${redactor.redact(inspected.stderr.trim())}`);
+  const mountpoint = inspected.stdout.trim();
+
+  const probeName = `${PREFIX}-volume-probe`;
+  const probeContent = `cpampd-same-volume-${runId}`;
+  registry.track('container', probeName, () => releaseDockerResource('container', probeName));
+  const probe = sh('docker', [
+    'run', '--rm', '--name', probeName,
+    '-v', `${volume}:/data`,
+    'alpine:3.21', 'sh', '-c', `printf %s '${probeContent}' > /data/.cpampd-volume-probe`,
+  ]);
+  evidence.commands.push(commandRecord(`docker run ${probeName} (same-volume probe)`, probe.code));
+  if (probe.code !== 0) {
+    throw new Error(`rollback: write through ${volume}: ${redactor.redact(tail(probe.stderr))}`);
+  }
+  registry.untrack('container', probeName);
+  const probeFile = path.join(directory, '.cpampd-volume-probe');
+  const observed = fs.existsSync(probeFile) ? fs.readFileSync(probeFile, 'utf8') : null;
+  fs.rmSync(probeFile, { force: true });
+  assertValue(
+    observed === probeContent,
+    `rollback: a write through ${volume} did not appear in ${directory}; the volume is not the directory --verify reads, so the verdict would not describe the restarted 1.x`,
+  );
+  assertValue(!fs.existsSync(probeFile), 'rollback: the same-volume probe file could not be removed before the plan fingerprint');
+  return { volume, directory, mountpoint };
+}
+
+function trackComposeProject(project, composeFile) {
+  registry.track('composeProject', project, () => releaseComposeProject(project, composeFile), { composeFile });
+}
+
+function trackComposeResources(project) {
+  const containers = dockerNames(['ps', '-a', '--filter', `label=com.docker.compose.project=${project}`, '--format', '{{.Names}}']) ?? [];
+  for (const name of containers) {
+    try {
+      registry.track('container', name, () => releaseDockerResource('container', name));
+    } catch {
+      // A compose container outside this run's prefix is not this run's to
+      // remove; the project release still brings the stack down.
+    }
+  }
+  const networks = dockerNames(['network', 'ls', '--filter', `label=com.docker.compose.project=${project}`, '--format', '{{.Name}}']) ?? [];
+  for (const name of networks) {
+    try {
+      registry.track('network', name, () => releaseDockerResource('network', name));
+    } catch {
+      /* see above */
+    }
+  }
+  return { containers, networks };
+}
+
+function releaseComposeProject(project, composeFile) {
+  const down = sh('docker', ['compose', '-p', project, '-f', '-', 'down', '-t', '20', '--remove-orphans'], {
+    input: composeFile,
+    timeout: 180_000,
+  });
+  evidence.commands.push(commandRecord(`docker compose -p ${project} -f - down`, down.code));
+  if (down.code !== 0) {
+    throw new Error(`docker compose -p ${project} down: ${redactor.redact(tail(down.stderr))}`);
+  }
+}
+
+// releaseDockerResource removes one object this run tracked. A missing object is
+// already released; anything else that fails is thrown so the registry reports
+// it instead of dropping the entry.
+function releaseDockerResource(kind, name) {
+  if (!dockerObjectExists(kind, name)) return;
+  const command =
+    kind === 'container'
+      ? ['rm', '-f', name]
+      : kind === 'volume'
+        ? ['volume', 'rm', '-f', name]
+        : kind === 'network'
+          ? ['network', 'rm', name]
+          : null;
+  if (!command) throw new Error(`no release command for ${kind}`);
+  const result = sh('docker', command);
+  if (result.code !== 0) {
+    throw new Error(`docker ${command.join(' ')}: ${redactor.redact(tail(result.stderr, 400))}`);
+  }
+}
+
+function dockerObjectExists(kind, name) {
+  const command =
+    kind === 'container'
+      ? ['inspect', '--type', 'container', name]
+      : kind === 'volume'
+        ? ['volume', 'inspect', name]
+        : ['network', 'inspect', name];
+  return sh('docker', command).code === 0;
+}
+
+// readCliOperation reads the recorded row through the CLI, so the comparison
+// after a refusal uses the product's own reader rather than raw SQL.
+function readCliOperation(binary, targetRoot, label) {
+  const status = runCli(binary, ['upgrade', 'status', '--db-path', path.join(targetRoot, 'usage.sqlite'), '--json'], label, {
+    expectExit: 0,
+  });
+  return parseJson(status.stdout, label);
+}
+
+// countSeededEventRow reads the 1.x store on the host at the directory the
+// verdict fingerprinted. The restarted 1.x wrote through the volume, so finding
+// the row here is the same-directory proof. The open is read-only because the
+// container writes as its own user: the harness only ever reads these files.
+function countSeededEventRow(root, eventHash) {
+  const database = path.join(root, 'usage.sqlite');
+  let db;
+  try {
+    db = new DatabaseSync(database, { readOnly: true });
+    const row = db.prepare('select count(*) as count from usage_events where event_hash = ?').get(eventHash);
+    return Number(row?.count ?? 0);
+  } catch (error) {
+    throw new Error(
+      `rollback: read ${database} read-only after the stack stopped (${redactor.redact(error?.message || error)}); an unclean 1.x shutdown leaves a WAL this host cannot join`,
+    );
+  } finally {
+    db?.close();
+  }
+}
+
+// probeClosedSurfaces proves the routes an unfinished operation keeps closed
+// really answer 404. The fixed surface serves only /health, the Bootstrap shell,
+// the Upgrade entry leaf and its two reads, so each of these is a route the full
+// surface owns and this one must not.
+const CLOSED_SURFACE_PATHS = Object.freeze([
+  '/management.html',
+  '/usage-service/info',
+  '/v0/management/model-prices',
+  '/v0/management/models',
+]);
+
+function probeClosedSurfaces(port, label, headers = {}) {
+  const answers = {};
+  for (const pathName of CLOSED_SURFACE_PATHS) {
+    const answer = httpJson('GET', `http://127.0.0.1:${port}${pathName}`, { headers });
+    assertValue(
+      answer.status === 404,
+      `${label}: ${pathName} = ${answer.status} want 404: only the Upgrade surface is admitted while the operation is unfinished`,
+    );
+    answers[pathName] = answer.status;
+  }
+  return answers;
+}
+
+// proveRolledBackSurface restarts the manager on the recorded `rolled_back` root
+// and proves that admission still serves only the Upgrade surface: /health 503,
+// the wizard status readable with the source key alone, and the console, key and
+// gateway routes closed.
+async function proveRolledBackSurface(binary, target, sourceRoot) {
+  const port = ports.take();
+  const name = `${PREFIX}-rolledback-surface`;
+  const label = 'admission(rolled_back)';
+  startHostManager({ name, binary, dataDir: target, port, adminKey: ADMIN_V2, legacyRoot: sourceRoot });
+  try {
+    await waitForHealth(port, `${name} /health`, 503);
+    const base = `http://127.0.0.1:${port}/.well-known/cpamp-bootstrap/api/v2/installation/upgrade`;
+    const status = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
+    assertValue(status.status === 200, `${label}: status = ${status.status} want 200 from the Manager store`);
+    assertValue(status.body?.recorded === true, `${label}: status recorded = ${status.body?.recorded}`);
+    assertValue(status.body?.stage === 'rolled_back', `${label}: status stage = ${status.body?.stage} want rolled_back`);
+    assertValue(status.body?.nextAction === 'rolled_back', `${label}: status nextAction = ${status.body?.nextAction} want rolled_back`);
+    assertNoSecretInBody(`${label}: status`, status.body, [ADMIN_V1, ADMIN_V2, sourceRoot, SCRATCH, target]);
+    const foreign = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V2}` } });
+    assertValue(foreign.status === 401, `${label}: status with the v2 Admin key = ${foreign.status} want 401`);
+    const closed = probeClosedSurfaces(port, label, { Authorization: `Bearer ${ADMIN_V1}` });
+    return {
+      health: 503,
+      status: { status: status.status, recorded: status.body.recorded, stage: status.body.stage, nextAction: status.body.nextAction },
+      credential: { sourceAdminKey: status.status, v2AdminKey: foreign.status },
+      closedSurfaces: closed,
+    };
+  } finally {
+    await stopHostManager(name);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,30 +2539,51 @@ function startHostManager({ name, binary, dataDir, port, adminKey, legacyRoot })
   const child = spawn(binary, [], { env, stdio: ['ignore', out, out], detached: true });
   child.unref();
   hostManagers.set(name, { child, logFile, port });
+  registry.track('hostProcess', name, () => stopHostProcess(name), { pid: child.pid, port });
 }
 
-function stopHostManager(name) {
+// stopHostProcess proves the manager actually stopped: SIGTERM, wait for the
+// listener to close, then SIGKILL and wait again. A process that still holds the
+// port is a cleanup failure, not a silent success.
+async function stopHostProcess(name) {
   const entry = hostManagers.get(name);
   if (!entry) return;
-  try {
-    process.kill(-entry.child.pid, 'SIGTERM');
-  } catch {
+  const signalGroup = (signal) => {
     try {
-      entry.child.kill('SIGTERM');
+      process.kill(-entry.child.pid, signal);
+      return true;
     } catch {
-      /* already gone */
+      try {
+        entry.child.kill(signal);
+        return true;
+      } catch {
+        return false;
+      }
     }
+  };
+  signalGroup('SIGTERM');
+  let closed = await waitForPortClosed(entry.port, 20_000);
+  if (!closed) {
+    signalGroup('SIGKILL');
+    closed = await waitForPortClosed(entry.port, 10_000);
   }
-  waitForPortClosed(entry.port);
   hostManagers.delete(name);
+  if (!closed) {
+    throw new Error(`host manager ${name} still holds 127.0.0.1:${entry.port} after SIGTERM and SIGKILL`);
+  }
 }
 
-async function waitForPortClosed(port) {
-  const deadline = Date.now() + 30_000;
+async function stopHostManager(name) {
+  return registry.releaseEntry('hostProcess', name);
+}
+
+async function waitForPortClosed(port, timeout = 30_000) {
+  const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    if (!(await portOpen(port))) return;
+    if (!(await portOpen(port))) return true;
     await sleep(100);
   }
+  return !(await portOpen(port));
 }
 
 function portOpen(port) {
@@ -1664,6 +2614,9 @@ async function waitForContainerExitOrHealth(name, port) {
 // ---------------------------------------------------------------------------
 
 function startContainer({ name, image, port, dataDir, adminKey }) {
+  // Tracked before `docker run`: a command that fails after creating the
+  // container still leaves it in the cleanup set.
+  registry.track('container', name, () => releaseDockerResource('container', name));
   const result = sh('docker', [
     'run', '-d',
     '--name', name,
@@ -1680,27 +2633,23 @@ function startContainer({ name, image, port, dataDir, adminKey }) {
   ]);
   evidence.commands.push(commandRecord(`docker run ${name}`, result.code));
   if (result.code !== 0) {
-    throw new Error(`start ${name}: ${tail(result.stderr)}`);
+    throw new Error(`start ${name}: ${redactor.redact(tail(result.stderr))}`);
   }
-  created.containers.add(name);
 }
 
 function stopContainer(name) {
   const result = sh('docker', ['stop', '-t', '20', name]);
   evidence.commands.push(commandRecord(`docker stop ${name}`, result.code));
-}
-
-function removeContainer(name) {
-  const result = sh('docker', ['rm', '-f', name]);
-  created.containers.delete(name);
   if (result.code !== 0) {
-    evidence.commands.push(commandRecord(`docker rm -f ${name}`, result.code, '', result.stderr));
+    throw new Error(`stop ${name}: ${redactor.redact(tail(result.stderr))}`);
   }
 }
 
-function stopCompose(project) {
-  const result = sh('docker', ['compose', '-p', project, 'down', '-t', '20']);
-  evidence.commands.push(commandRecord(`docker compose -p ${project} down`, result.code));
+async function removeContainer(name) {
+  const outcome = await registry.releaseEntry('container', name);
+  if (!outcome.released && !outcome.skipped) {
+    throw new Error(`remove ${name}: ${outcome.error}`);
+  }
 }
 
 async function waitForContainerExit(name) {
@@ -1791,10 +2740,12 @@ function runCli(binary, cliArgs, name, { expectExit = null, allowMissingBinary =
   const result = sh(binary, cliArgs, { timeout: 600_000 });
   evidence.commands.push(commandRecord(name, result.code, result.stdout, result.stderr));
   if (result.code === null && !allowMissingBinary) {
-    throw new Error(`${name}: the command did not run: ${result.stderr.trim()}`);
+    throw new Error(`${name}: the command did not run: ${redactor.redact(result.stderr.trim())}`);
   }
   if (expectExit !== null && result.code !== expectExit) {
-    throw new Error(`${name}: exit=${result.code} want ${expectExit}\n${tail(result.stderr)}${tail(result.stdout)}`);
+    throw new Error(
+      `${name}: exit=${result.code} want ${expectExit}\n${redactor.redact(tail(result.stderr))}${redactor.redact(tail(result.stdout))}`,
+    );
   }
   return result;
 }
@@ -1807,7 +2758,7 @@ function parseJson(text, label) {
   try {
     return JSON.parse(text);
   } catch (error) {
-    throw new Error(`${label}: the report is not JSON (${error.message}): ${tail(text, 400)}`);
+    throw new Error(`${label}: the report is not JSON (${redactor.redact(error.message)}): ${redactor.redact(tail(text, 400))}`);
   }
 }
 
@@ -1824,7 +2775,7 @@ function typedCode(command) {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const parsed = { reuseFixture: false, keep: false, v1Tag: DEFAULT_V1_TAG, sourceTag: DEFAULT_SOURCE_TAG };
+  const parsed = { reuseFixture: false, keep: false, v1Tag: DEFAULT_V1_TAG, sourceTag: DEFAULT_SOURCE_TAG, verifyEvidence: null, expectHead: null };
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
     switch (value) {
@@ -1840,9 +2791,18 @@ function parseArgs(argv) {
       case '--source-tag':
         parsed.sourceTag = argv[++index];
         break;
+      case '--verify-evidence':
+        parsed.verifyEvidence = argv[++index];
+        break;
+      case '--expect-head':
+        parsed.expectHead = argv[++index];
+        break;
       case '--help':
       case '-h':
-        console.log('usage: node bin/ci/upgrade-docker.mjs [--reuse-fixture] [--keep] [--v1-tag TAG] [--source-tag TAG]');
+        console.log(
+          'usage: node bin/ci/upgrade-docker.mjs [--reuse-fixture] [--keep] [--v1-tag TAG] [--source-tag TAG]\n' +
+            '       node bin/ci/upgrade-docker.mjs --verify-evidence FILE [--expect-head SHA]',
+        );
         process.exit(0);
         break;
       default:
@@ -1850,6 +2810,28 @@ function parseArgs(argv) {
     }
   }
   return parsed;
+}
+
+// verifyEvidenceCli re-checks one evidence document without Docker. CI runs it on
+// exactly the file this run wrote, so an upload can only carry a document that
+// matches its own canonical hash and names the commit the workflow checked out.
+function verifyEvidenceCli({ verifyEvidence, expectHead }) {
+  let document;
+  try {
+    document = JSON.parse(fs.readFileSync(verifyEvidence, 'utf8'));
+  } catch (error) {
+    console.error(`upgrade-docker: cannot read the evidence ${verifyEvidence}: ${redactor.redact(error?.message || error)}`);
+    return 1;
+  }
+  const verdict = verifyEvidenceDocument(document, { expectHead });
+  if (!verdict.ok) {
+    console.error(`upgrade-docker: ${verifyEvidence} is not a valid evidence document: ${verdict.problems.join('; ')}`);
+    return 1;
+  }
+  console.log(
+    `upgrade-docker: ${verifyEvidence} is bound to ${document.implementation.headSha} (${document.verdict}, ${document.exitCode ?? 'no exit code'})`,
+  );
+  return 0;
 }
 
 function sh(command, commandArgs, { cwd = ROOT, input, env, timeout = 120_000 } = {}) {
@@ -1875,7 +2857,7 @@ function git(commandArgs) {
 function dockerJson(commandArgs) {
   const result = sh('docker', commandArgs);
   if (result.code !== 0) {
-    throw new Error(`docker ${commandArgs.join(' ')}: ${result.stderr.trim()}`);
+    throw new Error(`docker ${commandArgs.join(' ')}: ${redactor.redact(result.stderr.trim())}`);
   }
   return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
 }
@@ -1885,34 +2867,39 @@ function imageId(image) {
   return result.code === 0 ? result.stdout.trim() : null;
 }
 
-function freePort() {
-  // Sequential allocation keeps the reports stable; a port already in use is
-  // skipped rather than reused.
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const candidate = 18_900 + Math.floor(Math.random() * 900);
-    const probe = spawnSync(
-      process.execPath,
-      ['-e', `require('net').createServer().listen(${candidate}, '127.0.0.1').on('listening', function () { this.close(); process.exit(0); }).on('error', () => process.exit(1));`],
-      { encoding: 'utf8' },
-    );
-    if (probe.status === 0) return candidate;
-  }
-  throw new Error('no free port could be reserved');
+function probePortAvailable(candidate) {
+  const probe = spawnSync(
+    process.execPath,
+    ['-e', `require('net').createServer().listen(${candidate}, '127.0.0.1').on('listening', function () { this.close(); process.exit(0); }).on('error', () => process.exit(1));`],
+    { encoding: 'utf8' },
+  );
+  return probe.status === 0;
 }
 
 function commandRecord(name, exitCode, stdout = '', stderr = '') {
+  // A failure path is exactly where output may carry credential material, so
+  // the record keeps only redacted text: the digest covers what may be shown.
+  const safeStdout = redactor.redact(stdout);
+  const safeStderr = redactor.redact(stderr);
   return {
     name,
     exitCode,
-    stdoutSha256: stdout ? sha256(stdout) : null,
-    stderrSha256: stderr ? sha256(stderr) : null,
-    stderrTail: stderr ? tail(stderr, 400) : '',
+    stdoutSha256: safeStdout ? sha256(safeStdout) : null,
+    stderrSha256: safeStderr ? sha256(safeStderr) : null,
+    stderrTail: safeStderr ? tail(safeStderr, 400) : '',
   };
 }
 
 function tail(text, limit = 2_000) {
   const trimmed = String(text ?? '').trim();
   return trimmed.length <= limit ? trimmed : `…${trimmed.slice(-limit)}`;
+}
+
+// preview is the only way a body or report reaches a message: credentials the
+// harness knows are removed first, then the text is shortened.
+function preview(value, limit = 200) {
+  const text = redactor.redact(typeof value === 'string' ? value : JSON.stringify(value));
+  return text.length <= limit ? text : `…${text.slice(0, limit)}`;
 }
 
 function sha256(value) {
@@ -2005,57 +2992,102 @@ function sqliteCount(dbPath, sql) {
 // cleanup and evidence
 // ---------------------------------------------------------------------------
 
-function cleanup() {
-  const result = { containers: [], volumes: [], worktrees: [], errors: [] };
-  for (const name of hostManagers.keys()) {
-    stopHostManager(name);
+// cleanupResources releases everything the registry tracked, then proves the
+// host holds nothing else under this run's prefix. A release that failed, a
+// listing that could not be read, a surviving object or a scratch tree that
+// could not be removed all leave `ok` false, which fails the run.
+async function cleanupResources() {
+  const result = newCleanupResult();
+  await registry.releaseAll(result);
+  if (evidence.host.docker) {
+    const listings = {
+      containers: dockerNames(['ps', '-a', '--format', '{{.Names}}']),
+      volumes: dockerNames(['volume', 'ls', '--format', '{{.Name}}']),
+      networks: dockerNames(['network', 'ls', '--format', '{{.Name}}']),
+    };
+    const leftovers = {};
+    for (const [kind, names] of Object.entries(listings)) {
+      if (names === null) {
+        result.ok = false;
+        result.errors.push(`cannot list the host's ${kind} after cleanup, so the host cannot be shown clean`);
+        continue;
+      }
+      leftovers[kind] = names.filter((name) => name.startsWith(PREFIX));
+      for (const name of leftovers[kind]) {
+        result.errors.push(`leftover ${kind.replace(/s$/, '')} ${name}`);
+      }
+    }
+    result.leftovers = leftovers;
   }
-  for (const name of created.containers) {
-    if (!name.startsWith(PREFIX)) continue;
-    const removal = sh('docker', ['rm', '-f', name]);
-    result.containers.push({ name, exitCode: removal.code });
+  if (args.keep) {
+    result.scratchKept = SCRATCH;
+  } else {
+    try {
+      fs.rmSync(SCRATCH, { recursive: true, force: true });
+      result.scratchRemoved = true;
+    } catch (error) {
+      result.ok = false;
+      result.scratchRemoved = false;
+      result.errors.push(`remove the scratch tree: ${redactor.redact(error?.message || error)}`);
+    }
   }
-  for (const volume of created.volumes) {
-    if (!volume.startsWith(PREFIX)) continue;
-    const removal = sh('docker', ['volume', 'rm', '-f', volume]);
-    result.volumes.push({ volume, exitCode: removal.code });
+  if (!evidence.host.docker && registry.all().length > 0) {
+    result.ok = false;
+    result.errors.push('docker never answered, so the objects this run created cannot be shown released');
   }
-  for (const worktree of created.worktrees) {
-    const removal = sh('git', ['worktree', 'remove', '--force', worktree]);
-    if (removal.code === 0) sh('git', ['worktree', 'prune']);
-    result.worktrees.push({ worktree, exitCode: removal.code });
-  }
-  // Nothing may survive this run under its own prefix.
-  const leftovers = dockerJson(['ps', '-a', '--format', '{{.Names}}']).filter((name) => name.startsWith(PREFIX));
-  const leftoverVolumes = dockerJson(['volume', 'ls', '--format', '{{.Name}}']).filter((name) => name.startsWith(PREFIX));
-  result.leftovers = { containers: leftovers, volumes: leftoverVolumes };
-  if (leftovers.length || leftoverVolumes.length) {
-    result.errors.push('cleanup left objects behind');
-  }
-  if (!args.keep) {
-    fs.rmSync(SCRATCH, { recursive: true, force: true });
-  }
-  evidence.cleanup = result;
-  console.log(`cleanup: ${JSON.stringify(result)}`);
+  result.ok = result.ok && result.errors.length === 0;
+  console.log(`cleanup: ${JSON.stringify({ ok: result.ok, released: result.released.length, errors: result.errors })}`);
+  return result;
 }
 
 function writeEvidence() {
   evidence.stableDigest = sha256(stableFacts.join('|'));
-  const body = JSON.stringify(evidence, null, 2);
-  const document = { ...evidence, sha256: sha256(body) };
+  // stableDigest covers the hand-written stable facts; resultsDigest covers what
+  // the run actually observed (the chain reports, the faults, the rollback and
+  // the admission projections), so a reader can detect a substitution of the
+  // results even without re-running Docker.
+  evidence.resultsDigest = sha256(
+    JSON.stringify({
+      chains: evidence.chains,
+      faults: evidence.faults,
+      rollback: evidence.rollback,
+      wizard: evidence.wizard,
+      admission: evidence.admission,
+    }),
+  );
+  evidence.hashRule = UPGRADE_DOCKER_CONTRACT.evidenceHashRule;
+  const document = withEvidenceHash(evidence);
+  // The document is checked against its own canonical hash before it is
+  // written, and the check is repeated on the bytes on disk: an upload of this
+  // file is then at least the file this run computed.
+  const verified = verifyEvidenceDocument(document, evidence.implementation?.headSha ? { expectHead: evidence.implementation.headSha } : {});
+  if (!verified.ok) {
+    throw new Error(`the evidence document is not bound to this run: ${verified.problems.join('; ')}`);
+  }
   const file = path.join(EVIDENCE_DIR, `${runId}.json`);
   fs.mkdirSync(EVIDENCE_DIR, { recursive: true });
   fs.writeFileSync(file, `${JSON.stringify(document, null, 2)}\n`);
+  const onDisk = verifyEvidenceDocument(JSON.parse(fs.readFileSync(file, 'utf8')));
+  if (!onDisk.ok) {
+    throw new Error(`the evidence file on disk does not verify: ${onDisk.problems.join('; ')}`);
+  }
   evidenceFile = file;
+  publishEvidencePath(file);
   console.log(`evidence: ${path.relative(ROOT, file)} (sha256 ${document.sha256})`);
   console.log(`stable digest: ${evidence.stableDigest}`);
 }
 
-// exported for the repository test that checks the harness contract
-export const UPGRADE_DOCKER_CONTRACT = {
-  prefixPattern: /^cpampd[0-9a-f]{8}$/,
-  skipVariable: 'SKIP_UPGRADE_DOCKER',
-  evidenceDirectory: path.join('bin', 'ci', 'evidence', 'upgrade-d'),
-};
+// publishEvidencePath hands the one file this run wrote to the workflow, so the
+// artifact upload can name it instead of a directory glob that also matches the
+// committed historical records.
+function publishEvidencePath(file) {
+  const outputFile = process.env.GITHUB_OUTPUT;
+  if (!outputFile) return;
+  try {
+    fs.appendFileSync(outputFile, `evidence_path=${file}\nevidence_run_id=${runId}\n`);
+  } catch (error) {
+    console.error(`upgrade-docker: could not publish the evidence path: ${redactor.redact(error?.message || error)}`);
+  }
+}
 
 export const evidencePath = () => evidenceFile;
