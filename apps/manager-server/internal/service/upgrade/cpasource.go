@@ -350,7 +350,10 @@ func parseCPAVersion(raw string) (cpaVersion, bool) {
 // compose.yaml and the release in `.env`, so a `${...}` reference is resolved
 // from that file — only the CPA_IMAGE value is read, and no other value is
 // retained or reported. When neither input names an exact release the gate
-// refuses; it never infers one from the shape of the file.
+// refuses; it never infers one from the shape of the file. A reference that
+// carries a digest (`repo:v7.3.4@sha256:…`) names bytes rather than a release and
+// is refused with the same code, because the tag beside it may name another
+// version and this reader cannot resolve the digest.
 func cpaSourceVersion(cpaDirectory, declared string) (string, bool) {
 	if trimmed := strings.TrimSpace(declared); trimmed != "" {
 		return trimmed, true
@@ -371,9 +374,16 @@ func cpaSourceVersion(cpaDirectory, declared string) (string, bool) {
 		if !ok {
 			continue
 		}
-		digestTrimmed, _, _ := strings.Cut(reference, "@")
-		slash := strings.LastIndex(digestTrimmed, "/")
-		last := digestTrimmed[slash+1:]
+		// A digest-bearing reference pins bytes, not a release: the tag beside the
+		// digest may name another version, and this reader cannot check what the
+		// digest resolves to. Accepting the tag would claim a version the pull does
+		// not guarantee, so the reference is treated like any other image that
+		// names no release.
+		if strings.Contains(reference, "@") {
+			continue
+		}
+		slash := strings.LastIndex(reference, "/")
+		last := reference[slash+1:]
 		repository, tag, tagged := strings.Cut(last, ":")
 		if !tagged || repository != "cli-proxy-api" || tag == "" || tag == "latest" {
 			continue

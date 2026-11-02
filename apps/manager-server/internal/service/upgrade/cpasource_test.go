@@ -531,6 +531,40 @@ func TestCPASourceVersionComesFromTheInstallerStack(t *testing.T) {
 	}
 }
 
+// TestCPASourceVersionRefusesADigestBearingImage pins the Low finding: a
+// tag-plus-digest reference pins bytes, not a release. The reader used to cut the
+// digest off and accept the tag, claiming a version the digest may not resolve to;
+// the documented contract says a digest names no release.
+func TestCPASourceVersionRefusesADigestBearingImage(t *testing.T) {
+	legacyRoot, cpaDirectory := writeCPAFixture(t, v7FixtureConfig, nil)
+	installDir := filepath.Dir(cpaDirectory)
+	compose := "services:\n  cli-proxy-api:\n    image: ${CPA_IMAGE}\n"
+	if err := os.WriteFile(filepath.Join(installDir, "compose.yaml"), []byte(compose), 0o600); err != nil {
+		t.Fatalf("write the installer compose file: %v", err)
+	}
+	digest := strings.Repeat("a", 64)
+	if err := os.WriteFile(filepath.Join(installDir, ".env"),
+		[]byte("CPA_IMAGE=eceasy/cli-proxy-api:v7.3.4@sha256:"+digest+"\n"), 0o600); err != nil {
+		t.Fatalf("write the installer environment file: %v", err)
+	}
+	_, err := openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
+		t.Fatalf("a digest-bearing image produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
+	}
+	// A bare digest names no release either, and the refusal must not echo it.
+	if err := os.WriteFile(filepath.Join(installDir, ".env"),
+		[]byte("CPA_IMAGE=eceasy/cli-proxy-api@sha256:"+digest+"\n"), 0o600); err != nil {
+		t.Fatalf("rewrite the installer environment file: %v", err)
+	}
+	_, err = openManagedCPASource(cpaSourceOptions{LegacyRoot: legacyRoot})
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAVersionRequired {
+		t.Fatalf("a bare digest produced %v (code %q), want %s", err, code, UpgradeErrorCPAVersionRequired)
+	}
+	if strings.Contains(err.Error(), digest) {
+		t.Fatalf("the refusal echoes the digest: %v", err)
+	}
+}
+
 // TestCPASourceVersionStaysUndeterminedWhenTheStackCannotNameIt pins the
 // fail-closed side of the same reader: an unresolvable reference is not a
 // release, and a file that cannot be read is not a declaration.
