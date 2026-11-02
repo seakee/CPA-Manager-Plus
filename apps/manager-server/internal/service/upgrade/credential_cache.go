@@ -41,6 +41,13 @@ const (
 	// plus the operator's key rotation and a few source states during the copy-in.
 	// Eviction only costs another read.
 	credentialCacheEntries = 64
+	// credentialFlightLimit bounds the verifications that may run at once. A
+	// success bound alone does not bound the work: every different non-empty key
+	// used to start a whole-source snapshot. Each running verification holds one
+	// private copy of the source, so this is the resource bound as well as the
+	// state bound; a request for a key already being verified joins that flight
+	// and takes no slot. Waiting for a slot honours the caller's own deadline.
+	credentialFlightLimit = 4
 	// credentialVerifyBytesPerSecond is the read rate the first-verification
 	// budget assumes. A source read costs three full passes (digest, copy,
 	// digest) plus one row; 64 MiB/s is deliberately slower than local disk so
@@ -201,12 +208,17 @@ type credentialCache struct {
 	// order is the insertion order the eviction bound follows.
 	order   []string
 	flights map[string]*credentialFlight
+	// slots is the admission bound on verifications that are actually running.
+	// A flight exists only while it holds one slot, so the bound covers both the
+	// work and the map entry; joiners wait on the flight and take none.
+	slots chan struct{}
 }
 
 func newCredentialCache() *credentialCache {
 	return &credentialCache{
 		entries: map[string]struct{}{},
 		flights: map[string]*credentialFlight{},
+		slots:   make(chan struct{}, credentialFlightLimit),
 	}
 }
 
@@ -225,7 +237,9 @@ var errCredentialVerificationAborted = errors.New("source credential verificatio
 //
 // The work runs on its own goroutine with its own lifetime, so the caller that
 // started it can stop waiting without abandoning the verdict other requests on
-// the same key are waiting for.
+// the same key are waiting for. Starting new work needs one of the finite
+// admission slots; waiting for one is this caller's wait, not the shared work's,
+// and a caller that gives up while waiting starts nothing and leaves no flight.
 func (c *credentialCache) verify(ctx context.Context, key string, run func() error) error {
 	if err := ctx.Err(); err != nil {
 		return credentialTimeout(err)
@@ -239,6 +253,35 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 		c.mu.Unlock()
 		return flight.wait(ctx)
 	}
+	c.mu.Unlock()
+
+	// One slot per running verification. The send is the admission decision; a
+	// cancelled or expired caller never reaches it as an owner, including one
+	// cancelled while this select was waiting.
+	select {
+	case c.slots <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-c.slots
+			return credentialTimeout(err)
+		}
+	case <-ctx.Done():
+		return credentialTimeout(ctx.Err())
+	}
+
+	// Another request may have started the same key while this one waited for a
+	// slot. Join that flight instead of copying the source twice, and give the
+	// slot back: a joiner never holds one.
+	c.mu.Lock()
+	if _, hit := c.entries[key]; hit {
+		c.mu.Unlock()
+		<-c.slots
+		return nil
+	}
+	if flight, running := c.flights[key]; running {
+		c.mu.Unlock()
+		<-c.slots
+		return flight.wait(ctx)
+	}
 	flight := &credentialFlight{done: make(chan struct{})}
 	c.flights[key] = flight
 	c.mu.Unlock()
@@ -250,7 +293,7 @@ func (c *credentialCache) verify(ctx context.Context, key string, run func() err
 // runFlight publishes the verdict exactly once, including when the read panics:
 // the flight is always completed and removed, so a concurrent request can never
 // wait on a flight nobody will finish, and a panic is never recorded as a
-// success.
+// success. The admission slot is released on every path.
 func (c *credentialCache) runFlight(key string, flight *credentialFlight, run func() error) (err error) {
 	completed := false
 	defer func() {
@@ -268,6 +311,7 @@ func (c *credentialCache) runFlight(key string, flight *credentialFlight, run fu
 		delete(c.flights, key)
 		c.mu.Unlock()
 		close(flight.done)
+		<-c.slots
 	}()
 	err = run()
 	completed = true

@@ -521,28 +521,51 @@ on both surfaces at once, and no write route exists.
   the read is refused (`upgrade_source_unreadable`) instead of answering from a
   stale or mixed state. The Manager's own store is this process's live database,
   not a volume to preserve, so `VerifyManagerCredential` reads it in place
-  read-only and immutable only when no live WAL can hold rows.
+  read-only and immutable only when no live WAL can hold rows. The one exception
+  is a target an unfinished copy-in still marks `materializing`: its restored
+  members, including the copied WAL index, are exactly what the resumed move
+  compares with its backup, and a read-only open of that store would join the
+  copied WAL and rewrite `-shm`. The marker is therefore read before any open,
+  the same order admission and the status projection use, and the key is proved
+  against a private snapshot outside both the target's data root and the
+  configured 1.x source root. A target whose key cannot be proved this way
+  answers the same typed condition as an unreadable source; authentication is
+  never skipped, and a rejected key still answers `401`.
   The credential read returns the credential row and nothing else:
   no `quick_check`, no schema vocabulary, no parity. The first read of one
   source state is bounded by `CredentialVerifyTimeout` — a 2s base plus 1s per
-  64 MiB of source — and capped by `CredentialVerifyMaxBudget` (20s): the read
-  copies the whole source, so a fixed 2s deadline answered 503 on a healthy
-  512 MiB source before the copy and its digests were done. A proved credential
+  64 MiB of every byte the read carries, the database plus a present WAL — and
+  capped by `CredentialVerifyMaxBudget` (20s): the read copies the whole source,
+  and a source that has not checkpointed keeps most of its data in the WAL, so a
+  budget derived from the database file alone answered 503 on a healthy
+  WAL-heavy source. The sum is computed without overflow and saturates into the
+  cap. A proved credential
   is then remembered in memory for the source state it was proved against: the
   digest of the presented key bound to the database and WAL device, inode, size
   and modification time, with an absent WAL as its own state. Every request stats
   the source; an unchanged identity reuses the verdict, and a write, checkpoint,
   a replaced file, a new WAL, an eviction or a restart verifies again. No
   credential and no key is stored and nothing is persisted; a rejected key or a
-  failed read is never cached as a success; at most 64 entries are kept; and
-  concurrent first requests for one state share a single verification. Every
+  failed read is never cached as a success; at most 64 success entries are kept;
+  and concurrent first requests for one state share a single verification. The
+  work itself is bounded separately from those entries: at most four
+  verifications may run at once, and a request for a key already in flight joins
+  it without taking another slot. A caller that gives up while waiting for a slot
+  starts nothing and leaves no flight; a distinct wrong key can therefore not
+  grow the active work or the cache without bound. The shared read has its own
+  lifetime — it may finish for another waiter and for the cache — while every
+  caller, the one that started it included, waits under its own context and a
+  cancelled request returns its deadline rather than a success that landed after
+  it was abandoned. Every
   authenticated request runs this, including every status poll, so a whole-file
   scan there would answer 503 on a large source and the result page would never
   arrive. The integrity check stays in `Preflight`, which is what qualifies a
-  source. `VerifyAdminSource` takes no fence. The Manager store's credential is
-  not cached: it is this process's live database, whose WAL and file change under
-  ordinary traffic, and its credential is one indexed row in an already open
-  store.
+  source. `VerifyAdminSource` takes no fence. The Manager store's live credential
+  is not cached: it is this process's live database, whose WAL and file change
+  under ordinary traffic, and its credential is one indexed row in an already
+  open store. Only a target read as a preserved source because it is still
+  `materializing` participates in the state-keyed cache, and only for the exact
+  byte state it was proved against.
   A read that outlives the bound — or a caller whose own deadline had passed —
   is `503 upgrade_credential_timeout`: a slow but healthy volume is a retry, not
   a repair.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -254,6 +255,118 @@ func TestCredentialCacheOwnerCancellationLetsAJoinerFinish(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCredentialCacheBoundsActiveVerifications is the P4 regression. The success
+// entry bound says nothing about the work a caller can start: 80 different
+// unproved keys used to create 80 active flights and 80 whole-source reads. The
+// admission bound is finite, a same-key request joins the running flight instead
+// of taking another slot, and the work that runs never exceeds the bound.
+func TestCredentialCacheBoundsActiveVerifications(t *testing.T) {
+	cache := newCredentialCache()
+	const calls = 80
+	started := make(chan struct{}, calls)
+	release := make(chan struct{})
+	var startedCount int32
+	var wg sync.WaitGroup
+	for index := range calls {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			_ = cache.verify(context.Background(), fmt.Sprintf("unproved-key-%d", index), func() error {
+				atomic.AddInt32(&startedCount, 1)
+				started <- struct{}{}
+				<-release
+				return ErrAdminUnauthorized
+			})
+		}(index)
+	}
+	for range credentialFlightLimit {
+		<-started
+	}
+	time.Sleep(25 * time.Millisecond)
+	cache.mu.Lock()
+	flights, entries := len(cache.flights), len(cache.entries)
+	cache.mu.Unlock()
+	if flights > credentialFlightLimit {
+		t.Fatalf("active flights = %d, beyond the bound %d", flights, credentialFlightLimit)
+	}
+	if got := atomic.LoadInt32(&startedCount); got != credentialFlightLimit {
+		t.Fatalf("%d different unproved keys started verification, want the bound %d", got, credentialFlightLimit)
+	}
+
+	// A same-key request joins the flight and consumes no second slot.
+	joined := make(chan error, 1)
+	go func() {
+		joined <- cache.verify(context.Background(), "unproved-key-0", func() error {
+			t.Error("a same-key joiner started its own verification")
+			return nil
+		})
+	}()
+	time.Sleep(10 * time.Millisecond)
+	if got := atomic.LoadInt32(&startedCount); got != credentialFlightLimit {
+		t.Fatalf("a same-key joiner raised active work to %d, beyond the bound %d", got, credentialFlightLimit)
+	}
+	close(release)
+	wg.Wait()
+	if err := <-joined; !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("the joined wrong key = %v, want %v", err, ErrAdminUnauthorized)
+	}
+	cache.mu.Lock()
+	flights, entries = len(cache.flights), len(cache.entries)
+	cache.mu.Unlock()
+	if entries != 0 {
+		t.Fatalf("failed keys were remembered as successes: %d entries", entries)
+	}
+	if flights != 0 {
+		t.Fatalf("%d flights survived their verdicts", flights)
+	}
+}
+
+// TestCredentialCacheAdmissionReleasesASlotAfterCancellation proves the
+// admission wait is the caller's own wait: a caller that gives up while the
+// bound is saturated starts nothing, leaves no flight, and the slot it never
+// took is available again once the running work completes.
+func TestCredentialCacheAdmissionReleasesASlotAfterCancellation(t *testing.T) {
+	cache := newCredentialCache()
+	started := make(chan struct{}, credentialFlightLimit)
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	for index := range credentialFlightLimit {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			_ = cache.verify(context.Background(), fmt.Sprintf("held-key-%d", index), func() error {
+				started <- struct{}{}
+				<-release
+				return ErrAdminUnauthorized
+			})
+		}(index)
+	}
+	for range credentialFlightLimit {
+		<-started
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cache.verify(ctx, "cancelled-admission", func() error {
+		t.Error("a cancelled caller started a verification")
+		return nil
+	}); !errors.Is(err, ErrCredentialVerifyTimeout) {
+		t.Fatalf("a cancelled admission wait = %v, want %v", err, ErrCredentialVerifyTimeout)
+	}
+	cache.mu.Lock()
+	_, present := cache.flights["cancelled-admission"]
+	cache.mu.Unlock()
+	if present {
+		t.Fatal("a cancelled admission left a flight behind")
+	}
+
+	close(release)
+	wg.Wait()
+	if err := cache.verify(context.Background(), "after-release", func() error { return nil }); err != nil {
+		t.Fatalf("a freed slot was not usable: %v", err)
 	}
 }
 
