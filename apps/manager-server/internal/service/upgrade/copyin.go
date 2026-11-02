@@ -1110,7 +1110,19 @@ func migrateAndRecord(ctx context.Context, paths targetPaths, result Result) (mo
 	if err := repository.Put(ctx, recorded); err != nil {
 		return model.UpgradeOperation{}, false, fmt.Errorf("record the copy_in stage: %w", err)
 	}
-	return recorded, alreadyRecorded, nil
+	// The repository owns created_at_ms and updated_at_ms: it discards the
+	// caller's proposal, and on the first write the returned struct still holds
+	// no timestamp at all. Reporting this run's result from the local struct
+	// would then show updated_at_ms=0 while the durable row holds the time the
+	// write happened, so the persisted row is read back and is the result.
+	persisted, found, err := repository.Get(ctx)
+	if err != nil {
+		return model.UpgradeOperation{}, false, fmt.Errorf("read the recorded copy_in stage: %w", err)
+	}
+	if !found {
+		return model.UpgradeOperation{}, false, errors.New("the copy_in stage is missing from the v2 database after it was recorded")
+	}
+	return persisted, alreadyRecorded, nil
 }
 
 // readOnlySnapshotName reads a store nobody else writes. It joins a live WAL

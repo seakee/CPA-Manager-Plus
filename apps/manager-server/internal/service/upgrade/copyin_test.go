@@ -1484,3 +1484,62 @@ func TestCopyInRefusesAHeldV2DataRoot(t *testing.T) {
 	}
 }
 
+// TestCopyInReportsTheDurableTimestamp is the result-timestamp regression. The
+// repository owns updated_at_ms and discards the caller's proposal, so building
+// the result from the local row after Put reported updatedAtMs=0 on the first
+// run while the durable row held the write time. The result is now the persisted
+// row, on a first run and on a rerun that still carries its marker.
+func TestCopyInReportsTheDurableTimestamp(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		interrupt func(options Options, err error) Options
+		wantRerun bool
+	}{
+		{name: "first run"},
+		{
+			name: "rerun after a surviving marker",
+			interrupt: func(options Options, interrupted error) Options {
+				options.checkpoint = func(phase string) error {
+					if phase == "recorded" {
+						return interrupted
+					}
+					return nil
+				}
+				return options
+			},
+			wantRerun: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			volume := newLegacyVolume(t)
+			targetRoot := canonicalTempDir(t)
+			options := copyInOptions(volume, targetRoot)
+			options.Lock = volume.lock(t)
+			if test.interrupt != nil {
+				interrupted := errors.New("injected interruption after the record committed")
+				options = test.interrupt(options, interrupted)
+				if _, err := CopyIn(context.Background(), options); !errors.Is(err, interrupted) {
+					t.Fatalf("interrupted copy in = %v, want the injected error", err)
+				}
+				options.checkpoint = nil
+			}
+			result, err := CopyIn(context.Background(), options)
+			if err != nil {
+				t.Fatalf("copy in: %v", err)
+			}
+			if test.wantRerun && !result.AlreadyComplete {
+				t.Fatalf("rerun = %+v, want it to clean up the surviving marker", result)
+			}
+			recorded, found, err := ReadRecord(context.Background(), result.TargetDatabase)
+			if err != nil || !found {
+				t.Fatalf("read the persisted operation: found=%t err=%v", found, err)
+			}
+			if recorded.UpdatedAtMS == 0 {
+				t.Fatal("the persisted row holds no updated_at_ms")
+			}
+			if result.UpdatedAtMS != recorded.UpdatedAtMS {
+				t.Fatalf("result updatedAtMs = %d, want the durable row's %d", result.UpdatedAtMS, recorded.UpdatedAtMS)
+			}
+		})
+	}
+}
