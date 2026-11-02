@@ -530,6 +530,66 @@ func TestAdoptionSummaryRedactsATruncatedSourceValue(t *testing.T) {
 	}
 }
 
+// Two source Client Keys may share their opening bytes. The boundary must
+// replace the value the name actually holds whole, not let a longer value's
+// shared prefix consume it and leave the rest of the shorter value behind.
+func TestAdoptionSummaryRedactsValuesThatShareAPrefix(t *testing.T) {
+	const (
+		// The shorter value is the one used as a file name; the longer one only
+		// shares its opening bytes.
+		key   = "01234567aaaaaaaaaaaaaaaaaaaaaaaa"
+		other = "01234567bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key, other)
+	name := key + ".json"
+	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
+	fixture.source.types[name] = "claude"
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+
+	// The record really does hold the name, so the reply's silence below is the
+	// boundary's doing rather than an accident of the run.
+	record := fixture.reload(t)
+	named := false
+	for _, item := range record.AdoptionSummary.Items {
+		if strings.Contains(item.Item, key) {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("the run recorded no name to redact: %+v", record.AdoptionSummary.Items)
+	}
+
+	body := fixture.adoption(t).Body.String()
+	for start := 0; start+minRedactedValue <= len(key); start++ {
+		if fragment := key[start : start+minRedactedValue]; strings.Contains(body, fragment) {
+			t.Fatalf("the summary carried a fragment of the source Client Key: %s", body)
+		}
+	}
+	if !strings.Contains(body, "[redacted]") {
+		t.Errorf("the summary did not mark the redaction: %s", body)
+	}
+}
+
+// The scan chooses the longest value match at each position, so the order the
+// values were read in cannot decide which of them is replaced.
+func TestAdoptionRedactorPicksTheLongestMatchAtEachPosition(t *testing.T) {
+	const (
+		shorter = "01234567aaaaaaaaaaaaaaaaaaaaaaaa"
+		longer  = "01234567bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	for _, secrets := range [][]string{{longer, shorter}, {shorter, longer}} {
+		redact := adoptionRedactor(secrets)
+		for _, value := range []string{shorter, longer} {
+			if got := redact("credential:" + value + ".json"); got != "credential:[redacted].json" {
+				t.Fatalf("redact(%q) with %v = %q", value, secrets, got)
+			}
+		}
+	}
+}
+
 // The reply's identity for an item must not turn a candidate credential into
 // something confirmable offline. The record's own name is not what the digest
 // covers, and the identity still keeps a record's items apart and stable.

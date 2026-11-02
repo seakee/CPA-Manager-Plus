@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -185,7 +184,7 @@ const minRedactedValue = 8
 
 // adoptionRedactor is the summary's output boundary for one string of the
 // record: the project's credential shapes first, then the values the migration
-// read, longest first so a credential that contains another is replaced whole.
+// read.
 //
 // The value rule matches prefixes as well as the whole value. An overlong name
 // is recorded as a bounded prefix, and a value can cross that cut, so the
@@ -199,7 +198,6 @@ func adoptionRedactor(secrets []string) func(string) string {
 			ordered = append(ordered, secret)
 		}
 	}
-	sort.Slice(ordered, func(left, right int) bool { return len(ordered[left]) > len(ordered[right]) })
 	return func(value string) string {
 		if value == "" {
 			return ""
@@ -208,45 +206,57 @@ func adoptionRedactor(secrets []string) func(string) string {
 		// begin with the marker's text must not rewrite it.
 		segments := strings.Split(usage.SanitizeCredentialText(value), redactedValue)
 		for index, segment := range segments {
-			for _, secret := range ordered {
-				segment = redactValueAndPrefixes(segment, secret)
-			}
-			segments[index] = segment
+			segments[index] = redactSourceValues(segment, ordered)
 		}
 		return strings.Join(segments, redactedValue)
 	}
 }
 
-// redactValueAndPrefixes replaces the longest prefix of `secret` found at every
-// position of `value` that starts with the shortest recognisable one. The scan
-// never rescans the marker it writes, so a replacement cannot feed itself.
-func redactValueAndPrefixes(value, secret string) string {
-	needle := shortestRedactedPrefix(secret)
-	if needle == "" || !strings.Contains(value, needle) {
-		return value
-	}
+// redactSourceValues replaces the source values in value in one left-to-right
+// pass, writing only text it has not replaced.
+//
+// At every position it takes the longest prefix any value still matches. That
+// choice is what keeps one value's short common prefix from consuming the text
+// another value would match whole: two Client Keys may share their opening
+// bytes, and rewriting the text once per value would let the longer value
+// replace that shared prefix first, leaving the shorter value's own suffix
+// behind. Choosing per position keeps the result the same whatever order the
+// values were read in, and the marker it writes is never scanned again.
+func redactSourceValues(value string, secrets []string) string {
 	var out strings.Builder
-	for {
-		at := strings.Index(value, needle)
-		if at < 0 {
-			out.WriteString(value)
-			return out.String()
+	for at := 0; at < len(value); {
+		matched := 0
+		for _, secret := range secrets {
+			needle := shortestRedactedPrefix(secret)
+			if needle == "" || !strings.HasPrefix(value[at:], needle) {
+				continue
+			}
+			// The match is at least the needle; it is the part of the value this
+			// text still holds, which is what a recorded truncation leaves.
+			length := len(needle)
+			for length < len(secret) && at+length < len(value) && value[at+length] == secret[length] {
+				length++
+			}
+			// Cut on a rune boundary of the value, so the replacement never splits
+			// a character.
+			for length > len(needle) && at+length < len(value) && !utf8.RuneStart(value[at+length]) {
+				length--
+			}
+			if length > matched {
+				matched = length
+			}
 		}
-		// The match is at least the needle; it is the part of the value this
-		// text still holds, which is what a recorded truncation leaves.
-		matched := len(needle)
-		for matched < len(secret) && at+matched < len(value) && value[at+matched] == secret[matched] {
-			matched++
+		if matched == 0 {
+			// No value starts here: copy one character and keep scanning.
+			_, size := utf8.DecodeRuneInString(value[at:])
+			out.WriteString(value[at : at+size])
+			at += size
+			continue
 		}
-		// Cut on a rune boundary of the value, so the replacement never splits a
-		// character.
-		for matched > len(needle) && at+matched < len(value) && !utf8.RuneStart(value[at+matched]) {
-			matched--
-		}
-		out.WriteString(value[:at])
 		out.WriteString(redactedValue)
-		value = value[at+matched:]
+		at += matched
 	}
+	return out.String()
 }
 
 // shortestRedactedPrefix is the smallest prefix of a source value this boundary
