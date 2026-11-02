@@ -310,7 +310,8 @@ hard `false`; the new surface grants no migration authority.
   from a private snapshot, so both work on non-writable volumes.
   `cpa-manager-plus upgrade migrate [--json] [--db-path PATH]` is the one command
   that adds upgrade columns an older store lacks; it needs the v2 Manager
-  stopped and holds the same process lock for its single writable open. That snapshot is
+  stopped and holds the same process lock for its proof snapshot and its single
+  writable open. That snapshot is
   a full copy of the Manager database and its sidecars: the read costs time and
   scratch space proportional to the database size, not to the single row it
   returns, so `status` is not a cheap poll and should not be looped tightly on a
@@ -684,17 +685,18 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   `upgrade_operations` table predates the current columns is therefore reported as
   `upgrade_store_schema_outdated` (naming the missing columns) instead of
   surfacing raw SQL, and the command exits 1. The remedy the refusal prints is
-  `cpa-manager-plus upgrade migrate [--db-path PATH]`: it proves from a private
-  snapshot that the store holds the row the copy-in records (`source_kind`
-  `upgraded-legacy`, `domains_done` contains `source_copy`, both fingerprints and
-  the backup manifest), then takes the v2 data-root process lock, opens the store
-  writable once, adds the columns, and is idempotent. Any other store — a 1.x
-  store, or a native store with no recorded copy-in — is refused as
-  `upgrade_migrate_not_copied_in` before the lock or any writable open, because
-  that open would migrate it into a store this build admits as native without the
-  Upgrade evidence; its bytes are unchanged. With the v2 Manager still running it
-  refuses as `upgrade_store_locked`, because the writable Manager holds that same
-  lock.
+  `cpa-manager-plus upgrade migrate [--db-path PATH]`: it takes the v2
+  data-root process lock first, proves from a private snapshot that the store
+  holds the row the copy-in records (`source_kind` `upgraded-legacy`,
+  `domains_done` contains `source_copy`, both fingerprints and the backup
+  manifest), then opens the store writable once, adds the columns, and is
+  idempotent. Any other store — a 1.x store, or a native store with no recorded
+  copy-in — is refused as `upgrade_migrate_not_copied_in` without a writable
+  open, because that open would migrate it into a store this build admits as
+  native without the Upgrade evidence; its bytes are unchanged. Because the lock
+  comes first, a store a running Manager still owns always reports
+  `upgrade_store_locked` — never a `upgrade_source_changed` from a snapshot that
+  raced that writer, a code that describes the 1.x source rather than the lock.
 - **A verdict without its evidence is the same outdated store.** A row that
   names `rolled_back` and none — or only part — of its evidence is reported as
   `upgrade_store_schema_outdated` too, with the same code and the same exit 1

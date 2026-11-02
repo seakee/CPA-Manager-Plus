@@ -1493,6 +1493,25 @@ func TestMigrateOperationStoreRefusesASnapshotInsideTheStoreRoot(t *testing.T) {
 	}
 }
 
+// TestMigrateOperationStoreReportsAHeldLockBeforeTheProof is L-c: migrate
+// proved from a snapshot before taking the v2 process lock, so a locked, writing
+// store could be reported as upgrade_source_changed — a code that describes the
+// 1.x source — while the real condition was upgrade_store_locked. The lock is
+// now taken first, so a held lock never reaches the proof.
+func TestMigrateOperationStoreReportsAHeldLockBeforeTheProof(t *testing.T) {
+	volume := newLegacyVolume(t)
+	databasePath := volume.databasePath()
+	lock, err := processlock.Acquire(databasePath)
+	if err != nil {
+		t.Fatalf("hold the v2 process lock: %v", err)
+	}
+	defer func() { _ = lock.Close() }()
+	err = MigrateOperationStore(context.Background(), databasePath)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorStoreLocked {
+		t.Fatalf("migrate a locked store = %v (code %q), want %v", err, code, UpgradeErrorStoreLocked)
+	}
+}
+
 // TestPrepareRollbackRefusesToBackfillUnderAHeldV2Lock is the second half of M3:
 // the binding writes the row, so it needs the same lock as the verdict.
 func TestPrepareRollbackRefusesToBackfillUnderAHeldV2Lock(t *testing.T) {

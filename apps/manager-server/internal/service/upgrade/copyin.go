@@ -313,9 +313,10 @@ func MigrateOperationStore(ctx context.Context, databasePath string) error {
 	if _, err := os.Lstat(databasePath); err != nil {
 		return fmt.Errorf("the Manager store cannot be migrated: %w", err)
 	}
-	if err := requireCopiedInStore(ctx, databasePath); err != nil {
-		return err
-	}
+	// The lock is taken before the proof. A live writer holding it means the
+	// store is in use, and that is the answer regardless of what a snapshot of a
+	// moving store would have said: proving first could report the source as
+	// changed while the real condition is upgrade_store_locked.
 	lock, err := processlock.Acquire(databasePath)
 	if err != nil {
 		if errors.Is(err, processlock.ErrLocked) {
@@ -325,6 +326,9 @@ func MigrateOperationStore(ctx context.Context, databasePath string) error {
 		return fmt.Errorf("take the v2 database process lock: %w", err)
 	}
 	defer func() { _ = lock.Close() }()
+	if err := requireCopiedInStore(ctx, databasePath); err != nil {
+		return err
+	}
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {
 		return fmt.Errorf("open the Manager store writable to migrate it: %w", err)
