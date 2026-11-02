@@ -1,4 +1,5 @@
 import type { TFunction } from 'i18next';
+import type { AccountQuotaWindowOrder } from './accountsWorkspaceUiState';
 import { ANTIGRAVITY_CONFIG } from '@/components/quota';
 import {
   getQuotaWindowShortLabel,
@@ -779,7 +780,8 @@ export const getQuotaWindowReadableLabel = (
 export const selectAccountQuotaMainListWindows = (
   row: AccountRow,
   quotaWindows: AccountQuotaDisplayWindow[],
-  maxWindows = 2
+  maxWindows = 2,
+  quotaWindowOrder: AccountQuotaWindowOrder = 'shortest-first'
 ): AccountQuotaDisplayWindow[] => {
   const standardQuotaWindows = quotaWindows.filter(isStandardAccountQuotaListWindow);
   let candidates: AccountQuotaDisplayWindow[];
@@ -847,7 +849,18 @@ export const selectAccountQuotaMainListWindows = (
     return a.w.key.localeCompare(b.w.key);
   });
 
-  return indexed.slice(0, maxWindows).map((item) => item.w);
+  const selected = indexed.slice(0, maxWindows).map((item) => item.w);
+  // Reorder only after selection so the preference cannot change candidates or limits.
+  if (row.provider === 'codex' && quotaWindowOrder === 'weekly-first') {
+    const weeklyIndex = selected.findIndex((window) => window.kind === 'weekly');
+    const fiveHourIndex = selected.findIndex((window) => window.kind === 'five_hour');
+    if (weeklyIndex > fiveHourIndex && fiveHourIndex >= 0) {
+      [selected[fiveHourIndex], selected[weeklyIndex]] = [
+        selected[weeklyIndex], selected[fiveHourIndex],
+      ];
+    }
+  }
+  return selected;
 };
 
 export const selectAccountQuotaListWindows = (

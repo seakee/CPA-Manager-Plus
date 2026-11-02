@@ -1532,6 +1532,8 @@
     "list_header_recent_requests": "Recent Requests",
     "list_header_historical_usage": "Historical Usage",
     "list_header_quota": "Quota",
+    "quota_window_order_shortest_first_hint": "Codex: 5-hour window before weekly. Click to show weekly first; remembered in this browser.",
+    "quota_window_order_weekly_first_hint": "Codex: weekly window before 5-hour. Click to show shortest first; remembered in this browser.",
     "list_header_actions": "Actions",
     "list_plan_remaining_days": "{{days}} days",
     "list_plan_remaining_days_tooltip": "{{days}} days remaining",
