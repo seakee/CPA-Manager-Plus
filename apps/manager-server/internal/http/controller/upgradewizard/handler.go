@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,8 +126,9 @@ const (
 const (
 	ActionPreflight  = "preflight"
 	ActionCopyIn     = "copy_in"
-	ActionCPAImport  = "cpa_import"
 	ActionReconcile  = "reconcile"
+	ActionCPAImport  = "cpa_import"
+	ActionVerify     = "verify"
 	ActionComplete   = "complete"
 	ActionRolledBack = "rolled_back"
 )
@@ -151,6 +153,11 @@ const (
 // published after the target was materialized, which is the same work the
 // recorded copy_in row names.
 const domainSourceCopy = "source_copy"
+
+// domainCPAConfig is the domain the CPA import records: the destination holds
+// the copied state and the target read it back. Its presence is what tells the
+// wizard verification is next rather than a repeated import.
+const domainCPAConfig = "cpa_config"
 
 // Handler serves both routes. It has no write path at all.
 //
@@ -738,8 +745,8 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 	document.Evidence = EvidenceOperationRow
 	document.Stage = row.Stage
 	document.StageKnown = knownStage(row.Stage)
-	document.NextAction = nextAction(row.Stage)
 	document.DomainsDone = decodeStrings(row.Domains)
+	document.NextAction = nextAction(row.Stage, document.DomainsDone)
 	// Manual items are operator instructions written by another step, so they
 	// pass the same content scrubber as the error detail: a copy-pasted command
 	// can carry a credential, and a path in an instruction is still a path.
@@ -772,10 +779,10 @@ func withCopyInMarker(databasePath string, document statusDocument) (statusDocum
 	document.Evidence = EvidenceCopyInMarker
 	document.Stage = StageCopyIn
 	document.StageKnown = true
-	document.NextAction = nextAction(StageCopyIn)
 	// The marker is written after the target was materialized, which is exactly
 	// the domain the recorded copy_in row names.
 	document.DomainsDone = []string{domainSourceCopy}
+	document.NextAction = nextAction(StageCopyIn, document.DomainsDone)
 	document.SourceKind = marker.SourceKind
 	document.SourceVersion = marker.SourceVersion
 	document.UpdatedAtMS = marker.WrittenAtMS
@@ -796,11 +803,18 @@ func knownStage(stage string) bool {
 	}
 }
 
-// nextAction maps a stage onto the wizard's next decision. A failed operation
-// resumes at reconciliation, and a stage this build does not know keeps the
-// empty string: the caller must show the recorded stage verbatim rather than
-// claim a step that may not be the real position.
-func nextAction(stage string) string {
+// nextAction maps the recorded stage and domains onto the wizard's next
+// decision.
+//
+// A stage is a checkpoint, not a pending step: recording `reconcile` means the
+// comparison finished, so the next decision is the import that follows it.
+// Recording `cpa_import` with the `cpa_config` domain means the destination was
+// copied and proved, so the next decision is verification — repeating the
+// import would ask the operator to redo work the row already proves. A failed
+// operation resumes at reconciliation, and a stage this build does not know
+// keeps the empty string: the caller must show the recorded stage verbatim
+// rather than claim a step that may not be the real position.
+func nextAction(stage string, domains []string) string {
 	switch stage {
 	case "":
 		return ActionPreflight
@@ -808,12 +822,21 @@ func nextAction(stage string) string {
 		return ActionPreflight
 	case StageCopyIn:
 		return ActionCopyIn
-	case StageCPAImport:
-		// The CPA import is a step of its own: it writes the destination and
-		// proves it, so the wizard offers it rather than the reconciliation that
-		// precedes it.
+	case StageReconcile:
 		return ActionCPAImport
-	case StageReconcile, StageExternal, StageVerify, StageFailed:
+	case StageCPAImport:
+		if slices.Contains(domains, domainCPAConfig) {
+			return ActionVerify
+		}
+		return ActionCPAImport
+	case StageExternal:
+		// The external connection is recorded once the source CPA answers; what
+		// remains is the verification of the migrated surface.
+		return ActionVerify
+	case StageVerify:
+		// Verification passed, so the only remaining step is completion.
+		return ActionComplete
+	case StageFailed:
 		return ActionReconcile
 	case StageComplete:
 		return ActionComplete

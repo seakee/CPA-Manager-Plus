@@ -673,8 +673,8 @@ func TestStatusProjectionOmitsSecretsAndToleratesUnknownStages(t *testing.T) {
 	if !status.Recorded || !status.StageKnown || status.Stage != string(model.UpgradeStageReconcile) {
 		t.Fatalf("status = %+v", status)
 	}
-	if status.NextAction != ActionReconcile {
-		t.Fatalf("next action = %q", status.NextAction)
+	if status.NextAction != ActionCPAImport {
+		t.Fatalf("next action = %q, want the import that follows reconciliation", status.NextAction)
 	}
 	if len(status.DomainsDone) != 2 || status.DomainsDone[0] != model.UpgradeDomainSourceCopy {
 		t.Fatalf("domains = %v", status.DomainsDone)
@@ -755,31 +755,81 @@ func TestStatusScrubsRecordedTextByContent(t *testing.T) {
 }
 
 // TestStatusStageToNextAction is the stage table the wizard renders against.
+//
+// Every recorded stage is covered, including the two cases the earlier table got
+// wrong: reconciliation finishes with the import, and a recorded import that
+// carries the cpa_config domain finishes with verification. A stage is a
+// checkpoint, so the next action never repeats the stage that just completed.
 func TestStatusStageToNextAction(t *testing.T) {
 	cases := []struct {
 		stage      string
+		domains    []string
 		action     string
 		stageKnown bool
 	}{
 		{stage: "", action: ActionPreflight, stageKnown: true},
 		{stage: StagePreflight, action: ActionPreflight, stageKnown: true},
 		{stage: StageCopyIn, action: ActionCopyIn, stageKnown: true},
-		{stage: StageReconcile, action: ActionReconcile, stageKnown: true},
-		{stage: StageCPAImport, action: ActionCPAImport, stageKnown: true},
-		{stage: StageExternal, action: ActionReconcile, stageKnown: true},
-		{stage: StageVerify, action: ActionReconcile, stageKnown: true},
+		{stage: StageReconcile, domains: []string{domainSourceCopy}, action: ActionCPAImport, stageKnown: true},
+		{stage: StageCPAImport, domains: []string{domainSourceCopy}, action: ActionCPAImport, stageKnown: true},
+		{stage: StageCPAImport, domains: []string{domainSourceCopy, domainCPAConfig}, action: ActionVerify, stageKnown: true},
+		{stage: StageExternal, action: ActionVerify, stageKnown: true},
+		{stage: StageVerify, action: ActionComplete, stageKnown: true},
 		{stage: StageFailed, action: ActionReconcile, stageKnown: true},
 		{stage: StageComplete, action: ActionComplete, stageKnown: true},
 		{stage: StageRolledBack, action: ActionRolledBack, stageKnown: true},
 		{stage: "quantum", action: "", stageKnown: false},
 	}
 	for _, testCase := range cases {
-		if got := nextAction(testCase.stage); got != testCase.action {
-			t.Fatalf("nextAction(%q) = %q, want %q", testCase.stage, got, testCase.action)
+		if got := nextAction(testCase.stage, testCase.domains); got != testCase.action {
+			t.Fatalf("nextAction(%q, %v) = %q, want %q", testCase.stage, testCase.domains, got, testCase.action)
 		}
 		if got := knownStage(testCase.stage); got != testCase.stageKnown {
 			t.Fatalf("knownStage(%q) = %t, want %t", testCase.stage, got, testCase.stageKnown)
 		}
+	}
+}
+
+// TestStatusRecordedStageGuidesTheNextStep is the route-level Low finding: the
+// projection reads the recorded domains, so a reconcile row offers the import
+// and a completed import offers verification. Both were previously told to
+// repeat the stage they had just finished.
+func TestStatusRecordedStageGuidesTheNextStep(t *testing.T) {
+	cases := []struct {
+		name    string
+		stage   model.UpgradeStage
+		domains []string
+		action  string
+	}{
+		{
+			name: "reconciled", stage: model.UpgradeStageReconcile,
+			domains: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainUsageEvents},
+			action:  ActionCPAImport,
+		},
+		{
+			name: "imported", stage: model.UpgradeStageCPAImport,
+			domains: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig},
+			action:  ActionVerify,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{
+				Stage:       testCase.stage,
+				DomainsDone: testCase.domains,
+			})
+			_, body := request(t, newHandler(legacySourceDir(t), database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+			var status statusDocument
+			if err := json.Unmarshal([]byte(body), &status); err != nil {
+				t.Fatal(err)
+			}
+			if !status.Recorded || status.Stage != string(testCase.stage) {
+				t.Fatalf("status = %+v", status)
+			}
+			if status.NextAction != testCase.action {
+				t.Fatalf("next action for %s = %q, want %q", testCase.stage, status.NextAction, testCase.action)
+			}
+		})
 	}
 }
 
@@ -1063,7 +1113,7 @@ func TestStatusAnswersFromTheManagerStoreWithoutTheSourceMount(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &status); err != nil {
 		t.Fatal(err)
 	}
-	if !status.Recorded || status.Stage != StageReconcile || status.NextAction != ActionReconcile {
+	if !status.Recorded || status.Stage != StageReconcile || status.NextAction != ActionCPAImport {
 		t.Fatalf("status without a source mount = %+v", status)
 	}
 	if status.SourceRoot != CodeLegacyRootMissing {
