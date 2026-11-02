@@ -37,6 +37,10 @@ const (
 	// record, so the operation row did not advance and nothing was marked
 	// instead of a recorded stage that names no domain.
 	UpgradeErrorReconcileNothingCompared UpgradeErrorCode = "upgrade_reconcile_nothing_compared"
+	// UpgradeErrorTargetLocked reports that another process holds the v2
+	// data-root lock, so this run cannot write the store. Nothing was compared
+	// and nothing was marked.
+	UpgradeErrorTargetLocked UpgradeErrorCode = "upgrade_target_locked"
 	// UpgradeErrorTargetConflict reports that the v2 data root cannot be resumed:
 	// a copy-in marker describes it, but the marker and the members beside it
 	// disagree, or the members no longer match the backup the marker names.
@@ -76,6 +80,7 @@ var (
 	ErrTargetModified            = &UpgradeError{Code: UpgradeErrorTargetModified}
 	ErrSourceChanged             = &UpgradeError{Code: UpgradeErrorSourceChanged}
 	ErrTargetConflict            = &UpgradeError{Code: UpgradeErrorTargetConflict}
+	ErrTargetLocked              = &UpgradeError{Code: UpgradeErrorTargetLocked}
 	ErrReconcileMismatch         = &UpgradeError{Code: UpgradeErrorReconcileMismatch}
 	ErrReconcileTargetIncomplete = &UpgradeError{Code: UpgradeErrorReconcileTargetIncomplete}
 	ErrReconcileNothingCompared  = &UpgradeError{Code: UpgradeErrorReconcileNothingCompared}
@@ -83,6 +88,13 @@ var (
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {
 	return &UpgradeError{Code: code, Message: message, err: err}
+}
+
+// CodedError builds a typed failure for a refusal the command layer has to
+// report itself, such as a lock another process holds. The code reaches the
+// CLI's JSON errorCode and its exit code through UpgradeErrorCodeOf.
+func CodedError(code UpgradeErrorCode, message string, err error) error {
+	return newUpgradeError(code, message, err)
 }
 
 // unresumable reports a v2 data root a copy-in may not continue from. The

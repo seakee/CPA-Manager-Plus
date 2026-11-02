@@ -137,6 +137,11 @@ type Options struct {
 	// Lock is the caller's held 1.x ownership fence. CopyIn and Reconcile
 	// require the lock bound to the source database; Preflight acquires its own.
 	Lock *processlock.Lock
+	// TargetLock is the caller's held v2 data-root process lock, bound to the
+	// store under TargetRoot. Reconcile requires it for the whole run: the step
+	// writes the store, and a live Manager or a second reconciliation must not
+	// share it. CopyIn does not use it.
+	TargetLock *processlock.Lock
 	// Acknowledged lists the UTC days (YYYY-MM-DD) the operator explicitly
 	// accepts as permanently incomplete. Reconcile only.
 	Acknowledged []string

@@ -20,6 +20,7 @@ import (
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
@@ -1040,6 +1041,42 @@ func TestReconcileExitsOneOnAnUnacknowledgedMismatch(t *testing.T) {
 		acknowledged.Report.NewlyMarkedDays != 1 ||
 		acknowledged.Report.IncompleteDays[0].Day != day {
 		t.Fatalf("acknowledged reconcile = %+v, want the day marked once", acknowledged.Report)
+	}
+}
+
+// TestReconcileRefusesAStoreAnotherProcessHolds reproduces review M3/P5 at the
+// CLI: a v2 data root another owner had locked was written anyway, because the
+// command took no lock at all.
+func TestReconcileRefusesAStoreAnotherProcessHolds(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	holder, err := processlock.Acquire(filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("take the v2 data-root lock as another owner: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle)
+	if code != 1 {
+		t.Fatalf("reconcile exit code = %d, want 1; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; stderr: %s; output: %s", err, stderr, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorTargetLocked) {
+		t.Fatalf("error code = %q, want %q; output: %s", output.ErrorCode, upgradeservice.UpgradeErrorTargetLocked, stdout)
+	}
+	if output.Report != nil && output.Report.Recorded {
+		t.Fatalf("reconcile recorded under another owner's lock: %+v", output.Report)
+	}
+	if code, _, stdout := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite")); code != 0 {
+		t.Fatalf("status exit code = %d; stdout: %s", code, stdout)
 	}
 }
 

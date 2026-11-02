@@ -61,13 +61,14 @@ const (
 var openSnapshot = upgradeservice.OpenSnapshot
 
 // ExitCode maps a Run result to the CLI contract: 0 ready, 1 a refusal the
-// operator has to look at — a blocked preflight, an unacknowledged mismatch, a
-// store that cannot show what the source holds, a reconciliation that compared
-// nothing, or a store whose recorded copy-in does not allow the step — and 2
-// anything else. A refusal is a decision about the migration, not a usage or
-// environment error, so every reconcile refusal shares exit 1 and the typed code
-// in the report says which one it was. A changed source stays retryable and
-// keeps exit 2: the retry marker is what tells the operator to run it again.
+// operator has to look at — a blocked preflight, a source or v2 data root
+// another process holds, an unacknowledged mismatch, a store that cannot show
+// what the source holds, a reconciliation that compared nothing, or a store
+// whose recorded copy-in does not allow the step — and 2 anything else. A
+// refusal is a decision about the migration, not a usage or environment error,
+// so every reconcile refusal shares exit 1 and the typed code in the report says
+// which one it was. A changed source stays retryable and keeps exit 2: the retry
+// marker is what tells the operator to run it again.
 func ExitCode(err error) int {
 	switch {
 	case err == nil:
@@ -75,11 +76,17 @@ func ExitCode(err error) int {
 	case errors.Is(err, ErrBlocked),
 		errors.Is(err, upgradeservice.ErrReconcileMismatch),
 		errors.Is(err, upgradeservice.ErrReconcileTargetIncomplete),
-		errors.Is(err, upgradeservice.ErrReconcileNothingCompared):
+		errors.Is(err, upgradeservice.ErrReconcileNothingCompared),
+		errors.Is(err, upgradeservice.ErrTargetLocked):
 		return 1
-	default:
-		return 2
 	}
+	// A source somebody else owns is the same decision as a blocked preflight:
+	// stop the Manager that holds it. It is not a usage or environment error.
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok &&
+		code == upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy) {
+		return 1
+	}
+	return 2
 }
 
 func IsHelp(err error) bool { return errors.Is(err, flag.ErrHelp) }
@@ -441,22 +448,45 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		writeReconcileOutput(stdout, *asJSON, output)
 		return ErrBlocked
 	}
-	reconcileReport, err := upgradeservice.Reconcile(ctx, upgradeservice.Options{
-		LegacyRoot:            legacyRoot,
-		TargetRoot:            targetRoot,
-		BundleDir:             bundleDir,
-		ScratchDir:            *scratchDir,
-		Acknowledged:          acknowledged,
-		AcknowledgeParityGaps: *acknowledgeParityGaps,
-	})
-	output.Report = &reconcileReport
-	if err != nil {
+	// Every refusal below still prints the report with its typed code, so a
+	// script reads the code and a person reads what to do next.
+	fail := func(err error) error {
 		if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok {
 			output.ErrorCode = string(code)
 		}
 		output.Error = err.Error()
 		writeReconcileOutput(stdout, *asJSON, output)
 		return err
+	}
+	// The step reads a stopped 1.x source and writes the v2 store, so it holds
+	// both fences for the whole run, exactly as the copy-in holds the source one:
+	// a live Manager or another offline step owns one of them, and racing it
+	// would write permanent marks under a reader's feet.
+	sourceLock, err := processlock.AcquireExisting(upgradeservice.SourceDatabasePath(legacyRoot))
+	if err != nil {
+		return fail(upgradeservice.CodedError(upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy),
+			"the 1.x source is held by another process; stop Manager Server and retry", err))
+	}
+	defer func() { _ = sourceLock.Close() }()
+	targetLock, err := processlock.Acquire(upgradeservice.TargetDatabasePath(targetRoot))
+	if err != nil {
+		return fail(upgradeservice.CodedError(upgradeservice.UpgradeErrorTargetLocked,
+			"the v2 data root is held by another process; stop Manager Server and retry", err))
+	}
+	defer func() { _ = targetLock.Close() }()
+	reconcileReport, err := upgradeservice.Reconcile(ctx, upgradeservice.Options{
+		LegacyRoot:            legacyRoot,
+		TargetRoot:            targetRoot,
+		BundleDir:             bundleDir,
+		ScratchDir:            *scratchDir,
+		Lock:                  sourceLock,
+		TargetLock:            targetLock,
+		Acknowledged:          acknowledged,
+		AcknowledgeParityGaps: *acknowledgeParityGaps,
+	})
+	output.Report = &reconcileReport
+	if err != nil {
+		return fail(err)
 	}
 	writeReconcileOutput(stdout, *asJSON, output)
 	return nil

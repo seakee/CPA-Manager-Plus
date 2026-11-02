@@ -396,12 +396,21 @@ func sourceBundleLayout(root string) maintenancebundle.Layout {
 // requireSourceLock proves the caller's fence is the one for this database, so
 // a lock taken for another path can never authorize this copy.
 func requireSourceLock(lock *processlock.Lock, databasePath string) error {
+	return requireLock(lock, databasePath, "1.x source database")
+}
+
+// requireLock proves the caller's held fence belongs to this database and is
+// still valid, so a lock taken for another path can never authorize a write.
+// Every offline writer holds a processlock on the store it writes; the role
+// names which one, because the same fence guards the 1.x source and the v2 data
+// root in different steps.
+func requireLock(lock *processlock.Lock, databasePath, role string) error {
 	resolved := databasePath
 	if dir, err := filepath.EvalSymlinks(filepath.Dir(databasePath)); err == nil {
 		resolved = filepath.Join(dir, filepath.Base(databasePath))
 	}
 	if filepath.Clean(resolved) != filepath.Clean(lock.DatabasePath()) {
-		return errors.New("the held ownership lock does not belong to the 1.x source database")
+		return fmt.Errorf("the held ownership lock does not belong to the %s", role)
 	}
 	return lock.Validate()
 }

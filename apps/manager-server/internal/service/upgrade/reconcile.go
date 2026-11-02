@@ -255,6 +255,13 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 	paths := newTargetPaths(targetRoot)
+	// The step reads a stopped 1.x source and writes the v2 store, so the caller
+	// must hold both fences for the whole run. Refusing here keeps a programmatic
+	// caller from marking a store a live Manager or a second reconciliation is
+	// writing at the same time.
+	if err := requireReconcileLocks(options, sourceRoot, paths); err != nil {
+		return ReconcileReport{}, err
+	}
 
 	recorded, found, err := readRecordedCopyIn(ctx, paths.Database)
 	if err != nil {
@@ -356,6 +363,27 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		UpdatedAtMS:       operation.UpdatedAtMS,
 	}, nil
 }
+
+// requireReconcileLocks proves the caller holds the two fences this step writes
+// under: the 1.x ownership lock for the source it reads and the v2 data-root
+// lock for the store it marks. A lock taken for another path is refused, and so
+// is a closed one: the fence has to be valid for the whole run, not just at the
+// moment it was taken.
+func requireReconcileLocks(options Options, sourceRoot string, paths targetPaths) error {
+	if err := requireLock(options.Lock, SourceDatabasePath(sourceRoot), "1.x source database"); err != nil {
+		return newUpgradeError(UpgradeErrorCode(CodeSourceBusy),
+			"the run does not hold the 1.x ownership lock of the source it compares; nothing was compared and nothing was marked", err)
+	}
+	if err := requireLock(options.TargetLock, paths.Database, "v2 data root"); err != nil {
+		return newUpgradeError(UpgradeErrorTargetLocked,
+			"the run does not hold the v2 data-root lock of the store it marks; nothing was compared and nothing was marked", err)
+	}
+	return nil
+}
+
+// TargetDatabasePath names the migrated store inside a v2 data root. The CLI
+// locks this path before a write, so the name is not duplicated there.
+func TargetDatabasePath(root string) string { return filepath.Join(root, databaseFileName) }
 
 // reconcileRoots resolves and fences the three roots. The 1.x volume is a
 // source, never a destination, so no root may contain another.

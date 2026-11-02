@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -22,9 +23,11 @@ import (
 // copiedVolume is a 1.x source that already went through the copy-in: the v2
 // data root holds the migrated store the recorded operation describes.
 type copiedVolume struct {
-	volume  legacyVolume
-	target  string
-	options Options
+	volume     legacyVolume
+	target     string
+	options    Options
+	sourceLock *processlock.Lock
+	targetLock *processlock.Lock
 }
 
 func newCopiedVolume(t *testing.T) copiedVolume {
@@ -42,7 +45,9 @@ func newCopiedVolumeWith(t *testing.T, seed func(*testing.T, legacyVolume)) copi
 	return copyVolume(t, volume)
 }
 
-// copyVolume copies an already prepared 1.x volume into a fresh v2 data root.
+// copyVolume copies an already prepared 1.x volume into a fresh v2 data root
+// and holds the two fences a reconciliation writes under, exactly as the CLI
+// does, so every later Reconcile on this volume runs the way production does.
 func copyVolume(t *testing.T, volume legacyVolume) copiedVolume {
 	t.Helper()
 	targetRoot := canonicalTempDir(t)
@@ -51,13 +56,27 @@ func copyVolume(t *testing.T, volume legacyVolume) copiedVolume {
 	if _, err := CopyIn(context.Background(), options); err != nil {
 		t.Fatalf("copy in: %v", err)
 	}
-	return copiedVolume{volume: volume, target: targetRoot, options: options}
+	targetLock, err := processlock.Acquire(filepath.Join(targetRoot, databaseFileName))
+	if err != nil {
+		t.Fatalf("acquire the v2 data-root lock: %v", err)
+	}
+	t.Cleanup(func() { _ = targetLock.Close() })
+	return copiedVolume{
+		volume: volume, target: targetRoot, options: options,
+		sourceLock: options.Lock, targetLock: targetLock,
+	}
 }
 
 // reconcileOptions is the copy-in options plus what this step needs: the same
 // source and target, and no acknowledgement yet.
 func (c copiedVolume) reconcileOptions() Options {
-	return Options{LegacyRoot: c.volume.root, TargetRoot: c.target, BundleDir: c.options.BundleDir}
+	return Options{
+		LegacyRoot: c.volume.root,
+		TargetRoot: c.target,
+		BundleDir:  c.options.BundleDir,
+		Lock:       c.sourceLock,
+		TargetLock: c.targetLock,
+	}
 }
 
 func (c copiedVolume) databasePath() string { return filepath.Join(c.target, databaseFileName) }
@@ -284,13 +303,7 @@ func TestReconcileRequiresAcknowledgementForAParityGap(t *testing.T) {
 	// The gap has to exist in the source before the copy-in: reconciliation
 	// refuses a source whose fingerprint is not the one the copy-in recorded.
 	seedParityGap(t, volume)
-	targetRoot := canonicalTempDir(t)
-	options := copyInOptions(volume, targetRoot)
-	options.Lock = volume.lock(t)
-	if _, err := CopyIn(context.Background(), options); err != nil {
-		t.Fatalf("copy in: %v", err)
-	}
-	copied := copiedVolume{volume: volume, target: targetRoot, options: options}
+	copied := copyVolume(t, volume)
 
 	report, err := Reconcile(context.Background(), copied.reconcileOptions())
 	if !errors.Is(err, ErrReconcileMismatch) {
@@ -332,13 +345,7 @@ func TestReconcileDoesNotWaiveAMeasuredMismatchWithTheParitySwitch(t *testing.T)
 	// Both the parity gap and the events the fixture seeds sit on 1970-01-01, so
 	// the measured disagreement and the gap share one day.
 	seedParityGap(t, volume)
-	targetRoot := canonicalTempDir(t)
-	options := copyInOptions(volume, targetRoot)
-	options.Lock = volume.lock(t)
-	if _, err := CopyIn(context.Background(), options); err != nil {
-		t.Fatalf("copy in: %v", err)
-	}
-	copied := copiedVolume{volume: volume, target: targetRoot, options: options}
+	copied := copyVolume(t, volume)
 	execTarget(t, copied.databasePath(),
 		`update usage_events set total_tokens = total_tokens + 999 where event_hash = 'legacy-event-1'`)
 
@@ -1272,6 +1279,85 @@ func TestReconcileOnlyRemovesItsOwnScratchDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(scratchRoot, reconcileScratchDirectory)); !os.IsNotExist(err) {
 		t.Fatalf("the tool-owned subdirectory survived: %v", err)
+	}
+}
+
+// TestReconcileRefusesToWriteWithoutItsLocks reproduces review M3/P5: the step
+// wrote the v2 store while another owner held the 1.x lock and the v2 data-root
+// lock, because it never took either.
+func TestReconcileRefusesToWriteWithoutItsLocks(t *testing.T) {
+	cases := []struct {
+		name   string
+		drop   func(copiedVolume) Options
+		want   error
+		code   UpgradeErrorCode
+		detail string
+	}{
+		{
+			name: "no v2 data-root lock",
+			drop: func(copied copiedVolume) Options {
+				options := copied.reconcileOptions()
+				options.TargetLock = nil
+				return options
+			},
+			want:   ErrTargetLocked,
+			code:   UpgradeErrorTargetLocked,
+			detail: "v2 data-root lock",
+		},
+		{
+			name: "no 1.x ownership lock",
+			drop: func(copied copiedVolume) Options {
+				options := copied.reconcileOptions()
+				options.Lock = nil
+				return options
+			},
+			want:   nil,
+			code:   UpgradeErrorCode(CodeSourceBusy),
+			detail: "1.x ownership lock",
+		},
+		{
+			name: "a v2 lock taken for another database",
+			drop: func(copied copiedVolume) Options {
+				options := copied.reconcileOptions()
+				other, err := processlock.Acquire(filepath.Join(canonicalTempDir(t), "other.sqlite"))
+				if err != nil {
+					t.Fatalf("acquire an unrelated lock: %v", err)
+				}
+				t.Cleanup(func() { _ = other.Close() })
+				options.TargetLock = other
+				return options
+			},
+			want:   ErrTargetLocked,
+			code:   UpgradeErrorTargetLocked,
+			detail: "v2 data-root lock",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			copied := newCopiedVolume(t)
+			report, err := Reconcile(context.Background(), testCase.drop(copied))
+			if err == nil {
+				t.Fatalf("reconcile wrote without its locks: %+v", report)
+			}
+			if testCase.want != nil && !errors.Is(err, testCase.want) {
+				t.Fatalf("reconcile error = %v, want %v", err, testCase.want)
+			}
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != testCase.code {
+				t.Fatalf("error code = %q (%t), want %q", code, ok, testCase.code)
+			}
+			if message := err.Error(); !strings.Contains(message, testCase.detail) {
+				t.Fatalf("error %q does not name the %s it is missing", message, testCase.detail)
+			}
+			if report.Recorded {
+				t.Fatal("a run without its locks recorded the operation")
+			}
+			if recorded := operationRow(t, copied.databasePath()); recorded.Stage != model.UpgradeStageCopyIn {
+				t.Fatalf("stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageCopyIn)
+			}
+			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
+				t.Fatalf("marked days = %v, want none", got)
+			}
+		})
 	}
 }
 
