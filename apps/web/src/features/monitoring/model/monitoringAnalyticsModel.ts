@@ -53,7 +53,12 @@ export const buildMonitoringFilterSelectorsScopeKey = (
 ) =>
   JSON.stringify({
     range: timeRange,
-    bounds: timeRange === 'custom' || timeRange === '24h' ? bounds : null,
+    bounds:
+      timeRange === 'custom'
+        ? bounds
+        : timeRange === '24h' && bounds
+          ? { startMs: bounds.startMs }
+          : null,
     searchQuery,
     searchApiKeyHash,
   });

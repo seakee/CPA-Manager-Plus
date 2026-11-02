@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { getRangeBounds, shouldUseHourlyTimeline } from './range';
 
 describe('monitoring range', () => {
-  it('uses the previous 24 complete hours, including repeated DST hours and fractional offsets', () => {
+  it('keeps 24 elapsed hours before the local hour and includes the current partial hour across timezones', () => {
     for (const [zone, now, boundary] of [
       ['Asia/Shanghai', '2026-11-03T00:32:00+08:00', '2026-11-03T00:00:00+08:00'],
       ['America/New_York', '2026-11-01T01:32:00-05:00', '2026-11-01T01:00:00-05:00'],
@@ -13,7 +13,11 @@ describe('monitoring range', () => {
         const endMs = Date.parse(boundary);
         expect(getRangeBounds('24h', Date.parse(now))).toEqual({
           startMs: endMs - 86_400_000,
-          endMs,
+          endMs: Date.parse(now),
+        });
+        expect(getRangeBounds('24h', Date.parse(now) + 30_000)).toEqual({
+          startMs: endMs - 86_400_000,
+          endMs: Date.parse(now) + 30_000,
         });
         expect(getRangeBounds('24h', endMs + 3_600_000)).toEqual({
           startMs: endMs - 82_800_000,

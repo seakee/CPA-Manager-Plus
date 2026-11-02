@@ -1,5 +1,14 @@
 import { joinUnique } from './base';
-import { buildDayLabel, buildHourLabel, formatHourOffset, getRangeBounds, HOUR_MS, padNumber, shouldUseHourlyTimeline } from './range';
+import {
+  buildDayLabel,
+  buildHourLabel,
+  buildLocalDayKey,
+  formatHourOffset,
+  getRangeBounds,
+  HOUR_MS,
+  padNumber,
+  shouldUseHourlyTimeline,
+} from './range';
 import type {
   MonitoringChannelRow,
   MonitoringCustomTimeRange,
@@ -23,7 +32,7 @@ export const buildTimeline = (
 ): { granularity: 'hour' | 'day'; points: MonitoringTimelinePoint[] } => {
   if (timeRange === '24h') {
     const bounds = getRangeBounds(timeRange, nowMs)!;
-    const points = Array.from({ length: 24 }, (_, index) => {
+    const points = Array.from({ length: 25 }, (_, index) => {
       const timestamp = bounds.startMs + index * HOUR_MS;
       return { label: buildHourLabel(timestamp), requests: 0, tokens: 0, cost: 0 };
     });
@@ -40,7 +49,7 @@ export const buildTimeline = (
     points.forEach((point, index) => {
       if (labels.indexOf(point.label) !== labels.lastIndexOf(point.label)) {
         const timestamp = bounds.startMs + index * HOUR_MS;
-        point.label += ` (UTC${formatHourOffset(timestamp)})`;
+        point.label = `${buildDayLabel(buildLocalDayKey(timestamp))} ${point.label} (UTC${formatHourOffset(timestamp)})`;
       }
     });
     return { granularity: 'hour', points };

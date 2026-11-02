@@ -191,7 +191,7 @@ export const buildMonitoringEventsScopeKey = (
   JSON.stringify({
     range: timeRange,
     bounds:
-      timeRange === 'custom' || timeRange === '24h'
+      timeRange === 'custom'
         ? analyticsBounds
         : analyticsBounds
           ? { startMs: analyticsBounds.startMs }
@@ -365,7 +365,9 @@ export function useMonitoringData({
       if (timeRange === '24h') setAnalyticsNowMs(Date.now());
     });
     if (timeRange !== '24h') {
-      return () => { cancelled = true; };
+      return () => {
+        cancelled = true;
+      };
     }
     const unsubscribe = subscribeHourlyClock(
       setAnalyticsNowMs,
@@ -767,7 +769,14 @@ export function useMonitoringData({
 
   const rangeFilteredRows = useMemo(
     () =>
-      buildRangeFilteredRows(allRows, timeRange, customTimeRange, searchQuery, searchApiKeyHash, analyticsNowMs),
+      buildRangeFilteredRows(
+        allRows,
+        timeRange,
+        customTimeRange,
+        searchQuery,
+        searchApiKeyHash,
+        analyticsNowMs
+      ),
     [allRows, analyticsNowMs, customTimeRange, searchApiKeyHash, searchQuery, timeRange]
   );
   const filteredRows = useMemo(
@@ -992,7 +1001,8 @@ export function useMonitoringData({
 
   const computedPresentationSnapshot = useMemo<MonitoringPresentationSnapshot>(
     () => ({
-      rangeBounds: analyticsBounds,
+      // Bounds belong to the published response, not a newer in-flight request.
+      rangeBounds: analytics.dataBounds ?? analyticsBounds,
       summary,
       coverage: currentAnalyticsData?.coverage,
       timeline: timelineData.points,
@@ -1017,6 +1027,7 @@ export function useMonitoringData({
     }),
     [
       analytics.lastRefreshedAt,
+      analytics.dataBounds,
       analyticsBounds,
       accountRows,
       apiKeyRows,

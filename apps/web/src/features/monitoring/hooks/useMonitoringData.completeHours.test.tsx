@@ -42,7 +42,7 @@ let latest: UseMonitoringDataReturn;
 let renderer: ReactTestRenderer | undefined;
 let doc: EventTarget & { visibilityState: string };
 const requests = () => api.mock.calls.map((call) => call[2]);
-function Harness({ range = '24h' }: { range?: MonitoringTimeRange }) {
+function Harness({ range = '24h', poll = false }: { range?: MonitoringTimeRange; poll?: boolean }) {
   const result = useMonitoringData({
     config: null,
     modelPrices: prices,
@@ -53,6 +53,14 @@ function Harness({ range = '24h' }: { range?: MonitoringTimeRange }) {
   useEffect(() => {
     latest = result;
   }, [result]);
+  const { refreshMeta } = result;
+  useEffect(() => {
+    if (!poll) return;
+    const timer = setInterval(() => {
+      void refreshMeta(false);
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [poll, refreshMeta]);
   return null;
 }
 const mount = async (range: MonitoringTimeRange = '24h') => {
@@ -62,7 +70,9 @@ const mount = async (range: MonitoringTimeRange = '24h') => {
 };
 
 beforeEach(() => {
-  vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+  vi.useFakeTimers({
+    toFake: ['Date', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+  });
   vi.setSystemTime(end + 32 * 60_000);
   doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
   vi.stubGlobal('document', doc);
@@ -118,15 +128,87 @@ afterEach(async () => {
   api.mockReset();
 });
 
-const expectWindow = (request: MonitoringAnalyticsRequest, boundary: number) => {
+const expectWindow = (request: MonitoringAnalyticsRequest, boundary: number, now = boundary) => {
   expect(request.from_ms).toBe(boundary - 86_400_000);
-  expect(request.to_ms).toBe(boundary);
+  expect(request.to_ms).toBe(now);
 };
 
-describe('complete-hour monitoring integration without auto-refresh', () => {
+describe('hour-aligned live monitoring integration', () => {
+  it.each([false, true])(
+    'includes a new current-hour event on same-hour refresh (normal polling: %s)',
+    async (poll) => {
+      await mount();
+      if (poll) {
+        await act(async () => {
+          renderer!.update(<Harness poll />);
+        });
+      }
+      const oldBounds = latest.rangeBounds;
+      const response = api.getMockImplementation()!;
+      api.mockImplementation(async (base, key, request, signal) => {
+        const data = await response(base, key, request, signal);
+        if (data.events && request.to_ms > end + 32 * 60_000) {
+          data.events.items.push({
+            ...data.events.items[0],
+            event_hash: 'new-current-hour',
+            timestamp_ms: end + 32 * 60_000 + 1,
+          });
+        }
+        return data;
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+        if (!poll) await latest.refreshMeta(false);
+      });
+      expect(latest.rangeBounds).toEqual({
+        startMs: end - 86_400_000,
+        endMs: end + 32 * 60_000 + 30_000,
+      });
+      expect(latest.rangeBounds?.startMs).toBe(oldBounds?.startMs);
+      expect(latest.filteredRows.some((row) => row.timestampMs === end + 32 * 60_000 + 1)).toBe(
+        true
+      );
+      expect(latest.summary.totalCalls).toBe(2);
+      expect(latest.isTransitioningScope).toBe(false);
+    }
+  );
+
+  it('preserves loaded pagination and snapshot bounds during a pending or failed same-hour refresh', async () => {
+    await mount();
+    await act(async () => {
+      latest.loadMoreEvents();
+    });
+    const previousBounds = latest.rangeBounds;
+    const previousRows = latest.filteredRows;
+    const response = api.getMockImplementation()!;
+    let rejectRefresh!: (error: Error) => void;
+    api.mockImplementation((base, key, request, signal) =>
+      request.include?.filter_selectors
+        ? response(base, key, request, signal)
+        : new Promise((_resolve, reject) => {
+            rejectRefresh = reject;
+          })
+    );
+    await act(async () => {
+      vi.setSystemTime(end + 33 * 60_000);
+      await latest.refreshMeta(false);
+    });
+    expect(latest.isTransitioningScope).toBe(false);
+    expect(latest.filteredRows).toEqual(previousRows);
+    expect(latest.rangeBounds).toEqual(previousBounds);
+    expect(requests()[requests().length - 2]?.include?.events_page?.before_ms).toBeNull();
+    expect(latest.eventsLoadedCount).toBe(previousRows.length);
+    await act(async () => {
+      rejectRefresh(new Error('same-hour refresh failed'));
+    });
+    expect(latest.rangeBounds).toEqual(previousBounds);
+    expect(latest.filteredRows).toEqual(previousRows);
+    expect(latest.error).toContain('same-hour refresh failed');
+  });
+
   it('requests identical half-open bounds for events/summary/selectors and resets pagination every hour', async () => {
     await mount();
-    requests().forEach((request) => expectWindow(request, end));
+    requests().forEach((request) => expectWindow(request, end, end + 32 * 60_000));
     expect(latest.timelineGranularity).toBe('hour');
     expect(latest.filteredRows).toHaveLength(1);
     expect(latest.summary.totalCalls).toBe(1);
@@ -172,11 +254,11 @@ describe('complete-hour monitoring integration without auto-refresh', () => {
     });
     expect(latest.isTransitioningScope).toBe(true);
     expect(latest.summary.totalCalls).toBe(1);
-    expect(latest.rangeBounds).toEqual({ startMs: end - 86_400_000, endMs: end });
+    expect(latest.rangeBounds).toEqual({ startMs: end - 86_400_000, endMs: end + 32 * 60_000 });
     await act(async () => {
       rejectRefresh(new Error('refresh failed'));
     });
-    expect(latest.rangeBounds).toEqual({ startMs: end - 86_400_000, endMs: end });
+    expect(latest.rangeBounds).toEqual({ startMs: end - 86_400_000, endMs: end + 32 * 60_000 });
     expect(latest.error).toContain('refresh failed');
   });
 
@@ -186,7 +268,7 @@ describe('complete-hour monitoring integration without auto-refresh', () => {
     ) => void;
     const normalResponse = api.getMockImplementation()!;
     api.mockImplementation((base, key, request, signal) => {
-      if (!request.include?.filter_selectors && request.to_ms === end) {
+      if (!request.include?.filter_selectors && request.to_ms === end + 32 * 60_000) {
         return new Promise((resolve) => {
           resolveOld = resolve;
         });
@@ -225,7 +307,9 @@ describe('complete-hour monitoring integration without auto-refresh', () => {
     expect(requests().slice(count)).toHaveLength(2);
     requests()
       .slice(count)
-      .forEach((request) => expectWindow(request, end + 4 * 3_600_000));
+      .forEach((request) =>
+        expectWindow(request, end + 4 * 3_600_000, end + 4 * 3_600_000 + 10_000)
+      );
     const resumedCount = api.mock.calls.length;
     await act(async () => {
       doc.dispatchEvent(new Event('visibilitychange'));
@@ -244,7 +328,9 @@ describe('complete-hour monitoring integration without auto-refresh', () => {
     });
     requests()
       .slice(-2)
-      .forEach((request) => expectWindow(request, end + 2 * 3_600_000));
+      .forEach((request) =>
+        expectWindow(request, end + 2 * 3_600_000, end + 2 * 3_600_000 + 10_000)
+      );
     await act(async () => {
       renderer!.unmount();
     });

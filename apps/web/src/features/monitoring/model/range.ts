@@ -63,8 +63,8 @@ export const getRangeBounds = (
 
   switch (range) {
     case '24h': {
-      const endMs = startOfLocalHourMs(nowMs);
-      return { startMs: endMs - 24 * HOUR_MS, endMs };
+      const startMs = startOfLocalHourMs(nowMs) - 24 * HOUR_MS;
+      return { startMs, endMs: nowMs };
     }
     case 'today':
       return { startMs: todayStart, endMs: nowMs };
@@ -86,10 +86,7 @@ export const getRangeBounds = (
 export const getRangeDisplayBounds = (
   range: MonitoringTimeRange,
   bounds: MonitoringCustomTimeRange | null
-) =>
-  bounds && (range === '24h' || range === 'yesterday')
-    ? { ...bounds, endMs: bounds.endMs - 1 }
-    : bounds;
+) => (bounds && range === 'yesterday' ? { ...bounds, endMs: bounds.endMs - 1 } : bounds);
 
 export const shouldUseHourlyTimeline = (
   range: MonitoringTimeRange,

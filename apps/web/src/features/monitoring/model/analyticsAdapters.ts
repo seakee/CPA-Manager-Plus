@@ -34,7 +34,13 @@ import {
 } from './base';
 import { sanitizeApiKeyDisplayText, type ApiKeyDisplayInfo } from './apiKeys';
 import { buildMonitoringAccountRowId, normalizeMonitoringProvider } from './accountIdentity';
-import { buildDayLabel, buildHourLabel, buildLocalDayKey, formatHourOffset, padNumber } from './range';
+import {
+  buildDayLabel,
+  buildHourLabel,
+  buildLocalDayKey,
+  formatHourOffset,
+  padNumber,
+} from './range';
 import { buildMonitoringSourceDisplay } from './sourceDisplay';
 import type {
   MonitoringAccountModelSpendRow,
@@ -462,10 +468,14 @@ export const buildTimelineFromAnalytics = (
   points.map((point) => ({
     label:
       granularity === 'hour'
-        ? buildHourLabel(point.bucket_ms) + (
-            points.some((other) => other.bucket_ms !== point.bucket_ms && buildHourLabel(other.bucket_ms) === buildHourLabel(point.bucket_ms))
-              ? ` (UTC${formatHourOffset(point.bucket_ms)})` : ''
+        ? buildHourLabel(point.bucket_ms) +
+          (points.some(
+            (other) =>
+              other.bucket_ms !== point.bucket_ms &&
+              buildHourLabel(other.bucket_ms) === buildHourLabel(point.bucket_ms)
           )
+            ? ` ${buildDayLabel(buildLocalDayKey(point.bucket_ms))} (UTC${formatHourOffset(point.bucket_ms)})`
+            : '')
         : buildDayLabel(buildLocalDayKey(point.bucket_ms)),
     requests: point.calls,
     tokens: point.tokens,
