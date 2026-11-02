@@ -1455,6 +1455,88 @@ func TestStatusDecidesFromTheMarkerBeforeOpeningAMaterializingTarget(t *testing.
 	}
 }
 
+// TestStatusAuthenticatesWithoutOpeningAMaterializingManagerStore is P1 at the
+// route boundary. Without a usable source mount the credential resolves to the
+// Manager store, so authentication runs before the marker-first status read can
+// protect anything. A copied-in target that is still `materializing` must not be
+// opened in place: a read-only open of its copied WAL joins that WAL and rewrites
+// `-shm`, the member the resumed move compares with its backup. The key is still
+// proved — against a private snapshot outside the target's data root — and the
+// three restored members stay byte-identical across admission, authentication
+// and the status projection.
+func TestStatusAuthenticatesWithoutOpeningAMaterializingManagerStore(t *testing.T) {
+	source := legacySourceDir(t)
+	writer, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	// Committed rows stay in the WAL: the writer is kept open and auto-checkpoint
+	// is off, so the copied target holds a live WAL and a real WAL index.
+	if _, err := writer.Exec(`pragma journal_mode = wal; pragma wal_autocheckpoint = 0;
+		create table wal_payload (value text);
+		insert into wal_payload values ('committed-in-wal')`); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "usage.sqlite")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		data, err := os.ReadFile(filepath.Join(source, "usage.sqlite") + suffix)
+		if err != nil {
+			t.Fatalf("read the restored member %q: %v", suffix, err)
+		}
+		if err := os.WriteFile(target+suffix, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyinmarker.Write(filepath.Dir(target), copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
+		TargetDatabase:          target,
+		SourceKind:              "upgraded-legacy",
+		SourceVersion:           "1.14.4",
+		SourceFingerprintBefore: "fingerprint-before",
+		SourceFingerprintAfter:  "fingerprint-after",
+		BackupManifestSHA256:    "manifest",
+		WrittenAtMS:             1717171717000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restored := targetMemberState(t, target)
+	if restored[databaseMember(target, "-shm")] == "" {
+		t.Fatalf("the restored target holds no WAL index: %v", restored)
+	}
+
+	// No mount at all: the Manager store is the only credential file, and the
+	// accepted admission must decide this phase from the marker alone.
+	stage, err := (legacypreflight.DatabaseUpgradeAdmission{DatabasePath: target}).Admitted(context.Background())
+	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
+		t.Fatalf("admission before status = %q err=%v", stage, err)
+	}
+	handler := newHandler("", target)
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatalf("decode status: %v: %s", err, body)
+	}
+	if !status.Recorded || status.Evidence != EvidenceCopyInMarker || status.Stage != StageCopyIn ||
+		status.NextAction != ActionCopyIn || status.SourceRoot != CodeLegacyRootMissing {
+		t.Fatalf("status on a materializing Manager target without a mount = %s", body)
+	}
+	if after := targetMemberState(t, target); !reflect.DeepEqual(restored, after) {
+		t.Fatalf("Manager credential fallback rewrote a materializing target: before=%v after=%v", restored, after)
+	}
+
+	// The wrong key is still a credential verdict, and it also leaves the target
+	// alone: refusing to prove the key never means opening the target.
+	_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(foreignKey), http.StatusUnauthorized)
+	if !strings.Contains(body, `"`+CodeAdminUnauthorized+`"`) {
+		t.Fatalf("wrong key on a materializing target = %s", body)
+	}
+	if after := targetMemberState(t, target); !reflect.DeepEqual(restored, after) {
+		t.Fatalf("a rejected key rewrote a materializing target: before=%v after=%v", restored, after)
+	}
+}
+
 // databaseMember names one member of the target database.
 func databaseMember(database, suffix string) string {
 	return filepath.Base(database) + suffix

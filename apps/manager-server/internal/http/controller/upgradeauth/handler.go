@@ -62,7 +62,7 @@ func (h *Handler) verifyCredential(ctx context.Context, key string) error {
 	if h.mountSource {
 		return upgradeservice.VerifyAdminSource(ctx, h.paths.Database, key)
 	}
-	return upgradeservice.VerifyManagerCredential(ctx, h.paths.Database, key)
+	return upgradeservice.VerifyManagerCredential(ctx, h.paths.Database, "", key)
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

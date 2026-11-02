@@ -320,7 +320,12 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 	if mount.database != "" {
 		verifyErr = upgradeservice.VerifyAdminSource(r.Context(), database, key)
 	} else {
-		verifyErr = upgradeservice.VerifyManagerCredential(r.Context(), database, key)
+		// The Manager fallback is normally this process's live store and is read
+		// in place. When it is a copy-in target that was not materialized
+		// completely, the service detects that before opening it and proves the
+		// key against a private snapshot; the configured source root is passed
+		// along so that snapshot never lands in the tree the copy-in is reading.
+		verifyErr = upgradeservice.VerifyManagerCredential(r.Context(), database, mount.root, key)
 	}
 	switch {
 	case verifyErr == nil:

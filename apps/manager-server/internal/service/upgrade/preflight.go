@@ -26,6 +26,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // Check names, in report order.
@@ -557,6 +558,17 @@ func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 // identical credential row; any change — a WAL that appears, a checkpoint, a
 // rewrite, a replaced file — produces a different identity and a fresh read.
 func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
+	return verifyPreservedCredential(ctx, databasePath, key)
+}
+
+// verifyPreservedCredential is the read behind VerifyAdminSource and behind the
+// Manager-store fallback when its store is a copy-in target that was not
+// materialized completely. extraRoots names directories the private copy must
+// not land in besides the database's own directory: the Manager store's data
+// root always, and the configured 1.x source root when the caller knows it, so a
+// host whose temporary directory points into either tree cannot hide a full
+// database copy there.
+func verifyPreservedCredential(ctx context.Context, databasePath, key string, extraRoots ...string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
 	}
@@ -585,7 +597,7 @@ func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
 		// by the cache instead of repeating that cost.
 		ctx, cancel := context.WithTimeout(context.Background(), credentialVerifyBudget(identity.database.size))
 		defer cancel()
-		source, openErr := openCredentialSource(ctx, databasePath)
+		source, openErr := openCredentialSource(ctx, databasePath, extraRoots...)
 		if openErr != nil {
 			// The bound is placed before and during the snapshot, so a read that
 			// outlives it fails here instead of in the query. That is a deadline,
@@ -712,13 +724,26 @@ func verifyAdminCredential(ctx context.Context, source *credentialSource, key st
 // snapshot of it would copy a database that changes under it and answer 503 on
 // the copy race, which is the wrong verdict for a poll.
 //
+// The one exception is a target that an unfinished copy-in has not materialized
+// completely. The marker is read before any open: in the `materializing` phase
+// the target still holds the members the resumed move compares with its backup,
+// and a read-only open of a store holding a copied WAL joins that WAL and
+// rewrites `-shm`. This route authenticates every status poll, so it is the
+// first reader to reach the target; it must leave it exactly as it found it and
+// still prove the administrator key. The key is therefore verified against a
+// private snapshot outside both the target's data root and, when the caller
+// names it, the configured 1.x source root. sourceRoot is that second root; an
+// empty value means the caller knows of none.
+//
 // The Manager store's credential is not cached either. It is the live database:
 // ordinary Manager traffic appends to its WAL and checkpoints it, so a cached
 // verdict would either miss on almost every poll or, on a filesystem with a
 // coarse modification time, answer with a credential row that was already
 // rotated. The read itself is one indexed row in the process's own open store,
-// not the whole-file copy that makes a preserved source expensive.
-func VerifyManagerCredential(ctx context.Context, databasePath, key string) error {
+// not the whole-file copy that makes a preserved source expensive. Only the
+// materializing target is read as a preserved source, and only it may be
+// answered from that state's remembered verdict.
+func VerifyManagerCredential(ctx context.Context, databasePath, sourceRoot, key string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
 	}
@@ -728,6 +753,13 @@ func VerifyManagerCredential(ctx context.Context, databasePath, key string) erro
 	}
 	if err := ctx.Err(); err != nil {
 		return credentialTimeout(err)
+	}
+	materializing, err := materializingManagerTarget(databasePath)
+	if err != nil {
+		return err
+	}
+	if materializing {
+		return verifyPreservedCredential(ctx, databasePath, key, sourceRoot)
 	}
 	ctx, cancel := context.WithTimeout(ctx, credentialVerifyTimeout)
 	defer cancel()
@@ -747,6 +779,23 @@ func VerifyManagerCredential(ctx context.Context, databasePath, key string) erro
 		return ErrAdminUnauthorized
 	}
 	return nil
+}
+
+// materializingManagerTarget reports whether databasePath is the target of a
+// copy-in that has not finished moving its members. The marker is read before
+// the store is opened, the same order the admission and the status projection
+// use; a marker that names another database file describes another run and is
+// not this store. A marker that cannot be read fails closed: an unreadable
+// provenance record could hide exactly the phase this check exists for.
+func materializingManagerTarget(databasePath string) (bool, error) {
+	marker, inFlight, err := copyinmarker.Read(filepath.Dir(databasePath))
+	if err != nil {
+		return false, err
+	}
+	if !inFlight || marker.Phase != copyinmarker.PhaseMaterializing {
+		return false, nil
+	}
+	return copyinmarker.SameTarget(marker.TargetDatabase, databasePath), nil
 }
 
 // openManagerStore opens the Manager's own database read-only. immutable is used

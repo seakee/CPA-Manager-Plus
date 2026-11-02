@@ -20,6 +20,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
@@ -1917,15 +1918,74 @@ func TestVerifyManagerCredentialReadsTheOwnStore(t *testing.T) {
 		t.Fatalf("store WAL = %v, %v; want the credential in the WAL", info, err)
 	}
 
-	if err := VerifyManagerCredential(context.Background(), store, key); err != nil {
+	if err := VerifyManagerCredential(context.Background(), store, "", key); err != nil {
 		t.Fatalf("verify the store credential: %v", err)
 	}
-	if err := VerifyManagerCredential(context.Background(), store, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
+	if err := VerifyManagerCredential(context.Background(), store, "", "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
 		t.Fatalf("foreign key = %v, want %v", err, ErrAdminUnauthorized)
 	}
-	if err := VerifyManagerCredential(context.Background(), filepath.Join(t.TempDir(), "absent.sqlite"), key); !errors.Is(err, ErrSourceDatabaseMissing) {
+	if err := VerifyManagerCredential(context.Background(), filepath.Join(t.TempDir(), "absent.sqlite"), "", key); !errors.Is(err, ErrSourceDatabaseMissing) {
 		t.Fatalf("absent store = %v, want %v", err, ErrSourceDatabaseMissing)
 	}
+}
+
+// TestVerifyManagerCredentialSnapshotsAMaterializingTarget is the service half
+// of P1. A copy-in target that is still materializing holds the members the
+// resumed move compares with its backup, including a copied WAL index. Opening
+// such a store in place joins its WAL and rewrites `-shm`, so the Manager
+// fallback proves the key against a private snapshot instead. Both the accepted
+// key and the rejected key leave every entry of the target's data root exactly
+// as they found it.
+func TestVerifyManagerCredentialSnapshotsAMaterializingTarget(t *testing.T) {
+	const key = "manager-target-credential"
+	fixture := newCredentialFixture(t, key)
+	writer, err := sql.Open("sqlite", fixture.dbPath)
+	if err != nil {
+		t.Fatalf("open the copied source: %v", err)
+	}
+	writer.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = writer.Close() })
+	// Committed rows stay in the WAL, and the writer stays open, so the copied
+	// target holds a live WAL and a real WAL index rather than a checkpointed
+	// database with no sidecars.
+	execFixture(t, writer, `pragma wal_autocheckpoint = 0`)
+	execFixture(t, writer, `create table materializing_payload (value text)`)
+	execFixture(t, writer, `insert into materializing_payload values ('committed-in-wal')`)
+	if info, err := os.Lstat(fixture.dbPath + "-wal"); err != nil || info.Size() == 0 {
+		t.Fatalf("the copied source has no WAL: info=%v err=%v", info, err)
+	}
+
+	targetRoot := t.TempDir()
+	target := filepath.Join(targetRoot, databaseFileName)
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		data, err := os.ReadFile(fixture.dbPath + suffix)
+		if err != nil {
+			t.Fatalf("read the restored member %q: %v", suffix, err)
+		}
+		if err := os.WriteFile(target+suffix, data, 0o600); err != nil {
+			t.Fatalf("write the restored member %q: %v", suffix, err)
+		}
+	}
+	if err := copyinmarker.Write(targetRoot, copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
+		TargetDatabase:          target,
+		SourceKind:              "upgraded-legacy",
+		SourceFingerprintBefore: "fingerprint-before",
+		SourceFingerprintAfter:  "fingerprint-after",
+		BackupManifestSHA256:    "manifest",
+	}); err != nil {
+		t.Fatalf("publish the materializing marker: %v", err)
+	}
+
+	before := sourceEntries(t, targetRoot)
+	if err := VerifyManagerCredential(context.Background(), target, "", key); err != nil {
+		t.Fatalf("verify the materializing target's credential: %v", err)
+	}
+	if err := VerifyManagerCredential(context.Background(), target, "", "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("foreign key on a materializing target = %v, want %v", err, ErrAdminUnauthorized)
+	}
+	requireUnchangedSource(t, before, sourceEntries(t, targetRoot))
 }
 
 // TestSourceDatabaseFilePolicyIsSharedByBothPaths proves the preflight and the
