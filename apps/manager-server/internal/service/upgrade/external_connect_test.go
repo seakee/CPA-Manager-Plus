@@ -282,6 +282,8 @@ func TestExternalConnectRefusesTheWrongStage(t *testing.T) {
 	execTarget(t, target.databasePath(),
 		`update upgrade_operations set stage = 'rolled_back',
 			rollback_image = 'ghcr.io/example/cpa:v1.14.4',
+			rollback_image_source = 'operator',
+			rollback_image_form = 'release-tag',
 			rollback_status_url = 'http://127.0.0.1:8080/health',
 			rollback_source_fingerprint = 'fingerprint',
 			rollback_observed_at_ms = 1`)

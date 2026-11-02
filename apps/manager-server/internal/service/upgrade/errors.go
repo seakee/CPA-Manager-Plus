@@ -127,10 +127,18 @@ const (
 	// the address the operator named, so it was not stopped before the plan was
 	// derived. Nothing was written.
 	UpgradeErrorRollbackV2Running UpgradeErrorCode = "upgrade_rollback_v2_running"
+	// UpgradeErrorSnapshotFailed reports that a private snapshot could not be
+	// created, or would have to be created inside a root this operation must not
+	// write to. The snapshot copies the whole database, so a scratch directory
+	// under the 1.x source or the Manager data root is refused before a directory
+	// is made; nothing was written.
+	UpgradeErrorSnapshotFailed UpgradeErrorCode = "upgrade_snapshot_failed"
 	// UpgradeErrorStoreSchemaOutdated reports that the Manager store predates the
 	// current build's upgrade table, so its operation row cannot be read without
-	// the columns a writable open adds. The store must be opened once by this
-	// build; nothing was written.
+	// the columns a writable open adds. It also reports the related row a writable
+	// open cannot repair: a rolled_back stage whose evidence did not survive, which
+	// only a build that recorded the two separately could write. Both commands that
+	// read the row report it with this code and exit 1; nothing was written.
 	UpgradeErrorStoreSchemaOutdated UpgradeErrorCode = "upgrade_store_schema_outdated"
 
 	// --- External Connect (U1-5) ---
@@ -181,6 +189,18 @@ const (
 	// rather than writing a store two processes would then disagree about. Stop
 	// the process and run the step again.
 	UpgradeErrorExternalV2Running UpgradeErrorCode = "upgrade_external_connect_v2_running"
+
+	// UpgradeErrorStoreLocked reports that the Manager store's process lock is
+	// held, so an offline migration cannot run. The lock is the proof that the
+	// writable Manager is still serving the store.
+	UpgradeErrorStoreLocked UpgradeErrorCode = "upgrade_store_locked"
+	// UpgradeErrorMigrateNotCopiedIn reports that `upgrade migrate` was asked to
+	// open a store that carries no recorded Upgrade copy-in. A 1.x store or a
+	// native v2 store without that row would be migrated into a store this build
+	// admits as native, without the copy evidence the Upgrade admission
+	// requires, so the command refuses before any writable open and nothing is
+	// written.
+	UpgradeErrorMigrateNotCopiedIn UpgradeErrorCode = "upgrade_migrate_not_copied_in"
 )
 
 // UpgradeError is a typed Upgrade failure. Callers match it with errors.Is
@@ -222,21 +242,21 @@ var (
 	ErrReconcileStageClosed      = &UpgradeError{Code: UpgradeErrorReconcileStageClosed}
 	ErrReconcileRecordIncomplete = &UpgradeError{Code: UpgradeErrorReconcileRecordIncomplete}
 	ErrReconcileNothingCompared  = &UpgradeError{Code: UpgradeErrorReconcileNothingCompared}
-
-	ErrRollbackNotApplicable = &UpgradeError{Code: UpgradeErrorRollbackNotApplicable}
-	ErrRollbackUnproven      = &UpgradeError{Code: UpgradeErrorRollbackUnproven}
-	ErrRollbackImageUnpinned = &UpgradeError{Code: UpgradeErrorRollbackImageUnpinned}
-	ErrRollbackImageFamily   = &UpgradeError{Code: UpgradeErrorRollbackImageFamily}
-	ErrRollbackVolumeUnbound = &UpgradeError{Code: UpgradeErrorRollbackVolumeUnbound}
-	ErrRollbackRootsOverlap  = &UpgradeError{Code: UpgradeErrorRollbackRootsOverlap}
-	ErrRollbackEvidenceStale = &UpgradeError{Code: UpgradeErrorRollbackEvidenceStale}
-	ErrRollbackProbeEndpoint = &UpgradeError{Code: UpgradeErrorRollbackProbeEndpoint}
-	ErrRollbackIdentity      = &UpgradeError{Code: UpgradeErrorRollbackIdentityForeign}
-	ErrRollbackProbeSelf     = &UpgradeError{Code: UpgradeErrorRollbackProbeSelf}
-	ErrRollbackPortCollision = &UpgradeError{Code: UpgradeErrorRollbackPortCollision}
-	ErrRollbackPortBusy      = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
-	ErrRollbackV2Running     = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
-	ErrStoreSchemaOutdated   = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
+	ErrRollbackNotApplicable     = &UpgradeError{Code: UpgradeErrorRollbackNotApplicable}
+	ErrRollbackUnproven          = &UpgradeError{Code: UpgradeErrorRollbackUnproven}
+	ErrRollbackImageUnpinned     = &UpgradeError{Code: UpgradeErrorRollbackImageUnpinned}
+	ErrRollbackImageFamily       = &UpgradeError{Code: UpgradeErrorRollbackImageFamily}
+	ErrRollbackVolumeUnbound     = &UpgradeError{Code: UpgradeErrorRollbackVolumeUnbound}
+	ErrRollbackRootsOverlap      = &UpgradeError{Code: UpgradeErrorRollbackRootsOverlap}
+	ErrRollbackEvidenceStale     = &UpgradeError{Code: UpgradeErrorRollbackEvidenceStale}
+	ErrRollbackProbeEndpoint     = &UpgradeError{Code: UpgradeErrorRollbackProbeEndpoint}
+	ErrRollbackIdentity          = &UpgradeError{Code: UpgradeErrorRollbackIdentityForeign}
+	ErrRollbackProbeSelf         = &UpgradeError{Code: UpgradeErrorRollbackProbeSelf}
+	ErrRollbackPortCollision     = &UpgradeError{Code: UpgradeErrorRollbackPortCollision}
+	ErrRollbackPortBusy          = &UpgradeError{Code: UpgradeErrorRollbackPortBusy}
+	ErrRollbackV2Running         = &UpgradeError{Code: UpgradeErrorRollbackV2Running}
+	ErrSnapshotScratch           = &UpgradeError{Code: UpgradeErrorSnapshotFailed}
+	ErrStoreSchemaOutdated       = &UpgradeError{Code: UpgradeErrorStoreSchemaOutdated}
 
 	// External Connect (U1-5). A v7 CPA, a rejected management credential and a
 	// moved target are decisions the owner has to look at; an unreachable target
@@ -250,6 +270,13 @@ var (
 	// ErrExternalV2Running is a refusal, not a transient failure: the operator
 	// stops the process that owns the store and reruns the step.
 	ErrExternalV2Running = &UpgradeError{Code: UpgradeErrorExternalV2Running}
+
+	// StoreLocked and MigrateNotCopiedIn belong to the offline migration the
+	// rollback acceptance needs: the first reports the live Manager still
+	// holding the store, the second a store the command must not make native
+	// without the copy-in evidence.
+	ErrStoreLocked        = &UpgradeError{Code: UpgradeErrorStoreLocked}
+	ErrMigrateNotCopiedIn = &UpgradeError{Code: UpgradeErrorMigrateNotCopiedIn}
 )
 
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {

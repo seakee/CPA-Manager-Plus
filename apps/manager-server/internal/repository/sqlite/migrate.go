@@ -1262,6 +1262,8 @@ func Migrate(db *sql.DB) error {
 			error_code text,
 			error_detail text,
 			rollback_image text,
+			rollback_image_source text,
+			rollback_image_form text,
 			rollback_status_url text,
 			rollback_source_fingerprint text,
 			rollback_observed_at_ms integer,
@@ -3052,6 +3054,8 @@ func ensureUpgradeOperationRollbackColumns(db *sql.DB) error {
 	for _, column := range []string{
 		"source_root text",
 		"rollback_image text",
+		"rollback_image_source text",
+		"rollback_image_form text",
 		"rollback_status_url text",
 		"rollback_source_fingerprint text",
 		"rollback_observed_at_ms integer",

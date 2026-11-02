@@ -308,7 +308,11 @@ hard `false`; the new surface grants no migration authority.
   `--target-dir` is required when the Manager database path cannot be derived;
   the command never substitutes the working directory. `cpa-manager-plus upgrade
   status [--json] [--db-path PATH] [--scratch-dir DIR]` reads the operation row
-  from a private snapshot, so both work on non-writable volumes. That snapshot is
+  from a private snapshot, so both work on non-writable volumes.
+  `cpa-manager-plus upgrade migrate [--json] [--db-path PATH]` is the one command
+  that adds upgrade columns an older store lacks; it needs the v2 Manager
+  stopped and holds the same process lock for its proof snapshot and its single
+  writable open. That snapshot is
   a full copy of the Manager database and its sidecars: the read costs time and
   scratch space proportional to the database size, not to the single row it
   returns, so `status` is not a cheap poll and should not be looped tightly on a
@@ -433,10 +437,19 @@ migration authority.
   and no inline environment key may override the copied key. Anything else is
   refused with `upgrade_target_layout_mismatch`, because a copied data key the
   service never loads leaves the 1.x encrypted fields undecryptable.
-  `upgrade preflight` and `upgrade status` remain read-only. The copy-in's exit
-  codes are unchanged in shape: 0 ready, 1 blocked — including a v2 data root
-  owned by another Manager process (`upgrade_copy_in_v2_running`) — and 2 for
-  usage, environment and retryable failures.
+  `upgrade preflight` and `upgrade status` remain read-only. Before the
+  preflight, `run` reports a recorded stage past `copy_in` without changing
+  anything. That guard reads the copy-in marker first and steps aside while a
+  copy-in is in flight (or its marker is unreadable): the marker and the member
+  digests are what a resume compares, never an open of the target, because a
+  read-only open of the materializing database would create its `-shm` and
+  strand the resume. The run stops at the copy-in and prints
+  `cpa-manager-plus upgrade status --db-path <v2 database>` plus a note that
+  reconciliation is a separate authorised step this build does not ship; it
+  prints no command that this build cannot dispatch. Every subcommand shares the
+  exit contract: 0 ready, 1 a blocked preflight or a typed operational refusal
+  (the command writes the reason to stderr exactly once and `main` does not log
+  it again), and 2 for usage, environment and retryable failures.
 
 ### Admission surface table
 
@@ -470,7 +483,7 @@ process serves:
 | the same marker under another absolute path, or a root relocated to another mount | `in_progress` | Upgrade surface only: the marker belongs to the data root it sits in, so a relocated volume is never read as "no record" |
 | a marker naming a different database file | — | not admitted (fail closed): it is evidence for another run |
 | `preflight`, `copy_in`, `reconcile`, `cpa_import`, `external_connect`, `verify`, `failed` | `in_progress` | Upgrade surface only: fixed Bootstrap discovery status reads, the read-only shell, the Upgrade authentication leaf and the wizard's two read-only routes. Console, Key workspace, gateway configuration, lifecycle and model traffic answer 404; health stays 503 and no writable subsystem starts |
-| `rolled_back` | `in_progress` + reason `upgrade_rolled_back` | Upgrade surface only, same as any unfinished operation. The reason is the typed string the console shows; it is never a completion |
+| `rolled_back` | `in_progress` + reason `upgrade_rolled_back` | Upgrade surface only, same as any unfinished operation. The reason is the typed string the console-side `upgrade status` prints as `reason: upgrade_rolled_back` and puts in its `reason` JSON field, derived by the same `legacypreflight.ReasonForStage` the admission log uses; it is never a completion. Unauthenticated discovery cannot carry it: the public projection exposes only mode, authentication and recovery, and its reason vocabulary has no rollback value |
 | `complete` with `source_kind=upgraded-legacy`, both source fingerprints and the backup manifest digest | `complete` | normal v2 surfaces, as for a native store |
 | `complete` missing any of those observations | — | not admitted (fail closed) |
 | reader error, unreadable marker or unsupported stage | — | not admitted (fail closed) |
@@ -910,13 +923,49 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   copy-in does (`upgrade_rollback_roots_overlap`), recomputes the 1.x source
   fingerprint and refuses a difference (`upgrade_source_changed`), refuses a row
   without both fingerprints or the backup manifest digest
-  (`upgrade_rollback_unproven`), and pins the 1.x image to
-  `seakee/cpa-manager-plus:v<source_version>`. A recorded version that is not an
-  exact release, or an explicit reference that names no version — `:latest`, a
-  bare repository, an empty tag, a partial version or a `@sha256:` digest — is
-  `upgrade_rollback_image_unpinned`; an explicit release outside the recorded
-  source's version family is `upgrade_rollback_image_family` unless the operator
-  passes the family override. Refusals write nothing at all.
+  (`upgrade_rollback_unproven`), and pins the 1.x image to an exact reference.
+  Two forms are accepted: an exact release tag (`vX.Y.Z`, with or without a
+  repository prefix, derived as `seakee/cpa-manager-plus:v<source_version>` when
+  none is given) or an immutable `@sha256:` digest. Both forms follow the Docker
+  reference grammar for the repository part: an optional registry host with an
+  optional port, then one or more lowercase repository components. A reference
+  whose repository part carries whitespace, a newline or a shell metacharacter is
+  `upgrade_rollback_image_unpinned` instead of text that reaches the compose file
+  or the printed `docker pull`, so `$(…)` and a newline cannot add a compose line
+  or a shell word. A digest is `[registry[:port]/]<repository>` followed by
+  `@sha256:` and 64 lowercase hex characters, so
+  `registry.example.com:5000/team/cpamp@sha256:…` and
+  `localhost:5000/cpamp@sha256:…` and `[::1]:5000/cpamp@sha256:…` (a bracketed
+  IPv6 registry) are accepted, while `Team/cpamp@…` is refused: a first
+  component without a dot or a colon is a repository path, and a path component
+  is lowercase. The registry host itself is case-insensitive, as in Docker. The
+  compose image line is a quoted YAML scalar, so a bracketed registry stays one
+  value. Everything else — `:latest`,
+  `:main`, `:beta`, a bare repository, an empty tag, a partial version, a
+  malformed digest — is `upgrade_rollback_image_unpinned`, and the family
+  override never changes that: it only relaxes the version-family comparison of
+  an exact tag. An exact tag outside the recorded source's family is
+  `upgrade_rollback_image_family` unless the operator passes the override; a
+  digest is immutable, so no family comparison applies. The plan records
+  `imageSource` (`operator` or `derived`) and `imageForm` (`release-tag` or
+  `digest`), and the printed verify command passes `--legacy-image` back only
+  when the operator named it, so a derived reference is never recorded as the
+  image the operator started. The verdict persists the same two fields beside
+  the reference (`rollback_image_source`, `rollback_image_form`), so a reader of
+  the row can still tell an operator tag from a derived one and a release tag
+  from a digest. The plan is written while holding the v2 data-root process
+  lock, so a Manager that still serves the store refuses the plan with
+  `upgrade_rollback_v2_running` even when the CLI runs in another network
+  namespace and cannot reach its listener. Refusals write nothing at all.
+- **An unfinished copy-in is resumed, never read.** Before `--prepare` or
+  `--verify` reads the operation row, it reads the copy-in marker. A marker
+  means the v2 data root may still hold members an interrupted copy-in is
+  moving, and any SQLite open in place creates or rewrites the WAL index the
+  resume compares by file identity: the refusal would strand the very recovery
+  the operator needs. Both commands therefore refuse such a root with
+  `upgrade_rollback_not_applicable`, name `upgrade run` as the way to resume,
+  and write no plan and no row; once the resume records `copy_in`, the rollback
+  commands work as documented below.
 - **A row without a source root is bound once, not sent back to the copy-in.**
   When the row names no 1.x directory (a row written before the column existed),
   the plan compares the directory under decision with the before-fingerprint the
@@ -930,18 +979,49 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   refuses once it is recorded.
 - **The plan's port is not the v2 port.** A rollback publishes the restarted
   1.x manager on `18318` (`--port` overrides it), never on the `18317` this
-  Manager publishes, because both managers answer `GET /health` with the same
-  identity. A plan whose port is the Manager's own is
-  `upgrade_rollback_port_collision`; a plan whose port is already held on the
-  host is `upgrade_rollback_port_busy` (the port is bound on every local address
-  and both wildcards, so a listener on any interface is found); with
-  `--manager-addr` the plan also refuses while the v2 stack still answers there
-  (`upgrade_rollback_v2_running`). A refusal writes nothing.
+  Manager publishes by default, because both managers answer `GET /health` with
+  the same identity. A plan whose port is the Manager's own is
+  `upgrade_rollback_port_collision`; a plan whose port is already held is
+  `upgrade_rollback_port_busy` (the port is bound on every local address and
+  both wildcards). `--manager-addr` overrides the v2 listen address; without it
+  the CLI uses the configured `HTTP_ADDR`, so a Manager moved to another port is
+  compared and dialled on the port it actually holds. A wildcard bind
+  (`0.0.0.0:PORT`, `[::]:PORT`) is the normal configuration and is reached on
+  loopback. With that address the plan refuses while the v2 stack still answers
+  there (`upgrade_rollback_v2_running`), and a probe of that listener is
+  `upgrade_rollback_probe_self`. A refusal writes nothing.
+- **The port and v2-running checks only see the CLI's own network namespace.**
+  `portFree` binds the port on every address of the process that runs the
+  command, and `requireV2Stopped` dials from the same namespace, so under
+  `docker compose run --rm` they describe the run container, not the host.
+  That is why the plan states the host-side checks (`docker ps
+  --filter publish=<port>`, `lsof -nP -iTCP:<port> -sTCP:LISTEN`, and the
+  compose invocation itself) for the operator to reproduce where the stack
+  really runs; the checks are not claimed to be host observations.
+- **The volume is the one the install used, and the identity half is the
+  operator's.** `--volume` names either a Docker volume (including the
+  unprefixed `cpa-manager-plus-data` a `docker run -v` install uses) or the
+  absolute path of the original bind mount; without it the plan derives
+  `<project>_cpa-manager-plus-data` as before. `volumeKind` says which form the
+  plan generated: a named volume stays `external: true` (compose refuses a
+  missing one instead of creating an empty replacement), a bind mount is written
+  as `<host directory>:/data` with no top-level `volumes:` key. A bind source
+  that is not the directory the operation recorded is
+  `upgrade_rollback_volume_unbound`. The plan proves the *directory* (data key,
+  backup manifest, archived bytes) and that a v1 answers `/health`. It cannot
+  prove that the answering process mounts that directory: the Manager runs in a
+  container and must not reach the Docker socket. `identityProof` is therefore
+  `operator-verified`, `identityStatement` says so in words, and the CLI prints
+  both; the preconditions list the host-side checks (mount source, volume
+  mountpoint, port) the operator reproduces. When the CLI itself runs under
+  `docker compose run --rm`, it sees its own network namespace and paths, so
+  those checks are stated as host-side checks rather than observations.
 - **The plan** (`<v2 data root>/.upgrade-rollback/plan.json`, canonical-JSON
-  SHA-256 in `digest`) names the pinned image, the volume derived from the
-  compose project and the mountpoint the 1.x container uses, the recorded source
-  root, the published `port` and the v2 Manager `managerPort` beside it, the
-  recorded `backupDirectory`, the exact `docker compose -p cpamp -f - up - d
+  SHA-256 in `digest`) names the pinned image, the volume and its kind
+  (`volume`/`volumeKind`), the mountpoint the 1.x container uses, the recorded
+  source root, the published `port` and the v2 Manager `managerPort` beside it,
+  the
+  recorded `backupDirectory`, the exact `docker compose -p cpamp -f - up -d
   cpa-manager-plus` invocation, the 1.x compose file to feed on stdin (publishing
   and binding the plan's own port), the preconditions and the health proof:
   `GET /health` on the plan's port with the documented
@@ -962,39 +1042,55 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   (`upgrade_rollback_probe_self`): the 1.x and the v2 Manager state the same
   service identity, so an answer from the port this Manager holds describes the
   v2 stack, never a restored volume. The probe target's port is compared with the
-  Manager's own port (`--manager-addr`, or the documented default), and the host
-  must not resolve to this machine — a loopback, wildcard, interface or
+  Manager's own port (`--manager-addr`, or the configured `HTTP_ADDR`), and the
+  host must not resolve to this machine — a loopback, wildcard, interface or
   hostname address is refused, including a container-local one. It also refuses
   a verdict while the v2 stack still answers on the address the operator named
   (`upgrade_rollback_v2_running`): the verdict says that stack was abandoned. It
-  then opens the live 1.x database immutable read-only with a `quick_check`; it
-  reads the recorded backup snapshot read-only, re-verifies its manifest digest,
+  then reads the live 1.x database through a private snapshot of the database
+  and its WAL sidecars and runs `quick_check` on that copy — never an in-place
+  open and never `immutable=1`, which cannot see rows a live v1 has committed to
+  its WAL — retrying the bounded snapshot budget when the copy races v1 writes.
+  No exclusive 1.x source lock is taken: v1 is expected to be serving. It reads
+  the recorded backup snapshot read-only, re-verifies its manifest digest,
   and requires the live volume to still retain at least the rows the backup
   holds — raw usage events counted together with the append-only archive
   projection — and every archived segment and the data key the backup describes
   (`upgrade_rollback_identity_foreign` on any difference,
   `upgrade_rollback_unproven` when a store cannot be opened). It writes the
-  stage and the evidence (image, health endpoint, observed fingerprint,
-  observation time) in one transaction through
+  stage and the evidence (image, its source and form, health endpoint, observed
+  fingerprint, observation time) in one transaction through
   `upgradeoperation.RecordRollback`, which never rewrites `source_kind`,
   `source_root`, both fingerprints, `backup_manifest_sha256` or the completed
-  domains; a second verdict is `upgrade_rollback_not_applicable`. The recorded
+  domains; a second verdict is `upgrade_rollback_not_applicable`. Stage
+  eligibility is decided again inside that transaction, against the row the
+  transaction holds: `preflight` and `failed` are refused as
+  `upgrade_rollback_not_applicable` even if the service precheck saw a later
+  stage, because a copy-in retry can park a row at `failed` after that read and
+  a preflight row never copied a root. The recorded
   observation time is the service's own clock reading after its proofs, not the
-  caller's label; a caller-supplied time outside the freshness window is still
-  refused (`upgrade_rollback_evidence_stale`). The observed fingerprint is
+  caller's label; a supplied time outside the freshness window is still
+  refused (`upgrade_rollback_evidence_stale`), and a zero `observedAtMs` leaves
+  the moment to the service, so a programmatic caller that proves the install
+  without labelling a time is not refused. The observed fingerprint is
   informational: the restarted 1.x manager keeps writing rows, so byte equality
   with the recorded before-fingerprint is neither required nor recorded as one.
 - **CLI.** `upgrade rollback --prepare --legacy <dir> [--legacy-image <ref>]
-  [--project <name>] [--port N] [--manager-addr HOST:PORT] [--backup <dir>]
+  [--project <name>] [--volume <name|host-directory>] [--port N]
+  [--manager-addr HOST:PORT] [--backup <dir>]
   [--allow-image-family-mismatch] [--json]` prints the plan and exits 0, or 1
-  with the typed refusal written to stderr; the printed verify command is
-  quoted, names `--target`, `--backup`, `--legacy-image` and `--status-url` at the
-  plan's own port, and carries `--manager-addr` when the plan was derived against
-  one. `upgrade rollback --verify --legacy <dir> [--backup <dir>]
-  [--status-url <url>] [--manager-addr HOST:PORT] [--legacy-image <ref>]
-  [--json]` passes the observation to the service, which probes the default
-  `http://127.0.0.1:18318/health` unless a URL is given, then records; unproven
-  evidence exits 1, usage errors 2.
+  with the typed refusal written to stderr exactly once; an untyped environment
+  or usage failure exits 2. `--manager-addr` defaults to the configured
+  `HTTP_ADDR`, so the plan's manager port and the probe comparison describe the
+  listener the Manager really holds; the printed verify command uses
+  single-quoted shell words (Go quoting would leave `$` and backticks live to
+  the shell), names
+  `--target`, `--backup`, `--legacy-image` and `--status-url` at the plan's own
+  port, and carries `--manager-addr`. `upgrade rollback --verify --legacy <dir>
+  [--backup <dir>] [--status-url <url>] [--manager-addr HOST:PORT]
+  [--legacy-image <ref>] [--json]` passes the observation to the service, which
+  probes the default `http://127.0.0.1:18318/health` unless a URL is given, then
+  records; unproven evidence exits 1, usage and environment errors 2.
 - **The verdict cannot exist without its evidence.** `model.Validate` requires
   `Rollback` whenever the stage is `rolled_back`, and the repository enforces the
   same invariant at both stage-writing paths: `Put` refuses such a row, and
@@ -1002,20 +1098,84 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   (`upgradeoperation.ErrRollbackEvidenceRequired`) because it carries no
   observation. The verdict is only ever written by
   `upgradeoperation.RecordRollback`, stage and evidence in one transaction.
-- **A store this build has not opened says so.** `upgrade status` and `upgrade
-  rollback --prepare` read the operation row from a private snapshot, which
-  cannot migrate. A store whose `upgrade_operations` table predates the current
-  columns is reported as `upgrade_store_schema_outdated` (naming the missing
-  columns and the writable open that adds them) instead of surfacing raw SQL, and
-  the command exits 1.
+- **A store this build has not opened says so, and names a command that works.**
+  `upgrade status` and `upgrade rollback --prepare` read the operation row through
+  a read-only open, which cannot migrate, and a Manager admitted only for the
+  Upgrade surface never opens the store writable. A store whose
+  `upgrade_operations` table predates the current columns is therefore reported as
+  `upgrade_store_schema_outdated` (naming the missing columns) instead of
+  surfacing raw SQL, and the command exits 1. The remedy the refusal prints is
+  `cpa-manager-plus upgrade migrate [--db-path PATH]`: it takes the v2
+  data-root process lock first, proves from a private snapshot that the store
+  holds the row the copy-in records (`source_kind` `upgraded-legacy`,
+  `domains_done` contains `source_copy`, both fingerprints and the backup
+  manifest), then opens the store writable once, adds the columns, and is
+  idempotent. Any other store — a 1.x store, or a native store with no recorded
+  copy-in — is refused as `upgrade_migrate_not_copied_in` without a writable
+  open, because that open would migrate it into a store this build admits as
+  native without the Upgrade evidence; its bytes are unchanged. Because the lock
+  comes first, a store a running Manager still owns always reports
+  `upgrade_store_locked` — never a `upgrade_source_changed` from a snapshot that
+  raced that writer, a code that describes the 1.x source rather than the lock.
+- **A verdict without its evidence is the same outdated store.** A row that
+  names `rolled_back` and none — or only part — of its evidence is reported as
+  `upgrade_store_schema_outdated` too, with the same code and the same exit 1
+  from both `upgrade status` and `upgrade rollback --prepare`: no write path of
+  this build records the stage without its observation, so such a row comes from
+  a build before the evidence columns, and a writable open only adds columns. The
+  copy therefore promises no repair; it says the operation cannot be read as
+  recorded and names the only real path: copy the 1.x source into a new v2 data
+  root with `upgrade run` and decide against that record. A test reopens the
+  store writable and re-reads it to keep that claim true.
 - **`upgrade run` stops at the copy-in.** It performs preflight plus copy-in,
   never reconciliation, and records the 1.x data directory it read so a later
-  rollback can bind its volume. It prints the exact
-  `upgrade reconcile --legacy … --target …` command (with `--bundle` only when
-  the operator passed one). A recorded stage beyond `copy_in` — including a
-  terminal `rolled_back` — is reported as-is with no write and no reconciliation
-  hint, and a blocked preflight still writes nothing.
+  rollback can bind its volume. It prints exactly
+  `cpa-manager-plus upgrade status --db-path <v2 database>` and says that
+  reconciliation is a separate authorised step this build does not ship; it
+  names no subcommand this build cannot dispatch. A recorded stage beyond
+  `copy_in` — including a terminal `rolled_back` — is reported as-is with no
+  write and no next-step hint. The guard that reads that row never opens the
+  data root in place: it skips the read only for a materializing marker (that
+  target belongs to the resume, which compares members by file digest), and
+  reads every other state — no marker, a migrating marker, or a marker that
+  outlived its committed row — through a private snapshot. A terminal row is
+  therefore reported without a writable open even when a stale marker survives
+  it, and that marker is left in place: only the run that finishes the copy-in
+  removes it. A blocked preflight still writes nothing.
 - **The 1.x volume is never written** by any path above: both the health probe
-  and the database probe are read-only, the database is opened immutable so not
+  and the database probe are read-only, the live database is read through a
+  private snapshot copied into validated scratch space outside both the 1.x
+  source and the v2 data root (the OS temporary directory by default), so not
   even a WAL index appears beside it, and the source manifest is unchanged by
-  prepare, verify and every refusal.
+  prepare, verify and every refusal. A scratch directory inside either root —
+  including a default `TMPDIR` that points there — is refused with
+  `upgrade_snapshot_failed` before a directory is created, because the snapshot
+  copies the whole database. The same check covers the private snapshot
+  `upgrade migrate` uses to prove the store was copied in. The copy costs
+  scratch space and time proportional to the database size, and it is retried
+  the shared bounded number of times when it races v1 writes.
+- **Known limits of the rollback evidence.** These are stated here so no reader
+  infers a proof the code does not make:
+  - A probe that reaches this Manager through a reverse proxy or tunnel in front
+    of the 1.x port is not detected. The self-probe refusal compares the probe
+    address and port with this Manager's listener; a proxy that forwards the
+    health path to v2 defeats that comparison. Point `--status-url` at the 1.x
+    container port directly, with no proxy between.
+  - An evidence-less `rolled_back` row written by an earlier build cannot be
+    repaired in place; it reads as an outdated store and the only real path is a
+    fresh copy-in into a new v2 data root.
+  - A bind-mode plan records the path the CLI itself sees. `--legacy` and
+    `--volume <host-directory>` are resolved in whatever filesystem namespace
+    the CLI runs in; under `docker compose run --rm` that is the run container,
+    not the host. The plan writes the recorded path as the compose bind source
+    (`<dir>:/data`), so if the CLI container sees the 1.x data at a different
+    absolute path than the host mount, the plan asks the host to bind a
+    directory that may be empty, v1 can start and answer `/health`, and verify
+    reads the CLI container's own copy instead of the host volume. Run
+    `--prepare` and `--verify` with the 1.x data mounted at the same absolute
+    path the host compose will mount, or use the named-volume form. The `stat`
+    precondition checks the recorded directory on the host and remains the
+    operator's proof that this path is the host's 1.x volume; it cannot repair a
+    path mismatch the CLI cannot see.
+  - The port and v2-running checks describe the CLI's own network namespace, so
+    under `docker compose run --rm` the operator reproduces them on the host.

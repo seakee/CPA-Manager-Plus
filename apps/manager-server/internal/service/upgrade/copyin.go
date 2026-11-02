@@ -3,6 +3,7 @@ package upgrade
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -287,6 +288,132 @@ func recordedOperation(ctx context.Context, databasePath string, immutable bool)
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
+	return ReadRecordFrom(ctx, db)
+}
+
+// MigrateOperationStore brings an outdated Manager store up to this build's
+// upgrade table. It is the remedy the read paths name: a read-only reader cannot
+// add a column, and a Manager admitted only for the Upgrade surface never opens
+// the store writable, so without this command an operation recorded by an older
+// build could not be read at all.
+//
+// The command only serves a store the Upgrade copy-in recorded. The writable
+// open also runs the full schema migration, so opening any other store would
+// turn a 1.x or native store into one this build serves as native-v2, without
+// the copy evidence the Upgrade admission requires. That store is refused from a
+// private snapshot before any writable open, so its bytes do not change.
+//
+// The migration is a write, so it holds the v2 data-root process lock for the
+// whole writable open. A held lock means the writable Manager is still serving
+// the store and the command refuses with upgrade_store_locked.
+func MigrateOperationStore(ctx context.Context, databasePath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(databasePath); err != nil {
+		return fmt.Errorf("the Manager store cannot be migrated: %w", err)
+	}
+	// The lock is taken before the proof. A live writer holding it means the
+	// store is in use, and that is the answer regardless of what a snapshot of a
+	// moving store would have said: proving first could report the source as
+	// changed while the real condition is upgrade_store_locked.
+	lock, err := processlock.Acquire(databasePath)
+	if err != nil {
+		if errors.Is(err, processlock.ErrLocked) {
+			return newUpgradeError(UpgradeErrorStoreLocked,
+				"the v2 Manager still holds its database process lock, so it has not been stopped; stop the v2 stack and run `upgrade migrate` again", err)
+		}
+		return fmt.Errorf("take the v2 database process lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := requireCopiedInStore(ctx, databasePath); err != nil {
+		return err
+	}
+	db, err := managersqlite.Open(databasePath)
+	if err != nil {
+		return fmt.Errorf("open the Manager store writable to migrate it: %w", err)
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close the migrated Manager store: %w", err)
+	}
+	return nil
+}
+
+// requireCopiedInStore proves from a private snapshot that this store is the
+// product of an Upgrade copy-in. The snapshot is a copy, so a store this build
+// must not open still answers the question with its bytes unchanged.
+func requireCopiedInStore(ctx context.Context, databasePath string) error {
+	// The proof reads a private copy of the database, so it must not write that
+	// copy back into the Manager data root it is measuring. A default TMPDIR
+	// inside that volume is refused before a directory is made.
+	if err := ValidateScratchDir("", "", filepath.Dir(databasePath)); err != nil {
+		return newUpgradeError(UpgradeErrorSnapshotFailed,
+			"the private snapshot of the Manager store would be created inside the Manager data root; point TMPDIR at a directory on a separate volume and run `upgrade migrate` again", err)
+	}
+	snapshot, err := OpenSnapshot(ctx, databasePath, "")
+	if err != nil {
+		return fmt.Errorf("read the Manager store before migrating it: %w", err)
+	}
+	defer func() { _ = snapshot.Close() }()
+	copiedIn, err := recordsCopyIn(ctx, snapshot.DB())
+	if err != nil {
+		return fmt.Errorf("read the recorded Upgrade operation: %w", err)
+	}
+	if !copiedIn {
+		return newUpgradeError(UpgradeErrorMigrateNotCopiedIn,
+			"this Manager store carries no recorded Upgrade copy-in, so it is not the store this command serves: opening it writable would migrate a 1.x or native store into one this build serves as native without the Upgrade admission. Copy the 1.x source in with `upgrade run`, or keep using the Manager build that wrote this store", nil)
+	}
+	return nil
+}
+
+// recordsCopyIn reports whether the store holds the row the copy-in records: a
+// copied-in source kind, the source-copy domain, both fingerprints and the
+// backup manifest. Only columns every version of the table has are read, so the
+// proof also works on the older schema this command exists to migrate.
+func recordsCopyIn(ctx context.Context, db *sql.DB) (bool, error) {
+	present, err := tablePresent(ctx, db, "upgrade_operations")
+	if err != nil || !present {
+		return false, err
+	}
+	var stage, sourceKind, domains, before, after, manifest sql.NullString
+	err = db.QueryRowContext(ctx, `select stage, source_kind, domains_done,
+		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256
+		from upgrade_operations where id = 1`).
+		Scan(&stage, &sourceKind, &domains, &before, &after, &manifest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	recordedStage := model.UpgradeStage(stage.String)
+	if !recordedStage.RollbackApplicable() {
+		return false, nil
+	}
+	if sourceKind.String != SourceKindUpgradedLegacy {
+		return false, nil
+	}
+	if strings.TrimSpace(before.String) == "" || strings.TrimSpace(after.String) == "" ||
+		strings.TrimSpace(manifest.String) == "" {
+		return false, nil
+	}
+	var completed []string
+	if err := json.Unmarshal([]byte(domains.String), &completed); err != nil {
+		return false, err
+	}
+	for _, domain := range completed {
+		if domain == model.UpgradeDomainSourceCopy {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ReadRecordFrom reads the single recorded operation from an already-open
+// read-only handle. It maps the two shapes a read-only reader cannot repair to
+// the shared store-schema code, so every reader reports the same thing instead
+// of surfacing raw SQL or a malformed-row error.
+func ReadRecordFrom(ctx context.Context, db *sql.DB) (model.UpgradeOperation, bool, error) {
 	present, err := tablePresent(ctx, db, "upgrade_operations")
 	if err != nil || !present {
 		return model.UpgradeOperation{}, false, err
@@ -300,9 +427,20 @@ func recordedOperation(ctx context.Context, databasePath string, immutable bool)
 		return model.UpgradeOperation{}, false, err
 	}
 	if len(missing) > 0 {
-		return model.UpgradeOperation{}, false, StoreSchemaOutdatedError(missing)
+		return model.UpgradeOperation{}, false, newUpgradeError(UpgradeErrorStoreSchemaOutdated,
+			fmt.Sprintf("this Manager store predates the current build's upgrade table (missing %s), so its operation cannot be read read-only; stop the v2 Manager and run `cpa-manager-plus upgrade migrate`, which opens the store writable under the v2 process lock and adds them (it refuses a store that carries no recorded copy-in)",
+				strings.Join(missing, ", ")), nil)
 	}
-	return repository.Get(ctx)
+	operation, found, err := repository.Get(ctx)
+	// A rolled_back row whose observation did not survive was written by a build
+	// that did not record the two together. No path of this build writes one and
+	// no open repairs one, so the store is the outdated thing here: the operator
+	// is told the record cannot be read and which record they can decide against.
+	if errors.Is(err, upgradeoperation.ErrRollbackEvidenceMissing) {
+		return model.UpgradeOperation{}, false, newUpgradeError(UpgradeErrorStoreSchemaOutdated,
+			"this Manager store records a rolled_back operation without the observation that justified it, which this build refuses on every write path, so the operation cannot be read as recorded and opening the store does not repair it; copy the 1.x source into a new v2 data root with `upgrade run` and decide against that record", nil)
+	}
+	return operation, found, err
 }
 
 // StoreSchemaOutdatedError reports a Manager store whose upgrade table predates

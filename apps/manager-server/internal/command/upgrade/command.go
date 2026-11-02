@@ -14,23 +14,21 @@ package upgrade
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	_ "modernc.org/sqlite"
 )
 
@@ -47,15 +45,15 @@ var (
 	ErrRetryable = errors.New("upgrade: retryable")
 )
 
-// statusSnapshotAttempts bounds how often `upgrade status` copies a Manager
-// database that is being written. A live Manager writes in bursts, so a handful
-// of attempts across roughly a second normally finds a quiet window. Preflight
-// never retries: a legacy source that is still being written is a stop
-// condition, not a race to win.
+// statusSnapshotAttempts is the shared snapshot retry budget. `upgrade status`
+// copies a Manager database that may still be written, and the rollback proof
+// copies a live 1.x database the same way; both use the policy and the budget
+// the upgrade service owns. Preflight never retries: a legacy source that is
+// still being written is a stop condition, not a race to win.
 const (
-	statusSnapshotAttempts  = 8
-	statusSnapshotBaseDelay = 20 * time.Millisecond
-	statusSnapshotMaxDelay  = 200 * time.Millisecond
+	statusSnapshotAttempts  = upgradeservice.SnapshotAttempts
+	statusSnapshotBaseDelay = upgradeservice.SnapshotBaseDelay
+	statusSnapshotMaxDelay  = upgradeservice.SnapshotMaxDelay
 )
 
 // openSnapshot is a seam so a test can prove the bounded retry and its
@@ -69,9 +67,11 @@ var openSnapshot = upgradeservice.OpenSnapshot
 // whose recorded copy-in does not allow the step, or a rollback whose recorded
 // evidence does not hold — and 2 anything else. A refusal is a decision about
 // the migration, not a usage or environment error, so every refusal shares
-// exit 1 and the typed code in the report says which one it was. A changed
-// source stays retryable and keeps exit 2: the retry marker is what tells the
-// operator to run it again.
+// exit 1 and the typed code in the report or stderr says which one it was. A
+// changed source stays retryable and keeps exit 2: the retry marker is what
+// tells the operator to run it again. When a command wrote its own refusal to
+// stderr, main.go must not log the same reason twice; ErrRefused and
+// ErrReported are the markers for that, and neither changes the exit code.
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
@@ -128,6 +128,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runPreflight(ctx, args[1:], stdout, stderr)
 	case "status":
 		return runStatus(ctx, args[1:], stdout, stderr)
+	case "migrate":
+		return runMigrate(ctx, args[1:], stdout, stderr)
 	case "run":
 		return runCopyIn(ctx, args[1:], stdout, stderr)
 	case "reconcile":
@@ -158,6 +160,8 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                      the days that can never be completed again")
 	_, _ = fmt.Fprintln(w, "  status [--json] [--db-path PATH] [--scratch-dir DIR]")
 	_, _ = fmt.Fprintln(w, "                                      read the persisted upgrade operation")
+	_, _ = fmt.Fprintln(w, "  migrate [--json] [--db-path PATH]  add the current upgrade columns to an older store")
+	_, _ = fmt.Fprintln(w, "                                      (the v2 Manager must be stopped; it holds the store lock)")
 	_, _ = fmt.Fprintln(w, "  rollback --prepare --legacy <dir> [--legacy-image <ref>] [--project <name>] [--port N] [--manager-addr HOST:PORT] [--json]")
 	_, _ = fmt.Fprintln(w, "  rollback --verify --legacy <dir> [--backup <dir>] [--status-url <url>] [--legacy-image <ref>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
@@ -165,7 +169,7 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                      connect the External CPA and record its identity; a v7 CPA stops")
 	_, _ = fmt.Fprintln(w, "The scratch copy is never the source or the target volume: --scratch-dir,")
 	_, _ = fmt.Fprintln(w, "and the default OS temporary directory, are checked the same way.")
-	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, an unacknowledged day, a held fence (1.x source or v2 data root), or a decision about the External CPA; 2 usage, environment or retryable error.")
+	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, an unacknowledged day, a held fence (1.x source or v2 data root), a rollback decision, or a decision about the External CPA; 2 usage, environment or retryable error.")
 }
 
 func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -245,6 +249,10 @@ func writePreflightSummary(w io.Writer, report upgradeservice.Report) {
 type statusOutput struct {
 	Recorded  bool                    `json:"recorded"`
 	Operation *model.UpgradeOperation `json:"operation,omitempty"`
+	// Reason is the typed explanation an admission attaches to a stage that
+	// restricts the surface, so the console can show why the normal surfaces are
+	// closed instead of reading a generic stage.
+	Reason string `json:"reason,omitempty"`
 }
 
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) error {
@@ -290,35 +298,53 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	}
 	defer func() { _ = snapshot.Close() }()
 	db := snapshot.DB()
-	tablePresent, err := upgradeOperationTablePresent(ctx, db)
+	// A read-only reader cannot migrate or repair the row, so the two shapes it
+	// cannot read are reported through the shared store-schema mapping rather
+	// than as raw SQL or a malformed row.
+	operation, found, err := upgradeservice.ReadRecordFrom(ctx, db)
 	if err != nil {
-		return err
+		return refuseTyped(stderr, err)
 	}
 	output := statusOutput{}
-	if tablePresent {
-		repository := upgradeoperation.New(db)
-		// The copy is read-only and cannot migrate, so a table written by an
-		// older build is named rather than met as raw SQL from the select.
-		missing, err := repository.MissingColumns(ctx)
-		if err != nil {
-			return err
-		}
-		if len(missing) > 0 {
-			return refuseTyped(stderr, upgradeservice.StoreSchemaOutdatedError(missing))
-		}
-		operation, found, err := repository.Get(ctx)
-		if err != nil {
-			return err
-		}
-		if found {
-			output.Recorded = true
-			output.Operation = &operation
-		}
+	if found {
+		output.Recorded = true
+		output.Operation = &operation
+		// The same derivation the startup admission uses, so the console reason
+		// and the log reason can never disagree about one row.
+		output.Reason = string(legacypreflight.ReasonForStage(operation.Stage))
 	}
 	if *asJSON {
 		return json.NewEncoder(stdout).Encode(output)
 	}
 	writeStatusSummary(stdout, output)
+	return nil
+}
+
+// runMigrate is the one command that adds the upgrade columns an older store
+// lacks. The read-only commands name it because neither a read-only open nor
+// the Upgrade-only admission can migrate the store.
+func runMigrate(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("upgrade migrate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dbPath := flags.String("db-path", "", "Manager SQLite path; defaults to the Manager configuration")
+	asJSON := flags.Bool("json", false, "print the migration result as JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("%w: no positional arguments are accepted", ErrUsage)
+	}
+	path, err := resolveManagerDatabasePath(*dbPath)
+	if err != nil {
+		return err
+	}
+	if err := upgradeservice.MigrateOperationStore(ctx, path); err != nil {
+		return refuseTyped(stderr, err)
+	}
+	if *asJSON {
+		return json.NewEncoder(stdout).Encode(map[string]string{"database": path, "schema": "current"})
+	}
+	_, _ = fmt.Fprintf(stdout, "Manager store schema is current: %s\n", path)
 	return nil
 }
 
@@ -329,6 +355,9 @@ func writeStatusSummary(w io.Writer, output statusOutput) {
 	}
 	operation := output.Operation
 	_, _ = fmt.Fprintf(w, "stage: %s\n", operation.Stage)
+	if output.Reason != "" {
+		_, _ = fmt.Fprintf(w, "reason: %s\n", output.Reason)
+	}
 	_, _ = fmt.Fprintf(w, "domains done: %s\n", strings.Join(operation.DomainsDone, ","))
 	if operation.SourceKind != "" {
 		_, _ = fmt.Fprintf(w, "source kind: %s\n", operation.SourceKind)
@@ -377,12 +406,23 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// owns preflight and the copy-in, so a later recorded stage is reported and
 	// left alone: re-running the copy would rewrite a store a later step already
 	// advanced.
-	if operation, found, err := recordedOperationAt(ctx, targetRoot); err != nil {
-		return err
-	} else if found && stagePastCopyIn(operation.Stage) {
-		output := runOutput{Operation: &operation}
-		writeRunOutput(stdout, *asJSON, output)
-		return nil
+	// A materializing marker is the one state that must not read the row first:
+	// CopyIn resumes it from the marker and the members beside it by file
+	// digest, and an in-place open would create or rewrite the WAL index the
+	// resume compares. Every other state (no marker, a migrating marker, or a
+	// marker that outlived its committed row) is read through a private
+	// snapshot: a terminal row is reported without any write, and a copy_in row
+	// reaches CopyIn, which owns the resume.
+	marker, markerPresent, markerErr := copyinmarker.Read(targetRoot)
+	materializing := markerErr == nil && markerPresent && marker.Phase == copyinmarker.PhaseMaterializing
+	if !materializing && upgradeservice.ValidateScratchDir(*scratchDir, legacyRoot, targetRoot) == nil {
+		if operation, found, err := recordedOperationAt(ctx, targetRoot, *scratchDir); err != nil {
+			return refuseTyped(stderr, err)
+		} else if found && stagePastCopyIn(operation.Stage) {
+			output := runOutput{Operation: &operation}
+			writeRunOutput(stdout, *asJSON, output)
+			return nil
+		}
 	}
 	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
 		LegacyRoot:      legacyRoot,
@@ -391,7 +431,7 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		ScratchDir:      *scratchDir,
 	})
 	if err != nil {
-		return err
+		return refuseTyped(stderr, err)
 	}
 	output := runOutput{Preflight: &report}
 	if !report.Ready {
@@ -416,7 +456,7 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		Lock:            lock,
 	})
 	if err != nil {
-		return err
+		return refuseTyped(stderr, err)
 	}
 	output.Result = &result
 	// The run stops at the copy-in by contract: reconciliation is a separate,
@@ -538,6 +578,55 @@ func runReconcile(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	return nil
 }
 
+type runOutput struct {
+	Preflight *upgradeservice.Report  `json:"preflight,omitempty"`
+	Result    *upgradeservice.Result  `json:"result,omitempty"`
+	Operation *model.UpgradeOperation `json:"operation,omitempty"`
+	Next      string                  `json:"next,omitempty"`
+	// NextNote says what remains after Next when the printed step only reports
+	// the recorded state.
+	NextNote string `json:"nextNote,omitempty"`
+}
+
+// recordedOperationAt reads the operation row from a v2 data root that may not
+// hold a database yet. It reads a private snapshot, never the store in place: a
+// target a copy-in has not finished must keep the WAL index and members its
+// resume compares. A missing store is not an error: it simply has no recorded
+// operation.
+func recordedOperationAt(ctx context.Context, targetRoot string, scratchDir string) (model.UpgradeOperation, bool, error) {
+	return upgradeservice.ReadRecordFromSnapshot(ctx, filepath.Join(targetRoot, upgradeservice.SourceDatabaseName), scratchDir)
+}
+
+// stagePastCopyIn reports whether the recorded operation already moved beyond
+// the copy-in. `upgrade run` owns preflight and the copy-in only.
+func stagePastCopyIn(stage model.UpgradeStage) bool {
+	switch stage {
+	case model.UpgradeStageReconcile, model.UpgradeStageCPAImport,
+		model.UpgradeStageExternalConnect, model.UpgradeStageVerify, model.UpgradeStageComplete:
+		return true
+	// A rolled-back operation already copied in and then abandoned the v2
+	// root. It is reported like any later stage: the copy-in is never redone,
+	// and nothing may suggest that reconciliation is still the next step.
+	case model.UpgradeStageRolledBack:
+		return true
+	default:
+		return false
+	}
+}
+
+// nextReconcileCommand is the command the operator runs to continue past the
+// copy-in. It is printed, never executed: reconciliation is its own step. Every
+// argument is quoted for the shell, not for Go: the operator pastes this line,
+// so a path containing `$` or backticks must reach the command unchanged.
+func nextReconcileCommand(legacyRoot, targetRoot, bundleDir string, declaredVersion string, explicitBundle bool) string {
+	command := fmt.Sprintf("cpa-manager-plus upgrade reconcile --legacy %s --target %s --source-version %s",
+		upgradeservice.ShellQuote(legacyRoot), upgradeservice.ShellQuote(targetRoot), upgradeservice.ShellQuote(declaredVersion))
+	if explicitBundle {
+		command += fmt.Sprintf(" --bundle %s", upgradeservice.ShellQuote(bundleDir))
+	}
+	return command
+}
+
 type reconcileOutput struct {
 	Preflight *upgradeservice.Report          `json:"preflight"`
 	Report    *upgradeservice.ReconcileReport `json:"report,omitempty"`
@@ -603,6 +692,54 @@ func writeReconcileSummary(w io.Writer, report upgradeservice.ReconcileReport) {
 	}
 }
 
+func writeRunOutput(w io.Writer, asJSON bool, output runOutput) {
+	if asJSON {
+		_ = json.NewEncoder(w).Encode(output)
+		return
+	}
+	if output.Preflight != nil {
+		writePreflightSummary(w, *output.Preflight)
+	}
+	if output.Operation != nil {
+		_, _ = fmt.Fprintln(w, "operation already past the copy-in; nothing was changed:")
+		_, _ = fmt.Fprintf(w, "  stage: %s\n", output.Operation.Stage)
+		_, _ = fmt.Fprintf(w, "  domains done: %s\n", strings.Join(output.Operation.DomainsDone, ","))
+		return
+	}
+	if output.Result == nil {
+		if output.Next != "" {
+			_, _ = fmt.Fprintln(w, "next:")
+			_, _ = fmt.Fprintf(w, "  %s\n", output.Next)
+			if output.NextNote != "" {
+				_, _ = fmt.Fprintf(w, "  %s\n", output.NextNote)
+			}
+		}
+		return
+	}
+	result := output.Result
+	_, _ = fmt.Fprintln(w, "copy-in:")
+	_, _ = fmt.Fprintf(w, "  backup: %s\n", result.BackupDirectory)
+	_, _ = fmt.Fprintf(w, "  backup manifest sha256: %s\n", result.BackupManifestSHA256)
+	_, _ = fmt.Fprintf(w, "  source fingerprint before: %s\n", result.SourceFingerprintBefore)
+	_, _ = fmt.Fprintf(w, "  source fingerprint after: %s\n", result.SourceFingerprintAfter)
+	_, _ = fmt.Fprintf(w, "  source kind: %s\n", result.SourceKind)
+	_, _ = fmt.Fprintf(w, "  source version: %s\n", result.SourceVersion)
+	_, _ = fmt.Fprintf(w, "  stage: %s\n", result.Stage)
+	_, _ = fmt.Fprintf(w, "  domains done: %s\n", strings.Join(result.DomainsDone, ","))
+	_, _ = fmt.Fprintf(w, "  restored: %t\n", result.Restored)
+	_, _ = fmt.Fprintf(w, "  already complete: %t\n", result.AlreadyComplete)
+	_, _ = fmt.Fprintf(w, "  database: %s\n", result.TargetDatabase)
+	_, _ = fmt.Fprintf(w, "  data key: %s\n", result.TargetDataKey)
+	_, _ = fmt.Fprintf(w, "  archives: %s\n", result.TargetArchives)
+	if output.Next != "" {
+		_, _ = fmt.Fprintln(w, "next:")
+		_, _ = fmt.Fprintf(w, "  %s\n", output.Next)
+		if output.NextNote != "" {
+			_, _ = fmt.Fprintf(w, "  %s\n", output.NextNote)
+		}
+	}
+}
+
 // resolveTargetRoot resolves the v2 data root of `upgrade run`.
 //
 // An explicit --target states the layout, so it is used as given. The Manager
@@ -662,35 +799,7 @@ func layoutMismatch(detail string) error {
 // This is the one place retries are allowed. Preflight stays fail-closed — a
 // legacy source that is still being written must be stopped, never polled.
 func openStatusSnapshot(ctx context.Context, path string, scratchDir string) (*upgradeservice.Snapshot, error) {
-	delay := statusSnapshotBaseDelay
-	var lastErr error
-	for attempt := 1; attempt <= statusSnapshotAttempts; attempt++ {
-		snapshot, err := openSnapshot(ctx, path, scratchDir)
-		if err == nil {
-			return snapshot, nil
-		}
-		if !errors.Is(err, upgradeservice.ErrSourceChanged) {
-			return nil, err
-		}
-		lastErr = err
-		if attempt == statusSnapshotAttempts {
-			break
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-		if delay < statusSnapshotMaxDelay {
-			delay *= 2
-			if delay > statusSnapshotMaxDelay {
-				delay = statusSnapshotMaxDelay
-			}
-		}
-	}
-	return nil, lastErr
+	return upgradeservice.OpenSnapshotWithRetry(ctx, openSnapshot, path, scratchDir)
 }
 
 // codedFailure prefixes a failure with the shared upgrade code vocabulary so the
@@ -711,103 +820,4 @@ func resolveManagerDatabasePath(override string) (string, error) {
 		return "", fmt.Errorf("%w: Manager database path is empty; pass --db-path", ErrUsage)
 	}
 	return cfg.DBPath, nil
-}
-
-func upgradeOperationTablePresent(ctx context.Context, db *sql.DB) (bool, error) {
-	var count int
-	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
-		where type = 'table' and name = 'upgrade_operations'`).Scan(&count); err != nil {
-		return false, err
-	}
-	return count == 1, nil
-}
-
-type runOutput struct {
-	Preflight *upgradeservice.Report  `json:"preflight,omitempty"`
-	Result    *upgradeservice.Result  `json:"result,omitempty"`
-	Operation *model.UpgradeOperation `json:"operation,omitempty"`
-	Next      string                  `json:"next,omitempty"`
-}
-
-// recordedOperationAt reads the operation row from a v2 data root that may not
-// hold a database yet. A missing store is not an error: it simply has no
-// recorded operation.
-func recordedOperationAt(ctx context.Context, targetRoot string) (model.UpgradeOperation, bool, error) {
-	databasePath := filepath.Join(targetRoot, upgradeservice.SourceDatabaseName)
-	if _, err := os.Lstat(databasePath); err != nil {
-		if os.IsNotExist(err) {
-			return model.UpgradeOperation{}, false, nil
-		}
-		return model.UpgradeOperation{}, false, err
-	}
-	return upgradeservice.ReadRecord(ctx, databasePath)
-}
-
-// stagePastCopyIn reports whether the recorded operation already moved beyond
-// the copy-in. `upgrade run` owns preflight and the copy-in only.
-func stagePastCopyIn(stage model.UpgradeStage) bool {
-	switch stage {
-	case model.UpgradeStageReconcile, model.UpgradeStageCPAImport,
-		model.UpgradeStageExternalConnect, model.UpgradeStageVerify, model.UpgradeStageComplete:
-		return true
-	// A rolled-back operation already copied in and then abandoned the v2
-	// root. It is reported like any later stage: the copy-in is never redone,
-	// and nothing may suggest that reconciliation is still the next step.
-	case model.UpgradeStageRolledBack:
-		return true
-	default:
-		return false
-	}
-}
-
-// nextReconcileCommand is the command the operator runs to continue past the
-// copy-in. It is printed, never executed: reconciliation is its own step.
-func nextReconcileCommand(legacyRoot, targetRoot, bundleDir string, declaredVersion string, explicitBundle bool) string {
-	command := fmt.Sprintf("cpa-manager-plus upgrade reconcile --legacy %q --target %q --source-version %q", legacyRoot, targetRoot, declaredVersion)
-	if explicitBundle {
-		command += fmt.Sprintf(" --bundle %q", bundleDir)
-	}
-	return command
-}
-
-func writeRunOutput(w io.Writer, asJSON bool, output runOutput) {
-	if asJSON {
-		_ = json.NewEncoder(w).Encode(output)
-		return
-	}
-	if output.Preflight != nil {
-		writePreflightSummary(w, *output.Preflight)
-	}
-	if output.Operation != nil {
-		_, _ = fmt.Fprintln(w, "operation already past the copy-in; nothing was changed:")
-		_, _ = fmt.Fprintf(w, "  stage: %s\n", output.Operation.Stage)
-		_, _ = fmt.Fprintf(w, "  domains done: %s\n", strings.Join(output.Operation.DomainsDone, ","))
-		return
-	}
-	if output.Result == nil {
-		if output.Next != "" {
-			_, _ = fmt.Fprintln(w, "next:")
-			_, _ = fmt.Fprintf(w, "  %s\n", output.Next)
-		}
-		return
-	}
-	result := output.Result
-	_, _ = fmt.Fprintln(w, "copy-in:")
-	_, _ = fmt.Fprintf(w, "  backup: %s\n", result.BackupDirectory)
-	_, _ = fmt.Fprintf(w, "  backup manifest sha256: %s\n", result.BackupManifestSHA256)
-	_, _ = fmt.Fprintf(w, "  source fingerprint before: %s\n", result.SourceFingerprintBefore)
-	_, _ = fmt.Fprintf(w, "  source fingerprint after: %s\n", result.SourceFingerprintAfter)
-	_, _ = fmt.Fprintf(w, "  source kind: %s\n", result.SourceKind)
-	_, _ = fmt.Fprintf(w, "  source version: %s\n", result.SourceVersion)
-	_, _ = fmt.Fprintf(w, "  stage: %s\n", result.Stage)
-	_, _ = fmt.Fprintf(w, "  domains done: %s\n", strings.Join(result.DomainsDone, ","))
-	_, _ = fmt.Fprintf(w, "  restored: %t\n", result.Restored)
-	_, _ = fmt.Fprintf(w, "  already complete: %t\n", result.AlreadyComplete)
-	_, _ = fmt.Fprintf(w, "  database: %s\n", result.TargetDatabase)
-	_, _ = fmt.Fprintf(w, "  data key: %s\n", result.TargetDataKey)
-	_, _ = fmt.Fprintf(w, "  archives: %s\n", result.TargetArchives)
-	if output.Next != "" {
-		_, _ = fmt.Fprintln(w, "next (reconciliation is a separate step):")
-		_, _ = fmt.Fprintf(w, "  %s\n", output.Next)
-	}
 }

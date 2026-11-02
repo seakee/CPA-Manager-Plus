@@ -55,6 +55,23 @@ func (s UpgradeStage) Valid() bool {
 
 func (s UpgradeStage) rank() int { return upgradeStageRanks[s] }
 
+// RollbackApplicable reports whether a rollback may abandon this position.
+//
+// Preflight is excluded: the copy-in has not run, so there is no v2 root to
+// abandon and no backup to compare. Failed is excluded: it has no position, so
+// it may have failed before the copy-in, and a verdict that the v2 root was
+// abandoned cannot be justified from it. Every forward position from copy_in
+// onward copied a root, so any of them can be abandoned.
+func (s UpgradeStage) RollbackApplicable() bool {
+	switch s {
+	case UpgradeStageCopyIn, UpgradeStageReconcile, UpgradeStageCPAImport,
+		UpgradeStageExternalConnect, UpgradeStageVerify, UpgradeStageComplete:
+		return true
+	default:
+		return false
+	}
+}
+
 // CanAdvanceTo reports whether moving from s to next keeps the operation
 // monotonic. A completed operation never moves again; a failed one may resume
 // any stage because it never claimed a position.
@@ -67,10 +84,10 @@ func (s UpgradeStage) CanAdvanceTo(next UpgradeStage) bool {
 	}
 	// A rollback abandons the forward order instead of extending it. It is the
 	// one move a completed operation may still make, so the completion barrier
-	// below does not apply to it; the caller decides which positions may be
-	// abandoned.
+	// below does not apply to it; RollbackApplicable decides which positions
+	// carry a copied root a rollback may abandon.
 	if next == UpgradeStageRolledBack {
-		return s.Valid()
+		return s.RollbackApplicable()
 	}
 	if s == UpgradeStageComplete {
 		return false
@@ -115,8 +132,18 @@ func ValidUpgradeDomain(domain string) bool { return upgradeDomains[domain] }
 // produced it are not recorded here: they are re-derived when the verdict is
 // written, and this value is the report of that run.
 type RollbackEvidence struct {
-	// Image is the exact 1.x image the operator started.
+	// Image is the exact 1.x reference the rollback restarted: the operator's
+	// release tag or digest when one was named, otherwise the release derived
+	// from the recorded source version. It is a description of the plan, not an
+	// observation that this image was the process the operator started.
 	Image string `json:"image"`
+	// ImageSource says who chose the reference: "operator" when the operator
+	// named it, "derived" when it was derived from the recorded source version.
+	// ImageForm says which accepted form it is: "release-tag" or "digest".
+	// Both are persisted so a reader can tell a reference the operator started
+	// from one this build inferred; the plan carried them, the row did not.
+	ImageSource string `json:"imageSource"`
+	ImageForm   string `json:"imageForm"`
 	// StatusURL is the 1.x health endpoint that answered for this install.
 	StatusURL string `json:"statusUrl"`
 	// SourceFingerprint is the fingerprint observed on the live 1.x volume. It
@@ -125,6 +152,15 @@ type RollbackEvidence struct {
 	SourceFingerprint string `json:"sourceFingerprint"`
 	// ObservedAtMS is when the observation was taken.
 	ObservedAtMS int64 `json:"observedAtMs"`
+}
+
+// Complete reports whether the evidence names everything a verdict rests on.
+// The fields are recorded whole or not at all, so an incomplete value describes
+// only the shape of an observation: a reader can neither re-check it nor name
+// the moment it belonged to.
+func (e RollbackEvidence) Complete() bool {
+	return e.Image != "" && e.ImageSource != "" && e.ImageForm != "" &&
+		e.StatusURL != "" && e.SourceFingerprint != "" && e.ObservedAtMS > 0
 }
 
 // UpgradeOperation is the whole persistent state of the v2 Upgrade operation:
@@ -231,13 +267,8 @@ func (o UpgradeOperation) Validate() error {
 	}
 	// Evidence is written whole or not at all. A partial record would let a
 	// reader believe a verdict was observed when only its shape survived.
-	if o.Rollback != nil {
-		if o.Rollback.Image == "" || o.Rollback.StatusURL == "" || o.Rollback.SourceFingerprint == "" {
-			return errors.New("upgrade operation rollback evidence must name the image, the health endpoint and the observed fingerprint")
-		}
-		if o.Rollback.ObservedAtMS <= 0 {
-			return errors.New("upgrade operation rollback evidence must name when it was observed")
-		}
+	if o.Rollback != nil && !o.Rollback.Complete() {
+		return errors.New("upgrade operation rollback evidence must name the image, its source and form, the health endpoint, the observed fingerprint and when it was observed")
 	}
 	return nil
 }

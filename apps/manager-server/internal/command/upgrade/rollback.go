@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
@@ -56,13 +56,15 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory")
 	legacyImage := flags.String("legacy-image", "", "exact 1.x image reference to pin; defaults to v<source version>")
 	project := flags.String("project", "", "1.x compose project that names the data volume; defaults to cpamp")
+	volume := flags.String("volume", "",
+		"1.x data volume name (including the unprefixed cpa-manager-plus-data) or absolute bind source; defaults to <project>"+upgradeservice.LegacyVolumeSuffix)
 	backup := flags.String("backup", "", "recorded backup snapshot; defaults to the v2 backup directory")
 	statusURL := flags.String("status-url", "",
 		"1.x health endpoint probed by --verify; defaults to "+upgradeservice.LegacyHealthURL())
 	rollbackPort := flags.Int("port", upgradeservice.LegacyRollbackPort,
 		"host port --prepare publishes the restarted 1.x manager on; it may not be the v2 Manager's port")
 	managerAddr := flags.String("manager-addr", "",
-		"v2 Manager listen address (host:port); naming it makes --prepare prove the v2 stack is stopped and refuses a probe of it")
+		"v2 Manager listen address (host:port); defaults to the configured HTTP_ADDR. Naming it makes --prepare prove the v2 stack is stopped and refuses a probe of it")
 	allowFamily := flags.Bool("allow-image-family-mismatch", false,
 		"accept a 1.x image from another version family than the recorded source")
 	asJSON := flags.Bool("json", false, "print the plan or the recorded operation as JSON")
@@ -81,11 +83,26 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	if *verify && *rollbackPort != upgradeservice.LegacyRollbackPort {
 		return fmt.Errorf("%w: --port belongs to --prepare; --verify proves the endpoint the plan printed", ErrUsage)
 	}
+	if *verify && strings.TrimSpace(*volume) != "" {
+		return fmt.Errorf("%w: --volume belongs to --prepare; --verify proves the volume the plan named", ErrUsage)
+	}
 	if trimmed := strings.TrimSpace(*managerAddr); trimmed != "" {
 		// The address is compared with the probe target and dialled to prove the
 		// v2 stack is down, so it has to name a port.
 		if _, _, err := net.SplitHostPort(trimmed); err != nil {
 			return fmt.Errorf("%w: --manager-addr must be host:port, got %q", ErrUsage, trimmed)
+		}
+	}
+	// An unnamed address is the configured listen address, not the documented
+	// default: HTTP_ADDR may move the Manager to another port, and every check
+	// below has to compare against the port it actually holds.
+	managerAddress, err := resolveManagerAddress(*managerAddr)
+	if err != nil {
+		return err
+	}
+	if managerAddress != "" {
+		if _, _, err := net.SplitHostPort(managerAddress); err != nil {
+			return fmt.Errorf("%w: the configured HTTP_ADDR %q is not host:port", ErrUsage, managerAddress)
 		}
 	}
 	targetRoot, err := resolveTargetRoot(*target)
@@ -99,8 +116,9 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 			BackupDir:                *backup,
 			TagOverride:              *legacyImage,
 			Project:                  *project,
+			Volume:                   *volume,
 			Port:                     *rollbackPort,
-			ManagerAddress:           *managerAddr,
+			ManagerAddress:           managerAddress,
 			AllowImageFamilyMismatch: *allowFamily,
 		})
 	}
@@ -110,16 +128,36 @@ func runRollback(ctx context.Context, args []string, stdout, stderr io.Writer) e
 		BackupDir:                *backup,
 		Image:                    *legacyImage,
 		StatusURL:                *statusURL,
-		ManagerAddress:           *managerAddr,
+		ManagerAddress:           managerAddress,
 		ObservedAtMS:             time.Now().UnixMilli(),
 		AllowImageFamilyMismatch: *allowFamily,
 	})
 }
 
+// resolveManagerAddress resolves the v2 Manager listen address a rollback is
+// decided against. An explicit --manager-addr wins. Otherwise the configured
+// HTTP_ADDR is used, because the Manager may listen on another port than the
+// documented default and the probe comparison, the port-collision check and the
+// v2-running proof must all describe the listener it actually holds.
+//
+// A wildcard bind is the normal configuration (0.0.0.0:PORT or [::]:PORT). The
+// service dials it on loopback and treats it as this host, so it is kept exactly
+// as configured and shown to the operator.
+func resolveManagerAddress(override string) (string, error) {
+	if trimmed := strings.TrimSpace(override); trimmed != "" {
+		return trimmed, nil
+	}
+	cfg, err := config.LoadWithoutCreatingDefault()
+	if err != nil {
+		return "", fmt.Errorf("load Manager configuration: %w", err)
+	}
+	return strings.TrimSpace(cfg.HTTPAddr), nil
+}
+
 func runRollbackPrepare(ctx context.Context, stdout, stderr io.Writer, asJSON bool, options upgradeservice.RollbackOptions) error {
 	plan, err := upgradeservice.PrepareRollback(ctx, options)
 	if err != nil {
-		return refuse(stderr, err)
+		return refuseTyped(stderr, err)
 	}
 	if asJSON {
 		return json.NewEncoder(stdout).Encode(plan)
@@ -132,8 +170,12 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	_, _ = fmt.Fprintln(w, "rollback plan:")
 	_, _ = fmt.Fprintf(w, "  stage: %s\n", plan.Stage)
 	_, _ = fmt.Fprintf(w, "  source version: %s\n", plan.SourceVersion)
-	_, _ = fmt.Fprintf(w, "  image: %s\n", plan.Image)
-	_, _ = fmt.Fprintf(w, "  volume: %s\n", plan.Volume)
+	_, _ = fmt.Fprintf(w, "  image: %s (%s %s)\n", plan.Image, plan.ImageSource, plan.ImageForm)
+	if plan.ImageSource == upgradeservice.RollbackImageSourceDerived {
+		_, _ = fmt.Fprintln(w, "    derived from the recorded source version, not an image the operator named;")
+		_, _ = fmt.Fprintln(w, "    pass --legacy-image with the exact tag or digest you started to record that instead")
+	}
+	_, _ = fmt.Fprintf(w, "  volume: %s (%s)\n", plan.Volume, plan.VolumeKind)
 	_, _ = fmt.Fprintf(w, "  volume mountpoint (v1 container): %s\n", plan.VolumeMountPoint)
 	_, _ = fmt.Fprintf(w, "  published port (v1 host): %d\n", plan.Port)
 	_, _ = fmt.Fprintf(w, "  v2 Manager port: %d\n", plan.ManagerPort)
@@ -142,6 +184,8 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	_, _ = fmt.Fprintf(w, "  source fingerprint: %s\n", plan.SourceFingerprint)
 	_, _ = fmt.Fprintf(w, "  backup directory: %s\n", plan.BackupDirectory)
 	_, _ = fmt.Fprintf(w, "  backup manifest sha256: %s\n", plan.BackupManifestSHA256)
+	_, _ = fmt.Fprintf(w, "  v1 identity: %s\n", plan.IdentityProof)
+	_, _ = fmt.Fprintf(w, "  identity statement: %s\n", plan.IdentityStatement)
 	_, _ = fmt.Fprintf(w, "  compose project: %s\n", plan.ComposeProject)
 	_, _ = fmt.Fprintf(w, "  invocation: %s\n", plan.ComposeInvocation)
 	_, _ = fmt.Fprintln(w, "  compose file (stdin):")
@@ -162,14 +206,20 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	// The command is printed to be pasted as-is: every path is quoted, and the
 	// recorded bundle and the plan's own port are named so the verdict cannot be
 	// recorded against a different copy or endpoint.
-	verifyCommand := fmt.Sprintf("  cpa-manager-plus upgrade rollback --verify --legacy %s --target %s --backup %s --legacy-image %s --status-url %s",
-		strconv.Quote(plan.SourceRoot), strconv.Quote(plan.TargetRoot), strconv.Quote(plan.BackupDirectory),
-		strconv.Quote(plan.Image), strconv.Quote(upgradeservice.RollbackHealthURL(plan.Port)))
+	verifyCommand := fmt.Sprintf("  cpa-manager-plus upgrade rollback --verify --legacy %s --target %s --backup %s --status-url %s",
+		upgradeservice.ShellQuote(plan.SourceRoot), upgradeservice.ShellQuote(plan.TargetRoot), upgradeservice.ShellQuote(plan.BackupDirectory),
+		upgradeservice.ShellQuote(upgradeservice.RollbackHealthURL(plan.Port)))
+	// Only an operator-named reference is passed back as one. Repeating a derived
+	// reference as --legacy-image would record it as the image the operator
+	// started, which nobody stated.
+	if plan.ImageSource == upgradeservice.RollbackImageSourceOperator {
+		verifyCommand += " --legacy-image " + upgradeservice.ShellQuote(plan.Image)
+	}
 	if plan.ImageFamilyOverride {
 		verifyCommand += " --allow-image-family-mismatch"
 	}
 	if plan.ManagerAddress != "" {
-		verifyCommand += " --manager-addr " + strconv.Quote(plan.ManagerAddress)
+		verifyCommand += " --manager-addr " + upgradeservice.ShellQuote(plan.ManagerAddress)
 	}
 	_, _ = fmt.Fprintln(w, verifyCommand)
 }
@@ -181,7 +231,7 @@ func runRollbackVerify(ctx context.Context, stdout, stderr io.Writer, asJSON boo
 	observation upgradeservice.RollbackObservation) error {
 	operation, err := upgradeservice.RecordRollback(ctx, observation)
 	if err != nil {
-		return refuse(stderr, err)
+		return refuseTyped(stderr, err)
 	}
 	if asJSON {
 		return json.NewEncoder(stdout).Encode(operation)
@@ -195,7 +245,11 @@ func runRollbackVerify(ctx context.Context, stdout, stderr io.Writer, asJSON boo
 	_, _ = fmt.Fprintf(stdout, "  source fingerprint after: %s\n", operation.SourceFingerprintAfter)
 	_, _ = fmt.Fprintf(stdout, "  backup manifest sha256: %s\n", operation.BackupManifestSHA256)
 	if evidence := operation.Rollback; evidence != nil {
-		_, _ = fmt.Fprintf(stdout, "  rollback image: %s\n", evidence.Image)
+		origin := "the reference the operator gave"
+		if evidence.ImageSource == upgradeservice.RollbackImageSourceDerived {
+			origin = "derived from the recorded source version; not an image the operator named"
+		}
+		_, _ = fmt.Fprintf(stdout, "  rollback image: %s (%s; %s)\n", evidence.Image, evidence.ImageForm, origin)
 		_, _ = fmt.Fprintf(stdout, "  rollback health endpoint: %s\n", evidence.StatusURL)
 		_, _ = fmt.Fprintf(stdout, "  observed source fingerprint: %s\n", evidence.SourceFingerprint)
 		_, _ = fmt.Fprintf(stdout, "  observed at ms: %d\n", evidence.ObservedAtMS)
