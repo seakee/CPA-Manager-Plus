@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -318,12 +319,12 @@ func TestRollbackPreparePrintsAnExactVerifyCommand(t *testing.T) {
 		t.Fatalf("prepare exit code = %d, want 0; stderr: %s", code, stderr)
 	}
 	for _, want := range []string{
-		"--legacy-image \"" + upgradeservice.LegacyImageRepository + ":v1.13.0\"",
+		"--legacy-image '" + upgradeservice.LegacyImageRepository + ":v1.13.0'",
 		"--allow-image-family-mismatch",
-		"--status-url \"" + upgradeservice.LegacyHealthURL() + "\"",
-		"--backup \"",
-		"--target \"",
-		"--legacy \"",
+		"--status-url '" + upgradeservice.LegacyHealthURL() + "'",
+		"--backup '",
+		"--target '",
+		"--legacy '",
 	} {
 		if !strings.Contains(human, want) {
 			t.Fatalf("printed verify command does not carry %q: %s", want, human)
@@ -407,23 +408,64 @@ func TestRunStopsAfterTheCopyInAndPrintsTheNextCommand(t *testing.T) {
 	}
 }
 
+// TestNextStepCommandIsShellQuoted is the L3 regression: the next step was
+// rendered with Go quoting, so a path containing `$` or backticks was expanded
+// by the operator's shell before the command saw it. The printed argument is now
+// one single-quoted shell word, and the shell hands it back unchanged.
+func TestNextStepCommandIsShellQuoted(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "v2 $HOME `x` with space")
+	path := filepath.Join(target, upgradeservice.SourceDatabaseName)
+	command := nextStepCommand(target)
+	if !strings.Contains(command, upgradeservice.ShellQuote(path)) {
+		t.Fatalf("next step is not shell-quoted for %q: %s", path, command)
+	}
+	output, err := exec.Command("sh", "-c", "printf '%s' "+upgradeservice.ShellQuote(path)).Output()
+	if err != nil {
+		t.Fatalf("render the path through the shell: %v", err)
+	}
+	if string(output) != path {
+		t.Fatalf("the shell expanded the printed path to %q, want %q", output, path)
+	}
+}
+
 // printedCommandArgs splits the command `upgrade run` prints into the arguments
 // this build accepts, so a test can execute exactly what the operator would
-// paste. Every quoted token is unquoted.
+// paste. The printed words are POSIX shell words: single-quoted with each
+// embedded single quote written as the close-escape-reopen sequence.
 func printedCommandArgs(command string) ([]string, error) {
-	fields := strings.Fields(command)
+	fields := []string{}
+	current := strings.Builder{}
+	inSingle := false
+	flush := func() {
+		if current.Len() > 0 {
+			fields = append(fields, current.String())
+			current.Reset()
+		}
+	}
+	runes := []rune(command)
+	for index := 0; index < len(runes); index++ {
+		switch r := runes[index]; {
+		case r == '\'':
+			inSingle = !inSingle
+		case r == '\\' && !inSingle && index+1 < len(runes) && runes[index+1] == '\'':
+			// The close-escape-reopen sequence shellQuote emits for an embedded
+			// single quote.
+			current.WriteRune('\'')
+			index++
+		case (r == ' ' || r == '\t') && !inSingle:
+			flush()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	if inSingle {
+		return nil, fmt.Errorf("unterminated single quote in %q", command)
+	}
+	flush()
 	if len(fields) < 3 || fields[0] != "cpa-manager-plus" || fields[1] != "upgrade" {
 		return nil, fmt.Errorf("want a `cpa-manager-plus upgrade ...` command, got %q", command)
 	}
-	args := make([]string, 0, len(fields)-2)
-	for _, field := range fields[2:] {
-		if unquoted, err := strconv.Unquote(field); err == nil {
-			args = append(args, unquoted)
-			continue
-		}
-		args = append(args, field)
-	}
-	return args, nil
+	return fields[2:], nil
 }
 
 func TestRunReportsALaterStageWithoutTouchingIt(t *testing.T) {
@@ -883,7 +925,7 @@ func TestRollbackManagerAddressDefaultsFromConfiguredHTTPAddr(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("human prepare exit code = %d, want 0; stderr: %s", code, stderr)
 	}
-	if !strings.Contains(human, `--manager-addr "0.0.0.0:`+strconv.Itoa(configuredPort)+`"`) {
+	if !strings.Contains(human, `--manager-addr '0.0.0.0:`+strconv.Itoa(configuredPort)+`'`) {
 		t.Fatalf("printed verify command does not carry the configured address:\n%s", human)
 	}
 }

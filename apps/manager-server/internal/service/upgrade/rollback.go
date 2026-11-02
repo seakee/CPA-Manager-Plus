@@ -862,19 +862,19 @@ func rollbackPreconditions(project, volume, volumeKind, image, sourceRoot, backu
 	}
 	if volumeKind == RollbackVolumeBind {
 		preconditions = append(preconditions,
-			"the v1 stack binds the host directory the operation recorded: "+strconv.Quote(volume)+" -> "+LegacyVolumeMountPoint,
-			"confirm it there: stat "+strconv.Quote(sourceRoot)+" must describe the 1.x data directory this operation copied",
+			"the v1 stack binds the host directory the operation recorded: "+ShellQuote(volume)+" -> "+LegacyVolumeMountPoint,
+			"confirm it there: stat "+ShellQuote(sourceRoot)+" must describe the 1.x data directory this operation copied",
 			"the v1 stack restarts under compose project "+project+".")
 	} else {
 		preconditions = append(preconditions,
-			"docker volume inspect "+strconv.Quote(volume)+" --format '{{ .Mountpoint }}'",
-			"that mountpoint must be the 1.x data directory this operation recorded: "+strconv.Quote(sourceRoot),
+			"docker volume inspect "+ShellQuote(volume)+" --format '{{ .Mountpoint }}'",
+			"that mountpoint must be the 1.x data directory this operation recorded: "+ShellQuote(sourceRoot),
 			"the v1 stack restarts under compose project "+project+", because that project names the volume")
 	}
 	preconditions = append(preconditions,
 		"pull the pinned 1.x image before restarting: docker pull "+image,
 		"the v1 stack publishes "+published+" rather than the v2 port "+held+", so a /health answer can only come from v1",
-		"the recorded backup this verdict is checked against is "+strconv.Quote(backupDir),
+		"the recorded backup this verdict is checked against is "+ShellQuote(backupDir),
 		"the v1 process that answers /health is operator-verified to be the stack above: this Manager cannot reach the Docker socket to bind it",
 	)
 	return preconditions

@@ -664,7 +664,9 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   with the typed refusal written to stderr exactly once; an untyped environment
   or usage failure exits 2. `--manager-addr` defaults to the configured
   `HTTP_ADDR`, so the plan's manager port and the probe comparison describe the
-  listener the Manager really holds; the printed verify command is quoted, names
+  listener the Manager really holds; the printed verify command uses
+  single-quoted shell words (Go quoting would leave `$` and backticks live to
+  the shell), names
   `--target`, `--backup`, `--legacy-image` and `--status-url` at the plan's own
   port, and carries `--manager-addr`. `upgrade rollback --verify --legacy <dir>
   [--backup <dir>] [--status-url <url>] [--manager-addr HOST:PORT]

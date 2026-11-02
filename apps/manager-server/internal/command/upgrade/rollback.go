@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"strings"
 	"time"
 
@@ -204,19 +203,19 @@ func writePlanSummary(w io.Writer, plan upgradeservice.Plan) {
 	// recorded bundle and the plan's own port are named so the verdict cannot be
 	// recorded against a different copy or endpoint.
 	verifyCommand := fmt.Sprintf("  cpa-manager-plus upgrade rollback --verify --legacy %s --target %s --backup %s --status-url %s",
-		strconv.Quote(plan.SourceRoot), strconv.Quote(plan.TargetRoot), strconv.Quote(plan.BackupDirectory),
-		strconv.Quote(upgradeservice.RollbackHealthURL(plan.Port)))
+		upgradeservice.ShellQuote(plan.SourceRoot), upgradeservice.ShellQuote(plan.TargetRoot), upgradeservice.ShellQuote(plan.BackupDirectory),
+		upgradeservice.ShellQuote(upgradeservice.RollbackHealthURL(plan.Port)))
 	// Only an operator-named reference is passed back as one. Repeating a derived
 	// reference as --legacy-image would record it as the image the operator
 	// started, which nobody stated.
 	if plan.ImageSource == upgradeservice.RollbackImageSourceOperator {
-		verifyCommand += " --legacy-image " + strconv.Quote(plan.Image)
+		verifyCommand += " --legacy-image " + upgradeservice.ShellQuote(plan.Image)
 	}
 	if plan.ImageFamilyOverride {
 		verifyCommand += " --allow-image-family-mismatch"
 	}
 	if plan.ManagerAddress != "" {
-		verifyCommand += " --manager-addr " + strconv.Quote(plan.ManagerAddress)
+		verifyCommand += " --manager-addr " + upgradeservice.ShellQuote(plan.ManagerAddress)
 	}
 	_, _ = fmt.Fprintln(w, verifyCommand)
 }

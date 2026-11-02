@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -129,6 +130,28 @@ func (f rollbackFixture) observation(t *testing.T) RollbackObservation {
 		Image:        LegacyImageRepository + ":v" + strings.TrimPrefix(f.recorded.SourceVersion, "v"),
 		StatusURL:    healthyProbe(t),
 		ObservedAtMS: time.Now().UnixMilli(),
+	}
+}
+
+// TestShellQuoteSurvivesTheShell keeps every printed command pastable: Go
+// quoting leaves `$`, backticks and `\` live to the shell, while single-quoted
+// shell words reach the command unchanged.
+func TestShellQuoteSurvivesTheShell(t *testing.T) {
+	for _, value := range []string{
+		"plain",
+		"with space",
+		"dollar$HOME",
+		"back`tick`",
+		`single'quote`,
+		`back\slash`,
+	} {
+		output, err := exec.Command("sh", "-c", "printf '%s' "+ShellQuote(value)).Output()
+		if err != nil {
+			t.Fatalf("render %q through the shell: %v", value, err)
+		}
+		if string(output) != value {
+			t.Fatalf("shell word for %q expanded to %q", value, output)
+		}
 	}
 }
 

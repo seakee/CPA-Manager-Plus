@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
@@ -462,7 +461,7 @@ func stagePastCopyIn(stage model.UpgradeStage) bool {
 // invented here.
 func nextStepCommand(targetRoot string) string {
 	return fmt.Sprintf("cpa-manager-plus upgrade status --db-path %s",
-		strconv.Quote(filepath.Join(targetRoot, upgradeservice.SourceDatabaseName)))
+		upgradeservice.ShellQuote(filepath.Join(targetRoot, upgradeservice.SourceDatabaseName)))
 }
 
 // nextStepNote says what is still missing after the printed step. The run owns
