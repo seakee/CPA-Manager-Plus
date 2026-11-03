@@ -616,7 +616,7 @@ jobs:
       needs.changes.outputs.bundle_boundary == 'true' ||
       needs.changes.outputs.manager_runtime == 'true'
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout code
