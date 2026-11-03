@@ -182,34 +182,163 @@ jobs:
         shell: bash
         env:
           SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Ordinary Debian sandbox matching the Runtime image base; only the
+          # two root-requiring proofs execute inside it.
+          CPAMP_TEST_IMAGE: debian:bookworm-slim
         run: |
           set -euo pipefail
+          umask 077
+
+          # Private, runner-owned staging replaces the fixed /tmp path; the
+          # cleanup trap removes it on every exit path.
+          work="$(mktemp -d "${RUNNER_TEMP}/fresh-adoption-work.XXXXXXXX")"
+          inputs="${work}/inputs"
           evidence="${RUNNER_TEMP}/fresh-adoption-v8"
-          tools="${RUNNER_TEMP}/fresh-adoption-tools"
-          mkdir -p "${evidence}" "${tools}/v8" "${tools}/v7"
-          curl --fail --location --max-time 120 --output "${tools}/v8/cpa.tar.gz" \
+          cleanup() {
+            rm -rf "${work}"
+          }
+          trap cleanup EXIT
+          rm -rf "${evidence}"
+          install -d -m 0700 "${inputs}/v8" "${inputs}/v7" "${evidence}"
+          curl --fail --location --max-time 120 --output "${inputs}/v8/cpa.tar.gz" \
             https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.13/CLIProxyAPI_8.0.13_linux_amd64.tar.gz
-          printf '%s  %s\n' 50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3 "${tools}/v8/cpa.tar.gz" | sha256sum --check --status
-          tar -xzf "${tools}/v8/cpa.tar.gz" -C "${tools}/v8" cli-proxy-api
-          printf '%s  %s\n' b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41 "${tools}/v8/cli-proxy-api" | sha256sum --check --status
+          printf '%s  %s\n' 50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3 "${inputs}/v8/cpa.tar.gz" | sha256sum --check --status
+          tar -xzf "${inputs}/v8/cpa.tar.gz" -C "${inputs}/v8" cli-proxy-api
+          printf '%s  %s\n' b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41 "${inputs}/v8/cli-proxy-api" | sha256sum --check --status
 
-          curl --fail --location --max-time 120 --output "${tools}/v7/cpa.tar.gz" \
+          curl --fail --location --max-time 120 --output "${inputs}/v7/cpa.tar.gz" \
             https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.0.12/CLIProxyAPI_7.0.12_linux_amd64.tar.gz
-          printf '%s  %s\n' 8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74 "${tools}/v7/cpa.tar.gz" | sha256sum --check --status
-          tar -xzf "${tools}/v7/cpa.tar.gz" -C "${tools}/v7" cli-proxy-api
+          printf '%s  %s\n' 8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74 "${inputs}/v7/cpa.tar.gz" | sha256sum --check --status
+          tar -xzf "${inputs}/v7/cpa.tar.gz" -C "${inputs}/v7" cli-proxy-api
 
-          go -C apps/runtime-supervisor build -trimpath -o "${tools}/cpamp-runtime-supervisor" ./cmd/cpamp-runtime-supervisor
-          export CPAMP_TEST_CPA_V8="${tools}/v8/cli-proxy-api"
-          export CPAMP_TEST_CPA_LEGACY="${tools}/v7/cli-proxy-api"
-          export CPAMP_TEST_RUNTIME="${tools}/cpamp-runtime-supervisor"
+          # Ordinary runner user builds the Supervisor and compiles the proofs;
+          # the race detector and the exact run selection stay as they were.
+          # No Go command, cache or test binary is ever created as root. The
+          # Supervisor keeps the Runtime image's static build (Dockerfile.runtime).
+          CGO_ENABLED=0 go -C apps/runtime-supervisor build -trimpath -o "${inputs}/cpamp-runtime-supervisor" ./cmd/cpamp-runtime-supervisor
+          go -C apps/runtime-supervisor test -c -race -o "${inputs}/supervisor.test" ./internal/lifecycle
+          go -C apps/manager-server test -c -race -o "${inputs}/adoption.test" ./internal/service/freshstrategy
+
+          # Both exact proofs pin the image layout: the runtime root is 0711,
+          # the Supervisor root is root:10001 0710 and the CPA child runs as the
+          # image identity, so the compiled tests require root
+          # (apps/manager-server/internal/service/freshstrategy/adoption_cpa_test.go).
+          # Root is granted only inside a throwaway container: no host
+          # namespace, no Docker socket, no writable host mount, no added
+          # capability and no credential. The proofs use loopback only, so the
+          # container keeps its network disabled. Evidence leaves through a tar
+          # stream, so nothing root-owned is created on the runner filesystem.
+          export CPAMP_TEST_CPA_LEGACY="${inputs}/v7/cli-proxy-api"
           export CPAMP_TEST_CPA_LEGACY_ARCHIVE_SHA256="8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74"
-          export CPAMP_TEST_FRESH_TRANSITION_OUT="${evidence}/fresh-legacy-transition.json"
           export CPAMP_TEST_FRESH_TRANSITION_HEAD="$(git rev-parse HEAD)"
           export CPAMP_TEST_FRESH_TRANSITION_TREE="$(git rev-parse HEAD^{tree})"
           export CPAMP_TEST_FRESH_TRANSITION_SOURCE_HEAD="${SOURCE_HEAD}"
+
+          cat > "${work}/run-proofs.sh" <<'CONTAINER'
+          set -euo pipefail
+          test "$(id -u)" -eq 0 || { echo "the exact adoption proofs require root inside the sandbox" >&2; exit 1; }
+          tools=/opt/fresh-adoption-tools
+          evidence=/evidence
+          mkdir -p "${evidence}"
+          install -d -m 0755 "${tools}"
+          install -m 0755 /inputs/v8/cli-proxy-api "${tools}/cpa-v8"
+          install -m 0755 /inputs/v7/cli-proxy-api "${tools}/cpa-v7"
+          install -m 0755 /inputs/cpamp-runtime-supervisor "${tools}/cpamp-runtime-supervisor"
+          install -m 0755 /inputs/supervisor.test "${tools}/supervisor.test"
+          install -m 0755 /inputs/adoption.test "${tools}/adoption.test"
+          # The destination child runs as the image identity (uid/gid 10001);
+          # prove it can execute every staged executable before spending the
+          # proofs on it.
+          for executable in "${tools}/cpa-v8" "${tools}/cpa-v7" "${tools}/cpamp-runtime-supervisor"; do
+            if ! setpriv --reuid 10001 --regid 10001 --clear-groups test -x "${executable}"; then
+              echo "the destination identity cannot execute ${executable}" >&2
+              exit 1
+            fi
+          done
+          export CPAMP_TEST_CPA_V8="${tools}/cpa-v8"
+          export CPAMP_TEST_CPA_LEGACY="${tools}/cpa-v7"
+          export CPAMP_TEST_RUNTIME="${tools}/cpamp-runtime-supervisor"
+          export CPAMP_TEST_CPA_LEGACY_ARCHIVE_SHA256=8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74
+          export CPAMP_TEST_FRESH_TRANSITION_OUT="${evidence}/fresh-legacy-transition.json"
           export CPAMP_TEST_FRESH_RESOURCE_OUT_DIR="${evidence}"
-          go -C apps/runtime-supervisor test -race -count=1 -json -run '^TestDestinationRealCPAV8$' ./internal/lifecycle | tee "${evidence}/supervisor.jsonl"
-          go -C apps/manager-server test -race -count=1 -json -run '^TestAdoptionExactCPAV8WithSupervisor$' ./internal/service/freshstrategy | tee "${evidence}/adoption.jsonl"
+          # The compiled binaries only emit -test.v text; the runner converts it
+          # to the JSON event stream. Both proofs run so a failure still yields
+          # the full evidence set.
+          status=0
+          "${tools}/supervisor.test" -test.v -test.count=1 -test.run '^TestDestinationRealCPAV8$' > "${evidence}/supervisor.testlog" 2>&1 || status=$?
+          adoption_status=0
+          "${tools}/adoption.test" -test.v -test.count=1 -test.run '^TestAdoptionExactCPAV8WithSupervisor$' > "${evidence}/adoption.testlog" 2>&1 || adoption_status=$?
+          if [ "${status}" -eq 0 ]; then
+            status="${adoption_status}"
+          fi
+          tar -C "${evidence}" -cf - .
+          exit "${status}"
+          CONTAINER
+
+          docker pull --platform linux/amd64 "${CPAMP_TEST_IMAGE}"
+          status=0
+          docker run --rm \
+            --platform linux/amd64 \
+            --network none \
+            --user 0:0 \
+            --env CPAMP_TEST_FRESH_TRANSITION_HEAD \
+            --env CPAMP_TEST_FRESH_TRANSITION_TREE \
+            --env CPAMP_TEST_FRESH_TRANSITION_SOURCE_HEAD \
+            --mount "type=bind,source=${inputs},target=/inputs,readonly" \
+            --mount "type=bind,source=${work}/run-proofs.sh,target=/run-proofs.sh,readonly" \
+            "${CPAMP_TEST_IMAGE}" bash /run-proofs.sh > "${work}/evidence.tar" || status=$?
+
+          if [ -s "${work}/evidence.tar" ]; then
+            if ! tar -C "${evidence}" -xf "${work}/evidence.tar"; then
+              echo "the sandbox did not return a complete evidence archive" >&2
+              if [ "${status}" -ne 0 ]; then
+                exit "${status}"
+              fi
+              exit 1
+            fi
+            rm -f "${work}/evidence.tar"
+          fi
+          find "${evidence}" -type d -exec chmod 0700 {} +
+          find "${evidence}" -type f -exec chmod 0600 {} +
+
+          # Authentic JSON events from the runner-side converter, and never a
+          # silently skipped proof.
+          if [ -s "${evidence}/supervisor.testlog" ]; then
+            go tool test2json -t -p github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/lifecycle \
+              < "${evidence}/supervisor.testlog" > "${evidence}/supervisor.jsonl"
+            rm -f "${evidence}/supervisor.testlog"
+          fi
+          if [ -s "${evidence}/adoption.testlog" ]; then
+            go tool test2json -t -p github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy \
+              < "${evidence}/adoption.testlog" > "${evidence}/adoption.jsonl"
+            rm -f "${evidence}/adoption.testlog"
+          fi
+          if [ "${status}" -ne 0 ]; then
+            exit "${status}"
+          fi
+          python3 - \
+            "TestDestinationRealCPAV8=${evidence}/supervisor.jsonl" \
+            "TestAdoptionExactCPAV8WithSupervisor=${evidence}/adoption.jsonl" <<'PY'
+          import json, os, sys
+
+          for pair in sys.argv[1:]:
+              name, path = pair.split('=', 1)
+              if not os.path.exists(path):
+                  raise SystemExit(path + ' is missing; the exact proof must run in CI')
+              passed = skipped = False
+              with open(path) as stream:
+                  for line in stream:
+                      line = line.strip()
+                      if not line:
+                          continue
+                      event = json.loads(line)
+                      if event.get('Test') != name:
+                          continue
+                      passed = passed or event.get('Action') == 'pass'
+                      skipped = skipped or event.get('Action') == 'skip'
+              if skipped or not passed:
+                  raise SystemExit(path + ' did not run to a pass for ' + name)
+          PY
           python3 - <<'PY'
           import hashlib, json, os, platform, subprocess
           def output(*args):
