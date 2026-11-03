@@ -17,7 +17,16 @@ type Repository interface {
 	ListDue(ctx context.Context, nowMS int64, limit int) ([]model.QuotaCooldown, error)
 	ListActive(ctx context.Context) ([]model.QuotaCooldown, error)
 	MarkRecovered(ctx context.Context, id int64, expectedUpdatedAtMS int64, recoveredAtMS int64) error
-	MarkSkipped(ctx context.Context, id int64, reason string) error
+	// ClaimRecovery retires an observed active generation before CPAMP mutates
+	// remote credential state and returns the claimed generation.
+	ClaimRecovery(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) (int64, error)
+	// MarkClaimedRecovered finalizes a claimed generation as recovered.
+	MarkClaimedRecovered(ctx context.Context, id int64, claimedUpdatedAtMS int64, recoveredAtMS int64) error
+	// MarkClaimedSkipped records why a claimed generation will not be confirmed.
+	MarkClaimedSkipped(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error
+	// ReopenClaim returns a claimed generation to active so it can retry.
+	ReopenClaim(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error
+	MarkSkipped(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) error
 	RecordFailure(ctx context.Context, id int64, reason string) error
 }
 
@@ -316,10 +325,87 @@ func (r *repository) MarkRecovered(ctx context.Context, id int64, expectedUpdate
 	return nil
 }
 
-func (r *repository) MarkSkipped(ctx context.Context, id int64, reason string) error {
-	now := time.Now().UnixMilli()
-	_, err := r.db.ExecContext(ctx, `update quota_cooldowns set status = ?, last_error = ?, updated_at_ms = ? where id = ?`, model.QuotaCooldownStatusSkipped, nullString(reason), now, id)
-	return err
+func (r *repository) MarkSkipped(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) error {
+	if expectedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: expected generation is required", ErrConflict)
+	}
+	return r.casGeneration(ctx, `update quota_cooldowns set status = ?, last_error = ?, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		model.QuotaCooldownStatusSkipped, nullString(reason), nextUpdatedAtMS(expectedUpdatedAtMS), id, model.QuotaCooldownStatusActive, expectedUpdatedAtMS,
+	)
+}
+
+// ClaimRecovery retires an observed active generation before CPAMP mutates the
+// remote credential. The row becomes terminal, so a restart, a later due tick,
+// or a retry with the same generation can never re-use it to enable a
+// credential that a human disabled after the request left the process.
+func (r *repository) ClaimRecovery(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) (int64, error) {
+	if expectedUpdatedAtMS <= 0 {
+		return 0, fmt.Errorf("%w: expected generation is required", ErrConflict)
+	}
+	claimedUpdatedAtMS := nextUpdatedAtMS(expectedUpdatedAtMS)
+	if err := r.casGeneration(ctx, `update quota_cooldowns set status = ?, last_error = ?, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		model.QuotaCooldownStatusSkipped, nullString(reason), claimedUpdatedAtMS, id, model.QuotaCooldownStatusActive, expectedUpdatedAtMS,
+	); err != nil {
+		return 0, err
+	}
+	return claimedUpdatedAtMS, nil
+}
+
+func (r *repository) MarkClaimedRecovered(ctx context.Context, id int64, claimedUpdatedAtMS int64, recoveredAtMS int64) error {
+	if claimedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: claimed generation is required", ErrConflict)
+	}
+	if recoveredAtMS <= 0 {
+		recoveredAtMS = time.Now().UnixMilli()
+	}
+	return r.casGeneration(ctx, `update quota_cooldowns set status = ?, recovered_at_ms = ?, last_error = null, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		model.QuotaCooldownStatusRecovered, recoveredAtMS, nextUpdatedAtMS(claimedUpdatedAtMS), id, model.QuotaCooldownStatusSkipped, claimedUpdatedAtMS,
+	)
+}
+
+func (r *repository) MarkClaimedSkipped(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error {
+	if claimedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: claimed generation is required", ErrConflict)
+	}
+	return r.casGeneration(ctx, `update quota_cooldowns set last_error = ?, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		nullString(reason), nextUpdatedAtMS(claimedUpdatedAtMS), id, model.QuotaCooldownStatusSkipped, claimedUpdatedAtMS,
+	)
+}
+
+func (r *repository) ReopenClaim(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error {
+	if claimedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: claimed generation is required", ErrConflict)
+	}
+	return r.casGeneration(ctx, `update quota_cooldowns set status = ?, last_error = ?, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		model.QuotaCooldownStatusActive, nullString(reason), nextUpdatedAtMS(claimedUpdatedAtMS), id, model.QuotaCooldownStatusSkipped, claimedUpdatedAtMS,
+	)
+}
+
+// casGeneration applies a generation-bound transition and reports ErrConflict
+// when the row no longer matches the generation the decision was made for. A
+// conflicting generation is never modified.
+func (r *repository) casGeneration(ctx context.Context, query string, args ...any) error {
+	result, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// nextUpdatedAtMS advances a generation strictly past the generation it
+// replaces, even within the same millisecond or after a clock rollback.
+func nextUpdatedAtMS(expectedUpdatedAtMS int64) int64 {
+	if now := time.Now().UnixMilli(); now > expectedUpdatedAtMS {
+		return now
+	}
+	return expectedUpdatedAtMS + 1
 }
 
 func (r *repository) RecordFailure(ctx context.Context, id int64, reason string) error {

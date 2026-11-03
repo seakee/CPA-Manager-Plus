@@ -1699,3 +1699,120 @@ func TestClient_FetchStrictInventory_Contract(t *testing.T) {
 		})
 	}
 }
+
+// TestActionErrorProvesNoMutationClassifiesFailedPatches pins which failed
+// management PATCHes are proven not to have changed CPA state. Only a request
+// CPAMP refused before sending it, or a definite 4xx rejection with an error
+// body, qualifies; everything else may have been applied.
+func TestActionErrorProvesNoMutationClassifiesFailedPatches(t *testing.T) {
+	cases := []struct {
+		name   string
+		reply  func(w http.ResponseWriter)
+		wantNo bool
+	}{
+		{
+			name: "rejection-with-error-body",
+			reply: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"credential is locked by policy"}`))
+			},
+			wantNo: true,
+		},
+		{
+			name: "rejection-without-body",
+			reply: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusConflict)
+			},
+		},
+		{
+			name: "gateway-5xx",
+			reply: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(`{"error":"bad gateway"}`))
+			},
+		},
+		{
+			name: "gateway-timeout",
+			reply: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusRequestTimeout)
+				_, _ = w.Write([]byte(`{"error":"timeout"}`))
+			},
+		},
+		{
+			name: "unconfirmed-success-body",
+			reply: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"message":"accepted"}`))
+			},
+		},
+		{
+			name: "connection-closed",
+			reply: func(w http.ResponseWriter) {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					t.Error("response writer does not support hijacking")
+					return
+				}
+				conn, _, err := hijacker.Hijack()
+				if err != nil {
+					t.Errorf("hijack connection: %v", err)
+					return
+				}
+				_ = conn.Close()
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != authFilesStatusPath {
+					http.NotFound(w, r)
+					return
+				}
+				tc.reply(w)
+			}))
+			defer server.Close()
+
+			target := StatusMutationTarget{
+				Selector: "runtime-1",
+				File:     File{ID: "runtime-1", Name: "shared.json", AuthIndex: "auth-1", Provider: "codex"},
+				Scope:    StatusMutationScopeCredential,
+			}
+			err := New(server.Client()).PatchDisabledTarget(context.Background(), server.URL, "mgmt", target, false)
+			if err == nil {
+				t.Fatal("patch error = nil, want a failed management PATCH")
+			}
+			if got := ActionErrorProvesNoMutation(err); got != tc.wantNo {
+				t.Fatalf("ActionErrorProvesNoMutation(%v) = %v, want %v", err, got, tc.wantNo)
+			}
+		})
+	}
+}
+
+func TestActionErrorProvesNoMutationTreatsPreflightRejectionAsUnsent(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer server.Close()
+
+	target := StatusMutationTarget{
+		Selector: "shared.json",
+		File:     File{ID: "runtime-1", Name: "shared.json", AuthIndex: "auth-1", Provider: "codex"},
+		Scope:    StatusMutationScopeSourceFile,
+	}
+	err := New(server.Client()).PatchDisabledTarget(context.Background(), server.URL, "mgmt", target, false)
+	if !errors.Is(err, ErrStatusMutationScopeAmbiguous) {
+		t.Fatalf("patch error = %v, want ErrStatusMutationScopeAmbiguous", err)
+	}
+	if calls != 0 {
+		t.Fatalf("request calls = %d, want none for a preflight rejection", calls)
+	}
+	if !ActionErrorProvesNoMutation(err) {
+		t.Fatalf("ActionErrorProvesNoMutation(%v) = false, want true for an unsent request", err)
+	}
+	if ActionErrorProvesNoMutation(nil) {
+		t.Fatal("ActionErrorProvesNoMutation(nil) = true, want false")
+	}
+}

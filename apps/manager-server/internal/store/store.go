@@ -889,8 +889,24 @@ func (s *Store) MarkQuotaCooldownRecovered(ctx context.Context, id int64, expect
 	return s.QuotaCooldowns.MarkRecovered(ctx, id, expectedUpdatedAtMS, recoveredAtMS)
 }
 
-func (s *Store) MarkQuotaCooldownSkipped(ctx context.Context, id int64, reason string) error {
-	return s.QuotaCooldowns.MarkSkipped(ctx, id, reason)
+func (s *Store) MarkQuotaCooldownSkipped(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) error {
+	return s.QuotaCooldowns.MarkSkipped(ctx, id, expectedUpdatedAtMS, reason)
+}
+
+func (s *Store) ClaimQuotaCooldownRecovery(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) (int64, error) {
+	return s.QuotaCooldowns.ClaimRecovery(ctx, id, expectedUpdatedAtMS, reason)
+}
+
+func (s *Store) MarkQuotaCooldownClaimedRecovered(ctx context.Context, id int64, claimedUpdatedAtMS int64, recoveredAtMS int64) error {
+	return s.QuotaCooldowns.MarkClaimedRecovered(ctx, id, claimedUpdatedAtMS, recoveredAtMS)
+}
+
+func (s *Store) MarkQuotaCooldownClaimedSkipped(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error {
+	return s.QuotaCooldowns.MarkClaimedSkipped(ctx, id, claimedUpdatedAtMS, reason)
+}
+
+func (s *Store) ReopenQuotaCooldownClaim(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error {
+	return s.QuotaCooldowns.ReopenClaim(ctx, id, claimedUpdatedAtMS, reason)
 }
 
 func (s *Store) RecordQuotaCooldownFailure(ctx context.Context, id int64, reason string) error {
