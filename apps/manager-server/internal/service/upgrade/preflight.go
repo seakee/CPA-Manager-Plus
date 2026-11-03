@@ -73,6 +73,12 @@ const (
 	CodeDiskProbeFailed = "upgrade_disk_probe_failed"
 )
 
+// parityInspectionFailedDetail is the fixed report text for a parity check that
+// could not run. It carries no SQL, table, column or data fragment: a failed
+// inspection is a source condition described by the typed code, and the raw
+// error can name internals the report must not leak.
+const parityInspectionFailedDetail = "parity inspection failed"
+
 // Source kinds reuse the vocabulary of the existing legacy preflight.
 const (
 	SourceKindLegacyManager   = "legacy-manager"
@@ -117,6 +123,31 @@ type Options struct {
 	// afterCopy runs after the snapshot copy and before the second source
 	// fingerprint. Tests use it to simulate a source that was not stopped.
 	afterCopy func()
+	// observe is a test-only observation seam. It is called at each source-read
+	// boundary so a test can prove that a busy source is never hashed, walked
+	// or inspected. It belongs to one Options value, so instrumented runs
+	// cannot race a production caller, and it is nil on every real path.
+	observe func(event string)
+}
+
+// Source-read boundaries reported through Options.observe. They name the
+// operation that is about to run, not a result.
+const (
+	observationLock             = "lock"
+	observationFingerprint      = "fingerprint"
+	observationSnapshot         = "snapshot"
+	observationSnapshotOpen     = "snapshot-open"
+	observationFingerprintAfter = "fingerprint-after"
+	observationSchema           = "schema"
+	observationDisk             = "disk"
+	observationCPA              = "cpa"
+	observationParity           = "parity"
+)
+
+func (o Options) observed(event string) {
+	if o.observe != nil {
+		o.observe(event)
+	}
 }
 
 // Check is one preflight observation. Detail is free text for the operator and
@@ -207,38 +238,64 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	targetDir := strings.TrimSpace(options.TargetDir)
 
 	databasePath := filepath.Join(root, databaseFileName)
+	databaseMissing := false
 	if _, statErr := os.Lstat(databasePath); os.IsNotExist(statErr) {
+		databaseMissing = true
 		report.SourceKind = SourceKindMissingDatabase
 	}
 
 	// A scratch copy inside the source root would write the whole database back
 	// into the tree this command promises to preserve, and one inside the target
 	// root would leave upgrade scratch in the volume the copy is measured
-	// against. Both are refused before a single directory is created.
+	// against. Both are refused before a single directory is created. This is a
+	// path question only: nothing under the source root is opened to answer it.
 	scratchErr := ValidateScratchDir(scratchBase, root, targetDir)
 
-	// The fingerprint is the state the snapshot has to preserve. It is taken
-	// before the copy and repeated afterwards, so a source that is still being
-	// written is refused instead of half-imported.
-	before, fingerprintErr := fingerprintSource(root)
-
-	// The fence is taken first and held for the whole inspection. It is opened
-	// read-only: a stopped source is normally preserved without write access.
+	// The fence is taken before anything under the source root is read: the
+	// existing read-only lock is acquired first and held until every observation
+	// and the private snapshot cleanup have finished. A busy source therefore
+	// costs one non-blocking lock attempt, not a full-tree fingerprint, and no
+	// digest can be reported from outside the fence.
+	options.observed(observationLock)
 	lock, lockErr := processlock.AcquireExistingReadOnly(databasePath)
 	if lockErr == nil {
 		defer func() { _ = lock.Close() }()
 	}
+	fenced := lockErr == nil
+
+	var before sourceFingerprint
+	var fingerprintErr error
 	var snapshot *Snapshot
 	var openErr error
 	var afterFingerprintErr error
-	switch {
-	case scratchErr != nil:
-		openErr = scratchErr
-	case lockErr == nil:
-		snapshot, openErr = OpenSnapshot(ctx, databasePath, scratchBase)
+	if fenced {
+		// The fingerprint is the state the snapshot has to preserve. It is taken
+		// after the fence and repeated after the copy, so a source that is still
+		// being written is refused instead of half-imported.
+		options.observed(observationFingerprint)
+		before, fingerprintErr = fingerprintSource(ctx, root)
+		if fingerprintErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return Report{}, ctxErr
+			}
+		}
+		switch {
+		case scratchErr != nil:
+			openErr = scratchErr
+		default:
+			options.observed(observationSnapshot)
+			snapshot, openErr = OpenSnapshot(ctx, databasePath, scratchBase)
+		}
+		// A cancelled run is not a source condition: the lock and any scratch
+		// copy are released by the deferred cleanup below before the caller sees
+		// the cancellation.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Report{}, ctxErr
+		}
 	}
 	if snapshot != nil {
 		defer func() { _ = snapshot.Close() }()
+		options.observed(observationSnapshotOpen)
 		if options.afterCopy != nil {
 			options.afterCopy()
 		}
@@ -246,7 +303,11 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 			// A second fingerprint that cannot be taken is as unusable as a
 			// source that changed: without it there is no proof the copy matches
 			// one stable state, so it blocks instead of being ignored.
-			after, afterErr := fingerprintSource(root)
+			options.observed(observationFingerprintAfter)
+			after, afterErr := fingerprintSource(ctx, root)
+			if afterErr != nil && ctx.Err() != nil {
+				return Report{}, ctx.Err()
+			}
 			switch {
 			case afterErr != nil:
 				afterFingerprintErr = afterErr
@@ -260,6 +321,7 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 
 	var schema sourceSchema
 	if snapshot != nil {
+		options.observed(observationSchema)
 		if err := quickCheckSource(ctx, snapshot.DB()); err != nil {
 			openErr = err
 		} else if schema, err = readSourceSchema(ctx, snapshot.DB()); err != nil {
@@ -268,14 +330,17 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 			report.SourceKind = schema.sourceKind()
 		}
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return Report{}, ctxErr
+	}
 
 	// Nothing below reads the source when the fence could not be taken: a live
 	// source is never inspected, not even for a version string.
-	readable := lockErr == nil && openErr == nil
+	readable := fenced && openErr == nil
 
 	// 1. Source stopped and exclusively ours, plus read-only integrity.
-	report.Checks = append(report.Checks, ownershipCheck(lockErr, openErr))
-	if code := ownershipCode(lockErr, openErr); code != "" {
+	report.Checks = append(report.Checks, ownershipCheck(lockErr, openErr, databaseMissing))
+	if code := ownershipCode(lockErr, openErr, databaseMissing); code != "" {
 		block(code)
 	}
 
@@ -300,14 +365,22 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	}
 
 	// 3. Deterministic source fingerprint. The reported value is the state the
-	// snapshot was taken from.
-	if fingerprintErr != nil {
+	// snapshot was taken from. Without the fence no digest is reported at all:
+	// an unverified tree is not evidence, and a clean-looking digest taken
+	// outside the lock would be exactly the claim this check must not make.
+	switch {
+	case !fenced:
+		report.Checks = append(report.Checks, Check{
+			Name: CheckFingerprint, Status: StatusSkipped,
+			Detail: "source was not inspected: the ownership fence was not taken",
+		})
+	case fingerprintErr != nil:
 		report.Checks = append(report.Checks, Check{
 			Name: CheckFingerprint, Status: StatusBlocked, Code: CodeSourceUnreadable,
 			Detail: "source files could not be read: " + rootCause(fingerprintErr),
 		})
 		block(CodeSourceUnreadable)
-	} else {
+	default:
 		report.Fingerprint = before.Digest
 		check := Check{
 			Name: CheckFingerprint, Status: StatusPass,
@@ -332,29 +405,57 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	}
 
 	// 4. Disk space for the copy plus 20% headroom, on the volume that will
-	// receive it.
-	check, diskBlocked := diskCheck(before.Bytes, targetDir, options)
-	if diskBlocked {
-		block(check.Code)
+	// receive it. The requirement is derived from the source size, so an
+	// unfenced source leaves it unmeasured rather than zero.
+	if !fenced {
+		report.Checks = append(report.Checks, Check{
+			Name: CheckDisk, Status: StatusSkipped,
+			Detail: "source size was not measured: the ownership fence was not taken",
+		})
+	} else {
+		options.observed(observationDisk)
+		check, diskBlocked := diskCheck(before.Bytes, targetDir, options)
+		if diskBlocked {
+			block(check.Code)
+		}
+		report.Checks = append(report.Checks, check)
 	}
-	report.Checks = append(report.Checks, check)
 
-	// 5. CPA classification. Never an import or a version qualification.
-	report.Checks = append(report.Checks, classifyCPA(root))
+	// 5. CPA classification. Never an import or a version qualification, and
+	// never a read of the source stack while the fence is not held.
+	if !fenced {
+		report.Checks = append(report.Checks, Check{
+			Name: CheckCPAClassification, Status: StatusSkipped,
+			Detail: "source was not inspected: the ownership fence was not taken",
+		})
+	} else {
+		options.observed(observationCPA)
+		report.Checks = append(report.Checks, classifyCPA(root))
+	}
 
-	// 6. Parity gaps. Reported for confirmation; never blocking. A source that
-	// cannot answer the question says so instead of reporting a clean zero.
+	// 6. Parity gaps. Reported for confirmation; computable gaps never block. A
+	// source that cannot answer the question says so instead of reporting a
+	// clean zero, and an inspection that fails blocks: a check that could not
+	// run is not evidence that history is intact.
 	if !readable {
 		report.Checks = append(report.Checks, Check{
 			Name: CheckParity, Status: StatusSkipped, Detail: "source database was not readable",
 		})
 	} else {
+		options.observed(observationParity)
 		gaps, parityErr := detectParityGaps(ctx, snapshot.DB(), schema)
+		if parityErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return Report{}, ctxErr
+			}
+		}
 		switch {
 		case parityErr != nil:
 			report.Checks = append(report.Checks, Check{
-				Name: CheckParity, Status: StatusSkipped, Detail: "parity detection unavailable: " + rootCause(parityErr),
+				Name: CheckParity, Status: StatusBlocked, Code: CodeSourceUnreadable,
+				Detail: parityInspectionFailedDetail,
 			})
+			block(CodeSourceUnreadable)
 		case !gaps.Applicable:
 			report.ParityGaps = gaps
 			report.Checks = append(report.Checks, Check{
@@ -387,13 +488,12 @@ func (g ParityGaps) any() bool {
 }
 
 // ownershipCheck reports the exclusivity and integrity observation.
-func ownershipCheck(lockErr, openErr error) Check {
+func ownershipCheck(lockErr, openErr error, databaseMissing bool) Check {
 	check := Check{Name: CheckSourceOwnership, Status: StatusPass}
 	switch {
 	case lockErr != nil:
 		check.Status = StatusBlocked
-		check.Code = CodeSourceBusy
-		check.Detail = ownershipDetail(lockErr)
+		check.Code, check.Detail = lockFailure(lockErr, databaseMissing)
 	case openErr != nil:
 		check.Status = StatusBlocked
 		check.Code, check.Detail = ownershipFailure(openErr)
@@ -403,15 +503,37 @@ func ownershipCheck(lockErr, openErr error) Check {
 	return check
 }
 
-func ownershipCode(lockErr, openErr error) string {
+func ownershipCode(lockErr, openErr error, databaseMissing bool) string {
 	switch {
 	case lockErr != nil:
-		return CodeSourceBusy
+		code, _ := lockFailure(lockErr, databaseMissing)
+		return code
 	case openErr != nil:
 		code, _ := ownershipFailure(openErr)
 		return code
 	default:
 		return ""
+	}
+}
+
+// lockFailure classifies a fence that could not be taken. Only a real lock
+// conflict is the busy condition: automated callers act on that code by
+// stopping a running Manager, so a missing database, a missing ownership
+// marker and an unreadable marker must not claim one. They all mean the source
+// cannot be used as a 1.x Manager database, which is the unreadable code. Every
+// detail is a fixed sentence: it carries no source path and no OS error string.
+func lockFailure(err error, databaseMissing bool) (string, string) {
+	switch {
+	case errors.Is(err, processlock.ErrLocked):
+		return CodeSourceBusy, "source lock is held by another process; stop the 1.x Manager first"
+	case databaseMissing:
+		return CodeSourceUnreadable, "source database is missing"
+	case errors.Is(err, processlock.ErrNoExistingLock):
+		return CodeSourceUnreadable, "source lock file is missing; the source ownership marker cannot prove exclusivity"
+	case errors.Is(err, processlock.ErrHardLinked):
+		return CodeSourceUnreadable, "source database has multiple hard links"
+	default:
+		return CodeSourceUnreadable, "source lock could not be taken; exclusivity cannot be proven"
 	}
 }
 
@@ -450,20 +572,6 @@ func resolveLegacyRoot(root string) (string, error) {
 		return "", fmt.Errorf("legacy source root %s is not a directory", absolute)
 	}
 	return absolute, nil
-}
-
-// ownershipDetail names the failure without leaking the source path.
-func ownershipDetail(err error) string {
-	switch {
-	case errors.Is(err, processlock.ErrLocked):
-		return "source lock is held by another process; stop the 1.x Manager first"
-	case errors.Is(err, processlock.ErrNoExistingLock):
-		return "source lock file is missing; the source ownership marker cannot prove exclusivity"
-	case errors.Is(err, processlock.ErrHardLinked):
-		return "source database has multiple hard links"
-	default:
-		return "source lock could not be taken"
-	}
 }
 
 // rootCause is the shortest stable description of a wrapped error.

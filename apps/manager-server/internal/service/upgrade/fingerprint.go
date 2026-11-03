@@ -1,6 +1,7 @@
 package upgrade
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -9,6 +10,12 @@ import (
 	"path/filepath"
 	"sort"
 )
+
+// digestChunkSize is the bounded batch size shared by the source fingerprint
+// and the snapshot copy. Cancellation is observed between batches: a read that
+// is already blocked inside the kernel is not interrupted by ctx alone, so the
+// bound limits how long a cancelled run can remain inside a single read.
+const digestChunkSize = 64 << 10
 
 // sourceFingerprintFiles are the fixed v1 data files, in the order the v1
 // Manager owns them. Optional files are skipped when absent.
@@ -34,10 +41,17 @@ type sourceFingerprint struct {
 // fingerprintSource hashes a stable manifest of the source tree. Repeating it on
 // an unchanged stopped source always returns the same value, and any change to
 // a covered file, including a -wal/-shm file appearing, changes it. It reads
-// only.
-func fingerprintSource(root string) (sourceFingerprint, error) {
+// only, and observes ctx between the bounded read batches so a cancelled
+// preflight stops instead of hashing a multi-gigabyte archive to the end.
+func fingerprintSource(ctx context.Context, root string) (sourceFingerprint, error) {
+	if err := ctx.Err(); err != nil {
+		return sourceFingerprint{}, err
+	}
 	entries := make([]manifestEntry, 0, len(sourceFingerprintFiles)+8)
 	for _, name := range sourceFingerprintFiles {
+		if err := ctx.Err(); err != nil {
+			return sourceFingerprint{}, err
+		}
 		path := filepath.Join(root, name)
 		info, err := os.Lstat(path)
 		if os.IsNotExist(err) {
@@ -51,7 +65,7 @@ func fingerprintSource(root string) (sourceFingerprint, error) {
 		}
 		entries = append(entries, manifestEntry{relative: name, size: info.Size()})
 	}
-	archives, err := collectArchiveEntries(root, filepath.Join(root, archivesDirName))
+	archives, err := collectArchiveEntries(ctx, root, filepath.Join(root, archivesDirName))
 	if err != nil {
 		return sourceFingerprint{}, err
 	}
@@ -61,7 +75,10 @@ func fingerprintSource(root string) (sourceFingerprint, error) {
 	manifest := sha256.New()
 	var total int64
 	for _, entry := range entries {
-		content, err := fileContentDigest(filepath.Join(root, filepath.FromSlash(entry.relative)))
+		if err := ctx.Err(); err != nil {
+			return sourceFingerprint{}, err
+		}
+		content, err := fileContentDigest(ctx, filepath.Join(root, filepath.FromSlash(entry.relative)))
 		if err != nil {
 			return sourceFingerprint{}, err
 		}
@@ -73,7 +90,10 @@ func fingerprintSource(root string) (sourceFingerprint, error) {
 	return sourceFingerprint{Digest: hex.EncodeToString(manifest.Sum(nil)), Bytes: total}, nil
 }
 
-func collectArchiveEntries(root string, archivesRoot string) ([]manifestEntry, error) {
+func collectArchiveEntries(ctx context.Context, root string, archivesRoot string) ([]manifestEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	info, err := os.Lstat(archivesRoot)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -88,6 +108,9 @@ func collectArchiveEntries(root string, archivesRoot string) ([]manifestEntry, e
 	walkErr := filepath.WalkDir(archivesRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		if entry.IsDir() {
 			return nil
@@ -112,15 +135,50 @@ func collectArchiveEntries(root string, archivesRoot string) ([]manifestEntry, e
 	return entries, nil
 }
 
-func fileContentDigest(path string) (string, error) {
+func fileContentDigest(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = file.Close() }()
 	digest := sha256.New()
-	if _, err := io.Copy(digest, file); err != nil {
+	if _, err := copyChunks(ctx, digest, file); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// copyChunks copies source into destination with one fixed buffer per call and
+// observes ctx between batches. The bytes and the digest are identical to a
+// single io.Copy; only the cancellation points are new. Callers keep their own
+// file lifetimes: a cancelled copy returns the context error and leaves the
+// partial destination for the caller's cleanup.
+func copyChunks(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {
+	buffer := make([]byte, digestChunkSize)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		n, readErr := source.Read(buffer)
+		if n > 0 {
+			written, writeErr := destination.Write(buffer[:n])
+			total += int64(written)
+			if writeErr != nil {
+				return total, writeErr
+			}
+			if written != n {
+				return total, io.ErrShortWrite
+			}
+		}
+		if readErr == io.EOF {
+			return total, nil
+		}
+		if readErr != nil {
+			return total, readErr
+		}
+	}
 }
