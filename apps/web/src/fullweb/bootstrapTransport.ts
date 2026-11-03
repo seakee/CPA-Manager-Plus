@@ -6,6 +6,7 @@ import {
   parseAdoptionSummary,
   type AdoptionDecision,
   type AdoptionSummary,
+  type AdoptCompletionBody,
 } from './freshAdoption';
 import {
   parseRuntimeJSON,
@@ -27,6 +28,7 @@ const COMPLETE_REFUSALS: Record<string, true> = {
   adopt_migration_running: true,
   adopt_migration_incomplete: true,
   adopt_migration_retryable: true,
+  adopt_migration_run_changed: true,
   adopt_destination_unproven: true,
 };
 
@@ -452,13 +454,18 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
           if (resource === 'complete') {
             if (typeof refusal?.code === 'string' && COMPLETE_REFUSALS[refusal.code] === true)
               code = refusal.code;
-            if (code && Number.isSafeInteger(refusal.retryable) && (refusal.retryable as number) > 0)
+            if (
+              code &&
+              Number.isSafeInteger(refusal.retryable) &&
+              (refusal.retryable as number) > 0
+            )
               retryable = refusal.retryable as number;
           } else {
             if (typeof refusal?.Code === 'string' && refusal.Code) code = refusal.Code;
             if (Array.isArray(refusal?.Unsupported))
               unsupported = refusal.Unsupported.filter(
-                (entry): entry is string => typeof entry === 'string' && !!entry && entry.length <= 64
+                (entry): entry is string =>
+                  typeof entry === 'string' && !!entry && entry.length <= 64
               );
           }
         } catch {
@@ -776,7 +783,7 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       operation = next;
       return { operation: next, initialClientKey: delivered ?? '' };
     },
-    async complete(body: { acceptRetryable?: true } = {}): Promise<FreshOperation> {
+    async complete(body: AdoptCompletionBody = {}): Promise<FreshOperation> {
       if (!canonicalBase || !operation?.adminInitialized) {
         throw new BootstrapTransportError('Installation authority unavailable', 'authority');
       }

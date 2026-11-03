@@ -40,6 +40,7 @@ const COMPLETE_ERROR_CODES: Record<string, true> = {
   adopt_migration_running: true,
   adopt_migration_incomplete: true,
   adopt_migration_retryable: true,
+  adopt_migration_run_changed: true,
   adopt_destination_unproven: true,
 };
 

@@ -1,7 +1,7 @@
-import { createHash } from 'node:crypto';
 import { useState } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { sha256RawTextHex } from '@/utils/apiKeyHash';
 import { FreshSetupWizard } from './FreshSetupWizard';
 import { FreshManagedRuntime } from './FreshManagedRuntime';
 import {
@@ -11,7 +11,7 @@ import {
   type FreshStrategyCheckpoint,
 } from './bootstrapTransport';
 import type { AdoptionItem, AdoptionSummary } from './freshAdoption';
-import type { createPublicApiClient } from './publicApi';
+import type { createPublicApiClient, PublicApiClient } from './publicApi';
 import { setFullWebLanguage } from '../i18n/fullweb';
 import { adoptGuidanceText, adoptReasonText, adoptText } from '../i18n/freshAdopt';
 
@@ -26,14 +26,21 @@ const admin = 'Admin_0123456789-abcdefghijklmnopqrstuvwxyz!';
 const sourceKey = 'adopt-source-management-key';
 const sourceAddress = 'http://source-cpa:8317';
 
-// A fixture's stable identity for one recorded item. The server binds the digest
-// to the scrubbed text and the item's ordinal, so a fixture only needs an identity
-// that is stable and distinct within one summary. `withIdentity` is how every
-// recorded item in this file carries the two fields the reply always states.
-const itemID = (name: string) => createHash('sha256').update(name).digest('hex');
+// A fixture's stable identity for one recorded item. The server derives the
+// public id from the public label and the item's ordinal, so a fixture only needs
+// an identity that is stable and distinct within one summary. `withIdentity` is
+// how every recorded item in this file carries the two fields the reply always
+// states, and a migrated item omits its reason like the real reply does.
+const itemID = (name: string) => sha256RawTextHex(name);
 const withIdentity = (
-  items: Array<Omit<AdoptionItem, 'id' | 'left'> & { left?: number }>
-): AdoptionItem[] => items.map((item) => ({ id: itemID(item.item), left: 0, ...item }));
+  items: Array<Omit<AdoptionItem, 'id' | 'left' | 'reason'> & { reason?: string; left?: number }>
+): AdoptionItem[] =>
+  items.map((item) => ({
+    ...item,
+    id: itemID(item.item),
+    reason: item.reason ?? '',
+    left: item.left ?? 0,
+  }));
 const artifactId = 'sha256:' + 'a'.repeat(64);
 const runtime = {
   runtimeIdentity: 'runtime',
@@ -80,11 +87,23 @@ const adoptCheckpoint: FreshStrategyCheckpoint = {
 
 // One recorded run: a copy that needs no retry, with one manual item and one
 // unknown reason, which is what the localization fallback is for.
+const runA = 'a1'.repeat(16);
+const runB = 'b2'.repeat(16);
+const runC = 'c3'.repeat(16);
+const runD = 'd4'.repeat(16);
+
 const finishedRun: AdoptionSummary = {
+  runId: runD,
   items: withIdentity([
-    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
     {
-      item: 'credential:b.json',
+      item: 'Credential file #1',
+      kind: 'credential',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
+    {
+      item: 'Credential file #2',
       kind: 'credential',
       outcome: 'manual',
       reason: 'runtime_only_credential',
@@ -116,10 +135,29 @@ const finishedRun: AdoptionSummary = {
 // and the run is finished, so the old completion rule called this a finished
 // console — the one state whose only working action is a resume.
 const shortfallRun: AdoptionSummary = {
+  runId: runC,
   items: withIdentity([
-    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
-    { item: 'credential:b.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
-    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', retryable: false },
+    {
+      item: 'Credential file #1',
+      kind: 'credential',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
+    {
+      item: 'Credential file #2',
+      kind: 'credential',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
+    {
+      item: 'config:routing.strategy',
+      kind: 'config_leaf',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
   ]),
   planned: 5,
   finished: true,
@@ -131,19 +169,50 @@ const shortfallRun: AdoptionSummary = {
 // Every outcome at once. The copy count on screen has to be the wire's
 // `counts.migrated`, and a resource the source never had is not a copy.
 const allOutcomes: AdoptionSummary = {
+  runId: runB,
   items: withIdentity([
-    { item: 'credential:copied-a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
-    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', retryable: false },
     {
-      item: 'credential:runtime-only.json',
+      item: 'Credential file #1',
+      kind: 'credential',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
+    {
+      item: 'config:routing.strategy',
+      kind: 'config_leaf',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
+    {
+      item: 'Credential file #2',
       kind: 'credential',
       outcome: 'manual',
       reason: 'runtime_only_credential',
       retryable: false,
     },
-    { item: 'credential:left-1.json', kind: 'credential', outcome: 'absent_at_source', reason: '', retryable: false },
-    { item: 'credential:left-2.json', kind: 'credential', outcome: 'absent_at_source', reason: '', retryable: false },
-    { item: 'credential:left-3.json', kind: 'credential', outcome: 'absent_at_source', reason: '', retryable: false },
+    {
+      item: 'config:routing.logging',
+      kind: 'config_leaf',
+      outcome: 'absent_at_source',
+      reason: '',
+      retryable: false,
+    },
+    {
+      item: 'config:routing.usage',
+      kind: 'config_leaf',
+      outcome: 'absent_at_source',
+      reason: '',
+      retryable: false,
+    },
+    {
+      item: 'section:providers.missing',
+      kind: 'provider_section',
+      outcome: 'absent_at_source',
+      reason: '',
+      retryable: false,
+    },
   ]),
   planned: 6,
   finished: true,
@@ -155,9 +224,22 @@ const allOutcomes: AdoptionSummary = {
 // A settled run with nothing left over: the only record that may be called a
 // complete adoption, and only once the installation itself is complete.
 const cleanRun: AdoptionSummary = {
+  runId: runA,
   items: withIdentity([
-    { item: 'credential:a.json', kind: 'credential', outcome: 'migrated', reason: '', retryable: false },
-    { item: 'config:routing.strategy', kind: 'config_leaf', outcome: 'migrated', reason: '', retryable: false },
+    {
+      item: 'Credential file #1',
+      kind: 'credential',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
+    {
+      item: 'config:routing.strategy',
+      kind: 'config_leaf',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
   ]),
   planned: 2,
   finished: true,
@@ -165,6 +247,26 @@ const cleanRun: AdoptionSummary = {
   retryable: 0,
   counts: { migrated: 2, manual: 0, failed: 0, absent_at_source: 0 },
 };
+
+// One failed, retryable item under a given run identity. The item is the same in
+// every run, so a test can tell run identity and item identity apart.
+const failedRun = (runId: string): AdoptionSummary => ({
+  runId,
+  items: withIdentity([
+    {
+      item: 'Credential file #1',
+      kind: 'credential',
+      outcome: 'failed',
+      reason: 'download_failed',
+      retryable: true,
+    },
+  ]),
+  planned: 1,
+  finished: true,
+  running: false,
+  retryable: 1,
+  counts: { migrated: 0, manual: 0, failed: 1, absent_at_source: 0 },
+});
 
 let renderer: ReactTestRenderer;
 // The fake route's body-contract violations for the current test. An expectation
@@ -220,59 +322,62 @@ function text() {
  * The Adopt server as the browser sees it: the two-POST inventory, the recorded
  * summary and the completion, all stateful so a replay answers like the real one.
  */
-async function adoptServer(options: {
-  resume?: boolean;
-  // A browser that reloaded a staged adoption: the inventory is durable, the body
-  // the page would commit is not.
-  staged?: boolean;
-  pluginChecked?: boolean;
-  summaries?: AdoptionSummary[];
-  completions?: { status: number; body: Record<string, unknown> }[];
-  // The next N progress reads answer a plain 500, which is what a lost route or a
-  // refused credential looks like to the page: no bounded refusal envelope.
-  readFailures?: number;
-  // The inventory POST is staged by the server and its reply is lost on the way
-  // back: the ambiguous write the page has to reconcile.
-  loseStrategyReply?: boolean;
-  // The revision the migration checkpoints wrote after the page last read the
-  // operation.
-  checkpointAdvance?: number;
-  // The first POST's reply is lost and the server finishes staging only when the
-  // operation is read for the Nth time afterwards: a slow source read whose
-  // staging lands between two of the page's own reads.
-  lateStage?: number;
-  // The lost first POST's staging lands on the next destination observation,
-  // i.e. strictly between the page's decision read and its staging POST.
-  stageOnRuntime?: boolean;
-} = {}) {
+async function adoptServer(
+  options: {
+    resume?: boolean;
+    // A browser that reloaded a staged adoption: the inventory is durable, the body
+    // the page would commit is not.
+    staged?: boolean;
+    pluginChecked?: boolean;
+    summaries?: AdoptionSummary[];
+    completions?: { status: number; body: Record<string, unknown> }[];
+    // The next N progress reads answer a plain 500, which is what a lost route or a
+    // refused credential looks like to the page: no bounded refusal envelope.
+    readFailures?: number;
+    // The inventory POST is staged by the server and its reply is lost on the way
+    // back: the ambiguous write the page has to reconcile.
+    loseStrategyReply?: boolean;
+    // The revision the migration checkpoints wrote after the page last read the
+    // operation.
+    checkpointAdvance?: number;
+    // The first POST's reply is lost and the server finishes staging only when the
+    // operation is read for the Nth time afterwards: a slow source read whose
+    // staging lands between two of the page's own reads.
+    lateStage?: number;
+    // The lost first POST's staging lands on the next destination observation,
+    // i.e. strictly between the page's decision read and its staging POST.
+    stageOnRuntime?: boolean;
+  } = {}
+) {
   // A resume is a browser that reloaded a committed adoption: the checkpoint is
   // durable and the source key is not.
-  let operation: FreshOperation = options.resume || options.staged
-    ? {
-        version: 1,
-        identity,
-        revision: 5,
-        adminInitialized: true,
-        productComplete: false,
-        gatewayPending: true,
-        routing: {
-          operationId: identity.operationId,
+  let operation: FreshOperation =
+    options.resume || options.staged
+      ? {
+          version: 1,
+          identity,
+          revision: 5,
+          adminInitialized: true,
+          productComplete: false,
+          gatewayPending: true,
+          routing: {
+            operationId: identity.operationId,
+            revision: 1,
+            target: '/console',
+            stage: 'committed',
+            committed: true,
+          },
+          strategy: { ...adoptCheckpoint, stage: options.staged ? 'staged' : 'committed' },
+        }
+      : {
+          version: 1,
+          identity,
           revision: 1,
-          target: '/console',
-          stage: 'committed',
-          committed: true,
-        },
-        strategy: { ...adoptCheckpoint, stage: options.staged ? 'staged' : 'committed' },
-      }
-    : {
-        version: 1,
-        identity,
-        revision: 1,
-        adminInitialized: false,
-        productComplete: false,
-        gatewayPending: true,
-        routing: { committed: false },
-      };
+          adminInitialized: false,
+          productComplete: false,
+          gatewayPending: true,
+          routing: { committed: false },
+        };
   const summaries = [...(options.summaries ?? [finishedRun])];
   const completions = [...(options.completions ?? [])];
   const strategyBodies: Record<string, unknown>[] = [];
@@ -344,8 +449,10 @@ async function adoptServer(options: {
     if (resource === 'strategy') {
       // The route's own decode: another installation's identity or a missing
       // fence is a bad request.
-      if (JSON.stringify(body.identity) !== JSON.stringify(identity) ||
-          typeof body.expectedRevision !== 'number')
+      if (
+        JSON.stringify(body.identity) !== JSON.stringify(identity) ||
+        typeof body.expectedRevision !== 'number'
+      )
         return new Response(null, { status: 400 });
       strategyBodies.push(body);
       // The route's preflight reads these fields; a mismatch would be a blocker,
@@ -484,9 +591,10 @@ async function adoptServer(options: {
     staleRefusals,
     summaryReads: () => summaryReads,
     posts: (name: string) =>
-      fetcher.mock.calls.filter(([url, init]) => init?.method === 'POST' && String(url).endsWith('/' + name)),
-    reads: (name: string) =>
-      fetcher.mock.calls.filter(([url]) => String(url).endsWith('/' + name)),
+      fetcher.mock.calls.filter(
+        ([url, init]) => init?.method === 'POST' && String(url).endsWith('/' + name)
+      ),
+    reads: (name: string) => fetcher.mock.calls.filter(([url]) => String(url).endsWith('/' + name)),
   };
 }
 
@@ -663,7 +771,10 @@ it('does not let a staged rebuild become confirmable from inputs the screen has 
   expect(maybe('adopt-read-inventory')).toHaveLength(1);
 
   const original = server.fetcher.getMockImplementation()!;
-  const { promise: gate, resolve: release } = Promise.withResolvers<void>();
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   let entered = false;
   server.fetcher.mockImplementation(async (url, init) => {
     if (String(url).endsWith('/installation/runtime')) {
@@ -708,7 +819,9 @@ it('does not let a staged rebuild become confirmable from inputs the screen has 
   await input('adopt-confirm-inventory', true);
   await click('adopt-confirm-migrate');
   await settle();
-  expect(server.strategyBodies.at(-1)?.baseUrl).toBe('http://source-cpa-2:8317');
+  expect(server.strategyBodies[server.strategyBodies.length - 1]?.baseUrl).toBe(
+    'http://source-cpa-2:8317'
+  );
   expect(text()).toContain(adoptText('keyMismatch'));
   expect(maybe('adopt-migration')).toHaveLength(0);
 });
@@ -794,7 +907,7 @@ it('lets a refused source key be corrected without reloading the page', async ()
   await input('adopt-confirm-inventory', true);
   await click('adopt-confirm-migrate');
   await settle();
-  expect(server.strategyBodies.at(-1)?.managementKey).toBe(sourceKey);
+  expect(server.strategyBodies[server.strategyBodies.length - 1]?.managementKey).toBe(sourceKey);
   expect(maybe('adopt-migration')).toHaveLength(1);
 });
 
@@ -832,7 +945,9 @@ it('sends the address the operator corrected after Back', async () => {
   await input('adopt-confirm-inventory', true);
   await click('adopt-confirm-migrate');
   await settle();
-  expect(server.strategyBodies.at(-1)?.baseUrl).toBe('http://source-cpa-2:8317');
+  expect(server.strategyBodies[server.strategyBodies.length - 1]?.baseUrl).toBe(
+    'http://source-cpa-2:8317'
+  );
   expect(text()).toContain(adoptText('keyMismatch'));
   expect(maybe('adopt-migration')).toHaveLength(0);
 });
@@ -872,6 +987,7 @@ it('resumes with the durable revision, not the one the page last read', async ()
     checkpointAdvance: 2,
     summaries: [
       {
+        runId: runB,
         items: [],
         planned: 2,
         finished: false,
@@ -895,6 +1011,7 @@ it('resumes with the durable revision, not the one the page last read', async ()
 
 it('clears the retryable acknowledgement when the set changes at the same size', async () => {
   const retryableRun = (item: string): AdoptionSummary => ({
+    runId: runD,
     items: withIdentity([
       { item, kind: 'credential', outcome: 'failed', reason: 'download_failed', retryable: true },
     ]),
@@ -905,7 +1022,7 @@ it('clears the retryable acknowledgement when the set changes at the same size',
     counts: { migrated: 0, manual: 0, failed: 1, absent_at_source: 0 },
   });
   await adoptServer({
-    summaries: [retryableRun('credential:a.json'), retryableRun('credential:b.json')],
+    summaries: [retryableRun('Credential file #1'), retryableRun('Credential file #2')],
     completions: [{ status: 409, body: { code: 'adopt_migration_retryable', retryable: 1 } }],
   });
   await click('adopt-read-inventory');
@@ -920,6 +1037,80 @@ it('clears the retryable acknowledgement when the set changes at the same size',
   await click('adopt-refresh');
   await settle();
   expect(byID('adopt-accept-retryable').props.checked).toBe(false);
+});
+
+it('clears the acknowledgement when a new run reuses the same retryable items', async () => {
+  const server = await adoptServer({
+    summaries: [failedRun(runA), failedRun(runB)],
+    completions: [
+      { status: 409, body: { code: 'adopt_migration_retryable', retryable: 1 } },
+      { status: 409, body: { code: 'adopt_migration_retryable', retryable: 1 } },
+    ],
+  });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  await click('adopt-complete');
+  await input('adopt-accept-retryable', true);
+  expect(byID('adopt-accept-retryable').props.checked).toBe(true);
+  // A different run, the same item and the same count. The acknowledgement was
+  // given for the run on screen, so the next read clears it even though every
+  // visible retryable fact is unchanged.
+  await click('adopt-refresh');
+  await settle();
+  expect(byID('adopt-accept-retryable').props.checked).toBe(false);
+  // Without a fresh acknowledgement the completion asks the server without one,
+  // and the server's own refusal names the items again.
+  await click('adopt-complete');
+  expect(JSON.parse(String(server.posts('complete')[1][1]!.body))).toEqual({});
+});
+
+it('clears the acknowledgement when the server says the run changed', async () => {
+  const server = await adoptServer({
+    summaries: [failedRun(runA), failedRun(runB)],
+    completions: [
+      { status: 409, body: { code: 'adopt_migration_retryable', retryable: 1 } },
+      { status: 409, body: { code: 'adopt_migration_run_changed' } },
+      { status: 409, body: { code: 'adopt_migration_retryable', retryable: 1 } },
+    ],
+  });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  await click('adopt-complete');
+  await input('adopt-accept-retryable', true);
+  await click('adopt-complete');
+  await settle();
+  // The server refused a stale run identity. The page says so and drops the
+  // acknowledgement instead of resending it.
+  expect(text()).toContain(adoptText('runChanged'));
+  expect(maybe('adopt-accept-retryable')).toHaveLength(0);
+  await settle();
+  // The next attempt carries no acknowledgement, so the server states the new
+  // run's retryable items and the page asks again, unchecked.
+  await click('adopt-complete');
+  expect(JSON.parse(String(server.posts('complete')[2][1]!.body))).toEqual({});
+  expect(maybe('adopt-accept-retryable')).toHaveLength(1);
+  expect(byID('adopt-accept-retryable').props.checked).toBe(false);
+});
+
+it('refuses to acknowledge failed items of an untracked legacy run', async () => {
+  await adoptServer({
+    summaries: [failedRun('')],
+    completions: [{ status: 409, body: { code: 'adopt_migration_retryable', retryable: 1 } }],
+  });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  await click('adopt-complete');
+  expect(text()).toContain(adoptText('legacyRunNotice'));
+  // There is no run identity to bind an acknowledgement to, so the action that
+  // helps is a resume into a tracked run, not a checkbox that cannot be fenced.
+  expect(maybe('adopt-accept-retryable')).toHaveLength(0);
+  expect(maybe('adopt-resume')).toHaveLength(1);
 });
 
 it('sends the plugin opt-in the operator chose, not the default', async () => {
@@ -946,7 +1137,15 @@ it('asks for the source key again after a reload and resumes from the recorded p
   const server = await adoptServer({
     resume: true,
     summaries: [
-      { items: [], planned: 2, finished: false, running: false, retryable: 0, counts: { migrated: 0, manual: 0, failed: 0, absent_at_source: 0 } },
+      {
+        runId: runB,
+        items: [],
+        planned: 2,
+        finished: false,
+        running: false,
+        retryable: 0,
+        counts: { migrated: 0, manual: 0, failed: 0, absent_at_source: 0 },
+      },
       finishedRun,
     ],
   });
@@ -996,6 +1195,7 @@ it('keeps polling on a running refusal and only finishes over failed items when 
   await click('adopt-complete');
   expect(JSON.parse(String(server.posts('complete')[2][1]!.body))).toEqual({
     acceptRetryable: true,
+    runId: finishedRun.runId,
   });
   expect(byID('enter-console').props.href).toBe('/console');
 });
@@ -1021,9 +1221,7 @@ it('localizes a known reason and falls back to one sentence for an unknown one',
   await settle();
   expect(text()).toContain(adoptReasonText('runtime_only_credential'));
   expect(text()).toContain(adoptReasonText('reason_this_browser_does_not_know'));
-  expect(adoptReasonText('reason_this_browser_does_not_know')).toBe(
-    adoptText('reasonFallback')
-  );
+  expect(adoptReasonText('reason_this_browser_does_not_know')).toBe(adoptText('reasonFallback'));
   // The next step is the page's own sentence for the item's kind and reason,
   // behind the disclosure. The record's instruction is not part of the reply at
   // all.
@@ -1066,13 +1264,13 @@ it('counts only copies as migrated and gives source-absent items their own group
       .findByProps({ 'data-testid': 'adopt-group-migrated' })
       .findAllByProps({ className: 'adopt-item-name' })
       .map((name) => name.props.children)
-  ).toEqual(['credential:copied-a.json', 'config:routing.strategy']);
+  ).toEqual(['Credential file #1', 'config:routing.strategy']);
   expect(
     renderer.root
       .findByProps({ 'data-testid': 'adopt-group-absent_at_source' })
       .findAllByProps({ className: 'adopt-item-name' })
       .map((name) => name.props.children)
-  ).toEqual(['credential:left-1.json', 'credential:left-2.json', 'credential:left-3.json']);
+  ).toEqual(['config:routing.logging', 'config:routing.usage', 'section:providers.missing']);
   expect(byID('adopt-progress').props.children).toBe(
     adoptText('progress', { settled: 6, planned: 6 })
   );
@@ -1161,10 +1359,11 @@ it('states the next step the recorded reason needs and the count it kept', async
   // copy; the other stands for files the record could not hold, and the count is
   // the record's own.
   const consolidated: AdoptionSummary = {
+    runId: runA,
     items: [
       {
-        id: itemID('credential:runtime-only.json'),
-        item: 'credential:runtime-only.json',
+        id: itemID('Credential file #1'),
+        item: 'Credential file #1',
         kind: 'credential',
         outcome: 'manual',
         reason: 'runtime_only_credential',
@@ -1172,8 +1371,8 @@ it('states the next step the recorded reason needs and the count it kept', async
         left: 0,
       },
       {
-        id: itemID('credential-inventory-excess'),
-        item: 'credential-inventory-excess',
+        id: itemID('Credential files left behind'),
+        item: 'Credential files left behind',
         kind: 'credential',
         outcome: 'manual',
         reason: 'adoption_inventory_too_large',
@@ -1200,14 +1399,14 @@ it('states the next step the recorded reason needs and the count it kept', async
   expect(text()).not.toContain(adoptText('guidanceCredential'));
 });
 
-it('keeps two items that scrub to the same name apart', async () => {
-  // Two token-shaped file names reach the page as the same text. The
-  // acknowledgement is about the record's items, so a different pair is a
-  // decision the operator has not made even though the text is identical.
-  const scrubbedRun = (first: string, second: string): AdoptionSummary => ({
-    items: [first, second].map((name) => ({
-      id: itemID(name),
-      item: 'credential:[redacted].json',
+it('keeps two items with the same public label apart', async () => {
+  // The acknowledgement is about the record's items, so a different pair is a
+  // decision the operator has not made even when the visible label is identical.
+  const sameLabelRun = (first: string, second: string): AdoptionSummary => ({
+    runId: runD,
+    items: [first, second].map((seed) => ({
+      id: itemID(seed),
+      item: 'Credential file #1',
       kind: 'credential',
       outcome: 'failed',
       reason: 'download_failed',
@@ -1222,8 +1421,8 @@ it('keeps two items that scrub to the same name apart', async () => {
   });
   await adoptServer({
     summaries: [
-      scrubbedRun('credential:sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json', 'credential:sk-proj-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json'),
-      scrubbedRun('credential:sk-proj-cccccccccccccccccccccccccccccccc.json', 'credential:sk-proj-dddddddddddddddddddddddddddddddd.json'),
+      sameLabelRun('Credential file #1', 'Credential file #2'),
+      sameLabelRun('Credential file #3', 'Credential file #4'),
     ],
     completions: [{ status: 409, body: { code: 'adopt_migration_retryable', retryable: 2 } }],
   });
@@ -1370,6 +1569,7 @@ it('sends the durable revision when the Console carrier resumes an adoption', as
   // their own durable writes.
   const advanced: FreshOperation = { ...committed, revision: 12 };
   const stopped: AdoptionSummary = {
+    runId: runB,
     items: [],
     planned: 2,
     finished: false,
@@ -1418,7 +1618,11 @@ it('sends the New Managed plugin opt-in from the Console path', async () => {
     resource === 'installation/runtime' ? runtime : staged
   );
   const { post } = await mountManaged(staged, get);
-  post.mockResolvedValue({ ...staged, revision: 5, strategy: { ...staged.strategy, stage: 'committed' } });
+  post.mockResolvedValue({
+    ...staged,
+    revision: 5,
+    strategy: { ...staged.strategy, stage: 'committed' },
+  });
   await act(async () => {
     await byID('install-runtime').props.onClick();
   });
@@ -1488,4 +1692,188 @@ it('shows the success headline only for a settled, clean, completed installation
   expect(text()).toContain(adoptText('done'));
   expect(text()).toContain(adoptText('doneHelp'));
   expect(text()).not.toContain(adoptText('settledTitle'));
+});
+
+// The installation can complete while the copy did not: the server lets manual
+// items and non-retryable failures stand. The screen has to state that split in
+// the operator's language instead of claiming the migration is done.
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'states that manual work remains after the installation completes (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    const done: FreshOperation = {
+      identity,
+      revision: 12,
+      adminInitialized: true,
+      productComplete: true,
+      gatewayPending: true,
+      routing: {
+        operationId: identity.operationId,
+        revision: 1,
+        target: '/console',
+        stage: 'committed',
+        committed: true,
+      },
+      strategy: { ...adoptCheckpoint, stage: 'committed' },
+    };
+    const get = vi.fn(async (resource: string) =>
+      resource === 'installation/adoption' ? allOutcomes : done
+    );
+    await mountManaged(done, get);
+    await settle();
+    expect(text()).toContain(adoptText('partialTitle'));
+    expect(text()).not.toContain(adoptText('done'));
+    expect(text()).toContain(adoptText('partialHelp', { manual: 1, failed: 0 }));
+    // The per-group counts still state the real outcome, manual included.
+    expect(byID('adopt-count-manual').props.children).toBe(1);
+  }
+);
+
+it('states that failed items remain after the installation completes', async () => {
+  const failedInstallation: AdoptionSummary = {
+    runId: runC,
+    items: withIdentity([
+      {
+        item: 'Credential file #1',
+        kind: 'credential',
+        outcome: 'migrated',
+        reason: '',
+        retryable: false,
+      },
+      {
+        item: 'config:routing.strategy',
+        kind: 'config_leaf',
+        outcome: 'failed',
+        reason: 'verify_mismatch',
+        retryable: false,
+      },
+    ]),
+    planned: 2,
+    finished: true,
+    running: false,
+    retryable: 0,
+    counts: { migrated: 1, manual: 0, failed: 1, absent_at_source: 0 },
+  };
+  const done: FreshOperation = {
+    identity,
+    revision: 12,
+    adminInitialized: true,
+    productComplete: true,
+    gatewayPending: true,
+    routing: {
+      operationId: identity.operationId,
+      revision: 1,
+      target: '/console',
+      stage: 'committed',
+      committed: true,
+    },
+    strategy: { ...adoptCheckpoint, stage: 'committed' },
+  };
+  const get = vi.fn(async (resource: string) =>
+    resource === 'installation/adoption' ? failedInstallation : done
+  );
+  await mountManaged(done, get);
+  await settle();
+  expect(text()).toContain(adoptText('partialTitle'));
+  expect(text()).not.toContain(adoptText('done'));
+  expect(text()).toContain(adoptText('partialHelp', { manual: 0, failed: 1 }));
+});
+
+// --- the locked New Managed plugin opt-in --------------------------------
+
+function pluginHarness(initial: FreshOperation) {
+  let apply: (operation: FreshOperation) => void = () => undefined;
+  const client = {
+    get: vi.fn(),
+    post: vi.fn(),
+  } as unknown as PublicApiClient;
+  function Harness() {
+    const [current, update] = useState(initial);
+    apply = update;
+    return (
+      <FreshManagedRuntime
+        guided
+        client={client}
+        credential="admin-secret"
+        operation={current}
+        onOperation={update}
+        onPending={() => undefined}
+        onContinue={() => undefined}
+        onUnauthorized={() => undefined}
+      />
+    );
+  }
+  return {
+    Harness,
+    apply: (operation: FreshOperation) => apply(operation),
+  };
+}
+
+const unstartedRuntime: FreshOperation = {
+  identity,
+  revision: 2,
+  adminInitialized: true,
+  gatewayPending: true,
+  routing: {
+    operationId: identity.operationId,
+    revision: 1,
+    target: '/console',
+    stage: 'committed',
+    committed: true,
+  },
+};
+
+it('renders the persisted plugin opt-in checked and locked when the draft was off', async () => {
+  const harness = pluginHarness(unstartedRuntime);
+  await act(async () => {
+    renderer = create(<harness.Harness />);
+  });
+  await click('choose-installation');
+  expect(byID('plugin-optin-checkbox').props.checked).toBe(false);
+  await act(async () =>
+    harness.apply({
+      ...unstartedRuntime,
+      revision: 3,
+      strategy: {
+        strategy: 'new_managed',
+        targetIdentity: runtime.runtimeIdentity,
+        targetGeneration: runtime.runtimeGeneration,
+        targetArtifactId: artifactId,
+        stage: 'staged',
+        pluginsEnabled: true,
+      },
+    })
+  );
+  // The record owns the choice: the control is locked and shows what was
+  // persisted, not the draft this page initialized from.
+  expect(byID('plugin-optin-checkbox').props.disabled).toBe(true);
+  expect(byID('plugin-optin-checkbox').props.checked).toBe(true);
+});
+
+it('renders the persisted plugin opt-in unchecked and locked when the draft was on', async () => {
+  const harness = pluginHarness(unstartedRuntime);
+  await act(async () => {
+    renderer = create(<harness.Harness />);
+  });
+  await click('choose-installation');
+  await input('plugin-optin-checkbox', true);
+  expect(byID('plugin-optin-checkbox').props.checked).toBe(true);
+  await act(async () =>
+    harness.apply({
+      ...unstartedRuntime,
+      revision: 3,
+      strategy: {
+        strategy: 'new_managed',
+        targetIdentity: runtime.runtimeIdentity,
+        targetGeneration: runtime.runtimeGeneration,
+        targetArtifactId: artifactId,
+        stage: 'staged',
+        pluginsEnabled: false,
+      },
+    })
+  );
+  // The draft was never the record's decision: the locked control states the
+  // persisted value instead of keeping the tick the page happened to hold.
+  expect(byID('plugin-optin-checkbox').props.disabled).toBe(true);
+  expect(byID('plugin-optin-checkbox').props.checked).toBe(false);
 });
