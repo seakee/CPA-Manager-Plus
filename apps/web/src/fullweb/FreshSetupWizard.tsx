@@ -13,11 +13,12 @@ import { validControlBasePath } from './routingContext';
 import { validRuntimeGeneration, type RuntimeGeneration } from './runtimeGeneration';
 import { adoptGuidanceText, adoptReasonText, adoptText } from '../i18n/freshAdopt';
 import {
+  adoptionCompletionState,
   normalizeCPAAddress,
   type AdoptionSummary,
   type AdoptRuntimeTarget,
 } from './freshAdoption';
-import { FreshAdoptFlow, adoptionCompletionState, type AdoptCarrier } from './FreshAdoptFlow';
+import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { FullWebIcon } from './FullWebIcon';
 
 type Strategy = 'new_managed' | 'connect_external' | 'adopt_existing';
