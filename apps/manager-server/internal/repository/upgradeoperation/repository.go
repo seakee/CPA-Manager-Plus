@@ -9,11 +9,13 @@
 package upgradeoperation
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -89,8 +91,11 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	if op.ManualItems, err = decodeStringList(manualItems, "manual_items"); err != nil {
 		return model.UpgradeOperation{}, false, err
 	}
+	// Only construction and Put input apply defaults. An existing row must
+	// carry an actual JSON object: an empty string here is corruption, not an
+	// empty reconciliation, because the column is "text not null default '{}'".
 	if reconciliation == "" {
-		reconciliation = "{}"
+		return model.UpgradeOperation{}, false, fmt.Errorf("%w: reconciliation is not a JSON object", ErrInvalidRow)
 	}
 	op.Reconciliation = json.RawMessage(reconciliation)
 	// Validate the stored row before normalization. A duplicate domain, an
@@ -104,18 +109,52 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	return op, true, nil
 }
 
+// decodeStringList parses a stored JSON string array. Only construction and Put
+// input may default a missing value; an existing row keeps the schema contract
+// ("text not null default '[]'"), so an empty string or JSON null is corruption
+// and is reported as ErrInvalidRow instead of being read as an empty list.
 func decodeStringList(raw string, column string) ([]string, error) {
-	values := []string{}
-	if raw == "" {
-		return values, nil
+	trimmed := bytes.TrimSpace([]byte(raw))
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, fmt.Errorf("%w: %s is not a JSON string array", ErrInvalidRow, column)
 	}
-	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+	values := []string{}
+	if err := json.Unmarshal(trimmed, &values); err != nil {
 		return nil, fmt.Errorf("%w: %s is not a JSON string array", ErrInvalidRow, column)
 	}
 	if values == nil {
-		values = []string{}
+		return nil, fmt.Errorf("%w: %s is not a JSON string array", ErrInvalidRow, column)
 	}
 	return values, nil
+}
+
+// rowCreated reports whether the guarded insert created the single row.
+// "on conflict(id) do nothing" affects zero rows when the row already existed,
+// which is how a first write is distinguished from a write to stored state.
+func rowCreated(result sql.Result) (bool, error) {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+// sameStoredContent reports whether proposed would store exactly the values the
+// completed row already holds. created_at_ms, updated_at_ms and revision are
+// repository-owned and checked separately, so they are not compared here.
+func sameStoredContent(stored, proposed model.UpgradeOperation) bool {
+	return stored.Stage == proposed.Stage &&
+		stored.LastForwardStage == proposed.LastForwardStage &&
+		slices.Equal(stored.DomainsDone, proposed.DomainsDone) &&
+		stored.SourceKind == proposed.SourceKind &&
+		stored.SourceVersion == proposed.SourceVersion &&
+		stored.SourceFingerprintBefore == proposed.SourceFingerprintBefore &&
+		stored.SourceFingerprintAfter == proposed.SourceFingerprintAfter &&
+		stored.BackupManifestSHA256 == proposed.BackupManifestSHA256 &&
+		bytes.Equal(stored.Reconciliation, proposed.Reconciliation) &&
+		slices.Equal(stored.ManualItems, proposed.ManualItems) &&
+		stored.ErrorCode == proposed.ErrorCode &&
+		stored.ErrorDetail == proposed.ErrorDetail
 }
 
 // Put replaces the single row exactly once per read. op.Revision is the
@@ -129,6 +168,11 @@ func decodeStringList(raw string, column string) ([]string, error) {
 // stage it reached), every recorded domain must still be present, and the
 // repository owns created_at_ms, updated_at_ms and LastForwardStage: caller
 // proposals for those fields are dropped before validation.
+//
+// A stored complete row is frozen. The first write into complete (including
+// the write that creates the row) succeeds; afterwards an exactly identical
+// proposal succeeds without writing anything, and any other proposal returns
+// ErrStageRegression with the stored row untouched.
 //
 // Precedence: typed input errors (unknown stage/domain, duplicate domain,
 // non-object reconciliation) are reported before the row is read; a stale
@@ -169,9 +213,14 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	// Take the write lock before reading so a concurrent advance cannot be
 	// overwritten with an older stage or a shorter domain list, and so the
 	// revision compared below is the one this transaction will replace.
-	if _, err := tx.ExecContext(ctx, `insert into `+tableName+`
+	result, err := tx.ExecContext(ctx, `insert into `+tableName+`
 		(id, stage, last_forward_stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?, ?)
-		on conflict(id) do nothing`, string(op.Stage), string(op.LastForwardStage), now, now); err != nil {
+		on conflict(id) do nothing`, string(op.Stage), string(op.LastForwardStage), now, now)
+	if err != nil {
+		return err
+	}
+	created, err := rowCreated(result)
+	if err != nil {
 		return err
 	}
 	current, found, err := scanOperation(tx.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`))
@@ -184,8 +233,20 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	if op.Revision != current.Revision {
 		return fmt.Errorf("%w: expected revision %d, stored revision %d", ErrConflict, op.Revision, current.Revision)
 	}
-	if err := requireTransition(current, op.Stage); err != nil {
-		return err
+	if !created {
+		if current.Stage == model.UpgradeStageComplete {
+			// A stored complete row is frozen: it may not gain or lose a
+			// domain, and no observation may be replaced. An exactly identical
+			// repeat is the one allowed call, and it writes nothing at all,
+			// not even a revision or a timestamp.
+			if sameStoredContent(current, op) {
+				return nil
+			}
+			return fmt.Errorf("%w: completed operation is frozen at %q", ErrStageRegression, current.Stage)
+		}
+		if err := requireTransition(current, op.Stage); err != nil {
+			return err
+		}
 	}
 	for _, domain := range current.DomainsDone {
 		if !op.HasDomain(domain) {
@@ -309,6 +370,10 @@ func nextUpdatedAtMS(nowMS int64, stored model.UpgradeOperation) int64 {
 // updated_at_ms only moves forward (see nextUpdatedAtMS) and the row is
 // revalidated inside the transaction, so advancing a row written by a clock that
 // ran ahead still leaves a row Get accepts.
+// A stored complete row is frozen: the transition that reaches complete (or
+// creates the row there) commits once, and a later Advance may only repeat that
+// exact call, which writes nothing. Adding a domain or moving to another stage
+// returns ErrStageRegression and leaves the row untouched.
 // Advancing does not imply that later stages are authorized.
 func (r *Repository) Advance(ctx context.Context, domain string, stage model.UpgradeStage) (model.UpgradeOperation, error) {
 	if domain != "" && !model.ValidUpgradeDomain(domain) {
@@ -329,9 +394,14 @@ func (r *Repository) Advance(ctx context.Context, domain string, stage model.Upg
 	}
 	// Take the write lock before reading so two advances cannot interleave and
 	// so the read below observes this transaction's own epoch.
-	if _, err := tx.ExecContext(ctx, `insert into `+tableName+`
+	result, err := tx.ExecContext(ctx, `insert into `+tableName+`
 		(id, stage, last_forward_stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?, ?)
-		on conflict(id) do nothing`, string(stage), string(lastForwardStage), now, now); err != nil {
+		on conflict(id) do nothing`, string(stage), string(lastForwardStage), now, now)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	created, err := rowCreated(result)
+	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	row := tx.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`)
@@ -343,8 +413,20 @@ func (r *Repository) Advance(ctx context.Context, domain string, stage model.Upg
 		return model.UpgradeOperation{}, errors.New("upgrade operation row disappeared during advance")
 	}
 	highWater := current.HighWater()
-	if err := requireTransition(current, stage); err != nil {
-		return current, err
+	if !created {
+		if current.Stage == model.UpgradeStageComplete {
+			// A stored complete row is frozen. The first transition into
+			// complete (including the one that creates the row) already ran
+			// above; from here on only an identical repeat is accepted, and it
+			// records nothing: no domain, no revision, no timestamp.
+			if stage == model.UpgradeStageComplete && (domain == "" || current.HasDomain(domain)) {
+				return current, nil
+			}
+			return current, fmt.Errorf("%w: completed operation is frozen at %q", ErrStageRegression, current.Stage)
+		}
+		if err := requireTransition(current, stage); err != nil {
+			return current, err
+		}
 	}
 	current.Stage = stage
 	if stage != model.UpgradeStageFailed {

@@ -115,7 +115,7 @@ func TestAdvanceRefusesToLeaveCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get completed row: %v", err)
 	}
-	for _, stage := range []model.UpgradeStage{model.UpgradeStageVerify, model.UpgradeStageFailed} {
+	for _, stage := range []model.UpgradeStage{model.UpgradeStageVerify, model.UpgradeStageFailed, model.UpgradeStageComplete} {
 		if _, err := repository.Advance(ctx, model.UpgradeDomainCoverage, stage); !errors.Is(err, upgradeoperation.ErrStageRegression) {
 			t.Fatalf("advance complete -> %q error = %v, want ErrStageRegression", stage, err)
 		}
@@ -937,4 +937,249 @@ func TestAdvanceRepeatsDuplicateDomainIdempotently(t *testing.T) {
 	if second.Revision != first.Revision+1 {
 		t.Fatalf("repeated advance revision = %d, want %d", second.Revision, first.Revision+1)
 	}
+}
+
+// TestAdvanceIntoCompleteThenFreezesTheRow is the R10 regression for Advance:
+// complete was compared after the same-stage shortcut, so a completed row could
+// still append a domain, move its revision and rewrite its timestamp. The first
+// entry into complete succeeds; afterwards only an exactly identical repeat is
+// accepted, and it writes nothing.
+func TestAdvanceIntoCompleteThenFreezesTheRow(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("advance verify: %v", err)
+	}
+	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
+		t.Fatalf("first advance into complete: %v", err)
+	}
+	complete, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get completed row: found=%t err=%v", found, err)
+	}
+	if complete.Stage != model.UpgradeStageComplete {
+		t.Fatalf("stage = %q, want complete", complete.Stage)
+	}
+	if _, err := repository.Advance(ctx, model.UpgradeDomainCoverage, model.UpgradeStageComplete); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+		t.Fatalf("advance complete -> complete with a new domain error = %v, want ErrStageRegression", err)
+	}
+	assertStoredOperation(t, repository, complete)
+
+	if _, err := repository.Advance(ctx, "", model.UpgradeStageFailed); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+		t.Fatalf("advance complete -> failed error = %v, want ErrStageRegression", err)
+	}
+	assertStoredOperation(t, repository, complete)
+
+	repeat, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageComplete)
+	if err != nil {
+		t.Fatalf("identical repeated advance into complete: %v", err)
+	}
+	if !reflect.DeepEqual(complete, repeat) {
+		t.Fatalf("identical repeat changed the completed row:\n want %+v\n got  %+v", complete, repeat)
+	}
+	assertStoredOperation(t, repository, complete)
+
+	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
+		t.Fatalf("identical completed advance without a domain: %v", err)
+	}
+	assertStoredOperation(t, repository, complete)
+}
+
+// TestFirstAdvanceIntoCompleteCreatesTheRow keeps the other half of the R10
+// contract: refusal applies to a stored complete row, not to the write that
+// creates the operation in complete.
+func TestFirstAdvanceIntoCompleteCreatesTheRow(t *testing.T) {
+	repository, _ := newRepository(t)
+	created, err := repository.Advance(context.Background(), "", model.UpgradeStageComplete)
+	if err != nil {
+		t.Fatalf("first advance into complete: %v", err)
+	}
+	if created.Stage != model.UpgradeStageComplete || created.LastForwardStage != model.UpgradeStageComplete {
+		t.Fatalf("created row = %q high-water %q, want complete/complete", created.Stage, created.LastForwardStage)
+	}
+	if created.Revision != 1 {
+		t.Fatalf("created row revision = %d, want 1", created.Revision)
+	}
+	assertStoredOperation(t, repository, created)
+}
+
+// TestPutCannotChangeAStoredCompleteRow is the R10 regression for Put: a
+// same-stage Put replaced observations on a completed row because the stage
+// comparison accepted complete -> complete.
+func TestPutCannotChangeAStoredCompleteRow(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
+		t.Fatalf("advance complete: %v", err)
+	}
+	complete, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get completed row: found=%t err=%v", found, err)
+	}
+	changedManifest := complete
+	changedManifest.BackupManifestSHA256 = "sha256:later"
+	changedManifest.ManualItems = []string{"confirm the archive copy"}
+	if err := repository.Put(ctx, changedManifest); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+		t.Fatalf("put changing a completed row error = %v, want ErrStageRegression", err)
+	}
+	assertStoredOperation(t, repository, complete)
+
+	changedDomains := complete
+	changedDomains.DomainsDone = []string{model.UpgradeDomainCoverage}
+	if err := repository.Put(ctx, changedDomains); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+		t.Fatalf("put adding a domain to a completed row error = %v, want ErrStageRegression", err)
+	}
+	assertStoredOperation(t, repository, complete)
+
+	// An exactly identical repeat is the one accepted call, and it must not
+	// bump the revision or the timestamp.
+	if err := repository.Put(ctx, complete); err != nil {
+		t.Fatalf("identical put on a completed row: %v", err)
+	}
+	assertStoredOperation(t, repository, complete)
+}
+
+// TestPutIntoCompleteCreatesTheRowOnce covers the creation side of the R10 Put
+// rule: the first write may store complete, the next may only repeat it.
+func TestPutIntoCompleteCreatesTheRowOnce(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:                model.UpgradeStageComplete,
+		DomainsDone:          []string{model.UpgradeDomainCoverage},
+		BackupManifestSHA256: "sha256:first",
+		Reconciliation:       json.RawMessage(`{"checked":true}`),
+		ManualItems:          []string{"hand over the copied database"},
+	}); err != nil {
+		t.Fatalf("first put into complete: %v", err)
+	}
+	complete, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get completed row: found=%t err=%v", found, err)
+	}
+	if complete.Stage != model.UpgradeStageComplete || !complete.HasDomain(model.UpgradeDomainCoverage) {
+		t.Fatalf("completed row = %q %v", complete.Stage, complete.DomainsDone)
+	}
+	changed := complete
+	changed.BackupManifestSHA256 = "sha256:second"
+	if err := repository.Put(ctx, changed); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+		t.Fatalf("second put into complete error = %v, want ErrStageRegression", err)
+	}
+	assertStoredOperation(t, repository, complete)
+}
+
+// TestGetRejectsCorruptedStoredJSON is the R11 regression: defaults belong to
+// construction and Put input only. An existing row must hold an actual JSON
+// string array and an actual JSON object, so empty text and JSON null are
+// corruption rather than an empty list or an empty reconciliation.
+func TestGetRejectsCorruptedStoredJSON(t *testing.T) {
+	cases := []struct {
+		name           string
+		domains        string
+		manualItems    string
+		reconciliation string
+	}{
+		{name: "domains_null", domains: "null", manualItems: "[]", reconciliation: "{}"},
+		{name: "domains_empty", domains: "", manualItems: "[]", reconciliation: "{}"},
+		{name: "domains_object", domains: "{}", manualItems: "[]", reconciliation: "{}"},
+		{name: "domains_non_string_element", domains: `["pricing",1]`, manualItems: "[]", reconciliation: "{}"},
+		{name: "manual_items_null", domains: "[]", manualItems: "null", reconciliation: "{}"},
+		{name: "manual_items_empty", domains: "[]", manualItems: "", reconciliation: "{}"},
+		{name: "manual_items_non_string_element", domains: "[]", manualItems: `["item",true]`, reconciliation: "{}"},
+		{name: "reconciliation_empty", domains: "[]", manualItems: "[]", reconciliation: ""},
+		{name: "reconciliation_null", domains: "[]", manualItems: "[]", reconciliation: "null"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			repository, db := newRepository(t)
+			ctx := context.Background()
+			if _, err := db.ExecContext(ctx, `insert into upgrade_operations
+				(id, stage, last_forward_stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+				values (1, ?, ?, ?, ?, ?, 5, 5)`,
+				string(model.UpgradeStagePreflight), string(model.UpgradeStagePreflight),
+				testCase.domains, testCase.reconciliation, testCase.manualItems); err != nil {
+				t.Fatalf("seed corrupted row: %v", err)
+			}
+			before := readRawOperation(t, db)
+			if _, _, err := repository.Get(ctx); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+				t.Fatalf("get corrupted row error = %v, want ErrInvalidRow", err)
+			}
+			if _, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageCopyIn); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+				t.Fatalf("advance on a corrupted row error = %v, want ErrInvalidRow", err)
+			}
+			if err := repository.Put(ctx, model.UpgradeOperation{
+				Stage:       model.UpgradeStageCopyIn,
+				DomainsDone: []string{model.UpgradeDomainUsageEvents},
+			}); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+				t.Fatalf("put on a corrupted row error = %v, want ErrInvalidRow", err)
+			}
+			if after := readRawOperation(t, db); after != before {
+				t.Fatalf("corrupted row was written:\n before %s\n after  %s", before, after)
+			}
+		})
+	}
+}
+
+// TestGetAcceptsStoredEmptyJSONAndEmptyPut keeps the non-corrupted side of R11:
+// the schema defaults still read, and Put input may still omit the fields.
+func TestGetAcceptsStoredEmptyJSONAndEmptyPut(t *testing.T) {
+	repository, db := newRepository(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `insert into upgrade_operations
+		(id, stage, last_forward_stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+		values (1, ?, ?, '[]', '{}', '[]', 5, 5)`,
+		string(model.UpgradeStagePreflight), string(model.UpgradeStagePreflight)); err != nil {
+		t.Fatalf("seed default row: %v", err)
+	}
+	stored, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get default row: found=%t err=%v", found, err)
+	}
+	if len(stored.DomainsDone) != 0 || len(stored.ManualItems) != 0 || string(stored.Reconciliation) != "{}" {
+		t.Fatalf("default row = %v %v %s", stored.DomainsDone, stored.ManualItems, stored.Reconciliation)
+	}
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:    model.UpgradeStageCopyIn,
+		Revision: stored.Revision,
+	}); err != nil {
+		t.Fatalf("put without domains, manual items or reconciliation: %v", err)
+	}
+	after, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get row after empty put: found=%t err=%v", found, err)
+	}
+	if after.Stage != model.UpgradeStageCopyIn || len(after.DomainsDone) != 0 || string(after.Reconciliation) != "{}" {
+		t.Fatalf("row after empty put = %q %v %s", after.Stage, after.DomainsDone, after.Reconciliation)
+	}
+}
+
+// assertStoredOperation fails unless the stored row equals want field by field,
+// including revision and timestamps.
+func assertStoredOperation(t *testing.T, repository *upgradeoperation.Repository, want model.UpgradeOperation) {
+	t.Helper()
+	got, found, err := repository.Get(context.Background())
+	if err != nil || !found {
+		t.Fatalf("get stored row: found=%t err=%v", found, err)
+	}
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("stored row changed:\n want %+v\n got  %+v", want, got)
+	}
+}
+
+// readRawOperation renders the whole row as one string so a test can prove that
+// a rejected write left every column, including revision and timestamps, alone
+// without going through Get (which rejects the corrupted rows under test).
+func readRawOperation(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var row string
+	if err := db.QueryRow(`select quote(stage) || '|' || quote(last_forward_stage) || '|' || quote(revision) ||
+		'|' || quote(domains_done) || '|' || quote(source_kind) || '|' || quote(source_version) ||
+		'|' || quote(source_fingerprint_before) || '|' || quote(source_fingerprint_after) ||
+		'|' || quote(backup_manifest_sha256) || '|' || quote(reconciliation) ||
+		'|' || quote(manual_items) || '|' || quote(error_code) || '|' || quote(error_detail) ||
+		'|' || quote(created_at_ms) || '|' || quote(updated_at_ms)
+		from upgrade_operations where id = 1`).Scan(&row); err != nil {
+		t.Fatalf("read raw row: %v", err)
+	}
+	return row
 }

@@ -50,15 +50,18 @@ func (s UpgradeStage) Valid() bool {
 func (s UpgradeStage) rank() int { return upgradeStageRanks[s] }
 
 // CanAdvanceTo reports whether moving from s to next keeps the operation
-// monotonic. A completed operation never moves again. A failed stage has no
-// position of its own, so this method cannot judge a resume: the row's
-// high-water mark decides that (see UpgradeOperation.CanLeaveFailedTo).
+// monotonic. A completed operation never moves again, not even to itself: the
+// completed row is frozen, so a same-stage transition is refused here and the
+// repository only lets an exactly identical write through as a no-op it does
+// not persist. A failed stage has no position of its own, so this method cannot
+// judge a resume: the row's high-water mark decides that (see
+// UpgradeOperation.CanLeaveFailedTo).
 func (s UpgradeStage) CanAdvanceTo(next UpgradeStage) bool {
-	if s == next {
-		return true
-	}
 	if s == UpgradeStageComplete {
 		return false
+	}
+	if s == next {
+		return true
 	}
 	if next == UpgradeStageFailed || s == UpgradeStageFailed {
 		return true
