@@ -144,6 +144,42 @@ func TestAdoptionSummaryEnforcesItsSizeBounds(t *testing.T) {
 	}
 }
 
+// `Left` is a count, not a stored item. A source far over the record's capacity
+// must still be able to report how many files were left behind, so the remainder
+// has its own, much larger bound rather than being squeezed into the item bound:
+// a count over the item bound is exactly the case the aggregate marker exists
+// for, and refusing it would stop the migration instead of settling it.
+func TestAdoptionRemainderCountsPastTheItemBound(t *testing.T) {
+	marker := AdoptionItem{
+		Item: "credential-inventory-excess", Kind: AdoptionKindCredential, Outcome: AdoptionManual,
+		Reason: "adoption_inventory_too_large", Instruction: "Copy the files by hand.",
+	}
+	// The documented bound on `Left` is 1,048,576: a thousand times the item
+	// bound, and it is written here as the contract rather than read back from
+	// the implementation. Accepting exactly that value and refusing the next one
+	// pins the enforced bound to it.
+	const documentedRemainderBound = 1 << 20
+	for _, left := range []int{1, maxAdoptionItems, maxAdoptionItems * 4, 3000, documentedRemainderBound} {
+		within := marker
+		within.Left = left
+		if err := validAdoptionSummary(summaryOf(within)); err != nil {
+			t.Fatalf("a remainder of %d was refused: %v", left, err)
+		}
+	}
+	for _, left := range []int{-1, documentedRemainderBound + 1} {
+		beyond := marker
+		beyond.Left = left
+		if err := validAdoptionSummary(summaryOf(beyond)); err == nil {
+			t.Fatalf("a remainder of %d was accepted", left)
+		}
+	}
+	// The published item bounds are unchanged: only the count is allowed past
+	// them, never a stored item.
+	if MaxAdoptionItems() != maxAdoptionItems || MaxAdoptionItemName() != maxAdoptionItemName {
+		t.Fatal("the published bounds differ from the enforced ones")
+	}
+}
+
 // A run that stops early records a plan it never reached, and completion reads
 // exactly that: `Finished` plus the item count against `Planned`. The marker may
 // only move forward once the installation is complete, because reopening a

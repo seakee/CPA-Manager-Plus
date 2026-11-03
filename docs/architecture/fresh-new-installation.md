@@ -1209,6 +1209,19 @@ re-staged installation. Step 4's completion conditions read this summary, and
 the Full Web Adopt flow of Step 5 reads it through `GET installation/adoption`
 (below). Model management is not part of this lane.
 
+**Bounded inventory.** The preflight charges every item it persists against one
+budget: the store's 1024-item summary, less what the record already holds and less
+the fixed configuration part (39 leaves, 5 rule families, 12 provider sections).
+An ordinary credential record, an overlong name's manual record and the single
+aggregate `credential-inventory-excess` marker all draw on that same allowance. A
+credential name longer than the 256-byte item bound is recorded under a bounded
+identity instead of stopping the run at it; once the budget is gone, names of
+either kind are counted by that one marker rather than written one by one. Its
+`left` is a count, not a stored item, so it has its own, much larger bound
+(1,048,576) and truthfully reports a source far over the record's capacity; only a
+value past that bound is refused as absurd. A replay appends nothing: settled
+items and the marker itself are skipped.
+
 The per-item summary is the operational record of the copy. It is deliberately
 *not* itself a qualification. `freshAdoptionRefRules`
 (`internal/domain/bootstrap/adoption.go`) now marks `cpa-auth-files`,
