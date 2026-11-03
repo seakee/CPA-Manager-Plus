@@ -18,6 +18,7 @@ import {
   adoptStrategyBody,
   adoptionCompletionState,
   groupAdoptionItems,
+  needsCredentialFileNote,
   normalizeCPAAddress,
   validManagementKey,
   type AdoptionDecision,
@@ -927,6 +928,19 @@ export function FreshAdoptFlow({
                             <p data-testid={`adopt-count-${outcome}`}>
                               {items.length === 0 ? '—' : items.length}
                             </p>
+                            {needsCredentialFileNote(items) && (
+                              // Once per group: the credentials in it are shown
+                              // as record ordinals, so the group states what the
+                              // number is and how to find the files it stands
+                              // for. Saying it per item would repeat the same
+                              // paragraph for every credential.
+                              <p
+                                className="journey-help"
+                                data-testid={`adopt-credential-note-${outcome}`}
+                              >
+                                {adoptText('credentialNote')}
+                              </p>
+                            )}
                             {items.length > 0 && (
                               <ul className="adopt-items">
                                 {items.map((item) => (

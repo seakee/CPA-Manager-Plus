@@ -160,6 +160,23 @@ export function groupAdoptionItems(summary: AdoptionSummary): AdoptionGroups {
 }
 
 /**
+ * needsCredentialFileNote says whether a group of items has to state what a
+ * credential label means.
+ *
+ * The reply projects every credential as "Credential file #N": the ordinal comes
+ * from the migration record, not from the source file name, because the name is
+ * source metadata. An operator told to copy "this file" therefore has nothing to
+ * look up, so the group carrying manual or failed credentials says once that the
+ * number is a record number and how to find the missing files. The per-item line
+ * stays one step.
+ */
+export function needsCredentialFileNote(items: readonly AdoptionItem[]): boolean {
+  return items.some(
+    (item) => item.kind === 'credential' && (item.outcome === 'manual' || item.outcome === 'failed')
+  );
+}
+
+/**
  * What a recorded run lets its host say about the installation and the copy.
  *
  * The two are different facts. The installation completing is the server's
