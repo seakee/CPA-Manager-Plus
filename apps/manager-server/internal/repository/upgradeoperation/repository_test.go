@@ -1707,3 +1707,130 @@ func TestRecordErrorNeedsARecordedOperation(t *testing.T) {
 		t.Fatalf("a refused refusal created a row: found=%t err=%v", found, err)
 	}
 }
+
+// TestStaleRevisionWriteIsRejectedAfterAnIntegratedWriter is the regression for
+// merging the two U1 halves. The writers the D harness added — the External
+// step's refusal and clear paths, the reconciliation record, the source-root
+// backfill and the rollback verdict — updated the row without consulting its
+// revision, so a caller holding the revision it read before them could still
+// write with Put and silently overwrite what they recorded. Every one of them
+// now stores revision+1 behind the revision it read, so that write is refused
+// with ErrConflict and the row keeps the writer's work. Advance is the control:
+// it already carried the revision, and it still does.
+func TestStaleRevisionWriteIsRejectedAfterAnIntegratedWriter(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		seed  func(t *testing.T, repository *upgradeoperation.Repository)
+		apply func(t *testing.T, repository *upgradeoperation.Repository, db *sql.DB)
+	}{
+		{
+			name: "record error",
+			seed: func(t *testing.T, repository *upgradeoperation.Repository) {
+				_ = recordedCopyIn(t, repository)
+			},
+			apply: func(t *testing.T, repository *upgradeoperation.Repository, _ *sql.DB) {
+				if err := repository.RecordError(ctx, "upgrade_external_connect_refused", "the target refused the credential"); err != nil {
+					t.Fatalf("record the refusal: %v", err)
+				}
+			},
+		},
+		{
+			name: "clear error",
+			seed: func(t *testing.T, repository *upgradeoperation.Repository) {
+				_ = recordedCopyIn(t, repository)
+				if err := repository.RecordError(ctx, "upgrade_external_connect_refused", "the target refused the credential"); err != nil {
+					t.Fatalf("record the refusal: %v", err)
+				}
+			},
+			apply: func(t *testing.T, repository *upgradeoperation.Repository, db *sql.DB) {
+				tx, err := db.BeginTx(ctx, nil)
+				if err != nil {
+					t.Fatalf("begin: %v", err)
+				}
+				if err := upgradeoperation.ClearErrorTx(ctx, tx); err != nil {
+					_ = tx.Rollback()
+					t.Fatalf("clear the refusal: %v", err)
+				}
+				if err := tx.Commit(); err != nil {
+					t.Fatalf("commit: %v", err)
+				}
+			},
+		},
+		{
+			name: "record reconciliation",
+			seed: func(t *testing.T, repository *upgradeoperation.Repository) {
+				_ = recordedCopyIn(t, repository)
+			},
+			apply: func(t *testing.T, repository *upgradeoperation.Repository, _ *sql.DB) {
+				if err := repository.RecordReconciliation(ctx, json.RawMessage(`{"usageDays":1}`)); err != nil {
+					t.Fatalf("record the reconciliation: %v", err)
+				}
+			},
+		},
+		{
+			name: "backfill source root",
+			seed: func(t *testing.T, repository *upgradeoperation.Repository) {
+				if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCopyIn); err != nil {
+					t.Fatalf("advance to copy_in: %v", err)
+				}
+			},
+			apply: func(t *testing.T, repository *upgradeoperation.Repository, _ *sql.DB) {
+				if _, err := repository.RecordSourceRoot(ctx, "/srv/cpamp/data"); err != nil {
+					t.Fatalf("record the source root: %v", err)
+				}
+			},
+		},
+		{
+			name: "record rollback",
+			seed: func(t *testing.T, repository *upgradeoperation.Repository) {
+				_ = recordedCopyIn(t, repository)
+			},
+			apply: func(t *testing.T, repository *upgradeoperation.Repository, _ *sql.DB) {
+				if _, err := repository.RecordRollback(ctx, rollbackEvidence()); err != nil {
+					t.Fatalf("record the verdict: %v", err)
+				}
+			},
+		},
+		{
+			name: "advance",
+			seed: func(t *testing.T, repository *upgradeoperation.Repository) {
+				_ = recordedCopyIn(t, repository)
+			},
+			apply: func(t *testing.T, repository *upgradeoperation.Repository, _ *sql.DB) {
+				if _, err := repository.Advance(ctx, model.UpgradeDomainPricing, model.UpgradeStageReconcile); err != nil {
+					t.Fatalf("advance to reconcile: %v", err)
+				}
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			repository, db := newRepository(t)
+			testCase.seed(t, repository)
+			stale, found, err := repository.Get(ctx)
+			if err != nil || !found {
+				t.Fatalf("read the seeded row: found=%t err=%v", found, err)
+			}
+			testCase.apply(t, repository, db)
+			advanced, found, err := repository.Get(ctx)
+			if err != nil || !found {
+				t.Fatalf("read the written row: found=%t err=%v", found, err)
+			}
+			if advanced.Revision != stale.Revision+1 {
+				t.Fatalf("stored revision %d, want %d: the writer did not advance the token a reader holds",
+					advanced.Revision, stale.Revision+1)
+			}
+			if err := repository.Put(ctx, stale); !errors.Is(err, upgradeoperation.ErrConflict) {
+				t.Fatalf("write with the revision read before the writer = %v, want %v", err, upgradeoperation.ErrConflict)
+			}
+			after, found, err := repository.Get(ctx)
+			if err != nil || !found {
+				t.Fatalf("read the row after the refused write: found=%t err=%v", found, err)
+			}
+			if !reflect.DeepEqual(after, advanced) {
+				t.Fatalf("the refused write changed the row:\nbefore %+v\nafter  %+v", advanced, after)
+			}
+		})
+	}
+}

@@ -210,6 +210,22 @@ func decodeStringList(raw string, column string) ([]string, error) {
 	return values, nil
 }
 
+// revisionGuard checks the revision-checked statement one writer issued: a zero
+// row count means the stored revision is no longer the one the write read, so
+// another writer committed first and this write changed nothing. Every writer
+// of the single operation row carries the revision it read and gets ErrConflict
+// from this check instead of overwriting a newer row.
+func revisionGuard(result sql.Result, expected int64) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: expected revision %d, the stored row is newer", ErrConflict, expected)
+	}
+	return nil
+}
+
 // rowCreated reports whether the guarded insert created the single row.
 // "on conflict(id) do nothing" affects zero rows when the row already existed,
 // which is how a first write is distinguished from a write to stored state.
@@ -531,7 +547,9 @@ func (r *Repository) Advance(ctx context.Context, domain string, stage model.Upg
 
 // AdvanceTx records a completed domain and moves the stage inside the caller's
 // transaction, so the stage can only ever commit beside the evidence that
-// explains it. The rules are the ones Advance documents.
+// explains it. The rules are the ones Advance documents, and the update carries
+// the revision this transaction read, so an advance that lost a race to another
+// writer returns ErrConflict with the row untouched.
 func AdvanceTx(ctx context.Context, tx Tx, domain string, stage model.UpgradeStage) (model.UpgradeOperation, error) {
 	if domain != "" && !model.ValidUpgradeDomain(domain) {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %q", ErrUnknownDomain, domain)
@@ -598,7 +616,8 @@ func AdvanceTx(ctx context.Context, tx Tx, domain string, stage model.UpgradeSta
 		current.CreatedAtMS = now
 	}
 	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
-	current.Revision++
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
 	// Validate the row this transaction is about to write. A row whose stored
 	// clock ran ahead must stay readable after the advance, and Get rejects any
 	// row that Validate does not accept.
@@ -609,9 +628,16 @@ func AdvanceTx(ctx context.Context, tx Tx, domain string, stage model.UpgradeSta
 	if err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `update `+tableName+`
+	// The update carries the revision this transaction read: a row another
+	// writer advanced since would not match, and this advance then reports
+	// ErrConflict instead of overwriting it.
+	result, err = tx.ExecContext(ctx, `update `+tableName+`
 		set stage = ?, last_forward_stage = ?, revision = ?, domains_done = ?, created_at_ms = ?, updated_at_ms = ?
-		where id = 1`, string(current.Stage), string(current.LastForwardStage), current.Revision, string(domains), current.CreatedAtMS, current.UpdatedAtMS); err != nil {
+		where id = 1 and revision = ?`, string(current.Stage), string(current.LastForwardStage), current.Revision, string(domains), current.CreatedAtMS, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	return current, nil
@@ -626,8 +652,9 @@ func nullString(value string) any {
 
 // RecordError records the typed refusal a step stopped on, without touching the
 // stage or the completed domains: the step did not advance, and no path may make
-// a refusal look like progress. Only the error columns and the update time move,
-// so the provenance a later rollback relies on is left exactly as it was.
+// a refusal look like progress. Only the error columns, the revision and the
+// update time move, so the provenance a later rollback relies on is left exactly
+// as it was.
 //
 // The stamp is computed from the stored row inside the transaction, so a refusal
 // written by a process whose clock lags the store cannot move updated_at_ms
@@ -665,12 +692,19 @@ func (r *Repository) RecordError(ctx context.Context, code, detail string) error
 	current.ErrorCode = code
 	current.ErrorDetail = strings.TrimSpace(detail)
 	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
 	if err := current.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
-	if _, err := tx.ExecContext(ctx, `update `+tableName+`
-		set error_code = ?, error_detail = ?, updated_at_ms = ? where id = 1`,
-		current.ErrorCode, nullString(current.ErrorDetail), current.UpdatedAtMS); err != nil {
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = ?, error_detail = ?, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		current.ErrorCode, nullString(current.ErrorDetail), current.Revision, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -680,8 +714,8 @@ func (r *Repository) RecordError(ctx context.Context, code, detail string) error
 // succeeded can commit the cleared refusal beside the stage it advanced to. The
 // refusal is the durable statement that the step did not advance; leaving it
 // behind after a successful run would keep telling the wizard a stop is still
-// standing. Only the error columns and the update time move, and the stamp is
-// computed from the row as this transaction sees it.
+// standing. Only the error columns, the revision and the update time move, and
+// the stamp is computed from the row as this transaction sees it.
 func ClearErrorTx(ctx context.Context, tx Tx) error {
 	now := time.Now().UnixMilli()
 	current, found, err := scanOperation(tx.QueryRowContext(ctx,
@@ -695,13 +729,19 @@ func ClearErrorTx(ctx context.Context, tx Tx) error {
 	current.ErrorCode = ""
 	current.ErrorDetail = ""
 	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
 	if err := current.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
-	_, err = tx.ExecContext(ctx, `update `+tableName+`
-		set error_code = null, error_detail = null, updated_at_ms = ? where id = 1`,
-		current.UpdatedAtMS)
-	return err
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = null, error_detail = null, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		current.Revision, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return err
+	}
+	return revisionGuard(result, expectedRevision)
 }
 
 // RecordReconciliation stores the reconciliation report on the single row
@@ -726,7 +766,8 @@ func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMe
 // authorizes. The repository owns updated_at_ms here too: it is recomputed from
 // the stored row with nextUpdatedAtMS, and the row is validated before it is
 // written, in this transaction, so a clock that ran ahead cannot make the next
-// reader reject the row.
+// reader reject the row. The write carries the revision this transaction read
+// and stores one more, so it conflicts instead of overwriting a newer row.
 func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) error {
 	if len(report) == 0 {
 		report = json.RawMessage("{}")
@@ -744,22 +785,18 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
 	}
 	current.UpdatedAtMS = nextUpdatedAtMS(time.Now().UnixMilli(), current)
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
 	if err := current.Validate(); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
 	result, err := tx.ExecContext(ctx, `update `+tableName+`
-		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(report), current.UpdatedAtMS)
+		set reconciliation = ?, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`, string(report), current.Revision, current.UpdatedAtMS, expectedRevision)
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
-	}
-	return nil
+	return revisionGuard(result, expectedRevision)
 }
 
 // requireVerdictEvidence keeps the terminal verdict and its observation
@@ -775,7 +812,8 @@ func requireVerdictEvidence(op model.UpgradeOperation) error {
 // RecordSourceRoot backfills the 1.x data directory of a row that recorded none:
 // an operation written before the column existed still has to bind its rollback
 // to the volume it copied. It only fills an empty value, so provenance is never
-// rewritten, and it refuses a row that has no operation at all.
+// rewritten, and it refuses a row that has no operation at all. The backfill is
+// revision-checked like every other writer, so it cannot land beside a newer row.
 func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (model.UpgradeOperation, error) {
 	if strings.TrimSpace(sourceRoot) == "" {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: the 1.x data directory is empty", ErrInvalidRow)
@@ -803,14 +841,21 @@ func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (m
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
 	}
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
 	// Validate the row this transaction is about to persist: the clock above is
 	// rewritten here, and a row whose stored clock ran ahead must stay readable.
 	if err := current.Validate(); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
-	if _, err := tx.ExecContext(ctx, `update `+tableName+`
-		set source_root = ?, updated_at_ms = ? where id = 1`,
-		sourceRoot, current.UpdatedAtMS); err != nil {
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set source_root = ?, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		sourceRoot, current.Revision, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -825,7 +870,9 @@ func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (m
 // and the completed domains are left exactly as recorded, so the evidence of
 // what was rolled back survives the verdict. A row that is already rolled back
 // is refused rather than re-described, and a rendered verdict is impossible:
-// either the stage and its evidence both land or neither does.
+// either the stage and its evidence both land or neither does. The verdict is
+// revision-checked, so it returns ErrConflict rather than re-describing a row
+// another writer advanced after this transaction read it.
 func (r *Repository) RecordRollback(ctx context.Context, evidence model.RollbackEvidence) (model.UpgradeOperation, error) {
 	op := model.UpgradeOperation{Stage: model.UpgradeStageRolledBack, Rollback: &evidence}
 	op.Normalize()
@@ -871,6 +918,8 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 	if current.CreatedAtMS == 0 {
 		current.CreatedAtMS = now
 	}
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
 	// The verdict and the observation this transaction is about to write must
 	// both still be acceptable, and a stored clock that ran ahead stays
 	// readable; validate the row this transaction persists, not just the
@@ -878,14 +927,21 @@ func (r *Repository) RecordRollback(ctx context.Context, evidence model.Rollback
 	if err := current.Validate(); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
-	if _, err := tx.ExecContext(ctx, `update `+tableName+`
+	// The verdict carries the revision this transaction read, so a row another
+	// writer advanced since is reported as ErrConflict instead of being
+	// re-described as abandoned.
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
 		set stage = ?, rollback_image = ?, rollback_image_source = ?, rollback_image_form = ?,
 			rollback_status_url = ?, rollback_source_fingerprint = ?, rollback_observed_at_ms = ?,
-			created_at_ms = ?, updated_at_ms = ?
-		where id = 1`,
+			revision = ?, created_at_ms = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
 		string(current.Stage), evidence.Image, evidence.ImageSource, evidence.ImageForm,
 		evidence.StatusURL, evidence.SourceFingerprint, evidence.ObservedAtMS,
-		current.CreatedAtMS, current.UpdatedAtMS); err != nil {
+		current.Revision, current.CreatedAtMS, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
 		return model.UpgradeOperation{}, err
 	}
 	if err := tx.Commit(); err != nil {
