@@ -308,7 +308,15 @@ async function freePort() {
 // Containers started by name, and the Compose project itself: those two are the
 // only owners cleanup may touch. The project name is this run's own random
 // `cpampd-adopt-*`, so no user container, image or volume can match it.
+//
+// Each name is registered in `ownedContainers` before its `docker run -d`, not
+// after it returns: Docker can create the container and still exit nonzero (a
+// refused start, a timeout, a lost reply), and a container Compose does not own
+// is only ever removed by the name this run recorded. `startedContainers` is the
+// narrower set whose `docker run -d` returned success — the containers the run
+// knows exist, and therefore the ones its log evidence must cover.
 const ownedContainers = new Set();
+const startedContainers = new Set();
 let composeStarted = false;
 // Filled by the lifecycle's log step before any container is removed, then read
 // by the secret assertion.
@@ -329,7 +337,7 @@ lifecycle.add('browser.close', async () => {
 });
 lifecycle.add('container logs', () => {
   // Nothing was created, so there is nothing this run's assertion must cover.
-  if (!composeStarted && ownedContainers.size === 0) {
+  if (!composeStarted && startedContainers.size === 0) {
     containerLogEvidence = { status: 'PASS', sources: [], failure: null };
     return;
   }
@@ -350,8 +358,25 @@ lifecycle.add('container logs', () => {
   }
 });
 lifecycle.add('containers', () => {
-  if (ownedContainers.size === 0) return;
-  run(['docker', 'rm', '-f', ...ownedContainers]);
+  // Each owned container is removed by its exact name, and every name is
+  // attempted so one failure cannot leave another container behind. Docker
+  // answers a container it does not have with `No such container`; that is a
+  // container already gone — the same answer a `docker run -d` gets when it
+  // created the container and then failed before this step existed — so it is
+  // idempotent success, not a teardown failure. Any other error is recorded.
+  const failures = [];
+  for (const name of ownedContainers) {
+    const result = run(['docker', 'rm', '-f', name], undefined, false);
+    if (result.status === 0) continue;
+    const output = (String(result.stdout || '') + '\n' + String(result.stderr || ''))
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (output.length > 0 && output.every((line) => /No such container/i.test(line))) continue;
+    const message = output.length > 0 ? output.join(' ').slice(0, 200) : 'docker rm exited ' + result.status;
+    failures.push(name + ': ' + redact(message));
+  }
+  if (failures.length > 0) throw new Error(failures.join('; '));
 });
 lifecycle.add('compose down', () => {
   if (!composeStarted) return;
@@ -643,7 +668,7 @@ function assertNoSecret(where, text) {
 // Compose names its own `project-service-index`, so a service of this run's
 // project is present when an enumerated name carries that prefix.
 function expectedLogSources() {
-  const expected = [...ownedContainers].map((name) => ({ name, prefix: false }));
+  const expected = [...startedContainers].map((name) => ({ name, prefix: false }));
   if (composeStarted)
     for (const service of ['cpamp-manager', 'cpamp-runtime', 'cpamp-ingress'])
       expected.push({ name: project + '-' + service + '-', prefix: true });
@@ -883,6 +908,7 @@ try {
   // The two source-side processes and the forwarder, all on the project network
   // under their own aliases. Nothing here is the Manager's Runtime.
   lifecycle.throwIfCancelled();
+  ownedContainers.add(sourceContainer);
   docker(
     'run', '-d', '--name', sourceContainer, '--network', network,
     '--network-alias', 'cpampd-adopt-cpa',
@@ -890,7 +916,8 @@ try {
     '-v', `${sourceAuthDir}:/cpa/auth`,
     images['cpamp-runtime'], '/usr/local/bin/cli-proxy-api', '-config', '/cpa/config.yaml'
   );
-  ownedContainers.add(sourceContainer);
+  startedContainers.add(sourceContainer);
+  ownedContainers.add(emptyContainer);
   docker(
     'run', '-d', '--name', emptyContainer, '--network', network,
     '--network-alias', 'cpampd-adopt-empty',
@@ -898,7 +925,8 @@ try {
     '-v', `${emptyAuthDir}:/cpa/auth`,
     images['cpamp-runtime'], '/usr/local/bin/cli-proxy-api', '-config', '/cpa/config.yaml'
   );
-  ownedContainers.add(emptyContainer);
+  startedContainers.add(emptyContainer);
+  ownedContainers.add(forwarderContainer);
   docker(
     'run', '-d', '--name', forwarderContainer, '--network', network,
     '--network-alias', 'cpampd-adopt-source',
@@ -906,7 +934,7 @@ try {
     '-v', `${controlDir}:/control`,
     pythonImage, 'python3', '/forwarder.py'
   );
-  ownedContainers.add(forwarderContainer);
+  startedContainers.add(forwarderContainer);
   const managementProbe = (alias, key) =>
     run(
       ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
@@ -1044,6 +1072,7 @@ try {
   if (process.env.CPAMP_D_CPA_LEGACY && existsSync(process.env.CPAMP_D_CPA_LEGACY)) {
     await check('a v7 source is refused with nothing committed', async () => {
       lifecycle.throwIfCancelled();
+      ownedContainers.add(legacyContainer);
       docker(
         'run', '-d', '--name', legacyContainer, '--network', network,
         '--network-alias', 'cpampd-adopt-v7',
@@ -1053,7 +1082,7 @@ try {
         '-v', `${process.env.CPAMP_D_CPA_LEGACY}:/usr/local/bin/cli-proxy-api:ro`,
         images['cpamp-runtime'], '/usr/local/bin/cli-proxy-api', '-config', '/cpa/config.yaml'
       );
-      ownedContainers.add(legacyContainer);
+      startedContainers.add(legacyContainer);
       await wait(
         async () =>
           (await fetch(`http://127.0.0.1:${legacyPort}/v0/management/config`, {

@@ -252,6 +252,13 @@ exit 0
     return existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith('.log')) : [];
   }
 
+  // The adapter's daemon state: the containers `docker run -d` created and no
+  // `docker rm -f` removed. The test seeds it with containers the run does not
+  // own, so touching one would be visible here as well as in the command log.
+  function daemonContainers(file) {
+    return readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  }
+
   // A complete adapter for the runs that must take the script's own teardown. The
   // container listing is derived from the filter the script itself passes, so this
   // run's random project is enumerated without the test naming it in advance. The
@@ -265,6 +272,29 @@ exit 0
       `#!/bin/sh
 printf '%s\\n' "$*" >> "$CPAMP_LIFECYCLE_DOCKER_LOG"
 case " $* " in
+  " run -d --name "*)
+    # The daemon owns the container the moment 'run -d' creates it; the CLI can
+    # still exit nonzero (a refused start, a timeout, a lost reply). That is the
+    # state cleanup has to survive, so the name is recorded here before the
+    # injected failure, exactly as the created container would exist.
+    name=$4
+    printf '%s\\n' "$name" >> "$CPAMP_LIFECYCLE_CONTAINER_STATE"
+    if [ -n "$CPAMP_FAKE_RUN_FAILS" ] && [ "\${name%-\${CPAMP_FAKE_RUN_FAILS}}" != "$name" ]; then
+      echo 'Error response from daemon: the container was created but the process failed to start' >&2
+      exit 1
+    fi
+    exit 0;;
+  " rm -f "*)
+    # Real removal semantics: only a name the daemon has is removed, and a name it
+    # does not have gets the idempotent "No such container" answer.
+    name=$3
+    if [ "$CPAMP_FAKE_RM_MISSING" != 1 ] && grep -qxF "$name" "$CPAMP_LIFECYCLE_CONTAINER_STATE" 2>/dev/null; then
+      grep -vxF "$name" "$CPAMP_LIFECYCLE_CONTAINER_STATE" > "\${CPAMP_LIFECYCLE_CONTAINER_STATE}.next"
+      mv "\${CPAMP_LIFECYCLE_CONTAINER_STATE}.next" "$CPAMP_LIFECYCLE_CONTAINER_STATE"
+      exit 0
+    fi
+    echo "Error response from daemon: No such container: $name" >&2
+    exit 1;;
   *" image inspect "*)
     case "$*" in
       *python:3.13-alpine*) printf 'sha256:3333\\n'; exit 0;;
@@ -306,14 +336,18 @@ exit 0
 
   // One controlled run of the real CLI, from its prerequisites into its own
   // teardown. `logDir` lets a test place — or block — the saved log without
-  // touching the shared directory real runs write to.
-  async function runControlled(name, { env = {}, logDir: logDirOverride } = {}) {
+  // touching the shared directory real runs write to. `containers` seeds the
+  // adapter's daemon state with containers this run does not own, so a cleanup
+  // that reached one of them would be observable.
+  async function runControlled(name, { env = {}, logDir: logDirOverride, containers = [] } = {}) {
     const caseDir = join(tempRoot, 'controlled', name);
     const out = join(caseDir, 'artifact');
     const logDir = logDirOverride || join(caseDir, 'logs');
     const dockerLog = join(caseDir, 'docker.log');
+    const containerState = join(caseDir, 'containers.state');
     mkdirSync(caseDir, { recursive: true });
     writeFileSync(dockerLog, '');
+    writeFileSync(containerState, containers.map((entry) => entry + '\n').join(''));
     const bin = completeAdapter(caseDir);
     // The bootstrap probe only needs an answer: the run stops at its first check,
     // which is long before a browser or a real Manager is needed.
@@ -334,6 +368,7 @@ exit 0
             ...process.env,
             PATH: bin + ':' + process.env.PATH,
             CPAMP_LIFECYCLE_DOCKER_LOG: dockerLog,
+            CPAMP_LIFECYCLE_CONTAINER_STATE: containerState,
             CPAMP_D_ADOPT_LOG_DIR: logDir,
             PLAYWRIGHT_MODULE: join(caseDir, 'no-playwright'),
             FAKE_REVISION: controlledRevision,
@@ -366,6 +401,7 @@ exit 0
         report,
         output: output.join(''),
         calls: readFileSync(dockerLog, 'utf8').trim().split('\n').filter(Boolean),
+        containerState,
         survivedSecrets: secretDirectories().filter((entry) => !before.has(entry)),
       };
     } finally {
@@ -498,6 +534,74 @@ exit 0
     assert.match(readFileSync(savedLog, 'utf8'), /FAIL/);
     rmSync(savedLog);
     assert.deepEqual(savedLogNames(run.logDir), []);
+  });
+
+  // `docker run -d` can create the container and still exit nonzero: a refused
+  // start, a timeout, a lost reply. Compose does not own that container, so the
+  // only handle cleanup has is the name the run registered before the call. The
+  // adapter records creation and removal, so a container left behind is visible.
+  it('removes the container a failed docker run created, for each container the run starts', async () => {
+    const unrelated = 'cpamp-existing-user-container';
+    for (const suffix of ['cpa', 'cpa-empty', 'forwarder']) {
+      const run = await runControlled('run-failure-' + suffix, {
+        env: { CPAMP_FAKE_RUN_FAILS: suffix },
+        containers: [unrelated],
+      });
+      assert.equal(run.exit.signal, null, suffix + ': the run was killed');
+      assert.equal(run.exit.code, 1, suffix + ': a failed docker run must fail the run');
+      const project = /(cpampd-adopt-[0-9a-f]{12})-/.exec(run.calls.join('\n'))?.[1];
+      assert(project, suffix + ': the run never named its project');
+      const created = ['cpa', 'cpa-empty', 'forwarder']
+        .map((entry) => project + '-' + entry)
+        .filter((container) => run.calls.some((line) => line.startsWith('run -d --name ' + container + ' ')));
+      assert(created.includes(project + '-' + suffix), suffix + ': the injected run created no container');
+      for (const container of created) {
+        assert(
+          run.calls.some((line) => line === 'rm -f ' + container),
+          suffix + ': cleanup did not remove ' + container
+        );
+      }
+      assert.equal(
+        run.calls.some((line) => line.includes(unrelated)),
+        false,
+        suffix + ': cleanup named a container outside this run'
+      );
+      assert.deepEqual(
+        daemonContainers(run.containerState),
+        [unrelated],
+        suffix + ': a container this run created survived cleanup'
+      );
+      assert(
+        run.calls.some((line) => line.startsWith('compose ') && line.includes(' down ')),
+        suffix + ': the Compose project was not taken down'
+      );
+      assert.deepEqual(run.survivedSecrets, [], suffix + ': a secret directory survived');
+      assert.equal(run.report?.result, 'FAIL', suffix + ': the failed run was reported as a PASS');
+    }
+  });
+
+  // Docker answers a container it does not have with `No such container`. A name
+  // that is already gone — the container was never created, or was already
+  // removed — leaves nothing to clean, so that answer must not fail the teardown.
+  it('treats a container Docker no longer has as already removed', async () => {
+    const run = await runControlled('container-missing', { env: { CPAMP_FAKE_RM_MISSING: '1' } });
+    assert.equal(run.exit.signal, null);
+    assert.equal(run.exit.code, 1, 'the run still fails on its own journey');
+    assert.equal(run.report?.result, 'FAIL');
+    assert.deepEqual(
+      (run.report?.teardown || []).map(({ step }) => step),
+      [],
+      'a container Docker does not have was recorded as a teardown failure'
+    );
+    const project = /(cpampd-adopt-[0-9a-f]{12})-/.exec(run.calls.join('\n'))?.[1];
+    assert(project, 'the run never named its project');
+    for (const entry of ['cpa', 'cpa-empty', 'forwarder']) {
+      assert(
+        run.calls.some((line) => line === 'rm -f ' + project + '-' + entry),
+        entry + ': cleanup did not attempt the exact name'
+      );
+    }
+    assert.deepEqual(run.survivedSecrets, [], 'a secret directory survived');
   });
 
   it('fails the persisted report when the log directory cannot be created', async () => {

@@ -114,6 +114,12 @@ jobs:
       - name: Test
         run: npm run test
 
+      # `npm run test` collects the vitest files; this D lifecycle suite is
+      # native node:test under bin/ci, so no step above runs it. The runner exits
+      # nonzero on any failing case and prints the pass/fail counts.
+      - name: Test D harness lifecycle
+        run: node --test bin/ci/fresh-adopt-lifecycle.test.mjs
+
       - name: Build
         run: npm --workspace apps/web run build:bundle
         env:
