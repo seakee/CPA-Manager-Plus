@@ -444,8 +444,17 @@ func TestMountLookupRunsOncePerRequestInsideItsBound(t *testing.T) {
 	close(start)
 	wait.Wait()
 	elapsed := time.Since(started)
-	if elapsed > time.Second {
-		t.Fatalf("%d status polls waited %s on a mount that never answered, bound %s", polls, elapsed, handler.MountTimeout)
+	// Every poll stops at the bound instead of waiting on the hung lookup, and
+	// the polls run together, so the aggregate is the bound plus the per-poll
+	// credential cost. The race detector multiplies that cost — a 20ms bound and
+	// 20 polls measured about a second under it — so the budget scales with the
+	// detector rather than turning this into an assertion about detector speed.
+	budget := time.Second
+	if raceDetectorEnabled {
+		budget = 10 * time.Second
+	}
+	if elapsed > budget {
+		t.Fatalf("%d status polls waited %s on a mount that never answered, bound %s, budget %s", polls, elapsed, handler.MountTimeout, budget)
 	}
 	for index := range codes {
 		if codes[index] != http.StatusOK {
