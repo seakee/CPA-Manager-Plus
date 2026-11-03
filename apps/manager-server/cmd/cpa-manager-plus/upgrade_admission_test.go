@@ -28,15 +28,25 @@ func recordUpgradeStage(t *testing.T, databasePath, stage string) {
 		t.Fatalf("open fixture store: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	operation := model.UpgradeOperation{
-		Stage:                   model.UpgradeStage(stage),
-		DomainsDone:             []string{model.UpgradeDomainSourceCopy},
-		SourceKind:              upgradeservice.SourceKindUpgradedLegacy,
-		SourceFingerprintBefore: "source-fingerprint",
-		SourceFingerprintAfter:  "source-fingerprint",
-		BackupManifestSHA256:    "backup-manifest-sha256",
+	repository := upgradeoperation.New(db)
+	ctx := context.Background()
+	// Put is a compare-and-set: a fixture that replaces an existing row has to
+	// read it first, exactly like every other writer.
+	operation, found, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("read fixture operation: %v", err)
 	}
-	if err := upgradeoperation.New(db).Put(context.Background(), operation); err != nil {
+	if !found {
+		operation = model.UpgradeOperation{
+			DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		}
+	}
+	operation.Stage = model.UpgradeStage(stage)
+	operation.SourceKind = upgradeservice.SourceKindUpgradedLegacy
+	operation.SourceFingerprintBefore = "source-fingerprint"
+	operation.SourceFingerprintAfter = "source-fingerprint"
+	operation.BackupManifestSHA256 = "backup-manifest-sha256"
+	if err := repository.Put(ctx, operation); err != nil {
 		t.Fatalf("record fixture stage %q: %v", stage, err)
 	}
 }

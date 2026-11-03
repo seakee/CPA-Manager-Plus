@@ -167,11 +167,15 @@ hard `false`; the new surface grants no migration authority.
 
 - **Operation state.** `upgrade_operations` (single row, `id = 1`) stores the
   stage, completed domains, source observations, backup manifest reference,
-  reconciliation object, manual items, `revision` and `last_forward_stage`.
+  reconciliation object, manual items, `revision`, `last_forward_stage` and
+  `source_root`.
   `Put` uses the revision returned by `Get` as a compare-and-set token inside
   its write transaction; a stale token returns `ErrConflict` without changing
   evidence or progress. A missing or migrated row starts at revision zero, and
-  every committed `Put` or `Advance` increments it, even within one millisecond.
+  every committed writer increments it, even within one millisecond: `Put`,
+  `Advance`, the External step's refusal and clear paths, the reconciliation
+  record, the source-root backfill and the rollback verdict all carry the
+  revision they read and store one more.
   Timestamps are repository-owned observations, never concurrency tokens.
   `Advance` appends a domain and moves the stage in one transaction; `Put` also
   preserves completed domains. Duplicate domains and non-object reconciliation
@@ -190,19 +194,36 @@ hard `false`; the new surface grants no migration authority.
   `Advance` that would change a domain, an observation or the stage is refused
   with `ErrStageRegression` and leaves every column, the revision and the
   timestamps untouched. An exactly identical repeat is a success that writes
-  nothing, and entering `failed` from `complete` stays refused. The table
-  is created only in the v2 Manager database, never in the legacy source root.
+  nothing, and entering `failed` from `complete` stays refused.
+  `rolled_back` is terminal and is recorded only together with the evidence it
+  rests on (the restarted image, its source and form, the health endpoint, the
+  observed fingerprint and when it was observed): `RecordRollback` writes the
+  stage and the observation in one transaction, a bare verdict is refused with
+  `ErrRollbackEvidenceRequired`, and a stored `rolled_back` row without a whole
+  observation is reported as `ErrRollbackEvidenceMissing` instead of being read
+  as a malformed row. A failed row is not a rollback position, so it cannot
+  resume at the verdict. The table is created only in the v2 Manager database,
+  never in the legacy source root.
 - **Never in place.** The existing source fence is acquired through a read-only
   descriptor (`processlock.AcquireExistingReadOnly`) before fingerprinting,
   archive walking, CPA inspection or snapshot copying, and held through cleanup.
-  Only an actually held lock is `upgrade_source_busy`; a missing database, missing
-  lock marker or unreadable source is `upgrade_source_unreadable`. No source lock
+  A live writer is `upgrade_source_busy`; a source whose database is absent or
+  empty is `upgrade_source_missing`; a shared-policy refusal of the file itself
+  (a hard link, or a link reached through the database path) is
+  `upgrade_source_symlinked` or `upgrade_source_lock_unavailable`, the same codes
+  the credential read and the mount lookup answer with; a database that cannot
+  be read through the private snapshot is `upgrade_source_unreadable`, and one
+  that changed while it was copied is `upgrade_source_changed`. No source lock
   file is created. Every v1.14.x release sets `pragma journal_mode = WAL`, and a
   plain `mode=ro` open can create sidecars beside it. Preflight therefore copies
   the database and sidecars into private scratch (`OpenSnapshot`), compares source
   digests before and after against the copied bytes, opens only that copy with
-  `mode=ro` plus `query_only`, and removes scratch. Changed bytes block with
-  `upgrade_source_changed`. `upgrade status` uses the same private-snapshot rule.
+  `mode=ro` plus `query_only`, and removes scratch. The credential read of the
+  Upgrade surface uses the same private copy rather than opening the source in
+  place, so a preserved 1.x source keeps its bytes and gains no sidecar; the
+  source fence is taken read-only, so a source preserved on a read-only volume
+  still proves exclusivity. `upgrade status` uses the same private-snapshot rule
+  for the Manager database, so it works when the Manager volume is not writable.
 - **Cooperative cancellation.** Fingerprinting, archive walking and snapshot
   copies check context between bounded read/write batches. Cancellation retains
   its context error and releases the fence, files and scratch. A filesystem call
@@ -545,15 +566,73 @@ on both surfaces at once, and no write route exists.
   handler has no credential input of its own: it applies that rule to the mount
   it inspected for the request, so nothing a caller supplies can point the read
   at a file the policy refused. The handler verifies the resolved file through
-  `upgrade.VerifyAdminSource`, which opens it read-only and runs
-  `setting.LoadAdminCredential` + `security.VerifyAdminKey`.
-  That open reads the credential row and nothing else:
-  no `quick_check`, no schema vocabulary, no parity, bounded to
-  `CredentialVerifyTimeout` (2s). Every authenticated request runs it, including
-  every status poll, so a whole-file scan there would answer 503 on a large
-  source and the result page would never arrive. The integrity check stays in
-  `Preflight`, which is what qualifies a source. `VerifyAdminSource` takes no
-  fence.
+  `upgrade.VerifyAdminSource` when it is a 1.x source, which reads it through
+  the same private snapshot the preflight takes (`OpenSnapshot`) and runs
+  `setting.LoadAdminCredential` + `security.VerifyAdminKey` on the copy. No
+  source is ever opened in place: `mode=ro` still creates `-wal`/`-shm` beside a
+  WAL database, and an immutable handle on a source that was cold when it was
+  inspected silently misses a WAL that appears while the read is being set up.
+  The source files are digested before the copy, again after it, and the copy is
+  digested as it is written; any difference means the source was not stopped and
+  the read is refused (`upgrade_source_unreadable`) instead of answering from a
+  stale or mixed state. The Manager's own store is this process's live database,
+  not a volume to preserve, so `VerifyManagerCredential` reads it in place
+  read-only and immutable only when no live WAL can hold rows. The one exception
+  is a target an unfinished copy-in still marks `materializing`: its restored
+  members, including the copied WAL index, are exactly what the resumed move
+  compares with its backup, and a read-only open of that store would join the
+  copied WAL and rewrite `-shm`. The marker is therefore read before any open,
+  the same order admission and the status projection use, and the key is proved
+  against a private snapshot outside both the target's data root and the
+  configured 1.x source root. Both roots are named by every caller that can reach
+  that read: the entry leaf carries the root it resolved at startup, and the
+  wizard carries the root its per-request mount lookup resolved — a lookup that
+  outlives its bound still names the root it published before the hung call, but
+  the snapshot then fails closed with `503 upgrade_mount_timeout` instead of
+  resolving that root again: canonicalizing it for the exclusion comparison is
+  the filesystem call the bound exists to stop. A lookup that never resolved the
+  root refuses with the typed unknown-root condition instead of staging a copy in
+  a tree nobody named. A target whose key cannot be proved this way
+  answers the typed condition that stopped the read — the mount's deadline, the
+  unknown-root condition, or the unreadable-source condition of a refused copy;
+  authentication is never skipped, and a rejected key still answers `401`.
+  The credential read returns the credential row and nothing else:
+  no `quick_check`, no schema vocabulary, no parity. The first read of one
+  source state is bounded by `CredentialVerifyTimeout` — a 2s base plus 1s per
+  64 MiB of every byte the read carries, the database plus a present WAL — and
+  capped by `CredentialVerifyMaxBudget` (20s): the read copies the whole source,
+  and a source that has not checkpointed keeps most of its data in the WAL, so a
+  budget derived from the database file alone answered 503 on a healthy
+  WAL-heavy source. The sum is computed without overflow and saturates into the
+  cap. A proved credential
+  is then remembered in memory for the source state it was proved against: the
+  digest of the presented key bound to the database and WAL device, inode, size
+  and modification time, with an absent WAL as its own state. Every request stats
+  the source; an unchanged identity reuses the verdict, and a write, checkpoint,
+  a replaced file, a new WAL, an eviction or a restart verifies again. No
+  credential and no key is stored and nothing is persisted; a rejected key or a
+  failed read is never cached as a success; at most 64 success entries are kept;
+  and concurrent first requests for one state share a single verification. The
+  work itself is bounded separately from those entries: at most four
+  verifications may run at once, and a request for a key already in flight joins
+  it without taking another slot. A caller that gives up while waiting for a slot
+  starts nothing and leaves no flight; a distinct wrong key can therefore not
+  grow the active work or the cache without bound. The shared read has its own
+  lifetime — it may finish for another waiter and for the cache — while every
+  caller, the one that started it included, waits under its own context and a
+  cancelled request returns its deadline rather than a success that landed after
+  it was abandoned. That check covers a remembered verdict too: a caller
+  cancelled while it waited for the cache itself is answered with its context
+  error, not with the entry that was already there when it got in. Every
+  authenticated request runs this, including every status poll, so a whole-file
+  scan there would answer 503 on a large source and the result page would never
+  arrive. The integrity check stays in `Preflight`, which is what qualifies a
+  source. `VerifyAdminSource` takes no fence. The Manager store's live credential
+  is not cached: it is this process's live database, whose WAL and file change
+  under ordinary traffic, and its credential is one indexed row in an already
+  open store. Only a target read as a preserved source because it is still
+  `materializing` participates in the state-keyed cache, and only for the exact
+  byte state it was proved against.
   A read that outlives the bound — or a caller whose own deadline had passed —
   is `503 upgrade_credential_timeout`: a slow but healthy volume is a retry, not
   a repair.
@@ -567,6 +646,36 @@ on both surfaces at once, and no write route exists.
   the other file is refused by both — but a mount that appears, disappears or is
   repointed after startup is seen by the reads first, and the entry leaf keeps its
   startup resolution until it is rebuilt.
+- **Entry statuses.** The authentication leaf
+  (`/.well-known/cpamp-bootstrap/upgrade/authenticate`) answers one of exactly
+  two statuses for a proved credential, and both carry `authenticated: true`,
+  `migration_available: false`, `expires_in_seconds: 60` and an opaque instance
+  revision that is never a session token: `unsupported_upgrade` when the public
+  discovery observation could classify the source, and `observation_unavailable`
+  when it could not describe it — a live WAL source is recovery-owned, so the
+  public observation refuses it. `observation_unavailable` says only that the
+  identity is proved and the public summary is unavailable: it claims no stage,
+  no readiness and no migration permission, and the two read routes prove the
+  key again on their own and name the source's conditions. It is not a credential
+  verdict, so a proved key is never downgraded to `401` because the observation
+  refused the source, and it is not a success claim, so the page does not present
+  it as upgrade-ready. A wrong key cannot open the leaf: it is
+  `401 admin_unauthorized` whenever the credential can be asked and refused, and
+  `503 source_unavailable` when the observation faulted for its own reason and
+  the key could not be proved — rather than blaming a credential the leaf could
+  not check. Every response for a proved credential is `200`, including the
+  unobservable one; `503 source_unavailable` is reserved for a source this build
+  cannot prove a key against, and `409 source_changed` for a presented revision
+  that no longer matches.
+- **The entry's own read preserves the source.** The authenticated observation
+  behind the entry leaf (`legacypreflight.WithAuthenticatedInspection`) reads a
+  cold source through a private copy as well: the read-only snapshot branch of
+  the SQLite inspection copies the rollback-mode database into scratch space
+  outside every source directory, re-validates the copy's own journal header and
+  opens only that copy. The source therefore keeps its entries, bytes, sizes and
+  modification times and gains no `-wal`/`-shm`; before this, a writer that
+  switched a cold source to WAL between the header check and the first credential
+  query left the sidecars of a read-only open in the preserved tree.
 - **One file policy on both paths.** The mount lookup applies the same database
   file rules as the preflight and the credential read
   (`processlock.InspectDatabaseFile`, via `upgrade.MountDatabase`): the path must
@@ -592,13 +701,15 @@ on both surfaces at once, and no write route exists.
   holds no mutable state.
   `503 upgrade_source_symlinked` on a leaf therefore means the resolved file
   itself is a link — in practice the Manager store — never the mount the
-  operator mounted through one. SQLite opens lazily on the first query, so
-  the open also pins a descriptor and compares it with the inspected file
-  (`processlock.OpenedDatabase`, the reader's form of `openedMarker`); after the
-  credential row is read the path is compared once more, so a swap between the
+  operator mounted through one. When the read runs, the resolved file is never
+  opened in place: the database and its sidecars are copied into private scratch
+  space and only the copy is opened (`OpenSnapshot`). A swap between the
   inspection and the read is refused (`ErrSourceDatabaseChanged`, reported as
-  `upgrade_source_unreadable`) instead of comparing a credential from a file
-  nothing assessed.
+  `upgrade_source_unreadable`) by the digests taken before the copy, after it and
+  over the copy as it is written, instead of comparing a credential from a file
+  nothing assessed. A verdict served from the remembered state is guarded by the
+  same identity: the source is stat'ed on every request, and any change to the
+  database or its WAL reads again.
 - **Order.** The credential is answered before the path and before the verb, on
   both the entry leaf and these two routes: an unauthenticated caller receives
   `401` whatever its method and whatever the path, so it cannot tell a real
@@ -616,10 +727,15 @@ on both surfaces at once, and no write route exists.
   and only when there is no Manager store to fall back to — with one, the
   credential resolves there and the refusal is reported as the `sourceRoot`
   marker instead; a mount lookup that outlives its bound answers
-  `503 upgrade_mount_timeout`; a credential read that exceeds its bound
-  answers `503 upgrade_credential_timeout`; a resolved database that is itself a
-  link answers `503 upgrade_source_symlinked`; a source that exists but cannot be
-  read to verify the key answers `503 upgrade_source_unreadable`. None of these is
+  `503 upgrade_mount_timeout` on every route that still needs the mount — the
+  preflight, and any request whose authentication would have to resolve the
+  source root to keep a private snapshot out of it; a status read whose
+  credential falls back to the live Manager store needs no snapshot and reports
+  the deadline as the `sourceRoot` marker instead; a credential read that exceeds
+  its bound answers `503 upgrade_credential_timeout`; a resolved database that is
+  itself a link answers `503 upgrade_source_symlinked`; a source that exists but
+  cannot be read to verify the key answers `503 upgrade_source_unreadable`.
+  None of these is
   a wrong-password message, and none of them is the ownership marker's verdict:
   that marker is the preflight's, and this surface never inspects it — the
   `upgrade_source_lock_unavailable` above is the file policy refusing the file,
@@ -658,6 +774,25 @@ on both surfaces at once, and no write route exists.
   store, so the mount's own key gets `401` and cannot read the marker that
   explains the refusal. `preflight` still inspects that mount, not the credential
   file the surface fell back to.
+  The projection applies the admission's marker order, not an equivalent one: a
+  `materializing` marker answers `copy_in` with `copy_in_marker` evidence and
+  `nextAction=copy_in` without opening the target, so a status poll cannot
+  rewrite the `-shm` a resumed live-WAL move restored; any other marker state
+  reads the row first, because a committed row outlives its marker. Both readers
+  use one provenance rule (`copyinmarker.SameTarget`): the marker names the
+  database inside its own data root, so a relocated root keeps its in-progress
+  state for the admission and the projection alike, while a marker naming a
+  different database file is a refusal for the admission and no record for the
+  projection.
+  Reconciliation travels through the same fixed allow-list (`mismatchDays`,
+  `mismatchDaysTotal`, `mismatchDaysTruncated`), never the producer's payload.
+  The list is bounded at 366 days — a transport bound, not a judgement about the
+  history — so a longer history is reported with its total and the truncation
+  flag: a cut list is a visible window, never silently the whole history, and
+  the wizard refuses a reply whose total is smaller than the list it stands for.
+  The page reads the recorded operation before anything else: a recorded stage
+  resumes where it stands, terminal or not, and the read-only preflight is the
+  first step only when the store answers that nothing is recorded.
 - **Scrubbing.** Operator-visible text is redacted by content, not by path
   shape: `Bearer …` (including a value wrapped onto the next line after a lone
   `Bearer`), `Authorization: Basic …`, `sk-…`, this product's own

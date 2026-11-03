@@ -9,6 +9,7 @@ import {
   rememberUpgradeCredential,
   rememberedUpgradeCredential,
   UpgradeAuthenticationError,
+  type UpgradeEntryObservation,
   verifyUpgradeCredential,
 } from './upgradeSession';
 
@@ -16,6 +17,11 @@ export function UpgradeAuthenticationEntry() {
   const { i18n } = useTranslation();
   const language = i18n.resolvedLanguage || i18n.language;
   const [revision, setRevision] = useState('');
+  // Which entry status the proved credential earned. `observation_unavailable`
+  // is a verified identity with no public observation: the page must say exactly
+  // that and never present it as an upgrade-ready source.
+  const [observation, setObservation] =
+    useState<UpgradeEntryObservation>('unsupported_upgrade');
   const [error, setError] = useState<UpgradeAuthenticationError['reason'] | 'expired' | ''>('');
   const [checking, setChecking] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -51,12 +57,13 @@ export function UpgradeAuthenticationEntry() {
       setError('');
       const timeout = window.setTimeout(() => controller.abort(), 10_000);
       try {
-        const next = await verifyUpgradeCredential(key, controller.signal, source);
+        const verified = await verifyUpgradeCredential(key, controller.signal, source);
         if (sequence.current !== current || controller.signal.aborted) return false;
         credential.current = key;
         expiresAt.current = Date.now() + 60_000;
         if (!source) rememberUpgradeCredential(key, remember);
-        setRevision(next);
+        setObservation(verified.observation);
+        setRevision(verified.revision);
         return true;
       } catch (err) {
         if (sequence.current === current)
@@ -162,11 +169,38 @@ export function UpgradeAuthenticationEntry() {
               </span>
             </div>
             <p className="upgrade-subtitle">{text('retained', language)}</p>
-            <div className="upgrade-notice" role="status" aria-live="polite">
-              <FullWebIcon name={checking ? 'refresh' : 'alert'} size={24} />
+            <div
+              className="upgrade-notice"
+              role="status"
+              aria-live="polite"
+              data-testid="upgrade-entry-status"
+              data-observation={checking ? 'checking' : observation}
+            >
+              <FullWebIcon
+                name={checking ? 'refresh' : observation === 'observation_unavailable' ? 'info' : 'alert'}
+                size={24}
+              />
               <div>
-                <h2>{text(checking ? 'checking' : 'blocked', language)}</h2>
-                <p>{text(checking ? 'checkingHelp' : 'boundary', language)}</p>
+                <h2>
+                  {text(
+                    checking
+                      ? 'checking'
+                      : observation === 'observation_unavailable'
+                        ? 'observationUnavailable'
+                        : 'blocked',
+                    language
+                  )}
+                </h2>
+                <p>
+                  {text(
+                    checking
+                      ? 'checkingHelp'
+                      : observation === 'observation_unavailable'
+                        ? 'observationUnavailableHelp'
+                        : 'boundary',
+                    language
+                  )}
+                </p>
               </div>
             </div>
             <p className="upgrade-next">{text('next', language)}</p>

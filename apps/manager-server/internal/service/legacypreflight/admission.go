@@ -272,7 +272,8 @@ func readCopyInMarker(databasePath string) (copyinmarker.Marker, bool, error) {
 	// on an unfinished store, so a relocated root stays in progress. A marker
 	// naming a different database file is evidence for some other run, and
 	// admitting this store on it would be guessing: it fails closed instead.
-	if filepath.Base(marker.TargetDatabase) != filepath.Base(databasePath) {
+	// SameTarget is the one rule the wizard's status projection applies too.
+	if !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
 		return copyinmarker.Marker{}, false, errors.New("the copy-in marker in this data root describes another database")
 	}
 	return marker, true, nil

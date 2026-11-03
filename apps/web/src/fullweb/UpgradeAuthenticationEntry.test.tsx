@@ -30,7 +30,9 @@ describe('upgrade authentication lifecycle', () => {
     setFullWebLanguage('en');
     await loginI18n.changeLanguage('en');
     mocks.candidate.mockReset().mockReturnValue('');
-    mocks.verify.mockReset().mockResolvedValue('a'.repeat(64));
+    mocks.verify
+      .mockReset()
+      .mockResolvedValue({ revision: 'a'.repeat(64), observation: 'unsupported_upgrade' });
     mocks.remember.mockReset();
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')));
     vi.stubGlobal('window', {
@@ -82,12 +84,18 @@ describe('upgrade authentication lifecycle', () => {
       1
     );
     expect(JSON.stringify(renderer.toJSON())).toContain('Migration is not available');
-    // The wizard is mounted only behind a verified session, and it is a reader:
-    // it asked the preflight route and nothing else.
+    // The wizard is mounted only behind a verified session, and it is a reader.
+    // Its first request is the recorded operation — the preflight is a step that
+    // only an empty record opens — and every request it makes stays on the two
+    // Upgrade read routes.
     expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
-    expect(vi.mocked(fetch).mock.calls[0][0]).toBe(
-      'https://manager.test/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/preflight'
-    );
+    const readRoutes = [
+      'https://manager.test/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/status',
+      'https://manager.test/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/preflight',
+    ];
+    const requested = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(requested[0]).toBe(readRoutes[0]);
+    for (const url of requested) expect(readRoutes).toContain(url);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
     });
@@ -112,9 +120,9 @@ describe('upgrade authentication lifecycle', () => {
     expect(focus).toHaveBeenCalledTimes(1);
 
     for (let index = 0; index < 3; index++) {
-      let finish!: (value: string) => void;
+      let finish!: (value: { revision: string; observation: string }) => void;
       mocks.verify.mockReturnValueOnce(
-        new Promise<string>((resolve) => {
+        new Promise<{ revision: string; observation: string }>((resolve) => {
           finish = resolve;
         })
       );
@@ -134,7 +142,7 @@ describe('upgrade authentication lifecycle', () => {
       );
       expect(JSON.stringify(renderer.toJSON())).not.toContain('Administrator identity verified');
       await act(async () => {
-        finish('a'.repeat(64));
+        finish({ revision: 'a'.repeat(64), observation: 'unsupported_upgrade' });
       });
       expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-authenticated' })).toHaveLength(
         1
@@ -157,9 +165,9 @@ describe('upgrade authentication lifecycle', () => {
     await act(async () => {
       await adapter().authenticate('old-key', false);
     });
-    let finish!: (value: string) => void;
+    let finish!: (value: { revision: string; observation: string }) => void;
     mocks.verify.mockReturnValueOnce(
-      new Promise<string>((resolve) => {
+      new Promise<{ revision: string; observation: string }>((resolve) => {
         finish = resolve;
       })
     );
@@ -175,7 +183,7 @@ describe('upgrade authentication lifecycle', () => {
     });
     expect(mocks.verify.mock.calls[mocks.verify.mock.calls.length - 1][1].aborted).toBe(true);
     await act(async () => {
-      finish('a'.repeat(64));
+      finish({ revision: 'a'.repeat(64), observation: 'unsupported_upgrade' });
     });
     expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-authenticated' })).toHaveLength(
       0
@@ -211,9 +219,9 @@ describe('upgrade authentication lifecycle', () => {
   });
 
   it('ignores a late response after a newer login or unmount', async () => {
-    let late!: (value: string) => void;
+    let late!: (value: { revision: string; observation: string }) => void;
     mocks.verify.mockReturnValueOnce(
-      new Promise<string>((resolve) => {
+      new Promise<{ revision: string; observation: string }>((resolve) => {
         late = resolve;
       })
     );
@@ -228,12 +236,36 @@ describe('upgrade authentication lifecycle', () => {
       await adapter().authenticate('current-key', false);
     });
     await act(async () => {
-      late('b'.repeat(64));
+      late({ revision: 'b'.repeat(64), observation: 'unsupported_upgrade' });
       await first;
     });
     expect(mocks.remember).toHaveBeenCalledTimes(1);
     expect(mocks.remember).toHaveBeenCalledWith('current-key', false);
     await act(async () => renderer.unmount());
     expect(mocks.verify.mock.calls[0][1].aborted).toBe(true);
+  });
+
+  it('accepts a proved key whose public observation is unavailable as a read-only entry', async () => {
+    mocks.verify.mockResolvedValueOnce({
+      revision: 'c'.repeat(64),
+      observation: 'observation_unavailable',
+    });
+    await act(async () => {
+      renderer = create(<UpgradeAuthenticationEntry />);
+    });
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+
+    // A refused observation is not a credential verdict: the entry stays
+    // authenticated, names the source condition, and mounts the read-only view.
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-authenticated' })).toHaveLength(1);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'upgrade-entry-status' }).props['data-observation']
+    ).toBe('observation_unavailable');
+    const page = JSON.stringify(renderer.toJSON());
+    expect(page).toContain('The source cannot be summarized publicly.');
+    expect(page).not.toContain('Migration is not available for this source yet.');
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
   });
 });

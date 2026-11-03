@@ -15,6 +15,7 @@ package upgrade
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // Check names, in report order.
@@ -289,9 +291,16 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	targetDir := strings.TrimSpace(options.TargetDir)
 
 	databasePath := filepath.Join(root, databaseFileName)
+	// An absent database and an empty one are the same operator condition: the
+	// file the credential read applies its policy to holds nothing to read.
 	databaseMissing := false
-	if _, statErr := os.Lstat(databasePath); os.IsNotExist(statErr) {
+	switch info, statErr := os.Lstat(databasePath); {
+	case os.IsNotExist(statErr):
 		databaseMissing = true
+	case statErr == nil && info.Mode().IsRegular() && info.Size() == 0:
+		databaseMissing = true
+	}
+	if databaseMissing {
 		report.SourceKind = SourceKindMissingDatabase
 	}
 
@@ -331,6 +340,9 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 			}
 		}
 		switch {
+		case databaseMissing:
+			// There is no database to copy, so the ownership check names the
+			// condition instead of a snapshot failing on an absent file.
 		case scratchErr != nil:
 			openErr = scratchErr
 		default:
@@ -389,9 +401,12 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 	// source is never inspected, not even for a version string.
 	readable := fenced && openErr == nil
 
-	// 1. Source stopped and exclusively ours, plus read-only integrity.
-	report.Checks = append(report.Checks, ownershipCheck(lockErr, openErr, databaseMissing))
-	if code := ownershipCode(lockErr, openErr, databaseMissing); code != "" {
+	// 1. Source stopped and exclusively ours, plus read-only integrity. One
+	// condition, one code: a missing database, a linked one, a live writer and an
+	// ownership marker that cannot be inspected are four different things for the
+	// operator, and the credential read names the same two file conditions.
+	report.Checks = append(report.Checks, ownershipCheck(databaseMissing, lockErr, openErr))
+	if code := ownershipCode(databaseMissing, lockErr, openErr); code != "" {
 		block(code)
 	}
 
@@ -539,66 +554,55 @@ func (g ParityGaps) any() bool {
 }
 
 // ownershipCheck reports the exclusivity and integrity observation.
-func ownershipCheck(lockErr, openErr error, databaseMissing bool) Check {
+func ownershipCheck(databaseMissing bool, lockErr, openErr error) Check {
 	check := Check{Name: CheckSourceOwnership, Status: StatusPass}
-	switch {
-	case lockErr != nil:
+	if code, detail := ownershipFailureOf(databaseMissing, lockErr, openErr); code != "" {
 		check.Status = StatusBlocked
-		check.Code, check.Detail = lockFailure(lockErr, databaseMissing)
-	case openErr != nil:
-		check.Status = StatusBlocked
-		check.Code, check.Detail = ownershipFailure(openErr)
-	default:
-		check.Detail = "source lock held read-only; private snapshot verified; quick_check ok"
+		check.Code = code
+		check.Detail = detail
+		return check
 	}
+	check.Detail = "source lock held read-only; private snapshot verified; quick_check ok"
 	return check
 }
 
-func ownershipCode(lockErr, openErr error, databaseMissing bool) string {
-	switch {
-	case lockErr != nil:
-		code, _ := lockFailure(lockErr, databaseMissing)
-		return code
-	case openErr != nil:
-		code, _ := ownershipFailure(openErr)
-		return code
-	default:
-		return ""
-	}
+func ownershipCode(databaseMissing bool, lockErr, openErr error) string {
+	code, _ := ownershipFailureOf(databaseMissing, lockErr, openErr)
+	return code
 }
 
-// lockFailure classifies a fence that could not be taken and names it for the
-// operator. Only a real lock conflict is the busy condition: automated callers
-// act on that code by stopping a running Manager, so a missing database, a
-// missing ownership marker and an unreadable marker must not claim one — each of
-// them means the source cannot be used as a 1.x Manager database, which is the
-// unreadable code. A file the shared database file policy refuses as
-// uninspectable (a hard link, or a link reached through the database path) is
-// upgrade_source_lock_unavailable and upgrade_source_symlinked, exactly what
-// MountDatabase reports for the same mount, so the status marker and the
-// preflight cannot name two conditions for one file. Every detail is a fixed
-// sentence: it carries no source path and no OS error string.
-func lockFailure(err error, databaseMissing bool) (string, string) {
+// ownershipFailureOf names the one condition that kept the source from being
+// read, in the operator's terms. The credential read answers a mount's file
+// conditions with the same two codes, so a linked or absent database reads the
+// same way on both paths.
+func ownershipFailureOf(databaseMissing bool, lockErr, openErr error) (string, string) {
 	switch {
-	case errors.Is(err, ErrSourceSymlinked):
-		return CodeSourceSymlinked, "source database is a symbolic link, which the database file policy refuses"
-	case errors.Is(err, processlock.ErrLocked):
-		return CodeSourceBusy, "source lock is held by another process; stop the 1.x Manager first"
-	case databaseMissing:
-		return CodeSourceUnreadable, "source database is missing"
-	case errors.Is(err, processlock.ErrNoExistingLock):
-		return CodeSourceUnreadable, "source lock file is missing; the source ownership marker cannot prove exclusivity"
-	case errors.Is(err, processlock.ErrHardLinked):
-		return CodeSourceLockUnavailable, "source database has multiple hard links"
+	case databaseMissing, errors.Is(openErr, ErrSourceDatabaseMissing), errors.Is(lockErr, os.ErrNotExist):
+		return CodeSourceMissing, "source database is missing"
+	case errors.Is(lockErr, processlock.ErrSymlinkedDatabase), errors.Is(openErr, ErrSourceSymlinked):
+		return CodeSourceSymlinked, symlinkedSourceDetail()
+	case errors.Is(lockErr, processlock.ErrLocked):
+		return CodeSourceBusy, ownershipDetail(lockErr)
+	case errors.Is(lockErr, processlock.ErrNoExistingLock), errors.Is(lockErr, processlock.ErrHardLinked):
+		return CodeSourceLockUnavailable, lockUnavailableDetail(lockErr)
+	case errors.Is(lockErr, os.ErrPermission):
+		// A database this account cannot read is an unreadable source, not an
+		// ownership marker to inspect: the operator has to fix permissions on the
+		// file, and "the marker could not be opened" would send them elsewhere.
+		return CodeSourceUnreadable, unreadableDetail(lockErr)
+	case lockErr != nil:
+		return CodeSourceLockUnavailable, lockUnavailableDetail(lockErr)
+	case openErr != nil:
+		return ownershipFailure(openErr)
 	default:
-		return CodeSourceUnreadable, "source lock could not be taken; exclusivity cannot be proven"
+		return "", ""
 	}
 }
 
 func ownershipFailure(err error) (string, string) {
 	switch {
-	case errors.Is(err, errDatabaseMissing):
-		return CodeSourceUnreadable, "source database is missing"
+	case errors.Is(err, errDatabaseMissing), errors.Is(err, ErrSourceDatabaseMissing):
+		return CodeSourceMissing, "source database is missing"
 	case errors.Is(err, errSourceIntegrity):
 		return CodeSourceUnreadable, "source database failed quick_check"
 	case errors.Is(err, ErrSourceChanged):
@@ -632,18 +636,20 @@ func fingerprintFailure(err error, prefix string) (string, string) {
 var ErrAdminUnauthorized = errors.New("source administrator credential could not be verified")
 
 // ErrCredentialVerifyTimeout is the deadline verdict: the source did not answer
-// within CredentialVerifyTimeout, or the caller's own deadline had already
-// passed. It is never a verdict on the presented key and never a statement that
-// the source is unreadable: a healthy source on a slow volume looks exactly like
-// this.
+// within the read's budget, or the caller's own deadline had already passed. It
+// is never a verdict on the presented key and never a statement that the source
+// is unreadable: a healthy source on a slow volume looks exactly like this.
 var ErrCredentialVerifyTimeout = errors.New("source credential verification timed out")
 
-// CredentialVerifyTimeout bounds the credential read. It is separate from the
-// preflight budget on purpose: authentication is the slow path of every
-// authenticated request, so it must stay far below a source qualification.
+// CredentialVerifyTimeout is the base budget of one uncached credential read.
+// The read itself is bounded by credentialVerifyBudget, which adds time in
+// proportion to the source size and caps the total, because the source is read
+// through a private copy whose cost grows with the file. This base stays far
+// below a source qualification on purpose, and every unchanged source is
+// answered from the credential cache instead of being read again.
 const CredentialVerifyTimeout = 2 * time.Second
 
-// credentialVerifyTimeout is the bound VerifyAdmin applies. It is
+// credentialVerifyTimeout is the base budget VerifyAdmin applies. It is
 // CredentialVerifyTimeout in production; a test shortens it to place the
 // deadline inside the read rather than before it.
 var credentialVerifyTimeout = CredentialVerifyTimeout
@@ -681,7 +687,32 @@ func VerifyAdmin(ctx context.Context, legacyRoot, key string) error {
 // carries the same administrator credential, and it is the only file left when
 // the operator did not mount the source. Naming the file directly keeps the
 // verified file and the resolved file the same one.
+//
+// It reads a 1.x source without ever opening it in place: the database and its
+// sidecars are copied into private scratch space by OpenSnapshot, the source is
+// digested before and after the copy, and only the copy is opened. `mode=ro`
+// would still create a -wal/-shm beside a preserved source, and an immutable
+// handle on a source that was cold when it was inspected would silently miss a
+// WAL that appears while the read is being set up. Callers passing the Manager's
+// own store use VerifyManagerCredential instead: that store is this process's
+// live database, not a source volume to preserve.
+//
+// A proved credential is remembered for the source state it was proved against
+// (see credential_cache.go). A source is preserved, so identical bytes carry the
+// identical credential row; any change — a WAL that appears, a checkpoint, a
+// rewrite, a replaced file — produces a different identity and a fresh read.
 func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
+	return verifyPreservedCredential(ctx, databasePath, key)
+}
+
+// verifyPreservedCredential is the read behind VerifyAdminSource and behind the
+// Manager-store fallback when its store is a copy-in target that was not
+// materialized completely. extraRoots names directories the private copy must
+// not land in besides the database's own directory: the Manager store's data
+// root always, and the configured 1.x source root when the caller knows it, so a
+// host whose temporary directory points into either tree cannot hide a full
+// database copy there.
+func verifyPreservedCredential(ctx context.Context, databasePath, key string, extraRoots ...string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
 	}
@@ -692,14 +723,39 @@ func VerifyAdminSource(ctx context.Context, databasePath, key string) error {
 	if err := ctx.Err(); err != nil {
 		return credentialTimeout(err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, credentialVerifyTimeout)
-	defer cancel()
-	source, openErr := openCredentialSource(databasePath)
-	if openErr != nil {
-		return openErr
+	if _, err := inspectSourceDatabase(databasePath); err != nil {
+		return credentialSourceError(err)
 	}
-	defer func() { _ = source.close() }()
-	return verifyAdminCredential(ctx, source, key)
+	// Every request describes the source it is asking about. An unchanged
+	// description reuses a proved verdict — the source is preserved, so the same
+	// bytes hold the same credential row — and any change falls through to a full
+	// read. The stat is the only cost of a poll that hits the cache.
+	identity, err := identifySourceCredential(databasePath)
+	if err != nil {
+		return err
+	}
+	cacheKey := credentialCacheKey(key, canonicalPath(databasePath), identity)
+	return sourceCredentialCache.verify(ctx, cacheKey, func() error {
+		// The first read of a source state pays for the copy and its digests, so
+		// its budget scales with every byte that read must carry — the database
+		// and a WAL that still holds committed rows, not the database file alone —
+		// and is capped; a later poll is served by the cache instead of repeating
+		// that cost.
+		ctx, cancel := context.WithTimeout(context.Background(), credentialVerifyBudget(identity.readBytes()))
+		defer cancel()
+		source, openErr := openCredentialSource(ctx, databasePath, extraRoots...)
+		if openErr != nil {
+			// The bound is placed before and during the snapshot, so a read that
+			// outlives it fails here instead of in the query. That is a deadline,
+			// not an unreadable source and never a verdict on the key.
+			if ctx.Err() != nil {
+				return credentialTimeout(openErr)
+			}
+			return openErr
+		}
+		defer func() { _ = source.close() }()
+		return verifyAdminCredential(ctx, source, key)
+	})
 }
 
 // MountDatabase answers the one question the whole Upgrade surface asks about
@@ -748,7 +804,7 @@ func MountDatabase(legacyRoot string) (string, string) {
 			// A hard-linked, non-regular or unreadable database is refused by the
 			// shared file policy before anything is opened. The preflight's
 			// ownership probe maps the same refusals to upgrade_source_lock_unavailable
-			// (lockFailureCode), so the status marker and the preflight name one
+			// (ownershipFailureOf), so the status marker and the preflight name one
 			// condition for one mount instead of busy on one surface and
 			// lock_unavailable on the other.
 			return "", CodeSourceLockUnavailable
@@ -788,25 +844,178 @@ func CredentialDatabase(legacyRoot, managerDatabase string) string {
 	return CredentialDatabaseFrom(database, managerDatabase)
 }
 
-// verifyAdminCredential reads the one credential row from an opened source,
-// proves the read came from the file that was inspected, and compares the key.
-// The read and the identity check are one function so nothing can be compared
-// from an uninspected file even if the caller's open raced a swap.
+// verifyAdminCredential reads the one credential row from the private copy,
+// proves the copy was taken from one stable source state (OpenSnapshot does that
+// while it copies), and compares the key. The copy and the comparison are one
+// path so nothing can be compared from a file this step never inspected.
 func verifyAdminCredential(ctx context.Context, source *credentialSource, key string) error {
-	credential, found, err := setting.New(source.db).LoadAdminCredential(ctx)
+	credential, found, err := setting.New(source.database()).LoadAdminCredential(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return credentialTimeout(err)
 		}
 		return err
 	}
-	if err := source.verifyUnchanged(); err != nil {
+	if !found || !security.VerifyAdminKey(credential, key) {
+		return ErrAdminUnauthorized
+	}
+	return nil
+}
+
+// CredentialSnapshotRoots names the trees a credential read's private snapshot
+// must stay out of. The read copies the whole database, and this route
+// authenticates every request, so a copy left behind in either tree is a full
+// database written into a volume the operation promises to preserve or to
+// measure.
+//
+// Target is the v2 data root that owns the database being read; the database
+// file's own directory is always excluded as well, so a caller cannot weaken the
+// target exclusion by naming a different tree. Source is the configured 1.x
+// source root, and SourceKnown separates the two cases an empty Source cannot:
+// no mount is configured at all, and the caller could not resolve the configured
+// root — a hung mount lookup, for example. A snapshot is taken only when the
+// second root is known or known to be absent; otherwise the read fails closed
+// with ErrSnapshotRootUnknown rather than guess, because the unnamed root may
+// hold the operating system's temporary directory.
+type CredentialSnapshotRoots struct {
+	Target      string
+	Source      string
+	SourceKnown bool
+	// SourceTimedOut reports that Source is the root a mount lookup published
+	// before the lookup itself outlived its bound. The root must still be
+	// excluded, but it was never inspected and resolving it for that comparison
+	// would put the filesystem call the bound exists to stop back on the request.
+	// A read that needs a snapshot therefore fails closed with
+	// ErrSnapshotRootTimedOut instead of touching the root again. It is ignored
+	// when SourceKnown is false: an unnamed root already fails closed.
+	SourceTimedOut bool
+}
+
+// VerifyManagerCredential is VerifyAdminSource against the Manager's own store
+// rather than a 1.x source volume.
+//
+// The two files need different reads because the invariants differ. A 1.x source
+// is preserved byte for byte, so its handle is immutable or a private copy
+// (VerifyAdminSource). The Manager store is this process's own live database: it
+// is opened in place read-only, and immutable only when no live WAL holds rows,
+// exactly as the admission and status reads of the same store already do. A
+// snapshot of it would copy a database that changes under it and answer 503 on
+// the copy race, which is the wrong verdict for a poll.
+//
+// The one exception is a target that an unfinished copy-in has not materialized
+// completely. The marker is read before any open: in the `materializing` phase
+// the target still holds the members the resumed move compares with its backup,
+// and a read-only open of a store holding a copied WAL joins that WAL and
+// rewrites `-shm`. This route authenticates every status poll, so it is the
+// first reader to reach the target; it must leave it exactly as it found it and
+// still prove the administrator key. The key is therefore verified against a
+// private snapshot outside both the target's data root and the configured 1.x
+// source root; CredentialSnapshotRoots names both, and a caller that could not
+// resolve the second root does not get a snapshot at all.
+//
+// The Manager store's credential is not cached either. It is the live database:
+// ordinary Manager traffic appends to its WAL and checkpoints it, so a cached
+// verdict would either miss on almost every poll or, on a filesystem with a
+// coarse modification time, answer with a credential row that was already
+// rotated. The read itself is one indexed row in the process's own open store,
+// not the whole-file copy that makes a preserved source expensive. Only the
+// materializing target is read as a preserved source, and only it may be
+// answered from that state's remembered verdict.
+func VerifyManagerCredential(ctx context.Context, databasePath string, roots CredentialSnapshotRoots, key string) error {
+	if strings.TrimSpace(key) == "" {
+		return ErrAdminUnauthorized
+	}
+	databasePath = strings.TrimSpace(databasePath)
+	if databasePath == "" {
+		return ErrSourceDatabaseMissing
+	}
+	if err := ctx.Err(); err != nil {
+		return credentialTimeout(err)
+	}
+	materializing, err := materializingManagerTarget(databasePath)
+	if err != nil {
+		return err
+	}
+	if materializing {
+		if !roots.SourceKnown {
+			// A snapshot under a root this process cannot name could land inside
+			// the tree the copy-in is preserving. Refusing before the read is the
+			// only answer that keeps the promise; the caller's next poll can
+			// retry once the mount answers.
+			return fmt.Errorf("%w: the configured source root was not resolved", ErrSnapshotRootUnknown)
+		}
+		if roots.SourceTimedOut {
+			// The root is named but was never inspected: the lookup that would
+			// have inspected it outlived its bound, and the bound exists to stop
+			// exactly the filesystem call that resolving the root for the
+			// exclusion check would repeat. The deadline is the answer, and the
+			// operator's next move is a retry once the mount responds.
+			return fmt.Errorf("%w: the configured source root did not answer within its bound", ErrSnapshotRootTimedOut)
+		}
+		return verifyPreservedCredential(ctx, databasePath, key, strings.TrimSpace(roots.Target), strings.TrimSpace(roots.Source))
+	}
+	ctx, cancel := context.WithTimeout(ctx, credentialVerifyTimeout)
+	defer cancel()
+	db, err := openManagerStore(databasePath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	credential, found, err := setting.New(db).LoadAdminCredential(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return credentialTimeout(err)
+		}
 		return err
 	}
 	if !found || !security.VerifyAdminKey(credential, key) {
 		return ErrAdminUnauthorized
 	}
 	return nil
+}
+
+// materializingManagerTarget reports whether databasePath is the target of a
+// copy-in that has not finished moving its members. The marker is read before
+// the store is opened, the same order the admission and the status projection
+// use; a marker that names another database file describes another run and is
+// not this store. A marker that cannot be read fails closed: an unreadable
+// provenance record could hide exactly the phase this check exists for.
+func materializingManagerTarget(databasePath string) (bool, error) {
+	marker, inFlight, err := copyinmarker.Read(filepath.Dir(databasePath))
+	if err != nil {
+		return false, err
+	}
+	if !inFlight || marker.Phase != copyinmarker.PhaseMaterializing {
+		return false, nil
+	}
+	return copyinmarker.SameTarget(marker.TargetDatabase, databasePath), nil
+}
+
+// openManagerStore opens the Manager's own database read-only. immutable is used
+// only when no live WAL can hold rows: an immutable handle ignores the WAL, so
+// joining a live one would read a stale row instead of failing.
+func openManagerStore(databasePath string) (*sql.DB, error) {
+	info, err := os.Lstat(databasePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrSourceDatabaseMissing
+		}
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return nil, ErrSourceDatabaseMissing
+	}
+	immutable := true
+	if wal, walErr := os.Lstat(databasePath + "-wal"); walErr == nil && wal.Size() > 0 {
+		immutable = false
+	}
+	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath, immutable))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return db, nil
 }
 
 // credentialTimeout names the deadline verdict while keeping the cause for logs.
@@ -837,6 +1046,51 @@ func resolveLegacyRoot(root string) (string, error) {
 		return "", fmt.Errorf("legacy source root %s is not a directory", absolute)
 	}
 	return absolute, nil
+}
+
+// ownershipDetail names the failure without leaking the source path.
+func ownershipDetail(err error) string {
+	switch {
+	case errors.Is(err, processlock.ErrLocked):
+		return "source lock is held by another process; stop the 1.x Manager first"
+	case errors.Is(err, processlock.ErrNoExistingLock):
+		return "source lock file is missing; the source ownership marker cannot prove exclusivity"
+	case errors.Is(err, processlock.ErrHardLinked):
+		return "source database has multiple hard links"
+	default:
+		return "source lock could not be taken"
+	}
+}
+
+// lockUnavailableDetail reports an ownership marker a read-only observation
+// cannot inspect at all. It is separate from a busy source: nothing is holding
+// the source, but this step cannot prove that from the source itself.
+func lockUnavailableDetail(err error) string {
+	switch {
+	case errors.Is(err, processlock.ErrNoExistingLock):
+		return "source has no ownership marker to inspect; the ownership of the source cannot be established"
+	case errors.Is(err, processlock.ErrHardLinked):
+		return "source database has multiple hard links"
+	default:
+		return "source ownership marker could not be opened read-only"
+	}
+}
+
+// symlinkedSourceDetail names the one condition the shared database file policy
+// refuses before any read: the configured database is a link, so the file that
+// would be inspected is not the file that would be read.
+func symlinkedSourceDetail() string {
+	return "source database is a symbolic link; the upgrade reads the file itself, not a link"
+}
+
+func unreadableDetail(err error) string {
+	if errors.Is(err, ErrSourceDatabaseMissing) {
+		return "source database is missing"
+	}
+	if errors.Is(err, errSourceIntegrity) {
+		return "source database failed quick_check"
+	}
+	return "source database could not be opened read-only"
 }
 
 // rootCause is the shortest stable description of a wrapped error.

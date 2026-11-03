@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,6 +21,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
 
@@ -702,20 +704,19 @@ func TestPreflightReportsMissingLockFile(t *testing.T) {
 		t.Fatalf("remove lock file: %v", err)
 	}
 	report := preflight(t, fixture.root, declared())
-	// A missing ownership marker is not lock contention: no running Manager
-	// holds it, so the busy code would tell an automated caller to stop a
-	// process that does not exist. It is an unusable source instead.
-	requireBlocked(t, report, CodeSourceUnreadable)
+	// Nothing holds the source, but without the marker its ownership cannot be
+	// established from the source itself: that is not a busy source.
+	requireBlocked(t, report, CodeSourceLockUnavailable)
 	// Without the fence the source is never profiled, so it stays unknown
 	// rather than being described from an unfenced read.
 	if report.SourceKind != SourceKindUnknown {
 		t.Fatalf("source kind = %q, want %q", report.SourceKind, SourceKindUnknown)
 	}
 	check, found := checkByName(report, CheckSourceOwnership)
-	if !found || check.Status != StatusBlocked || check.Code != CodeSourceUnreadable {
-		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceUnreadable)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceLockUnavailable {
+		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceLockUnavailable)
 	}
-	if !strings.Contains(check.Detail, "lock file is missing") {
+	if !strings.Contains(check.Detail, "ownership marker") {
 		t.Fatalf("ownership detail %q does not name the missing marker", check.Detail)
 	}
 	if _, err := os.Lstat(fixture.dbPath + ".manager.lock"); !os.IsNotExist(err) {
@@ -754,15 +755,15 @@ func TestPreflightReportsMissingDatabase(t *testing.T) {
 	if report.SourceKind != SourceKindMissingDatabase {
 		t.Fatalf("source kind = %q, want %q", report.SourceKind, SourceKindMissingDatabase)
 	}
-	// An empty directory has neither the ownership marker nor the database;
-	// the missing database, not a lock conflict, is what blocks it.
-	requireBlocked(t, report, CodeSourceUnreadable)
+	// An empty directory has neither the ownership marker nor the database. The
+	// absent database is what the operator has to fix, so it is named as itself.
+	requireBlocked(t, report, CodeSourceMissing)
 	check, found := checkByName(report, CheckSourceOwnership)
-	if !found || check.Status != StatusBlocked || check.Code != CodeSourceUnreadable {
-		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceUnreadable)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceMissing {
+		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceMissing)
 	}
-	if !strings.Contains(check.Detail, "source database is missing") {
-		t.Fatalf("ownership detail %q does not say the database is missing", check.Detail)
+	if !strings.Contains(check.Detail, "missing") {
+		t.Fatalf("ownership detail = %q, want the missing database named", check.Detail)
 	}
 	if _, err := os.Lstat(filepath.Join(root, databaseFileName+".manager.lock")); !os.IsNotExist(err) {
 		t.Fatalf("preflight created a source lock file: %v", err)
@@ -1635,6 +1636,501 @@ func TestDiskTargetNeverMeasuresTheWorkingDirectory(t *testing.T) {
 	}
 }
 
+// TestPreflightFingerprintNamesTheSymlinkedFile pins L-2: a covered file that is
+// a link is refused with upgrade_source_symlinked, and the detail names that
+// file instead of reusing the lock package's "database inspection" wording for a
+// key or a WAL sidecar.
+func TestPreflightFingerprintNamesTheSymlinkedFile(t *testing.T) {
+	for _, name := range []string{dataKeyFileName, databaseFileName + "-wal"} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newSourceFixture(t, nil)
+			path := filepath.Join(fixture.root, name)
+			if _, err := os.Lstat(path); os.IsNotExist(err) {
+				if err := os.WriteFile(path, []byte("sidecar\n"), 0o600); err != nil {
+					t.Fatalf("create %s: %v", name, err)
+				}
+			}
+			real := path + ".real"
+			if err := os.Rename(path, real); err != nil {
+				t.Fatalf("move %s: %v", name, err)
+			}
+			if err := os.Symlink(real, path); err != nil {
+				t.Skipf("create %s symlink: %v", name, err)
+			}
+
+			report := preflight(t, fixture.root, Options{DeclaredVersion: pinnedSourceVersion()})
+			if report.Ready {
+				t.Fatalf("preflight accepted a symlinked %s", name)
+			}
+			check, found := checkByName(report, CheckFingerprint)
+			if !found || check.Status != StatusBlocked || check.Code != CodeSourceSymlinked {
+				t.Fatalf("fingerprint check = %+v, want blocked %q", check, CodeSourceSymlinked)
+			}
+			if !strings.Contains(check.Detail, name) {
+				t.Fatalf("fingerprint detail %q does not name %s", check.Detail, name)
+			}
+			if strings.Contains(check.Detail, "database inspection") {
+				t.Fatalf("fingerprint detail %q reuses the database wording for %s", check.Detail, name)
+			}
+			if !slices.Contains(report.Blocked, CodeSourceSymlinked) {
+				t.Fatalf("preflight blocked %v, want %q", report.Blocked, CodeSourceSymlinked)
+			}
+		})
+	}
+}
+
+// TestPreflightFingerprintCoversTheJournalAndNewRootFiles is the regression for
+// the two gaps the fingerprint had: a rollback journal was invisible even though
+// it changes what the database means on its first open, and a file appearing
+// beside the source did not change the fingerprint at all.
+func TestPreflightFingerprintCoversTheJournalAndNewRootFiles(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	base := preflight(t, fixture.root, Options{})
+
+	journal := filepath.Join(fixture.root, databaseFileName+"-journal")
+	writeFixtureFile(t, journal, "journal-frames\n")
+	if withJournal := preflight(t, fixture.root, Options{}); withJournal.Fingerprint == base.Fingerprint {
+		t.Fatal("fingerprint did not change after a rollback journal appeared")
+	}
+	if err := os.Remove(journal); err != nil {
+		t.Fatalf("remove the rollback journal: %v", err)
+	}
+	if restored := preflight(t, fixture.root, Options{}); restored.Fingerprint != base.Fingerprint {
+		t.Fatal("fingerprint did not return to its original value after the journal was removed")
+	}
+
+	// A file beside the source is a change to the source, even though the copy
+	// never carries it.
+	writeFixtureFile(t, filepath.Join(fixture.root, "written-by-another-tool.bin"), "evidence\n")
+	if withExtra := preflight(t, fixture.root, Options{}); withExtra.Fingerprint == base.Fingerprint {
+		t.Fatal("fingerprint did not change after a new file appeared in the source root")
+	}
+}
+
+// The Upgrade surface's credential read.
+//
+// Every authenticated request — including every status poll — proves the source
+// administrator credential. These tests are the contract of that read: it proves
+// the key the source holds, it reads one row instead of the whole database, it
+// leaves a preserved 1.x source byte for byte untouched, and the file policy it
+// applies is the same one the mount lookup and the preflight apply.
+// newCredentialFixture writes a 1.x source whose administrator credential is key.
+func newCredentialFixture(t *testing.T, key string) sourceFixture {
+	t.Helper()
+	credential, err := security.NewAdminCredential(key, "test")
+	if err != nil {
+		t.Fatalf("build credential: %v", err)
+	}
+	raw, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatalf("encode credential: %v", err)
+	}
+	return newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+		execFixture(t, db, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
+	})
+}
+
+// TestVerifyAdminUsesTheSourceCredential proves the credential the bootstrap
+// Upgrade entry verified is the only one this read accepts, and that a source
+// with no credential proves nothing.
+func TestVerifyAdminUsesTheSourceCredential(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := newCredentialFixture(t, key)
+	if err := VerifyAdmin(context.Background(), fixture.root, key); err != nil {
+		t.Fatalf("verify the source credential: %v", err)
+	}
+	for _, candidate := range []string{"", "another-Manager-key"} {
+		if err := VerifyAdmin(context.Background(), fixture.root, candidate); !errors.Is(err, ErrAdminUnauthorized) {
+			t.Fatalf("candidate %q = %v, want %v", candidate, err, ErrAdminUnauthorized)
+		}
+	}
+	unrecorded := newSourceFixture(t, nil)
+	if err := VerifyAdmin(context.Background(), unrecorded.root, key); !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("source without a credential = %v, want %v", err, ErrAdminUnauthorized)
+	}
+	if err := VerifyAdmin(context.Background(), filepath.Join(fixture.root, "absent"), key); err == nil {
+		t.Fatal("absent root verified a credential")
+	}
+}
+
+// largeCredentialSource builds a source whose database is large enough for a
+// whole-file integrity scan to dominate, then corrupts the root page of its
+// padding table. The integrity check must fail while the pages the credential
+// row lives on stay readable, which is what separates "this read proves the
+// credential" from "this read verifies the whole database".
+func largeCredentialSource(t *testing.T, key string, megabytes int) sourceFixture {
+	t.Helper()
+	credential, err := security.NewAdminCredential(key, "test")
+	if err != nil {
+		t.Fatalf("build credential: %v", err)
+	}
+	raw, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatalf("encode credential: %v", err)
+	}
+	paddingRoot := 0
+	fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+		execFixture(t, db, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
+		execFixture(t, db, `create table padding (id integer primary key, payload blob)`)
+		for range megabytes {
+			execFixture(t, db, `insert into padding (payload) values (zeroblob(1048576))`)
+		}
+		if err := db.QueryRow(`select rootpage from sqlite_master where name = 'padding'`).Scan(&paddingRoot); err != nil {
+			t.Fatalf("read the padding root page: %v", err)
+		}
+	})
+	corruptDatabasePage(t, fixture.dbPath, paddingRoot)
+	return fixture
+}
+
+// corruptDatabasePage overwrites one b-tree page with bytes no page type
+// accepts. The damage is confined to the tree that page belongs to: the
+// integrity check reports it, and every other tree still reads.
+func corruptDatabasePage(t *testing.T, path string, page int) {
+	t.Helper()
+	file, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture database: %v", err)
+	}
+	pageSize := int(binary.BigEndian.Uint16(file[16:18]))
+	if pageSize == 1 {
+		pageSize = 65536
+	}
+	offset := (page - 1) * pageSize
+	if page < 2 || offset+pageSize > len(file) {
+		t.Fatalf("page %d does not fit a %d-byte database", page, len(file))
+	}
+	for index := offset; index < offset+pageSize; index++ {
+		file[index] = 0xff
+	}
+	if err := os.WriteFile(path, file, 0o600); err != nil {
+		t.Fatalf("corrupt fixture database: %v", err)
+	}
+}
+
+const (
+	// credentialFixtureMegabytes keeps the fixture large enough that a whole-file
+	// integrity scan and the private copy are both real work, without making one
+	// authenticated request a multi-second test.
+	credentialFixtureMegabytes = 8
+)
+
+// TestVerifyAdminReadsOnlyTheCredentialRow is the credential reader's contract:
+// a source whose whole-file integrity check fails, and whose size dwarfs the one
+// row the read needs, still proves the right key. Preflight, which does qualify
+// the source, still runs the check and blocks on it.
+//
+// The source itself is read through a private copy (openCredentialSource), so
+// this test no longer claims a per-read time budget: copying and digesting the
+// source is what never reading it in place costs. What it still separates is the
+// query — no quick_check and no schema scan — because the corrupt page outside
+// the credential tree must not become a credential verdict.
+func TestVerifyAdminReadsOnlyTheCredentialRow(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := largeCredentialSource(t, key, credentialFixtureMegabytes)
+	// The corruption is real: the qualification path cannot read this file.
+	if db, _, err := openSource(context.Background(), fixture.dbPath, true); err == nil {
+		_ = db.Close()
+		t.Fatal("the fixture passed the whole-database integrity check")
+	}
+
+	started := time.Now()
+	if err := VerifyAdmin(context.Background(), fixture.root, key); err != nil {
+		t.Fatalf("verify the source credential: %v", err)
+	}
+	t.Logf("credential read on a %d MB source (private copy included): %s", credentialFixtureMegabytes, time.Since(started))
+	if err := VerifyAdmin(context.Background(), fixture.root, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("foreign key = %v, want %v", err, ErrAdminUnauthorized)
+	}
+
+	report := preflight(t, fixture.root, declared())
+	// One corruption is one refusal: the qualification path runs the whole-file
+	// check and blocks on it, and nothing else about this source is refused.
+	if report.Ready || len(report.Blocked) != 1 || report.Blocked[0] != CodeSourceUnreadable {
+		t.Fatalf("blocked = %v, want [%s]", report.Blocked, CodeSourceUnreadable)
+	}
+}
+
+// sourceEntry is one directory entry a preserved source must keep exactly: its
+// kind, size, mode and modification time. Contents are compared through the
+// digest, because a rewrite with the same bytes is still a write.
+type sourceEntry struct {
+	size  int64
+	mode  os.FileMode
+	mtime time.Time
+	sha   string
+}
+
+// sourceEntries records every entry under a source root, including the
+// directories a read must not create.
+func sourceEntries(t *testing.T, root string) map[string]sourceEntry {
+	t.Helper()
+	entries := map[string]sourceEntry{}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		record := sourceEntry{size: info.Size(), mode: info.Mode(), mtime: info.ModTime()}
+		if entry.Type().IsRegular() {
+			record.sha = mustDigest(t, path)
+		}
+		entries[path] = record
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read source entries: %v", err)
+	}
+	return entries
+}
+
+// requireUnchangedSource fails with the exact entry that changed, so a created
+// sidecar is named instead of reported as a map difference.
+func requireUnchangedSource(t *testing.T, before, after map[string]sourceEntry) {
+	t.Helper()
+	for path := range after {
+		if _, found := before[path]; !found {
+			t.Fatalf("the read created %s beside the source", filepath.Base(path))
+		}
+	}
+	for path, expected := range before {
+		actual, found := after[path]
+		if !found {
+			t.Fatalf("the read removed %s", filepath.Base(path))
+		}
+		if actual != expected {
+			t.Fatalf("the read rewrote %s: %+v, want %+v", filepath.Base(path), actual, expected)
+		}
+	}
+}
+
+// TestCredentialReadLeavesAWALSourceUnchanged is the regression for a read that
+// opened the 1.x source in place: mode=ro plus query_only forbids SQL writes but
+// still lets SQLite create the WAL index, so a cleanly stopped WAL source went
+// from five entries to seven on the first authenticated request. The fixture is
+// exactly that cold source — WAL journal mode, writer closed, no -wal/-shm beside
+// it — which is also the case the later cold-source shortcut (immutable=1) read in
+// place; both now go through the private copy.
+func TestCredentialReadLeavesAWALSourceUnchanged(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := newCredentialFixture(t, key)
+	before := sourceEntries(t, fixture.root)
+
+	if err := VerifyAdmin(context.Background(), fixture.root, key); err != nil {
+		t.Fatalf("verify the source credential: %v", err)
+	}
+	requireUnchangedSource(t, before, sourceEntries(t, fixture.root))
+}
+
+// TestCredentialReadJoinsALiveWALAndLeavesItUnchanged proves the second half of
+// the same invariant: a source whose committed rows are only in its WAL is still
+// readable, because the read joins a private copy instead of the source, and the
+// copy leaves every source entry exactly as it was.
+func TestCredentialReadJoinsALiveWALAndLeavesItUnchanged(t *testing.T) {
+	const key = "legacy-manager-credential"
+	credential, err := security.NewAdminCredential(key, "test")
+	if err != nil {
+		t.Fatalf("build credential: %v", err)
+	}
+	raw, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatalf("encode credential: %v", err)
+	}
+	fixture := newSourceFixture(t, nil)
+	// Hold a live writer open with the credential still in the WAL, so the
+	// committed row exists only in usage.sqlite-wal.
+	writer, err := sql.Open("sqlite", fixture.dbPath)
+	if err != nil {
+		t.Fatalf("open live writer: %v", err)
+	}
+	writer.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = writer.Close() })
+	execFixture(t, writer, `pragma wal_autocheckpoint = 0`)
+	execFixture(t, writer, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
+	walPath := fixture.dbPath + "-wal"
+	if info, err := os.Lstat(walPath); err != nil || info.Size() == 0 {
+		t.Fatalf("fixture WAL = %v, %v; want committed rows in the WAL", info, err)
+	}
+	before := sourceEntries(t, fixture.root)
+
+	if err := VerifyAdmin(context.Background(), fixture.root, key); err != nil {
+		t.Fatalf("verify a credential held in the WAL: %v", err)
+	}
+	if err := VerifyAdmin(context.Background(), fixture.root, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("foreign key on a WAL source = %v, want %v", err, ErrAdminUnauthorized)
+	}
+	requireUnchangedSource(t, before, sourceEntries(t, fixture.root))
+}
+
+// TestPreflightLeavesAWALSourceUnchanged runs the qualifying read over the same
+// preserved source. The preflight takes the ownership fence and reads a private
+// copy, so the fence is the only thing it may touch, and the fence belongs to the
+// holder.
+func TestPreflightLeavesAWALSourceUnchanged(t *testing.T) {
+	fixture := newCredentialFixture(t, "legacy-manager-credential")
+	before := sourceEntries(t, fixture.root)
+	report := preflight(t, fixture.root, declared())
+	if !report.Ready {
+		t.Fatalf("ready = false, blocked = %v", report.Blocked)
+	}
+	requireUnchangedSource(t, before, sourceEntries(t, fixture.root))
+}
+
+// TestVerifyManagerCredentialReadsTheOwnStore covers the other file the surface
+// may verify: the Manager's own store, which is this process's live database
+// rather than a preserved source. The credential may still be in its WAL, so the
+// read has to join one.
+func TestVerifyManagerCredentialReadsTheOwnStore(t *testing.T) {
+	const key = "manager-store-credential"
+	credential, err := security.NewAdminCredential(key, "test")
+	if err != nil {
+		t.Fatalf("build credential: %v", err)
+	}
+	raw, err := json.Marshal(credential)
+	if err != nil {
+		t.Fatalf("encode credential: %v", err)
+	}
+	store := filepath.Join(t.TempDir(), databaseFileName)
+	writer, err := sql.Open("sqlite", store)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	writer.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = writer.Close() })
+	for _, statement := range []string{
+		`create table settings (key text primary key, value text not null, updated_at_ms integer not null)`,
+		`pragma journal_mode = WAL`,
+		`pragma wal_autocheckpoint = 0`,
+	} {
+		if _, err := writer.Exec(statement); err != nil {
+			t.Fatalf("prepare store: %v", err)
+		}
+	}
+	execFixture(t, writer, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
+	if info, err := os.Lstat(store + "-wal"); err != nil || info.Size() == 0 {
+		t.Fatalf("store WAL = %v, %v; want the credential in the WAL", info, err)
+	}
+
+	liveStore := CredentialSnapshotRoots{SourceKnown: true}
+	if err := VerifyManagerCredential(context.Background(), store, liveStore, key); err != nil {
+		t.Fatalf("verify the store credential: %v", err)
+	}
+	if err := VerifyManagerCredential(context.Background(), store, liveStore, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("foreign key = %v, want %v", err, ErrAdminUnauthorized)
+	}
+	if err := VerifyManagerCredential(context.Background(), filepath.Join(t.TempDir(), "absent.sqlite"), liveStore, key); !errors.Is(err, ErrSourceDatabaseMissing) {
+		t.Fatalf("absent store = %v, want %v", err, ErrSourceDatabaseMissing)
+	}
+	// A live store is read in place and needs no snapshot, so an unresolved
+	// source root cannot make it refuse: only the materializing branch can.
+	if err := VerifyManagerCredential(context.Background(), store, CredentialSnapshotRoots{}, key); err != nil {
+		t.Fatalf("live store with an unresolved source root: %v", err)
+	}
+}
+
+// TestVerifyManagerCredentialSnapshotsAMaterializingTarget is the service half
+// of P1. A copy-in target that is still materializing holds the members the
+// resumed move compares with its backup, including a copied WAL index. Opening
+// such a store in place joins its WAL and rewrites `-shm`, so the Manager
+// fallback proves the key against a private snapshot instead. Both the accepted
+// key and the rejected key leave every entry of the target's data root exactly
+// as they found it.
+func TestVerifyManagerCredentialSnapshotsAMaterializingTarget(t *testing.T) {
+	const key = "manager-target-credential"
+	fixture := newCredentialFixture(t, key)
+	writer, err := sql.Open("sqlite", fixture.dbPath)
+	if err != nil {
+		t.Fatalf("open the copied source: %v", err)
+	}
+	writer.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = writer.Close() })
+	// Committed rows stay in the WAL, and the writer stays open, so the copied
+	// target holds a live WAL and a real WAL index rather than a checkpointed
+	// database with no sidecars.
+	execFixture(t, writer, `pragma wal_autocheckpoint = 0`)
+	execFixture(t, writer, `create table materializing_payload (value text)`)
+	execFixture(t, writer, `insert into materializing_payload values ('committed-in-wal')`)
+	if info, err := os.Lstat(fixture.dbPath + "-wal"); err != nil || info.Size() == 0 {
+		t.Fatalf("the copied source has no WAL: info=%v err=%v", info, err)
+	}
+
+	targetRoot := t.TempDir()
+	target := filepath.Join(targetRoot, databaseFileName)
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		data, err := os.ReadFile(fixture.dbPath + suffix)
+		if err != nil {
+			t.Fatalf("read the restored member %q: %v", suffix, err)
+		}
+		if err := os.WriteFile(target+suffix, data, 0o600); err != nil {
+			t.Fatalf("write the restored member %q: %v", suffix, err)
+		}
+	}
+	if err := copyinmarker.Write(targetRoot, copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
+		TargetDatabase:          target,
+		SourceKind:              "upgraded-legacy",
+		SourceFingerprintBefore: "fingerprint-before",
+		SourceFingerprintAfter:  "fingerprint-after",
+		BackupManifestSHA256:    "manifest",
+	}); err != nil {
+		t.Fatalf("publish the materializing marker: %v", err)
+	}
+
+	before := sourceEntries(t, targetRoot)
+	// The source root is known to be absent for this fixture: the snapshot only
+	// has to stay out of the target's own data root.
+	roots := CredentialSnapshotRoots{Target: targetRoot, SourceKnown: true}
+	if err := VerifyManagerCredential(context.Background(), target, roots, key); err != nil {
+		t.Fatalf("verify the materializing target's credential: %v", err)
+	}
+	if err := VerifyManagerCredential(context.Background(), target, roots, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("foreign key on a materializing target = %v, want %v", err, ErrAdminUnauthorized)
+	}
+	requireUnchangedSource(t, before, sourceEntries(t, targetRoot))
+}
+
+// TestSourceDatabaseFilePolicyIsSharedByBothPaths proves the preflight and the
+// credential read apply one file policy: a source database reached through a
+// symbolic link is refused by both, with the same code, because the file that is
+// inspected has to be the file that is read.
+func TestSourceDatabaseFilePolicyIsSharedByBothPaths(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := newCredentialFixture(t, key)
+	real := fixture.dbPath + ".real"
+	if err := os.Rename(fixture.dbPath, real); err != nil {
+		t.Fatalf("move fixture database: %v", err)
+	}
+	if err := os.Symlink(real, fixture.dbPath); err != nil {
+		t.Skipf("create database symlink: %v", err)
+	}
+
+	err := VerifyAdmin(context.Background(), fixture.root, key)
+	if !errors.Is(err, ErrSourceSymlinked) {
+		t.Fatalf("credential read through a symlink = %v, want %v", err, ErrSourceSymlinked)
+	}
+	if errors.Is(err, ErrAdminUnauthorized) || errors.Is(err, ErrSourceDatabaseMissing) {
+		t.Fatalf("a symlinked source was misreported as %v", err)
+	}
+
+	report := preflight(t, fixture.root, declared())
+	if report.Ready || len(report.Blocked) == 0 || report.Blocked[0] != CodeSourceSymlinked {
+		t.Fatalf("blocked = %v, want [%s ...]", report.Blocked, CodeSourceSymlinked)
+	}
+	for _, code := range report.Blocked {
+		if code == CodeSourceLockUnavailable || code == CodeSourceMissing || code == CodeSourceBusy || code == CodeSourceUnreadable {
+			t.Fatalf("a symlinked source was reported as %s: %v", code, report.Blocked)
+		}
+	}
+	check, found := checkByName(report, CheckSourceOwnership)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceSymlinked {
+		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceSymlinked)
+	}
+}
+
 // TestMountDatabaseAppliesTheCredentialFilePolicy proves the surface's mount
 // lookup asks exactly the question the credential read will ask: the path must
 // name the database itself, with content, never a link. A mount the policy
@@ -1707,19 +2203,17 @@ func TestMountDatabaseAppliesTheCredentialFilePolicy(t *testing.T) {
 				}
 			}
 
-			// The mount lookup is the surface's own file policy and names the
-			// condition exactly. The preflight reports the source's own verdict,
-			// which is coarser (a refused marker is a busy source, an unreadable
-			// database is unreadable), so it is only required to agree on the
-			// decision: a mount this lookup refuses is never a ready source.
-			report := preflight(t, fixture.root, Options{DeclaredVersion: pinnedSourceVersion()})
-			if testCase.refusal != "" {
-				if report.Ready {
-					t.Fatalf("preflight accepted a mount the lookup refused as %q", testCase.refusal)
+			// One condition, one code: the report the operator reads names the same
+			// condition the mount lookup refused.
+			report := preflight(t, fixture.root, declared())
+			named := false
+			for _, code := range report.Blocked {
+				if code == testCase.refusal {
+					named = true
 				}
-				if len(report.Blocked) == 0 {
-					t.Fatal("preflight blocked nothing for a refused mount")
-				}
+			}
+			if testCase.refusal != "" && !named {
+				t.Fatalf("preflight blocked = %v, want it to name %s", report.Blocked, testCase.refusal)
 			}
 			if testCase.refusal == "" && !report.Ready {
 				t.Fatalf("genuine mount is not ready: %v", report.Blocked)
@@ -1728,142 +2222,13 @@ func TestMountDatabaseAppliesTheCredentialFilePolicy(t *testing.T) {
 	}
 }
 
-// TestSourceDatabaseFilePolicyIsSharedByBothPaths proves the preflight and the
-// credential read apply one file policy: a source database reached through a
-// symbolic link is refused by both, with the same code, because the file that is
-// inspected has to be the file that is read.
-func TestSourceDatabaseFilePolicyIsSharedByBothPaths(t *testing.T) {
-	const key = "legacy-manager-credential"
-	fixture := newCredentialFixture(t, key)
-	real := fixture.dbPath + ".real"
-	if err := os.Rename(fixture.dbPath, real); err != nil {
-		t.Fatalf("move fixture database: %v", err)
-	}
-	if err := os.Symlink(real, fixture.dbPath); err != nil {
-		t.Skipf("create database symlink: %v", err)
-	}
-
-	err := VerifyAdmin(context.Background(), fixture.root, key)
-	if !errors.Is(err, ErrSourceSymlinked) {
-		t.Fatalf("credential read through a symlink = %v, want %v", err, ErrSourceSymlinked)
-	}
-	if errors.Is(err, ErrAdminUnauthorized) || errors.Is(err, ErrSourceDatabaseMissing) {
-		t.Fatalf("a symlinked source was misreported as %v", err)
-	}
-
-	report := preflight(t, fixture.root, Options{DeclaredVersion: pinnedSourceVersion()})
-	// The credential read names the link with the shared file policy's code. The
-	// preflight opens the source through its own ownership probe and snapshot,
-	// and both refusals are the same policy decision, so it reports that code
-	// too: a linked database is never ready, its ownership check is blocked with
-	// upgrade_source_symlinked, and neither refusal is misreported as a busy or
-	// merely unreadable source.
-	if report.Ready {
-		t.Fatalf("preflight accepted a symlinked source: %v", report.Blocked)
-	}
-	check, found := checkByName(report, CheckSourceOwnership)
-	if !found || check.Status != StatusBlocked || check.Code != CodeSourceSymlinked {
-		t.Fatalf("ownership check = %+v, want a blocked %q check", check, CodeSourceSymlinked)
-	}
-	if !slices.Contains(report.Blocked, CodeSourceSymlinked) {
-		t.Fatalf("preflight blocked %v, want %q", report.Blocked, CodeSourceSymlinked)
-	}
-	for _, misreported := range []string{CodeSourceBusy, CodeSourceUnreadable} {
-		if slices.Contains(report.Blocked, misreported) {
-			t.Fatalf("preflight misreported a symlinked source as %q: %v", misreported, report.Blocked)
-		}
-	}
-}
-
-// TestPreflightFingerprintNamesTheSymlinkedFile pins L-2: a covered file that is
-// a link is refused with upgrade_source_symlinked, and the detail names that
-// file instead of reusing the lock package's "database inspection" wording for a
-// key or a WAL sidecar.
-func TestPreflightFingerprintNamesTheSymlinkedFile(t *testing.T) {
-	for _, name := range []string{dataKeyFileName, databaseFileName + "-wal"} {
-		t.Run(name, func(t *testing.T) {
-			fixture := newSourceFixture(t, nil)
-			path := filepath.Join(fixture.root, name)
-			if _, err := os.Lstat(path); os.IsNotExist(err) {
-				if err := os.WriteFile(path, []byte("sidecar\n"), 0o600); err != nil {
-					t.Fatalf("create %s: %v", name, err)
-				}
-			}
-			real := path + ".real"
-			if err := os.Rename(path, real); err != nil {
-				t.Fatalf("move %s: %v", name, err)
-			}
-			if err := os.Symlink(real, path); err != nil {
-				t.Skipf("create %s symlink: %v", name, err)
-			}
-
-			report := preflight(t, fixture.root, Options{DeclaredVersion: pinnedSourceVersion()})
-			if report.Ready {
-				t.Fatalf("preflight accepted a symlinked %s", name)
-			}
-			check, found := checkByName(report, CheckFingerprint)
-			if !found || check.Status != StatusBlocked || check.Code != CodeSourceSymlinked {
-				t.Fatalf("fingerprint check = %+v, want blocked %q", check, CodeSourceSymlinked)
-			}
-			if !strings.Contains(check.Detail, name) {
-				t.Fatalf("fingerprint detail %q does not name %s", check.Detail, name)
-			}
-			if strings.Contains(check.Detail, "database inspection") {
-				t.Fatalf("fingerprint detail %q reuses the database wording for %s", check.Detail, name)
-			}
-			if !slices.Contains(report.Blocked, CodeSourceSymlinked) {
-				t.Fatalf("preflight blocked %v, want %q", report.Blocked, CodeSourceSymlinked)
-			}
-		})
-	}
-}
-
-const (
-	// credentialFixtureMegabytes keeps the fixture large enough that a whole-file
-	// scan, not the single credential page, is what a source of this shape costs.
-	credentialFixtureMegabytes = 256
-	// credentialBudget is far below a whole-file scan of that fixture and far
-	// below the credential read's own timeout.
-	credentialBudget = time.Second
-)
-
-// TestVerifyAdminReadsOnlyTheCredentialRow is the R1 contract at the service
-// layer: a source whose whole-file integrity check fails, and whose size dwarfs
-// any credential budget, still proves the right key quickly. Preflight, which
-// does qualify the source, still runs the check and blocks on it.
-func TestVerifyAdminReadsOnlyTheCredentialRow(t *testing.T) {
-	const key = "legacy-manager-credential"
-	fixture := largeCredentialSource(t, key, credentialFixtureMegabytes)
-	// The corruption is real: the qualification path cannot read this file.
-	if db, _, err := openSource(context.Background(), fixture.dbPath, false); err == nil {
-		_ = db.Close()
-		t.Fatal("the fixture passed the whole-database integrity check")
-	}
-
-	started := time.Now()
-	if err := VerifyAdmin(context.Background(), fixture.root, key); err != nil {
-		t.Fatalf("verify the source credential: %v", err)
-	}
-	if elapsed := time.Since(started); elapsed > credentialBudget {
-		t.Fatalf("credential read took %s, budget %s", elapsed, credentialBudget)
-	} else {
-		t.Logf("credential read on a %d MB source: %s", credentialFixtureMegabytes, elapsed)
-	}
-	if err := VerifyAdmin(context.Background(), fixture.root, "another-Manager-key"); !errors.Is(err, ErrAdminUnauthorized) {
-		t.Fatalf("foreign key = %v, want %v", err, ErrAdminUnauthorized)
-	}
-
-	report := preflight(t, fixture.root, Options{})
-	if report.Ready || len(report.Blocked) != 1 || report.Blocked[0] != CodeSourceUnreadable {
-		t.Fatalf("blocked = %v, want [%s]", report.Blocked, CodeSourceUnreadable)
-	}
-}
-
-// TestVerifyAdminRefusesASwapBetweenInspectionAndRead proves the credential that
-// is compared belongs to the file that was inspected. SQLite opens lazily, so
-// the swap lands between the inspection and the first read; the read itself
-// still succeeds, and the identity comparison is what refuses the credential.
-func TestVerifyAdminRefusesASwapBetweenInspectionAndRead(t *testing.T) {
+// TestVerifyAdminComparesTheCredentialItCopiedNotThePath proves the compared
+// credential belongs to the source state the read copied. The private copy is
+// taken before the query, so replacing the path afterwards cannot substitute a
+// credential at all: the copied key still verifies, and the replacement's key is
+// a foreign key — never a source-change verdict, because the copy was never
+// touched by the swap.
+func TestVerifyAdminComparesTheCredentialItCopiedNotThePath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows refuses to replace an open file, so the swap cannot be staged")
 	}
@@ -1872,7 +2237,7 @@ func TestVerifyAdminRefusesASwapBetweenInspectionAndRead(t *testing.T) {
 	fixture := newCredentialFixture(t, inspectedKey)
 	replacement := newCredentialFixture(t, replacementKey)
 
-	source, err := openCredentialSource(fixture.dbPath)
+	source, err := openCredentialSource(context.Background(), fixture.dbPath)
 	if err != nil {
 		t.Fatalf("open credential source: %v", err)
 	}
@@ -1880,18 +2245,60 @@ func TestVerifyAdminRefusesASwapBetweenInspectionAndRead(t *testing.T) {
 	if err := os.Rename(replacement.dbPath, fixture.dbPath); err != nil {
 		t.Fatalf("swap fixture database: %v", err)
 	}
-	// The replacement carries a key of its own: without the identity comparison
-	// this read would prove a credential from a file nothing inspected.
-	err = verifyAdminCredential(context.Background(), source, replacementKey)
-	if !errors.Is(err, ErrSourceDatabaseChanged) {
-		t.Fatalf("swapped source = %v, want %v", err, ErrSourceDatabaseChanged)
+	// The copy is the inspected file. Reading it again proves the key it holds,
+	// and the replacement's key cannot be proved from a file this read copied.
+	if err := verifyAdminCredential(context.Background(), source, inspectedKey); err != nil {
+		t.Fatalf("the copied source's own key = %v, want it verified", err)
 	}
-	if errors.Is(err, ErrAdminUnauthorized) {
-		t.Fatalf("the swap was reported as a credential verdict: %v", err)
+	err = verifyAdminCredential(context.Background(), source, replacementKey)
+	if !errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("the replacement's key against the copied source = %v, want %v", err, ErrAdminUnauthorized)
+	}
+	if errors.Is(err, ErrSourceDatabaseChanged) {
+		t.Fatalf("a swap after the copy was reported as a source change: %v", err)
 	}
 }
 
-// TestVerifyAdminReportsADeadlineAsATimeout is the L-a contract: a healthy
+// TestCredentialReadRefusesAWALThatAppearsWhileTheCopyIsTaken is the regression
+// for reading a cold source in place. A source with no -wal beside it was opened
+// immutable, which reads exactly the database file and never looks at a WAL that
+// appears afterwards: a writer that started during the read went unnoticed and
+// the key was proved against the state before it. The private copy is digested
+// before and after it is taken, so the same race is a typed refusal.
+func TestCredentialReadRefusesAWALThatAppearsWhileTheCopyIsTaken(t *testing.T) {
+	const key = "legacy-manager-credential"
+	fixture := newCredentialFixture(t, key)
+	if _, err := os.Lstat(fixture.dbPath + "-wal"); !os.IsNotExist(err) {
+		t.Fatalf("fixture WAL = %v; want a cleanly stopped source", err)
+	}
+	previous := afterSnapshotCopy
+	t.Cleanup(func() { afterSnapshotCopy = previous })
+	// The writer that appears at the copy boundary holds its own credential in a
+	// WAL that is still there when the source is digested again.
+	afterSnapshotCopy = func() {
+		writer, err := sql.Open("sqlite", fixture.dbPath)
+		if err != nil {
+			t.Fatalf("open the writer that appears mid-copy: %v", err)
+		}
+		writer.SetMaxOpenConns(1)
+		t.Cleanup(func() { _ = writer.Close() })
+		execFixture(t, writer, `pragma wal_autocheckpoint = 0`)
+		execFixture(t, writer, `insert into settings (key, value, updated_at_ms) values ('written-by-the-new-writer', '1', 1)`)
+		if info, err := os.Lstat(fixture.dbPath + "-wal"); err != nil || info.Size() == 0 {
+			t.Fatalf("mid-copy WAL = %v, %v; want committed rows in the WAL", info, err)
+		}
+	}
+
+	err := VerifyAdmin(context.Background(), fixture.root, key)
+	if !errors.Is(err, ErrSourceDatabaseChanged) {
+		t.Fatalf("a source that began writing during the copy = %v, want %v", err, ErrSourceDatabaseChanged)
+	}
+	if errors.Is(err, ErrAdminUnauthorized) {
+		t.Fatalf("a source that began writing was reported as a credential verdict: %v", err)
+	}
+}
+
+// TestVerifyAdminReportsADeadlineAsATimeout is the deadline contract: a healthy
 // source that outlives the credential budget is a deadline, never an unreadable
 // source and never a wrong key. The bound is placed inside the read, so the
 // failure happens after the source opened.
@@ -1908,137 +2315,5 @@ func TestVerifyAdminReportsADeadlineAsATimeout(t *testing.T) {
 	}
 	if errors.Is(err, ErrSourceDatabaseMissing) || errors.Is(err, ErrAdminUnauthorized) || errors.Is(err, ErrSourceDatabaseChanged) {
 		t.Fatalf("a deadline was misreported as %v", err)
-	}
-}
-
-// TestVerifyAdminUsesTheSourceCredential proves the credential the bootstrap
-// Upgrade entry verified is the only one this read accepts, and that a source
-// with no credential proves nothing.
-func TestVerifyAdminUsesTheSourceCredential(t *testing.T) {
-	const key = "legacy-manager-credential"
-	fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
-		credential, err := security.NewAdminCredential(key, "test")
-		if err != nil {
-			t.Fatalf("build credential: %v", err)
-		}
-		raw, err := json.Marshal(credential)
-		if err != nil {
-			t.Fatalf("encode credential: %v", err)
-		}
-		execFixture(t, db, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
-	})
-	if err := VerifyAdmin(context.Background(), fixture.root, key); err != nil {
-		t.Fatalf("verify the source credential: %v", err)
-	}
-	for _, candidate := range []string{"", "another-Manager-key"} {
-		if err := VerifyAdmin(context.Background(), fixture.root, candidate); !errors.Is(err, ErrAdminUnauthorized) {
-			t.Fatalf("candidate %q = %v, want %v", candidate, err, ErrAdminUnauthorized)
-		}
-	}
-	unrecorded := newSourceFixture(t, nil)
-	if err := VerifyAdmin(context.Background(), unrecorded.root, key); !errors.Is(err, ErrAdminUnauthorized) {
-		t.Fatalf("source without a credential = %v, want %v", err, ErrAdminUnauthorized)
-	}
-	if err := VerifyAdmin(context.Background(), filepath.Join(fixture.root, "absent"), key); err == nil {
-		t.Fatal("absent root verified a credential")
-	}
-}
-
-// TestPreflightFingerprintCoversTheJournalAndNewRootFiles is the regression for
-// the two gaps the fingerprint had: a rollback journal was invisible even though
-// it changes what the database means on its first open, and a file appearing
-// beside the source did not change the fingerprint at all.
-func TestPreflightFingerprintCoversTheJournalAndNewRootFiles(t *testing.T) {
-	fixture := newSourceFixture(t, nil)
-	base := preflight(t, fixture.root, Options{})
-
-	journal := filepath.Join(fixture.root, databaseFileName+"-journal")
-	writeFixtureFile(t, journal, "journal-frames\n")
-	if withJournal := preflight(t, fixture.root, Options{}); withJournal.Fingerprint == base.Fingerprint {
-		t.Fatal("fingerprint did not change after a rollback journal appeared")
-	}
-	if err := os.Remove(journal); err != nil {
-		t.Fatalf("remove the rollback journal: %v", err)
-	}
-	if restored := preflight(t, fixture.root, Options{}); restored.Fingerprint != base.Fingerprint {
-		t.Fatal("fingerprint did not return to its original value after the journal was removed")
-	}
-
-	// A file beside the source is a change to the source, even though the copy
-	// never carries it.
-	writeFixtureFile(t, filepath.Join(fixture.root, "written-by-another-tool.bin"), "evidence\n")
-	if withExtra := preflight(t, fixture.root, Options{}); withExtra.Fingerprint == base.Fingerprint {
-		t.Fatal("fingerprint did not change after a new file appeared in the source root")
-	}
-}
-
-// newCredentialFixture writes a 1.x source whose administrator credential is key.
-func newCredentialFixture(t *testing.T, key string) sourceFixture {
-	t.Helper()
-	credential, err := security.NewAdminCredential(key, "test")
-	if err != nil {
-		t.Fatalf("build credential: %v", err)
-	}
-	raw, err := json.Marshal(credential)
-	if err != nil {
-		t.Fatalf("encode credential: %v", err)
-	}
-	return newSourceFixture(t, func(t *testing.T, db *sql.DB) {
-		execFixture(t, db, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
-	})
-}
-
-// largeCredentialSource builds a source whose database is large enough for a
-// whole-file integrity scan to dominate, then corrupts the root page of its
-// padding table. The integrity check must fail while the pages the credential
-// row lives on stay readable, which is what separates "this read proves the
-// credential" from "this read verifies the whole database".
-func largeCredentialSource(t *testing.T, key string, megabytes int) sourceFixture {
-	t.Helper()
-	credential, err := security.NewAdminCredential(key, "test")
-	if err != nil {
-		t.Fatalf("build credential: %v", err)
-	}
-	raw, err := json.Marshal(credential)
-	if err != nil {
-		t.Fatalf("encode credential: %v", err)
-	}
-	paddingRoot := 0
-	fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
-		execFixture(t, db, `insert into settings (key, value, updated_at_ms) values ('admin_credential_v1', ?, 1)`, string(raw))
-		execFixture(t, db, `create table padding (id integer primary key, payload blob)`)
-		for range megabytes {
-			execFixture(t, db, `insert into padding (payload) values (zeroblob(1048576))`)
-		}
-		if err := db.QueryRow(`select rootpage from sqlite_master where name = 'padding'`).Scan(&paddingRoot); err != nil {
-			t.Fatalf("read the padding root page: %v", err)
-		}
-	})
-	corruptDatabasePage(t, fixture.dbPath, paddingRoot)
-	return fixture
-}
-
-// corruptDatabasePage overwrites one b-tree page with bytes no page type
-// accepts. The damage is confined to the tree that page belongs to: the
-// integrity check reports it, and every other tree still reads.
-func corruptDatabasePage(t *testing.T, path string, page int) {
-	t.Helper()
-	file, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read fixture database: %v", err)
-	}
-	pageSize := int(binary.BigEndian.Uint16(file[16:18]))
-	if pageSize == 1 {
-		pageSize = 65536
-	}
-	offset := (page - 1) * pageSize
-	if page < 2 || offset+pageSize > len(file) {
-		t.Fatalf("page %d does not fit a %d-byte database", page, len(file))
-	}
-	for index := offset; index < offset+pageSize; index++ {
-		file[index] = 0xff
-	}
-	if err := os.WriteFile(path, file, 0o600); err != nil {
-		t.Fatalf("corrupt fixture database: %v", err)
 	}
 }

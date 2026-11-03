@@ -28,6 +28,30 @@ var (
 	// inspect a WAL database. It is also the code for a scratch directory that
 	// would land inside a tree the operation must not write to.
 	ErrSnapshotFailed = errors.New("upgrade database snapshot could not be created")
+
+	// ErrSnapshotRootUnknown reports a read that would have to stage a private
+	// copy but cannot name the configured source root it must stay out of — a
+	// mount lookup that outlived its bound before it resolved the root, for
+	// example. It fails closed: the unnamed root may hold the temporary
+	// directory, and a snapshot abandoned by a killed process would stay in a
+	// tree this operation must not write to.
+	ErrSnapshotRootUnknown = errors.New("upgrade credential snapshot root is unknown")
+
+	// ErrSnapshotRootTimedOut reports a read that would have to stage a private
+	// copy while the configured source root is known but was never inspected:
+	// the mount lookup that would have inspected it outlived its bound.
+	// Canonicalizing that root for the exclusion check is the filesystem call the
+	// bound exists to stop, so the read fails closed instead of re-entering the
+	// mount; the caller answers the mount's deadline, which is a retry and never
+	// a verdict on the source or the presented key.
+	ErrSnapshotRootTimedOut = errors.New("upgrade credential snapshot root timed out")
+
+	// afterSnapshotCopy is the package's synchronous test seam. It runs once
+	// between the copy and the source's second digest, so a test can prove that
+	// a source which gains a WAL or a rewrite at exactly that moment is refused
+	// instead of answering from the state it held before. Production never sets
+	// it.
+	afterSnapshotCopy func()
 )
 
 // SnapshotAttempts bounds how often a snapshot of a database a writer may still
@@ -126,6 +150,14 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	snapshot := &Snapshot{dir: dir, path: filepath.Join(dir, filepath.Base(databasePath))}
 	copied, err := copyDatabaseFiles(ctx, databasePath, dir)
 	if err == nil {
+		// A source that starts writing while its private copy is being taken
+		// must be refused, not read as the state it held before the write. The
+		// second digest is what proves it, so a test places the write between the
+		// copy and that digest through this synchronous seam. Production never
+		// sets it.
+		if afterSnapshotCopy != nil {
+			afterSnapshotCopy()
+		}
 		var after map[string]databaseFileDigest
 		if after, err = digestDatabaseFiles(ctx, databasePath); err == nil {
 			if !sameDigests(before, after) || !sameDigests(before, copied) {
@@ -212,7 +244,7 @@ func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) 
 		if dir == "" {
 			continue
 		}
-		if pathWithin(scratchPath, canonicalPath(dir)) {
+		if pathWithin(scratchPath, canonicalExclusionRoot(dir)) {
 			// The default is named as such: an operator who never passed
 			// --scratch-dir has to learn that the OS temporary directory is the
 			// one that landed inside the root.
@@ -234,11 +266,25 @@ func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) 
 
 // pathWithin reports whether child is parent itself or lies underneath it. Both
 // paths must already be canonical.
+//
+// The separator is added only when the parent does not already end in one. The
+// filesystem root is a parent of every absolute path, and appending a separator
+// to "/" would build the "//" prefix that no cleaned path starts with — so an
+// operator who set the source root to "/" (or to any aliased spelling of it)
+// would pass the exclusion check and stage the whole database copy inside that
+// root. A parent with a trailing separator, such as "/a/", names the same tree
+// as "/a" and is handled by cleaning both sides first.
 func pathWithin(child string, parent string) bool {
+	child = filepath.Clean(child)
+	parent = filepath.Clean(parent)
 	if child == parent {
 		return true
 	}
-	return strings.HasPrefix(child, parent+string(filepath.Separator))
+	prefix := parent
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	return strings.HasPrefix(child, prefix)
 }
 
 // canonicalPath makes a path absolute and resolves the symlinks of the deepest
@@ -264,6 +310,12 @@ func canonicalPath(path string) string {
 		current = parent
 	}
 }
+
+// canonicalExclusionRoot resolves one root whose subtree the scratch directory
+// must stay out of. It is the package's synchronous seam for that single
+// filesystem call: a test substitutes it to prove that a root whose mount lookup
+// already timed out is never resolved again. Production never sets it.
+var canonicalExclusionRoot = canonicalPath
 
 // DB returns the read-only handle on the private copy.
 func (s *Snapshot) DB() *sql.DB {

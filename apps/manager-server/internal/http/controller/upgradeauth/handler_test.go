@@ -24,7 +24,7 @@ func TestExplicitPublicOriginSupportsTLSIngressWithoutTrustingForwardedHeaders(t
 		{"https://public-manager.test", "http://manager.test", "", 403},
 		{"https://public-manager.test", "https://attacker.test", "https", 403},
 	} {
-		h, err := New(paths, tc.configured)
+		h, err := New(paths, tc.configured, false, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -40,7 +40,7 @@ func TestExplicitPublicOriginSupportsTLSIngressWithoutTrustingForwardedHeaders(t
 		}
 	}
 	for _, invalid := range []string{"null", "file:///tmp/source", "https://user:pass@manager.test", "https://manager.test/path", "https://manager.test?key=test"} {
-		if _, err := New(paths, invalid); err == nil {
+		if _, err := New(paths, invalid, false, ""); err == nil {
 			t.Fatalf("accepted invalid origin %q", invalid)
 		}
 	}

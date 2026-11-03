@@ -39,17 +39,18 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 	)
 	base := bootstrap.FixedBootstrapAPIPath + "installation/upgrade"
 	cases := []struct {
-		name            string
-		mountLegacy     bool
-		symlinkDatabase bool
-		observable      bool
-		accepted        string
-		refused         string
-		entryStatus     int
-		entryCode       string
-		preflight       int
-		preflightErr    string
-		sourceRoot      string
+		name             string
+		mountLegacy      bool
+		symlinkDatabase  bool
+		observable       bool
+		accepted         string
+		refused          string
+		entryStatus      int
+		entryCode        string
+		entryObservation string
+		preflight        int
+		preflightErr     string
+		sourceRoot       string
 	}{
 		{
 			name: "legacy mount wins", mountLegacy: true, observable: false,
@@ -65,7 +66,7 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 			name: "symlinked mount database falls back to the manager store", mountLegacy: true, symlinkDatabase: true, observable: true,
 			accepted: managerKey, refused: legacyKey,
 			entryStatus:  http.StatusOK,
-			preflight:     http.StatusOK,
+			preflight:    http.StatusOK,
 			preflightErr: "upgrade_source_symlinked",
 			sourceRoot:   "upgrade_source_symlinked",
 		},
@@ -78,13 +79,18 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 			sourceRoot:   "upgrade_legacy_root_missing",
 		},
 		{
+			// The public observation refuses a WAL store, but the presented key is
+			// proved against the resolved file. The entry therefore answers
+			// authenticated with the observation named as unavailable: a refused
+			// observation is not a credential verdict, and closing the read-only
+			// operation view on it is what stranded a resumable operation.
 			name: "unobservable manager store is not a credential verdict", mountLegacy: false, observable: false,
 			accepted: managerKey, refused: legacyKey,
-			entryStatus:  http.StatusServiceUnavailable,
-			entryCode:    "source_unavailable",
-			preflight:    http.StatusServiceUnavailable,
-			preflightErr: "upgrade_legacy_root_missing",
-			sourceRoot:   "upgrade_legacy_root_missing",
+			entryStatus:      http.StatusOK,
+			entryObservation: "observation_unavailable",
+			preflight:        http.StatusServiceUnavailable,
+			preflightErr:     "upgrade_legacy_root_missing",
+			sourceRoot:       "upgrade_legacy_root_missing",
 		},
 	}
 	for _, testCase := range cases {
@@ -144,8 +150,22 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 			if testCase.entryCode != "" && !strings.Contains(body, `"`+testCase.entryCode+`"`) {
 				t.Fatalf("entry page did not name %s: %s", testCase.entryCode, body)
 			}
-			if testCase.entryStatus == http.StatusOK && !strings.Contains(body, `"status":"unsupported_upgrade"`) {
-				t.Fatalf("entry page accepted the key without a projection: %s", body)
+			if testCase.entryStatus == http.StatusOK {
+				// A proved credential is authenticated and claims no migration
+				// permission, whether or not the public observation could describe
+				// the source.
+				for _, want := range []string{`"authenticated":true`, `"migration_available":false`} {
+					if !strings.Contains(body, want) {
+						t.Fatalf("entry page accepted the key without %s: %s", want, body)
+					}
+				}
+				observation := "unsupported_upgrade"
+				if testCase.entryObservation != "" {
+					observation = testCase.entryObservation
+				}
+				if !strings.Contains(body, `"status":"`+observation+`"`) {
+					t.Fatalf("entry page did not answer %s: %s", observation, body)
+				}
 			}
 
 			// Both reads answer the recorded operation from the Manager store,
@@ -261,4 +281,73 @@ func upgradeSurfaceManagerStore(t *testing.T, key string, observable bool) strin
 		t.Fatal(err)
 	}
 	return database
+}
+
+// TestStartupUpgradeNamespaceAnswersTheCredentialBeforeThePath is M3 at the
+// startup carrier. The fixed surface routes the whole Upgrade read namespace to
+// the reader, so an unknown route inside it — and the entry leaf's query string —
+// must meet the same credential and origin gates as a real resource. Only a
+// proved credential may learn that the route does not exist.
+func TestStartupUpgradeNamespaceAnswersTheCredentialBeforeThePath(t *testing.T) {
+	const key = "legacy-source-administrator-key"
+	source, _ := upgradeAuthSource(t, key)
+	t.Setenv(legacyRootEnvironment, source)
+	database := upgradeSurfaceManagerStore(t, "manager-store-not-used-for-this-read", true)
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(legacypreflight.DefaultPaths(database), legacypreflight.Options{}, 5*time.Second)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	request := func(method, path, authorization, origin string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(method, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if authorization != "" {
+			req.Header.Set("Authorization", authorization)
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		response, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response.StatusCode, string(body)
+	}
+
+	unknown := bootstrap.FixedBootstrapAPIPath + "installation/upgrade/not-a-route"
+	entryQuery := upgradeauth.Path + "?resource=1"
+	for name, authorization := range map[string]string{
+		"absent":       "",
+		"other scheme": "Basic b3BlcmF0b3I6cGFzcw==",
+		"foreign key":  "Bearer another-Manager-key",
+	} {
+		if status, body := request(http.MethodGet, unknown, authorization, ""); status != http.StatusUnauthorized {
+			t.Fatalf("unknown Upgrade route with the %s credential = %d: %s", name, status, body)
+		}
+		if status, body := request(http.MethodPost, entryQuery, authorization, ""); status != http.StatusUnauthorized {
+			t.Fatalf("entry query with the %s credential = %d: %s", name, status, body)
+		}
+	}
+	if status, body := request(http.MethodGet, unknown, "Bearer "+key, "https://attacker.test"); status != http.StatusForbidden {
+		t.Fatalf("unknown Upgrade route from another site = %d: %s", status, body)
+	}
+	if status, body := request(http.MethodPost, entryQuery, "Bearer "+key, "https://attacker.test"); status != http.StatusForbidden {
+		t.Fatalf("entry query from another site = %d: %s", status, body)
+	}
+	// Only the proved credential learns the route or the query string is unknown.
+	if status, body := request(http.MethodGet, unknown, "Bearer "+key, ""); status != http.StatusNotFound {
+		t.Fatalf("unknown Upgrade route with the proved credential = %d: %s", status, body)
+	}
+	if status, body := request(http.MethodPost, entryQuery, "Bearer "+key, ""); status != http.StatusNotFound {
+		t.Fatalf("entry query with the proved credential = %d: %s", status, body)
+	}
 }

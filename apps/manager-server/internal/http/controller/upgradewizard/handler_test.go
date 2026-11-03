@@ -2,13 +2,16 @@ package upgradewizard
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +25,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
@@ -495,6 +499,126 @@ func TestMountDeadlineIsATimeoutNotAnUnreadableSource(t *testing.T) {
 	<-finished
 }
 
+// TestTimedOutMountDoesNotRunThePreflight is the preflight half of the same
+// contract, now that a timed-out answer still carries the configured root for the
+// credential snapshot's exclusion. That root is not an inspection result: running
+// the preflight against it would put the hung filesystem call back on the request
+// thread, where the preflight deadline cannot interrupt it. The route answers the
+// mount's deadline, and a root that would otherwise produce a report is never
+// inspected.
+func TestTimedOutMountDoesNotRunThePreflight(t *testing.T) {
+	root := legacySourceDir(t) // A report-producing mount if it were inspected.
+	database := managerCredentialStore(t, testAdminKey)
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	handler := newHandler(root, database)
+	handler.MountTimeout = 20 * time.Millisecond
+	handler.lookupMount = func(string) mountResolution {
+		<-release
+		close(finished)
+		return mountResolution{root: root}
+	}
+	_, body := request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusServiceUnavailable)
+	if !strings.Contains(body, `"`+CodeMountTimeout+`"`) {
+		t.Fatalf("timed-out preflight = %s, want %s", body, CodeMountTimeout)
+	}
+	close(release)
+	<-finished
+}
+
+// TestMountBoundContainsTheConfiguredRootResolution is M4 at the one place the
+// bound lives. The production resolver behind Handler.LegacyRoot stats the
+// configured directory — `/legacy` when the operator set nothing — and a stat on
+// a hung mount waits exactly as long as the database inspection behind it.
+// Resolving the root before the lookup would leave that wait outside the only
+// bound this surface has, so the whole resolution has to run inside the one
+// bounded, one-in-flight lookup.
+//
+// The measurement is that bounded lookup and nothing else. A full request also
+// pays the credential read and the projection; placing those under the mount's
+// bound would fail this test for a cost it does not describe, and for a rate that
+// belongs to the machine. The deadline verdict at the route boundary and the
+// one-lookup rule are covered by TestMountDeadlineIsATimeoutNotAnUnreadableSource
+// and TestMountLookupRunsOncePerRequestInsideItsBound.
+func TestMountBoundContainsTheConfiguredRootResolution(t *testing.T) {
+	root := t.TempDir()
+	var resolverCalls, lookups, active, peak int32
+	resolved := make(chan struct{})
+	var slow sync.Once
+	handler := &Handler{
+		LegacyRoot: func() string {
+			atomic.AddInt32(&resolverCalls, 1)
+			running := atomic.AddInt32(&active, 1)
+			for {
+				seen := atomic.LoadInt32(&peak)
+				if running <= seen || atomic.CompareAndSwapInt32(&peak, seen, running) {
+					break
+				}
+			}
+			defer atomic.AddInt32(&active, -1)
+			// The first resolution is the hung filesystem call. Every later one
+			// answers immediately, so the handler's recovery is observable.
+			slow.Do(func() {
+				time.Sleep(300 * time.Millisecond)
+				close(resolved)
+			})
+			return ""
+		},
+		MountTimeout: 20 * time.Millisecond,
+	}
+	handler.lookupMount = func(string) mountResolution {
+		atomic.AddInt32(&lookups, 1)
+		return mountResolution{root: root, code: CodeLegacyRootMissing}
+	}
+
+	// Every waiter joins the one flight: a hung root costs exactly one resolution
+	// however many lookups arrive, and each of them stops at the bound.
+	const polls = 20
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	answers := make([]mountResolution, polls)
+	for index := range polls {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			answers[index] = handler.resolveMount(context.Background())
+		}(index)
+	}
+	started := time.Now()
+	close(start)
+	wait.Wait()
+	elapsed := time.Since(started)
+	// Five times the bound separates a lookup that stops at the timer from one
+	// that waits the hung resolution out (300 ms) without measuring scheduling.
+	if budget := handler.MountTimeout * 5; elapsed > budget {
+		t.Fatalf("%d lookups waited %s on a root resolution bounded to %s (allowed %s)",
+			polls, elapsed, handler.MountTimeout, budget)
+	}
+	if got := atomic.LoadInt32(&resolverCalls); got != 1 {
+		t.Fatalf("%d concurrent lookups resolved the configured root %d times, want 1", polls, got)
+	}
+	if got := atomic.LoadInt32(&lookups); got != 0 {
+		t.Fatalf("%d root inspections ran before the hung resolution answered", got)
+	}
+	for index, answer := range answers {
+		if answer.expired || answer.code != CodeMountTimeout {
+			t.Fatalf("lookup %d on a hung root = %+v, want %q", index, answer, CodeMountTimeout)
+		}
+	}
+
+	// The resolution lands after every waiter was answered. It must not replace a
+	// deadline verdict, and it must not strand the handler: the next lookup reads
+	// the landed answer (joining that flight or starting the next one).
+	<-resolved
+	if landed := handler.resolveMount(context.Background()); landed.code != CodeLegacyRootMissing {
+		t.Fatalf("the lookup after the late resolution = %+v", landed)
+	}
+	if got := atomic.LoadInt32(&peak); got != 1 {
+		t.Fatalf("%d root resolutions ran at once, want at most 1", got)
+	}
+}
+
 // managerCredentialStore writes the Manager's own store with an administrator
 // credential and one recorded operation row: everything the surface reads when
 // it is not reading a 1.x mount.
@@ -679,8 +803,11 @@ func TestStatusProjectionOmitsSecretsAndToleratesUnknownStages(t *testing.T) {
 	if len(status.DomainsDone) != 2 || status.DomainsDone[0] != model.UpgradeDomainSourceCopy {
 		t.Fatalf("domains = %v", status.DomainsDone)
 	}
-	if got := string(status.Reconciliation); got != `{"mismatchDays":["2026-10-01","2026-10-02"]}` {
-		t.Fatalf("reconciliation = %s", got)
+	if got := status.Reconciliation.MismatchDays; len(got) != 2 || got[0] != "2026-10-01" || got[1] != "2026-10-02" {
+		t.Fatalf("reconciliation = %+v", status.Reconciliation)
+	}
+	if status.Reconciliation.MismatchDaysTotal != 2 || status.Reconciliation.MismatchDaysTruncated {
+		t.Fatalf("reconciliation bounds = %+v", status.Reconciliation)
 	}
 	if status.SourceKind != "upgraded-legacy" || status.SourceVersion != "1.14.4" {
 		t.Fatalf("source = %+v", status)
@@ -818,23 +945,40 @@ func TestStatusUnrecordedAndUnreadable(t *testing.T) {
 }
 
 const (
-	// largeSourceMegabytes keeps the fixture in the range a real 1.x source
-	// reaches, where a whole-file integrity scan — not the credential row — is
-	// the dominant cost of a request.
-	largeSourceMegabytes = 256
-	// statusPollBudget is far below a whole-file scan of that fixture and below
-	// the credential read's own timeout.
-	statusPollBudget = time.Second
+	// largeSourceMegabytes is the size a real 1.x source reaches, where the
+	// credential read's private copy and digests dominate a request. The fixture
+	// is real bytes, not a sparse file, and it sits past the size this read used
+	// to hide behind a small fixture: the first read has to fit a budget scaled
+	// to the source, and a poll after it has to be answered without a second
+	// copy.
+	largeSourceMegabytes = 512
 )
 
-// largeCorruptSourceDir grows the smallest 1.x source into a multi-hundred
-// megabyte database and corrupts the root page of its padding tree. The
-// credential row still reads; a whole-file integrity check cannot pass.
+// largeSourceDir grows the smallest 1.x source into a real-sized database: the
+// credential read must prove the credential on it, not just on a toy file.
+func largeSourceDir(t *testing.T, megabytes int) string {
+	t.Helper()
+	dir, _ := growLargeSource(t, megabytes)
+	return dir
+}
+
+// largeCorruptSourceDir grows the smallest 1.x source into a real-sized database
+// and corrupts the root page of its padding tree. The credential row still
+// reads; a whole-file integrity check cannot pass.
 func largeCorruptSourceDir(t *testing.T, megabytes int) string {
 	t.Helper()
+	dir, paddingRoot := growLargeSource(t, megabytes)
+	corruptDatabasePage(t, filepath.Join(dir, "usage.sqlite"), paddingRoot)
+	return dir
+}
+
+// growLargeSource returns the fixture root and the root page of the padding tree
+// that the corruption cases damage. The padding is inserted in one transaction:
+// the fixture is about size, not about commit cost.
+func growLargeSource(t *testing.T, megabytes int) (string, int) {
+	t.Helper()
 	dir := legacySourceDir(t)
-	database := filepath.Join(dir, "usage.sqlite")
-	db, err := sql.Open("sqlite", database)
+	db, err := sql.Open("sqlite", filepath.Join(dir, "usage.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,22 +986,31 @@ func largeCorruptSourceDir(t *testing.T, megabytes int) string {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
 	for range megabytes {
-		if _, err := db.Exec(`insert into padding (payload) values (zeroblob(1048576))`); err != nil {
+		if _, err := tx.Exec(`insert into padding (payload) values (zeroblob(1048576))`); err != nil {
+			_ = tx.Rollback()
 			_ = db.Close()
 			t.Fatal(err)
 		}
 	}
-	var root int
-	if err := db.QueryRow(`select rootpage from sqlite_master where name = 'padding'`).Scan(&root); err != nil {
+	if err := tx.Commit(); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	var paddingRoot int
+	if err := db.QueryRow(`select rootpage from sqlite_master where name = 'padding'`).Scan(&paddingRoot); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	corruptDatabasePage(t, database, root)
-	return dir
+	return dir, paddingRoot
 }
 
 // corruptDatabasePage overwrites one b-tree page with bytes no page type
@@ -889,8 +1042,10 @@ func corruptDatabasePage(t *testing.T, path string, page int) {
 // the route boundary. Every request proves the credential, so the read behind it
 // must not scan the source: the fixture's padding tree is corrupt, which a
 // whole-file check reports and a credential row read never touches. The poll
-// still answers quickly with the operation projection, and the preflight on the
-// same source still runs the check and reports it.
+// still answers with the operation projection, and the preflight on the same
+// source still runs the check and reports it. The credential read takes the
+// source's private snapshot, so the poll is not timed: the corruption is what
+// distinguishes the row read from an integrity scan.
 func TestStatusPollAuthenticatesWithoutVerifyingTheWholeSource(t *testing.T) {
 	root := largeCorruptSourceDir(t, largeSourceMegabytes)
 	database := filepath.Join(t.TempDir(), "usage.sqlite")
@@ -903,13 +1058,13 @@ func TestStatusPollAuthenticatesWithoutVerifyingTheWholeSource(t *testing.T) {
 	}
 	handler := newHandler(root, database)
 
-	started := time.Now()
+	// The credential read takes the private snapshot every source read requires,
+	// so a poll's cost is proportional to the copy and a wall-clock budget would
+	// measure the machine, not the query. The corrupted padding tree is the
+	// proof instead: a whole-file integrity check cannot pass on this fixture,
+	// and the poll still answers with the operation projection — so the read
+	// touched the credential row and never scanned the file.
 	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
-	elapsed := time.Since(started)
-	if elapsed > statusPollBudget {
-		t.Fatalf("status poll took %s on a %d MB source, budget %s", elapsed, largeSourceMegabytes, statusPollBudget)
-	}
-	t.Logf("status poll on a %d MB source: %s", largeSourceMegabytes, elapsed)
 	var status statusDocument
 	if err := json.Unmarshal([]byte(body), &status); err != nil {
 		t.Fatalf("decode status: %v: %s", err, body)
@@ -922,6 +1077,168 @@ func TestStatusPollAuthenticatesWithoutVerifyingTheWholeSource(t *testing.T) {
 	_, body = request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusOK)
 	if !strings.Contains(body, `"`+CodeSourceUnreadable+`"`) {
 		t.Fatalf("preflight did not report the failed integrity check: %s", body)
+	}
+}
+
+// TestStatusFirstReadOfALargeSourceFitsTheScaledBudgetAndPollsAreCached is D3 at
+// the route boundary. A healthy 512 MiB source is a real 1.x size, and proving a
+// correct credential on it cannot fit a fixed 2 s deadline: the read is a private
+// copy plus its digests. The first request must therefore fit a budget scaled to
+// the source while staying under its cap, and every poll after it must be
+// answered from the remembered verdict instead of copying the file again.
+func TestStatusFirstReadOfALargeSourceFitsTheScaledBudgetAndPollsAreCached(t *testing.T) {
+	root := largeSourceDir(t, largeSourceMegabytes)
+	info, err := os.Stat(filepath.Join(root, "usage.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() < 512<<20 {
+		t.Fatalf("the fixture is %d bytes, want a real source of at least 512 MiB", info.Size())
+	}
+	database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+	handler := newHandler(root, database)
+
+	started := time.Now()
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	first := time.Since(started)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Recorded || status.Stage != StageCopyIn {
+		t.Fatalf("status on a %d-byte source = %s", info.Size(), body)
+	}
+	t.Logf("first authenticated read of a %d-byte source: %s", info.Size(), first)
+	if first >= upgradeservice.CredentialVerifyMaxBudget {
+		t.Fatalf("the first read of a %d-byte source took %s, at or beyond the capped budget %s",
+			info.Size(), first, upgradeservice.CredentialVerifyMaxBudget)
+	}
+
+	// A poll reuses the verdict for the source state it described: the only work
+	// left is describing the source again. The comparison is relative — four
+	// times faster than the read that had to copy the file — because the absolute
+	// cost of a stat belongs to the machine, not to this contract.
+	for index := range 3 {
+		pollStarted := time.Now()
+		_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+		poll := time.Since(pollStarted)
+		t.Logf("cached poll %d on the %d-byte source: %s", index, info.Size(), poll)
+		if poll*4 >= first {
+			t.Fatalf("poll %d after the first read took %s against a %s first read; the verified source was not reused (%s)",
+				index, poll, first, body)
+		}
+	}
+}
+
+// TestStatusFirstReadOfALargeWALSourceFitsTheScaledBudgetAndPollsAreCached is the
+// P2 regression. A 1.x source is qualified with most of its committed data still
+// in the WAL — a small database and a real, non-checkpointed WAL of the same
+// order as a large source. The first authenticated read must budget for the
+// bytes it actually copies and digests, not the database file alone; otherwise a
+// healthy source whose layout differs answers 503 `upgrade_credential_timeout`
+// forever. Every poll after the first is answered from the remembered state.
+func TestStatusFirstReadOfALargeWALSourceFitsTheScaledBudgetAndPollsAreCached(t *testing.T) {
+	root := legacySourceDir(t)
+	source := filepath.Join(root, "usage.sqlite")
+	writer, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = writer.Close() })
+	if _, err := writer.Exec(`pragma journal_mode = wal; pragma wal_autocheckpoint = 0;
+		create table review_wal_padding (payload blob)`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := writer.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 512 {
+		if _, err := tx.Exec(`insert into review_wal_padding values (zeroblob(1048576))`); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	dbInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walInfo, err := os.Stat(source + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if walInfo.Size() < 512<<20 {
+		t.Fatalf("the fixture WAL is %d bytes, want a real committed WAL of at least 512 MiB", walInfo.Size())
+	}
+	if dbInfo.Size() >= walInfo.Size()/4 {
+		t.Fatalf("the fixture database is %d bytes against a %d-byte WAL; the WAL-heavy layout was not exercised", dbInfo.Size(), walInfo.Size())
+	}
+
+	database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+	handler := newHandler(root, database)
+
+	started := time.Now()
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	first := time.Since(started)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Recorded || status.Stage != StageCopyIn {
+		t.Fatalf("status on a WAL-heavy source = %s", body)
+	}
+	t.Logf("first authenticated read: DB=%d WAL=%d elapsed=%s", dbInfo.Size(), walInfo.Size(), first)
+	if first >= upgradeservice.CredentialVerifyMaxBudget {
+		t.Fatalf("the first read of a %d-byte database with a %d-byte WAL took %s, at or beyond the capped budget %s",
+			dbInfo.Size(), walInfo.Size(), first, upgradeservice.CredentialVerifyMaxBudget)
+	}
+	for index := range 3 {
+		pollStarted := time.Now()
+		_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+		poll := time.Since(pollStarted)
+		t.Logf("cached poll %d: %s", index, poll)
+		if poll*4 >= first {
+			t.Fatalf("poll %d after the first read took %s against a %s first read; the verified source state was not reused (%s)",
+				index, poll, first, body)
+		}
+	}
+}
+
+// TestStatusKeepsTheTypedErrorForARowThatContradictsItself guards the projection
+// refactor: a recorded row that runs backwards, or carries a list column of the
+// wrong shape, is still a typed 503 upgrade_operation_invalid — never a stage the
+// operator can act on and never a 500.
+func TestStatusKeepsTheTypedErrorForARowThatContradictsItself(t *testing.T) {
+	root := legacySourceDir(t)
+	for _, test := range []struct {
+		name   string
+		update string
+	}{
+		{"reversed timestamps", `created_at_ms = 2000, updated_at_ms = 1000`},
+		{"manual items not a string array", `created_at_ms = 1000, updated_at_ms = 2000, manual_items = '[1]'`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+			db, err := sql.Open("sqlite", database)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`update upgrade_operations set ` + test.update + ` where id = 1`); err != nil {
+				_ = db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			_, body := request(t, newHandler(root, database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusServiceUnavailable)
+			if !strings.Contains(body, `"`+CodeOperationInvalid+`"`) {
+				t.Fatalf("a contradictory row = %s", body)
+			}
+		})
 	}
 }
 
@@ -1010,7 +1327,9 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 	const splitSecret = "eyJhbGciOiJIUzI1NiJ9.c3BsaXQ.c2lnbmF0dXJl"
 	if got := scrubError("upstream refused\nAuthorization: Bearer\n" + splitSecret + "\nretry later"); strings.Contains(got, splitSecret) {
 		t.Fatalf("split bearer survived: %q", got)
-	} else if !strings.Contains(got, "Authorization: Bearer "+redactedText) {
+	} else if !strings.Contains(got, "Authorization: ") || !strings.Contains(got, redactedText) {
+		// The shared content scrubber redacts the whole header value, scheme word
+		// included; the wrap is still resolved, which is what this asserts.
 		t.Fatalf("split bearer is not joined and redacted: %q", got)
 	} else if got := strings.Count(got, "\n"); got != 2 {
 		t.Fatalf("split bearer changed the detail shape: %q", got)
@@ -1142,8 +1461,11 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
 		t.Fatalf("admission = %q err=%v", stage, err)
 	}
-	// A marker that names another database describes nothing here.
-	foreign := filepath.Join(t.TempDir(), "usage.sqlite")
+	// A marker that names another database file describes nothing here. The
+	// name is what identifies the store inside its data root (see SameTarget), so
+	// a marker whose file name differs is the only foreign evidence: the same
+	// name at another absolute path is a relocated root.
+	foreign := filepath.Join(t.TempDir(), "other.sqlite")
 	if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
 		Phase:                   copyinmarker.PhaseMaterializing,
@@ -1161,6 +1483,252 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	}
 	if status.Recorded || status.Stage != "" || status.NextAction != ActionPreflight || status.Evidence != EvidenceNone {
 		t.Fatalf("a foreign marker was read as this operation: %+v", status)
+	}
+}
+
+// TestStatusDecidesFromTheMarkerBeforeOpeningAMaterializingTarget is the D2
+// regression. The copy-in publishes a `materializing` marker before the first
+// member is moved and before the migration that creates the operation table, so
+// a target holding restored members cannot have a committed row. Reading the
+// operation table first — as status used to — joins the restored live WAL and
+// rewrites `-shm`, the member the resumed move compares with the backup, which
+// makes the accepted admission's marker-first protection pointless.
+func TestStatusDecidesFromTheMarkerBeforeOpeningAMaterializingTarget(t *testing.T) {
+	source := legacySourceDir(t)
+	writer, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	// Committed rows stay in the WAL: the writer is kept open and auto-checkpoint
+	// is off, so the copied target holds a live WAL and a real WAL index.
+	if _, err := writer.Exec(`pragma journal_mode = wal; pragma wal_autocheckpoint = 0;
+		create table wal_payload (value text);
+		insert into wal_payload values ('committed-in-wal')`); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "usage.sqlite")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		data, err := os.ReadFile(filepath.Join(source, "usage.sqlite") + suffix)
+		if err != nil {
+			t.Fatalf("read the restored member %q: %v", suffix, err)
+		}
+		if err := os.WriteFile(target+suffix, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyinmarker.Write(filepath.Dir(target), copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
+		TargetDatabase:          target,
+		SourceKind:              "upgraded-legacy",
+		SourceVersion:           "1.14.4",
+		SourceFingerprintBefore: "fingerprint-before",
+		SourceFingerprintAfter:  "fingerprint-after",
+		BackupManifestSHA256:    "manifest",
+		WrittenAtMS:             1717171717000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restored := targetMemberState(t, target)
+	if restored[databaseMember(target, "-shm")] == "" {
+		t.Fatalf("the restored target holds no WAL index: %v", restored)
+	}
+
+	// The accepted admission decides this phase from the marker alone.
+	stage, err := legacypreflight.DatabaseUpgradeAdmission{DatabasePath: target}.Admitted(context.Background())
+	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
+		t.Fatalf("admission before status = %q err=%v", stage, err)
+	}
+	if after := targetMemberState(t, target); !reflect.DeepEqual(restored, after) {
+		t.Fatalf("admission rewrote the materializing target: before=%v after=%v", restored, after)
+	}
+
+	// The real status route, with the source's own credential, so the Manager
+	// credential open cannot be the writer.
+	_, body := request(t, newHandler(source, target), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatal(err)
+	}
+	if !status.Recorded || status.Evidence != EvidenceCopyInMarker || status.Stage != StageCopyIn ||
+		!status.StageKnown || status.NextAction != ActionCopyIn {
+		t.Fatalf("status on a materializing target = %s", body)
+	}
+	if after := targetMemberState(t, target); !reflect.DeepEqual(restored, after) {
+		t.Fatalf("status rewrote the materializing target: before=%v after=%v", restored, after)
+	}
+}
+
+// TestStatusAuthenticatesWithoutOpeningAMaterializingManagerStore is P1 at the
+// route boundary. Without a usable source mount the credential resolves to the
+// Manager store, so authentication runs before the marker-first status read can
+// protect anything. A copied-in target that is still `materializing` must not be
+// opened in place: a read-only open of its copied WAL joins that WAL and rewrites
+// `-shm`, the member the resumed move compares with its backup. The key is still
+// proved — against a private snapshot outside the target's data root — and the
+// three restored members stay byte-identical across admission, authentication
+// and the status projection.
+func TestStatusAuthenticatesWithoutOpeningAMaterializingManagerStore(t *testing.T) {
+	source := legacySourceDir(t)
+	writer, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = writer.Close() }()
+	// Committed rows stay in the WAL: the writer is kept open and auto-checkpoint
+	// is off, so the copied target holds a live WAL and a real WAL index.
+	if _, err := writer.Exec(`pragma journal_mode = wal; pragma wal_autocheckpoint = 0;
+		create table wal_payload (value text);
+		insert into wal_payload values ('committed-in-wal')`); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "usage.sqlite")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		data, err := os.ReadFile(filepath.Join(source, "usage.sqlite") + suffix)
+		if err != nil {
+			t.Fatalf("read the restored member %q: %v", suffix, err)
+		}
+		if err := os.WriteFile(target+suffix, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyinmarker.Write(filepath.Dir(target), copyinmarker.Marker{
+		Version:                 copyinmarker.Version,
+		Phase:                   copyinmarker.PhaseMaterializing,
+		TargetDatabase:          target,
+		SourceKind:              "upgraded-legacy",
+		SourceVersion:           "1.14.4",
+		SourceFingerprintBefore: "fingerprint-before",
+		SourceFingerprintAfter:  "fingerprint-after",
+		BackupManifestSHA256:    "manifest",
+		WrittenAtMS:             1717171717000,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restored := targetMemberState(t, target)
+	if restored[databaseMember(target, "-shm")] == "" {
+		t.Fatalf("the restored target holds no WAL index: %v", restored)
+	}
+
+	// No mount at all: the Manager store is the only credential file, and the
+	// accepted admission must decide this phase from the marker alone.
+	stage, err := (legacypreflight.DatabaseUpgradeAdmission{DatabasePath: target}).Admitted(context.Background())
+	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
+		t.Fatalf("admission before status = %q err=%v", stage, err)
+	}
+	handler := newHandler("", target)
+	_, body := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
+	var status statusDocument
+	if err := json.Unmarshal([]byte(body), &status); err != nil {
+		t.Fatalf("decode status: %v: %s", err, body)
+	}
+	if !status.Recorded || status.Evidence != EvidenceCopyInMarker || status.Stage != StageCopyIn ||
+		status.NextAction != ActionCopyIn || status.SourceRoot != CodeLegacyRootMissing {
+		t.Fatalf("status on a materializing Manager target without a mount = %s", body)
+	}
+	if after := targetMemberState(t, target); !reflect.DeepEqual(restored, after) {
+		t.Fatalf("Manager credential fallback rewrote a materializing target: before=%v after=%v", restored, after)
+	}
+
+	// The wrong key is still a credential verdict, and it also leaves the target
+	// alone: refusing to prove the key never means opening the target.
+	_, body = request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(foreignKey), http.StatusUnauthorized)
+	if !strings.Contains(body, `"`+CodeAdminUnauthorized+`"`) {
+		t.Fatalf("wrong key on a materializing target = %s", body)
+	}
+	if after := targetMemberState(t, target); !reflect.DeepEqual(restored, after) {
+		t.Fatalf("a rejected key rewrote a materializing target: before=%v after=%v", restored, after)
+	}
+}
+
+// databaseMember names one member of the target database.
+func databaseMember(database, suffix string) string {
+	return filepath.Base(database) + suffix
+}
+
+// targetMemberState is the byte identity of a copied-in target's members.
+func targetMemberState(t *testing.T, database string) map[string]string {
+	t.Helper()
+	state := map[string]string{}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		data, err := os.ReadFile(database + suffix)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.Sum256(data)
+		state[databaseMember(database, suffix)] = fmt.Sprintf("%x/%d", digest, len(data))
+	}
+	return state
+}
+
+// TestRelocatedRootKeepsTheMarkerForTheWizardAndTheAdmission is D4. The marker
+// lives in the data root's own reserved work directory, so a root mounted at a
+// different absolute path — the host that runs the CLI, the container that runs
+// the server — is still the store with an unfinished copy-in. Admission already
+// reads it that way; the wizard's projection used to compare absolute paths and
+// report "no operation", sending the operator to a preflight for a store that is
+// in progress. Both must apply one rule, and a marker naming a different
+// database file must still fail closed for both.
+func TestRelocatedRootKeepsTheMarkerForTheWizardAndTheAdmission(t *testing.T) {
+	root := t.TempDir()
+	database := filepath.Join(root, "usage.sqlite")
+	writeMarker := func(target string) {
+		t.Helper()
+		if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
+			Version:                 copyinmarker.Version,
+			Phase:                   copyinmarker.PhaseMaterializing,
+			TargetDatabase:          target,
+			SourceKind:              "upgraded-legacy",
+			SourceVersion:           "1.14.4",
+			SourceFingerprintBefore: "fingerprint-before",
+			SourceFingerprintAfter:  "fingerprint-after",
+			BackupManifestSHA256:    "manifest",
+			WrittenAtMS:             1717171717000,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMarker(database)
+	relocated := root + "-relocated"
+	if err := os.Rename(root, relocated); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(relocated) }()
+	database = filepath.Join(relocated, "usage.sqlite")
+
+	stage, err := legacypreflight.DatabaseUpgradeAdmission{DatabasePath: database}.Admitted(context.Background())
+	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
+		t.Fatalf("admission on the relocated root = %q/%v, want in progress", stage, err)
+	}
+	document, err := readStatus(context.Background(), database)
+	if err != nil {
+		t.Fatalf("status on the relocated root: %v", err)
+	}
+	if !document.Recorded || document.Evidence != EvidenceCopyInMarker || document.Stage != StageCopyIn ||
+		document.NextAction != ActionCopyIn || !document.StageKnown {
+		t.Fatalf("status lost the relocated provenance the admission keeps: %+v", document)
+	}
+	if document.SourceKind != "upgraded-legacy" || document.SourceVersion != "1.14.4" {
+		t.Fatalf("status lost the recorded source evidence: %+v", document)
+	}
+
+	// A marker that names another database file is evidence for a different run.
+	// The admission refuses it and the projection reads it as no record: neither
+	// guesses that this store is the one that marker describes.
+	writeMarker(filepath.Join(t.TempDir(), "other.sqlite"))
+	if stage, err := (legacypreflight.DatabaseUpgradeAdmission{DatabasePath: database}).Admitted(context.Background()); err == nil {
+		t.Fatalf("a foreign marker was admitted as %q", stage)
+	}
+	document, err = readStatus(context.Background(), database)
+	if err != nil {
+		t.Fatalf("status with a foreign marker: %v", err)
+	}
+	if document.Recorded || document.Evidence != EvidenceNone || document.NextAction != ActionPreflight {
+		t.Fatalf("a foreign marker was read as this operation: %+v", document)
 	}
 }
 
@@ -1208,5 +1776,32 @@ func TestReadsRefuseCrossSiteOrigins(t *testing.T) {
 		send(resource, bearer(testAdminKey), "", "", http.StatusOK)
 		// An unauthenticated caller learns nothing about the origin rule either.
 		send(resource, "", "https://attacker.test", "", http.StatusUnauthorized)
+	}
+}
+
+// TestStatusScrubsTheShapesTheReviewProvedLeak is the regression for the five
+// shapes a content scrubber missed: a quoted bearer value, a JSON password, a
+// base64 Basic value wrapped onto the next line, an assignment whose value is on
+// the next line, and a bearer token cut by a line break.
+func TestStatusScrubsTheShapesTheReviewProvedLeak(t *testing.T) {
+	for _, secret := range []string{
+		`Authorization: Bearer "opaque-review-key"`,
+		`{"password":"opaque-review-password"}`,
+		"Authorization: Basic\nc2VhcmNoOnNlY3JldA==",
+		"password=\nopaque-review-password",
+		"Bearer opaque-review-\nkeytail",
+	} {
+		got := scrubError(secret)
+		for _, leaked := range []string{
+			"opaque-review-key", "opaque-review-password", "c2VhcmNoOnNlY3JldA==",
+			"opaque-review-password", "keytail",
+		} {
+			if strings.Contains(got, leaked) {
+				t.Fatalf("%q leaked %q: %q", secret, leaked, got)
+			}
+		}
+		if !strings.Contains(got, redactedText) {
+			t.Fatalf("%q has no redaction marker: %q", secret, got)
+		}
 	}
 }

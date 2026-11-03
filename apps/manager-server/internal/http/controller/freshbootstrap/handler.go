@@ -207,10 +207,16 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// upgradeNamespace is the one namespace the Upgrade surface owns on this
+// carrier. Every route in it goes to the reader, which answers the credential and
+// the browser's origin before it answers the path: an unknown route inside the
+// namespace must not be the one resource that leaks its own non-existence.
+const upgradeNamespace = "installation/upgrade/"
+
 // upgradeResource reports whether a fixed-carrier resource belongs to the
 // Upgrade surface's own credential instead of the installation session.
 func upgradeResource(resource string) bool {
-	return resource == "installation/upgrade/preflight" || resource == "installation/upgrade/status"
+	return strings.HasPrefix(resource, upgradeNamespace)
 }
 
 // SessionToken deliberately uses a distinct scheme. Bearer Admin/CPA keys and

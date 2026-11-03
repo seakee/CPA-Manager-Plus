@@ -47,8 +47,8 @@ func (a *freshApplication) newUpgradeWizard() *upgradewizard.Handler {
 // mount that appears, disappears or is repointed after startup is seen by the
 // reads first, and the entry leaf keeps its startup resolution until it is
 // rebuilt.
-func upgradeCredentialDatabase(managerDatabase string) string {
-	return upgradeservice.CredentialDatabase(configuredLegacyRoot(), managerDatabase)
+func upgradeCredentialDatabase(legacyRoot, managerDatabase string) string {
+	return upgradeservice.CredentialDatabase(legacyRoot, managerDatabase)
 }
 
 // upgradeCredentialPaths is the surface's one credential resolution expressed as
@@ -57,12 +57,16 @@ func upgradeCredentialDatabase(managerDatabase string) string {
 // layout the rest of the 1.x inspection already uses; otherwise the Manager's
 // own paths are the credential source and are used unchanged — which includes the
 // case where the mount holds only a database the shared file policy refuses.
-func upgradeCredentialPaths(manager sqliterepo.InspectionPaths) sqliterepo.InspectionPaths {
-	database := upgradeCredentialDatabase(manager.Database)
+//
+// The second result reports which file it is, because the two are read
+// differently: the configured source is preserved byte for byte and is never
+// opened in place, while the Manager store is this process's own live database.
+func upgradeCredentialPaths(legacyRoot string, manager sqliterepo.InspectionPaths) (sqliterepo.InspectionPaths, bool) {
+	database := upgradeCredentialDatabase(legacyRoot, manager.Database)
 	if strings.TrimSpace(database) == strings.TrimSpace(manager.Database) {
-		return manager
+		return manager, false
 	}
-	return legacypreflight.DefaultPaths(database)
+	return legacypreflight.DefaultPaths(database), true
 }
 
 // configuredLegacyRoot resolves the mounted 1.x source. An absent mount is not
@@ -78,8 +82,14 @@ func configuredLegacyRoot() string {
 	return ""
 }
 
-// upgradeWizardResource reports whether a canonical continuation resource is one
-// of the Upgrade wizard's reads.
+// upgradeWizardReadNamespace is the namespace the Upgrade reads own on the
+// canonical continuation. Every route in it goes to the reader, which answers the
+// credential before the path, so an unknown route cannot be mapped by a caller
+// without one.
+const upgradeWizardReadNamespace = "installation/upgrade/"
+
+// upgradeWizardResource reports whether a canonical continuation resource belongs
+// to the Upgrade wizard's reads.
 func upgradeWizardResource(resource string) bool {
-	return resource == "installation/upgrade/preflight" || resource == "installation/upgrade/status"
+	return strings.HasPrefix(resource, upgradeWizardReadNamespace)
 }

@@ -33,6 +33,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
 )
 
 // Contract is the wire contract of both routes.
@@ -103,6 +104,12 @@ const (
 	// authentication does not inspect that marker at all.
 	CodeSourceMissing    = upgradeservice.CodeSourceMissing
 	CodeSourceUnreadable = upgradeservice.CodeSourceUnreadable
+	// CodeOperationInvalid is the row's own verdict: the recorded operation
+	// contradicts itself or the schema (a timestamp pair that runs backwards, a
+	// list column that is not a JSON string array, a reconciliation body that is
+	// not an object). It is a typed read error, never a 500 and never a stage the
+	// operator can act on.
+	CodeOperationInvalid = "upgrade_operation_invalid"
 )
 
 // Stages the projection understands. The list is deliberately a string
@@ -248,14 +255,22 @@ type Handler struct {
 	mountFlight *mountFlight
 }
 
-// mountFlight is one mount lookup in progress. The goroutine that runs it fills
-// answer and closes done; every request that arrives meanwhile waits on done
-// instead of starting a second lookup, so a mount that never answers cannot
-// accumulate one goroutine per poll.
+// mountFlight is one mount lookup in progress. The goroutine that runs it
+// resolves the configured root and inspects it, then fills answer and closes
+// done; every request that arrives meanwhile waits on done instead of starting a
+// second lookup, so a mount that never answers cannot accumulate one goroutine
+// per poll.
 type mountFlight struct {
-	root   string
 	done   chan struct{}
 	answer mountResolution
+	// root and rootKnown publish the configured root as soon as the flight has
+	// resolved it, before the lookup that can hang. A bound that expires while
+	// the lookup is still unanswered can then still name the tree a credential
+	// snapshot must stay out of; a bound that expires before the root is
+	// resolved leaves rootKnown false, and a snapshot is refused rather than
+	// staged under a tree nobody named. Both are written under Handler.mountMu.
+	root      string
+	rootKnown bool
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -343,20 +358,52 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 		writeError(w, status, code)
 		return false
 	}
-	// VerifyAdminSource bounds its own read: this runs on every request,
-	// including every status poll, and reads the credential row only.
-	switch err := upgradeservice.VerifyAdminSource(r.Context(), database, key); {
-	case err == nil:
+	// The credential read bounds itself: this runs on every request, including
+	// every status poll, and reads the credential row only. The file decides how
+	// it is read: a preserved 1.x source is never opened in place and is read
+	// through a private snapshot, while the Manager's own store is this
+	// process's live database.
+	var verifyErr error
+	if mount.database != "" {
+		verifyErr = upgradeservice.VerifyAdminSource(r.Context(), database, key)
+	} else {
+		// The Manager fallback is normally this process's live store and is read
+		// in place. When it is a copy-in target that was not materialized
+		// completely, the service detects that before opening it and proves the
+		// key against a private snapshot; both trees that copy must stay out of
+		// are named here, so a mount lookup that timed out still hands over the
+		// root it resolved. A root the flight never resolved arrives with
+		// rootKnown false and the service refuses the snapshot instead of
+		// staging it in a tree this request could not name. A root the flight
+		// did resolve is marked with the timeout that stopped the lookup: the
+		// service refuses a snapshot that would have to resolve it again rather
+		// than putting the filesystem call the bound exists to stop back on this
+		// request.
+		verifyErr = upgradeservice.VerifyManagerCredential(r.Context(), database, upgradeservice.CredentialSnapshotRoots{
+			Target:         filepath.Dir(database),
+			Source:         mount.root,
+			SourceKnown:    mount.rootKnown,
+			SourceTimedOut: mount.code == CodeMountTimeout,
+		}, key)
+	}
+	switch {
+	case verifyErr == nil:
 		return true
-	case errors.Is(err, upgradeservice.ErrAdminUnauthorized):
+	case errors.Is(verifyErr, upgradeservice.ErrAdminUnauthorized):
 		writeError(w, http.StatusUnauthorized, CodeAdminUnauthorized)
-	case errors.Is(err, upgradeservice.ErrCredentialVerifyTimeout):
+	case errors.Is(verifyErr, upgradeservice.ErrSnapshotRootTimedOut):
+		// The mount never answered, and the private copy would have had to
+		// resolve that same root to keep out of it. The mount's own deadline is
+		// the answer here, exactly as it is for the preflight: a retry once the
+		// mount responds, not a verdict on the source or on the key.
+		writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
+	case errors.Is(verifyErr, upgradeservice.ErrCredentialVerifyTimeout):
 		// A deadline is not an unreadable source: the volume may be healthy and
 		// only slow, and the operator's next move is to retry, not to repair it.
 		writeError(w, http.StatusServiceUnavailable, CodeCredentialTimeout)
-	case errors.Is(err, upgradeservice.ErrSourceDatabaseMissing):
+	case errors.Is(verifyErr, upgradeservice.ErrSourceDatabaseMissing):
 		writeError(w, http.StatusServiceUnavailable, CodeSourceMissing)
-	case errors.Is(err, upgradeservice.ErrSourceSymlinked):
+	case errors.Is(verifyErr, upgradeservice.ErrSourceSymlinked):
 		// The preflight refuses the same mount with the same code: both paths read
 		// the file itself, never whatever a link points at.
 		writeError(w, http.StatusServiceUnavailable, CodeSourceSymlinked)
@@ -402,6 +449,12 @@ func (h *Handler) managerDatabase() string {
 type mountResolution struct {
 	// root is the configured 1.x data directory, empty when none is configured.
 	root string
+	// rootKnown reports whether root above is the answer to "what is
+	// configured" or only an empty placeholder. A resolution that never got to
+	// resolve the root — a lookup bound that expired while the root itself was
+	// still being resolved — leaves it false, and the credential read refuses to
+	// snapshot rather than guess the tree it must stay out of.
+	rootKnown bool
 	// database is the mount's database the shared file policy accepts. Empty
 	// when the mount holds no database this build may read.
 	database string
@@ -440,8 +493,9 @@ func (m mountResolution) rootInspects() bool {
 }
 
 // resolveMount answers the mount question once for the request, inside a bound.
-// The filesystem calls behind it cannot be cancelled, so the lookup runs on its
-// own goroutine and the request stops waiting at the bound.
+// The filesystem calls behind it cannot be cancelled, so the whole lookup — the
+// configured root's resolution included — runs on its own goroutine and the
+// request stops waiting at the bound.
 //
 // Two properties come from that, and neither depends on the mount answering:
 //
@@ -454,55 +508,66 @@ func (m mountResolution) rootInspects() bool {
 //     another, and takes its answer when it lands or its own bound's verdict if
 //     it does not. A mount that never answers therefore holds one goroutine,
 //     however many polls arrive, instead of one goroutine per poll.
+//
+// The root resolution is part of the flight on purpose: the default resolver
+// stats /legacy, and a stat on a hung mount waits exactly as long as the lookup
+// behind it. Resolving the root before starting the flight would leave that wait
+// outside the only bound this surface has.
 func (h *Handler) resolveMount(ctx context.Context) mountResolution {
-	root := ""
-	if h.LegacyRoot != nil {
-		root = strings.TrimSpace(h.LegacyRoot())
-	}
 	// A caller whose own deadline had already passed learns nothing from a
 	// lookup, and no mount condition may replace that deadline's verdict.
 	if ctx.Err() != nil {
-		return mountResolution{root: root, expired: true}
+		return mountResolution{expired: true}
 	}
 	timeout := h.MountTimeout
 	if timeout <= 0 {
 		timeout = MountLookupTimeout
 	}
-	flight := h.joinMountFlight(root)
+	flight := h.joinMountFlight()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-flight.done:
 		return flight.answer
 	case <-ctx.Done():
-		return mountResolution{root: root, expired: true}
+		return mountResolution{expired: true}
 	case <-timer.C:
 		// The lookup outlived its bound. The goroutine keeps running — its
 		// filesystem calls cannot be cancelled — but it is not replaced: the
-		// flight stays in place and the next poll joins it.
-		return mountResolution{root: root, code: CodeMountTimeout}
+		// flight stays in place and the next poll joins it. Whatever the flight
+		// already resolved is carried into the answer, because a credential read
+		// behind this request still has to keep its private snapshot out of the
+		// configured source tree. A root the flight had not published yet stays
+		// unknown rather than being guessed.
+		h.mountMu.Lock()
+		root, known := flight.root, flight.rootKnown
+		h.mountMu.Unlock()
+		return mountResolution{root: root, rootKnown: known, code: CodeMountTimeout}
 	}
 }
 
 // joinMountFlight returns this request's share of the mount answer: the lookup
-// already in flight for this root, or a new one started here. The configured
-// root is fixed for the lifetime of a handler, so a flight is shared by every
-// concurrent poll; a different root retires the previous flight rather than
-// answering about another directory.
-func (h *Handler) joinMountFlight(root string) *mountFlight {
-	lookup := inspectMount
-	if h.lookupMount != nil {
-		lookup = h.lookupMount
-	}
+// already in flight, or a new one started here. A handler serves one configured
+// root for its lifetime, so one flight at a time is both enough and the whole
+// answer: every concurrent poll joins it.
+func (h *Handler) joinMountFlight() *mountFlight {
 	h.mountMu.Lock()
 	defer h.mountMu.Unlock()
-	if h.mountFlight != nil && h.mountFlight.root == root {
+	if h.mountFlight != nil {
 		return h.mountFlight
 	}
-	flight := &mountFlight{root: root, done: make(chan struct{})}
+	flight := &mountFlight{done: make(chan struct{})}
 	h.mountFlight = flight
 	go func() {
-		answer := lookup(root)
+		// Resolve the root first and publish it: on a hung mount the lookup below
+		// never returns, and the request's bound must still know which tree a
+		// credential snapshot cannot land in. The publication is a plain field
+		// assignment under the same mutex the answer uses.
+		root := h.configuredRoot()
+		h.mountMu.Lock()
+		flight.root, flight.rootKnown = root, true
+		h.mountMu.Unlock()
+		answer := h.inspectMountAt(root)
 		h.mountMu.Lock()
 		flight.answer = answer
 		if h.mountFlight == flight {
@@ -512,6 +577,33 @@ func (h *Handler) joinMountFlight(root string) *mountFlight {
 		close(flight.done)
 	}()
 	return flight
+}
+
+// configuredRoot resolves the configured 1.x data directory. A handler with no
+// resolver has no configured root, which is a known answer: the empty string.
+// The call is the filesystem's — the default resolver stats /legacy — so it runs
+// inside the flight, never on the request's own thread.
+func (h *Handler) configuredRoot() string {
+	if h.LegacyRoot == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.LegacyRoot())
+}
+
+// inspectMountAt runs the mount question for a root the flight already resolved:
+// the shared database file policy on the database inside it. It is a function,
+// not a package variable: a test substitutes the inspection through
+// Handler.lookupMount, so the package holds no mutable state and a substitution
+// cannot leak between tests.
+func (h *Handler) inspectMountAt(root string) mountResolution {
+	lookup := inspectMount
+	if h.lookupMount != nil {
+		lookup = h.lookupMount
+	}
+	answer := lookup(root)
+	answer.root = root
+	answer.rootKnown = true
+	return answer
 }
 
 // inspectMount is the body of resolveMount: the configured directory's own
@@ -599,8 +691,25 @@ type preflightDocument struct {
 // directory-level conditions short-circuit it, because those leave nothing to
 // inspect.
 func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount mountResolution) {
-	if mount.rootInspects() {
-		writeError(w, http.StatusServiceUnavailable, mount.code)
+	// A lookup that outlived its bound was never assessed. The root such an answer
+	// carries is the tree the credential snapshot must stay out of, not an
+	// inspection result: running the preflight against it would put the very
+	// filesystem call the bound exists to stop back on the request thread. The
+	// preflight's own deadline cannot interrupt that call.
+	if mount.code == CodeMountTimeout {
+		writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
+		return
+	}
+	// Without a configured directory there is nothing to inspect: the mount's own
+	// condition (a missing or unusable root) is the answer. A file-level refusal
+	// keeps its root and is reported by the preflight itself, with the same code
+	// the mount lookup named.
+	if mount.root == "" {
+		code := mount.code
+		if code == "" {
+			code = CodeLegacyRootMissing
+		}
+		writeError(w, http.StatusServiceUnavailable, code)
 		return
 	}
 	root := mount.root
@@ -657,6 +766,25 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 	})
 }
 
+// reconciliationDocument is the reconciliation output projected through a fixed
+// allow-list. A producer's free-form payload never reaches the browser wholesale,
+// and the one bounded list says how much it stands for: a list cut at the bound
+// is never presented as the whole history.
+type reconciliationDocument struct {
+	MismatchDays          []string `json:"mismatchDays"`
+	MismatchDaysTotal     int      `json:"mismatchDaysTotal"`
+	MismatchDaysTruncated bool     `json:"mismatchDaysTruncated"`
+}
+
+// maxMismatchDays bounds one response. It is a transport bound, not a judgement
+// about the history: a longer history is reported with its total and the flag,
+// so a cut list is visibly a window instead of silently reading as everything.
+const maxMismatchDays = 366
+
+func emptyReconciliation() reconciliationDocument {
+	return reconciliationDocument{MismatchDays: []string{}}
+}
+
 // statusDocument is the operation row projection. Every field is either a
 // bounded count, an enumerated stage, or a string the operation itself
 // recorded; no fingerprint, digest or path has a field here on purpose.
@@ -678,15 +806,15 @@ type statusDocument struct {
 	// available here and is refused by the preflight, which is the step that
 	// actually qualifies the source. The projection never requires the mount; the
 	// stage does not promise a step that needs it can run.
-	SourceRoot     string          `json:"sourceRoot"`
-	DomainsDone    []string        `json:"domainsDone"`
-	SourceKind     string          `json:"sourceKind,omitempty"`
-	SourceVersion  string          `json:"sourceVersion,omitempty"`
-	Reconciliation json.RawMessage `json:"reconciliation"`
-	ManualItems    []string        `json:"manualItems"`
-	ErrorCode      string          `json:"errorCode,omitempty"`
-	ErrorDetail    string          `json:"errorDetail,omitempty"`
-	UpdatedAtMS    int64           `json:"updatedAtMs"`
+	SourceRoot     string                 `json:"sourceRoot"`
+	DomainsDone    []string               `json:"domainsDone"`
+	SourceKind     string                 `json:"sourceKind,omitempty"`
+	SourceVersion  string                 `json:"sourceVersion,omitempty"`
+	Reconciliation reconciliationDocument `json:"reconciliation"`
+	ManualItems    []string               `json:"manualItems"`
+	ErrorCode      string                 `json:"errorCode,omitempty"`
+	ErrorDetail    string                 `json:"errorDetail,omitempty"`
+	UpdatedAtMS    int64                  `json:"updatedAtMs"`
 }
 
 func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount mountResolution) {
@@ -699,6 +827,12 @@ func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount moun
 	defer cancel()
 	document, err := readStatus(ctx, database)
 	if err != nil {
+		// A row that contradicts itself is its own condition: it is not the same
+		// as a store this step cannot read, and neither is a 500.
+		if errors.Is(err, errStatusRowInvalid) {
+			writeError(w, http.StatusServiceUnavailable, CodeOperationInvalid)
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, CodeOperationUnread)
 		return
 	}
@@ -722,73 +856,170 @@ type statusRow struct {
 	ManualItems   string
 	ErrorCode     sql.NullString
 	ErrorDetail   sql.NullString
+	CreatedAtMS   int64
 	UpdatedAtMS   int64
+}
+
+// errStatusRowInvalid reports a recorded operation that contradicts itself or
+// the schema. It is a typed read error: the projection must not turn a corrupt
+// row into a stage the operator could act on, and it must not turn it into a
+// 500 either.
+var errStatusRowInvalid = errors.New("recorded upgrade operation is invalid")
+
+// validateStatusRow checks the row's own consistency before any of it is
+// projected. The stage is deliberately not validated: an unknown stage is a
+// newer build's observation and is shown verbatim. What has to hold is that the
+// row is a record at all — that its timestamps run forwards and its JSON columns
+// are the shape the schema promises.
+func validateStatusRow(row statusRow) error {
+	if row.CreatedAtMS < 0 || row.UpdatedAtMS < 0 {
+		return fmt.Errorf("%w: timestamps are negative", errStatusRowInvalid)
+	}
+	if row.CreatedAtMS > 0 && row.UpdatedAtMS > 0 && row.UpdatedAtMS < row.CreatedAtMS {
+		return fmt.Errorf("%w: updated_at_ms precedes created_at_ms", errStatusRowInvalid)
+	}
+	return nil
 }
 
 // readStatus reads the single operation row without the model validator: a
 // stage this build does not know (a newer build's rolled_back, or a failed
-// attempt) is still an honest observation and must reach the operator. A store
-// with no row is not the same as no operation: the copy-in publishes its
-// provenance before the row commits, and that window must not read "preflight".
+// attempt) is still an honest observation and must reach the operator. What it
+// does validate is the row itself (see validateStatusRow): a corrupt or
+// future-dated row is a typed read error, never a fabricated stage. A store with
+// no row is not the same as no operation: the copy-in publishes its provenance
+// before the row commits, and that window must not read "preflight".
+//
+// The marker is read before the store, exactly like the startup admission. A
+// `materializing` marker was published before the first member was moved and
+// before the migration that creates the operation table, so no row can be
+// committed in such a target: reading it decides nothing and costs the resume
+// everything. A read-only open of a target that still holds the copied WAL joins
+// that WAL and rewrites `-shm`, the member the resumed move compares with the
+// backup. This route is a status poll: it must not be the reason an interrupted
+// copy-in can never be resumed.
 func readStatus(ctx context.Context, databasePath string) (statusDocument, error) {
-	document := statusDocument{
+	document := emptyStatusDocument()
+	marker, inFlight, err := readCopyInMarker(databasePath)
+	if err != nil {
+		return statusDocument{}, err
+	}
+	if inFlight && marker.Phase == copyinmarker.PhaseMaterializing {
+		return withCopyInMarker(document, marker), nil
+	}
+	// A `migrating` marker leaves the possibility that the row committed, and
+	// the row is the stronger evidence, so it is read first — the same order the
+	// admission uses.
+	recorded, found, err := readRecordedStatus(ctx, databasePath, document)
+	if err != nil {
+		return statusDocument{}, err
+	}
+	if found {
+		return recorded, nil
+	}
+	if inFlight {
+		return withCopyInMarker(recorded, marker), nil
+	}
+	return recorded, nil
+}
+
+// emptyStatusDocument is the unrecorded projection: no operation has started,
+// and the next action is the preflight.
+func emptyStatusDocument() statusDocument {
+	return statusDocument{
 		ContractVersion: Contract,
 		Evidence:        EvidenceNone,
 		StageKnown:      true,
 		NextAction:      ActionPreflight,
 		DomainsDone:     []string{},
 		ManualItems:     []string{},
-		Reconciliation:  json.RawMessage("{}"),
+		Reconciliation:  emptyReconciliation(),
 	}
+}
+
+// readRecordedStatus reads the operation row from the Manager store. found is
+// false when the store holds no operation yet: the file is absent, empty or not a
+// database this build can read, the table is absent, or no row exists.
+func readRecordedStatus(ctx context.Context, databasePath string, document statusDocument) (statusDocument, bool, error) {
 	info, err := os.Stat(databasePath)
 	if os.IsNotExist(err) {
-		return withCopyInMarker(databasePath, document)
+		return document, false, nil
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
-		return withCopyInMarker(databasePath, document)
+		return document, false, nil
 	}
 	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath))
 	if err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
 	var present int
 	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
 	}
 	if present == 0 {
-		return withCopyInMarker(databasePath, document)
+		return document, false, nil
 	}
 	var row statusRow
 	err = db.QueryRowContext(ctx, `select stage, domains_done, source_kind, source_version,
-		reconciliation, manual_items, error_code, error_detail, updated_at_ms
+		reconciliation, manual_items, error_code, error_detail, created_at_ms, updated_at_ms
 		from upgrade_operations where id = 1`).Scan(&row.Stage, &row.Domains, &row.SourceKind, &row.SourceVersion,
-		&row.Reconciled, &row.ManualItems, &row.ErrorCode, &row.ErrorDetail, &row.UpdatedAtMS)
+		&row.Reconciled, &row.ManualItems, &row.ErrorCode, &row.ErrorDetail, &row.CreatedAtMS, &row.UpdatedAtMS)
 	if errors.Is(err, sql.ErrNoRows) {
-		return withCopyInMarker(databasePath, document)
+		return document, false, nil
 	}
 	if err != nil {
-		return statusDocument{}, err
+		return statusDocument{}, false, err
+	}
+	if err := validateStatusRow(row); err != nil {
+		return statusDocument{}, false, err
+	}
+	domains, err := decodeStringColumn(row.Domains, "domains_done")
+	if err != nil {
+		return statusDocument{}, false, err
+	}
+	manualItems, err := decodeStringColumn(row.ManualItems, "manual_items")
+	if err != nil {
+		return statusDocument{}, false, err
+	}
+	reconciliation, err := reconciliationSummary(row.Reconciled)
+	if err != nil {
+		return statusDocument{}, false, err
 	}
 	document.Recorded = true
 	document.Evidence = EvidenceOperationRow
 	document.Stage = row.Stage
 	document.StageKnown = knownStage(row.Stage)
 	document.NextAction = nextActionForRecordedStage(row.Stage, row.ErrorCode.String)
-	document.DomainsDone = decodeStrings(row.Domains)
+	document.DomainsDone = domains
 	// Manual items are operator instructions written by another step, so they
 	// pass the same content scrubber as the error detail: a copy-pasted command
 	// can carry a credential, and a path in an instruction is still a path.
-	document.ManualItems = scrubList(decodeStrings(row.ManualItems))
+	document.ManualItems = scrubList(manualItems)
 	document.SourceKind = row.SourceKind.String
 	document.SourceVersion = row.SourceVersion.String
 	document.ErrorCode = row.ErrorCode.String
 	document.ErrorDetail = scrubError(row.ErrorDetail.String)
 	document.UpdatedAtMS = row.UpdatedAtMS
-	document.Reconciliation = reconciliationSummary(row.Reconciled)
-	return document, nil
+	document.Reconciliation = reconciliation
+	return document, true, nil
+}
+
+// readCopyInMarker reads the provenance marker that describes this database.
+// The marker sits in this data root's own reserved work directory, so it
+// describes this root even when the root is mounted at another absolute path;
+// a marker naming a different database file is evidence for some other run and
+// is not applied here, the same rule the startup admission applies.
+func readCopyInMarker(databasePath string) (copyinmarker.Marker, bool, error) {
+	marker, found, err := copyinmarker.Read(filepath.Dir(databasePath))
+	if err != nil {
+		return copyinmarker.Marker{}, false, fmt.Errorf("read the copy-in provenance marker: %w", err)
+	}
+	if !found || !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
+		return copyinmarker.Marker{}, false, nil
+	}
+	return marker, true, nil
 }
 
 // withCopyInMarker answers the window the row cannot. The copy-in publishes its
@@ -798,14 +1029,7 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 // stage is reported with the marker as its evidence, and the next action is the
 // copy-in the operator has to resume; "preflight" would claim nothing had
 // started while admission refuses every normal surface.
-func withCopyInMarker(databasePath string, document statusDocument) (statusDocument, error) {
-	marker, found, err := copyinmarker.Read(filepath.Dir(databasePath))
-	if err != nil {
-		return statusDocument{}, fmt.Errorf("read the copy-in provenance marker: %w", err)
-	}
-	if !found || !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
-		return document, nil
-	}
+func withCopyInMarker(document statusDocument, marker copyinmarker.Marker) statusDocument {
 	document.Recorded = true
 	document.Evidence = EvidenceCopyInMarker
 	document.Stage = StageCopyIn
@@ -817,7 +1041,7 @@ func withCopyInMarker(databasePath string, document statusDocument) (statusDocum
 	document.SourceKind = marker.SourceKind
 	document.SourceVersion = marker.SourceVersion
 	document.UpdatedAtMS = marker.WrittenAtMS
-	return document, nil
+	return document
 }
 
 // knownStage reports whether this build can name the recorded stage. An empty
@@ -858,16 +1082,21 @@ func nextAction(stage string) string {
 }
 
 // reconciliationSummary projects the operation's reconciliation output through
-// a fixed allow-list: only the days it names. A producer's free-form payload
-// never reaches the browser wholesale.
-func reconciliationSummary(raw string) json.RawMessage {
-	empty := json.RawMessage("{}")
+// a fixed allow-list: only the days it names, deduplicated and chronological.
+// A producer's free-form payload never reaches the browser wholesale.
+//
+// The list is bounded by maxMismatchDays, and the bound is stated: the newest
+// window is kept, the total is reported, and a cut list is flagged. Silently
+// dropping the tail — and, because the list was ascending, the newest days —
+// presented an incomplete history as the whole one.
+func reconciliationSummary(raw string) (reconciliationDocument, error) {
+	empty := emptyReconciliation()
 	if strings.TrimSpace(raw) == "" {
-		return empty
+		return empty, nil
 	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &object); err != nil {
-		return empty
+		return empty, fmt.Errorf("%w: reconciliation is not a JSON object", errStatusRowInvalid)
 	}
 	seen := map[string]bool{}
 	days := []string{}
@@ -878,7 +1107,9 @@ func reconciliationSummary(raw string) json.RawMessage {
 		}
 		var list []string
 		if err := json.Unmarshal(value, &list); err != nil {
-			continue
+			// A named field this projection cannot read is a corrupt row, not an
+			// empty reconciliation.
+			return empty, fmt.Errorf("%w: reconciliation.%s is not a string array", errStatusRowInvalid, key)
 		}
 		for _, day := range list {
 			if !isDate(day) || seen[day] {
@@ -889,14 +1120,19 @@ func reconciliationSummary(raw string) json.RawMessage {
 		}
 	}
 	sort.Strings(days)
-	if len(days) > 366 {
-		days = days[:366]
+	total := len(days)
+	truncated := false
+	if len(days) > maxMismatchDays {
+		// The newest window, not the oldest: the days an operator can still act
+		// on are the recent ones.
+		days = days[len(days)-maxMismatchDays:]
+		truncated = true
 	}
-	encoded, err := json.Marshal(map[string]any{"mismatchDays": days})
-	if err != nil {
-		return empty
-	}
-	return json.RawMessage(encoded)
+	return reconciliationDocument{
+		MismatchDays:          days,
+		MismatchDaysTotal:     total,
+		MismatchDaysTruncated: truncated,
+	}, nil
 }
 
 func isDate(value string) bool {
@@ -917,18 +1153,21 @@ func isDate(value string) bool {
 	return true
 }
 
-func decodeStrings(raw string) []string {
+// decodeStringColumn reads one JSON string-array column. Unlike the lenient
+// reader it replaces, a value that is not a JSON string array is a corrupt row:
+// returning an empty list would present a damaged record as an empty one.
+func decodeStringColumn(raw string, column string) ([]string, error) {
 	values := []string{}
 	if strings.TrimSpace(raw) == "" {
-		return values
+		return values, nil
 	}
 	if err := json.Unmarshal([]byte(raw), &values); err != nil {
-		return []string{}
+		return nil, fmt.Errorf("%w: %s is not a JSON string array", errStatusRowInvalid, column)
 	}
 	if values == nil {
-		return []string{}
+		return []string{}, nil
 	}
-	return values
+	return values, nil
 }
 
 // scrubList applies the content scrubber to every item and keeps the list shape.
@@ -944,39 +1183,41 @@ func scrubList(values []string) []string {
 // credential carries no path, and an error written by another step can quote one
 // without naming a file. A multi-line detail is evidence too, so it is scrubbed
 // line by line instead of being dropped.
+//
+// Credential material is recognised by the project's one content scrubber
+// (usage.SanitizeCredentialText), not by a second vocabulary that could disagree
+// with the usage pipeline about what a key looks like. What this package adds on
+// top is its own policy — source paths, which the usage pipeline does not have —
+// and the cross-line handling below.
 const (
-	redactedText   = "<redacted>"
+	// redactedText is the marker the shared scrubber writes; the cross-line
+	// continuation rule reads it back.
+	redactedText   = "[redacted]"
 	sourceText     = "<source>"
 	maxDetailLine  = 600
 	maxDetailLines = 40
 	// minProductKeyBody is the shortest key body this product issues after its
-	// prefix. The key pattern and the wrapped-key rule both read it.
+	// prefix, and the shortest run this package will treat as the tail of a key
+	// that a line break cut in two.
 	minProductKeyBody = 4
 )
 
 var (
-	// bearerTokenPattern is the credential half of a Bearer value.
-	bearerTokenPattern = regexp.MustCompile(`(?i)(bearer\s+)[^\s,;"'()<>]+`)
-	// basicCredentialPattern is an Authorization: Basic value, which is a
-	// base64-encoded password: it is a credential in a different alphabet.
-	basicCredentialPattern = regexp.MustCompile(`(?i)(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=]{4,}`)
-	// apiKeyHeaderPattern is an x-api-key header, assignment or env-style name.
-	apiKeyHeaderPattern = regexp.MustCompile(`(?i)(x[-_]api[-_]key\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;]+)`)
-	// issuedKeyPattern is the issued key prefix the Manager and its clients use.
-	issuedKeyPattern = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{4,}`)
-	// productKeyPrefixes and productKeyPattern are this product's own key
-	// vocabulary: installation, usage and administrator keys all start with one
-	// of these prefixes and carry no other marker. The prefix match is
-	// case-insensitive, because a key pasted with a different prefix case is
-	// still a credential, and the same list is what a key wrapped across a line
-	// boundary is recognised by.
+	// productKeyPrefixes are this product's own key prefixes. The shared scrubber
+	// recognises the whole key; this list is what a key wrapped across a line
+	// boundary is recognised by, because the tail carries no prefix of its own.
 	productKeyPrefixes = []string{"cpamp_", "cmp_admin_"}
-	productKeyPattern  = regexp.MustCompile(
-		`(?i)\b(?:` + strings.Join(productKeyPrefixes, "|") + `)[A-Za-z0-9_.\-]{` + strconv.Itoa(minProductKeyBody) + `,}`)
-	// passwordPattern is a password written as an assignment: a query string, a
-	// DSN, an env-style variable or a copied command.
-	passwordPattern = regexp.MustCompile(`(?i)(password\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&]+)`)
-	// urlCredentialPattern is a URL whose authority embeds credentials.
+	// issuedKeyPattern and productKeyPattern are this package's stricter reading
+	// of the two key families an error is most likely to quote. The shared
+	// scrubber deliberately requires a long body before it calls something a key;
+	// an error shown to the administrator is read by a human who can act on a
+	// short fragment, so this surface redacts from the prefix. It is a tighter
+	// threshold on the same vocabulary, not a second one.
+	issuedKeyPattern  = regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{4,}`)
+	productKeyPattern = regexp.MustCompile(`(?i)\b(?:` + strings.Join(productKeyPrefixes, "|") + `)[A-Za-z0-9_.\-]{` + strconv.Itoa(minProductKeyBody) + `,}`)
+	// urlCredentialPattern is a URL whose authority embeds credentials. The
+	// shared scrubber covers the header and assignment shapes; a userinfo
+	// password in a URL is a different shape and is redacted here.
 	urlCredentialPattern = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://)[^/\s:@]+(:[^/\s@]*)?@`)
 	// localPathPattern is an absolute POSIX path at a token boundary. The colon
 	// of a URL scheme is not a boundary, so a remote URL is never a local path.
@@ -1018,20 +1259,22 @@ func (s scrubber) text(value string) string {
 		return ""
 	}
 	lines := strings.Split(strings.ReplaceAll(trimmed, "\r\n", "\n"), "\n")
-	// A credential wrapped across two lines is still one credential: a lone
-	// trailing `Bearer` and the line after it are joined before the patterns
-	// see them. Nothing else is joined — a line break is evidence.
-	lines = joinSplitBearer(lines)
+	// A credential wrapped across two lines is still one credential. A label left
+	// on its own — `Bearer`, `Basic`, `password=`, `"password":` — is joined with
+	// the line that carries its value before the patterns see it. Nothing else is
+	// joined: a line break is evidence.
+	lines = joinSplitLabels(lines)
 	scrubbed := make([]string, 0, len(lines))
-	// A product key broken mid-token is one credential too. The line that carries
-	// the head is redacted by the key pattern, and the fragment on the next line
-	// carries no prefix of its own, so the run that continues it is removed there
-	// instead. The line break itself stays: it is still evidence of shape.
+	// Two shapes can be cut by a line break with no label on the tail: a product
+	// key broken mid-token, and a token whose whole tail is the line after a
+	// redaction that consumed the previous line's end. Both tails are removed
+	// where they start. The line break itself stays: it is still evidence of
+	// shape.
 	openKey := false
 	for _, line := range lines {
 		line = strings.ReplaceAll(line, "\x00", "")
 		if openKey {
-			line = redactKeyTail(line)
+			line = redactSecretTail(line, minProductKeyBody)
 		}
 		openKey = endsWithOpenProductKey(line)
 		for _, token := range s.replacements {
@@ -1052,57 +1295,125 @@ func (s scrubber) text(value string) string {
 	return strings.Join(scrubbed, "\n")
 }
 
-// scrubCredentials redacts the credential shapes an error can quote. URL
-// credentials go first so the userinfo cannot be read as part of a token.
+// scrubCredentials redacts the credential shapes an error can quote through the
+// project's shared content scrubber, then applies this package's path policy.
 func scrubCredentials(line string) string {
 	line = urlCredentialPattern.ReplaceAllString(line, "$1"+redactedText+"@")
-	line = basicCredentialPattern.ReplaceAllString(line, "$1"+redactedText)
-	line = bearerTokenPattern.ReplaceAllString(line, "$1"+redactedText)
-	line = apiKeyHeaderPattern.ReplaceAllString(line, "$1"+redactedText)
+	line = usage.SanitizeCredentialText(line)
 	line = productKeyPattern.ReplaceAllString(line, redactedText)
 	line = issuedKeyPattern.ReplaceAllString(line, redactedText)
-	line = passwordPattern.ReplaceAllString(line, "$1"+redactedText)
 	line = windowsPathPattern.ReplaceAllString(line, "$1"+sourceText)
 	line = localPathPattern.ReplaceAllString(line, "$1"+sourceText)
 	return line
 }
 
-// joinSplitBearer joins a line whose last word is a bare `Bearer` with the line
+// joinSplitLabels joins a line that ends with a credential label with the line
 // that carries its value, so a value wrapped onto the next line is redacted
-// instead of surviving as an unlabelled secret.
-func joinSplitBearer(lines []string) []string {
+// instead of surviving as an unlabelled secret. The scheme words, a bare
+// `Authorization:`, and the assignment forms an error message quotes are the
+// labels: a line break after one of them is a wrap, not a delimiter.
+func joinSplitLabels(lines []string) []string {
 	joined := make([]string, 0, len(lines))
 	for _, line := range lines {
-		if len(joined) != 0 && endsWithBareBearer(joined[len(joined)-1]) {
-			joined[len(joined)-1] += " " + strings.TrimSpace(line)
+		if len(joined) == 0 {
+			joined = append(joined, line)
 			continue
 		}
-		joined = append(joined, line)
+		last := joined[len(joined)-1]
+		switch {
+		case endsInsideToken(last) && isSecretFragment(strings.TrimSpace(line)):
+			// A line break inside a token is not a delimiter: the two halves are
+			// one credential, so they are rejoined with nothing between them. Only
+			// a line that is nothing but a token fragment continues the token; any
+			// other line is the next sentence, and a line break there is evidence.
+			joined[len(joined)-1] = last + strings.TrimSpace(line)
+		case endsWithCredentialLabel(last):
+			joined[len(joined)-1] = last + " " + strings.TrimSpace(line)
+		default:
+			joined = append(joined, line)
+		}
 	}
 	return joined
 }
 
-// endsWithBareBearer reports whether a line ends with the scheme word and no
-// value after it.
-func endsWithBareBearer(line string) bool {
-	trimmed := strings.ToLower(strings.TrimRight(line, " \t"))
-	return trimmed == "bearer" || strings.HasSuffix(trimmed, " bearer")
+// endsInsideToken reports whether a line ends in the middle of a labelled
+// credential token: a scheme word and a run of token characters that reaches the
+// end of the line. It is what distinguishes a wrapped token from a complete one.
+func endsInsideToken(line string) bool {
+	trimmed := strings.TrimRight(line, " \t")
+	lower := strings.ToLower(trimmed)
+	for _, label := range []string{"bearer ", "basic "} {
+		at := strings.LastIndex(lower, label)
+		if at < 0 {
+			continue
+		}
+		token := trimmed[at+len(label):]
+		if len(token) >= minProductKeyBody && isSecretFragment(token) && endsOnTokenSeparator(token) {
+			return true
+		}
+	}
+	return false
 }
 
-// redactKeyTail removes the leading key run of a line whose predecessor ended
-// inside a product key: that run is the rest of the token, so it is credential
-// material even though it carries no prefix of its own. A run shorter than the
-// shortest key body is left alone — it is not a fragment this product issues.
-func redactKeyTail(line string) string {
+// endsOnTokenSeparator reports whether a token run ends on one of the characters
+// a key body uses only between parts. A token that stops there was almost
+// certainly cut by the line break; one that stops on an ordinary character is
+// read as complete, because the next line is a sentence far more often than it is
+// the rest of a key. The ambiguity is inherent to a line break with no marker —
+// this is the reading that keeps both real credentials and real messages.
+func endsOnTokenSeparator(token string) bool {
+	if token == "" {
+		return false
+	}
+	switch token[len(token)-1] {
+	case '-', '_', '.', '+', '/', '=':
+		return true
+	default:
+		return false
+	}
+}
+
+// isSecretFragment reports whether a value is nothing but token characters.
+func isSecretFragment(value string) bool {
+	for _, r := range value {
+		if !isSecretRune(r) {
+			return false
+		}
+	}
+	return value != ""
+}
+
+// endsWithCredentialLabel reports whether a line ends with a label whose value
+// is not on it.
+func endsWithCredentialLabel(line string) bool {
+	trimmed := strings.ToLower(strings.TrimRight(line, " \t"))
+	for _, label := range []string{
+		"bearer", "basic", "authorization:", "authorization: basic", "authorization: bearer",
+		`"authorization":`, "x-api-key:", "x_api_key:", "api-key:", "api_key:",
+		"password=", "password:", `password":`,
+	} {
+		if trimmed == label || strings.HasSuffix(trimmed, " "+label) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactSecretTail removes the leading credential run of a line whose
+// predecessor ended inside a token: that run is the rest of the token, so it is
+// credential material even though it carries no prefix of its own. A run shorter
+// than the shortest key body is left alone — it is not a fragment this product
+// issues, and redacting every short word would erase the rest of the error.
+func redactSecretTail(line string, minRun int) string {
 	trimmed := strings.TrimLeft(line, " \t")
 	run := 0
 	for _, r := range trimmed {
-		if !isKeyRune(r) {
+		if !isSecretRune(r) {
 			break
 		}
 		run += len(string(r))
 	}
-	if run < minProductKeyBody {
+	if run < minRun {
 		return line
 	}
 	return redactedText + trimmed[run:]
@@ -1143,6 +1454,12 @@ func isKeyRune(r rune) bool {
 	default:
 		return false
 	}
+}
+
+// isSecretRune reports whether r can appear in a credential token: the product
+// key alphabet plus the base64 alphabet of a Basic value.
+func isSecretRune(r rune) bool {
+	return isKeyRune(r) || r == '+' || r == '/' || r == '='
 }
 
 // capText truncates on a rune boundary so a cut never produces invalid text.
