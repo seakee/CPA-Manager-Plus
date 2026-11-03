@@ -649,16 +649,19 @@ func (r *cpaImportRun) requireStagedDestinationIdentity(ctx context.Context, bas
 	return nil
 }
 
-// requireCredentialGatingListener refuses a URL that is silent or that does not
-// answer as a credential-gating CPA, before any credential of this import is sent
-// to it.
+// requireCredentialGatingListener refuses a URL that is silent or that answers
+// either an absent or an unknown credential, before any credential of this import
+// is sent to it.
 //
 // The endpoint is asked two questions that need no secret: `GET /v1/models` with
 // no credential, and the same read with a fresh random value. A CPA answers 401 to
-// both, because gateway admission rejects an absent or unknown key. An endpoint
-// that accepts either one is not the destination this import stages — it cannot
-// even be shown to enforce the authentication the staged destination was built
-// with — and one that answers nothing cannot be proved at all.
+// both, because gateway admission rejects an absent or unknown key — but so does
+// any other endpoint that gates credentials, and this probe cannot tell them apart
+// (cpaimport_probe.go records the v8.0.13 rejection body that was checked and
+// cannot narrow it). An endpoint that accepts either one is not the destination
+// this import stages — it cannot even be shown to enforce the authentication the
+// staged destination was built with — and one that answers nothing cannot be
+// proved at all.
 func requireCredentialGatingListener(ctx context.Context, baseURL string, boundURL bool) error {
 	probe, probeErr := probeDestinationListener(ctx, baseURL)
 	switch probe {
@@ -666,7 +669,7 @@ func requireCredentialGatingListener(ctx context.Context, baseURL string, boundU
 		return unreachableDestinationError(probeErr, boundURL)
 	case destinationListenerNotCPA:
 		return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
-			"the endpoint at the destination URL answered, but not as the CPA Management API this import stages: a CPA rejects an absent and an unknown credential on GET /v1/models, and this endpoint did not, so the destination management secret this run staged was never sent to it; nothing was written to it", probeErr)
+			"the endpoint at the destination URL answered, but it did not reject both an absent and an unknown credential on GET /v1/models, so it is not the destination this import stages and the management secret this run staged was never sent to it; nothing was written to it", probeErr)
 	default:
 		return nil
 	}

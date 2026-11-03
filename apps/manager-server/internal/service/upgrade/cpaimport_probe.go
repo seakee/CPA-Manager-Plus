@@ -22,13 +22,33 @@ package upgrade
 // # What the probe can and cannot prove
 //
 // The probe presents no credential of this import. It asks whether something
-// answers at all, and whether it answers the way a CPA gateway answers an absent
-// or unknown credential: a rejection. A silent endpoint is classified as
-// unreachable and an endpoint that does not reject is classified as not this
-// destination, and neither ever receives the management secret. What the probe
-// cannot do is name the destination — only the staged secret does that, which is
-// what the authenticated proof reads — so the probe gates the proof instead of
-// replacing it, and the URL is recorded as proved only after the proof passes.
+// answers at all, and whether both an absent and an unknown credential are
+// answered with 401. Any endpoint that answers 401 to both passes: an nginx basic
+// auth front end, an OpenAI-compatible gateway with its own admission, or another
+// CPA. The probe therefore proves "this endpoint enforces some credential", never
+// "this endpoint is a CPA", and the authenticated readback — not the probe — is
+// what names the destination.
+//
+// The CPA v8 rejection body was checked before deciding whether the probe could
+// narrow that, and it cannot. In v8.0.13 (tag d7914af, the release
+// internal/service/cpa/config_schema.go pins) the standard `v1` group — which
+// carries GET /v1/models (internal/api/server_routes.go:64-66) — is guarded by
+// AuthMiddleware, i.e. accessAuthMiddleware with realtimeError=false
+// (internal/api/server_middleware.go:151-159), and that branch writes the message
+// as a plain string: `c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})`
+// (internal/api/server_middleware.go:198). The typed codes
+// AuthErrorCodeNoCredentials ("no_credentials") and AuthErrorCodeInvalidCredential
+// ("invalid_credential") exist in sdk/access/errors.go:13-14,65-71 but never reach
+// that body; the only typed `error.type` the server emits is on the realtime route,
+// and it is "authentication_error" / "server_error"
+// (internal/api/server_middleware.go:183-197). A body-type check would therefore
+// refuse every real CPA, so the gate stays a status check.
+//
+// What follows from that: a silent endpoint is classified as unreachable and an
+// endpoint that does not reject is classified as not this destination, and neither
+// ever receives the management secret. The secret is what the probe cannot
+// replace, which is why the proof runs only behind it and the URL is recorded as
+// proved only after the proof passes.
 
 import (
 	"context"
@@ -63,24 +83,27 @@ const (
 	// refused, the name did not resolve, or no answer arrived within the budget.
 	// It is the only outcome that says nothing about whether the URL is right.
 	destinationListenerSilent destinationListener = iota
-	// destinationListenerNotCPA means something answered, but not as the CPA
-	// gateway this import stages: it either accepted an absent or unknown
-	// credential or answered something other than a rejection, so it is not the
-	// destination and must never be given this run's credential.
+	// destinationListenerNotCPA means something answered, but not with a rejection
+	// of both an absent and an unknown credential: it either accepted one of them
+	// or answered another status, so it is not a credential-gating endpoint at all
+	// and must never be given this run's credential. The next step calls it a
+	// foreign target because that is the refusal the import can act on; it does not
+	// claim the endpoint is a CPA.
 	destinationListenerNotCPA
 	// destinationListenerCredentialGatingCPA means every unauthenticated and
-	// unknown-credential request was rejected exactly as a CPA rejects them. That
-	// is the precondition the authenticated proof may run under; it is not itself
-	// proof that this is the staged destination.
+	// unknown-credential request was answered with 401. Any endpoint that rejects
+	// both credentials this way lands here — a CPA, but also a reverse proxy with
+	// basic auth — so this is the precondition the authenticated proof may run
+	// under and not proof that this is a CPA, let alone the staged destination.
 	destinationListenerCredentialGatingCPA
 )
 
 // probeDestinationListener asks the caller's URL the two questions that need no
-// credential: does anything answer, and does it reject an absent and an unknown
-// credential.
+// credential: does anything answer, and does it answer both an absent and an
+// unknown credential with 401.
 //
 // Both requests are read-only `GET /v1/models`, the same read the authenticated
-// proof begins with, over a transport of its own: no proxy, no redirect, no retry
+// proof begins with, over the direct transport: no proxy, no redirect, no retry
 // and one five-second budget per request. It never mutates a CPA.
 func probeDestinationListener(ctx context.Context, baseURL string) (destinationListener, error) {
 	status, err := probeModelsStatus(ctx, baseURL, "")
