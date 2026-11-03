@@ -1451,16 +1451,18 @@ Both wizards render one shared `FreshAdoptFlow`:
   headers can outlast the rule;
 - the success headline is a claim about the copy, so it requires a settled run,
   no retryable or unprocessed item, no manual item, no failed item and a complete
-  installation. A complete installation that still has manual or non-retryable
-  failed items shows "Installation complete — manual steps remain" with the real
-  counts in all four locales, never the complete-adoption sentence; a settled run
-  that is not yet complete keeps "Migration settled" and names what remains. The
-  hosts honour the same rule: the flow hands its last summary to `onComplete`, the
-  setup wizard's final step then shows that headline, the counts and each
-  remaining item's guidance instead of "Your CPAMP management console is ready",
-  and the guided Console keeps the flow on screen with an explicit console action
-  rather than entering the console automatically. A clean Adopt, New Managed and
-  External keep their unchanged success step;
+  installation. A complete installation that still has manual items or failed
+  items — including the retryable items of the run the operator accepted, which the
+  server completes only over that run-bound acknowledgement — shows "Installation
+  complete — manual steps remain" with the real counts in all four locales, never
+  the complete-adoption sentence; a settled run whose installation is not complete,
+  or whose retryable items have not been accepted, keeps "Migration settled" and
+  names what remains. Both hosts apply one exported rule: the flow hands its last
+  summary to `onComplete`, the setup wizard's final step then shows that headline,
+  the counts and each remaining item's guidance instead of "Your CPAMP management
+  console is ready", and the guided Console keeps the flow on screen with an
+  explicit console action rather than entering the console automatically. A clean
+  Adopt, New Managed and External keep their unchanged success step;
 - the plugin opt-in, once the record holds a strategy, displays and submits the
   persisted `pluginsEnabled`, locked, in both the Adopt flow and the New Managed
   page — never the local draft a reload started from;

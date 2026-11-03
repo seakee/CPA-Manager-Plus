@@ -16,6 +16,7 @@ import {
 } from './bootstrapTransport';
 import {
   adoptStrategyBody,
+  adoptionCompletionState,
   groupAdoptionItems,
   normalizeCPAAddress,
   validManagementKey,
@@ -695,28 +696,15 @@ export function FreshAdoptFlow({
   const manualCount = summary?.counts.manual ?? 0;
   const failedCount = summary?.counts.failed ?? 0;
   // The installation can be complete while the copy is not: the server allows a
-  // manual item or a non-retryable failure to stand, and neither means the
-  // resource was copied. The success headline is a claim about the copy, so it
-  // needs the settled run, no retryable item, no unprocessed plan item, no
-  // manual work and no failure, and the completed installation.
-  const migrationCopiedEverything = manualCount === 0 && failedCount === 0;
-  const adoptionComplete =
-    !!summary &&
-    settledRun &&
-    summary.retryable === 0 &&
-    remaining === 0 &&
-    migrationCopiedEverything &&
-    operation.productComplete;
-  // The split state: the installation finished, but items still need the
-  // operator's own work. It keeps its own headline instead of borrowing the
-  // complete-adoption sentence.
-  const installationComplete =
-    !!summary &&
-    settledRun &&
-    summary.retryable === 0 &&
-    remaining === 0 &&
-    !migrationCopiedEverything &&
-    operation.productComplete;
+  // manual item, a non-retryable failure, or the retryable items of the run the
+  // operator accepted to stand, and none of them means the resource was copied.
+  // The success headline is a claim about the copy, so it needs the settled run,
+  // no retryable item, no unprocessed plan item, no manual work and no failure,
+  // and the completed installation. The split state keeps the installation's own
+  // headline and the failed items with their counts.
+  const completionState = adoptionCompletionState(summary, operation.productComplete === true);
+  const adoptionComplete = completionState === 'complete';
+  const installationComplete = completionState === 'partial';
   const needingResume =
     !!summary && !summary.running && (!summary.finished || summary.retryable > 0 || remaining > 0);
   const resumeForm = needingResume && !body;
@@ -990,7 +978,11 @@ export function FreshAdoptFlow({
                 )}
               </>
             )}
-            {summary && summary.retryable > 0 && !summary.running && (
+            {summary && summary.retryable > 0 && !summary.running && !operation.productComplete && (
+              // While the installation is not complete this sentence carries the
+              // next action: resume, or finish anyway. Once it is complete, both
+              // actions are gone — the failed group and the split headline state
+              // the remainder instead.
               <p className="journey-help" data-testid="adopt-retryable">
                 {adoptText('retryableRefusal', { count: summary.retryable })}
               </p>

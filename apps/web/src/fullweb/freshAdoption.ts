@@ -159,6 +159,34 @@ export function groupAdoptionItems(summary: AdoptionSummary): AdoptionGroups {
   return groups;
 }
 
+/**
+ * What a recorded run lets its host say about the installation and the copy.
+ *
+ * The two are different facts. The installation completing is the server's
+ * decision, and the server grants it over retryable items once the operator has
+ * accepted this exact run: the acknowledgement is durable and run-bound, so a
+ * positive retryable count means the decision was taken, not that it is still
+ * open. What the copy left behind is the record's own count of manual and failed
+ * items, and only a settled run that recorded its whole plan with nothing left
+ * over may say the adoption itself is complete.
+ *
+ * Both hosts call this, so the completion step of a wizard and the shared flow
+ * cannot disagree about the same run.
+ */
+export type AdoptionCompletionState = 'none' | 'partial' | 'complete';
+
+export function adoptionCompletionState(
+  summary: AdoptionSummary | null | undefined,
+  productComplete: boolean
+): AdoptionCompletionState {
+  if (!summary || !summary.finished || summary.running || !productComplete) return 'none';
+  const left = Math.max(summary.planned, summary.items.length) - summary.items.length;
+  if (left !== 0) return 'none';
+  if (summary.counts.manual === 0 && summary.counts.failed === 0)
+    return summary.retryable === 0 ? 'complete' : 'none';
+  return 'partial';
+}
+
 const kinds: Record<string, true> = {
   credential: true,
   config_leaf: true,
