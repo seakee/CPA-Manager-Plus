@@ -28,7 +28,7 @@ func (a *freshApplication) providerNames(w http.ResponseWriter, r *http.Request,
 	}
 	grant := a.externalReadGrant(r.Context())
 	if grant.Refused {
-		w.WriteHeader(http.StatusConflict)
+		writeExternalManagementRejected(w)
 		return
 	}
 	if r.Method == http.MethodGet {

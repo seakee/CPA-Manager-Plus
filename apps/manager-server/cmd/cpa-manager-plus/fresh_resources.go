@@ -21,13 +21,23 @@ import (
 )
 
 func guardFreshLegacyWrites(next http.Handler, wiringErr error) http.Handler {
-	if wiringErr == nil {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "Console writes are unavailable", http.StatusServiceUnavailable)
-			return
+			if wiringErr != nil {
+				http.Error(w, "Console writes are unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			// Only the v2 Fresh bridge uses this guard. Flat provider-section
+			// writes rebuild native groups and can erase names or split keys.
+			// Refuse them even for an old tab or a direct API caller.
+			path := strings.TrimRight(r.URL.Path, "/")
+			for _, section := range []string{"codex-api-key", "claude-api-key", "gemini-api-key", "interactions-api-key", "xai-api-key", "vertex-api-key", "openai-compatibility", "meta-api-key"} {
+				base := "/v0/management/" + section
+				if path == base || strings.HasPrefix(path, base+"/") {
+					writeLegacyRefusal(w, "legacy_provider_write_paused")
+					return
+				}
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

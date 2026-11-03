@@ -5056,14 +5056,15 @@
     }
   },
   "provider_names": {
+    "legacy_paused": "為保護原生名稱與憑證分組，Full Web v2 已暫停舊版提供商的編輯、新增、刪除、啟停及批次健康檢查寫入。原生提供商管理就緒前，請透過 CPA 原生管理介面修改憑證。",
     "title": "供應商群組名稱",
-    "hint": "將信箱或備註儲存為 CPA v8 原生群組名稱。名稱僅供顯示，不作為路由身分。重新整理會捨棄目前草稿。",
+    "hint": "可為 codex、claude、gemini、interactions、xai、vertex 分組儲存信箱或顯示名稱。本編輯器不支援 OpenAI 相容身分名稱及 meta 分組。重新整理會捨棄目前草稿。",
     "refresh": "重新整理名稱",
-    "read_failed": "無法讀取名稱，需要支援設定 ETag 的 CPA v8。",
+    "read_failed": "無法讀取名稱。本編輯器需要設定 GET ETag 與原子 If-Match 寫入能力（CPA v8.0.31+ 合約）；不支援更早的 v8 版本。",
     "save_failed": "無法確認儲存結果，草稿已保留。請先重新整理再編輯，不會自動重試寫入。",
     "loading": "正在讀取供應商名稱…",
     "read_only": "目前安裝為唯讀。",
-    "empty": "尚無 API Key 供應商群組。",
+    "empty": "暫無支援的提供商分組（codex、claude、gemini、interactions、xai、vertex）。其他提供商類型不在此顯示。",
     "unnamed": "未命名群組",
     "edit": "編輯名稱",
     "name": "信箱 / 顯示名稱",

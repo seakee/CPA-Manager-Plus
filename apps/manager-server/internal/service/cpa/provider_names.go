@@ -17,7 +17,16 @@ func (t *Transport) ReadProviderNameDocument(ctx context.Context, management str
 		return nil, "", ErrProofUnavailable
 	}
 	code, body, headers, err := t.requestHeaders(ctx, http.MethodGet, "/v8/management/config", management, nil, nil)
-	if err != nil || code != http.StatusOK {
+	if err != nil {
+		return nil, "", ErrProofUnavailable
+	}
+	switch code {
+	case http.StatusUnauthorized:
+		return nil, "", ErrManagementRejected
+	case http.StatusForbidden:
+		return nil, "", ErrManagementClientForbidden
+	case http.StatusOK:
+	default:
 		return nil, "", ErrProofUnavailable
 	}
 	etag := headers.Get("ETag")
@@ -37,6 +46,12 @@ func (t *Transport) PutProviderNameGroups(ctx context.Context, management, provi
 	code, body, _, err := t.requestHeaders(ctx, http.MethodPut, "/v8/management/config/api-keys/"+provider, management, payload, http.Header{"If-Match": {etag}})
 	if err != nil {
 		return ErrApplyUnknown
+	}
+	if code == http.StatusUnauthorized {
+		return ErrManagementRejected
+	}
+	if code == http.StatusForbidden {
+		return ErrManagementClientForbidden
 	}
 	if code == http.StatusPreconditionFailed {
 		return ErrConfigChanged
@@ -58,7 +73,7 @@ func validConfigETag(value string) bool {
 // ProviderNameKind is deliberately closed; paths never come from arbitrary input.
 func ProviderNameKind(value string) bool {
 	switch value {
-	case "codex", "claude", "gemini", "interactions", "xai", "vertex", "openai-compatibility":
+	case "codex", "claude", "gemini", "interactions", "xai", "vertex":
 		return true
 	}
 	return false

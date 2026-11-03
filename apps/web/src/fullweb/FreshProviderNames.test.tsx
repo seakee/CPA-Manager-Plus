@@ -117,6 +117,67 @@ describe('native CPA provider group names', () => {
     await act(async () => resolve(snapshot));
     expect(JSON.stringify(renderer.toJSON())).not.toContain('old@example.com');
   });
+  it('keeps the draft when another installation returns the same name and index', async () => {
+    const api = client();
+    await mount(api);
+    await edit('draft@example.com');
+    api.get.mockResolvedValue({
+      ...snapshot,
+      generation: '8',
+      groups: [{ ...snapshot.groups[0], name: 'draft@example.com' }],
+    });
+    await save();
+    expect(renderer.root.findByType('input').props.value).toBe('draft@example.com');
+    expect(renderer.root.findByProps({ role: 'alert' }).children).toContain(
+      'provider_names.save_failed'
+    );
+    expect(button('save').props.disabled).toBe(true);
+    expect(button('edit').props.disabled).toBe(true);
+    await save();
+    expect(api.put).toHaveBeenCalledTimes(1);
+    // Only an explicit refresh accepts the new target; it never replays the write.
+    await act(async () => button('refresh').props.onClick());
+    expect(renderer.root.findAllByType('input')).toHaveLength(0);
+    expect(button('edit').props.disabled).toBe(false);
+    expect(api.put).toHaveBeenCalledTimes(1);
+  });
+  it('ignores an old write readback after the authenticated scope changes', async () => {
+    const api = client();
+    await mount(api);
+    await edit('old-target@example.com');
+    let finish!: (value: unknown) => void;
+    api.get.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    await save();
+    const next = client();
+    next.get.mockResolvedValue({ ...snapshot, generation: '8', groups: [] });
+    await act(async () =>
+      renderer.update(
+        <FreshProviderNames
+          client={next as PublicApiClient}
+          credential="new-admin"
+          onUnauthorized={unauthorized}
+        />
+      )
+    );
+    await act(async () =>
+      finish({ ...snapshot, groups: [{ ...snapshot.groups[0], name: 'old-target@example.com' }] })
+    );
+    expect(renderer.root.findAllByType('input')).toHaveLength(0);
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('old-target@example.com');
+    expect(next.put).not.toHaveBeenCalled();
+  });
+  it.each(['openai-compatibility', 'meta', '../../codex'])(
+    'rejects an unsupported UI projection: %s',
+    (provider) => {
+      expect(() =>
+        parseProviderNames({ ...snapshot, groups: [{ ...snapshot.groups[0], provider }] })
+      ).toThrow();
+    }
+  );
   it('does not accept a malformed projection', () => {
     expect(() =>
       parseProviderNames({ ...snapshot, groups: [{ ...snapshot.groups[0], index: -1 }] })

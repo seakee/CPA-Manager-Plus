@@ -99,3 +99,30 @@ func TestProviderNamePrivateScopeFrozen(t *testing.T) {
 		t.Fatal("private scope widened")
 	}
 }
+
+func TestProviderNamesExcludeIdentityNamesAndUnqualifiedFamilies(t *testing.T) {
+	svc, wire, _ := nameService(t)
+	keys := wire.document["api-keys"].(map[string]any)
+	for _, provider := range []string{"openai-compatibility", "meta"} {
+		keys[provider] = []any{map[string]any{"name": "identity-not-a-label", "keys": []any{map[string]any{"api-key": "secret"}}}}
+		q := nameRequest()
+		q.Provider = provider
+		if !errors.Is(svc.RenameProvider(t.Context(), q), ErrInvalid) || wire.writes != 0 {
+			t.Fatal("unsupported family was writable")
+		}
+	}
+	view, err := svc.ProviderNames(t.Context())
+	if err != nil || len(view.Groups) != 2 {
+		t.Fatalf("projection: %+v %v", view, err)
+	}
+	for _, group := range view.Groups {
+		if group.Provider != "codex" {
+			t.Fatal("identity name projected")
+		}
+	}
+	delete(keys, "codex")
+	view, err = svc.ProviderNames(t.Context())
+	if err != nil || len(view.Groups) != 0 {
+		t.Fatalf("meta/identity-only projection: %+v %v", view, err)
+	}
+}

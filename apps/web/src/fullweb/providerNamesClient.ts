@@ -21,7 +21,7 @@ export function parseProviderNames(value: unknown): View {
     !v.groups.every(
       (g) =>
         g &&
-        typeof g.provider === 'string' &&
+        ['codex', 'claude', 'gemini', 'interactions', 'xai', 'vertex'].includes(g.provider) &&
         Number.isSafeInteger(g.index) &&
         g.index >= 0 &&
         typeof g.name === 'string'

@@ -24,7 +24,6 @@ import { ManagerUpdates } from '../features/system/ManagerUpdates';
 import { SystemPage } from '../features/system/SystemPage';
 import { RuntimeStatusPage } from '@/features/system/RuntimeStatusPage';
 import { FreshProviderNames } from './FreshProviderNames';
-import { AiProvidersPage } from '../features/aiProviders/AiProvidersPage';
 import { FreshSystemWorkspace } from './FreshSystemWorkspace';
 import { useAuthStore } from '../stores';
 import { FreshManagedResources } from './FreshManagedResources';
@@ -162,16 +161,15 @@ export function LegacyConsolePage({
             // active drafts, one-time secrets and in-flight operations are
             // retained across page transitions.
             if (route === '/api-keys') return null;
-            if (route === '/ai-providers')
+            // Retire every legacy Provider editor, including bookmarked child
+            // routes. Its flat-section writes can rebuild native groups.
+            if (route === '/ai-providers' || route.startsWith('/ai-providers/'))
               return (
-                <>
-                  <FreshProviderNames
-                    client={client}
-                    credential={credential}
-                    onUnauthorized={onUnauthorized}
-                  />
-                  <AiProvidersPage />
-                </>
+                <FreshProviderNames
+                  client={client}
+                  credential={credential}
+                  onUnauthorized={onUnauthorized}
+                />
               );
             if (route === '/gateway' || route === '/config') return null;
             if (route === '/system') {

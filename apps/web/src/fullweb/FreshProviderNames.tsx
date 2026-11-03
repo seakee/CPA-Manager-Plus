@@ -110,7 +110,8 @@ export function FreshProviderNames({
       const saved = next.groups.find(
         (g) => g.provider === editing.provider && g.index === editing.index
       );
-      if (!saved || saved.name !== draft.trim()) throw new Error('readback mismatch');
+      if (next.generation !== view.generation || !saved || saved.name !== draft.trim())
+        throw new Error('readback mismatch');
       setView(next);
       setEditing(null);
       setDraft('');
@@ -139,6 +140,7 @@ export function FreshProviderNames({
       }
     >
       <p className="hint">{t('provider_names.hint')}</p>
+      <p role="status">{t('provider_names.legacy_paused')}</p>
       {error && (
         <p role="alert" className="error-box">
           {error}
@@ -185,6 +187,7 @@ export function FreshProviderNames({
             {t('provider_names.save')}
           </Button>{' '}
           <Button
+            type="button"
             variant="secondary"
             disabled={busy}
             onClick={() => {

@@ -57,7 +57,9 @@ func ValidateProviderName(q ProviderNameRequest) error {
 func projectProviderNames(document map[string]any, generation, etag string, writable bool) ProviderNamesView {
 	view := ProviderNamesView{Generation: generation, ETag: etag, Writable: writable, Groups: []ProviderName{}}
 	keys, _ := document["api-keys"].(map[string]any)
-	for _, provider := range []string{"codex", "claude", "gemini", "interactions", "xai", "vertex", "openai-compatibility"} {
+	// OpenAI-compatible names are identifiers, not display-only metadata. Meta
+	// remains unsupported until its name contract is independently qualified.
+	for _, provider := range []string{"codex", "claude", "gemini", "interactions", "xai", "vertex"} {
 		groups, _ := keys[provider].([]any)
 		for index, value := range groups {
 			group, ok := value.(map[string]any)
