@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -496,6 +497,60 @@ func TestImportCPAUnreachableAfterAProofKeepsTheProvedURL(t *testing.T) {
 	}
 	if strings.Contains(message, "corrected URL") || strings.Contains(message, "still accepted") {
 		t.Fatalf("a proved attempt is told its URL is replaceable: %v", err)
+	}
+}
+
+// TestImportCPAProbesTheAddressTheProofDials is the Low finding: the probe built
+// its own transport with the default dialer, which falls back from a dead first
+// address to the second one a dual-stack name resolves to, while
+// cpa.VerifyV8Adoption pins the first address of its own resolution. A destination
+// that answers only behind the second address therefore passed the probe, failed
+// the proof, and was then reported as a foreign target for a URL that was correct.
+// The probe now shares cpa.NewDirectClient, so probe, proof and classification
+// either reach the same address or report that nothing answered.
+func TestImportCPAProbesTheAddressTheProofDials(t *testing.T) {
+	ctx := context.Background()
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, "localhost")
+	if err != nil {
+		t.Fatalf("resolve localhost: %v", err)
+	}
+	if len(addresses) < 2 {
+		t.Skipf("localhost resolves to %d address(es) here, so the dual-stack case cannot be built", len(addresses))
+	}
+	// The CPA stand-in answers only on an address the direct transport does not
+	// dial: a probe that falls back would reach it, the pinned proof would not.
+	listener, err := net.Listen("tcp", net.JoinHostPort(addresses[1].IP.String(), "0"))
+	if err != nil {
+		t.Skipf("listen on the second resolved address %s: %v", addresses[1].IP, err)
+	}
+	var mu sync.Mutex
+	reached := 0
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		reached++
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"Missing API key"}`))
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	staged := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = staged
+	targetURL := "http://localhost:" + strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	_, err = ImportCPA(ctx, importOptions(fixture, runtime, targetURL, boolPointer(true)))
+	code, ok := UpgradeErrorCodeOf(err)
+	if !ok || code != UpgradeErrorCPAImportTargetUnreachable {
+		t.Fatalf("a destination reachable only behind the second resolved address produced %v (code %q), want %s",
+			err, code, UpgradeErrorCPAImportTargetUnreachable)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if reached != 0 {
+		t.Fatalf("the destination behind %s answered %d request(s), so the probe and the proof resolved localhost differently",
+			addresses[1].IP, reached)
 	}
 }
 

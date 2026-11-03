@@ -656,18 +656,18 @@ func (r *cpaImportRun) requireStagedDestinationIdentity(ctx context.Context, bas
 // The endpoint is asked two questions that need no secret: `GET /v1/models` with
 // no credential, and the same read with a fresh random value. A CPA answers 401 to
 // both, because gateway admission rejects an absent or unknown key — but so does
-// any other endpoint that gates credentials, and this probe cannot tell them apart
-// (cpaimport_probe.go records the v8.0.13 rejection body that was checked and
-// cannot narrow it). An endpoint that accepts either one is not the destination
+// any other endpoint that gates credentials, and cpa.ProbeV8Listener cannot tell
+// them apart (its file header records the v8.0.13 rejection body that was checked
+// and cannot narrow it). An endpoint that accepts either one is not the destination
 // this import stages — it cannot even be shown to enforce the authentication the
 // staged destination was built with — and one that answers nothing cannot be
 // proved at all.
 func requireCredentialGatingListener(ctx context.Context, baseURL string, boundURL bool) error {
-	probe, probeErr := probeDestinationListener(ctx, baseURL)
+	probe, probeErr := cpa.ProbeV8Listener(ctx, baseURL)
 	switch probe {
-	case destinationListenerSilent:
+	case cpa.V8ListenerSilent:
 		return unreachableDestinationError(probeErr, boundURL)
-	case destinationListenerNotCPA:
+	case cpa.V8ListenerNotCredentialGated:
 		return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
 			"the endpoint at the destination URL answered, but it did not reject both an absent and an unknown credential on GET /v1/models, so it is not the destination this import stages and the management secret this run staged was never sent to it; nothing was written to it", probeErr)
 	default:
@@ -704,8 +704,8 @@ func unreachableDestinationError(err error, boundURL bool) error {
 // as the proof's own verdict says. Both refusals leave the recorded operation and
 // the attempt where they were.
 func classifyDestinationProofFailure(ctx context.Context, baseURL string, proofErr error, boundURL bool) error {
-	probe, probeErr := probeDestinationListener(ctx, baseURL)
-	if probe == destinationListenerSilent {
+	probe, probeErr := cpa.ProbeV8Listener(ctx, baseURL)
+	if probe == cpa.V8ListenerSilent {
 		return unreachableDestinationError(errors.Join(proofErr, probeErr), boundURL)
 	}
 	return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
