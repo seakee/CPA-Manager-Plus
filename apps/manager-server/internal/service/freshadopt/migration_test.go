@@ -1990,3 +1990,66 @@ func TestCredentialStateReadsOnlyTheOneCredential(t *testing.T) {
 		}
 	}
 }
+
+// The executor's clones must carry the run generation: the checkpoint a run
+// writes is the record's own generation, and a clone that dropped it would make
+// every checkpoint of that run look like a different run's.
+func TestExecutorCarriesTheRunGenerationThroughItsClones(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	runID := strings.Repeat("a", 32)
+	previous := freshstore.AdoptionSummary{RunID: runID}
+	checkpoints := 0
+	summary := runMigrationWithCheckpoint(t, source, destination, previous, func(current freshstore.AdoptionSummary) error {
+		checkpoints++
+		if current.RunID != runID {
+			t.Fatalf("a checkpoint carried the wrong generation: %q", current.RunID)
+		}
+		return nil
+	})
+	if checkpoints == 0 {
+		t.Fatal("the run checkpointed nothing")
+	}
+	if summary.RunID != runID {
+		t.Fatalf("the result dropped the generation: %q", summary.RunID)
+	}
+}
+
+// An earlier executor recorded an over-long credential as the digest of its
+// whole name. A resume recognises that identity from the current preflight name
+// and records nothing for the file: the durable item is the outcome the operator
+// was already told about, and appending the current identity would duplicate it.
+func TestLegacyOverlongIdentityIsNotRecordedAgainOnResume(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	long := strings.Repeat("a", freshstore.MaxAdoptionItemName()) + ".json"
+	source.seedAuthFile(long, "claude", []byte(`{"type":"claude","access_token":"legacy-token"}`), false)
+
+	legacy := freshstore.AdoptionItem{
+		Item: legacyOverlongCredentialItem(long), Kind: freshstore.AdoptionKindCredential,
+		Outcome: freshstore.AdoptionManual, Reason: "adoption_item_name_too_long",
+		Instruction: "Copy the credential file by hand.",
+	}
+	previous := freshstore.AdoptionSummary{Items: []freshstore.AdoptionItem{legacy}}
+
+	summary := runMigration(t, source, destination, previous)
+	if item, ok := summary.Item(legacyOverlongCredentialItem(long)); !ok || item != legacy {
+		t.Fatalf("a resume rewrote the legacy item: %+v", item)
+	}
+	if _, ok := summary.Item(overlongCredentialItem(long)); ok {
+		t.Fatal("a resume appended a second record for a file an earlier run settled")
+	}
+	tooLong := 0
+	for _, item := range summary.Items {
+		if item.Reason == "adoption_item_name_too_long" {
+			tooLong++
+		}
+	}
+	if tooLong != 1 {
+		t.Fatalf("the resume recorded %d over-long items for one file", tooLong)
+	}
+	// The file is still not copied: the durable record says the operator must do
+	// it by hand, and the identity being recognised does not change that.
+	if _, stored := destination.credential(long); stored {
+		t.Fatal("a credential whose earlier record is manual was uploaded anyway")
+	}
+	source.usesOnlyReads(t)
+}

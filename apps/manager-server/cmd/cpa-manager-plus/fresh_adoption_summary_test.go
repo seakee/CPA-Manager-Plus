@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -99,6 +100,9 @@ func TestAdoptionSummaryReportsTheRecordedItems(t *testing.T) {
 	if reply.Planned != record.AdoptionSummary.Planned || !reply.Finished || reply.Running {
 		t.Fatalf("run markers disagree with the record: %+v", reply)
 	}
+	if reply.RunID != record.AdoptionSummary.RunID || len(reply.RunID) != 32 {
+		t.Fatalf("the reply does not carry the run generation: %q", reply.RunID)
+	}
 	if len(reply.Items) != len(record.AdoptionSummary.Items) || len(reply.Items) == 0 {
 		t.Fatalf("items disagree with the record: %d vs %d", len(reply.Items), len(record.AdoptionSummary.Items))
 	}
@@ -133,6 +137,10 @@ func TestAdoptionSummaryReportsTheRecordedItems(t *testing.T) {
 		if item.Outcome == string(freshstore.AdoptionManual) && item.Reason == "" {
 			t.Fatalf("a manual item carries no reason: %+v", item)
 		}
+	}
+	// The generation is a fact about the record, not about one read of it.
+	if again := readAdoption(t, fixture.adoption(t)); again.RunID != reply.RunID {
+		t.Fatalf("the run generation changed between two reads")
 	}
 }
 
@@ -227,10 +235,16 @@ func TestAdoptionSummaryReportsTheRunInFlight(t *testing.T) {
 	if !inFlight.Running || inFlight.Finished {
 		t.Fatalf("an in-flight run was reported as settled: %+v", inFlight)
 	}
+	if len(inFlight.RunID) != 32 {
+		t.Fatalf("the in-flight run carries no generation: %+v", inFlight)
+	}
 	release()
 	fixture.wait()
 	if settled := readAdoption(t, fixture.adoption(t)); settled.Running || !settled.Finished {
 		t.Fatalf("a settled run was reported as in flight: %+v", settled)
+	}
+	if settled := readAdoption(t, fixture.adoption(t)); settled.RunID != inFlight.RunID {
+		t.Fatalf("the settled run changed generation without a new run")
 	}
 }
 
@@ -315,7 +329,7 @@ func TestAdoptionSummaryLeaksNoSecretOrDigest(t *testing.T) {
 			t.Fatalf("the summary leaked a secret: %s", body)
 		}
 	}
-	for _, field := range []string{"sourceSha256", "destinationSha256", "secret-key", "managementKey", "access_token"} {
+	for _, field := range []string{"sourceSha256", "destinationSha256", "secret-key", "managementKey", "access_token", "instruction"} {
 		if strings.Contains(body, field) {
 			t.Fatalf("the summary carried %q: %s", field, body)
 		}
@@ -325,8 +339,8 @@ func TestAdoptionSummaryLeaksNoSecretOrDigest(t *testing.T) {
 // The summary route is the read face of text the Manager did not author: a
 // credential file name is the source CPA's metadata, and the type string is the
 // destination's. Both travel through the migration record, and neither may be
-// echoed to the browser as free text — the reply is a projection of typed codes
-// and scrubbed identifiers, not the record's prose.
+// echoed to the browser as free text — the reply is a projection of typed codes,
+// closed-vocabulary references and generic labels.
 func TestAdoptionSummaryRedactsUntrustedMetadata(t *testing.T) {
 	// A Client Key and a credential token in the shapes CPA issues, placed where
 	// the run reads names and types rather than values.
@@ -365,6 +379,20 @@ func TestAdoptionSummaryRedactsUntrustedMetadata(t *testing.T) {
 	}
 	if strings.Contains(body, untrustedToken) || strings.Contains(body, "classifies it as") {
 		t.Errorf("the summary carried the destination's type metadata: %s", body)
+	}
+	// The item is still reported, under a generic label with its bounded reason.
+	reply := readAdoptionJSON(t, fixture.adoption(t))
+	shown := false
+	for _, item := range reply.Items {
+		if item.Kind == string(freshstore.AdoptionKindCredential) && item.Reason == "type_diverged" {
+			shown = true
+			if !strings.HasPrefix(item.Item, adoptionCredentialLabel+" #") {
+				t.Errorf("a credential item was not projected structurally: %+v", item)
+			}
+		}
+	}
+	if !shown {
+		t.Fatalf("the diverged credential was not reported at all: %+v", reply.Items)
 	}
 }
 
@@ -418,6 +446,7 @@ type summaryItemJSON struct {
 
 type summaryJSON struct {
 	Items     []summaryItemJSON `json:"items"`
+	RunID     string            `json:"runId"`
 	Planned   int               `json:"planned"`
 	Finished  bool              `json:"finished"`
 	Running   bool              `json:"running"`
@@ -436,22 +465,51 @@ func readAdoptionJSON(t *testing.T, response *httptest.ResponseRecorder) summary
 	return reply
 }
 
-// A Client Key used verbatim as a credential file name is the one credential
-// shape the project's scrubber cannot see: a bare digest or a UUID has no prefix
-// to recognise. The reply is therefore redacted by value as well, from the source
-// keys the migration itself read.
-func TestAdoptionSummaryRedactsTheSourceClientKeysByValue(t *testing.T) {
+// noProtectedFragment fails when any window of at least eight bytes of a
+// protected value reaches the reply. Eight is the shortest value this Manager
+// treats as a credential, so a shorter window cannot identify one; a longer one
+// must never be emitted.
+func noProtectedFragment(t *testing.T, body string, value string) {
+	t.Helper()
+	for start := 0; start+8 <= len(value); start++ {
+		if fragment := value[start : start+8]; strings.Contains(body, fragment) {
+			t.Fatalf("the summary carried an eight-byte fragment of a protected value: %q", fragment)
+		}
+	}
+}
+
+// A credential file name is source metadata and can be, or contain, a credential
+// whose shape the project's scrubber does not recognise. The reply therefore
+// never carries the name at all: every credential item is a Manager-owned label
+// with a stable ordinal, whether the value appears whole, as a prefix, a middle
+// or a suffix fragment, across two values' start offset, under an overlong cut,
+// or as the marker's own literal text.
+func TestAdoptionSummaryProjectsCredentialItemsStructurally(t *testing.T) {
 	const (
-		hexKey  = "d41d8cd98f00b204e9800998ecf8427e"
-		uuidKey = "3f2504e0-4f89-11d3-9a0c-0305e82c3301"
+		middleValue  = "middleValue0123456789abcdefghij"
+		suffixValue  = "suffixValue0123456789abcdefghijkl"
+		overlapValue = "01234567overlapValueabcdefghij"
+		markerName   = "[redacted]-literalValue0123456789"
 	)
-	keys := []string{migrationSourceClientValue, hexKey, uuidKey}
-	// The source presents all three shapes, and the destination was staged from
-	// that inventory, so verification compares the same list.
-	fixture := newAdoptMigrationFixtureWithClientKeys(t, keys...)
-	for _, key := range keys {
-		name := key + ".json"
-		fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"value-` + key + `"}`)
+	// Two real source client keys: one used whole as a name, one only as a middle
+	// fragment. The rest are ordinary names carrying the fragments above.
+	wholeKey := "sk-wholeValue0123456789abcdef"
+	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, wholeKey)
+	overlong := strings.Repeat("p", 100) + "overlongValue0123456789abcdefgh" + strings.Repeat("q", 200) + ".json"
+	names := []string{
+		migrationSourceClientValue + ".json",
+		wholeKey + ".json",
+		"prefix-" + middleValue[10:] + ".json",
+		"trailer-" + suffixValue[len(suffixValue)-16:] + ".json",
+		// Two values whose matches start at different offsets in the same text:
+		// the shorter one is a prefix of the longer one and the longer one starts
+		// where the shorter ends.
+		overlapValue[:16] + overlapValue + ".json",
+		markerName + ".json",
+		overlong,
+	}
+	for _, name := range names {
+		fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
 		fixture.source.types[name] = "claude"
 	}
 	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
@@ -460,359 +518,93 @@ func TestAdoptionSummaryRedactsTheSourceClientKeysByValue(t *testing.T) {
 	fixture.wait()
 
 	// The record really does hold the names, so the reply's silence below is the
-	// boundary's doing rather than an accident of the run.
+	// projection's doing rather than an accident of the run. An overlong name is
+	// recorded as a bounded prefix, which is still identity text.
 	record := fixture.reload(t)
-	named := 0
-	for _, item := range record.AdoptionSummary.Items {
-		for _, key := range keys {
-			if strings.Contains(item.Item, key) {
-				named++
+	for _, name := range names {
+		needle := name
+		if len(needle) > 120 {
+			needle = needle[:120]
+		}
+		found := false
+		for _, item := range record.AdoptionSummary.Items {
+			if strings.Contains(item.Item, needle) {
+				found = true
 			}
 		}
-	}
-	if named != len(keys) {
-		t.Fatalf("the run recorded %d of %d client-key names: %+v", named, len(keys), record.AdoptionSummary.Items)
-	}
-
-	body := fixture.adoption(t).Body.String()
-	for _, key := range keys {
-		if strings.Contains(body, key) {
-			t.Errorf("the summary echoed the source Client Key %q: %s", key, body)
+		if !found {
+			t.Fatalf("the run recorded no identity for %q", name)
 		}
 	}
-	if !strings.Contains(body, "[redacted]") {
-		t.Errorf("the summary did not mark the redaction: %s", body)
-	}
-}
 
-// An overlong credential name is recorded as a bounded prefix, so a Client Key
-// can straddle that cut: the whole value never reaches the record, and a
-// whole-value match would leave the readable fragment behind. The reply must
-// carry no fragment of a source value either.
-func TestAdoptionSummaryRedactsATruncatedSourceValue(t *testing.T) {
-	const key = "0123456789abcdef0123456789abcdef"
-	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key)
-	// The record keeps 120 bytes of the name: 100 readable bytes and the first
-	// 20 of the key.
-	name := strings.Repeat("p", 100) + key + strings.Repeat("q", 200) + ".json"
-	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
-	fixture.source.types[name] = "claude"
-	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
-		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
-	}
-	fixture.wait()
-
-	// The record really does hold the fragment, so the reply's silence below is
-	// the boundary's doing rather than an accident of the run.
-	record := fixture.reload(t)
-	truncated := false
-	for _, item := range record.AdoptionSummary.Items {
-		if strings.Contains(item.Item, key[:20]) {
-			truncated = true
-		}
-	}
-	if !truncated {
-		t.Fatalf("the run recorded no truncated value to redact: %+v", record.AdoptionSummary.Items)
-	}
-
-	body := fixture.adoption(t).Body.String()
-	// No window of the value long enough to be a credential may reach the
-	// browser: a truncation leaves exactly such a window.
-	for start := 0; start+minRedactedValue <= len(key); start++ {
-		if fragment := key[start : start+minRedactedValue]; strings.Contains(body, fragment) {
-			t.Fatalf("the summary carried a fragment of the source Client Key: %s", body)
-		}
-	}
-	// The readable part of the name stays: redaction must not make the item
-	// unrecognisable.
-	if !strings.Contains(body, strings.Repeat("p", 100)) {
-		t.Fatalf("the summary dropped the readable part of the name: %s", body)
-	}
-}
-
-// Two source Client Keys may share their opening bytes. The boundary must
-// replace the value the name actually holds whole, not let a longer value's
-// shared prefix consume it and leave the rest of the shorter value behind.
-func TestAdoptionSummaryRedactsValuesThatShareAPrefix(t *testing.T) {
-	const (
-		// The shorter value is the one used as a file name; the longer one only
-		// shares its opening bytes.
-		key   = "01234567aaaaaaaaaaaaaaaaaaaaaaaa"
-		other = "01234567bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	)
-	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key, other)
-	name := key + ".json"
-	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
-	fixture.source.types[name] = "claude"
-	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
-		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
-	}
-	fixture.wait()
-
-	// The record really does hold the name, so the reply's silence below is the
-	// boundary's doing rather than an accident of the run.
-	record := fixture.reload(t)
-	named := false
-	for _, item := range record.AdoptionSummary.Items {
-		if strings.Contains(item.Item, key) {
-			named = true
-		}
-	}
-	if !named {
-		t.Fatalf("the run recorded no name to redact: %+v", record.AdoptionSummary.Items)
-	}
-
-	body := fixture.adoption(t).Body.String()
-	for start := 0; start+minRedactedValue <= len(key); start++ {
-		if fragment := key[start : start+minRedactedValue]; strings.Contains(body, fragment) {
-			t.Fatalf("the summary carried a fragment of the source Client Key: %s", body)
-		}
-	}
-	if !strings.Contains(body, "[redacted]") {
-		t.Errorf("the summary did not mark the redaction: %s", body)
-	}
-}
-
-// The scan chooses the longest value match at each position, so the order the
-// values were read in cannot decide which of them is replaced.
-func TestAdoptionRedactorPicksTheLongestMatchAtEachPosition(t *testing.T) {
-	const (
-		shorter = "01234567aaaaaaaaaaaaaaaaaaaaaaaa"
-		longer  = "01234567bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	)
-	for _, secrets := range [][]string{{longer, shorter}, {shorter, longer}} {
-		redact := adoptionRedactor(secrets)
-		for _, value := range []string{shorter, longer} {
-			if got := redact("credential:" + value + ".json"); got != "credential:[redacted].json" {
-				t.Fatalf("redact(%q) with %v = %q", value, secrets, got)
-			}
-		}
-	}
-}
-
-// Every value's occurrence is covered on the original text, so a shorter match
-// that starts earlier cannot consume the start of another value's longer match
-// and leave that value's own suffix in the reply. A marker in the text is text,
-// not a promise: a source value may begin with the marker's own bytes.
-func TestAdoptionRedactorCoversEveryValueMatchOnTheOriginalText(t *testing.T) {
-	const key = "01234567aaaaaaaaaaaaaaaaaaaaaaaa"
-	cases := []struct {
-		name    string
-		secrets []string
-		input   string
-		want    string
-	}{
-		{
-			// "backup-" opens a value whose match ends before the key's begins;
-			// skipping ahead from its end would print the whole key but eight
-			// bytes.
-			name:    "a shorter value before a longer one",
-			secrets: []string{key, "backup-01234567b"},
-			input:   "credential:backup-" + key + ".json",
-			want:    "credential:" + redactedValue + ".json",
-		},
-		{
-			name:    "the marker's own text inside a value",
-			secrets: []string{redactedValue + "aaaaaaaaaaaaaaaaaaaaaaaa"},
-			input:   "credential:" + redactedValue + "aaaaaaaaaaaaaaaaaaaaaaaa.json",
-			want:    "credential:" + redactedValue + ".json",
-		},
-		{
-			name:    "values whose ranges touch",
-			secrets: []string{"01234567", "abcdefgh"},
-			input:   "01234567abcdefgh",
-			want:    redactedValue,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := adoptionRedactor(tc.secrets)(tc.input); got != tc.want {
-				t.Fatalf("redact(%q) = %q, want %q", tc.input, got, tc.want)
-			}
-		})
-	}
-}
-
-// The reply's HTTP case of the same rule: one source value starts inside the
-// credential name the other value is written into. No eight-byte window of
-// either value may reach the browser.
-func TestAdoptionSummaryRedactsOverlappingValuesByValue(t *testing.T) {
-	const (
-		key   = "01234567aaaaaaaaaaaaaaaaaaaaaaaa"
-		other = "backup-01234567b"
-	)
-	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key, other)
-	name := "backup-" + key + ".json"
-	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
-	fixture.source.types[name] = "claude"
-	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
-		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
-	}
-	fixture.wait()
-
-	// The record really does hold the name, so the reply's silence below is the
-	// boundary's doing rather than an accident of the run.
-	recorded := false
-	for _, item := range fixture.reload(t).AdoptionSummary.Items {
-		if item.Item == "credential:"+name {
-			recorded = true
-		}
-	}
-	if !recorded {
-		t.Fatalf("the run recorded no overlapping name to redact")
-	}
-
-	reply := readAdoptionJSON(t, fixture.adoption(t))
-	shown := false
+	response := fixture.adoption(t)
+	body := response.Body.String()
+	reply := readAdoptionJSON(t, response)
+	// Every credential item is the generic label and a contiguous ordinal, and no
+	// credential text carries any part of a name.
+	ordinal := 0
+	labels := 0
 	for _, item := range reply.Items {
-		if item.Item == "credential:"+redactedValue+".json" {
-			shown = true
+		if item.Kind != string(freshstore.AdoptionKindCredential) {
+			continue
 		}
-	}
-	if !shown {
-		t.Fatalf("the reply did not redact the overlapping name: %+v", reply.Items)
-	}
-	body := fixture.adoption(t).Body.String()
-	for _, value := range []string{key, other} {
-		for start := 0; start+minRedactedValue <= len(value); start++ {
-			if fragment := value[start : start+minRedactedValue]; strings.Contains(body, fragment) {
-				t.Fatalf("the summary carried a fragment of a source value: %s", body)
+		if item.Left > 0 {
+			if item.Item != adoptionCredentialOverflowLabel {
+				t.Fatalf("the overflow marker was not projected structurally: %+v", item)
 			}
+			continue
+		}
+		ordinal++
+		if want := adoptionCredentialLabel + " #" + strconv.Itoa(ordinal); item.Item != want {
+			t.Fatalf("credential item text = %q, want %q", item.Item, want)
+		}
+		labels++
+	}
+	expected := 0
+	for _, item := range record.AdoptionSummary.Items {
+		if item.Kind == freshstore.AdoptionKindCredential && item.Left == 0 {
+			expected++
 		}
 	}
-}
-
-// A real source key can begin with the marker's own text. The input is not a
-// place markers are trusted: the whole value is a value, and the reply marks it
-// like any other.
-func TestAdoptionSummaryRedactsAKeyThatBeginsWithTheMarker(t *testing.T) {
-	const key = redactedValue + "aaaaaaaaaaaaaaaaaaaaaaaa"
-	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key)
-	name := key + ".json"
-	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
-	fixture.source.types[name] = "claude"
-	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
-		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	if labels != expected {
+		t.Fatalf("the reply projected %d credential labels for %d recorded credentials", labels, expected)
 	}
-	fixture.wait()
-
-	reply := readAdoptionJSON(t, fixture.adoption(t))
-	shown := false
+	if expected < len(names) {
+		t.Fatalf("the fixture recorded %d credentials for %d seeded names", expected, len(names))
+	}
+	// Canonical non-credential references still identify their item: they come
+	// from the Manager's own tables, not from the source.
+	if !strings.Contains(body, "config:routing.strategy") || !strings.Contains(body, "section:api-keys.claude") {
+		t.Fatalf("the reply dropped the canonical references: %s", body)
+	}
+	// Protected values and every recorded name are absent, whole and in
+	// fragments: whole value, prefix, middle-only, suffix-only, two values whose
+	// matches start at different offsets, the overlong cut and the marker's own
+	// literal text.
+	for _, value := range []string{
+		migrationSourceClientValue, wholeKey,
+		middleValue[10:], suffixValue[len(suffixValue)-16:],
+		overlapValue, overlapValue[:16], markerName, overlong,
+	} {
+		noProtectedFragment(t, body, value)
+	}
+	for _, field := range []string{"…#sha256:", "credential-name-sha256", "credential:"} {
+		if strings.Contains(body, field) {
+			t.Fatalf("the reply carried the record's identity text %q: %s", field, body)
+		}
+	}
+	// The identity is stable across reads, unique per item and derived only from
+	// public text: it never confirms a source name offline.
+	seen := map[string]bool{}
 	for _, item := range reply.Items {
-		if item.Item == "credential:"+name {
-			t.Fatalf("the summary emitted the source key in full: %+v", item)
+		if len(item.ID) != 64 {
+			t.Fatalf("item %q carries no stable identity: %+v", item.Item, item)
 		}
-		if item.Item == "credential:"+redactedValue+".json" {
-			shown = true
-		}
-	}
-	if !shown {
-		t.Fatalf("the reply did not mark the key that begins with the marker: %+v", reply.Items)
-	}
-	// The marker itself is expected in the output; the key's tail is not.
-	body := fixture.adoption(t).Body.String()
-	if strings.Contains(body, key) {
-		t.Fatalf("the summary carried the source key: %s", body)
-	}
-	if tail := strings.Repeat("a", minRedactedValue); strings.Contains(body, tail) {
-		t.Fatalf("the summary carried the tail of the source key: %s", body)
-	}
-}
-
-// An overlong name's record identity carries the SHA-256 of the unscrubbed name.
-// The reply must not: a reader who knows the rest of a file name could otherwise
-// confirm a guessed credential offline from the item text.
-func TestAdoptionSummaryOverlongNameIsNotAnOfflineOracle(t *testing.T) {
-	const key = "0123456789abcdef0123456789abcdef"
-	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key)
-	// The record keeps 120 bytes of the name: 100 readable bytes and the first 20
-	// of the key. Only a candidate for the whole name can confirm the digest.
-	name := strings.Repeat("p", 100) + key + strings.Repeat("q", 200) + ".json"
-	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
-	fixture.source.types[name] = "claude"
-	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
-		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
-	}
-	fixture.wait()
-
-	raw := sha256.Sum256([]byte(name))
-	candidate := hex.EncodeToString(raw[:])
-	// The record really does keep the digest, so the reply's silence below is the
-	// boundary's doing rather than an accident of the run.
-	recorded := false
-	for _, recordedItem := range fixture.reload(t).AdoptionSummary.Items {
-		if strings.Contains(recordedItem.Item, candidate) {
-			recorded = true
-		}
-	}
-	if !recorded {
-		t.Fatalf("the record kept no digest of the overlong name")
-	}
-
-	body := fixture.adoption(t).Body.String()
-	if strings.Contains(body, candidate) {
-		t.Fatalf("the summary confirms the candidate file name: %s", body)
-	}
-	if strings.Contains(body, overlongNameDigestMarker) {
-		t.Fatalf("the summary carries the record's name digest marker: %s", body)
-	}
-
-	reply := readAdoptionJSON(t, fixture.adoption(t))
-	index := -1
-	for at := range reply.Items {
-		if strings.Contains(reply.Items[at].Item, strings.Repeat("p", 100)) {
-			index = at
-		}
-	}
-	if index < 0 {
-		t.Fatalf("the reply dropped the readable name: %+v", reply.Items)
-	}
-	item := reply.Items[index]
-	if item.ID == candidate {
-		t.Fatalf("the reply's identity confirms the candidate file name: %+v", item)
-	}
-	if len(item.ID) != 64 {
-		t.Fatalf("the item carries no stable identity: %+v", item)
-	}
-	// The identity is the record's, so a second read states the same item.
-	if again := readAdoptionJSON(t, fixture.adoption(t)); again.Items[index].ID != item.ID {
-		t.Fatalf("the item identity changed between two reads")
-	}
-}
-
-// The reply's identity for an item must not turn a candidate credential into
-// something confirmable offline. The record's own name is not what the digest
-// covers, and the identity still keeps a record's items apart and stable.
-func TestAdoptionSummaryIdentityIsNotADigestOfTheRecordName(t *testing.T) {
-	const key = "0123456789abcdef0123456789abcdef"
-	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue, key)
-	name := key + ".json"
-	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
-	fixture.source.types[name] = "claude"
-	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
-		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
-	}
-	fixture.wait()
-
-	reply := readAdoptionJSON(t, fixture.adoption(t))
-	// The old identity was exactly this digest of the unredacted name, which is
-	// what made a guessed key confirmable from the reply.
-	raw := sha256.Sum256([]byte("credential:" + key + ".json"))
-	candidate := hex.EncodeToString(raw[:])
-	identities := map[string]bool{}
-	for _, item := range reply.Items {
-		if item.ID == candidate {
-			t.Fatalf("the reply's identity confirms the record's own name: %+v", item)
-		}
-		if strings.Contains(item.Item, key) {
-			t.Fatalf("the reply showed the source Client Key: %+v", item)
-		}
-		if identities[item.ID] {
+		if seen[item.ID] {
 			t.Fatalf("two items share one identity: %+v", reply.Items)
 		}
-		identities[item.ID] = true
+		seen[item.ID] = true
 	}
-	// The identity is a fact about the record, not about one read of it.
 	again := readAdoptionJSON(t, fixture.adoption(t))
 	for index := range reply.Items {
 		if again.Items[index].ID != reply.Items[index].ID {
@@ -821,106 +613,193 @@ func TestAdoptionSummaryIdentityIsNotADigestOfTheRecordName(t *testing.T) {
 	}
 }
 
-// A source value can begin with the marker's own text. The prefix rule must
-// terminate and must not rewrite a marker the scrubber already wrote.
-func TestAdoptionRedactorDoesNotRewrapItsOwnMarker(t *testing.T) {
-	redact := adoptionRedactor([]string{"redactedValue123", "x-redacted-value"})
-	for value, want := range map[string]string{
-		"credential:redactedValue123.json": "credential:[redacted].json",
-		"credential:[redacted].json":       "credential:[redacted].json",
-		"redactedValue123-backup.json":     "[redacted]-backup.json",
-	} {
-		if got := redact(value); got != want {
-			t.Fatalf("redact(%q) = %q, want %q", value, got, want)
-		}
-	}
-}
+// An earlier build persisted an overlong credential as the unsalted SHA-256 of
+// its whole name, and this build persists the same file with a readable prefix
+// and that digest. Neither record may reach the browser, and a resume must
+// recognise both rather than append a third identity for the same file.
+func TestAdoptionSummaryProjectsALegacyRecordAndResumesIt(t *testing.T) {
+	// ASCII only, so the executor's 120-byte cut and this test's prefix agree.
+	const fragment = "legacy-overlong-value-0123456789ab"
+	name := strings.Repeat("p", 100) + fragment + strings.Repeat("q", 200) + ".json"
+	fixture := newAdoptMigrationFixtureWithClientKeys(t, migrationSourceClientValue)
+	fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"x"}`)
+	fixture.source.types[name] = "claude"
 
-// Two token-shaped file names scrub to the same text. The browser binds an
-// acknowledgement to the record's item, not to text that happens to be equal, so
-// the reply carries a stable identity that keeps them distinct.
-func TestAdoptionSummaryKeepsScrubbedNamesDistinct(t *testing.T) {
-	const (
-		first  = "sk-proj-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		second = "sk-proj-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	)
-	fixture := newAdoptMigrationFixture(t)
-	for _, key := range []string{first, second} {
-		name := key + ".json"
-		fixture.source.credentials[name] = []byte(`{"type":"claude","access_token":"shared-token-"` + key + `"}`)
-		fixture.source.types[name] = "claude"
+	raw := sha256.Sum256([]byte(name))
+	legacyDigest := hex.EncodeToString(raw[:])
+	legacyItem := freshstore.AdoptionItem{
+		Item: "credential-name-sha256:" + legacyDigest, Kind: freshstore.AdoptionKindCredential,
+		Outcome: freshstore.AdoptionManual, Reason: "adoption_item_name_too_long",
+		Instruction: "Copy the credential file into the destination CPA's auth directory by hand.",
 	}
-	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+	// The shape this build writes, seeded as a record an earlier run of this
+	// build already settled.
+	truncatedItem := freshstore.AdoptionItem{
+		Item: "credential:" + name[:120] + "…#sha256:" + legacyDigest, Kind: freshstore.AdoptionKindCredential,
+		Outcome: freshstore.AdoptionManual, Reason: "adoption_item_name_too_long",
+		Instruction: "Copy the credential file into the destination CPA's auth directory by hand.",
+	}
+	seed := freshstore.AdoptionSummary{Items: []freshstore.AdoptionItem{legacyItem, truncatedItem}, Planned: 2}
+	record := fixture.reload(t)
+	record, err := fixture.app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+		copied := seed
+		r.AdoptionSummary = &copied
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed the legacy record: %v", err)
+	}
+
+	if response := fixture.strategy(t, record); response.Code != http.StatusOK {
 		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
 	}
 	fixture.wait()
 
-	reply := readAdoptionJSON(t, fixture.adoption(t))
-	byItem := map[string][]string{}
+	// The resume recognised both identities and appended nothing for this file.
+	settled := fixture.reload(t)
+	if len(settled.AdoptionSummary.Items) < 2 ||
+		settled.AdoptionSummary.Items[0] != legacyItem || settled.AdoptionSummary.Items[1] != truncatedItem {
+		t.Fatalf("the resume rewrote the seeded record: %+v", settled.AdoptionSummary.Items)
+	}
+	tooLong := 0
+	appended := false
+	for _, item := range settled.AdoptionSummary.Items {
+		if item.Reason == "adoption_item_name_too_long" {
+			tooLong++
+		}
+		if item.Item == "credential:"+name[:120]+"…#sha256:"+legacyDigest {
+			appended = true
+		}
+	}
+	if tooLong != 2 {
+		t.Fatalf("the resume re-recorded an overlong name: %d manual items", tooLong)
+	}
+	if count := strings.Count(strings.Join(itemNames(settled.AdoptionSummary), "\x00"), "credential-name-sha256:"); count != 1 {
+		t.Fatalf("the resume duplicated the legacy identity: %+v", settled.AdoptionSummary.Items)
+	}
+	if !appended {
+		t.Fatal("the seeded truncated identity disappeared from the record")
+	}
+
+	response := fixture.adoption(t)
+	body := response.Body.String()
+	for _, forbidden := range []string{legacyDigest, "…#sha256:", "credential-name-sha256", strings.Repeat("p", 100), strings.Repeat("q", 8)} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("the reply carried %q from the legacy record", forbidden)
+		}
+	}
+	for _, value := range []string{migrationSourceClientValue, fragment} {
+		noProtectedFragment(t, body, value)
+	}
+	reply := readAdoptionJSON(t, response)
+	if len(reply.RunID) != 32 {
+		t.Fatalf("the resumed run did not persist its generation: %q", reply.RunID)
+	}
 	for _, item := range reply.Items {
-		if len(item.ID) != 64 {
-			t.Fatalf("item %q carries no stable identity: %+v", item.Item, item)
+		if item.Kind == string(freshstore.AdoptionKindCredential) && item.Left == 0 &&
+			!strings.HasPrefix(item.Item, adoptionCredentialLabel+" #") {
+			t.Fatalf("a credential item was not projected structurally: %+v", item)
 		}
-		byItem[item.Item] = append(byItem[item.Item], item.ID)
-	}
-	collided := 0
-	for _, named := range byItem {
-		if len(named) < 2 {
-			continue
+		if strings.Contains(item.Reason, "sha256") {
+			t.Fatalf("the reply carried a legacy identity as a reason: %+v", item)
 		}
-		collided++
-		distinct := map[string]bool{}
-		for _, id := range named {
-			if distinct[id] {
-				t.Fatalf("two items share one identity: %v", named)
-			}
-			distinct[id] = true
-		}
-	}
-	if collided == 0 {
-		t.Fatalf("the fixtures did not collapse into one name: %+v", byItem)
 	}
 }
 
-// A credential whose name cannot be an item identity keeps enough of the name to
-// be actionable. The record also keeps a digest of the whole name for its own
-// identity; the reply keeps the prefix and the ellipsis, not the digest.
-func TestAdoptionSummaryKeepsAnOverlongNameReadable(t *testing.T) {
-	overlong := strings.Repeat("overlong-credential-name-", 12) + ".json"
-	fixture := newAdoptMigrationFixture(t)
-	fixture.source.credentials[overlong] = []byte(`{"type":"claude","access_token":"overlong"}`)
-	fixture.source.types[overlong] = "claude"
-	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
-		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+// itemNames returns the record's identities, for assertions that count one
+// identity without depending on the reply's projection.
+func itemNames(summary *freshstore.AdoptionSummary) []string {
+	if summary == nil {
+		return nil
 	}
-	fixture.wait()
+	names := make([]string, 0, len(summary.Items))
+	for _, item := range summary.Items {
+		names = append(names, item.Item)
+	}
+	return names
+}
 
-	reply := readAdoptionJSON(t, fixture.adoption(t))
-	var item *summaryItemJSON
-	for index := range reply.Items {
-		if reply.Items[index].Reason == "adoption_item_name_too_long" {
-			item = &reply.Items[index]
+// A record written before run generations existed is still projected: its
+// `runId` is empty on the wire, its credential identities are structural, and the
+// projection does not invent a generation the record never carried.
+func TestAdoptionSummaryProjectsALegacyRecordWithoutARunGeneration(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	reply := adoptionSummaryFrom(&freshstore.AdoptionSummary{
+		Items: []freshstore.AdoptionItem{{
+			Item: "credential-name-sha256:" + digest, Kind: freshstore.AdoptionKindCredential,
+			Outcome: freshstore.AdoptionManual, Reason: "adoption_item_name_too_long",
+		}},
+		Planned: 1, Finished: true,
+	})
+	if reply.RunID != "" {
+		t.Fatalf("a legacy record invented a run generation: %q", reply.RunID)
+	}
+	if len(reply.Items) != 1 || reply.Items[0].Item != adoptionCredentialLabel+" #1" {
+		t.Fatalf("the legacy credential was not projected structurally: %+v", reply.Items)
+	}
+	encoded, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(encoded)
+	if !strings.Contains(body, `"runId":""`) {
+		t.Fatalf("the reply omitted the legacy run identity: %s", body)
+	}
+	if strings.Contains(body, digest) || strings.Contains(body, "credential-name-sha256") {
+		t.Fatalf("the reply carried the legacy identity: %s", body)
+	}
+	if reply.Items[0].Reason != "adoption_item_name_too_long" {
+		t.Fatalf("the projection dropped a bounded reason: %+v", reply.Items[0])
+	}
+}
+
+// A reason is text the record carries from its producer, and a failed
+// destination write can quote CPA's own rejection. The reply keeps this
+// Manager's own codes and drops everything else, so no upstream text can reach
+// the browser through the one free-text field the projection still has.
+func TestAdoptionSummaryReasonsAreBoundedToOwnCodes(t *testing.T) {
+	const upstream = "cpa said: upstream-value-0123456789abcdef"
+	summary := &freshstore.AdoptionSummary{Items: []freshstore.AdoptionItem{
+		{Item: "config:routing.strategy", Kind: freshstore.AdoptionKindConfigLeaf, Outcome: freshstore.AdoptionFailed, Reason: upstream},
+		{Item: "credential:claude.json", Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionManual, Reason: "type_diverged"},
+		{Item: "rule:default", Kind: freshstore.AdoptionKindConfigFamily, Outcome: freshstore.AdoptionManual, Reason: "reconfigure_after_adoption"},
+		{Item: "section:attacker-named-section", Kind: freshstore.AdoptionKindProviderSection, Outcome: freshstore.AdoptionManual, Reason: "reconfigure_after_adoption"},
+	}}
+	reply := adoptionSummaryFrom(summary)
+	if reply.Items[0].Reason != "" {
+		t.Fatalf("an upstream reason reached the reply: %q", reply.Items[0].Reason)
+	}
+	if reply.Items[1].Reason != "type_diverged" || reply.Items[2].Reason != "reconfigure_after_adoption" {
+		t.Fatalf("a bounded code was dropped: %+v", reply.Items)
+	}
+	// A canonical Manager reference stays; an identity outside the closed
+	// vocabulary is not echoed and keeps an ordinal-based label instead.
+	if reply.Items[0].Item != "config:routing.strategy" {
+		t.Fatalf("a canonical leaf lost its reference: %q", reply.Items[0].Item)
+	}
+	if reply.Items[2].Item != adoptionConfigurationLabel+" #3" {
+		t.Fatalf("an unknown configuration identity was echoed: %q", reply.Items[2].Item)
+	}
+	if reply.Items[3].Item != adoptionProviderLabel+" #4" {
+		t.Fatalf("an unknown provider identity was echoed: %q", reply.Items[3].Item)
+	}
+	// The item whose reason was dropped is still reported: the outcome is the
+	// fact the operator acts on.
+	if reply.Items[0].Outcome != string(freshstore.AdoptionFailed) {
+		t.Fatalf("the item lost its outcome with its reason: %+v", reply.Items[0])
+	}
+	encoded, err := json.Marshal(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "upstream-value") {
+		t.Fatalf("the projection emitted the upstream reason: %s", encoded)
+	}
+	// A non-credential identity outside the closed vocabulary is not echoed
+	// either, and keeps a stable ordinal-based label instead.
+	for _, item := range reply.Items {
+		if strings.Contains(item.Item, "upstream") {
+			t.Fatalf("the projection emitted an unknown identity: %+v", item)
 		}
-	}
-	if item == nil {
-		t.Fatalf("the overlong name was not recorded as manual work: %+v", reply.Items)
-	}
-	if len(item.Item) > freshstore.MaxAdoptionItemName() {
-		t.Fatalf("the item identity exceeds the store's bound: %d", len(item.Item))
-	}
-	if !strings.HasPrefix(item.Item, "credential:"+overlong[:100]) {
-		t.Fatalf("the item identity kept no readable prefix: %q", item.Item)
-	}
-	if !strings.HasSuffix(item.Item, "…") {
-		t.Fatalf("the cut identity lost its ellipsis: %q", item.Item)
-	}
-	// The record's digest of the whole name is a digest of the unscrubbed name,
-	// so the reply must not carry it.
-	if strings.Contains(item.Item, overlongNameDigestMarker) {
-		t.Fatalf("the reply carries the record's name digest: %q", item.Item)
-	}
-	// The identity is the record's, so a second read states the same item.
-	if again := readAdoptionJSON(t, fixture.adoption(t)); again.Items[0].ID != reply.Items[0].ID {
-		t.Fatalf("the item identity changed between two reads")
 	}
 }

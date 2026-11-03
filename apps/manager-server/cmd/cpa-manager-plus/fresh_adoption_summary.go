@@ -3,15 +3,12 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usage"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshadopt"
 )
 
 // adoptionSummaryUnavailable is the only code the read route answers with when
@@ -19,6 +16,27 @@ import (
 // bare 404 so the browser can tell "this installation is not an adoption" from a
 // lost route.
 const adoptionSummaryUnavailable = "adopt_summary_unavailable"
+
+// The reply's text for a credential item is a Manager-owned label and the item's
+// ordinal, never the record's identity.
+//
+// A credential file name is the source CPA's metadata. It can be, or contain, a
+// credential — a Client Key used verbatim as a file name has no credential shape
+// for the project's scrubber to recognise — and the record's overlong identity
+// carries an unsalted digest of the unscrubbed name. A redaction rule that tries
+// to find every fragment of every known value in that text is a matcher with an
+// open-ended failure mode: a middle or suffix fragment, a value that starts
+// outside the recorded cut, or a name that merely shares a long prefix is exactly
+// what a prefix-only rule misses. The reply therefore does not carry the name at
+// all. The label says what the item is; the ordinal keeps two credentials apart;
+// the outcome, reason and retryable flag say what happened to it.
+const (
+	adoptionCredentialLabel         = "Credential file"
+	adoptionCredentialOverflowLabel = "Credential files left behind"
+	adoptionConfigurationLabel      = "Configuration item"
+	adoptionProviderLabel           = "Provider section"
+	adoptionUnknownLabel            = "Adoption item"
+)
 
 // adoptionSummaryItem is one per-item migration result as the completion screen
 // reads it.
@@ -29,26 +47,19 @@ const adoptionSummaryUnavailable = "adopt_summary_unavailable"
 // needs. Dropping them here is what makes the reply a statement about progress
 // only.
 //
-// The reply is also a separate output boundary from the record, because the
-// record's text is not all the Manager's: a credential file name is the source
-// CPA's metadata, and a reason can quote an upstream code. Both pass two rules
-// here — the project's credential scrubber, then the exact source values the
-// migration read — because a Client Key used verbatim as a file name has no
-// credential shape for the scrubber to recognise. The record's free-text
-// instruction, which interpolates a source name and a destination type string, is
-// not emitted at all: the page states the next step from the item's own kind, so
-// untrusted metadata cannot reach the browser as prose. An overlong credential
-// name is recorded with a readable prefix and a digest of the unscrubbed name;
-// that digest is dropped here as well, because it would confirm a candidate
-// value offline.
+// The reply is also a separate output boundary from the record. Text in the
+// record is not all the Manager's: a credential file name is the source CPA's
+// metadata, and a failed write can quote an upstream code. Both are projected
+// structurally — a credential item by a generic label and ordinal, a reason by a
+// closed set of this Manager's own codes — rather than by trying to scrub
+// arbitrary upstream text. The record's free-text instruction is not emitted at
+// all: the page states the next step from the item's own kind.
 type adoptionSummaryItem struct {
-	// ID is the record's stable identity for this item, independent of the text
-	// the reply may show. Two token-shaped file names scrub to the same `item`,
-	// and a browser that identified them by that text would treat two different
-	// resources as one: an acknowledgement, a list key and a request are about the
-	// record's item, so they are bound to a digest of the scrubbed text and the
-	// item's ordinal. The digest never covers the record's own name: that name can
-	// be a credential, and a digest of it would confirm a candidate value offline.
+	// ID is the reply's stable identity for this item: a digest of the text the
+	// reply shows and the item's ordinal. Two credentials with unreadable names
+	// project to different ordinals, so the identity keeps them apart, and it
+	// digests only public text — never the record's own name, which may be or
+	// contain a credential.
 	ID      string `json:"id"`
 	Item    string `json:"item"`
 	Kind    string `json:"kind"`
@@ -78,11 +89,19 @@ type adoptionSummaryCounts struct {
 //
 // `running` is the live single-flight flag rather than a recorded value, so a
 // poll that arrives between two checkpoints still sees the truth: the copy is
-// either in flight right now or it is not. `finished` and `planned` are the
-// durable run markers, so a browser that reloads mid-run resumes from the same
-// facts the completion path decides on.
+// either in flight right now or it is not. `finished`, `planned` and `runId` are
+// the durable run markers, so a browser that reloads mid-run resumes from the
+// same facts the completion path decides on.
+//
+// `runId` is the identity of the run that wrote this record. A completion that
+// accepts retryable items names it, and the server refuses the acknowledgement
+// when the durable record has moved to a different run: two runs can leave the
+// same items and counts, and the generation is the only fact that tells the
+// operator's confirmation apart. It is empty on a record written before run
+// generations existed.
 type adoptionSummaryReply struct {
 	Items     []adoptionSummaryItem `json:"items"`
+	RunID     string                `json:"runId"`
 	Planned   int                   `json:"planned"`
 	Finished  bool                  `json:"finished"`
 	Running   bool                  `json:"running"`
@@ -119,278 +138,122 @@ func (a *freshApplication) adoptionSummary(w http.ResponseWriter, r *http.Reques
 		writeFreshJSON(w, map[string]string{"code": adoptionSummaryUnavailable})
 		return
 	}
-	secrets, ok := a.adoptionSummarySourceSecrets(record)
-	if !ok {
-		// The source credentials this reply has to redact by value are
-		// unreadable, so the reply cannot be proven to carry none of them. An
-		// unavailable summary is a state the screen already knows how to state.
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		writeFreshJSON(w, map[string]string{"code": adoptionSummaryUnavailable})
-		return
-	}
-	reply := adoptionSummaryFrom(record.AdoptionSummary, adoptionRedactor(secrets))
+	reply := adoptionSummaryFrom(record.AdoptionSummary)
 	reply.Running = a.adoptMigrationInFlight()
 	writeFreshJSON(w, reply)
 }
 
-// adoptionSummarySourceSecrets reads the source credentials this operation was
-// staged with, so the reply can redact them by value.
+// adoptionPublicReasons is the closed set of reason codes this Manager writes
+// into the record: the executor's own per-item outcomes and the adoption
+// decision's manual actions.
 //
-// The scrubber recognises credential shapes. A Client Key used verbatim as a
-// credential file name has no shape, and the only rule that catches it is the
-// value itself; the protected snapshot is the one place the Manager still holds
-// those values. They are read here to be replaced, never emitted: no value is
-// returned beyond the redactor's own input, and none of them is logged.
+// The projection keeps exactly these and drops everything else. A failed
+// destination write can quote CPA's own rejection code, and a rejection message
+// can embed the value it refused; neither is this Manager's vocabulary, so an
+// unrecognised reason is not echoed. The item's outcome and retryable flag still
+// answer what happened, which is what the operator acts on.
+var adoptionPublicReasons = map[string]bool{
+	// Adoption decisions.
+	"not_authorized":                true,
+	"reauthenticate_after_adoption": true,
+	"reconfigure_after_adoption":    true,
+	// Credential outcomes.
+	"download_failed":              true,
+	"not_uploadable":               true,
+	"runtime_only_credential":      true,
+	"type_diverged":                true,
+	"status_write_failed":          true,
+	"status_unverified":            true,
+	"adoption_item_name_too_long":  true,
+	"adoption_inventory_too_large": true,
+	// Configuration outcomes.
+	"manager_owned":           true,
+	"value_shape_unsupported": true,
+	"path_unresolved":         true,
+	"payload_unresolved":      true,
+	"family_unresolved":       true,
+	// Destination write outcomes.
+	"verify_mismatch":         true,
+	"cpa_rejected":            true,
+	"apply_unknown":           true,
+	"destination_unavailable": true,
+	"value_not_canonical":     true,
+	"write_failed":            true,
+	"source_unreadable":       true,
+}
+
+// publicAdoptionReason bounds one recorded reason to this Manager's own codes.
+func publicAdoptionReason(reason string) string {
+	if adoptionPublicReasons[reason] {
+		return reason
+	}
+	return ""
+}
+
+// publicAdoptionItemText projects one durable item identity into the text the
+// reply shows.
 //
-// The boolean is whether the snapshot could be read at all. A record with no
-// snapshot has nothing to redact; a snapshot that cannot be unread is a reply
-// that cannot be proven clean, and the caller answers unavailable instead.
-func (a *freshApplication) adoptionSummarySourceSecrets(record freshstore.Record) ([]string, bool) {
-	if record.AdoptionCiphertext == "" {
-		return nil, true
-	}
-	if a.protector == nil {
-		return nil, false
-	}
-	plain, err := a.protector.UnprotectString(record.AdoptionCiphertext)
-	if err != nil {
-		return nil, false
-	}
-	var snapshot struct {
-		SourceManagementKey string
-		Destination         struct {
-			APIKeys []string `json:"apiKeys"`
-		}
-	}
-	if json.Unmarshal([]byte(plain), &snapshot) != nil {
-		return nil, false
-	}
-	secrets := make([]string, 0, len(snapshot.Destination.APIKeys)+1)
-	secrets = append(secrets, snapshot.Destination.APIKeys...)
-	if snapshot.SourceManagementKey != "" {
-		secrets = append(secrets, snapshot.SourceManagementKey)
-	}
-	return secrets, true
-}
-
-// redactedValue is the marker both rules of the output boundary use, so a reply
-// never says which of them replaced a string.
-const redactedValue = "[redacted]"
-
-// minRedactedValue is the shortest source credential this boundary replaces by
-// value, and the shortest fragment of one it recognises. A shorter string
-// cannot be told apart inside a name without replacing arbitrary text, so a
-// source credential under eight bytes is the one value this boundary does not
-// claim to catch.
-const minRedactedValue = 8
-
-// adoptionRedactor is the summary's output boundary for one string of the
-// record: the values the migration read first, then the project's credential
-// shapes.
+// A credential is always a generic label plus its ordinal: the record's identity
+// is source metadata, and its overlong form is a digest of that metadata, so
+// neither may reach the browser. The inventory-overflow marker keeps its own
+// bounded meaning and the `left` count.
 //
-// Markers are this function's output, never a claim about its input. A source
-// value can begin with the marker's own text, so an input is never split on a
-// marker: a real credential that starts that way would look already redacted and
-// pass through in full. What a marker does is stand for itself, which is why a
-// value match inside one is left as it is (see insideMarker); everything around
-// it is still matched by value. The value rule therefore reads the text as
-// recorded, and the scrubber runs last, on a result only this function has
-// written.
-//
-// The value rule matches prefixes as well as the whole value. An overlong name
-// is recorded as a bounded prefix, and a value can cross that cut, so the
-// fragment a whole-value match would leave behind is exactly a prefix of the
-// value. Every prefix of at least minRedactedValue bytes is therefore replaced,
-// not only the value itself.
-func adoptionRedactor(secrets []string) func(string) string {
-	values := make([]string, 0, len(secrets))
-	for _, secret := range secrets {
-		if len(secret) >= minRedactedValue {
-			values = append(values, secret)
+// A configuration or provider item keeps its canonical reference only when the
+// reference is a name from this Manager's own closed vocabulary
+// (`freshadopt.CanonicalItem`): those tables are what built the name, so the text
+// is Manager-authored rather than upstream free text. A record from an older
+// table that no longer matches falls back to a generic label with its ordinal,
+// which is honest and cannot carry anything else.
+func publicAdoptionItemText(item freshstore.AdoptionItem, ordinal, credentialOrdinal int) string {
+	switch item.Kind {
+	case freshstore.AdoptionKindCredential:
+		if item.Left > 0 {
+			return adoptionCredentialOverflowLabel
 		}
-	}
-	return func(value string) string {
-		if value == "" {
-			return ""
+		return adoptionCredentialLabel + " #" + strconv.Itoa(credentialOrdinal)
+	case freshstore.AdoptionKindConfigLeaf, freshstore.AdoptionKindConfigFamily:
+		if freshadopt.CanonicalItem(item) {
+			return item.Item
 		}
-		return usage.SanitizeCredentialText(redactSourceValues(value, values))
-	}
-}
-
-// sourceValueSpan is one covered byte range of a record string.
-type sourceValueSpan struct {
-	start int
-	end   int
-}
-
-// redactSourceValues replaces every source value the text holds, and every
-// fragment of one at least minRedactedValue bytes long.
-//
-// It finds every occurrence of every value on the original text, on rune
-// boundaries, and merges the ranges that overlap or touch before writing
-// anything. Replacing each merged range once is what makes the result independent
-// of the values' order and of any earlier replacement: a shorter partial match can
-// no longer consume the start of another value's longer match, which would leave
-// that value's own suffix in place. A recorded text may hold only a prefix of a
-// value — an overlong name is cut — so a match can end before its value does; the
-// merged range is still replaced as one.
-func redactSourceValues(value string, secrets []string) string {
-	spans := sourceValueSpans(value, secrets)
-	if len(spans) == 0 {
-		return value
-	}
-	var out strings.Builder
-	at := 0
-	for _, span := range spans {
-		out.WriteString(value[at:span.start])
-		if insideMarker(value, span) {
-			// The range is text of a marker, not of a value: it is already the
-			// public marker, and writing it as it is keeps markers un-nested.
-			out.WriteString(value[span.start:span.end])
-		} else {
-			out.WriteString(redactedValue)
+		return adoptionConfigurationLabel + " #" + strconv.Itoa(ordinal+1)
+	case freshstore.AdoptionKindProviderSection:
+		if freshadopt.CanonicalItem(item) {
+			return item.Item
 		}
-		at = span.end
+		return adoptionProviderLabel + " #" + strconv.Itoa(ordinal+1)
+	default:
+		return adoptionUnknownLabel + " #" + strconv.Itoa(ordinal+1)
 	}
-	out.WriteString(value[at:])
-	return out.String()
-}
-
-// sourceValueSpans is the merged coverage of every value match in value. The scan
-// visits rune boundaries in order, so the ranges are collected by start and the
-// merge can run over them as they are.
-func sourceValueSpans(value string, secrets []string) []sourceValueSpan {
-	var spans []sourceValueSpan
-	for at := 0; at < len(value); {
-		for _, secret := range secrets {
-			if length := sourceValueMatchAt(value, at, secret); length > 0 {
-				spans = append(spans, sourceValueSpan{start: at, end: at + length})
-			}
-		}
-		_, size := utf8.DecodeRuneInString(value[at:])
-		at += size
-	}
-	merged := spans[:0]
-	for _, span := range spans {
-		last := len(merged) - 1
-		if last >= 0 && span.start <= merged[last].end {
-			if span.end > merged[last].end {
-				merged[last].end = span.end
-			}
-			continue
-		}
-		merged = append(merged, span)
-	}
-	return merged
-}
-
-// insideMarker reports whether span covers only text of a marker occurrence. The
-// marker is public text this boundary writes, so a value match inside one is the
-// marker standing for itself rather than a fragment of a source value. The
-// exception cannot hide a value: a source value that contains the marker is
-// longer than it, so that value's own range reaches outside and is replaced
-// whole.
-func insideMarker(value string, span sourceValueSpan) bool {
-	for at := strings.Index(value, redactedValue); at >= 0; {
-		if at <= span.start && span.end <= at+len(redactedValue) {
-			return true
-		}
-		next := strings.Index(value[at+1:], redactedValue)
-		if next < 0 {
-			return false
-		}
-		at += 1 + next
-	}
-	return false
-}
-
-// sourceValueMatchAt is the length of secret's longest prefix the text holds at
-// at, or zero when the text does not hold the shortest prefix this boundary
-// recognises there. A match never splits a character of the text.
-func sourceValueMatchAt(value string, at int, secret string) int {
-	needle := shortestRedactedPrefix(secret)
-	if needle == "" || !strings.HasPrefix(value[at:], needle) {
-		return 0
-	}
-	// The match is at least the needle; it is the part of the value this text
-	// still holds, which is what a recorded truncation leaves.
-	length := len(needle)
-	for length < len(secret) && at+length < len(value) && value[at+length] == secret[length] {
-		length++
-	}
-	// Cut on a rune boundary of the value, so the replacement never splits a
-	// character.
-	for length > len(needle) && at+length < len(value) && !utf8.RuneStart(value[at+length]) {
-		length--
-	}
-	return length
-}
-
-// shortestRedactedPrefix is the smallest prefix of a source value this boundary
-// recognises, cut on a rune boundary so the needle is valid text of its own.
-func shortestRedactedPrefix(secret string) string {
-	cut := minRedactedValue
-	for cut < len(secret) && !utf8.RuneStart(secret[cut]) {
-		cut++
-	}
-	if cut > len(secret) {
-		return ""
-	}
-	return secret[:cut]
-}
-
-// overlongNameDigestMarker is how the executor marks a credential identity cut
-// short: the readable prefix, this marker and the SHA-256 of the whole name.
-const overlongNameDigestMarker = "…#sha256:"
-
-// withoutNameDigest drops the record's digest of an overlong credential name
-// from the text the reply shows.
-//
-// That digest is an unsalted SHA-256 of the unscrubbed name, so a reader who
-// knows the rest of the name could confirm a guessed value from it offline. The
-// record keeps it — it is what makes the record's own identity stable across
-// replays — but the reply states progress, not evidence, and a digest that
-// confirms a candidate credential is not something this boundary may emit. The
-// readable prefix and the ellipsis that says the name was cut stay; the item's
-// ordinal in the reply's identity keeps two cut names apart.
-func withoutNameDigest(item string) string {
-	at := strings.LastIndex(item, overlongNameDigestMarker)
-	if at < 0 || len(item) != at+len(overlongNameDigestMarker)+sha256.Size*2 {
-		return item
-	}
-	if _, err := hex.DecodeString(item[at+len(overlongNameDigestMarker):]); err != nil {
-		return item
-	}
-	return item[:at] + "…"
 }
 
 // adoptionItemID is the stable, non-secret identity of one recorded item.
 //
-// It digests the text the reply shows and the item's ordinal in the record,
-// never the record's own name: the record's name can be a credential the reply
-// redacted, and a digest of it would confirm a candidate value offline. The
-// ordinal keeps two items whose text scrubs to the same string apart, and the
-// record's own order keeps the identity stable across reads.
-func adoptionItemID(redactedItem string, ordinal int) string {
-	sum := sha256.Sum256([]byte(redactedItem + "\x00" + strconv.Itoa(ordinal)))
+// It digests the text the reply shows and the item's ordinal, never the record's
+// own name: the record's name can be a credential, and a digest of it would
+// confirm a candidate value offline. The ordinal keeps two items whose text is
+// the same apart, and the record's own order keeps the identity stable across
+// reads.
+func adoptionItemID(itemText string, ordinal int) string {
+	sum := sha256.Sum256([]byte(itemText + "\x00" + strconv.Itoa(ordinal)))
 	return hex.EncodeToString(sum[:])
 }
 
 // adoptionSummaryFrom projects the durable summary into the reply. The order is
 // the migration's own order, which is the plan order the run fixed before its
 // first write.
-//
-// `redact` is the output boundary for the record's own text, applied to the item
-// identity and the reason: both can quote the source.
-func adoptionSummaryFrom(summary *freshstore.AdoptionSummary, redact func(string) string) adoptionSummaryReply {
+func adoptionSummaryFrom(summary *freshstore.AdoptionSummary) adoptionSummaryReply {
 	reply := adoptionSummaryReply{Items: []adoptionSummaryItem{}}
 	if summary == nil {
 		return reply
 	}
+	reply.RunID = summary.RunID
 	reply.Planned = summary.Planned
 	reply.Finished = summary.Finished
+	credentialOrdinal := 0
 	for ordinal, item := range summary.Items {
+		if item.Kind == freshstore.AdoptionKindCredential {
+			credentialOrdinal++
+		}
 		retryable := summary.Retryable(item.Item)
 		if retryable {
 			reply.Retryable++
@@ -405,13 +268,13 @@ func adoptionSummaryFrom(summary *freshstore.AdoptionSummary, redact func(string
 		case freshstore.AdoptionAbsentAtSource:
 			reply.Counts.AbsentAtSource++
 		}
-		itemText := redact(withoutNameDigest(item.Item))
+		itemText := publicAdoptionItemText(item, ordinal, credentialOrdinal)
 		reply.Items = append(reply.Items, adoptionSummaryItem{
 			ID:      adoptionItemID(itemText, ordinal),
 			Item:    itemText,
 			Kind:    string(item.Kind),
 			Outcome: string(item.Outcome),
-			Reason:  redact(item.Reason),
+			Reason:  publicAdoptionReason(item.Reason),
 			// The record's free-text instruction stays behind: it interpolates a
 			// source name and a destination type string, and neither is text this
 			// Manager wrote.

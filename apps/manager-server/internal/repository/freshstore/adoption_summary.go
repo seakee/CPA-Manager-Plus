@@ -64,6 +64,14 @@ type AdoptionItem struct {
 // place a per-item result survives a Manager restart.
 type AdoptionSummary struct {
 	Items []AdoptionItem `json:"items"`
+	// RunID identifies the run that wrote the item list below. A run start
+	// assigns a fresh opaque 128-bit identity and persists it before the run
+	// touches the source or the destination, so an acknowledgement of one run's
+	// retryable items can never be applied to a different run whose items happen
+	// to look identical. It is empty on a record written before run generations
+	// existed; such a record is read normally and never authorizes a new
+	// acknowledgement.
+	RunID string `json:"runId,omitempty"`
 	// Finished records that one run processed every item it planned: each item is
 	// settled or recorded as retryable. It is the run-finished marker completion
 	// reads, and it is never inferred from the item list, because a run that
@@ -216,11 +224,32 @@ func validAdoptionDigest(digest string) bool {
 	return true
 }
 
+// validAdoptionRunID accepts an absent run identity — a record written before
+// run generations existed — or exactly one 128-bit run identity in lower-case
+// hex. A shorter or non-hex value is not something this Manager writes.
+func validAdoptionRunID(runID string) bool {
+	if runID == "" {
+		return true
+	}
+	if len(runID) != 32 {
+		return false
+	}
+	for _, c := range runID {
+		if c < '0' || c > '9' && c < 'a' || c > 'f' {
+			return false
+		}
+	}
+	return true
+}
+
 // validAdoptionSummary accepts only the bounded shape the executor emits. It
 // never inspects a value, because a value is never stored.
 func validAdoptionSummary(summary AdoptionSummary) error {
 	if len(summary.Items) > maxAdoptionItems {
 		return errors.New("adoption summary exceeds its item bound")
+	}
+	if !validAdoptionRunID(summary.RunID) {
+		return errors.New("invalid adoption run identity")
 	}
 	if summary.Planned < 0 || summary.Planned > maxAdoptionItems {
 		return errors.New("adoption summary plan exceeds its bound")
@@ -278,6 +307,14 @@ func validAdoptionSummaryUpdate(before, after *AdoptionSummary, productComplete 
 	if before.Finished && !after.Finished && productComplete {
 		return errors.New("a completed installation may not reopen its migration")
 	}
+	// A run identity may change only at a run start: a new, unfinished generation
+	// takes the record over. Clearing it back to the legacy absent value and
+	// replacing it on a finished run are both refused, so an old run's checkpoint
+	// cannot present itself as a newer generation and no new run can hide behind
+	// a recorded one.
+	if before.RunID != after.RunID && (after.RunID == "" || after.Finished) {
+		return errors.New("adoption run identity replaced outside a run start")
+	}
 	for index, item := range before.Items {
 		if after.Items[index] == item {
 			continue
@@ -294,7 +331,12 @@ func cloneAdoptionSummary(summary *AdoptionSummary) *AdoptionSummary {
 	if summary == nil {
 		return nil
 	}
-	copied := AdoptionSummary{Items: append([]AdoptionItem(nil), summary.Items...), Finished: summary.Finished, Planned: summary.Planned}
+	copied := AdoptionSummary{
+		Items:    append([]AdoptionItem(nil), summary.Items...),
+		RunID:    summary.RunID,
+		Finished: summary.Finished,
+		Planned:  summary.Planned,
+	}
 	return &copied
 }
 
