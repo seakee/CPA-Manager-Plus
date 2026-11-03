@@ -554,6 +554,136 @@ func TestImportCPAProbesTheAddressTheProofDials(t *testing.T) {
 	}
 }
 
+// TestImportCPARecordsTheProofWhenItReplaysARecordedAttempt is the replay arm's
+// half of the URL binding: an attempt that was recorded but never proved is
+// replayed on the next run, and that run must write the proof it obtained. Without
+// the write the attempt stays unbound, so the "a proved URL is immutable" rule
+// silently does not apply to any path that resumes a recorded attempt, and only a
+// later run that happens to take the ready arm would repair it.
+func TestImportCPARecordsTheProofWhenItReplaysARecordedAttempt(t *testing.T) {
+	ctx := context.Background()
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	staged := newFakeDestinationCPA(t, "")
+	foreign := newFakeDestinationCPA(t, "foreign-management-secret-value-0123456789")
+	foreign.clientKeys = []string{"another-installation-client-key"}
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = staged
+
+	// The first run stages and starts the destination, then refuses the URL it was
+	// given: the attempt is recorded, unproved and not terminal.
+	_, err := ImportCPA(ctx, importOptions(fixture, runtime, foreign.url(), boolPointer(true)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetForeign {
+		t.Fatalf("a foreign URL produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetForeign)
+	}
+	paths := newTargetPaths(fixture.targetRoot)
+	attempt, recordedKey, found, err := loadCPAImportDestinationRecord(ctx, paths.Database, paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("the destination attempt was not recorded (found %t): %v", found, err)
+	}
+	if attempt.urlProved() || attempt.TerminalFailure {
+		t.Fatalf("the refused run left the attempt proved or terminal: %+v", attempt)
+	}
+
+	// The Supervisor no longer reports the destination as ready, so the next run
+	// resumes the recorded attempt through the replay arm instead of proving a ready
+	// destination.
+	runtime.mu.Lock()
+	runtime.state = model.RuntimeStateOffline
+	runtime.mu.Unlock()
+	result, err := ImportCPA(ctx, importOptions(fixture, runtime, staged.url(), boolPointer(true)))
+	if err != nil {
+		t.Fatalf("the replay with the staged destination's URL was refused: %v", err)
+	}
+	if result.Stage != model.UpgradeStageCPAImport {
+		t.Fatalf("the replay recorded stage %q, want %q", result.Stage, model.UpgradeStageCPAImport)
+	}
+	replayed, keptKey, found, err := loadCPAImportDestinationRecord(ctx, paths.Database, paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("the replayed attempt could not be read (found %t): %v", found, err)
+	}
+	if !replayed.bindsURL(staged.url()) {
+		t.Fatalf("the replay proved the destination but did not record it: %+v", replayed)
+	}
+	if keptKey != recordedKey {
+		t.Fatal("the replay replaced the secret the destination was staged with")
+	}
+
+	// A later run cannot silently swap the URL the replay proved.
+	other := newFakeDestinationCPA(t, "")
+	_, err = ImportCPA(ctx, importOptions(fixture, runtime, other.url(), boolPointer(true)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+		t.Fatalf("a swapped URL after the replay produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
+	}
+	if requests := other.requests(); len(requests) != 0 {
+		t.Fatalf("the other CPA answered %v, want no request", requests)
+	}
+}
+
+// TestImportCPAClassifiesAProofTransportFailureAsUnreachable is the other half of
+// the unreachable classification: the gate and the proof are separate exchanges, so
+// a destination that answers the credential-free probe can still be gone by the
+// time the authenticated read runs. That read collapses its transport failure into
+// a wrong-key verdict, and the classification probe is what distinguishes the two;
+// when the destination stopped answering in between, the run must say unreachable
+// rather than tell the operator the URL is foreign.
+func TestImportCPAClassifiesAProofTransportFailureAsUnreachable(t *testing.T) {
+	ctx := context.Background()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen on a loopback port: %v", err)
+	}
+	var mu sync.Mutex
+	paths := []string{}
+	server := &http.Server{}
+	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path == "/v1/models" {
+			// The gate passes: both an absent and an unknown credential are rejected.
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// The destination dies in the middle of the authenticated read: the
+		// connection is dropped and the listener goes away, so the proof fails in
+		// transport and the classification probe finds nothing to ask.
+		if hijacker, ok := w.(http.Hijacker); ok {
+			if conn, _, hijackErr := hijacker.Hijack(); hijackErr == nil {
+				_ = conn.Close()
+			}
+		}
+		go func() { _ = server.Close() }()
+	})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	staged := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = staged
+	_, err = ImportCPA(ctx, importOptions(fixture, runtime, "http://"+listener.Addr().String(), boolPointer(true)))
+	code, ok := UpgradeErrorCodeOf(err)
+	if !ok || code != UpgradeErrorCPAImportTargetUnreachable {
+		t.Fatalf("a destination that stopped answering between the gate and the proof produced %v (code %q), want %s",
+			err, code, UpgradeErrorCPAImportTargetUnreachable)
+	}
+	if strings.Contains(err.Error(), "not the destination this operation staged") {
+		t.Fatalf("a transport failure after the gate was reported as a foreign target: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// The premise: the gate let this endpoint through and the proof read it.
+	found := false
+	for _, path := range paths {
+		if path == "GET /v8/management/config" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the authenticated read never reached the endpoint, so the test proves nothing: %v", paths)
+	}
+}
+
 // unprovenEndpoint answers the unauthenticated probe without being the staged
 // destination. It records every Authorization value it was sent, so a test can
 // prove which credentials crossed to it.
