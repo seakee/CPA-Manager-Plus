@@ -125,12 +125,6 @@ describe('Full Web upgrade wizard', () => {
     await press('upgrade-confirm-continue');
   }
 
-  function reader(status: () => unknown): UpgradeWizardRead {
-    return vi.fn(async (resource: UpgradeWizardResource) =>
-      resource === 'installation/upgrade/preflight' ? preflightDocument() : status()
-    );
-  }
-
   // The ordinary path: the boot read reports no operation, so the wizard walks
   // the preflight and only projects `recorded` once the operator reaches
   // progress. A test that starts from an existing operation uses `resumeRead`.
