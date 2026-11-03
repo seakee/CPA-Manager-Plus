@@ -1781,32 +1781,22 @@ it('states that failed items remain after the installation completes', async () 
 
 // --- the locked New Managed plugin opt-in --------------------------------
 
-function pluginHarness(initial: FreshOperation) {
-  let apply: (operation: FreshOperation) => void = () => undefined;
-  const client = {
-    get: vi.fn(),
-    post: vi.fn(),
-  } as unknown as PublicApiClient;
-  function Harness() {
-    const [current, update] = useState(initial);
-    apply = update;
-    return (
-      <FreshManagedRuntime
-        guided
-        client={client}
-        credential="admin-secret"
-        operation={current}
-        onOperation={update}
-        onPending={() => undefined}
-        onContinue={() => undefined}
-        onUnauthorized={() => undefined}
-      />
-    );
-  }
-  return {
-    Harness,
-    apply: (operation: FreshOperation) => apply(operation),
-  };
+// The Runtime page is driven by the operation its host hands it, so a new durable
+// read is an updated element: React keeps the page's own state (the plugin draft)
+// while the checkpoint prop changes, which is exactly the conflict under test.
+function managedRuntimeElement(operation: FreshOperation, client: PublicApiClient) {
+  return (
+    <FreshManagedRuntime
+      guided
+      client={client}
+      credential="admin-secret"
+      operation={operation}
+      onOperation={() => undefined}
+      onPending={() => undefined}
+      onContinue={() => undefined}
+      onUnauthorized={() => undefined}
+    />
+  );
 }
 
 const unstartedRuntime: FreshOperation = {
@@ -1824,26 +1814,27 @@ const unstartedRuntime: FreshOperation = {
 };
 
 it('renders the persisted plugin opt-in checked and locked when the draft was off', async () => {
-  const harness = pluginHarness(unstartedRuntime);
+  const client = { get: vi.fn(), post: vi.fn() } as unknown as PublicApiClient;
   await act(async () => {
-    renderer = create(<harness.Harness />);
+    renderer = create(managedRuntimeElement(unstartedRuntime, client));
   });
   await click('choose-installation');
   expect(byID('plugin-optin-checkbox').props.checked).toBe(false);
-  await act(async () =>
-    harness.apply({
-      ...unstartedRuntime,
-      revision: 3,
-      strategy: {
-        strategy: 'new_managed',
-        targetIdentity: runtime.runtimeIdentity,
-        targetGeneration: runtime.runtimeGeneration,
-        targetArtifactId: artifactId,
-        stage: 'staged',
-        pluginsEnabled: true,
-      },
-    })
-  );
+  const locked: FreshOperation = {
+    ...unstartedRuntime,
+    revision: 3,
+    strategy: {
+      strategy: 'new_managed',
+      targetIdentity: runtime.runtimeIdentity,
+      targetGeneration: runtime.runtimeGeneration,
+      targetArtifactId: artifactId,
+      stage: 'staged',
+      pluginsEnabled: true,
+    },
+  };
+  await act(async () => {
+    renderer.update(managedRuntimeElement(locked, client));
+  });
   // The record owns the choice: the control is locked and shows what was
   // persisted, not the draft this page initialized from.
   expect(byID('plugin-optin-checkbox').props.disabled).toBe(true);
@@ -1851,27 +1842,28 @@ it('renders the persisted plugin opt-in checked and locked when the draft was of
 });
 
 it('renders the persisted plugin opt-in unchecked and locked when the draft was on', async () => {
-  const harness = pluginHarness(unstartedRuntime);
+  const client = { get: vi.fn(), post: vi.fn() } as unknown as PublicApiClient;
   await act(async () => {
-    renderer = create(<harness.Harness />);
+    renderer = create(managedRuntimeElement(unstartedRuntime, client));
   });
   await click('choose-installation');
   await input('plugin-optin-checkbox', true);
   expect(byID('plugin-optin-checkbox').props.checked).toBe(true);
-  await act(async () =>
-    harness.apply({
-      ...unstartedRuntime,
-      revision: 3,
-      strategy: {
-        strategy: 'new_managed',
-        targetIdentity: runtime.runtimeIdentity,
-        targetGeneration: runtime.runtimeGeneration,
-        targetArtifactId: artifactId,
-        stage: 'staged',
-        pluginsEnabled: false,
-      },
-    })
-  );
+  const locked: FreshOperation = {
+    ...unstartedRuntime,
+    revision: 3,
+    strategy: {
+      strategy: 'new_managed',
+      targetIdentity: runtime.runtimeIdentity,
+      targetGeneration: runtime.runtimeGeneration,
+      targetArtifactId: artifactId,
+      stage: 'staged',
+      pluginsEnabled: false,
+    },
+  };
+  await act(async () => {
+    renderer.update(managedRuntimeElement(locked, client));
+  });
   // The draft was never the record's decision: the locked control states the
   // persisted value instead of keeping the tick the page happened to hold.
   expect(byID('plugin-optin-checkbox').props.disabled).toBe(true);
