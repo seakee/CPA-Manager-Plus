@@ -3730,6 +3730,134 @@ func TestRateLimitAutoDisableWorkerRetriesEnableRejectedByCPA(t *testing.T) {
 	}
 }
 
+type supersedingReopenQuotaCooldownRepository struct {
+	quotacooldownrepo.Repository
+	prepare func() error
+	once    sync.Once
+}
+
+// ReopenClaim inserts another writer's active generation for the same
+// credential just before delegating, reproducing the window between the
+// worker's newer-generation check and its reopen of a rejected enable.
+func (r *supersedingReopenQuotaCooldownRepository) ReopenClaim(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error {
+	r.once.Do(func() {
+		if r.prepare != nil {
+			_ = r.prepare()
+		}
+	})
+	return r.Repository.ReopenClaim(ctx, id, claimedUpdatedAtMS, reason)
+}
+
+// TestRateLimitAutoDisableWorkerKeepsSupersededClaimSkipped covers a second
+// writer recording newer active cooldown evidence for the same credential
+// after the worker checked for newer generations but before it reopened a
+// rejected enable. The claimed generation must stay skipped with a reason that
+// names the superseding owner instead of becoming a second active owner.
+func TestRateLimitAutoDisableWorkerKeepsSupersededClaimSkipped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	otherWriter, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	defer otherWriter.Close()
+
+	fixture := quotaEnableFixtures()[0]
+	var mu sync.Mutex
+	disabled := true
+	patches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			mu.Lock()
+			current := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{fixture.authFilePayload(current)})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			mu.Lock()
+			patches++
+			mu.Unlock()
+			// A definite CPA rejection: nothing was applied.
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"credential is locked by policy"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	seeded := seedDueQuotaCooldown(t, st, fixture, "evt-superseded-claim")
+	var sibling store.QuotaCooldown
+	var siblingErr error
+	st.QuotaCooldowns = &supersedingReopenQuotaCooldownRepository{
+		Repository: st.QuotaCooldowns,
+		prepare: func() error {
+			sibling, siblingErr = otherWriter.UpsertQuotaCooldown(context.Background(), store.QuotaCooldownUpsert{
+				AuthFileName:     fixture.fileName,
+				AuthIndex:        fixture.authIndex,
+				AccountSnapshot:  fixture.account,
+				Provider:         fixture.provider,
+				EvidenceJSON:     fixture.evidence,
+				RecoverAtMS:      now.Add(time.Hour).UnixMilli(),
+				Owner:            fixture.owner,
+				EventHash:        "evt-superseding-evidence",
+				PreDisabledState: false,
+				DisabledAtMS:     now.Add(-time.Minute).UnixMilli(),
+			})
+			return siblingErr
+		},
+	}
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	worker.enableDue(ctx, now)
+
+	if siblingErr != nil {
+		t.Fatalf("record superseding cooldown evidence: %v", siblingErr)
+	}
+	if sibling.ID == 0 || sibling.ID == seeded.ID {
+		t.Fatalf("superseding evidence did not take its own generation: seeded=%+v sibling=%+v", seeded, sibling)
+	}
+	mu.Lock()
+	gotPatches := patches
+	gotDisabled := disabled
+	mu.Unlock()
+	if gotPatches != 1 {
+		t.Fatalf("patch attempts = %d, want 1", gotPatches)
+	}
+	if !gotDisabled {
+		t.Fatal("rejected enable changed the credential")
+	}
+	owners, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(owners) != 1 || owners[0].ID != sibling.ID {
+		t.Fatalf("active cooldowns = %#v, want only the superseding generation %d", owners, sibling.ID)
+	}
+	status, reason, updatedAtMS := readQuotaCooldownRow(t, path, seeded.ID)
+	if status != model.QuotaCooldownStatusSkipped {
+		t.Fatalf("claimed cooldown status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+	}
+	if !strings.Contains(reason, "superseded by a newer active cooldown") {
+		t.Fatalf("claimed cooldown reason = %q, want the superseded reason", reason)
+	}
+	if updatedAtMS <= seeded.UpdatedAtMS {
+		t.Fatalf("claimed cooldown generation = %d, want it advanced past %d", updatedAtMS, seeded.UpdatedAtMS)
+	}
+	siblingStatus, siblingReason, siblingUpdatedAtMS := readQuotaCooldownRow(t, path, sibling.ID)
+	if siblingStatus != model.QuotaCooldownStatusActive || siblingReason != "" || siblingUpdatedAtMS != sibling.UpdatedAtMS {
+		t.Fatalf("superseding cooldown = (%q, %q, %d), want the untouched active generation (%d)", siblingStatus, siblingReason, siblingUpdatedAtMS, sibling.UpdatedAtMS)
+	}
+}
+
 // TestRateLimitAutoDisableWorkerKeepsNewerEvidenceOnUnconfirmedEnable covers a
 // second database writer recording newer quota evidence for the same credential
 // between the enable request and its verification. The newer generation owns the

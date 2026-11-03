@@ -535,8 +535,34 @@ func TestUpsertActiveDoesNotReviveClaimedGeneration(t *testing.T) {
 	if status != model.QuotaCooldownStatusSkipped || lastError != "enable in progress" || updatedAtMS != claimedUpdatedAtMS {
 		t.Fatalf("claimed row changed by newer evidence: status=%q last_error=%q updated_at=%d", status, lastError, updatedAtMS)
 	}
-	if err := st.QuotaCooldowns.ReopenClaim(ctx, active.ID, claimedUpdatedAtMS, "retry"); err != nil {
-		t.Fatalf("reopen still works after newer evidence: %v", err)
+	// A reopen must not join the newer active generation as a second active
+	// owner for the same credential.
+	if err := st.QuotaCooldowns.ReopenClaim(ctx, active.ID, claimedUpdatedAtMS, "retry"); !errors.Is(err, quotacooldown.ErrSuperseded) {
+		t.Fatalf("reopen with a newer active cooldown error = %v, want ErrSuperseded", err)
+	} else if !errors.Is(err, quotacooldown.ErrConflict) {
+		t.Fatalf("superseded reopen error = %v, want it to keep the generation conflict semantics", err)
+	}
+	status, lastError, updatedAtMS = readCooldownRow(t, dbPath, active.ID)
+	if status != model.QuotaCooldownStatusSkipped || lastError != "enable in progress" || updatedAtMS != claimedUpdatedAtMS {
+		t.Fatalf("superseded reopen changed the claimed row: status=%q last_error=%q updated_at=%d", status, lastError, updatedAtMS)
+	}
+	owners, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(owners) != 1 || owners[0].ID != newer.ID {
+		t.Fatalf("active cooldowns = %#v, want only the newer generation %d", owners, newer.ID)
+	}
+	// The newer generation keeps merging quota evidence for its identity.
+	later := next
+	later.EventHash = "evt-claim-later"
+	later.RecoverAtMS = time.Now().Add(3 * time.Hour).UnixMilli()
+	latest, err := st.QuotaCooldowns.UpsertActive(ctx, later)
+	if err != nil {
+		t.Fatalf("upsert after a superseded reopen: %v", err)
+	}
+	if latest.ID != newer.ID || latest.EventHash != "evt-claim-later" {
+		t.Fatalf("upsert after a superseded reopen = %#v, want an update of the active generation %d", latest, newer.ID)
 	}
 }
 

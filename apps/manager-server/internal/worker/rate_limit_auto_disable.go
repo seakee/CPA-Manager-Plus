@@ -38,6 +38,11 @@ const (
 	// sent. It marks a generation whose automatic recovery was relinquished and
 	// that a human must verify unless the same call confirms the enabled state.
 	quotaCooldownEnableClaimReason = "cooldown recovery claimed: enable in progress; manual verification required if the enable is not confirmed"
+
+	// quotaCooldownSupersededReason replaces the claim reason when a reopen
+	// loses the credential to a newer active cooldown generation. The claimed
+	// row stays terminal instead of becoming a second active owner.
+	quotaCooldownSupersededReason = "superseded by a newer active cooldown for the same credential"
 )
 
 // RateLimitAutoDisableWorker reacts to request-monitoring events in near real time.
@@ -865,6 +870,16 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		defer cancelRelease()
 		reason := fmt.Sprintf("enable request was rejected before taking effect: %v", patchErr)
 		if releaseErr := w.store.ReopenQuotaCooldownClaim(releaseCtx, item.ID, claimedUpdatedAtMS, reason); releaseErr != nil {
+			if errors.Is(releaseErr, quotacooldownrepo.ErrSuperseded) {
+				// A newer active cooldown already owns this credential, so the
+				// claimed generation must stay skipped instead of joining it as
+				// a second active owner. Record why it will never retry.
+				if markerErr := w.store.MarkQuotaCooldownClaimedSkipped(releaseCtx, item.ID, claimedUpdatedAtMS, quotaCooldownSupersededReason); markerErr != nil {
+					log.Printf("[quota-auto-disable] auth file %q cooldown id=%d stays skipped; failed to record that a newer active cooldown owns the credential: %v", item.AuthFileName, item.ID, markerErr)
+				}
+				log.Printf("[quota-auto-disable] failed to enable auth file %q; cooldown id=%d stays skipped because a newer active cooldown owns the credential: %v", item.AuthFileName, item.ID, releaseErr)
+				return false, patchErr
+			}
 			log.Printf("[quota-auto-disable] failed to enable auth file %q and could not return cooldown id=%d to retry: %v", item.AuthFileName, item.ID, releaseErr)
 			return false, errors.Join(patchErr, fmt.Errorf("return rejected cooldown generation to retry: %w", releaseErr))
 		}
