@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -513,6 +514,87 @@ func TestExtendExistingCooldownKeepsEvidenceForLaterRecovery(t *testing.T) {
 	}
 	if len(active) != 1 || active[0].RecoverAtMS != existingRecoverAt.UnixMilli() || active[0].EvidenceJSON != existingEvidence {
 		t.Fatalf("active cooldown = %#v", active)
+	}
+}
+
+// TestExtendExistingCooldownPrefersTheLegacyRowOverAnIndexedSibling covers an
+// already-disabled credential owned by two active rows: an indexed row recorded
+// through UpsertActive and the legacy empty-index row that the same evidence
+// falls back to. New legacy evidence carries no auth_index, so it must extend
+// the legacy row instead of stopping at an indexed sibling it cannot address.
+func TestExtendExistingCooldownPrefersTheLegacyRowOverAnIndexedSibling(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	ctx := context.Background()
+	now := time.Now()
+	indexedRecoverAt := now.Add(time.Hour)
+	indexed, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:    "xai-auth.json",
+		AuthIndex:       "auth-xai-1",
+		AccountSnapshot: "alice@example.com",
+		Provider:        "xai",
+		RecoverAtMS:     indexedRecoverAt.UnixMilli(),
+		Owner:           model.QuotaCooldownOwnerXAIFreeUsage,
+		DisabledAtMS:    now.Add(-time.Hour).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("seed indexed cooldown: %v", err)
+	}
+	legacy, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:    "xai-auth.json",
+		AccountSnapshot: "alice@example.com",
+		Provider:        "xai",
+		RecoverAtMS:     now.Add(2 * time.Hour).UnixMilli(),
+		Owner:           model.QuotaCooldownOwnerXAIFreeUsage,
+		DisabledAtMS:    now.Add(-time.Hour).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("seed legacy cooldown: %v", err)
+	}
+	if legacy.ID == indexed.ID {
+		t.Fatalf("legacy evidence reused the indexed row %d", indexed.ID)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st)
+	resetAt := now.Add(6 * time.Hour)
+	candidate := quotaAutoDisableCandidate{
+		FileName:        "xai-auth.json",
+		AccountSnapshot: "alice@example.com",
+		Provider:        "xai",
+		Owner:           model.QuotaCooldownOwnerXAIFreeUsage,
+		ResetAt:         resetAt,
+	}
+	if !worker.extendExistingCooldown(ctx, candidate, authFile{
+		Name:            candidate.FileName,
+		Provider:        candidate.Provider,
+		AccountSnapshot: candidate.AccountSnapshot,
+		Disabled:        true,
+	}) {
+		t.Fatal("legacy cooldown was not extended")
+	}
+
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	byID := make(map[int64]store.QuotaCooldown, len(active))
+	for _, item := range active {
+		byID[item.ID] = item
+	}
+	if len(byID) != 2 {
+		t.Fatalf("active cooldowns = %#v, want the indexed and the legacy row", active)
+	}
+	extended, ok := byID[legacy.ID]
+	if !ok || extended.RecoverAtMS != resetAt.UnixMilli() {
+		t.Fatalf("legacy cooldown = %#v, want its recovery at %d", extended, resetAt.UnixMilli())
+	}
+	if untouched, ok := byID[indexed.ID]; !ok || untouched.RecoverAtMS != indexedRecoverAt.UnixMilli() ||
+		untouched.UpdatedAtMS != indexed.UpdatedAtMS || untouched.AuthIndex != "auth-xai-1" {
+		t.Fatalf("indexed cooldown = %#v, want the untouched generation %#v", untouched, indexed)
 	}
 }
 
@@ -1745,6 +1827,7 @@ func TestRateLimitAutoDisableWorkerEarlyRecoveryIsEventDriven(t *testing.T) {
 	}
 	defer st.Close()
 
+	disabled := true
 	patchCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
@@ -1756,7 +1839,7 @@ func TestRateLimitAutoDisableWorkerEarlyRecoveryIsEventDriven(t *testing.T) {
 				"provider":   "codex",
 				"account":    "alice@example.com",
 				"account_id": "workspace-1",
-				"disabled":   true,
+				"disabled":   disabled,
 			}})
 		case "PATCH /v0/management/auth-files/status":
 			var payload struct {
@@ -1767,6 +1850,7 @@ func TestRateLimitAutoDisableWorkerEarlyRecoveryIsEventDriven(t *testing.T) {
 				return
 			}
 			patchCalls++
+			disabled = payload.Disabled
 			if payload.Disabled {
 				http.Error(w, "expected enable", http.StatusBadRequest)
 				return
@@ -1937,6 +2021,455 @@ func (r *pausedActiveQuotaCooldownRepository) ListActive(ctx context.Context) ([
 	return items, err
 }
 
+func TestRateLimitAutoDisableWorkerEarlyRecoveryRequiresEnabledPostCondition(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	patchCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id":         "runtime-alice",
+				"name":       "codex-auth.json",
+				"auth_index": "auth-1",
+				"provider":   "codex",
+				"account":    "alice@example.com",
+				"account_id": "workspace-1",
+				"disabled":   true,
+			}})
+		case "PATCH /v0/management/auth-files/status":
+			patchCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	seeded, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:     "codex-auth.json",
+		AuthIndex:        "auth-1",
+		AccountSnapshot:  "alice@example.com",
+		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
+		RecoverAtMS:      now.Add(time.Hour).UnixMilli(),
+		Owner:            model.QuotaCooldownOwnerUsage429,
+		EventHash:        "evt-post-condition",
+		PreDisabledState: false,
+		DisabledAtMS:     now.Add(-time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	recovered, err := worker.RecoverOwnedCooldown(ctx, "codex-auth.json", "auth-1", "codex", seeded.ID, seeded.UpdatedAtMS)
+	if err == nil || !strings.Contains(err.Error(), "could not be confirmed") {
+		t.Fatalf("early recover error = %v, want unconfirmed-enable failure", err)
+	}
+	if recovered {
+		t.Fatal("early recover = true, want false when post-condition is not observed")
+	}
+	if patchCalls != 1 {
+		t.Fatalf("patch calls = %d, want 1", patchCalls)
+	}
+	// The enable PATCH already applied, so the generation that issued it keeps no
+	// automatic enable authority. A later due tick or a retry with the same
+	// generation must not enable the credential again on stale evidence.
+	worker.enableDue(ctx, now.Add(2*time.Hour))
+	if patchCalls != 1 {
+		t.Fatalf("patch calls after due tick = %d, want 1; unconfirmed enable must not stay retryable", patchCalls)
+	}
+	again, err := worker.RecoverOwnedCooldown(ctx, "codex-auth.json", "auth-1", "codex", seeded.ID, seeded.UpdatedAtMS)
+	if err != nil {
+		t.Fatalf("retry with old generation: %v", err)
+	}
+	if again || patchCalls != 1 {
+		t.Fatalf("retry = %v patches = %d, want no second enable", again, patchCalls)
+	}
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("active cooldowns = %#v, want terminal cooldown after unconfirmed enable", active)
+	}
+	status, reason, _ := readQuotaCooldownRow(t, path, seeded.ID)
+	if status != model.QuotaCooldownStatusSkipped {
+		t.Fatalf("cooldown status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+	}
+	if !strings.Contains(reason, "manual verification required") {
+		t.Fatalf("cooldown reason = %q, want manual verification marker", reason)
+	}
+}
+
+func TestRateLimitAutoDisableWorkerRetiresEnableWhoseResultIsUnconfirmed(t *testing.T) {
+	now := time.Now()
+	fixtures := []struct {
+		name      string
+		owner     string
+		provider  string
+		fileName  string
+		authIndex string
+		account   string
+		accountID string
+		evidence  string
+	}{
+		{
+			name: "usage429", owner: model.QuotaCooldownOwnerUsage429, provider: "codex",
+			fileName: "codex-auth.json", authIndex: "auth-1",
+			account: "alice@example.com", accountID: "workspace-1",
+			evidence: codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
+		},
+		{
+			name: "xai-free-usage", owner: model.QuotaCooldownOwnerXAIFreeUsage, provider: "xai",
+			fileName: "xai-auth.json", authIndex: "auth-xai-1",
+		},
+	}
+	for _, fixture := range fixtures {
+		for _, verification := range []string{"verification-error", "stale-disabled", "cancelled-request"} {
+			t.Run(fixture.name+"/"+verification, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "usage.sqlite")
+				st, err := store.Open(path)
+				if err != nil {
+					t.Fatalf("open store: %v", err)
+				}
+				defer st.Close()
+
+				var mu sync.Mutex
+				disabled := true
+				patched := false
+				patches := make([]bool, 0, 2)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					currentDisabled, alreadyPatched := disabled, patched
+					mu.Unlock()
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+						if verification == "verification-error" && alreadyPatched {
+							http.Error(w, "verification unavailable", http.StatusInternalServerError)
+							return
+						}
+						if verification == "stale-disabled" {
+							currentDisabled = true
+						}
+						file := map[string]any{
+							"id":         "runtime-" + fixture.authIndex,
+							"name":       fixture.fileName,
+							"auth_index": fixture.authIndex,
+							"provider":   fixture.provider,
+							"disabled":   currentDisabled,
+						}
+						if fixture.account != "" {
+							file["account"] = fixture.account
+						}
+						if fixture.accountID != "" {
+							file["account_id"] = fixture.accountID
+						}
+						_ = json.NewEncoder(w).Encode([]map[string]any{file})
+					case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+						var payload struct {
+							Disabled bool `json:"disabled"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+						mu.Lock()
+						disabled = payload.Disabled
+						patched = true
+						patches = append(patches, payload.Disabled)
+						mu.Unlock()
+						_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer server.Close()
+
+				ctx := context.Background()
+				var cancel context.CancelFunc
+				if verification == "cancelled-request" {
+					ctx, cancel = context.WithCancel(context.Background())
+					defer cancel()
+				}
+				worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+					CPAUpstreamURL: server.URL,
+					ManagementKey:  "mgmt",
+				})
+				if verification == "cancelled-request" {
+					// Cancel at the end of the PATCH response so the enable is
+					// applied but the same call can no longer verify it.
+					clientCancel := cancel
+					worker.client = &http.Client{Transport: workerRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+						response, err := http.DefaultTransport.RoundTrip(r)
+						if err == nil && r.Method == http.MethodPatch {
+							response.Body = &cancelAtEOFReadCloser{reader: response.Body, cancel: clientCancel}
+						}
+						return response, err
+					})}
+				}
+
+				seeded, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+					AuthFileName:     fixture.fileName,
+					AuthIndex:        fixture.authIndex,
+					AccountSnapshot:  fixture.account,
+					Provider:         fixture.provider,
+					EvidenceJSON:     fixture.evidence,
+					RecoverAtMS:      now.Add(-time.Minute).UnixMilli(),
+					Owner:            fixture.owner,
+					EventHash:        "evt-unconfirmed-" + verification,
+					PreDisabledState: false,
+					DisabledAtMS:     now.Add(-2 * time.Minute).UnixMilli(),
+				})
+				if err != nil {
+					t.Fatalf("seed cooldown: %v", err)
+				}
+
+				worker.enableDue(ctx, now)
+
+				mu.Lock()
+				firstPatches := append([]bool(nil), patches...)
+				mu.Unlock()
+				if len(firstPatches) != 1 || firstPatches[0] {
+					t.Fatalf("patches = %v, want exactly the enable PATCH", firstPatches)
+				}
+
+				// The enable really applied, then a human disables the credential
+				// again before the cooldown would come due.
+				mu.Lock()
+				disabled = true
+				mu.Unlock()
+
+				followUpCtx := context.Background()
+				worker.enableDue(followUpCtx, now.Add(2*time.Hour))
+				if fixture.provider == "codex" {
+					recovered, recoverErr := worker.RecoverOwnedCooldown(
+						followUpCtx,
+						fixture.fileName,
+						fixture.authIndex,
+						"codex",
+						seeded.ID,
+						seeded.UpdatedAtMS,
+					)
+					if recoverErr != nil {
+						t.Fatalf("retry with old generation: %v", recoverErr)
+					}
+					if recovered {
+						t.Fatal("old generation recovered a cooldown whose enable was never confirmed")
+					}
+				}
+
+				mu.Lock()
+				finalPatches := append([]bool(nil), patches...)
+				finalDisabled := disabled
+				mu.Unlock()
+				if len(finalPatches) != 1 {
+					t.Fatalf("patches = %v, want no second enable PATCH", finalPatches)
+				}
+				if !finalDisabled {
+					t.Fatal("credential ended enabled; the manual disable was overridden")
+				}
+				status, reason, _ := readQuotaCooldownRow(t, path, seeded.ID)
+				if status != model.QuotaCooldownStatusSkipped {
+					t.Fatalf("cooldown status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+				}
+				if !strings.Contains(reason, "could not be confirmed") || !strings.Contains(reason, "manual verification required") {
+					t.Fatalf("cooldown reason = %q, want unconfirmed-enable reason with manual verification", reason)
+				}
+			})
+		}
+	}
+}
+
+func TestRateLimitAutoDisableWorkerKeepsNewerCooldownGenerationOnRecoveryConflict(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	// A second store handle on the same database file stands in for another
+	// writer that records newer quota evidence for the same credential.
+	otherWriter, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	defer otherWriter.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	upsert := store.QuotaCooldownUpsert{
+		AuthFileName:     "codex-auth.json",
+		AuthIndex:        "auth-1",
+		AccountSnapshot:  "alice@example.com",
+		Provider:         "codex",
+		EvidenceJSON:     codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
+		RecoverAtMS:      now.Add(-time.Minute).UnixMilli(),
+		Owner:            model.QuotaCooldownOwnerUsage429,
+		EventHash:        "evt-recovery-cas-old",
+		PreDisabledState: false,
+		DisabledAtMS:     now.Add(-time.Hour).UnixMilli(),
+	}
+	seeded, err := st.UpsertQuotaCooldown(ctx, upsert)
+	if err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+
+	var mu sync.Mutex
+	disabled := true
+	patches := make([]bool, 0, 2)
+	var newer store.QuotaCooldown
+	var newerErr error
+	var advanceOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			mu.Lock()
+			currentDisabled := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"id":         "runtime-alice",
+				"name":       "codex-auth.json",
+				"auth_index": "auth-1",
+				"provider":   "codex",
+				"account":    "alice@example.com",
+				"account_id": "workspace-1",
+				"disabled":   currentDisabled,
+			}})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			var payload struct {
+				Disabled bool `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			disabled = payload.Disabled
+			patches = append(patches, payload.Disabled)
+			mu.Unlock()
+			// Between the enable PATCH and the recovery marker, newer quota
+			// evidence advances the same cooldown row.
+			advanceOnce.Do(func() {
+				next := upsert
+				next.EventHash = "evt-recovery-cas-new"
+				next.RecoverAtMS = now.Add(time.Hour).UnixMilli()
+				next.DisabledAtMS = now.Add(-time.Minute).UnixMilli()
+				newer, newerErr = otherWriter.UpsertQuotaCooldown(context.Background(), next)
+			})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	recovered, err := worker.RecoverOwnedCooldown(ctx, "codex-auth.json", "auth-1", "codex", seeded.ID, seeded.UpdatedAtMS)
+	if err == nil || !strings.Contains(err.Error(), "generation conflict") {
+		t.Fatalf("recovery error = %v, want generation conflict", err)
+	}
+	if recovered {
+		t.Fatal("old writer recovered a cooldown generation it no longer owns")
+	}
+	if newerErr != nil {
+		t.Fatalf("advance cooldown generation: %v", newerErr)
+	}
+	if newer.ID == 0 || newer.ID == seeded.ID {
+		t.Fatalf("newer generation did not take over the credential: old=%+v new=%+v", seeded, newer)
+	}
+
+	mu.Lock()
+	gotPatches := append([]bool(nil), patches...)
+	gotDisabled := disabled
+	mu.Unlock()
+	if len(gotPatches) != 2 || gotPatches[0] || !gotPatches[1] {
+		t.Fatalf("patches = %v, want enable followed by compensating disable", gotPatches)
+	}
+	if !gotDisabled {
+		t.Fatal("credential ended enabled although newer quota evidence owns the cooldown")
+	}
+	// The newer generation owns the credential and must stay untouched.
+	newerStatus, newerReason, newerUpdatedAtMS := readQuotaCooldownRow(t, path, newer.ID)
+	if newerStatus != model.QuotaCooldownStatusActive {
+		t.Fatalf("newer cooldown status = %q, want %q", newerStatus, model.QuotaCooldownStatusActive)
+	}
+	if newerUpdatedAtMS != newer.UpdatedAtMS {
+		t.Fatalf("newer cooldown generation = %d, want untouched generation %d", newerUpdatedAtMS, newer.UpdatedAtMS)
+	}
+	if newerReason != "" {
+		t.Fatalf("newer generation last_error = %q, want untouched", newerReason)
+	}
+	// The generation that issued the enable stays terminal: it can never enable
+	// the credential again on its stale evidence.
+	retiredStatus, retiredReason, _ := readQuotaCooldownRow(t, path, seeded.ID)
+	if retiredStatus != model.QuotaCooldownStatusSkipped {
+		t.Fatalf("retired cooldown status = %q, want %q", retiredStatus, model.QuotaCooldownStatusSkipped)
+	}
+	if !strings.Contains(retiredReason, "newer cooldown generation") || !strings.Contains(retiredReason, "manual verification required") {
+		t.Fatalf("retired cooldown reason = %q, want newer-generation evidence with manual verification", retiredReason)
+	}
+	// A tick after the retired generation's recover_at but before the newer
+	// generation comes due must not enable anything.
+	worker.enableDue(ctx, now.Add(30*time.Minute))
+	mu.Lock()
+	gotPatches = append([]bool(nil), patches...)
+	mu.Unlock()
+	if len(gotPatches) != 2 {
+		t.Fatalf("patches = %v, want no further enable from the retired generation", gotPatches)
+	}
+}
+
+func readQuotaCooldownRow(t *testing.T, path string, id int64) (string, string, int64) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open cooldown database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var status string
+	var lastError sql.NullString
+	var updatedAtMS int64
+	if err := db.QueryRow(
+		`select status, last_error, updated_at_ms from quota_cooldowns where id = ?`,
+		id,
+	).Scan(&status, &lastError, &updatedAtMS); err != nil {
+		t.Fatalf("read cooldown %d: %v", id, err)
+	}
+	return status, lastError.String, updatedAtMS
+}
+
+func readQuotaCooldownRecoverAt(t *testing.T, path string, id int64) int64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open cooldown database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var recoverAtMS int64
+	if err := db.QueryRow(
+		`select recover_at_ms from quota_cooldowns where id = ?`,
+		id,
+	).Scan(&recoverAtMS); err != nil {
+		t.Fatalf("read cooldown %d recover_at: %v", id, err)
+	}
+	return recoverAtMS
+}
+
 func TestRateLimitAutoDisableWorkerEarlyRecoveryDoesNotEnablePreDisabledCredential(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
@@ -2003,6 +2536,7 @@ func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvi
 	}
 	defer st.Close()
 
+	disabled := true
 	patchCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
@@ -2014,7 +2548,7 @@ func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvi
 				"provider":   "codex",
 				"account":    "alice@example.com",
 				"account_id": "workspace-1",
-				"disabled":   true,
+				"disabled":   disabled,
 			}})
 		case "PATCH /v0/management/auth-files/status":
 			var payload struct {
@@ -2025,6 +2559,7 @@ func TestRateLimitAutoDisableWorkerRecoversLegacyCodexCooldownWithoutIdentityEvi
 				return
 			}
 			patchCalls++
+			disabled = payload.Disabled
 			if payload.Disabled {
 				http.Error(w, "expected enable", http.StatusBadRequest)
 				return
@@ -2586,7 +3121,8 @@ func TestRateLimitAutoDisableWorkerRecoversXAICooldownWithoutTouchingManualDisab
 }
 
 func TestRateLimitAutoDisableWorkerRollsBackEnableWhenRecoveryPersistenceFails(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -2632,7 +3168,7 @@ func TestRateLimitAutoDisableWorkerRollsBackEnableWhenRecoveryPersistenceFails(t
 
 	ctx := context.Background()
 	now := time.Now()
-	if _, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+	seeded, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
 		AuthFileName:     "shared.json",
 		AuthIndex:        "auth-1",
 		AccountSnapshot:  "user@example.com",
@@ -2643,7 +3179,8 @@ func TestRateLimitAutoDisableWorkerRollsBackEnableWhenRecoveryPersistenceFails(t
 		EventHash:        "recovery-persistence-failure",
 		PreDisabledState: false,
 		DisabledAtMS:     now.Add(-time.Hour).UnixMilli(),
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("upsert cooldown: %v", err)
 	}
 
@@ -2656,12 +3193,26 @@ func TestRateLimitAutoDisableWorkerRollsBackEnableWhenRecoveryPersistenceFails(t
 	if !disabled || len(patches) != 2 || patches[0] || !patches[1] {
 		t.Fatalf("disabled=%v patches=%v, want enable followed by rollback disable", disabled, patches)
 	}
+	// The generation that issued the enable is retired, not kept active: after the
+	// marker failure the row must never regain automatic enable authority.
+	status, reason, _ := readQuotaCooldownRow(t, path, seeded.ID)
+	if status != model.QuotaCooldownStatusSkipped {
+		t.Fatalf("cooldown status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+	}
+	if !strings.Contains(reason, "recovery marker persistence failed") {
+		t.Fatalf("cooldown reason = %q, want recovery marker failure evidence", reason)
+	}
 	active, err := st.QuotaCooldowns.ListActive(ctx)
 	if err != nil {
 		t.Fatalf("list active cooldowns: %v", err)
 	}
-	if len(active) != 1 || !strings.Contains(active[0].LastError, "recovery marker persistence failed") {
-		t.Fatalf("active cooldown = %#v, want retained ownership with failure evidence", active)
+	if len(active) != 0 {
+		t.Fatalf("active cooldowns = %#v, want none after a failed recovery marker", active)
+	}
+	worker.enableDue(ctx, now.Add(2*time.Hour))
+	worker.enableDue(ctx, now.Add(4*time.Hour))
+	if len(patches) != 2 {
+		t.Fatalf("patches = %v, want no further enable after the marker failure", patches)
 	}
 }
 
@@ -2968,10 +3519,1042 @@ type failMarkRecoveredQuotaCooldownRepository struct {
 	err       error
 }
 
-func (r *failMarkRecoveredQuotaCooldownRepository) MarkRecovered(ctx context.Context, id int64, recoveredAtMS int64) error {
+func (r *failMarkRecoveredQuotaCooldownRepository) MarkRecovered(ctx context.Context, id int64, expectedUpdatedAtMS int64, recoveredAtMS int64) error {
 	if r.remaining > 0 {
 		r.remaining--
 		return r.err
 	}
-	return r.Repository.MarkRecovered(ctx, id, recoveredAtMS)
+	return r.Repository.MarkRecovered(ctx, id, expectedUpdatedAtMS, recoveredAtMS)
+}
+
+func (r *failMarkRecoveredQuotaCooldownRepository) MarkClaimedRecovered(ctx context.Context, id int64, claimedUpdatedAtMS int64, recoveredAtMS int64) error {
+	if r.remaining > 0 {
+		r.remaining--
+		return r.err
+	}
+	return r.Repository.MarkClaimedRecovered(ctx, id, claimedUpdatedAtMS, recoveredAtMS)
+}
+
+type quotaEnableFixture struct {
+	name      string
+	owner     string
+	provider  string
+	fileName  string
+	authIndex string
+	account   string
+	accountID string
+	evidence  string
+}
+
+func quotaEnableFixtures() []quotaEnableFixture {
+	return []quotaEnableFixture{
+		{
+			name: "usage429", owner: model.QuotaCooldownOwnerUsage429, provider: "codex",
+			fileName: "codex-auth.json", authIndex: "auth-1",
+			account: "alice@example.com", accountID: "workspace-1",
+			evidence: codexCooldownIdentityEvidenceJSON("workspace-1", "alice@example.com"),
+		},
+		{
+			name: "xai-free-usage", owner: model.QuotaCooldownOwnerXAIFreeUsage, provider: "xai",
+			fileName: "xai-auth.json", authIndex: "auth-xai-1",
+		},
+	}
+}
+
+func (f quotaEnableFixture) authFilePayload(disabled bool) map[string]any {
+	file := map[string]any{
+		"id":         "runtime-" + f.authIndex,
+		"name":       f.fileName,
+		"auth_index": f.authIndex,
+		"provider":   f.provider,
+		"disabled":   disabled,
+	}
+	if f.account != "" {
+		file["account"] = f.account
+	}
+	if f.accountID != "" {
+		file["account_id"] = f.accountID
+	}
+	return file
+}
+
+func seedDueQuotaCooldown(t *testing.T, st *store.Store, fixture quotaEnableFixture, eventHash string) store.QuotaCooldown {
+	t.Helper()
+	now := time.Now()
+	seeded, err := st.UpsertQuotaCooldown(context.Background(), store.QuotaCooldownUpsert{
+		AuthFileName:     fixture.fileName,
+		AuthIndex:        fixture.authIndex,
+		AccountSnapshot:  fixture.account,
+		Provider:         fixture.provider,
+		EvidenceJSON:     fixture.evidence,
+		RecoverAtMS:      now.Add(-time.Minute).UnixMilli(),
+		Owner:            fixture.owner,
+		EventHash:        eventHash,
+		PreDisabledState: false,
+		DisabledAtMS:     now.Add(-2 * time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("seed cooldown: %v", err)
+	}
+	return seeded
+}
+
+// TestRateLimitAutoDisableWorkerRetiresEnableWhoseResponseWasLost covers the
+// case where CPA applied the enable PATCH but the caller never learned it: the
+// connection dropped after the request was sent, the 2xx body did not confirm
+// success, or a gateway answered 5xx. None of these proves the credential was
+// not enabled, so the generation that issued the request must never enable the
+// credential again.
+func TestRateLimitAutoDisableWorkerRetiresEnableWhoseResponseWasLost(t *testing.T) {
+	for _, fixture := range quotaEnableFixtures() {
+		for _, mode := range []string{"connection-closed", "unconfirmed-body", "gateway-5xx"} {
+			t.Run(fixture.name+"/"+mode, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "usage.sqlite")
+				st, err := store.Open(path)
+				if err != nil {
+					t.Fatalf("open store: %v", err)
+				}
+				defer st.Close()
+
+				var mu sync.Mutex
+				disabled := true
+				patches := make([]bool, 0, 2)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+						mu.Lock()
+						current := disabled
+						mu.Unlock()
+						_ = json.NewEncoder(w).Encode([]map[string]any{fixture.authFilePayload(current)})
+					case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+						var payload struct {
+							Disabled bool `json:"disabled"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+						// CPA applies the request before the caller loses the answer.
+						mu.Lock()
+						disabled = payload.Disabled
+						patches = append(patches, payload.Disabled)
+						mu.Unlock()
+						switch mode {
+						case "connection-closed":
+							hijacker, ok := w.(http.Hijacker)
+							if !ok {
+								t.Error("response writer does not support hijacking")
+								return
+							}
+							conn, _, err := hijacker.Hijack()
+							if err != nil {
+								t.Errorf("hijack connection: %v", err)
+								return
+							}
+							_ = conn.Close()
+						case "unconfirmed-body":
+							w.WriteHeader(http.StatusOK)
+							_, _ = w.Write([]byte(`{"message":"accepted"}`))
+						case "gateway-5xx":
+							w.WriteHeader(http.StatusBadGateway)
+							_, _ = w.Write([]byte(`{"error":"bad gateway"}`))
+						}
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer server.Close()
+
+				ctx := context.Background()
+				now := time.Now()
+				seeded := seedDueQuotaCooldown(t, st, fixture, "evt-lost-enable-"+mode)
+				worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+					CPAUpstreamURL: server.URL,
+					ManagementKey:  "mgmt",
+				})
+				worker.enableDue(ctx, now)
+
+				mu.Lock()
+				firstPatches := append([]bool(nil), patches...)
+				firstDisabled := disabled
+				mu.Unlock()
+				if len(firstPatches) != 1 || firstPatches[0] {
+					t.Fatalf("patches = %v, want exactly the enable request", firstPatches)
+				}
+				if firstDisabled {
+					t.Fatal("fake CPA did not apply the enable whose response was lost")
+				}
+				// A human disables the credential again before the cooldown is due.
+				mu.Lock()
+				disabled = true
+				mu.Unlock()
+
+				followUp := context.Background()
+				worker.enableDue(followUp, now.Add(2*time.Hour))
+				worker.enableDue(followUp, now.Add(4*time.Hour))
+				if fixture.provider == "codex" {
+					recovered, recoverErr := worker.RecoverOwnedCooldown(
+						followUp, fixture.fileName, fixture.authIndex, "codex", seeded.ID, seeded.UpdatedAtMS,
+					)
+					if recoverErr != nil {
+						t.Fatalf("retry with the old generation: %v", recoverErr)
+					}
+					if recovered {
+						t.Fatal("old generation recovered a cooldown whose enable response was lost")
+					}
+				}
+
+				mu.Lock()
+				finalPatches := append([]bool(nil), patches...)
+				finalDisabled := disabled
+				mu.Unlock()
+				if len(finalPatches) != 1 {
+					t.Fatalf("patches = %v, want no second enable request", finalPatches)
+				}
+				if !finalDisabled {
+					t.Fatal("credential ended enabled; the manual disable was overridden")
+				}
+				status, reason, _ := readQuotaCooldownRow(t, path, seeded.ID)
+				if status != model.QuotaCooldownStatusSkipped {
+					t.Fatalf("cooldown status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+				}
+				if !strings.Contains(reason, "manual verification required") {
+					t.Fatalf("cooldown reason = %q, want the manual verification marker", reason)
+				}
+				active, err := st.QuotaCooldowns.ListActive(ctx)
+				if err != nil {
+					t.Fatalf("list active cooldowns: %v", err)
+				}
+				if len(active) != 0 {
+					t.Fatalf("active cooldowns = %#v, want the lost-response generation retired", active)
+				}
+			})
+		}
+	}
+}
+
+func TestRateLimitAutoDisableWorkerRetriesEnableRejectedByCPA(t *testing.T) {
+	for _, fixture := range quotaEnableFixtures() {
+		t.Run(fixture.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "usage.sqlite")
+			st, err := store.Open(path)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer st.Close()
+
+			var mu sync.Mutex
+			disabled := true
+			attempts := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+					mu.Lock()
+					current := disabled
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode([]map[string]any{fixture.authFilePayload(current)})
+				case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+					var payload struct {
+						Disabled bool `json:"disabled"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					mu.Lock()
+					attempts++
+					first := attempts == 1
+					if !first {
+						disabled = payload.Disabled
+					}
+					mu.Unlock()
+					if first {
+						// A definite CPA rejection: nothing was applied.
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = w.Write([]byte(`{"error":"credential is locked by policy"}`))
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			ctx := context.Background()
+			now := time.Now()
+			seeded := seedDueQuotaCooldown(t, st, fixture, "evt-rejected-enable")
+			worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+				CPAUpstreamURL: server.URL,
+				ManagementKey:  "mgmt",
+			})
+			worker.enableDue(ctx, now)
+
+			mu.Lock()
+			firstAttempts := attempts
+			firstDisabled := disabled
+			mu.Unlock()
+			if firstAttempts != 1 {
+				t.Fatalf("patch attempts = %d, want 1", firstAttempts)
+			}
+			if !firstDisabled {
+				t.Fatal("rejected enable changed the credential")
+			}
+			status, lastError, _ := readQuotaCooldownRow(t, path, seeded.ID)
+			if status != model.QuotaCooldownStatusActive {
+				t.Fatalf("cooldown status = %q, want %q for a definite rejection", status, model.QuotaCooldownStatusActive)
+			}
+			if !strings.Contains(lastError, "credential is locked by policy") {
+				t.Fatalf("cooldown last_error = %q, want the CPA rejection", lastError)
+			}
+
+			worker.enableDue(ctx, now.Add(time.Minute))
+
+			mu.Lock()
+			finalAttempts := attempts
+			finalDisabled := disabled
+			mu.Unlock()
+			if finalAttempts != 2 {
+				t.Fatalf("patch attempts = %d, want a retry after a definite rejection", finalAttempts)
+			}
+			if finalDisabled {
+				t.Fatal("retried enable did not enable the credential")
+			}
+			status, _, _ = readQuotaCooldownRow(t, path, seeded.ID)
+			if status != model.QuotaCooldownStatusRecovered {
+				t.Fatalf("cooldown status = %q, want %q after the retry succeeded", status, model.QuotaCooldownStatusRecovered)
+			}
+		})
+	}
+}
+
+type supersedingReopenQuotaCooldownRepository struct {
+	quotacooldownrepo.Repository
+	prepare func() error
+	once    sync.Once
+}
+
+// ReopenClaim inserts another writer's active generation for the same
+// credential just before delegating, reproducing the window between the
+// worker's newer-generation check and its reopen of a rejected enable.
+func (r *supersedingReopenQuotaCooldownRepository) ReopenClaim(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error {
+	r.once.Do(func() {
+		if r.prepare != nil {
+			_ = r.prepare()
+		}
+	})
+	return r.Repository.ReopenClaim(ctx, id, claimedUpdatedAtMS, reason)
+}
+
+// TestRateLimitAutoDisableWorkerKeepsSupersededClaimSkipped covers a second
+// writer recording newer active cooldown evidence for the same credential
+// after the worker checked for newer generations but before it reopened a
+// rejected enable. The claimed generation must stay skipped with a reason that
+// names the superseding owner instead of becoming a second active owner.
+func TestRateLimitAutoDisableWorkerKeepsSupersededClaimSkipped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	otherWriter, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	defer otherWriter.Close()
+
+	fixture := quotaEnableFixtures()[0]
+	var mu sync.Mutex
+	disabled := true
+	patches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			mu.Lock()
+			current := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{fixture.authFilePayload(current)})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			mu.Lock()
+			patches++
+			mu.Unlock()
+			// A definite CPA rejection: nothing was applied.
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"credential is locked by policy"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	seeded := seedDueQuotaCooldown(t, st, fixture, "evt-superseded-claim")
+	var sibling store.QuotaCooldown
+	var siblingErr error
+	st.QuotaCooldowns = &supersedingReopenQuotaCooldownRepository{
+		Repository: st.QuotaCooldowns,
+		prepare: func() error {
+			sibling, siblingErr = otherWriter.UpsertQuotaCooldown(context.Background(), store.QuotaCooldownUpsert{
+				AuthFileName:     fixture.fileName,
+				AuthIndex:        fixture.authIndex,
+				AccountSnapshot:  fixture.account,
+				Provider:         fixture.provider,
+				EvidenceJSON:     fixture.evidence,
+				RecoverAtMS:      now.Add(time.Hour).UnixMilli(),
+				Owner:            fixture.owner,
+				EventHash:        "evt-superseding-evidence",
+				PreDisabledState: false,
+				DisabledAtMS:     now.Add(-time.Minute).UnixMilli(),
+			})
+			return siblingErr
+		},
+	}
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	worker.enableDue(ctx, now)
+
+	if siblingErr != nil {
+		t.Fatalf("record superseding cooldown evidence: %v", siblingErr)
+	}
+	if sibling.ID == 0 || sibling.ID == seeded.ID {
+		t.Fatalf("superseding evidence did not take its own generation: seeded=%+v sibling=%+v", seeded, sibling)
+	}
+	mu.Lock()
+	gotPatches := patches
+	gotDisabled := disabled
+	mu.Unlock()
+	if gotPatches != 1 {
+		t.Fatalf("patch attempts = %d, want 1", gotPatches)
+	}
+	if !gotDisabled {
+		t.Fatal("rejected enable changed the credential")
+	}
+	owners, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(owners) != 1 || owners[0].ID != sibling.ID {
+		t.Fatalf("active cooldowns = %#v, want only the superseding generation %d", owners, sibling.ID)
+	}
+	status, reason, updatedAtMS := readQuotaCooldownRow(t, path, seeded.ID)
+	if status != model.QuotaCooldownStatusSkipped {
+		t.Fatalf("claimed cooldown status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+	}
+	if !strings.Contains(reason, "superseded by a newer active cooldown") {
+		t.Fatalf("claimed cooldown reason = %q, want the superseded reason", reason)
+	}
+	if updatedAtMS <= seeded.UpdatedAtMS {
+		t.Fatalf("claimed cooldown generation = %d, want it advanced past %d", updatedAtMS, seeded.UpdatedAtMS)
+	}
+	siblingStatus, siblingReason, siblingUpdatedAtMS := readQuotaCooldownRow(t, path, sibling.ID)
+	if siblingStatus != model.QuotaCooldownStatusActive || siblingReason != "" || siblingUpdatedAtMS != sibling.UpdatedAtMS {
+		t.Fatalf("superseding cooldown = (%q, %q, %d), want the untouched active generation (%d)", siblingStatus, siblingReason, siblingUpdatedAtMS, sibling.UpdatedAtMS)
+	}
+}
+
+// TestRateLimitAutoDisableWorkerKeepsNewerEvidenceOnUnconfirmedEnable covers a
+// second database writer recording newer quota evidence for the same credential
+// between the enable request and its verification. The newer generation owns the
+// credential, stays untouched, and the stale enable is compensated.
+func TestRateLimitAutoDisableWorkerKeepsNewerEvidenceOnUnconfirmedEnable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	otherWriter, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	defer otherWriter.Close()
+
+	fixture := quotaEnableFixtures()[0]
+	upsert := store.QuotaCooldownUpsert{
+		AuthFileName:     fixture.fileName,
+		AuthIndex:        fixture.authIndex,
+		AccountSnapshot:  fixture.account,
+		Provider:         fixture.provider,
+		EvidenceJSON:     fixture.evidence,
+		RecoverAtMS:      time.Now().Add(time.Hour).UnixMilli(),
+		Owner:            fixture.owner,
+		EventHash:        "evt-newer-evidence",
+		PreDisabledState: false,
+		DisabledAtMS:     time.Now().Add(-time.Minute).UnixMilli(),
+	}
+
+	var mu sync.Mutex
+	disabled := true
+	patched := false
+	verifyFailures := 0
+	patches := make([]bool, 0, 2)
+	var newer store.QuotaCooldown
+	var newerErr error
+	var advanceOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			mu.Lock()
+			alreadyPatched := patched
+			// The verification read right after the enable fails once; later
+			// reads (the compensating revalidation) succeed.
+			failOnce := alreadyPatched && verifyFailures == 0
+			if failOnce {
+				verifyFailures++
+			}
+			current := disabled
+			mu.Unlock()
+			if failOnce {
+				http.Error(w, "verification unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{fixture.authFilePayload(current)})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			var payload struct {
+				Disabled bool `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			disabled = payload.Disabled
+			patched = true
+			patches = append(patches, payload.Disabled)
+			mu.Unlock()
+			// Newer quota evidence from another writer lands after the enable
+			// request and before its verification.
+			advanceOnce.Do(func() {
+				newer, newerErr = otherWriter.UpsertQuotaCooldown(context.Background(), upsert)
+			})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	seeded := seedDueQuotaCooldown(t, st, fixture, "evt-unconfirmed-old")
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	recovered, err := worker.RecoverOwnedCooldown(ctx, fixture.fileName, fixture.authIndex, "codex", seeded.ID, seeded.UpdatedAtMS)
+	if recovered {
+		t.Fatal("old writer recovered a generation that newer evidence owns")
+	}
+	if newerErr != nil {
+		t.Fatalf("record newer evidence: %v", newerErr)
+	}
+	if newer.ID == 0 || newer.UpdatedAtMS <= seeded.UpdatedAtMS {
+		t.Fatalf("newer evidence did not take over the credential: old=%+v new=%+v", seeded, newer)
+	}
+	mu.Lock()
+	gotDisabled := disabled
+	mu.Unlock()
+	if !gotDisabled {
+		t.Fatal("credential ended enabled although newer quota evidence owns it")
+	}
+	newerStatus, newerReason, newerUpdatedAtMS := readQuotaCooldownRow(t, path, newer.ID)
+	if newerStatus != model.QuotaCooldownStatusActive {
+		t.Fatalf("newer cooldown status = %q, want %q", newerStatus, model.QuotaCooldownStatusActive)
+	}
+	if newerUpdatedAtMS != newer.UpdatedAtMS || newerReason != "" {
+		t.Fatalf("newer generation was modified: updated_at=%d last_error=%q want updated_at=%d last_error=\"\"", newerUpdatedAtMS, newerReason, newer.UpdatedAtMS)
+	}
+	mu.Lock()
+	gotPatches := append([]bool(nil), patches...)
+	mu.Unlock()
+	if len(gotPatches) != 2 || gotPatches[0] || !gotPatches[1] {
+		t.Fatalf("patches = %v, want enable followed by compensating disable", gotPatches)
+	}
+	retiredStatus, retiredReason, _ := readQuotaCooldownRow(t, path, seeded.ID)
+	if retiredStatus != model.QuotaCooldownStatusSkipped || !strings.Contains(retiredReason, "manual verification required") {
+		t.Fatalf("retired cooldown status=%q reason=%q, want a terminal generation", retiredStatus, retiredReason)
+	}
+	// A later tick before the newer generation is due must not enable anything.
+	worker.enableDue(ctx, time.Now().Add(30*time.Minute))
+	mu.Lock()
+	gotPatches = append([]bool(nil), patches...)
+	mu.Unlock()
+	if len(gotPatches) != 2 {
+		t.Fatalf("patches = %v, want no enable from the retired generation", gotPatches)
+	}
+	if err == nil || !strings.Contains(err.Error(), "generation conflict") {
+		t.Fatalf("recovery error = %v, want a generation conflict", err)
+	}
+}
+
+// TestRateLimitAutoDisableWorkerKeepsNewerIndexedEvidenceOverLegacyClaim covers
+// a second writer recording newer quota evidence for the same physical
+// credential under its auth_index while this worker holds the claim of the
+// legacy empty-index row. UpsertActive resolves both row shapes to one
+// credential, so the newer indexed generation must own it before a stale enable
+// is confirmed.
+func TestRateLimitAutoDisableWorkerKeepsNewerIndexedEvidenceOverLegacyClaim(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	otherWriter, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	defer otherWriter.Close()
+
+	fixture := quotaEnableFixture{
+		name: "xai-legacy", owner: model.QuotaCooldownOwnerXAIFreeUsage, provider: "xai",
+		fileName: "xai-auth.json", account: "alice@example.com",
+	}
+	var mu sync.Mutex
+	disabled := true
+	patches := make([]bool, 0, 2)
+	var indexed store.QuotaCooldown
+	var indexedErr error
+	var recordOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			mu.Lock()
+			current := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{fixture.authFilePayload(current)})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			var payload struct {
+				Disabled bool `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			disabled = payload.Disabled
+			patches = append(patches, payload.Disabled)
+			mu.Unlock()
+			// The second writer records newer evidence for the same credential
+			// under its auth_index right after this worker claimed the legacy
+			// row, so the claim and the newer generation coexist.
+			recordOnce.Do(func() {
+				indexed, indexedErr = otherWriter.UpsertQuotaCooldown(context.Background(), store.QuotaCooldownUpsert{
+					AuthFileName:     fixture.fileName,
+					AuthIndex:        "auth-xai-1",
+					AccountSnapshot:  fixture.account,
+					Provider:         fixture.provider,
+					RecoverAtMS:      time.Now().Add(time.Hour).UnixMilli(),
+					Owner:            fixture.owner,
+					EventHash:        "evt-newer-indexed-evidence",
+					PreDisabledState: false,
+					DisabledAtMS:     time.Now().Add(-time.Minute).UnixMilli(),
+				})
+			})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	seeded := seedDueQuotaCooldown(t, st, fixture, "evt-legacy-claim")
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	worker.enableDue(ctx, now)
+
+	if indexedErr != nil {
+		t.Fatalf("record newer indexed evidence: %v", indexedErr)
+	}
+	if indexed.ID == 0 || indexed.ID == seeded.ID {
+		t.Fatalf("newer indexed evidence did not take its own generation: seeded=%+v indexed=%+v", seeded, indexed)
+	}
+	mu.Lock()
+	gotDisabled := disabled
+	gotPatches := append([]bool(nil), patches...)
+	mu.Unlock()
+	if !gotDisabled {
+		t.Fatal("credential ended enabled although newer indexed evidence owns it")
+	}
+	if len(gotPatches) != 2 || gotPatches[0] || !gotPatches[1] {
+		t.Fatalf("patches = %v, want enable followed by compensating disable", gotPatches)
+	}
+	status, reason, updatedAtMS := readQuotaCooldownRow(t, path, seeded.ID)
+	if status != model.QuotaCooldownStatusSkipped {
+		t.Fatalf("claimed cooldown status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+	}
+	if !strings.Contains(reason, "newer cooldown generation") {
+		t.Fatalf("claimed cooldown reason = %q, want the superseding generation reason", reason)
+	}
+	if updatedAtMS <= seeded.UpdatedAtMS {
+		t.Fatalf("claimed cooldown generation = %d, want it advanced past %d", updatedAtMS, seeded.UpdatedAtMS)
+	}
+	indexedStatus, indexedReason, indexedUpdatedAtMS := readQuotaCooldownRow(t, path, indexed.ID)
+	if indexedStatus != model.QuotaCooldownStatusActive || indexedReason != "" || indexedUpdatedAtMS != indexed.UpdatedAtMS {
+		t.Fatalf("newer indexed cooldown = (%q, %q, %d), want the untouched active generation (%d)", indexedStatus, indexedReason, indexedUpdatedAtMS, indexed.UpdatedAtMS)
+	}
+	// A later tick before the newer generation is due must not enable anything.
+	worker.enableDue(ctx, now.Add(30*time.Minute))
+	mu.Lock()
+	gotPatches = append([]bool(nil), patches...)
+	mu.Unlock()
+	if len(gotPatches) != 2 {
+		t.Fatalf("patches = %v, want no enable from the retired legacy generation", gotPatches)
+	}
+}
+
+// TestRateLimitAutoDisableWorkerKeepsCooldownOnAnotherAuthFileOutOfRecovery
+// covers two credential files that share a provider and account snapshot. The
+// fallback identity cannot tell them apart, but a cooldown recorded for the
+// sibling file neither owns this credential nor is due. The claimed generation
+// must recover instead of being retired by the sibling and disabled again.
+func TestRateLimitAutoDisableWorkerKeepsCooldownOnAnotherAuthFileOutOfRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	claimedFixture := quotaEnableFixture{
+		name: "xai-legacy", owner: model.QuotaCooldownOwnerXAIFreeUsage, provider: "xai",
+		fileName: "xai-a.json", account: "alice@example.com",
+	}
+	siblingFixture := quotaEnableFixture{
+		name: "xai-indexed", owner: model.QuotaCooldownOwnerXAIFreeUsage, provider: "xai",
+		fileName: "xai-b.json", authIndex: "auth-b", account: "alice@example.com",
+	}
+	type statusPatch struct {
+		name     string
+		disabled bool
+	}
+	var mu sync.Mutex
+	disabled := map[string]bool{"runtime-xai-a": true, "runtime-xai-b": true}
+	patches := make([]statusPatch, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			mu.Lock()
+			payload := []map[string]any{
+				{
+					"id":       "runtime-xai-a",
+					"name":     claimedFixture.fileName,
+					"provider": claimedFixture.provider,
+					"account":  claimedFixture.account,
+					"disabled": disabled["runtime-xai-a"],
+				},
+				{
+					"id":         "runtime-xai-b",
+					"name":       siblingFixture.fileName,
+					"auth_index": siblingFixture.authIndex,
+					"provider":   siblingFixture.provider,
+					"account":    siblingFixture.account,
+					"disabled":   disabled["runtime-xai-b"],
+				},
+			}
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(payload)
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			var payload struct {
+				Name     string `json:"name"`
+				Disabled bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			name := strings.TrimSpace(payload.Name)
+			mu.Lock()
+			patches = append(patches, statusPatch{name: name, disabled: payload.Disabled})
+			disabled[name] = payload.Disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	claimed := seedDueQuotaCooldown(t, st, claimedFixture, "evt-claimed-file")
+	sibling, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:     siblingFixture.fileName,
+		AuthIndex:        siblingFixture.authIndex,
+		AccountSnapshot:  siblingFixture.account,
+		Provider:         siblingFixture.provider,
+		RecoverAtMS:      now.Add(time.Hour).UnixMilli(),
+		Owner:            siblingFixture.owner,
+		EventHash:        "evt-sibling-file",
+		PreDisabledState: false,
+		DisabledAtMS:     now.Add(-time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("seed sibling cooldown: %v", err)
+	}
+	if sibling.ID == 0 || sibling.ID == claimed.ID {
+		t.Fatalf("sibling cooldown took over the claimed generation: claimed=%+v sibling=%+v", claimed, sibling)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	worker.enableDue(ctx, now)
+
+	mu.Lock()
+	gotPatches := append([]statusPatch(nil), patches...)
+	siblingDisabled := disabled["runtime-xai-b"]
+	mu.Unlock()
+	if !siblingDisabled {
+		t.Fatal("sibling credential was enabled despite its own active cooldown")
+	}
+	enables := 0
+	for _, patch := range gotPatches {
+		switch {
+		case patch.name == "runtime-xai-a" && !patch.disabled:
+			enables++
+		case patch.name == "runtime-xai-a":
+			t.Fatalf("patches = %+v, want no disable after enabling the claimed credential", gotPatches)
+		case patch.name == "runtime-xai-b":
+			t.Fatalf("patches = %+v, want no mutation of the sibling credential file", gotPatches)
+		}
+	}
+	if enables != 1 {
+		t.Fatalf("enable patches for %q = %d in %+v, want exactly one", claimedFixture.fileName, enables, gotPatches)
+	}
+
+	status, reason, updatedAtMS := readQuotaCooldownRow(t, path, claimed.ID)
+	if status != model.QuotaCooldownStatusRecovered {
+		t.Fatalf("claimed cooldown status = %q, want %q", status, model.QuotaCooldownStatusRecovered)
+	}
+	if reason != "" {
+		t.Fatalf("claimed cooldown last_error = %q, want none", reason)
+	}
+	if updatedAtMS <= claimed.UpdatedAtMS {
+		t.Fatalf("claimed cooldown generation = %d, want it advanced past %d", updatedAtMS, claimed.UpdatedAtMS)
+	}
+	siblingStatus, siblingReason, siblingUpdatedAtMS := readQuotaCooldownRow(t, path, sibling.ID)
+	if siblingStatus != model.QuotaCooldownStatusActive || siblingReason != "" || siblingUpdatedAtMS != sibling.UpdatedAtMS {
+		t.Fatalf("sibling cooldown = (%q, %q, %d), want the untouched active generation (%d)", siblingStatus, siblingReason, siblingUpdatedAtMS, sibling.UpdatedAtMS)
+	}
+	if got := readQuotaCooldownRecoverAt(t, path, sibling.ID); got != sibling.RecoverAtMS {
+		t.Fatalf("sibling cooldown recover_at = %d, want untouched %d", got, sibling.RecoverAtMS)
+	}
+}
+
+type failClaimedMarkerQuotaCooldownRepository struct {
+	quotacooldownrepo.Repository
+	fail bool
+	err  error
+}
+
+func (r *failClaimedMarkerQuotaCooldownRepository) MarkClaimedSkipped(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error {
+	if r.fail {
+		return r.err
+	}
+	return r.Repository.MarkClaimedSkipped(ctx, id, claimedUpdatedAtMS, reason)
+}
+
+// TestRateLimitAutoDisableWorkerKeepsClaimedGenerationTerminalWhenMarkerFails
+// covers a database that rejects the terminal marker write after the enable was
+// applied. The claim written before the request keeps the generation terminal,
+// so neither the recovered database, a manual disable, nor a restarted worker
+// can turn stale evidence into another enable.
+func TestRateLimitAutoDisableWorkerKeepsClaimedGenerationTerminalWhenMarkerFails(t *testing.T) {
+	for _, fixture := range quotaEnableFixtures() {
+		t.Run(fixture.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "usage.sqlite")
+			st, err := store.Open(path)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer st.Close()
+
+			baseRepository := st.QuotaCooldowns
+			failing := &failClaimedMarkerQuotaCooldownRepository{
+				Repository: baseRepository,
+				fail:       true,
+				err:        errors.New("database is busy"),
+			}
+			st.QuotaCooldowns = failing
+
+			var mu sync.Mutex
+			disabled := true
+			patched := false
+			verifyFailures := 0
+			patches := make([]bool, 0, 2)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+					mu.Lock()
+					// The verification read right after the enable fails once; later
+					// reads see the real credential state again.
+					failOnce := patched && verifyFailures == 0
+					if failOnce {
+						verifyFailures++
+					}
+					current := disabled
+					mu.Unlock()
+					if failOnce {
+						http.Error(w, "verification unavailable", http.StatusServiceUnavailable)
+						return
+					}
+					_ = json.NewEncoder(w).Encode([]map[string]any{fixture.authFilePayload(current)})
+				case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+					var payload struct {
+						Disabled bool `json:"disabled"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					mu.Lock()
+					disabled = payload.Disabled
+					patched = true
+					patches = append(patches, payload.Disabled)
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			ctx := context.Background()
+			now := time.Now()
+			seeded := seedDueQuotaCooldown(t, st, fixture, "evt-marker-failure")
+			worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+				CPAUpstreamURL: server.URL,
+				ManagementKey:  "mgmt",
+			})
+			worker.enableDue(ctx, now)
+
+			mu.Lock()
+			firstPatches := append([]bool(nil), patches...)
+			mu.Unlock()
+			if len(firstPatches) != 1 || firstPatches[0] {
+				t.Fatalf("patches = %v, want exactly the enable request", firstPatches)
+			}
+			// The database recovers and a human disables the credential again.
+			failing.fail = false
+			mu.Lock()
+			disabled = true
+			mu.Unlock()
+
+			followUp := context.Background()
+			worker.enableDue(followUp, now.Add(2*time.Hour))
+			worker.enableDue(followUp, now.Add(4*time.Hour))
+
+			// A restarted worker over the same database must not revive it either.
+			restartedStore, err := store.Open(path)
+			if err != nil {
+				t.Fatalf("reopen store: %v", err)
+			}
+			defer restartedStore.Close()
+			restarted := NewRateLimitAutoDisableWorker(restartedStore, collectorpkg.RuntimeConfig{
+				CPAUpstreamURL: server.URL,
+				ManagementKey:  "mgmt",
+			})
+			restarted.enableDue(followUp, now.Add(6*time.Hour))
+			restarted.enableDue(followUp, now.Add(8*time.Hour))
+
+			mu.Lock()
+			finalPatches := append([]bool(nil), patches...)
+			finalDisabled := disabled
+			mu.Unlock()
+			if len(finalPatches) != 1 {
+				t.Fatalf("patches = %v, want no enable after the failed terminal marker", finalPatches)
+			}
+			if !finalDisabled {
+				t.Fatal("credential ended enabled; the manual disable was overridden")
+			}
+			// Only the claim reason survives the failed detail write.
+			status, reason, _ := readQuotaCooldownRow(t, path, seeded.ID)
+			if status != model.QuotaCooldownStatusSkipped {
+				t.Fatalf("cooldown status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+			}
+			if !strings.Contains(reason, "manual verification required") {
+				t.Fatalf("cooldown reason = %q, want the claim reason to keep manual verification", reason)
+			}
+			active, err := st.QuotaCooldowns.ListActive(ctx)
+			if err != nil {
+				t.Fatalf("list active cooldowns: %v", err)
+			}
+			if len(active) != 0 {
+				t.Fatalf("active cooldowns = %#v, want none after the claim", active)
+			}
+		})
+	}
+}
+
+type failClaimRecoveryQuotaCooldownRepository struct {
+	quotacooldownrepo.Repository
+	err error
+}
+
+func (r *failClaimRecoveryQuotaCooldownRepository) ClaimRecovery(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) (int64, error) {
+	return 0, r.err
+}
+
+func TestRateLimitAutoDisableWorkerDoesNotEnableWithoutClaim(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	st.QuotaCooldowns = &failClaimRecoveryQuotaCooldownRepository{
+		Repository: st.QuotaCooldowns,
+		err:        errors.New("database is busy"),
+	}
+
+	patches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			_ = json.NewEncoder(w).Encode([]map[string]any{quotaEnableFixtures()[0].authFilePayload(true)})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			patches++
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	fixture := quotaEnableFixtures()[0]
+	seeded := seedDueQuotaCooldown(t, st, fixture, "evt-claim-failure")
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	worker.enableDue(ctx, now)
+
+	if patches != 0 {
+		t.Fatalf("patch calls = %d, want none while the claim cannot be persisted", patches)
+	}
+	status, lastError, _ := readQuotaCooldownRow(t, path, seeded.ID)
+	if status != model.QuotaCooldownStatusActive {
+		t.Fatalf("cooldown status = %q, want the claimable active generation", status)
+	}
+	if !strings.Contains(lastError, "database is busy") {
+		t.Fatalf("cooldown last_error = %q, want the claim failure", lastError)
+	}
+	due, err := st.QuotaCooldowns.ListDue(ctx, now.UnixMilli(), 10)
+	if err != nil {
+		t.Fatalf("list due cooldowns: %v", err)
+	}
+	if len(due) != 1 || due[0].ID != seeded.ID {
+		t.Fatalf("due cooldowns = %#v, want the still-retryable generation", due)
+	}
 }

@@ -1512,6 +1512,37 @@ func IsPluginVirtualMutationConflict(err error) bool {
 	return isPluginVirtualMutationConflict(err)
 }
 
+// ActionErrorProvesNoMutation reports whether a failed CPA management action is
+// proven not to have changed CPA state, so callers may safely retry it.
+//
+// It is true only for a request CPAMP rejected before sending it (an ambiguous
+// or unstable mutation target) and for a definite CPA rejection: a 4xx response
+// carrying an error body. Transport failures after the request was issued, 5xx
+// and gateway responses, and 2xx responses that do not confirm success leave
+// the remote outcome unknown and report false.
+func ActionErrorProvesNoMutation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *actionHTTPError
+	if errors.As(err, &httpErr) {
+		return actionRejectionProvesNoMutation(httpErr)
+	}
+	return errors.Is(err, ErrStatusMutationScopeAmbiguous)
+}
+
+func actionRejectionProvesNoMutation(err *actionHTTPError) bool {
+	if err == nil || err.statusCode < 400 || err.statusCode >= 500 {
+		return false
+	}
+	// A 408 means CPA stopped waiting for this request; it does not prove the
+	// request was never applied before the connection stalled.
+	if err.statusCode == http.StatusRequestTimeout {
+		return false
+	}
+	return strings.TrimSpace(err.body) != ""
+}
+
 func filesFromJSON(value any) []File {
 	switch typed := value.(type) {
 	case []any:

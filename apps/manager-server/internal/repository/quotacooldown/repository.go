@@ -16,10 +16,32 @@ type Repository interface {
 	UpsertActive(ctx context.Context, cooldown model.QuotaCooldownUpsert) (model.QuotaCooldown, error)
 	ListDue(ctx context.Context, nowMS int64, limit int) ([]model.QuotaCooldown, error)
 	ListActive(ctx context.Context) ([]model.QuotaCooldown, error)
-	MarkRecovered(ctx context.Context, id int64, recoveredAtMS int64) error
-	MarkSkipped(ctx context.Context, id int64, reason string) error
+	MarkRecovered(ctx context.Context, id int64, expectedUpdatedAtMS int64, recoveredAtMS int64) error
+	// ClaimRecovery retires an observed active generation before CPAMP mutates
+	// remote credential state and returns the claimed generation.
+	ClaimRecovery(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) (int64, error)
+	// MarkClaimedRecovered finalizes a claimed generation as recovered.
+	MarkClaimedRecovered(ctx context.Context, id int64, claimedUpdatedAtMS int64, recoveredAtMS int64) error
+	// MarkClaimedSkipped records why a claimed generation will not be confirmed.
+	MarkClaimedSkipped(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error
+	// ReopenClaim returns a claimed generation to active so it can retry.
+	ReopenClaim(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error
+	MarkSkipped(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) error
 	RecordFailure(ctx context.Context, id int64, reason string) error
 }
+
+// ErrConflict reports that the cooldown row no longer matches the generation a
+// recovery decision was made for. Another writer advanced it, so the caller
+// must not treat its own enable decision as the current truth.
+var ErrConflict = errors.New("quota cooldown generation conflict")
+
+// ErrSuperseded reports that a claimed generation cannot be reopened because
+// another active cooldown already owns the same credential. Ownership follows
+// UpsertActive, so a legacy row without an auth_index and the indexed row for
+// the same provider and account snapshot are one owner. The claimed row stays
+// skipped and the active owner keeps the authority. It wraps ErrConflict so
+// callers that only distinguish stale generations keep their existing behavior.
+var ErrSuperseded = fmt.Errorf("%w: a newer active cooldown owns the same credential identity", ErrConflict)
 
 type repository struct {
 	db *sql.DB
@@ -65,19 +87,9 @@ func (r *repository) UpsertActive(ctx context.Context, cooldown model.QuotaCoold
 	authIndexIdentity, providerIdentity, accountSnapshotIdentity := cooldownIdentity(cooldown)
 	id, found, err := querySingleCooldownID(ctx, tx, `select id from quota_cooldowns
 		where auth_file_name = ? and owner = ? and status = ?
-			and coalesce(trim(auth_index), '') = ?
-			and case
-				when coalesce(trim(auth_index), '') <> '' then ''
-				else case coalesce(lower(replace(trim(provider), '_', '-')), '')
-					when 'x-ai' then 'xai'
-					when 'grok' then 'xai'
-					else coalesce(lower(replace(trim(provider), '_', '-')), '')
-				end
-			end = ?
-			and case
-				when coalesce(trim(auth_index), '') <> '' then ''
-				else coalesce(trim(account_snapshot), '')
-			end = ?
+			and `+cooldownIdentityAuthIndexSQL+` = ?
+			and `+cooldownIdentityProviderSQL+` = ?
+			and `+cooldownIdentityAccountSnapshotSQL+` = ?
 		order by id asc limit 2`,
 		cooldown.AuthFileName,
 		cooldown.Owner,
@@ -95,13 +107,9 @@ func (r *repository) UpsertActive(ctx context.Context, cooldown model.QuotaCoold
 		if fallbackProvider != "" && fallbackSnapshot != "" {
 			id, found, err = querySingleCooldownID(ctx, tx, `select id from quota_cooldowns
 				where auth_file_name = ? and owner = ? and status = ?
-					and coalesce(trim(auth_index), '') = ''
-					and case coalesce(lower(replace(trim(provider), '_', '-')), '')
-						when 'x-ai' then 'xai'
-						when 'grok' then 'xai'
-						else coalesce(lower(replace(trim(provider), '_', '-')), '')
-					end = ?
-					and coalesce(trim(account_snapshot), '') = ?
+					and `+cooldownIdentityAuthIndexSQL+` = ''
+					and `+cooldownStoredProviderSQL+` = ?
+					and `+cooldownStoredAccountSnapshotSQL+` = ?
 				order by id asc limit 2`,
 				cooldown.AuthFileName,
 				cooldown.Owner,
@@ -265,6 +273,83 @@ func normalizeProvider(value string) string {
 	}
 }
 
+func cooldownColumn(table string, name string) string {
+	return table + "." + name
+}
+
+// cooldownAuthIndexColumn returns the trimmed auth index of a cooldown row and
+// normalizes NULL to the empty legacy index.
+func cooldownAuthIndexColumn(table string) string {
+	return `coalesce(trim(` + cooldownColumn(table, "auth_index") + `), '')`
+}
+
+// cooldownNormalizedProviderColumn returns the provider of a cooldown row in
+// the form normalizeProvider produces.
+func cooldownNormalizedProviderColumn(table string) string {
+	normalized := `coalesce(lower(replace(trim(` + cooldownColumn(table, "provider") + `), '_', '-')), '')`
+	return `case ` + normalized + `
+			when 'x-ai' then 'xai'
+			when 'grok' then 'xai'
+			else ` + normalized + `
+		end`
+}
+
+// cooldownAccountSnapshotColumn returns the trimmed account snapshot of a
+// cooldown row and normalizes NULL to empty.
+func cooldownAccountSnapshotColumn(table string) string {
+	return `coalesce(trim(` + cooldownColumn(table, "account_snapshot") + `), '')`
+}
+
+// cooldownIdentityColumns returns the SQL expressions that define a cooldown
+// identity for the given table reference. UpsertActive resolves an active row
+// by these expressions and ReopenClaim refuses to reactivate a claimed row
+// while another active row matches them, so both call sites share this single
+// definition and cannot drift apart. They mirror cooldownIdentity.
+func cooldownIdentityColumns(table string) (authIndex string, provider string, accountSnapshot string) {
+	authIndex = cooldownAuthIndexColumn(table)
+	provider = `case when ` + authIndex + ` <> '' then '' else ` + cooldownNormalizedProviderColumn(table) + ` end`
+	accountSnapshot = `case when ` + authIndex + ` <> '' then '' else ` + cooldownAccountSnapshotColumn(table) + ` end`
+	return authIndex, provider, accountSnapshot
+}
+
+// cooldownSameCredentialSQL returns the predicate that decides whether two
+// cooldown rows address the same physical credential. Callers restrict both
+// rows to the same auth_file_name and owner already.
+//
+// A row carrying an auth_index owns exactly that index; a row without one owns
+// its normalized provider and account snapshot. The second branch is the legacy
+// fallback UpsertActive applies to an indexed request that finds no exact
+// active row: it merges into the empty-index row with the same provider and
+// account snapshot. Comparing both identified shapes here keeps the reopen
+// guard and UpsertActive from disagreeing about which rows are one credential.
+func cooldownSameCredentialSQL(left string, right string) string {
+	leftAuthIndex := cooldownAuthIndexColumn(left)
+	rightAuthIndex := cooldownAuthIndexColumn(right)
+	leftProvider := cooldownNormalizedProviderColumn(left)
+	rightProvider := cooldownNormalizedProviderColumn(right)
+	leftAccountSnapshot := cooldownAccountSnapshotColumn(left)
+	rightAccountSnapshot := cooldownAccountSnapshotColumn(right)
+	_, leftIdentityProvider, leftIdentityAccountSnapshot := cooldownIdentityColumns(left)
+	_, rightIdentityProvider, rightIdentityAccountSnapshot := cooldownIdentityColumns(right)
+	exact := `(` + leftAuthIndex + ` = ` + rightAuthIndex +
+		` and ` + leftIdentityProvider + ` = ` + rightIdentityProvider +
+		` and ` + leftIdentityAccountSnapshot + ` = ` + rightIdentityAccountSnapshot + `)`
+	legacyFallback := `((` + leftAuthIndex + ` = '' and ` + rightAuthIndex + ` <> '') or (` +
+		leftAuthIndex + ` <> '' and ` + rightAuthIndex + ` = ''))` +
+		` and ` + leftProvider + ` <> '' and ` + leftProvider + ` = ` + rightProvider +
+		` and ` + leftAccountSnapshot + ` <> '' and ` + leftAccountSnapshot + ` = ` + rightAccountSnapshot
+	return `(` + exact + ` or (` + legacyFallback + `))`
+}
+
+var (
+	cooldownIdentityAuthIndexSQL, cooldownIdentityProviderSQL, cooldownIdentityAccountSnapshotSQL = cooldownIdentityColumns("quota_cooldowns")
+	// The provider and account snapshot as stored, without the identity
+	// projection that blanks them for indexed rows. UpsertActive's legacy
+	// fallback lookup matches an incoming indexed cooldown against these.
+	cooldownStoredProviderSQL        = cooldownNormalizedProviderColumn("quota_cooldowns")
+	cooldownStoredAccountSnapshotSQL = cooldownAccountSnapshotColumn("quota_cooldowns")
+)
+
 func (r *repository) ListDue(ctx context.Context, nowMS int64, limit int) ([]model.QuotaCooldown, error) {
 	if limit <= 0 {
 		limit = 100
@@ -286,18 +371,180 @@ func (r *repository) ListActive(ctx context.Context) ([]model.QuotaCooldown, err
 	return scanList(rows)
 }
 
-func (r *repository) MarkRecovered(ctx context.Context, id int64, recoveredAtMS int64) error {
+func (r *repository) MarkRecovered(ctx context.Context, id int64, expectedUpdatedAtMS int64, recoveredAtMS int64) error {
 	if recoveredAtMS <= 0 {
 		recoveredAtMS = time.Now().UnixMilli()
 	}
-	_, err := r.db.ExecContext(ctx, `update quota_cooldowns set status = ?, recovered_at_ms = ?, last_error = null, updated_at_ms = ? where id = ?`, model.QuotaCooldownStatusRecovered, recoveredAtMS, recoveredAtMS, id)
-	return err
+	if expectedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: expected generation is required", ErrConflict)
+	}
+	result, err := r.db.ExecContext(
+		ctx,
+		`update quota_cooldowns set status = ?, recovered_at_ms = ?, last_error = null, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		model.QuotaCooldownStatusRecovered, recoveredAtMS, recoveredAtMS, id, model.QuotaCooldownStatusActive, expectedUpdatedAtMS,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrConflict
+	}
+	return nil
 }
 
-func (r *repository) MarkSkipped(ctx context.Context, id int64, reason string) error {
-	now := time.Now().UnixMilli()
-	_, err := r.db.ExecContext(ctx, `update quota_cooldowns set status = ?, last_error = ?, updated_at_ms = ? where id = ?`, model.QuotaCooldownStatusSkipped, nullString(reason), now, id)
-	return err
+func (r *repository) MarkSkipped(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) error {
+	if expectedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: expected generation is required", ErrConflict)
+	}
+	return r.casGeneration(ctx, `update quota_cooldowns set status = ?, last_error = ?, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		model.QuotaCooldownStatusSkipped, nullString(reason), nextUpdatedAtMS(expectedUpdatedAtMS), id, model.QuotaCooldownStatusActive, expectedUpdatedAtMS,
+	)
+}
+
+// ClaimRecovery retires an observed active generation before CPAMP mutates the
+// remote credential. The row becomes terminal, so a restart, a later due tick,
+// or a retry with the same generation can never re-use it to enable a
+// credential that a human disabled after the request left the process.
+func (r *repository) ClaimRecovery(ctx context.Context, id int64, expectedUpdatedAtMS int64, reason string) (int64, error) {
+	if expectedUpdatedAtMS <= 0 {
+		return 0, fmt.Errorf("%w: expected generation is required", ErrConflict)
+	}
+	claimedUpdatedAtMS := nextUpdatedAtMS(expectedUpdatedAtMS)
+	if err := r.casGeneration(ctx, `update quota_cooldowns set status = ?, last_error = ?, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		model.QuotaCooldownStatusSkipped, nullString(reason), claimedUpdatedAtMS, id, model.QuotaCooldownStatusActive, expectedUpdatedAtMS,
+	); err != nil {
+		return 0, err
+	}
+	return claimedUpdatedAtMS, nil
+}
+
+func (r *repository) MarkClaimedRecovered(ctx context.Context, id int64, claimedUpdatedAtMS int64, recoveredAtMS int64) error {
+	if claimedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: claimed generation is required", ErrConflict)
+	}
+	if recoveredAtMS <= 0 {
+		recoveredAtMS = time.Now().UnixMilli()
+	}
+	return r.casGeneration(ctx, `update quota_cooldowns set status = ?, recovered_at_ms = ?, last_error = null, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		model.QuotaCooldownStatusRecovered, recoveredAtMS, nextUpdatedAtMS(claimedUpdatedAtMS), id, model.QuotaCooldownStatusSkipped, claimedUpdatedAtMS,
+	)
+}
+
+func (r *repository) MarkClaimedSkipped(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error {
+	if claimedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: claimed generation is required", ErrConflict)
+	}
+	return r.casGeneration(ctx, `update quota_cooldowns set last_error = ?, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		nullString(reason), nextUpdatedAtMS(claimedUpdatedAtMS), id, model.QuotaCooldownStatusSkipped, claimedUpdatedAtMS,
+	)
+}
+
+func (r *repository) ReopenClaim(ctx context.Context, id int64, claimedUpdatedAtMS int64, reason string) error {
+	if claimedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: claimed generation is required", ErrConflict)
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Reactivate the claimed row only while it is still at the claimed
+	// generation and no other active row already owns the same credential.
+	// cooldownSameCredentialSQL resolves that ownership exactly like
+	// UpsertActive does, including the legacy empty-index fallback, so a newer
+	// active generation can never be joined by a second active owner for the
+	// same credential.
+	result, err := tx.ExecContext(ctx, `update quota_cooldowns set status = ?, last_error = ?, updated_at_ms = ?
+		where id = ? and status = ? and updated_at_ms = ?
+			and not exists (
+				select 1 from quota_cooldowns as sibling
+				where sibling.id <> quota_cooldowns.id
+					and sibling.auth_file_name = quota_cooldowns.auth_file_name
+					and sibling.owner = quota_cooldowns.owner
+					and sibling.status = ?
+					and `+cooldownSameCredentialSQL("sibling", "quota_cooldowns")+`
+			)`,
+		model.QuotaCooldownStatusActive, nullString(reason), nextUpdatedAtMS(claimedUpdatedAtMS),
+		id, model.QuotaCooldownStatusSkipped, claimedUpdatedAtMS,
+		model.QuotaCooldownStatusActive,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 1 {
+		return tx.Commit()
+	}
+	superseded, err := claimedGenerationSuperseded(ctx, tx, id, claimedUpdatedAtMS)
+	if err != nil {
+		return err
+	}
+	if superseded {
+		return ErrSuperseded
+	}
+	return ErrConflict
+}
+
+// claimedGenerationSuperseded reports whether the claimed row is still at the
+// generation the caller observed while another active row already owns the
+// same credential. Ownership is resolved by cooldownSameCredentialSQL, so a
+// claimed legacy row and an indexed row for the same provider and account
+// snapshot count as one owner. It distinguishes a reopen that lost the
+// credential to a newer active generation from a generation that moved on its
+// own.
+func claimedGenerationSuperseded(ctx context.Context, tx *sql.Tx, id int64, claimedUpdatedAtMS int64) (bool, error) {
+	var superseded int
+	err := tx.QueryRowContext(ctx, `select exists (
+		select 1 from quota_cooldowns as claimed
+		join quota_cooldowns as sibling on
+			sibling.id <> claimed.id
+			and sibling.auth_file_name = claimed.auth_file_name
+			and sibling.owner = claimed.owner
+			and sibling.status = ?
+			and `+cooldownSameCredentialSQL("sibling", "claimed")+`
+		where claimed.id = ? and claimed.status = ? and claimed.updated_at_ms = ?
+	)`,
+		model.QuotaCooldownStatusActive,
+		id, model.QuotaCooldownStatusSkipped, claimedUpdatedAtMS,
+	).Scan(&superseded)
+	if err != nil {
+		return false, err
+	}
+	return superseded != 0, nil
+}
+
+// casGeneration applies a generation-bound transition and reports ErrConflict
+// when the row no longer matches the generation the decision was made for. A
+// conflicting generation is never modified.
+func (r *repository) casGeneration(ctx context.Context, query string, args ...any) error {
+	result, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// nextUpdatedAtMS advances a generation strictly past the generation it
+// replaces, even within the same millisecond or after a clock rollback.
+func nextUpdatedAtMS(expectedUpdatedAtMS int64) int64 {
+	if now := time.Now().UnixMilli(); now > expectedUpdatedAtMS {
+		return now
+	}
+	return expectedUpdatedAtMS + 1
 }
 
 func (r *repository) RecordFailure(ctx context.Context, id int64, reason string) error {

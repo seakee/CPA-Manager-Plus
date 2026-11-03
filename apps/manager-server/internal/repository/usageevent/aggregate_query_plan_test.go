@@ -2,6 +2,7 @@ package usageevent
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,7 +19,24 @@ func TestTopModelsQueryUsesTimestampIndexBeforePricingMaterialization(t *testing
 	if err := sqliterepo.RunDerivedStartupMaintenance(context.Background(), db); err != nil {
 		t.Fatalf("prepare post-listen indexes: %v", err)
 	}
+	// Preserve the original timestamp-only planner regression, then verify
+	// coexistence without pinning SQLite to one timestamp-leading index.
+	if _, err := db.Exec(`drop index ` + latencyCoverIndex); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("timestamp_only", func(t *testing.T) {
+		assertTopModelsTimestampPlan(t, db, "idx_usage_events_timestamp")
+	})
+	if _, err := db.Exec(latencyCoverDDL); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("timestamp_and_latency_cover", func(t *testing.T) {
+		assertTopModelsTimestampPlan(t, db, "")
+	})
+}
 
+func assertTopModelsTimestampPlan(t *testing.T, db *sql.DB, requiredIndex string) {
+	t.Helper()
 	rows, err := db.Query(`explain query plan `+topModelsSQL, int64(1_000), int64(2_000), 5)
 	if err != nil {
 		t.Fatalf("explain top models query: %v", err)
@@ -26,7 +44,7 @@ func TestTopModelsQueryUsesTimestampIndexBeforePricingMaterialization(t *testing
 	defer rows.Close()
 
 	details := make([]string, 0, 8)
-	usesTimestampIndex := false
+	usesTimestampRange := false
 	fullUsageScan := false
 	for rows.Next() {
 		var id, parent, notUsed int
@@ -35,13 +53,17 @@ func TestTopModelsQueryUsesTimestampIndexBeforePricingMaterialization(t *testing
 			t.Fatalf("scan query plan: %v", err)
 		}
 		details = append(details, detail)
-		usesTimestampIndex = usesTimestampIndex || strings.Contains(detail, "SEARCH usage_events USING INDEX idx_usage_events_timestamp")
+		if requiredIndex != "" {
+			usesTimestampRange = usesTimestampRange || strings.Contains(detail, "SEARCH usage_events USING INDEX "+requiredIndex)
+		} else {
+			usesTimestampRange = usesTimestampRange || (strings.Contains(detail, "SEARCH usage_events USING ") && strings.Contains(detail, "(timestamp_ms>? AND timestamp_ms<?)"))
+		}
 		fullUsageScan = fullUsageScan || strings.Contains(detail, "SCAN usage_events")
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("query plan rows: %v", err)
 	}
-	if !usesTimestampIndex || fullUsageScan {
-		t.Fatalf("top models query did not constrain usage_events with the timestamp index: %v", details)
+	if !usesTimestampRange || fullUsageScan {
+		t.Fatalf("top models query did not constrain usage_events with a timestamp range index: %v", details)
 	}
 }
