@@ -3,9 +3,11 @@ package upgradeoperation_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"math"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -109,15 +111,24 @@ func TestAdvanceRefusesToLeaveCompleted(t *testing.T) {
 	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
 		t.Fatalf("advance complete: %v", err)
 	}
-	if _, err := repository.Advance(ctx, model.UpgradeDomainCoverage, model.UpgradeStageVerify); !errors.Is(err, upgradeoperation.ErrStageRegression) {
-		t.Fatalf("advance after complete error = %v, want ErrStageRegression", err)
+	before, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get completed row: %v", err)
+	}
+	for _, stage := range []model.UpgradeStage{model.UpgradeStageVerify, model.UpgradeStageFailed} {
+		if _, err := repository.Advance(ctx, model.UpgradeDomainCoverage, stage); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+			t.Fatalf("advance complete -> %q error = %v, want ErrStageRegression", stage, err)
+		}
 	}
 	stored, _, err := repository.Get(ctx)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if stored.Stage != model.UpgradeStageComplete {
-		t.Fatalf("stage = %q, want complete", stored.Stage)
+	if stored.Stage != model.UpgradeStageComplete || stored.Revision != before.Revision {
+		t.Fatalf("stage = %q revision = %d, want complete/%d", stored.Stage, stored.Revision, before.Revision)
+	}
+	if stored.HasDomain(model.UpgradeDomainCoverage) {
+		t.Fatal("rejected advance recorded its domain")
 	}
 }
 
@@ -163,6 +174,7 @@ func TestPutKeepsOneRowAndCreationTime(t *testing.T) {
 		SourceKind:     "legacy-manager",
 		SourceVersion:  "v1.14.0",
 		Reconciliation: nil,
+		Revision:       created.Revision,
 	}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -203,6 +215,7 @@ func TestPutRefusesToMoveTheStageBackwards(t *testing.T) {
 	err = repository.Put(ctx, model.UpgradeOperation{
 		Stage:       model.UpgradeStagePreflight,
 		DomainsDone: []string{model.UpgradeDomainUsageEvents},
+		Revision:    before.Revision,
 	})
 	if !errors.Is(err, upgradeoperation.ErrStageRegression) {
 		t.Fatalf("put error = %v, want ErrStageRegression", err)
@@ -223,9 +236,14 @@ func TestPutRefusesToClearRecordedDomains(t *testing.T) {
 	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCopyIn); err != nil {
 		t.Fatalf("advance copy_in: %v", err)
 	}
-	err := repository.Put(ctx, model.UpgradeOperation{
+	before, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get before rejected put: %v", err)
+	}
+	err = repository.Put(ctx, model.UpgradeOperation{
 		Stage:       model.UpgradeStageReconcile,
 		DomainsDone: []string{},
+		Revision:    before.Revision,
 	})
 	if !errors.Is(err, upgradeoperation.ErrDomainCleared) {
 		t.Fatalf("put error = %v, want ErrDomainCleared", err)
@@ -253,6 +271,7 @@ func TestPutNeverMovesUpdatedAtBackwards(t *testing.T) {
 		Stage:       model.UpgradeStageCopyIn,
 		DomainsDone: []string{model.UpgradeDomainSourceCopy},
 		UpdatedAtMS: created.UpdatedAtMS - 5_000,
+		Revision:    created.Revision,
 	}); err != nil {
 		t.Fatalf("put with an older timestamp: %v", err)
 	}
@@ -268,6 +287,7 @@ func TestPutNeverMovesUpdatedAtBackwards(t *testing.T) {
 		Stage:       model.UpgradeStageReconcile,
 		DomainsDone: []string{model.UpgradeDomainSourceCopy},
 		UpdatedAtMS: 1,
+		Revision:    first.Revision,
 	}); err != nil {
 		t.Fatalf("put with a stale timestamp: %v", err)
 	}
@@ -332,9 +352,9 @@ func TestAdvanceKeepsAFutureDatedRowReadable(t *testing.T) {
 	ctx := context.Background()
 	future := time.Now().Add(time.Hour).UnixMilli()
 	if _, err := db.ExecContext(ctx, `insert into upgrade_operations
-		(id, stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
-		values (1, ?, '[]', '{}', '[]', ?, ?)`,
-		string(model.UpgradeStagePreflight), future, future); err != nil {
+		(id, stage, last_forward_stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+		values (1, ?, ?, '[]', '{}', '[]', ?, ?)`,
+		string(model.UpgradeStagePreflight), string(model.UpgradeStagePreflight), future, future); err != nil {
 		t.Fatalf("seed a future-dated row: %v", err)
 	}
 	before, found, err := repository.Get(ctx)
@@ -376,9 +396,9 @@ func TestAdvanceKeepsACreatedOnlyRowReadable(t *testing.T) {
 	ctx := context.Background()
 	created := time.Now().Add(time.Hour).UnixMilli()
 	if _, err := db.ExecContext(ctx, `insert into upgrade_operations
-		(id, stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
-		values (1, ?, '[]', '{}', '[]', ?, 0)`,
-		string(model.UpgradeStagePreflight), created); err != nil {
+		(id, stage, last_forward_stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+		values (1, ?, ?, '[]', '{}', '[]', ?, 0)`,
+		string(model.UpgradeStagePreflight), string(model.UpgradeStagePreflight), created); err != nil {
 		t.Fatalf("seed a created-only row: %v", err)
 	}
 	seeded, found, err := repository.Get(ctx)
@@ -466,12 +486,14 @@ func TestPutReportsTypedInputErrors(t *testing.T) {
 func TestPutMayOnlyAppendDomainsAndAdvance(t *testing.T) {
 	repository, _ := newRepository(t)
 	ctx := context.Background()
-	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStagePreflight); err != nil {
+	advanced, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStagePreflight)
+	if err != nil {
 		t.Fatalf("advance preflight: %v", err)
 	}
 	if err := repository.Put(ctx, model.UpgradeOperation{
 		Stage:       model.UpgradeStageCopyIn,
 		DomainsDone: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainUsageEvents},
+		Revision:    advanced.Revision,
 	}); err != nil {
 		t.Fatalf("forward put: %v", err)
 	}
@@ -484,5 +506,435 @@ func TestPutMayOnlyAppendDomainsAndAdvance(t *testing.T) {
 	}
 	if !stored.HasDomain(model.UpgradeDomainUsageEvents) {
 		t.Fatalf("domains = %v, want usage_events appended", stored.DomainsDone)
+	}
+}
+
+// TestFirstPutClaimsRevisionZeroOnce covers competing first inserts: both
+// callers read "no row" (revision 0), and only the first may commit. The second
+// must conflict instead of overwriting the first observation.
+func TestFirstPutClaimsRevisionZeroOnce(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:      model.UpgradeStagePreflight,
+		SourceKind: "first",
+	}); err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:      model.UpgradeStagePreflight,
+		SourceKind: "second",
+	})
+	if !errors.Is(err, upgradeoperation.ErrConflict) {
+		t.Fatalf("second first insert error = %v, want ErrConflict", err)
+	}
+	stored, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get after competing inserts: found=%t err=%v", found, err)
+	}
+	if stored.SourceKind != "first" || stored.Revision != 1 {
+		t.Fatalf("stored row = source %q revision %d, want first/1", stored.SourceKind, stored.Revision)
+	}
+}
+
+// TestPutRejectsAStaleSnapshot is the R2 regression: two readers hold the same
+// stage, the second commits newer evidence, and the first then replays its old
+// snapshot. Without the revision token the stale write replaced fingerprints,
+// manifest and reconciliation while updated_at_ms still looked monotonic.
+func TestPutRejectsAStaleSnapshot(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStagePreflight); err != nil {
+		t.Fatalf("advance preflight: %v", err)
+	}
+	stale, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get stale reader: found=%t err=%v", found, err)
+	}
+	stale.Stage = model.UpgradeStageCopyIn
+	stale.SourceFingerprintAfter = "sha256:stale"
+	stale.BackupManifestSHA256 = "sha256:stale-manifest"
+	stale.Reconciliation = json.RawMessage(`{"reader":"stale"}`)
+
+	fresh := stale
+	fresh.SourceFingerprintAfter = "sha256:fresh"
+	fresh.BackupManifestSHA256 = "sha256:fresh-manifest"
+	fresh.Reconciliation = json.RawMessage(`{"reader":"fresh"}`)
+	if err := repository.Put(ctx, fresh); err != nil {
+		t.Fatalf("fresh put: %v", err)
+	}
+	committed, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get committed row: found=%t err=%v", found, err)
+	}
+	if err := repository.Put(ctx, stale); !errors.Is(err, upgradeoperation.ErrConflict) {
+		t.Fatalf("stale put error = %v, want ErrConflict", err)
+	}
+	after, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get after stale put: found=%t err=%v", found, err)
+	}
+	if !reflect.DeepEqual(committed, after) {
+		t.Fatalf("stale put changed the row:\n before %+v\n after  %+v", committed, after)
+	}
+	if after.SourceFingerprintAfter != "sha256:fresh" || after.BackupManifestSHA256 != "sha256:fresh-manifest" {
+		t.Fatalf("stale put replaced evidence: %q/%q", after.SourceFingerprintAfter, after.BackupManifestSHA256)
+	}
+	if string(after.Reconciliation) != `{"reader":"fresh"}` {
+		t.Fatalf("stale put replaced reconciliation: %s", after.Reconciliation)
+	}
+}
+
+// TestPutAndAdvanceShareOneRevisionToken covers the R2 cross-API case: an
+// Advance commits between a caller's Get and Put, so the token the caller holds
+// is stale even though the stage it wants to write would still be forward.
+func TestPutAndAdvanceShareOneRevisionToken(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, "", model.UpgradeStagePreflight); err != nil {
+		t.Fatalf("advance preflight: %v", err)
+	}
+	observed, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get observed row: %v", err)
+	}
+	advanced, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCopyIn)
+	if err != nil {
+		t.Fatalf("advance copy_in: %v", err)
+	}
+	if advanced.Revision != observed.Revision+1 {
+		t.Fatalf("advanced revision = %d, want %d", advanced.Revision, observed.Revision+1)
+	}
+	err = repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStageReconcile,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy},
+		Revision:    observed.Revision,
+	})
+	if !errors.Is(err, upgradeoperation.ErrConflict) {
+		t.Fatalf("put after advance error = %v, want ErrConflict", err)
+	}
+	stored, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after conflicting put: %v", err)
+	}
+	if stored.Stage != model.UpgradeStageCopyIn || stored.Revision != advanced.Revision {
+		t.Fatalf("row = %q/%d, want copy_in/%d", stored.Stage, stored.Revision, advanced.Revision)
+	}
+}
+
+// TestRevisionIncrementsWithinTheSameMillisecond covers the R2 token choice: a
+// stored row whose clock is ahead keeps updated_at_ms constant for every write,
+// so the timestamp cannot be the token; revision must still increase.
+func TestRevisionIncrementsWithinTheSameMillisecond(t *testing.T) {
+	repository, db := newRepository(t)
+	ctx := context.Background()
+	future := time.Now().Add(time.Hour).UnixMilli()
+	if _, err := db.ExecContext(ctx, `insert into upgrade_operations
+		(id, stage, last_forward_stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+		values (1, ?, ?, '[]', '{}', '[]', ?, ?)`,
+		string(model.UpgradeStagePreflight), string(model.UpgradeStagePreflight), future, future); err != nil {
+		t.Fatalf("seed a future-dated row: %v", err)
+	}
+	observed, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get seeded row: %v", err)
+	}
+	if observed.Revision != 0 {
+		t.Fatalf("seeded revision = %d, want 0", observed.Revision)
+	}
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:    model.UpgradeStageCopyIn,
+		Revision: observed.Revision,
+	}); err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	first, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after first put: %v", err)
+	}
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:    model.UpgradeStageReconcile,
+		Revision: first.Revision,
+	}); err != nil {
+		t.Fatalf("second put: %v", err)
+	}
+	second, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after second put: %v", err)
+	}
+	advanced, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageCPAImport)
+	if err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	revisions := []int64{observed.Revision, first.Revision, second.Revision, advanced.Revision}
+	want := []int64{0, 1, 2, 3}
+	if !reflect.DeepEqual(revisions, want) {
+		t.Fatalf("revisions = %v, want %v", revisions, want)
+	}
+	for index, stored := range []model.UpgradeOperation{first, second} {
+		if stored.UpdatedAtMS != future {
+			t.Fatalf("write %d updated_at_ms = %d, want unchanged %d", index, stored.UpdatedAtMS, future)
+		}
+	}
+	if advanced.UpdatedAtMS != future {
+		t.Fatalf("advance updated_at_ms = %d, want unchanged %d", advanced.UpdatedAtMS, future)
+	}
+}
+
+// TestFailedKeepsHighWaterAndRefusesLowerResume is the R3 regression:
+// verify -> failed -> copy_in used to succeed because failed erased the
+// position the operation had reached.
+func TestFailedKeepsHighWaterAndRefusesLowerResume(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("advance verify: %v", err)
+	}
+	failed, err := repository.Advance(ctx, "", model.UpgradeStageFailed)
+	if err != nil {
+		t.Fatalf("advance failed: %v", err)
+	}
+	if failed.Stage != model.UpgradeStageFailed || failed.LastForwardStage != model.UpgradeStageVerify {
+		t.Fatalf("failed row = %q high-water %q, want failed/verify", failed.Stage, failed.LastForwardStage)
+	}
+	before, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get before resume: %v", err)
+	}
+	if _, err := repository.Advance(ctx, "", model.UpgradeStageCopyIn); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+		t.Fatalf("resume below high-water error = %v, want ErrStageRegression", err)
+	}
+	unchanged, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after refused resume: %v", err)
+	}
+	if !reflect.DeepEqual(before, unchanged) {
+		t.Fatalf("refused resume changed the row:\n before %+v\n after  %+v", before, unchanged)
+	}
+	resumed, err := repository.Advance(ctx, model.UpgradeDomainCoverage, model.UpgradeStageVerify)
+	if err != nil {
+		t.Fatalf("resume at high-water: %v", err)
+	}
+	if resumed.Stage != model.UpgradeStageVerify || resumed.LastForwardStage != model.UpgradeStageVerify {
+		t.Fatalf("resumed row = %q high-water %q, want verify/verify", resumed.Stage, resumed.LastForwardStage)
+	}
+	if resumed.Revision != before.Revision+1 {
+		t.Fatalf("resumed revision = %d, want %d", resumed.Revision, before.Revision+1)
+	}
+}
+
+// TestPutResumesFailedAtOrAboveHighWater is the R3 regression through Put: the
+// same rule must hold for evidence writes, and a stale token must not bypass it.
+func TestPutResumesFailedAtOrAboveHighWater(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("advance verify: %v", err)
+	}
+	parked, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get verified row: %v", err)
+	}
+	parked.Stage = model.UpgradeStageFailed
+	if err := repository.Put(ctx, parked); err != nil {
+		t.Fatalf("put failed: %v", err)
+	}
+	stored, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get failed row: %v", err)
+	}
+	if stored.Stage != model.UpgradeStageFailed || stored.LastForwardStage != model.UpgradeStageVerify {
+		t.Fatalf("failed row = %q high-water %q", stored.Stage, stored.LastForwardStage)
+	}
+	lower := stored
+	lower.Stage = model.UpgradeStageCopyIn
+	if err := repository.Put(ctx, lower); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+		t.Fatalf("put below high-water error = %v, want ErrStageRegression", err)
+	}
+	unchanged, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after refused put: %v", err)
+	}
+	if !reflect.DeepEqual(stored, unchanged) {
+		t.Fatalf("refused put changed the row:\n before %+v\n after  %+v", stored, unchanged)
+	}
+	resume := stored
+	resume.Stage = model.UpgradeStageVerify
+	if err := repository.Put(ctx, resume); err != nil {
+		t.Fatalf("put at high-water: %v", err)
+	}
+	resumed, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get resumed row: %v", err)
+	}
+	if resumed.Stage != model.UpgradeStageVerify || resumed.LastForwardStage != model.UpgradeStageVerify {
+		t.Fatalf("resumed row = %q high-water %q", resumed.Stage, resumed.LastForwardStage)
+	}
+	if resumed.Revision != stored.Revision+1 {
+		t.Fatalf("resumed revision = %d, want %d", resumed.Revision, stored.Revision+1)
+	}
+}
+
+// TestPutRefusesToLeaveCompleted closes the other end of R3: complete is
+// terminal for both write APIs, including complete -> failed.
+func TestPutRefusesToLeaveCompleted(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
+		t.Fatalf("advance complete: %v", err)
+	}
+	complete, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get complete row: %v", err)
+	}
+	for _, stage := range []model.UpgradeStage{model.UpgradeStageFailed, model.UpgradeStageVerify} {
+		candidate := complete
+		candidate.Stage = stage
+		if err := repository.Put(ctx, candidate); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+			t.Fatalf("put complete -> %q error = %v, want ErrStageRegression", stage, err)
+		}
+	}
+	after, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after refused puts: %v", err)
+	}
+	if !reflect.DeepEqual(complete, after) {
+		t.Fatalf("refused put changed the completed row:\n before %+v\n after  %+v", complete, after)
+	}
+}
+
+// TestPutRejectsNonObjectReconciliation is the R7 regression: decoding into a
+// map accepted JSON null, so the stored row broke the "JSON object" contract.
+func TestPutRejectsNonObjectReconciliation(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	for _, raw := range []string{"null", "[]", `"text"`, "1", "{broken"} {
+		err := repository.Put(ctx, model.UpgradeOperation{
+			Stage:          model.UpgradeStagePreflight,
+			Reconciliation: json.RawMessage(raw),
+		})
+		if err == nil {
+			t.Fatalf("put reconciliation %s was accepted", raw)
+		}
+	}
+	if _, found, err := repository.Get(ctx); err != nil || found {
+		t.Fatalf("rejected put wrote a row: found=%t err=%v", found, err)
+	}
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:          model.UpgradeStagePreflight,
+		Reconciliation: json.RawMessage(`{"checked":true}`),
+	}); err != nil {
+		t.Fatalf("put object reconciliation: %v", err)
+	}
+	stored, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(stored.Reconciliation) != `{"checked":true}` {
+		t.Fatalf("reconciliation = %s", stored.Reconciliation)
+	}
+}
+
+// TestGetRejectsStoredNonObjectReconciliation covers the read side of R7: a row
+// written by an older build with reconciliation = null must fail closed.
+func TestGetRejectsStoredNonObjectReconciliation(t *testing.T) {
+	for _, raw := range []string{"null", "[1,2]"} {
+		t.Run(raw, func(t *testing.T) {
+			repository, db := newRepository(t)
+			ctx := context.Background()
+			if _, err := db.ExecContext(ctx, `insert into upgrade_operations
+				(id, stage, last_forward_stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+				values (1, ?, ?, '[]', ?, '[]', 1, 1)`,
+				string(model.UpgradeStagePreflight), string(model.UpgradeStagePreflight), raw); err != nil {
+				t.Fatalf("seed corrupted row: %v", err)
+			}
+			if _, _, err := repository.Get(ctx); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+				t.Fatalf("get corrupted reconciliation error = %v, want ErrInvalidRow", err)
+			}
+		})
+	}
+}
+
+// TestPutRejectsDuplicateDomainsBeforeNormalizing is the R9 regression: Put
+// normalized before validating, so a duplicate domain was silently deduplicated
+// and the write committed.
+func TestPutRejectsDuplicateDomainsBeforeNormalizing(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStagePreflight,
+		DomainsDone: []string{model.UpgradeDomainPricing, model.UpgradeDomainPricing},
+	})
+	if err == nil {
+		t.Fatal("put with duplicate domains was accepted")
+	}
+	if _, found, getErr := repository.Get(ctx); getErr != nil || found {
+		t.Fatalf("rejected put wrote a row: found=%t err=%v", found, getErr)
+	}
+	if _, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageCopyIn); err != nil {
+		t.Fatalf("advance: %v", err)
+	}
+	before, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get before rejected put: %v", err)
+	}
+	err = repository.Put(ctx, model.UpgradeOperation{
+		Stage:       model.UpgradeStageReconcile,
+		DomainsDone: []string{model.UpgradeDomainUsageEvents, model.UpgradeDomainUsageEvents},
+		Revision:    before.Revision,
+	})
+	if err == nil {
+		t.Fatal("put with duplicate domains was accepted on an existing row")
+	}
+	after, _, err := repository.Get(ctx)
+	if err != nil {
+		t.Fatalf("get after rejected put: %v", err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("rejected put changed the row:\n before %+v\n after  %+v", before, after)
+	}
+}
+
+// TestGetRejectsStoredDuplicateDomains is the read half of R9: Normalize used to
+// deduplicate a corrupted row before Get returned it.
+func TestGetRejectsStoredDuplicateDomains(t *testing.T) {
+	repository, db := newRepository(t)
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `insert into upgrade_operations
+		(id, stage, last_forward_stage, domains_done, reconciliation, manual_items, created_at_ms, updated_at_ms)
+		values (1, ?, ?, '["pricing","pricing"]', '{}', '[]', 1, 1)`,
+		string(model.UpgradeStagePreflight), string(model.UpgradeStagePreflight)); err != nil {
+		t.Fatalf("seed duplicate-domain row: %v", err)
+	}
+	if _, _, err := repository.Get(ctx); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+		t.Fatalf("get stored duplicate domains error = %v, want ErrInvalidRow", err)
+	}
+}
+
+// TestAdvanceRepeatsDuplicateDomainIdempotently keeps the R9 contract for
+// Advance: re-recording a domain is the normal idempotent operation, not an
+// input error.
+func TestAdvanceRepeatsDuplicateDomainIdempotently(t *testing.T) {
+	repository, _ := newRepository(t)
+	ctx := context.Background()
+	first, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageCopyIn)
+	if err != nil {
+		t.Fatalf("advance copy_in: %v", err)
+	}
+	second, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageReconcile)
+	if err != nil {
+		t.Fatalf("re-advance usage_events: %v", err)
+	}
+	occurrences := 0
+	for _, domain := range second.DomainsDone {
+		if domain == model.UpgradeDomainUsageEvents {
+			occurrences++
+		}
+	}
+	if occurrences != 1 {
+		t.Fatalf("domains = %v, want usage_events recorded once", second.DomainsDone)
+	}
+	if second.Revision != first.Revision+1 {
+		t.Fatalf("repeated advance revision = %d, want %d", second.Revision, first.Revision+1)
 	}
 }
