@@ -121,6 +121,37 @@ function refusal(err: unknown): { code?: string; retryable?: number } {
 }
 
 /**
+ * What a recorded run lets its host say about the installation and the copy.
+ *
+ * The two are different facts. The installation completing is the server's
+ * decision, and the server grants it over retryable items once the operator has
+ * accepted this exact run: the acknowledgement is durable and run-bound, so a
+ * positive retryable count means the decision was taken, not that it is still
+ * open. What the copy left behind is the record's own count of manual and failed
+ * items, and only a settled run that recorded its whole plan with nothing left
+ * over may say the adoption itself is complete.
+ *
+ * Both hosts call this, so the completion step of a wizard and the shared flow
+ * cannot disagree about the same run.
+ */
+export type AdoptionCompletionState = 'none' | 'partial' | 'complete';
+
+// The setup wizard's own completion step applies this same rule, so it is
+// exported beside the flow rather than copied into the host.
+// eslint-disable-next-line react-refresh/only-export-components
+export function adoptionCompletionState(
+  summary: AdoptionSummary | null | undefined,
+  productComplete: boolean
+): AdoptionCompletionState {
+  if (!summary || !summary.finished || summary.running || !productComplete) return 'none';
+  const left = Math.max(summary.planned, summary.items.length) - summary.items.length;
+  if (left !== 0) return 'none';
+  if (summary.counts.manual === 0 && summary.counts.failed === 0)
+    return summary.retryable === 0 ? 'complete' : 'none';
+  return 'partial';
+}
+
+/**
  * FreshAdoptFlow is the one network-adoption journey, rendered by both wizards.
  *
  *   1. source: address, management key, plugin opt-in and the migration scope;
@@ -695,28 +726,15 @@ export function FreshAdoptFlow({
   const manualCount = summary?.counts.manual ?? 0;
   const failedCount = summary?.counts.failed ?? 0;
   // The installation can be complete while the copy is not: the server allows a
-  // manual item or a non-retryable failure to stand, and neither means the
-  // resource was copied. The success headline is a claim about the copy, so it
-  // needs the settled run, no retryable item, no unprocessed plan item, no
-  // manual work and no failure, and the completed installation.
-  const migrationCopiedEverything = manualCount === 0 && failedCount === 0;
-  const adoptionComplete =
-    !!summary &&
-    settledRun &&
-    summary.retryable === 0 &&
-    remaining === 0 &&
-    migrationCopiedEverything &&
-    operation.productComplete;
-  // The split state: the installation finished, but items still need the
-  // operator's own work. It keeps its own headline instead of borrowing the
-  // complete-adoption sentence.
-  const installationComplete =
-    !!summary &&
-    settledRun &&
-    summary.retryable === 0 &&
-    remaining === 0 &&
-    !migrationCopiedEverything &&
-    operation.productComplete;
+  // manual item, a non-retryable failure, or the retryable items of the run the
+  // operator accepted to stand, and none of them means the resource was copied.
+  // The success headline is a claim about the copy, so it needs the settled run,
+  // no retryable item, no unprocessed plan item, no manual work and no failure,
+  // and the completed installation. The split state keeps the installation's own
+  // headline and the failed items with their counts.
+  const completionState = adoptionCompletionState(summary, operation.productComplete === true);
+  const adoptionComplete = completionState === 'complete';
+  const installationComplete = completionState === 'partial';
   const needingResume =
     !!summary && !summary.running && (!summary.finished || summary.retryable > 0 || remaining > 0);
   const resumeForm = needingResume && !body;
@@ -990,7 +1008,11 @@ export function FreshAdoptFlow({
                 )}
               </>
             )}
-            {summary && summary.retryable > 0 && !summary.running && (
+            {summary && summary.retryable > 0 && !summary.running && !operation.productComplete && (
+              // While the installation is not complete this sentence carries the
+              // next action: resume, or finish anyway. Once it is complete, both
+              // actions are gone — the failed group and the split headline state
+              // the remainder instead.
               <p className="journey-help" data-testid="adopt-retryable">
                 {adoptText('retryableRefusal', { count: summary.retryable })}
               </p>

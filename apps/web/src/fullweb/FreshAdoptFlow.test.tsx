@@ -1227,6 +1227,12 @@ it('keeps polling on a running refusal and only finishes over failed items when 
     runId: finishedRun.runId,
   });
   expect(byID('enter-console').props.href).toBe('/console');
+  // The accepted completion is an installation that finished: the host step
+  // states the failures it finished over, not a copy that stopped short.
+  expect(text()).toContain(adoptText('partialTitle'));
+  expect(text()).toContain(adoptText('partialHelp', { manual: 2, failed: 1 }));
+  expect(text()).not.toContain(adoptText('settledTitle'));
+  expect(text()).not.toContain(adoptText('done'));
 });
 
 it('names an unproven destination instead of offering a retry that cannot work', async () => {
@@ -1518,6 +1524,12 @@ it('renders the Adopt flow for an adopt checkpoint instead of an empty card', as
   await settle();
   expect(maybe('fresh-adopt-flow').length).toBeGreaterThan(0);
   expect(text()).toContain(adoptText('progress', { settled: 4, planned: 4 }));
+  // The run settled with retryable items and the installation is not complete:
+  // nothing on this screen may claim either the adoption or the installation.
+  expect(text()).toContain(adoptText('settledTitle'));
+  expect(text()).toContain(adoptText('settledHelp'));
+  expect(text()).not.toContain(adoptText('partialTitle'));
+  expect(text()).not.toContain(adoptText('done'));
   // The record owns this journey now: there is no other choice to go back to.
   expect(maybe('adopt-exit')).toHaveLength(0);
   expect(get.mock.calls.map(([resource]) => resource)).toContain('installation/adoption');
@@ -1666,34 +1678,49 @@ it('sends the New Managed plugin opt-in from the Console path', async () => {
 });
 
 // A completed installation whose operator accepted the retryable items: the
-// installation is done, the copies are not. The screen said "Adoption complete"
-// here, next to a list of items that were never copied.
-it('does not call an installation complete while accepted items are still uncopied', async () => {
-  const done: FreshOperation = {
-    identity,
-    revision: 12,
-    adminInitialized: true,
-    productComplete: true,
-    gatewayPending: true,
-    routing: {
-      operationId: identity.operationId,
-      revision: 1,
-      target: '/console',
-      stage: 'committed',
-      committed: true,
-    },
-    strategy: { ...adoptCheckpoint, stage: 'committed' },
-  };
-  const get = vi.fn(async (resource: string) =>
-    resource === 'installation/adoption' ? finishedRun : done
-  );
-  await mountManaged(done, get);
-  await settle();
-  expect(text()).not.toContain(adoptText('done'));
-  expect(text()).not.toContain(adoptText('doneHelp'));
-  expect(text()).toContain(adoptText('settledTitle'));
-  expect(text()).toContain(adoptText('retryableRefusal', { count: 1 }));
-});
+// installation is done, the copies are not. The server grants that completion
+// only over a run-bound acknowledgement, so a positive retryable count means
+// "accepted and finished", never "still waiting"; the screen must state the
+// remainder instead of claiming the copy stopped before the installation.
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'states the accepted retryable remainder on the Console completion step (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    const done: FreshOperation = {
+      identity,
+      revision: 12,
+      adminInitialized: true,
+      productComplete: true,
+      gatewayPending: true,
+      routing: {
+        operationId: identity.operationId,
+        revision: 1,
+        target: '/console',
+        stage: 'committed',
+        committed: true,
+      },
+      strategy: { ...adoptCheckpoint, stage: 'committed' },
+    };
+    const get = vi.fn(async (resource: string) =>
+      resource === 'installation/adoption' ? finishedRun : done
+    );
+    await mountManaged(done, get);
+    await settle();
+    expect(text()).toContain(adoptText('partialTitle'));
+    expect(text()).toContain(adoptText('partialHelp', { manual: 2, failed: 1 }));
+    expect(text()).not.toContain(adoptText('done'));
+    expect(text()).not.toContain(adoptText('doneHelp'));
+    expect(text()).not.toContain(adoptText('settledTitle'));
+    // The accepted failures stay visible with their own count.
+    expect(byID('adopt-count-failed').props.children).toBe(1);
+    expect(byID('adopt-count-manual').props.children).toBe(2);
+    // The completion is behind this page: the acceptance prompt and its
+    // "finish anyway" action are gone, the remainder is not.
+    expect(maybe('adopt-retryable')).toHaveLength(0);
+    expect(text()).not.toContain(adoptText('retryableRefusal', { count: finishedRun.retryable }));
+    expect(maybe('adopt-enter-console')).toHaveLength(1);
+  }
+);
 
 // The one state that may say the adoption is complete: the run settled, nothing
 // is left to retry, and the installation completed.
@@ -1824,6 +1851,23 @@ it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
     expect(text()).toContain(adoptText('partialHelp', { manual: 0, failed: 1 }));
     expect(text()).toContain(adoptGuidanceText('config_leaf', 'verify_mismatch'));
     expect(text()).not.toContain(j('successHelp'));
+    expect(byID('enter-console').props.href).toBe('/console');
+  }
+);
+
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'states the accepted retryable remainder on the setup completion step (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    await completeAdoption(finishedRun);
+    // Completion over retryable items is the server's decision after this run
+    // was accepted: the host step says the installation is done and keeps the
+    // failures with their counts, never the clean-installation sentence.
+    expect(text()).toContain(adoptText('partialTitle'));
+    expect(text()).toContain(adoptText('partialHelp', { manual: 2, failed: 1 }));
+    expect(text()).not.toContain(j('successHelp'));
+    expect(text()).not.toContain(adoptText('done'));
+    expect(text()).toContain(adoptGuidanceText('config_leaf', 'download_failed'));
     expect(byID('enter-console').props.href).toBe('/console');
   }
 );

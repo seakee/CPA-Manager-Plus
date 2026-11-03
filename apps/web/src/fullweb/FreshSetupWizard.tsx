@@ -17,7 +17,7 @@ import {
   type AdoptionSummary,
   type AdoptRuntimeTarget,
 } from './freshAdoption';
-import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
+import { FreshAdoptFlow, adoptionCompletionState, type AdoptCarrier } from './FreshAdoptFlow';
 import { FullWebIcon } from './FullWebIcon';
 
 type Strategy = 'new_managed' | 'connect_external' | 'adopt_existing';
@@ -345,11 +345,12 @@ export function FreshSetupWizard({
   const complete = operation.productComplete === true;
   const adoptionManual = adoptSummary?.counts.manual ?? 0;
   const adoptionFailed = adoptSummary?.counts.failed ?? 0;
-  // The server completes an installation over manual items and non-retryable
-  // failures, but those were never copied. The wizard's own success step must
-  // say so instead of borrowing the clean-installation sentence.
+  // The server completes an installation over manual items, non-retryable
+  // failures, and the retryable items of the run the operator accepted, but none
+  // of them were copied. The wizard's own success step uses the flow's rule, so
+  // it says that instead of borrowing the clean-installation sentence.
   const adoptionPartial =
-    complete && strategy === 'adopt_existing' && (adoptionManual > 0 || adoptionFailed > 0);
+    strategy === 'adopt_existing' && adoptionCompletionState(adoptSummary, complete) === 'partial';
   const adoptionRemainder = adoptSummary
     ? adoptSummary.items.filter((item) => item.outcome === 'manual' || item.outcome === 'failed')
     : [];
