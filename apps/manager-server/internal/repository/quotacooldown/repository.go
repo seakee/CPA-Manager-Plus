@@ -16,10 +16,15 @@ type Repository interface {
 	UpsertActive(ctx context.Context, cooldown model.QuotaCooldownUpsert) (model.QuotaCooldown, error)
 	ListDue(ctx context.Context, nowMS int64, limit int) ([]model.QuotaCooldown, error)
 	ListActive(ctx context.Context) ([]model.QuotaCooldown, error)
-	MarkRecovered(ctx context.Context, id int64, recoveredAtMS int64) error
+	MarkRecovered(ctx context.Context, id int64, expectedUpdatedAtMS int64, recoveredAtMS int64) error
 	MarkSkipped(ctx context.Context, id int64, reason string) error
 	RecordFailure(ctx context.Context, id int64, reason string) error
 }
+
+// ErrConflict reports that the cooldown row no longer matches the generation a
+// recovery decision was made for. Another writer advanced it, so the caller
+// must not treat its own enable decision as the current truth.
+var ErrConflict = errors.New("quota cooldown generation conflict")
 
 type repository struct {
 	db *sql.DB
@@ -286,12 +291,29 @@ func (r *repository) ListActive(ctx context.Context) ([]model.QuotaCooldown, err
 	return scanList(rows)
 }
 
-func (r *repository) MarkRecovered(ctx context.Context, id int64, recoveredAtMS int64) error {
+func (r *repository) MarkRecovered(ctx context.Context, id int64, expectedUpdatedAtMS int64, recoveredAtMS int64) error {
 	if recoveredAtMS <= 0 {
 		recoveredAtMS = time.Now().UnixMilli()
 	}
-	_, err := r.db.ExecContext(ctx, `update quota_cooldowns set status = ?, recovered_at_ms = ?, last_error = null, updated_at_ms = ? where id = ?`, model.QuotaCooldownStatusRecovered, recoveredAtMS, recoveredAtMS, id)
-	return err
+	if expectedUpdatedAtMS <= 0 {
+		return fmt.Errorf("%w: expected generation is required", ErrConflict)
+	}
+	result, err := r.db.ExecContext(
+		ctx,
+		`update quota_cooldowns set status = ?, recovered_at_ms = ?, last_error = null, updated_at_ms = ? where id = ? and status = ? and updated_at_ms = ?`,
+		model.QuotaCooldownStatusRecovered, recoveredAtMS, recoveredAtMS, id, model.QuotaCooldownStatusActive, expectedUpdatedAtMS,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (r *repository) MarkSkipped(ctx context.Context, id int64, reason string) error {

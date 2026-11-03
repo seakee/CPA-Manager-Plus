@@ -1824,6 +1824,74 @@ func TestWriteKeepsBatchLocalBoundaryOrderForSameTimestamp(t *testing.T) {
 	}
 }
 
+// failingCandidateQuotaSnapshotRepository makes the historical candidate read
+// observable and unusable. Write must serve this batch from its own snapshots.
+type failingCandidateQuotaSnapshotRepository struct {
+	quotasnapshotrepo.Repository
+	calls int
+	err   error
+}
+
+func (r *failingCandidateQuotaSnapshotRepository) ListCandidates(ctx context.Context, accountKey, provider string, limit int) ([]model.AccountQuotaSnapshot, error) {
+	r.calls++
+	return nil, r.err
+}
+
+func TestWriteStabilizesHeaderBoundaryFromCurrentBatchOnly(t *testing.T) {
+	const observedAtMS = int64(1_785_928_574_638)
+	service, path := newQuotaSnapshotTestServiceWithPath(t, observedAtMS+1_000)
+	durationSeconds := int64(18_000)
+	cycleEndMS := int64(1_788_520_573_000)
+	cycleStartMS := cycleEndMS - durationSeconds*1000
+	used := 1.0
+
+	repository := &failingCandidateQuotaSnapshotRepository{
+		Repository: service.store.QuotaSnapshots,
+		err:        fmt.Errorf("historical candidate read must not run while writing"),
+	}
+	service.store.QuotaSnapshots = repository
+
+	if _, err := service.Write(context.Background(), WriteRequest{Entries: []WriteEntry{{
+		RowKey: "row-1", Provider: "codex", Account: quotaSnapshotTestAccount(),
+		Observation: &ObservationInput{
+			Source: "response_header", SourceObservationID: "writer-batch-only",
+			ObservedAtMS: observedAtMS, InventoryScopeKey: "codex:rate-limits", InventoryMode: "partial",
+		},
+		Windows: []WindowInput{{
+			ProviderWindowID: "five-hour", WindowKind: "five_hour", WindowMode: "fixed",
+			ModelScopeKind: "family", ModelScopeKey: "codex_main",
+			Source: "response_header", SourceObservationID: "writer-batch-only",
+			ObservedAtMS: observedAtMS, BoundaryAccuracy: "derived",
+			CycleStartMS: &cycleStartMS, CycleEndMS: &cycleEndMS,
+			DurationSeconds: &durationSeconds, UsedPercent: &used,
+		}},
+	}}}); err != nil {
+		t.Fatalf("write with unavailable historical candidates: %v", err)
+	}
+	if repository.calls != 0 {
+		t.Fatalf("historical candidate reads during Write = %d, want 0", repository.calls)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open quota database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var storedStartMS, storedEndMS, storedDuration int64
+	if err := db.QueryRow(`select cycle_start_ms, cycle_end_ms, duration_seconds
+		from account_quota_snapshots
+		where source_observation_id = 'writer-batch-only'
+		order by id desc limit 1`).Scan(&storedStartMS, &storedEndMS, &storedDuration); err != nil {
+		t.Fatalf("read persisted batch boundary: %v", err)
+	}
+	if storedStartMS != cycleStartMS || storedEndMS != cycleEndMS || storedDuration != durationSeconds {
+		t.Fatalf(
+			"persisted batch boundary = start:%d end:%d duration:%d, want start:%d end:%d duration:%d",
+			storedStartMS, storedEndMS, storedDuration, cycleStartMS, cycleEndMS, durationSeconds,
+		)
+	}
+}
+
 func TestWriteQueryStabilizesDerivedCodexHeaderBoundaryWithinCycle(t *testing.T) {
 	const (
 		firstObservedAtMS  = int64(1_785_928_574_638)

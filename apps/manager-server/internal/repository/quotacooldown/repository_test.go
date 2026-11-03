@@ -3,11 +3,13 @@ package quotacooldown_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	quotacooldown "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/quotacooldown"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
@@ -277,5 +279,53 @@ func TestUpsertActiveBeginsNewCycleAfterObservedEnable(t *testing.T) {
 	}
 	if oldRecoveredAtMS.Int64 > second.DisabledAtMS {
 		t.Fatalf("archived cooldown recovered_at_ms=%d exceeds new disabled_at_ms=%d", oldRecoveredAtMS.Int64, second.DisabledAtMS)
+	}
+}
+
+func TestMarkRecoveredRequiresMatchingActiveGeneration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+
+	active, err := st.QuotaCooldowns.UpsertActive(ctx, model.QuotaCooldownUpsert{
+		AuthFileName: "codex.json",
+		AuthIndex:    "auth-1",
+		Provider:     "codex",
+		Owner:        model.QuotaCooldownOwnerUsage429,
+		RecoverAtMS:  time.Now().Add(time.Hour).UnixMilli(),
+		EventHash:    "evt-cas",
+	})
+	if err != nil {
+		t.Fatalf("upsert cooldown: %v", err)
+	}
+
+	recoveredAtMS := time.Now().UnixMilli()
+	if err := st.QuotaCooldowns.MarkRecovered(ctx, active.ID, active.UpdatedAtMS+1, recoveredAtMS); !errors.Is(err, quotacooldown.ErrConflict) {
+		t.Fatalf("stale generation mark recovered error = %v, want ErrConflict", err)
+	}
+	untouched, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(untouched) != 1 || untouched[0] != active {
+		t.Fatalf("active cooldowns = %#v, want untouched generation %#v", untouched, active)
+	}
+
+	if err := st.QuotaCooldowns.MarkRecovered(ctx, active.ID, active.UpdatedAtMS, recoveredAtMS); err != nil {
+		t.Fatalf("matching generation mark recovered: %v", err)
+	}
+	if err := st.QuotaCooldowns.MarkRecovered(ctx, active.ID, active.UpdatedAtMS, recoveredAtMS); !errors.Is(err, quotacooldown.ErrConflict) {
+		t.Fatalf("repeat mark recovered error = %v, want ErrConflict for a non-active row", err)
+	}
+	left, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("active cooldowns = %#v, want recovered", left)
 	}
 }

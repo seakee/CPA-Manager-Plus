@@ -885,8 +885,8 @@ func (s *Store) ListDueQuotaCooldowns(ctx context.Context, nowMS int64, limit in
 	return s.QuotaCooldowns.ListDue(ctx, nowMS, limit)
 }
 
-func (s *Store) MarkQuotaCooldownRecovered(ctx context.Context, id int64, recoveredAtMS int64) error {
-	return s.QuotaCooldowns.MarkRecovered(ctx, id, recoveredAtMS)
+func (s *Store) MarkQuotaCooldownRecovered(ctx context.Context, id int64, expectedUpdatedAtMS int64, recoveredAtMS int64) error {
+	return s.QuotaCooldowns.MarkRecovered(ctx, id, expectedUpdatedAtMS, recoveredAtMS)
 }
 
 func (s *Store) MarkQuotaCooldownSkipped(ctx context.Context, id int64, reason string) error {
