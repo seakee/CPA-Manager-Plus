@@ -2453,6 +2453,23 @@ func readQuotaCooldownRow(t *testing.T, path string, id int64) (string, string, 
 	return status, lastError.String, updatedAtMS
 }
 
+func readQuotaCooldownRecoverAt(t *testing.T, path string, id int64) int64 {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open cooldown database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var recoverAtMS int64
+	if err := db.QueryRow(
+		`select recover_at_ms from quota_cooldowns where id = ?`,
+		id,
+	).Scan(&recoverAtMS); err != nil {
+		t.Fatalf("read cooldown %d recover_at: %v", id, err)
+	}
+	return recoverAtMS
+}
+
 func TestRateLimitAutoDisableWorkerEarlyRecoveryDoesNotEnablePreDisabledCredential(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
@@ -4190,6 +4207,146 @@ func TestRateLimitAutoDisableWorkerKeepsNewerIndexedEvidenceOverLegacyClaim(t *t
 	mu.Unlock()
 	if len(gotPatches) != 2 {
 		t.Fatalf("patches = %v, want no enable from the retired legacy generation", gotPatches)
+	}
+}
+
+// TestRateLimitAutoDisableWorkerKeepsCooldownOnAnotherAuthFileOutOfRecovery
+// covers two credential files that share a provider and account snapshot. The
+// fallback identity cannot tell them apart, but a cooldown recorded for the
+// sibling file neither owns this credential nor is due. The claimed generation
+// must recover instead of being retired by the sibling and disabled again.
+func TestRateLimitAutoDisableWorkerKeepsCooldownOnAnotherAuthFileOutOfRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	claimedFixture := quotaEnableFixture{
+		name: "xai-legacy", owner: model.QuotaCooldownOwnerXAIFreeUsage, provider: "xai",
+		fileName: "xai-a.json", account: "alice@example.com",
+	}
+	siblingFixture := quotaEnableFixture{
+		name: "xai-indexed", owner: model.QuotaCooldownOwnerXAIFreeUsage, provider: "xai",
+		fileName: "xai-b.json", authIndex: "auth-b", account: "alice@example.com",
+	}
+	type statusPatch struct {
+		name     string
+		disabled bool
+	}
+	var mu sync.Mutex
+	disabled := map[string]bool{"runtime-xai-a": true, "runtime-xai-b": true}
+	patches := make([]statusPatch, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			mu.Lock()
+			payload := []map[string]any{
+				{
+					"id":       "runtime-xai-a",
+					"name":     claimedFixture.fileName,
+					"provider": claimedFixture.provider,
+					"account":  claimedFixture.account,
+					"disabled": disabled["runtime-xai-a"],
+				},
+				{
+					"id":         "runtime-xai-b",
+					"name":       siblingFixture.fileName,
+					"auth_index": siblingFixture.authIndex,
+					"provider":   siblingFixture.provider,
+					"account":    siblingFixture.account,
+					"disabled":   disabled["runtime-xai-b"],
+				},
+			}
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(payload)
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			var payload struct {
+				Name     string `json:"name"`
+				Disabled bool   `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			name := strings.TrimSpace(payload.Name)
+			mu.Lock()
+			patches = append(patches, statusPatch{name: name, disabled: payload.Disabled})
+			disabled[name] = payload.Disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	claimed := seedDueQuotaCooldown(t, st, claimedFixture, "evt-claimed-file")
+	sibling, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:     siblingFixture.fileName,
+		AuthIndex:        siblingFixture.authIndex,
+		AccountSnapshot:  siblingFixture.account,
+		Provider:         siblingFixture.provider,
+		RecoverAtMS:      now.Add(time.Hour).UnixMilli(),
+		Owner:            siblingFixture.owner,
+		EventHash:        "evt-sibling-file",
+		PreDisabledState: false,
+		DisabledAtMS:     now.Add(-time.Minute).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("seed sibling cooldown: %v", err)
+	}
+	if sibling.ID == 0 || sibling.ID == claimed.ID {
+		t.Fatalf("sibling cooldown took over the claimed generation: claimed=%+v sibling=%+v", claimed, sibling)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	worker.enableDue(ctx, now)
+
+	mu.Lock()
+	gotPatches := append([]statusPatch(nil), patches...)
+	siblingDisabled := disabled["runtime-xai-b"]
+	mu.Unlock()
+	if !siblingDisabled {
+		t.Fatal("sibling credential was enabled despite its own active cooldown")
+	}
+	enables := 0
+	for _, patch := range gotPatches {
+		switch {
+		case patch.name == "runtime-xai-a" && !patch.disabled:
+			enables++
+		case patch.name == "runtime-xai-a":
+			t.Fatalf("patches = %+v, want no disable after enabling the claimed credential", gotPatches)
+		case patch.name == "runtime-xai-b":
+			t.Fatalf("patches = %+v, want no mutation of the sibling credential file", gotPatches)
+		}
+	}
+	if enables != 1 {
+		t.Fatalf("enable patches for %q = %d in %+v, want exactly one", claimedFixture.fileName, enables, gotPatches)
+	}
+
+	status, reason, updatedAtMS := readQuotaCooldownRow(t, path, claimed.ID)
+	if status != model.QuotaCooldownStatusRecovered {
+		t.Fatalf("claimed cooldown status = %q, want %q", status, model.QuotaCooldownStatusRecovered)
+	}
+	if reason != "" {
+		t.Fatalf("claimed cooldown last_error = %q, want none", reason)
+	}
+	if updatedAtMS <= claimed.UpdatedAtMS {
+		t.Fatalf("claimed cooldown generation = %d, want it advanced past %d", updatedAtMS, claimed.UpdatedAtMS)
+	}
+	siblingStatus, siblingReason, siblingUpdatedAtMS := readQuotaCooldownRow(t, path, sibling.ID)
+	if siblingStatus != model.QuotaCooldownStatusActive || siblingReason != "" || siblingUpdatedAtMS != sibling.UpdatedAtMS {
+		t.Fatalf("sibling cooldown = (%q, %q, %d), want the untouched active generation (%d)", siblingStatus, siblingReason, siblingUpdatedAtMS, sibling.UpdatedAtMS)
+	}
+	if got := readQuotaCooldownRecoverAt(t, path, sibling.ID); got != sibling.RecoverAtMS {
+		t.Fatalf("sibling cooldown recover_at = %d, want untouched %d", got, sibling.RecoverAtMS)
 	}
 }
 

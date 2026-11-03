@@ -910,8 +910,12 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 }
 
 // newerActiveCooldownGeneration reports the newest active cooldown generation,
-// other than the one being recovered, that owns this credential. Such a
-// generation was recorded after this recovery decision and must win.
+// other than the one being recovered, that owns this credential. A generation
+// owns a credential only within its own auth file: the fallback identity
+// (provider plus account snapshot) is shared by sibling credential files, so a
+// cooldown recorded for another file must never supersede this recovery and
+// retire its claim. Such a same-file generation was recorded after this
+// recovery decision and must win.
 func (w *RateLimitAutoDisableWorker) newerActiveCooldownGeneration(
 	ctx context.Context,
 	item store.QuotaCooldown,
@@ -929,8 +933,15 @@ func (w *RateLimitAutoDisableWorker) newerActiveCooldownGeneration(
 	}
 	newest := store.QuotaCooldown{}
 	found := false
+	claimedFileName := strings.TrimSpace(item.AuthFileName)
 	for _, candidate := range active {
 		if candidate.ID == item.ID {
+			continue
+		}
+		// Identity fallbacks (provider plus account snapshot) are shared by
+		// sibling credential files, so only a cooldown recorded for the same
+		// file can take over this recovery.
+		if strings.TrimSpace(candidate.AuthFileName) != claimedFileName {
 			continue
 		}
 		if !quotaCooldownMatchesIdentity(candidate, authIndex, provider, accountID, accountSnapshot) &&
