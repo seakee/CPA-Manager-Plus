@@ -490,13 +490,21 @@ const excessCredentialItem = "credential-inventory-excess"
 // second copy of them:
 //
 //   - a credential whose stable item identity is longer than the store accepts
-//     can never be recorded, so it is reported as manual with an instruction
-//     instead of stopping the run at it;
+//     can never be recorded under its own name, so it is reported with a
+//     bounded, stable identity and an instruction instead of stopping the run
+//     at it;
 //   - the whole inventory must fit the summary. The fixed part of the plan (the
 //     gateway leaves, the rule families and the provider sections) is known
 //     exactly, so the credential allowance is the remainder. Anything past it is
-//     reported as manual: a bounded, valid record the operator can act on is
-//     strictly better than a record the store refuses.
+//     reported by one aggregate marker: a bounded, valid record the operator can
+//     act on is strictly better than a record the store refuses.
+//
+// One budget pays for every item this preflight persists — an ordinary
+// credential's record, an overlong name's manual record and the aggregate marker
+// itself all draw on the same allowance. Charging one kind and not another would
+// let a source crowd out the fixed configuration items, or overflow the item
+// bound the allowance was computed from; the aggregate is what keeps the report
+// honest once the budget is gone.
 //
 // The summary is validated against the store's own checker before it is
 // checkpointed, so a plan that still does not fit ends the run here, before any
@@ -526,7 +534,8 @@ func (e *Executor) preflightInventory(ctx context.Context, summary *freshstore.A
 			// The name cannot be the item identity: the store would refuse the
 			// whole summary. The record carries a bounded identity derived from the
 			// name instead, so the item is still reported, still stable across
-			// replays and still actionable.
+			// replays and still actionable. It costs exactly one slot of the same
+			// budget an ordinary credential costs.
 			item := overlongCredentialItem(file.Name)
 			if summary.Settled(item) {
 				continue
@@ -539,6 +548,14 @@ func (e *Executor) preflightInventory(ctx context.Context, summary *freshstore.A
 			if summary.Settled(legacyOverlongCredentialItem(file.Name)) {
 				continue
 			}
+			if allowed == 0 {
+				// No room for this name either. It joins the same aggregate the
+				// ordinary credentials past the budget use, instead of being
+				// written one by one past the store's item bound.
+				excess++
+				continue
+			}
+			allowed--
 			if err := e.record(ctx, summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionManual,
 				Reason:      "adoption_item_name_too_long",

@@ -56,6 +56,12 @@ type AdoptionItem struct {
 	// aggregate "inventory too large" marker sets it: the count is the one fact
 	// about those items the record can keep without keeping them, and without it
 	// the operator is told to copy "some files" by hand.
+	//
+	// It is a count, not a stored item, so it is bounded by
+	// `maxAdoptionRemainder` rather than by the item bound: a source whose
+	// inventory is far larger than the record has to be able to report how much
+	// was left behind, or the aggregate marker itself would be refused and the
+	// run would stop instead of settling. The count is exact below that bound.
 	Left int `json:"left,omitempty"`
 }
 
@@ -170,7 +176,15 @@ const (
 	maxAdoptionItemName = 256
 	// maxAdoptionItems bounds the whole summary. The migration inventory is a
 	// few dozen entries; a larger summary was not produced by this executor.
-	maxAdoptionItems       = 1024
+	maxAdoptionItems = 1024
+	// maxAdoptionRemainder bounds the `Left` count of the one aggregate excess
+	// marker. It is deliberately far above the item bound and unrelated to it:
+	// `Left` is a count of source files the record could not hold, and a source
+	// far over the record's capacity must still be able to report the true
+	// number instead of failing validation. 1,048,576 is a thousand times the
+	// item bound and well past any inventory a single CPA listing can carry into
+	// this preflight; the bound exists only to refuse a corrupted or absurd row.
+	maxAdoptionRemainder   = 1 << 20
 	maxAdoptionReason      = 120
 	maxAdoptionInstruction = 512
 )
@@ -272,7 +286,7 @@ func validAdoptionSummary(summary AdoptionSummary) error {
 		if !validAdoptionDigest(item.SourceSHA256) || !validAdoptionDigest(item.DestinationSHA256) {
 			return errors.New("invalid adoption item digest")
 		}
-		if item.Left < 0 || item.Left > maxAdoptionItems {
+		if item.Left < 0 || item.Left > maxAdoptionRemainder {
 			return errors.New("adoption item remainder exceeds its bound")
 		}
 		if item.Outcome == AdoptionMigrated && (item.Instruction != "" || item.Reason != "") {
