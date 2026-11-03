@@ -320,7 +320,8 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	}
 	a.fixed = freshbootstrap.Handler{Authority: a.authority, Routing: a.routing, Current: a.current,
 		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime),
-		Adoption: http.HandlerFunc(a.fixedAdoption)}
+		Adoption: http.HandlerFunc(a.fixedAdoption),
+		Upgrade:  http.HandlerFunc(a.newUpgradeWizard().ServeHTTP)}
 	return a
 }
 
@@ -427,6 +428,18 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	// It authenticates no browser and cannot mutate the pending installation.
 	if resource == "bootstrap/identity" && r.Method == http.MethodGet {
 		writeFreshJSON(w, freshrouting.StateFor(op))
+		return
+	}
+	// The Upgrade reads own their credential. They are neither the installation
+	// session's nor the Fresh Admin's, so they are answered before either gate and
+	// the reader decides the caller. A completed installation has no Upgrade step
+	// at all, so the resources stop existing with the operation.
+	if upgradeWizardResource(resource) {
+		if op.ProductComplete {
+			http.NotFound(w, r)
+			return
+		}
+		a.newUpgradeWizard().ServeHTTP(w, r)
 		return
 	}
 	continuation, freshAuth := freshbootstrap.SessionToken(r)

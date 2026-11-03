@@ -27,6 +27,15 @@ const jobBlock = (workflow, jobName) => {
   return lines.slice(start + 1, end).join('\n');
 };
 
+const stepBlock = (job, stepName) => {
+  const lines = job.split('\n');
+  const start = lines.findIndex((line) => line === `      - name: ${stepName}`);
+  if (start === -1) throw new Error(`Missing workflow step: ${stepName}`);
+  const relativeEnd = lines.slice(start + 1).findIndex((line) => /^      - /.test(line));
+  const end = relativeEnd === -1 ? lines.length : start + 1 + relativeEnd;
+  return lines.slice(start, end).join('\n');
+};
+
 describe('GitHub Actions workflow integrity', () => {
   it('pins every external action to a full commit SHA', () => {
     const workflowFiles = readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(file));
@@ -305,6 +314,24 @@ describe('GitHub Actions workflow integrity', () => {
     expect(packageJson.scripts.test).toContain('test:repo');
     expect(packageJson.scripts['test:repo']).toBe(
       'vitest run tests/*.test.mjs --exclude tests/nativeControlScripts.test.mjs'
+    );
+  });
+
+  it('runs the Upgrade harness unit tests on every run, without Docker', () => {
+    const workflow = readWorkflow('upgrade-docker.yml');
+    const job = jobBlock(workflow, 'upgrade-docker');
+    const nodeStep = stepBlock(job, 'Set up Node');
+    const testStep = stepBlock(job, 'Test the Upgrade harness without Docker');
+
+    expect(testStep).toContain('run: node --test bin/ci/upgrade-docker.test.mjs');
+    expect(testStep).not.toMatch(/^\s+if:/m);
+    expect(testStep).not.toContain('continue-on-error');
+    expect(nodeStep).not.toMatch(/^\s+if:/m);
+    expect(job.indexOf('- name: Set up Node')).toBeLessThan(
+      job.indexOf('- name: Test the Upgrade harness without Docker')
+    );
+    expect(job.indexOf('- name: Test the Upgrade harness without Docker')).toBeLessThan(
+      job.indexOf('- name: Classify the skip variable')
     );
   });
 

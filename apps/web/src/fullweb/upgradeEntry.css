@@ -75,9 +75,10 @@
 .upgrade-main {
   flex: 1;
   display: flex;
-  justify-content: center;
-  align-items: flex-start;
-  padding: 66px 24px 0;
+  flex-direction: column;
+  align-items: center;
+  gap: 26px;
+  padding: 66px 24px 40px;
 }
 
 .upgrade-card {
@@ -195,6 +196,322 @@
   margin: 12px 0 0;
 }
 
+/* The Upgrade wizard. It reuses the card, notice and button language of the
+   entry above it: no new visual vocabulary, only the steps and the report. */
+.upgrade-flow {
+  width: min(100%, 1016px);
+  background: var(--glass-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 22px;
+  padding: 32px 46px 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.upgrade-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: none;
+}
+
+.upgrade-steps li {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 15px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 18px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.upgrade-steps li[data-state='current'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.upgrade-steps li[data-state='done'] {
+  border-color: var(--emerald-border);
+  background: var(--emerald-soft);
+  color: var(--emerald);
+}
+
+.upgrade-step-index {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--bg-subtle);
+  color: inherit;
+  font-size: 12px;
+}
+
+.upgrade-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.upgrade-step-body h2 {
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.35;
+  letter-spacing: -0.4px;
+  color: var(--text-primary);
+}
+
+.upgrade-step-body h3 {
+  margin: 8px 0 0;
+  font-size: 17px;
+  color: var(--text-primary);
+}
+
+.upgrade-step-help,
+.upgrade-step-status {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.upgrade-step-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-tertiary);
+}
+
+.upgrade-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 26px;
+  margin: 0;
+}
+
+.upgrade-facts div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 150px;
+}
+
+.upgrade-facts dt {
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.upgrade-facts dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.upgrade-checks,
+.upgrade-list,
+.upgrade-domains,
+.upgrade-days {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.upgrade-checks li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 11px 15px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 11px;
+  background: var(--bg-subtle);
+}
+
+.upgrade-check-name {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.upgrade-check-outcome {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 12px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+
+.upgrade-check-outcome.is-pass {
+  background: var(--emerald-soft);
+  color: var(--emerald);
+}
+
+.upgrade-check-outcome.is-blocked {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.upgrade-check-outcome.is-gap {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.upgrade-check-detail {
+  flex-basis: 100%;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.upgrade-checks code,
+.upgrade-notice code,
+.upgrade-days code,
+.upgrade-stage code {
+  padding: 1px 7px;
+  border-radius: 7px;
+  background: var(--bg-code, var(--bg-subtle));
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.upgrade-notice-ready {
+  border-color: var(--emerald-border);
+  background: var(--emerald-soft);
+}
+
+.upgrade-notice-ready > svg {
+  color: var(--emerald);
+}
+
+.upgrade-notice ul {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  line-height: 1.7;
+}
+
+.upgrade-notice ul li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.upgrade-ack {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 12px;
+  color: var(--text-primary);
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.upgrade-ack input {
+  margin-top: 4px;
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.upgrade-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 6px;
+}
+
+.upgrade-actions .btn {
+  min-height: 46px;
+  gap: 10px;
+}
+
+.upgrade-actions .btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.upgrade-stage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 14px;
+  padding: 15px 19px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 11px;
+  background: var(--bg-subtle);
+}
+
+.upgrade-stage-label {
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.upgrade-stage-value {
+  color: var(--text-primary);
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.upgrade-stage-note {
+  flex-basis: 100%;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.upgrade-domains,
+.upgrade-list {
+  gap: 6px;
+  padding-left: 20px;
+  list-style: disc;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.upgrade-days {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.upgrade-gaps,
+.upgrade-reconciliation,
+.upgrade-manual {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 19px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 11px;
+}
+
+.upgrade-gaps h3,
+.upgrade-reconciliation h3,
+.upgrade-manual h3 {
+  margin: 0;
+}
+
+.upgrade-result-headline {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.35;
+  letter-spacing: -0.4px;
+  color: var(--text-primary);
+}
+
+.upgrade-result-headline.is-complete {
+  color: var(--emerald);
+}
+
 @media (max-width: 760px) {
   .upgrade-header {
     min-height: 70px;
@@ -261,5 +578,27 @@
   }
   .upgrade-footer {
     padding: 18px 20px;
+  }
+  .upgrade-flow {
+    border-radius: 16px;
+    padding: 22px 20px 25px;
+    gap: 18px;
+  }
+  .upgrade-step-body h2 {
+    font-size: 22px;
+  }
+  .upgrade-result-headline {
+    font-size: 23px;
+  }
+  .upgrade-steps li {
+    padding: 6px 11px;
+    font-size: 13px;
+  }
+  .upgrade-actions {
+    justify-content: stretch;
+  }
+  .upgrade-actions .btn {
+    flex: 1;
+    justify-content: center;
   }
 }

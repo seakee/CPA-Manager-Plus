@@ -5,17 +5,42 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
+
+	_ "modernc.org/sqlite"
 )
 
 var (
+	// ErrSourceDatabaseMissing is the credential read's environment verdict: the
+	// configured root holds no database to read a credential from. It is never a
+	// verdict on the presented key, so a route that reports it must not answer
+	// 401.
+	ErrSourceDatabaseMissing = errors.New("source database is missing")
+	// errDatabaseMissing is the snapshot's own verdict on a database file that
+	// is not there. The preflight reports both as source-unreadable; the
+	// snapshot needs its own sentinel because it also fails on a broken file.
 	errDatabaseMissing = errors.New("database file is missing")
 	errSourceIntegrity = errors.New("source database integrity check failed")
+	// ErrSourceDatabaseChanged is the credential read's before-read verdict: the
+	// path no longer names the file that was inspected and opened, so the row that
+	// was read is not the credential this step assessed. Nothing was compared and
+	// nothing was written.
+	ErrSourceDatabaseChanged = errors.New("source database changed during the credential read")
+	// ErrSourceSymlinked is the shared file policy's verdict, exported here so a
+	// caller of this package does not have to reach into the lock package for it:
+	// the configured database is a symbolic link, so the file that would be
+	// inspected is not the file that would be read. The preflight and the
+	// credential read refuse it with the same code.
+	ErrSourceSymlinked = processlock.ErrSymlinkedDatabase
 )
 
 // VersionUnknown is reported when the operator declared no source release.
@@ -101,8 +126,180 @@ func (s sourceSchema) v2OnlyTables() []string {
 	return found
 }
 
-// quickCheckSource runs the single read-only integrity command the preflight is
-// allowed to issue against the snapshot.
+// openReadOnlySource opens the legacy database without write access and
+// verifies integrity with a single quick_check. It creates no WAL/SHM files,
+// applies no pragma that persists state and never migrates.
+func openReadOnlySource(ctx context.Context, path string) (*sql.DB, sourceSchema, error) {
+	return openSource(ctx, path, false)
+}
+
+// openImmutableSource reads a byte-for-byte snapshot nobody writes, such as a
+// verified backup member. immutable keeps SQLite from creating a WAL index
+// beside it, which would make the snapshot disagree with its own manifest.
+func openImmutableSource(ctx context.Context, path string) (*sql.DB, sourceSchema, error) {
+	return openSource(ctx, path, true)
+}
+
+// openCredentialSource opens the legacy database read-only for the one row a
+// credential check reads, and stops there. It deliberately runs no quick_check:
+// that read scans every page of the file, and every authenticated request —
+// including every status poll — proves the credential, so an integrity scan
+// here would make a large source time out on a route that never sees the
+// database otherwise. The full preflight keeps the check where the source is
+// actually being qualified.
+//
+// It applies the same database file policy as the preflight: the path must be
+// the database itself, never a symbolic or hard link. SQLite opens lazily on the
+// first query, so the returned handle pins the descriptor it inspected; the
+// caller proves after the read that the path still names that file.
+func openCredentialSource(path string) (*credentialSource, error) {
+	inspected, err := inspectSourceDatabase(path)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := processlock.OpenedDatabase(file, inspected); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	db, err := openSourceDatabaseFile(path, false)
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return &credentialSource{db: db, file: file, path: path, inspected: inspected}, nil
+}
+
+// credentialSource is the open handle of one credential read. The pinned
+// descriptor keeps the inspected file alive, so the read can be checked against
+// it afterwards instead of trusting a path that may have been repointed.
+type credentialSource struct {
+	db        *sql.DB
+	file      *os.File
+	path      string
+	inspected os.FileInfo
+}
+
+// verifyUnchanged is the read's closing half of the file policy: it runs after
+// the first real read, and refuses a path that no longer names the file that was
+// inspected. Without it a swap between the inspection and the lazy open would
+// compare a credential from a file this step never assessed.
+func (s *credentialSource) verifyUnchanged() error {
+	if s == nil || s.file == nil {
+		return ErrSourceDatabaseChanged
+	}
+	if err := processlock.OpenedDatabase(s.file, s.inspected); err != nil {
+		return err
+	}
+	current, err := os.Lstat(s.path)
+	if err != nil {
+		return err
+	}
+	if !current.Mode().IsRegular() || !os.SameFile(s.inspected, current) {
+		return ErrSourceDatabaseChanged
+	}
+	return nil
+}
+
+func (s *credentialSource) close() error {
+	if s == nil {
+		return nil
+	}
+	return errors.Join(s.db.Close(), s.file.Close())
+}
+
+// openSource opens the source and qualifies it: integrity first, then the
+// bounded schema vocabulary a preflight is allowed to observe.
+func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sourceSchema, error) {
+	db, err := openSourceDatabase(path, immutable)
+	if err != nil {
+		return nil, sourceSchema{}, err
+	}
+	schema, err := qualifySource(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, sourceSchema{}, err
+	}
+	return db, schema, nil
+}
+
+// openSourceWith opens the database at path through dsn and qualifies it the
+// same way openSource does. It exists for the caller that must read its own
+// copy of the source with a different access mode, and it applies the same
+// file policy so both paths refuse the same shapes.
+func openSourceWith(ctx context.Context, path, dsn string) (*sql.DB, sourceSchema, error) {
+	if _, err := inspectSourceDatabase(path); err != nil {
+		return nil, sourceSchema{}, err
+	}
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, sourceSchema{}, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	schema, err := qualifySource(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, sourceSchema{}, err
+	}
+	return db, schema, nil
+}
+
+// qualifySource proves the whole file is structurally readable and reads the
+// bounded schema vocabulary a preflight is allowed to observe.
+func qualifySource(ctx context.Context, db *sql.DB) (sourceSchema, error) {
+	if err := quickCheckSource(ctx, db); err != nil {
+		return sourceSchema{}, err
+	}
+	return readSourceSchema(ctx, db)
+}
+
+// openSourceDatabase opens an existing source file read-only and reads nothing
+// from it: the caller decides how much of the file to verify.
+func openSourceDatabase(path string, immutable bool) (*sql.DB, error) {
+	if _, err := inspectSourceDatabase(path); err != nil {
+		return nil, err
+	}
+	return openSourceDatabaseFile(path, immutable)
+}
+
+// openSourceDatabaseFile opens the DSN without touching the file itself: SQLite
+// reads lazily on the first statement, which is why a caller that has to prove
+// the file identity does so around that first read.
+func openSourceDatabaseFile(path string, immutable bool) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, immutable))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return db, nil
+}
+
+// inspectSourceDatabase applies the shared database file policy and rejects a
+// file with no content, which is not a readable source. A missing database is
+// ErrSourceDatabaseMissing rather than a host error, because it is the
+// operator's mount that has to change.
+func inspectSourceDatabase(path string) (os.FileInfo, error) {
+	info, err := processlock.InspectDatabaseFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrSourceDatabaseMissing
+		}
+		return nil, err
+	}
+	if info.Size() == 0 {
+		return nil, ErrSourceDatabaseMissing
+	}
+	return info, nil
+}
+
+// quickCheckSource proves the whole database is structurally readable. It scans
+// every page, so it belongs to the full preflight and never to a credential
+// read.
 func quickCheckSource(ctx context.Context, db *sql.DB) error {
 	var result string
 	if err := db.QueryRowContext(ctx, "pragma quick_check").Scan(&result); err != nil {
@@ -112,6 +309,22 @@ func quickCheckSource(ctx context.Context, db *sql.DB) error {
 		return errSourceIntegrity
 	}
 	return nil
+}
+
+func readOnlyDataSourceName(path string, immutable bool) string {
+	uriPath := filepath.ToSlash(path)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsn := &url.URL{Scheme: "file", Path: uriPath}
+	q := dsn.Query()
+	q.Set("mode", "ro")
+	q.Add("_pragma", "query_only(1)")
+	if immutable {
+		q.Set("immutable", "1")
+	}
+	dsn.RawQuery = q.Encode()
+	return dsn.String()
 }
 
 func readSourceSchema(ctx context.Context, db *sql.DB) (sourceSchema, error) {

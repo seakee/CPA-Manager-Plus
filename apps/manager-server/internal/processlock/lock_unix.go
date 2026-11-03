@@ -21,6 +21,17 @@ func lockFile(file *os.File) error {
 	return err
 }
 
+// probeLockFile takes a shared, non-blocking lock. It conflicts with a live
+// exclusive holder without excluding another reader, so an observer can name a
+// busy source and let it go immediately.
+func probeLockFile(file *os.File) error {
+	err := unix.Flock(int(file.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		return ErrLocked
+	}
+	return err
+}
+
 func unlockFile(file *os.File) error {
 	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
 }

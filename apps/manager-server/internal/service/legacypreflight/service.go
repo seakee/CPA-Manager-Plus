@@ -45,7 +45,15 @@ type Options struct {
 	FreshAdmission   bool
 	ValidatedHop     *legacyartifact.ValidatedHopEvidence
 	readOnlySnapshot bool
-	adminKey         string
+	// observeOnly replaces the ownership fence with a shared, non-blocking probe
+	// of the same marker. The authentication leaf sets it: proving a credential
+	// must work on a source mounted read-only, where the marker cannot be opened
+	// for writing at all. It is never set on a path that admits a writer.
+	observeOnly bool
+	adminKey    string
+	// UpgradeAdmission is the injected, read-only Upgrade operation reader. Nil
+	// keeps the pre-seam behavior: no source is admitted on an Upgrade record.
+	UpgradeAdmission UpgradeAdmission
 }
 
 type Admission struct {
@@ -59,6 +67,12 @@ type Admission struct {
 	closeErr          error
 	markerPermanent   atomic.Bool
 	PendingFresh      *processlock.FreshReceipt
+	// UpgradeStage is the recorded Upgrade position this admission was granted
+	// on; UpgradeStageNone when no record was read.
+	UpgradeStage UpgradeStage
+	// UpgradeReason explains a surface restriction; empty when the admission
+	// restricts nothing or has no more specific explanation.
+	UpgradeReason UpgradeReason
 }
 
 // RetainMarker makes the ownership marker permanent after writable DB open.
@@ -81,7 +95,7 @@ func (a *Admission) Close() error {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				report, err := inspect(ctx, a.paths, a.options, a.Lock, true)
-				if err == nil && report.SourceKind == "fresh" && startupAllowed(report) &&
+				if err == nil && report.SourceKind == SourceKindFresh && startupAllowed(report, a.UpgradeStage) &&
 					sqlite.SameInspectionSource(a.initial, report.Observed) {
 					a.closeErr = a.Lock.DiscardNew()
 					return
@@ -102,6 +116,10 @@ const DiscoveryInspectionTimeout = 2 * time.Second
 // fail closed for a later qualified owner. A pre-existing Manager marker may be
 // retained as coordination evidence, but public discovery never enters the
 // general recovery-copy inspection path and never creates a marker.
+//
+// The marker is taken as a fence, except when Options.observeOnly asks only for
+// its state: that mode reads a source mounted read-only and must not need write
+// access to the marker.
 func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, options Options, consume func(Report, error)) {
 	ctx, cancel := context.WithTimeout(ctx, DiscoveryInspectionTimeout)
 	defer cancel()
@@ -124,7 +142,7 @@ func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, opt
 		return
 	}
 
-	lock, err := processlock.AcquireExisting(paths.Database)
+	lock, err := fenceSource(paths.Database, options.observeOnly)
 	if err != nil && !errors.Is(err, processlock.ErrNoExistingLock) {
 		consume(Report{}, errors.New("source ownership unavailable"))
 		return
@@ -145,13 +163,24 @@ func WithFencedInspection(ctx context.Context, paths sqlite.InspectionPaths, opt
 	consume(report, errors.Join(inspectErr, ctx.Err()))
 }
 
+// fenceSource takes the source's ownership fence, or only observes it when the
+// caller must stay readable on media mounted read-only. The probe is shared and
+// non-blocking and is released before it returns, so it proves no writer holds
+// the marker without ever opening it for writing.
+func fenceSource(databasePath string, observeOnly bool) (*processlock.Lock, error) {
+	if observeOnly {
+		return nil, processlock.ProbeExisting(databasePath)
+	}
+	return processlock.AcquireExisting(databasePath)
+}
+
 func Inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options) (report Report, err error) {
 	// Diagnostic projection only. Startup admission uses inspect directly and
 	// never consumes the planned target as source identity or authority.
 	defer func() { addPlannedBridgeCandidate(ctx, &report, paths, options.ValidatedHop) }()
 	lock, err := processlock.AcquireExisting(paths.Database)
 	if err != nil && !errors.Is(err, processlock.ErrNoExistingLock) {
-		report := Report{SourceKind: "unknown", Unknown: []string{"source-consistency", "compatibility-profile", "exact-source-release"}, Blocked: []string{"source-ownership-unavailable"}}
+		report := Report{SourceKind: SourceKindUnknown, Unknown: []string{"source-consistency", "compatibility-profile", "exact-source-release"}, Blocked: []string{"source-ownership-unavailable"}}
 		addCompatibilityObservations(&report)
 		return report, errors.New("source ownership unavailable")
 	}
@@ -188,7 +217,7 @@ func inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options,
 	} else {
 		observed, err = sqlite.InspectLegacySource(ctx, paths, inspectionOptions)
 	}
-	report = Report{SourceKind: "unknown", Observed: observed, Unknown: []string{
+	report = Report{SourceKind: SourceKindUnknown, Observed: observed, Unknown: []string{
 		"exact-source-release", "compatibility-profile", "verified-backup", "full-database-integrity", "archive-content",
 	}, Blocked: append([]string{}, observed.Issues...)}
 	report.AdminCredentialRevision = credentialRevision
@@ -201,7 +230,7 @@ func inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options,
 		return report, errors.New("source inventory unavailable")
 	}
 	if observed.Files[0].State == "missing" {
-		report.SourceKind = "fresh"
+		report.SourceKind = SourceKindFresh
 		for _, file := range observed.Files[1:] {
 			if file.Role == "source-directory" || (file.Role == "process-lock" && createdLock && file.State == "present") {
 				continue
@@ -210,15 +239,15 @@ func inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options,
 				continue
 			}
 			if file.State == "not-inspected" {
-				report.SourceKind = "missing-database"
+				report.SourceKind = SourceKindMissingDatabase
 				report.Unknown = append(report.Unknown, "source-inventory-incomplete")
 			}
 			if file.State != "missing" && file.State != "not-inspected" {
-				report.SourceKind = "partial-source"
+				report.SourceKind = SourceKindPartialSource
 				report.Blocked = append(report.Blocked, "database-missing-with-source-artifacts")
 			}
 		}
-		if report.SourceKind == "fresh" {
+		if report.SourceKind == SourceKindFresh {
 			// A Fresh projection carries an explicit no-v1-product witness. The
 			// discovery layer must not infer Fresh from a missing SQLite file
 			// without this bounded administrator-state observation.
@@ -228,16 +257,16 @@ func inspect(ctx context.Context, paths sqlite.InspectionPaths, options Options,
 		return report, nil
 	}
 	if observed.Files[0].Size == 0 {
-		report.SourceKind = "empty-database"
+		report.SourceKind = SourceKindEmptyDatabase
 		return report, nil
 	}
 	if observed.SQLite != "observed" {
 		return report, nil
 	}
 	if nativeV2Schema(observed) {
-		report.SourceKind = "native-v2"
+		report.SourceKind = SourceKindNativeV2
 	} else if hasColumns(observed, "settings", "key:text", "value:text") && hasColumns(observed, "usage_events", "id:integer") {
-		report.SourceKind = "legacy-manager"
+		report.SourceKind = SourceKindLegacyManager
 	}
 	return report, nil
 }
@@ -320,6 +349,12 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 		}
 	}()
 	options.SourceStopped = true // provisional cold read; WAL still requires a fence
+	// The Upgrade operation is read once, before any classification, so an
+	// unreadable record blocks startup instead of being mistaken for "none".
+	upgradeStage, upgradeReason, upgradeErr := upgradeAdmissionStageAndReason(ctx, options.UpgradeAdmission)
+	if upgradeErr != nil {
+		return nil, upgradeErr
+	}
 	if options.FreshAdmission && lock != nil {
 		receipt, receiptErr := lock.PendingFreshAdmission()
 		if receiptErr != nil {
@@ -340,11 +375,11 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 	if !options.FreshAdmission && before.Observed.FreshOwnershipCheckpointPresent {
 		return nil, errors.New("Fresh store requires its product-owned admission path")
 	}
-	if !startupAllowed(before) {
-		return nil, errors.New("Manager source is not proven fresh or native v2; run legacy-preflight and restore missing source assets; use initialize only for a deliberate config-only new installation")
+	if !startupAllowed(before, upgradeStage) {
+		return nil, errors.New("Manager source is not proven fresh, native v2 or a recorded Upgrade; run legacy-preflight and restore missing source assets; use initialize only for a deliberate config-only new installation")
 	}
 	if lock == nil {
-		fresh := before.SourceKind == "fresh"
+		fresh := before.SourceKind == SourceKindFresh
 		lock, err = acquireStartupLock(paths.Database, fresh)
 		if err != nil {
 			return nil, err
@@ -365,7 +400,7 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 		if err != nil {
 			return nil, err
 		}
-		if !startupAllowed(after) || !sqlite.SameInspectionSource(before.Observed, after.Observed) {
+		if !startupAllowed(after, upgradeStage) || !sqlite.SameInspectionSource(before.Observed, after.Observed) {
 			return nil, errors.New("Manager source changed before startup admission")
 		}
 		before = after
@@ -381,7 +416,8 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 		freshAdmission.ConnectionStorage = before.Observed.ConnectionStorage
 		return freshAdmission, nil
 	}
-	return &Admission{Lock: lock, ConnectionStorage: before.Observed.ConnectionStorage}, nil
+	return &Admission{Lock: lock, ConnectionStorage: before.Observed.ConnectionStorage,
+		UpgradeStage: upgradeStage, UpgradeReason: upgradeReason}, nil
 }
 
 func acquireStartupLock(databasePath string, fresh bool) (*processlock.Lock, error) {
@@ -389,10 +425,6 @@ func acquireStartupLock(databasePath string, fresh bool) (*processlock.Lock, err
 		return processlock.AcquireNew(databasePath)
 	}
 	return processlock.Acquire(databasePath)
-}
-
-func startupAllowed(report Report) bool {
-	return len(report.Blocked) == 0 && (report.SourceKind == "fresh" || report.SourceKind == "native-v2")
 }
 
 func DefaultPaths(database string) sqlite.InspectionPaths {

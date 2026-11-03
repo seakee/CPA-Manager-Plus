@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -35,15 +36,72 @@ var (
 	// ErrConflict reports a Put whose Revision no longer matches the stored row:
 	// another writer committed after the caller read it. The row is untouched.
 	ErrConflict = errors.New("upgrade operation changed since it was read")
+	// ErrRollbackEvidenceRequired reports an attempt to write the terminal
+	// rolled_back stage without the observation that justified it. The verdict
+	// is recorded once, with its evidence, and never as a bare stage.
+	ErrRollbackEvidenceRequired = errors.New("a rolled_back operation requires recorded evidence")
+	// ErrRollbackEvidenceMissing reports a stored rolled_back row that carries
+	// none of, or only part of, the observation that justified it. Both write
+	// paths refuse such a row before it reaches the table, so a store that holds
+	// one was written by a build that recorded the verdict without its evidence.
+	// A read-only reader cannot repair it and reports the store as the outdated
+	// one it is instead of as a malformed row.
+	ErrRollbackEvidenceMissing = errors.New("upgrade operation rolled_back row carries no evidence")
 )
 
 type Repository struct{ db *sql.DB }
 
 func New(db *sql.DB) *Repository { return &Repository{db: db} }
 
-const selectColumns = `stage, last_forward_stage, revision, domains_done, source_kind, source_version,
+const selectColumns = `stage, last_forward_stage, revision, domains_done, source_kind, source_version, source_root,
 	source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
-	reconciliation, manual_items, error_code, error_detail, created_at_ms, updated_at_ms`
+	reconciliation, manual_items, error_code, error_detail,
+	rollback_image, rollback_image_source, rollback_image_form,
+	rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
+	created_at_ms, updated_at_ms`
+
+// requiredColumns are the columns selectColumns reads. The table is created by a
+// writable open, so a store written by an earlier build can hold the table
+// without these columns; a read-only reader cannot migrate it and must say so
+// instead of letting the SQL fail.
+var requiredColumns = []string{
+	"stage", "domains_done", "source_kind", "source_version", "source_root",
+	"source_fingerprint_before", "source_fingerprint_after", "backup_manifest_sha256",
+	"reconciliation", "manual_items", "error_code", "error_detail",
+	"rollback_image", "rollback_image_source", "rollback_image_form",
+	"rollback_status_url", "rollback_source_fingerprint", "rollback_observed_at_ms",
+	"created_at_ms", "updated_at_ms",
+}
+
+// MissingColumns reports the columns of a readable operation row that this
+// store does not have. An empty result means the row can be selected. The
+// caller must have seen the table itself: a store without the table is a store
+// with no recorded operation, not an outdated one.
+func (r *Repository) MissingColumns(ctx context.Context) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `select name from pragma_table_info(?)`, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	present := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		present[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	missing := make([]string, 0, len(requiredColumns))
+	for _, column := range requiredColumns {
+		if !present[column] {
+			missing = append(missing, column)
+		}
+	}
+	return missing, nil
+}
 
 // Get returns the single operation row. found is false before the first
 // Advance; the caller must not treat that as an operation in progress.
@@ -58,17 +116,22 @@ type rowScanner interface {
 
 func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	var (
-		op                                     model.UpgradeOperation
-		stage, lastForwardStage                string
-		domains, reconciliation                string
-		manualItems                            string
-		sourceKind, sourceVersion              sql.NullString
-		fingerprintBefore, fingerprintAfter    sql.NullString
-		backupManifest, errorCode, errorDetail sql.NullString
+		op                                                    model.UpgradeOperation
+		stage, lastForwardStage                               string
+		domains, reconciliation                               string
+		manualItems                                           string
+		sourceKind, sourceVersion, sourceRoot                 sql.NullString
+		fingerprintBefore, fingerprintAfter                   sql.NullString
+		backupManifest, errorCode, errorDetail                sql.NullString
+		rollbackImage, rollbackImageSource, rollbackImageForm sql.NullString
+		rollbackStatusURL, rollbackFpr                        sql.NullString
+		rollbackObservedAtMS                                  sql.NullInt64
 	)
-	err := row.Scan(&stage, &lastForwardStage, &op.Revision, &domains, &sourceKind, &sourceVersion,
+	err := row.Scan(&stage, &lastForwardStage, &op.Revision, &domains, &sourceKind, &sourceVersion, &sourceRoot,
 		&fingerprintBefore, &fingerprintAfter, &backupManifest,
 		&reconciliation, &manualItems, &errorCode, &errorDetail,
+		&rollbackImage, &rollbackImageSource, &rollbackImageForm,
+		&rollbackStatusURL, &rollbackFpr, &rollbackObservedAtMS,
 		&op.CreatedAtMS, &op.UpdatedAtMS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.UpgradeOperation{}, false, nil
@@ -80,11 +143,23 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	op.LastForwardStage = model.UpgradeStage(lastForwardStage)
 	op.SourceKind = sourceKind.String
 	op.SourceVersion = sourceVersion.String
+	op.SourceRoot = sourceRoot.String
 	op.SourceFingerprintBefore = fingerprintBefore.String
 	op.SourceFingerprintAfter = fingerprintAfter.String
 	op.BackupManifestSHA256 = backupManifest.String
 	op.ErrorCode = errorCode.String
 	op.ErrorDetail = errorDetail.String
+	if rollbackImage.String != "" || rollbackImageSource.String != "" || rollbackImageForm.String != "" ||
+		rollbackStatusURL.String != "" || rollbackFpr.String != "" || rollbackObservedAtMS.Int64 > 0 {
+		op.Rollback = &model.RollbackEvidence{
+			Image:             rollbackImage.String,
+			ImageSource:       rollbackImageSource.String,
+			ImageForm:         rollbackImageForm.String,
+			StatusURL:         rollbackStatusURL.String,
+			SourceFingerprint: rollbackFpr.String,
+			ObservedAtMS:      rollbackObservedAtMS.Int64,
+		}
+	}
 	if op.DomainsDone, err = decodeStringList(domains, "domains_done"); err != nil {
 		return model.UpgradeOperation{}, false, err
 	}
@@ -98,6 +173,13 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 		return model.UpgradeOperation{}, false, fmt.Errorf("%w: reconciliation is not a JSON object", ErrInvalidRow)
 	}
 	op.Reconciliation = json.RawMessage(reconciliation)
+	// The verdict and its evidence are written together, so a store that holds
+	// the terminal stage without a whole observation was written by a build that
+	// did not. Validate would report it as a malformed row; naming the case lets
+	// a reader report the store the operator can act on.
+	if op.Stage == model.UpgradeStageRolledBack && (op.Rollback == nil || !op.Rollback.Complete()) {
+		return model.UpgradeOperation{}, false, ErrRollbackEvidenceMissing
+	}
 	// Validate the stored row before normalization. A duplicate domain, an
 	// unknown domain or a non-object reconciliation on disk is corruption the
 	// caller must see as ErrInvalidRow; normalizing first would silently turn
@@ -148,13 +230,25 @@ func sameStoredContent(stored, proposed model.UpgradeOperation) bool {
 		slices.Equal(stored.DomainsDone, proposed.DomainsDone) &&
 		stored.SourceKind == proposed.SourceKind &&
 		stored.SourceVersion == proposed.SourceVersion &&
+		stored.SourceRoot == proposed.SourceRoot &&
 		stored.SourceFingerprintBefore == proposed.SourceFingerprintBefore &&
 		stored.SourceFingerprintAfter == proposed.SourceFingerprintAfter &&
 		stored.BackupManifestSHA256 == proposed.BackupManifestSHA256 &&
 		bytes.Equal(stored.Reconciliation, proposed.Reconciliation) &&
 		slices.Equal(stored.ManualItems, proposed.ManualItems) &&
 		stored.ErrorCode == proposed.ErrorCode &&
-		stored.ErrorDetail == proposed.ErrorDetail
+		stored.ErrorDetail == proposed.ErrorDetail &&
+		sameRollbackEvidence(stored.Rollback, proposed.Rollback)
+}
+
+// sameRollbackEvidence reports whether both rows carry the same recorded
+// verdict evidence. The pointer itself must not be compared: two reads of the
+// same row allocate different values.
+func sameRollbackEvidence(stored, proposed *model.RollbackEvidence) bool {
+	if stored == nil || proposed == nil {
+		return stored == nil && proposed == nil
+	}
+	return *stored == *proposed
 }
 
 // Put replaces the single row exactly once per read. op.Revision is the
@@ -183,10 +277,19 @@ func sameStoredContent(stored, proposed model.UpgradeOperation) bool {
 func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	op.CreatedAtMS = 0
 	op.UpdatedAtMS = 0
-	if op.Stage == model.UpgradeStageFailed {
+	if op.Stage == model.UpgradeStageFailed || op.Stage == model.UpgradeStageRolledBack {
+		// A parked or rolled-back row keeps the highest forward stage it
+		// reached. It is unknown before the stored row is read, so an empty
+		// value stands in here and the transaction recomputes it.
 		op.LastForwardStage = ""
 	} else {
 		op.LastForwardStage = op.Stage
+	}
+	// This is one of the two paths that write a stage, so the terminal verdict's
+	// evidence invariant is enforced here, before the model's shape check turns
+	// it into a plain error.
+	if err := requireVerdictEvidence(op); err != nil {
+		return err
 	}
 	// A bad stage or domain is reported with the same sentinels Advance uses, so
 	// a caller can classify input errors from either write API with errors.Is.
@@ -259,9 +362,9 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	}
 	op.UpdatedAtMS = nextUpdatedAtMS(now, current)
 	op.Revision = current.Revision + 1
-	if op.Stage == model.UpgradeStageFailed {
-		// Parking keeps the highest forward stage the row ever reached; a
-		// caller cannot replace it with a lower one.
+	if op.Stage == model.UpgradeStageFailed || op.Stage == model.UpgradeStageRolledBack {
+		// Parking and the terminal verdict keep the highest forward stage the
+		// row ever reached; a caller cannot replace it with a lower one.
 		op.LastForwardStage = current.HighWater()
 	}
 	// Revalidate the row this transaction is about to persist, not just the
@@ -309,11 +412,27 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 	if err != nil {
 		return err
 	}
+	var rollbackImage, rollbackImageSource, rollbackImageForm any
+	var rollbackStatusURL, rollbackFingerprint any
+	var rollbackObservedAtMS any
+	if op.Rollback != nil {
+		rollbackImage = nullString(op.Rollback.Image)
+		rollbackImageSource = nullString(op.Rollback.ImageSource)
+		rollbackImageForm = nullString(op.Rollback.ImageForm)
+		rollbackStatusURL = nullString(op.Rollback.StatusURL)
+		rollbackFingerprint = nullString(op.Rollback.SourceFingerprint)
+		if op.Rollback.ObservedAtMS > 0 {
+			rollbackObservedAtMS = op.Rollback.ObservedAtMS
+		}
+	}
 	_, err = writer.ExecContext(ctx, `insert into `+tableName+` (
-		id, stage, last_forward_stage, revision, domains_done, source_kind, source_version,
+		id, stage, last_forward_stage, revision, domains_done, source_kind, source_version, source_root,
 		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
-		reconciliation, manual_items, error_code, error_detail, created_at_ms, updated_at_ms
-	) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		reconciliation, manual_items, error_code, error_detail,
+		rollback_image, rollback_image_source, rollback_image_form,
+		rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
+		created_at_ms, updated_at_ms
+	) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	on conflict(id) do update set
 		stage = excluded.stage,
 		last_forward_stage = excluded.last_forward_stage,
@@ -321,6 +440,7 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 		domains_done = excluded.domains_done,
 		source_kind = excluded.source_kind,
 		source_version = excluded.source_version,
+		source_root = excluded.source_root,
 		source_fingerprint_before = excluded.source_fingerprint_before,
 		source_fingerprint_after = excluded.source_fingerprint_after,
 		backup_manifest_sha256 = excluded.backup_manifest_sha256,
@@ -328,13 +448,30 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 		manual_items = excluded.manual_items,
 		error_code = excluded.error_code,
 		error_detail = excluded.error_detail,
+		rollback_image = excluded.rollback_image,
+		rollback_image_source = excluded.rollback_image_source,
+		rollback_image_form = excluded.rollback_image_form,
+		rollback_status_url = excluded.rollback_status_url,
+		rollback_source_fingerprint = excluded.rollback_source_fingerprint,
+		rollback_observed_at_ms = excluded.rollback_observed_at_ms,
 		created_at_ms = excluded.created_at_ms,
 		updated_at_ms = excluded.updated_at_ms`,
 		string(op.Stage), string(op.LastForwardStage), op.Revision, string(domains), nullString(op.SourceKind), nullString(op.SourceVersion),
+		nullString(op.SourceRoot),
 		nullString(op.SourceFingerprintBefore), nullString(op.SourceFingerprintAfter),
 		nullString(op.BackupManifestSHA256), string(op.Reconciliation), string(manualItems),
-		nullString(op.ErrorCode), nullString(op.ErrorDetail), op.CreatedAtMS, op.UpdatedAtMS)
+		nullString(op.ErrorCode), nullString(op.ErrorDetail),
+		rollbackImage, rollbackImageSource, rollbackImageForm,
+		rollbackStatusURL, rollbackFingerprint, rollbackObservedAtMS,
+		op.CreatedAtMS, op.UpdatedAtMS)
 	return err
+}
+
+// Tx is the transaction surface the recording helpers need, so a caller can
+// commit a stage change together with the evidence that justifies it.
+type Tx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // nextUpdatedAtMS returns the updated_at_ms the next write must store. nowMS is
@@ -376,17 +513,37 @@ func nextUpdatedAtMS(nowMS int64, stored model.UpgradeOperation) int64 {
 // returns ErrStageRegression and leaves the row untouched.
 // Advancing does not imply that later stages are authorized.
 func (r *Repository) Advance(ctx context.Context, domain string, stage model.UpgradeStage) (model.UpgradeOperation, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	advanced, err := AdvanceTx(ctx, tx, domain, stage)
+	if err != nil {
+		// A regression still reports the row it refused to move.
+		return advanced, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return advanced, nil
+}
+
+// AdvanceTx records a completed domain and moves the stage inside the caller's
+// transaction, so the stage can only ever commit beside the evidence that
+// explains it. The rules are the ones Advance documents.
+func AdvanceTx(ctx context.Context, tx Tx, domain string, stage model.UpgradeStage) (model.UpgradeOperation, error) {
 	if domain != "" && !model.ValidUpgradeDomain(domain) {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %q", ErrUnknownDomain, domain)
 	}
 	if !stage.Valid() {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %q", ErrUnknownStage, stage)
 	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.UpgradeOperation{}, err
+	// Advance carries no observation, so it can never write the terminal
+	// verdict: the evidence and the stage land together in RecordRollback.
+	if stage == model.UpgradeStageRolledBack {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: record the verdict with its evidence instead", ErrRollbackEvidenceRequired)
 	}
-	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UnixMilli()
 	lastForwardStage := stage
 	if stage == model.UpgradeStageFailed {
@@ -457,9 +614,6 @@ func (r *Repository) Advance(ctx context.Context, domain string, stage model.Upg
 		where id = 1`, string(current.Stage), string(current.LastForwardStage), current.Revision, string(domains), current.CreatedAtMS, current.UpdatedAtMS); err != nil {
 		return model.UpgradeOperation{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return model.UpgradeOperation{}, err
-	}
 	return current, nil
 }
 
@@ -468,4 +622,274 @@ func nullString(value string) any {
 		return nil
 	}
 	return value
+}
+
+// RecordError records the typed refusal a step stopped on, without touching the
+// stage or the completed domains: the step did not advance, and no path may make
+// a refusal look like progress. Only the error columns and the update time move,
+// so the provenance a later rollback relies on is left exactly as it was.
+//
+// The stamp is computed from the stored row inside the transaction, so a refusal
+// written by a process whose clock lags the store cannot move updated_at_ms
+// backwards, and the row is validated before it is written.
+func (r *Repository) RecordError(ctx context.Context, code, detail string) error {
+	if strings.TrimSpace(code) == "" {
+		return fmt.Errorf("%w: the refusal code is empty", ErrInvalidRow)
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UnixMilli()
+	// Take the write lock before reading, so the stamp this refusal advances is
+	// the one on disk. The placeholder carries no stage, and a refusal may not
+	// create an operation: a row of zero rows affected means there is none.
+	inserted, err := tx.ExecContext(ctx, `insert into `+tableName+`
+		(id, stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?)
+		on conflict(id) do nothing`, "", now, now)
+	if err != nil {
+		return err
+	}
+	if created, err := inserted.RowsAffected(); err == nil && created > 0 {
+		return fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
+	}
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
+	}
+	current.ErrorCode = code
+	current.ErrorDetail = strings.TrimSpace(detail)
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	if _, err := tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = ?, error_detail = ?, updated_at_ms = ? where id = 1`,
+		current.ErrorCode, nullString(current.ErrorDetail), current.UpdatedAtMS); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ClearErrorTx clears a refusal inside the caller's transaction, so a step that
+// succeeded can commit the cleared refusal beside the stage it advanced to. The
+// refusal is the durable statement that the step did not advance; leaving it
+// behind after a successful run would keep telling the wizard a stop is still
+// standing. Only the error columns and the update time move, and the stamp is
+// computed from the row as this transaction sees it.
+func ClearErrorTx(ctx context.Context, tx Tx) error {
+	now := time.Now().UnixMilli()
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: no operation row to clear the refusal on", ErrInvalidRow)
+	}
+	current.ErrorCode = ""
+	current.ErrorDetail = ""
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	_, err = tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = null, error_detail = null, updated_at_ms = ? where id = 1`,
+		current.UpdatedAtMS)
+	return err
+}
+
+// RecordReconciliation stores the reconciliation report on the single row
+// without rebuilding it: Put would clear the provenance a completed operation
+// must keep carrying, so this is the only writer for this column. A row must
+// already exist, because a reconciliation only ever describes a recorded
+// copy-in.
+func (r *Repository) RecordReconciliation(ctx context.Context, report json.RawMessage) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := RecordReconciliationTx(ctx, tx, report); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RecordReconciliationTx stores the report inside the caller's transaction, so
+// the evidence commits together with the marks it explains and the stage it
+// authorizes. The repository owns updated_at_ms here too: it is recomputed from
+// the stored row with nextUpdatedAtMS, and the row is validated before it is
+// written, in this transaction, so a clock that ran ahead cannot make the next
+// reader reject the row.
+func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) error {
+	if len(report) == 0 {
+		report = json.RawMessage("{}")
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(report, &object); err != nil {
+		return fmt.Errorf("%w: reconciliation must be a JSON object", ErrInvalidRow)
+	}
+	row := tx.QueryRowContext(ctx, `select `+selectColumns+` from `+tableName+` where id = 1`)
+	current, found, err := scanOperation(row)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(time.Now().UnixMilli(), current)
+	if err := current.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set reconciliation = ?, updated_at_ms = ? where id = 1`, string(report), current.UpdatedAtMS)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
+	}
+	return nil
+}
+
+// requireVerdictEvidence keeps the terminal verdict and its observation
+// inseparable: rolled_back is never resumed, so a row without its evidence could
+// never be re-proven.
+func requireVerdictEvidence(op model.UpgradeOperation) error {
+	if op.Stage == model.UpgradeStageRolledBack && op.Rollback == nil {
+		return fmt.Errorf("%w: write rolled_back with RollbackEvidence", ErrRollbackEvidenceRequired)
+	}
+	return nil
+}
+
+// RecordSourceRoot backfills the 1.x data directory of a row that recorded none:
+// an operation written before the column existed still has to bind its rollback
+// to the volume it copied. It only fills an empty value, so provenance is never
+// rewritten, and it refuses a row that has no operation at all.
+func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (model.UpgradeOperation, error) {
+	if strings.TrimSpace(sourceRoot) == "" {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: the 1.x data directory is empty", ErrInvalidRow)
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found {
+		return model.UpgradeOperation{}, errors.New("no upgrade operation is recorded, so there is no source root to record")
+	}
+	if current.SourceRoot != "" {
+		// Another path recorded it first, so this one changed nothing.
+		return current, tx.Commit()
+	}
+	now := time.Now().UnixMilli()
+	current.SourceRoot = sourceRoot
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if current.CreatedAtMS == 0 {
+		current.CreatedAtMS = now
+	}
+	// Validate the row this transaction is about to persist: the clock above is
+	// rewritten here, and a row whose stored clock ran ahead must stay readable.
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	if _, err := tx.ExecContext(ctx, `update `+tableName+`
+		set source_root = ?, updated_at_ms = ? where id = 1`,
+		sourceRoot, current.UpdatedAtMS); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
+}
+
+// RecordRollback writes the rolled_back stage together with the observation
+// that justified it, in one transaction. It never rewrites provenance: the
+// source kind, the source root, both fingerprints, the backup manifest digest
+// and the completed domains are left exactly as recorded, so the evidence of
+// what was rolled back survives the verdict. A row that is already rolled back
+// is refused rather than re-described, and a rendered verdict is impossible:
+// either the stage and its evidence both land or neither does.
+func (r *Repository) RecordRollback(ctx context.Context, evidence model.RollbackEvidence) (model.UpgradeOperation, error) {
+	op := model.UpgradeOperation{Stage: model.UpgradeStageRolledBack, Rollback: &evidence}
+	op.Normalize()
+	if err := op.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UnixMilli()
+	// Take the write lock before reading so two verdicts cannot interleave. The
+	// placeholder row carries no stage, so even inside this transaction no
+	// rolled_back row exists without its evidence; the deferred rollback removes
+	// it either way.
+	inserted, err := tx.ExecContext(ctx, `insert into `+tableName+`
+		(id, stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?)
+		on conflict(id) do nothing`, "", now, now)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if created, err := inserted.RowsAffected(); err == nil && created > 0 {
+		return model.UpgradeOperation{}, errors.New("no upgrade operation is recorded, so there is nothing to roll back")
+	}
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found {
+		return model.UpgradeOperation{}, errors.New("upgrade operation row disappeared during record")
+	}
+	if !current.Stage.RollbackApplicable() {
+		// Stage eligibility is decided here, against the row this transaction
+		// holds, not only by the caller's earlier read: a copy-in retry may have
+		// parked the row at failed, and preflight never copied a root at all.
+		return current, fmt.Errorf("%w: %q -> %q", ErrStageRegression, current.Stage, model.UpgradeStageRolledBack)
+	}
+	current.Stage = model.UpgradeStageRolledBack
+	current.Rollback = &evidence
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	if current.CreatedAtMS == 0 {
+		current.CreatedAtMS = now
+	}
+	// The verdict and the observation this transaction is about to write must
+	// both still be acceptable, and a stored clock that ran ahead stays
+	// readable; validate the row this transaction persists, not just the
+	// caller's evidence, because the clock above is rewritten here.
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	if _, err := tx.ExecContext(ctx, `update `+tableName+`
+		set stage = ?, rollback_image = ?, rollback_image_source = ?, rollback_image_form = ?,
+			rollback_status_url = ?, rollback_source_fingerprint = ?, rollback_observed_at_ms = ?,
+			created_at_ms = ?, updated_at_ms = ?
+		where id = 1`,
+		string(current.Stage), evidence.Image, evidence.ImageSource, evidence.ImageForm,
+		evidence.StatusURL, evidence.SourceFingerprint, evidence.ObservedAtMS,
+		current.CreatedAtMS, current.UpdatedAtMS); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
 }

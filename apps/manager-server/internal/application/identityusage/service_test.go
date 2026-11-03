@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityusage"
@@ -26,6 +28,7 @@ type fakeRepo struct {
 	windows       map[identity.APIKeyID]ports.Window
 	series        []ports.Bucket
 	rawDeleted    bool
+	incomplete    []ports.IncompleteDay
 	windowFromMS  int64
 	windowToMS    int64
 	markedAt      int64
@@ -61,6 +64,10 @@ func (f *fakeRepo) Series(context.Context, identity.APIKeyID, int64, int64, int6
 
 func (f *fakeRepo) RawDeletedIn(context.Context, int64, int64) (bool, error) {
 	return f.rawDeleted, nil
+}
+
+func (f *fakeRepo) IncompleteDaysIn(context.Context, int64, int64) ([]ports.IncompleteDay, error) {
+	return f.incomplete, nil
 }
 
 func (f *fakeRepo) CollectionStartedAtMS(context.Context) (int64, error) {
@@ -179,6 +186,9 @@ func TestDetailReportsPartialBoundsWithoutClaimingExhaustiveness(t *testing.T) {
 			r.windows = map[identity.APIKeyID]ports.Window{testKeyID: {Totals: r.windows[testKeyID].Totals, UnmappedEvents: 2}}
 		}, "identity_unmapped"},
 		{"raw deleted", func(r *fakeRepo) { r.rawDeleted = true }, "raw_deleted"},
+		{"upgrade marked the day", func(r *fakeRepo) {
+			r.incomplete = []ports.IncompleteDay{{Day: markedDay(), Reason: "reconcile_mismatch"}}
+		}, "upgrade_incomplete"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -192,6 +202,39 @@ func TestDetailReportsPartialBoundsWithoutClaimingExhaustiveness(t *testing.T) {
 				t.Fatalf("partial window must keep its observed lower bound, totals = %+v", response.Totals)
 			}
 		})
+	}
+}
+
+// markedDay is the UTC day one hour inside the default window, so a mark on it
+// provably overlaps what the detail read covers.
+func markedDay() string {
+	return time.UnixMilli(testNowMS - 3_600_000).UTC().Format("2006-01-02")
+}
+
+func TestDetailReportsTheUpgradeMarkThatBoundsTheWindow(t *testing.T) {
+	repo := healthy()
+	repo.incomplete = []ports.IncompleteDay{
+		{Day: "1999-12-31", Reason: "projection_lost_before_v1_14_6"},
+		{Day: markedDay(), Reason: "reconcile_mismatch"},
+	}
+	response := detail(t, repo, PhaseRunning)
+	if response.Coverage.State != "partial" || response.Coverage.Reason != "upgrade_incomplete" {
+		t.Fatalf("coverage = %+v, want the upgrade mark to bound the window", response.Coverage)
+	}
+	if len(response.IncompleteDays) != 1 || response.IncompleteDays[0].Day != markedDay() ||
+		response.IncompleteDays[0].Reason != "reconcile_mismatch" {
+		t.Fatalf("incomplete days = %+v, want only the day inside the window", response.IncompleteDays)
+	}
+	if response.Totals == nil || response.Totals.Calls != 3 {
+		t.Fatalf("totals = %+v, want the observed lower bound", response.Totals)
+	}
+
+	// A mark that predates the provable window says nothing about this key.
+	outside := healthy()
+	outside.incomplete = []ports.IncompleteDay{{Day: "1999-12-31", Reason: "reconcile_mismatch"}}
+	clean := detail(t, outside, PhaseRunning)
+	if clean.Coverage.State != "complete" || len(clean.IncompleteDays) != 0 {
+		t.Fatalf("coverage = %+v with %+v, want a complete window", clean.Coverage, clean.IncompleteDays)
 	}
 }
 
@@ -404,5 +447,46 @@ func TestResponsesCarryNoSecretOrHashField(t *testing.T) {
 		if strings.Contains(lowered, forbidden) {
 			t.Fatalf("usage response leaks %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+// TestDaysWithinKeepsAYearZeroMark reproduces review F4 for the Key workspace:
+// the mark writer accepts 0000-12-31, but the calendar clamp started at
+// 0001-01-01, so a key window that covered that day reported complete while the
+// persisted mark existed.
+func TestDaysWithinKeepsAYearZeroMark(t *testing.T) {
+	marks := []ports.IncompleteDay{{Day: "0000-12-31", Reason: "reconcile_mismatch"}}
+	start := time.Date(0, time.December, 31, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if got := daysWithin(marks, start, start+utcDayMilliseconds); len(got) != 1 || got[0].Day != "0000-12-31" {
+		t.Fatalf("daysWithin(year zero) = %+v, want the persisted mark", got)
+	}
+	if got := daysWithin(marks, math.MinInt64, math.MaxInt64); len(got) != 1 {
+		t.Fatalf("daysWithin(whole range) = %+v, want the persisted mark", got)
+	}
+	// The clamp is still a lower bound, not a blanket: a window that starts
+	// after year zero does not report the year-zero mark.
+	if got := daysWithin(marks, 1, math.MaxInt64); len(got) != 0 {
+		t.Fatalf("daysWithin(after year zero) = %+v, want none", got)
+	}
+}
+
+// TestDaysWithinKeepsMarksWithAnUpperBoundAtTheLimitOfInt64 reproduces review
+// L4 for the Key workspace: the same day arithmetic hid every mark from a
+// window that ended near the largest int64.
+func TestDaysWithinKeepsMarksWithAnUpperBoundAtTheLimitOfInt64(t *testing.T) {
+	marks := []ports.IncompleteDay{{Day: "2026-03-01", Reason: "reconcile_mismatch"}}
+	for _, upper := range []int64{1 << 42, math.MaxInt64 - utcDayMilliseconds, math.MaxInt64} {
+		if got := daysWithin(marks, 1, upper); len(got) != 1 || got[0].Day != "2026-03-01" {
+			t.Fatalf("daysWithin(1, %d) = %+v, want the mark", upper, got)
+		}
+	}
+	// The window stays half-open, and a window that starts after the last day
+	// the stored form can hold reports nothing.
+	start := time.Date(2026, time.March, 2, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if got := daysWithin(marks, start, math.MaxInt64); len(got) != 0 {
+		t.Fatalf("daysWithin after the mark = %+v, want none", got)
+	}
+	if got := daysWithin(marks, 1<<60, math.MaxInt64); len(got) != 0 {
+		t.Fatalf("daysWithin past the last stored day = %+v, want none", got)
 	}
 }

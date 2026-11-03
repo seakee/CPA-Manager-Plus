@@ -157,7 +157,12 @@ func main() {
 					return
 				}
 				code := upgradecommand.ExitCode(err)
-				if !errors.Is(err, upgradecommand.ErrBlocked) {
+				// A blocked preflight and a subcommand that already wrote its
+				// own failure to stderr both carry the operator's text; logging
+				// them here too would print the same reason twice. Every other
+				// failure reaches this log path, so nothing is suppressed.
+				if !errors.Is(err, upgradecommand.ErrBlocked) &&
+					!errors.Is(err, upgradecommand.ErrReported) {
 					log.Printf("upgrade: %v", err)
 				}
 				os.Exit(code)
@@ -215,6 +220,11 @@ func runServerWithOptions(options legacypreflight.Options) {
 	defer stop()
 	paths := sqliterepo.InspectionPaths{
 		Database: cfg.DBPath, Config: configPath, DataKey: cfg.DataKeyPath, Archives: cfg.UsageArchiveDir,
+	}
+	// The Upgrade operation row is the one explicit admission input beyond the
+	// schema classification. It is read read-only, before any store is opened.
+	if options.UpgradeAdmission == nil {
+		options.UpgradeAdmission = legacypreflight.DatabaseUpgradeAdmission{DatabasePath: cfg.DBPath}
 	}
 	// The listener comes up before product/data mutation. Discovery starts
 	// unavailable, then switches only to current read-only evidence: missing-DB
@@ -275,6 +285,25 @@ func runServerWithOptions(options legacypreflight.Options) {
 			log.Print("close manager database process lock failed")
 		}
 	}()
+	// An unfinished Upgrade operation admits the source only for the Upgrade
+	// surface: Bootstrap discovery status reads, the read-only shell and the
+	// Upgrade authentication leaf. Console, Key workspace, gateway
+	// configuration and model traffic stay closed until the operation is
+	// recorded complete.
+	if databaseLock.Surface() == legacypreflight.SurfaceUpgradeOnly {
+		if err := databaseLock.Close(); err != nil {
+			log.Printf("close upgrade admission fence: %v", err)
+		}
+		startupHandler.EnableReadOnlyDiscovery(paths, options, inspectionTimeout)
+		if databaseLock.UpgradeReason != "" {
+			log.Printf("Upgrade operation %s is unfinished (reason %s); serving only the Upgrade surface",
+				databaseLock.UpgradeStage, databaseLock.UpgradeReason)
+		} else {
+			log.Printf("Upgrade operation %s is unfinished; serving only the Upgrade surface", databaseLock.UpgradeStage)
+		}
+		waitForReadOnlyStartup(ctx, server, serverResult)
+		return
+	}
 	// Admission permits writes, not a Bootstrap Completed transition. Revoke
 	// the pre-write observation before config/key/store initialization can make
 	// it stale. Phase4-01 has no qualified post-write discovery authority.

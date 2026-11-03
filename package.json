@@ -23,6 +23,7 @@
     "test": "npm run test:web && npm run test:repo",
     "test:web": "npm --workspace apps/web run test -- src",
     "test:repo": "vitest run tests/*.test.mjs --exclude tests/nativeControlScripts.test.mjs",
+    "test:upgrade-docker": "node bin/ci/upgrade-docker.mjs",
     "lint": "npm --workspace apps/web run lint",
     "format": "npm --workspace apps/web run format",
     "type-check": "npm --workspace apps/web run type-check",

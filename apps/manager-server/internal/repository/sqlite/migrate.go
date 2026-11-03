@@ -1255,6 +1255,7 @@ func Migrate(db *sql.DB) error {
 			domains_done text not null default '[]',
 			source_kind text,
 			source_version text,
+			source_root text,
 			source_fingerprint_before text,
 			source_fingerprint_after text,
 			backup_manifest_sha256 text,
@@ -1262,8 +1263,40 @@ func Migrate(db *sql.DB) error {
 			manual_items text not null default '[]',
 			error_code text,
 			error_detail text,
+			rollback_image text,
+			rollback_image_source text,
+			rollback_image_form text,
+			rollback_status_url text,
+			rollback_source_fingerprint text,
+			rollback_observed_at_ms integer,
 			created_at_ms integer not null,
 			updated_at_ms integer not null
+		)`,
+		// The External connect step's durable target binding. It lives beside the
+		// operation row and is written in the same transaction as the stage and
+		// the domains it proves, so a row can never claim external_connect
+		// without naming the CPA it connected. The evidence file under the data
+		// root is a projection of this row, never the record a rerun decides on.
+		`create table if not exists upgrade_external_connect (
+			id integer primary key check(id = 1),
+			base_url text not null,
+			identity text not null,
+			generation text not null,
+			server_fingerprint text not null default '',
+			cpa_version text not null default '',
+			support text not null default '',
+			client_keys integer not null default 0,
+			observed_at_ms integer not null
+		)`,
+		// A UTC day the v2 Upgrade reconciliation permanently marked incomplete:
+		// the source can never be read again for it, so its covered numbers stay
+		// a lower bound for the life of this store. The row is evidence, not a
+		// derived table: no revision change or cleanup job may drop or rebuild it.
+		`create table if not exists usage_coverage_incomplete_days (
+			day text primary key,
+			reason text not null,
+			source text not null,
+			recorded_at_ms integer not null
 		)`,
 	}
 	for _, statement := range statements {
@@ -1291,6 +1324,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureUsageArchiveRunColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUpgradeOperationRollbackColumns(db); err != nil {
 		return err
 	}
 	if err := ensureUsageEventSnapshotColumns(db); err != nil {
@@ -3025,6 +3061,54 @@ func ensureUsageArchiveRunColumns(db *sql.DB) error {
 	}
 	return nil
 
+}
+
+// ensureUpgradeOperationRollbackColumns adds the observation columns a rollback
+// records. A table created before a rollback could be recorded keeps its row:
+// the new columns are nullable, so an existing operation simply carries no
+// rollback evidence until one is recorded.
+func ensureUpgradeOperationRollbackColumns(db *sql.DB) error {
+	rows, err := db.Query(`pragma table_info(upgrade_operations)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]struct{}{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, column := range []string{
+		"source_root text",
+		"rollback_image text",
+		"rollback_image_source text",
+		"rollback_image_form text",
+		"rollback_status_url text",
+		"rollback_source_fingerprint text",
+		"rollback_observed_at_ms integer",
+	} {
+		if _, ok := existing[strings.Fields(column)[0]]; ok {
+			continue
+		}
+		if _, err := db.Exec(`alter table upgrade_operations add column ` + column); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureCodexInspectionOwnershipColumns(db *sql.DB) error {

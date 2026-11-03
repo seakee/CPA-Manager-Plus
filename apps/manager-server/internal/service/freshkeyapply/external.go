@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
@@ -35,9 +36,25 @@ var ErrExternalUnavailable = errors.New("external cpa authority unavailable")
 // management credential itself is a protected envelope.
 const externalIdentityPrefix = "external:sha256:"
 
-// ExternalIdentity is the connection identity of one External CPA address.
+// ExternalIdentity is the connection identity of one External CPA address. The
+// value is the digest of the exact bytes it is given, so a caller that compares
+// identities must pass the address it persisted, spelled the same way. The
+// Upgrade External connect step canonicalizes the address first
+// (identity.CanonicalExternalURL), which is what makes the three spellings of one
+// CPA reach this derivation as one value.
 func ExternalIdentity(baseURL string) string {
 	digest := sha256.Sum256([]byte(baseURL))
+	return externalIdentityPrefix + hex.EncodeToString(digest[:])
+}
+
+// ExternalServerFingerprint is the informational companion of ExternalIdentity:
+// the digest of the server facts a rebind compares when the address alone cannot
+// tell two CPAs apart (two CPAs published behind one URL). It is recorded beside
+// the identity and is never the input of the moved-target decision, which stays
+// address-based so a CPA restarting with a new build cannot strand an
+// installation.
+func ExternalServerFingerprint(version, sourceSHA256 string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(version) + "\x00" + strings.ToLower(strings.TrimSpace(sourceSHA256))))
 	return externalIdentityPrefix + hex.EncodeToString(digest[:])
 }
 

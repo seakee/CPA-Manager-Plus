@@ -9,14 +9,18 @@ import (
 )
 
 func TestExplicitPublicOriginSupportsTLSIngressWithoutTrustingForwardedHeaders(t *testing.T) {
+	// The source is absent, so a request that clears the origin rule gets the
+	// typed source answer. The origin verdict is what this table covers: a
+	// same-origin browser reaches the credential path, a cross-site one never
+	// does.
 	paths := legacypreflight.DefaultPaths(filepath.Join(t.TempDir(), "missing.sqlite"))
 	for _, tc := range []struct {
 		configured, origin, forwarded string
 		want                          int
 	}{
-		{"", "http://manager.test", "", 401},
+		{"", "http://manager.test", "", 503},
 		{"", "https://manager.test", "https", 403},
-		{"https://public-manager.test/", "https://public-manager.test", "", 401},
+		{"https://public-manager.test/", "https://public-manager.test", "", 503},
 		{"https://public-manager.test", "http://manager.test", "", 403},
 		{"https://public-manager.test", "https://attacker.test", "https", 403},
 	} {

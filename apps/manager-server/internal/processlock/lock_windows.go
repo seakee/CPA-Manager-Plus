@@ -68,6 +68,25 @@ func unlockFile(file *os.File) error {
 	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &overlapped)
 }
 
+// probeLockFile takes a shared, non-blocking lock. It conflicts with a live
+// exclusive holder without excluding another reader, so an observer can name a
+// busy source and let it go immediately.
+func probeLockFile(file *os.File) error {
+	var overlapped windows.Overlapped
+	err := windows.LockFileEx(
+		windows.Handle(file.Fd()),
+		windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0,
+		1,
+		0,
+		&overlapped,
+	)
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return ErrLocked
+	}
+	return err
+}
+
 func hasMultipleLinks(file *os.File) (bool, error) {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {

@@ -20,8 +20,10 @@ Coordination/task input: `seakee/cpamp-plan` at
   logged-in flags cannot silently establish authentication. Manual login accepts
   existing keys without applying Fresh key-strength rules.
 - Every attempt verifies the persisted credential with the existing bounded,
-  fenced, read-only source inspector. No normal Console login/config loading,
-  writable store open, initialization, collector or CPA client is invoked.
+  read-only source inspector. Its ownership marker is only probed, never
+  fenced, so a 1.x volume mounted read-only still authenticates. No normal
+  Console login/config loading, writable store open, initialization, collector or
+  CPA client is invoked.
 - The in-memory observation is revalidated after 30 seconds, on foreground return
   and explicitly by the user, with a 60-second maximum age. Source/credential
   changes and process restart invalidate the old observation. Late responses and
