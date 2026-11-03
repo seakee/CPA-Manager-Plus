@@ -36,10 +36,11 @@ type Repository interface {
 var ErrConflict = errors.New("quota cooldown generation conflict")
 
 // ErrSuperseded reports that a claimed generation cannot be reopened because
-// another active cooldown already owns the same credential identity. The
-// claimed row stays skipped and the active owner keeps the authority. It wraps
-// ErrConflict so callers that only distinguish stale generations keep their
-// existing behavior.
+// another active cooldown already owns the same credential. Ownership follows
+// UpsertActive, so a legacy row without an auth_index and the indexed row for
+// the same provider and account snapshot are one owner. The claimed row stays
+// skipped and the active owner keeps the authority. It wraps ErrConflict so
+// callers that only distinguish stale generations keep their existing behavior.
 var ErrSuperseded = fmt.Errorf("%w: a newer active cooldown owns the same credential identity", ErrConflict)
 
 type repository struct {
@@ -107,8 +108,8 @@ func (r *repository) UpsertActive(ctx context.Context, cooldown model.QuotaCoold
 			id, found, err = querySingleCooldownID(ctx, tx, `select id from quota_cooldowns
 				where auth_file_name = ? and owner = ? and status = ?
 					and `+cooldownIdentityAuthIndexSQL+` = ''
-					and `+cooldownIdentityProviderSQL+` = ?
-					and `+cooldownIdentityAccountSnapshotSQL+` = ?
+					and `+cooldownStoredProviderSQL+` = ?
+					and `+cooldownStoredAccountSnapshotSQL+` = ?
 				order by id asc limit 2`,
 				cooldown.AuthFileName,
 				cooldown.Owner,
@@ -272,26 +273,81 @@ func normalizeProvider(value string) string {
 	}
 }
 
+func cooldownColumn(table string, name string) string {
+	return table + "." + name
+}
+
+// cooldownAuthIndexColumn returns the trimmed auth index of a cooldown row and
+// normalizes NULL to the empty legacy index.
+func cooldownAuthIndexColumn(table string) string {
+	return `coalesce(trim(` + cooldownColumn(table, "auth_index") + `), '')`
+}
+
+// cooldownNormalizedProviderColumn returns the provider of a cooldown row in
+// the form normalizeProvider produces.
+func cooldownNormalizedProviderColumn(table string) string {
+	normalized := `coalesce(lower(replace(trim(` + cooldownColumn(table, "provider") + `), '_', '-')), '')`
+	return `case ` + normalized + `
+			when 'x-ai' then 'xai'
+			when 'grok' then 'xai'
+			else ` + normalized + `
+		end`
+}
+
+// cooldownAccountSnapshotColumn returns the trimmed account snapshot of a
+// cooldown row and normalizes NULL to empty.
+func cooldownAccountSnapshotColumn(table string) string {
+	return `coalesce(trim(` + cooldownColumn(table, "account_snapshot") + `), '')`
+}
+
 // cooldownIdentityColumns returns the SQL expressions that define a cooldown
 // identity for the given table reference. UpsertActive resolves an active row
 // by these expressions and ReopenClaim refuses to reactivate a claimed row
 // while another active row matches them, so both call sites share this single
 // definition and cannot drift apart. They mirror cooldownIdentity.
 func cooldownIdentityColumns(table string) (authIndex string, provider string, accountSnapshot string) {
-	column := func(name string) string { return table + "." + name }
-	authIndex = `coalesce(trim(` + column("auth_index") + `), '')`
-	normalizedProvider := `case coalesce(lower(replace(trim(` + column("provider") + `), '_', '-')), '')
-			when 'x-ai' then 'xai'
-			when 'grok' then 'xai'
-			else coalesce(lower(replace(trim(` + column("provider") + `), '_', '-')), '')
-		end`
-	provider = `case when ` + authIndex + ` <> '' then '' else ` + normalizedProvider + ` end`
-	accountSnapshot = `case when ` + authIndex + ` <> '' then '' else coalesce(trim(` + column("account_snapshot") + `), '') end`
+	authIndex = cooldownAuthIndexColumn(table)
+	provider = `case when ` + authIndex + ` <> '' then '' else ` + cooldownNormalizedProviderColumn(table) + ` end`
+	accountSnapshot = `case when ` + authIndex + ` <> '' then '' else ` + cooldownAccountSnapshotColumn(table) + ` end`
 	return authIndex, provider, accountSnapshot
+}
+
+// cooldownSameCredentialSQL returns the predicate that decides whether two
+// cooldown rows address the same physical credential. Callers restrict both
+// rows to the same auth_file_name and owner already.
+//
+// A row carrying an auth_index owns exactly that index; a row without one owns
+// its normalized provider and account snapshot. The second branch is the legacy
+// fallback UpsertActive applies to an indexed request that finds no exact
+// active row: it merges into the empty-index row with the same provider and
+// account snapshot. Comparing both identified shapes here keeps the reopen
+// guard and UpsertActive from disagreeing about which rows are one credential.
+func cooldownSameCredentialSQL(left string, right string) string {
+	leftAuthIndex := cooldownAuthIndexColumn(left)
+	rightAuthIndex := cooldownAuthIndexColumn(right)
+	leftProvider := cooldownNormalizedProviderColumn(left)
+	rightProvider := cooldownNormalizedProviderColumn(right)
+	leftAccountSnapshot := cooldownAccountSnapshotColumn(left)
+	rightAccountSnapshot := cooldownAccountSnapshotColumn(right)
+	_, leftIdentityProvider, leftIdentityAccountSnapshot := cooldownIdentityColumns(left)
+	_, rightIdentityProvider, rightIdentityAccountSnapshot := cooldownIdentityColumns(right)
+	exact := `(` + leftAuthIndex + ` = ` + rightAuthIndex +
+		` and ` + leftIdentityProvider + ` = ` + rightIdentityProvider +
+		` and ` + leftIdentityAccountSnapshot + ` = ` + rightIdentityAccountSnapshot + `)`
+	legacyFallback := `((` + leftAuthIndex + ` = '' and ` + rightAuthIndex + ` <> '') or (` +
+		leftAuthIndex + ` <> '' and ` + rightAuthIndex + ` = ''))` +
+		` and ` + leftProvider + ` <> '' and ` + leftProvider + ` = ` + rightProvider +
+		` and ` + leftAccountSnapshot + ` <> '' and ` + leftAccountSnapshot + ` = ` + rightAccountSnapshot
+	return `(` + exact + ` or (` + legacyFallback + `))`
 }
 
 var (
 	cooldownIdentityAuthIndexSQL, cooldownIdentityProviderSQL, cooldownIdentityAccountSnapshotSQL = cooldownIdentityColumns("quota_cooldowns")
+	// The provider and account snapshot as stored, without the identity
+	// projection that blanks them for indexed rows. UpsertActive's legacy
+	// fallback lookup matches an incoming indexed cooldown against these.
+	cooldownStoredProviderSQL        = cooldownNormalizedProviderColumn("quota_cooldowns")
+	cooldownStoredAccountSnapshotSQL = cooldownAccountSnapshotColumn("quota_cooldowns")
 )
 
 func (r *repository) ListDue(ctx context.Context, nowMS int64, limit int) ([]model.QuotaCooldown, error) {
@@ -391,17 +447,17 @@ func (r *repository) ReopenClaim(ctx context.Context, id int64, claimedUpdatedAt
 	if claimedUpdatedAtMS <= 0 {
 		return fmt.Errorf("%w: claimed generation is required", ErrConflict)
 	}
-	siblingAuthIndexSQL, siblingProviderSQL, siblingAccountSnapshotSQL := cooldownIdentityColumns("sibling")
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	// Reactivate the claimed row only while it is still at the claimed
-	// generation and no other active row already owns the same credential
-	// identity. The identity expressions are the ones UpsertActive resolves
-	// active rows with, so a newer active generation can never be joined by a
-	// second active owner for the same credential.
+	// generation and no other active row already owns the same credential.
+	// cooldownSameCredentialSQL resolves that ownership exactly like
+	// UpsertActive does, including the legacy empty-index fallback, so a newer
+	// active generation can never be joined by a second active owner for the
+	// same credential.
 	result, err := tx.ExecContext(ctx, `update quota_cooldowns set status = ?, last_error = ?, updated_at_ms = ?
 		where id = ? and status = ? and updated_at_ms = ?
 			and not exists (
@@ -410,9 +466,7 @@ func (r *repository) ReopenClaim(ctx context.Context, id int64, claimedUpdatedAt
 					and sibling.auth_file_name = quota_cooldowns.auth_file_name
 					and sibling.owner = quota_cooldowns.owner
 					and sibling.status = ?
-					and `+siblingAuthIndexSQL+` = `+cooldownIdentityAuthIndexSQL+`
-					and `+siblingProviderSQL+` = `+cooldownIdentityProviderSQL+`
-					and `+siblingAccountSnapshotSQL+` = `+cooldownIdentityAccountSnapshotSQL+`
+					and `+cooldownSameCredentialSQL("sibling", "quota_cooldowns")+`
 			)`,
 		model.QuotaCooldownStatusActive, nullString(reason), nextUpdatedAtMS(claimedUpdatedAtMS),
 		id, model.QuotaCooldownStatusSkipped, claimedUpdatedAtMS,
@@ -440,11 +494,12 @@ func (r *repository) ReopenClaim(ctx context.Context, id int64, claimedUpdatedAt
 
 // claimedGenerationSuperseded reports whether the claimed row is still at the
 // generation the caller observed while another active row already owns the
-// same credential identity. It distinguishes a reopen that lost the credential
-// to a newer active generation from a generation that moved on its own.
+// same credential. Ownership is resolved by cooldownSameCredentialSQL, so a
+// claimed legacy row and an indexed row for the same provider and account
+// snapshot count as one owner. It distinguishes a reopen that lost the
+// credential to a newer active generation from a generation that moved on its
+// own.
 func claimedGenerationSuperseded(ctx context.Context, tx *sql.Tx, id int64, claimedUpdatedAtMS int64) (bool, error) {
-	claimedAuthIndexSQL, claimedProviderSQL, claimedAccountSnapshotSQL := cooldownIdentityColumns("claimed")
-	siblingAuthIndexSQL, siblingProviderSQL, siblingAccountSnapshotSQL := cooldownIdentityColumns("sibling")
 	var superseded int
 	err := tx.QueryRowContext(ctx, `select exists (
 		select 1 from quota_cooldowns as claimed
@@ -453,9 +508,7 @@ func claimedGenerationSuperseded(ctx context.Context, tx *sql.Tx, id int64, clai
 			and sibling.auth_file_name = claimed.auth_file_name
 			and sibling.owner = claimed.owner
 			and sibling.status = ?
-			and `+siblingAuthIndexSQL+` = `+claimedAuthIndexSQL+`
-			and `+siblingProviderSQL+` = `+claimedProviderSQL+`
-			and `+siblingAccountSnapshotSQL+` = `+claimedAccountSnapshotSQL+`
+			and `+cooldownSameCredentialSQL("sibling", "claimed")+`
 		where claimed.id = ? and claimed.status = ? and claimed.updated_at_ms = ?
 	)`,
 		model.QuotaCooldownStatusActive,

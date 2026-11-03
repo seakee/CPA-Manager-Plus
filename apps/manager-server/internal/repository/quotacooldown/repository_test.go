@@ -566,6 +566,145 @@ func TestUpsertActiveDoesNotReviveClaimedGeneration(t *testing.T) {
 	}
 }
 
+// TestReopenClaimTreatsLegacyAndIndexedCooldownsAsOneOwner covers the identity
+// fallback UpsertActive applies when a cooldown arrives with an auth_index but
+// the active row only carries the legacy provider/account_snapshot identity.
+// The reopen guard must refuse exactly the pairs UpsertActive would have
+// merged; otherwise one physical credential ends up with two active owners.
+func TestReopenClaimTreatsLegacyAndIndexedCooldownsAsOneOwner(t *testing.T) {
+	const claimReason = "enable in progress"
+	legacy := func(account string) model.QuotaCooldownUpsert {
+		return model.QuotaCooldownUpsert{
+			AuthFileName:    "xai.json",
+			AccountSnapshot: account,
+			Provider:        "xai",
+			Owner:           model.QuotaCooldownOwnerXAIFreeUsage,
+			RecoverAtMS:     time.Now().Add(-time.Minute).UnixMilli(),
+			EventHash:       "evt-legacy",
+		}
+	}
+	indexed := func(authIndex string, account string) model.QuotaCooldownUpsert {
+		return model.QuotaCooldownUpsert{
+			AuthFileName:    "xai.json",
+			AuthIndex:       authIndex,
+			AccountSnapshot: account,
+			Provider:        "x_ai",
+			Owner:           model.QuotaCooldownOwnerXAIFreeUsage,
+			RecoverAtMS:     time.Now().Add(-time.Minute).UnixMilli(),
+			EventHash:       "evt-indexed",
+		}
+	}
+	withoutProvider := legacy("alice@example.com")
+	withoutProvider.Provider = ""
+
+	tests := []struct {
+		name           string
+		claimed        model.QuotaCooldownUpsert
+		sibling        model.QuotaCooldownUpsert
+		wantSuperseded bool
+	}{
+		{
+			name:           "indexed sibling owns a claimed legacy identity",
+			claimed:        legacy("alice@example.com"),
+			sibling:        indexed("auth-1", "alice@example.com"),
+			wantSuperseded: true,
+		},
+		{
+			name:           "legacy sibling owns a claimed indexed identity",
+			claimed:        indexed("auth-1", "alice@example.com"),
+			sibling:        legacy("alice@example.com"),
+			wantSuperseded: true,
+		},
+		{
+			name:    "another auth index is a different credential",
+			claimed: indexed("auth-1", "alice@example.com"),
+			sibling: indexed("auth-2", "alice@example.com"),
+		},
+		{
+			name:    "another account snapshot is a different credential",
+			claimed: indexed("auth-1", "alice@example.com"),
+			sibling: legacy("bob@example.com"),
+		},
+		{
+			name:    "a legacy row without a provider identity does not own the claimed credential",
+			claimed: indexed("auth-1", "alice@example.com"),
+			sibling: withoutProvider,
+		},
+		{
+			name:    "a legacy row without an account snapshot identity does not own the claimed credential",
+			claimed: indexed("auth-1", "alice@example.com"),
+			sibling: legacy(""),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+			st, err := store.Open(dbPath)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = st.Close() })
+			ctx := context.Background()
+
+			claimed, err := st.QuotaCooldowns.UpsertActive(ctx, tc.claimed)
+			if err != nil {
+				t.Fatalf("upsert claimed cooldown: %v", err)
+			}
+			claimedUpdatedAtMS, err := st.QuotaCooldowns.ClaimRecovery(ctx, claimed.ID, claimed.UpdatedAtMS, claimReason)
+			if err != nil {
+				t.Fatalf("claim observed generation: %v", err)
+			}
+			// The second writer records its own evidence while the claim is in
+			// flight, so it cannot join the claimed row.
+			sibling, err := st.QuotaCooldowns.UpsertActive(ctx, tc.sibling)
+			if err != nil {
+				t.Fatalf("upsert sibling cooldown: %v", err)
+			}
+			if sibling.ID == claimed.ID {
+				t.Fatalf("sibling evidence reused the claimed row %d instead of recording a new generation", claimed.ID)
+			}
+
+			reopenErr := st.QuotaCooldowns.ReopenClaim(ctx, claimed.ID, claimedUpdatedAtMS, "retry")
+			active, err := st.QuotaCooldowns.ListActive(ctx)
+			if err != nil {
+				t.Fatalf("list active cooldowns: %v", err)
+			}
+			status, lastError, updatedAtMS := readCooldownRow(t, dbPath, claimed.ID)
+
+			if tc.wantSuperseded {
+				if !errors.Is(reopenErr, quotacooldown.ErrSuperseded) {
+					t.Fatalf("reopen with an owning sibling error = %v, want ErrSuperseded", reopenErr)
+				}
+				if !errors.Is(reopenErr, quotacooldown.ErrConflict) {
+					t.Fatalf("superseded reopen error = %v, want it to keep the generation conflict semantics", reopenErr)
+				}
+				if status != model.QuotaCooldownStatusSkipped || lastError != claimReason || updatedAtMS != claimedUpdatedAtMS {
+					t.Fatalf("superseded reopen changed the claimed row: status=%q last_error=%q updated_at=%d", status, lastError, updatedAtMS)
+				}
+				if len(active) != 1 || active[0].ID != sibling.ID {
+					t.Fatalf("active cooldowns = %#v, want only the sibling generation %d", active, sibling.ID)
+				}
+				return
+			}
+
+			if reopenErr != nil {
+				t.Fatalf("reopen a distinct credential error = %v, want nil", reopenErr)
+			}
+			if status != model.QuotaCooldownStatusActive || lastError != "retry" {
+				t.Fatalf("reopened row status=%q last_error=%q, want an active retryable generation", status, lastError)
+			}
+			owners := make(map[int64]bool, len(active))
+			for _, item := range active {
+				owners[item.ID] = true
+			}
+			if len(owners) != 2 || !owners[claimed.ID] || !owners[sibling.ID] {
+				t.Fatalf("active cooldowns = %#v, want the reopened claim %d and the sibling %d", active, claimed.ID, sibling.ID)
+			}
+		})
+	}
+}
+
 func readCooldownRow(t *testing.T, dbPath string, id int64) (string, string, int64) {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)

@@ -517,6 +517,87 @@ func TestExtendExistingCooldownKeepsEvidenceForLaterRecovery(t *testing.T) {
 	}
 }
 
+// TestExtendExistingCooldownPrefersTheLegacyRowOverAnIndexedSibling covers an
+// already-disabled credential owned by two active rows: an indexed row recorded
+// through UpsertActive and the legacy empty-index row that the same evidence
+// falls back to. New legacy evidence carries no auth_index, so it must extend
+// the legacy row instead of stopping at an indexed sibling it cannot address.
+func TestExtendExistingCooldownPrefersTheLegacyRowOverAnIndexedSibling(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	ctx := context.Background()
+	now := time.Now()
+	indexedRecoverAt := now.Add(time.Hour)
+	indexed, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:    "xai-auth.json",
+		AuthIndex:       "auth-xai-1",
+		AccountSnapshot: "alice@example.com",
+		Provider:        "xai",
+		RecoverAtMS:     indexedRecoverAt.UnixMilli(),
+		Owner:           model.QuotaCooldownOwnerXAIFreeUsage,
+		DisabledAtMS:    now.Add(-time.Hour).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("seed indexed cooldown: %v", err)
+	}
+	legacy, err := st.UpsertQuotaCooldown(ctx, store.QuotaCooldownUpsert{
+		AuthFileName:    "xai-auth.json",
+		AccountSnapshot: "alice@example.com",
+		Provider:        "xai",
+		RecoverAtMS:     now.Add(2 * time.Hour).UnixMilli(),
+		Owner:           model.QuotaCooldownOwnerXAIFreeUsage,
+		DisabledAtMS:    now.Add(-time.Hour).UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("seed legacy cooldown: %v", err)
+	}
+	if legacy.ID == indexed.ID {
+		t.Fatalf("legacy evidence reused the indexed row %d", indexed.ID)
+	}
+
+	worker := NewRateLimitAutoDisableWorker(st)
+	resetAt := now.Add(6 * time.Hour)
+	candidate := quotaAutoDisableCandidate{
+		FileName:        "xai-auth.json",
+		AccountSnapshot: "alice@example.com",
+		Provider:        "xai",
+		Owner:           model.QuotaCooldownOwnerXAIFreeUsage,
+		ResetAt:         resetAt,
+	}
+	if !worker.extendExistingCooldown(ctx, candidate, authFile{
+		Name:            candidate.FileName,
+		Provider:        candidate.Provider,
+		AccountSnapshot: candidate.AccountSnapshot,
+		Disabled:        true,
+	}) {
+		t.Fatal("legacy cooldown was not extended")
+	}
+
+	active, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	byID := make(map[int64]store.QuotaCooldown, len(active))
+	for _, item := range active {
+		byID[item.ID] = item
+	}
+	if len(byID) != 2 {
+		t.Fatalf("active cooldowns = %#v, want the indexed and the legacy row", active)
+	}
+	extended, ok := byID[legacy.ID]
+	if !ok || extended.RecoverAtMS != resetAt.UnixMilli() {
+		t.Fatalf("legacy cooldown = %#v, want its recovery at %d", extended, resetAt.UnixMilli())
+	}
+	if untouched, ok := byID[indexed.ID]; !ok || untouched.RecoverAtMS != indexedRecoverAt.UnixMilli() ||
+		untouched.UpdatedAtMS != indexed.UpdatedAtMS || untouched.AuthIndex != "auth-xai-1" {
+		t.Fatalf("indexed cooldown = %#v, want the untouched generation %#v", untouched, indexed)
+	}
+}
+
 func TestExtendExistingCooldownKeepsWinningRecoveryMetadata(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "usage.sqlite"))
 	if err != nil {
@@ -3989,6 +4070,126 @@ func TestRateLimitAutoDisableWorkerKeepsNewerEvidenceOnUnconfirmedEnable(t *test
 	}
 	if err == nil || !strings.Contains(err.Error(), "generation conflict") {
 		t.Fatalf("recovery error = %v, want a generation conflict", err)
+	}
+}
+
+// TestRateLimitAutoDisableWorkerKeepsNewerIndexedEvidenceOverLegacyClaim covers
+// a second writer recording newer quota evidence for the same physical
+// credential under its auth_index while this worker holds the claim of the
+// legacy empty-index row. UpsertActive resolves both row shapes to one
+// credential, so the newer indexed generation must own it before a stale enable
+// is confirmed.
+func TestRateLimitAutoDisableWorkerKeepsNewerIndexedEvidenceOverLegacyClaim(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	otherWriter, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	defer otherWriter.Close()
+
+	fixture := quotaEnableFixture{
+		name: "xai-legacy", owner: model.QuotaCooldownOwnerXAIFreeUsage, provider: "xai",
+		fileName: "xai-auth.json", account: "alice@example.com",
+	}
+	var mu sync.Mutex
+	disabled := true
+	patches := make([]bool, 0, 2)
+	var indexed store.QuotaCooldown
+	var indexedErr error
+	var recordOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v0/management/auth-files":
+			mu.Lock()
+			current := disabled
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode([]map[string]any{fixture.authFilePayload(current)})
+		case r.Method == http.MethodPatch && r.URL.Path == "/v0/management/auth-files/status":
+			var payload struct {
+				Disabled bool `json:"disabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			disabled = payload.Disabled
+			patches = append(patches, payload.Disabled)
+			mu.Unlock()
+			// The second writer records newer evidence for the same credential
+			// under its auth_index right after this worker claimed the legacy
+			// row, so the claim and the newer generation coexist.
+			recordOnce.Do(func() {
+				indexed, indexedErr = otherWriter.UpsertQuotaCooldown(context.Background(), store.QuotaCooldownUpsert{
+					AuthFileName:     fixture.fileName,
+					AuthIndex:        "auth-xai-1",
+					AccountSnapshot:  fixture.account,
+					Provider:         fixture.provider,
+					RecoverAtMS:      time.Now().Add(time.Hour).UnixMilli(),
+					Owner:            fixture.owner,
+					EventHash:        "evt-newer-indexed-evidence",
+					PreDisabledState: false,
+					DisabledAtMS:     time.Now().Add(-time.Minute).UnixMilli(),
+				})
+			})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	seeded := seedDueQuotaCooldown(t, st, fixture, "evt-legacy-claim")
+	worker := NewRateLimitAutoDisableWorker(st, collectorpkg.RuntimeConfig{
+		CPAUpstreamURL: server.URL,
+		ManagementKey:  "mgmt",
+	})
+	worker.enableDue(ctx, now)
+
+	if indexedErr != nil {
+		t.Fatalf("record newer indexed evidence: %v", indexedErr)
+	}
+	if indexed.ID == 0 || indexed.ID == seeded.ID {
+		t.Fatalf("newer indexed evidence did not take its own generation: seeded=%+v indexed=%+v", seeded, indexed)
+	}
+	mu.Lock()
+	gotDisabled := disabled
+	gotPatches := append([]bool(nil), patches...)
+	mu.Unlock()
+	if !gotDisabled {
+		t.Fatal("credential ended enabled although newer indexed evidence owns it")
+	}
+	if len(gotPatches) != 2 || gotPatches[0] || !gotPatches[1] {
+		t.Fatalf("patches = %v, want enable followed by compensating disable", gotPatches)
+	}
+	status, reason, updatedAtMS := readQuotaCooldownRow(t, path, seeded.ID)
+	if status != model.QuotaCooldownStatusSkipped {
+		t.Fatalf("claimed cooldown status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+	}
+	if !strings.Contains(reason, "newer cooldown generation") {
+		t.Fatalf("claimed cooldown reason = %q, want the superseding generation reason", reason)
+	}
+	if updatedAtMS <= seeded.UpdatedAtMS {
+		t.Fatalf("claimed cooldown generation = %d, want it advanced past %d", updatedAtMS, seeded.UpdatedAtMS)
+	}
+	indexedStatus, indexedReason, indexedUpdatedAtMS := readQuotaCooldownRow(t, path, indexed.ID)
+	if indexedStatus != model.QuotaCooldownStatusActive || indexedReason != "" || indexedUpdatedAtMS != indexed.UpdatedAtMS {
+		t.Fatalf("newer indexed cooldown = (%q, %q, %d), want the untouched active generation (%d)", indexedStatus, indexedReason, indexedUpdatedAtMS, indexed.UpdatedAtMS)
+	}
+	// A later tick before the newer generation is due must not enable anything.
+	worker.enableDue(ctx, now.Add(30*time.Minute))
+	mu.Lock()
+	gotPatches = append([]bool(nil), patches...)
+	mu.Unlock()
+	if len(gotPatches) != 2 {
+		t.Fatalf("patches = %v, want no enable from the retired legacy generation", gotPatches)
 	}
 }
 

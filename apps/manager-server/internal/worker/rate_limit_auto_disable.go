@@ -933,7 +933,8 @@ func (w *RateLimitAutoDisableWorker) newerActiveCooldownGeneration(
 		if candidate.ID == item.ID {
 			continue
 		}
-		if !quotaCooldownMatchesIdentity(candidate, authIndex, provider, accountID, accountSnapshot) {
+		if !quotaCooldownMatchesIdentity(candidate, authIndex, provider, accountID, accountSnapshot) &&
+			!quotaCooldownIndexedRowOwnsLegacyClaim(candidate, authIndex, provider, accountSnapshot) {
 			continue
 		}
 		if !found || candidate.UpdatedAtMS > newest.UpdatedAtMS ||
@@ -1694,12 +1695,43 @@ func quotaCooldownMatchesIdentity(item store.QuotaCooldown, authIndex string, pr
 	if itemAuthIndex != "" {
 		return authIndex != "" && itemAuthIndex == authIndex
 	}
+	// The row has no auth_index, so it owns the credential through its
+	// provider and account snapshot. This direction is deliberately one-way:
+	// this function also decides whether current evidence may extend an
+	// existing active owner, and an indexed row is only ever matched by the
+	// index it stores. Callers that compare an active generation with a claimed
+	// generation add the opposite direction explicitly.
+	return quotaCooldownFallbackIdentityMatches(item, provider, accountSnapshot)
+}
 
-	itemSnapshot := quotaActionAccountSnapshot(item.AuthFileName, item.AccountSnapshot)
-	if itemSnapshot == "" || accountSnapshot == "" || itemSnapshot != accountSnapshot {
+// quotaCooldownFallbackIdentityMatches reports whether a cooldown row without an
+// auth_index addresses the credential described by provider and accountSnapshot.
+// It mirrors the legacy fallback in the cooldown repository: the normalized
+// provider and the account snapshot must both be known and equal.
+func quotaCooldownFallbackIdentityMatches(item store.QuotaCooldown, provider string, accountSnapshot string) bool {
+	itemProvider := normalizeQuotaProvider(item.Provider)
+	if itemProvider == "" || provider == "" || itemProvider != provider {
 		return false
 	}
-	return itemProvider != "" && provider != "" && itemProvider == provider
+	itemSnapshot := quotaActionAccountSnapshot(item.AuthFileName, item.AccountSnapshot)
+	return itemSnapshot != "" && accountSnapshot != "" && itemSnapshot == accountSnapshot
+}
+
+// quotaCooldownIndexedRowOwnsLegacyClaim reports whether an active cooldown
+// recorded under an auth_index owns the credential of a claimed generation that
+// has none. The cooldown repository treats those two rows as one owner, so a
+// newer indexed generation must win over an older legacy claim; the shared
+// matcher cannot decide this, because it keeps the one-way rule the
+// extend-existing path depends on. Codex keeps its own rules: it never owns a
+// credential without an auth_index.
+func quotaCooldownIndexedRowOwnsLegacyClaim(candidate store.QuotaCooldown, authIndex string, provider string, accountSnapshot string) bool {
+	if strings.TrimSpace(authIndex) != "" || strings.TrimSpace(candidate.AuthIndex) == "" {
+		return false
+	}
+	if provider == "codex" || normalizeQuotaProvider(candidate.Provider) == "codex" {
+		return false
+	}
+	return quotaCooldownFallbackIdentityMatches(candidate, provider, accountSnapshot)
 }
 
 func codexCooldownIdentityEvidenceJSON(workspace string, member string) string {
