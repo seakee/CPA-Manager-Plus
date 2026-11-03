@@ -1451,7 +1451,15 @@ Both wizards render one shared `FreshAdoptFlow`:
   `reason` behind a "what to do" disclosure — a credential that exists only in the
   source process is told to re-authenticate rather than to copy a file that does
   not exist, and the item standing for credentials the record could not hold
-  carries the count it kept;
+  carries the count it kept. Because `Credential file #N` is the record's ordinal
+  and not the source file name, a group that holds manual or failed credentials
+  states once, in the operator's language, that `#N` is a record number and that
+  the credential-file lists of the source and destination auth directories are to
+  be compared before copying the missing files or re-authenticating those
+  providers; the same sentence heads the setup wizard's completion block. The
+  per-item line stays one step, each specific cause (an overlong name, a download
+  the source never returned) keeps its own words, and no source name is emitted to
+  make the instruction actionable;
 - the progress read is bounded: three consecutive failures stop the loop and show
   a typed state with an explicit retry, so a refused or lost route cannot leave
   "reading the migration record" spinning forever. A read that never answers is

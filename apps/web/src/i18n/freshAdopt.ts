@@ -96,14 +96,20 @@ const en = {
   kindConfigLeaf: 'Gateway settings',
   kindConfigFamily: 'Payload rules',
   kindProviderSection: 'Provider sections',
+  // A credential item is projected as "Credential file #N", which is the record's
+  // ordinal and not the source file name, so "copy this file" alone leaves the
+  // operator without anything to find. This group-level sentence says what the
+  // number is and how to locate the files; the per-item lines stay one step.
+  credentialNote:
+    '“Credential file #N” is a number in the migration record, not a source file name. Compare the credential files in the source CPA’s auth directory with the destination CPA’s, then copy the missing files across, or re-authenticate those providers on the destination.',
   guidanceCredential:
-    'Copy this credential file into the destination CPA’s authentication directory, or re-authenticate the provider in the destination Console.',
+    'Copy this file into the destination CPA’s auth directory, or re-authenticate the provider on the destination.',
   guidanceRuntimeOnlyCredential:
     'This credential exists only inside the source CPA process, so there is no file to copy. Re-authenticate the provider in the destination Console.',
   guidanceCredentialNameTooLong:
-    'This credential file’s name is too long for the migration record, so it was left on the source. Copy it into the destination CPA’s authentication directory by hand.',
+    'This file’s name is too long for the migration record, so it stayed on the source. Copy it into the destination CPA’s auth directory by hand.',
   guidanceCredentialInventoryExcess:
-    'The migration record was full, so {count} credential file(s) were left on the source. Copy them into the destination CPA’s authentication directory by hand.',
+    '{count} credential file(s) did not fit in the migration record and stayed on the source. Copy them into the destination CPA’s auth directory by hand.',
   guidanceConfigLeaf:
     'Set this gateway setting on the destination CPA’s gateway configuration page.',
   guidanceConfigFamily:
@@ -189,13 +195,15 @@ const zh: typeof en = {
   kindConfigLeaf: '网关配置项',
   kindConfigFamily: '载荷规则',
   kindProviderSection: '提供商配置段',
-  guidanceCredential: '请把该凭证文件复制到目标 CPA 的认证目录，或在目标控制台重新认证该提供商。',
+  credentialNote:
+    '“Credential file #N”里的 #N 是迁移记录中的条目编号，不是源端文件名。请对比源 CPA 与目标 CPA 认证目录中的凭证文件清单，把目标缺少的文件复制过去，或在目标重新认证对应提供商。',
+  guidanceCredential: '请把该文件复制到目标 CPA 的认证目录，或在目标重新认证该提供商。',
   guidanceRuntimeOnlyCredential:
     '该凭证只存在于源 CPA 进程中，没有可复制的文件。请在目标控制台重新认证该提供商。',
   guidanceCredentialNameTooLong:
-    '该凭证文件名超出迁移记录的上限，因此留在了源端。请手动复制到目标 CPA 的认证目录。',
+    '该文件名超出迁移记录的上限，因此留在了源端。请手动复制到目标 CPA 的认证目录。',
   guidanceCredentialInventoryExcess:
-    '迁移记录已满，源端有 {count} 个凭证文件未能记录。请手动复制到目标 CPA 的认证目录。',
+    '有 {count} 个凭证文件放不进迁移记录，留在了源端。请手动复制到目标 CPA 的认证目录。',
   guidanceConfigLeaf: '请在目标 CPA 的网关配置页面设置该配置项。',
   guidanceConfigFamily: '请在目标 CPA 的网关配置页面替换该载荷规则列表。',
   guidanceProviderSection: '请把该提供商配置段（含其提供商密钥）复制到目标 CPA 的配置中。',
@@ -276,13 +284,15 @@ const tw: typeof en = {
   kindConfigLeaf: '閘道設定項',
   kindConfigFamily: '載荷規則',
   kindProviderSection: '供應商設定區段',
-  guidanceCredential: '請把該憑證檔案複製到目標 CPA 的認證目錄，或在目標主控台重新認證該供應商。',
+  credentialNote:
+    '「Credential file #N」中的 #N 是遷移記錄中的項目編號，不是來源端檔名。請比對來源 CPA 與目標 CPA 認證目錄中的憑證檔案清單，把目標缺少的檔案複製過去，或在目標重新認證對應供應商。',
+  guidanceCredential: '請把該檔案複製到目標 CPA 的認證目錄，或在目標重新認證該供應商。',
   guidanceRuntimeOnlyCredential:
     '該憑證只存在於來源 CPA 程序中，沒有可複製的檔案。請在目標主控台重新認證該供應商。',
   guidanceCredentialNameTooLong:
-    '該憑證檔名超出遷移記錄的上限，因此留在來源端。請手動複製到目標 CPA 的認證目錄。',
+    '該檔名超出遷移記錄的上限，因此留在來源端。請手動複製到目標 CPA 的認證目錄。',
   guidanceCredentialInventoryExcess:
-    '遷移記錄已滿，來源端有 {count} 個憑證檔案未被記錄。請手動複製到目標 CPA 的認證目錄。',
+    '有 {count} 個憑證檔案放不進遷移記錄，留在來源端。請手動複製到目標 CPA 的認證目錄。',
   guidanceConfigLeaf: '請在目標 CPA 的閘道設定頁面設定該項目。',
   guidanceConfigFamily: '請在目標 CPA 的閘道設定頁面取代該載荷規則清單。',
   guidanceProviderSection: '請把該供應商設定區段（含其供應商金鑰）複製到目標 CPA 的設定中。',
@@ -378,14 +388,16 @@ const ru: typeof en = {
   kindConfigLeaf: 'Настройки шлюза',
   kindConfigFamily: 'Правила нагрузки',
   kindProviderSection: 'Разделы провайдеров',
+  credentialNote:
+    '«Credential file #N» — это номер записи в переносе, а не имя файла на источнике. Сравните файлы учётных данных в каталоге аутентификации исходного и целевого CPA, затем скопируйте недостающие файлы или повторно авторизуйте этих провайдеров на целевом CPA.',
   guidanceCredential:
-    'Скопируйте этот файл учётных данных в каталог аутентификации целевого CPA или повторно авторизуйте провайдера в консоли целевого CPA.',
+    'Скопируйте этот файл в каталог аутентификации целевого CPA или повторно авторизуйте провайдера на целевом CPA.',
   guidanceRuntimeOnlyCredential:
     'Эти учётные данные существуют только в процессе исходного CPA, файла для копирования нет. Повторно авторизуйте провайдера в консоли целевого CPA.',
   guidanceCredentialNameTooLong:
-    'Имя этого файла учётных данных длиннее, чем принимает запись переноса, поэтому он остался на источнике. Скопируйте его в каталог аутентификации целевого CPA вручную.',
+    'Имя этого файла длиннее, чем принимает запись переноса, поэтому он остался на источнике. Скопируйте его в каталог аутентификации целевого CPA вручную.',
   guidanceCredentialInventoryExcess:
-    'Запись переноса заполнена, поэтому {count} файл(ов) учётных данных остались на источнике. Скопируйте их в каталог аутентификации целевого CPA вручную.',
+    'Файлы учётных данных не поместились в запись переноса и остались на источнике: {count}. Скопируйте их в каталог аутентификации целевого CPA вручную.',
   guidanceConfigLeaf: 'Задайте эту настройку шлюза на странице конфигурации шлюза целевого CPA.',
   guidanceConfigFamily:
     'Замените этот список правил нагрузки на странице конфигурации шлюза целевого CPA.',

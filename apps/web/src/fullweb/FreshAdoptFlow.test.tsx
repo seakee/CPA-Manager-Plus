@@ -297,6 +297,57 @@ const failedRun = (runId: string): AdoptionSummary => ({
   counts: { migrated: 0, manual: 0, failed: 1, absent_at_source: 0 },
 });
 
+// A settled run whose manual group holds several credentials. The reply names
+// each credential "Credential file #N" — the migration record's ordinal, not the
+// source file name — so the group has to say once what the number stands for and
+// how to find the file, instead of leaving the operator with a name to search for
+// that does not exist.
+const manualCredentials: AdoptionSummary = {
+  runId: runB,
+  items: withIdentity([
+    {
+      item: 'Credential file #1',
+      kind: 'credential',
+      outcome: 'manual',
+      reason: 'runtime_only_credential',
+      retryable: false,
+    },
+    {
+      item: 'Credential file #2',
+      kind: 'credential',
+      outcome: 'manual',
+      reason: 'adoption_item_name_too_long',
+      retryable: false,
+    },
+    {
+      item: 'Credential file #3',
+      kind: 'credential',
+      outcome: 'manual',
+      reason: 'not_uploadable',
+      retryable: false,
+    },
+    {
+      item: 'config:routing.logging',
+      kind: 'config_leaf',
+      outcome: 'manual',
+      reason: 'path_unresolved',
+      retryable: false,
+    },
+    {
+      item: 'Credential file #4',
+      kind: 'credential',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
+  ]),
+  planned: 5,
+  finished: true,
+  running: false,
+  retryable: 0,
+  counts: { migrated: 1, manual: 4, failed: 0, absent_at_source: 0 },
+};
+
 let renderer: ReactTestRenderer;
 // The fake route's body-contract violations for the current test. An expectation
 // inside the fetcher is swallowed by the carrier as a transport failure, so the
@@ -1265,6 +1316,70 @@ it('localizes a known reason and falls back to one sentence for an unknown one',
   expect(text()).toContain(adoptGuidanceText('config_leaf', 'reason_this_browser_does_not_know'));
 });
 
+// The credentials on a manual group are record ordinals, so the group has to say
+// what the number is and how to find the files. One sentence per group, in the
+// operator's language, and never a source file name.
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'explains the credential record number once per manual group (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    await adoptServer({ summaries: [manualCredentials] });
+    await click('adopt-read-inventory');
+    await input('adopt-confirm-inventory', true);
+    await click('adopt-confirm-migrate');
+    await settle();
+    const manualGroup = renderer.root.findByProps({ 'data-testid': 'adopt-group-manual' });
+    // One note for a group of three manual credentials, not one per credential.
+    expect(
+      manualGroup.findAllByProps({ 'data-testid': 'adopt-credential-note-manual' })
+    ).toHaveLength(1);
+    const note = byID('adopt-credential-note-manual');
+    expect(note.props.children).toBe(adoptText('credentialNote'));
+    // It is placement, not just presence: the note belongs to this group's body
+    // and comes before the item list it explains.
+    const body = manualGroup.findByType('div');
+    const noteIndex = body.children.findIndex(
+      (child) =>
+        typeof child !== 'string' && child.props['data-testid'] === 'adopt-credential-note-manual'
+    );
+    const listIndex = body.children.findIndex(
+      (child) => typeof child !== 'string' && child.type === 'ul'
+    );
+    expect(noteIndex).toBeGreaterThan(-1);
+    expect(listIndex).toBeGreaterThan(noteIndex);
+    // The migrated group holds a credential too, and there is nothing to copy
+    // there, so it carries no note.
+    expect(maybe('adopt-credential-note-migrated')).toHaveLength(0);
+    expect(maybe('adopt-credential-note-failed')).toHaveLength(0);
+    // Every credential still renders the label the reply gave it, and the screen
+    // does not reconstruct a source file name from the record.
+    expect(
+      manualGroup
+        .findAllByProps({ className: 'adopt-item-name' })
+        .map((name) => name.props.children)
+    ).toEqual([
+      'Credential file #1',
+      'Credential file #2',
+      'Credential file #3',
+      'config:routing.logging',
+    ]);
+    expect(text()).not.toMatch(/\.(json|key|pem|toml)\b/);
+  }
+);
+
+it('leaves the credential note out when every credential was copied', async () => {
+  await adoptServer({ summaries: [cleanRun] });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  // Both items copied, so there is no file to hunt for and the group stays as
+  // short as its items.
+  expect(maybe('adopt-credential-note-migrated')).toHaveLength(0);
+  expect(maybe('adopt-credential-note-manual')).toHaveLength(0);
+  expect(text()).not.toContain(adoptText('credentialNote'));
+});
+
 it('never claims a complete adoption over a settled run with retryable items', async () => {
   await adoptServer();
   await click('adopt-read-inventory');
@@ -1841,6 +1956,46 @@ it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
     expect(byID('enter-console').props.href).toBe('/console');
   }
 );
+
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'explains the credential record number once in the completion step (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    await completeAdoption(manualCredentials);
+    const block = byID('adopt-remaining-work');
+    // The same sentence as the flow's group, said once for the whole block
+    // rather than under each of the three manual credentials.
+    expect(block.findAllByProps({ 'data-testid': 'adopt-credential-note' })).toHaveLength(1);
+    expect(byID('adopt-credential-note').props.children).toBe(adoptText('credentialNote'));
+    // Its place is above the list it explains, not after it.
+    const noteIndex = block.children.findIndex(
+      (child) => typeof child !== 'string' && child.props['data-testid'] === 'adopt-credential-note'
+    );
+    const listIndex = block.children.findIndex(
+      (child) => typeof child !== 'string' && child.type === 'ul'
+    );
+    expect(noteIndex).toBeGreaterThan(-1);
+    expect(listIndex).toBeGreaterThan(noteIndex);
+    // The items keep the record labels they came in as, and no source file name
+    // is invented anywhere on the step.
+    expect(
+      block.findAllByProps({ className: 'adopt-item-name' }).map((name) => name.props.children)
+    ).toEqual([
+      'Credential file #1',
+      'Credential file #2',
+      'Credential file #3',
+      'config:routing.logging',
+    ]);
+    expect(text()).not.toMatch(/\.(json|key|pem|toml)\b/);
+  }
+);
+
+it('leaves the completion step without the credential note when no credential is left', async () => {
+  await completeAdoption(failedInstallation);
+  const block = byID('adopt-remaining-work');
+  expect(block.findAllByProps({ 'data-testid': 'adopt-credential-note' })).toHaveLength(0);
+  expect(text()).not.toContain(adoptText('credentialNote'));
+});
 
 it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
   'states the failed remainder on the setup completion step (%s)',

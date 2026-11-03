@@ -14,6 +14,7 @@ import { validRuntimeGeneration, type RuntimeGeneration } from './runtimeGenerat
 import { adoptGuidanceText, adoptReasonText, adoptText } from '../i18n/freshAdopt';
 import {
   adoptionCompletionState,
+  needsCredentialFileNote,
   normalizeCPAAddress,
   type AdoptionSummary,
   type AdoptRuntimeTarget,
@@ -706,6 +707,14 @@ export function FreshSetupWizard({
               {complete && adoptionPartial && (
                 <section className="journey-field" data-testid="adopt-remaining-work">
                   <h2 className="form-label">{adoptText('details')}</h2>
+                  {needsCredentialFileNote(adoptionRemainder) && (
+                    // The same sentence as the flow's group: the credentials
+                    // below are record ordinals, so the block says once what the
+                    // number is and how to compare the two auth directories.
+                    <p className="journey-help" data-testid="adopt-credential-note">
+                      {adoptText('credentialNote')}
+                    </p>
+                  )}
                   <ul className="adopt-items">
                     {adoptionRemainder.map((item) => (
                       <li key={item.id} data-testid={`adopt-remaining-${item.id}`}>
