@@ -158,9 +158,11 @@ func (a *freshApplication) startAdoptionMigration(ctx context.Context, identity 
 	}
 	current, started := a.beginAdoptionRun(ctx, identity)
 	if !started {
-		// Not this adoption at committed any more — complete, re-staged or
-		// replaced: a run would write into an installation this replay no longer
-		// describes, so none is started.
+		// Either this record is no longer the committed, unfinished adoption the
+		// replay describes, or its last run already settled with nothing left to
+		// copy. Neither gets a run — the first would write into an installation the
+		// replay no longer describes, the second would reopen a settled run — and
+		// the replay is answered from the durable record as it stands.
 		a.adoptMigrationMu.Unlock()
 		return ""
 	}
@@ -193,11 +195,22 @@ func (a *freshApplication) startAdoptionMigration(ctx context.Context, identity 
 // cleared because the new run has not processed its plan yet. A conflict is
 // another writer having moved the record, which the next attempt resolves; a
 // conflict that survives the retry bound is a record this run must not touch.
+//
+// A record whose last run already settled — finished, every planned item
+// recorded, no retryable item left — starts nothing. Reopening it would burn a
+// generation and clear `Finished`, so an operator who replays the committed
+// strategy before completing the installation could leave a complete-able
+// installation behind if the source has since become unreachable. The replay is
+// answered with the durable record as it stands, and the settled generation is
+// kept; only genuine work (an unfinished or retryable run) gets a new one.
 func (a *freshApplication) beginAdoptionRun(ctx context.Context, identity bootstrap.FreshIdentity) (freshstore.Record, bool) {
 	for range adoptSummaryWriteAttempts {
 		current, err := a.store.Load(ctx)
 		if err != nil || current.Operation.Identity != identity || !adoptionMigrationCommitted(current) {
 			return freshstore.Record{}, false
+		}
+		if current.AdoptionSummary != nil && adoptionMigrationSettled(*current.AdoptionSummary) {
+			return current, false
 		}
 		runID, err := newAdoptionRunID()
 		if err != nil {
@@ -538,6 +551,27 @@ func persistAdoptionSummary(ctx context.Context, a *freshApplication, identity b
 		}
 		return freshstore.ErrConflict
 	}
+}
+
+// adoptionMigrationSettled reports whether the durable summary has no further
+// work for a run to do: the last run reached the end of the plan it fixed and
+// left no retryable item behind.
+//
+// It applies the record's own completion rules — the `Finished`/`Planned` pair
+// and the item-level `Retryable` classification — rather than a parallel
+// predicate, so "settled" here means exactly what the completion accepts as a
+// finished migration. An unfinished run, or one with an item whose source read
+// wrote nothing, still needs a run and gets a new generation.
+func adoptionMigrationSettled(summary freshstore.AdoptionSummary) bool {
+	if !summary.Finished || len(summary.Items) < summary.Planned {
+		return false
+	}
+	for _, item := range summary.Items {
+		if summary.Retryable(item.Item) {
+			return false
+		}
+	}
+	return true
 }
 
 // adoptionMigrationCommitted reports whether one record is still the committed,

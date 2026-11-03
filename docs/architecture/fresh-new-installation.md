@@ -1118,7 +1118,13 @@ record's revision CAS while `adoptMigrationMu` is held — before either endpoin
 client is created and before the reply says `running`. The items and plan the
 record already held are kept, so a resume still continues from its durable
 prefix. A replay that finds a run in flight writes nothing and reuses that run's
-generation. Executor checkpoints carry the `runId` and are refused when the
+generation. A replay that finds the run already settled — `Finished`, every
+planned item recorded and no retryable item left — starts nothing as well: it
+keeps the generation and `Finished` and answers with the durable record, so a
+replay after the source has become unreachable cannot reopen a run and leave a
+complete-able installation refused as `adopt_migration_incomplete`. An
+unfinished run, or one that still carries a retryable item, is real work and gets
+a new generation. Executor checkpoints carry the `runId` and are refused when the
 durable record has moved to another run, so an earlier run cannot overwrite a
 later one. Two runs can leave identical retryable items and counts; the
 generation is what keeps an acknowledgement of one from completing the other. A

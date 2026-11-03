@@ -724,6 +724,134 @@ func TestCommittedReplayResumesWithoutRewritingItems(t *testing.T) {
 	}
 }
 
+// A replay of a settled run has nothing to do: it must not reopen the run. The
+// source is unreachable by then, so a reopened run would stop before writing
+// `Finished` again and leave an installation that could already complete
+// refused as incomplete.
+func TestSettledReplayDoesNotReopenTheRunWhenTheSourceIsUnreachable(t *testing.T) {
+	fixture := settledAdoption(t)
+	before := fixture.reload(t)
+	if before.AdoptionSummary == nil || before.AdoptionSummary.RunID == "" {
+		t.Fatalf("the settled run carries no generation: %+v", before.AdoptionSummary)
+	}
+	writes, uploads := fixture.destination.writeCount(), len(fixture.destination.uploads())
+	// The source goes away after the run settled: a replay that reopened the run
+	// could not finish it.
+	fixture.source.server.Close()
+
+	replay := fixture.strategy(t, before)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay: %d %s", replay.Code, replay.Body.String())
+	}
+	var reply struct {
+		MigrationState string `json:"migrationState"`
+	}
+	if json.Unmarshal(replay.Body.Bytes(), &reply) != nil || reply.MigrationState != "" {
+		t.Fatalf("a settled replay reported a new run: %s", replay.Body.String())
+	}
+	after := fixture.reload(t)
+	if after.AdoptionSummary == nil || !after.AdoptionSummary.Finished {
+		t.Fatalf("a settled replay reopened the run: %+v", after.AdoptionSummary)
+	}
+	if after.AdoptionSummary.RunID != before.AdoptionSummary.RunID {
+		t.Fatalf("a settled replay replaced the generation: %q -> %q",
+			before.AdoptionSummary.RunID, after.AdoptionSummary.RunID)
+	}
+	if got := fixture.destination.writeCount(); got != writes {
+		t.Fatalf("a settled replay wrote %d times", got-writes)
+	}
+	if got := len(fixture.destination.uploads()); got != uploads {
+		t.Fatalf("a settled replay uploaded %d credentials", got-uploads)
+	}
+
+	// The installation still completes. A reopened run would have left it refused
+	// as `adopt_migration_incomplete`.
+	completed := fixture.complete(t)
+	if completed.Code != http.StatusOK {
+		t.Fatalf("completion after a settled replay: %d %s", completed.Code, completed.Body.String())
+	}
+	if !fixture.reload(t).Operation.ProductComplete {
+		t.Fatal("a settled replay left the installation uncompleted")
+	}
+}
+
+// A finished run that still carries a retryable item is real work: a replay
+// starts a new generation and the run continues from the durable prefix.
+func TestRetryableReplayStartsANewGenerationAndContinues(t *testing.T) {
+	fixture := retryableAdoption(t)
+	first := fixture.reload(t)
+	runA := first.AdoptionSummary.RunID
+	// The source becomes readable again, so the resumed run can settle the item
+	// the first one could not read.
+	fixture.source.mu.Lock()
+	fixture.source.downloadFailures["codex-source.json"] = false
+	fixture.source.mu.Unlock()
+
+	replay := fixture.strategy(t, first)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay: %d %s", replay.Code, replay.Body.String())
+	}
+	var reply struct {
+		MigrationState string `json:"migrationState"`
+	}
+	if json.Unmarshal(replay.Body.Bytes(), &reply) != nil || reply.MigrationState != adoptMigrationStateRunning {
+		t.Fatalf("a retryable replay did not start a run: %s", replay.Body.String())
+	}
+	fixture.wait()
+	second := fixture.reload(t)
+	if second.AdoptionSummary == nil || len(second.AdoptionSummary.RunID) != 32 || second.AdoptionSummary.RunID == runA {
+		t.Fatalf("the retryable replay did not start a new generation: %+v", second.AdoptionSummary)
+	}
+	if !second.AdoptionSummary.Finished {
+		t.Fatalf("the resumed run did not settle: %+v", second.AdoptionSummary)
+	}
+	if item, ok := second.AdoptionSummary.Item("credential:codex-source.json"); !ok || item.Outcome != freshstore.AdoptionMigrated {
+		t.Fatalf("the resumed run did not continue the retryable item: %+v", item)
+	}
+	if names := retryableIdentities(second.AdoptionSummary); len(names) != 0 {
+		t.Fatalf("the resumed run left retryable items: %v", names)
+	}
+}
+
+// An unfinished run is real work too: a replay gets a new generation and settles
+// the plan rather than being mistaken for a settled run.
+func TestUnfinishedReplayStartsANewGeneration(t *testing.T) {
+	fixture := settledAdoption(t)
+	before := fixture.reload(t)
+	runA := before.AdoptionSummary.RunID
+	// The shape a stopped run leaves: the recorded list is intact, `Finished` is
+	// false and the plan is one the list never reached.
+	unfinished, err := fixture.app.store.Update(t.Context(), before.Operation.Identity, before.Operation.Revision, func(r *freshstore.Record) error {
+		summary := *r.AdoptionSummary
+		summary.Finished, summary.Planned = false, summary.Planned+1
+		r.AdoptionSummary = &summary
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replay := fixture.strategy(t, unfinished)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay: %d %s", replay.Code, replay.Body.String())
+	}
+	var reply struct {
+		MigrationState string `json:"migrationState"`
+	}
+	if json.Unmarshal(replay.Body.Bytes(), &reply) != nil || reply.MigrationState != adoptMigrationStateRunning {
+		t.Fatalf("an unfinished replay did not start a run: %s", replay.Body.String())
+	}
+	fixture.wait()
+	after := fixture.reload(t)
+	if after.AdoptionSummary == nil || len(after.AdoptionSummary.RunID) != 32 ||
+		after.AdoptionSummary.RunID == runA {
+		t.Fatalf("the unfinished replay did not start a new generation: %+v", after.AdoptionSummary)
+	}
+	if !after.AdoptionSummary.Finished {
+		t.Fatalf("the resumed run did not settle its plan: %+v", after.AdoptionSummary)
+	}
+}
+
 // The source CPA is only ever read: the migration cannot write to it, and the
 // test proves the fake observed no write.
 func TestAdoptionMigrationNeverWritesTheSource(t *testing.T) {
@@ -1272,6 +1400,29 @@ func settledAdoption(t *testing.T) *adoptMigrationFixture {
 	return fixture
 }
 
+// retryableAdoption commits the fixture with one source read the fake refuses,
+// so the finished run still carries a retryable item: the record has work left,
+// and a later replay of it must start a new generation.
+func retryableAdoption(t *testing.T) *adoptMigrationFixture {
+	t.Helper()
+	fixture := newAdoptMigrationFixture(t)
+	fixture.source.mu.Lock()
+	fixture.source.downloadFailures["codex-source.json"] = true
+	fixture.source.mu.Unlock()
+	if response := fixture.strategy(t, fixture.record); response.Code != http.StatusOK {
+		t.Fatalf("commit: %d %s", response.Code, response.Body.String())
+	}
+	fixture.wait()
+	summary := fixture.reload(t).AdoptionSummary
+	if summary == nil || !summary.Finished {
+		t.Fatalf("the migration did not record a finished run: %+v", summary)
+	}
+	if len(retryableIdentities(summary)) == 0 {
+		t.Fatalf("the fixture recorded no retryable item: %+v", summary)
+	}
+	return fixture
+}
+
 // An unfinished migration is not a completed installation: the run never reached
 // every planned item, so the record still describes work the destination has not
 // received.
@@ -1360,9 +1511,10 @@ func TestCompletionAdvancesOverManualItems(t *testing.T) {
 // Every actual run start persists a fresh 128-bit generation through the
 // record's own CAS before any network work, and leaves the durable prefix the
 // run continues from. The generation is what binds an acknowledgement to the
-// run the operator was shown.
+// run the operator was shown. The fixture carries a retryable item, so the run
+// has real work left and is not the settled case that starts nothing.
 func TestRunStartPersistsItsGenerationBeforeAnyWork(t *testing.T) {
-	fixture := settledAdoption(t)
+	fixture := retryableAdoption(t)
 	before := fixture.reload(t)
 	if before.AdoptionSummary == nil || len(before.AdoptionSummary.RunID) != 32 {
 		t.Fatalf("the settled run carries no generation: %+v", before.AdoptionSummary)
@@ -1548,9 +1700,10 @@ func TestCheckpointFromAnEarlierRunCannotOverwriteTheNext(t *testing.T) {
 
 // The durable generation is a persisted fact, not process memory: after a
 // restart the record still names the run whose acknowledgement completion must
-// match.
+// match. The fixture carries a retryable item, so the restart test starts a real
+// run rather than the settled no-op.
 func TestRunGenerationSurvivesAManagerRestart(t *testing.T) {
-	fixture := settledAdoption(t)
+	fixture := retryableAdoption(t)
 	record := fixture.reload(t)
 	if state := fixture.app.startAdoptionMigration(t.Context(), record.Operation.Identity, func(context.Context, freshstore.Record) {}); state != adoptMigrationStateRunning {
 		t.Fatalf("the start reported %q", state)
@@ -1665,7 +1818,7 @@ func TestLegacyRetryableAcknowledgementRequiresAResume(t *testing.T) {
 // before it took the migration lock: a run that started and settled in between
 // replaced the generation, so an acknowledgement of the older run is refused.
 func TestCompletionValidatesTheGenerationOnTheDurableRecord(t *testing.T) {
-	fixture := settledAdoption(t)
+	fixture := retryableAdoption(t)
 	stale := fixture.reload(t)
 	runA := stale.AdoptionSummary.RunID
 	if len(runA) != 32 {
@@ -1683,8 +1836,9 @@ func TestCompletionValidatesTheGenerationOnTheDurableRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The handler's copy still names run A, whose retryable set is empty and
-	// whose run is finished: trusting it would complete the installation.
+	// The handler's copy still names run A: its finished run and the
+	// acknowledgement it matches would complete the installation if that copy
+	// were trusted.
 	fixture.app.adoptMigrationMu.Lock()
 	decision := fixture.app.decideAdoptionCompletion(t.Context(), stale.Operation, managementKey, "", false,
 		adoptCompleteRequest{AcceptRetryable: true, RunID: runA})
