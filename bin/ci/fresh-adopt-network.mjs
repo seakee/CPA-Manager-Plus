@@ -20,7 +20,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRedactor, stderrLines } from './fresh-adopt-redaction.mjs';
 
@@ -141,7 +141,11 @@ export async function runAcceptance(argv = process.argv.slice(2)) {
   const forwarderPath = resolve(secretsDir, 'forwarder.py');
   const controlDir = resolve(secretsDir, 'control');
   const overridePath = resolve(out, 'compose.override.json');
-  const logDir = resolve(root, 'bin/tmp/logs');
+  // The run's saved log lives beside the evidence of the other D runs, in the
+  // repository's scratch tree. The directory is overridable only so a test can
+  // inject a failed write without touching that shared directory; the run still
+  // names its own file inside it.
+  const logDir = resolve(process.env.CPAMP_D_ADOPT_LOG_DIR || resolve(root, 'bin/tmp/logs'));
   const sourceContainer = project + '-cpa';
   const emptyContainer = project + '-cpa-empty';
   const forwarderContainer = project + '-forwarder';
@@ -309,6 +313,12 @@ let composeStarted = false;
 // Filled by the lifecycle's log step before any container is removed, then read
 // by the secret assertion.
 let containerLogs = [];
+// What the log step proved. `null` until it runs; a step that could not read the
+// logs it expected records the reason here, because a container list that could
+// not be read is not an empty one and a log that could not be read is not a log
+// without a secret. The secret assertion is only allowed to say PASS on
+// `status: 'PASS'`.
+let containerLogEvidence = null;
 
 // Cleanup is registered before the first resource exists, in the order the
 // teardown needs. Each step is independent: a failed browser close cannot skip
@@ -318,8 +328,26 @@ lifecycle.add('browser.close', async () => {
   if (browser) await browser.close();
 });
 lifecycle.add('container logs', () => {
-  if (!composeStarted && ownedContainers.size === 0) return;
-  containerLogs = runContainerLogs();
+  // Nothing was created, so there is nothing this run's assertion must cover.
+  if (!composeStarted && ownedContainers.size === 0) {
+    containerLogEvidence = { status: 'PASS', sources: [], failure: null };
+    return;
+  }
+  try {
+    const { sources, logs } = runContainerLogs();
+    containerLogs = logs;
+    containerLogEvidence = { status: 'PASS', sources, failure: null };
+  } catch (error) {
+    // Whatever was read before the failure still passes through the secret
+    // assertion; the failure itself is what the report records.
+    containerLogs = error.partialLogs || [];
+    containerLogEvidence = {
+      status: 'FAIL',
+      sources: [],
+      failure: String(error.message || error).slice(0, 300),
+    };
+    throw error;
+  }
 });
 lifecycle.add('containers', () => {
   if (ownedContainers.size === 0) return;
@@ -610,21 +638,83 @@ function assertNoSecret(where, text) {
     if (value && text.includes(value)) throw new Error('a secret value reached ' + where);
   }
 }
+// The containers this run expects to read logs from, in the two ways they get
+// their names. A container the run started by name must be enumerated exactly;
+// Compose names its own `project-service-index`, so a service of this run's
+// project is present when an enumerated name carries that prefix.
+function expectedLogSources() {
+  const expected = [...ownedContainers].map((name) => ({ name, prefix: false }));
+  if (composeStarted)
+    for (const service of ['cpamp-manager', 'cpamp-runtime', 'cpamp-ingress'])
+      expected.push({ name: project + '-' + service + '-', prefix: true });
+  return expected;
+}
+// Container enumeration and every per-container log read must succeed. This is
+// the evidence the secret assertion rests on, so a command that failed cannot
+// stand in for a command that found nothing: `docker ps` exiting nonzero is not
+// "the run had no containers", and `docker logs` exiting nonzero is not "that
+// container printed nothing". A partial read is attached to the error so the
+// assertion still scans whatever did come back.
 function runContainerLogs() {
-  const names = run(
+  const listed = run(
     // The trailing dash makes this the project's own prefix, not a substring:
     // every container this run created is named `<project>-*`.
     ['docker', 'ps', '-a', '--filter', 'name=' + project + '-', '--format', '{{.Names}}'],
     undefined,
     false
-  )
-    .stdout.trim()
+  );
+  if (listed.status !== 0)
+    throw new Error(
+      'docker ps -a failed (' +
+        listed.status +
+        '): ' +
+        redact(String(listed.stderr || listed.stdout || '').trim()).slice(0, 200)
+    );
+  const sources = listed.stdout
     .split('\n')
+    .map((name) => name.trim())
     .filter(Boolean);
-  return names.map((name) => {
-    const logs = run(['docker', 'logs', name], undefined, false);
-    return { name, text: (logs.stdout || '') + (logs.stderr || '') };
-  });
+  const missing = expectedLogSources().filter(({ name, prefix }) =>
+    prefix ? !sources.some((seen) => seen.startsWith(name)) : !sources.includes(name)
+  );
+  if (missing.length > 0)
+    throw new Error(
+      'the container listing of this run is incomplete: ' + missing.map((source) => source.name).join(' | ')
+    );
+  const logs = [];
+  try {
+    for (const name of sources) {
+      const result = run(['docker', 'logs', name], undefined, false);
+      if (result.status !== 0)
+        throw new Error(
+          'docker logs ' + name + ' failed (' + result.status + '): ' +
+            redact(String(result.stderr || '').trim()).slice(0, 200)
+        );
+      logs.push({ name, text: (result.stdout || '') + (result.stderr || '') });
+    }
+  } catch (error) {
+    error.partialLogs = logs;
+    throw error;
+  }
+  return { sources, logs };
+}
+// The saved log is this run's own artifact: it carries the run suffix as well as
+// the commit, so two runs of the same HEAD are two files instead of one that
+// overwrites the other. The write is exclusive, so an existing file is never
+// replaced even if a name were ever reused. The report records the path it
+// wrote — relative to the repository when it is inside it.
+function saveRunLog() {
+  const name =
+    'd-adopt-' +
+    String(report.gitHead || 'unknown').slice(0, 12) +
+    '-' +
+    runSuffix +
+    '.log';
+  const path = resolve(logDir, name);
+  mkdirSync(logDir, { recursive: true });
+  writeFileSync(path, redact(printed.join('\n')), { mode: 0o600, flag: 'wx' });
+  const recorded = relative(root, path);
+  return recorded.startsWith('..') ? path : recorded;
 }
 function containerLog(container, lines = 200) {
   const logs = run(['docker', 'logs', '--tail', String(lines), container], undefined, false);
@@ -1396,7 +1486,18 @@ try {
     report.result = 'FAIL';
     if (!report.failure) report.failure = 'run cancelled by ' + lifecycle.signals[0];
   }
-  report.secretAssertion = 'PASS';
+  // What the secret assertion is allowed to claim. The log step's own result is
+  // recorded before the assertion reads it: a run that could not read the logs it
+  // expected has not shown that no secret reached them, so it is not a PASS.
+  report.containerLogEvidence = containerLogEvidence?.status || 'NOT COLLECTED';
+  if (containerLogEvidence?.sources?.length > 0)
+    report.containerLogSources = containerLogEvidence.sources;
+  const secretFailures = [];
+  if (containerLogEvidence?.failure) {
+    const failure = redact(containerLogEvidence.failure).slice(0, 300);
+    report.containerLogFailure = failure;
+    secretFailures.push('container log evidence unavailable: ' + failure);
+  }
   try {
     assertNoSecret('the report', JSON.stringify(report));
     assertNoSecret('the run log', printed.join('\n'));
@@ -1407,28 +1508,31 @@ try {
     assertNoSecret('the final output', stderrLines(report).join('\n'));
     for (const { name, text } of containerLogs) assertNoSecret('the logs of ' + name, text);
   } catch (error) {
-    report.secretAssertion = 'FAIL';
-    report.secretFailure = String(error.message);
+    secretFailures.push(String(error.message));
+  }
+  report.secretAssertion = secretFailures.length === 0 ? 'PASS' : 'FAIL';
+  if (secretFailures.length > 0) {
+    report.secretFailure = secretFailures.join('; ');
     report.result = 'FAIL';
   }
   if (outOwned) {
+    // The saved log is part of the artifact, so it settles before the report that
+    // names it. The report is serialized and written exactly once, after every
+    // field is final: a report on disk must never be contradicted by a later
+    // failure the run already knew about.
+    try {
+      report.logPath = saveRunLog();
+    } catch (error) {
+      // A run whose log could not be written has not produced the evidence it
+      // claims; the one report that is written says so instead of claiming a
+      // PASS.
+      report.logWriteFailure = redact(String(error.message || error)).slice(0, 300);
+      report.result = 'FAIL';
+    }
     const serialized = redact(JSON.stringify(report, null, 2));
     for (const value of secretValues)
       assert(!serialized.includes(value), 'a secret reached the serialized report');
     writeFileSync(resolve(out, 'report.json'), serialized, { mode: 0o600 });
-    try {
-      mkdirSync(logDir, { recursive: true });
-      writeFileSync(
-        resolve(logDir, 'd-adopt-' + String(report.gitHead || 'unknown').slice(0, 12) + '.log'),
-        redact(printed.join('\n')),
-        { mode: 0o600 }
-      );
-    } catch (error) {
-      // The saved log is part of the artifact: a run whose log could not be
-      // written has not produced the evidence it claims.
-      report.logWriteFailure = redact(String(error.message || error)).slice(0, 300);
-      report.result = 'FAIL';
-    }
     console.log(redact(report.result + ': ' + resolve(out, 'report.json')));
   } else {
     // mkdirSync refused the directory, so it belongs to an earlier run. The

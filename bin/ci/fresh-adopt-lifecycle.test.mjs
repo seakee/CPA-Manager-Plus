@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { after, describe, it } from 'node:test';
 
@@ -237,95 +237,29 @@ exit 0
     return { bin, dockerLog };
   }
 
-  it('cleans up when the image precondition fails before any Docker resource exists', () => {
-    const root = join(tempRoot, 'precondition');
-    const out = join(root, 'artifact');
-    const dockerLog = join(root, 'docker.log');
-    const { bin } = fakeDocker(root, dockerLog);
-    writeFileSync(dockerLog, '');
-    const before = new Set(readdirSync(join(repoRoot, 'bin/tmp')).filter((name) => name.startsWith(secretsPrefix)));
-    const result = spawnSync(
-      process.execPath,
-      [harnessPath, 'cpampd-probe-runtime', 'cpampd-probe-manager', 'cpampd-probe-ingress', out],
-      {
-        cwd: repoRoot,
-        env: {
-          ...process.env,
-          PATH: bin + ':' + process.env.PATH,
-          CPAMP_LIFECYCLE_DOCKER_LOG: dockerLog,
-          // The browser never starts; a module that cannot be resolved here must
-          // not change what this probe observes.
-          PLAYWRIGHT_MODULE: join(root, 'no-playwright'),
-        },
-        encoding: 'utf8',
-        timeout: 60000,
-      }
-    );
-    assert.equal(result.status, 1, 'a failed prerequisite must exit nonzero');
-    const after = new Set(readdirSync(join(repoRoot, 'bin/tmp')).filter((name) => name.startsWith(secretsPrefix)));
-    assert.deepEqual([...after].filter((name) => !before.has(name)), [], 'a secret directory survived');
-    const reportPath = join(out, 'report.json');
-    assert.equal(existsSync(reportPath), true, 'the redacted artifact was not attempted');
-    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
-    assert.equal(report.result, 'FAIL');
-    assert.equal(report.secretAssertion, 'PASS');
-    assert.equal(report.checkRegistry, 'PASS');
-    assert.match(report.failure, /No such image|image inspect|Command failed/);
-    // The teardown ran no destructive command: no project was ever created, so
-    // there is nothing to remove and nothing outside this run may be touched.
-    const dockerCalls = readFileSync(dockerLog, 'utf8');
-    for (const forbidden of ['prune', ' system ', ' rmi ', ' tag ', ' build ', ' down ', ' rm '])
-      assert.equal(dockerCalls.includes(forbidden), false, 'the teardown ran `' + forbidden.trim() + '`');
-    rmSync(join(repoRoot, 'bin/tmp/logs', 'd-adopt-unknown.log'), { force: true });
-  });
+  const controlledRevision = 'f'.repeat(40);
+  const controlledHead = controlledRevision.slice(0, 12);
 
-  it('does not overwrite an artifact directory it did not create', () => {
-    const root = join(tempRoot, 'artifact-exists');
-    const out = join(root, 'artifact');
-    const dockerLog = join(root, 'docker.log');
-    mkdirSync(out, { recursive: true });
-    writeFileSync(join(out, 'report.json'), '{"result":"PRIOR"}', { mode: 0o600 });
-    const { bin } = fakeDocker(root, dockerLog);
-    writeFileSync(dockerLog, '');
-    const before = new Set(
-      readdirSync(join(repoRoot, 'bin/tmp')).filter((name) => name.startsWith(secretsPrefix))
-    );
-    const result = spawnSync(
-      process.execPath,
-      [harnessPath, 'cpampd-probe-runtime', 'cpampd-probe-manager', 'cpampd-probe-ingress', out],
-      {
-        cwd: repoRoot,
-        env: {
-          ...process.env,
-          PATH: bin + ':' + process.env.PATH,
-          CPAMP_LIFECYCLE_DOCKER_LOG: dockerLog,
-          PLAYWRIGHT_MODULE: join(root, 'no-playwright'),
-        },
-        encoding: 'utf8',
-        timeout: 60000,
-      }
-    );
-    assert.equal(result.status, 1);
-    assert.equal(readFileSync(join(out, 'report.json'), 'utf8'), '{"result":"PRIOR"}', 'an earlier artifact was overwritten');
-    const after = new Set(
-      readdirSync(join(repoRoot, 'bin/tmp')).filter((name) => name.startsWith(secretsPrefix))
-    );
-    assert.deepEqual([...after].filter((name) => !before.has(name)), [], 'a secret directory survived');
-    assert.equal(readFileSync(dockerLog, 'utf8').trim(), '', 'the refused run touched a command');
-  });
+  // The secrets directories this run may leave behind. Read from the repository's
+  // scratch tree, which is where the script creates them; a checkout without that
+  // directory has none.
+  function secretDirectories() {
+    const dir = join(repoRoot, 'bin/tmp');
+    return existsSync(dir) ? readdirSync(dir).filter((name) => name.startsWith(secretsPrefix)) : [];
+  }
 
-  it('removes the secret directory when Compose down itself fails', async () => {
-    const root = join(tempRoot, 'teardown-cli');
-    const out = join(root, 'artifact');
-    const dockerLog = join(root, 'docker.log');
-    const revision = 'f'.repeat(40);
+  function savedLogNames(dir) {
+    return existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith('.log')) : [];
+  }
+
+  // A complete adapter for the runs that must take the script's own teardown. The
+  // container listing is derived from the filter the script itself passes, so this
+  // run's random project is enumerated without the test naming it in advance. The
+  // fault switches are environment flags: one adapter serves every injected
+  // failure, and each run is a controlled probe, not a Docker D run.
+  function completeAdapter(root) {
     const bin = join(root, 'bin');
     mkdirSync(bin, { recursive: true });
-    writeFileSync(dockerLog, '');
-    // A complete adapter: image inspect and the revision check pass, Compose
-    // answers, and only `down` fails. That takes the real script past its
-    // prerequisites with real containers in its owned set, so the teardown path
-    // under test is the script's own wiring, not the fixture's.
     writeFileSync(
       join(bin, 'docker'),
       `#!/bin/sh
@@ -337,9 +271,20 @@ case " $* " in
       *) printf '[{"Os":"linux","Architecture":"amd64","Id":"sha256:1111","Config":{"Labels":{"org.opencontainers.image.revision":"%s"}}}]\\n' "$FAKE_REVISION"; exit 0;;
     esac;;
   *" compose "*" ps -q cpamp-ingress"*) printf 'fake-ingress-id\\n'; exit 0;;
-  *" down "*) echo 'compose down refused' >&2; exit 1;;
-  *" ps -a "*) exit 0;;
-  *" inspect "*) printf '[{"NetworkSettings":{"Ports":{"18317/tcp":[{"HostIp":"127.0.0.1","HostPort":"%s"}]},"Networks":{"fake-net":{}}}}]\\n' "$FAKE_PORT"; exit 0;;
+  *" ps -a "*)
+    if [ "$CPAMP_FAKE_PS_FAILS" = 1 ]; then echo 'the container listing refused' >&2; exit 1; fi
+    prefix=$(printf '%s\\n' "$*" | sed -n 's/.*name=\\([^ ]*\\).*/\\1/p')
+    printf '%s\\n' "\${prefix}cpamp-manager-1" "\${prefix}cpamp-runtime-1" "\${prefix}cpamp-ingress-1" "\${prefix}cpa" "\${prefix}cpa-empty" "\${prefix}forwarder"
+    exit 0;;
+  " logs "*)
+    if [ "$CPAMP_FAKE_LOGS_FAILS" = 1 ]; then echo 'the container log refused' >&2; exit 1; fi
+    echo 'container log line'
+    exit 0;;
+  *" down "*)
+    if [ "$CPAMP_FAKE_DOWN_FAILS" = 1 ]; then echo 'compose down refused' >&2; exit 1; fi
+    exit 0;;
+  *" inspect "*)
+    printf '[{"NetworkSettings":{"Ports":{"18317/tcp":[{"HostIp":"127.0.0.1","HostPort":"%s"}]},"Networks":{"fake-net":{}}}}]\\n' "$FAKE_PORT"; exit 0;;
 esac
 exit 0
 `,
@@ -356,16 +301,87 @@ exit 0
 `,
       { mode: 0o700 }
     );
+    return bin;
+  }
+
+  // One controlled run of the real CLI, from its prerequisites into its own
+  // teardown. `logDir` lets a test place — or block — the saved log without
+  // touching the shared directory real runs write to.
+  async function runControlled(name, { env = {}, logDir: logDirOverride } = {}) {
+    const caseDir = join(tempRoot, 'controlled', name);
+    const out = join(caseDir, 'artifact');
+    const logDir = logDirOverride || join(caseDir, 'logs');
+    const dockerLog = join(caseDir, 'docker.log');
+    mkdirSync(caseDir, { recursive: true });
+    writeFileSync(dockerLog, '');
+    const bin = completeAdapter(caseDir);
+    // The bootstrap probe only needs an answer: the run stops at its first check,
+    // which is long before a browser or a real Manager is needed.
     const server = createServer((request, response) => {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end('{}');
     });
     await new Promise((done) => server.listen(0, '127.0.0.1', done));
     const port = server.address().port;
-    const before = new Set(
-      readdirSync(join(repoRoot, 'bin/tmp')).filter((name) => name.startsWith(secretsPrefix))
-    );
-    const child = spawn(
+    const before = new Set(secretDirectories());
+    try {
+      const child = spawn(
+        process.execPath,
+        [harnessPath, 'cpampd-probe-runtime', 'cpampd-probe-manager', 'cpampd-probe-ingress', out],
+        {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            PATH: bin + ':' + process.env.PATH,
+            CPAMP_LIFECYCLE_DOCKER_LOG: dockerLog,
+            CPAMP_D_ADOPT_LOG_DIR: logDir,
+            PLAYWRIGHT_MODULE: join(caseDir, 'no-playwright'),
+            FAKE_REVISION: controlledRevision,
+            FAKE_PORT: String(port),
+            ...env,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }
+      );
+      const output = [];
+      child.stdout.on('data', (chunk) => output.push(String(chunk)));
+      child.stderr.on('data', (chunk) => output.push(String(chunk)));
+      let timer;
+      const exit = await Promise.race([
+        waitForExit(child),
+        new Promise((done, fail) => {
+          timer = setTimeout(() => {
+            child.kill('SIGKILL');
+            fail(new Error('the controlled run did not exit'));
+          }, 60000);
+        }),
+      ]);
+      clearTimeout(timer);
+      const reportPath = join(out, 'report.json');
+      const report = existsSync(reportPath) ? JSON.parse(readFileSync(reportPath, 'utf8')) : null;
+      return {
+        exit,
+        out,
+        logDir,
+        report,
+        output: output.join(''),
+        calls: readFileSync(dockerLog, 'utf8').trim().split('\n').filter(Boolean),
+        survivedSecrets: secretDirectories().filter((entry) => !before.has(entry)),
+      };
+    } finally {
+      await new Promise((done) => server.close(done));
+    }
+  }
+
+  it('cleans up when the image precondition fails before any Docker resource exists', () => {
+    const root = join(tempRoot, 'precondition');
+    const out = join(root, 'artifact');
+    const logDir = join(root, 'logs');
+    const dockerLog = join(root, 'docker.log');
+    const { bin } = fakeDocker(root, dockerLog);
+    writeFileSync(dockerLog, '');
+    const before = new Set(secretDirectories());
+    const result = spawnSync(
       process.execPath,
       [harnessPath, 'cpampd-probe-runtime', 'cpampd-probe-manager', 'cpampd-probe-ingress', out],
       {
@@ -374,38 +390,94 @@ exit 0
           ...process.env,
           PATH: bin + ':' + process.env.PATH,
           CPAMP_LIFECYCLE_DOCKER_LOG: dockerLog,
+          CPAMP_D_ADOPT_LOG_DIR: logDir,
+          // The browser never starts; a module that cannot be resolved here must
+          // not change what this probe observes.
           PLAYWRIGHT_MODULE: join(root, 'no-playwright'),
-          FAKE_REVISION: revision,
-          FAKE_PORT: String(port),
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
+        encoding: 'utf8',
+        timeout: 60000,
       }
     );
-    const exitPromise = waitForExit(child);
-    let timer;
-    const timedOut = new Promise((done, fail) => {
-      timer = setTimeout(() => {
-        child.kill('SIGKILL');
-        fail(new Error('the CLI probe did not exit'));
-      }, 30000);
-    });
-    const exit = await Promise.race([exitPromise, timedOut]);
-    clearTimeout(timer);
-    await new Promise((done) => server.close(done));
-    assert.equal(exit.signal, null);
-    assert.equal(exit.code, 1, 'a failed teardown must exit nonzero');
-    const after = new Set(
-      readdirSync(join(repoRoot, 'bin/tmp')).filter((name) => name.startsWith(secretsPrefix))
-    );
+    assert.equal(result.status, 1, 'a failed prerequisite must exit nonzero');
+    const after = new Set(secretDirectories());
     assert.deepEqual([...after].filter((name) => !before.has(name)), [], 'a secret directory survived');
-    const report = JSON.parse(readFileSync(join(out, 'report.json'), 'utf8'));
+    const reportPath = join(out, 'report.json');
+    assert.equal(existsSync(reportPath), true, 'the redacted artifact was not attempted');
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.equal(report.result, 'FAIL');
+    assert.equal(report.secretAssertion, 'PASS');
+    assert.equal(report.containerLogEvidence, 'PASS');
+    assert.equal(report.checkRegistry, 'PASS');
+    assert.match(report.failure, /No such image|image inspect|Command failed/);
+    // The teardown ran no destructive command: no project was ever created, so
+    // there is nothing to remove and nothing outside this run may be touched.
+    const dockerCalls = readFileSync(dockerLog, 'utf8');
+    for (const forbidden of ['prune', ' system ', ' rmi ', ' tag ', ' build ', ' down ', ' rm '])
+      assert.equal(dockerCalls.includes(forbidden), false, 'the teardown ran `' + forbidden.trim() + '`');
+    // The saved log is this run's own file, named for the run as well as the
+    // head, and the probe removes only the file the report names.
+    assert.equal(typeof report.logPath, 'string', 'the report does not name its saved log');
+    const savedLog = resolve(repoRoot, report.logPath);
+    assert.equal(dirname(savedLog), logDir);
+    assert.match(basename(savedLog), /^d-adopt-unknown-[0-9a-f]{12}\.log$/);
+    assert.match(readFileSync(savedLog, 'utf8'), /NOT RUN/, 'the saved log does not record this run');
+    rmSync(savedLog);
+    assert.deepEqual(savedLogNames(logDir), [], 'the probe left a saved log behind');
+  });
+
+  it('does not overwrite an artifact directory it did not create', () => {
+    const root = join(tempRoot, 'artifact-exists');
+    const out = join(root, 'artifact');
+    const logDir = join(root, 'logs');
+    const dockerLog = join(root, 'docker.log');
+    mkdirSync(out, { recursive: true });
+    writeFileSync(join(out, 'report.json'), '{"result":"PRIOR"}', { mode: 0o600 });
+    const { bin } = fakeDocker(root, dockerLog);
+    writeFileSync(dockerLog, '');
+    const before = new Set(secretDirectories());
+    const result = spawnSync(
+      process.execPath,
+      [harnessPath, 'cpampd-probe-runtime', 'cpampd-probe-manager', 'cpampd-probe-ingress', out],
+      {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          PATH: bin + ':' + process.env.PATH,
+          CPAMP_LIFECYCLE_DOCKER_LOG: dockerLog,
+          CPAMP_D_ADOPT_LOG_DIR: logDir,
+          PLAYWRIGHT_MODULE: join(root, 'no-playwright'),
+        },
+        encoding: 'utf8',
+        timeout: 60000,
+      }
+    );
+    assert.equal(result.status, 1);
+    assert.equal(readFileSync(join(out, 'report.json'), 'utf8'), '{"result":"PRIOR"}', 'an earlier artifact was overwritten');
+    const after = new Set(secretDirectories());
+    assert.deepEqual([...after].filter((name) => !before.has(name)), [], 'a secret directory survived');
+    assert.equal(readFileSync(dockerLog, 'utf8').trim(), '', 'the refused run touched a command');
+    // A refused run writes no report, so it saves no log either: the artifact it
+    // did not own is the only thing its evidence could have touched.
+    assert.deepEqual(savedLogNames(logDir), [], 'the refused run saved a log beside its own artifact');
+  });
+
+  it('removes the secret directory when Compose down itself fails', async () => {
+    const run = await runControlled('teardown-cli', { env: { CPAMP_FAKE_DOWN_FAILS: '1' } });
+    assert.equal(run.exit.signal, null);
+    assert.equal(run.exit.code, 1, 'a failed teardown must exit nonzero');
+    assert.deepEqual(run.survivedSecrets, [], 'a secret directory survived');
+    const { report, calls } = run;
     assert.equal(report.result, 'FAIL', 'a failed teardown was reported as a PASS');
+    // The container logs were read, so the secret assertion was allowed to claim
+    // PASS despite an unrelated teardown failure.
+    assert.equal(report.containerLogEvidence, 'PASS');
+    assert.equal(report.secretAssertion, 'PASS');
     assert.deepEqual(
       report.teardown.map(({ step }) => step),
       ['compose down']
     );
     assert.match(report.teardown[0].message, /compose down refused/);
-    const calls = readFileSync(dockerLog, 'utf8').trim().split('\n').filter(Boolean);
     const composeLine = calls.find((line) => line.startsWith('compose ') && line.includes(' -p '));
     assert(composeLine, 'the run never owned a Compose project: ' + calls.join(' | '));
     const project = composeLine.split(' ')[composeLine.split(' ').indexOf('-p') + 1];
@@ -418,8 +490,128 @@ exit 0
     assert(downLine, 'the owned Compose project was never taken down: ' + calls.join(' | '));
     assert(downLine.includes(' -p ' + project + ' '), 'the teardown named another project');
     for (const forbidden of ['prune', ' system ', ' rmi ', ' tag ', ' build '])
-      assert.equal(readFileSync(dockerLog, 'utf8').includes(forbidden), false, 'the probe ran `' + forbidden.trim() + '`');
-    rmSync(join(repoRoot, 'bin/tmp/logs', 'd-adopt-' + revision.slice(0, 12) + '.log'), { force: true });
+      assert.equal(calls.join('\n').includes(forbidden), false, 'the probe ran `' + forbidden.trim() + '`');
+    // The saved log is this run's own file, and the test removes only that file.
+    const savedLog = resolve(repoRoot, report.logPath);
+    assert.equal(dirname(savedLog), run.logDir);
+    assert.match(basename(savedLog), new RegExp('^d-adopt-' + controlledHead + '-[0-9a-f]{12}\\.log$'));
+    assert.match(readFileSync(savedLog, 'utf8'), /FAIL/);
+    rmSync(savedLog);
+    assert.deepEqual(savedLogNames(run.logDir), []);
+  });
+
+  it('fails the persisted report when the log directory cannot be created', async () => {
+    const caseDir = join(tempRoot, 'controlled', 'log-dir-failure');
+    mkdirSync(caseDir, { recursive: true });
+    // A regular file where the log directory's parent must be: creating the
+    // directory itself fails, which used to happen after the report had already
+    // claimed its result on disk.
+    writeFileSync(join(caseDir, 'logs'), 'not a directory');
+    const blocked = join(caseDir, 'logs', 'nested');
+    const run = await runControlled('log-dir-failure', { logDir: blocked });
+    assert.equal(run.exit.signal, null);
+    assert.equal(run.exit.code, 1, 'a run that saved no log must exit nonzero');
+    assert.notEqual(run.report, null, 'the run wrote no report at all');
+    assert.equal(run.report.result, 'FAIL', 'the persisted report claims a result the run did not have');
+    assert.equal(typeof run.report.logWriteFailure, 'string', 'the persisted report does not say the log is missing');
+    assert.match(run.report.logWriteFailure, /ENOTDIR|not a directory/i);
+    assert.equal(run.report.logPath, undefined, 'a report that saved no log names one');
+  });
+
+  it('fails the persisted report when the saved log cannot be written', async () => {
+    const caseDir = join(tempRoot, 'controlled', 'log-write-failure');
+    const logDir = join(caseDir, 'logs');
+    mkdirSync(logDir, { recursive: true });
+    chmodSync(logDir, 0o500);
+    try {
+      const run = await runControlled('log-write-failure', { logDir });
+      assert.equal(run.exit.code, 1, 'a run that saved no log must exit nonzero');
+      assert.notEqual(run.report, null, 'the run wrote no report at all');
+      assert.equal(run.report.result, 'FAIL', 'the persisted report claims a result the run did not have');
+      assert.equal(typeof run.report.logWriteFailure, 'string', 'the persisted report does not say the log is missing');
+      assert.match(run.report.logWriteFailure, /EACCES|permission denied/i);
+      assert.equal(run.report.logPath, undefined, 'a report that saved no log names one');
+      assert.deepEqual(savedLogNames(logDir), []);
+    } finally {
+      chmodSync(logDir, 0o700);
+    }
+  });
+
+  it('does not assert a secret-free run when the container listing cannot be read', async () => {
+    const run = await runControlled('container-listing-failure', { env: { CPAMP_FAKE_PS_FAILS: '1' } });
+    assert.equal(run.exit.code, 1);
+    const { report } = run;
+    assert.equal(report.result, 'FAIL');
+    // The assertion scans every container log of the run; a listing that failed is
+    // not a listing that found nothing, so it cannot end as a PASS.
+    assert.notEqual(report.secretAssertion, 'PASS', 'a run with no container logs asserted a secret-free PASS');
+    assert.equal(report.containerLogEvidence, 'FAIL');
+    assert.match(report.containerLogFailure, /docker ps -a failed/);
+    assert.match(report.secretFailure, /container log evidence unavailable/);
+    assert.deepEqual(
+      report.teardown.map(({ step }) => step),
+      ['container logs']
+    );
+    // The evidence failure does not stop cleanup: the containers and the project
+    // are still removed, in their own steps.
+    assert(run.calls.some((line) => line.startsWith('rm -f ')), 'the owned containers were not removed');
+    assert(
+      run.calls.some((line) => line.startsWith('compose ') && line.includes(' down ')),
+      'the owned project was not taken down'
+    );
+    assert.deepEqual(run.survivedSecrets, []);
+  });
+
+  it('does not assert a secret-free run when a container log cannot be read', async () => {
+    const run = await runControlled('container-log-failure', { env: { CPAMP_FAKE_LOGS_FAILS: '1' } });
+    assert.equal(run.exit.code, 1);
+    const { report } = run;
+    assert.equal(report.result, 'FAIL');
+    assert.notEqual(report.secretAssertion, 'PASS', 'a run that could not read a log asserted a secret-free PASS');
+    assert.equal(report.containerLogEvidence, 'FAIL');
+    assert.match(report.containerLogFailure, /docker logs .+ failed/);
+    assert.match(report.secretFailure, /container log evidence unavailable/);
+    assert.deepEqual(
+      report.teardown.map(({ step }) => step),
+      ['container logs']
+    );
+    assert(run.calls.some((line) => line.startsWith('rm -f ')), 'the owned containers were not removed');
+    assert(
+      run.calls.some((line) => line.startsWith('compose ') && line.includes(' down ')),
+      'the owned project was not taken down'
+    );
+    assert.deepEqual(run.survivedSecrets, []);
+  });
+
+  it('saves a distinct log for each run of the same head', async () => {
+    const caseDir = join(tempRoot, 'controlled', 'same-head');
+    const logDir = join(caseDir, 'logs');
+    mkdirSync(logDir, { recursive: true });
+    // A log an earlier run left behind: neither run may overwrite it, and the
+    // cleanup below removes only the two files these two runs created.
+    const unrelated = join(logDir, 'd-adopt-' + controlledHead + '-000000000000.log');
+    writeFileSync(unrelated, 'an earlier run\n', { mode: 0o600 });
+    const first = await runControlled('same-head-1', { logDir });
+    const second = await runControlled('same-head-2', { logDir });
+    for (const run of [first, second]) {
+      assert.equal(run.exit.code, 1);
+      assert.equal(typeof run.report.logPath, 'string', 'the report does not name its saved log');
+      assert.equal(dirname(resolve(repoRoot, run.report.logPath)), logDir);
+    }
+    const firstLog = resolve(repoRoot, first.report.logPath);
+    const secondLog = resolve(repoRoot, second.report.logPath);
+    assert.notEqual(firstLog, secondLog, 'two runs of the same head share one log file');
+    assert.match(readFileSync(firstLog, 'utf8'), /FAIL/);
+    assert.match(readFileSync(secondLog, 'utf8'), /FAIL/);
+    assert.equal(readFileSync(unrelated, 'utf8'), 'an earlier run\n', 'a run overwrote an unrelated log');
+    assert.deepEqual(
+      savedLogNames(logDir).sort(),
+      [basename(unrelated), basename(firstLog), basename(secondLog)].sort()
+    );
+    rmSync(firstLog);
+    rmSync(secondLog);
+    assert.equal(existsSync(unrelated), true, 'cleanup removed a log it did not create');
+    rmSync(unrelated);
   });
 
   it('imports without creating anything or touching a command', () => {
@@ -427,7 +619,7 @@ exit 0
     const dockerLog = join(root, 'docker.log');
     const { bin } = fakeDocker(root, dockerLog);
     writeFileSync(dockerLog, '');
-    const before = new Set(readdirSync(join(repoRoot, 'bin/tmp')).filter((name) => name.startsWith(secretsPrefix)));
+    const before = new Set(secretDirectories());
     const result = spawnSync(
       process.execPath,
       [
@@ -450,7 +642,7 @@ exit 0
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout.trim(), 'function function');
     assert.equal(readFileSync(dockerLog, 'utf8'), '', 'importing the harness ran a command');
-    const after = new Set(readdirSync(join(repoRoot, 'bin/tmp')).filter((name) => name.startsWith(secretsPrefix)));
+    const after = new Set(secretDirectories());
     assert.deepEqual([...after].filter((name) => !before.has(name)), [], 'importing the harness created a secret directory');
   });
 });
