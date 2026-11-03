@@ -65,7 +65,7 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	before, err := digestDatabaseFiles(databasePath)
+	before, err := digestDatabaseFiles(ctx, databasePath)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +77,7 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	copied, err := copyDatabaseFiles(ctx, databasePath, dir)
 	if err == nil {
 		var after map[string]databaseFileDigest
-		if after, err = digestDatabaseFiles(databasePath); err == nil {
+		if after, err = digestDatabaseFiles(ctx, databasePath); err == nil {
 			if !sameDigests(before, after) || !sameDigests(before, copied) {
 				err = ErrSourceChanged
 			}
@@ -234,9 +234,12 @@ func snapshotDataSourceName(path string) string {
 // digestDatabaseFiles hashes the database and every sidecar that exists. A
 // missing database is reported as the missing-source condition; missing
 // sidecars are normal for a cleanly stopped writer.
-func digestDatabaseFiles(databasePath string) (map[string]databaseFileDigest, error) {
+func digestDatabaseFiles(ctx context.Context, databasePath string) (map[string]databaseFileDigest, error) {
 	digests := make(map[string]databaseFileDigest, len(databaseSidecars))
 	for _, suffix := range databaseSidecars {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		path := databasePath + suffix
 		info, err := os.Lstat(path)
 		if os.IsNotExist(err) {
@@ -248,7 +251,7 @@ func digestDatabaseFiles(databasePath string) (map[string]databaseFileDigest, er
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("database file %s is not a regular file", filepath.Base(path))
 		}
-		digest, err := fileContentDigest(path)
+		digest, err := fileContentDigest(ctx, path)
 		if err != nil {
 			return nil, err
 		}
@@ -279,9 +282,9 @@ func copyDatabaseFiles(ctx context.Context, databasePath string, destination str
 		if !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("database file %s is not a regular file", filepath.Base(sourcePath))
 		}
-		digest, size, err := copyFileWithDigest(sourcePath, filepath.Join(destination, filepath.Base(sourcePath)))
+		digest, size, err := copyFileWithDigest(ctx, sourcePath, filepath.Join(destination, filepath.Base(sourcePath)))
 		if err != nil {
-			return nil, fmt.Errorf("%w: %s", ErrSnapshotFailed, rootCause(err))
+			return nil, snapshotCopyFailure(err)
 		}
 		copied[suffix] = databaseFileDigest{size: size, digest: digest}
 	}
@@ -291,7 +294,19 @@ func copyDatabaseFiles(ctx context.Context, databasePath string, destination str
 	return copied, nil
 }
 
-func copyFileWithDigest(sourcePath string, destinationPath string) (string, int64, error) {
+// snapshotCopyFailure labels a failed copy as a snapshot failure without
+// destroying the reason. Cancellation keeps its identity: stringifying it would
+// turn an interrupted run into a suspicious source, and the caller could no
+// longer tell the two apart. Every other cause stays a short, path-free
+// description for the report.
+func snapshotCopyFailure(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(ErrSnapshotFailed, err)
+	}
+	return fmt.Errorf("%w: %s", ErrSnapshotFailed, rootCause(err))
+}
+
+func copyFileWithDigest(ctx context.Context, sourcePath string, destinationPath string) (string, int64, error) {
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return "", 0, err
@@ -302,7 +317,7 @@ func copyFileWithDigest(sourcePath string, destinationPath string) (string, int6
 		return "", 0, err
 	}
 	digest := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(destination, digest), source)
+	written, copyErr := copyChunks(ctx, io.MultiWriter(destination, digest), source)
 	closeErr := destination.Close()
 	if copyErr != nil || closeErr != nil {
 		return "", 0, errors.Join(copyErr, closeErr)

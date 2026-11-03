@@ -660,7 +660,7 @@ func TestPreflightReadsUncheckpointedWalRows(t *testing.T) {
 
 func mustDigest(t *testing.T, path string) string {
 	t.Helper()
-	digest, err := fileContentDigest(path)
+	digest, err := fileContentDigest(context.Background(), path)
 	if err != nil {
 		t.Fatalf("digest %s: %v", filepath.Base(path), err)
 	}
@@ -696,7 +696,28 @@ func TestPreflightReportsMissingLockFile(t *testing.T) {
 		t.Fatalf("remove lock file: %v", err)
 	}
 	report := preflight(t, fixture.root, declared())
-	requireBlocked(t, report, CodeSourceBusy)
+	// A missing ownership marker is not lock contention: no running Manager
+	// holds it, so the busy code would tell an automated caller to stop a
+	// process that does not exist. It is an unusable source instead.
+	requireBlocked(t, report, CodeSourceUnreadable)
+	// Without the fence the source is never profiled, so it stays unknown
+	// rather than being described from an unfenced read.
+	if report.SourceKind != SourceKindUnknown {
+		t.Fatalf("source kind = %q, want %q", report.SourceKind, SourceKindUnknown)
+	}
+	check, found := checkByName(report, CheckSourceOwnership)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceUnreadable {
+		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceUnreadable)
+	}
+	if !strings.Contains(check.Detail, "lock file is missing") {
+		t.Fatalf("ownership detail %q does not name the missing marker", check.Detail)
+	}
+	if _, err := os.Lstat(fixture.dbPath + ".manager.lock"); !os.IsNotExist(err) {
+		t.Fatalf("preflight created a source lock file: %v", err)
+	}
+	if report.Fingerprint != "" {
+		t.Fatal("an unfenced source reported a fingerprint")
+	}
 }
 
 func TestPreflightReportsMissingDatabase(t *testing.T) {
@@ -705,11 +726,18 @@ func TestPreflightReportsMissingDatabase(t *testing.T) {
 	if report.SourceKind != SourceKindMissingDatabase {
 		t.Fatalf("source kind = %q, want %q", report.SourceKind, SourceKindMissingDatabase)
 	}
-	// An empty directory has neither the ownership marker nor the database; the
-	// first failing condition is the ownership fence.
-	requireBlocked(t, report, CodeSourceBusy)
-	if check, found := checkByName(report, CheckSourceOwnership); !found || check.Status != StatusBlocked {
-		t.Fatalf("ownership check = %+v, want blocked", check)
+	// An empty directory has neither the ownership marker nor the database;
+	// the missing database, not a lock conflict, is what blocks it.
+	requireBlocked(t, report, CodeSourceUnreadable)
+	check, found := checkByName(report, CheckSourceOwnership)
+	if !found || check.Status != StatusBlocked || check.Code != CodeSourceUnreadable {
+		t.Fatalf("ownership check = %+v, want blocked %s", check, CodeSourceUnreadable)
+	}
+	if !strings.Contains(check.Detail, "source database is missing") {
+		t.Fatalf("ownership detail %q does not say the database is missing", check.Detail)
+	}
+	if _, err := os.Lstat(filepath.Join(root, databaseFileName+".manager.lock")); !os.IsNotExist(err) {
+		t.Fatalf("preflight created a source lock file: %v", err)
 	}
 }
 
@@ -1094,6 +1122,11 @@ func TestPreflightParityDetectsProjectionlessRefOnly(t *testing.T) {
 	if check.Status != StatusGap {
 		t.Fatalf("parity check status = %q, want %q", check.Status, StatusGap)
 	}
+	// A computable gap is operator information, not a failed inspection: it
+	// asks for a later explicit decision and never blocks the source.
+	if !report.Ready {
+		t.Fatalf("a computable parity gap blocked the source: blocked = %v", report.Blocked)
+	}
 }
 
 func TestPreflightParityDetectsMismatchedProjectionAndWatermark(t *testing.T) {
@@ -1145,6 +1178,11 @@ func TestPreflightParityDetectsStaleSameTimestampProjection(t *testing.T) {
 	check, _ := checkByName(report, CheckParity)
 	if check.Status != StatusGap {
 		t.Fatalf("parity check status = %q, want %q", check.Status, StatusGap)
+	}
+	// A computable gap is operator information, not a failed inspection: it
+	// asks for a later explicit decision and never blocks the source.
+	if !report.Ready {
+		t.Fatalf("a computable parity gap blocked the source: blocked = %v", report.Blocked)
 	}
 }
 
@@ -1262,7 +1300,7 @@ func snapshotTree(t *testing.T, root string) map[string]string {
 			snapshot[relative+string(filepath.Separator)] = ""
 			return nil
 		}
-		digest, err := fileContentDigest(path)
+		digest, err := fileContentDigest(context.Background(), path)
 		if err != nil {
 			return err
 		}
