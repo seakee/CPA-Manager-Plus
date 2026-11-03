@@ -55,27 +55,27 @@ export type AdoptionOutcome = 'migrated' | 'manual' | 'failed' | 'absent_at_sour
 /**
  * One recorded per-item result.
  *
- * `item` is the record's item name after the server's output boundary, so it can
- * still be a credential file name the source CPA chose. The server scrubs the
- * credential shapes it knows and replaces the source values it read — and every
- * recognisable fragment of one, because a truncated name can carry half a value.
- * A source credential shorter than eight bytes is not replaced: that is the
- * boundary's documented limit, so this text is scrubbed, not proven value-free.
- * An overlong name keeps a readable prefix and an ellipsis where it was cut; the
- * digest the record keeps for the whole name is dropped, so this text cannot
- * confirm a guessed name either.
- * It never carries the record's free-text instruction: the page states the next
- * step from `kind` and `reason`, so upstream metadata cannot reach the screen as
- * prose.
+ * The reply is a projection, not the record: the Manager chooses every field at
+ * its output boundary. A credential item is described by the Manager's own
+ * generic credential label plus its stable ordinal, never by the source file
+ * name and never by a digest of it. A non-credential item keeps a canonical
+ * reference from the Manager's closed vocabulary; upstream or free text does not
+ * flow through on the strength of a prefix match. So `item` is a product label,
+ * not a value the source wrote, and it cannot confirm a guessed credential
+ * offline.
  *
- * `id` is the record's identity for the item, a digest of this scrubbed text and
- * the item's ordinal in the record: two token-shaped names scrub to the same
- * string, and an acknowledgement has to be about the record's item rather than
- * about text that happens to be equal. It is not a digest of the record's own
- * name, so it cannot be used to confirm a guessed credential offline.
+ * `id` is the record's public identity for the item. It derives only from that
+ * public label and the item's ordinal in the record: two items whose labels
+ * coincide are still two items, and an acknowledgement has to be about the
+ * record's item rather than about text that happens to be equal. It carries no
+ * source name or name digest either.
  *
  * `left` is how many source items the record could not hold at all, set on the
  * aggregate excess marker only.
+ *
+ * The item never carries the record's free-text instruction: the page states the
+ * next step from `kind` and `reason`, so upstream metadata cannot reach the
+ * screen as prose.
  */
 export interface AdoptionItem {
   id: string;
@@ -108,6 +108,14 @@ export interface AdoptionDecision {
 
 /** The recorded progress of one run plus the live in-flight flag. */
 export interface AdoptionSummary {
+  /**
+   * The identity of the run these items belong to: 32 lowercase hex assigned
+   * when the run started and persisted with it. Every actual start is a new
+   * identity even when it rediscovers the same items and counts. A legacy record
+   * written before run identity existed parses as the empty string; it cannot be
+   * acknowledged and has to be resumed into a tracked run first.
+   */
+  runId: string;
   items: AdoptionItem[];
   planned: number;
   finished: boolean;
@@ -180,6 +188,11 @@ export function parseAdoptionSummary(value: unknown): AdoptionSummary {
   if (
     !reply ||
     typeof reply !== 'object' ||
+    // Only a legacy record may omit the run identity; a present value has to be
+    // the exact opaque identity the Manager assigns, never a placeholder.
+    (reply.runId !== undefined &&
+      (typeof reply.runId !== 'string' ||
+        (reply.runId !== '' && !/^[a-f0-9]{32}$/.test(reply.runId)))) ||
     !Array.isArray(reply.items) ||
     !count(reply.planned) ||
     typeof reply.finished !== 'boolean' ||
@@ -219,6 +232,7 @@ export function parseAdoptionSummary(value: unknown): AdoptionSummary {
     };
   });
   return {
+    runId: reply.runId ?? '',
     items,
     planned: reply.planned,
     finished: reply.finished,
@@ -256,6 +270,19 @@ export function normalizeCPAAddress(value: string): string {
 /** A management key is a bearer secret the browser holds in memory only. */
 export function validManagementKey(value: string): boolean {
   return !!value && value.length <= 4096 && !/[\s\p{Cc}]/u.test(value);
+}
+
+/**
+ * The completion body.
+ *
+ * An ordinary completion is `{}`. Only an operator who accepted the retryable
+ * items sends an acknowledgement, and that acknowledgement names the durable run
+ * it was given for: a newer run with the same items and counts must ask again,
+ * and the server refuses a mismatched identity with `adopt_migration_run_changed`.
+ */
+export interface AdoptCompletionBody {
+  acceptRetryable?: true;
+  runId?: string;
 }
 
 /** The destination this Manager owns, observed before the source is read. */

@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { sha256RawTextHex } from '@/utils/apiKeyHash';
 import { BOOTSTRAP_UI, createBootstrapTransport, type FreshOperation } from './bootstrapTransport';
 import {
   ADOPT_SOURCE_CLASS,
@@ -38,35 +38,43 @@ const source = {
 };
 const target = { runtimeIdentity: 'owned-runtime', runtimeGeneration: 3, artifactId };
 
-// A fixture's stable identity for one item. The server binds the digest to the
-// scrubbed text and the item's ordinal, so the fixture only needs an identity
-// that is stable and distinct within one summary.
-const itemID = (name: string) => createHash('sha256').update(name).digest('hex');
+// A fixture's stable identity for one item. The server derives the public id
+// from the public label and the item's ordinal, so the fixture only needs an
+// identity that is stable and distinct within one summary.
+const itemID = (name: string) => sha256RawTextHex(name);
 const recorded = (
-  item: Omit<AdoptionItem, 'id' | 'left'> & { left?: number }
-): AdoptionItem => ({ id: itemID(item.item), left: 0, ...item });
+  item: Omit<AdoptionItem, 'id' | 'left' | 'reason'> & { reason?: string; left?: number }
+): AdoptionItem => ({
+  ...item,
+  id: itemID(item.item),
+  reason: item.reason ?? '',
+  left: item.left ?? 0,
+});
 
 // A real `GET installation/adoption` body: the frozen server shape, including an
 // omitted reason on a migrated item and the reason code the executor records for
-// its manual and retryable ones. The reply carries no instruction text: the page
+// its manual and retryable ones. A credential is the Manager's generic label and
+// ordinal, never a source filename; non-credential items keep canonical
+// Manager-owned references. The reply carries no instruction text: the page
 // states the next step from the item's kind and reason.
 const summary = {
+  runId: 'b7c1'.repeat(8),
   items: [
     recorded({
-      item: 'credential:claude-source.json',
+      item: 'Credential file #1',
       kind: 'credential',
       outcome: 'migrated',
       retryable: false,
     }),
     recorded({
-      item: 'credential:codex-source.json',
+      item: 'Credential file #2',
       kind: 'credential',
       outcome: 'failed',
       reason: 'download_failed',
       retryable: true,
     }),
     recorded({
-      item: 'credential:plugin-source.json',
+      item: 'Credential file #3',
       kind: 'credential',
       outcome: 'manual',
       reason: 'runtime_only_credential',
@@ -197,12 +205,13 @@ async function cutoverClient(fetchMock: FetchMock) {
 describe('the Adopt wire contract', () => {
   it('accepts the recorded summary and keeps the omitted fields empty', () => {
     const parsed = parseAdoptionSummary(summary);
+    expect(parsed.runId).toBe(summary.runId);
     expect(parsed.items).toHaveLength(6);
     expect(parsed.counts).toEqual({ migrated: 3, manual: 1, failed: 1, absent_at_source: 1 });
     expect(parsed.retryable).toBe(1);
     expect(parsed.items[0]).toEqual({
-      id: itemID('credential:claude-source.json'),
-      item: 'credential:claude-source.json',
+      id: itemID('Credential file #1'),
+      item: 'Credential file #1',
       kind: 'credential',
       outcome: 'migrated',
       reason: '',
@@ -212,12 +221,22 @@ describe('the Adopt wire contract', () => {
     expect(parsed.items[1].retryable).toBe(true);
   });
 
+  it('parses a legacy record without a run identity as the empty run', () => {
+    // Only a record written before run identity existed omits it. Every other
+    // shape is refused rather than guessed.
+    expect(parseAdoptionSummary({ ...summary, runId: undefined }).runId).toBe('');
+  });
+
   it.each([
     { items: 'none' },
     { planned: -1 },
     { finished: 'yes' },
     { running: null },
     { counts: { migrated: 0, manual: 0, failed: 0 } },
+    // A run identity is opaque and fixed-width; a placeholder is not the record.
+    { runId: 'not-a-run-identity' },
+    { runId: 'A'.repeat(32) },
+    { runId: 42 },
     { items: [{ item: '', kind: 'credential', outcome: 'migrated', retryable: false }] },
     { items: [{ item: 'a', kind: 'unknown', outcome: 'migrated', retryable: false }] },
     { items: [{ item: 'a', kind: 'credential', outcome: 'skipped', retryable: false }] },
@@ -227,12 +246,21 @@ describe('the Adopt wire contract', () => {
     { items: [{ item: 'a', kind: 'credential', outcome: 'migrated', retryable: false }] },
     {
       items: [
-        { id: 'not-a-digest', item: 'a', kind: 'credential', outcome: 'migrated', retryable: false },
+        {
+          id: 'not-a-digest',
+          item: 'a',
+          kind: 'credential',
+          outcome: 'migrated',
+          retryable: false,
+        },
       ],
     },
     {
       items: [
-        { ...recorded({ item: 'b', kind: 'credential', outcome: 'migrated', retryable: false }), left: -1 },
+        {
+          ...recorded({ item: 'b', kind: 'credential', outcome: 'migrated', retryable: false }),
+          left: -1,
+        },
       ],
     },
   ])('refuses a body that is not the recorded summary: %j', (patch) => {
@@ -244,7 +272,7 @@ describe('the Adopt wire contract', () => {
       ...summary,
       items: [
         recorded({
-          item: 'credential-inventory-excess',
+          item: 'Credential files left behind',
           kind: 'credential',
           outcome: 'manual',
           reason: 'adoption_inventory_too_large',
@@ -252,7 +280,7 @@ describe('the Adopt wire contract', () => {
           left: 7,
         }),
         recorded({
-          item: 'credential:sk-proj-aaaaaaaaaaaaaaaaaaaaaaaa…#sha256:' + 'a'.repeat(64),
+          item: 'Credential file #2',
           kind: 'credential',
           outcome: 'manual',
           reason: 'adoption_item_name_too_long',
@@ -262,7 +290,7 @@ describe('the Adopt wire contract', () => {
       planned: 2,
     });
     expect(consolidated.items[0]).toMatchObject({
-      id: itemID('credential-inventory-excess'),
+      id: itemID('Credential files left behind'),
       left: 7,
     });
     // An item without a count is an item with nothing left over, never a missing
@@ -426,6 +454,7 @@ describe('the bootstrap carrier reads and writes the adoption', () => {
     [{ code: 'adopt_migration_retryable', retryable: 2 }, 409, 'adopt_migration_retryable', 2],
     [{ code: 'adopt_migration_running' }, 409, 'adopt_migration_running', undefined],
     [{ code: 'adopt_migration_incomplete' }, 409, 'adopt_migration_incomplete', undefined],
+    [{ code: 'adopt_migration_run_changed' }, 409, 'adopt_migration_run_changed', undefined],
     [{ code: 'adopt_destination_unproven' }, 503, 'adopt_destination_unproven', undefined],
   ])('reads the completion refusal %j', async (body, status, code, retryable) => {
     stubBootstrapOrigin();
@@ -459,9 +488,10 @@ describe('the bootstrap carrier reads and writes the adoption', () => {
         routing: { ...staged.routing, stage: 'committed', committed: true },
       })
     );
-    await client.complete({ acceptRetryable: true });
+    await client.complete({ acceptRetryable: true, runId: 'd'.repeat(32) });
     expect(JSON.parse(fetchMock.mock.calls[4][1]!.body as string)).toEqual({
       acceptRetryable: true,
+      runId: 'd'.repeat(32),
     });
   });
 });
@@ -513,6 +543,20 @@ describe('the canonical carrier reads and writes the adoption', () => {
       status: 409,
       code: 'adopt_migration_retryable',
       retryable: 2,
+    });
+  });
+
+  it('reads a run-changed completion refusal on the canonical carrier', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ code: 'adopt_migration_run_changed' }, { status: 409 }));
+    const client = canonicalClient(fetchMock);
+    await expect(
+      client.post('complete', { acceptRetryable: true, runId: 'd'.repeat(32) }, credential)
+    ).rejects.toMatchObject({
+      kind: 'http',
+      status: 409,
+      code: 'adopt_migration_run_changed',
     });
   });
 

@@ -62,10 +62,20 @@ const en = {
   retryableRefusal:
     '{count} item(s) could not be copied. Resume the migration, or finish anyway and handle them on the destination.',
   acceptRetryable: 'Finish anyway; I will handle the failed items myself.',
+  runChanged:
+    'The migration run changed since the failed items were accepted. Review them and accept again.',
+  legacyRunNotice:
+    'This run predates run tracking, so its failed items cannot be accepted here. Resume the migration to start a tracked run and ask again.',
   unprovenRefusal:
     'The destination CPA could not be proven with the management key this Manager installed. Retry once the CPA is ready.',
   done: 'Adoption complete',
   doneHelp: 'The console is ready.',
+  // The installation can finish while the copy has not: manual items and
+  // non-retryable failures are the operator's work. This headline never claims
+  // the migration copied everything.
+  partialTitle: 'Installation complete — manual steps remain',
+  partialHelp:
+    'The console is ready, but {manual} item(s) need manual work and {failed} item(s) could not be copied. The groups below state what is left.',
   // The settled-but-incomplete state: the run stopped, but the installation is
   // not complete. The title never says "complete", and the body names what is
   // left instead.
@@ -156,9 +166,15 @@ const zh: typeof en = {
   incompleteRefusal: '迁移尚未处理完计划中的全部条目。',
   retryableRefusal: '有 {count} 项未能复制。可以继续迁移重试，或选择仍然完成，稍后在目标手动处理。',
   acceptRetryable: '仍然完成，我会自行处理失败项。',
+  runChanged: '自接受失败项以来，迁移运行已发生变化。请重新查看并再次确认。',
+  legacyRunNotice:
+    '该运行早于运行标识功能，无法在此接受失败项。请继续迁移以启动一次有标识的运行，然后重新选择。',
   unprovenRefusal: '无法用本管理程序安装的管理密钥校验目标 CPA。请等 CPA 就绪后重试。',
   done: '接管完成',
   doneHelp: '控制台已就绪。',
+  partialTitle: '安装已完成，仍有迁移项需手动处理',
+  partialHelp:
+    '控制台已就绪，但仍有 {manual} 项需要手动处理，{failed} 项未能复制。下方分组列出了剩余工作。',
   settledTitle: '迁移已停止复制',
   settledHelp: '复制在安装完成前停止。可以继续迁移以处理剩余条目。',
   remainingItems: '有 {count} 项计划中的条目从未处理。',
@@ -174,9 +190,12 @@ const zh: typeof en = {
   kindConfigFamily: '载荷规则',
   kindProviderSection: '提供商配置段',
   guidanceCredential: '请把该凭证文件复制到目标 CPA 的认证目录，或在目标控制台重新认证该提供商。',
-  guidanceRuntimeOnlyCredential: '该凭证只存在于源 CPA 进程中，没有可复制的文件。请在目标控制台重新认证该提供商。',
-  guidanceCredentialNameTooLong: '该凭证文件名超出迁移记录的上限，因此留在了源端。请手动复制到目标 CPA 的认证目录。',
-  guidanceCredentialInventoryExcess: '迁移记录已满，源端有 {count} 个凭证文件未能记录。请手动复制到目标 CPA 的认证目录。',
+  guidanceRuntimeOnlyCredential:
+    '该凭证只存在于源 CPA 进程中，没有可复制的文件。请在目标控制台重新认证该提供商。',
+  guidanceCredentialNameTooLong:
+    '该凭证文件名超出迁移记录的上限，因此留在了源端。请手动复制到目标 CPA 的认证目录。',
+  guidanceCredentialInventoryExcess:
+    '迁移记录已满，源端有 {count} 个凭证文件未能记录。请手动复制到目标 CPA 的认证目录。',
   guidanceConfigLeaf: '请在目标 CPA 的网关配置页面设置该配置项。',
   guidanceConfigFamily: '请在目标 CPA 的网关配置页面替换该载荷规则列表。',
   guidanceProviderSection: '请把该提供商配置段（含其提供商密钥）复制到目标 CPA 的配置中。',
@@ -234,9 +253,15 @@ const tw: typeof en = {
   incompleteRefusal: '遷移尚未處理完計畫中的全部項目。',
   retryableRefusal: '有 {count} 項未能複製。可以繼續遷移重試，或選擇仍然完成，稍後在目標手動處理。',
   acceptRetryable: '仍然完成，我會自行處理失敗項目。',
+  runChanged: '自接受失敗項目以來，遷移執行已發生變化。請重新檢視並再次確認。',
+  legacyRunNotice:
+    '此執行早於執行識別功能，無法在此接受失敗項目。請繼續遷移以開始一次有識別的執行，然後重新選擇。',
   unprovenRefusal: '無法用本管理程式安裝的管理金鑰驗證目標 CPA。請等 CPA 就緒後重試。',
   done: '接管完成',
   doneHelp: '主控台已就緒。',
+  partialTitle: '安裝已完成，仍有遷移項目需手動處理',
+  partialHelp:
+    '主控台已就緒，但仍有 {manual} 項需要手動處理，{failed} 項未能複製。下方分組列出了剩餘工作。',
   settledTitle: '遷移已停止複製',
   settledHelp: '複製在安裝完成前停止。可以繼續遷移以處理剩餘項目。',
   remainingItems: '有 {count} 項計畫中的項目從未處理。',
@@ -252,9 +277,12 @@ const tw: typeof en = {
   kindConfigFamily: '載荷規則',
   kindProviderSection: '供應商設定區段',
   guidanceCredential: '請把該憑證檔案複製到目標 CPA 的認證目錄，或在目標主控台重新認證該供應商。',
-  guidanceRuntimeOnlyCredential: '該憑證只存在於來源 CPA 程序中，沒有可複製的檔案。請在目標主控台重新認證該供應商。',
-  guidanceCredentialNameTooLong: '該憑證檔名超出遷移記錄的上限，因此留在來源端。請手動複製到目標 CPA 的認證目錄。',
-  guidanceCredentialInventoryExcess: '遷移記錄已滿，來源端有 {count} 個憑證檔案未被記錄。請手動複製到目標 CPA 的認證目錄。',
+  guidanceRuntimeOnlyCredential:
+    '該憑證只存在於來源 CPA 程序中，沒有可複製的檔案。請在目標主控台重新認證該供應商。',
+  guidanceCredentialNameTooLong:
+    '該憑證檔名超出遷移記錄的上限，因此留在來源端。請手動複製到目標 CPA 的認證目錄。',
+  guidanceCredentialInventoryExcess:
+    '遷移記錄已滿，來源端有 {count} 個憑證檔案未被記錄。請手動複製到目標 CPA 的認證目錄。',
   guidanceConfigLeaf: '請在目標 CPA 的閘道設定頁面設定該項目。',
   guidanceConfigFamily: '請在目標 CPA 的閘道設定頁面取代該載荷規則清單。',
   guidanceProviderSection: '請把該供應商設定區段（含其供應商金鑰）複製到目標 CPA 的設定中。',
@@ -322,10 +350,17 @@ const ru: typeof en = {
   retryableRefusal:
     'Не удалось скопировать элементы: {count}. Продолжите перенос или завершите установку и обработайте их на целевом CPA.',
   acceptRetryable: 'Всё равно завершить; ошибки я обработаю сам.',
+  runChanged:
+    'Запуск миграции изменился после подтверждения неудачных элементов. Просмотрите их и подтвердите снова.',
+  legacyRunNotice:
+    'Этот запуск старше учёта идентификатора запуска, поэтому принять неудачные элементы здесь нельзя. Продолжите миграцию, чтобы начать отслеживаемый запуск, и выберите снова.',
   unprovenRefusal:
     'Не удалось подтвердить целевой CPA ключом управления, установленным этим Manager. Повторите, когда CPA будет готов.',
   done: 'Подключение завершено',
   doneHelp: 'Консоль готова.',
+  partialTitle: 'Установка завершена — остались ручные шаги',
+  partialHelp:
+    'Консоль готова, но {manual} элемент(ов) требуют ручной работы, а {failed} элемент(ов) скопировать не удалось. Группы ниже показывают, что осталось.',
   settledTitle: 'Перенос остановлен',
   settledHelp:
     'Копирование остановилось до завершения установки. Продолжите перенос, чтобы обработать оставшееся.',
@@ -738,8 +773,7 @@ const reasonGuidanceKeys: Record<string, keyof typeof en> = {
 
 /** adoptGuidanceText is the operator's next step for one recorded item. */
 export const adoptGuidanceText = (kind: string, reason = '', count = 0): string => {
-  const key =
-    (kind === 'credential' && reasonGuidanceKeys[reason]) || guidanceKeys[kind];
+  const key = (kind === 'credential' && reasonGuidanceKeys[reason]) || guidanceKeys[kind];
   return key ? adoptText(key, { count }) : copy[locale()].guidanceFallback;
 };
 

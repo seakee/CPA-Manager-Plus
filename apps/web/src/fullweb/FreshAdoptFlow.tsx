@@ -20,11 +20,13 @@ import {
   normalizeCPAAddress,
   validManagementKey,
   type AdoptionDecision,
+  type AdoptionOutcome,
   type AdoptionSummary,
+  type AdoptCompletionBody,
   type AdoptRuntimeTarget,
 } from './freshAdoption';
 import { PublicApiError } from './publicApi';
-import { FullWebIcon } from './FullWebIcon';
+import { FullWebIcon, type FullWebIconName } from './FullWebIcon';
 
 // The Adopt flow's two carriers. The wizard before routing exists and the Console
 // after it hold the same operation but not the same transport, so the flow talks
@@ -44,7 +46,7 @@ export interface AdoptCarrier {
   writeStrategy(body: Record<string, unknown>, fence?: AdoptionFence): Promise<FreshOperation>;
   /** Commit the canonical route before completion. Bootstrap-only. */
   prepareRoute?(): Promise<FreshOperation>;
-  complete(body: { acceptRetryable?: true }): Promise<FreshOperation>;
+  complete(body: AdoptCompletionBody): Promise<FreshOperation>;
   /** Read the recorded per-item migration summary. */
   readAdoption(): Promise<AdoptionSummary>;
 }
@@ -66,18 +68,35 @@ function decisions(checkpoint?: FreshStrategyCheckpoint): AdoptionDecision[] {
   return Array.isArray(value) ? value : [];
 }
 
-// retryableIdentity is the set of items a retryable acknowledgement is given
-// for. The count is not the set: a different run can fail the same number of
-// items, and those are items nobody has accepted yet. Both the poll and the
-// checkbox go through it, because an acknowledgement that means two different
-// things is an acknowledgement of nothing.
+// retryableIdentity is the run and item set a retryable acknowledgement is
+// given for. Neither the count nor the item set alone is the identity: a new run
+// can fail the same items, and those are items nobody has accepted yet. The run
+// identity is what distinguishes the two. Both the poll and the checkbox go
+// through it, because an acknowledgement that means two different things is an
+// acknowledgement of nothing.
 function retryableIdentity(summary: AdoptionSummary): string {
-  return summary.items
-    .filter((item) => item.retryable)
-    .map((item) => item.id)
-    .sort()
-    .join('\n');
+  return [
+    summary.runId,
+    ...summary.items
+      .filter((item) => item.retryable)
+      .map((item) => item.id)
+      .sort(),
+  ].join('\n');
 }
+
+// The four recorded outcomes in the order the completion screen states them. One
+// group per outcome, read from the record: `absent_at_source` is a settled result
+// about a resource the source never had, so it is never counted as a copy.
+const outcomeGroups: ReadonlyArray<{
+  outcome: AdoptionOutcome;
+  label: 'migratedGroup' | 'manualBadge' | 'failedGroup' | 'absentBadge';
+  icon: FullWebIconName;
+}> = [
+  { outcome: 'migrated', label: 'migratedGroup', icon: 'check' },
+  { outcome: 'manual', label: 'manualBadge', icon: 'info' },
+  { outcome: 'failed', label: 'failedGroup', icon: 'alert' },
+  { outcome: 'absent_at_source', label: 'absentBadge', icon: 'info' },
+];
 
 function groupDecisions(list: AdoptionDecision[]) {
   const groups: Record<'migrate' | 'manual_action' | 'unsupported', AdoptionDecision[]> = {
@@ -573,6 +592,16 @@ export function FreshAdoptFlow({
       setNote(adoptText('retryableRefusal', { count: coded.retryable ?? summary?.retryable ?? 0 }));
       return true;
     }
+    if (coded.code === 'adopt_migration_run_changed') {
+      // The acknowledgement named a run that is no longer current — another tab
+      // or operator resumed in between. It is not this run's decision any more,
+      // so the page drops it and reads the run that is.
+      acceptedRetryable.current = null;
+      setAcceptRetryable(false);
+      setNote(adoptText('runChanged'));
+      poll();
+      return true;
+    }
     if (coded.code === 'adopt_destination_unproven') {
       setError(adoptText('unprovenRefusal'));
       return true;
@@ -582,6 +611,23 @@ export function FreshAdoptFlow({
 
   async function complete() {
     if (!alive.current) return;
+    // The acknowledgement belongs to the run and items on screen. A newer
+    // summary invalidates it even when the retryable ids are identical, so the
+    // page refuses to send a body it can no longer claim the operator confirmed.
+    // The server is the final fence; this only keeps the page from asking with a
+    // decision the operator was never shown.
+    if (acceptRetryable) {
+      const identity = summary ? retryableIdentity(summary) : null;
+      if (!summary?.runId || acceptedRetryable.current !== identity) {
+        acceptedRetryable.current = null;
+        setAcceptRetryable(false);
+        setNote(adoptText('runChanged'));
+        poll();
+        return;
+      }
+    }
+    const acknowledgement: AdoptCompletionBody =
+      acceptRetryable && summary ? { acceptRetryable: true, runId: summary.runId } : {};
     inflight.current = true;
     setBusy(true);
     setError('');
@@ -593,7 +639,7 @@ export function FreshAdoptFlow({
         current = await carrier.prepareRoute();
         onOperation(current);
       }
-      const next = await carrier.complete(acceptRetryable ? { acceptRetryable: true } : {});
+      const next = await carrier.complete(acknowledgement);
       if (!alive.current) return;
       onOperation(next);
       setCompletion(null);
@@ -609,6 +655,13 @@ export function FreshAdoptFlow({
         } catch {
           if (alive.current) setUnknown(true);
         }
+      }
+      // A refusal or a lost reply is not a decision that carries into the next
+      // attempt: the operator accepts the run that is on screen when they try
+      // again. `completeFailure` already cleared the coded run change.
+      if (acceptRetryable) {
+        acceptedRetryable.current = null;
+        setAcceptRetryable(false);
       }
     } finally {
       inflight.current = false;
@@ -628,12 +681,31 @@ export function FreshAdoptFlow({
   // be granted over it.
   const remaining = groups ? groups.remaining : 0;
   const settledRun = !!summary && summary.finished && !summary.running;
-  // The success headline is a claim about the installation, so it needs all
-  // three facts: the run settled, no retryable item remains, and the
-  // installation itself completed. A settled run missing any of them says what
-  // is left instead of borrowing the sentence for a finished console.
+  const manualCount = summary?.counts.manual ?? 0;
+  const failedCount = summary?.counts.failed ?? 0;
+  // The installation can be complete while the copy is not: the server allows a
+  // manual item or a non-retryable failure to stand, and neither means the
+  // resource was copied. The success headline is a claim about the copy, so it
+  // needs the settled run, no retryable item, no unprocessed plan item, no
+  // manual work and no failure, and the completed installation.
+  const migrationCopiedEverything = manualCount === 0 && failedCount === 0;
   const adoptionComplete =
-    !!summary && settledRun && summary.retryable === 0 && remaining === 0 && operation.productComplete;
+    !!summary &&
+    settledRun &&
+    summary.retryable === 0 &&
+    remaining === 0 &&
+    migrationCopiedEverything &&
+    operation.productComplete;
+  // The split state: the installation finished, but items still need the
+  // operator's own work. It keeps its own headline instead of borrowing the
+  // complete-adoption sentence.
+  const installationComplete =
+    !!summary &&
+    settledRun &&
+    summary.retryable === 0 &&
+    remaining === 0 &&
+    !migrationCopiedEverything &&
+    operation.productComplete;
   const needingResume =
     !!summary && !summary.running && (!summary.finished || summary.retryable > 0 || remaining > 0);
   const resumeForm = needingResume && !body;
@@ -652,9 +724,14 @@ export function FreshAdoptFlow({
       : stage === 'migration'
         ? adoptionComplete
           ? { title: adoptText('done'), help: adoptText('doneHelp') }
-          : settledRun
-            ? { title: adoptText('settledTitle'), help: adoptText('settledHelp') }
-            : { title: adoptText('migrationTitle'), help: adoptText('migrationHelp') }
+          : installationComplete
+            ? {
+                title: adoptText('partialTitle'),
+                help: adoptText('partialHelp', { manual: manualCount, failed: failedCount }),
+              }
+            : settledRun
+              ? { title: adoptText('settledTitle'), help: adoptText('settledHelp') }
+              : { title: adoptText('migrationTitle'), help: adoptText('migrationHelp') }
         : { title: adoptText('title'), help: adoptText('help') };
 
   const journey = (
@@ -740,9 +817,7 @@ export function FreshAdoptFlow({
                   id="adopt-plugin-optin"
                   data-testid="adopt-plugin-optin"
                   type="checkbox"
-                  checked={
-                    pluginsLocked ? checkpoint?.pluginsEnabled === true : plugins
-                  }
+                  checked={pluginsLocked ? checkpoint?.pluginsEnabled === true : plugins}
                   disabled={pluginsLocked || busy}
                   onChange={(event) => setPlugins(event.target.checked)}
                 />
@@ -841,70 +916,65 @@ export function FreshAdoptFlow({
                 </p>
                 {groups && (
                   <ol className="journey-stages" data-testid="adopt-items">
-                    {(
-                      [
-                        ['migrated', adoptText('migratedGroup'), groups.migrated, 'check'],
-                        ['manual', adoptText('manualBadge'), groups.manual, 'info'],
-                        ['failed', adoptText('failedGroup'), groups.failed, 'alert'],
-                        [
-                          'absent_at_source',
-                          adoptText('absentBadge'),
-                          groups.absent_at_source,
-                          'info',
-                        ],
-                      ] as const
-                    ).map(([outcome, label, items, icon]) => (
-                      <li key={outcome} data-testid={`adopt-group-${outcome}`}>
-                        <span className="journey-stage-mark">
-                          <FullWebIcon name={icon} size={22} />
-                        </span>
-                        <div>
-                          <strong>{label}</strong>
-                          <p data-testid={`adopt-count-${outcome}`}>
-                            {items.length === 0 ? '—' : items.length}
-                          </p>
-                          {items.length > 0 && (
-                            <ul className="adopt-items">
-                              {items.map((item, index) => (
-                                <li
-                                  // The identity is the record's own, not the
-                                  // text this page shows: two scrubbed names can
-                                  // be equal and are still two items.
-                                  key={item.id}
-                                  data-testid={`adopt-item-${item.id}`}
-                                >
-                                  <span className="adopt-item-name">{item.item}</span>
-                                  <span className="badge badge-neutral">
-                                    {adoptKindText(item.kind)}
-                                  </span>
-                                  {item.reason && (
-                                    <span className="adopt-item-reason">
-                                      {adoptReasonText(item.reason)}
+                    {outcomeGroups.map(({ outcome, label, icon }) => {
+                      const items = groups[outcome];
+                      return (
+                        <li key={outcome} data-testid={`adopt-group-${outcome}`}>
+                          <span className="journey-stage-mark">
+                            <FullWebIcon name={icon} size={22} />
+                          </span>
+                          <div>
+                            <strong>{adoptText(label)}</strong>
+                            <p data-testid={`adopt-count-${outcome}`}>
+                              {items.length === 0 ? '—' : items.length}
+                            </p>
+                            {items.length > 0 && (
+                              <ul className="adopt-items">
+                                {items.map((item) => (
+                                  <li
+                                    // The identity is the record's own, not the
+                                    // text this page shows: two items whose
+                                    // public labels coincide are still two
+                                    // items, and the id is what an
+                                    // acknowledgement names.
+                                    key={item.id}
+                                    data-testid={`adopt-item-${item.id}`}
+                                  >
+                                    <span className="adopt-item-name">{item.item}</span>
+                                    <span className="badge badge-neutral">
+                                      {adoptKindText(item.kind)}
                                     </span>
-                                  )}
-                                  {item.outcome === 'failed' && (
-                                    <span
-                                      className={`badge ${item.retryable ? 'badge-amber' : 'badge-neutral'}`}
-                                    >
-                                      {adoptText(item.retryable ? 'retryableBadge' : 'failedGroup')}
-                                    </span>
-                                  )}
-                                  {(item.outcome === 'manual' || item.outcome === 'failed') && (
-                                    <details className="journey-disclosure">
-                                      <summary>{adoptText('details')}</summary>
-                                      <p data-testid={`adopt-guidance-${item.kind}`}>
-                                        {adoptGuidanceText(item.kind, item.reason, item.left)}
-                                      </p>
-                                    </details>
-                                  )}
-                                </li>
-                              ))}
-                            </ul>
-                          )}
-                        </div>
-                        <small>{items.length}</small>
-                      </li>
-                    ))}
+                                    {item.reason && (
+                                      <span className="adopt-item-reason">
+                                        {adoptReasonText(item.reason)}
+                                      </span>
+                                    )}
+                                    {item.outcome === 'failed' && (
+                                      <span
+                                        className={`badge ${item.retryable ? 'badge-amber' : 'badge-neutral'}`}
+                                      >
+                                        {adoptText(
+                                          item.retryable ? 'retryableBadge' : 'failedGroup'
+                                        )}
+                                      </span>
+                                    )}
+                                    {(item.outcome === 'manual' || item.outcome === 'failed') && (
+                                      <details className="journey-disclosure">
+                                        <summary>{adoptText('details')}</summary>
+                                        <p data-testid={`adopt-guidance-${item.kind}`}>
+                                          {adoptGuidanceText(item.kind, item.reason, item.left)}
+                                        </p>
+                                      </details>
+                                    )}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                          <small>{items.length}</small>
+                        </li>
+                      );
+                    })}
                   </ol>
                 )}
               </>
@@ -912,6 +982,11 @@ export function FreshAdoptFlow({
             {summary && summary.retryable > 0 && !summary.running && (
               <p className="journey-help" data-testid="adopt-retryable">
                 {adoptText('retryableRefusal', { count: summary.retryable })}
+              </p>
+            )}
+            {completion?.code === 'adopt_migration_retryable' && !summary?.runId && (
+              <p className="journey-help" data-testid="adopt-retryable-legacy">
+                {adoptText('legacyRunNotice')}
               </p>
             )}
             {summary && !summary.running && remaining > 0 && (
@@ -1012,7 +1087,7 @@ export function FreshAdoptFlow({
                 <FullWebIcon name="arrowRight" size={20} />
               </button>
             )}
-            {completion?.code === 'adopt_migration_retryable' && (
+            {completion?.code === 'adopt_migration_retryable' && summary?.runId && (
               <label className="journey-checkline">
                 <input
                   type="checkbox"
@@ -1020,8 +1095,9 @@ export function FreshAdoptFlow({
                   checked={acceptRetryable}
                   onChange={(event) => {
                     setAcceptRetryable(event.target.checked);
-                    // The acknowledgement covers the set on screen right now,
-                    // item for item, and only that set.
+                    // The acknowledgement covers this run and the retryable
+                    // items on screen right now, item for item, and only those:
+                    // the completion carries the run identity it was given for.
                     acceptedRetryable.current =
                       event.target.checked && summary ? retryableIdentity(summary) : null;
                   }}

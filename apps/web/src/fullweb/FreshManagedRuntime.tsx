@@ -359,7 +359,9 @@ export function FreshManagedRuntime({
       writeStrategy: async (body, fence) => {
         // A fenced write already carries the read it was decided on; anything
         // else reads the record now, once.
-        const read = fence ? undefined : (await guarded(() => client.get<FreshOperation>('operation', auth)));
+        const read = fence
+          ? undefined
+          : await guarded(() => client.get<FreshOperation>('operation', auth));
         const identity = fence?.identity ?? read!.identity;
         if (!sameIdentity(identity, operation.identity))
           throw new Error('Invalid installation response');
@@ -580,7 +582,7 @@ export function FreshManagedRuntime({
                       id="runtime-plugin-optin"
                       data-testid="plugin-optin-checkbox"
                       type="checkbox"
-                      checked={checkpoint?.pluginsEnabled === true || plugins}
+                      checked={checkpoint?.strategy ? checkpoint.pluginsEnabled === true : plugins}
                       disabled={!!checkpoint?.strategy}
                       onChange={(event) => setPlugins(event.target.checked)}
                     />
