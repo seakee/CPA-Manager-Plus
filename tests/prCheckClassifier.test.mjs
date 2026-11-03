@@ -51,6 +51,20 @@ describe('PR check classifier', () => {
     expect(classifyChangedFiles(['bin/ci/validate-cpa-v8-evidence-other.mjs'])).toEqual(noChecks);
   });
 
+  // The D acceptance and its native `node:test` lifecycle suite run in the
+  // Frontend job. A PR that changes only one of these files must still run it,
+  // and a neighbouring script that no job executes must not.
+  it('runs the Node D lifecycle suite when only an Adopt D script changes', () => {
+    for (const filePath of [
+      'bin/ci/fresh-adopt-network.mjs',
+      'bin/ci/fresh-adopt-lifecycle.test.mjs',
+      'bin/ci/fresh-adopt-redaction.mjs',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({ ...noChecks, frontend: true });
+    }
+    expect(classifyChangedFiles(['bin/ci/fresh-adopt-network-other.mjs'])).toEqual(noChecks);
+  });
+
   it('fails closed when no changed files are available', () => {
     expect(classifyChangedFiles([])).toEqual({
       frontend: true,

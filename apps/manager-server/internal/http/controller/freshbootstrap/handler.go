@@ -26,6 +26,10 @@ type Handler struct {
 	Shell     http.Handler
 	Strategy  http.Handler
 	Runtime   http.Handler
+	// Adoption is the per-item migration summary. It is the progress read of an
+	// adoption this carrier's own claim committed, so it is delegated exactly as
+	// the runtime observation is, and never served by this package.
+	Adoption http.Handler
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +92,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, result)
 		return
 	}
-	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet}
+	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet, "installation/adoption": http.MethodGet}
 	method, ok := known[resource]
 	if !ok {
 		http.NotFound(w, r)
@@ -179,6 +183,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.Runtime.ServeHTTP(w, r)
+	case "installation/adoption":
+		if h.Adoption == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		h.Adoption.ServeHTTP(w, r)
 	}
 }
 

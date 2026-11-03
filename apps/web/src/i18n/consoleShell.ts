@@ -57,7 +57,8 @@ const en = {
   newManaged: 'New embedded installation',
   newDetail: 'Use the official CPA packaged with this deployment. Linux/amd64 Embedded only.',
   adopt: 'Adopt existing CPA',
-  adoptHelp: 'Host takeover authorization is not available. This path cannot run yet.',
+  adoptHelp:
+    'Copy the credentials, gateway configuration and client keys of another CPA v8 into the CPA this Manager runs. The source is only read.',
   external: 'Connect external CPA',
   externalHelp:
     'Connect your existing CPA without taking over its lifecycle. Verify the connection and finish CPAMP setup.',
@@ -164,7 +165,8 @@ const zh: typeof en = {
   newManaged: '全新内置安装',
   newDetail: '使用随部署提供的官方 CPA，仅支持 Linux/amd64 Embedded。',
   adopt: '接管现有 CPA',
-  adoptHelp: '受信宿主机接管授权尚未交付，当前不能执行。',
+  adoptHelp:
+    '把另一个 CPA v8 的凭证、网关配置与客户端密钥迁移到本管理程序运行的 CPA。源 CPA 只会被读取。',
   external: '连接外部 CPA',
   externalHelp: '保留已有 CPA 的管理方式，验证并保存连接后完成 CPAMP 初始化。',
   upgradeHelp: '本新装流程不支持升级既有安装；已有数据必须保留。',
@@ -248,7 +250,8 @@ const tw: typeof en = {
   newManaged: '全新內嵌安裝',
   newDetail: '使用隨部署提供的官方 CPA，僅支援 Linux/amd64 Embedded。',
   adopt: '接管現有 CPA',
-  adoptHelp: '受信任主機的接管授權尚未交付，目前無法執行。',
+  adoptHelp:
+    '把另一個 CPA v8 的憑證、閘道設定與用戶端金鑰遷移到本管理程式執行的 CPA。來源 CPA 只會被讀取。',
   external: '連線至外部 CPA',
   externalHelp: '保留既有 CPA 的管理方式，驗證並儲存連線後完成 CPAMP 初始化。',
   upgradeHelp: '本新裝流程不支援升級既有安裝；既有資料必須保留。',
@@ -335,7 +338,7 @@ const ru: typeof en = {
     'Используется официальный CPA из комплекта развёртывания. Поддерживается только Linux/amd64 Embedded.',
   adopt: 'Подключить существующий CPA',
   adoptHelp:
-    'Доверенная авторизация хоста для передачи управления ещё не доступна. Этот вариант пока нельзя выполнить.',
+    'Скопируйте учётные данные, конфигурацию шлюза и клиентские ключи другого CPA v8 в CPA этого Manager. Источник только читается.',
   external: 'Подключить внешний CPA',
   externalHelp:
     'Сохраните управление CPA у себя. Проверьте подключение и завершите настройку CPAMP.',

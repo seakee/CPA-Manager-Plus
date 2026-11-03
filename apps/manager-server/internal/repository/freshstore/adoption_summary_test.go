@@ -144,6 +144,42 @@ func TestAdoptionSummaryEnforcesItsSizeBounds(t *testing.T) {
 	}
 }
 
+// `Left` is a count, not a stored item. A source far over the record's capacity
+// must still be able to report how many files were left behind, so the remainder
+// has its own, much larger bound rather than being squeezed into the item bound:
+// a count over the item bound is exactly the case the aggregate marker exists
+// for, and refusing it would stop the migration instead of settling it.
+func TestAdoptionRemainderCountsPastTheItemBound(t *testing.T) {
+	marker := AdoptionItem{
+		Item: "credential-inventory-excess", Kind: AdoptionKindCredential, Outcome: AdoptionManual,
+		Reason: "adoption_inventory_too_large", Instruction: "Copy the files by hand.",
+	}
+	// The documented bound on `Left` is 1,048,576: a thousand times the item
+	// bound, and it is written here as the contract rather than read back from
+	// the implementation. Accepting exactly that value and refusing the next one
+	// pins the enforced bound to it.
+	const documentedRemainderBound = 1 << 20
+	for _, left := range []int{1, maxAdoptionItems, maxAdoptionItems * 4, 3000, documentedRemainderBound} {
+		within := marker
+		within.Left = left
+		if err := validAdoptionSummary(summaryOf(within)); err != nil {
+			t.Fatalf("a remainder of %d was refused: %v", left, err)
+		}
+	}
+	for _, left := range []int{-1, documentedRemainderBound + 1} {
+		beyond := marker
+		beyond.Left = left
+		if err := validAdoptionSummary(summaryOf(beyond)); err == nil {
+			t.Fatalf("a remainder of %d was accepted", left)
+		}
+	}
+	// The published item bounds are unchanged: only the count is allowed past
+	// them, never a stored item.
+	if MaxAdoptionItems() != maxAdoptionItems || MaxAdoptionItemName() != maxAdoptionItemName {
+		t.Fatal("the published bounds differ from the enforced ones")
+	}
+}
+
 // A run that stops early records a plan it never reached, and completion reads
 // exactly that: `Finished` plus the item count against `Planned`. The marker may
 // only move forward once the installation is complete, because reopening a
@@ -308,5 +344,88 @@ func TestAdoptionSummarySurvivesReloadWithItsConnection(t *testing.T) {
 	}
 	if loaded.Connection == nil || *loaded.Connection != *connected {
 		t.Fatalf("the summary write changed the destination connection: %+v", loaded.Connection)
+	}
+}
+
+// The run identity is part of the record's bounded shape: absent on a record
+// written before generations existed, otherwise exactly one 128-bit hex value.
+// It may only be taken over by a new, unfinished run, which is what makes an
+// acknowledgement of one run's retryable items inapplicable to another.
+func TestAdoptionSummaryRunGenerationIsBoundedAndReplacedOnlyAtARunStart(t *testing.T) {
+	for name, runID := range map[string]string{
+		"short":   strings.Repeat("a", 31),
+		"long":    strings.Repeat("a", 33),
+		"upper":   strings.Repeat("A", 32),
+		"non-hex": strings.Repeat("g", 32),
+	} {
+		if validAdoptionRunID(runID) {
+			t.Fatalf("a %s run identity was accepted", name)
+		}
+		invalid := summaryOf(migratedItem("config:routing.strategy"))
+		invalid.RunID = runID
+		if err := validAdoptionSummary(invalid); err == nil {
+			t.Fatalf("a %s run identity passed the summary validator", name)
+		}
+	}
+	if !validAdoptionRunID("") || !validAdoptionRunID(strings.Repeat("a", 32)) {
+		t.Fatal("a valid run identity was refused")
+	}
+
+	store, id, record := adoptionSummaryStore(t)
+	item := migratedItem("config:routing.strategy")
+	// The legacy shape loads and is never invented into a generation.
+	record, err := writeSummary(t, store, id, record, summaryOf(item))
+	if err != nil {
+		t.Fatalf("a legacy summary was refused: %v", err)
+	}
+	legacy, err := store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.AdoptionSummary == nil || legacy.AdoptionSummary.RunID != "" || len(legacy.AdoptionSummary.Items) != 1 {
+		t.Fatalf("the legacy summary did not reload: %+v", legacy.AdoptionSummary)
+	}
+
+	runA := strings.Repeat("a", 32)
+	withA := summaryOf(item)
+	withA.RunID = runA
+	record, err = writeSummary(t, store, id, record, withA)
+	if err != nil {
+		t.Fatalf("a legacy record could not start a run: %v", err)
+	}
+	if clone := cloneAdoptionSummary(record.AdoptionSummary); clone == nil || clone.RunID != runA {
+		t.Fatalf("the clone dropped the run identity: %+v", clone)
+	}
+
+	// A new run takes the record over while it is unfinished.
+	runB := strings.Repeat("b", 32)
+	withB := withA
+	withB.RunID, withB.Finished = runB, false
+	record, err = writeSummary(t, store, id, record, withB)
+	if err != nil {
+		t.Fatalf("a new run could not take the record over: %v", err)
+	}
+	// The run finishes under its own generation.
+	finished := withB
+	finished.Finished = true
+	record, err = writeSummary(t, store, id, record, finished)
+	if err != nil {
+		t.Fatalf("a run could not finish under its own generation: %v", err)
+	}
+	// A finished run may not change its generation, and a generation may not be
+	// cleared back to the legacy absent value.
+	replaced := finished
+	replaced.RunID = strings.Repeat("c", 32)
+	if _, err := writeSummary(t, store, id, record, replaced); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a finished run's generation was replaced: %v", err)
+	}
+	cleared := finished
+	cleared.RunID = ""
+	if _, err := writeSummary(t, store, id, record, cleared); !errors.Is(err, ErrConflict) {
+		t.Fatalf("a persisted generation was cleared: %v", err)
+	}
+	loaded, err := store.Load(t.Context())
+	if err != nil || loaded.AdoptionSummary == nil || loaded.AdoptionSummary.RunID != runB {
+		t.Fatalf("the refused writes changed the record: %+v %v", loaded.AdoptionSummary, err)
 	}
 }

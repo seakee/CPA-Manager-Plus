@@ -34,7 +34,11 @@ func TestFreshSetupBrowserFixture(t *testing.T) {
 	app := newFreshApplication(opened, config.Config{}, nil)
 	app.routing = freshrouting.New(app.store, &setupBrowserIngress{})
 	app.fixed = freshbootstrap.Handler{Authority: app.authority, Routing: app.routing, Current: app.current,
-		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(app.fixedStrategy), Runtime: http.HandlerFunc(app.fixedRuntime)}
+		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(app.fixedStrategy), Runtime: http.HandlerFunc(app.fixedRuntime),
+		// The wizard's own progress read: an adoption that this claim committed
+		// reads its recorded summary through the fixed carrier until the public
+		// route is committed.
+		Adoption: http.HandlerFunc(app.fixedAdoption)}
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer browser-fixture-cpa-key" {
 			w.WriteHeader(http.StatusUnauthorized)

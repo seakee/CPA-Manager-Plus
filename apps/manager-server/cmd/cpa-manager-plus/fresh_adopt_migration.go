@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -80,7 +82,14 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 		if current.AdoptionSummary != nil {
 			previous = *current.AdoptionSummary
 		}
-		revision := current.Operation.Revision
+		// The run identity was assigned and persisted under the start lock before
+		// this function ran, so the record carries the generation every checkpoint
+		// of this run must still find. A record without one is not a run this
+		// build started.
+		if previous.RunID == "" {
+			log.Printf("Fresh adoption migration skipped: run generation unavailable")
+			return
+		}
 		// Both clients fix their DNS resolution once and are closed with the run.
 		// A source or destination that cannot be reached ends the run here; the
 		// adoption itself is already committed.
@@ -99,7 +108,7 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 		// The checkpoint is built from the run's own context, not the request's:
 		// the reply has already returned, and every write this run makes has to
 		// outlive it.
-		checkpoint := persistAdoptionSummary(ctx, a, identity, revision, a.adoptionMigrationSession(ctx, sessionToken))
+		checkpoint := persistAdoptionSummary(ctx, a, identity, previous.RunID, a.adoptionMigrationSession(ctx, sessionToken))
 		result, runErr := freshadopt.New(source, destination, current.Operation.Strategy.AdoptionDecisions).Run(ctx, previous, checkpoint)
 		if runErr != nil {
 			// Only the bounded code is logged. A runner error can quote an upstream
@@ -134,17 +143,26 @@ func (a *freshApplication) runAdoptionMigration(ctx context.Context, record fres
 // does. The host lifetime is the right parent because the copy writes into this
 // process's installation, so a host shutdown must cancel it rather than leave a
 // goroutine writing into a closing database; the deadline bounds it besides.
+//
+// Every actual run start writes a fresh run identity through the record's own
+// revision CAS while this lock is held, before any network work and before the
+// caller is told `running`. The generation is what makes an acknowledgement of
+// one run's retryable items inapplicable to another run whose items look the
+// same. A replay that finds a run already in flight starts nothing and reuses
+// the generation that run wrote; it never burns an epoch.
 func (a *freshApplication) startAdoptionMigration(ctx context.Context, identity bootstrap.FreshIdentity, run func(context.Context, freshstore.Record)) string {
 	a.adoptMigrationMu.Lock()
 	if a.adoptMigrationRunning {
 		a.adoptMigrationMu.Unlock()
 		return adoptMigrationStateRunning
 	}
-	current, err := a.store.Load(ctx)
-	if err != nil || current.Operation.Identity != identity || !adoptionMigrationCommitted(current) {
-		// Not this adoption at committed any more — complete, re-staged or
-		// replaced: a run would write into an installation this replay no longer
-		// describes, so none is started.
+	current, started := a.beginAdoptionRun(ctx, identity)
+	if !started {
+		// Either this record is no longer the committed, unfinished adoption the
+		// replay describes, or its last run already settled with nothing left to
+		// copy. Neither gets a run — the first would write into an installation the
+		// replay no longer describes, the second would reopen a settled run — and
+		// the replay is answered from the durable record as it stands.
 		a.adoptMigrationMu.Unlock()
 		return ""
 	}
@@ -167,6 +185,72 @@ func (a *freshApplication) startAdoptionMigration(ctx context.Context, identity 
 	return adoptMigrationStateRunning
 }
 
+// beginAdoptionRun assigns and persists the identity of one new run. The caller
+// holds `adoptMigrationMu`, so no other run can take the record between the
+// re-read, the check and the CAS; the revision CAS keeps store-level writers
+// honest besides.
+//
+// The write carries the items and plan the record already held: a resume
+// continues from the durable prefix rather than discarding it, and `Finished` is
+// cleared because the new run has not processed its plan yet. A conflict is
+// another writer having moved the record, which the next attempt resolves; a
+// conflict that survives the retry bound is a record this run must not touch.
+//
+// A record whose last run already settled — finished, every planned item
+// recorded, no retryable item left — starts nothing. Reopening it would burn a
+// generation and clear `Finished`, so an operator who replays the committed
+// strategy before completing the installation could leave a complete-able
+// installation behind if the source has since become unreachable. The replay is
+// answered with the durable record as it stands, and the settled generation is
+// kept; only genuine work (an unfinished or retryable run) gets a new one.
+func (a *freshApplication) beginAdoptionRun(ctx context.Context, identity bootstrap.FreshIdentity) (freshstore.Record, bool) {
+	for range adoptSummaryWriteAttempts {
+		current, err := a.store.Load(ctx)
+		if err != nil || current.Operation.Identity != identity || !adoptionMigrationCommitted(current) {
+			return freshstore.Record{}, false
+		}
+		if current.AdoptionSummary != nil && adoptionMigrationSettled(*current.AdoptionSummary) {
+			return current, false
+		}
+		runID, err := newAdoptionRunID()
+		if err != nil {
+			return freshstore.Record{}, false
+		}
+		next, err := a.store.Update(ctx, identity, current.Operation.Revision, func(record *freshstore.Record) error {
+			if record.Operation.Identity != identity || !adoptionMigrationCommitted(*record) {
+				return freshstore.ErrConflict
+			}
+			summary := freshstore.AdoptionSummary{}
+			if record.AdoptionSummary != nil {
+				summary = *record.AdoptionSummary
+			}
+			summary.RunID, summary.Finished = runID, false
+			record.AdoptionSummary = &summary
+			return nil
+		})
+		if err == nil {
+			return next, true
+		}
+		if !errors.Is(err, freshstore.ErrConflict) {
+			return freshstore.Record{}, false
+		}
+	}
+	return freshstore.Record{}, false
+}
+
+// newAdoptionRunID returns one opaque 128-bit run identity in the lower-case hex
+// the record's own validator accepts. It is random, not derived from the
+// installation or the time: two runs on one installation must never be
+// guessable from each other, because the identity is what binds an operator's
+// acknowledgement to the run they were shown.
+func newAdoptionRunID() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
 // adoptMigrationInFlight reports whether a background copy is running right now.
 // It is the read half of the single-flight lock, so the completion path and the
 // start path agree on what "running" means. A caller that also decides something
@@ -177,13 +261,33 @@ func (a *freshApplication) adoptMigrationInFlight() bool {
 	return a.adoptMigrationRunning
 }
 
-// adoptCompleteRequest is the only field a completion request may carry. An
-// adoption's conditions are the record's, so the body never states them.
+// adoptMigrationRunChanged refuses an acknowledgement of retryable items that
+// was given for a different run than the durable record's current one. The
+// operator is asked to read the run they are looking at before accepting it; the
+// refusal is a code, not a generic conflict, because the page has to clear the
+// stale acknowledgement rather than retry the same request.
+const adoptMigrationRunChanged = "adopt_migration_run_changed"
+
+// errAdoptMigrationRunChanged carries that refusal out of the completion's own
+// CAS, where the durable run identity — not the record the handler read — is the
+// authority.
+var errAdoptMigrationRunChanged = errors.New("adopt migration run changed")
+
+// adoptCompleteRequest is the only body a completion request may carry. An
+// adoption's conditions are the record's, so the body never states them; the run
+// identity is not a condition either, it is the binding of the operator's
+// acknowledgement to the run they were shown.
 type adoptCompleteRequest struct {
 	// AcceptRetryable lets the operator finish over items a run could not read
 	// from the source and wrote nothing for. It never accepts an item whose write
 	// result is unknown: that one's only resolution is its own read-back.
 	AcceptRetryable bool `json:"acceptRetryable,omitempty"`
+	// RunID is the run the acknowledgement belongs to. It is required whenever
+	// AcceptRetryable is set, and must equal the durable summary's current run
+	// identity under the completion's own CAS: two runs may leave the same
+	// retryable item ids and counts, and the identity is the only thing that tells
+	// the operator's confirmation apart.
+	RunID string `json:"runId,omitempty"`
 }
 
 // adoptComplete finishes an adopted installation once its migration has really
@@ -198,7 +302,9 @@ type adoptCompleteRequest struct {
 //  4. the destination carries at least one client key, because a CPA with none
 //     accepts unauthenticated Gateway traffic;
 //  5. the run recorded `Finished` with every planned item present;
-//  6. no item is retryable, unless the request accepts them.
+//  6. no item is retryable, unless the request accepts them;
+//  7. an accepted set of retryable items names the durable run's current
+//     generation, verified again in the completion's own CAS.
 //
 // Every one of them is decided while `adoptMigrationMu` is held, and the CAS that
 // sets `ProductComplete` runs under the same lock, so a run can never start
@@ -235,7 +341,7 @@ func (a *freshApplication) adoptComplete(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	a.adoptMigrationMu.Lock()
-	decision := a.decideAdoptionCompletion(r.Context(), op, record, managementKey, continuation, freshAuth, request)
+	decision := a.decideAdoptionCompletion(r.Context(), op, managementKey, continuation, freshAuth, request)
 	a.adoptMigrationMu.Unlock()
 	if decision.code != "" {
 		writeFreshAdoptCompleteError(w, decision.status, decision.code, decision.retryable)
@@ -266,20 +372,36 @@ type adoptCompletion struct {
 // holds `adoptMigrationMu` and releases it before using the result: nothing here
 // may hold the lock across a network sample other than the proof itself, which
 // has to be decided with the run's single-flight flag.
-func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op bootstrap.FreshOperation, record freshstore.Record, managementKey, continuation string, freshAuth bool, request adoptCompleteRequest) adoptCompletion {
+//
+// The record the handler read is not trusted: it was read before this lock, and a
+// run start takes the same lock. Everything below is decided on the durable record
+// as it is now, and the CAS that completes the installation uses the revision
+// that read returned.
+func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op bootstrap.FreshOperation, managementKey, continuation string, freshAuth bool, request adoptCompleteRequest) adoptCompletion {
 	if a.adoptMigrationRunning {
 		// The operator retries once the copy has settled. Nothing is written.
 		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_running"}
+	}
+	current, err := a.store.Load(ctx)
+	if err != nil || current.Operation.Identity != op.Identity {
+		return adoptCompletion{status: http.StatusConflict}
+	}
+	record := current
+	summary := freshstore.AdoptionSummary{}
+	if record.AdoptionSummary != nil {
+		summary = *record.AdoptionSummary
+	}
+	// An acknowledgement belongs to the run the operator was shown. The same
+	// comparison is repeated inside the CAS below, where the write itself is
+	// decided.
+	if request.AcceptRetryable && (request.RunID == "" || summary.RunID != request.RunID) {
+		return adoptCompletion{status: http.StatusConflict, code: adoptMigrationRunChanged}
 	}
 	// One authenticated read of the destination is conditions 3 and 4: the Adopt
 	// posture proves the key this Manager installed, and the snapshot carries the
 	// client keys the destination actually has.
 	if _, err := a.keyApply.AdoptedDestinationKeys(ctx, managementKey); err != nil {
 		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_destination_unproven"}
-	}
-	summary := freshstore.AdoptionSummary{}
-	if record.AdoptionSummary != nil {
-		summary = *record.AdoptionSummary
 	}
 	if !summary.Finished || len(summary.Items) < summary.Planned {
 		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_incomplete"}
@@ -293,7 +415,7 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 	if retryable > 0 && !request.AcceptRetryable {
 		return adoptCompletion{status: http.StatusConflict, code: "adopt_migration_retryable", retryable: retryable}
 	}
-	next, err := a.store.Update(ctx, op.Identity, op.Revision, func(record *freshstore.Record) error {
+	next, err := a.store.Update(ctx, op.Identity, record.Operation.Revision, func(record *freshstore.Record) error {
 		if freshAuth {
 			if err := a.authority.ValidateContinuation(*record, continuation); err != nil {
 				return err
@@ -302,10 +424,21 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 		if record.Operation.Strategy.Stage != "committed" || record.Operation.Strategy.Strategy != bootstrap.AdoptExisting || record.Operation.ProductComplete {
 			return freshstore.ErrConflict
 		}
+		// The durable generation, checked in the same CAS that completes the
+		// installation: a run that replaced the acknowledged one — even one whose
+		// retryable items are identical — makes this acknowledgement stale, and the
+		// operator is told to read the current run rather than finish over a
+		// confirmation they did not give.
+		if request.AcceptRetryable && (record.AdoptionSummary == nil || record.AdoptionSummary.RunID != request.RunID) {
+			return errAdoptMigrationRunChanged
+		}
 		record.Operation.ProductComplete = true
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errAdoptMigrationRunChanged) {
+			return adoptCompletion{status: http.StatusConflict, code: adoptMigrationRunChanged}
+		}
 		return adoptCompletion{status: http.StatusConflict}
 	}
 	return adoptCompletion{next: next}
@@ -356,28 +489,50 @@ const adoptSummaryWriteAttempts = 3
 // as every other Fresh write, so a recorded success can never describe a write
 // that did not happen and can never be rewritten.
 //
+// The checkpoint is bound to one run generation. Every attempt re-reads the
+// record and refuses when the durable summary belongs to a different run, and the
+// CAS callback repeats that comparison on the record it is about to write: a
+// checkpoint retry that outlived its run — a slow item, a blocked write, a
+// process that resumed meanwhile — can never overwrite the newer run's item list,
+// even though both runs may look identical to a reader.
+//
 // A revision conflict is not a failure of the item: the copy resolved nothing
 // extra, and another writer only moved the record forward. The checkpoint
 // therefore re-reads the record and retries the append under the new revision,
 // at most adoptSummaryWriteAttempts times. It stops when the conflict persists,
 // and it stops immediately when the record it re-read is no longer this adoption
-// still at committed — that is not a race but a record this run must not write.
-func persistAdoptionSummary(ctx context.Context, a *freshApplication, identity bootstrap.FreshIdentity, revision uint64, session adoptMigrationSession) freshadopt.Checkpoint {
+// still at committed, or no longer this run.
+func persistAdoptionSummary(ctx context.Context, a *freshApplication, identity bootstrap.FreshIdentity, runID string, session adoptMigrationSession) freshadopt.Checkpoint {
 	return func(summary freshstore.AdoptionSummary) error {
+		if runID == "" || summary.RunID != runID {
+			// The executor's clone is the run's own plan; a summary that carries a
+			// different generation is not this checkpoint's to write.
+			return freshstore.ErrConflict
+		}
 		for range adoptSummaryWriteAttempts {
+			current, err := a.store.Load(ctx)
+			if err != nil {
+				return err
+			}
+			if current.Operation.Identity != identity || !adoptionMigrationCommitted(current) ||
+				current.AdoptionSummary == nil || current.AdoptionSummary.RunID != runID {
+				return freshstore.ErrConflict
+			}
 			// The session is re-checked before the write, not once at the start: a
 			// migration runs for minutes after the reply that started it.
 			if session != nil {
-				current, err := a.store.Load(ctx)
-				if err != nil {
-					return err
-				}
 				if err := session(current); err != nil {
 					return err
 				}
 			}
-			next, err := a.store.Update(ctx, identity, revision, func(record *freshstore.Record) error {
-				if !adoptionMigrationCommitted(*record) {
+			// The revision is the one just read: a conflict means another writer
+			// moved the record between this read and the write, which the next
+			// attempt resolves from its own read. The CAS still checks the whole
+			// record, and the callback re-checks the run generation on the record
+			// it is about to write.
+			_, err = a.store.Update(ctx, identity, current.Operation.Revision, func(record *freshstore.Record) error {
+				if !adoptionMigrationCommitted(*record) ||
+					record.AdoptionSummary == nil || record.AdoptionSummary.RunID != runID {
 					return freshstore.ErrConflict
 				}
 				copied := summary
@@ -385,25 +540,38 @@ func persistAdoptionSummary(ctx context.Context, a *freshApplication, identity b
 				return nil
 			})
 			if err == nil {
-				revision = next.Operation.Revision
 				return nil
 			}
 			if !errors.Is(err, freshstore.ErrConflict) {
 				return err
 			}
-			// Re-read and decide: only the same adoption still at committed is a
-			// record this run may write to again.
-			current, loadErr := a.store.Load(ctx)
-			if loadErr != nil {
-				return loadErr
-			}
-			if current.Operation.Identity != identity || !adoptionMigrationCommitted(current) {
-				return freshstore.ErrConflict
-			}
-			revision = current.Operation.Revision
+			// The next attempt re-reads and decides: only the same adoption still at
+			// committed, still carrying this run's generation, is a record this run
+			// may write to again.
 		}
 		return freshstore.ErrConflict
 	}
+}
+
+// adoptionMigrationSettled reports whether the durable summary has no further
+// work for a run to do: the last run reached the end of the plan it fixed and
+// left no retryable item behind.
+//
+// It applies the record's own completion rules — the `Finished`/`Planned` pair
+// and the item-level `Retryable` classification — rather than a parallel
+// predicate, so "settled" here means exactly what the completion accepts as a
+// finished migration. An unfinished run, or one with an item whose source read
+// wrote nothing, still needs a run and gets a new generation.
+func adoptionMigrationSettled(summary freshstore.AdoptionSummary) bool {
+	if !summary.Finished || len(summary.Items) < summary.Planned {
+		return false
+	}
+	for _, item := range summary.Items {
+		if summary.Retryable(item.Item) {
+			return false
+		}
+	}
+	return true
 }
 
 // adoptionMigrationCommitted reports whether one record is still the committed,

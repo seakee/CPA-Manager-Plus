@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
@@ -238,7 +239,10 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 	if e == nil || e.source == nil || e.destination == nil {
 		return Result{}, errors.New("freshadopt: source and destination are required")
 	}
-	summary := freshstore.AdoptionSummary{Items: append([]freshstore.AdoptionItem(nil), previous.Items...)}
+	summary := freshstore.AdoptionSummary{
+		Items: append([]freshstore.AdoptionItem(nil), previous.Items...),
+		RunID: previous.RunID,
+	}
 	// The document is read once: the source is never written, so three
 	// independent reads could not observe three different states, and one read
 	// bounds both the request count and the memory held.
@@ -369,12 +373,74 @@ func configFamilyItemName(family string) string { return "rules:" + family }
 
 func providerSectionItemName(section string) string { return "section:" + section }
 
+// overlongNamePrefixBytes is how much of a name an overlong identity keeps. The
+// identity itself has the store's own bound, so the prefix leaves room for the
+// item prefix, the ellipsis, the digest label and the digest.
+const overlongNamePrefixBytes = 120
+
 // overlongCredentialItem is the stable identity of a credential whose own name
-// cannot be an item identity because it is longer than the store accepts. It is
-// the digest of the name, so it is stable across replays and carries no name
-// byte beyond its own bounded prefix.
+// cannot be an item identity because it is longer than the store accepts. It
+// keeps a readable prefix of the name — an opaque digest alone tells the
+// operator nothing to look for — and the digest of the whole name, which is what
+// keeps the identity stable across replays.
+//
+// The digest stays in the record. The summary's output boundary never emits a
+// credential identity at all (fresh_adoption_summary.go projects a generic,
+// Manager-owned label), because the identity is derived from the unscrubbed name
+// and a browser could confirm a candidate credential from it offline.
 func overlongCredentialItem(name string) string {
+	prefix := name
+	if len(prefix) > overlongNamePrefixBytes {
+		// Cut on a rune boundary: this identity is text the record keeps.
+		cut := overlongNamePrefixBytes
+		for cut > 0 && !utf8.RuneStart(name[cut]) {
+			cut--
+		}
+		prefix = name[:cut]
+	}
+	return "credential:" + prefix + "…#sha256:" + digestSHA256([]byte(name))
+}
+
+// legacyOverlongCredentialItem is the identity an earlier executor wrote for an
+// overlong credential: the digest of the whole name and nothing else. This
+// executable never produces it again, and it is never rewritten in place; it
+// exists so a resume recognises the item an older run already settled and does
+// not append a second record for the same file. The lookup is derived from the
+// current preflight name, so it needs no stored alias and no migration pass.
+func legacyOverlongCredentialItem(name string) string {
 	return "credential-name-sha256:" + digestSHA256([]byte(name))
+}
+
+// CanonicalItem reports whether one non-credential item identity is a name from
+// the Manager's own closed vocabulary: the writable gateway leaves, the payload
+// rule families and the provider sections this package plans from. A credential
+// identity is never canonical here — it quotes source metadata — and anything
+// else has no structural proof that it is Manager-authored, so a reader may not
+// treat it as safe text.
+func CanonicalItem(item freshstore.AdoptionItem) bool {
+	switch item.Kind {
+	case freshstore.AdoptionKindConfigLeaf:
+		path, ok := strings.CutPrefix(item.Item, "config:")
+		return ok && containsName(cpa.ConfigLeafPaths(), path)
+	case freshstore.AdoptionKindConfigFamily:
+		family, ok := strings.CutPrefix(item.Item, "rules:")
+		return ok && containsName(cpa.ConfigRuleFamilyIDs(), family)
+	case freshstore.AdoptionKindProviderSection:
+		section, ok := strings.CutPrefix(item.Item, "section:")
+		return ok && containsName(ProviderSections(), section)
+	default:
+		return false
+	}
+}
+
+// containsName reports membership in one of the closed tables above.
+func containsName(names []string, name string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
 }
 
 // boundedName quotes a credential name inside an instruction without letting an
@@ -424,13 +490,21 @@ const excessCredentialItem = "credential-inventory-excess"
 // second copy of them:
 //
 //   - a credential whose stable item identity is longer than the store accepts
-//     can never be recorded, so it is reported as manual with an instruction
-//     instead of stopping the run at it;
+//     can never be recorded under its own name, so it is reported with a
+//     bounded, stable identity and an instruction instead of stopping the run
+//     at it;
 //   - the whole inventory must fit the summary. The fixed part of the plan (the
 //     gateway leaves, the rule families and the provider sections) is known
 //     exactly, so the credential allowance is the remainder. Anything past it is
-//     reported as manual: a bounded, valid record the operator can act on is
-//     strictly better than a record the store refuses.
+//     reported by one aggregate marker: a bounded, valid record the operator can
+//     act on is strictly better than a record the store refuses.
+//
+// One budget pays for every item this preflight persists — an ordinary
+// credential's record, an overlong name's manual record and the aggregate marker
+// itself all draw on the same allowance. Charging one kind and not another would
+// let a source crowd out the fixed configuration items, or overflow the item
+// bound the allowance was computed from; the aggregate is what keeps the report
+// honest once the budget is gone.
 //
 // The summary is validated against the store's own checker before it is
 // checkpointed, so a plan that still does not fit ends the run here, before any
@@ -460,11 +534,28 @@ func (e *Executor) preflightInventory(ctx context.Context, summary *freshstore.A
 			// The name cannot be the item identity: the store would refuse the
 			// whole summary. The record carries a bounded identity derived from the
 			// name instead, so the item is still reported, still stable across
-			// replays and still actionable.
+			// replays and still actionable. It costs exactly one slot of the same
+			// budget an ordinary credential costs.
 			item := overlongCredentialItem(file.Name)
 			if summary.Settled(item) {
 				continue
 			}
+			// An earlier executor recorded this same file as a digest of its
+			// whole name. That record is evidence of an outcome the operator was
+			// already told about, so a resume recognises it from the current name
+			// and records nothing: duplicating it would change the plan and the
+			// counts of a run that already settled the file.
+			if summary.Settled(legacyOverlongCredentialItem(file.Name)) {
+				continue
+			}
+			if allowed == 0 {
+				// No room for this name either. It joins the same aggregate the
+				// ordinary credentials past the budget use, instead of being
+				// written one by one past the store's item bound.
+				excess++
+				continue
+			}
+			allowed--
 			if err := e.record(ctx, summary, freshstore.AdoptionItem{
 				Item: item, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionManual,
 				Reason:      "adoption_item_name_too_long",
@@ -489,6 +580,7 @@ func (e *Executor) preflightInventory(ctx context.Context, summary *freshstore.A
 		if err := e.record(ctx, summary, freshstore.AdoptionItem{
 			Item: excessCredentialItem, Kind: freshstore.AdoptionKindCredential, Outcome: freshstore.AdoptionManual,
 			Reason:      "adoption_inventory_too_large",
+			Left:        excess,
 			Instruction: fmt.Sprintf("%d credential files were left behind because the migration record is full. Copy them into the destination CPA's auth directory by hand.", excess),
 		}, checkpoint); err != nil {
 			return nil, err

@@ -4,6 +4,8 @@ import { shellText as s } from '../i18n/consoleShell';
 import { bootstrapJourneyText as journey } from '../i18n/bootstrapJourney';
 import { FullWebIcon, type FullWebIconName } from './FullWebIcon';
 import { sameIdentity, type FreshOperation } from './bootstrapTransport';
+import { parseAdoptionSummary } from './freshAdoption';
+import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { PublicApiError, type createPublicApiClient } from './publicApi';
 import { parseRuntimeJSON, validRuntimeGeneration } from './runtimeGeneration';
 
@@ -85,10 +87,18 @@ export function FreshManagedRuntime({
   const [unknown, setUnknown] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [error, setError] = useState('');
+  // The journey is the operator's to choose. An adoption has no managed stage of
+  // its own, so the choice itself is what renders the shared flow; from then on
+  // the record owns it.
+  const [adoptChoice, setAdoptChoice] = useState(false);
   const [step, setStep] = useState(operation.strategy?.strategy ? 3 : 0);
   const [acknowledged, setAcknowledged] = useState(false);
   const [running, setRunning] = useState(false);
   const [readiness, setReadiness] = useState(false);
+  // The plugin opt-in belongs to the destination this installation stages. It
+  // starts from the persisted decision and is submitted with the same operation
+  // that writes the destination, so a retry cannot silently change it.
+  const [plugins, setPlugins] = useState(operation.strategy?.pluginsEnabled === true);
   const [checking, setChecking] = useState(false);
   const runningRef = useRef(false);
   const inFlight = useRef(false);
@@ -172,8 +182,13 @@ export function FreshManagedRuntime({
                 expectedRuntimeIdentity: checkpoint.targetIdentity,
                 expectedRuntimeGeneration: checkpoint.targetGeneration,
                 expectedArtifactId: checkpoint.targetArtifactId,
+                // A replay states the decision the checkpoint recorded.
+                ...(checkpoint.pluginsEnabled ? { pluginsEnabled: true } : {}),
               }
-            : expectedTarget.current),
+            : {
+                ...expectedTarget.current,
+                ...(plugins ? { pluginsEnabled: true } : {}),
+              }),
         };
       } catch {
         setError(t('installObservationInvalid'));
@@ -309,6 +324,82 @@ export function FreshManagedRuntime({
     }
   }
 
+  // An adopted installation is a journey of its own. It is never `null`: an
+  // adopt checkpoint used to fall into the foreign branch and render nothing, so
+  // a browser that had committed an adoption showed an empty card.
+  if (checkpoint?.strategy === 'adopt_existing' || adoptChoice) {
+    const guarded = async <T,>(call: () => Promise<T>): Promise<T> => {
+      try {
+        return await call();
+      } catch (err) {
+        if (err instanceof PublicApiError && err.kind === 'authentication') onUnauthorized();
+        throw err;
+      }
+    };
+    const adoptCarrier: AdoptCarrier = {
+      readOperation: () => guarded(() => client.get<FreshOperation>('operation', auth)),
+      observeTarget: async () => {
+        const observed = hostTarget(
+          JSON.stringify(await guarded(() => client.get<unknown>('installation/runtime', auth)))
+        );
+        return {
+          runtimeIdentity: observed.expectedRuntimeIdentity,
+          runtimeGeneration: observed.expectedRuntimeGeneration,
+          artifactId: observed.expectedArtifactId,
+        };
+      },
+      // The canonical carrier adds the fence the bootstrap carrier adds: the
+      // operation's identity and its durable revision. A write the flow fenced
+      // on its own decision read sends that revision and is refused as stale if
+      // a staging landed after it — the staging POST can never be re-fenced
+      // onto the commit. A write with no fence (a resume, the confirmation)
+      // reads the revision per write, because a migration checkpoint is its own
+      // durable write — the revision this page last saw is stale exactly when a
+      // run stopped between items.
+      writeStrategy: async (body, fence) => {
+        // A fenced write already carries the read it was decided on; anything
+        // else reads the record now, once.
+        const read = fence
+          ? undefined
+          : await guarded(() => client.get<FreshOperation>('operation', auth));
+        const identity = fence?.identity ?? read!.identity;
+        if (!sameIdentity(identity, operation.identity))
+          throw new Error('Invalid installation response');
+        return guarded(() =>
+          client.post<FreshOperation>(
+            'strategy',
+            { identity, expectedRevision: fence?.revision ?? read!.revision, ...body },
+            auth
+          )
+        );
+      },
+      complete: (body) => guarded(() => client.post<FreshOperation>('complete', body, auth)),
+      readAdoption: async () =>
+        parseAdoptionSummary(
+          await guarded(() => client.get<unknown>('installation/adoption', auth))
+        ),
+    };
+    return (
+      <FreshAdoptFlow
+        operation={operation}
+        carrier={adoptCarrier}
+        onOperation={onOperation}
+        onComplete={(completed) => {
+          // A clean copy enters the console. Manual or failed items keep this
+          // journey on screen with its groups and next steps until the operator
+          // has read them; the footer then offers the console.
+          if (completed.counts.manual === 0 && completed.counts.failed === 0) onContinue?.();
+        }}
+        onEnterConsole={() => onContinue?.()}
+        onPending={onPending}
+        // Choosing Adopt must be reversible until the record holds an attempt:
+        // the tile is a choice, and a choice with no way back is a trap. Once an
+        // adopt checkpoint exists the record decides, so no exit is offered.
+        onExit={checkpoint?.strategy ? undefined : () => setAdoptChoice(false)}
+      />
+    );
+  }
+
   if (foreign) return null;
 
   if (guided) {
@@ -427,19 +518,23 @@ export function FreshManagedRuntime({
                     <p>{s('newDetail')}</p>
                   </div>
                 </div>
-                <div className="journey-choice is-unavailable" aria-disabled="true">
+                <button
+                  type="button"
+                  className={`journey-choice ${adoptChoice ? 'selected' : ''}`}
+                  data-testid="choose-adopt"
+                  aria-pressed={adoptChoice}
+                  disabled={!!checkpoint?.strategy}
+                  onClick={() => setAdoptChoice(true)}
+                >
                   <span className="journey-radio" aria-hidden="true" />
                   <span className="journey-tile-icon">
                     <FullWebIcon name="copy" size={34} />
                   </span>
                   <div>
-                    <h2>
-                      {s('adopt')}
-                      <span className="badge badge-neutral">{journey('unavailable')}</span>
-                    </h2>
+                    <h2>{s('adopt')}</h2>
                     <p>{s('adoptHelp')}</p>
                   </div>
-                </div>
+                </button>
                 <details className="journey-disclosure">
                   <summary>{journey('advanced')}</summary>
                   <button
@@ -486,6 +581,20 @@ export function FreshManagedRuntime({
                     </strong>
                     <p>{journey('createsHelp')}</p>
                   </div>
+                </div>
+                <div className="journey-field">
+                  <label className="journey-checkline" htmlFor="runtime-plugin-optin">
+                    <input
+                      id="runtime-plugin-optin"
+                      data-testid="plugin-optin-checkbox"
+                      type="checkbox"
+                      checked={checkpoint?.strategy ? checkpoint.pluginsEnabled === true : plugins}
+                      disabled={!!checkpoint?.strategy}
+                      onChange={(event) => setPlugins(event.target.checked)}
+                    />
+                    <span>{journey('pluginsOptIn')}</span>
+                  </label>
+                  <p className="journey-help">{journey('pluginsOptInHelp')}</p>
                 </div>
               </>
             )}

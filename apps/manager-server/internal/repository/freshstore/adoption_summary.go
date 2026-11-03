@@ -52,6 +52,17 @@ type AdoptionItem struct {
 	Instruction       string           `json:"instruction,omitempty"`
 	SourceSHA256      string           `json:"sourceSha256,omitempty"`
 	DestinationSHA256 string           `json:"destinationSha256,omitempty"`
+	// Left is how many source items the record could not hold at all. Only the
+	// aggregate "inventory too large" marker sets it: the count is the one fact
+	// about those items the record can keep without keeping them, and without it
+	// the operator is told to copy "some files" by hand.
+	//
+	// It is a count, not a stored item, so it is bounded by
+	// `maxAdoptionRemainder` rather than by the item bound: a source whose
+	// inventory is far larger than the record has to be able to report how much
+	// was left behind, or the aggregate marker itself would be refused and the
+	// run would stop instead of settling. The count is exact below that bound.
+	Left int `json:"left,omitempty"`
 }
 
 // AdoptionSummary is what the executor checkpointed so far, in migration order.
@@ -59,6 +70,14 @@ type AdoptionItem struct {
 // place a per-item result survives a Manager restart.
 type AdoptionSummary struct {
 	Items []AdoptionItem `json:"items"`
+	// RunID identifies the run that wrote the item list below. A run start
+	// assigns a fresh opaque 128-bit identity and persists it before the run
+	// touches the source or the destination, so an acknowledgement of one run's
+	// retryable items can never be applied to a different run whose items happen
+	// to look identical. It is empty on a record written before run generations
+	// existed; such a record is read normally and never authorizes a new
+	// acknowledgement.
+	RunID string `json:"runId,omitempty"`
 	// Finished records that one run processed every item it planned: each item is
 	// settled or recorded as retryable. It is the run-finished marker completion
 	// reads, and it is never inferred from the item list, because a run that
@@ -157,7 +176,15 @@ const (
 	maxAdoptionItemName = 256
 	// maxAdoptionItems bounds the whole summary. The migration inventory is a
 	// few dozen entries; a larger summary was not produced by this executor.
-	maxAdoptionItems       = 1024
+	maxAdoptionItems = 1024
+	// maxAdoptionRemainder bounds the `Left` count of the one aggregate excess
+	// marker. It is deliberately far above the item bound and unrelated to it:
+	// `Left` is a count of source files the record could not hold, and a source
+	// far over the record's capacity must still be able to report the true
+	// number instead of failing validation. 1,048,576 is a thousand times the
+	// item bound and well past any inventory a single CPA listing can carry into
+	// this preflight; the bound exists only to refuse a corrupted or absurd row.
+	maxAdoptionRemainder   = 1 << 20
 	maxAdoptionReason      = 120
 	maxAdoptionInstruction = 512
 )
@@ -211,11 +238,32 @@ func validAdoptionDigest(digest string) bool {
 	return true
 }
 
+// validAdoptionRunID accepts an absent run identity — a record written before
+// run generations existed — or exactly one 128-bit run identity in lower-case
+// hex. A shorter or non-hex value is not something this Manager writes.
+func validAdoptionRunID(runID string) bool {
+	if runID == "" {
+		return true
+	}
+	if len(runID) != 32 {
+		return false
+	}
+	for _, c := range runID {
+		if c < '0' || c > '9' && c < 'a' || c > 'f' {
+			return false
+		}
+	}
+	return true
+}
+
 // validAdoptionSummary accepts only the bounded shape the executor emits. It
 // never inspects a value, because a value is never stored.
 func validAdoptionSummary(summary AdoptionSummary) error {
 	if len(summary.Items) > maxAdoptionItems {
 		return errors.New("adoption summary exceeds its item bound")
+	}
+	if !validAdoptionRunID(summary.RunID) {
+		return errors.New("invalid adoption run identity")
 	}
 	if summary.Planned < 0 || summary.Planned > maxAdoptionItems {
 		return errors.New("adoption summary plan exceeds its bound")
@@ -237,6 +285,9 @@ func validAdoptionSummary(summary AdoptionSummary) error {
 		}
 		if !validAdoptionDigest(item.SourceSHA256) || !validAdoptionDigest(item.DestinationSHA256) {
 			return errors.New("invalid adoption item digest")
+		}
+		if item.Left < 0 || item.Left > maxAdoptionRemainder {
+			return errors.New("adoption item remainder exceeds its bound")
 		}
 		if item.Outcome == AdoptionMigrated && (item.Instruction != "" || item.Reason != "") {
 			return errors.New("migrated adoption item cannot carry a reason or instruction")
@@ -270,6 +321,14 @@ func validAdoptionSummaryUpdate(before, after *AdoptionSummary, productComplete 
 	if before.Finished && !after.Finished && productComplete {
 		return errors.New("a completed installation may not reopen its migration")
 	}
+	// A run identity may change only at a run start: a new, unfinished generation
+	// takes the record over. Clearing it back to the legacy absent value and
+	// replacing it on a finished run are both refused, so an old run's checkpoint
+	// cannot present itself as a newer generation and no new run can hide behind
+	// a recorded one.
+	if before.RunID != after.RunID && (after.RunID == "" || after.Finished) {
+		return errors.New("adoption run identity replaced outside a run start")
+	}
 	for index, item := range before.Items {
 		if after.Items[index] == item {
 			continue
@@ -286,7 +345,12 @@ func cloneAdoptionSummary(summary *AdoptionSummary) *AdoptionSummary {
 	if summary == nil {
 		return nil
 	}
-	copied := AdoptionSummary{Items: append([]AdoptionItem(nil), summary.Items...), Finished: summary.Finished, Planned: summary.Planned}
+	copied := AdoptionSummary{
+		Items:    append([]AdoptionItem(nil), summary.Items...),
+		RunID:    summary.RunID,
+		Finished: summary.Finished,
+		Planned:  summary.Planned,
+	}
 	return &copied
 }
 

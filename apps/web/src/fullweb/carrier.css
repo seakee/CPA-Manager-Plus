@@ -1143,6 +1143,57 @@ input {
   white-space: nowrap;
 }
 
+.adopt-decisions {
+  display: grid;
+  gap: 16px;
+  margin: 0;
+}
+
+.adopt-decision-group dt {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.adopt-decision-group dd {
+  margin: 6px 0 0;
+}
+
+.adopt-decisions ul,
+.adopt-items {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.adopt-decision-group li {
+  font-size: 15px;
+  color: var(--text-secondary);
+}
+
+.adopt-items li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.adopt-item-name {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.adopt-item-reason {
+  flex-basis: 100%;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
 .journey-stage-mark {
   width: 31px;
   height: 31px;

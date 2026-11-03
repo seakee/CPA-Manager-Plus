@@ -93,6 +93,16 @@ func TestFreshSetupContinuationCannotBecomeConsoleAuthentication(t *testing.T) {
 	if w := request(http.MethodPost, "/control/api/v2/strategy", "Fresh "+token); w.Code != 401 {
 		t.Fatal("completed installation allowed mutation", w.Code)
 	}
+	// Completion ends the installation credential's reach over its own resources
+	// too. The adoption summary is the one installation resource the session read
+	// while the installation was pending (see fresh_adoption_summary_test.go);
+	// afterwards it is a Console resource and the session is only a receipt
+	// reader.
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		if w := request(method, "/control/api/v2/installation/adoption", "Fresh "+token); w.Code != 401 {
+			t.Fatal("completed installation still reached its adoption summary", method, w.Code)
+		}
+	}
 	if w := request(http.MethodGet, "/control/api/v2/operation", "Bearer "+strategyTestAdmin); w.Code != 200 {
 		t.Fatal("normal Admin login stopped working", w.Code)
 	}

@@ -2,6 +2,13 @@
 // secrets. This module belongs to the existing Full Web entry graph.
 import { validControlBasePath } from './routingContext';
 import {
+  ADOPT_SOURCE_CLASS,
+  parseAdoptionSummary,
+  type AdoptionDecision,
+  type AdoptionSummary,
+  type AdoptCompletionBody,
+} from './freshAdoption';
+import {
   parseRuntimeJSON,
   runtimeRequestJSON,
   validRuntimeGeneration,
@@ -10,6 +17,20 @@ import {
 export const BOOTSTRAP_ROOT = '/.well-known/cpamp-bootstrap';
 export const BOOTSTRAP_UI = `${BOOTSTRAP_ROOT}/ui`;
 const API = `${BOOTSTRAP_ROOT}/api/v2/`;
+// The same deadline every canonical read carries: a request that never answers
+// has to become a failure the screen can state.
+const REQUEST_TIMEOUT = 15000;
+
+// The completion refusals an adoption's operator can act on. A code outside this
+// set never reaches the UI: the completion screen shows a message for a cause it
+// knows, and a plain failure otherwise.
+const COMPLETE_REFUSALS: Record<string, true> = {
+  adopt_migration_running: true,
+  adopt_migration_incomplete: true,
+  adopt_migration_retryable: true,
+  adopt_migration_run_changed: true,
+  adopt_destination_unproven: true,
+};
 
 export interface FreshIdentity {
   admissionId: string;
@@ -35,6 +56,13 @@ export interface FreshStrategyCheckpoint {
   stage?: string;
   /** The persisted plugin opt-in of a New Managed install; absent means off. */
   pluginsEnabled?: boolean;
+  /** An adoption's recorded source class and connection identities. */
+  sourceClass?: string;
+  sourceIdentity?: string;
+  destinationConnectionIdentity?: string;
+  /** An adoption's discovered resources and their recorded dispositions. */
+  adoptionResources?: string[];
+  adoptionDecisions?: AdoptionDecision[];
 }
 
 export interface FreshOperation {
@@ -46,6 +74,23 @@ export interface FreshOperation {
   gatewayPending: boolean;
   routing: FreshRoutingCheckpoint;
   strategy?: FreshStrategyCheckpoint;
+}
+
+/**
+ * The durable read a write is fenced by.
+ *
+ * An adoption is two POSTs of one body, and only the record decides which of
+ * them a POST is: a body matching a staged attempt commits it. A write that
+ * must stay a staging therefore carries the revision of the read that decided
+ * there was nothing to commit, so a staging that landed after that read — a
+ * slow source, a lost reply — makes the CAS refuse it instead of turning it
+ * into the commit nobody confirmed. A write with no such decision behind it (a
+ * resume, the confirmation itself) passes no fence and the carrier reads the
+ * durable revision, because a migration checkpoint is its own durable write.
+ */
+export interface AdoptionFence {
+  identity: FreshIdentity;
+  revision: number;
 }
 
 export interface Handoff {
@@ -79,13 +124,29 @@ export class BootstrapTransportError extends Error {
   // Absent when the refusal carried none, which keeps a lost reply and a typed
   // refusal distinguishable.
   readonly code?: string;
+  // The bounded capability list a strategy blocker names
+  // ({ "Code": "…", "Unsupported": ["…"] }): what the refusal says is not
+  // supported, never free text.
+  readonly unsupported?: readonly string[];
+  // The item count of an `adopt_migration_retryable` completion refusal, which
+  // is the number the operator decides over.
+  readonly retryable?: number;
 
-  constructor(message: string, kind: BootstrapErrorKind, status?: number, code?: string) {
+  constructor(
+    message: string,
+    kind: BootstrapErrorKind,
+    status?: number,
+    code?: string,
+    unsupported?: readonly string[],
+    retryable?: number
+  ) {
     super(message);
     this.name = 'BootstrapTransportError';
     this.kind = kind;
     this.status = status;
     this.code = code;
+    this.unsupported = unsupported;
+    this.retryable = retryable;
   }
 }
 
@@ -211,11 +272,17 @@ function validOperationState(next: FreshOperation | undefined, previous?: FreshO
           ? validRuntimeGeneration(checkpoint.targetGeneration) &&
             /^sha256:[a-f0-9]{64}$/.test(checkpoint.targetArtifactId || '') &&
             ['staged', 'starting', 'committed'].includes(checkpoint.stage || '')
-          : checkpoint.strategy === 'connect_external' &&
-            checkpoint.targetGeneration === 1 &&
-            !checkpoint.targetArtifactId &&
-            /^external:sha256:[a-f0-9]{64}$/.test(checkpoint.targetIdentity) &&
-            ['validated', 'committed'].includes(checkpoint.stage || '')))) &&
+          : checkpoint.strategy === 'adopt_existing'
+            ? // An adoption has no starting stage: it is staged by the two-POST
+              // inventory, or committed once the destination is verified.
+              validRuntimeGeneration(checkpoint.targetGeneration) &&
+              /^sha256:[a-f0-9]{64}$/.test(checkpoint.targetArtifactId || '') &&
+              ['staged', 'committed'].includes(checkpoint.stage || '')
+            : checkpoint.strategy === 'connect_external' &&
+              checkpoint.targetGeneration === 1 &&
+              !checkpoint.targetArtifactId &&
+              /^external:sha256:[a-f0-9]{64}$/.test(checkpoint.targetIdentity) &&
+              ['validated', 'committed'].includes(checkpoint.stage || '')))) &&
     (!previousCheckpoint?.strategy ||
       (checkpoint?.strategy === previousCheckpoint.strategy &&
         checkpoint.targetIdentity === previousCheckpoint.targetIdentity &&
@@ -279,6 +346,20 @@ export function consumeHandoff(
   }
 }
 
+// The exact field set of an adoption strategy body. The carrier adds the
+// identity and the revision, so anything else is a body this client never
+// builds and the server would refuse.
+const ADOPT_BODY_FIELDS: Record<string, true> = {
+  strategy: true,
+  adoptSourceClass: true,
+  baseUrl: true,
+  managementKey: true,
+  expectedRuntimeIdentity: true,
+  expectedRuntimeGeneration: true,
+  expectedArtifactId: true,
+  pluginsEnabled: true,
+};
+
 const methods = {
   'claim/exchange': 'POST',
   operation: 'GET',
@@ -288,6 +369,7 @@ const methods = {
   'routing/activate': 'POST',
   strategy: 'POST',
   'installation/runtime': 'GET',
+  'installation/adoption': 'GET',
   complete: 'POST',
 } as const;
 type Resource = keyof typeof methods;
@@ -302,7 +384,13 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       !['http:', 'https:'].includes(window.location.protocol) ||
       !Object.prototype.hasOwnProperty.call(methods, resource) ||
       (canonicalBase &&
-        !['operation', 'strategy', 'installation/runtime', 'complete'].includes(resource)) ||
+        ![
+          'operation',
+          'strategy',
+          'installation/runtime',
+          'installation/adoption',
+          'complete',
+        ].includes(resource)) ||
       (resource !== 'claim/exchange' && !token)
     ) {
       throw new BootstrapTransportError('Bootstrap authority unavailable', 'authority');
@@ -314,48 +402,95 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (token) headers.Authorization = `Fresh ${token}`;
+    // A read that never answers is not a read that succeeds: the progress loop
+    // only counts answers, so a hung request would spin forever behind a screen
+    // that states nothing. Reads get the same 15 s the canonical carrier gives
+    // every request, which turns a hang into the failure the loop can count.
+    const bounded =
+      resource === 'operation' ||
+      resource === 'installation/runtime' ||
+      resource === 'installation/adoption';
+    const controller = bounded ? new AbortController() : undefined;
+    const deadline = controller ? setTimeout(() => controller.abort(), REQUEST_TIMEOUT) : undefined;
     let response: Response;
+    // The deadline covers the whole answer, not only its headers: a half-open
+    // connection that sends a status line and then stalls is exactly the hang the
+    // progress loop has to count, and the canonical carrier bounds the body read
+    // the same way. Every exit from this block clears it.
     try {
-      response = await transport(target.href, {
-        method: methods[resource],
-        headers,
-        ...(body === undefined
-          ? {}
-          : { body: resource === 'strategy' ? runtimeRequestJSON(body) : JSON.stringify(body) }),
-        mode: 'same-origin',
-        credentials: 'omit',
-        redirect: 'error',
-        cache: 'no-store',
-      });
-    } catch {
-      throw new BootstrapTransportError('Bootstrap transport unavailable', 'transport');
-    }
-    if (!response.ok) {
-      // The Fresh strategy adapter refuses with a typed, bounded blocker body.
-      // Preserve its code so a typed refusal stays distinguishable from a reply
-      // that was lost after the server may have acted.
-      let code: string | undefined;
       try {
-        const refusal = (await response.json()) as { Code?: unknown };
-        if (typeof refusal?.Code === 'string' && refusal.Code) code = refusal.Code;
+        response = await transport(target.href, {
+          method: methods[resource],
+          headers,
+          ...(body === undefined
+            ? {}
+            : { body: resource === 'strategy' ? runtimeRequestJSON(body) : JSON.stringify(body) }),
+          ...(controller ? { signal: controller.signal } : {}),
+          mode: 'same-origin',
+          credentials: 'omit',
+          redirect: 'error',
+          cache: 'no-store',
+        });
       } catch {
-        /* A refusal without a bounded envelope stays a plain status failure. */
+        throw new BootstrapTransportError('Bootstrap transport unavailable', 'transport');
       }
-      throw new BootstrapTransportError(
-        'Bootstrap request unavailable',
-        classifyStatus(response.status),
-        response.status,
-        code
-      );
-    }
-    try {
-      return parseRuntimeJSON(await response.text()) as T;
-    } catch {
-      throw new BootstrapTransportError(
-        'Bootstrap response unavailable',
-        'response',
-        response.status
-      );
+      if (!response.ok) {
+        // Two bounded refusal envelopes exist, and they are read by the call that
+        // can act on them:
+        //  - a strategy blocker answers `{"Code": "…", "Unsupported": […]}`;
+        //  - an adoption completion answers `{"code": "…", "retryable": N}`.
+        // Preserving them keeps a typed refusal distinguishable from a reply that
+        // was lost after the server may have acted.
+        let code: string | undefined;
+        let unsupported: readonly string[] | undefined;
+        let retryable: number | undefined;
+        try {
+          const refusal = (await response.json()) as {
+            Code?: unknown;
+            Unsupported?: unknown;
+            code?: unknown;
+            retryable?: unknown;
+          };
+          if (resource === 'complete') {
+            if (typeof refusal?.code === 'string' && COMPLETE_REFUSALS[refusal.code] === true)
+              code = refusal.code;
+            if (
+              code &&
+              Number.isSafeInteger(refusal.retryable) &&
+              (refusal.retryable as number) > 0
+            )
+              retryable = refusal.retryable as number;
+          } else {
+            if (typeof refusal?.Code === 'string' && refusal.Code) code = refusal.Code;
+            if (Array.isArray(refusal?.Unsupported))
+              unsupported = refusal.Unsupported.filter(
+                (entry): entry is string =>
+                  typeof entry === 'string' && !!entry && entry.length <= 64
+              );
+          }
+        } catch {
+          /* A refusal without a bounded envelope stays a plain status failure. */
+        }
+        throw new BootstrapTransportError(
+          'Bootstrap request unavailable',
+          classifyStatus(response.status),
+          response.status,
+          code,
+          unsupported,
+          retryable
+        );
+      }
+      try {
+        return parseRuntimeJSON(await response.text()) as T;
+      } catch {
+        throw new BootstrapTransportError(
+          'Bootstrap response unavailable',
+          'response',
+          response.status
+        );
+      }
+    } finally {
+      clearTimeout(deadline);
     }
   }
   async function verifyCanonical(prepared: FreshOperation): Promise<string> {
@@ -575,15 +710,57 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       return verified;
     },
     async executeStrategy(
-      body: Record<string, unknown>
+      body: Record<string, unknown>,
+      fence?: AdoptionFence
     ): Promise<{ operation: FreshOperation; initialClientKey: string }> {
       if (!operation?.adminInitialized) {
         throw new BootstrapTransportError('Installation authority unavailable', 'authority');
       }
+      // An adoption body is the whole two-POST contract, so it is validated as a
+      // whole before it leaves the browser: the server decodes it strictly, and
+      // the destination snapshot is keyed by it, so a malformed body is a
+      // request the server would refuse rather than an attempt worth sending.
+      if (body.strategy === 'adopt_existing') {
+        const adopt = body as Record<string, unknown>;
+        if (
+          Object.keys(adopt).some((key) => !ADOPT_BODY_FIELDS[key]) ||
+          adopt.adoptSourceClass !== ADOPT_SOURCE_CLASS ||
+          typeof adopt.baseUrl !== 'string' ||
+          typeof adopt.managementKey !== 'string' ||
+          typeof adopt.pluginsEnabled !== 'boolean' ||
+          typeof adopt.expectedRuntimeIdentity !== 'string' ||
+          typeof adopt.expectedArtifactId !== 'string' ||
+          !validRuntimeGeneration(adopt.expectedRuntimeGeneration)
+        )
+          throw new BootstrapTransportError('Adoption request unavailable', 'bad_request');
+      }
+      // A caller that read the record to decide what to send passes that read's
+      // revision: the POST then either lands on exactly the state it decided
+      // about or is refused as stale, which is what keeps an adoption's staging
+      // POST from committing a staging that landed in between. A caller with no
+      // such decision (a resume, or the confirmation itself) fences on the
+      // durable revision instead, because a migration checkpoint is its own
+      // durable write and the cached revision is stale exactly when the run
+      // stopped between items.
+      let expected = fence;
+      if (!expected) {
+        const current = await request<FreshOperation>('operation');
+        if (
+          !sameIdentity(current?.identity, operation.identity) ||
+          !validOperationState(current, operation)
+        ) {
+          throw new BootstrapTransportError('Installation response unavailable', 'response');
+        }
+        operation = current;
+        expected = { identity: current.identity, revision: current.revision };
+      } else if (!sameIdentity(expected.identity, operation.identity)) {
+        // A fence of another installation is not this operation's fact.
+        throw new BootstrapTransportError('Installation response unavailable', 'authority');
+      }
       const next = await request<FreshOperation & { initialClientKey?: unknown }>('strategy', {
         ...body,
-        identity: operation.identity,
-        expectedRevision: operation.revision,
+        identity: expected.identity,
+        expectedRevision: expected.revision,
       });
       if (
         !sameIdentity(next?.identity, operation.identity) ||
@@ -606,11 +783,11 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       operation = next;
       return { operation: next, initialClientKey: delivered ?? '' };
     },
-    async complete(): Promise<FreshOperation> {
+    async complete(body: AdoptCompletionBody = {}): Promise<FreshOperation> {
       if (!canonicalBase || !operation?.adminInitialized) {
         throw new BootstrapTransportError('Installation authority unavailable', 'authority');
       }
-      const next = await request<FreshOperation>('complete', {});
+      const next = await request<FreshOperation>('complete', body);
       if (
         !sameIdentity(next?.identity, operation.identity) ||
         !validOperationState(next, operation) ||
@@ -620,6 +797,17 @@ export function createBootstrapTransport(transport: typeof fetch = globalThis.fe
       }
       operation = next;
       return next;
+    },
+    async readAdoption(): Promise<AdoptionSummary> {
+      if (!operation?.adminInitialized) {
+        throw new BootstrapTransportError('Installation authority unavailable', 'authority');
+      }
+      const next = await request<unknown>('installation/adoption');
+      try {
+        return parseAdoptionSummary(next);
+      } catch {
+        throw new BootstrapTransportError('Adoption response unavailable', 'response');
+      }
     },
     request,
     clear() {

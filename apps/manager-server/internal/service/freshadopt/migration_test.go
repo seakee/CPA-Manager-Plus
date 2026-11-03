@@ -1100,6 +1100,17 @@ func TestOversizedInventoryIsRecordedAsManualAndTheRunCompletes(t *testing.T) {
 	if excess.Outcome != freshstore.AdoptionManual || excess.Reason != "adoption_inventory_too_large" || excess.Instruction == "" {
 		t.Fatalf("the excess must be one manual item with an instruction: %+v", excess)
 	}
+	// The marker carries how many files it stands for, so the operator is told
+	// how much work is left instead of "some files".
+	omitted := 0
+	for name := range source.credentials {
+		if summary.Index("credential:"+name) < 0 {
+			omitted++
+		}
+	}
+	if omitted == 0 || excess.Left != omitted {
+		t.Fatalf("the excess marker reports %d left behind, the record omits %d", excess.Left, omitted)
+	}
 	// The credentials that did fit were still copied, so the excess is a bound on
 	// the record and not on the migration.
 	migrated, manual, failed := summary.Counts()
@@ -1152,6 +1163,246 @@ func TestCredentialNameLongerThanTheItemBoundIsManual(t *testing.T) {
 	if item, ok := replay.Item(overlongCredentialItem(long)); !ok || item != recorded {
 		t.Fatalf("a replay did not recognize the over-long item: %+v", item)
 	}
+}
+
+// capacitySource is a source whose whole inventory is exactly the names the
+// caller gives it, on an empty configuration. A test for the record's capacity
+// has to know the full inventory, which the happy-path fixture's handful of
+// credentials would hide.
+func capacitySource(t *testing.T, names []string) *fakeCPA {
+	t.Helper()
+	source := newFakeCPA(t, "source-management-key")
+	for index, name := range names {
+		source.seedAuthFile(name, "claude", []byte(fmt.Sprintf(`{"type":"claude","access_token":"capacity-token-%d"}`, index)), false)
+	}
+	return source
+}
+
+// ordinaryCredentialName is one name the record can hold directly, sorted before
+// every overlong name this file builds.
+func ordinaryCredentialName(index int) string { return fmt.Sprintf("bulk-%04d.json", index) }
+
+// overlongCredentialName is one name the store cannot hold as an item identity.
+// The index keeps both the kept prefix and the whole-name digest distinct.
+func overlongCredentialName(index int) string {
+	return fmt.Sprintf("zzz-%04d-%s.json", index, strings.Repeat("x", freshstore.MaxAdoptionItemName()))
+}
+
+func ordinaryCredentialNames(count int) []string {
+	names := make([]string, 0, count)
+	for index := range count {
+		names = append(names, ordinaryCredentialName(index))
+	}
+	return names
+}
+
+func overlongCredentialNames(count int) []string {
+	names := make([]string, 0, count)
+	for index := range count {
+		names = append(names, overlongCredentialName(index))
+	}
+	return names
+}
+
+// assertCapacityRecord proves the invariants one over-capacity preflight must
+// keep: a record the store accepts and keeps within its item bound, every fixed
+// configuration item present, and exactly one aggregate marker whose count is
+// the true number of source credentials the record does not hold.
+func assertCapacityRecord(t *testing.T, source, destination *fakeCPA, summary freshstore.AdoptionSummary) freshstore.AdoptionItem {
+	t.Helper()
+	if err := freshstore.ValidateAdoptionSummary(summary); err != nil {
+		t.Fatalf("the preflight produced a record the store refuses: %v", err)
+	}
+	if len(summary.Items) > freshstore.MaxAdoptionItems() {
+		t.Fatalf("recorded %d items over the store's bound", len(summary.Items))
+	}
+	// The fixed configuration part of the plan keeps its room: one item per
+	// gateway leaf, rule family and provider section, whatever the credential
+	// inventory looks like.
+	for _, path := range cpa.ConfigLeafPaths() {
+		itemByName(t, summary, configLeafItemName(path))
+	}
+	for _, family := range cpa.ConfigRuleFamilyIDs() {
+		itemByName(t, summary, configFamilyItemName(family))
+	}
+	for _, section := range ProviderSections() {
+		itemByName(t, summary, providerSectionItemName(section))
+	}
+	marker := itemByName(t, summary, excessCredentialItem)
+	if marker.Outcome != freshstore.AdoptionManual || marker.Reason != "adoption_inventory_too_large" || marker.Instruction == "" {
+		t.Fatalf("the excess must be one manual item with an instruction: %+v", marker)
+	}
+	omitted := 0
+	for name := range source.credentials {
+		if summary.Index(credentialItemName(name)) >= 0 ||
+			summary.Index(overlongCredentialItem(name)) >= 0 ||
+			summary.Index(legacyOverlongCredentialItem(name)) >= 0 {
+			continue
+		}
+		omitted++
+	}
+	if omitted == 0 || marker.Left != omitted {
+		t.Fatalf("the excess marker reports %d left behind, the record omits %d", marker.Left, omitted)
+	}
+	// The budget is actually spent: the record sits at its item bound, so no
+	// capacity was reserved for a kind of item that never needed it.
+	if len(summary.Items) != freshstore.MaxAdoptionItems() {
+		t.Fatalf("the record settled at %d of its %d item bound", len(summary.Items), freshstore.MaxAdoptionItems())
+	}
+	// Every uploaded credential is a recorded copy and nothing else: a bounded
+	// record never claims a copy it did not make, and never makes one it did not
+	// record.
+	migratedCredentials := 0
+	for _, item := range summary.Items {
+		if item.Kind == freshstore.AdoptionKindCredential && item.Outcome == freshstore.AdoptionMigrated {
+			migratedCredentials++
+		}
+	}
+	if uploads := len(destination.uploadNames()); uploads != migratedCredentials {
+		t.Fatalf("the destination received %d uploads for %d recorded copies", uploads, migratedCredentials)
+	}
+	return marker
+}
+
+// assertCapacityReplay proves the over-capacity record is a settle, not a stop:
+// a replay of the same source appends nothing, leaves the marker alone and
+// uploads nothing new.
+func assertCapacityReplay(t *testing.T, source, destination *fakeCPA, durable freshstore.AdoptionSummary) {
+	t.Helper()
+	uploads := len(destination.uploadNames())
+	replay := runMigration(t, source, destination, durable)
+	if err := freshstore.ValidateAdoptionSummary(replay); err != nil {
+		t.Fatalf("a replay produced a record the store refuses: %v", err)
+	}
+	if len(replay.Items) != len(durable.Items) {
+		t.Fatalf("a replay appended %d items", len(replay.Items)-len(durable.Items))
+	}
+	if !reflect.DeepEqual(replay.Items, durable.Items) {
+		t.Fatal("a replay rewrote a settled item")
+	}
+	if !replay.Finished || replay.Planned != len(replay.Items) {
+		t.Fatalf("a replay did not settle its own plan: finished=%v planned=%d items=%d",
+			replay.Finished, replay.Planned, len(replay.Items))
+	}
+	if len(destination.uploadNames()) != uploads {
+		t.Fatalf("a replay uploaded %d credentials again", len(destination.uploadNames())-uploads)
+	}
+}
+
+// Many names the record cannot hold must settle with one aggregate marker
+// instead of stopping at the item bound. Every overlong name costs one slot of
+// the same budget an ordinary credential costs, and the names past the budget
+// are counted by the marker rather than written one by one.
+func TestManyOverlongCredentialNamesSettleAsOneAggregate(t *testing.T) {
+	const total = 1100
+	names := overlongCredentialNames(total)
+	source := capacitySource(t, names)
+	destination := destinationFixture(t)
+	var durable freshstore.AdoptionSummary
+	checkpoint := func(current freshstore.AdoptionSummary) error {
+		if err := freshstore.ValidateAdoptionSummary(current); err != nil {
+			return err
+		}
+		durable = current
+		return nil
+	}
+	summary := runMigrationWithCheckpoint(t, source, destination, freshstore.AdoptionSummary{}, checkpoint)
+	marker := assertCapacityRecord(t, source, destination, summary)
+	if marker.Left >= total {
+		t.Fatalf("the marker counted every file as left behind: %d", marker.Left)
+	}
+	recorded := 0
+	for _, item := range summary.Items {
+		if item.Reason != "adoption_item_name_too_long" {
+			continue
+		}
+		recorded++
+		if item.Outcome != freshstore.AdoptionManual {
+			t.Fatalf("an over-long name was not manual work: %+v", item)
+		}
+	}
+	if recorded != total-marker.Left {
+		t.Fatalf("the record holds %d over-long items and reports %d left behind", recorded, marker.Left)
+	}
+	// An overlong name can never be uploaded: it is manual work by definition.
+	if uploads := destination.uploadNames(); len(uploads) != 0 {
+		t.Fatalf("a run with no ordinary inventory uploaded %d credentials", len(uploads))
+	}
+	assertCapacityReplay(t, source, destination, durable)
+	source.usesOnlyReads(t)
+}
+
+// A mixed inventory shares one budget: the ordinary credentials that fit are
+// copied, the overlong names that fit are reported individually, and the rest of
+// both kinds are counted by the same aggregate. Charging one kind and not the
+// other used to overflow the item bound.
+func TestMixedOrdinaryAndOverlongInventorySharesOneBudget(t *testing.T) {
+	const ordinary, overlong = 950, 300
+	names := append(ordinaryCredentialNames(ordinary), overlongCredentialNames(overlong)...)
+	source := capacitySource(t, names)
+	destination := destinationFixture(t)
+	var durable freshstore.AdoptionSummary
+	checkpoint := func(current freshstore.AdoptionSummary) error {
+		if err := freshstore.ValidateAdoptionSummary(current); err != nil {
+			return err
+		}
+		durable = current
+		return nil
+	}
+	summary := runMigrationWithCheckpoint(t, source, destination, freshstore.AdoptionSummary{}, checkpoint)
+	marker := assertCapacityRecord(t, source, destination, summary)
+	// The ordinary names sorted first filled their part of the budget, so all of
+	// them are recorded and copied; the overlong tail is what the marker counts.
+	for index := range ordinary {
+		item := itemByName(t, summary, credentialItemName(ordinaryCredentialName(index)))
+		if item.Outcome != freshstore.AdoptionMigrated {
+			t.Fatalf("an ordinary credential inside the budget was not copied: %+v", item)
+		}
+	}
+	if marker.Left <= 0 || marker.Left >= overlong {
+		t.Fatalf("the marker reports %d of %d overlong files left behind", marker.Left, overlong)
+	}
+	if uploads := destination.uploadNames(); len(uploads) != ordinary {
+		t.Fatalf("the run uploaded %d credentials, %d ordinary names fit", len(uploads), ordinary)
+	}
+	if _, stored := destination.credential(overlongCredentialName(overlong - 1)); stored {
+		t.Fatal("an overlong credential was uploaded anyway")
+	}
+	assertCapacityReplay(t, source, destination, durable)
+	source.usesOnlyReads(t)
+}
+
+// An ordinary inventory far over the record's capacity settles the same way: the
+// aggregate marker reports the true remainder, which is larger than the item
+// bound the record itself keeps. A count is not a stored item, so it must not be
+// the thing that stops the migration.
+func TestOversizedOrdinaryInventoryStillFormsTheAggregateMarker(t *testing.T) {
+	const total = 3000
+	source := capacitySource(t, ordinaryCredentialNames(total))
+	destination := destinationFixture(t)
+	var durable freshstore.AdoptionSummary
+	checkpoint := func(current freshstore.AdoptionSummary) error {
+		if err := freshstore.ValidateAdoptionSummary(current); err != nil {
+			return err
+		}
+		durable = current
+		return nil
+	}
+	summary := runMigrationWithCheckpoint(t, source, destination, freshstore.AdoptionSummary{}, checkpoint)
+	marker := assertCapacityRecord(t, source, destination, summary)
+	if marker.Left <= freshstore.MaxAdoptionItems() {
+		t.Fatalf("the marker reports %d left behind, which the item bound could already hold", marker.Left)
+	}
+	if marker.Left >= total {
+		t.Fatalf("the marker counted every file as left behind: %d", marker.Left)
+	}
+	// The credential past the budget was never uploaded: a bounded record never
+	// claims a copy it did not make.
+	if _, stored := destination.credential(ordinaryCredentialName(total - 1)); stored {
+		t.Fatal("a credential past the bound was uploaded anyway")
+	}
+	assertCapacityReplay(t, source, destination, durable)
+	source.usesOnlyReads(t)
 }
 
 // A source credential whose bytes CPA could not parse is never uploaded at all.
@@ -1978,4 +2229,67 @@ func TestCredentialStateReadsOnlyTheOneCredential(t *testing.T) {
 			t.Fatalf("no per-name read of %s: %v", name, names)
 		}
 	}
+}
+
+// The executor's clones must carry the run generation: the checkpoint a run
+// writes is the record's own generation, and a clone that dropped it would make
+// every checkpoint of that run look like a different run's.
+func TestExecutorCarriesTheRunGenerationThroughItsClones(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	runID := strings.Repeat("a", 32)
+	previous := freshstore.AdoptionSummary{RunID: runID}
+	checkpoints := 0
+	summary := runMigrationWithCheckpoint(t, source, destination, previous, func(current freshstore.AdoptionSummary) error {
+		checkpoints++
+		if current.RunID != runID {
+			t.Fatalf("a checkpoint carried the wrong generation: %q", current.RunID)
+		}
+		return nil
+	})
+	if checkpoints == 0 {
+		t.Fatal("the run checkpointed nothing")
+	}
+	if summary.RunID != runID {
+		t.Fatalf("the result dropped the generation: %q", summary.RunID)
+	}
+}
+
+// An earlier executor recorded an over-long credential as the digest of its
+// whole name. A resume recognises that identity from the current preflight name
+// and records nothing for the file: the durable item is the outcome the operator
+// was already told about, and appending the current identity would duplicate it.
+func TestLegacyOverlongIdentityIsNotRecordedAgainOnResume(t *testing.T) {
+	source, destination := sourceFixture(t), destinationFixture(t)
+	long := strings.Repeat("a", freshstore.MaxAdoptionItemName()) + ".json"
+	source.seedAuthFile(long, "claude", []byte(`{"type":"claude","access_token":"legacy-token"}`), false)
+
+	legacy := freshstore.AdoptionItem{
+		Item: legacyOverlongCredentialItem(long), Kind: freshstore.AdoptionKindCredential,
+		Outcome: freshstore.AdoptionManual, Reason: "adoption_item_name_too_long",
+		Instruction: "Copy the credential file by hand.",
+	}
+	previous := freshstore.AdoptionSummary{Items: []freshstore.AdoptionItem{legacy}}
+
+	summary := runMigration(t, source, destination, previous)
+	if item, ok := summary.Item(legacyOverlongCredentialItem(long)); !ok || item != legacy {
+		t.Fatalf("a resume rewrote the legacy item: %+v", item)
+	}
+	if _, ok := summary.Item(overlongCredentialItem(long)); ok {
+		t.Fatal("a resume appended a second record for a file an earlier run settled")
+	}
+	tooLong := 0
+	for _, item := range summary.Items {
+		if item.Reason == "adoption_item_name_too_long" {
+			tooLong++
+		}
+	}
+	if tooLong != 1 {
+		t.Fatalf("the resume recorded %d over-long items for one file", tooLong)
+	}
+	// The file is still not copied: the durable record says the operator must do
+	// it by hand, and the identity being recognised does not change that.
+	if _, stored := destination.credential(long); stored {
+		t.Fatal("a credential whose earlier record is manual was uploaded anyway")
+	}
+	source.usesOnlyReads(t)
 }

@@ -68,12 +68,13 @@ one-time credential: do not paste it into issues, service logs or evidence.
 
 After signing in, the installation wizard continues the same durable operation:
 
-1. Choose **New embedded installation**. External remains a Host-authorized
-   connection checkpoint and cannot finish installation. The Fresh flow does not
-   upgrade existing product data. The `adopt_existing`/`network_existing` service
-   path is admitted (see [Adopt `network_existing`](#adopt-network_existing)),
-   but the wizard still offers no Adopt action, so it stays unreachable from the
-   browser in this lane.
+1. Choose **New embedded installation**, **Adopt existing CPA** or **Connect to
+   external CPA**. New Managed is the recommended path. Adopt reads the
+   `adopt_existing`/`network_existing` source the operator names and copies its
+   credentials, gateway configuration, provider sections and client keys into the
+   CPA this Manager runs (see [Adopt `network_existing`](#adopt-network_existing)).
+   External remains a Host-authorized connection checkpoint and cannot finish
+   installation. The Fresh flow does not upgrade existing product data.
 2. Review the Console address and packaged official CPA version, then select
    **Check deployment**. Manager reads the Runtime through its existing
    Host-configured authenticated transport. There is no Runtime JSON input,
@@ -687,6 +688,101 @@ zero: a window that never opened is not coverage. Enabling statistics is a
 two-step gate — opening the confirmation writes nothing, and only an explicit
 confirm sends `{requestId, confirmEnableStatistics: true}`.
 
+### D acceptance: `bin/ci/fresh-adopt-network.mjs`
+
+```sh
+revision=$(git rev-parse HEAD)
+docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --label "org.opencontainers.image.revision=$revision" \
+  --target v8-amd64-candidate -f Dockerfile.runtime -t cpamp-d-runtime:local .
+docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --label "org.opencontainers.image.revision=$revision" \
+  -f Dockerfile.manager-server -t cpamp-d-manager:local .
+docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --label "org.opencontainers.image.revision=$revision" \
+  -f Dockerfile.ingress -t cpamp-d-ingress:local .
+
+node bin/ci/fresh-adopt-network.mjs \
+  cpamp-d-runtime:local cpamp-d-manager:local cpamp-d-ingress:local bin/tmp/d-adopt
+```
+
+It is the browser journey, not an API reconstruction. A real CPA v8.0.13 runs as
+its own container holding 40 credential files, one gateway config with the seeded
+routing, provider and client-key sections, one credential whose item name is past
+the record's limit (recorded `manual` with an instruction, never uploaded) and one
+`.json` file the source cannot classify (present on the host, absent from the
+source's own v8 credential listing, so never an item); the destination is the CPA
+the project's own Compose Runtime stages, because an adoption needs a
+Manager-owned destination. The script claims the installation, chooses Adopt,
+enters the source and confirms the inventory in Chromium.
+
+It proves, in order:
+
+1. the four pre-commit negatives each answer their own code and commit nothing —
+   a wrong management key (`adoption_source_read_unavailable`), a source with no
+   client key (`adoption_source_empty`), a source that is the destination
+   (`adoption_destination_identity_conflict`), and, when `CPAMP_D_CPA_LEGACY`
+   names the pinned v7 binary, a v7 source;
+2. the inventory screen separates what copies from what needs manual work, and the
+   commit is impossible before it is confirmed;
+3. the migration runs behind a TCP forwarder this script controls. It refuses every
+   new connection once the run has recorded its first item, so the remaining items
+   fail before writing anything and are recorded retryable — a deterministic fault
+   rather than a race;
+4. the interrupted screen does not call the adoption complete: a settled run with
+   retryable items still on the source shows the settled state and names the count.
+   Completion then answers `adopt_migration_retryable`, and the screen offers the
+   acknowledgement;
+5. removing the control file and pressing **Resume** continues from the durable
+   prefix and finishes the run. The resumed run is read from the summary the page
+   receives *after* the click, so no assertion can be satisfied by the interrupted
+   run's own summary, and its rendered per-outcome numbers are reconciled against
+   the route's `counts`;
+6. the destination — read from the CPA the Supervisor staged, not from the Manager's
+   own report — carries exactly the source client keys, the seeded gateway values
+   and the migrated credential bytes (and neither the unparseable file nor the
+   credential the record cannot name), admits a client key through Ingress
+   `/v1/models` while refusing an unknown one, records a collection window the
+   usage workspace reports as still catching up (`projection_catching_up`, so the
+   check asserts that a window exists and not that usage is proven), reports a
+   `runtime/status` body carrying what its page renders — mode, status, the
+   Manager's own state and the gateway observation of that same read — and leaves
+   the source's config bytes and credential list unchanged. The page's own
+   progress reads are checked as well: a read that never left, never answered or
+   never parsed fails the run, because a page that stopped polling and a read
+   that failed are not the same observation.
+
+Screenshots cover the source form, the inventory, the retryable result, the
+retryable completion and the finished installation. The report goes to
+`bin/tmp/d-adopt/report.json`, is written 0600, and records PASS/FAIL/NOT RUN for
+every check — including the checks a failure prevented from running, which are
+recorded as NOT RUN with the check that ended the run — plus `gitHead`, the image
+revisions and the failure logs. The report is written exactly once, after the
+saved log and every other result field have settled: the log is
+`bin/tmp/logs/d-adopt-<HEAD12>-<runSuffix>.log`, created exclusively so two runs
+of the same commit are two intact files rather than one overwritten, and
+`report.logPath` names it; a log that could not be written makes that same report
+`FAIL` with `logWriteFailure` instead of leaving a PASS on disk. Its check
+registry is self-checking: a check the run recorded but never declared, or a
+declared check it never executed, fails the report, so a name cannot drift out
+of the NOT RUN backfill unnoticed. The harness is the External one — secrets in a
+sibling directory outside the artifact directory, `assertNoSecret` over the
+unredacted report, the run log and every container log before teardown, a dirty
+tree refused. That assertion rests on evidence, not on an empty list: the
+container enumeration and every `docker logs` read must succeed and cover every
+container this run started, so a failed read is
+`containerLogEvidence: FAIL` with a `secretAssertion` that is not PASS, never a
+run that checked nothing and called it clean. Redaction collects every
+occurrence of every declared value on the original text and merges overlapping
+or touching ranges before one replacement pass, so two values overlapping from
+different starts leave no fragment. The run owns a lifecycle created before its
+first directory: browser close, container log capture, exact container removal,
+project-scoped Compose down and secrets removal are independent steps, each
+failure is recorded in `report.teardown` and makes the run exit nonzero, and
+persistent SIGINT/SIGTERM listeners keep a second signal from interrupting
+cleanup. Resources carry a per-run `cpampd-adopt-*` prefix; nothing outside this
+run's project is removed.
+
 ### D acceptance: `bin/ci/fresh-external-management.mjs`
 
 ```sh
@@ -1003,8 +1099,13 @@ while `adoptMigrationMu` is held — the same mutex `startAdoptionMigration` tak
 4. the destination carries at least one client key (part of the same read);
 5. the run recorded `Finished` with every planned item present → 409
    `adopt_migration_incomplete`;
-6. no item is retryable, unless the body carries `{"acceptRetryable": true}` →
-   409 `adopt_migration_retryable` with `{"retryable": n}`.
+6. no item is retryable, unless the body carries
+   `{"acceptRetryable": true, "runId": "<current run>"}` → 409
+   `adopt_migration_retryable` with `{"retryable": n}`. An acknowledgement whose
+   `runId` is absent or is not the durable record's current run → 409
+   `adopt_migration_run_changed`; the check is made on the record re-read under
+   the lock and again inside the completion CAS. Unknown body fields → 400. A
+   plain completion still sends `{}`.
 
 Only then does the CAS set `ProductComplete`, still under the lock. The lock is
 released before the reply is written and before the idempotent usage-collection
@@ -1020,6 +1121,27 @@ list reached that plan — it is never inferred from the list, because a run
 stopped at an item leaves a list that looks exactly like a complete one. A stop
 therefore leaves `Finished` false with `len(Items) < Planned`, which is what the
 completion refuses.
+
+**Run generation.** Every run that actually starts assigns a random 128-bit
+`runId` (32 lowercase hex) and persists it with `Finished=false` through the
+record's revision CAS while `adoptMigrationMu` is held — before either endpoint
+client is created and before the reply says `running`. The items and plan the
+record already held are kept, so a resume still continues from its durable
+prefix. A replay that finds a run in flight writes nothing and reuses that run's
+generation. A replay that finds the run already settled — `Finished`, every
+planned item recorded and no retryable item left — starts nothing as well: it
+keeps the generation and `Finished` and answers with the durable record, so a
+replay after the source has become unreachable cannot reopen a run and leave a
+complete-able installation refused as `adopt_migration_incomplete`. An
+unfinished run, or one that still carries a retryable item, is real work and gets
+a new generation. Executor checkpoints carry the `runId` and are refused when the
+durable record has moved to another run, so an earlier run cannot overwrite a
+later one. Two runs can leave identical retryable items and counts; the
+generation is what keeps an acknowledgement of one from completing the other. A
+record written before generations existed reads as `runId: ""`; it cannot
+authorize a retryable acknowledgement and must be resumed first. Its
+`credential-name-sha256:<hex>` overlong identities remain valid ledger entries:
+a resume treats them as settled and never rewrites them.
 
 **The update channel stays New Managed only** (`cmd/…/fresh_updates.go`). The
 Fresh version-update wiring that replaces a Supervisor-staged artifact is Later,
@@ -1099,9 +1221,22 @@ committed with an empty summary. A committed replay of `POST strategy` is the
 resume path and continues from the durable prefix; a replay that was already
 waiting for the migration lock when a completion took it starts nothing, because
 the start re-reads the record under that lock and refuses a completed or
-re-staged installation. Step 4's completion conditions read this summary; the
-authority generalization and usage enablement are described above, while model
-management and the Full Web Adopt flow are not part of this lane.
+re-staged installation. Step 4's completion conditions read this summary, and
+the Full Web Adopt flow of Step 5 reads it through `GET installation/adoption`
+(below). Model management is not part of this lane.
+
+**Bounded inventory.** The preflight charges every item it persists against one
+budget: the store's 1024-item summary, less what the record already holds and less
+the fixed configuration part (39 leaves, 5 rule families, 12 provider sections).
+An ordinary credential record, an overlong name's manual record and the single
+aggregate `credential-inventory-excess` marker all draw on that same allowance. A
+credential name longer than the 256-byte item bound is recorded under a bounded
+identity instead of stopping the run at it; once the budget is gone, names of
+either kind are counted by that one marker rather than written one by one. Its
+`left` is a count, not a stored item, so it has its own, much larger bound
+(1,048,576) and truthfully reports a source far over the record's capacity; only a
+value past that bound is refused as absurd. A replay appends nothing: settled
+items and the marker itself are skipped.
 
 The per-item summary is the operational record of the copy. It is deliberately
 *not* itself a qualification. `freshAdoptionRefRules`
@@ -1213,9 +1348,170 @@ this lane re-emitted the `network_existing` and `legacy_managed` resource
 reports/traces and the legacy-transition report/observation rather than editing a
 digest by hand.
 
-Adopt stays unreachable from the web UI in this lane: the wizard's only
-actionable strategy is still **New embedded installation**, and the Full Web
-Adopt flow is a later step.
+#### The Adopt read route and the Full Web flow
+
+The per-item summary was durable but readable only by the completion decision, so
+the browser could learn whether an adoption had finished and nothing else. Step 5
+adds one read: `GET installation/adoption`, in the same `canonicalAPI` switch as
+`GET operation`, allowed for the Fresh session exactly as `GET
+installation/runtime` is — it is the progress read of the session that committed
+the adoption.
+
+It answers `{items[], runId, planned, finished, running, retryable, counts}`,
+where each item carries `id`, `item`, `kind`, `outcome`, `reason`, the store's
+own `retryable` rule and — on the one item that stands for credentials the record
+could not hold — `left`, `running` is the live single-flight flag rather than a
+recorded value, and `counts` tallies the four outcomes. The reply omits the
+record's source and destination digests: they are the Manager's evidence, and
+dropping them keeps the route a statement about progress.
+
+The reply is a structural projection, not a scrubbed copy of the record. A
+credential file name is the source CPA's metadata and can be, or contain, a
+credential; an overlong record identity is an unsalted digest of that name.
+Neither reaches the browser. A credential item is always `Credential file #N`
+(its 1-based ordinal among credentials), and the inventory-overflow marker is
+`Credential files left behind` plus `left`. A configuration or provider item keeps
+its `config:` / `rules:` / `section:` reference only when that reference belongs
+to the Manager's closed gateway, rule or provider tables; otherwise it becomes
+`Configuration item #N` or `Provider section #N`. `reason` is emitted only when it
+is one of the Manager's own reason codes, so an upstream rejection code is
+dropped. The record's free-text `instruction` is never emitted: the page states
+the next step from the item's `kind` and `reason`. Because no upstream text is
+copied, no prefix, middle, suffix or overlapping fragment of a source value can
+appear, and there is no value matcher whose coverage must be argued.
+
+`id` digests only the public text and the item's ordinal — never the record's own
+name — so it cannot confirm a candidate credential offline. The ordinal is a
+discriminator, not a salt: it keeps two items with the same public text apart,
+and the record's order keeps an item's identity stable across reads.
+
+A staged adoption, a non-adoption and an unreadable record answer
+`404 {"code":"adopt_summary_unavailable"}` rather than an empty list that reads
+like a finished run. The session branch is bounded by `ProductComplete`: the
+claim that committed the adoption reads its own progress until the installation
+completes, and afterwards the route is an Admin resource and the same session is
+answered `401`.
+
+Both wizards render one shared `FreshAdoptFlow`:
+
+- the Adopt tile in the setup wizard and in the Console's guided Runtime page is a
+  real choice, an `adopt_existing` checkpoint renders the flow instead of an empty
+  card, and the Console's source step offers a way back to the strategy choice
+  until the record holds an attempt (after that the record decides, and no exit is
+  rendered);
+- the source stage asks for the address, the management key (a password input held
+  in component memory, never persisted or logged) and the plugin opt-in, and
+  states the scope: credentials, gateway configuration, provider sections and
+  client keys migrate; usage history, logs and plugins do not; the source is never
+  written;
+- the first `POST strategy` answers `staged` with `adoptionResources` and
+  `adoptionDecisions` — PascalCase fields the pinned domain type has no JSON tags
+  for, read as they are — and the flow groups them into what copies and what needs
+  manual work. Nothing is copied until the operator confirms, and the second POST
+  sends the identical body. Because the two POSTs are the same request, reading
+  the inventory reads the durable operation first, and that read is also the
+  staging write's fence: the POST carries the revision of the read that decided
+  "nothing staged", so a staging that lands between that read and the write — a
+  slow source, a lost first reply — makes the server refuse the POST as stale
+  instead of accepting it as the commit. Only the confirmation (and a resume)
+  sends a write fenced on the durable revision, which is what lets a replay
+  succeed after the migration's own checkpoints;
+- a staged checkpoint whose body the page no longer holds — a reload — asks for
+  the source key again before it offers the confirmation, and the confirm button
+  stays disabled until there is a body to send instead of accepting a click that
+  cannot do anything. Every read that finds the record staged rebuilds that body
+  from the inputs on screen and the plugin choice the record holds, so a lost
+  first reply, a corrected address or a key typed after Back is what the
+  confirmation sends instead of a body built before the record owned the attempt;
+  a corrected address is then refused by the server as another attempt, not
+  committed silently. The body a previous read built stops being confirmable
+  before that rebuild: the rebuild observes the destination, and a read that
+  fails leaves its failure on screen with the confirmation unavailable, until a
+  later read rebuilds a body again. The address and key fields are closed while an
+  action runs, and a rebuilt body is checked against the inputs it was built from
+  once the observation returns: a body whose inputs the screen has moved past is
+  discarded with its own message instead of becoming confirmable, so no path
+  offers a confirmation of anything but the values the operator can still see.
+  The durable staged record answers a lost
+  reply, never a failed read: it does not bring back a body the screen no longer
+  matches. The plugin opt-in is locked to the recorded value as soon as
+  a read finds the record staged, with its own explanation, because the
+  destination template already carries that decision: a choice the record did not
+  record is stated on the source step instead of being carried into a
+  confirmation. A refusal that says the body is not this record's attempt
+  (`fresh_strategy_owner_conflict`, `adopt_plugin_optin_conflict`) drops the body
+  again: the source form returns, a mistyped key is corrected without a reload,
+  and the recorded inventory is reused;
+- the committed run is polled every two seconds with a bounded backoff until the
+  record says `finished` and not `running`, then the per-item results are grouped
+  by their own outcome — migrated, manual, failed and `absent_at_source` — so the
+  number beside "Migrated" is `counts.migrated` and a resource the source never had
+  is never counted as a copy. Each reason code has a localized sentence, and a
+  manual or failed item's next step is the page's own sentence for its `kind` and
+  `reason` behind a "what to do" disclosure — a credential that exists only in the
+  source process is told to re-authenticate rather than to copy a file that does
+  not exist, and the item standing for credentials the record could not hold
+  carries the count it kept. Because `Credential file #N` is the record's ordinal
+  and not the source file name, a group that holds manual or failed credentials
+  states once, in the operator's language, that `#N` is a record number and that
+  the credential-file lists of the source and destination auth directories are to
+  be compared before copying the missing files or re-authenticating those
+  providers; the same sentence heads the setup wizard's completion block. The
+  per-item line stays one step, each specific cause (an overlong name, a download
+  the source never returned) keeps its own words, and no source name is emitted to
+  make the instruction actionable;
+- the progress read is bounded: three consecutive failures stop the loop and show
+  a typed state with an explicit retry, so a refused or lost route cannot leave
+  "reading the migration record" spinning forever. A read that never answers is
+  one of those failures — the fixed carrier bounds the whole answer, body
+  included, by the same 15 s the canonical carrier gives a request — so neither a
+  request that never answers nor a half-open connection that stalls after its
+  headers can outlast the rule;
+- the success headline is a claim about the copy, so it requires a settled run,
+  no retryable or unprocessed item, no manual item, no failed item and a complete
+  installation. A complete installation that still has manual items or failed
+  items — including the retryable items of the run the operator accepted, which the
+  server completes only over that run-bound acknowledgement — shows "Installation
+  complete — manual steps remain" with the real counts in all four locales, never
+  the complete-adoption sentence; a settled run whose installation is not complete,
+  or whose retryable items have not been accepted, keeps "Migration settled" and
+  names what remains. Both hosts apply one exported rule: the flow hands its last
+  summary to `onComplete`, the setup wizard's final step then shows that headline,
+  the counts and each remaining item's guidance instead of "Your CPAMP management
+  console is ready", and the guided Console keeps the flow on screen with an
+  explicit console action rather than entering the console automatically. A clean
+  Adopt, New Managed and External keep their unchanged success step;
+- the plugin opt-in, once the record holds a strategy, displays and submits the
+  persisted `pluginsEnabled`, locked, in both the Adopt flow and the New Managed
+  page — never the local draft a reload started from;
+- a run that stopped, a page reloaded mid-run, or a finished run that never
+  processed its own plan resumes from the durable prefix with the same `baseUrl`,
+  key and `pluginsEnabled`. The key is not kept anywhere, so the resume form asks
+  for it again and pins the recorded plugin choice. A replay reads the durable
+  operation and sends its current revision, because a migration checkpoint is its
+  own durable write: the revision the page last saw is stale exactly when a run
+  stopped between items. Completion is refused over an unprocessed plan, because
+  the server cannot accept it either;
+- the completion's coded refusals each have their own next action:
+  `adopt_migration_running` keeps polling, `adopt_migration_incomplete` offers
+  Resume, `adopt_migration_retryable` shows the count plus an explicit
+  "finish anyway" checkbox, and `adopt_destination_unproven` names the specific
+  failure. The acknowledgement is bound to `runId` plus the sorted retryable item
+  ids the operator was shown and sends `{acceptRetryable: true, runId}`. A newer
+  run — even with identical items and counts, and even when this page never saw
+  it running — clears the acknowledgement; so does any completion error or an
+  `adopt_migration_run_changed` refusal. A legacy run with an empty `runId`
+  offers Resume instead of the checkbox.
+
+The strategy body and both refusal envelopes are read by both carriers: the
+bootstrap transport parses `Code` and `Unsupported` for a blocker and lowercase
+`code` plus `retryable` for a completion, and the canonical transport forwards
+only the bounded Adopt blocker vocabulary. Every parser has a test built on real
+server bodies.
+
+`FreshManagedRuntime` also sends `pluginsEnabled` for New Managed: the console
+path never did, so an operator who installed from the Console could not opt into
+the plugin runtime at all.
 
 ### Existing-install migration
 
