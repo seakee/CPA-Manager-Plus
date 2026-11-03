@@ -239,7 +239,10 @@ func (e *Executor) Run(ctx context.Context, previous freshstore.AdoptionSummary,
 	if e == nil || e.source == nil || e.destination == nil {
 		return Result{}, errors.New("freshadopt: source and destination are required")
 	}
-	summary := freshstore.AdoptionSummary{Items: append([]freshstore.AdoptionItem(nil), previous.Items...)}
+	summary := freshstore.AdoptionSummary{
+		Items: append([]freshstore.AdoptionItem(nil), previous.Items...),
+		RunID: previous.RunID,
+	}
 	// The document is read once: the source is never written, so three
 	// independent reads could not observe three different states, and one read
 	// bounds both the request count and the memory held.
@@ -381,14 +384,14 @@ const overlongNamePrefixBytes = 120
 // operator nothing to look for — and the digest of the whole name, which is what
 // keeps the identity stable across replays.
 //
-// The digest stays in the record. The summary's output boundary drops it before
-// the text leaves the Manager (fresh_adoption_summary.go's withoutNameDigest),
-// because it is a digest of the unscrubbed name and a browser could confirm a
-// candidate credential from it offline.
+// The digest stays in the record. The summary's output boundary never emits a
+// credential identity at all (fresh_adoption_summary.go projects a generic,
+// Manager-owned label), because the identity is derived from the unscrubbed name
+// and a browser could confirm a candidate credential from it offline.
 func overlongCredentialItem(name string) string {
 	prefix := name
 	if len(prefix) > overlongNamePrefixBytes {
-		// Cut on a rune boundary: this identity is text a browser renders.
+		// Cut on a rune boundary: this identity is text the record keeps.
 		cut := overlongNamePrefixBytes
 		for cut > 0 && !utf8.RuneStart(name[cut]) {
 			cut--
@@ -396,6 +399,48 @@ func overlongCredentialItem(name string) string {
 		prefix = name[:cut]
 	}
 	return "credential:" + prefix + "…#sha256:" + digestSHA256([]byte(name))
+}
+
+// legacyOverlongCredentialItem is the identity an earlier executor wrote for an
+// overlong credential: the digest of the whole name and nothing else. This
+// executable never produces it again, and it is never rewritten in place; it
+// exists so a resume recognises the item an older run already settled and does
+// not append a second record for the same file. The lookup is derived from the
+// current preflight name, so it needs no stored alias and no migration pass.
+func legacyOverlongCredentialItem(name string) string {
+	return "credential-name-sha256:" + digestSHA256([]byte(name))
+}
+
+// CanonicalItem reports whether one non-credential item identity is a name from
+// the Manager's own closed vocabulary: the writable gateway leaves, the payload
+// rule families and the provider sections this package plans from. A credential
+// identity is never canonical here — it quotes source metadata — and anything
+// else has no structural proof that it is Manager-authored, so a reader may not
+// treat it as safe text.
+func CanonicalItem(item freshstore.AdoptionItem) bool {
+	switch item.Kind {
+	case freshstore.AdoptionKindConfigLeaf:
+		path, ok := strings.CutPrefix(item.Item, "config:")
+		return ok && containsName(cpa.ConfigLeafPaths(), path)
+	case freshstore.AdoptionKindConfigFamily:
+		family, ok := strings.CutPrefix(item.Item, "rules:")
+		return ok && containsName(cpa.ConfigRuleFamilyIDs(), family)
+	case freshstore.AdoptionKindProviderSection:
+		section, ok := strings.CutPrefix(item.Item, "section:")
+		return ok && containsName(ProviderSections(), section)
+	default:
+		return false
+	}
+}
+
+// containsName reports membership in one of the closed tables above.
+func containsName(names []string, name string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
 }
 
 // boundedName quotes a credential name inside an instruction without letting an
@@ -484,6 +529,14 @@ func (e *Executor) preflightInventory(ctx context.Context, summary *freshstore.A
 			// replays and still actionable.
 			item := overlongCredentialItem(file.Name)
 			if summary.Settled(item) {
+				continue
+			}
+			// An earlier executor recorded this same file as a digest of its
+			// whole name. That record is evidence of an outcome the operator was
+			// already told about, so a resume recognises it from the current name
+			// and records nothing: duplicating it would change the plan and the
+			// counts of a run that already settled the file.
+			if summary.Settled(legacyOverlongCredentialItem(file.Name)) {
 				continue
 			}
 			if err := e.record(ctx, summary, freshstore.AdoptionItem{
