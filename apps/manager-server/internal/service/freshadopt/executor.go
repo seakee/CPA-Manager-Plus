@@ -20,6 +20,13 @@
 // the destination's client keys were already installed by the verified
 // StageDestination/VerifyV8Adoption path. ManagerOwned reports that exclusion and
 // the executor refuses an excluded item even if a caller asks for it.
+//
+// One authority drives a run: the per-reference decisions a Fresh adoption's
+// qualification produced. A reference without a migrate verdict from that chain is
+// recorded with the rule table's manual action and never written, so an unproven
+// source cannot copy anything. A caller that holds no decisions at all — the
+// Upgrade surface holds no qualification record, so it passes none — gets a run in
+// which every item is recorded as manual work and nothing is written.
 package freshadopt
 
 import (
@@ -169,14 +176,21 @@ func (e *Executor) gated(item freshstore.AdoptionItem, name string) (freshstore.
 	if ok && decision.Disposition == bootstrap.Migrate {
 		return freshstore.AdoptionItem{}, false
 	}
+	return e.manual(item, name, ref), true
+}
+
+// manual records an item this run is not authorized to write. The reason is the
+// product rule table's own manual action for the reference; asking for it with no
+// decision at all is the "not authorized" input, never an evidence claim.
+func (e *Executor) manual(item freshstore.AdoptionItem, name string, ref bootstrap.ResourceRef) freshstore.AdoptionItem {
 	reason := "not_authorized"
-	if ok && decision.ManualAction != "" {
+	if decision, ok := bootstrap.FreshAdoptionDecision(ref, bootstrap.AdoptionResourceDecision{}); ok && decision.ManualAction != "" {
 		reason = string(decision.ManualAction)
 	}
 	return freshstore.AdoptionItem{
 		Item: item.Item, Kind: item.Kind, Outcome: freshstore.AdoptionManual,
 		Reason: reason, Instruction: manualInstruction(item.Kind, name),
-	}, true
+	}
 }
 
 // Checkpoint persists the items recorded so far. It is called once per item,

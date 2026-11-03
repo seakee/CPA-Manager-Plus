@@ -46,10 +46,12 @@ func TestNextActionForAnExternalConnectRefusal(t *testing.T) {
 			want:      ActionExternalConnect,
 		},
 		{
+			// The code is not this step's, so the stage table decides: an import
+			// recorded without the cpa_config domain offers the import again.
 			name:      "unrelated refusal keeps the stage table",
 			stage:     StageCPAImport,
 			errorCode: "upgrade_reconcile_blocked",
-			want:      ActionReconcile,
+			want:      ActionCPAImport,
 		},
 		{
 			// The step runs from the copy-in of a second legacy volume as well as
@@ -74,16 +76,17 @@ func TestNextActionForAnExternalConnectRefusal(t *testing.T) {
 		},
 		{
 			// A stage the step cannot run from keeps the stage table: the code
-			// there describes something other than this step's refusal.
+			// there describes something other than this step's refusal, and a
+			// recorded verify leaves only the completion of the operation.
 			name:      "the same code at a stage the step cannot run from",
 			stage:     StageVerify,
 			errorCode: "external_cpa_version_unsupported",
-			want:      ActionReconcile,
+			want:      ActionComplete,
 		},
 		{
 			name:  "no refusal",
 			stage: StageCPAImport,
-			want:  ActionReconcile,
+			want:  ActionCPAImport,
 		},
 		{
 			name:  "an unrecorded operation",
@@ -93,7 +96,7 @@ func TestNextActionForAnExternalConnectRefusal(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if got := nextActionForRecordedStage(testCase.stage, testCase.errorCode); got != testCase.want {
+			if got := nextActionForRecordedStage(testCase.stage, testCase.errorCode, nil, nil); got != testCase.want {
 				t.Fatalf("nextActionForRecordedStage(%q, %q) = %q, want %q",
 					testCase.stage, testCase.errorCode, got, testCase.want)
 			}

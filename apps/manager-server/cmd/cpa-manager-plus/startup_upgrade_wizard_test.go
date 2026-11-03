@@ -83,7 +83,10 @@ func TestStartupServesTheUpgradeWizardFromTheCopiedOperation(t *testing.T) {
 			base := bootstrap.FixedBootstrapAPIPath + "installation/upgrade"
 			nextActions := map[string]string{"preflight": "preflight", "status": "copy_in"}
 			if stage == model.UpgradeStageReconcile {
-				nextActions["status"] = "reconcile"
+				// A stage is a checkpoint, not a pending step: a recorded reconcile
+				// means the comparison finished, so the decision it leaves is the
+				// CPA import that follows it in model/upgrade_operation.go.
+				nextActions["status"] = "cpa_import"
 			}
 			for _, resource := range []string{"preflight", "status"} {
 				target := base + "/" + resource

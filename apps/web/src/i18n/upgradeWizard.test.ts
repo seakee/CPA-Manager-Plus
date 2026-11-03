@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   blockedCodeText,
+  nextActionText,
   reconciliationBoundText,
   reconciliationTotalText,
   upgradeWizardText,
@@ -98,6 +99,20 @@ describe('upgrade wizard blocked codes', () => {
     const english = blockedCodeText('upgrade_source_missing', 'en-US');
     for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
       expect(blockedCodeText('upgrade_source_missing', language)).not.toBe(english);
+    }
+  });
+});
+
+describe('upgrade wizard next actions', () => {
+  it('gives the CPA import its own sentence instead of the reconciliation', () => {
+    // The import writes the destination and proves it, so the wizard must name
+    // it as its own step; a missing one falls back to the reconciliation an
+    // operator already finished.
+    for (const language of LOCALES) {
+      const importAction = nextActionText('cpa_import', language);
+      expect(importAction, `cpa_import in ${language}`).not.toBe('');
+      expect(importAction, `cpa_import in ${language}`).not.toBe(nextActionText('reconcile', language));
+      expect(importAction, `cpa_import in ${language}`).not.toBe(nextActionText('copy_in', language));
     }
   });
 });

@@ -710,6 +710,55 @@ func (r *Repository) RecordError(ctx context.Context, code, detail string) error
 	return tx.Commit()
 }
 
+// AppendManualItemsTx appends operator instructions to the row inside the
+// caller's transaction, so a step that cannot finish commits the instructions
+// that say what it left undone beside the stage it advanced to.
+//
+// It appends rather than replaces and drops a line the row already carries, so a
+// rerun does not duplicate its own instruction and never loses one an earlier
+// step wrote: the list this transaction read is the only input. Like every other
+// writer it stores revision+1 behind the revision it read, so a row another
+// writer advanced since returns ErrConflict instead of being overwritten.
+func AppendManualItemsTx(ctx context.Context, tx Tx, items []string) (model.UpgradeOperation, error) {
+	now := time.Now().UnixMilli()
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: no operation row to record the manual items on", ErrInvalidRow)
+	}
+	for _, item := range items {
+		line := strings.TrimSpace(item)
+		if line == "" || slices.Contains(current.ManualItems, line) {
+			continue
+		}
+		current.ManualItems = append(current.ManualItems, line)
+	}
+	payload, err := json.Marshal(current.ManualItems)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set manual_items = ?, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		string(payload), current.Revision, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
+}
+
 // ClearErrorTx clears a refusal inside the caller's transaction, so a step that
 // succeeded can commit the cleared refusal beside the stage it advanced to. The
 // refusal is the durable statement that the step did not advance; leaving it

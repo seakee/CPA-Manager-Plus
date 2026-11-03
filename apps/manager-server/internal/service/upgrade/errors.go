@@ -279,6 +279,163 @@ var (
 	ErrMigrateNotCopiedIn = &UpgradeError{Code: UpgradeErrorMigrateNotCopiedIn}
 )
 
+// The CPA import step's own vocabulary (U1-4). Each code is the one the import
+// command and its executor return, so the CLI exit code and the wizard copy read
+// the same word for the same refusal.
+const (
+	// UpgradeErrorCPASourceMissing reports that the 1.x stack holds no readable
+	// managed CPA directory, configuration or auth directory. The source was not
+	// read and nothing was written.
+	UpgradeErrorCPASourceMissing UpgradeErrorCode = "upgrade_cpa_source_missing"
+
+	// UpgradeErrorCPAConfigInvalid reports that the managed CPA configuration is
+	// not a readable YAML mapping, or declares a layout this destination does not
+	// load. Nothing was written.
+	UpgradeErrorCPAConfigInvalid UpgradeErrorCode = "upgrade_cpa_config_invalid"
+
+	// UpgradeErrorCPAVersionRequired reports that the source uses the v7 layout
+	// and neither the operator nor the stack's compose/environment files name an
+	// exact CPA release. A v7 file carries no version of its own, and this import
+	// never infers one from the file's shape. Nothing was written.
+	UpgradeErrorCPAVersionRequired UpgradeErrorCode = "upgrade_cpa_version_required"
+
+	// UpgradeErrorCPAVersionUnsupported reports that the source CPA release is
+	// below the accepted floor, is not an exact release, or does not describe the
+	// configuration it holds. Nothing was written; the operator upgrades the CPA
+	// inside the 1.x stack first.
+	UpgradeErrorCPAVersionUnsupported UpgradeErrorCode = "upgrade_cpa_version_unsupported"
+
+	// UpgradeErrorCPAClientKeysMissing reports that the source CPA holds no client
+	// API key (or more than a destination accepts), so the destination could not
+	// be staged and verified with the keys the import would install. Nothing was
+	// written.
+	UpgradeErrorCPAClientKeysMissing UpgradeErrorCode = "upgrade_cpa_client_keys_missing"
+
+	// UpgradeErrorCPAPluginChoiceRequired reports that the run carries no explicit
+	// plugin-runtime decision. The choice is never inherited from the source and
+	// is never defaulted. Nothing was written.
+	UpgradeErrorCPAPluginChoiceRequired UpgradeErrorCode = "upgrade_cpa_plugin_choice_required"
+
+	// UpgradeErrorCPAStageConflict reports that the recorded operation is not in a
+	// stage the import may be entered from — it runs after reconciliation and
+	// resumes from its own unrecorded stage — or is already past it. This run
+	// read and wrote nothing; the recorded position did not move.
+	UpgradeErrorCPAStageConflict UpgradeErrorCode = "upgrade_cpa_stage_conflict"
+
+	// UpgradeErrorCPADestinationUnready reports that the destination could not be
+	// observed, staged or started, so no configuration was written to it.
+	UpgradeErrorCPADestinationUnready UpgradeErrorCode = "upgrade_cpa_destination_unready"
+
+	// UpgradeErrorCPAImportUnproven reports that the inventory is not the clean
+	// deferral this build records: the executor copied an item without a migration
+	// decision, or left an item's outcome unknown or the inventory partial. The
+	// import stops, the operation stays at cpa_import and the cpa_config domain is
+	// not recorded.
+	UpgradeErrorCPAImportUnproven UpgradeErrorCode = "upgrade_cpa_import_unproven"
+
+	// UpgradeErrorCPAImportUnavailable reports that the source inventory could not
+	// be read, so this run settled no item. Nothing was written to the
+	// destination by this run and the cpa_config domain is not recorded.
+	UpgradeErrorCPAImportUnavailable UpgradeErrorCode = "upgrade_cpa_import_unavailable"
+
+	// UpgradeErrorCPASourceLocked reports that the 1.x source ownership marker
+	// this step holds for its whole read/write path could not be taken: another
+	// process holds it, or the source carries no marker at all. The source is
+	// then not provably stopped, so nothing was read from it and nothing was
+	// written.
+	UpgradeErrorCPASourceLocked UpgradeErrorCode = "upgrade_cpa_source_locked"
+
+	// UpgradeErrorCPASourceRootMismatch reports that the 1.x directory the run
+	// named is not the one the recorded copy-in read, so the CPA directory beside
+	// it belongs to another installation. Nothing was read from it and nothing
+	// was written.
+	UpgradeErrorCPASourceRootMismatch UpgradeErrorCode = "upgrade_cpa_source_root_mismatch"
+
+	// UpgradeErrorCPADestinationRequestChanged reports that an earlier run of this
+	// step already submitted a different request to this destination — another
+	// secret, plugin choice or client key set, a changed source identity or class,
+	// a Runtime identity, generation or active artifact the recorded authority no
+	// longer matches, or a destination URL that an earlier run proved to be the
+	// staged destination — and the Supervisor replays the journalled attempt as it
+	// was submitted. The run refuses instead of overwriting the record, and it
+	// wrote nothing to the destination.
+	UpgradeErrorCPADestinationRequestChanged UpgradeErrorCode = "upgrade_cpa_destination_request_changed"
+
+	// UpgradeErrorCPAImportTargetForeign reports that the CPA answering at the
+	// destination URL does not hold the client keys this import stages, so it is
+	// not the target this operation staged. The import refuses before writing any
+	// configuration or credential to it.
+	UpgradeErrorCPAImportTargetForeign UpgradeErrorCode = "upgrade_cpa_import_target_foreign"
+
+	// UpgradeErrorCPAImportTargetUnreachable reports that nothing answered at the
+	// destination URL: the connection was refused, the name did not resolve, or no
+	// answer arrived within the probe budget. That is not a statement about whether
+	// the URL is right — a destination that is not listening yet is unreachable
+	// too, and so is the stopped 1.x CPA the CLI's default CPA_UPSTREAM_URL usually
+	// names — and the operator is not told to start that CPA. A started 1.x CPA
+	// rejects an absent and an unknown credential, so it passes the
+	// unauthenticated probe and is then sent the management secret this run staged;
+	// the recovery is to name the destination instead (--destination-url) once it
+	// listens. While no run has proved a URL the attempt holds none, so a retry with
+	// the same or a different URL is still accepted; once a run proved one, the
+	// attempt stays bound to it and a different URL is refused as
+	// upgrade_cpa_destination_request_changed. Nothing was written either way.
+	UpgradeErrorCPAImportTargetUnreachable UpgradeErrorCode = "upgrade_cpa_import_target_unreachable"
+
+	// UpgradeErrorCPAConnectionConflict reports that the Manager already holds a
+	// complete CPA connection to a different CPA, so handing it this destination
+	// would repoint the Console away from a CPA it manages. The import refuses and
+	// leaves the destination attempt recorded, so a later run completes once the
+	// stored connection is rebound explicitly.
+	UpgradeErrorCPAConnectionConflict UpgradeErrorCode = "upgrade_cpa_connection_conflict"
+
+	// UpgradeErrorCPADestinationKeyRequired reports that the destination CPA is
+	// already running and this run holds no management secret for it: no earlier
+	// run of this step recorded one and the caller supplied none. The import never
+	// stages or invents a second secret for a destination it did not stage, so the
+	// operator supplies the secret the Manager stored. This run wrote nothing to
+	// the destination or the operation row.
+	UpgradeErrorCPADestinationKeyRequired UpgradeErrorCode = "upgrade_cpa_destination_key_required"
+)
+
+// The CPA import errors. Every one of them is a refusal that wrote nothing,
+// except where its code says the destination was staged and left unproven.
+var (
+	ErrCPASourceMissing = &UpgradeError{Code: UpgradeErrorCPASourceMissing}
+
+	ErrCPAConfigInvalid = &UpgradeError{Code: UpgradeErrorCPAConfigInvalid}
+
+	ErrCPAVersionRequired = &UpgradeError{Code: UpgradeErrorCPAVersionRequired}
+
+	ErrCPAVersionUnsupported = &UpgradeError{Code: UpgradeErrorCPAVersionUnsupported}
+
+	ErrCPAClientKeysMissing = &UpgradeError{Code: UpgradeErrorCPAClientKeysMissing}
+
+	ErrCPAPluginChoice = &UpgradeError{Code: UpgradeErrorCPAPluginChoiceRequired}
+
+	ErrCPAStageConflict = &UpgradeError{Code: UpgradeErrorCPAStageConflict}
+
+	ErrCPADestinationUnready = &UpgradeError{Code: UpgradeErrorCPADestinationUnready}
+
+	ErrCPAImportUnproven = &UpgradeError{Code: UpgradeErrorCPAImportUnproven}
+
+	ErrCPAImportUnavailable = &UpgradeError{Code: UpgradeErrorCPAImportUnavailable}
+
+	ErrCPASourceLocked = &UpgradeError{Code: UpgradeErrorCPASourceLocked}
+
+	ErrCPASourceRootMismatch = &UpgradeError{Code: UpgradeErrorCPASourceRootMismatch}
+
+	ErrCPADestinationChanged = &UpgradeError{Code: UpgradeErrorCPADestinationRequestChanged}
+
+	ErrCPATargetForeign = &UpgradeError{Code: UpgradeErrorCPAImportTargetForeign}
+
+	ErrCPATargetUnreachable = &UpgradeError{Code: UpgradeErrorCPAImportTargetUnreachable}
+
+	ErrCPAConnectionConflict = &UpgradeError{Code: UpgradeErrorCPAConnectionConflict}
+
+	ErrCPADestinationKey = &UpgradeError{Code: UpgradeErrorCPADestinationKeyRequired}
+)
+
 func newUpgradeError(code UpgradeErrorCode, message string, err error) error {
 	return &UpgradeError{Code: code, Message: message, err: err}
 }

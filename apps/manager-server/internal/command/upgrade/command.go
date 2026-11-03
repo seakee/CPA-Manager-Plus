@@ -137,6 +137,30 @@ var refusalCodes = []upgradeservice.UpgradeErrorCode{
 	upgradeservice.UpgradeErrorExternalManagementRejected,
 	upgradeservice.UpgradeErrorExternalTargetMoved,
 	upgradeservice.UpgradeErrorExternalV2Running,
+	// A decision about the stopped 1.x stack's managed CPA state or about the
+	// destination it imports into: a held source marker, missing or unreadable
+	// managed state, a v7 source without a named release, absent client keys, no
+	// plugin decision, a stage the import may not be entered from, a source root
+	// that is not the one the copy-in read, a destination request that changed,
+	// a destination that answers as another product, or an inventory the run could
+	// not prove it copied faithfully. Each one needs the operator to act, so none
+	// is read as a transient error. A destination that is not ready or cannot be
+	// reached, and an import the destination simply has not been deployed for, are
+	// environment conditions and stay out of the table.
+	upgradeservice.UpgradeErrorCPASourceLocked,
+	upgradeservice.UpgradeErrorCPASourceMissing,
+	upgradeservice.UpgradeErrorCPAConfigInvalid,
+	upgradeservice.UpgradeErrorCPAVersionRequired,
+	upgradeservice.UpgradeErrorCPAVersionUnsupported,
+	upgradeservice.UpgradeErrorCPAClientKeysMissing,
+	upgradeservice.UpgradeErrorCPAPluginChoiceRequired,
+	upgradeservice.UpgradeErrorCPAStageConflict,
+	upgradeservice.UpgradeErrorCPASourceRootMismatch,
+	upgradeservice.UpgradeErrorCPADestinationKeyRequired,
+	upgradeservice.UpgradeErrorCPADestinationRequestChanged,
+	upgradeservice.UpgradeErrorCPAConnectionConflict,
+	upgradeservice.UpgradeErrorCPAImportTargetForeign,
+	upgradeservice.UpgradeErrorCPAImportUnproven,
 }
 
 func IsHelp(err error) bool { return errors.Is(err, flag.ErrHelp) }
@@ -161,6 +185,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runRollback(ctx, args[1:], stdout, stderr)
 	case "external-connect":
 		return runExternalConnect(ctx, args[1:], stdout, stderr)
+	case "cpa-import":
+		return runCPAImport(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		writeUsage(stdout)
 		return nil
@@ -190,9 +216,14 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
 	_, _ = fmt.Fprintln(w, "  external-connect --cpa-base-url <url> --management-key-file <path> [--target <dir>] [--cpa-version <v>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      connect the External CPA and record its identity; a v7 CPA stops")
+	_, _ = fmt.Fprintln(w, "  cpa-import --legacy <dir> --plugins <true|false> [--cpa-dir <dir>] [--cpa-version <release>]")
+	_, _ = fmt.Fprintln(w, "             [--cpa-auth-dir <dir>] [--target <dir>] [--destination-url <url>]")
+	_, _ = fmt.Fprintln(w, "             [--destination-management-key-file <file>] [--json]")
+	_, _ = fmt.Fprintln(w, "                                      import a stopped 1.x stack's managed CPA state into the")
+	_, _ = fmt.Fprintln(w, "                                      v2 destination and prove it")
 	_, _ = fmt.Fprintln(w, "The scratch copy is never the source or the target volume: --scratch-dir,")
 	_, _ = fmt.Fprintln(w, "and the default OS temporary directory, are checked the same way.")
-	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, an unacknowledged day, a held fence (1.x source or v2 data root), a rollback decision, or a decision about the External CPA; 2 usage, environment or retryable error.")
+	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, an unacknowledged day, a held fence (1.x source or v2 data root), a rollback decision, or a decision about the External CPA or the CPA import; 2 usage, environment or retryable error.")
 }
 
 func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) error {

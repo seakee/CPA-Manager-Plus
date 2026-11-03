@@ -1,0 +1,2322 @@
+{
+  "contract": "cpamp.cpa-mapping-upstream.v1",
+  "upstream": {
+    "repository": "https://github.com/router-for-me/CLIProxyAPI",
+    "generator": "internal/service/upgrade/testdata/gencpamapping",
+    "regenerate": "cd apps/manager-server \u0026\u0026 go run ./internal/service/upgrade/testdata/gencpamapping -upstream \u003ccheckout\u003e [-tags \u003ctag-commits.txt\u003e] -out internal/service/upgrade/testdata/cpa_mapping_upstream.json"
+  },
+  "sources": [
+    {
+      "role": "v8-alias-table",
+      "ref": "v8.0.13",
+      "commit": "d7914afdedca7af95ee974a42453dc49fc1388ce",
+      "path": "internal/config/config_v8.go",
+      "sha256": "db781a14c5a4d7a4d61ffe21e22b6ed9566a9185cb0db36b761f9e8dcbb7575a"
+    },
+    {
+      "role": "config-struct-yaml-tags",
+      "ref": "v7.0.0..v8.0.51",
+      "commit": "",
+      "path": "internal/config/*.go (non-test)"
+    }
+  ],
+  "versions": [
+    "v7.0.0",
+    "v7.0.1",
+    "v7.0.2",
+    "v7.0.3",
+    "v7.0.4",
+    "v7.0.5",
+    "v7.0.6",
+    "v7.0.7",
+    "v7.0.8",
+    "v7.0.9",
+    "v7.0.10",
+    "v7.0.11",
+    "v7.0.12",
+    "v7.1.0",
+    "v7.1.1",
+    "v7.1.2",
+    "v7.1.3",
+    "v7.1.4",
+    "v7.1.5",
+    "v7.1.6",
+    "v7.1.7",
+    "v7.1.8",
+    "v7.1.9",
+    "v7.1.10",
+    "v7.1.11",
+    "v7.1.12",
+    "v7.1.13",
+    "v7.1.14",
+    "v7.1.15",
+    "v7.1.16",
+    "v7.1.17",
+    "v7.1.18",
+    "v7.1.19",
+    "v7.1.20",
+    "v7.1.21",
+    "v7.1.22",
+    "v7.1.23",
+    "v7.1.24",
+    "v7.1.25",
+    "v7.1.26",
+    "v7.1.27",
+    "v7.1.28",
+    "v7.1.29",
+    "v7.1.30",
+    "v7.1.31",
+    "v7.1.32",
+    "v7.1.33",
+    "v7.1.34",
+    "v7.1.35",
+    "v7.1.36",
+    "v7.1.37",
+    "v7.1.38",
+    "v7.1.39",
+    "v7.1.40",
+    "v7.1.41",
+    "v7.1.42",
+    "v7.1.43",
+    "v7.1.44",
+    "v7.1.45",
+    "v7.1.46",
+    "v7.1.47",
+    "v7.1.48",
+    "v7.1.49",
+    "v7.1.50",
+    "v7.1.51",
+    "v7.1.52",
+    "v7.1.53",
+    "v7.1.54",
+    "v7.1.55",
+    "v7.1.56",
+    "v7.1.57",
+    "v7.1.58",
+    "v7.1.59",
+    "v7.1.60",
+    "v7.1.61",
+    "v7.1.62",
+    "v7.1.63",
+    "v7.1.64",
+    "v7.1.65",
+    "v7.1.66",
+    "v7.1.67",
+    "v7.1.68",
+    "v7.1.69",
+    "v7.1.70",
+    "v7.1.71",
+    "v7.1.72",
+    "v7.1.73",
+    "v7.1.74",
+    "v7.1.75",
+    "v7.1.76",
+    "v7.2.0",
+    "v7.2.1",
+    "v7.2.2",
+    "v7.2.3",
+    "v7.2.4",
+    "v7.2.5",
+    "v7.2.6",
+    "v7.2.7",
+    "v7.2.8",
+    "v7.2.9",
+    "v7.2.10",
+    "v7.2.11",
+    "v7.2.12",
+    "v7.2.13",
+    "v7.2.14",
+    "v7.2.15",
+    "v7.2.16",
+    "v7.2.17",
+    "v7.2.18",
+    "v7.2.19",
+    "v7.2.20",
+    "v7.2.21",
+    "v7.2.22",
+    "v7.2.23",
+    "v7.2.24",
+    "v7.2.25",
+    "v7.2.26",
+    "v7.2.27",
+    "v7.2.28",
+    "v7.2.29",
+    "v7.2.30",
+    "v7.2.31",
+    "v7.2.32",
+    "v7.2.33",
+    "v7.2.34",
+    "v7.2.35",
+    "v7.2.36",
+    "v7.2.37",
+    "v7.2.38",
+    "v7.2.39",
+    "v7.2.40",
+    "v7.2.41",
+    "v7.2.42",
+    "v7.2.43",
+    "v7.2.44",
+    "v7.2.45",
+    "v7.2.46",
+    "v7.2.47",
+    "v7.2.48",
+    "v7.2.49",
+    "v7.2.50",
+    "v7.2.51",
+    "v7.2.52",
+    "v7.2.53",
+    "v7.2.54",
+    "v7.2.55",
+    "v7.2.56",
+    "v7.2.57",
+    "v7.2.58",
+    "v7.2.59",
+    "v7.2.60",
+    "v7.2.61",
+    "v7.2.62",
+    "v7.2.63",
+    "v7.2.64",
+    "v7.2.65",
+    "v7.2.66",
+    "v7.2.67",
+    "v7.2.68",
+    "v7.2.69",
+    "v7.2.70",
+    "v7.2.71",
+    "v7.2.72",
+    "v7.2.73",
+    "v7.2.74",
+    "v7.2.75",
+    "v7.2.76",
+    "v7.2.77",
+    "v7.2.78",
+    "v7.2.79",
+    "v7.2.80",
+    "v7.2.81",
+    "v7.2.82",
+    "v7.2.83",
+    "v7.2.84",
+    "v7.2.85",
+    "v7.2.86",
+    "v7.2.87",
+    "v7.2.88",
+    "v7.2.89",
+    "v7.2.90",
+    "v7.2.91",
+    "v7.2.92",
+    "v7.2.93",
+    "v7.2.97",
+    "v7.2.98",
+    "v7.2.101",
+    "v7.2.102",
+    "v7.2.109",
+    "v7.2.110",
+    "v7.2.115",
+    "v7.2.116",
+    "v7.2.137",
+    "v7.2.138",
+    "v7.2.148",
+    "v7.2.149",
+    "v7.2.155",
+    "v7.2.156",
+    "v7.2.159",
+    "v7.3.0",
+    "v7.3.2",
+    "v7.3.3",
+    "v7.3.4",
+    "v7.3.6",
+    "v7.3.7",
+    "v7.3.8",
+    "v7.3.9",
+    "v7.3.20",
+    "v8.0.0",
+    "v8.0.3",
+    "v8.0.4",
+    "v8.0.13",
+    "v8.0.51"
+  ],
+  "tagCommits": {
+    "v7.0.0": "a44e5eb1ab419c33ab8bfad2b9e4794ad6ece1c5",
+    "v7.0.1": "15ac7fb9324095330e60f522147b8a8e81f16ab5",
+    "v7.0.10": "f4c6c41f0bec778f07832a9ced37d349a278c2e9",
+    "v7.0.11": "c66fa37665143427fd67415464964861ff2a1617",
+    "v7.0.12": "cd0cea393cd2eb9ab2e989f60e197926f4509aef",
+    "v7.0.2": "1fca942b9c2c5bbdf78334eb4744a098983a05e9",
+    "v7.0.3": "bd8c05a830a36b2e5181bb5c8596a2c8d85c3dbc",
+    "v7.0.4": "6bfcb0ce799f2d449b812da8a21fc057da9734e2",
+    "v7.0.5": "bcbb94906c3c635278c662453ea56b90760d078d",
+    "v7.0.6": "3a9fb3780ed63d9c71efca760d0c5935b3f6fc19",
+    "v7.0.7": "1d529c3ce48970f67467feb23223ef21183d4a4c",
+    "v7.0.8": "e7a185962dfc666ade6d8773690c3eb3f9441e1d",
+    "v7.0.9": "82c9e0de58f91210061bb596ab65b5fb3aff2381",
+    "v7.1.0": "e4c957078c8eeaadddb2336e471e1b6940bd7142",
+    "v7.1.1": "2ff9e33e262ae996dc0e852164c01585e98e1579",
+    "v7.1.10": "605adaa3c22b51de8d6c1930237780b80c0c28ad",
+    "v7.1.11": "66c5d60b3dcd763255ea648083c59021773fa3c7",
+    "v7.1.12": "77ba15f71b61d25653465d9fba3417cae1ec7055",
+    "v7.1.13": "ad98c9549ace5faa674483113c5f00432eb71b50",
+    "v7.1.14": "bac006e72bf7b53d6cdbbb47b7f2c54013f97461",
+    "v7.1.15": "bbe30f53b5dbfb776cdc90250e675bb39fb76abb",
+    "v7.1.16": "bb5ac40a674cac65549852af9ecfcd6355acb0bb",
+    "v7.1.17": "99fa530967fdbb0284ce3bc22523fa36ee74799c",
+    "v7.1.18": "a726e373941517795155d9076710d7498e16f1a6",
+    "v7.1.19": "21fad9dbb447a2ab70d51d0ac3e3d032525a6054",
+    "v7.1.2": "53d1fd6c5c8f8703458501e8b8bf5d23408caead",
+    "v7.1.20": "aaec9194d54946fc89a97a2c888e9400470c3d97",
+    "v7.1.21": "a0bb1f3a2b85fc0e0904f1c9ff3aa902edf31052",
+    "v7.1.22": "167edfec6ccd05c1d5f03bc355050d5ec57ef550",
+    "v7.1.23": "e399edd3cc9aaa5b42702f792df8a5aae9212206",
+    "v7.1.24": "94c1b25146a82d50369a69c579d8cbb1373286fc",
+    "v7.1.25": "2bcc76220c582e0892b1204647c172cc7332ce2e",
+    "v7.1.26": "65e760aa1a0ffef2b7a9e5a92115885acf97769b",
+    "v7.1.27": "71c185f6144ca185aff18f1486d36d1d3504bc1f",
+    "v7.1.28": "c65275fd3266022765f9d0d9087eeb0b456c19db",
+    "v7.1.29": "7d9980e8fa2c0ffe58c60550774d8b61c0a224dd",
+    "v7.1.3": "ddd10539adf3fea72c9ab23d20c5f97dc8d6602c",
+    "v7.1.30": "96b6f7e217a35e523b62d26614f2f8129ffaedab",
+    "v7.1.31": "55901f0bda28977f71cda10912a58677e38d44ed",
+    "v7.1.32": "3a54fb7fcf3a39de620ca250ff9c1dedc79c9549",
+    "v7.1.33": "33983b6f3e0ecff7619d96241e60d900ff5d0514",
+    "v7.1.34": "0f24cafbddbf457473093d652ef6fb365533b049",
+    "v7.1.35": "bbcdaab79d852d3d70dce30b10829d4afcd4d218",
+    "v7.1.36": "fb4f39d300cac0177c99f618dd6e597035eb3b5d",
+    "v7.1.37": "05b972479aeb6885235e8d363cdc8a15be41fd6f",
+    "v7.1.38": "959067edfbf8d01c978e9de5d801a8bbb0343abf",
+    "v7.1.39": "f353979e0a6f4d5a9fcc4a1a8d4fb616a710852a",
+    "v7.1.4": "96754f5a33f1ac409d6ba1b620e287b044fd3c9c",
+    "v7.1.40": "02d0d92a8e4623fe0e355b23f539dc184452d6ff",
+    "v7.1.41": "35ab084fc35c7a77fab82791a3ddc653f1ca0cf3",
+    "v7.1.42": "9c02454005cb356b18d1257aa97400171a3f005d",
+    "v7.1.43": "55440f0a3907f9085edbe179de71877c9fde9369",
+    "v7.1.44": "fd3094483084ae0c6913e56258d2baa5ba85223b",
+    "v7.1.45": "5753d1a0896fd5bb9ace47adb17b0174ceb79e4d",
+    "v7.1.46": "fca12a2630133a2715920fe0a76e5617a48c4a58",
+    "v7.1.47": "3abfc83d963ba71ca48bd42c5a913f2493cee7b4",
+    "v7.1.48": "0ed85bb88b0b4b4d8538c2fbed067cfec7c7512c",
+    "v7.1.49": "bc58c21673cd9be203d48f643de9e86cc2d0527f",
+    "v7.1.5": "8b3670b8dda5277cc16c1b4752fa6dc3b7691179",
+    "v7.1.50": "4f55eccae2229bba99b337fe84bdd1c6a1d89ac5",
+    "v7.1.51": "ec672446d19f71e56ae90aca738e84cab8ffabf0",
+    "v7.1.52": "69d937a8d326a1f9d12c8a82e85db4288edcb889",
+    "v7.1.53": "d55f215c63864dd612c01a00ca56a2a4107d0abb",
+    "v7.1.54": "856dc81748a10ac127d1d3741b384f5492fa7e39",
+    "v7.1.55": "1762ee0d2e5bdd8f881771f3120d68159707c8e7",
+    "v7.1.56": "583053509dd1cb823514dc320f978b46c26ffeda",
+    "v7.1.57": "556f50aa2adf4075303e82ccf6355efc06d3f2df",
+    "v7.1.58": "2aeb41cecfa11fe032fd20b3abd7e1569ca7721f",
+    "v7.1.59": "44ea9abceda7ef83d4ff876216feec1f21bf646c",
+    "v7.1.6": "4b13f9c255025dc4a1afa138dadb3249ecb7d2b2",
+    "v7.1.60": "efd69d8ece26d567127e2ed72d8d7373e930be15",
+    "v7.1.61": "21387f5c71f3d37c026e99f2d48119be2019f5be",
+    "v7.1.62": "1ca048abdc6af78c1d8ae3381ce5bf380976e2e7",
+    "v7.1.63": "58bf645e66db1895126d29e14b0142bc30230c1d",
+    "v7.1.64": "dc04d8be52f71eb1051e17825ea93b6b1ed08036",
+    "v7.1.65": "9985976ebd70849cd3e76baae14606c8c14cdd88",
+    "v7.1.66": "ac4017ea0ee5f5768a281b7f1b7658933c62e370",
+    "v7.1.67": "538e3416dbd275d8037d2a8535add733ecdfcc5b",
+    "v7.1.68": "ed52c6147cdffdf18a9fe0cea106616a83113412",
+    "v7.1.69": "049ced5c3f151a345d2d218813b6e427286897d4",
+    "v7.1.7": "26d13af28f8a5dd01b950c79fa7bfe8959c605f5",
+    "v7.1.70": "44d3066a9c9a004c99fd27ad301f77d1099eee35",
+    "v7.1.71": "b6c22f2d827bc3ad708184bfd831eb21790f8637",
+    "v7.1.72": "c006e672f8ebf7b7729bef622acab6a721154958",
+    "v7.1.73": "6a0b198c7e3c03f866b045858a23c6e8847489b0",
+    "v7.1.74": "94c5a7fd478700ba9add8407b26da2e6c69f1916",
+    "v7.1.75": "83c53d05eeaed17a5737947ec72da341bf940734",
+    "v7.1.76": "e0cb43f38d5cda4eeae89c33f38e3053bd56041c",
+    "v7.1.8": "2007a895941a540a2f8d2a27960dc8ee2f661526",
+    "v7.1.9": "9ef99aa76688f1462fab96670f75ab0d2fc3a77c",
+    "v7.2.0": "2a050dc95d418f15555d49b1c235deb181a07433",
+    "v7.2.1": "6f923a28f77b08bda6eaa5eafc41b96dfcbcb8df",
+    "v7.2.10": "f49d1798d18f4fe1ecb322b3fef25290d454d070",
+    "v7.2.101": "42a00a2a6521b867c27f7ad096d08699db8e6d19",
+    "v7.2.102": "8423cce2d1004e80948a9e2c60ee69354c0aabc3",
+    "v7.2.109": "928478e4b91533cec05a763bfac3edad9c3e76cf",
+    "v7.2.11": "a5cb88323d83e6eedd9bac6bc147c350858c306b",
+    "v7.2.110": "a80e8082ef759aa172d23e948fe51578e0b90abf",
+    "v7.2.115": "ffdb9c9fbc78a6235d59c9ccbdc4243ba35ecdcd",
+    "v7.2.116": "a88197f845c979132c8978ea223c6af05cc81536",
+    "v7.2.12": "8d2c00c107b2e62d0798bb2325224c178889e662",
+    "v7.2.13": "29f22acd77f01e06f57b4e00348e7855042f7215",
+    "v7.2.137": "85d2faddd17e6f4f8675a84ee28b131f702e8eaa",
+    "v7.2.138": "1d5b7612c6ba1fc79c665a63bc61d5a488461797",
+    "v7.2.14": "644ba74bff4b85c78a15a8b87cde9f3ae7fe773a",
+    "v7.2.148": "d577e630b18bcc13e852888c9c0cc34b92cff72d",
+    "v7.2.149": "2a6b87aca083a5bf498ac1f68a1b636c500d7aaa",
+    "v7.2.15": "f23fb122e77aba129141af1af7aa281fedd665aa",
+    "v7.2.155": "7fac6b15bcfe5ea55c18c9eaec8e5b7e6457d974",
+    "v7.2.156": "d1a024e9400bc65bd78ccd908945cf2eacc2835e",
+    "v7.2.159": "ac02da6c05e18f465aa7e3ed5b0a65a2f060917d",
+    "v7.2.16": "dd49a5200381f1849e489ed37f201c3741709634",
+    "v7.2.17": "ae6c5eaea52b296293172ca72db3d468dc1c8e96",
+    "v7.2.18": "052f1934b8b99f7b5a10adc85b639052b7cca37d",
+    "v7.2.19": "07c297a51b674c90c90c6e9fd3bfd680ad049e5e",
+    "v7.2.2": "7de9757c82ddce433fef2a986b9764bcbf8f18d0",
+    "v7.2.20": "041a065b2fc318bf2a96d19143417aee9bfe90b6",
+    "v7.2.21": "4c78e40da4f1031f6c4a0dcb010ce9dc0214ce0a",
+    "v7.2.22": "35c3d80ab9ea2def6bf7ca0a26c09263257e3485",
+    "v7.2.23": "1f21f946baf89b721d4f5301682b683474353717",
+    "v7.2.24": "5bc0c682842ec1c920bcd8592af6127f21e197ae",
+    "v7.2.25": "babef2a1ef5a7c04d855e12e77e03da8540b09b7",
+    "v7.2.26": "369e560f1d25d62038d93e8e74e1f06d700be735",
+    "v7.2.27": "1f2504ebcc3064b6fef2534e79ec8abdd16876f2",
+    "v7.2.28": "5d9ea1667b8b5b2185f8011b4f7a91d5dd58a0bf",
+    "v7.2.29": "bd646819ed95a65c355933ea8fe9c3273f77800c",
+    "v7.2.3": "ea90ab6f775f3ef834602e7aed5ed91bc3477b3b",
+    "v7.2.30": "f1ed8912bbed42e72499b4065c0eb93667123f98",
+    "v7.2.31": "05d1792d43ff9c338943dd9f8b2031faaa2699e4",
+    "v7.2.32": "b89c594aacdd2e5eddcffdfd17be9e330bf0f444",
+    "v7.2.33": "3a13865db82707fcdd61222d788dfa45ac358130",
+    "v7.2.34": "c20ac28a544602833e45b9928c7f4c861a573cf1",
+    "v7.2.35": "87e6d9cf252da91402a8a0a1afa5df7763f5898f",
+    "v7.2.36": "7712ffed1d4d98eee6f866efc3c433efc341476d",
+    "v7.2.37": "b53d1e9569d6e73bbe2e139b50260c9bc687e97c",
+    "v7.2.38": "29b53434b2ede78af19689e842e122f5ed30d0ad",
+    "v7.2.39": "c4cf0fd3241afca8b63673bac7e0fc2e11ed9426",
+    "v7.2.4": "f33bc56bb947134e4fc10bdd3212404c56dcbaf8",
+    "v7.2.40": "eb2e1e33d437c9b284ca00d8fd764e561748b430",
+    "v7.2.41": "65f2288a4ad6069782bb05ada62a2ab70a763e79",
+    "v7.2.42": "4c0c60292d27102f370b2469468594073fa49062",
+    "v7.2.43": "b05a27e4d7087d62d9c5a96580888fdfc999f5b1",
+    "v7.2.44": "884fc3ce9478f3c7c67584830eb2c025653d657f",
+    "v7.2.45": "c22795af80ec6b3f14028c16bd4350d76e47174d",
+    "v7.2.46": "a26d38450e5b5436548070c6a062aa1cf9e1bf26",
+    "v7.2.47": "00114bec1b76d985fd33a8a19f91c22ffed88580",
+    "v7.2.48": "956ce7cf785a0676aa7cc24719927bbfa03c69af",
+    "v7.2.49": "cde9336b92efe2509d7b654797c0dab97c6f3566",
+    "v7.2.5": "bbef8da454c88ad09d6e589f7ddce5ed2eeddb51",
+    "v7.2.50": "5afc0f1d5e9ed8d47809a1bd1f54834bc7e75375",
+    "v7.2.51": "8b9c4da2452b42aaa917a80daadf72aadc843a13",
+    "v7.2.52": "14b139661d98acbbd7ac19eb827754e78118736f",
+    "v7.2.53": "4f2e19042cdd174cc6f17651061eb05e47f74660",
+    "v7.2.54": "3fd189262da34e8703a31a582207e6636863927c",
+    "v7.2.55": "f21beb05b58bab64742d09169ad1c724b833ae00",
+    "v7.2.56": "b4c594050efffeec30694102c2e08c63ef28e493",
+    "v7.2.57": "15f30371619a3541637407a0801e48ba72cd9867",
+    "v7.2.58": "26d45fd46a2d2911adef14772465131066dae465",
+    "v7.2.59": "35dba9b4120984db2fbb0fe6edf9831bdfc87595",
+    "v7.2.6": "e40599831a2d5ba901909b6aeab9d8303cbeafb8",
+    "v7.2.60": "20e61f281f4b88e150c5cdfa81c3315d9fcfeabe",
+    "v7.2.61": "ca67caf0872eef65f8eaedf2e127cf214a49621d",
+    "v7.2.62": "3554b63721aac9b4202bf2ef88ba7a82b4e5caf8",
+    "v7.2.63": "cc2095f33c2ffa24028ab7e300b36b6af36be550",
+    "v7.2.64": "6e819ab6225748fb111460d6acebb28324a81093",
+    "v7.2.65": "8c2bf2c24baa8e1268a5f8e5313d84988429e42c",
+    "v7.2.66": "e99a2056baa981345f4a93600039725363ffca46",
+    "v7.2.67": "2075f77c8ebe9ec872759965661936fb1ac2931f",
+    "v7.2.68": "042f1fea6809380b5538978449a54be90249ee2b",
+    "v7.2.69": "f4a8aee69500038289064bf5aba5ffc11cabd603",
+    "v7.2.7": "2406daf3ef7e07aa1fd4035b87b4566d8d12e717",
+    "v7.2.70": "9c3f7207106a59f5a0b87cf8d7f1e9ab648159c2",
+    "v7.2.71": "5b7f2361ee27d195f6514dde08656f6e4773a9a4",
+    "v7.2.72": "6279bb8a4c2835ff6ed99c6b85083b2afbefa681",
+    "v7.2.73": "2a63b271877c813287e7448c8d7a4f9375d02b0f",
+    "v7.2.74": "411d7d41eee0ff841b5badba5abacad6c11331ef",
+    "v7.2.75": "e57416731aec87051ac00d0812df6aebd0e9d57a",
+    "v7.2.76": "9f62c8df28dc749ea976865450a458917bf45042",
+    "v7.2.77": "c8803713c972af0076f55933fdeed4db81d72d24",
+    "v7.2.78": "768b4c49fd44e1c6e21981d96dfcb8dd31490bf0",
+    "v7.2.79": "b6ce0beecd31dff389d3190f7db6d7a1d4ce0e7e",
+    "v7.2.8": "f63cf9820a03143eb866124c96e9fc7e083624c4",
+    "v7.2.80": "09da52ad509e2c18e7b9540db3b98c2214c280aa",
+    "v7.2.81": "106270bea6f18ba2f2cc8b0b5887987f2874eed8",
+    "v7.2.82": "f583414fd9914f9ccfd280fc3a23aebaea30e9eb",
+    "v7.2.83": "9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66",
+    "v7.2.84": "fbe116071a0e46525edddd6398043eca8fd90a99",
+    "v7.2.85": "baffbe2cc703fa694c0c72baad13715b9bd28e57",
+    "v7.2.86": "81d70f5d9f3fdb39a6290ed9c917ff0c6f27ca30",
+    "v7.2.87": "bd3841155e4e948f4cae0ae3dfcc18a48fd540a6",
+    "v7.2.88": "93d74a890a44802f656d7f39a573916b2611896e",
+    "v7.2.89": "7c61e982e490f028d295d69e22e372b29cd2db8c",
+    "v7.2.9": "2884a67ed02a9c0989b3b3db42a0d07684fd466f",
+    "v7.2.90": "e47ffda75b6d55ce88462ca6e76f8ffed1c0e88a",
+    "v7.2.91": "fde40c5a0a2f8f6808bcde498bc6079f32c355ef",
+    "v7.2.92": "53c1e7e2dd6ddf973098a4e685e852aeebed9fe3",
+    "v7.2.93": "01f387f44754af09783ac52a2051cb2c66a7bf44",
+    "v7.2.97": "42f36b94e0805a9897c3aa3be46a2b124be0057e",
+    "v7.2.98": "35ebe3f3ed1e74ffb49da399ea371f27db8e926b",
+    "v7.3.0": "30b2ac8996ea920285ef983dfaaa8e17624c8d21",
+    "v7.3.2": "7fa443dc8bf8ca2f1ffd81c2472deb31b097b697",
+    "v7.3.20": "ef9e71201e0ca72b03a540d9b6e0862f8c053347",
+    "v7.3.3": "7bbfeaf8a7acf2cd5a834dcb0842539fe6aabc2b",
+    "v7.3.4": "8335eac731946bd4eff18f500653f93736df53d6",
+    "v7.3.6": "8c664b2fede5c83b919be1df9b01057ec4e4c950",
+    "v7.3.7": "b773607e3e7756dc6020a291825e4eb08899595a",
+    "v7.3.8": "c93978c4ea2e908255a2a06c37599fda3651554a",
+    "v7.3.9": "61fdfc341b96178a8dcb53f2efc46cbc341d267c",
+    "v8.0.0": "31f4cfab3fc17f0ebc57b491508f451b190b020f",
+    "v8.0.13": "d7914afdedca7af95ee974a42453dc49fc1388ce",
+    "v8.0.3": "acdace936fa7df2905500c7f5e0a97d683138dea",
+    "v8.0.4": "d33f63f8e3d98428440ebca5a5b6a981a61ff71e",
+    "v8.0.51": "7cad1cb7df48c6c5ffb7ff0b34ef8198806115bc"
+  },
+  "families": [
+    {
+      "legacy": "gemini-api-key",
+      "current": "gemini"
+    },
+    {
+      "legacy": "interactions-api-key",
+      "current": "interactions"
+    },
+    {
+      "legacy": "vertex-api-key",
+      "current": "vertex"
+    },
+    {
+      "legacy": "codex-api-key",
+      "current": "codex"
+    },
+    {
+      "legacy": "claude-api-key",
+      "current": "claude"
+    },
+    {
+      "legacy": "xai-api-key",
+      "current": "xai"
+    },
+    {
+      "legacy": "meta-api-key",
+      "current": "meta"
+    },
+    {
+      "legacy": "openai-compatibility",
+      "current": "openai-compatibility"
+    }
+  ],
+  "paths": [
+    {
+      "legacy": "oauth.providers.codex.optimize-multi-agent-v2",
+      "current": "client.codex.optimize-multi-agent-v2",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "providers.codex.optimize-multi-agent-v2",
+      "current": "client.codex.optimize-multi-agent-v2",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "codex.optimize-multi-agent-v2",
+      "current": "client.codex.optimize-multi-agent-v2",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.codex.disable-codex-cloaking",
+      "current": "upstream.codex.disable-codex-cloaking",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.codex.stream-bootstrap-buffering",
+      "current": "upstream.codex.stream-bootstrap-buffering",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.codex.stream-bootstrap-timeout",
+      "current": "upstream.codex.stream-bootstrap-timeout",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.codex.orphan-delegation-compatibility",
+      "current": "upstream.codex.orphan-delegation-compatibility",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.codex.model-level-cooling",
+      "current": "upstream.codex.model-level-cooling",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.codex.response-steering",
+      "current": "upstream.codex.response-steering",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.model-level-cooling",
+      "current": "upstream.claude.model-level-cooling",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.claude-code.disable-cloaking-model-list",
+      "current": "upstream.claude.disable-cloaking-model-list",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.disable-claude-cloak-mode",
+      "current": "upstream.claude.disable-claude-cloak-mode",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.header-defaults.user-agent",
+      "current": "upstream.claude.header-defaults.user-agent",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.header-defaults.package-version",
+      "current": "upstream.claude.header-defaults.package-version",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.header-defaults.runtime-version",
+      "current": "upstream.claude.header-defaults.runtime-version",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.header-defaults.os",
+      "current": "upstream.claude.header-defaults.os",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.header-defaults.arch",
+      "current": "upstream.claude.header-defaults.arch",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.header-defaults.timeout",
+      "current": "upstream.claude.header-defaults.timeout",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.header-defaults.timezone",
+      "current": "upstream.claude.header-defaults.timezone",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.claude.header-defaults.stabilize-device-profile",
+      "current": "upstream.claude.header-defaults.stabilize-device-profile",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "oauth.providers.xai.inject-x-search",
+      "current": "upstream.xai.inject-x-search",
+      "kind": "leaf"
+    },
+    {
+      "legacy": "host",
+      "current": "server.host",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "port",
+      "current": "server.port",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "trusted-proxies",
+      "current": "server.trusted-proxies",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "tls",
+      "current": "server.tls",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "commercial-mode",
+      "current": "server.commercial-mode",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "discovery",
+      "current": "server.discovery",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "remote-management",
+      "current": "management",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "api-keys",
+      "current": "access.api-keys",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "credential-concurrency",
+      "current": "credentials.concurrency",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "credential-in-flight",
+      "current": "credentials.in-flight",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "force-model-prefix",
+      "current": "routing.force-model-prefix",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "request-retry",
+      "current": "routing.retry.request-retry",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "max-retry-credentials",
+      "current": "routing.retry.max-retry-credentials",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "max-retry-interval",
+      "current": "routing.retry.max-retry-interval",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "disable-cooling",
+      "current": "routing.cooldown.disable-cooling",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "save-cooldown-status",
+      "current": "routing.cooldown.save-cooldown-status",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "transient-error-cooldown-seconds",
+      "current": "routing.cooldown.transient-error-cooldown-seconds",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "proxy-url",
+      "current": "requests.proxy-url",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "passthrough-headers",
+      "current": "requests.passthrough-headers",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "nonstream-keepalive-interval",
+      "current": "requests.nonstream-keepalive-interval",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "streaming",
+      "current": "requests.streaming",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "payload",
+      "current": "requests.payload",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "auth-dir",
+      "current": "oauth.auth-dir",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "auth-auto-refresh-workers",
+      "current": "oauth.auth-auto-refresh-workers",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "oauth-model-alias",
+      "current": "oauth.model-alias",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "oauth-excluded-models",
+      "current": "oauth.excluded-models",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "oauth-request-scoped-errors",
+      "current": "oauth.request-scoped-errors",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "oauth-settings",
+      "current": "oauth.settings",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "ws-auth",
+      "current": "oauth.providers.aistudio.ws-auth",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex.disable-codex-cloaking",
+      "current": "upstream.codex.disable-codex-cloaking",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex.stream-bootstrap-buffering",
+      "current": "upstream.codex.stream-bootstrap-buffering",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex.stream-bootstrap-timeout",
+      "current": "upstream.codex.stream-bootstrap-timeout",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex.orphan-delegation-compatibility",
+      "current": "upstream.codex.orphan-delegation-compatibility",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex.model-level-cooling",
+      "current": "upstream.codex.model-level-cooling",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex.response-steering",
+      "current": "upstream.codex.response-steering",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex",
+      "current": "oauth.providers.codex",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "codex-header-defaults",
+      "current": "oauth.providers.codex.header-defaults",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "claude",
+      "current": "upstream.claude",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "claude-code",
+      "current": "upstream.claude",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "disable-claude-cloak-mode",
+      "current": "upstream.claude.disable-claude-cloak-mode",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "claude-header-defaults",
+      "current": "upstream.claude.header-defaults",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "antigravity",
+      "current": "oauth.providers.antigravity",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "antigravity-signature-cache-enabled",
+      "current": "oauth.providers.antigravity.signature-cache-enabled",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "antigravity-signature-bypass-strict",
+      "current": "oauth.providers.antigravity.signature-bypass-strict",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "quota-exceeded.antigravity-credits",
+      "current": "oauth.providers.antigravity.antigravity-credits",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "xai",
+      "current": "upstream.xai",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "devin",
+      "current": "oauth.providers.devin",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "disable-image-generation",
+      "current": "multimedia.disable-image-generation",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "gpt-image-2-base-model",
+      "current": "multimedia.gpt-image-2-base-model",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "video-result-auth-cache-ttl",
+      "current": "multimedia.video-result-auth-cache-ttl",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "debug",
+      "current": "observability.logs.debug",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "logging-to-file",
+      "current": "observability.logs.logging-to-file",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "logs-max-total-size-mb",
+      "current": "observability.logs.logs-max-total-size-mb",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "request-log",
+      "current": "observability.logs.request-log",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "error-logs-max-files",
+      "current": "observability.logs.error-logs-max-files",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "usage-statistics-enabled",
+      "current": "observability.usage.usage-statistics-enabled",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "redis-usage-queue-retention-seconds",
+      "current": "observability.usage.redis-usage-queue-retention-seconds",
+      "kind": "prefix"
+    },
+    {
+      "legacy": "pprof",
+      "current": "observability.pprof",
+      "kind": "prefix"
+    }
+  ],
+  "presence": {
+    "ampcode": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.force-model-mappings": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.model-mappings": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.model-mappings.from": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.model-mappings.regex": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.model-mappings.to": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.restrict-management-to-localhost": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.upstream-api-key": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.upstream-api-keys": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.upstream-api-keys.api-keys": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.upstream-api-keys.upstream-api-key": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "ampcode.upstream-url": {
+      "first": "v7.0.0",
+      "removed": "v7.2.0"
+    },
+    "antigravity": {
+      "first": "v7.2.137"
+    },
+    "antigravity-signature-bypass-strict": {
+      "first": "v7.0.0"
+    },
+    "antigravity-signature-cache-enabled": {
+      "first": "v7.0.0"
+    },
+    "antigravity.connection-pool": {
+      "first": "v7.2.155"
+    },
+    "antigravity.connection-pool.enabled": {
+      "first": "v7.2.155"
+    },
+    "antigravity.connection-pool.idle-conn-timeout": {
+      "first": "v7.2.155"
+    },
+    "antigravity.connection-pool.max-idle-conns-per-host": {
+      "first": "v7.2.155"
+    },
+    "antigravity.sensitive-words": {
+      "first": "v7.2.137"
+    },
+    "api-keys": {
+      "first": "v7.0.0"
+    },
+    "auth-auto-refresh-workers": {
+      "first": "v7.0.0"
+    },
+    "auth-dir": {
+      "first": "v7.0.0"
+    },
+    "claude": {
+      "first": "v7.3.7"
+    },
+    "claude-api-key": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.api-key": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.base-url": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.cloak": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.cloak.cache-user-id": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.cloak.mode": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.cloak.sensitive-words": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.cloak.strict-mode": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.connection-pool": {
+      "first": "v8.0.51"
+    },
+    "claude-api-key.connection-pool.enabled": {
+      "first": "v8.0.51"
+    },
+    "claude-api-key.connection-pool.idle-conn-timeout": {
+      "first": "v8.0.51"
+    },
+    "claude-api-key.connection-pool.max-idle-conns-per-host": {
+      "first": "v8.0.51"
+    },
+    "claude-api-key.disable-cooling": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.excluded-models": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.experimental-cch-signing": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.fingerprint-profile": {
+      "first": "v7.2.137"
+    },
+    "claude-api-key.headers": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.models": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.models.alias": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.models.display-name": {
+      "first": "v7.2.70"
+    },
+    "claude-api-key.models.force-mapping": {
+      "first": "v7.2.40"
+    },
+    "claude-api-key.models.is-compat": {
+      "first": "v7.2.137"
+    },
+    "claude-api-key.models.max-context-length": {
+      "first": "v7.2.115"
+    },
+    "claude-api-key.models.name": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.models.thinking": {
+      "first": "v7.2.109"
+    },
+    "claude-api-key.native-tool-search": {
+      "first": "v8.0.51"
+    },
+    "claude-api-key.prefix": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.priority": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.proxy-url": {
+      "first": "v7.0.0"
+    },
+    "claude-api-key.rebuild-mid-system-message": {
+      "first": "v7.2.22"
+    },
+    "claude-api-key.request-retry": {
+      "first": "v7.2.137"
+    },
+    "claude-api-key.request-scoped-errors": {
+      "first": "v7.2.137"
+    },
+    "claude-api-key.request-scoped-errors.action": {
+      "first": "v7.2.137"
+    },
+    "claude-api-key.request-scoped-errors.match": {
+      "first": "v7.2.137"
+    },
+    "claude-api-key.request-scoped-errors.match-regexr": {
+      "first": "v7.2.137"
+    },
+    "claude-api-key.request-scoped-errors.status": {
+      "first": "v7.2.137"
+    },
+    "claude-api-key.weight": {
+      "first": "v7.2.109"
+    },
+    "claude-code": {
+      "first": "v7.2.109"
+    },
+    "claude-code.disable-cloaking-model-list": {
+      "first": "v7.2.109"
+    },
+    "claude-header-defaults": {
+      "first": "v7.0.0"
+    },
+    "claude-header-defaults.anthropic-beta-append": {
+      "first": "v8.0.51"
+    },
+    "claude-header-defaults.anthropic-beta-strip": {
+      "first": "v8.0.51"
+    },
+    "claude-header-defaults.arch": {
+      "first": "v7.0.0"
+    },
+    "claude-header-defaults.client-request-id": {
+      "first": "v8.0.51"
+    },
+    "claude-header-defaults.inject-diagnostics": {
+      "first": "v8.0.51"
+    },
+    "claude-header-defaults.os": {
+      "first": "v7.0.0"
+    },
+    "claude-header-defaults.package-version": {
+      "first": "v7.0.0"
+    },
+    "claude-header-defaults.runtime-version": {
+      "first": "v7.0.0"
+    },
+    "claude-header-defaults.stabilize-device-profile": {
+      "first": "v7.0.0"
+    },
+    "claude-header-defaults.timeout": {
+      "first": "v7.0.0"
+    },
+    "claude-header-defaults.timezone": {
+      "first": "v7.2.116"
+    },
+    "claude-header-defaults.user-agent": {
+      "first": "v7.0.0"
+    },
+    "claude.model-level-cooling": {
+      "first": "v7.3.7"
+    },
+    "claude.session-date-pin-days": {
+      "first": "v8.0.51"
+    },
+    "claude.tool-search": {
+      "first": "v8.0.51"
+    },
+    "client": {
+      "first": "v8.0.13"
+    },
+    "client.claude": {
+      "first": "v8.0.51"
+    },
+    "client.claude.show-codex-commentary": {
+      "first": "v8.0.51"
+    },
+    "client.codex": {
+      "first": "v8.0.13"
+    },
+    "client.codex.enable-apply-patch": {
+      "first": "v8.0.13"
+    },
+    "client.codex.optimize-multi-agent-v2": {
+      "first": "v8.0.13"
+    },
+    "client.codex.web-search-result-cache": {
+      "first": "v8.0.51"
+    },
+    "client.codex.web-search-result-cache.enabled": {
+      "first": "v8.0.51"
+    },
+    "client.codex.web-search-result-cache.limit": {
+      "first": "v8.0.51"
+    },
+    "client.codex.web-search-result-cache.ttl": {
+      "first": "v8.0.51"
+    },
+    "codex": {
+      "first": "v7.1.34"
+    },
+    "codex-api-key": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.alpha-search": {
+      "first": "v7.2.115"
+    },
+    "codex-api-key.api-key": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.base-url": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.connection-pool": {
+      "first": "v8.0.51"
+    },
+    "codex-api-key.connection-pool.enabled": {
+      "first": "v8.0.51"
+    },
+    "codex-api-key.connection-pool.idle-conn-timeout": {
+      "first": "v8.0.51"
+    },
+    "codex-api-key.connection-pool.max-idle-conns-per-host": {
+      "first": "v8.0.51"
+    },
+    "codex-api-key.disable-codex-cloaking": {
+      "first": "v7.3.20"
+    },
+    "codex-api-key.disable-cooling": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.excluded-models": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.headers": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.models": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.models.alias": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.models.display-name": {
+      "first": "v7.2.70"
+    },
+    "codex-api-key.models.force-mapping": {
+      "first": "v7.2.40"
+    },
+    "codex-api-key.models.is-compat": {
+      "first": "v7.2.137"
+    },
+    "codex-api-key.models.max-context-length": {
+      "first": "v7.2.115"
+    },
+    "codex-api-key.models.name": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.models.support-configuration-update": {
+      "first": "v7.3.20"
+    },
+    "codex-api-key.models.thinking": {
+      "first": "v7.2.109"
+    },
+    "codex-api-key.prefix": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.priority": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.proxy-url": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.request-retry": {
+      "first": "v7.2.137"
+    },
+    "codex-api-key.request-scoped-errors": {
+      "first": "v7.2.137"
+    },
+    "codex-api-key.request-scoped-errors.action": {
+      "first": "v7.2.137"
+    },
+    "codex-api-key.request-scoped-errors.match": {
+      "first": "v7.2.137"
+    },
+    "codex-api-key.request-scoped-errors.match-regexr": {
+      "first": "v7.2.137"
+    },
+    "codex-api-key.request-scoped-errors.status": {
+      "first": "v7.2.137"
+    },
+    "codex-api-key.websockets": {
+      "first": "v7.0.0"
+    },
+    "codex-api-key.weight": {
+      "first": "v7.2.109"
+    },
+    "codex-header-defaults": {
+      "first": "v7.0.0"
+    },
+    "codex-header-defaults.beta-features": {
+      "first": "v7.0.0"
+    },
+    "codex-header-defaults.user-agent": {
+      "first": "v7.0.0"
+    },
+    "codex.disable-codex-cloaking": {
+      "first": "v7.2.110"
+    },
+    "codex.identity-confuse": {
+      "first": "v7.1.34",
+      "removed": "v8.0.4"
+    },
+    "codex.live-media-relay": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.disable-private-remote-ips": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.enabled": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.ice-servers": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.ice-servers.credential": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.ice-servers.urls": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.ice-servers.username": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.max-sessions": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.public-ip": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.udp-port-max": {
+      "first": "v7.2.101"
+    },
+    "codex.live-media-relay.udp-port-min": {
+      "first": "v7.2.101"
+    },
+    "codex.model-level-cooling": {
+      "first": "v7.2.156"
+    },
+    "codex.optimize-multi-agent-v2": {
+      "first": "v7.2.98",
+      "removed": "v8.0.13"
+    },
+    "codex.orphan-delegation-compatibility": {
+      "first": "v7.2.149"
+    },
+    "codex.response-steering": {
+      "first": "v7.3.9"
+    },
+    "codex.signin-with-chatgpt-identifier": {
+      "first": "v8.0.51"
+    },
+    "codex.stream-bootstrap-buffering": {
+      "first": "v7.2.138"
+    },
+    "codex.stream-bootstrap-timeout": {
+      "first": "v7.3.3"
+    },
+    "codex.upstream-request-compression": {
+      "first": "v8.0.51"
+    },
+    "codex.upstream-request-compression-min-bytes": {
+      "first": "v8.0.51"
+    },
+    "codex.websocket-compression": {
+      "first": "v8.0.51"
+    },
+    "commercial-mode": {
+      "first": "v7.0.0"
+    },
+    "credential-concurrency": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.busy-retry-max": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.busy-retry-min": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.cleanup-interval": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.cpa-cancel-bound": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.cpa-heartbeat-timeout": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.lifecycle-config-revision": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.max-limit": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.observation-barrier-revision": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.reclaim-grace": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.release-flush-interval": {
+      "first": "v7.2.97"
+    },
+    "credential-concurrency.release-max-backoff": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight.max-aggregate-groups": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight.max-details": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight.max-part-bytes": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight.max-part-count": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight.max-revision-bytes": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight.max-string-bytes": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight.snapshot-interval": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight.staging-retention": {
+      "first": "v7.2.97"
+    },
+    "credential-in-flight.stale-after": {
+      "first": "v7.2.97"
+    },
+    "debug": {
+      "first": "v7.0.0"
+    },
+    "devin": {
+      "first": "v7.3.0"
+    },
+    "devin.sensitive-words": {
+      "first": "v7.3.0"
+    },
+    "disable-claude-cloak-mode": {
+      "first": "v7.2.8"
+    },
+    "disable-cooling": {
+      "first": "v7.0.0"
+    },
+    "disable-image-generation": {
+      "first": "v7.0.0"
+    },
+    "discovery": {
+      "first": "v7.3.3"
+    },
+    "discovery.advertise-management": {
+      "first": "v7.3.3"
+    },
+    "discovery.auth-required": {
+      "first": "v7.3.3"
+    },
+    "discovery.enabled": {
+      "first": "v7.3.3"
+    },
+    "discovery.interfaces": {
+      "first": "v7.3.3"
+    },
+    "discovery.interfaces.exclude": {
+      "first": "v7.3.3"
+    },
+    "discovery.interfaces.include": {
+      "first": "v7.3.3"
+    },
+    "discovery.service-name": {
+      "first": "v7.3.3"
+    },
+    "discovery.service-type": {
+      "first": "v7.3.3"
+    },
+    "discovery.subtypes": {
+      "first": "v7.3.3"
+    },
+    "enable-gemini-cli-endpoint": {
+      "first": "v7.0.0",
+      "removed": "v7.2.20"
+    },
+    "error-logs-max-files": {
+      "first": "v7.0.0"
+    },
+    "force-model-prefix": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.api-key": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.base-url": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.connection-pool": {
+      "first": "v8.0.51"
+    },
+    "gemini-api-key.connection-pool.enabled": {
+      "first": "v8.0.51"
+    },
+    "gemini-api-key.connection-pool.idle-conn-timeout": {
+      "first": "v8.0.51"
+    },
+    "gemini-api-key.connection-pool.max-idle-conns-per-host": {
+      "first": "v8.0.51"
+    },
+    "gemini-api-key.disable-cooling": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.excluded-models": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.headers": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.models": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.models.alias": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.models.display-name": {
+      "first": "v7.2.70"
+    },
+    "gemini-api-key.models.force-mapping": {
+      "first": "v7.2.40"
+    },
+    "gemini-api-key.models.is-compat": {
+      "first": "v7.2.137"
+    },
+    "gemini-api-key.models.max-context-length": {
+      "first": "v7.2.115"
+    },
+    "gemini-api-key.models.name": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.models.thinking": {
+      "first": "v7.2.109"
+    },
+    "gemini-api-key.prefix": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.priority": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.proxy-url": {
+      "first": "v7.0.0"
+    },
+    "gemini-api-key.request-retry": {
+      "first": "v7.2.137"
+    },
+    "gemini-api-key.request-scoped-errors": {
+      "first": "v7.2.137"
+    },
+    "gemini-api-key.request-scoped-errors.action": {
+      "first": "v7.2.137"
+    },
+    "gemini-api-key.request-scoped-errors.match": {
+      "first": "v7.2.137"
+    },
+    "gemini-api-key.request-scoped-errors.match-regexr": {
+      "first": "v7.2.137"
+    },
+    "gemini-api-key.request-scoped-errors.status": {
+      "first": "v7.2.137"
+    },
+    "gemini-api-key.weight": {
+      "first": "v7.2.109"
+    },
+    "github-token": {
+      "first": "v8.0.51"
+    },
+    "gpt-image-2-base-model": {
+      "first": "v7.1.23"
+    },
+    "home": {
+      "first": "v7.0.0",
+      "removed": "v7.1.17"
+    },
+    "home.disable-cluster-discovery": {
+      "first": "v7.0.10",
+      "removed": "v7.1.17"
+    },
+    "home.enabled": {
+      "first": "v7.0.0",
+      "removed": "v7.1.17"
+    },
+    "home.host": {
+      "first": "v7.0.0",
+      "removed": "v7.1.17"
+    },
+    "home.password": {
+      "first": "v7.0.0",
+      "removed": "v7.1.17"
+    },
+    "home.port": {
+      "first": "v7.0.0",
+      "removed": "v7.1.17"
+    },
+    "home.tls": {
+      "first": "v7.0.10",
+      "removed": "v7.1.17"
+    },
+    "home.tls.ca-cert": {
+      "first": "v7.0.10",
+      "removed": "v7.1.17"
+    },
+    "home.tls.enable": {
+      "first": "v7.0.10",
+      "removed": "v7.1.17"
+    },
+    "home.tls.insecure-skip-verify": {
+      "first": "v7.0.10",
+      "removed": "v7.1.17"
+    },
+    "home.tls.server-name": {
+      "first": "v7.0.10",
+      "removed": "v7.1.17"
+    },
+    "host": {
+      "first": "v7.0.0"
+    },
+    "interactions-api-key": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.api-key": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.base-url": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.connection-pool": {
+      "first": "v8.0.51"
+    },
+    "interactions-api-key.connection-pool.enabled": {
+      "first": "v8.0.51"
+    },
+    "interactions-api-key.connection-pool.idle-conn-timeout": {
+      "first": "v8.0.51"
+    },
+    "interactions-api-key.connection-pool.max-idle-conns-per-host": {
+      "first": "v8.0.51"
+    },
+    "interactions-api-key.disable-cooling": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.excluded-models": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.headers": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.models": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.models.alias": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.models.display-name": {
+      "first": "v7.2.70"
+    },
+    "interactions-api-key.models.force-mapping": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.models.is-compat": {
+      "first": "v7.2.137"
+    },
+    "interactions-api-key.models.max-context-length": {
+      "first": "v7.2.115"
+    },
+    "interactions-api-key.models.name": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.models.thinking": {
+      "first": "v7.2.109"
+    },
+    "interactions-api-key.prefix": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.priority": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.proxy-url": {
+      "first": "v7.2.51"
+    },
+    "interactions-api-key.request-retry": {
+      "first": "v7.2.137"
+    },
+    "interactions-api-key.request-scoped-errors": {
+      "first": "v7.2.137"
+    },
+    "interactions-api-key.request-scoped-errors.action": {
+      "first": "v7.2.137"
+    },
+    "interactions-api-key.request-scoped-errors.match": {
+      "first": "v7.2.137"
+    },
+    "interactions-api-key.request-scoped-errors.match-regexr": {
+      "first": "v7.2.137"
+    },
+    "interactions-api-key.request-scoped-errors.status": {
+      "first": "v7.2.137"
+    },
+    "interactions-api-key.weight": {
+      "first": "v7.2.109"
+    },
+    "logging-to-file": {
+      "first": "v7.0.0"
+    },
+    "logs-max-total-size-mb": {
+      "first": "v7.0.0"
+    },
+    "max-request-body-bytes": {
+      "first": "v8.0.51"
+    },
+    "max-retry-credentials": {
+      "first": "v7.0.0"
+    },
+    "max-retry-interval": {
+      "first": "v7.0.0"
+    },
+    "meta-api-key": {
+      "first": "v7.3.4"
+    },
+    "models": {
+      "first": "v8.0.51"
+    },
+    "nonstream-keepalive-interval": {
+      "first": "v7.0.0"
+    },
+    "oauth-excluded-models": {
+      "first": "v7.0.0"
+    },
+    "oauth-model-alias": {
+      "first": "v7.0.0"
+    },
+    "oauth-model-alias.alias": {
+      "first": "v7.0.0"
+    },
+    "oauth-model-alias.display-name": {
+      "first": "v7.2.84"
+    },
+    "oauth-model-alias.force-mapping": {
+      "first": "v7.2.34"
+    },
+    "oauth-model-alias.fork": {
+      "first": "v7.0.0"
+    },
+    "oauth-model-alias.name": {
+      "first": "v7.0.0"
+    },
+    "oauth-model-alias.openapi": {
+      "first": "v8.0.51"
+    },
+    "oauth-request-scoped-errors": {
+      "first": "v7.2.138"
+    },
+    "oauth-request-scoped-errors.action": {
+      "first": "v7.2.138"
+    },
+    "oauth-request-scoped-errors.match": {
+      "first": "v7.2.138"
+    },
+    "oauth-request-scoped-errors.match-regexr": {
+      "first": "v7.2.138"
+    },
+    "oauth-request-scoped-errors.status": {
+      "first": "v7.2.138"
+    },
+    "oauth-settings": {
+      "first": "v8.0.13"
+    },
+    "oauth-settings.alias": {
+      "first": "v8.0.13"
+    },
+    "oauth-settings.max-context-length": {
+      "first": "v8.0.13"
+    },
+    "oauth-settings.name": {
+      "first": "v8.0.13"
+    },
+    "oauth-settings.openapi": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.api-key-entries": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.api-key-entries.api-key": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.api-key-entries.connection-pool": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility.api-key-entries.connection-pool.enabled": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility.api-key-entries.connection-pool.idle-conn-timeout": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility.api-key-entries.connection-pool.max-idle-conns-per-host": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility.api-key-entries.proxy-url": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.api-key-entries.weight": {
+      "first": "v7.2.109"
+    },
+    "openai-compatibility.base-url": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.connection-pool": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility.connection-pool.enabled": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility.connection-pool.idle-conn-timeout": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility.connection-pool.max-idle-conns-per-host": {
+      "first": "v8.0.51"
+    },
+    "openai-compatibility.disable-cooling": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.disabled": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.headers": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models.alias": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models.display-name": {
+      "first": "v7.2.70"
+    },
+    "openai-compatibility.models.force-mapping": {
+      "first": "v7.2.40"
+    },
+    "openai-compatibility.models.image": {
+      "first": "v7.1.15"
+    },
+    "openai-compatibility.models.input-modalities": {
+      "first": "v7.2.52"
+    },
+    "openai-compatibility.models.is-compat": {
+      "first": "v7.2.137"
+    },
+    "openai-compatibility.models.max-context-length": {
+      "first": "v7.2.115"
+    },
+    "openai-compatibility.models.name": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models.output-modalities": {
+      "first": "v7.2.52"
+    },
+    "openai-compatibility.models.thinking": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.models.use-max-completion-tokens": {
+      "first": "v7.3.8"
+    },
+    "openai-compatibility.name": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.prefix": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.priority": {
+      "first": "v7.0.0"
+    },
+    "openai-compatibility.request-retry": {
+      "first": "v7.2.137"
+    },
+    "openai-compatibility.request-scoped-errors": {
+      "first": "v7.2.137"
+    },
+    "openai-compatibility.request-scoped-errors.action": {
+      "first": "v7.2.137"
+    },
+    "openai-compatibility.request-scoped-errors.match": {
+      "first": "v7.2.137"
+    },
+    "openai-compatibility.request-scoped-errors.match-regexr": {
+      "first": "v7.2.137"
+    },
+    "openai-compatibility.request-scoped-errors.status": {
+      "first": "v7.2.137"
+    },
+    "openai-compatibility.support-prompt-cache-key": {
+      "first": "v7.2.115"
+    },
+    "passthrough-headers": {
+      "first": "v7.0.0"
+    },
+    "payload": {
+      "first": "v7.0.0"
+    },
+    "payload.default": {
+      "first": "v7.0.0"
+    },
+    "payload.default-raw": {
+      "first": "v7.0.0"
+    },
+    "payload.default-raw.models": {
+      "first": "v7.0.0"
+    },
+    "payload.default-raw.models.exist": {
+      "first": "v7.1.8"
+    },
+    "payload.default-raw.models.form-protocol": {
+      "first": "v7.1.8",
+      "removed": "v7.1.9"
+    },
+    "payload.default-raw.models.from-protocol": {
+      "first": "v7.1.9"
+    },
+    "payload.default-raw.models.headers": {
+      "first": "v7.1.8"
+    },
+    "payload.default-raw.models.match": {
+      "first": "v7.1.8"
+    },
+    "payload.default-raw.models.name": {
+      "first": "v7.0.0"
+    },
+    "payload.default-raw.models.not-exist": {
+      "first": "v7.1.8"
+    },
+    "payload.default-raw.models.not-match": {
+      "first": "v7.1.8"
+    },
+    "payload.default-raw.models.protocol": {
+      "first": "v7.0.0"
+    },
+    "payload.default-raw.params": {
+      "first": "v7.0.0"
+    },
+    "payload.default.models": {
+      "first": "v7.0.0"
+    },
+    "payload.default.models.exist": {
+      "first": "v7.1.8"
+    },
+    "payload.default.models.form-protocol": {
+      "first": "v7.1.8",
+      "removed": "v7.1.9"
+    },
+    "payload.default.models.from-protocol": {
+      "first": "v7.1.9"
+    },
+    "payload.default.models.headers": {
+      "first": "v7.1.8"
+    },
+    "payload.default.models.match": {
+      "first": "v7.1.8"
+    },
+    "payload.default.models.name": {
+      "first": "v7.0.0"
+    },
+    "payload.default.models.not-exist": {
+      "first": "v7.1.8"
+    },
+    "payload.default.models.not-match": {
+      "first": "v7.1.8"
+    },
+    "payload.default.models.protocol": {
+      "first": "v7.0.0"
+    },
+    "payload.default.params": {
+      "first": "v7.0.0"
+    },
+    "payload.filter": {
+      "first": "v7.0.0"
+    },
+    "payload.filter.models": {
+      "first": "v7.0.0"
+    },
+    "payload.filter.models.exist": {
+      "first": "v7.1.8"
+    },
+    "payload.filter.models.form-protocol": {
+      "first": "v7.1.8",
+      "removed": "v7.1.9"
+    },
+    "payload.filter.models.from-protocol": {
+      "first": "v7.1.9"
+    },
+    "payload.filter.models.headers": {
+      "first": "v7.1.8"
+    },
+    "payload.filter.models.match": {
+      "first": "v7.1.8"
+    },
+    "payload.filter.models.name": {
+      "first": "v7.0.0"
+    },
+    "payload.filter.models.not-exist": {
+      "first": "v7.1.8"
+    },
+    "payload.filter.models.not-match": {
+      "first": "v7.1.8"
+    },
+    "payload.filter.models.protocol": {
+      "first": "v7.0.0"
+    },
+    "payload.filter.params": {
+      "first": "v7.0.0"
+    },
+    "payload.override": {
+      "first": "v7.0.0"
+    },
+    "payload.override-raw": {
+      "first": "v7.0.0"
+    },
+    "payload.override-raw.models": {
+      "first": "v7.0.0"
+    },
+    "payload.override-raw.models.exist": {
+      "first": "v7.1.8"
+    },
+    "payload.override-raw.models.form-protocol": {
+      "first": "v7.1.8",
+      "removed": "v7.1.9"
+    },
+    "payload.override-raw.models.from-protocol": {
+      "first": "v7.1.9"
+    },
+    "payload.override-raw.models.headers": {
+      "first": "v7.1.8"
+    },
+    "payload.override-raw.models.match": {
+      "first": "v7.1.8"
+    },
+    "payload.override-raw.models.name": {
+      "first": "v7.0.0"
+    },
+    "payload.override-raw.models.not-exist": {
+      "first": "v7.1.8"
+    },
+    "payload.override-raw.models.not-match": {
+      "first": "v7.1.8"
+    },
+    "payload.override-raw.models.protocol": {
+      "first": "v7.0.0"
+    },
+    "payload.override-raw.params": {
+      "first": "v7.0.0"
+    },
+    "payload.override.models": {
+      "first": "v7.0.0"
+    },
+    "payload.override.models.exist": {
+      "first": "v7.1.8"
+    },
+    "payload.override.models.form-protocol": {
+      "first": "v7.1.8",
+      "removed": "v7.1.9"
+    },
+    "payload.override.models.from-protocol": {
+      "first": "v7.1.9"
+    },
+    "payload.override.models.headers": {
+      "first": "v7.1.8"
+    },
+    "payload.override.models.match": {
+      "first": "v7.1.8"
+    },
+    "payload.override.models.name": {
+      "first": "v7.0.0"
+    },
+    "payload.override.models.not-exist": {
+      "first": "v7.1.8"
+    },
+    "payload.override.models.not-match": {
+      "first": "v7.1.8"
+    },
+    "payload.override.models.protocol": {
+      "first": "v7.0.0"
+    },
+    "payload.override.params": {
+      "first": "v7.0.0"
+    },
+    "plugins": {
+      "first": "v7.1.47"
+    },
+    "plugins.auth-revision": {
+      "first": "v7.2.87"
+    },
+    "plugins.configs": {
+      "first": "v7.1.47"
+    },
+    "plugins.configs.enabled": {
+      "first": "v7.1.47"
+    },
+    "plugins.configs.priority": {
+      "first": "v7.1.47"
+    },
+    "plugins.dir": {
+      "first": "v7.1.47"
+    },
+    "plugins.enabled": {
+      "first": "v7.1.47"
+    },
+    "plugins.store-auth": {
+      "first": "v7.2.44"
+    },
+    "plugins.store-sources": {
+      "first": "v7.2.2"
+    },
+    "plugins.sync-revision": {
+      "first": "v7.2.82",
+      "removed": "v7.2.87"
+    },
+    "port": {
+      "first": "v7.0.0"
+    },
+    "pprof": {
+      "first": "v7.0.0"
+    },
+    "pprof.addr": {
+      "first": "v7.0.0"
+    },
+    "pprof.enable": {
+      "first": "v7.0.0"
+    },
+    "proxy-url": {
+      "first": "v7.0.0"
+    },
+    "quota-exceeded": {
+      "first": "v7.0.0"
+    },
+    "quota-exceeded.antigravity-credits": {
+      "first": "v7.0.0"
+    },
+    "quota-exceeded.switch-preview-model": {
+      "first": "v7.0.0"
+    },
+    "quota-exceeded.switch-project": {
+      "first": "v7.0.0"
+    },
+    "redis-usage-queue-retention-seconds": {
+      "first": "v7.0.0"
+    },
+    "remote-management": {
+      "first": "v7.0.0"
+    },
+    "remote-management.allow-remote": {
+      "first": "v7.0.0"
+    },
+    "remote-management.base-url": {
+      "first": "v7.3.20"
+    },
+    "remote-management.disable-auto-update-panel": {
+      "first": "v7.0.0"
+    },
+    "remote-management.disable-control-panel": {
+      "first": "v7.0.0"
+    },
+    "remote-management.panel-github-repository": {
+      "first": "v7.0.0"
+    },
+    "remote-management.secret-key": {
+      "first": "v7.0.0"
+    },
+    "request-log": {
+      "first": "v7.0.0"
+    },
+    "request-retry": {
+      "first": "v7.0.0"
+    },
+    "response-compression": {
+      "first": "v8.0.51"
+    },
+    "response-compression.enabled": {
+      "first": "v8.0.51"
+    },
+    "response-compression.min-bytes": {
+      "first": "v8.0.51"
+    },
+    "routing": {
+      "first": "v7.0.0"
+    },
+    "routing.session-affinity": {
+      "first": "v7.0.0"
+    },
+    "routing.session-affinity-rebind-on": {
+      "first": "v8.0.51"
+    },
+    "routing.session-affinity-subagents": {
+      "first": "v7.2.148"
+    },
+    "routing.session-affinity-ttl": {
+      "first": "v7.0.0"
+    },
+    "routing.strategy": {
+      "first": "v7.0.0"
+    },
+    "save-cooldown-status": {
+      "first": "v7.2.19"
+    },
+    "streaming": {
+      "first": "v7.0.0"
+    },
+    "streaming.bootstrap-retries": {
+      "first": "v7.0.0"
+    },
+    "streaming.keepalive-seconds": {
+      "first": "v7.0.0"
+    },
+    "streaming.send-keepalive-before-ft": {
+      "first": "v8.0.51"
+    },
+    "tls": {
+      "first": "v7.0.0"
+    },
+    "tls-handshake-timeout-seconds": {
+      "first": "v8.0.51"
+    },
+    "tls.cert": {
+      "first": "v7.0.0"
+    },
+    "tls.enable": {
+      "first": "v7.0.0"
+    },
+    "tls.key": {
+      "first": "v7.0.0"
+    },
+    "transient-error-cooldown-seconds": {
+      "first": "v7.2.19"
+    },
+    "trusted-proxies": {
+      "first": "v7.3.20"
+    },
+    "usage-statistics-enabled": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.api-key": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.base-url": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.connection-pool": {
+      "first": "v8.0.51"
+    },
+    "vertex-api-key.connection-pool.enabled": {
+      "first": "v8.0.51"
+    },
+    "vertex-api-key.connection-pool.idle-conn-timeout": {
+      "first": "v8.0.51"
+    },
+    "vertex-api-key.connection-pool.max-idle-conns-per-host": {
+      "first": "v8.0.51"
+    },
+    "vertex-api-key.disable-cooling": {
+      "first": "v7.2.137"
+    },
+    "vertex-api-key.excluded-models": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.headers": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.interactions": {
+      "first": "v8.0.51"
+    },
+    "vertex-api-key.models": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.models.alias": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.models.display-name": {
+      "first": "v7.2.70"
+    },
+    "vertex-api-key.models.force-mapping": {
+      "first": "v7.2.40"
+    },
+    "vertex-api-key.models.name": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.models.openapi": {
+      "first": "v8.0.51"
+    },
+    "vertex-api-key.models.thinking": {
+      "first": "v7.2.109"
+    },
+    "vertex-api-key.openapi": {
+      "first": "v8.0.51"
+    },
+    "vertex-api-key.openapi-location": {
+      "first": "v8.0.51"
+    },
+    "vertex-api-key.prefix": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.priority": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.proxy-url": {
+      "first": "v7.0.0"
+    },
+    "vertex-api-key.request-retry": {
+      "first": "v7.2.137"
+    },
+    "vertex-api-key.weight": {
+      "first": "v7.2.109"
+    },
+    "video-result-auth-cache-ttl": {
+      "first": "v7.2.5"
+    },
+    "ws-auth": {
+      "first": "v7.0.0"
+    },
+    "xai": {
+      "first": "v7.2.102"
+    },
+    "xai-api-key": {
+      "first": "v7.2.73"
+    },
+    "xai.inject-x-search": {
+      "first": "v7.2.102"
+    }
+  }
+}
