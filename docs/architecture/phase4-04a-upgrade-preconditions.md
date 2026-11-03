@@ -175,12 +175,22 @@ hard `false`; the new surface grants no migration authority.
   Timestamps are repository-owned observations, never concurrency tokens.
   `Advance` appends a domain and moves the stage in one transaction; `Put` also
   preserves completed domains. Duplicate domains and non-object reconciliation
-  JSON (including `null`) are rejected before defaults are normalized; stored
-  corruption is reported rather than silently repaired.
+  JSON (including `null`) are rejected before defaults are normalized. Stored
+  corruption is reported rather than silently repaired: defaults are applied
+  only to construction and `Put` input, so a stored row must hold an actual
+  JSON string array for `domains_done` / `manual_items` and an actual JSON
+  object for `reconciliation`; empty text, JSON `null`, a non-array or an array
+  with a non-string element makes `Get` (and any write that would read the row)
+  return `ErrInvalidRow`.
   Entering `failed` preserves the highest forward stage in `last_forward_stage`;
   a resume below it is refused. A migrated failed row with no recorded high-water
   mark stays parked and cannot automatically resume from an invented position.
-  `complete` is terminal, including a later attempt to enter `failed`. The table
+  `complete` is frozen. The first transition into `complete`, including the
+  write that creates the row there, is accepted once; afterwards a `Put` or
+  `Advance` that would change a domain, an observation or the stage is refused
+  with `ErrStageRegression` and leaves every column, the revision and the
+  timestamps untouched. An exactly identical repeat is a success that writes
+  nothing, and entering `failed` from `complete` stays refused. The table
   is created only in the v2 Manager database, never in the legacy source root.
 - **Never in place.** The existing source fence is acquired through a read-only
   descriptor (`processlock.AcquireExistingReadOnly`) before fingerprinting,
