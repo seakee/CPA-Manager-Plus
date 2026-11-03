@@ -384,7 +384,13 @@ export function FreshManagedRuntime({
         operation={operation}
         carrier={adoptCarrier}
         onOperation={onOperation}
-        onComplete={onContinue}
+        onComplete={(completed) => {
+          // A clean copy enters the console. Manual or failed items keep this
+          // journey on screen with its groups and next steps until the operator
+          // has read them; the footer then offers the console.
+          if (completed.counts.manual === 0 && completed.counts.failed === 0) onContinue?.();
+        }}
+        onEnterConsole={() => onContinue?.()}
         onPending={onPending}
         // Choosing Adopt must be reversible until the record holds an attempt:
         // the tile is a choice, and a choice with no way back is a trap. Once an

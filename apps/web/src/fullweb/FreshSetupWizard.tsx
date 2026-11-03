@@ -11,7 +11,12 @@ import {
 } from './bootstrapTransport';
 import { validControlBasePath } from './routingContext';
 import { validRuntimeGeneration, type RuntimeGeneration } from './runtimeGeneration';
-import { normalizeCPAAddress, type AdoptRuntimeTarget } from './freshAdoption';
+import { adoptGuidanceText, adoptReasonText, adoptText } from '../i18n/freshAdopt';
+import {
+  normalizeCPAAddress,
+  type AdoptionSummary,
+  type AdoptRuntimeTarget,
+} from './freshAdoption';
 import { FreshAdoptFlow, type AdoptCarrier } from './FreshAdoptFlow';
 import { FullWebIcon } from './FullWebIcon';
 
@@ -107,6 +112,10 @@ export function FreshSetupWizard({
   // The adoption's own step inside this wizard's four-step chrome: the confirm
   // step is the inventory and the execute step is the migration.
   const [adoptStep, setAdoptStep] = useState(2);
+  // The recorded summary of the adoption that just completed. It is the flow's
+  // last read of the run, kept so this wizard's own completion step can state
+  // what the copy left behind instead of claiming a clean installation.
+  const [adoptSummary, setAdoptSummary] = useState<AdoptionSummary | null>(null);
   const inflight = useRef(false);
   const alive = useRef(true);
   const pending = useRef<Pending | null>(null);
@@ -334,6 +343,16 @@ export function FreshSetupWizard({
     });
   }
   const complete = operation.productComplete === true;
+  const adoptionManual = adoptSummary?.counts.manual ?? 0;
+  const adoptionFailed = adoptSummary?.counts.failed ?? 0;
+  // The server completes an installation over manual items and non-retryable
+  // failures, but those were never copied. The wizard's own success step must
+  // say so instead of borrowing the clean-installation sentence.
+  const adoptionPartial =
+    complete && strategy === 'adopt_existing' && (adoptionManual > 0 || adoptionFailed > 0);
+  const adoptionRemainder = adoptSummary
+    ? adoptSummary.items.filter((item) => item.outcome === 'manual' || item.outcome === 'failed')
+    : [];
   // The shared Adopt flow's carrier. The bootstrap transport owns identity,
   // revision and the canonical route, so each capability is one call.
   const adoptCarrier: AdoptCarrier = {
@@ -386,6 +405,7 @@ export function FreshSetupWizard({
             operation={operation}
             carrier={adoptCarrier}
             onOperation={accept}
+            onComplete={(completed) => setAdoptSummary(completed)}
             onStage={(stage) => setAdoptStep(stage === 'migration' ? 3 : 2)}
           />
         </div>
@@ -435,7 +455,9 @@ export function FreshSetupWizard({
             <div>
               <h1 className="wizard-title">
                 {complete
-                  ? s('ready')
+                  ? adoptionPartial
+                    ? adoptText('partialTitle')
+                    : s('ready')
                   : step === 0
                     ? j('welcome')
                     : step === 1
@@ -448,7 +470,12 @@ export function FreshSetupWizard({
               </h1>
               <p className="wizard-desc">
                 {complete
-                  ? j('successHelp')
+                  ? adoptionPartial
+                    ? adoptText('partialHelp', {
+                        manual: adoptionManual,
+                        failed: adoptionFailed,
+                      })
+                    : j('successHelp')
                   : step === 0
                     ? j('chooseHelp')
                     : step === 1
@@ -674,6 +701,24 @@ export function FreshSetupWizard({
                   </div>
                 ))}
               </dl>
+              {complete && adoptionPartial && (
+                <section className="journey-field" data-testid="adopt-remaining-work">
+                  <h2 className="form-label">{adoptText('details')}</h2>
+                  <ul className="adopt-items">
+                    {adoptionRemainder.map((item) => (
+                      <li key={item.id} data-testid={`adopt-remaining-${item.id}`}>
+                        <strong className="adopt-item-name">{item.item}</strong>
+                        {item.reason && (
+                          <span className="adopt-item-reason">{adoptReasonText(item.reason)}</span>
+                        )}
+                        <p className="journey-help">
+                          {adoptGuidanceText(item.kind, item.reason, item.left)}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
               {!complete && (
                 <>
                   <p className="alert alert-info">{j('noMigration')}</p>

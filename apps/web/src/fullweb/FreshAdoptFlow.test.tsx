@@ -14,6 +14,8 @@ import type { AdoptionItem, AdoptionSummary } from './freshAdoption';
 import type { createPublicApiClient, PublicApiClient } from './publicApi';
 import { setFullWebLanguage } from '../i18n/fullweb';
 import { adoptGuidanceText, adoptReasonText, adoptText } from '../i18n/freshAdopt';
+import { bootstrapJourneyText as j } from '../i18n/bootstrapJourney';
+import { shellText as s } from '../i18n/consoleShell';
 
 const identity = {
   admissionId: 'admission',
@@ -246,6 +248,33 @@ const cleanRun: AdoptionSummary = {
   running: false,
   retryable: 0,
   counts: { migrated: 2, manual: 0, failed: 0, absent_at_source: 0 },
+};
+
+// A completed installation whose copy left one non-retryable failure. Nothing
+// is retryable, so the server completes it, but the item was never copied.
+const failedInstallation: AdoptionSummary = {
+  runId: runC,
+  items: withIdentity([
+    {
+      item: 'Credential file #1',
+      kind: 'credential',
+      outcome: 'migrated',
+      reason: '',
+      retryable: false,
+    },
+    {
+      item: 'config:routing.strategy',
+      kind: 'config_leaf',
+      outcome: 'failed',
+      reason: 'verify_mismatch',
+      retryable: false,
+    },
+  ]),
+  planned: 2,
+  finished: true,
+  running: false,
+  retryable: 0,
+  counts: { migrated: 1, manual: 0, failed: 1, absent_at_source: 0 },
 };
 
 // One failed, retryable item under a given run identity. The item is the same in
@@ -1730,30 +1759,6 @@ it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
 );
 
 it('states that failed items remain after the installation completes', async () => {
-  const failedInstallation: AdoptionSummary = {
-    runId: runC,
-    items: withIdentity([
-      {
-        item: 'Credential file #1',
-        kind: 'credential',
-        outcome: 'migrated',
-        reason: '',
-        retryable: false,
-      },
-      {
-        item: 'config:routing.strategy',
-        kind: 'config_leaf',
-        outcome: 'failed',
-        reason: 'verify_mismatch',
-        retryable: false,
-      },
-    ]),
-    planned: 2,
-    finished: true,
-    running: false,
-    retryable: 0,
-    counts: { migrated: 1, manual: 0, failed: 1, absent_at_source: 0 },
-  };
   const done: FreshOperation = {
     identity,
     revision: 12,
@@ -1777,6 +1782,96 @@ it('states that failed items remain after the installation completes', async () 
   expect(text()).toContain(adoptText('partialTitle'));
   expect(text()).not.toContain(adoptText('done'));
   expect(text()).toContain(adoptText('partialHelp', { manual: 0, failed: 1 }));
+});
+
+// --- the host completion step --------------------------------------------
+
+// Walk the setup wizard through a completed adoption with the given recorded
+// summary: read the inventory, confirm, commit, and complete. The fake route
+// answers the completion with a product-complete operation.
+async function completeAdoption(summary: AdoptionSummary) {
+  await adoptServer({ summaries: [summary] });
+  await click('adopt-read-inventory');
+  await input('adopt-confirm-inventory', true);
+  await click('adopt-confirm-migrate');
+  await settle();
+  await click('adopt-complete');
+  await settle();
+}
+
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'states the manual remainder on the setup completion step (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    await completeAdoption(allOutcomes);
+    // The installation finished, but a manual item was never copied: the host
+    // step says that, with the real count and the item's next step.
+    expect(text()).toContain(adoptText('partialTitle'));
+    expect(text()).toContain(adoptText('partialHelp', { manual: 1, failed: 0 }));
+    expect(text()).toContain(adoptGuidanceText('credential', 'runtime_only_credential'));
+    // The clean-installation sentence is exactly what must not appear.
+    expect(text()).not.toContain(j('successHelp'));
+    expect(byID('enter-console').props.href).toBe('/console');
+  }
+);
+
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'states the failed remainder on the setup completion step (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    await completeAdoption(failedInstallation);
+    expect(text()).toContain(adoptText('partialTitle'));
+    expect(text()).toContain(adoptText('partialHelp', { manual: 0, failed: 1 }));
+    expect(text()).toContain(adoptGuidanceText('config_leaf', 'verify_mismatch'));
+    expect(text()).not.toContain(j('successHelp'));
+    expect(byID('enter-console').props.href).toBe('/console');
+  }
+);
+
+it.each(['en', 'zh-CN', 'zh-TW', 'ru'])(
+  'keeps the clean setup completion step when every item copied (%s)',
+  async (language) => {
+    await act(async () => setFullWebLanguage(language));
+    await completeAdoption(cleanRun);
+    expect(text()).toContain(s('ready'));
+    expect(text()).toContain(j('successHelp'));
+    expect(text()).not.toContain(adoptText('partialTitle'));
+    expect(byID('enter-console').props.href).toBe('/console');
+  }
+);
+
+it('keeps the partial adoption groups on the Console after completion', async () => {
+  const committed: FreshOperation = {
+    identity,
+    revision: 9,
+    adminInitialized: true,
+    gatewayPending: true,
+    routing: {
+      operationId: identity.operationId,
+      revision: 1,
+      target: '/console',
+      stage: 'committed',
+      committed: true,
+    },
+    strategy: { ...adoptCheckpoint, stage: 'committed' },
+  };
+  const done: FreshOperation = { ...committed, revision: 10, productComplete: true };
+  const get = vi.fn(async (resource: string) =>
+    resource === 'installation/adoption' ? allOutcomes : done
+  );
+  const { post } = await mountManaged(committed, get);
+  post.mockResolvedValue(done);
+  await settle();
+  await click('adopt-complete');
+  await settle();
+  // The Console does not leave for a console that would hide the remaining
+  // work: the partial headline, the manual group and its guidance stay visible,
+  // and entry to the console is the operator's next action.
+  expect(text()).toContain(adoptText('partialTitle'));
+  expect(text()).toContain(adoptText('partialHelp', { manual: 1, failed: 0 }));
+  expect(maybe('adopt-group-manual')).toHaveLength(1);
+  expect(maybe('adopt-enter-console')).toHaveLength(1);
+  expect(text()).not.toContain(adoptText('done'));
 });
 
 // --- the locked New Managed plugin opt-in --------------------------------
