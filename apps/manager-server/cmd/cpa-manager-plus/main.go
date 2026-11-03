@@ -32,6 +32,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/managerdatabundle"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/managerdatasnapshot"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/runtimeconfig"
+	upgradecommand "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/command/usagecompact"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
@@ -146,6 +147,20 @@ func main() {
 			if err := runtimeconfig.Run(os.Args[2:], os.Stdout, os.Stderr); err != nil {
 				log.Printf("sanitize runtime config: %v", err)
 				os.Exit(1)
+			}
+			return
+		case "upgrade":
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if err := upgradecommand.Run(ctx, os.Args[2:], os.Stdout, os.Stderr); err != nil {
+				if upgradecommand.IsHelp(err) {
+					return
+				}
+				code := upgradecommand.ExitCode(err)
+				if !errors.Is(err, upgradecommand.ErrBlocked) {
+					log.Printf("upgrade: %v", err)
+				}
+				os.Exit(code)
 			}
 			return
 		}
