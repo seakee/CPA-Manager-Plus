@@ -62,6 +62,11 @@ const triggersFrontend = (filePath) =>
   filePath === 'bin/ci/cpa-v8-usage-fixtures.mjs' ||
   filePath === 'bin/ci/cpa-v8-stage-fixtures.mjs' ||
   filePath === 'bin/ci/cpa-v8-extension-fixtures.mjs' ||
+  // The D acceptance and its native `node:test` lifecycle suite run in the
+  // Frontend job, which is the job that runs the repository's Node tests.
+  filePath === 'bin/ci/fresh-adopt-network.mjs' ||
+  filePath === 'bin/ci/fresh-adopt-lifecycle.test.mjs' ||
+  filePath === 'bin/ci/fresh-adopt-redaction.mjs' ||
   startsWithPath(filePath, 'bin/release');
 
 const triggersManagerServer = (filePath) =>
