@@ -50,8 +50,9 @@ func (s UpgradeStage) Valid() bool {
 func (s UpgradeStage) rank() int { return upgradeStageRanks[s] }
 
 // CanAdvanceTo reports whether moving from s to next keeps the operation
-// monotonic. A completed operation never moves again; a failed one may resume
-// any stage because it never claimed a position.
+// monotonic. A completed operation never moves again. A failed stage has no
+// position of its own, so this method cannot judge a resume: the row's
+// high-water mark decides that (see UpgradeOperation.CanLeaveFailedTo).
 func (s UpgradeStage) CanAdvanceTo(next UpgradeStage) bool {
 	if s == next {
 		return true
@@ -98,7 +99,14 @@ func ValidUpgradeDomain(domain string) bool { return upgradeDomains[domain] }
 // kind/version/fingerprints, backup manifest, manual items) and never an
 // authorization flag.
 type UpgradeOperation struct {
-	Stage                   UpgradeStage    `json:"stage"`
+	Stage UpgradeStage `json:"stage"`
+	// LastForwardStage is the highest forward stage the operation reached. It
+	// equals Stage except while parked in failed, where it keeps the position a
+	// resume must not go below. Empty means no forward stage was ever recorded:
+	// either a row migrated from a schema without this column that was already
+	// failed, or a failure before the first step. Such a row fails closed and
+	// cannot resume. The repository owns this field on every write.
+	LastForwardStage        UpgradeStage    `json:"lastForwardStage,omitempty"`
 	DomainsDone             []string        `json:"domainsDone"`
 	SourceKind              string          `json:"sourceKind,omitempty"`
 	SourceVersion           string          `json:"sourceVersion,omitempty"`
@@ -109,12 +117,18 @@ type UpgradeOperation struct {
 	ManualItems             []string        `json:"manualItems"`
 	ErrorCode               string          `json:"errorCode,omitempty"`
 	ErrorDetail             string          `json:"errorDetail,omitempty"`
-	CreatedAtMS             int64           `json:"createdAtMs"`
-	UpdatedAtMS             int64           `json:"updatedAtMs"`
+	// Revision is the row's compare-and-set token. Put only commits when the
+	// caller's Revision equals the stored one, and every committed write stores
+	// one more, so two writes in the same millisecond stay distinguishable.
+	Revision    int64 `json:"revision"`
+	CreatedAtMS int64 `json:"createdAtMs"`
+	UpdatedAtMS int64 `json:"updatedAtMs"`
 }
 
-// Normalize fills the zero values that the schema requires and drops duplicate
-// domains while keeping first-recorded order.
+// Normalize fills the zero values that the schema requires. It never removes,
+// reorders or replaces recorded values: unknown or duplicate domains and a
+// non-object reconciliation are rejected by Validate, so invalid input cannot
+// become acceptable by being normalized.
 func (o *UpgradeOperation) Normalize() {
 	if o.DomainsDone == nil {
 		o.DomainsDone = []string{}
@@ -125,16 +139,6 @@ func (o *UpgradeOperation) Normalize() {
 	if len(o.Reconciliation) == 0 {
 		o.Reconciliation = json.RawMessage("{}")
 	}
-	seen := make(map[string]bool, len(o.DomainsDone))
-	unique := o.DomainsDone[:0]
-	for _, domain := range o.DomainsDone {
-		if seen[domain] {
-			continue
-		}
-		seen[domain] = true
-		unique = append(unique, domain)
-	}
-	o.DomainsDone = unique
 }
 
 func (o *UpgradeOperation) HasDomain(domain string) bool {
@@ -156,9 +160,48 @@ func (o *UpgradeOperation) MarkDomain(domain string) {
 	o.DomainsDone = append(o.DomainsDone, domain)
 }
 
+// HighWater is the highest forward stage the operation has reached. A parked
+// row keeps it in LastForwardStage; every other row's Stage is that position,
+// so a row stored before the column existed still reports its stored stage.
+func (o UpgradeOperation) HighWater() UpgradeStage {
+	if o.Stage == UpgradeStageFailed {
+		return o.LastForwardStage
+	}
+	return o.Stage
+}
+
+// CanLeaveFailedTo reports whether a failed operation may resume at next. It may
+// stay failed and it may resume at or above the highest forward stage it
+// reached, never below it. A row with no recorded forward stage cannot resume
+// at all: its position is unknowable, so leaving failed fails closed instead of
+// claiming work that may already have been done.
+func (o UpgradeOperation) CanLeaveFailedTo(next UpgradeStage) bool {
+	if next == UpgradeStageFailed {
+		return true
+	}
+	if !next.Valid() {
+		return false
+	}
+	high := o.HighWater()
+	if high == "" {
+		return false
+	}
+	return next.rank() >= high.rank()
+}
+
 func (o UpgradeOperation) Validate() error {
 	if !o.Stage.Valid() {
 		return fmt.Errorf("upgrade operation stage %q is not supported", o.Stage)
+	}
+	if o.Stage == UpgradeStageFailed {
+		if o.LastForwardStage != "" && (!o.LastForwardStage.Valid() || o.LastForwardStage == UpgradeStageFailed) {
+			return fmt.Errorf("upgrade operation last forward stage %q is not a forward stage", o.LastForwardStage)
+		}
+	} else if o.LastForwardStage != o.Stage {
+		return fmt.Errorf("upgrade operation last forward stage %q does not match stage %q", o.LastForwardStage, o.Stage)
+	}
+	if o.Revision < 0 {
+		return errors.New("upgrade operation revision must not be negative")
 	}
 	if o.CreatedAtMS < 0 || o.UpdatedAtMS < 0 {
 		return errors.New("upgrade operation timestamps must not be negative")
@@ -166,19 +209,24 @@ func (o UpgradeOperation) Validate() error {
 	if o.CreatedAtMS > 0 && o.UpdatedAtMS > 0 && o.UpdatedAtMS < o.CreatedAtMS {
 		return errors.New("upgrade operation was updated before it was created")
 	}
-	seen := make(map[string]bool, len(o.DomainsDone))
-	for _, domain := range o.DomainsDone {
+	for index, domain := range o.DomainsDone {
 		if !ValidUpgradeDomain(domain) {
 			return fmt.Errorf("upgrade operation domain %q is not supported", domain)
 		}
-		if seen[domain] {
-			return fmt.Errorf("upgrade operation domain %q is recorded twice", domain)
+		// The domain set is tiny, so a nested scan avoids allocating a set on
+		// every read and validation.
+		for _, earlier := range o.DomainsDone[:index] {
+			if earlier == domain {
+				return fmt.Errorf("upgrade operation domain %q is recorded twice", domain)
+			}
 		}
-		seen[domain] = true
 	}
 	if len(o.Reconciliation) > 0 {
+		// A comparison into a map accepts JSON null with a nil map and no error,
+		// so both the decode error and a nil object are rejected: the field is a
+		// JSON object, never null, an array or a scalar.
 		var object map[string]json.RawMessage
-		if err := json.Unmarshal(o.Reconciliation, &object); err != nil {
+		if err := json.Unmarshal(o.Reconciliation, &object); err != nil || object == nil {
 			return errors.New("upgrade operation reconciliation must be a JSON object")
 		}
 	}

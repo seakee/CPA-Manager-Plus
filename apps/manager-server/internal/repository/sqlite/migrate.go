@@ -1250,6 +1250,8 @@ func Migrate(db *sql.DB) error {
 		`create table if not exists upgrade_operations (
 			id integer primary key check(id = 1),
 			stage text not null default '',
+			last_forward_stage text not null default '',
+			revision integer not null default 0,
 			domains_done text not null default '[]',
 			source_kind text,
 			source_version text,
@@ -1336,7 +1338,46 @@ func Migrate(db *sql.DB) error {
 	if err := ensureFreshKeyColumns(db); err != nil {
 		return err
 	}
+	if err := ensureUpgradeOperationColumns(db); err != nil {
+		return err
+	}
 	return ensureModelPriceColumns(db)
+}
+
+// ensureUpgradeOperationColumns adds the compare-and-set revision and the
+// forward high-water mark to an upgrade_operations table created before those
+// columns existed, and derives the high-water mark from the stored stage.
+//
+// revision defaults to 0, so every migrated row is writable exactly once by the
+// caller that read revision 0 and conflicts afterwards. A row that was already
+// failed has no knowable forward position: its high-water mark stays empty,
+// which makes every resume fail closed instead of inventing progress (the
+// domains already recorded are preserved as they are).
+func ensureUpgradeOperationColumns(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, column := range []struct{ name, ddl string }{
+		{"revision", "revision integer not null default 0"},
+		{"last_forward_stage", "last_forward_stage text not null default ''"},
+	} {
+		found, err := tableHasColumn(tx, "upgrade_operations", column.name)
+		if err != nil {
+			return err
+		}
+		if !found {
+			if _, err := tx.Exec("alter table upgrade_operations add column " + column.ddl); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.Exec(`update upgrade_operations set last_forward_stage = stage
+		where last_forward_stage = '' and stage <> '' and stage <> 'failed'`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func ensureFreshKeyColumns(db *sql.DB) error {
