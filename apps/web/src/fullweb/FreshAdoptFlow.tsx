@@ -141,6 +141,7 @@ export function FreshAdoptFlow({
   carrier,
   onOperation,
   onComplete,
+  onEnterConsole,
   onPending,
   onStage,
   onExit,
@@ -149,7 +150,17 @@ export function FreshAdoptFlow({
   operation: FreshOperation;
   carrier: AdoptCarrier;
   onOperation: (operation: FreshOperation) => void;
-  onComplete?: () => void;
+  /**
+   * Completion succeeded. The recorded summary is the last read of the run, so a
+   * host that leaves the flow can state what the copy left behind instead of
+   * claiming a clean installation.
+   */
+  onComplete?: (summary: AdoptionSummary) => void;
+  /**
+   * A completed installation whose host kept this screen visible (because the
+   * copy left manual or failed items) offers entry to the console here.
+   */
+  onEnterConsole?: () => void;
   onPending?: (pending: boolean) => void;
   /** Reports the stage so a host wizard can move its own step indicator. */
   onStage?: (stage: Stage) => void;
@@ -643,7 +654,7 @@ export function FreshAdoptFlow({
       if (!alive.current) return;
       onOperation(next);
       setCompletion(null);
-      onComplete?.();
+      if (summary) onComplete?.(summary);
     } catch (err) {
       if (!alive.current) return;
       if (!completeFailure(err)) {
@@ -1063,7 +1074,19 @@ export function FreshAdoptFlow({
             </button>
           </>
         )}
-        {stage === 'migration' && (
+        {stage === 'migration' && operation.productComplete && onEnterConsole && (
+          <button
+            type="button"
+            className="btn btn-primary"
+            data-testid="adopt-enter-console"
+            disabled={busy}
+            onClick={onEnterConsole}
+          >
+            {s('console')}
+            <FullWebIcon name="arrowRight" size={20} />
+          </button>
+        )}
+        {stage === 'migration' && !operation.productComplete && (
           <>
             <button
               type="button"
