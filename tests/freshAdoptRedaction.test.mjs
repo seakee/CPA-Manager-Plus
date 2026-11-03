@@ -40,6 +40,80 @@ describe('the D acceptance redaction boundary', () => {
     expect(redact('value ' + key)).toBe('value [REDACTED]');
   });
 
+  it('redacts two values that overlap from different starts, in either order', () => {
+    // Neither value contains the other: they meet in the middle. Replacing one
+    // first would destroy the other's full match and leave its readable tail.
+    const left = 'AAAABBBBCCCC';
+    const right = 'CCCCDDDDEEEE';
+    // The actual overlap: left at 0..12, right at 8..20.
+    const overlapping = 'AAAABBBBCCCCDDDDEEEE';
+    for (const order of [
+      [left, right],
+      [right, left],
+    ]) {
+      const redacted = createRedactor(order)(overlapping);
+      expect(redacted).toBe('[REDACTED]');
+      // The fragment the sequential implementation used to leave behind.
+      expect(redacted).not.toContain('DDDDEEEE');
+      expect(redacted).not.toContain('AAAABBBB');
+    }
+  });
+
+  it('redacts ABCDE and BCDEF in ABCDEF as one region', () => {
+    for (const order of [
+      ['ABCDE', 'BCDEF'],
+      ['BCDEF', 'ABCDE'],
+    ]) {
+      expect(createRedactor(order)('ABCDEF')).toBe('[REDACTED]');
+    }
+  });
+
+  it('leaves a literal marker in the input untouched when no value matches', () => {
+    // A previous run's marker is text, not a match; it must survive verbatim.
+    expect(redact('[REDACTED] nothing to hide')).toBe('[REDACTED] nothing to hide');
+    expect(redact('value [REDACTED] ' + key)).toBe('value [REDACTED] [REDACTED]');
+  });
+
+  it('redacts every occurrence, including one that overlaps itself', () => {
+    const repeated = createRedactor(['abcd']);
+    expect(repeated('abcd--abcd')).toBe('[REDACTED]--[REDACTED]');
+    expect(repeated('abcabcd')).toBe('abc[REDACTED]');
+    // Every starting position is collected before replacement, so the value that
+    // starts one character later is part of the same region.
+    expect(createRedactor(['aaaa'])('aaaaa')).toBe('[REDACTED]');
+  });
+
+  it('redacts adjacent and unicode values on the original text', () => {
+    const first = 'ключ-Ω-秘密-001';
+    const second = '秘密-001-хвост';
+    expect(createRedactor([first, second])('x ' + first + second)).toBe('x [REDACTED]');
+    // Adjacent but not overlapping values are one region, never a broken pair.
+    expect(createRedactor(['abcdefgh', 'ijklmnop'])('abcdefghijklmnop')).toBe('[REDACTED]');
+  });
+
+  it('leaves no protected fragment in the serialized report or the stderr lines', () => {
+    const left = 'AAAABBBBCCCC';
+    const right = 'CCCCDDDDEEEE';
+    const secrets = [left, right];
+    const boundary = createRedactor(secrets);
+    const report = {
+      result: 'FAIL',
+      failure: 'Error: left ' + left + ' right ' + right + '\n    at check (x:1:1)',
+      secretFailure: 'a secret value reached ' + left + right,
+    };
+    const outputs = [boundary(JSON.stringify(report)), stderrLines(report).map(boundary).join('\n')];
+    for (const output of outputs) {
+      for (const value of secrets) {
+        // Every window of the protected length, so a surviving suffix or middle
+        // piece fails even when the whole value is gone.
+        for (let at = 0; at + 8 <= value.length; at += 1)
+          expect(output).not.toContain(value.slice(at, at + 8));
+      }
+      expect(output).toContain('[REDACTED]');
+      expect(output).toContain('at check (x:1:1)');
+    }
+  });
+
   it('the secret-check text is redacted on the same boundary', () => {
     const report = { result: 'FAIL', secretFailure: 'a secret value reached ' + longer };
     expect(stderrLines(report).map(redact).join('\n')).toBe('a secret value reached [REDACTED]');
@@ -110,6 +184,8 @@ function driveTail(source) {
     resolve: (from, to) => path.resolve(from, to),
     out: path.join(repoRoot, 'bin/tmp'),
     logDir: path.join(repoRoot, 'bin/tmp'),
+    outOwned: true,
+    mkdirSync: () => undefined,
     writeFileSync: () => undefined,
     console: {
       log: (value) => stdout.push(String(value)),

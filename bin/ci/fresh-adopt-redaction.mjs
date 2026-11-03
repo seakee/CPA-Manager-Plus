@@ -9,16 +9,48 @@
 // stderr have in common.
 
 /**
- * createRedactor replaces the longest declared secret first, so a secret that
- * contains another is redacted whole rather than left with a readable tail. The
- * secret list is read on every call because the run appends its runtime secrets
- * to one array as they come into existence.
+ * createRedactor replaces every declared secret in one pass over the original
+ * text. All matches are located first, then the touching or overlapping
+ * intervals are merged and written out left to right.
+ *
+ * Replacing value by value is not equivalent: two secrets that overlap from
+ * different starting positions are not nested, so replacing one first destroys
+ * the other's full match and leaves its readable remainder in place. A union of
+ * intervals cannot leave a fragment of any declared value.
+ *
+ * The secret list is read on every call because the run appends its runtime
+ * secrets to one array as they come into existence.
  */
 export function createRedactor(secrets) {
-  return (text) =>
-    [...new Set(secrets.filter(Boolean))]
-      .sort((left, right) => right.length - left.length)
-      .reduce((message, value) => message.replaceAll(value, '[REDACTED]'), String(text));
+  return (text) => {
+    const message = String(text);
+    const values = [...new Set(secrets.filter(Boolean))];
+    const ranges = [];
+    for (const value of values) {
+      // Every starting position, including overlapping occurrences of the same
+      // value, so the union below is over the text and not over occurrences.
+      for (let at = message.indexOf(value); at !== -1; at = message.indexOf(value, at + 1))
+        ranges.push([at, at + value.length]);
+    }
+    if (ranges.length === 0) return message;
+    ranges.sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+    const merged = [];
+    for (const range of ranges) {
+      const last = merged[merged.length - 1];
+      // Touching intervals merge too: two secrets written back to back are one
+      // redacted region, not two replacements that would be indistinguishable
+      // from an unredacted neighbour.
+      if (last && range[0] <= last[1]) last[1] = Math.max(last[1], range[1]);
+      else merged.push([range[0], range[1]]);
+    }
+    let redacted = '';
+    let cursor = 0;
+    for (const [start, end] of merged) {
+      redacted += message.slice(cursor, start) + '[REDACTED]';
+      cursor = end;
+    }
+    return redacted + message.slice(cursor);
+  };
 }
 
 /**
