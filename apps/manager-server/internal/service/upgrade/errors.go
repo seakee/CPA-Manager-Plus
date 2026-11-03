@@ -173,11 +173,16 @@ const (
 	// UpgradeErrorCPAImportTargetUnreachable reports that nothing answered at the
 	// destination URL: the connection was refused, the name did not resolve, or no
 	// answer arrived within the probe budget. That is not a statement about whether
-	// the URL is right — a destination this run just started, or a 1.x CPA that has
-	// not come up yet, is unreachable too — so the operator starts the CPA and
-	// re-runs instead of editing a correct URL. Nothing was written, the attempt
-	// keeps no URL, and a retry with the same or a corrected URL can still prove
-	// the destination.
+	// the URL is right — a destination that is not listening yet is unreachable
+	// too, and so is the stopped 1.x CPA the CLI's default CPA_UPSTREAM_URL usually
+	// names — and the operator is not told to start that CPA. A started 1.x CPA
+	// rejects an absent and an unknown credential, so it passes the
+	// unauthenticated probe and is then sent the management secret this run staged;
+	// the recovery is to name the destination instead (--destination-url) once it
+	// listens. While no run has proved a URL the attempt holds none, so a retry with
+	// the same or a different URL is still accepted; once a run proved one, the
+	// attempt stays bound to it and a different URL is refused as
+	// upgrade_cpa_destination_request_changed. Nothing was written either way.
 	UpgradeErrorCPAImportTargetUnreachable UpgradeErrorCode = "upgrade_cpa_import_target_unreachable"
 	// UpgradeErrorStoreLocked reports that another process holds the v2 Manager
 	// store lock, so this offline write path did not open or change the store.

@@ -429,6 +429,22 @@ func TestImportCPAReportsAnUnreachableDestinationAsUnreachable(t *testing.T) {
 			if !strings.Contains(err.Error(), "nothing answered") {
 				t.Fatalf("the refusal does not say that nothing answered: %v", err)
 			}
+			// The recovery this URL needs is the destination, not the 1.x CPA the
+			// URL may name: starting that CPA passes the credential-free probe and is
+			// then handed the staged secret, so the operator is sent to
+			// --destination-url instead.
+			if strings.Contains(err.Error(), "so start that CPA") {
+				t.Fatalf("the refusal tells the operator to start the CPA the URL names: %v", err)
+			}
+			if !strings.Contains(err.Error(), "never start") {
+				t.Fatalf("the refusal does not warn against starting the CPA the URL names: %v", err)
+			}
+			if !strings.Contains(err.Error(), "--destination-url") {
+				t.Fatalf("the refusal does not name the destination URL as the recovery: %v", err)
+			}
+			if !strings.Contains(err.Error(), "still accepted") {
+				t.Fatalf("an unproved attempt is told its URL is fixed, but no run recorded one: %v", err)
+			}
 			if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
 				t.Fatalf("an unreachable destination moved the recorded stage to %q, want %q", recorded.Stage, model.UpgradeStageReconcile)
 			}
@@ -442,6 +458,44 @@ func TestImportCPAReportsAnUnreachableDestinationAsUnreachable(t *testing.T) {
 				t.Fatalf("the retry recorded stage %q, want %q", result.Stage, model.UpgradeStageCPAImport)
 			}
 		})
+	}
+}
+
+// TestImportCPAUnreachableAfterAProofKeepsTheProvedURL is the operator-wording
+// half of the unreachable refusal: once a run proved a URL, the attempt is bound to
+// it and requireSameDestinationRequest refuses a different one. The refusal must
+// therefore not offer a corrected URL as a recovery the way the unproved case does,
+// and it must not send the operator to start the CPA the URL names either.
+func TestImportCPAUnreachableAfterAProofKeepsTheProvedURL(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
+	staged := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = staged
+	if _, err := ImportCPA(context.Background(), importOptions(fixture, runtime, staged.url(), boolPointer(true))); err != nil {
+		t.Fatalf("the run against the staged destination was refused: %v", err)
+	}
+	paths := newTargetPaths(fixture.targetRoot)
+	attempt, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("the destination attempt was not recorded (found %t): %v", found, err)
+	}
+	if !attempt.bindsURL(staged.url()) {
+		t.Fatalf("the finished run did not record the proved URL: %+v", attempt)
+	}
+
+	// The destination stops answering, and the same URL is retried.
+	staged.server.Close()
+	_, err = ImportCPA(context.Background(), importOptions(fixture, runtime, staged.url(), boolPointer(true)))
+	code, ok := UpgradeErrorCodeOf(err)
+	if !ok || code != UpgradeErrorCPAImportTargetUnreachable {
+		t.Fatalf("a proved URL that stopped answering produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetUnreachable)
+	}
+	message := err.Error()
+	if !strings.Contains(message, "the same URL") || !strings.Contains(message, "changed request") {
+		t.Fatalf("the refusal does not say the proved URL is kept and a different one is refused: %v", err)
+	}
+	if strings.Contains(message, "corrected URL") || strings.Contains(message, "still accepted") {
+		t.Fatalf("a proved attempt is told its URL is replaceable: %v", err)
 	}
 }
 

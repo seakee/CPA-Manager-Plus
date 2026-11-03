@@ -498,7 +498,7 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			return err
 		}
 		if status.State == model.RuntimeStateReady {
-			if err := r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys); err != nil {
+			if err := r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys, record.bindsURL(baseURL)); err != nil {
 				return err
 			}
 			return r.recordProvedDestination(ctx, record, baseURL, recordedKey)
@@ -518,7 +518,7 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		if err := r.submitDestination(ctx, record, recordedKey); err != nil {
 			return err
 		}
-		if err := r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys); err != nil {
+		if err := r.requireStagedDestinationIdentity(ctx, baseURL, recordedKey, clientKeys, record.bindsURL(baseURL)); err != nil {
 			return err
 		}
 		return r.recordProvedDestination(ctx, record, baseURL, recordedKey)
@@ -533,7 +533,7 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			return newUpgradeError(UpgradeErrorCPADestinationKeyRequired,
 				"the destination CPA is already running and this run holds no management secret for it; pass the secret the Manager stored with --destination-management-key-file, or stage the destination from a stopped state", nil)
 		}
-		return r.requireStagedDestinationIdentity(ctx, baseURL, supplied, clientKeys)
+		return r.requireStagedDestinationIdentity(ctx, baseURL, supplied, clientKeys, false)
 	}
 
 	managementKey := supplied
@@ -568,7 +568,7 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 	// configuration and credentials and only notice at the final proof. The
 	// authenticated key-list read binds the two before the executor is built, and
 	// only that read records the URL on the attempt.
-	if err := r.requireStagedDestinationIdentity(ctx, baseURL, managementKey, clientKeys); err != nil {
+	if err := r.requireStagedDestinationIdentity(ctx, baseURL, managementKey, clientKeys, false); err != nil {
 		return err
 	}
 	return r.recordProvedDestination(ctx, record, baseURL, managementKey)
@@ -617,25 +617,33 @@ func (r *cpaImportRun) recordProvedDestination(
 // A URL that does not answer at all is a different outcome and is reported as
 // one: the proof's read collapses a transport failure into the same refusal as a
 // wrong key set, so it is classified by one unauthenticated probe before it is
-// named. A just-staged destination that is not listening yet, or a stopped 1.x CPA
-// at the URL the CLI defaulted to, is then not described as a foreign CPA: the
-// operator is told the URL may still be right, and the attempt stays unbound so a
-// retry can prove it.
+// named. A destination that is not listening yet, or a stopped 1.x CPA at the URL
+// the CLI defaulted to, is then not described as a foreign CPA. What the operator
+// is told depends on the attempt: while no run proved a URL, the attempt holds
+// none and a retry may name either this URL or the destination's, so the operator
+// is sent to the destination's URL instead of being told to start the 1.x CPA;
+// once a run proved this URL, the attempt is bound to it and only the same URL can
+// be retried.
 //
 // The proof is never the first thing sent to the URL. It reads the destination's
 // configuration with the secret this run minted, so it runs only after the
-// unauthenticated probe has shown that the endpoint answers as a CPA that rejects
-// credentials it does not know. An endpoint that answers as anything else never
-// receives that secret, which is the secret the destination is deployed with. The
-// probe cannot name the destination — only the staged secret can — so it is a
+// unauthenticated probe has shown that the endpoint rejects both an absent and an
+// unknown credential. An endpoint that answers with anything else never receives
+// that secret, which is the secret the destination is deployed with. The probe
+// cannot name the destination — only the staged secret can — so it is a
 // precondition of the proof, not a replacement, and the URL is recorded as proved
 // only after the proof passes.
-func (r *cpaImportRun) requireStagedDestinationIdentity(ctx context.Context, baseURL, managementKey string, clientKeys []string) error {
-	if err := requireCredentialGatingListener(ctx, baseURL); err != nil {
+//
+// boundURL reports whether an earlier run already proved this URL to be the
+// staged destination. It changes only what an unreachable URL tells the operator:
+// a URL this attempt is bound to can only be retried as it is, because a different
+// one is refused as a changed request.
+func (r *cpaImportRun) requireStagedDestinationIdentity(ctx context.Context, baseURL, managementKey string, clientKeys []string, boundURL bool) error {
+	if err := requireCredentialGatingListener(ctx, baseURL, boundURL); err != nil {
 		return err
 	}
 	if err := cpa.VerifyV8Adoption(ctx, baseURL, managementKey, clientKeys); err != nil {
-		return classifyDestinationProofFailure(ctx, baseURL, err)
+		return classifyDestinationProofFailure(ctx, baseURL, err, boundURL)
 	}
 	r.managementKey = managementKey
 	return nil
@@ -651,11 +659,11 @@ func (r *cpaImportRun) requireStagedDestinationIdentity(ctx context.Context, bas
 // that accepts either one is not the destination this import stages — it cannot
 // even be shown to enforce the authentication the staged destination was built
 // with — and one that answers nothing cannot be proved at all.
-func requireCredentialGatingListener(ctx context.Context, baseURL string) error {
+func requireCredentialGatingListener(ctx context.Context, baseURL string, boundURL bool) error {
 	probe, probeErr := probeDestinationListener(ctx, baseURL)
 	switch probe {
 	case destinationListenerSilent:
-		return unreachableDestinationError(probeErr)
+		return unreachableDestinationError(probeErr, boundURL)
 	case destinationListenerNotCPA:
 		return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
 			"the endpoint at the destination URL answered, but not as the CPA Management API this import stages: a CPA rejects an absent and an unknown credential on GET /v1/models, and this endpoint did not, so the destination management secret this run staged was never sent to it; nothing was written to it", probeErr)
@@ -666,9 +674,23 @@ func requireCredentialGatingListener(ctx context.Context, baseURL string) error 
 
 // unreachableDestinationError is the one wording for "nothing answered": the URL
 // is not thereby proven wrong, and the operator must not be told to edit it.
-func unreachableDestinationError(err error) error {
+//
+// It separates the two states the attempt can be in, because they have different
+// recoveries. While no run has proved a URL, the attempt holds none and a retry
+// may name either this URL again or the destination's own URL, so the operator is
+// told both — and told explicitly not to start the 1.x CPA the URL may name, since
+// a started 1.x CPA answers the unauthenticated probe with 401 and is then handed
+// the management secret this run staged. Once a run proved this URL, the attempt is
+// bound to it and a different URL is refused as a changed request, so the only
+// recovery is the same URL once the destination listens again.
+func unreachableDestinationError(err error, boundURL bool) error {
+	if boundURL {
+		return newUpgradeError(UpgradeErrorCPAImportTargetUnreachable,
+			"nothing answered at the destination URL, so this run could not confirm the destination an earlier run proved is still the CPA the Supervisor staged; an unreachable CPA is not a foreign one — it may still be starting, or its listener may have stopped — so wait for it to listen and re-run with the same URL; an earlier run proved this URL is the destination, so a different URL is refused as a changed request and this URL is kept; nothing was written to it",
+			err)
+	}
 	return newUpgradeError(UpgradeErrorCPAImportTargetUnreachable,
-		"nothing answered at the destination URL, so this run could not prove it is the destination the Supervisor staged; an unreachable CPA is not a foreign one — the destination may still be starting, or the URL may name a 1.x CPA that is already stopped — so start that CPA (or wait for it to listen) and re-run with the same or a corrected URL, which is accepted until a run proves one; nothing was written to it and the attempt keeps no URL",
+		"nothing answered at the destination URL, so this run could not prove it is the destination the Supervisor staged; an unreachable endpoint is not a foreign one, and this URL is not known to be wrong — it may be the destination still starting, or a 1.x CPA that is already stopped, which is what the CLI's default CPA_UPSTREAM_URL usually names; re-run with the destination CPA's URL (--destination-url) once it listens, or with the same URL once it does, and never start the 1.x CPA to make this URL answer: a started 1.x CPA rejects an absent and an unknown credential, passes the probe and is then sent the management secret this run staged; no URL is recorded until a run proves one, so the same and a different URL are both still accepted, and nothing was written to it",
 		err)
 }
 
@@ -678,10 +700,10 @@ func unreachableDestinationError(err error) error {
 // silence from an answer; everything that answered is a foreign target, exactly
 // as the proof's own verdict says. Both refusals leave the recorded operation and
 // the attempt where they were.
-func classifyDestinationProofFailure(ctx context.Context, baseURL string, proofErr error) error {
+func classifyDestinationProofFailure(ctx context.Context, baseURL string, proofErr error, boundURL bool) error {
 	probe, probeErr := probeDestinationListener(ctx, baseURL)
 	if probe == destinationListenerSilent {
-		return unreachableDestinationError(errors.Join(proofErr, probeErr))
+		return unreachableDestinationError(errors.Join(proofErr, probeErr), boundURL)
 	}
 	return newUpgradeError(UpgradeErrorCPAImportTargetForeign,
 		"the CPA at the destination URL does not answer with the management secret and client keys this run staged, so it is not the destination this operation staged; nothing was written to it", proofErr)

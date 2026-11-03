@@ -63,6 +63,15 @@ func (r cpaImportDestinationRecord) urlProved() bool {
 	return r.URLProved && r.BaseURL != ""
 }
 
+// bindsURL reports whether this record already proved baseURL to be the
+// destination the attempt staged, which is the only state in which the URL is no
+// longer replaceable: requireSameDestinationRequest refuses a different one once
+// this is true. A record that proved another URL, or none, still accepts a
+// different URL, so an operator instruction has to distinguish the two.
+func (r cpaImportDestinationRecord) bindsURL(baseURL string) bool {
+	return r.urlProved() && r.BaseURL == baseURL
+}
+
 // cpaImportDestinationIntent is the Supervisor's destination request without its
 // operation ID.
 //
