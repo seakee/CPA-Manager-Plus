@@ -184,6 +184,8 @@ function driveTail(source) {
     resolve: (from, to) => path.resolve(from, to),
     out: path.join(repoRoot, 'bin/tmp'),
     logDir: path.join(repoRoot, 'bin/tmp'),
+    outOwned: true,
+    mkdirSync: () => undefined,
     writeFileSync: () => undefined,
     console: {
       log: (value) => stdout.push(String(value)),

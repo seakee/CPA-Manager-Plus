@@ -17,7 +17,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { resolve, dirname } from 'node:path';
@@ -25,29 +25,127 @@ import { fileURLToPath } from 'node:url';
 import { createRedactor, stderrLines } from './fresh-adopt-redaction.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const [runtimeImage, managerImage, ingressImage, output] = process.argv.slice(2);
-assert(
-  runtimeImage && managerImage && ingressImage && output,
-  'Usage: fresh-adopt-network.mjs RUNTIME_IMAGE MANAGER_IMAGE INGRESS_IMAGE OUTPUT'
-);
-const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright');
-const out = resolve(output);
-mkdirSync(out, { recursive: false, mode: 0o700 });
-// The CPA config and the forwarder control live outside the artifact directory:
-// the config carries every secret of this run, and an artifact directory is the
-// one place a secret must never be.
-const secretsDir = resolve(root, 'bin/tmp', 'd-adopt-secrets-' + randomBytes(6).toString('hex'));
-mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
-const sourceConfigPath = resolve(secretsDir, 'source-config.yaml');
-const sourceAuthDir = resolve(secretsDir, 'source-auth');
-const emptyConfigPath = resolve(secretsDir, 'empty-config.yaml');
-const emptyAuthDir = resolve(secretsDir, 'empty-auth');
-const legacyConfigPath = resolve(secretsDir, 'legacy-config.yaml');
-const legacyAuthDir = resolve(secretsDir, 'legacy-auth');
-const forwarderPath = resolve(secretsDir, 'forwarder.py');
-const controlDir = resolve(secretsDir, 'control');
-for (const dir of [sourceAuthDir, emptyAuthDir, legacyAuthDir, controlDir])
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+const bootstrap = '/.well-known/cpamp-bootstrap';
+
+/**
+ * The lifecycle a run owns: cleanup steps registered the moment a resource
+ * exists, and one close() that runs every step exactly once.
+ *
+ * close() never stops at the first failure — a browser that refuses to close
+ * cannot skip the container removal, and a failed Compose down cannot leave the
+ * secrets directory behind. The failures are returned, never swallowed, so the
+ * caller can fail the artifact and the exit code.
+ *
+ * SIGINT and SIGTERM are handled with persistent listeners: once the run owns
+ * anything, the first signal starts that same close() and every later signal is
+ * recorded and ignored. The listeners are removed only after close() finished,
+ * so a second signal cannot fall back to Node's default termination in the
+ * middle of cleanup.
+ */
+export function createLifecycle({ installSignalHandlers = false } = {}) {
+  const steps = [];
+  const failures = [];
+  const signals = [];
+  let closeStarted = false;
+  let closePromise = null;
+  let detachSignals = () => {};
+
+  const describe = (error) => String(error?.message || error).slice(0, 500);
+
+  async function close() {
+    if (closePromise) return closePromise;
+    closeStarted = true;
+    closePromise = (async () => {
+      for (const step of steps) {
+        if (step.done) continue;
+        step.done = true;
+        try {
+          await step.cleanup();
+        } catch (error) {
+          failures.push({ step: step.name, message: describe(error) });
+        }
+      }
+      detachSignals();
+      detachSignals = () => {};
+      return { failures, signals };
+    })();
+    return closePromise;
+  }
+
+  if (installSignalHandlers) {
+    const onSignal = (signal) => {
+      signals.push(signal);
+      if (closeStarted) return;
+      void close().then(() => {
+        process.exitCode = signal === 'SIGINT' ? 130 : 143;
+      });
+    };
+    process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onSignal);
+    detachSignals = () => {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+    };
+  }
+
+  return {
+    get cancelled() {
+      return closeStarted;
+    },
+    get signals() {
+      return [...signals];
+    },
+    // A resource that appears after close() started is reaped by its caller:
+    // cleanup already ran, so queueing it here would never run.
+    add(name, cleanup) {
+      if (closeStarted) return false;
+      steps.push({ name, cleanup, done: false });
+      return true;
+    },
+    close,
+    throwIfCancelled() {
+      if (closeStarted) throw new Error('run cancelled: cleanup has started');
+    },
+  };
+}
+
+export async function runAcceptance(argv = process.argv.slice(2)) {
+  // Argument validation is the one step that may fail before the run owns
+  // anything at all, so it runs before the lifecycle exists.
+  assert(
+    argv.length === 4 && argv.every(Boolean),
+    'Usage: fresh-adopt-network.mjs RUNTIME_IMAGE MANAGER_IMAGE INGRESS_IMAGE OUTPUT'
+  );
+  const [runtimeImage, managerImage, ingressImage, output] = argv;
+
+  // The lifecycle is established before the first directory. Every resource
+  // below is registered with it the moment it exists, so a failed prerequisite —
+  // an image inspect, the revision check — still removes this run's secrets
+  // instead of leaving them in bin/tmp.
+  const lifecycle = createLifecycle({ installSignalHandlers: true });
+  const runSuffix = randomBytes(6).toString('hex');
+  // Every protected resource this run creates carries its own `cpampd` prefix:
+  // cleanup names these exact resources and never a user's `cpamp-*` stack.
+  const project = 'cpampd-adopt-' + runSuffix;
+  // The CPA configs and the forwarder control live outside the artifact
+  // directory: they carry every secret of this run, and an artifact directory is
+  // the one place a secret must never be.
+  const secretsDir = resolve(root, 'bin/tmp', 'cpampd-adopt-secrets-' + runSuffix);
+  const out = resolve(output);
+  const sourceConfigPath = resolve(secretsDir, 'source-config.yaml');
+  const sourceAuthDir = resolve(secretsDir, 'source-auth');
+  const emptyConfigPath = resolve(secretsDir, 'empty-config.yaml');
+  const emptyAuthDir = resolve(secretsDir, 'empty-auth');
+  const legacyConfigPath = resolve(secretsDir, 'legacy-config.yaml');
+  const legacyAuthDir = resolve(secretsDir, 'legacy-auth');
+  const forwarderPath = resolve(secretsDir, 'forwarder.py');
+  const controlDir = resolve(secretsDir, 'control');
+  const overridePath = resolve(out, 'compose.override.json');
+  const logDir = resolve(root, 'bin/tmp/logs');
+  const sourceContainer = project + '-cpa';
+  const emptyContainer = project + '-cpa-empty';
+  const forwarderContainer = project + '-forwarder';
+  const legacyContainer = project + '-cpa-v7';
 
 // Everything this run prints is kept, unredacted, so the secret assertion below
 // can look at it before redaction rewrites it.
@@ -59,11 +157,6 @@ for (const level of ['log', 'error']) {
     write(...args);
   };
 }
-const project = 'cpamp-d-adopt-' + randomBytes(6).toString('hex');
-const bootstrap = '/.well-known/cpamp-bootstrap';
-const api = bootstrap + '/api/v2/';
-const logDir = resolve(root, 'bin/tmp/logs');
-mkdirSync(logDir, { recursive: true });
 const report = {
   result: 'FAIL',
   project,
@@ -147,27 +240,16 @@ const secretValues = [
   ...Object.values(providerKeys),
   ...Object.values(sourceFiles).flatMap((body) => body.match(/[A-Za-z0-9_-]{16,}/g) || []),
 ];
-for (const [name, body] of Object.entries(sourceFiles)) {
-  writeFileSync(resolve(sourceAuthDir, name), body, { mode: 0o600 });
-}
-
-// A free loopback port, pinned before Compose starts: publishing port 0 lets the
-// host port change after a restart, which would invalidate the browser's origin.
-async function freePort() {
-  const probe = createServer();
-  await new Promise((resolveProbe, reject) => {
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', resolveProbe);
-  });
-  const { port } = probe.address();
-  await new Promise((resolveClose) => probe.close(resolveClose));
-  return port;
-}
-const publicPort = await freePort();
-const legacyPort = await freePort();
-const env = { ...process.env, CPAMP_PUBLIC_PORT: `127.0.0.1:${publicPort}` };
 let browser;
 let page;
+let legacyPort = 0;
+let images;
+let pythonImage;
+// The artifact directory is written only when this run created it. A re-run
+// pointed at an existing directory keeps the original refusal: it must not
+// overwrite evidence another run left there.
+let outOwned = false;
+const env = { ...process.env };
 
 // Every value that must never reach a log or the report passes through one
 // boundary. The list is live: the three secrets that only exist at runtime join
@@ -188,18 +270,102 @@ function run(args, input, check = true) {
     );
   return result;
 }
-const docker = (...args) => run(['docker', ...args]).stdout.trim();
-const images = Object.fromEntries(
-  [
-    ['cpamp-runtime', runtimeImage],
-    ['cpamp-manager', managerImage],
-    ['cpamp-ingress', ingressImage],
-  ].map(([service, image]) => {
-    const meta = JSON.parse(docker('image', 'inspect', image))[0];
-    assert(meta.Os === 'linux' && meta.Architecture === 'amd64', 'Linux/amd64 image required');
-    return [service, meta.Id];
-  })
-);
+function docker(...args) {
+  return run(['docker', ...args]).stdout.trim();
+}
+function dc(...args) {
+  return run([
+    'docker',
+    'compose',
+    '--project-directory',
+    root,
+    '-p',
+    project,
+    '-f',
+    resolve(root, 'docker-compose.yml'),
+    '-f',
+    overridePath,
+    ...args,
+  ]).stdout.trim();
+}
+// A free loopback port, pinned before Compose starts: publishing port 0 lets the
+// host port change after a restart, which would invalidate the browser's origin.
+async function freePort() {
+  const probe = createServer();
+  await new Promise((resolveProbe, reject) => {
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', resolveProbe);
+  });
+  const { port } = probe.address();
+  await new Promise((resolveClose) => probe.close(resolveClose));
+  return port;
+}
+
+// Containers started by name, and the Compose project itself: those two are the
+// only owners cleanup may touch. The project name is this run's own random
+// `cpampd-adopt-*`, so no user container, image or volume can match it.
+const ownedContainers = new Set();
+let composeStarted = false;
+// Filled by the lifecycle's log step before any container is removed, then read
+// by the secret assertion.
+let containerLogs = [];
+
+// Cleanup is registered before the first resource exists, in the order the
+// teardown needs. Each step is independent: a failed browser close cannot skip
+// the container removal, and a failed Compose down cannot leave the secrets
+// directory behind.
+lifecycle.add('browser.close', async () => {
+  if (browser) await browser.close();
+});
+lifecycle.add('container logs', () => {
+  if (!composeStarted && ownedContainers.size === 0) return;
+  containerLogs = runContainerLogs();
+});
+lifecycle.add('containers', () => {
+  if (ownedContainers.size === 0) return;
+  run(['docker', 'rm', '-f', ...ownedContainers]);
+});
+lifecycle.add('compose down', () => {
+  if (!composeStarted) return;
+  // Only this run's Compose project: no other stack, no prune, no wildcard.
+  dc('down', '-v', '--remove-orphans');
+});
+lifecycle.add('secrets directory', () => {
+  rmSync(secretsDir, { recursive: true, force: true });
+});
+
+// Prerequisites own the first resources (the artifact directory, the secrets
+// directory and its files), so their failure is captured here and re-thrown in
+// the journey's own boundary below: that is where the artifact and teardown
+// live, and a failed prerequisite must reach them.
+let prerequisiteFailure = null;
+try {
+  mkdirSync(out, { recursive: false, mode: 0o700 });
+  outOwned = true;
+  mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
+  for (const dir of [sourceAuthDir, emptyAuthDir, legacyAuthDir, controlDir])
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  for (const [name, body] of Object.entries(sourceFiles)) {
+    writeFileSync(resolve(sourceAuthDir, name), body, { mode: 0o600 });
+  }
+  const publicPort = await freePort();
+  legacyPort = await freePort();
+  env.CPAMP_PUBLIC_PORT = `127.0.0.1:${publicPort}`;
+  // A signal during the port probe already ran cleanup; nothing below may
+  // create anything after that.
+  lifecycle.throwIfCancelled();
+
+  images = Object.fromEntries(
+    [
+      ['cpamp-runtime', runtimeImage],
+      ['cpamp-manager', managerImage],
+      ['cpamp-ingress', ingressImage],
+    ].map(([service, image]) => {
+      const meta = JSON.parse(docker('image', 'inspect', image))[0];
+      assert(meta.Os === 'linux' && meta.Architecture === 'amd64', 'Linux/amd64 image required');
+      return [service, meta.Id];
+    })
+  );
 report.images = images;
 report.imageSourceRevisions = Object.fromEntries(
   Object.entries(images).map(([service, image]) => [
@@ -310,7 +476,7 @@ writeFileSync(
   forwarderPath,
   `import asyncio, os
 CONTROL = "/control/refuse"
-UPSTREAM = ("cpamp-d-adopt-cpa", 8317)
+UPSTREAM = ("cpampd-adopt-cpa", 8317)
 
 async def pipe(reader, writer):
     try:
@@ -349,9 +515,8 @@ asyncio.run(main())
   { mode: 0o600 }
 );
 
-const override = resolve(out, 'compose.override.json');
 writeFileSync(
-  override,
+  overridePath,
   JSON.stringify(
     {
       services: Object.fromEntries(
@@ -371,24 +536,10 @@ writeFileSync(
     2
   )
 );
-const compose = [
-  'docker',
-  'compose',
-  '--project-directory',
-  root,
-  '-p',
-  project,
-  '-f',
-  resolve(root, 'docker-compose.yml'),
-  '-f',
-  override,
-];
-const dc = (...args) => run([...compose, ...args]).stdout.trim();
-const sourceContainer = project + '-cpa';
-const emptyContainer = project + '-cpa-empty';
-const forwarderContainer = project + '-forwarder';
-const legacyContainer = project + '-cpa-v7';
-const pythonImage = docker('image', 'inspect', 'python:3.13-alpine', '--format', '{{.Id}}');
+pythonImage = docker('image', 'inspect', 'python:3.13-alpine', '--format', '{{.Id}}');
+} catch (error) {
+  prerequisiteFailure = error;
+}
 
 // The check that ended the journey. A thrown check stops the script, so every
 // check after it is unobserved; the report records that instead of simply
@@ -412,6 +563,9 @@ function notRun(name, reason) {
 async function check(name, body) {
   try {
     const observed = await body();
+    // Cleanup may have started while the body was awaiting; a reservation that
+    // closed the resources cannot end as a PASS.
+    lifecycle.throwIfCancelled();
     pass(name, observed);
     return observed;
   } catch (error) {
@@ -421,6 +575,7 @@ async function check(name, body) {
 async function wait(body, label, timeout = 60000) {
   const end = Date.now() + timeout;
   do {
+    lifecycle.throwIfCancelled();
     try {
       if (await body()) return;
     } catch {}
@@ -457,7 +612,9 @@ function assertNoSecret(where, text) {
 }
 function runContainerLogs() {
   const names = run(
-    ['docker', 'ps', '-a', '--filter', 'name=' + project, '--format', '{{.Names}}'],
+    // The trailing dash makes this the project's own prefix, not a substring:
+    // every container this run created is named `<project>-*`.
+    ['docker', 'ps', '-a', '--filter', 'name=' + project + '-', '--format', '{{.Names}}'],
     undefined,
     false
   )
@@ -617,6 +774,13 @@ const plannedChecks = [
 ];
 
 try {
+  // The prerequisite boundary captured its failure instead of throwing so the
+  // declarations above stay in one scope; this is where the artifact and
+  // teardown live, so the failure re-enters there.
+  if (prerequisiteFailure) throw prerequisiteFailure;
+  // Marked before `up`: a partial start still belongs to this project and must
+  // be taken down.
+  composeStarted = true;
   dc('up', '-d', '--no-build', '--pull', 'never');
   const ingressID = dc('ps', '-q', 'cpamp-ingress');
   const binding = JSON.parse(docker('inspect', ingressID))[0].NetworkSettings.Ports['18317/tcp'][0];
@@ -628,27 +792,31 @@ try {
 
   // The two source-side processes and the forwarder, all on the project network
   // under their own aliases. Nothing here is the Manager's Runtime.
+  lifecycle.throwIfCancelled();
   docker(
     'run', '-d', '--name', sourceContainer, '--network', network,
-    '--network-alias', 'cpamp-d-adopt-cpa',
+    '--network-alias', 'cpampd-adopt-cpa',
     '-v', `${sourceConfigPath}:/cpa/config.yaml`,
     '-v', `${sourceAuthDir}:/cpa/auth`,
     images['cpamp-runtime'], '/usr/local/bin/cli-proxy-api', '-config', '/cpa/config.yaml'
   );
+  ownedContainers.add(sourceContainer);
   docker(
     'run', '-d', '--name', emptyContainer, '--network', network,
-    '--network-alias', 'cpamp-d-adopt-empty',
+    '--network-alias', 'cpampd-adopt-empty',
     '-v', `${emptyConfigPath}:/cpa/config.yaml`,
     '-v', `${emptyAuthDir}:/cpa/auth`,
     images['cpamp-runtime'], '/usr/local/bin/cli-proxy-api', '-config', '/cpa/config.yaml'
   );
+  ownedContainers.add(emptyContainer);
   docker(
     'run', '-d', '--name', forwarderContainer, '--network', network,
-    '--network-alias', 'cpamp-d-adopt-source',
+    '--network-alias', 'cpampd-adopt-source',
     '-v', `${forwarderPath}:/forwarder.py:ro`,
     '-v', `${controlDir}:/control`,
     pythonImage, 'python3', '/forwarder.py'
   );
+  ownedContainers.add(forwarderContainer);
   const managementProbe = (alias, key) =>
     run(
       ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
@@ -657,11 +825,11 @@ try {
       undefined, false
     ).status === 0;
   await check('an independent CPA v8.0.13 source answers its v8 management API', async () => {
-    await wait(async () => managementProbe('cpamp-d-adopt-cpa', managementKey), 'source CPA', 120000);
+    await wait(async () => managementProbe('cpampd-adopt-cpa', managementKey), 'source CPA', 120000);
     const version = run(
       ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
         images['cpamp-manager'], '-S', '-qO-', '--header=Authorization: Bearer ' + managementKey,
-        'http://cpamp-d-adopt-cpa:8317/v8/management/config'],
+        'http://cpampd-adopt-cpa:8317/v8/management/config'],
       undefined, false
     );
     report.sourceVersion =
@@ -670,8 +838,8 @@ try {
     assert.match(report.sourceVersion, /8\.0\.13/, 'the source must be CPA v8.0.13');
     return { version: report.sourceVersion };
   });
-  await wait(async () => managementProbe('cpamp-d-adopt-source', managementKey), 'forwarder', 60000);
-  await wait(async () => managementProbe('cpamp-d-adopt-empty', emptySourceKey), 'empty source', 120000);
+  await wait(async () => managementProbe('cpampd-adopt-source', managementKey), 'forwarder', 60000);
+  await wait(async () => managementProbe('cpampd-adopt-empty', emptySourceKey), 'empty source', 120000);
   const before = sourceSnapshot();
   report.sourceSnapshot = { configSha256: before.configSha256, credentials: before.credentials };
   assert(before.credentials.includes('source-00.json'), 'the source credential list');
@@ -700,10 +868,18 @@ try {
   const claim = JSON.parse(Buffer.from(handoff.split('#handoff=')[1], 'base64url').toString());
   secretValues.push(claim.token);
 
+  const { chromium } = createRequire(import.meta.url)(process.env.PLAYWRIGHT_MODULE || 'playwright');
   browser = await chromium.launch({
     headless: true,
     ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}),
   });
+  // The launch is the one acquisition that can resolve after cleanup already
+  // ran. That browser is not owned by the lifecycle, so reap it here instead of
+  // leaving it to the process exit.
+  if (lifecycle.cancelled) {
+    await browser.close().catch(() => {});
+    throw new Error('run cancelled while the browser was starting');
+  }
   const context = await browser.newContext({ locale: 'en-US', viewport: { width: 1440, height: 1000 } });
   page = await context.newPage();
   page.on('pageerror', () => report.pageErrors.push('Uncaught browser error'));
@@ -760,12 +936,12 @@ try {
     return message;
   };
   await check('a wrong management key is refused with adoption_source_read_unavailable', async () => {
-    const message = await attemptSource('http://cpamp-d-adopt-cpa:8317', 'wrong-' + randomBytes(8).toString('hex'));
+    const message = await attemptSource('http://cpampd-adopt-cpa:8317', 'wrong-' + randomBytes(8).toString('hex'));
     assert.match(message, /could not be read with this key|not CPA v8/i);
     return { message };
   });
   await check('a source with zero client keys is refused with adoption_source_empty', async () => {
-    const message = await attemptSource('http://cpamp-d-adopt-empty:8317', emptySourceKey);
+    const message = await attemptSource('http://cpampd-adopt-empty:8317', emptySourceKey);
     assert.match(message, /no client keys/i);
     return { message };
   });
@@ -777,15 +953,17 @@ try {
   });
   if (process.env.CPAMP_D_CPA_LEGACY && existsSync(process.env.CPAMP_D_CPA_LEGACY)) {
     await check('a v7 source is refused with nothing committed', async () => {
+      lifecycle.throwIfCancelled();
       docker(
         'run', '-d', '--name', legacyContainer, '--network', network,
-        '--network-alias', 'cpamp-d-adopt-v7',
+        '--network-alias', 'cpampd-adopt-v7',
         '-p', `127.0.0.1:${legacyPort}:8317`,
         '-v', `${legacyConfigPath}:/cpa/config.yaml`,
         '-v', `${legacyAuthDir}:/cpa/auth`,
         '-v', `${process.env.CPAMP_D_CPA_LEGACY}:/usr/local/bin/cli-proxy-api:ro`,
         images['cpamp-runtime'], '/usr/local/bin/cli-proxy-api', '-config', '/cpa/config.yaml'
       );
+      ownedContainers.add(legacyContainer);
       await wait(
         async () =>
           (await fetch(`http://127.0.0.1:${legacyPort}/v0/management/config`, {
@@ -794,7 +972,7 @@ try {
         'v7 CPA',
         120000
       );
-      const message = await attemptSource('http://cpamp-d-adopt-v7:8317', managementKey);
+      const message = await attemptSource('http://cpampd-adopt-v7:8317', managementKey);
       assert.match(message, /could not be read with this key|not CPA v8/i);
       return { message };
     });
@@ -804,7 +982,7 @@ try {
 
   // The real journey. The forwarder is up, so the inventory read and the copy both
   // reach the source.
-  await page.getByTestId('adopt-source-url').fill('http://cpamp-d-adopt-source:8317');
+  await page.getByTestId('adopt-source-url').fill('http://cpampd-adopt-source:8317');
   await page.getByTestId('adopt-management-key').fill(managementKey);
   await screenshot('adopt-source');
   await page.getByTestId('adopt-read-inventory').click();
@@ -1158,18 +1336,21 @@ try {
   report.result = 'PASS';
 } catch (error) {
   report.failure = String(error.stack || error);
-  try {
-    for (const [name, container] of [
-      ['manager', dc('ps', '-q', 'cpamp-manager')],
-      ['runtime', dc('ps', '-q', 'cpamp-runtime')],
-      ['ingress', dc('ps', '-q', 'cpamp-ingress')],
-      ['source', sourceContainer],
-      ['forwarder', forwarderContainer],
-    ]) {
-      if (!container) continue;
-      report['failure' + name + 'Logs'] = containerLog(container, 120).slice(-8000);
-    }
-  } catch {}
+  // Evidence is collected only from resources this run owns. A refused
+  // prerequisite never started a project, so it must not even read one.
+  if (composeStarted || ownedContainers.size > 0) {
+    try {
+      const containers = [];
+      if (composeStarted)
+        for (const service of ['cpamp-manager', 'cpamp-runtime', 'cpamp-ingress'])
+          containers.push([service.replace('cpamp-', ''), dc('ps', '-q', service)]);
+      for (const name of ownedContainers) containers.push([name.slice(project.length + 1), name]);
+      for (const [name, container] of containers) {
+        if (!container) continue;
+        report['failure' + name + 'Logs'] = containerLog(container, 120).slice(-8000);
+      }
+    } catch {}
+  }
   if (page && !page.isClosed()) {
     report.failurePage = await page.locator('body').innerText().catch(() => 'Page unavailable');
     await page.screenshot({ path: resolve(out, 'failure.png'), fullPage: true }).catch(() => {});
@@ -1179,7 +1360,7 @@ try {
   // read as a run that had fewer checks, not one that stopped early.
   for (const name of plannedChecks) {
     if (report.checks.some((entry) => entry.name === name)) continue;
-    notRun(name, 'abandoned after "' + abandonedAfter + '" failed');
+    notRun(name, 'abandoned after "' + (abandonedAfter || 'the run prerequisites') + '" failed');
   }
 } finally {
   // Every name this run recorded must be one it declared above, and every
@@ -1200,18 +1381,21 @@ try {
     ].join('; ');
     report.result = 'FAIL';
   }
-  if (browser) await browser.close();
-  // Container logs are read before anything is removed: a removed container has
-  // no log, so an assertion after teardown could never fail.
-  const containerLogs = runContainerLogs();
-  // Only this run's containers. Nothing named cpamp-* beyond the project prefix is
-  // touched, and the user's own stack is never in this project.
-  run(['docker', 'rm', '-f', sourceContainer, emptyContainer, forwarderContainer, legacyContainer], undefined, false);
-  dc('down', '-v', '--remove-orphans');
-  // The CPA configs and the forwarder are inputs, not evidence: they hold every
-  // management key and seed Client Key, so the whole directory is removed rather
-  // than redacted in place.
-  rmSync(secretsDir, { recursive: true, force: true });
+  // Every registered step runs, in order, each in its own boundary: a browser
+  // that refuses to close cannot skip the container logs or removal, and a
+  // Compose down that fails cannot leave the secrets directory behind. The
+  // collected failures are never swallowed — they are recorded and the run is
+  // not a PASS.
+  const { failures } = await lifecycle.close();
+  if (failures.length > 0) {
+    report.teardown = failures.map(({ step, message }) => ({ step, message: redact(message) }));
+    report.result = 'FAIL';
+  }
+  if (lifecycle.signals.length > 0) {
+    report.cancelledBy = lifecycle.signals;
+    report.result = 'FAIL';
+    if (!report.failure) report.failure = 'run cancelled by ' + lifecycle.signals[0];
+  }
   report.secretAssertion = 'PASS';
   try {
     assertNoSecret('the report', JSON.stringify(report));
@@ -1227,20 +1411,46 @@ try {
     report.secretFailure = String(error.message);
     report.result = 'FAIL';
   }
-  const serialized = redact(JSON.stringify(report, null, 2));
-  for (const value of secretValues)
-    assert(!serialized.includes(value), 'a secret reached the serialized report');
-  writeFileSync(resolve(out, 'report.json'), serialized, { mode: 0o600 });
-  try {
-    writeFileSync(
-      resolve(logDir, 'd-adopt-' + report.gitHead.slice(0, 12) + '.log'),
-      redact(printed.join('\n')),
-      { mode: 0o600 }
-    );
-  } catch {}
-  console.log(redact(report.result + ': ' + resolve(out, 'report.json')));
+  if (outOwned) {
+    const serialized = redact(JSON.stringify(report, null, 2));
+    for (const value of secretValues)
+      assert(!serialized.includes(value), 'a secret reached the serialized report');
+    writeFileSync(resolve(out, 'report.json'), serialized, { mode: 0o600 });
+    try {
+      mkdirSync(logDir, { recursive: true });
+      writeFileSync(
+        resolve(logDir, 'd-adopt-' + String(report.gitHead || 'unknown').slice(0, 12) + '.log'),
+        redact(printed.join('\n')),
+        { mode: 0o600 }
+      );
+    } catch (error) {
+      // The saved log is part of the artifact: a run whose log could not be
+      // written has not produced the evidence it claims.
+      report.logWriteFailure = redact(String(error.message || error)).slice(0, 300);
+      report.result = 'FAIL';
+    }
+    console.log(redact(report.result + ': ' + resolve(out, 'report.json')));
+  } else {
+    // mkdirSync refused the directory, so it belongs to an earlier run. The
+    // failure is already in report.failure; do not write over its evidence.
+    console.log(redact(report.result + ': no artifact written; the output directory already existed'));
+  }
   // The failure text is a stack trace that can quote a value this run generated,
   // so stderr goes through the same redaction as the report and the saved log.
   for (const line of stderrLines(report)) console.error(redact(line));
   if (report.result !== 'PASS') process.exitCode = 1;
+  }
+}
+
+// Only the real CLI runs the acceptance. Importing this module — the lifecycle
+// tests do — must not create a directory, read a secret or touch Docker. The
+// comparison uses real paths so a symlinked worktree still starts the run.
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+) {
+  runAcceptance().catch((error) => {
+    console.error(String(error?.stack || error));
+    process.exitCode = 1;
+  });
 }
