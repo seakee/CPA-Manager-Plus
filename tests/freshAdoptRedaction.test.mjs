@@ -140,7 +140,7 @@ describe('the D acceptance redaction boundary', () => {
 // final `finally` block, verbatim from the file, run against a report that holds
 // a generated value.
 const harnessSource = readFileSync(harnessPath, 'utf8');
-const tailStart = "  report.secretAssertion = 'PASS';";
+const tailStart = "  report.containerLogEvidence = containerLogEvidence?.status || 'NOT COLLECTED';";
 const tailEnd = "  if (report.result !== 'PASS') process.exitCode = 1;";
 const tailFrom = harnessSource.indexOf(tailStart);
 const tailTo = harnessSource.indexOf(tailEnd);
@@ -185,6 +185,10 @@ function driveTail(source) {
     out: path.join(repoRoot, 'bin/tmp'),
     logDir: path.join(repoRoot, 'bin/tmp'),
     outOwned: true,
+    // The saved log is not what this test drives: the artifact writes are elided
+    // above, and this stand-in only lets the tail name the file it would write.
+    containerLogEvidence: null,
+    saveRunLog: () => 'bin/tmp/log-elided.log',
     mkdirSync: () => undefined,
     writeFileSync: () => undefined,
     console: {

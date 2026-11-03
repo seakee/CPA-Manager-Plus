@@ -757,12 +757,22 @@ retryable completion and the finished installation. The report goes to
 `bin/tmp/d-adopt/report.json`, is written 0600, and records PASS/FAIL/NOT RUN for
 every check — including the checks a failure prevented from running, which are
 recorded as NOT RUN with the check that ended the run — plus `gitHead`, the image
-revisions and the failure logs. Its check registry is self-checking: a check the
-run recorded but never declared, or a declared check it never executed, fails the
-report, so a name cannot drift out of the NOT RUN backfill unnoticed. The harness
-is the External one — secrets in a sibling directory outside the artifact
-directory, `assertNoSecret` over the unredacted report, the run log and every
-container log before teardown, a dirty tree refused. Redaction collects every
+revisions and the failure logs. The report is written exactly once, after the
+saved log and every other result field have settled: the log is
+`bin/tmp/logs/d-adopt-<HEAD12>-<runSuffix>.log`, created exclusively so two runs
+of the same commit are two intact files rather than one overwritten, and
+`report.logPath` names it; a log that could not be written makes that same report
+`FAIL` with `logWriteFailure` instead of leaving a PASS on disk. Its check
+registry is self-checking: a check the run recorded but never declared, or a
+declared check it never executed, fails the report, so a name cannot drift out
+of the NOT RUN backfill unnoticed. The harness is the External one — secrets in a
+sibling directory outside the artifact directory, `assertNoSecret` over the
+unredacted report, the run log and every container log before teardown, a dirty
+tree refused. That assertion rests on evidence, not on an empty list: the
+container enumeration and every `docker logs` read must succeed and cover every
+container this run started, so a failed read is
+`containerLogEvidence: FAIL` with a `secretAssertion` that is not PASS, never a
+run that checked nothing and called it clean. Redaction collects every
 occurrence of every declared value on the original text and merges overlapping
 or touching ranges before one replacement pass, so two values overlapping from
 different starts leave no fragment. The run owns a lifecycle created before its
