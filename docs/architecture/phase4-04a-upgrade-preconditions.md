@@ -166,30 +166,37 @@ Added after the 04A slice. `UpgradeAuthorized` and `TrustedHopReceipt` stay
 hard `false`; the new surface grants no migration authority.
 
 - **Operation state.** `upgrade_operations` (single row, `id = 1`) stores the
-  stage, the completed domains, the source kind/version and before/after
-  fingerprints, the backup manifest reference, reconciliation output and manual
-  items. `internal/repository/upgradeoperation.Advance` appends a domain and
-  moves the stage in one transaction; a backwards move is rejected and leaves
-  row untouched. `Put` is monotonic too: it may only advance the stage and
-  append domains, and `updated_at_ms` never moves backwards — an older
-  caller-supplied value (or a clock that went backwards) is replaced, so a retry
-  cannot make recorded work look uncompleted or the row look older than the
-  write it replaced.
-  `complete` never moves again, `failed` parks the operation without dropping
-  completed domains. The table is created by the v2 migration in the Manager
-  database, never in the legacy source root.
-- **Never in place.** Every v1.14.x release sets `pragma journal_mode = WAL`, and
-  a plain `mode=ro` open of a WAL database creates `usage.sqlite-wal` and
-  `usage.sqlite-shm` next to it. Preflight therefore copies `usage.sqlite` and
-  its sidecars into a private scratch directory (`OpenSnapshot`), digests the
-  source files before the copy, again after it, and the copy as it is written —
-  any difference blocks with `upgrade_source_changed` — then opens only the copy
-  with `mode=ro` plus `query_only` and removes the scratch directory. The source
-  fence is taken through a read-only descriptor
-  (`processlock.AcquireExistingReadOnly`), so a stopped source preserved on a
-  read-only mount still proves exclusivity. `upgrade status` uses the same
-  snapshot for the Manager database, so it works when the Manager volume is not
-  writable.
+  stage, completed domains, source observations, backup manifest reference,
+  reconciliation object, manual items, `revision` and `last_forward_stage`.
+  `Put` uses the revision returned by `Get` as a compare-and-set token inside
+  its write transaction; a stale token returns `ErrConflict` without changing
+  evidence or progress. A missing or migrated row starts at revision zero, and
+  every committed `Put` or `Advance` increments it, even within one millisecond.
+  Timestamps are repository-owned observations, never concurrency tokens.
+  `Advance` appends a domain and moves the stage in one transaction; `Put` also
+  preserves completed domains. Duplicate domains and non-object reconciliation
+  JSON (including `null`) are rejected before defaults are normalized; stored
+  corruption is reported rather than silently repaired.
+  Entering `failed` preserves the highest forward stage in `last_forward_stage`;
+  a resume below it is refused. A migrated failed row with no recorded high-water
+  mark stays parked and cannot automatically resume from an invented position.
+  `complete` is terminal, including a later attempt to enter `failed`. The table
+  is created only in the v2 Manager database, never in the legacy source root.
+- **Never in place.** The existing source fence is acquired through a read-only
+  descriptor (`processlock.AcquireExistingReadOnly`) before fingerprinting,
+  archive walking, CPA inspection or snapshot copying, and held through cleanup.
+  Only an actually held lock is `upgrade_source_busy`; a missing database, missing
+  lock marker or unreadable source is `upgrade_source_unreadable`. No source lock
+  file is created. Every v1.14.x release sets `pragma journal_mode = WAL`, and a
+  plain `mode=ro` open can create sidecars beside it. Preflight therefore copies
+  the database and sidecars into private scratch (`OpenSnapshot`), compares source
+  digests before and after against the copied bytes, opens only that copy with
+  `mode=ro` plus `query_only`, and removes scratch. Changed bytes block with
+  `upgrade_source_changed`. `upgrade status` uses the same private-snapshot rule.
+- **Cooperative cancellation.** Fingerprinting, archive walking and snapshot
+  copies check context between bounded read/write batches. Cancellation retains
+  its context error and releases the fence, files and scratch. A filesystem call
+  already blocked in the kernel cannot be forcibly cancelled by these checks.
 - **Checks, in order:** `source_ownership` (`upgrade_source_busy`,
   `upgrade_source_unreadable`, `upgrade_source_changed`,
   `upgrade_snapshot_failed`), `source_version`
@@ -283,6 +290,10 @@ hard `false`; the new surface grants no migration authority.
   `usage_archive_event_refs` or `usage_archive_deleted_coverage_daily` is
   absent. Such a source has no retained history to compare; reporting zero gaps
   would read as a clean result.
+  An applicable parity query or scan failure blocks readiness with
+  `upgrade_source_unreadable` and the fixed detail `parity inspection failed`;
+  it is not a skipped check and never exposes SQL details. A successfully measured
+  parity gap remains non-blocking, so later reconciliation can handle it.
 - **Scratch placement.** `--scratch-dir` may not point inside the legacy source
   root or inside the target root (the Manager data directory): the snapshot
   copies the whole database, so either place writes data into a tree this

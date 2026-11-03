@@ -118,6 +118,12 @@ destination, artifact, Runtime identity/generation; partial journal persistence;
 and lost successful stage/Start responses. The existing PR workflow downloads
 the exact original Linux amd64 archive, checks both SHA-256 values, builds the
 current Supervisor, and runs real-process tests for both source classes with race.
+  Compilation and Go caches belong to the ordinary runner user. Only the two
+  compiled, root-requiring proofs execute as root inside a disposable Linux
+  sandbox, with read-only inputs, no host namespaces, Docker socket or writable
+  host mount. Evidence leaves via a tar stream into a private runner-owned
+  directory (files `0600`, directories `0700`); missing or skipped proofs fail
+  the gate. The root/uid-10001 filesystem witnesses stay inside that sandbox.
 It uploads only sanitized JSONL and source/tested HEAD/artifact metadata as
 `fresh-adoption-v8-<run>-<attempt>`. These observations require independent review;
 they are not inserted into the production consumer record or represented as a
