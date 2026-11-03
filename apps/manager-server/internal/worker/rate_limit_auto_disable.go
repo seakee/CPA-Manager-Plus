@@ -33,6 +33,11 @@ const (
 	quotaReasonXAIFreeUsage       = "xai_free_usage_exhausted"
 	quotaWindowRolling24H         = "rolling_24h"
 	quotaWindowUnknown            = "unknown"
+
+	// quotaCooldownEnableClaimReason is persisted before an enable request is
+	// sent. It marks a generation whose automatic recovery was relinquished and
+	// that a human must verify unless the same call confirms the enabled state.
+	quotaCooldownEnableClaimReason = "cooldown recovery claimed: enable in progress; manual verification required if the enable is not confirmed"
 )
 
 // RateLimitAutoDisableWorker reacts to request-monitoring events in near real time.
@@ -678,13 +683,13 @@ func (w *RateLimitAutoDisableWorker) RecoverOwnedCooldown(
 func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseURL string, managementKey string, item store.QuotaCooldown, now time.Time) (bool, error) {
 	if item.Owner != model.QuotaCooldownOwnerUsage429 && item.Owner != model.QuotaCooldownOwnerXAIFreeUsage {
 		reason := "unknown owner"
-		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, reason)
+		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, item.UpdatedAtMS, reason)
 		log.Printf("[quota-auto-disable] skip cooldown recovery id=%d authFile=%q reason=%s owner=%q", item.ID, item.AuthFileName, reason, item.Owner)
 		return false, nil
 	}
 	if item.PreDisabledState {
 		reason := "pre-disabled before CPAMP action"
-		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, reason)
+		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, item.UpdatedAtMS, reason)
 		log.Printf("[quota-auto-disable] skip cooldown recovery id=%d authFile=%q reason=%s", item.ID, item.AuthFileName, reason)
 		return false, nil
 	}
@@ -706,7 +711,7 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		accountID, member, identityPresent, identityOK = codexCooldownIdentity(item)
 		if !identityOK {
 			reason := "Codex cooldown has conflicting workspace/member evidence"
-			_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, reason)
+			_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, item.UpdatedAtMS, reason)
 			log.Printf("[quota-auto-disable] skip cooldown recovery id=%d authFile=%q reason=%s", item.ID, item.AuthFileName, reason)
 			return false, nil
 		}
@@ -716,13 +721,13 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 	}
 	if provider == "codex" && authIndex == "" {
 		reason := "Codex cooldown has no auth index; credential locator is not recoverable"
-		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, reason)
+		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, item.UpdatedAtMS, reason)
 		log.Printf("[quota-auto-disable] skip cooldown recovery id=%d authFile=%q reason=%s", item.ID, item.AuthFileName, reason)
 		return false, nil
 	}
 	if authIndex == "" && !hasQuotaFallbackIdentity(provider, accountSnapshot) {
 		reason := "cooldown identity has no stable auth index or provider/account snapshot identity"
-		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, reason)
+		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, item.UpdatedAtMS, reason)
 		log.Printf("[quota-auto-disable] skip cooldown recovery id=%d authFile=%q reason=%s", item.ID, item.AuthFileName, reason)
 		return false, nil
 	}
@@ -763,7 +768,7 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 	if err != nil {
 		if errors.Is(err, cpaauthfiles.ErrIdentityMismatch) {
 			reason := "auth file identity changed before cooldown recovery"
-			_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, reason)
+			_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, item.UpdatedAtMS, reason)
 			log.Printf("[quota-auto-disable] skip cooldown recovery id=%d authFile=%q reason=%s: %v", item.ID, item.AuthFileName, reason, err)
 			return false, nil
 		}
@@ -772,7 +777,7 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 		return false, err
 	}
 	if !ok {
-		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, "auth file missing or auth index mismatch")
+		_ = w.store.MarkQuotaCooldownSkipped(ctx, item.ID, item.UpdatedAtMS, "auth file missing or auth index mismatch")
 		log.Printf("[quota-auto-disable] auth file %q authIndex=%q missing/mismatched, skip auto-enable", item.AuthFileName, item.AuthIndex)
 		return false, nil
 	}
@@ -789,61 +794,98 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 	}
 
 	log.Printf("[quota-auto-disable] recovering quota cooldown for auth file %q account=%q, enabling", item.AuthFileName, item.AccountSnapshot)
-	if err := w.patchAuthFileTarget(ctx, baseURL, managementKey, target, false); err != nil {
+	// Relinquish this generation's automatic enable authority before the request
+	// leaves the process. A lost response, a 2xx without a success marker, or a
+	// restart in between must never let a later due tick enable a credential that
+	// a human disabled after this attempt.
+	if err := ctx.Err(); err != nil {
 		_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, err.Error())
-		log.Printf("[quota-auto-disable] failed to enable auth file %q: %v", item.AuthFileName, err)
 		return false, err
 	}
-	verifiedTarget, verified, verifyErr := w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
-		AuthFileName:      target.File.Name,
-		AuthIndex:         target.File.AuthIndex,
-		Provider:          target.File.Provider,
-		AccountSnapshot:   target.File.AccountSnapshot,
-		AccountIDSnapshot: target.File.AccountID,
-	})
-	// The enable PATCH already applied. From here the old generation keeps no
-	// automatic enable authority unless this call observes the enabled state:
-	// a human (or CPA itself) may disable the credential again before the next
-	// due tick, and an active row would let that tick override the decision.
-	if verifyErr != nil {
-		return w.markEnableUnconfirmed(ctx, item, fmt.Sprintf("verify enabled auth file after recovery: %v", verifyErr))
-	}
-	if !verified {
-		return w.markEnableUnconfirmed(ctx, item, "verify enabled auth file after recovery: credential is no longer resolvable")
-	}
-	if verifiedTarget.File.Disabled {
-		return w.markEnableUnconfirmed(ctx, item, "verify enabled auth file after recovery: credential still reports disabled")
-	}
-	if err := w.store.MarkQuotaCooldownRecovered(ctx, item.ID, item.UpdatedAtMS, now.UnixMilli()); err != nil {
-		rollbackCtx, cancelRollback := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
-		defer cancelRollback()
-		rollbackTarget, rollbackErr := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).ResolveVerifiedStatusMutationTarget(
-			rollbackCtx,
-			baseURL,
-			managementKey,
-			cpaauthfiles.Identity{
-				AuthFileName:      target.File.Name,
-				AuthIndex:         target.File.AuthIndex,
-				Provider:          target.File.Provider,
-				AccountSnapshot:   target.File.AccountSnapshot,
-				AccountIDSnapshot: target.File.AccountID,
-			},
-		)
-		if rollbackErr != nil {
-			rollbackErr = fmt.Errorf("revalidate rollback target: %w", rollbackErr)
-		} else {
-			rollbackErr = w.patchAuthFileTarget(rollbackCtx, baseURL, managementKey, rollbackTarget, true)
+	claimedUpdatedAtMS, err := w.store.ClaimQuotaCooldownRecovery(ctx, item.ID, item.UpdatedAtMS, quotaCooldownEnableClaimReason)
+	if err != nil {
+		if !errors.Is(err, quotacooldownrepo.ErrConflict) {
+			_ = w.store.RecordQuotaCooldownFailure(ctx, item.ID, fmt.Sprintf("claim cooldown generation before enable: %v", err))
 		}
+		log.Printf("[quota-auto-disable] cooldown id=%d for auth file %q could not claim its generation before enabling; credential left untouched: %v", item.ID, item.AuthFileName, err)
+		return false, err
+	}
+	patchErr := w.patchAuthFileTarget(ctx, baseURL, managementKey, target, false)
+	// The enable PATCH already applied. This generation keeps no automatic
+	// enable authority unless this call observes the enabled state: a human (or
+	// CPA itself) may disable the credential again before the next due tick, and
+	// an active row would let that tick override the decision.
+	verifyDetail := ""
+	if patchErr == nil {
+		verifiedTarget, verified, verifyErr := w.currentAuthFileTarget(ctx, baseURL, managementKey, cpaauthfiles.Identity{
+			AuthFileName:      target.File.Name,
+			AuthIndex:         target.File.AuthIndex,
+			Provider:          target.File.Provider,
+			AccountSnapshot:   target.File.AccountSnapshot,
+			AccountIDSnapshot: target.File.AccountID,
+		})
+		switch {
+		case verifyErr != nil:
+			verifyDetail = fmt.Sprintf("verify enabled auth file after recovery: %v", verifyErr)
+		case !verified:
+			verifyDetail = "verify enabled auth file after recovery: credential is no longer resolvable"
+		case verifiedTarget.File.Disabled:
+			verifyDetail = "verify enabled auth file after recovery: credential still reports disabled"
+		}
+	}
+	// Whether the enable applied or not, quota evidence recorded for the same
+	// credential while the request was in flight owns the credential now. Its
+	// cooldown states that the credential must stay disabled. The lookup runs on
+	// a detached context: a cancelled caller must not turn "could not check"
+	// into a stale enable.
+	checkCtx, cancelCheck := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
+	defer cancelCheck()
+	newerGeneration, newerFound, newerErr := w.newerActiveCooldownGeneration(checkCtx, item, authIndex, provider, accountID, accountSnapshot)
+	switch {
+	case newerErr != nil:
+		// Cannot prove that no newer generation took over while the enable was in
+		// flight; fail closed towards the disabled state a cooldown requires.
+		return w.retireClaimedGeneration(ctx, baseURL, managementKey, item, target, claimedUpdatedAtMS,
+			fmt.Sprintf("newer cooldown generations could not be inspected after recovery: %v", newerErr), false, true)
+	case newerFound:
+		compensate := patchErr == nil || !cpaauthfiles.ActionErrorProvesNoMutation(patchErr)
+		return w.retireClaimedGeneration(ctx, baseURL, managementKey, item, target, claimedUpdatedAtMS,
+			fmt.Sprintf("newer cooldown generation id=%d updated_at_ms=%d owns this credential", newerGeneration.ID, newerGeneration.UpdatedAtMS), true, compensate)
+	}
+	if patchErr != nil {
+		if !cpaauthfiles.ActionErrorProvesNoMutation(patchErr) {
+			// The request may have reached CPA and may have been applied. Nothing
+			// below may treat this generation as retryable enable intent.
+			return w.retireClaimedGeneration(ctx, baseURL, managementKey, item, target, claimedUpdatedAtMS,
+				fmt.Sprintf("enable request outcome is unknown: %v", patchErr), false, false)
+		}
+		// CPA rejected the request, or it was never sent: the generation may
+		// retry once it is active again.
+		releaseCtx, cancelRelease := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
+		defer cancelRelease()
+		reason := fmt.Sprintf("enable request was rejected before taking effect: %v", patchErr)
+		if releaseErr := w.store.ReopenQuotaCooldownClaim(releaseCtx, item.ID, claimedUpdatedAtMS, reason); releaseErr != nil {
+			log.Printf("[quota-auto-disable] failed to enable auth file %q and could not return cooldown id=%d to retry: %v", item.AuthFileName, item.ID, releaseErr)
+			return false, errors.Join(patchErr, fmt.Errorf("return rejected cooldown generation to retry: %w", releaseErr))
+		}
+		log.Printf("[quota-auto-disable] failed to enable auth file %q, retry later: %v", item.AuthFileName, patchErr)
+		return false, patchErr
+	}
+	if verifyDetail != "" {
+		return w.retireClaimedGeneration(ctx, baseURL, managementKey, item, target, claimedUpdatedAtMS, verifyDetail, false, false)
+	}
+	if err := w.store.MarkQuotaCooldownClaimedRecovered(ctx, item.ID, claimedUpdatedAtMS, now.UnixMilli()); err != nil {
+		rollbackErr := w.disableAfterFailedRecovery(ctx, baseURL, managementKey, target)
 		reason := fmt.Sprintf("cooldown recovery marker persistence failed: %v", err)
 		if rollbackErr != nil {
 			reason += fmt.Sprintf("; rollback disable failed: %v", rollbackErr)
 		}
-		// A generation conflict means newer quota evidence owns this row. Keep
-		// that generation untouched (not even its last_error) and let the
-		// compensation above leave the credential disabled, which is the state
-		// the newer evidence requires.
-		if !errors.Is(err, quotacooldownrepo.ErrConflict) {
-			_ = w.store.RecordQuotaCooldownFailure(rollbackCtx, item.ID, reason)
+		markerCtx, cancelMarker := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
+		defer cancelMarker()
+		// The claimed generation is already terminal, so a failed detail write
+		// keeps it terminal instead of restoring automatic enable authority.
+		if markerErr := w.store.MarkQuotaCooldownClaimedSkipped(markerCtx, item.ID, claimedUpdatedAtMS, reason); markerErr != nil {
+			log.Printf("[quota-auto-disable] auth file %q cooldown id=%d stays terminal; failed to record the recovery marker failure: %v", item.AuthFileName, item.ID, markerErr)
 		}
 		log.Printf("[quota-auto-disable] enabled auth file %q but failed to mark cooldown recovered; rollbackErr=%v: %v", item.AuthFileName, rollbackErr, err)
 		return false, errors.New(reason)
@@ -852,21 +894,97 @@ func (w *RateLimitAutoDisableWorker) recoverCooldown(ctx context.Context, baseUR
 	return true, nil
 }
 
-// markEnableUnconfirmed retires the cooldown generation that just applied an
-// enable PATCH but could not observe the enabled state in the same call. The
-// terminal skipped marker is persisted with a detached, bounded context so a
-// cancelled request context cannot leave the row active and keep automatic
-// enable authority for a credential that may already be manually disabled
-// again.
-func (w *RateLimitAutoDisableWorker) markEnableUnconfirmed(ctx context.Context, item store.QuotaCooldown, detail string) (bool, error) {
+// newerActiveCooldownGeneration reports the newest active cooldown generation,
+// other than the one being recovered, that owns this credential. Such a
+// generation was recorded after this recovery decision and must win.
+func (w *RateLimitAutoDisableWorker) newerActiveCooldownGeneration(
+	ctx context.Context,
+	item store.QuotaCooldown,
+	authIndex string,
+	provider string,
+	accountID string,
+	accountSnapshot string,
+) (store.QuotaCooldown, bool, error) {
+	if w.store == nil || w.store.QuotaCooldowns == nil {
+		return store.QuotaCooldown{}, false, errors.New("quota cooldown store is unavailable")
+	}
+	active, err := w.store.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		return store.QuotaCooldown{}, false, err
+	}
+	newest := store.QuotaCooldown{}
+	found := false
+	for _, candidate := range active {
+		if candidate.ID == item.ID {
+			continue
+		}
+		if !quotaCooldownMatchesIdentity(candidate, authIndex, provider, accountID, accountSnapshot) {
+			continue
+		}
+		if !found || candidate.UpdatedAtMS > newest.UpdatedAtMS ||
+			(candidate.UpdatedAtMS == newest.UpdatedAtMS && candidate.ID < newest.ID) {
+			newest = candidate
+			found = true
+		}
+	}
+	return newest, found, nil
+}
+
+// disableAfterFailedRecovery restores the disabled state a cooldown requires
+// when an enable cannot be confirmed. It revalidates the mutation target so a
+// replacement credential is never disabled, and runs on a detached bounded
+// context so a cancelled or expired caller cannot skip the compensation.
+func (w *RateLimitAutoDisableWorker) disableAfterFailedRecovery(ctx context.Context, baseURL string, managementKey string, target cpaauthfiles.StatusMutationTarget) error {
+	rollbackCtx, cancelRollback := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
+	defer cancelRollback()
+	rollbackTarget, err := cpaauthfiles.New(w.client, quotaAutoDisableActionTimeout).ResolveVerifiedStatusMutationTarget(
+		rollbackCtx,
+		baseURL,
+		managementKey,
+		cpaauthfiles.Identity{
+			AuthFileName:      target.File.Name,
+			AuthIndex:         target.File.AuthIndex,
+			Provider:          target.File.Provider,
+			AccountSnapshot:   target.File.AccountSnapshot,
+			AccountIDSnapshot: target.File.AccountID,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("revalidate rollback target: %w", err)
+	}
+	return w.patchAuthFileTarget(rollbackCtx, baseURL, managementKey, rollbackTarget, true)
+}
+
+// retireClaimedGeneration keeps a claimed generation terminal after its enable
+// was rejected, could not be confirmed, or was superseded by newer evidence.
+// The row is already terminal, so a failed detail write leaves the claim reason
+// in place and still grants no automatic enable authority.
+func (w *RateLimitAutoDisableWorker) retireClaimedGeneration(
+	ctx context.Context,
+	baseURL string,
+	managementKey string,
+	item store.QuotaCooldown,
+	target cpaauthfiles.StatusMutationTarget,
+	claimedUpdatedAtMS int64,
+	detail string,
+	conflict bool,
+	compensate bool,
+) (bool, error) {
 	reason := fmt.Sprintf("enable result could not be confirmed after recovery; manual verification required: %s", detail)
 	markerCtx, cancelMarker := detachedAuthFileMutationContext(ctx, w.compensationTimeout)
 	defer cancelMarker()
-	if err := w.store.MarkQuotaCooldownSkipped(markerCtx, item.ID, reason); err != nil {
-		log.Printf("[quota-auto-disable] auth file %q enable is unconfirmed and the cooldown marker could not be retired: %v", item.AuthFileName, err)
-		return false, errors.New(reason)
+	if err := w.store.MarkQuotaCooldownClaimedSkipped(markerCtx, item.ID, claimedUpdatedAtMS, reason); err != nil {
+		log.Printf("[quota-auto-disable] auth file %q cooldown id=%d stays terminal; failed to record the unconfirmed enable: %v", item.AuthFileName, item.ID, err)
+	}
+	if compensate {
+		if compensateErr := w.disableAfterFailedRecovery(markerCtx, baseURL, managementKey, target); compensateErr != nil {
+			reason += fmt.Sprintf("; compensating disable failed: %v", compensateErr)
+		}
 	}
 	log.Printf("[quota-auto-disable] auth file %q enable is unconfirmed; retired cooldown id=%d reason=%s", item.AuthFileName, item.ID, reason)
+	if conflict {
+		return false, fmt.Errorf("%w: %s", quotacooldownrepo.ErrConflict, reason)
+	}
 	return false, errors.New(reason)
 }
 

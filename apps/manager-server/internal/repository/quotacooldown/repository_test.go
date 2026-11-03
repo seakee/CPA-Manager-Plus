@@ -329,3 +329,229 @@ func TestMarkRecoveredRequiresMatchingActiveGeneration(t *testing.T) {
 		t.Fatalf("active cooldowns = %#v, want recovered", left)
 	}
 }
+
+func TestClaimRecoveryFencesObservedGeneration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+
+	active, err := st.QuotaCooldowns.UpsertActive(ctx, model.QuotaCooldownUpsert{
+		AuthFileName: "codex.json",
+		AuthIndex:    "auth-1",
+		Provider:     "codex",
+		Owner:        model.QuotaCooldownOwnerUsage429,
+		RecoverAtMS:  time.Now().Add(-time.Minute).UnixMilli(),
+		EventHash:    "evt-claim",
+	})
+	if err != nil {
+		t.Fatalf("upsert cooldown: %v", err)
+	}
+
+	if _, err := st.QuotaCooldowns.ClaimRecovery(ctx, active.ID, active.UpdatedAtMS+1, "enable in progress"); !errors.Is(err, quotacooldown.ErrConflict) {
+		t.Fatalf("stale generation claim error = %v, want ErrConflict", err)
+	}
+	residue, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(residue) != 1 || residue[0] != active {
+		t.Fatalf("active cooldowns = %#v, want untouched generation %#v", residue, active)
+	}
+
+	claimedUpdatedAtMS, err := st.QuotaCooldowns.ClaimRecovery(ctx, active.ID, active.UpdatedAtMS, "enable in progress")
+	if err != nil {
+		t.Fatalf("claim observed generation: %v", err)
+	}
+	if claimedUpdatedAtMS <= active.UpdatedAtMS {
+		t.Fatalf("claimed generation = %d, want strictly after %d", claimedUpdatedAtMS, active.UpdatedAtMS)
+	}
+	status, lastError, updatedAtMS := readCooldownRow(t, dbPath, active.ID)
+	if status != model.QuotaCooldownStatusSkipped {
+		t.Fatalf("claimed status = %q, want %q", status, model.QuotaCooldownStatusSkipped)
+	}
+	if lastError != "enable in progress" {
+		t.Fatalf("claimed last_error = %q, want the claim reason", lastError)
+	}
+	if updatedAtMS != claimedUpdatedAtMS {
+		t.Fatalf("claimed generation = %d, want %d", updatedAtMS, claimedUpdatedAtMS)
+	}
+	due, err := st.QuotaCooldowns.ListDue(ctx, time.Now().Add(24*time.Hour).UnixMilli(), 10)
+	if err != nil {
+		t.Fatalf("list due cooldowns: %v", err)
+	}
+	if len(due) != 0 {
+		t.Fatalf("due cooldowns = %#v, want a claimed generation to be ineligible", due)
+	}
+
+	// A claimed generation can only be finalized through its own generation.
+	if err := st.QuotaCooldowns.MarkClaimedRecovered(ctx, active.ID, active.UpdatedAtMS, time.Now().UnixMilli()); !errors.Is(err, quotacooldown.ErrConflict) {
+		t.Fatalf("stale claimed marker error = %v, want ErrConflict", err)
+	}
+	if _, unchangedError, unchangedUpdatedAt := readCooldownRow(t, dbPath, active.ID); unchangedUpdatedAt != claimedUpdatedAtMS || unchangedError != "enable in progress" {
+		t.Fatalf("claimed row changed by a stale marker: updated_at=%d last_error=%q", unchangedUpdatedAt, unchangedError)
+	}
+
+	if err := st.QuotaCooldowns.MarkClaimedRecovered(ctx, active.ID, claimedUpdatedAtMS, time.Now().UnixMilli()); err != nil {
+		t.Fatalf("claimed generation mark recovered: %v", err)
+	}
+	if status, _, _ := readCooldownRow(t, dbPath, active.ID); status != model.QuotaCooldownStatusRecovered {
+		t.Fatalf("final status = %q, want %q", status, model.QuotaCooldownStatusRecovered)
+	}
+	if err := st.QuotaCooldowns.ReopenClaim(ctx, active.ID, claimedUpdatedAtMS, "retry"); !errors.Is(err, quotacooldown.ErrConflict) {
+		t.Fatalf("reopen of a finalized claim error = %v, want ErrConflict", err)
+	}
+}
+
+func TestReopenClaimRestoresRetryableGeneration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+
+	active, err := st.QuotaCooldowns.UpsertActive(ctx, model.QuotaCooldownUpsert{
+		AuthFileName: "xai.json",
+		AuthIndex:    "auth-xai",
+		Provider:     "xai",
+		Owner:        model.QuotaCooldownOwnerXAIFreeUsage,
+		RecoverAtMS:  time.Now().Add(-time.Minute).UnixMilli(),
+		EventHash:    "evt-reopen",
+	})
+	if err != nil {
+		t.Fatalf("upsert cooldown: %v", err)
+	}
+	claimedUpdatedAtMS, err := st.QuotaCooldowns.ClaimRecovery(ctx, active.ID, active.UpdatedAtMS, "enable in progress")
+	if err != nil {
+		t.Fatalf("claim observed generation: %v", err)
+	}
+	if err := st.QuotaCooldowns.MarkClaimedSkipped(ctx, active.ID, active.UpdatedAtMS, "unconfirmed"); !errors.Is(err, quotacooldown.ErrConflict) {
+		t.Fatalf("stale claimed skip error = %v, want ErrConflict", err)
+	}
+	if status, lastError, updatedAtMS := readCooldownRow(t, dbPath, active.ID); status != model.QuotaCooldownStatusSkipped ||
+		lastError != "enable in progress" || updatedAtMS != claimedUpdatedAtMS {
+		t.Fatalf("claimed row changed by a stale skip: status=%q last_error=%q updated_at=%d", status, lastError, updatedAtMS)
+	}
+	if err := st.QuotaCooldowns.ReopenClaim(ctx, active.ID, claimedUpdatedAtMS, "rejected before apply"); err != nil {
+		t.Fatalf("reopen claimed generation: %v", err)
+	}
+	reopened, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(reopened) != 1 || reopened[0].ID != active.ID || reopened[0].UpdatedAtMS <= claimedUpdatedAtMS {
+		t.Fatalf("active cooldowns = %#v, want the reopened generation", reopened)
+	}
+	if reopened[0].LastError != "rejected before apply" {
+		t.Fatalf("reopened last_error = %q, want the rejection reason", reopened[0].LastError)
+	}
+}
+
+func TestMarkSkippedRequiresObservedActiveGeneration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+
+	active, err := st.QuotaCooldowns.UpsertActive(ctx, model.QuotaCooldownUpsert{
+		AuthFileName: "codex.json",
+		AuthIndex:    "auth-1",
+		Provider:     "codex",
+		Owner:        model.QuotaCooldownOwnerUsage429,
+		RecoverAtMS:  time.Now().Add(time.Hour).UnixMilli(),
+		EventHash:    "evt-skip",
+	})
+	if err != nil {
+		t.Fatalf("upsert cooldown: %v", err)
+	}
+	if err := st.QuotaCooldowns.MarkSkipped(ctx, active.ID, active.UpdatedAtMS+1, "identity changed"); !errors.Is(err, quotacooldown.ErrConflict) {
+		t.Fatalf("stale generation skip error = %v, want ErrConflict", err)
+	}
+	residue, err := st.QuotaCooldowns.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active cooldowns: %v", err)
+	}
+	if len(residue) != 1 || residue[0] != active {
+		t.Fatalf("active cooldowns = %#v, want untouched generation %#v", residue, active)
+	}
+	if err := st.QuotaCooldowns.MarkSkipped(ctx, active.ID, active.UpdatedAtMS, "identity changed"); err != nil {
+		t.Fatalf("matching generation skip: %v", err)
+	}
+	status, lastError, _ := readCooldownRow(t, dbPath, active.ID)
+	if status != model.QuotaCooldownStatusSkipped || lastError != "identity changed" {
+		t.Fatalf("skipped row status=%q last_error=%q", status, lastError)
+	}
+}
+
+func TestUpsertActiveDoesNotReviveClaimedGeneration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.sqlite")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctx := context.Background()
+
+	upsert := model.QuotaCooldownUpsert{
+		AuthFileName: "codex.json",
+		AuthIndex:    "auth-1",
+		Provider:     "codex",
+		Owner:        model.QuotaCooldownOwnerUsage429,
+		RecoverAtMS:  time.Now().Add(time.Hour).UnixMilli(),
+		EventHash:    "evt-claim-old",
+	}
+	active, err := st.QuotaCooldowns.UpsertActive(ctx, upsert)
+	if err != nil {
+		t.Fatalf("upsert cooldown: %v", err)
+	}
+	claimedUpdatedAtMS, err := st.QuotaCooldowns.ClaimRecovery(ctx, active.ID, active.UpdatedAtMS, "enable in progress")
+	if err != nil {
+		t.Fatalf("claim observed generation: %v", err)
+	}
+	next := upsert
+	next.EventHash = "evt-claim-new"
+	next.RecoverAtMS = time.Now().Add(2 * time.Hour).UnixMilli()
+	newer, err := st.QuotaCooldowns.UpsertActive(ctx, next)
+	if err != nil {
+		t.Fatalf("upsert newer evidence: %v", err)
+	}
+	// Newer quota evidence owns the credential in its own fresh generation; the
+	// claimed generation keeps no automatic enable authority.
+	if newer.ID == active.ID {
+		t.Fatalf("newer evidence reused the claimed row %d", active.ID)
+	}
+	if newer.Status != model.QuotaCooldownStatusActive || newer.EventHash != "evt-claim-new" {
+		t.Fatalf("newer generation = %#v, want a fresh active generation", newer)
+	}
+	status, lastError, updatedAtMS := readCooldownRow(t, dbPath, active.ID)
+	if status != model.QuotaCooldownStatusSkipped || lastError != "enable in progress" || updatedAtMS != claimedUpdatedAtMS {
+		t.Fatalf("claimed row changed by newer evidence: status=%q last_error=%q updated_at=%d", status, lastError, updatedAtMS)
+	}
+	if err := st.QuotaCooldowns.ReopenClaim(ctx, active.ID, claimedUpdatedAtMS, "retry"); err != nil {
+		t.Fatalf("reopen still works after newer evidence: %v", err)
+	}
+}
+
+func readCooldownRow(t *testing.T, dbPath string, id int64) (string, string, int64) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open cooldown database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var status string
+	var lastError sql.NullString
+	var updatedAtMS int64
+	if err := db.QueryRow(`select status, last_error, updated_at_ms from quota_cooldowns where id = ?`, id).Scan(&status, &lastError, &updatedAtMS); err != nil {
+		t.Fatalf("read cooldown %d: %v", id, err)
+	}
+	return status, lastError.String, updatedAtMS
+}
