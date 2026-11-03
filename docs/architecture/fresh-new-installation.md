@@ -762,8 +762,16 @@ run recorded but never declared, or a declared check it never executed, fails th
 report, so a name cannot drift out of the NOT RUN backfill unnoticed. The harness
 is the External one — secrets in a sibling directory outside the artifact
 directory, `assertNoSecret` over the unredacted report, the run log and every
-container log before teardown, a dirty tree refused, and a `finally` that removes
-only this project.
+container log before teardown, a dirty tree refused. Redaction collects every
+occurrence of every declared value on the original text and merges overlapping
+or touching ranges before one replacement pass, so two values overlapping from
+different starts leave no fragment. The run owns a lifecycle created before its
+first directory: browser close, container log capture, exact container removal,
+project-scoped Compose down and secrets removal are independent steps, each
+failure is recorded in `report.teardown` and makes the run exit nonzero, and
+persistent SIGINT/SIGTERM listeners keep a second signal from interrupting
+cleanup. Resources carry a per-run `cpampd-adopt-*` prefix; nothing outside this
+run's project is removed.
 
 ### D acceptance: `bin/ci/fresh-external-management.mjs`
 
@@ -1081,8 +1089,13 @@ while `adoptMigrationMu` is held — the same mutex `startAdoptionMigration` tak
 4. the destination carries at least one client key (part of the same read);
 5. the run recorded `Finished` with every planned item present → 409
    `adopt_migration_incomplete`;
-6. no item is retryable, unless the body carries `{"acceptRetryable": true}` →
-   409 `adopt_migration_retryable` with `{"retryable": n}`.
+6. no item is retryable, unless the body carries
+   `{"acceptRetryable": true, "runId": "<current run>"}` → 409
+   `adopt_migration_retryable` with `{"retryable": n}`. An acknowledgement whose
+   `runId` is absent or is not the durable record's current run → 409
+   `adopt_migration_run_changed`; the check is made on the record re-read under
+   the lock and again inside the completion CAS. Unknown body fields → 400. A
+   plain completion still sends `{}`.
 
 Only then does the CAS set `ProductComplete`, still under the lock. The lock is
 released before the reply is written and before the idempotent usage-collection
@@ -1098,6 +1111,21 @@ list reached that plan — it is never inferred from the list, because a run
 stopped at an item leaves a list that looks exactly like a complete one. A stop
 therefore leaves `Finished` false with `len(Items) < Planned`, which is what the
 completion refuses.
+
+**Run generation.** Every run that actually starts assigns a random 128-bit
+`runId` (32 lowercase hex) and persists it with `Finished=false` through the
+record's revision CAS while `adoptMigrationMu` is held — before either endpoint
+client is created and before the reply says `running`. The items and plan the
+record already held are kept, so a resume still continues from its durable
+prefix. A replay that finds a run in flight writes nothing and reuses that run's
+generation. Executor checkpoints carry the `runId` and are refused when the
+durable record has moved to another run, so an earlier run cannot overwrite a
+later one. Two runs can leave identical retryable items and counts; the
+generation is what keeps an acknowledgement of one from completing the other. A
+record written before generations existed reads as `runId: ""`; it cannot
+authorize a retryable acknowledgement and must be resumed first. Its
+`credential-name-sha256:<hex>` overlong identities remain valid ledger entries:
+a resume treats them as settled and never rewrites them.
 
 **The update channel stays New Managed only** (`cmd/…/fresh_updates.go`). The
 Fresh version-update wiring that replaces a Supervisor-staged artifact is Later,
@@ -1300,60 +1328,40 @@ adds one read: `GET installation/adoption`, in the same `canonicalAPI` switch as
 installation/runtime` is — it is the progress read of the session that committed
 the adoption.
 
-It answers `{items[], planned, finished, running, retryable, counts}`, where each
-item carries `id`, `item`, `kind`, `outcome`, `reason`, the store's own
-`retryable` rule and — on the one item that stands for credentials the record
+It answers `{items[], runId, planned, finished, running, retryable, counts}`,
+where each item carries `id`, `item`, `kind`, `outcome`, `reason`, the store's
+own `retryable` rule and — on the one item that stands for credentials the record
 could not hold — `left`, `running` is the live single-flight flag rather than a
 recorded value, and `counts` tallies the four outcomes. The reply omits the
 record's source and destination digests: they are the Manager's evidence, and
 dropping them keeps the route a statement about progress.
 
-`id` is the record's identity for the item, a SHA-256 of its scrubbed text and its
-ordinal in the record, because `item` is scrubbed text: two token-shaped file
-names both become `credential:[redacted].json`, and a browser binding an
-acknowledgement or a list key to that text would treat two resources as one. The
-digest never covers the unscrubbed name, so a candidate credential cannot be
-confirmed offline from it; the ordinal keeps two equal scrubbed names apart, and
-the record's own order keeps an item's identity stable across reads. The name
-stays display only. An overlong credential name is recorded with a readable
-prefix and the digest of the whole name; that digest does not reach the reply
-either — the reply keeps the prefix and the ellipsis that says it was cut —
-because it is a digest of the unscrubbed name, and the ordinal is what keeps two
-cut names apart.
+The reply is a structural projection, not a scrubbed copy of the record. A
+credential file name is the source CPA's metadata and can be, or contain, a
+credential; an overlong record identity is an unsalted digest of that name.
+Neither reaches the browser. A credential item is always `Credential file #N`
+(its 1-based ordinal among credentials), and the inventory-overflow marker is
+`Credential files left behind` plus `left`. A configuration or provider item keeps
+its `config:` / `rules:` / `section:` reference only when that reference belongs
+to the Manager's closed gateway, rule or provider tables; otherwise it becomes
+`Configuration item #N` or `Provider section #N`. `reason` is emitted only when it
+is one of the Manager's own reason codes, so an upstream rejection code is
+dropped. The record's free-text `instruction` is never emitted: the page states
+the next step from the item's `kind` and `reason`. Because no upstream text is
+copied, no prefix, middle, suffix or overlapping fragment of a source value can
+appear, and there is no value matcher whose coverage must be argued.
 
-The reply is also a separate output boundary from the record, because the
-record's text is not all the Manager's: a credential file name is the source
-CPA's metadata and a reason can quote an upstream code. `item` and `reason` pass
-two rules — the exact source Client Keys and management key the migration was
-staged with, read from the protected adoption snapshot and replaced by value,
-then the project's credential scrubber (`internal/usage`). A bare 32-hex key or a
-UUID used verbatim as a credential file name has no credential shape, so the
-value rule is the one that catches it. The value rule replaces every occurrence
-of every value on the text as recorded, and every prefix of one at least eight
-bytes long, not only the value itself: an overlong name is recorded as a bounded
-prefix, and a key can cross that cut, so a fragment of a source value is what a
-whole-value match would leave behind. All the ranges it finds are merged before
-anything is written, and each merged range is replaced once — so a shorter match
-that starts earlier cannot consume the start of another value's longer match and
-leave that value's own suffix in the reply, whichever order the values were read
-in. The text is never split on `[redacted]` — a real source value can begin with
-that text, and treating it as an already-redacted marker would print the whole
-value. All a marker does is stand for itself: a value match inside one is left as
-it is, so a reply never nests markers, while everything around it is still
-matched by value. The boundary's own limit is a value's length: a source
-credential shorter than eight bytes is not replaced by value, because a string
-that short cannot be told apart inside a name, and this boundary does not claim
-to catch it. The record's free-text `instruction` — which interpolates a source
-name and the destination's own type string — is not emitted at all: the page
-states the next step from the item's `kind` and `reason`, so untrusted metadata
-cannot reach the browser as prose. A
-staged adoption, a non-adoption, an unreadable record and a snapshot that cannot
-be unprotected answer `404 {"code":"adopt_summary_unavailable"}` rather than an
-empty list that reads like a finished run: a reply that cannot be proven free of
-a source value is not a reply. The session branch is bounded by
-`ProductComplete`: the claim that committed the adoption reads its own progress
-until the installation completes, and afterwards the route is an Admin resource
-and the same session is answered `401`.
+`id` digests only the public text and the item's ordinal — never the record's own
+name — so it cannot confirm a candidate credential offline. The ordinal is a
+discriminator, not a salt: it keeps two items with the same public text apart,
+and the record's order keeps an item's identity stable across reads.
+
+A staged adoption, a non-adoption and an unreadable record answer
+`404 {"code":"adopt_summary_unavailable"}` rather than an empty list that reads
+like a finished run. The session branch is bounded by `ProductComplete`: the
+claim that committed the adoption reads its own progress until the installation
+completes, and afterwards the route is an Admin resource and the same session is
+answered `401`.
 
 Both wizards render one shared `FreshAdoptFlow`:
 
@@ -1422,10 +1430,15 @@ Both wizards render one shared `FreshAdoptFlow`:
   included, by the same 15 s the canonical carrier gives a request — so neither a
   request that never answers nor a half-open connection that stalls after its
   headers can outlast the rule;
-- the success headline is a claim about the installation, so it requires the run to
-  be settled, no retryable item to remain, and the installation itself to be
-  complete. A settled run missing any of the three shows the settled state and
-  names the retryable or unprocessed items instead;
+- the success headline is a claim about the copy, so it requires a settled run,
+  no retryable or unprocessed item, no manual item, no failed item and a complete
+  installation. A complete installation that still has manual or non-retryable
+  failed items shows "Installation complete — manual steps remain" with the real
+  counts in all four locales, never the complete-adoption sentence; a settled run
+  that is not yet complete keeps "Migration settled" and names what remains;
+- the plugin opt-in, once the record holds a strategy, displays and submits the
+  persisted `pluginsEnabled`, locked, in both the Adopt flow and the New Managed
+  page — never the local draft a reload started from;
 - a run that stopped, a page reloaded mid-run, or a finished run that never
   processed its own plan resumes from the durable prefix with the same `baseUrl`,
   key and `pluginsEnabled`. The key is not kept anywhere, so the resume form asks
@@ -1437,11 +1450,13 @@ Both wizards render one shared `FreshAdoptFlow`:
 - the completion's coded refusals each have their own next action:
   `adopt_migration_running` keeps polling, `adopt_migration_incomplete` offers
   Resume, `adopt_migration_retryable` shows the count plus an explicit
-  "finish anyway" checkbox that sends `acceptRetryable`, and
-  `adopt_destination_unproven` names the specific failure. The acknowledgement is
-  bound to the retryable items the operator was shown, not to their count: a new
-  run, or a different set of the same size, asks again instead of carrying the old
-  answer into a decision nobody made.
+  "finish anyway" checkbox, and `adopt_destination_unproven` names the specific
+  failure. The acknowledgement is bound to `runId` plus the sorted retryable item
+  ids the operator was shown and sends `{acceptRetryable: true, runId}`. A newer
+  run — even with identical items and counts, and even when this page never saw
+  it running — clears the acknowledgement; so does any completion error or an
+  `adopt_migration_run_changed` refusal. A legacy run with an empty `runId`
+  offers Resume instead of the checkbox.
 
 The strategy body and both refusal envelopes are read by both carriers: the
 bootstrap transport parses `Code` and `Unsupported` for a blocker and lowercase
