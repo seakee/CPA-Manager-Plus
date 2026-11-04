@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	PlannedDirectRelease      = "v1.14.4"
-	PlannedDirectSourceCommit = "166262365d506157b99968105c890f480cc7c07c"
+	PlannedDirectRelease      = "v1.14.10"
+	PlannedDirectSourceCommit = "a67ed8834a914ab24c36d2490fa6bb6d4166724c"
+	phase400V1144Release      = "v1.14.4"
+	phase400V1144SourceCommit = "166262365d506157b99968105c890f480cc7c07c"
 	CPAManagementGenerationV8 = "v8"
 )
 
@@ -123,7 +125,7 @@ const (
 type PlannedCandidate struct{ Release, SourceCommit string }
 
 func ExactV1144Candidate() PlannedCandidate {
-	return PlannedCandidate{Release: PlannedDirectRelease, SourceCommit: PlannedDirectSourceCommit}
+	return PlannedCandidate{Release: phase400V1144Release, SourceCommit: phase400V1144SourceCommit}
 }
 func (c PlannedCandidate) valid() bool { return c == ExactV1144Candidate() }
 

@@ -42,7 +42,7 @@
 // reads the published path) and in the ignored bin/tmp/u1-docker/evidence
 // locally, so one local run's output cannot make the next local run refuse the
 // tree. UPGRADE_DOCKER_EVIDENCE_DIR overrides both.
-//                                  [--source-tag v1.14.4]
+//                                  [--source-tag v1.14.10]
 //   node bin/ci/upgrade-docker.mjs --verify-evidence <file> [--expect-head <sha>]
 //
 // `--reuse-fixture` skips `git worktree` + `docker build` and uses the recorded
@@ -68,13 +68,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MANAGER_SERVER = path.join(ROOT, 'apps', 'manager-server');
 
-// The planned direct-upgrade release. It is the fixture the U1-1b re-pin
-// reuses, so it is built and recorded on every run.
+// The planned direct-upgrade release. It is also the release the contract
+// pins, so the whole acceptance chain runs against this one fixture instead of
+// recording a version gap.
 const DEFAULT_V1_TAG = 'v1.14.10';
-// The release the running contract accepts. It is only the fallback: the real
-// value is read from the product's own preflight report, so a re-pin needs no
-// change here.
-const DEFAULT_SOURCE_TAG = 'v1.14.4';
+// The release the contract pins, used only when the product's own preflight
+// report cannot be read. The report is the real source of that value; this
+// constant is the fallback that agrees with it, so a re-pin that misses it
+// still records the release the product actually accepts.
+const DEFAULT_SOURCE_TAG = 'v1.14.10';
 
 const ADMIN_V1 = 'Cpamp_U1D_Harness_Legacy_Admin_Key_11410';
 const ADMIN_V2 = 'Cpamp_U1D_Harness_V2_Admin_Key_11410';
@@ -764,10 +766,10 @@ async function runAcceptance() {
   let sourceFixture = nextFixture;
   let source = nextSource;
   if (expected !== args.v1Tag) {
-    // The planned fixture is newer than what the contract accepts. The next
-    // re-pin (U1-1b) is what closes this, so the harness records the typed
-    // refusal and proves the chain against the accepted release instead of
-    // pretending the planned one works.
+    // The planned fixture is not the release the contract accepts. The U1-1b
+    // re-pin closed that gap for v1.14.10, so this branch is the guard for the
+    // next one: the harness records the typed refusal and proves the chain
+    // against the accepted release instead of pretending the planned one works.
     assertVersionGap(binary, probe, expected, nextFixture, nextSource);
     sourceFixture = await acceptanceStep('accepted-fixture', () => ensureFixture(expected));
     source = await acceptanceStep('accepted-seed', () => seedSource(sourceFixture));

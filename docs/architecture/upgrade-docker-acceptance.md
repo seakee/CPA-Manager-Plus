@@ -194,13 +194,19 @@ recorded separately.
   Docker cannot bind that directory (or the tag cannot be resolved), it fails
   there instead of recording a verdict against a different directory.
 
-* **Source release pin.** The contract accepts `v1.14.4`
-  (`internal/domain/bootstrap/contract.go:12`), so the planned `v1.14.10`
-  fixture is refused with `upgrade_source_version_unsupported`. The harness reads
-  the accepted release from the product's own report and proves the chain
-  against it, while building and recording the `v1.14.10` fixture for the U1-1b
-  re-pin (same image, same seed script: `--v1-tag v1.14.10`). After the re-pin
-  the two fixtures collapse into one and the harness needs no change.
+* **Source release pin.** The contract pins `v1.14.10`
+  (`internal/domain/bootstrap/contract.go:12`,
+  `a67ed8834a914ab24c36d2490fa6bb6d4166724c`), so the harness runs the entire
+  chain — preflight, copy-in, reconcile, import, External connect, verify,
+  wizard, admission, fault injection and rollback — directly against the
+  `v1.14.10` fixture it builds and seeds. The evidence says so
+  (`mode.sourceFixture: "same"`, `mode.acceptedRelease: "v1.14.10"`); there is
+  no second fixture and no recorded version gap. The accepted release is still
+  read from the product's own preflight report rather than duplicated here, and
+  the gap branch that records a typed `upgrade_source_version_unsupported`
+  refusal stays as the guard for the next re-pin. The historical `v1.14.4`
+  candidate survives only for the Phase 4-00 / Phase 4A fixtures
+  (`bootstrap.ExactV1144Candidate()`), which still read the old pin.
 * **Completion transition.** No step in this milestone writes the terminal
   `complete` row, so the completed-admission case writes that stage onto the row
   the real copy-in recorded. The evidence admission demands — the
