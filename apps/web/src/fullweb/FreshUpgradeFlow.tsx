@@ -15,10 +15,12 @@ import { BOOTSTRAP_ROOT } from './bootstrapTransport';
 import { FullWebIcon } from './FullWebIcon';
 import { readRoutingContext } from './routingContext';
 
-// The wizard is a reader. The two routes it uses only report what the operation
-// recorded: the read-only preflight report and the operation row projection.
-// Nothing here starts, advances or repairs an operation, and the copy-in itself
-// is started from the Manager host (`cpa-manager-plus upgrade run`).
+// The wizard reads the operation and runs the one action that can advance it.
+// The reads only report what the operation recorded: the read-only preflight
+// report and the operation row projection. The action is the same completion gate
+// the command line runs, so the page can never declare the upgrade finished on
+// its own. The copy-in, the reconciliation, the CPA import and the connection are
+// started from the Manager host.
 export const UPGRADE_WIZARD_CONTRACT = 'cpamp.upgrade-wizard.v1';
 
 export type UpgradeWizardResource =
@@ -32,6 +34,10 @@ export type UpgradeWizardRead = (
   resource: UpgradeWizardResource,
   signal: AbortSignal
 ) => Promise<unknown>;
+
+// The action takes no resource argument: this surface has exactly one, and a
+// caller that could name its own path could post somewhere nothing proves.
+export type UpgradeWizardVerify = (signal: AbortSignal) => Promise<unknown>;
 
 export type UpgradeWizardFailure = 'authentication' | 'network' | 'unavailable' | 'response';
 
@@ -93,6 +99,11 @@ export interface UpgradeStatus {
 
 const PREFLIGHT_TIMEOUT_MS = 45_000;
 const STATUS_TIMEOUT_MS = 15_000;
+// The action outlives the reads on purpose: the server holds the source fence,
+// fingerprints the volume twice and commits a transaction inside its own bound,
+// and this client bound only exists so a hung connection does not leave the page
+// waiting forever.
+const VERIFY_TIMEOUT_MS = 60_000;
 // Same rule as the Adopt flow: three consecutive read failures stop the poll
 // and ask the operator, instead of retrying a surface that is not answering.
 const MAX_CONSECUTIVE_FAILURES = 3;
@@ -188,6 +199,47 @@ export function parseUpgradeStatus(value: unknown): UpgradeStatus | null {
   };
 }
 
+// The action's answer. It reports the position the gate recorded in the same
+// vocabulary the status projection uses, so the page presents the action's own
+// result and then re-reads the row instead of inventing a stage in between.
+export interface UpgradeVerifyOutcome {
+  stage: string;
+  stageKnown: boolean;
+  complete: boolean;
+  targetMode: string;
+  domainsDone: string[];
+  reasonCode: string;
+  reason: string;
+  manualItems: string[];
+  alreadyVerified: boolean;
+  updatedAtMs: number;
+}
+
+// Only a document this build can read is presented. The action wrote something
+// when it answered 200, so a reply that does not describe a position is a read
+// failure: the page then re-reads the row rather than guessing what happened.
+export function parseUpgradeVerify(value: unknown): UpgradeVerifyOutcome | null {
+  if (!value || typeof value !== 'object') return null;
+  const document = value as Record<string, unknown>;
+  if (document.contractVersion !== UPGRADE_WIZARD_CONTRACT) return null;
+  if (typeof document.recorded !== 'boolean' || document.recorded !== true) return null;
+  if (typeof document.stage !== 'string' || typeof document.stageKnown !== 'boolean') return null;
+  if (typeof document.complete !== 'boolean') return null;
+  if (typeof document.alreadyVerified !== 'boolean') return null;
+  return {
+    stage: document.stage,
+    stageKnown: document.stageKnown,
+    complete: document.complete,
+    targetMode: text(document.targetMode),
+    domainsDone: strings(document.domainsDone),
+    reasonCode: text(document.reasonCode),
+    reason: text(document.reason),
+    manualItems: strings(document.manualItems),
+    alreadyVerified: document.alreadyVerified,
+    updatedAtMs: count(document.updatedAtMs),
+  };
+}
+
 // The canonical continuation prefix owns these reads once routing is committed;
 // before that the fixed Bootstrap API does. Neither is discovered from browser
 // state beyond the verified routing context the Manager itself served.
@@ -203,11 +255,8 @@ function upgradeAPIBase(): string {
 
 // The credential is a getter so the entry keeps it in its own ref: the wizard
 // never stores, renders or copies the key.
-export function createUpgradeWizardRead(
-  credential: () => string,
-  transport: typeof fetch = globalThis.fetch
-): UpgradeWizardRead {
-  return async (resource, signal) => {
+function createUpgradeWizardRequest(credential: () => string, transport: typeof fetch) {
+  return async (resource: UpgradeWizardResource | 'installation/upgrade/verify', method: 'GET' | 'POST', signal: AbortSignal) => {
     const base = upgradeAPIBase();
     const target = new URL(`${base}/${resource}`, window.location.origin);
     if (target.origin !== window.location.origin || target.pathname !== `${base}/${resource}`) {
@@ -218,15 +267,22 @@ export function createUpgradeWizardRead(
     const controller = new AbortController();
     const abort = () => controller.abort();
     signal.addEventListener('abort', abort);
+    // The action is bounded by the server's own verification deadline, so this
+    // client bound is larger: a premature client abort would hide the typed
+    // verdict the server was about to answer with.
     const timer = window.setTimeout(
       abort,
-      resource === 'installation/upgrade/preflight' ? PREFLIGHT_TIMEOUT_MS : STATUS_TIMEOUT_MS
+      method === 'POST'
+        ? VERIFY_TIMEOUT_MS
+        : resource === 'installation/upgrade/preflight'
+          ? PREFLIGHT_TIMEOUT_MS
+          : STATUS_TIMEOUT_MS
     );
     try {
       let response: Response;
       try {
         response = await transport(target.href, {
-          method: 'GET',
+          method,
           headers: { Accept: 'application/json', Authorization: `Bearer ${key}` },
           signal: controller.signal,
           mode: 'same-origin',
@@ -262,6 +318,25 @@ export function createUpgradeWizardRead(
       signal.removeEventListener('abort', abort);
     }
   };
+}
+
+export function createUpgradeWizardRead(
+  credential: () => string,
+  transport: typeof fetch = globalThis.fetch
+): UpgradeWizardRead {
+  const request = createUpgradeWizardRequest(credential, transport);
+  return (resource, signal) => request(resource, 'GET', signal);
+}
+
+// The action's transport. It is a POST to the one verification route: the route
+// refuses every other verb, so a bookmark or a prefetch of this address cannot
+// record anything.
+export function createUpgradeWizardVerify(
+  credential: () => string,
+  transport: typeof fetch = globalThis.fetch
+): UpgradeWizardVerify {
+  const request = createUpgradeWizardRequest(credential, transport);
+  return (signal) => request('installation/upgrade/verify', 'POST', signal);
 }
 
 function asWizardError(error: unknown): UpgradeWizardError {
@@ -319,6 +394,12 @@ type StatusState = {
   failures: number;
 };
 
+type VerifyState =
+  | { phase: 'idle' }
+  | { phase: 'running' }
+  | { phase: 'done'; value: UpgradeVerifyOutcome }
+  | { phase: 'failed'; error: UpgradeWizardError };
+
 // The wizard boots on the recorded operation, not on the preflight. An operation
 // that already recorded a stage must stay readable after a refresh, after the
 // 1.x volume was unmounted, and after a rollback handed the source back to its
@@ -344,10 +425,15 @@ type BootState =
  */
 export function FreshUpgradeFlow({
   read,
+  verify,
   language = fullWebLanguage(),
   pollDelays = DEFAULT_POLL_DELAYS,
 }: {
   read: UpgradeWizardRead;
+  // The one action of this surface. It is injected exactly like the reads, so a
+  // wizard without it offers no way to advance the operation and the page stays
+  // a reader.
+  verify?: UpgradeWizardVerify;
   language?: string;
   pollDelays?: number[];
 }) {
@@ -356,6 +442,7 @@ export function FreshUpgradeFlow({
   const [preflight, setPreflight] = useState<PreflightState>({ phase: 'idle' });
   const [acknowledged, setAcknowledged] = useState(false);
   const [status, setStatus] = useState<StatusState>({ phase: 'idle', failures: 0 });
+  const [verification, setVerification] = useState<VerifyState>({ phase: 'idle' });
   const [attempt, setAttempt] = useState(0);
 
   const delayFor = useCallback(
@@ -466,6 +553,24 @@ export function FreshUpgradeFlow({
   const reread = () => {
     setStatus({ phase: 'idle', failures: 0 });
     setAttempt((current) => current + 1);
+  };
+
+  // The action runs once per press and never retries itself: a verification
+  // writes the store, so a silent retry would record a verdict the operator did
+  // not ask for twice. Its answer is presented as the action's own result, and
+  // the recorded row is re-read afterwards so the page shows what the store
+  // holds instead of what this reply happened to say.
+  const runVerification = async () => {
+    if (!verify || verification.phase === 'running') return;
+    setVerification({ phase: 'running' });
+    try {
+      const parsed = parseUpgradeVerify(await verify(new AbortController().signal));
+      if (!parsed) throw new UpgradeWizardError('response');
+      setVerification({ phase: 'done', value: parsed });
+      reread();
+    } catch (error) {
+      setVerification({ phase: 'failed', error: asWizardError(error) });
+    }
   };
 
   return (
@@ -744,7 +849,96 @@ export function FreshUpgradeFlow({
               )}
               <Reconciliation status={record} language={language} />
               <ManualItems status={record} language={language} />
+              {record.errorCode && (
+                // The recorded refusal is the operation's own statement about
+                // why it stopped. The verification of a Managed target records
+                // one here too — the position it may not promote — so the
+                // operator reads the reason from the row, not from a page.
+                <div
+                  className="upgrade-notice"
+                  role="status"
+                  data-testid="upgrade-progress-reason"
+                >
+                  <FullWebIcon name="info" size={24} />
+                  <div>
+                    <h3>{t('verifyReasonLabel', language)}</h3>
+                    <p>{record.errorDetail}</p>
+                    <code>{record.errorCode}</code>
+                  </div>
+                </div>
+              )}
             </>
+          )}
+          {record?.recorded && record.nextAction === 'verify' && verify && (
+            <div className="upgrade-notice" data-testid="upgrade-verify-offer">
+              <FullWebIcon name="shield" size={24} />
+              <div>
+                <h3>{t('verifyTitle', language)}</h3>
+                <p>{t('verifyHelp', language)}</p>
+                <p>{t('verifySourceRequired', language)}</p>
+              </div>
+            </div>
+          )}
+          {verification.phase === 'running' && (
+            <p className="upgrade-step-status" role="status" data-testid="upgrade-verify-running">
+              <FullWebIcon name="refresh" size={18} />
+              {t('verifyRunning', language)}
+            </p>
+          )}
+          {verification.phase === 'done' && (
+            <div
+              className="upgrade-notice upgrade-notice-ready"
+              role="status"
+              data-testid="upgrade-verify-done"
+            >
+              <FullWebIcon name="check" size={24} />
+              <div>
+                <h3>{t('verifyDoneTitle', language)}</h3>
+                <p data-testid="upgrade-verify-outcome">
+                  {verification.value.complete
+                    ? t('verifyComplete', language)
+                    : t('verifyWaiting', language)}
+                </p>
+                {verification.value.alreadyVerified && (
+                  <p data-testid="upgrade-verify-already">{t('verifyAlready', language)}</p>
+                )}
+                {verification.value.targetMode && (
+                  <p data-testid="upgrade-verify-target">
+                    {verification.value.targetMode === 'external'
+                      ? t('verifyTargetExternal', language)
+                      : t('verifyTargetManaged', language)}
+                  </p>
+                )}
+                {!verification.value.complete && verification.value.reason && (
+                  <p data-testid="upgrade-verify-reason">{verification.value.reason}</p>
+                )}
+              </div>
+            </div>
+          )}
+          {verification.phase === 'failed' && (
+            <div className="upgrade-notice" role="alert" data-testid="upgrade-verify-failed">
+              <FullWebIcon name="alert" size={24} />
+              <div>
+                <h3>{t('verifyFailedTitle', language)}</h3>
+                <p>{errorText(verification.error, language)}</p>
+                {verification.error.code && <code>{verification.error.code}</code>}
+              </div>
+            </div>
+          )}
+          {record?.recorded && record.nextAction === 'verify' && verify && (
+            <div className="upgrade-actions">
+              <button
+                className="btn btn-primary"
+                data-testid="upgrade-verify-action"
+                disabled={verification.phase === 'running'}
+                onClick={runVerification}
+              >
+                <FullWebIcon name="shield" size={18} />{' '}
+                {verification.phase === 'done'
+                  ? t('verifyRetry', language)
+                  : t('verifyAction', language)}
+              </button>
+            </div>
           )}
           {record && status.phase !== 'stalled' && (
             <p className="upgrade-step-help" data-testid="upgrade-progress-waiting">

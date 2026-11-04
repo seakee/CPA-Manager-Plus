@@ -25,6 +25,23 @@ const CODES = [
   'upgrade_preflight_timeout',
   'upgrade_preflight_failed',
   'upgrade_operation_unreadable',
+  // The verification's own vocabulary. Every one of them is answered as a typed
+  // code on a route the wizard calls, so every one needs a sentence in every
+  // locale: a refusal the operator cannot read is a dead end.
+  'upgrade_verify_not_applicable',
+  'upgrade_verify_v2_running',
+  'upgrade_verify_source_unavailable',
+  'upgrade_verify_source_mismatch',
+  'upgrade_verify_reconciliation_invalid',
+  'upgrade_verify_reconciliation_unacknowledged',
+  'upgrade_verify_domains_incomplete',
+  'upgrade_verify_binding_missing',
+  'upgrade_verify_binding_drifted',
+  'upgrade_verify_connection_unproven',
+  'upgrade_verify_waiting_for_repin',
+  'upgrade_verify_conflict',
+  'upgrade_verify_failed',
+  'upgrade_request_invalid',
 ] as const;
 
 const LOCALES = ['en-US', 'zh-CN', 'zh-TW', 'ru'] as const;
@@ -152,6 +169,51 @@ describe('upgrade wizard resume and bounded history copy', () => {
       expect(total, language).toContain('400');
       expect(bound, language).toContain('366');
       expect(total, language).not.toBe(bound);
+    }
+  });
+});
+
+// The verification is the one place this page acts, so its copy has to say what
+// acting does and what waiting means. A locale that falls back to English is a
+// missing translation, not a cosmetic gap.
+describe('upgrade wizard verification copy', () => {
+  const VERIFY = [
+    'verifyTitle',
+    'verifyHelp',
+    'verifySourceRequired',
+    'verifyAction',
+    'verifyRetry',
+    'verifyRunning',
+    'verifyDoneTitle',
+    'verifyComplete',
+    'verifyWaiting',
+    'verifyAlready',
+    'verifyFailedTitle',
+    'verifyTargetExternal',
+    'verifyTargetManaged',
+    'verifyReasonLabel',
+  ] as const;
+
+  it('translates every verification sentence in all four locales', () => {
+    for (const key of VERIFY) {
+      expect(upgradeWizardText(key, 'en-US'), key).not.toBe('');
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        expect(upgradeWizardText(key, language), `${key} in ${language}`).not.toBe('');
+        expect(upgradeWizardText(key, language), `${key} in ${language}`).not.toBe(
+          upgradeWizardText(key, 'en-US')
+        );
+      }
+    }
+  });
+
+  it('keeps a completion apart from the Managed position that waits', () => {
+    // The two outcomes are different operator situations: one closes the upgrade
+    // surface on the next start, the other leaves the installation waiting for
+    // the trusted re-pin. They must never share a sentence.
+    for (const language of LOCALES) {
+      expect(upgradeWizardText('verifyComplete', language)).not.toBe(
+        upgradeWizardText('verifyWaiting', language)
+      );
     }
   });
 });

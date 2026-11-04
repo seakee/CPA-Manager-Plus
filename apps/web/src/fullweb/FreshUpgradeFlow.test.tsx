@@ -2,11 +2,13 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createUpgradeWizardRead,
+  createUpgradeWizardVerify,
   FreshUpgradeFlow,
   type UpgradeStatus,
   UpgradeWizardError,
   type UpgradeWizardRead,
   type UpgradeWizardResource,
+  type UpgradeWizardVerify,
 } from './FreshUpgradeFlow';
 import { blockedCodeText, upgradeWizardText as t } from '../i18n/upgradeWizard';
 
@@ -95,9 +97,11 @@ describe('Full Web upgrade wizard', () => {
     vi.unstubAllGlobals();
   });
 
-  async function mount(read: UpgradeWizardRead) {
+  async function mount(read: UpgradeWizardRead, verify?: UpgradeWizardVerify) {
     await act(async () => {
-      renderer = create(<FreshUpgradeFlow read={read} language="en" pollDelays={[10]} />);
+      renderer = create(
+        <FreshUpgradeFlow read={read} verify={verify} language="en" pollDelays={[10]} />
+      );
     });
   }
 
@@ -487,5 +491,159 @@ describe('Full Web upgrade wizard', () => {
     expect(byTestId('upgrade-boot-failed')).toBeTruthy();
     expect(view()).toContain(t('errorResponse', 'en'));
     expect(allByTestId('upgrade-reconciliation-total')).toHaveLength(0);
+  });
+
+  it('offers the verification exactly where the recorded operation asks for it', async () => {
+    // A deferred CPA import is the position this build hands to the gate: it
+    // recorded no cpa_config, so the next decision is the verification that names
+    // where the operation really stands.
+    const deferred = resumeRead(() =>
+      statusDocument({
+        stage: 'cpa_import',
+        nextAction: 'verify',
+        manualItems: ['section:ampcode: re-create it (upgrade_cpa_import_requires_qualification)'],
+      })
+    );
+    await mount(deferred, vi.fn());
+    expect(byTestId('upgrade-verify-action')).toBeTruthy();
+    expect(byTestId('upgrade-verify-offer')).toBeTruthy();
+    await act(async () => renderer!.unmount());
+
+    // A recorded copy-in is not a position the gate runs from, so the action is
+    // not offered: it would only be refused.
+    renderer = undefined;
+    await mount(
+      resumeRead(() => statusDocument({ stage: 'copy_in', nextAction: 'copy_in' })),
+      vi.fn()
+    );
+    expect(allByTestId('upgrade-verify-action')).toHaveLength(0);
+    await act(async () => renderer!.unmount());
+
+    // A wizard mounted without the action stays a reader, even at a position the
+    // gate would accept.
+    renderer = undefined;
+    await mount(deferred);
+    expect(allByTestId('upgrade-verify-action')).toHaveLength(0);
+  });
+
+  it('presents the action verdict and then re-reads what the store recorded', async () => {
+    const verified = statusDocument({
+      stage: 'verify',
+      nextAction: 'verify',
+      domainsDone: ['source_copy', 'usage_events', 'identity'],
+      errorCode: 'upgrade_verify_waiting_for_repin',
+      errorDetail: 'wait for the trusted U1-1b re-pin',
+      manualItems: ['verification: wait (upgrade_verify_waiting_for_repin)'],
+    });
+    let current = statusDocument({
+      stage: 'cpa_import',
+      nextAction: 'verify',
+      manualItems: ['section:ampcode: re-create it (upgrade_cpa_import_requires_qualification)'],
+    });
+    const read = resumeRead(() => current);
+    const verify = vi.fn<UpgradeWizardVerify>(async () => {
+      current = verified;
+      return {
+        contractVersion: CONTRACT,
+        recorded: true,
+        stage: 'verify',
+        stageKnown: true,
+        nextAction: 'verify',
+        complete: false,
+        targetMode: 'managed',
+        domainsDone: verified.domainsDone,
+        reasonCode: 'upgrade_verify_waiting_for_repin',
+        reason: 'wait for the trusted U1-1b re-pin',
+        manualItems: verified.manualItems,
+        alreadyVerified: false,
+        updatedAtMs: 40,
+      };
+    });
+    await mount(read, verify);
+    const statusReadsBefore = vi.mocked(read).mock.calls.filter(
+      ([resource]) => resource === 'installation/upgrade/status'
+    ).length;
+
+    await press('upgrade-verify-action');
+    expect(verify).toHaveBeenCalledTimes(1);
+    // The action's own answer is shown, and the row is read again so the page
+    // presents the record rather than this reply.
+    expect(byTestId('upgrade-verify-done')).toBeTruthy();
+    expect(byTestId('upgrade-verify-outcome').children.join('')).toContain(t('verifyWaiting', 'en'));
+    expect(byTestId('upgrade-verify-target').children.join('')).toContain(
+      t('verifyTargetManaged', 'en')
+    );
+    expect(
+      vi.mocked(read).mock.calls.filter(([resource]) => resource === 'installation/upgrade/status')
+    ).toHaveLength(statusReadsBefore + 1);
+    expect(byTestId('upgrade-progress-reason')).toBeTruthy();
+    expect(view()).toContain('upgrade_verify_waiting_for_repin');
+    // The Managed position is never presented as a completion.
+    expect(allByTestId('upgrade-result-complete')).toHaveLength(0);
+  });
+
+  it('reports a refused verification instead of moving the operation on', async () => {
+    const read = resumeRead(() => statusDocument({ stage: 'external_connect', nextAction: 'verify' }));
+    const verify = vi.fn<UpgradeWizardVerify>(async () => {
+      throw new UpgradeWizardError('unavailable', 'upgrade_verify_binding_drifted', 409);
+    });
+    await mount(read, verify);
+    const statusReadsBefore = vi.mocked(read).mock.calls.filter(
+      ([resource]) => resource === 'installation/upgrade/status'
+    ).length;
+
+    await press('upgrade-verify-action');
+    expect(byTestId('upgrade-verify-failed')).toBeTruthy();
+    expect(view()).toContain(blockedCodeText('upgrade_verify_binding_drifted', 'en'));
+    expect(allByTestId('upgrade-verify-done')).toHaveLength(0);
+    // Nothing was re-read into a stage: the recorded position is unchanged.
+    expect(
+      vi.mocked(read).mock.calls.filter(([resource]) => resource === 'installation/upgrade/status')
+    ).toHaveLength(statusReadsBefore);
+  });
+
+  it('asks the verification route with a POST and the same credential, never a cookie', async () => {
+    const credential = 'Cpamp_Legacy_Upgrade_Admin_Secret_11441';
+    const calls: Array<{ url: string; init: Record<string, unknown> }> = [];
+    const transport = vi.fn(async (input: string, init: Record<string, unknown>) => {
+      calls.push({ url: input, init });
+      return { ok: true, status: 200, json: async () => ({ contractVersion: CONTRACT }) };
+    }) as unknown as typeof fetch;
+    vi.stubGlobal('document', { getElementById: () => null });
+    vi.stubGlobal('window', {
+      setTimeout,
+      clearTimeout,
+      location: { origin: 'http://manager.test' },
+    });
+
+    const verify = createUpgradeWizardVerify(() => credential, transport);
+    await verify(new AbortController().signal);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(
+      'http://manager.test/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/verify'
+    );
+    expect(calls[0].init).toMatchObject({
+      method: 'POST',
+      credentials: 'omit',
+      mode: 'same-origin',
+      redirect: 'error',
+      headers: { Accept: 'application/json', Authorization: `Bearer ${credential}` },
+    });
+  });
+
+  it('refuses to run the action without the entry credential', async () => {
+    const transport = vi.fn() as unknown as typeof fetch;
+    vi.stubGlobal('document', { getElementById: () => null });
+    vi.stubGlobal('window', {
+      setTimeout,
+      clearTimeout,
+      location: { origin: 'http://manager.test' },
+    });
+
+    await expect(
+      createUpgradeWizardVerify(() => '', transport)(new AbortController().signal)
+    ).rejects.toMatchObject({ failure: 'authentication' });
+    expect(transport).not.toHaveBeenCalled();
   });
 });

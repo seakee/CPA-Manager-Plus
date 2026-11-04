@@ -79,6 +79,32 @@ const en = {
   codeUpgradeOperationUnreadable:
     'The operation record cannot be read. Check the Manager database on the host.',
   codeUnknown: 'This condition has no description in this version. Report the exact code.',
+  codeUpgradeVerifyNotApplicable:
+    'The recorded operation stands where the verification cannot run from. Continue the step it names on the host, then run the verification again.',
+  codeUpgradeVerifyV2Running:
+    'Another process owns the v2 data root, so nothing was verified. Stop it and run the verification again.',
+  codeUpgradeVerifySourceUnavailable:
+    'The 1.x source cannot be observed, so the volume the copy-in read cannot be proven unchanged. Mount the directory read-only and run the verification again.',
+  codeUpgradeVerifySourceMismatch:
+    'The mounted 1.x source is not the volume the recorded copy-in read, or it was written while it was being verified. Nothing was recorded.',
+  codeUpgradeVerifyReconciliationInvalid:
+    'The recorded reconciliation is not one this build can read, so nothing proves the copied store holds the source usage. Run the reconciliation again.',
+  codeUpgradeVerifyReconciliationUnacknowledged:
+    'The recorded reconciliation leaves days undecided or unacknowledged, so it was never accepted. Acknowledge them and reconcile again.',
+  codeUpgradeVerifyDomainsIncomplete:
+    'The recorded operation does not hold every domain this target needs, so the copy is not proven for them.',
+  codeUpgradeVerifyBindingMissing:
+    'The recorded operation reached the CPA connection step without the target binding, so the CPA it connected cannot be proven.',
+  codeUpgradeVerifyBindingDrifted:
+    'The CPA this Manager connects to is not the target the connection step recorded. Reconnect the CPA, then verify again.',
+  codeUpgradeVerifyConnectionUnproven:
+    'The connection the CPA import handed over did not survive: the Manager no longer names that destination with the secret the import used.',
+  codeUpgradeVerifyWaitingForRepin:
+    'Waiting for the trusted re-pin to complete the Managed authority promotion and the CPA copy qualification. Nothing was promoted or copied, and the recorded manual items stay open.',
+  codeUpgradeVerifyConflict:
+    'The recorded operation changed while it was being verified, so nothing was written. Run the verification again.',
+  codeUpgradeVerifyFailed: 'The verification could not finish and recorded nothing.',
+  codeUpgradeRequestInvalid: 'The verification takes no input; the request was refused.',
 
   confirmTitle: 'What the upgrade will do',
   confirmHelp:
@@ -153,11 +179,29 @@ const en = {
   resultManualNone: 'No manual item is recorded.',
   resultReread: 'Read the operation again',
 
+  verifyTitle: 'Verify and complete the upgrade',
+  verifyHelp:
+    'The verification re-reads the recorded operation and proves the copied source, the reconciliation and the CPA this installation uses. It records the one verdict the recorded target supports; this page never declares the upgrade finished on its own.',
+  verifySourceRequired:
+    'The 1.x data directory must stay mounted and stopped: its fingerprint is the proof that the volume the copy-in read was not written.',
+  verifyAction: 'Run the verification',
+  verifyRetry: 'Run the verification again',
+  verifyRunning: 'Verifying the recorded operation…',
+  verifyDoneTitle: 'The verification recorded a verdict',
+  verifyComplete:
+    'The operation is complete. Restart the Manager: the normal product starts and the Upgrade surface closes.',
+  verifyWaiting:
+    'The verification recorded this position but did not complete the operation. The Managed authority promotion and the CPA copy qualification wait for the trusted re-pin; nothing was promoted, copied or waived, and the recorded manual items stay open.',
+  verifyAlready: 'This position was already recorded; nothing was written this time.',
+  verifyFailedTitle: 'The verification recorded nothing',
+  verifyTargetExternal: 'Target: an External CPA, administered by its owner',
+  verifyTargetManaged: 'Target: the CPA this Manager owns',
+  verifyReasonLabel: 'Recorded reason',
+
   stagePreflight: 'Preflight',
   stageCopyIn: 'Copy-in',
   stageReconcile: 'Reconciliation',
   stageCpaImport: 'CPA import',
-  stageManualItems: 'Manual items',
   stageExternalConnect: 'CPA connection',
   stageVerify: 'Verification',
   stageComplete: 'Complete',
@@ -245,6 +289,31 @@ const zh: typeof en = {
   codeUpgradePreflightFailed: '预检在报告来源之前就失败了。',
   codeUpgradeOperationUnreadable: '无法读取操作记录。请在宿主机上检查 Manager 数据库。',
   codeUnknown: '此版本没有该条件的说明。请上报完整错误码。',
+  codeUpgradeVerifyNotApplicable:
+    '已记录的操作不处于可执行验证的位置。请在宿主机上完成它指明的步骤，然后重新执行验证。',
+  codeUpgradeVerifyV2Running:
+    '另一个进程持有 v2 数据根目录，因此没有进行验证。请停止该进程后重新执行验证。',
+  codeUpgradeVerifySourceUnavailable:
+    '无法观测 1.x 来源，因此无法证明复制时读取的卷未被写入。请以只读方式挂载该目录后重新执行验证。',
+  codeUpgradeVerifySourceMismatch:
+    '挂载的 1.x 来源不是已记录复制所读取的卷，或在验证过程中被写入。本次没有写入任何内容。',
+  codeUpgradeVerifyReconciliationInvalid:
+    '已记录的对账结果不是本版本可读取的证据，因此无法证明复制的存储包含来源用量。请重新执行对账。',
+  codeUpgradeVerifyReconciliationUnacknowledged:
+    '已记录的对账仍存在未定或未确认的日期，因此从未被接受。请先确认这些日期再重新对账。',
+  codeUpgradeVerifyDomainsIncomplete:
+    '已记录的操作缺少该目标所需的某些数据域，因此这些域未被证明。',
+  codeUpgradeVerifyBindingMissing:
+    '已记录的操作进入 CPA 连接步骤却没有目标绑定，因此无法证明它连接的 CPA。',
+  codeUpgradeVerifyBindingDrifted:
+    '本 Manager 当前连接的 CPA 不是连接步骤记录的目标。请重新连接 CPA 后再验证。',
+  codeUpgradeVerifyConnectionUnproven:
+    'CPA 导入移交的连接未能保持：Manager 不再以导入使用的管理密钥指向该目标。',
+  codeUpgradeVerifyWaitingForRepin:
+    '等待受信任的 re-pin 完成托管式权限提升与 CPA 复制资格。未提升、未复制任何事项，已记录的手工项仍然待办。',
+  codeUpgradeVerifyConflict: '验证过程中已记录的操作发生变更，因此没有写入任何内容。请重新执行验证。',
+  codeUpgradeVerifyFailed: '验证未能完成，也没有记录任何内容。',
+  codeUpgradeRequestInvalid: '验证不接受任何输入，该请求已被拒绝。',
 
   confirmTitle: '升级将做什么',
   confirmHelp: '开始前请确认以下事实。本页面只读取状态；复制步骤本身由 Manager 宿主机启动。',
@@ -305,11 +374,28 @@ const zh: typeof en = {
   resultManualNone: '没有记录手工项。',
   resultReread: '重新读取操作状态',
 
+  verifyTitle: '验证并完成升级',
+  verifyHelp:
+    '验证会重新读取已记录的操作，核对复制来源、对账结果以及本安装实际使用的 CPA，并记录该目标唯一支持的结论。本页面不会自行宣布升级已完成。',
+  verifySourceRequired:
+    '1.x 数据目录必须保持已挂载且已停止：它的指纹是“复制读取的卷未被写入”的证明。',
+  verifyAction: '执行验证',
+  verifyRetry: '再次执行验证',
+  verifyRunning: '正在验证已记录的操作…',
+  verifyDoneTitle: '验证已记录结论',
+  verifyComplete: '操作已完成。请重启 Manager：常规产品将启动，升级界面关闭。',
+  verifyWaiting:
+    '验证已记录当前位置，但未完成该操作。托管式权限提升与 CPA 复制资格需等待受信任的 re-pin；未提升、未复制、也未豁免任何事项，已记录的手工项仍然待办。',
+  verifyAlready: '该位置此前已记录，本次没有写入任何内容。',
+  verifyFailedTitle: '验证未记录任何结论',
+  verifyTargetExternal: '目标：由所有者管理的 External CPA',
+  verifyTargetManaged: '目标：由本 Manager 拥有的 CPA',
+  verifyReasonLabel: '已记录的原因',
+
   stagePreflight: '预检',
   stageCopyIn: '复制入库',
   stageReconcile: '对账',
   stageCpaImport: 'CPA 导入',
-  stageManualItems: '手动项',
   stageExternalConnect: 'CPA 连接',
   stageVerify: '验证',
   stageComplete: '完成',
@@ -396,6 +482,31 @@ const tw: typeof en = {
   codeUpgradePreflightFailed: '預檢在回報來源之前就失敗了。',
   codeUpgradeOperationUnreadable: '無法讀取操作記錄。請在主機上檢查 Manager 資料庫。',
   codeUnknown: '此版本沒有該條件的說明。請回報完整錯誤碼。',
+  codeUpgradeVerifyNotApplicable:
+    '已記錄的操作不在可執行驗證的位置。請在主機上完成它指明的步驟，然後重新執行驗證。',
+  codeUpgradeVerifyV2Running:
+    '另一個行程持有 v2 資料根目錄，因此沒有進行驗證。請停止該行程後重新執行驗證。',
+  codeUpgradeVerifySourceUnavailable:
+    '無法觀測 1.x 來源，因此無法證明複製時讀取的磁碟區未被寫入。請以唯讀方式掛載該目錄後重新執行驗證。',
+  codeUpgradeVerifySourceMismatch:
+    '掛載的 1.x 來源不是已記錄複製所讀取的磁碟區，或在驗證過程中被寫入。本次沒有寫入任何內容。',
+  codeUpgradeVerifyReconciliationInvalid:
+    '已記錄的對帳結果不是本版本可讀取的證據，因此無法證明複製的儲存包含來源用量。請重新執行對帳。',
+  codeUpgradeVerifyReconciliationUnacknowledged:
+    '已記錄的對帳仍有未定或未確認的日期，因此從未被接受。請先確認這些日期再重新對帳。',
+  codeUpgradeVerifyDomainsIncomplete:
+    '已記錄的操作缺少該目標所需的某些資料域，因此這些域未被證明。',
+  codeUpgradeVerifyBindingMissing:
+    '已記錄的操作進入 CPA 連線步驟卻沒有目標綁定，因此無法證明它連線的 CPA。',
+  codeUpgradeVerifyBindingDrifted:
+    '本 Manager 目前連線的 CPA 不是連線步驟記錄的目標。請重新連線 CPA 後再驗證。',
+  codeUpgradeVerifyConnectionUnproven:
+    'CPA 匯入移交的連線未能保持：Manager 不再以匯入使用的管理金鑰指向該目標。',
+  codeUpgradeVerifyWaitingForRepin:
+    '等待受信任的 re-pin 完成受管權限提升與 CPA 複製資格。未提升、未複製任何項目，已記錄的手動項目仍然待辦。',
+  codeUpgradeVerifyConflict: '驗證過程中已記錄的操作發生變更，因此沒有寫入任何內容。請重新執行驗證。',
+  codeUpgradeVerifyFailed: '驗證未能完成，也沒有記錄任何內容。',
+  codeUpgradeRequestInvalid: '驗證不接受任何輸入，該請求已被拒絕。',
 
   confirmTitle: '升級將做什麼',
   confirmHelp: '開始前請確認以下事實。本頁面只讀取狀態；複製步驟本身由 Manager 主機啟動。',
@@ -455,11 +566,28 @@ const tw: typeof en = {
   resultManualNone: '沒有記錄手動項目。',
   resultReread: '重新讀取操作狀態',
 
+  verifyTitle: '驗證並完成升級',
+  verifyHelp:
+    '驗證會重新讀取已記錄的操作，核對複製來源、對帳結果以及本安裝實際使用的 CPA，並記錄該目標唯一支援的結論。本頁面不會自行宣布升級已完成。',
+  verifySourceRequired:
+    '1.x 資料目錄必須保持已掛載且已停止：它的指紋是「複製讀取的磁碟區未被寫入」的證明。',
+  verifyAction: '執行驗證',
+  verifyRetry: '再次執行驗證',
+  verifyRunning: '正在驗證已記錄的操作…',
+  verifyDoneTitle: '驗證已記錄結論',
+  verifyComplete: '操作已完成。請重新啟動 Manager：一般產品將啟動，升級介面關閉。',
+  verifyWaiting:
+    '驗證已記錄目前位置，但未完成該操作。受管權限提升與 CPA 複製資格需等待受信任的 re-pin；未提升、未複製、也未豁免任何項目，已記錄的手動項目仍然待辦。',
+  verifyAlready: '該位置先前已記錄，本次沒有寫入任何內容。',
+  verifyFailedTitle: '驗證未記錄任何結論',
+  verifyTargetExternal: '目標：由擁有者管理的 External CPA',
+  verifyTargetManaged: '目標：由本 Manager 擁有的 CPA',
+  verifyReasonLabel: '已記錄的原因',
+
   stagePreflight: '預檢',
   stageCopyIn: '複製寫入',
   stageReconcile: '對帳',
   stageCpaImport: 'CPA 匯入',
-  stageManualItems: '手動項目',
   stageExternalConnect: 'CPA 連線',
   stageVerify: '驗證',
   stageComplete: '完成',
@@ -549,6 +677,32 @@ const ru: typeof en = {
   codeUpgradePreflightFailed: 'Проверка завершилась ошибкой, не успев описать источник.',
   codeUpgradeOperationUnreadable: 'Запись операции не читается. Проверьте базу Manager на хосте.',
   codeUnknown: 'В этой версии нет описания этого условия. Передайте точный код.',
+  codeUpgradeVerifyNotApplicable:
+    'Записанная операция находится там, откуда проверка не может начаться. Выполните названный ею шаг на хосте и запустите проверку снова.',
+  codeUpgradeVerifyV2Running:
+    'Корневой каталог данных v2 занят другим процессом, поэтому ничего не проверено. Остановите его и запустите проверку снова.',
+  codeUpgradeVerifySourceUnavailable:
+    'Источник 1.x недоступен для наблюдения, поэтому нельзя доказать, что прочитанный при копировании том не был записан. Смонтируйте каталог только для чтения и повторите проверку.',
+  codeUpgradeVerifySourceMismatch:
+    'Смонтированный источник 1.x — не тот том, который прочитало записанное копирование, либо в него писали во время проверки. Ничего не записано.',
+  codeUpgradeVerifyReconciliationInvalid:
+    'Записанная сверка не читается этой сборкой, поэтому ничто не доказывает, что скопированное хранилище содержит данные источника. Выполните сверку снова.',
+  codeUpgradeVerifyReconciliationUnacknowledged:
+    'В записанной сверке остались нерешённые или неподтверждённые дни, поэтому она не была принята. Подтвердите их и выполните сверку снова.',
+  codeUpgradeVerifyDomainsIncomplete:
+    'Записанная операция не содержит всех доменов, нужных этой цели, поэтому по ним копия не доказана.',
+  codeUpgradeVerifyBindingMissing:
+    'Записанная операция дошла до шага подключения CPA без привязки к цели, поэтому CPA, к которому она подключилась, недоказуем.',
+  codeUpgradeVerifyBindingDrifted:
+    'CPA, к которому подключается этот Manager, — не та цель, которую записал шаг подключения. Подключите CPA заново и повторите проверку.',
+  codeUpgradeVerifyConnectionUnproven:
+    'Соединение, переданное импортом CPA, не сохранилось: Manager больше не указывает на это назначение с тем секретом, который использовал импорт.',
+  codeUpgradeVerifyWaitingForRepin:
+    'Ожидание доверенного re-pin, который выполнит повышение полномочий управляемой установки и подтверждение права копирования CPA. Ничего не повышено и не скопировано, записанные ручные пункты остаются открытыми.',
+  codeUpgradeVerifyConflict:
+    'Записанная операция изменилась во время проверки, поэтому ничего не записано. Запустите проверку снова.',
+  codeUpgradeVerifyFailed: 'Проверка не завершилась и ничего не записала.',
+  codeUpgradeRequestInvalid: 'Проверка не принимает входных данных; запрос отклонён.',
 
   confirmTitle: 'Что сделает обновление',
   confirmHelp:
@@ -621,11 +775,29 @@ const ru: typeof en = {
   resultManualNone: 'Ручные пункты не записаны.',
   resultReread: 'Прочитать операцию снова',
 
+  verifyTitle: 'Проверить и завершить обновление',
+  verifyHelp:
+    'Проверка заново читает записанную операцию и подтверждает скопированный источник, сверку и CPA, который использует эта установка. Она записывает единственный вывод, который допускает цель; эта страница никогда не объявляет обновление завершённым сама.',
+  verifySourceRequired:
+    'Каталог данных 1.x должен оставаться смонтированным и остановленным: его отпечаток доказывает, что том, прочитанный при копировании, не был записан.',
+  verifyAction: 'Выполнить проверку',
+  verifyRetry: 'Выполнить проверку снова',
+  verifyRunning: 'Проверка записанной операции…',
+  verifyDoneTitle: 'Проверка записала вывод',
+  verifyComplete:
+    'Операция завершена. Перезапустите Manager: запустится обычный продукт, а интерфейс обновления закроется.',
+  verifyWaiting:
+    'Проверка записала эту позицию, но не завершила операцию. Повышение полномочий управляемой установки и подтверждение права копирования CPA ждут доверенного re-pin; ничего не повышено и не скопировано, записанные ручные пункты остаются открытыми.',
+  verifyAlready: 'Эта позиция уже была записана; на этот раз ничего не записано.',
+  verifyFailedTitle: 'Проверка ничего не записала',
+  verifyTargetExternal: 'Цель: внешний CPA, которым управляет его владелец',
+  verifyTargetManaged: 'Цель: CPA, которым владеет этот Manager',
+  verifyReasonLabel: 'Записанная причина',
+
   stagePreflight: 'Проверка',
   stageCopyIn: 'Копирование',
   stageReconcile: 'Сверка',
   stageCpaImport: 'Импорт CPA',
-  stageManualItems: 'Ручные пункты',
   stageExternalConnect: 'Подключение CPA',
   stageVerify: 'Проверка результата',
   stageComplete: 'Завершено',
@@ -725,6 +897,34 @@ export function blockedCodeText(code: string, language = fullWebLanguage()): str
       return upgradeWizardText('codeUpgradePreflightFailed', language);
     case 'upgrade_operation_unreadable':
       return upgradeWizardText('codeUpgradeOperationUnreadable', language);
+    case 'upgrade_verify_not_applicable':
+      return upgradeWizardText('codeUpgradeVerifyNotApplicable', language);
+    case 'upgrade_verify_v2_running':
+      return upgradeWizardText('codeUpgradeVerifyV2Running', language);
+    case 'upgrade_verify_source_unavailable':
+      return upgradeWizardText('codeUpgradeVerifySourceUnavailable', language);
+    case 'upgrade_verify_source_mismatch':
+      return upgradeWizardText('codeUpgradeVerifySourceMismatch', language);
+    case 'upgrade_verify_reconciliation_invalid':
+      return upgradeWizardText('codeUpgradeVerifyReconciliationInvalid', language);
+    case 'upgrade_verify_reconciliation_unacknowledged':
+      return upgradeWizardText('codeUpgradeVerifyReconciliationUnacknowledged', language);
+    case 'upgrade_verify_domains_incomplete':
+      return upgradeWizardText('codeUpgradeVerifyDomainsIncomplete', language);
+    case 'upgrade_verify_binding_missing':
+      return upgradeWizardText('codeUpgradeVerifyBindingMissing', language);
+    case 'upgrade_verify_binding_drifted':
+      return upgradeWizardText('codeUpgradeVerifyBindingDrifted', language);
+    case 'upgrade_verify_connection_unproven':
+      return upgradeWizardText('codeUpgradeVerifyConnectionUnproven', language);
+    case 'upgrade_verify_waiting_for_repin':
+      return upgradeWizardText('codeUpgradeVerifyWaitingForRepin', language);
+    case 'upgrade_verify_conflict':
+      return upgradeWizardText('codeUpgradeVerifyConflict', language);
+    case 'upgrade_verify_failed':
+      return upgradeWizardText('codeUpgradeVerifyFailed', language);
+    case 'upgrade_request_invalid':
+      return upgradeWizardText('codeUpgradeRequestInvalid', language);
     default:
       return upgradeWizardText('codeUnknown', language);
   }
@@ -742,8 +942,6 @@ export function stageText(stage: string, language = fullWebLanguage()): string {
       return upgradeWizardText('stageReconcile', language);
     case 'cpa_import':
       return upgradeWizardText('stageCpaImport', language);
-    case 'manual_items':
-      return upgradeWizardText('stageManualItems', language);
     case 'external_connect':
       return upgradeWizardText('stageExternalConnect', language);
     case 'verify':
