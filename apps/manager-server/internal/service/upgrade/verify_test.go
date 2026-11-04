@@ -2,6 +2,7 @@ package upgrade
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -951,3 +952,103 @@ func TestVerifyExternalIdentityMatchesTheConnectStep(t *testing.T) {
 		t.Fatalf("Manager connection = %q, binding = %q", resolution.Connection.BaseURL, binding.BaseURL)
 	}
 }
+
+// snapshotCompletedTarget renders the operation row and the External binding
+// exactly as stored, so a refused re-verification of a completed row can prove
+// that it wrote neither.
+func snapshotCompletedTarget(t *testing.T, databasePath string) (row, binding string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open the v2 database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.QueryRow(`select quote(stage) || '|' || quote(domains_done) || '|' || quote(reconciliation) ||
+		'|' || quote(verification) || '|' || quote(manual_items) || '|' || quote(error_code) ||
+		'|' || quote(error_detail) || '|' || quote(revision) || '|' || quote(updated_at_ms)
+		from upgrade_operations where id = 1`).Scan(&row); err != nil {
+		t.Fatalf("read the stored operation: %v", err)
+	}
+	err = db.QueryRow(`select quote(base_url) || '|' || quote(identity) || '|' || quote(generation) ||
+		'|' || quote(server_fingerprint) || '|' || quote(cpa_version) || '|' || quote(support) ||
+		'|' || quote(client_keys) || '|' || quote(observed_at_ms)
+		from upgrade_external_connect where id = 1`).Scan(&binding)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("read the stored binding: %v", err)
+	}
+	return row, binding
+}
+
+// storeVerification overwrites the stored verification block, which is the shape
+// of a row written by a build whose gate proved something else.
+func storeVerification(t *testing.T, databasePath string, evidence model.UpgradeVerification) {
+	t.Helper()
+	payload, err := json.Marshal(evidence)
+	if err != nil {
+		t.Fatalf("encode the verification: %v", err)
+	}
+	execTarget(t, databasePath, `update upgrade_operations set verification = '`+string(payload)+`' where id = 1`)
+}
+
+// TestVerifyRefusesACompletedRowWithoutTheGateEvidence is the R1 regression on
+// the read side: the completed path must cross-check the row against the
+// evidence it carries. A verdict naming another target, another source volume,
+// another binding or a domain the row never marked is refused, and the row is
+// left exactly as the corrupted store holds it.
+func TestVerifyRefusesACompletedRowWithoutTheGateEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// mutate corrupts the stored record; true means it replaced the
+		// verification block instead of writing raw SQL.
+		mutate func(t *testing.T, fixture *verifyFixture, evidence *model.UpgradeVerification) bool
+	}{
+		{name: "no verification evidence", mutate: func(t *testing.T, fixture *verifyFixture, _ *model.UpgradeVerification) bool {
+			execTarget(t, fixture.databasePath(), `update upgrade_operations set verification = '{}' where id = 1`)
+			return false
+		}},
+		{name: "a managed verdict", mutate: func(_ *testing.T, _ *verifyFixture, evidence *model.UpgradeVerification) bool {
+			evidence.TargetMode = model.UpgradeTargetManaged
+			evidence.BindingIdentity = ""
+			evidence.BindingGeneration = ""
+			evidence.BindingObservedAtMS = 0
+			evidence.ObservedAtMS = 1_700_000_000_002
+			return true
+		}},
+		{name: "a foreign source fingerprint", mutate: func(_ *testing.T, _ *verifyFixture, evidence *model.UpgradeVerification) bool {
+			evidence.SourceFingerprint = "sha256:another-volume"
+			return true
+		}},
+		{name: "a completed domain the row never recorded", mutate: func(t *testing.T, fixture *verifyFixture, _ *model.UpgradeVerification) bool {
+			execTarget(t, fixture.databasePath(), `update upgrade_operations set domains_done = '["source_copy"]' where id = 1`)
+			return false
+		}},
+		{name: "a binding the row never recorded", mutate: func(t *testing.T, fixture *verifyFixture, _ *model.UpgradeVerification) bool {
+			execTarget(t, fixture.databasePath(), `delete from upgrade_external_connect`)
+			return false
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExternalVerifyFixture(t)
+			if _, err := fixture.verify(t); err != nil {
+				t.Fatalf("complete the fixture operation: %v", err)
+			}
+			recorded := fixture.operation(t)
+			evidence, err := recorded.VerificationEvidence()
+			if err != nil {
+				t.Fatalf("read the recorded verification: %v", err)
+			}
+			if test.mutate(t, fixture, &evidence) {
+				storeVerification(t, fixture.databasePath(), evidence)
+			}
+			before, beforeBinding := snapshotCompletedTarget(t, fixture.databasePath())
+			if _, err := fixture.verify(t); !errors.Is(err, ErrVerifyNotApplicable) {
+				t.Fatalf("verify on a completed row with %s error = %v, want ErrVerifyNotApplicable", test.name, err)
+			}
+			after, afterBinding := snapshotCompletedTarget(t, fixture.databasePath())
+			if after != before || afterBinding != beforeBinding {
+				t.Fatalf("a refused re-verification wrote the store: %q/%q -> %q/%q", before, beforeBinding, after, afterBinding)
+			}
+		})
+	}
+}
+

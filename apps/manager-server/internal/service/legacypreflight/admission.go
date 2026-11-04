@@ -13,6 +13,7 @@ package legacypreflight
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -231,26 +232,121 @@ func readRecordedUpgrade(ctx context.Context, path string) (upgradeRecord, bool,
 	if present == 0 {
 		return upgradeRecord{}, false, nil
 	}
+	// The columns a reader may select depend on the build that wrote the table:
+	// a store that predates the completion gate has neither the verification
+	// block nor the External connect table, and reading it must say "no evidence"
+	// instead of failing on SQL.
+	columns, err := recordedUpgradeColumns(ctx, db)
+	if err != nil {
+		return upgradeRecord{}, false, err
+	}
 	var (
 		stage                                                           string
+		domainsDone, verification                                       sql.NullString
 		sourceKind, fingerprintBefore, fingerprintAfter, backupManifest sql.NullString
 	)
-	err = db.QueryRowContext(ctx, `select stage, source_kind, source_fingerprint_before,
-		source_fingerprint_after, backup_manifest_sha256 from upgrade_operations where id = 1`).
-		Scan(&stage, &sourceKind, &fingerprintBefore, &fingerprintAfter, &backupManifest)
+	selected := []string{"stage"}
+	destinations := []any{&stage}
+	addColumn := func(name string, destination any) {
+		if columns[name] {
+			selected = append(selected, name)
+			destinations = append(destinations, destination)
+		}
+	}
+	addColumn("source_kind", &sourceKind)
+	addColumn("source_fingerprint_before", &fingerprintBefore)
+	addColumn("source_fingerprint_after", &fingerprintAfter)
+	addColumn("backup_manifest_sha256", &backupManifest)
+	addColumn("domains_done", &domainsDone)
+	addColumn("verification", &verification)
+	err = db.QueryRowContext(ctx, `select `+strings.Join(selected, ", ")+
+		` from upgrade_operations where id = 1`).Scan(destinations...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return upgradeRecord{}, false, nil
 	}
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
-	return upgradeRecord{
+	record := upgradeRecord{
 		Stage:                   model.UpgradeStage(stage),
 		SourceKind:              sourceKind.String,
 		SourceFingerprintBefore: fingerprintBefore.String,
 		SourceFingerprintAfter:  fingerprintAfter.String,
 		BackupManifestSHA256:    backupManifest.String,
-	}, true, nil
+		DomainsDone:             domainsDone.String,
+		Verification:            verification.String,
+	}
+	if record.Stage == model.UpgradeStageComplete {
+		binding, err := readRecordedExternalBinding(ctx, db)
+		if err != nil {
+			return upgradeRecord{}, false, err
+		}
+		record.Binding = binding
+	}
+	return record, true, nil
+}
+
+// recordedUpgradeColumns reports the columns the stored operation table has. A
+// pre-gate schema is not an error: the missing evidence is what the admission
+// then refuses, not a read failure a process could mistake for "no record".
+func recordedUpgradeColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `pragma table_info(upgrade_operations)`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var (
+			cid          int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue any
+			pk           int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
+}
+
+// readRecordedExternalBinding reads the External connect row the completion
+// evidence has to name. A store whose connect step never ran, or one written
+// before the table existed, has no binding at all.
+func readRecordedExternalBinding(ctx context.Context, db *sql.DB) (upgradeRecordBinding, error) {
+	var present int
+	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
+		where type = 'table' and name = 'upgrade_external_connect'`).Scan(&present); err != nil {
+		return upgradeRecordBinding{}, err
+	}
+	if present == 0 {
+		return upgradeRecordBinding{}, nil
+	}
+	var (
+		baseURL, identity, generation sql.NullString
+		observedAtMS                  sql.NullInt64
+	)
+	err := db.QueryRowContext(ctx, `select base_url, identity, generation, observed_at_ms
+		from upgrade_external_connect where id = 1`).Scan(&baseURL, &identity, &generation, &observedAtMS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return upgradeRecordBinding{}, nil
+	}
+	if err != nil {
+		return upgradeRecordBinding{}, err
+	}
+	return upgradeRecordBinding{
+		Found:        true,
+		BaseURL:      baseURL.String,
+		Identity:     identity.String,
+		Generation:   generation.String,
+		ObservedAtMS: observedAtMS.Int64,
+	}, nil
 }
 
 // readCopyInMarker reads the provenance marker of an in-flight copy-in. The
@@ -288,6 +384,29 @@ type upgradeRecord struct {
 	SourceFingerprintBefore string
 	SourceFingerprintAfter  string
 	BackupManifestSHA256    string
+	// DomainsDone is the recorded completed-domain list exactly as stored. The
+	// completion gate's evidence is checked against it, so an unreadable or
+	// shortened list is a refusal instead of an empty set.
+	DomainsDone string
+	// Verification is the recorded verification block. It stays empty when the
+	// store predates the column, which is exactly the state a build without the
+	// completion gate wrote: there is no evidence such a row could carry.
+	Verification string
+	// Binding is the External connect record. The verification the gate writes
+	// names the binding it observed, so a complete row is only admissible with
+	// the same binding on disk.
+	Binding upgradeRecordBinding
+}
+
+// upgradeRecordBinding is the External connect row a completed External
+// operation's verification names. Found is false before the connect step
+// recorded one, which is also the state of a store that predates the table.
+type upgradeRecordBinding struct {
+	Found        bool
+	BaseURL      string
+	Identity     string
+	Generation   string
+	ObservedAtMS int64
 }
 
 // upgradeStageFromRecord maps the durable row onto the two admission stages.
@@ -317,6 +436,13 @@ func upgradeStageFromRecord(record upgradeRecord) (UpgradeStage, error) {
 // and the backup manifest digest the row cannot distinguish a copied-in store
 // from any other database that happens to carry a row, so it never unlocks the
 // normal surfaces.
+//
+// The stage alone is not a verdict. The completion gate writes the observation
+// it rests on beside the stage, so this reader proves the same facts the gate
+// proved: an External target, the source volume the copy-in observed, every
+// domain the verdict names, and the External binding that verdict bound. A row
+// written before the gate existed carries none of that, and it is refused here
+// instead of admitting a store the gate never verified.
 func requireCompleteEvidence(record upgradeRecord) error {
 	switch {
 	case record.SourceKind != SourceKindUpgradedLegacy:
@@ -326,7 +452,85 @@ func requireCompleteEvidence(record upgradeRecord) error {
 	case record.BackupManifestSHA256 == "":
 		return errors.New("a complete Upgrade record must carry the backup manifest digest")
 	}
+	evidence, err := (model.UpgradeOperation{Verification: json.RawMessage(record.Verification)}).VerificationEvidence()
+	if err != nil {
+		return fmt.Errorf("a complete Upgrade record must carry the verification the completion gate wrote: %w", err)
+	}
+	if err := evidence.Validate(); err != nil {
+		return fmt.Errorf("a complete Upgrade record carries verification this build cannot accept: %w", err)
+	}
+	if evidence.TargetMode != model.UpgradeTargetExternal {
+		// A Managed operation stops at verify until the trusted U1-1b re-pin
+		// promotes its authority, so this build can never have recorded one as
+		// complete.
+		return fmt.Errorf("a complete Upgrade record must name an external target, not %q", evidence.TargetMode)
+	}
+	if strings.TrimSpace(evidence.SourceFingerprint) != strings.TrimSpace(record.SourceFingerprintAfter) {
+		return errors.New("a complete Upgrade record's verification names a different source volume than the recorded copy-in")
+	}
+	recorded, err := decodeRecordedDomains(record.DomainsDone)
+	if err != nil {
+		return fmt.Errorf("a complete Upgrade record must carry its completed domains: %w", err)
+	}
+	for _, domain := range evidence.Domains {
+		if !containsRecordedDomain(recorded, domain) {
+			return fmt.Errorf("a complete Upgrade record's verification names the %q domain the row never recorded", domain)
+		}
+	}
+	for _, required := range []string{
+		model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig, model.UpgradeDomainIdentity,
+	} {
+		if !containsRecordedDomain(evidence.Domains, required) {
+			return fmt.Errorf("a complete Upgrade record's verification does not name the %q domain", required)
+		}
+	}
+	binding := record.Binding
+	switch {
+	case !binding.Found:
+		return errors.New("a complete Upgrade record must name the External connect binding its verification observed")
+	case strings.TrimSpace(binding.BaseURL) == "":
+		return errors.New("a complete Upgrade record's External binding names no target address")
+	case strings.TrimSpace(binding.Identity) == "" || strings.TrimSpace(binding.Generation) == "":
+		return errors.New("a complete Upgrade record's External binding names no identity")
+	case binding.Identity != binding.Generation:
+		return errors.New("a complete Upgrade record's External binding identity is not its generation")
+	case binding.ObservedAtMS <= 0:
+		return errors.New("a complete Upgrade record's External binding carries no observation time")
+	}
+	if evidence.BindingIdentity != binding.Identity ||
+		evidence.BindingGeneration != binding.Generation ||
+		evidence.BindingObservedAtMS != binding.ObservedAtMS {
+		return errors.New("a complete Upgrade record's verification names a different External binding than the recorded one")
+	}
 	return nil
+}
+
+// decodeRecordedDomains parses the stored completed-domain list. The column is a
+// JSON string array on disk, so anything else is corruption the admission must
+// refuse rather than read as "no domains".
+func decodeRecordedDomains(raw string) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, errors.New("the completed-domain list is empty")
+	}
+	var domains []string
+	if err := json.Unmarshal([]byte(raw), &domains); err != nil {
+		return nil, err
+	}
+	for _, domain := range domains {
+		if !model.ValidUpgradeDomain(domain) {
+			return nil, fmt.Errorf("the completed-domain list names the unsupported domain %q", domain)
+		}
+	}
+	return domains, nil
+}
+
+func containsRecordedDomain(domains []string, want string) bool {
+	for _, domain := range domains {
+		if domain == want {
+			return true
+		}
+	}
+	return false
 }
 
 // admissionDataSourceName mirrors the bounded inspection DSN: read-only, no

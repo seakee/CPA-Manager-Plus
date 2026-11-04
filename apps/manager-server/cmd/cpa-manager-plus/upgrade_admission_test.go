@@ -73,6 +73,7 @@ func recordUpgradeStage(t *testing.T, databasePath, stage string) {
 			DomainsDone: []string{model.UpgradeDomainSourceCopy},
 		}
 	}
+	priorStage := operation.Stage
 	operation.Stage = model.UpgradeStage(stage)
 	operation.SourceKind = upgradeservice.SourceKindUpgradedLegacy
 	operation.SourceFingerprintBefore = "source-fingerprint"
@@ -82,12 +83,33 @@ func recordUpgradeStage(t *testing.T, databasePath, stage string) {
 		// The complete verdict is the gate's record, and it is never a bare
 		// stage: this fixture writes the same whole observation the gate would, so
 		// the startup reader sees the row a finished operation actually holds.
-		// RecordCompletionTx only continues an operation, and this fixture has
-		// already created one above.
+		// The observations are recorded at the stage the row sat at first, because
+		// `complete` itself is the gate's to write.
+		recordStage := priorStage
+		if recordStage == "" {
+			recordStage = model.UpgradeStagePreflight
+		}
+		operation.Stage = recordStage
+		if err := repository.Put(ctx, operation); err != nil {
+			t.Fatalf("record fixture observations: %v", err)
+		}
+		stored, found, err := repository.Get(ctx)
+		if err != nil || !found {
+			t.Fatalf("read fixture observations: found=%t err=%v", found, err)
+		}
+		for _, domain := range []string{model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig} {
+			if !stored.HasDomain(domain) {
+				advanced, err := repository.Advance(ctx, domain, stored.Stage)
+				if err != nil {
+					t.Fatalf("record fixture domain %q: %v", domain, err)
+				}
+				stored = advanced
+			}
+		}
 		verification := model.UpgradeVerification{
 			TargetMode:          model.UpgradeTargetExternal,
-			SourceFingerprint:   operation.SourceFingerprintAfter,
-			Domains:             fixtureDomains(operation.DomainsDone),
+			SourceFingerprint:   stored.SourceFingerprintAfter,
+			Domains:             fixtureDomains(stored.DomainsDone),
 			BindingIdentity:     "https://cpa.example",
 			BindingGeneration:   "https://cpa.example",
 			BindingObservedAtMS: 1_700_000_000_000,
@@ -98,6 +120,14 @@ func recordUpgradeStage(t *testing.T, databasePath, stage string) {
 			t.Fatalf("begin fixture completion: %v", err)
 		}
 		defer func() { _ = tx.Rollback() }()
+		if err := upgradeoperation.RecordExternalBindingTx(ctx, tx, upgradeoperation.ExternalBinding{
+			BaseURL:      "https://cpa.example",
+			Identity:     verification.BindingIdentity,
+			Generation:   verification.BindingGeneration,
+			ObservedAtMS: verification.BindingObservedAtMS,
+		}); err != nil {
+			t.Fatalf("record fixture binding: %v", err)
+		}
 		if _, err := upgradeoperation.RecordCompletionTx(ctx, tx, verification); err != nil {
 			t.Fatalf("record fixture completion: %v", err)
 		}

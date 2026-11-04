@@ -54,12 +54,47 @@ func upgradeAdmissionFixture(t *testing.T) sqlite.InspectionPaths {
 }
 
 // recordEvidence is the observation half of an operation row. A finished copy-in
-// fills every field; a row that only carries a stage cannot describe one.
+// fills every field; a row that only carries a stage cannot describe one. The
+// zero value of the last three fields is the whole record a finished External
+// operation holds, so a test that only departs from one of them states just that.
 type recordEvidence struct {
 	sourceKind        string
 	fingerprintBefore string
 	fingerprintAfter  string
 	backupManifest    string
+	// domainsDone is the recorded completed-domain list.
+	domainsDone string
+	// verification is the observation the completion gate writes beside the
+	// stage.
+	verification string
+	// binding is the External connect row that observation names.
+	binding *completedBinding
+}
+
+func (e recordEvidence) recordedDomains() string {
+	if e.domainsDone != "" {
+		return e.domainsDone
+	}
+	return `["source_copy","cpa_config","identity"]`
+}
+
+func (e recordEvidence) recordedVerification() string {
+	if e.verification != "" {
+		return e.verification
+	}
+	return completedVerification
+}
+
+func (e recordEvidence) recordedBinding() *completedBinding {
+	if e.binding != nil {
+		return e.binding
+	}
+	return &completedBinding{
+		baseURL:      "https://cpa.example",
+		identity:     "https://cpa.example",
+		generation:   "https://cpa.example",
+		observedAtMS: 1_700_000_000_000,
+	}
 }
 
 // fullCopyInEvidence is what a completed source copy records.
@@ -82,17 +117,51 @@ func recordFixtureOperation(t *testing.T, databasePath, stage string, evidence r
 		t.Fatalf("open admission fixture: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	if _, err := db.Exec(`insert into upgrade_operations (
-		id, stage, domains_done, source_kind, source_fingerprint_before,
-		source_fingerprint_after, backup_manifest_sha256, created_at_ms, updated_at_ms
-	) values (1, ?, '["source_copy"]', nullif(?, ''), nullif(?, ''), nullif(?, ''), nullif(?, ''), 1, 1)
-	on conflict(id) do update set stage = excluded.stage,
+	// A store written by a build that predates the completion gate has neither
+	// the verification column nor the External connect table, so the fixture
+	// writes only the record that schema can hold.
+	var hasVerification int
+	if err := db.QueryRow(`select count(*) from pragma_table_info('upgrade_operations')
+		where name = 'verification'`).Scan(&hasVerification); err != nil {
+		t.Fatalf("read the fixture schema: %v", err)
+	}
+	columns := `id, stage, domains_done, source_kind, source_fingerprint_before,
+		source_fingerprint_after, backup_manifest_sha256, created_at_ms, updated_at_ms`
+	values := []any{1, stage, evidence.recordedDomains(), evidence.sourceKind,
+		evidence.fingerprintBefore, evidence.fingerprintAfter, evidence.backupManifest, 1, 1}
+	placeholders := `?, ?, ?, nullif(?, ''), nullif(?, ''), nullif(?, ''), nullif(?, ''), ?, ?`
+	updates := `stage = excluded.stage, domains_done = excluded.domains_done,
 		source_kind = excluded.source_kind,
 		source_fingerprint_before = excluded.source_fingerprint_before,
 		source_fingerprint_after = excluded.source_fingerprint_after,
-		backup_manifest_sha256 = excluded.backup_manifest_sha256`,
-		stage, evidence.sourceKind, evidence.fingerprintBefore, evidence.fingerprintAfter, evidence.backupManifest); err != nil {
+		backup_manifest_sha256 = excluded.backup_manifest_sha256`
+	if hasVerification > 0 {
+		columns += `, verification`
+		values = append(values, evidence.recordedVerification())
+		placeholders += `, ?`
+		updates += `, verification = excluded.verification`
+	}
+	if _, err := db.Exec(`insert into upgrade_operations (`+columns+`) values (`+placeholders+`)
+		on conflict(id) do update set `+updates, values...); err != nil {
 		t.Fatalf("record fixture stage %q: %v", stage, err)
+	}
+	var hasBinding int
+	if err := db.QueryRow(`select count(*) from sqlite_master
+		where type = 'table' and name = 'upgrade_external_connect'`).Scan(&hasBinding); err != nil {
+		t.Fatalf("read the fixture binding table: %v", err)
+	}
+	if hasBinding == 0 {
+		return
+	}
+	binding := evidence.recordedBinding()
+	if _, err := db.Exec(`insert into upgrade_external_connect (
+		id, base_url, identity, generation, observed_at_ms
+	) values (1, ?, ?, ?, ?)
+	on conflict(id) do update set
+		base_url = excluded.base_url, identity = excluded.identity,
+		generation = excluded.generation, observed_at_ms = excluded.observed_at_ms`,
+		binding.baseURL, binding.identity, binding.generation, binding.observedAtMS); err != nil {
+		t.Fatalf("record fixture binding: %v", err)
 	}
 }
 
@@ -549,4 +618,204 @@ func TestCommittedRowOutlivesTheMigratingMarker(t *testing.T) {
 		t.Fatalf("write the migrating marker: %v", err)
 	}
 	assertUpgradeAdmission(t, paths.Database, UpgradeStageComplete, SurfaceFull)
+}
+
+// completedOperationFixture seeds the row a finished operation holds: the
+// copy-in observations, the completed domains, the verification the completion
+// gate records and the External binding that verdict names. A test replaces one
+// half of it, so the admission has to re-check every half instead of trusting
+// the stage.
+type completedOperationFixture struct {
+	paths sqlite.InspectionPaths
+	// verification is the recorded verification block. An empty value writes the
+	// schema default `{}`, which is what a row recorded before the gate exists.
+	verification string
+	domainsDone  string
+	// preVerification drops the verification column and the binding table, so the
+	// store holds the schema a build that predates the completion gate leaves.
+	preVerification bool
+	// binding is the External connect binding. nil writes no binding row, which
+	// is the shape of a store whose connect step never recorded its target.
+	binding *completedBinding
+}
+
+// completedBinding is the External connect row a completed External operation
+// names.
+type completedBinding struct {
+	baseURL      string
+	identity     string
+	generation   string
+	observedAtMS int64
+}
+
+const completedVerification = `{"targetMode":"external","sourceFingerprint":"source-fingerprint",` +
+	`"domains":["source_copy","cpa_config","identity"],` +
+	`"bindingIdentity":"https://cpa.example","bindingGeneration":"https://cpa.example",` +
+	`"bindingObservedAtMs":1700000000000,"observedAtMs":1700000000001}`
+
+// newCompletedOperationFixture creates the store a copy-in leaves behind with a
+// complete row and its binding: the positive control every variant departs from.
+func newCompletedOperationFixture(t *testing.T) completedOperationFixture {
+	t.Helper()
+	paths := fixturePaths(t)
+	store, err := sqlite.Open(paths.Database)
+	if err != nil {
+		t.Fatalf("create the migrated v2 store: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close the migrated v2 store: %v", err)
+	}
+	return completedOperationFixture{
+		paths:        paths,
+		verification: completedVerification,
+		domainsDone:  `["source_copy","cpa_config","identity"]`,
+		binding: &completedBinding{
+			baseURL:      "https://cpa.example",
+			identity:     "https://cpa.example",
+			generation:   "https://cpa.example",
+			observedAtMS: 1_700_000_000_000,
+		},
+	}
+}
+
+// preGateOperationSchema is the operation table a build that predates the
+// completion gate created: no verification column.
+const preGateOperationSchema = `create table upgrade_operations (
+	id integer primary key check(id = 1),
+	stage text not null default '',
+	domains_done text not null default '[]',
+	source_kind text,
+	source_version text,
+	source_fingerprint_before text,
+	source_fingerprint_after text,
+	backup_manifest_sha256 text,
+	reconciliation text not null default '{}',
+	manual_items text not null default '[]',
+	error_code text,
+	error_detail text,
+	created_at_ms integer not null,
+	updated_at_ms integer not null
+)`
+
+func (f completedOperationFixture) record(t *testing.T) {
+	t.Helper()
+	db, err := sql.Open("sqlite", f.paths.Database)
+	if err != nil {
+		t.Fatalf("open the completed fixture store: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if f.preVerification {
+		for _, statement := range []string{
+			`drop table upgrade_operations`,
+			`drop table if exists upgrade_external_connect`,
+			preGateOperationSchema,
+		} {
+			if _, err := db.Exec(statement); err != nil {
+				t.Fatalf("write the pre-gate schema: %v", err)
+			}
+		}
+		if _, err := db.Exec(`insert into upgrade_operations (
+			id, stage, domains_done, source_kind, source_fingerprint_before,
+			source_fingerprint_after, backup_manifest_sha256, created_at_ms, updated_at_ms
+		) values (1, 'complete', ?, 'upgraded-legacy', 'source-fingerprint',
+			'source-fingerprint', 'backup-manifest-sha256', 1, 1)`, f.domainsDone); err != nil {
+			t.Fatalf("record the pre-gate completed row: %v", err)
+		}
+		return
+	}
+	if _, err := db.Exec(`insert into upgrade_operations (
+		id, stage, last_forward_stage, domains_done, source_kind,
+		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
+		verification, created_at_ms, updated_at_ms
+	) values (1, 'complete', 'complete', ?, 'upgraded-legacy', 'source-fingerprint',
+		'source-fingerprint', 'backup-manifest-sha256', ?, 1, 1)`,
+		f.domainsDone, f.verification); err != nil {
+		t.Fatalf("record the completed fixture row: %v", err)
+	}
+	if f.binding == nil {
+		return
+	}
+	if _, err := db.Exec(`insert into upgrade_external_connect (
+		id, base_url, identity, generation, observed_at_ms
+	) values (1, ?, ?, ?, ?)`,
+		f.binding.baseURL, f.binding.identity, f.binding.generation, f.binding.observedAtMS); err != nil {
+		t.Fatalf("record the completed fixture binding: %v", err)
+	}
+}
+
+// TestCompletedOperationAdmissionRequiresTheGateEvidence is the R1 regression:
+// a `complete` label is not a verdict. The admission must read the verification
+// the completion gate records beside the stage, and refuse the row when the
+// evidence is missing, names another target, another source volume or another
+// binding. Before this check the three copy-in observations alone unlocked the
+// full writable product for a row that never passed the gate.
+func TestCompletedOperationAdmissionRequiresTheGateEvidence(t *testing.T) {
+	ctx := context.Background()
+
+	// The positive control: the record a real gate writes is admitted.
+	control := newCompletedOperationFixture(t)
+	control.record(t)
+	assertUpgradeAdmission(t, control.paths.Database, UpgradeStageComplete, SurfaceFull)
+	admission, err := AdmitStartup(ctx, control.paths, Options{
+		UpgradeAdmission: DatabaseUpgradeAdmission{DatabasePath: control.paths.Database},
+	})
+	if err != nil {
+		t.Fatalf("admit the recorded completion: %v", err)
+	}
+	if err := admission.Close(); err != nil {
+		t.Fatalf("release the admitted completion: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*completedOperationFixture)
+	}{
+		{name: "no verification evidence", mutate: func(f *completedOperationFixture) {
+			f.verification = "{}"
+		}},
+		{name: "a verification column the schema never had", mutate: func(f *completedOperationFixture) {
+			f.preVerification = true
+		}},
+		{name: "a managed verdict", mutate: func(f *completedOperationFixture) {
+			f.verification = `{"targetMode":"managed","sourceFingerprint":"source-fingerprint",` +
+				`"domains":["source_copy","cpa_config","identity"],"observedAtMs":1700000000001}`
+		}},
+		{name: "a foreign source fingerprint", mutate: func(f *completedOperationFixture) {
+			f.verification = `{"targetMode":"external","sourceFingerprint":"another-volume",` +
+				`"domains":["source_copy","cpa_config","identity"],` +
+				`"bindingIdentity":"https://cpa.example","bindingGeneration":"https://cpa.example",` +
+				`"bindingObservedAtMs":1700000000000,"observedAtMs":1700000000001}`
+		}},
+		{name: "a completed domain the row never recorded", mutate: func(f *completedOperationFixture) {
+			f.domainsDone = `["source_copy"]`
+		}},
+		{name: "a verification that names no identity domain", mutate: func(f *completedOperationFixture) {
+			f.verification = `{"targetMode":"external","sourceFingerprint":"source-fingerprint",` +
+				`"domains":["source_copy","cpa_config"],` +
+				`"bindingIdentity":"https://cpa.example","bindingGeneration":"https://cpa.example",` +
+				`"bindingObservedAtMs":1700000000000,"observedAtMs":1700000000001}`
+		}},
+		{name: "no external binding", mutate: func(f *completedOperationFixture) {
+			f.binding = nil
+		}},
+		{name: "a binding generation the verdict did not observe", mutate: func(f *completedOperationFixture) {
+			f.binding.observedAtMS = 1_700_000_000_999
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCompletedOperationFixture(t)
+			test.mutate(&fixture)
+			fixture.record(t)
+			if stage, err := (DatabaseUpgradeAdmission{DatabasePath: fixture.paths.Database}).Admitted(ctx); err == nil {
+				t.Fatalf("a complete row with %s was read as %q", test.name, stage)
+			}
+			refused, err := AdmitStartup(ctx, fixture.paths, Options{
+				UpgradeAdmission: DatabaseUpgradeAdmission{DatabasePath: fixture.paths.Database},
+			})
+			if err == nil {
+				_ = refused.Close()
+				t.Fatalf("a complete row with %s was admitted to startup", test.name)
+			}
+		})
+	}
 }

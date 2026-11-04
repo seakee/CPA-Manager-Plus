@@ -17,14 +17,15 @@ import (
 )
 
 // actionVerification is a whole verification observation: every field the verdict
-// rests on. It is the value the completion gate writes beside the stage.
+// rests on. It is the value the completion gate writes beside the stage, on the
+// source fingerprint the fixture row carries.
 func actionVerification(domains ...string) model.UpgradeVerification {
 	if len(domains) == 0 {
-		domains = []string{model.UpgradeDomainSourceCopy}
+		domains = []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig, model.UpgradeDomainIdentity}
 	}
 	return model.UpgradeVerification{
 		TargetMode:          model.UpgradeTargetExternal,
-		SourceFingerprint:   "sha256:source-manifest",
+		SourceFingerprint:   "fingerprint-after-secret-value",
 		Domains:             domains,
 		BindingIdentity:     "https://cpa.example",
 		BindingGeneration:   "https://cpa.example",
@@ -34,7 +35,8 @@ func actionVerification(domains ...string) model.UpgradeVerification {
 }
 
 // recordCompletedOperation leaves the row a finished operation holds: the stage
-// and the verification, written by the gate in one statement.
+// and the verification, written by the gate in one statement, beside the External
+// binding that verification names.
 func recordCompletedOperation(t *testing.T, database string, domains ...string) {
 	t.Helper()
 	ctx := context.Background()
@@ -50,12 +52,26 @@ func recordCompletedOperation(t *testing.T, database string, domains ...string) 
 	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageVerify); err != nil {
 		t.Fatalf("record the fixture position: %v", err)
 	}
+	for _, domain := range []string{model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig} {
+		if _, err := repository.Advance(ctx, domain, model.UpgradeStageVerify); err != nil {
+			t.Fatalf("record the fixture domain %q: %v", domain, err)
+		}
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("begin the fixture completion: %v", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := upgradeoperation.RecordCompletionTx(ctx, tx, actionVerification(domains...)); err != nil {
+	verification := actionVerification(domains...)
+	if err := upgradeoperation.RecordExternalBindingTx(ctx, tx, upgradeoperation.ExternalBinding{
+		BaseURL:      "https://cpa.example",
+		Identity:     verification.BindingIdentity,
+		Generation:   verification.BindingGeneration,
+		ObservedAtMS: verification.BindingObservedAtMS,
+	}); err != nil {
+		t.Fatalf("record the fixture binding: %v", err)
+	}
+	if _, err := upgradeoperation.RecordCompletionTx(ctx, tx, verification); err != nil {
 		t.Fatalf("record the fixture verdict: %v", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -220,7 +236,7 @@ func TestVerifyActionRefusesACallerSuppliedInput(t *testing.T) {
 func TestVerifyActionReportsTheRecordedVerdict(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "usage.sqlite")
 	recordOperation(t, database, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
-	recordCompletedOperation(t, database, model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity)
+	recordCompletedOperation(t, database, model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig)
 	before := readRecordedOperation(t, database)
 
 	w := actionRequest(t, handlerFor(t, database), http.MethodPost, testPrefix+VerifySuffix, bearer(testAdminKey))

@@ -146,7 +146,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	}
 	recorded, found, err := readRecordedCopyIn(ctx, paths.Database)
 	if err != nil {
-		return VerifyResult{}, err
+		return VerifyResult{}, verifyRecordReadError(err)
 	}
 	if !found {
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
@@ -156,7 +156,11 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	// touches neither the store nor the source. The product is admitted normally
 	// from here, so it must not need the 1.x volume to answer this call.
 	if recorded.Stage == model.UpgradeStageComplete {
-		return completedVerifyResult(recorded)
+		binding, hasBinding, err := readVerifyBinding(ctx, paths.Database)
+		if err != nil {
+			return VerifyResult{}, err
+		}
+		return completedVerifyResult(recorded, binding, hasBinding)
 	}
 	if err := verifyEntry(recorded); err != nil {
 		return VerifyResult{}, err
@@ -189,14 +193,18 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	// write into is the one below, not the pre-fence snapshot.
 	recorded, found, err = readRecordedCopyInFrom(ctx, repository)
 	if err != nil {
-		return VerifyResult{}, err
+		return VerifyResult{}, verifyRecordReadError(err)
 	}
 	if !found {
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
 			"the v2 data root holds no recorded operation, so there is nothing to verify; nothing was written", nil)
 	}
 	if recorded.Stage == model.UpgradeStageComplete {
-		return completedVerifyResult(recorded)
+		binding, hasBinding, err := repository.ExternalBinding(ctx)
+		if err != nil {
+			return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
+		}
+		return completedVerifyResult(recorded, binding, hasBinding)
 	}
 	if err := verifyEntry(recorded); err != nil {
 		return VerifyResult{}, err
@@ -245,14 +253,20 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	defer func() { _ = tx.Rollback() }()
 	current, found, err := upgradeoperation.GetTx(ctx, tx)
 	if err != nil {
-		return VerifyResult{}, fmt.Errorf("read the recorded operation: %w", err)
+		return VerifyResult{}, verifyRecordReadError(err)
 	}
 	if !found {
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
 			"the recorded operation disappeared before it could be verified; nothing was written", nil)
 	}
 	if current.Stage == model.UpgradeStageComplete {
-		return completedVerifyResult(current)
+		// The binding is read inside the transaction: a completed verdict is
+		// reported only against the target record this transaction sees.
+		binding, hasBinding, err := upgradeoperation.ExternalBindingTx(ctx, tx)
+		if err != nil {
+			return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
+		}
+		return completedVerifyResult(current, binding, hasBinding)
 	}
 	if err := verifyEntry(current); err != nil {
 		return VerifyResult{}, err
@@ -347,7 +361,14 @@ func verifyWaitingManualItem() string {
 // is written and the source is not read: the operation is over, the product is
 // admitted normally, and a repeated call must not re-observe a volume those
 // installs may already have discarded.
-func completedVerifyResult(recorded model.UpgradeOperation) (VerifyResult, error) {
+//
+// The stage is not the verdict on its own. This reader re-checks the record the
+// gate wrote against the row it was written to: an External target, the source
+// volume the copy-in observed, every domain the verdict names, and the External
+// binding the verdict bound. A row that fails any of them is a store whose
+// `complete` label no gate ever proved, and it is reported as unusable instead of
+// as a finished install.
+func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeoperation.ExternalBinding, hasBinding bool) (VerifyResult, error) {
 	evidence, err := recorded.VerificationEvidence()
 	if err != nil {
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
@@ -357,7 +378,82 @@ func completedVerifyResult(recorded model.UpgradeOperation) (VerifyResult, error
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
 			"the recorded operation is complete but its verification evidence is incomplete, so its verdict cannot be reported; restore the v2 store from its backup", nil)
 	}
+	// A Managed operation stops at verify until the trusted U1-1b re-pin promotes
+	// its authority, so this build can never have recorded one as complete. A
+	// completed row that says otherwise was not written by this gate.
+	if evidence.TargetMode != model.UpgradeTargetExternal {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but its verification names a target this build cannot complete, so its verdict cannot be reported; restore the v2 store from its backup", nil)
+	}
+	if strings.TrimSpace(evidence.SourceFingerprint) != strings.TrimSpace(recorded.SourceFingerprintAfter) {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but its verification names a different source volume than the recorded copy-in, so its verdict cannot be reported; restore the v2 store from its backup", nil)
+	}
+	required := append([]string{}, evidence.Domains...)
+	for _, domain := range []string{
+		model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig, model.UpgradeDomainIdentity,
+	} {
+		if !containsVerifyDomain(required, domain) {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable, fmt.Sprintf(
+				"the recorded operation is complete but its verification does not name the %q domain this target needs, so its verdict cannot be reported; restore the v2 store from its backup", domain), nil)
+		}
+	}
+	missing := make([]string, 0, len(required))
+	for _, domain := range required {
+		if !recorded.HasDomain(domain) {
+			missing = append(missing, domain)
+		}
+	}
+	if len(missing) > 0 {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable, fmt.Sprintf(
+			"the recorded operation is complete but does not hold the %s its verification proves, so its verdict cannot be reported; restore the v2 store from its backup: %s",
+			plural(len(missing), "domain", "domains"), strings.Join(missing, ", ")), nil)
+	}
+	if !hasBinding {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but carries no External connect binding, so the target its verdict names cannot be checked; restore the v2 store from its backup", nil)
+	}
+	if evidence.BindingIdentity != binding.Identity ||
+		evidence.BindingGeneration != binding.Generation ||
+		evidence.BindingObservedAtMS != binding.ObservedAtMS {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but its verification names a different External binding than the recorded one, so its verdict cannot be reported; restore the v2 store from its backup", nil)
+	}
 	return verifyResult(recorded, evidence.TargetMode, true), nil
+}
+
+// readVerifyBinding reads the recorded External binding without opening the store
+// for writes: a completed operation is answered from a read-only handle, exactly
+// like the operation row it is checked against. A store whose connect step never
+// ran, or one written before the binding table existed, simply has none.
+func readVerifyBinding(ctx context.Context, databasePath string) (upgradeoperation.ExternalBinding, bool, error) {
+	if _, err := os.Lstat(databasePath); err != nil {
+		return upgradeoperation.ExternalBinding{}, false, err
+	}
+	db, err := sql.Open("sqlite", readOnlySnapshotName(databasePath))
+	if err != nil {
+		return upgradeoperation.ExternalBinding{}, false, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer func() { _ = db.Close() }()
+	present, err := tablePresent(ctx, db, "upgrade_external_connect")
+	if err != nil || !present {
+		return upgradeoperation.ExternalBinding{}, false, err
+	}
+	return upgradeoperation.New(db).ExternalBinding(ctx)
+}
+
+// verifyRecordReadError maps the one stored-row failure the gate cannot report as
+// anything but an outdated verdict: a complete row whose verification did not
+// survive. Keeping it in the gate's own vocabulary means a caller reads the same
+// code for a completion this run refused and one the store cannot describe.
+func verifyRecordReadError(err error) error {
+	if errors.Is(err, upgradeoperation.ErrVerificationEvidenceMissing) {
+		return newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but carries no verification evidence, so its verdict cannot be reported; restore the v2 store from its backup", err)
+	}
+	return err
 }
 
 func verifyResult(operation model.UpgradeOperation, mode string, already bool) VerifyResult {
