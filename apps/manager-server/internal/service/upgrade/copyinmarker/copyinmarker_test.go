@@ -172,11 +172,17 @@ func TestIdentitySurvivesARenameAndARewriteAndDetectsAnotherFile(t *testing.T) {
 	}
 
 	// A file swapped in under the same name is not the store that was recorded.
-	if err := os.Remove(moved); err != nil {
-		t.Fatalf("remove the copied store: %v", err)
-	}
-	if err := os.WriteFile(moved, []byte("foreign store"), 0o600); err != nil {
+	// The replacement is written beside the recorded file and renamed over it, so
+	// the two files exist at the same time and the filesystem cannot hand the
+	// recorded inode back to the new one. Removing the recorded file first makes
+	// this depend on the allocator: ext4 reuses a just-freed inode for the very
+	// next file, and the check then fails on a correct product (CI, Linux).
+	foreignPath := filepath.Join(root, "foreign.sqlite")
+	if err := os.WriteFile(foreignPath, []byte("foreign store"), 0o600); err != nil {
 		t.Fatalf("write the foreign store: %v", err)
+	}
+	if err := os.Rename(foreignPath, moved); err != nil {
+		t.Fatalf("swap the foreign store in: %v", err)
 	}
 	foreign, err := Identity(moved)
 	if err != nil {
