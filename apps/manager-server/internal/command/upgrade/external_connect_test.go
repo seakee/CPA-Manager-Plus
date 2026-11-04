@@ -25,8 +25,12 @@ type externalCPAServer struct {
 	// configDocument is what /v8/management/config answers. It defaults to a v8
 	// document; a translated target answers a v7 one while still advertising v8.
 	configDocument string
-	rejectKey      bool
-	requests       []string
+	// acceptedKey is the management key the server authenticates. It starts as
+	// the key the fixture connects with and is rotated by a test whose CPA has
+	// replaced its credential.
+	acceptedKey string
+	rejectKey   bool
+	requests    []string
 }
 
 // v8ConfigDocument is a v8 configuration document: the generation a v8 CPA
@@ -38,7 +42,7 @@ const v8ConfigDocument = `{"config-version":8,"server":{"port":8317},"oauth":{"a
 
 func newExternalCPAServer(t *testing.T, version string) *externalCPAServer {
 	t.Helper()
-	server := &externalCPAServer{version: version, configDocument: v8ConfigDocument}
+	server := &externalCPAServer{version: version, configDocument: v8ConfigDocument, acceptedKey: cliManagementKey}
 	server.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.requests = append(server.requests, r.Method+" "+r.URL.Path)
 		if r.URL.Path == "/v1/models" {
@@ -46,7 +50,7 @@ func newExternalCPAServer(t *testing.T, version string) *externalCPAServer {
 			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-test"}]}`))
 			return
 		}
-		if r.Header.Get("Authorization") != "Bearer "+cliManagementKey || server.rejectKey {
+		if r.Header.Get("Authorization") != "Bearer "+server.acceptedKey || server.rejectKey {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -404,5 +408,79 @@ func TestExitCodePinsTheExternalRefusals(t *testing.T) {
 				t.Fatalf("exit code = %d, want %d", code, testCase.want)
 			}
 		})
+	}
+}
+
+// cliRotatedManagementKey is the credential the synthetic CPA answers with after
+// its owner rotated the one the connect step proved.
+const cliRotatedManagementKey = "rotated-management-key"
+
+// TestExternalConnectCLIReprovesARotatedKey drives the recovery the completion
+// gate's refusal names: the default repeat of a rotated key exits 1 and says to
+// pass --reprove, and --reprove re-proves the CPA and seals the key the Manager
+// now stores.
+func TestExternalConnectCLIReprovesARotatedKey(t *testing.T) {
+	target := copiedTarget(t)
+	server := newExternalCPAServer(t, "v8.0.13")
+	if code, _, stderr := run(t, "external-connect", "--json", "--target", target,
+		"--cpa-base-url", server.URL, "--management-key-file", managementKeyFile(t, cliManagementKey)); code != 0 {
+		t.Fatalf("first connect exit code = %d; stderr: %s", code, stderr)
+	}
+
+	// The CPA rotates its management key, and the Manager follows it.
+	server.acceptedKey = cliRotatedManagementKey
+	code, stdout, stderr := run(t, "external-connect", "--json", "--target", target,
+		"--cpa-base-url", server.URL, "--management-key-file", managementKeyFile(t, cliRotatedManagementKey))
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 (a rotated key is a decision); stderr: %s", code, stderr)
+	}
+	var refused externalConnectOutput
+	if err := json.Unmarshal([]byte(stdout), &refused); err != nil {
+		t.Fatalf("decode output: %v; output: %s", err, stdout)
+	}
+	if refused.ErrorCode != string(upgradeservice.UpgradeErrorExternalManagementRejected) {
+		t.Fatalf("error code = %q", refused.ErrorCode)
+	}
+	if !strings.Contains(refused.Error, "--reprove") {
+		t.Fatalf("the refusal does not name the recovery: %q", refused.Error)
+	}
+
+	code, stdout, stderr = run(t, "external-connect", "--json", "--reprove", "--target", target,
+		"--cpa-base-url", server.URL, "--management-key-file", managementKeyFile(t, cliRotatedManagementKey))
+	if code != 0 {
+		t.Fatalf("reproof exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var reproved externalConnectOutput
+	if err := json.Unmarshal([]byte(stdout), &reproved); err != nil {
+		t.Fatalf("decode output: %v; output: %s", err, stdout)
+	}
+	if reproved.Result == nil || reproved.Result.Stage != "external_connect" || reproved.Result.AlreadyComplete {
+		t.Fatalf("reproof result = %+v, want a fresh connection record", reproved.Result)
+	}
+	if reproved.Error != "" {
+		t.Fatalf("reproof reported %q", reproved.Error)
+	}
+}
+
+// TestExternalConnectCLIReproofRequiresARecordedConnection keeps --reprove from
+// becoming a first connection: with nothing recorded there is nothing to
+// re-prove, and the CLI says so through the prerequisite exit status.
+func TestExternalConnectCLIReproofRequiresARecordedConnection(t *testing.T) {
+	target := copiedTarget(t)
+	server := newExternalCPAServer(t, "v8.0.13")
+	code, stdout, stderr := run(t, "external-connect", "--json", "--reprove", "--target", target,
+		"--cpa-base-url", server.URL, "--management-key-file", managementKeyFile(t, cliManagementKey))
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2 (no recorded connection is a prerequisite); stderr: %s", code, stderr)
+	}
+	var output externalConnectOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode output: %v; output: %s", err, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorExternalNotApplicable) {
+		t.Fatalf("error code = %q, want the not-applicable refusal", output.ErrorCode)
+	}
+	if !strings.Contains(output.Error, "recorded External connection") {
+		t.Fatalf("the refusal does not say what is missing: %q", output.Error)
 	}
 }

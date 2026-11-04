@@ -1238,3 +1238,85 @@ func TestVerifyRefusesACompletedRowWithoutTheProvedCredential(t *testing.T) {
 		})
 	}
 }
+
+// externalConnectOptionsFor drives the connect step with the same synthetic probe
+// seams the fixture's verification uses, so an offline test re-proves the
+// recorded target without dialing its address.
+func externalConnectOptionsFor(fixture *verifyFixture, managementKey string, reprove bool) ExternalConnectOptions {
+	verifyOptions := fixture.verifyOptions()
+	return ExternalConnectOptions{
+		TargetRoot:             fixture.target,
+		BaseURL:                verifyExternalAddress,
+		ManagementKey:          managementKey,
+		Reprove:                reprove,
+		observeExternalVersion: verifyOptions.observeExternalVersion,
+		readExternalKeys:       verifyOptions.readExternalKeys,
+		proveModelSurface:      verifyOptions.proveModelSurface,
+		readV8Config:           verifyOptions.readV8Config,
+	}
+}
+
+// TestVerifyCompletesAfterAnExternalConnectBackfill is the F2 regression on the
+// gate's side: the refusal an unsealed binding earns tells the operator to run
+// the External connect step again, so that instruction has to be executable.
+func TestVerifyCompletesAfterAnExternalConnectBackfill(t *testing.T) {
+	fixture := newExternalVerifyFixture(t)
+	// The shape 1040edcc and 081fcc53 left: the stage and the binding, no secret.
+	execTarget(t, fixture.databasePath(), `update upgrade_external_connect set management_key = '' where id = 1`)
+	if _, err := fixture.verify(t); !errors.Is(err, ErrVerifyConnectionUnproven) {
+		t.Fatalf("verify on an unsealed binding error = %v, want ErrVerifyConnectionUnproven", err)
+	}
+	// No --reprove: the operator is recovering a binding that never carried a
+	// secret, which is exactly the case the default path now repairs.
+	result, err := ExternalConnect(context.Background(), externalConnectOptionsFor(fixture, externalTestKey, false))
+	if err != nil {
+		t.Fatalf("backfill the unsealed binding: %v", err)
+	}
+	if result.AlreadyComplete {
+		t.Fatalf("the backfill answered from the record it had to repair: %+v", result)
+	}
+	verified, err := fixture.verify(t)
+	if err != nil {
+		t.Fatalf("verify after the backfill: %v", err)
+	}
+	if !verified.Complete || verified.Stage != model.UpgradeStageComplete {
+		t.Fatalf("result = %+v, want a completed operation", verified)
+	}
+}
+
+// TestVerifyCompletesAfterAReproofedRotatedKey is the F2 rotation path end to
+// end: the connect step proved K1, the CPA rotated to K2, the Manager stores K2.
+// The gate refuses, the default repeat refuses, and --reprove seals K2 so the
+// next verification completes.
+func TestVerifyCompletesAfterAReproofedRotatedKey(t *testing.T) {
+	const rotated = "rotated-management-key"
+	fixture := newExternalVerifyFixture(t)
+	// The Manager follows the CPA's rotation; the binding still seals K1.
+	fixture.handManagerConnection(t, verifyExternalAddress, rotated)
+	_, verifyErr := fixture.verify(t)
+	if !errors.Is(verifyErr, ErrVerifyConnectionUnproven) {
+		t.Fatalf("verify after the rotation error = %v, want ErrVerifyConnectionUnproven", verifyErr)
+	}
+	if !strings.Contains(verifyErr.Error(), "--reprove") {
+		t.Fatalf("the refusal does not name the recovery: %v", verifyErr)
+	}
+	// The default repeat refuses a credential the operation did not connect with.
+	if _, err := ExternalConnect(context.Background(), externalConnectOptionsFor(fixture, rotated, false)); !errors.Is(err, ErrExternalManagementRejected) {
+		t.Fatalf("the default repeat of a rotated key refused with %v", err)
+	}
+	// The explicit re-proof seals the key the CPA now answers with.
+	reproved, err := ExternalConnect(context.Background(), externalConnectOptionsFor(fixture, rotated, true))
+	if err != nil {
+		t.Fatalf("reprove the rotated key: %v", err)
+	}
+	if reproved.AlreadyComplete {
+		t.Fatalf("the reproof answered from the recorded connection: %+v", reproved)
+	}
+	verified, err := fixture.verify(t)
+	if err != nil {
+		t.Fatalf("verify after the reproof: %v", err)
+	}
+	if !verified.Complete || verified.Stage != model.UpgradeStageComplete {
+		t.Fatalf("result = %+v, want a completed operation", verified)
+	}
+}

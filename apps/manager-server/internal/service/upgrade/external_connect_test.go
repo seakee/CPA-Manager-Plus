@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 )
@@ -357,6 +360,145 @@ func TestExternalConnectDeclaredVersion(t *testing.T) {
 		t.Fatalf("err = %v, want the version refusal", err)
 	} else if !strings.Contains(err.Error(), "v7.9.9") {
 		t.Fatalf("refusal %q does not name the declared version", err)
+	}
+}
+
+// sealedBinding reads the recorded External binding and decrypts the management
+// secret the step sealed into it, using the data key beside the store. It is the
+// one place a test turns the durable record back into the credential the Manager
+// would present.
+func sealedBinding(t *testing.T, databasePath string) (upgradeoperation.ExternalBinding, string) {
+	t.Helper()
+	db, err := managersqlite.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open the v2 database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	binding, found, err := upgradeoperation.New(db).ExternalBinding(context.Background())
+	if err != nil || !found {
+		t.Fatalf("read the recorded binding: found=%t err=%v", found, err)
+	}
+	key, _, err := security.LoadOrCreateDataKey("", filepath.Join(filepath.Dir(databasePath), dataKeyFileName))
+	if err != nil {
+		t.Fatalf("load the data key: %v", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		t.Fatalf("initialize the protector: %v", err)
+	}
+	secret, err := protector.UnprotectString(binding.ManagementKey)
+	if err != nil {
+		t.Fatalf("decrypt the recorded management secret: %v", err)
+	}
+	return binding, secret
+}
+
+// TestExternalConnectBackfillsAnUnsealedBinding is the F2 regression for the
+// pre-R2 shape: an operation recorded before the connect step sealed its secret
+// sits at external_connect with an empty management_key.
+//
+// The completion gate refuses that row and tells the operator to run the step
+// again — which used to answer "already connected" from the empty record, so the
+// operation could never leave external_connect. The step now proves the CPA again
+// and seals the key in place.
+func TestExternalConnectBackfillsAnUnsealedBinding(t *testing.T) {
+	target := newExternalTarget(t)
+	first, err := target.connect(t)
+	if err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	execTarget(t, target.databasePath(), `update upgrade_external_connect set management_key = '' where id = 1`)
+	before := operationRow(t, target.databasePath())
+	probes := target.probes
+
+	backfilled, err := target.connect(t)
+	if err != nil {
+		t.Fatalf("backfill the unsealed binding: %v", err)
+	}
+	if backfilled.AlreadyComplete {
+		t.Fatalf("the backfill answered from the record it had to repair: %+v", backfilled)
+	}
+	if target.probes == probes {
+		t.Fatal("the backfill never proved the CPA again")
+	}
+	if backfilled.Generation != first.Generation {
+		t.Fatalf("the backfill rebound the operation: %q -> %q", first.Generation, backfilled.Generation)
+	}
+	after := operationRow(t, target.databasePath())
+	if after.Stage != model.UpgradeStageExternalConnect || after.Revision <= before.Revision {
+		t.Fatalf("the backfill did not record a new revision: %+v -> %+v", before, after)
+	}
+	binding, secret := sealedBinding(t, target.databasePath())
+	if !security.IsValidProtectedEnvelope(binding.ManagementKey) {
+		t.Fatalf("the backfill left the binding unsealed: %q", binding.ManagementKey)
+	}
+	if secret != externalTestKey {
+		t.Fatalf("the backfill sealed %q, want the key it proved", secret)
+	}
+	evidence, found, err := readExternalConnectEvidence(target.copied.target)
+	if err != nil || !found || evidence.Identity != first.Identity {
+		t.Fatalf("the backfill left the evidence stale: %+v, found %t, err %v", evidence, found, err)
+	}
+}
+
+// TestExternalConnectBackfillRefusesARejectedKey proves the backfill is a real
+// proof, not a repair: a CPA that answers 401 leaves the row exactly as it was,
+// with the empty secret the operator still has to resolve.
+func TestExternalConnectBackfillRefusesARejectedKey(t *testing.T) {
+	target := newExternalTarget(t)
+	if _, err := target.connect(t); err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	execTarget(t, target.databasePath(), `update upgrade_external_connect set management_key = '' where id = 1`)
+	before := operationRow(t, target.databasePath())
+	target.probErr = cpa.ErrManagementRejected
+
+	_, err := target.connect(t)
+	if !errors.Is(err, ErrExternalManagementRejected) {
+		t.Fatalf("a rejected key refused with %v", err)
+	}
+	binding, _ := sealedBinding(t, target.databasePath())
+	if strings.TrimSpace(binding.ManagementKey) != "" {
+		t.Fatalf("a refused backfill sealed %q", binding.ManagementKey)
+	}
+	after := operationRow(t, target.databasePath())
+	if after.Stage != model.UpgradeStageExternalConnect || after.ErrorCode != string(UpgradeErrorExternalManagementRejected) {
+		t.Fatalf("a refused backfill recorded %+v", after)
+	}
+	if !after.HasDomain(model.UpgradeDomainCPAConfig) || !before.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the refusal changed the domains: %v -> %v", before.DomainsDone, after.DomainsDone)
+	}
+}
+
+// TestExternalConnectRefusesARotatedKeyWithoutReprove keeps the default repeat
+// strict: a credential the operation did not connect with is refused, and the
+// refusal names the one command that can re-prove it.
+func TestExternalConnectRefusesARotatedKeyWithoutReprove(t *testing.T) {
+	target := newExternalTarget(t)
+	if _, err := target.connect(t); err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	before := operationRow(t, target.databasePath())
+	probes := target.probes
+	options := target.options
+	options.ManagementKey = "rotated-management-key"
+
+	_, err := target.connectWith(t, options)
+	if !errors.Is(err, ErrExternalManagementRejected) {
+		t.Fatalf("a rotated key refused with %v", err)
+	}
+	if !strings.Contains(err.Error(), "--reprove") {
+		t.Fatalf("the refusal does not name the recovery: %v", err)
+	}
+	if target.probes != probes {
+		t.Fatalf("the default repeat probed the CPA %d more time(s)", target.probes-probes)
+	}
+	binding, secret := sealedBinding(t, target.databasePath())
+	if secret != externalTestKey || !security.IsValidProtectedEnvelope(binding.ManagementKey) {
+		t.Fatalf("the refusal rewrote the sealed secret: %q (%q)", binding.ManagementKey, secret)
+	}
+	if after := operationRow(t, target.databasePath()); after.Stage != before.Stage {
+		t.Fatalf("the refusal moved the stage: %q -> %q", before.Stage, after.Stage)
 	}
 }
 

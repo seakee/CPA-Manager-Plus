@@ -744,7 +744,7 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 		}
 		if !security.EqualHMAC(strings.TrimSpace(target.connection.ManagementKey), strings.TrimSpace(bindingSecret)) {
 			return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-				"the Manager connection does not carry the management secret the External connect step proved, so a restarted Manager could not administer the CPA this run verified; nothing was written", nil)
+				"the Manager connection does not carry the management secret the External connect step proved, so a restarted Manager could not administer the CPA this run verified; run `upgrade external-connect --reprove` with the current management key to re-prove the CPA and seal it, or `store-cpa-connection` with the key the External connect step proved, and nothing was written", nil)
 		}
 		return nil
 	}
