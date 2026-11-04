@@ -428,6 +428,7 @@ export function FreshUpgradeFlow({
   verify,
   language = fullWebLanguage(),
   pollDelays = DEFAULT_POLL_DELAYS,
+  onRecordedOperation,
 }: {
   read: UpgradeWizardRead;
   // The one action of this surface. It is injected exactly like the reads, so a
@@ -436,6 +437,10 @@ export function FreshUpgradeFlow({
   verify?: UpgradeWizardVerify;
   language?: string;
   pollDelays?: number[];
+  // The host page needs the one fact the read establishes — whether an operation
+  // is recorded — to keep its own copy honest: a recorded operation is not a
+  // source with no migration path.
+  onRecordedOperation?: (recorded: boolean) => void;
 }) {
   const [step, setStep] = useState<Step>('preflight');
   const [boot, setBoot] = useState<BootState>({ phase: 'reading' });
@@ -464,6 +469,7 @@ export function FreshUpgradeFlow({
         const parsed = parseUpgradeStatus(raw);
         if (stopped) return;
         if (!parsed) throw new UpgradeWizardError('response');
+        onRecordedOperation?.(parsed.recorded);
         if (parsed.recorded) {
           // The first answer is the resume: the poll effect continues from it
           // instead of asking the operator to qualify the source again.
@@ -480,7 +486,7 @@ export function FreshUpgradeFlow({
       stopped = true;
       controller.abort();
     };
-  }, [boot.phase, read]);
+  }, [boot.phase, read, onRecordedOperation]);
 
   // The preflight runs for a source that has no operation yet, and only then. A
   // retry resets the observation to `idle`, which is what re-runs this effect.

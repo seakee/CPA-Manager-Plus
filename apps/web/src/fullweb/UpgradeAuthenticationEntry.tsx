@@ -24,6 +24,11 @@ export function UpgradeAuthenticationEntry() {
     useState<UpgradeEntryObservation>('unsupported_upgrade');
   const [error, setError] = useState<UpgradeAuthenticationError['reason'] | 'expired' | ''>('');
   const [checking, setChecking] = useState(false);
+  // Whether the wizard below found a recorded operation. The entry's own copy
+  // describes a source with no public observation; once an operation is recorded
+  // that description is wrong, because the read-only view below is a migration
+  // already under way and this page can act on it.
+  const [recorded, setRecorded] = useState(false);
   const heading = useRef<HTMLHeadingElement>(null);
   const credential = useRef('');
   const request = useRef<AbortController | null>(null);
@@ -199,14 +204,19 @@ export function UpgradeAuthenticationEntry() {
                     checking
                       ? 'checkingHelp'
                       : observation === 'observation_unavailable'
-                        ? 'observationUnavailableHelp'
+                        ? recorded
+                          ? 'recordedObservationHelp'
+                          : 'observationUnavailableHelp'
                         : 'boundary',
                     language
                   )}
                 </p>
               </div>
             </div>
-            <p className="upgrade-next">{text('next', language)}</p>
+            {/* The "further decisions will become available" line belongs to a
+                source with no migration path. A recorded operation already has
+                one, and the wizard below shows it. */}
+            {!recorded && <p className="upgrade-next">{text('next', language)}</p>}
           </div>
           <div className="upgrade-footer">
             <button className="btn btn-secondary" onClick={() => revoke()}>
@@ -224,7 +234,12 @@ export function UpgradeAuthenticationEntry() {
         </section>
         {/* The wizard is mounted only once the server has verified a session,
             and it reads nothing but the two upgrade routes. */}
-        <FreshUpgradeFlow read={wizardRead} verify={wizardVerify} language={language} />
+        <FreshUpgradeFlow
+          read={wizardRead}
+          verify={wizardVerify}
+          language={language}
+          onRecordedOperation={setRecorded}
+        />
       </main>
       <footer className="journey-copyright">{text('footer', language)}</footer>
     </div>

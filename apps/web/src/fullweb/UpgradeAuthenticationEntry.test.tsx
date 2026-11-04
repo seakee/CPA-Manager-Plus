@@ -268,4 +268,56 @@ describe('upgrade authentication lifecycle', () => {
     expect(page).not.toContain('Migration is not available for this source yet.');
     expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
   });
+
+  it('does not claim there is no migration path once the wizard reads a recorded operation', async () => {
+    mocks.verify.mockResolvedValueOnce({
+      revision: 'd'.repeat(64),
+      observation: 'observation_unavailable',
+    });
+    const recorded = {
+      contractVersion: 'cpamp.upgrade-wizard.v1',
+      recorded: true,
+      stage: 'external_connect',
+      stageKnown: true,
+      nextAction: 'verify',
+      domainsDone: ['source_copy'],
+      sourceKind: 'upgraded-legacy',
+      sourceVersion: 'v1.14.4',
+      manualItems: [],
+      errorCode: '',
+      errorDetail: '',
+      reconciliation: { mismatchDays: [], mismatchDaysTotal: 0, mismatchDaysTruncated: false },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        const payload = url.includes('/installation/upgrade/status') ? recorded : {};
+        return { ok: true, status: 200, json: async () => payload } as Response;
+      })
+    );
+    await act(async () => {
+      renderer = create(<UpgradeAuthenticationEntry />);
+    });
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    // The wizard's boot read is one promise deep: flush it before reading the page.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const page = JSON.stringify(renderer.toJSON());
+    // A recorded operation is a migration that is already under way. The entry
+    // must not tell the operator nothing was written, that migration is
+    // unavailable, or that further decisions wait for a future path — with the
+    // recorded row on screen those sentences contradict it.
+    expect(page).not.toContain('Nothing was written and migration is not available');
+    expect(page).not.toContain('Further upgrade decisions will become available');
+    expect(page).toContain('it is the record this page acts on');
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
+  });
 });

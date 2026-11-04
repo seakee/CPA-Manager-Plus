@@ -11,6 +11,8 @@ const en = {
   observationUnavailable: 'The source cannot be summarized publicly.',
   observationUnavailableHelp:
     'Your administrator identity is verified, but this source keeps recent writes in a log its recovery path owns, so the public summary is unavailable. Nothing was written and migration is not available; the read-only operation view below still shows what this installation recorded.',
+  recordedObservationHelp:
+    'Your administrator identity is verified. The source keeps recent writes in a log its recovery path owns, so its public summary is unavailable — the read-only operation view below shows what this installation recorded, and it is the record this page acts on.',
   next: 'Further upgrade decisions will become available when a supported migration path is implemented. Keep your existing data and key.',
   verify: 'Check authentication again',
   logout: 'Return to login',
@@ -44,6 +46,8 @@ const zh: typeof en = {
   observationUnavailable: '当前来源无法生成公开摘要。',
   observationUnavailableHelp:
     '管理员身份已验证，但该来源将最近写入保留在由恢复流程掌管的日志中，因此公开摘要不可用。没有写入任何数据，也没有可执行的迁移；下方只读操作视图仍会显示本安装已记录的内容。',
+  recordedObservationHelp:
+    '管理员身份已验证。该来源将最近写入保留在由恢复流程掌管的日志中，因此无法生成公开摘要；下方只读操作视图会显示本安装已记录的内容，本页面的操作只依据这条记录。',
   next: '支持的迁移路径实现后才能继续升级决策。请保留原有数据和管理员密钥。',
   verify: '重新验证当前身份',
   logout: '返回登录',
@@ -73,6 +77,8 @@ const tw: typeof en = {
   observationUnavailable: '目前來源無法產生公開摘要。',
   observationUnavailableHelp:
     '管理員身分已驗證，但此來源將最近寫入保留在由復原流程掌管的日誌中，因此公開摘要不可用。沒有寫入任何資料，也沒有可執行的移轉；下方唯讀操作檢視仍會顯示本安裝已記錄的內容。',
+  recordedObservationHelp:
+    '管理員身分已驗證。此來源將最近寫入保留在由復原流程掌管的記錄檔中，因此無法產生公開摘要；下方唯讀操作檢視會顯示本安裝已記錄的內容，本頁面的操作只依據這筆記錄。',
   next: '支援的移轉路徑實作後才能繼續升級決策。請保留原有資料與管理員金鑰。',
   verify: '重新驗證目前身分',
   logout: '返回登入',
@@ -103,6 +109,8 @@ const ru: typeof en = {
   observationUnavailable: 'Источник нельзя описать публично.',
   observationUnavailableHelp:
     'Личность администратора подтверждена, но этот источник хранит последние записи в журнале, которым владеет путь восстановления, поэтому публичная сводка недоступна. Ничего не записано, миграция недоступна; доступный только для чтения обзор операции ниже по-прежнему показывает, что записала эта установка.',
+  recordedObservationHelp:
+    'Личность администратора подтверждена. Источник хранит последние записи в журнале, которым управляет путь восстановления, поэтому публичная сводка недоступна; ниже показано, что записала эта установка, и действия страницы опираются только на эту запись.',
   next: 'Дальнейшие решения об обновлении появятся, когда будет реализован поддерживаемый путь миграции. Сохраните существующие данные и ключ.',
   verify: 'Проверить подлинность ещё раз',
   logout: 'Вернуться ко входу',
