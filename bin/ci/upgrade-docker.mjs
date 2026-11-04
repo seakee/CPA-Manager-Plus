@@ -53,6 +53,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -114,6 +115,11 @@ const REDACTED = '[redacted]';
 // mount (the same-volume probe). Ownership normalization is the same shape, and
 // it must not need a second image contract.
 const OWNERSHIP_HELPER_IMAGE = 'alpine:3.21';
+// The management and client keys the harness's synthetic v8 CPA accepts. They
+// are this run's own secrets, registered with the redactor beside the two
+// administrator keys.
+const SYNTHETIC_CPA_MANAGEMENT_KEY = 'Cpamp_U1D_Harness_CPA_Management_Key_0001';
+const SYNTHETIC_CPA_CLIENT_KEY = 'cpampd-u1d-client-key-0001';
 
 const isEntryPoint = (() => {
   try {
@@ -575,7 +581,7 @@ export function verifyEvidenceDocument(document, { expectHead = null } = {}) {
   return { ok: problems.length === 0, problems, expected, actual: document?.sha256 ?? null };
 }
 
-const redactor = createRedactor([ADMIN_V1, ADMIN_V2]);
+const redactor = createRedactor([ADMIN_V1, ADMIN_V2, SYNTHETIC_CPA_MANAGEMENT_KEY]);
 
 const evidence = {
   contract: UPGRADE_DOCKER_CONTRACT.contract,
@@ -1976,6 +1982,169 @@ async function proveRefusedMountStatus(binary, root, stage, sourceRoot) {
   }
 }
 
+// completeThroughTheGate finishes the operation the way an operator does. The
+// External connection is real (a synthetic v8 CPA this harness serves, with its
+// own management key and one client key), the Manager's own connection is
+// stored, and then `upgrade verify` runs — the same command the operator runs —
+// on the copied root. Both halves of the verdict are asserted: the CLI report
+// and the row the gate wrote, including the evidence beside the stage.
+async function completeThroughTheGate(binary, completedRoot, sourceRoot, databasePath) {
+  const cpa = await startSyntheticCPA();
+  try {
+    const keyFile = path.join(SCRATCH, 'work', 'admission', 'management-key');
+    fs.writeFileSync(keyFile, `${SYNTHETIC_CPA_MANAGEMENT_KEY}\n`, { mode: 0o600 });
+
+    const connect = runCli(
+      binary,
+      ['upgrade', 'external-connect', '--target', completedRoot, '--cpa-base-url', cpa.url, '--management-key-file', keyFile, '--json'],
+      'admission:connect',
+      { expectExit: 0 },
+    );
+    const connected = parseJson(connect.stdout, 'admission:connect');
+    assertValue(connected.result?.stage === 'external_connect', `admission:connect stage=${connected.result?.stage}`);
+
+    // The gate compares the recorded binding with the CPA the Manager itself
+    // resolves, so the Manager's own configuration has to name this CPA: the
+    // same command an operator runs, against the copied root's own store.
+    const configPath = path.join(SCRATCH, 'work', 'admission', 'manager-config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ dataDir: '.' }));
+    runCli(
+      binary,
+      [
+        'store-cpa-connection',
+        '--cpa-base-url', cpa.url,
+        '--management-key-file', keyFile,
+        '--db-path', path.join(completedRoot, 'usage.sqlite'),
+        '--data-key-path', path.join(completedRoot, 'data.key'),
+      ],
+      'admission:store-connection',
+      { expectExit: 0, env: { CPA_MANAGER_CONFIG: configPath } },
+    );
+
+    const verify = runCli(
+      binary,
+      ['upgrade', 'verify', '--legacy', sourceRoot, '--target', completedRoot, '--json'],
+      'admission:verify',
+      { expectExit: 0 },
+    );
+    const report = parseJson(verify.stdout, 'admission:verify');
+    assertValue(report.result?.complete === true, `admission:verify complete=${report.result?.complete}`);
+    assertValue(report.result?.stage === 'complete', `admission:verify stage=${report.result?.stage}`);
+    assertValue(report.result?.targetMode === 'external', `admission:verify targetMode=${report.result?.targetMode}`);
+    assertValue(report.result?.alreadyVerified === false, 'admission:verify reported the first verdict as a repeat');
+    for (const domain of ['source_copy', 'cpa_config', 'identity']) {
+      assertValue(
+        (report.result?.domainsDone ?? []).includes(domain),
+        `admission:verify domainsDone=${JSON.stringify(report.result?.domainsDone)} is missing ${domain}`,
+      );
+    }
+
+    const row = readRowJson(databasePath, 'select stage, error_code, verification from upgrade_operations where id = 1');
+    assertValue(row?.stage === 'complete', `admission: the gate did not record complete (stage=${row?.stage})`);
+    const recorded = JSON.parse(String(row.verification ?? '{}'));
+    assertValue(recorded.targetMode === 'external', `admission: the recorded evidence target=${recorded.targetMode}`);
+    for (const domain of ['source_copy', 'cpa_config']) {
+      assertValue(
+        Array.isArray(recorded.domains) && recorded.domains.includes(domain),
+        `admission: the recorded evidence domains=${JSON.stringify(recorded.domains)} is missing ${domain}`,
+      );
+    }
+    assertValue(
+      typeof recorded.sourceFingerprint === 'string' && SHA256_PATTERN.test(recorded.sourceFingerprint),
+      'admission: the recorded evidence carries no source fingerprint',
+    );
+    // The verdict is repeatable and writes nothing the second time, which is
+    // what the wizard and the CLI both report.
+    const repeat = runCli(
+      binary,
+      ['upgrade', 'verify', '--legacy', sourceRoot, '--target', completedRoot, '--json'],
+      'admission:verify-repeat',
+      { expectExit: 0 },
+    );
+    const repeated = parseJson(repeat.stdout, 'admission:verify-repeat');
+    assertValue(repeated.result?.alreadyVerified === true, 'admission:verify repeat was not reported as already recorded');
+
+    return {
+      verify: {
+        exitCode: verify.code,
+        stage: report.result?.stage,
+        targetMode: report.result?.targetMode,
+        domainsDone: report.result?.domainsDone,
+      },
+      row: { stage: row.stage, errorCode: row.error_code ?? null, verificationKeys: Object.keys(recorded).sort() },
+      repeat: { exitCode: repeat.code, alreadyVerified: repeated.result?.alreadyVerified, updatedAtMs: repeated.result?.updatedAtMs },
+    };
+  } finally {
+    await cpa.close();
+  }
+}
+
+// startSyntheticCPA serves the four reads the External connect step makes, with
+// the version header and the management credential it expects. It is the
+// harness's own CPA, on a port this run allocated, closed before the run ends.
+function startSyntheticCPA() {
+  const port = ports.take();
+  const name = `${PREFIX}-cpa`;
+  const server = http.createServer((request, response) => {
+    const url = request.url ?? '';
+    const send = (status, payload, headers = {}) => {
+      response.writeHead(status, { 'content-type': 'application/json', ...headers });
+      response.end(payload);
+    };
+    if (url === '/v1/models') {
+      send(200, JSON.stringify({ object: 'list', data: [{ id: DATASET_MODELS[0].model }] }));
+      return;
+    }
+    if (request.headers.authorization !== `Bearer ${SYNTHETIC_CPA_MANAGEMENT_KEY}`) {
+      send(401, JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    if (url === '/v0/management/config') {
+      send(200, '{}', { 'x-cpa-version': 'v8.0.13' });
+      return;
+    }
+    if (url === '/v8/management/config') {
+      send(200, JSON.stringify({
+        'config-version': 8,
+        server: { port },
+        oauth: { 'auth-dir': '/auth' },
+        access: { 'api-keys': [SYNTHETIC_CPA_CLIENT_KEY] },
+      }));
+      return;
+    }
+    if (url === '/v8/management/config/access/api-keys') {
+      send(200, JSON.stringify([SYNTHETIC_CPA_CLIENT_KEY]));
+      return;
+    }
+    send(404, JSON.stringify({ error: 'not found' }));
+  });
+  registry.track('hostProcess', name, () => new Promise((resolve) => server.close(() => resolve(undefined))));
+  return new Promise((resolve, reject) => {
+    server.once('error', (error) => {
+      registry.untrack('hostProcess', name);
+      reject(new Error(`synthetic CPA on 127.0.0.1:${port}: ${error?.message || error}`));
+    });
+    server.listen(port, '127.0.0.1', () => {
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        close: () => new Promise((done) => {
+          registry.untrack('hostProcess', name);
+          server.close(() => done());
+        }),
+      });
+    });
+  });
+}
+
+function readRowJson(dbPath, sql) {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return db.prepare(sql).get();
+  } finally {
+    db.close();
+  }
+}
+
 // proveCompletedAdmission proves the reads end with the operation. The recorded
 // row is the terminal `complete` one, so admission serves the full writable
 // surface — /health 200 — and both fixed-surface reads answer 404 to every
@@ -2040,22 +2209,17 @@ async function assertAdmission(binary, workspace) {
     reconcile: await proveRefusedMountStatus(binary, workspace.main.target, 'reconcile', sourceRoot),
   };
 
-  // Completion is the terminal stage on the row the copy-in recorded. No
-  // completion transition ships in this milestone (it is the operation's own
-  // later steps), so the harness writes that stage onto the real row: the
-  // evidence admission demands — the upgraded-legacy kind, both fingerprints and
-  // the backup manifest digest — is the copy-in's own, and the stage token is
-  // the only input the harness supplies.
+  // Completion is the product's own verdict. The operation on the copied root is
+  // connected to a real v8 CPA, the Manager's own connection is stored, and the
+  // built binary runs the completion gate on it. The gate records the stage and
+  // the evidence it rests on in one transaction; the harness writes no stage
+  // token and reads back only what the verdict recorded.
   const completedRoot = path.join(SCRATCH, 'work', 'admission', 'complete');
   fs.rmSync(completedRoot, { recursive: true, force: true });
   copyTree(workspace.main.target, completedRoot);
   fs.rmSync(path.join(completedRoot, 'usage.sqlite.manager.lock'), { force: true });
   const completedDatabase = path.join(completedRoot, 'usage.sqlite');
-  sqliteExec(completedDatabase, "update upgrade_operations set stage = 'complete' where id = 1");
-  assertValue(
-    sqliteCount(completedDatabase, "select count(*) as count from upgrade_operations where id = 1 and stage = 'complete'") === 1,
-    'admission: the terminal stage did not land on the recorded row',
-  );
+  const completion = await completeThroughTheGate(binary, completedRoot, sourceRoot, completedDatabase);
   const completed = await proveCompletedAdmission(binary, completedRoot, sourceRoot);
 
   evidence.admission = {
@@ -2064,7 +2228,7 @@ async function assertAdmission(binary, workspace) {
     mountless,
     refusedMount,
     completed,
-    completionInput: 'terminal stage written onto the row the real copy-in recorded; the evidence the admission demands is the copy-in\'s own',
+    completion,
   };
   stableFacts.push(`admission:copy_in:${copyIn.health}:${copyIn.status.status}:${copyIn.status.stage}:${copyIn.status.nextAction}:${copyIn.preflight.status}`);
   stableFacts.push(`admission:reconcile:${reconcile.health}:${reconcile.status.status}:${reconcile.status.stage}:${reconcile.status.nextAction}:${reconcile.preflight.status}`);
@@ -2081,6 +2245,9 @@ async function assertAdmission(binary, workspace) {
     `admission:refused-mount:reconcile:${refusedMount.reconcile.health}:${refusedMount.reconcile.status.status}:${refusedMount.reconcile.status.stage}:${refusedMount.reconcile.status.nextAction}:${refusedMount.reconcile.status.sourceRoot}:${refusedMount.reconcile.preflight.status}:${refusedMount.reconcile.preflight.ready}:${refusedMount.reconcile.preflight.code}`,
   );
   stableFacts.push(`admission:complete:${completed.health}:${completed.status}:${completed.preflight}`);
+  stableFacts.push(
+    `admission:completion:${completion.verify.stage}:${completion.verify.targetMode}:${completion.row.stage}:${completion.row.verificationKeys.join(',')}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -3176,9 +3343,9 @@ export function shellTokens(command) {
   return tokens;
 }
 
-function runCli(binary, cliArgs, name, { expectExit = null, allowMissingBinary = false } = {}) {
+function runCli(binary, cliArgs, name, { expectExit = null, allowMissingBinary = false, env = null } = {}) {
   const effectiveArgs = withDeclaredSourceVersion(cliArgs, acceptedRelease);
-  const result = sh(binary, effectiveArgs, { timeout: 600_000 });
+  const result = sh(binary, effectiveArgs, { timeout: 600_000, ...(env ? { env } : {}) });
   evidence.commands.push(commandRecord(name, result.code, result.stdout, result.stderr));
   if (result.code === null && !allowMissingBinary) {
     throw new Error(`${name}: the command did not run: ${redactor.redact(result.stderr.trim())}`);
