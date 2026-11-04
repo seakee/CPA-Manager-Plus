@@ -77,6 +77,12 @@ export interface UpgradePreflight {
   parityGaps: PreflightGaps;
   blocked: string[];
   ready: boolean;
+  // The declaration this read cannot make. Present on every document, so
+  // readiness is never inferred from a missing field, and deliberately separate
+  // from the CLI's exact-equality acceptance: the check behind it is pending,
+  // not passed.
+  pendingDeclaration: boolean;
+  expectedVersion: string;
 }
 
 export interface UpgradeStatus {
@@ -147,6 +153,19 @@ export function parseUpgradePreflight(value: unknown): UpgradePreflight | null {
   const blocked = strings(document.blocked);
   // The report cannot be ready while it names a blocking code.
   if (document.ready !== (blocked.length === 0)) return null;
+  // A pending declaration is a fact the document states, not one to infer: it
+  // must agree with the one row it can describe, and it is only usable when it
+  // carries the version the copy-in needs and nothing else blocks.
+  if (typeof document.pendingDeclaration !== 'boolean') return null;
+  const pendingDeclaration = document.pendingDeclaration;
+  const expectedVersion = text(document.expectedVersion);
+  const rowPending = checks.some((check) => check.name === 'source_version' && check.status === 'pending');
+  if (pendingDeclaration !== rowPending) return null;
+  if (pendingDeclaration) {
+    if (expectedVersion === '' || !document.ready || blocked.length !== 0) return null;
+  } else if (expectedVersion !== '') {
+    return null;
+  }
   return {
     sourceKind: text(document.sourceKind),
     sourceVersion: text(document.sourceVersion),
@@ -163,6 +182,8 @@ export function parseUpgradePreflight(value: unknown): UpgradePreflight | null {
     },
     blocked,
     ready: document.ready,
+    pendingDeclaration,
+    expectedVersion,
   };
 }
 
@@ -684,6 +705,16 @@ export function FreshUpgradeFlow({
                   </dd>
                 </div>
               </dl>
+              {preflightReport.pendingDeclaration && (
+                <div className="upgrade-pending" role="note" data-testid="upgrade-preflight-pending-declaration">
+                  <h3>{t('preflightPendingTitle', language)}</h3>
+                  <p>
+                    {t('preflightPendingHelp', language)}{' '}
+                    <code>{`--source-version ${preflightReport.expectedVersion}`}</code>
+                  </p>
+                  <p>{t('preflightPendingTail', language)}</p>
+                </div>
+              )}
               <h3>{t('preflightChecks', language)}</h3>
               <ul className="upgrade-checks">
                 {preflightReport.checks.map((check) => (

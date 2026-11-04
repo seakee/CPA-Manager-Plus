@@ -366,6 +366,43 @@
   color: var(--amber);
 }
 
+.upgrade-check-outcome.is-pending {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+/* A pending declaration is information, not a failure: it says what the
+   operator has to hand the copy-in, in the same voice as the offer card. */
+.upgrade-pending {
+  margin: 4px 0 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--amber);
+  border-radius: 12px;
+  background: var(--amber-soft);
+}
+
+.upgrade-pending h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+
+.upgrade-pending p {
+  margin: 0 0 6px;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.upgrade-pending p:last-child {
+  margin-bottom: 0;
+}
+
+.upgrade-pending code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 13px;
+}
+
 .upgrade-check-detail {
   flex-basis: 100%;
   color: var(--text-tertiary);

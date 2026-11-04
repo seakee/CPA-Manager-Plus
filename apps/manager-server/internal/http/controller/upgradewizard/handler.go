@@ -722,6 +722,15 @@ type preflightDocument struct {
 	ParityGaps      preflightGaps    `json:"parityGaps"`
 	Blocked         []string         `json:"blocked"`
 	Ready           bool             `json:"ready"`
+	// PendingDeclaration reports the one check this surface cannot answer: the
+	// 1.x release is declared by the CLI copy-in, and a read-only read has no
+	// way to say it. It is present on every answer (false when nothing is
+	// pending) so a client never has to infer it, and it exists precisely so the
+	// answer cannot be mistaken for the CLI's exact-equality acceptance.
+	PendingDeclaration bool `json:"pendingDeclaration"`
+	// ExpectedVersion is the release the copy-in must be told when the
+	// declaration is pending. Empty when the caller declared a version.
+	ExpectedVersion string `json:"expectedVersion,omitempty"`
 }
 
 // servePreflight reports on the mount the operator supplied, never on the
@@ -761,7 +770,13 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{LegacyRoot: root})
+	// The read cannot declare the 1.x release: only the operator's copy-in can.
+	// An undeclared version is therefore reported as a pending observation, not
+	// as a refusal, while every other check keeps its blocking power.
+	report, err := upgradeservice.Preflight(ctx, upgradeservice.Options{
+		LegacyRoot:              root,
+		AcceptUndeclaredVersion: true,
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			writeError(w, http.StatusServiceUnavailable, CodePreflightTimeout)
@@ -788,6 +803,15 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 	if dates == nil {
 		dates = []string{}
 	}
+	pendingDeclaration := false
+	expectedVersion := ""
+	for _, check := range report.Checks {
+		if check.Name != upgradeservice.CheckSourceVersion || check.Status != upgradeservice.StatusPending {
+			continue
+		}
+		pendingDeclaration = true
+		expectedVersion = check.ExpectedVersion
+	}
 	writeJSON(w, http.StatusOK, preflightDocument{
 		ContractVersion: Contract,
 		SourceKind:      report.SourceKind,
@@ -803,8 +827,10 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 			CoverageDaysWithGaps:  report.ParityGaps.CoverageDaysWithGaps,
 			AffectedDates:         dates,
 		},
-		Blocked: blocked,
-		Ready:   report.Ready,
+		Blocked:            blocked,
+		Ready:              report.Ready,
+		PendingDeclaration: pendingDeclaration,
+		ExpectedVersion:    expectedVersion,
 	})
 }
 

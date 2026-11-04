@@ -1700,9 +1700,33 @@ async function assertWizard(binary, sourceRoot) {
   assertValue(preflight.body?.contractVersion === 'cpamp.upgrade-wizard.v1', `wizard contract = ${preflight.body?.contractVersion}`);
   assertValue(preflight.body?.sourceKind === 'legacy-manager', `wizard source kind = ${preflight.body?.sourceKind}`);
   assertValue(preflight.body?.ready === true, `wizard preflight ready = ${preflight.body?.ready}`);
+  // The read-only preflight cannot declare the 1.x release: the CLI copy-in
+  // declares it. That is a pending observation, never the exact-equality
+  // acceptance the CLI makes, and never a refusal of a sound source.
   assertValue(
-    (preflight.body?.checks ?? []).some((check) => check.name === 'source_version' && check.status === 'pass'),
-    'wizard preflight did not pass the source version check',
+    preflight.body?.pendingDeclaration === true,
+    `wizard preflight pendingDeclaration = ${preflight.body?.pendingDeclaration}`,
+  );
+  assertValue(
+    preflight.body?.expectedVersion === acceptedRelease,
+    `wizard preflight expectedVersion = ${preflight.body?.expectedVersion} want ${acceptedRelease}`,
+  );
+  const wizardVersionCheck = (preflight.body?.checks ?? []).find((check) => check.name === 'source_version');
+  assertValue(
+    wizardVersionCheck?.status === 'pending',
+    `wizard source version status = ${wizardVersionCheck?.status}`,
+  );
+  assertValue(
+    wizardVersionCheck?.code === 'upgrade_source_version_declared_at_copy_in',
+    `wizard source version code = ${wizardVersionCheck?.code}`,
+  );
+  assertValue(
+    (preflight.body?.checks ?? []).every((check) => check.status !== 'blocked'),
+    `wizard preflight blocked a check on a sound source: ${preview(preflight.body?.checks)}`,
+  );
+  assertValue(
+    (preflight.body?.blocked ?? []).length === 0,
+    `wizard preflight blocked = ${preview(preflight.body?.blocked)}`,
   );
 
   const status = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });

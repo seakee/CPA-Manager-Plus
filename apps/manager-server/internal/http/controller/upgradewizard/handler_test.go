@@ -190,6 +190,37 @@ func TestPreflightServesAReport(t *testing.T) {
 // TestPreflightMissingLegacyRootIsTyped proves a missing environment is a typed
 // code the wizard can name, never a 500 and never a fabricated ready report. The
 // caller still has to present a credential first.
+// TestPreflightReportsThePendingDeclarationShape pins the one field this read
+// adds: the declaration is always reported as a boolean, it agrees with the row
+// that describes it, and it never appears without the version the copy-in needs.
+func TestPreflightReportsThePendingDeclarationShape(t *testing.T) {
+	handler := newHandler(legacySourceDir(t), "")
+	_, body := request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(testAdminKey), http.StatusOK)
+	if !strings.Contains(body, `"pendingDeclaration"`) {
+		t.Fatalf("preflight omitted the pending declaration flag: %s", body)
+	}
+	var report preflightDocument
+	if err := json.Unmarshal([]byte(body), &report); err != nil {
+		t.Fatalf("decode preflight: %v: %s", err, body)
+	}
+	rowPending := false
+	for _, check := range report.Checks {
+		if check.Name == "source_version" && check.Status == "pending" {
+			rowPending = true
+		}
+	}
+	if report.PendingDeclaration != rowPending {
+		t.Fatalf("pendingDeclaration = %v but the source_version row says %v: %s", report.PendingDeclaration, rowPending, body)
+	}
+	if report.PendingDeclaration {
+		if report.ExpectedVersion == "" || !report.Ready || len(report.Blocked) != 0 {
+			t.Fatalf("a pending declaration is not a usable report: %s", body)
+		}
+	} else if report.ExpectedVersion != "" {
+		t.Fatalf("a declared version still reported an expectation: %s", body)
+	}
+}
+
 func TestPreflightMissingLegacyRootIsTyped(t *testing.T) {
 	cases := []struct {
 		name, root, code string

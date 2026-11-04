@@ -43,6 +43,8 @@ function preflightDocument(overrides: Record<string, unknown> = {}) {
     },
     blocked: [],
     ready: true,
+    pendingDeclaration: false,
+    expectedVersion: '',
     ...overrides,
   };
 }
@@ -203,6 +205,53 @@ describe('Full Web upgrade wizard', () => {
     expect(allByTestId('upgrade-preflight-ready')).toHaveLength(0);
     // A blocked preflight can only be re-run, never carried forward.
     expect(byTestId('upgrade-continue').props.disabled).toBe(true);
+  });
+
+  it('shows a pending version declaration as information, not as a failure', async () => {
+    await mount(
+      wizardRead({
+        preflight: () =>
+          preflightDocument({
+            checks: [
+              { name: 'source_ownership', status: 'pass', code: '', detail: 'no live source writer' },
+              {
+                name: 'source_version',
+                status: 'pending',
+                code: 'upgrade_source_version_declared_at_copy_in',
+                detail: 'expected=v1.14.4 declared=none',
+              },
+              { name: 'fingerprint', status: 'pass', code: '', detail: 'sha256 over source manifest' },
+              { name: 'disk', status: 'pass', code: '', detail: 'needs 12 GiB, has 40 GiB' },
+              { name: 'cpa_classification', status: 'pass', code: '', detail: 'kind=external' },
+              { name: 'parity', status: 'pass', code: '', detail: 'no gaps' },
+            ],
+            pendingDeclaration: true,
+            expectedVersion: 'v1.14.4',
+          }),
+      })
+    );
+
+    expect(byTestId('upgrade-preflight-pending-declaration')).toBeTruthy();
+    expect(view()).toContain('--source-version v1.14.4');
+    expect(view()).toContain('declared at copy-in');
+    // The row is labelled pending, in the same vocabulary as every other check.
+    expect(byTestId('upgrade-check-source_version').props['data-status']).toBe('pending');
+    expect(view()).toContain('Pending');
+    // Nothing is presented as blocked, and the step stays usable: readiness is a
+    // separate fact from the declaration this read cannot make.
+    expect(allByTestId('upgrade-preflight-blocked')).toHaveLength(0);
+    expect(view()).not.toContain('Preflight blocked the upgrade');
+    expect(byTestId('upgrade-continue').props.disabled).toBe(false);
+  });
+
+  it('treats a pending flag that disagrees with its row as a typed read failure', async () => {
+    await mount(
+      wizardRead({
+        preflight: () => preflightDocument({ pendingDeclaration: true, expectedVersion: 'v1.14.4' }),
+      })
+    );
+    expect(byTestId('upgrade-preflight-error')).toBeTruthy();
+    expect(allByTestId('upgrade-preflight-pending-declaration')).toHaveLength(0);
   });
 
   it('continues from a ready preflight only after an explicit acknowledgement', async () => {

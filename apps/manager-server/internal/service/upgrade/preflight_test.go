@@ -783,6 +783,61 @@ func TestPreflightBlocksUndeclaredSourceVersion(t *testing.T) {
 	}
 }
 
+// TestPreflightPendsAnUndeclaredVersionForAReadOnlyCaller is the wizard's
+// reading of the same source: the read cannot declare the release, the copy-in
+// declares it, so the check reports the pending declaration with the version it
+// expects instead of blocking a source that is otherwise sound.
+func TestPreflightPendsAnUndeclaredVersionForAReadOnlyCaller(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	report := preflight(t, fixture.root, Options{AcceptUndeclaredVersion: true})
+	if !report.Ready {
+		t.Fatalf("ready = false, blocked = %v, checks = %+v", report.Blocked, report.Checks)
+	}
+	if len(report.Blocked) != 0 {
+		t.Fatalf("blocked = %v, want none", report.Blocked)
+	}
+	check, found := checkByName(report, CheckSourceVersion)
+	if !found || check.Status != StatusPending || check.Code != CodeSourceVersionDeclaredAtCopyIn {
+		t.Fatalf("version check = %+v, want pending %s", check, CodeSourceVersionDeclaredAtCopyIn)
+	}
+	if check.ExpectedVersion != pinnedSourceVersion() {
+		t.Fatalf("expected version = %q, want %q", check.ExpectedVersion, pinnedSourceVersion())
+	}
+	if !strings.Contains(check.Detail, "--source-version "+pinnedSourceVersion()) {
+		t.Fatalf("version detail %q does not name the declaration the copy-in takes", check.Detail)
+	}
+	// The source version is still unknown: the pending check names what the
+	// copy-in must be told, never a value inferred from the database.
+	if report.SourceVersion != VersionUnknown {
+		t.Fatalf("source version = %q, want %q", report.SourceVersion, VersionUnknown)
+	}
+	// The pending check is the only non-pass observation: nothing else lost its
+	// blocking power.
+	for _, other := range report.Checks {
+		if other.Name == CheckSourceVersion {
+			continue
+		}
+		if other.Status == StatusBlocked || other.Status == StatusPending {
+			t.Fatalf("check %q = %+v, want an answered check", other.Name, other)
+		}
+	}
+}
+
+// TestPreflightKeepsExactEqualityWhenTheVersionIsDeclared: accepting a pending
+// declaration must not soften the comparison for a caller that did declare one.
+func TestPreflightKeepsExactEqualityWhenTheVersionIsDeclared(t *testing.T) {
+	fixture := newSourceFixture(t, nil)
+	other := "v9.9.9"
+	if other == pinnedSourceVersion() {
+		t.Fatal("the fixture's pin cannot be used as the mismatch")
+	}
+	report := preflight(t, fixture.root, Options{DeclaredVersion: other, AcceptUndeclaredVersion: true})
+	requireBlocked(t, report, CodeSourceVersionUnsupported)
+	if report.Ready {
+		t.Fatal("a declared mismatch was reported ready")
+	}
+}
+
 func TestPreflightBlocksDeclaredVersionThatIsNotPinned(t *testing.T) {
 	fixture := newSourceFixture(t, nil)
 	pinned := pinnedSourceVersion()

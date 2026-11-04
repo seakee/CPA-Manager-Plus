@@ -31,6 +31,10 @@ const en = {
   preflightChecks: 'Inspection checks',
   preflightUnknown: 'Not reported',
   preflightRetry: 'Run the preflight again',
+  preflightPendingTitle: 'Source version declared at copy-in',
+  preflightPendingHelp:
+    'The read-only preflight cannot declare the 1.x release, and the source does not record it. The CLI copy-in does: pass',
+  preflightPendingTail: 'The check stays pending here; it is not a failure.',
   preflightBlockedTitle: 'Preflight blocked the upgrade',
   preflightBlockedHelp:
     'Resolve each named condition on the host, then run the preflight again. Nothing has been copied.',
@@ -52,6 +56,7 @@ const en = {
   checkPass: 'Passed',
   checkBlocked: 'Blocked',
   checkSkipped: 'Skipped',
+  checkPending: 'Pending',
   checkGap: 'Gap',
   checkUnknown: 'Unreported',
 
@@ -248,6 +253,9 @@ const zh: typeof en = {
   preflightChecks: '检查项',
   preflightUnknown: '未上报',
   preflightRetry: '重新预检',
+  preflightPendingTitle: '来源版本在命令行复制时声明',
+  preflightPendingHelp: '只读预检无法声明 1.x 版本，来源本身也不记录该信息。请在命令行复制时传入',
+  preflightPendingTail: '此检查在本页保持待定状态，并不是失败。',
   preflightBlockedTitle: '预检阻断了升级',
   preflightBlockedHelp: '请在宿主机上逐项解决下列问题后重新预检。当前尚未复制任何数据。',
   preflightReadyTitle: '来源已通过预检',
@@ -267,6 +275,7 @@ const zh: typeof en = {
   checkPass: '通过',
   checkBlocked: '阻断',
   checkSkipped: '跳过',
+  checkPending: '待定',
   checkGap: '缺口',
   checkUnknown: '未上报',
 
@@ -441,6 +450,9 @@ const tw: typeof en = {
   preflightChecks: '檢查項目',
   preflightUnknown: '未回報',
   preflightRetry: '重新預檢',
+  preflightPendingTitle: '來源版本在命令列複製時宣告',
+  preflightPendingHelp: '唯讀預檢無法宣告 1.x 版本，來源本身也不記錄此資訊。請在命令列複製時傳入',
+  preflightPendingTail: '此檢查在本頁保持待定狀態，並不是失敗。',
   preflightBlockedTitle: '預檢阻斷了升級',
   preflightBlockedHelp: '請在主機上逐項解決下列問題後重新預檢。目前尚未複製任何資料。',
   preflightReadyTitle: '來源已通過預檢',
@@ -460,6 +472,7 @@ const tw: typeof en = {
   checkPass: '通過',
   checkBlocked: '阻斷',
   checkSkipped: '略過',
+  checkPending: '待定',
   checkGap: '缺口',
   checkUnknown: '未回報',
 
@@ -633,6 +646,10 @@ const ru: typeof en = {
   preflightChecks: 'Проверки',
   preflightUnknown: 'Не сообщается',
   preflightRetry: 'Запустить проверку снова',
+  preflightPendingTitle: 'Версия источника объявляется при копировании в CLI',
+  preflightPendingHelp:
+    'Предварительная проверка только для чтения не может объявить версию 1.x, и сам источник её не хранит. Это делает копирование в CLI: передайте',
+  preflightPendingTail: 'Здесь проверка остаётся в ожидании — это не ошибка.',
   preflightBlockedTitle: 'Проверка заблокировала обновление',
   preflightBlockedHelp:
     'Устраните каждое названное условие на хосте и запустите проверку снова. Ничего не скопировано.',
@@ -654,6 +671,7 @@ const ru: typeof en = {
   checkPass: 'Пройдено',
   checkBlocked: 'Заблокировано',
   checkSkipped: 'Пропущено',
+  checkPending: 'Ожидает',
   checkGap: 'Пробел',
   checkUnknown: 'Не сообщается',
 
@@ -859,6 +877,8 @@ export function checkOutcomeText(status: string, language = fullWebLanguage()): 
       return upgradeWizardText('checkSkipped', language);
     case 'gap':
       return upgradeWizardText('checkGap', language);
+    case 'pending':
+      return upgradeWizardText('checkPending', language);
     default:
       return upgradeWizardText('checkUnknown', language);
   }

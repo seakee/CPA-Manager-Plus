@@ -49,6 +49,13 @@ const (
 	// on a source that predates the retained projection. It is not a pass: an
 	// unanswerable check never reports a clean zero.
 	StatusNotApplicable = "not-applicable"
+	// StatusPending marks a check whose answer is a fact the caller cannot
+	// supply, and whose absence is not a property of the source. A read-only
+	// caller cannot declare the 1.x release, so the declaration is pending until
+	// the copy-in makes it; the report still counts the check as satisfied only
+	// in the sense that nothing is blocked. It is deliberately not a pass: an
+	// equivalence the caller never asserted must not read as one.
+	StatusPending = "pending"
 )
 
 // Blocked codes. Parity gaps are never codes: they are reported for explicit
@@ -68,6 +75,10 @@ const (
 	// CodeSourceVersionUndeclared means no release was declared. The version is
 	// not recoverable from the database, so a declaration is required.
 	CodeSourceVersionUndeclared = "upgrade_source_version_undeclared"
+	// CodeSourceVersionDeclaredAtCopyIn marks the read-only reading of an
+	// undeclared release: the copy-in declares it, so the check is pending
+	// rather than blocking. A caller that can declare never sees this code.
+	CodeSourceVersionDeclaredAtCopyIn = "upgrade_source_version_declared_at_copy_in"
 	// CodeSourceAlreadyV2 means the source already carries v2-only tables.
 	CodeSourceAlreadyV2 = "upgrade_source_already_v2"
 	// CodeSourceChanged means the source was written while it was being copied.
@@ -165,6 +176,12 @@ type Options struct {
 	// writes the store, and a live Manager or a second reconciliation must not
 	// share it. CopyIn does not use it.
 	TargetLock *processlock.Lock
+	// AcceptUndeclaredVersion makes an undeclared 1.x release a pending
+	// observation instead of a blocking refusal. It exists for a read-only
+	// caller that cannot declare a release: the copy-in declares it, so the
+	// report says so and stays usable. The command line never sets it, so a CLI
+	// preflight without --source-version still blocks.
+	AcceptUndeclaredVersion bool
 	// Acknowledged lists the UTC days (YYYY-MM-DD) the operator explicitly
 	// accepts as permanently incomplete. Reconcile only.
 	Acknowledged []string
@@ -210,6 +227,10 @@ type Check struct {
 	Status string `json:"status"`
 	Code   string `json:"code,omitempty"`
 	Detail string `json:"detail,omitempty"`
+	// ExpectedVersion is the release this build pins, stated only where the
+	// caller still has to supply it (a pending declaration). It is the value the
+	// copy-in must be told, not a value read out of the source.
+	ExpectedVersion string `json:"expectedVersion,omitempty"`
 }
 
 // ParityGaps counts raw-deleted events whose retained projection is missing,
@@ -422,7 +443,7 @@ func Preflight(ctx context.Context, options Options) (Report, error) {
 		report.MissingTables = schema.missingTables(requiredLegacyTables)
 		check := versionCheck(
 			report.SourceKind, schema.v2OnlyTables(), report.MissingTables, ladder.newer(schema),
-			options.DeclaredVersion, pinnedSourceVersion(),
+			options.DeclaredVersion, pinnedSourceVersion(), options.AcceptUndeclaredVersion,
 		)
 		if check.Status == StatusBlocked {
 			block(check.Code)

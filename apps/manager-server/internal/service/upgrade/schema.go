@@ -378,7 +378,7 @@ func declaredVersion(declared string) string {
 // Printing "expected=v1.14.4 declared=v1.14.4" next to a refusal reads as if the
 // check contradicted itself; what actually decided it is the marker, so the
 // detail names the marker and the release that introduced it.
-func versionCheck(kind string, v2Tables []string, missingTables []string, newer []markerEvidence, declared string, pinned string) Check {
+func versionCheck(kind string, v2Tables []string, missingTables []string, newer []markerEvidence, declared string, pinned string, acceptUndeclared bool) Check {
 	check := Check{Name: CheckSourceVersion, Status: StatusPass}
 	switch {
 	case kind == SourceKindNativeV2:
@@ -394,6 +394,15 @@ func versionCheck(kind string, v2Tables []string, missingTables []string, newer 
 		check.Code = CodeSourceVersionUnsupported
 		check.Detail = fmt.Sprintf("expected=%s declared=%s missingTables=%s; the source does not carry the v1.14 structure",
 			pinned, declaredVersion(declared), strings.Join(missingTables, ","))
+	case strings.TrimSpace(declared) == "" && acceptUndeclared:
+		// A read-only caller cannot declare the release, and the version is not
+		// recoverable from the database. Saying so is the honest answer; calling
+		// it a refusal would make a source that is otherwise sound unusable from
+		// the one surface that can finish the operation.
+		check.Status = StatusPending
+		check.Code = CodeSourceVersionDeclaredAtCopyIn
+		check.ExpectedVersion = pinned
+		check.Detail = fmt.Sprintf("expected=%s declared=none; a read-only check cannot declare it — the CLI copy-in declares the release with --source-version %s", pinned, pinned)
 	case strings.TrimSpace(declared) == "":
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUndeclared
