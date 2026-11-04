@@ -155,14 +155,34 @@ export function parseUpgradePreflight(value: unknown): UpgradePreflight | null {
   if (document.ready !== (blocked.length === 0)) return null;
   // A pending declaration is a fact the document states, not one to infer: it
   // must agree with the one row it can describe, and it is only usable when it
-  // carries the version the copy-in needs and nothing else blocks.
+  // carries the version the copy-in needs. Other checks may still block the same
+  // source — the wizard never declares a version, so a pending row can coexist
+  // with a disk, parity or ownership refusal, and hiding that refusal would hide
+  // the diagnosis the operator opened this step for.
   if (typeof document.pendingDeclaration !== 'boolean') return null;
   const pendingDeclaration = document.pendingDeclaration;
   const expectedVersion = text(document.expectedVersion);
   const rowPending = checks.some((check) => check.name === 'source_version' && check.status === 'pending');
   if (pendingDeclaration !== rowPending) return null;
   if (pendingDeclaration) {
-    if (expectedVersion === '' || !document.ready || blocked.length !== 0) return null;
+    if (expectedVersion === '') return null;
+    // The row is pending, so the same check cannot also be settled or refused.
+    if (
+      checks.some(
+        (check) =>
+          check.name === 'source_version' && (check.status === 'blocked' || check.status === 'pass')
+      )
+    ) {
+      return null;
+    }
+    // A declaration still owed is not a refusal: those codes describe the
+    // blocked answer, not the pending one.
+    if (
+      blocked.includes('upgrade_source_version_undeclared') ||
+      blocked.includes('upgrade_source_version_unsupported')
+    ) {
+      return null;
+    }
   } else if (expectedVersion !== '') {
     return null;
   }

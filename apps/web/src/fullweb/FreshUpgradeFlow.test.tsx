@@ -4,6 +4,8 @@ import {
   createUpgradeWizardRead,
   createUpgradeWizardVerify,
   FreshUpgradeFlow,
+  parseUpgradePreflight,
+  parseUpgradeVerify,
   type UpgradeStatus,
   UpgradeWizardError,
   type UpgradeWizardRead,
@@ -252,6 +254,130 @@ describe('Full Web upgrade wizard', () => {
     );
     expect(byTestId('upgrade-preflight-error')).toBeTruthy();
     expect(allByTestId('upgrade-preflight-pending-declaration')).toHaveLength(0);
+  });
+
+  it('accepts a pending declaration that names its version while another check blocks', () => {
+    // The wizard never declares a source version, so the row stays pending — but
+    // a blocked disk or parity gap is an independent fact about the same source
+    // and must not invalidate the report that carries it.
+    const parsed = parseUpgradePreflight(
+      preflightDocument({
+        checks: [
+          { name: 'source_ownership', status: 'pass', code: '', detail: 'no live source writer' },
+          {
+            name: 'source_version',
+            status: 'pending',
+            code: 'upgrade_source_version_declared_at_copy_in',
+            detail: 'expected=v1.14.4 declared=none',
+          },
+          {
+            name: 'disk',
+            status: 'blocked',
+            code: 'upgrade_insufficient_disk_space',
+            detail: 'needs 12 GiB, has 3 GiB',
+          },
+        ],
+        blocked: ['upgrade_insufficient_disk_space'],
+        ready: false,
+        pendingDeclaration: true,
+        expectedVersion: 'v1.14.4',
+      })
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.pendingDeclaration).toBe(true);
+    expect(parsed?.expectedVersion).toBe('v1.14.4');
+    expect(parsed?.ready).toBe(false);
+    expect(parsed?.blocked).toEqual(['upgrade_insufficient_disk_space']);
+  });
+
+  it('still refuses a pending declaration without a version or with its own row blocked', () => {
+    const pendingRow = { name: 'source_version', status: 'pending', code: '', detail: '' };
+
+    // No version to require at copy-in: the declaration could never be satisfied.
+    expect(
+      parseUpgradePreflight(
+        preflightDocument({
+          checks: [pendingRow],
+          pendingDeclaration: true,
+          expectedVersion: '',
+        })
+      )
+    ).toBeNull();
+
+    // The same row cannot be pending and further down the same report blocked.
+    expect(
+      parseUpgradePreflight(
+        preflightDocument({
+          checks: [pendingRow, { ...pendingRow, status: 'blocked' }],
+          blocked: ['upgrade_source_version_undeclared'],
+          ready: false,
+          pendingDeclaration: true,
+          expectedVersion: 'v1.14.4',
+        })
+      )
+    ).toBeNull();
+
+    // A pending declaration is not a refusal, so the source-version codes cannot
+    // be the document's blocking codes.
+    expect(
+      parseUpgradePreflight(
+        preflightDocument({
+          checks: [pendingRow],
+          blocked: ['upgrade_source_version_unsupported'],
+          ready: false,
+          pendingDeclaration: true,
+          expectedVersion: 'v1.14.4',
+        })
+      )
+    ).toBeNull();
+  });
+
+  it('shows a pending declaration and a separate blocker together, holding Continue disabled', async () => {
+    await mount(
+      wizardRead({
+        preflight: () =>
+          preflightDocument({
+            checks: [
+              {
+                name: 'source_ownership',
+                status: 'pass',
+                code: '',
+                detail: 'no live source writer',
+              },
+              {
+                name: 'source_version',
+                status: 'pending',
+                code: 'upgrade_source_version_declared_at_copy_in',
+                detail: 'expected=v1.14.4 declared=none',
+              },
+              {
+                name: 'disk',
+                status: 'blocked',
+                code: 'upgrade_insufficient_disk_space',
+                detail: 'needs 12 GiB, has 3 GiB',
+              },
+            ],
+            blocked: ['upgrade_insufficient_disk_space'],
+            ready: false,
+            pendingDeclaration: true,
+            expectedVersion: 'v1.14.4',
+          }),
+      })
+    );
+
+    // Both facts the document states are shown: the version this read cannot
+    // declare and the check that actually stops the upgrade.
+    expect(byTestId('upgrade-preflight-pending-declaration')).toBeTruthy();
+    expect(view()).toContain('--source-version v1.14.4');
+    expect(view()).toContain(t('preflightPendingTitle', 'en'));
+    expect(byTestId('upgrade-preflight-blocked')).toBeTruthy();
+    expect(view()).toContain(blockedCodeText('upgrade_insufficient_disk_space', 'en'));
+    expect(allByTestId('upgrade-preflight-ready')).toHaveLength(0);
+    expect(byTestId('upgrade-continue').props.disabled).toBe(true);
+    // The report was presented, not discarded as an unreadable reply.
+    expect(allByTestId('upgrade-preflight-error')).toHaveLength(0);
+    expect(view()).not.toContain(t('errorResponse', 'en'));
   });
 
   it('continues from a ready preflight only after an explicit acknowledgement', async () => {
