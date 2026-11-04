@@ -3023,8 +3023,17 @@ async function proveRollback(binary, workspace, fixture) {
     persistedStage: persisted.operation?.stage,
     rolledBackSurface,
   };
-  stableFacts.push(`rollback:${operation.stage}:${operation.rollback?.image}`);
+  stableFacts.push(`rollback:${operation.stage}:${stableImageRef(operation.rollback?.image)}`);
   stableFacts.push('rollback:same-volume-write-observed');
+}
+
+// stableImageRef normalises an image reference this run owns, so a stable fact
+// can be compared between runs: the alias carries the run's prefix by design
+// (`cpampd<runid>/upgrade:vX.Y.Z`), and only its tag says anything the runs
+// share. Any other reference is left exactly as it is.
+export function stableImageRef(reference, prefix = PREFIX) {
+  const text = String(reference ?? '');
+  return text.startsWith(`${prefix}/`) ? `<run>${text.slice(prefix.length)}` : text;
 }
 
 function planHealthURL(plan) {

@@ -28,6 +28,7 @@ import {
   isOwnedImageAlias,
   rollbackAliasReference,
   shellTokens,
+  stableImageRef,
   withDeclaredSourceVersion,
   assertNoSecretInBody,
   canonicalEvidenceDocument,
@@ -1148,4 +1149,16 @@ test('dirDigest counts content, not the sidecars SQLite leaves behind when it op
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('stableImageRef keeps the tag and drops the run prefix a stable fact cannot compare', () => {
+  assert.equal(stableImageRef('cpampd01234567/upgrade:v1.14.4', 'cpampd01234567'), '<run>/upgrade:v1.14.4');
+  // Two runs share the tag and differ only in the alias they own.
+  assert.equal(
+    stableImageRef('cpampd01234567/upgrade:v1.14.4', 'cpampd01234567'),
+    stableImageRef('cpampd89abcdef/upgrade:v1.14.4', 'cpampd89abcdef'),
+  );
+  // A reference this run does not own is recorded exactly as printed.
+  assert.equal(stableImageRef('cpampd-fixture/legacy-v1:1.14.4', 'cpampd01234567'), 'cpampd-fixture/legacy-v1:1.14.4');
+  assert.equal(stableImageRef(undefined, 'cpampd01234567'), '');
 });
