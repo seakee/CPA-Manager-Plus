@@ -32,6 +32,7 @@ import {
   assertNoSecretInBody,
   canonicalEvidenceDocument,
   copyDirectory,
+  evidenceDirectory,
   ownershipNormalizationArgv,
   createImplementationIdentity,
   createPortAllocator,
@@ -1052,4 +1053,27 @@ test('ownershipNormalizationArgv repairs the tree as root and returns it to the 
   assert.throws(() => ownershipNormalizationArgv({ name: 'x', directory: '/data', uid: 'me', gid: 1 }), /numeric uid/);
   assert.throws(() => ownershipNormalizationArgv({ name: 'x', directory: '/data', uid: 1, gid: -2 }), /numeric gid/);
   assert.throws(() => ownershipNormalizationArgv({ name: 'x', directory: '', uid: 1, gid: 1 }), /needs a directory/);
+});
+
+test('evidenceDirectory keeps CI on the published path and a local run out of the tracked tree', () => {
+  const root = path.join(path.sep, 'repo');
+  const tracked = path.join(root, 'bin', 'ci', 'evidence', 'upgrade-d');
+
+  // CI semantics are unchanged: the workflow reads evidence_path from here.
+  assert.equal(evidenceDirectory({ env: { GITHUB_ACTIONS: 'true' }, root }), tracked);
+  // A local run writes under the ignored scratch tree, so its own output cannot
+  // make the next local run fail with implementation.treeClean is not true.
+  const local = evidenceDirectory({ env: {}, root });
+  assert.equal(local, path.join(root, 'bin', 'tmp', 'u1-docker', 'evidence'));
+  assert.ok(!local.startsWith(path.join(root, 'bin', 'ci')), 'a local run must not publish into the tracked evidence tree');
+  // The override is explicit in both directions.
+  assert.equal(
+    evidenceDirectory({ env: { GITHUB_ACTIONS: 'true', UPGRADE_DOCKER_EVIDENCE_DIR: 'out/evidence' }, root }),
+    path.join(root, 'out', 'evidence'),
+  );
+  assert.equal(
+    evidenceDirectory({ env: { UPGRADE_DOCKER_EVIDENCE_DIR: path.join(path.sep, 'tmp', 'e') }, root }),
+    path.join(path.sep, 'tmp', 'e'),
+  );
+  assert.equal(evidenceDirectory({ env: { UPGRADE_DOCKER_EVIDENCE_DIR: '   ' }, root }), local);
 });

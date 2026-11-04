@@ -37,6 +37,11 @@
 //
 // Usage:
 //   node bin/ci/upgrade-docker.mjs [--reuse-fixture] [--keep] [--v1-tag v1.14.10]
+//
+// The evidence document lands in bin/ci/evidence/upgrade-d in CI (the workflow
+// reads the published path) and in the ignored bin/tmp/u1-docker/evidence
+// locally, so one local run's output cannot make the next local run refuse the
+// tree. UPGRADE_DOCKER_EVIDENCE_DIR overrides both.
 //                                  [--source-tag v1.14.4]
 //   node bin/ci/upgrade-docker.mjs --verify-evidence <file> [--expect-head <sha>]
 //
@@ -135,7 +140,25 @@ const args = isEntryPoint
 const runId = crypto.randomBytes(4).toString('hex');
 const PREFIX = `cpampd${runId}`;
 const SCRATCH = path.join(ROOT, 'bin', 'tmp', 'u1-8', runId);
-const EVIDENCE_DIR = path.join(ROOT, 'bin', 'ci', 'evidence', 'upgrade-d');
+// evidenceDirectory is where this run publishes its document. CI keeps the
+// committed, uploaded location and the workflow reads it back through
+// `evidence_path`. A local run writes under the ignored scratch tree instead:
+// the committed records next to it are tracked files, so a local run that wrote
+// beside them would leave the tree dirty and the *next* local run would refuse
+// with `implementation.treeClean is not true` before doing any work.
+// `UPGRADE_DOCKER_EVIDENCE_DIR` overrides both, which is how a local run can
+// publish into a specific directory on purpose (and then owns that choice).
+export function evidenceDirectory({ env = process.env, root = ROOT } = {}) {
+  const override = typeof env.UPGRADE_DOCKER_EVIDENCE_DIR === 'string' ? env.UPGRADE_DOCKER_EVIDENCE_DIR.trim() : '';
+  if (override !== '') {
+    return path.isAbsolute(override) ? override : path.join(root, override);
+  }
+  return env.GITHUB_ACTIONS === 'true'
+    ? path.join(root, 'bin', 'ci', 'evidence', 'upgrade-d')
+    : path.join(root, 'bin', 'tmp', 'u1-docker', 'evidence');
+}
+
+const EVIDENCE_DIR = evidenceDirectory();
 // This run's own rollback alias. The accepted rollback grammar needs a
 // repository-qualified reference at an exact `vX.Y.Z` tag, and the shared
 // `cpampd-fixture/upgrade` names are occupied by images this run cannot
@@ -159,6 +182,8 @@ export const UPGRADE_DOCKER_CONTRACT = Object.freeze({
   prefixPattern: /^cpampd[0-9a-f]{8}$/,
   resourceNamePattern: /^cpampd[0-9a-f]{8}(?:[-_].+)?$/,
   skipVariable: 'SKIP_UPGRADE_DOCKER',
+  // Where CI publishes (see evidenceDirectory): a local run writes under the
+  // ignored scratch tree so its own output cannot dirty the next local run.
   evidenceDirectory: path.join('bin', 'ci', 'evidence', 'upgrade-d'),
   // The labels a build writes onto the fixture image. A reused image without
   // them cannot be shown to come from this harness's build of that tag.
