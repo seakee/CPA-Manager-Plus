@@ -20,11 +20,12 @@ const (
 	defaultLegacyRoot     = "/legacy"
 )
 
-// newUpgradeWizard builds the read-only Upgrade wizard routes. The handler
-// proves its own credential — the key the Upgrade entry verified, presented as a
-// Bearer value — against the surface's one resolved source, so no
-// surface-level session or "authorize everything" hook can stand in for it.
-// Both routes only read.
+// newUpgradeWizard builds the Upgrade wizard routes. The handler proves its own
+// credential — the key the Upgrade entry verified, presented as a Bearer value —
+// against the surface's one resolved source, so no surface-level session or
+// "authorize everything" hook can stand in for it. The two reads only read; the
+// verify action is the surface's one write, and it delegates to the same
+// completion gate the command line runs.
 func (a *freshApplication) newUpgradeWizard() *upgradewizard.Handler {
 	return &upgradewizard.Handler{
 		LegacyRoot:   configuredLegacyRoot,
@@ -82,10 +83,11 @@ func configuredLegacyRoot() string {
 	return ""
 }
 
-// upgradeWizardReadNamespace is the namespace the Upgrade reads own on the
+// upgradeWizardReadNamespace is the namespace the Upgrade surface owns on the
 // canonical continuation. Every route in it goes to the reader, which answers the
 // credential before the path, so an unknown route cannot be mapped by a caller
-// without one.
+// without one. The verb rule belongs to the reader as well: the two reads take
+// GET and HEAD, the verify action takes POST.
 const upgradeWizardReadNamespace = "installation/upgrade/"
 
 // upgradeWizardResource reports whether a canonical continuation resource belongs

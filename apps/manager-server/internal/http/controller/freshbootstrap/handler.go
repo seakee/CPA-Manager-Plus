@@ -30,8 +30,9 @@ type Handler struct {
 	// adoption this carrier's own claim committed, so it is delegated exactly as
 	// the runtime observation is, and never served by this package.
 	Adoption http.Handler
-	// Upgrade serves the two read-only Upgrade wizard routes. Nil keeps them
-	// closed, so an installation that mounts no Upgrade reader answers 503.
+	// Upgrade serves the Upgrade wizard routes: the two reads and the one verify
+	// action that runs the completion gate. Nil keeps them closed, so an
+	// installation that mounts no Upgrade reader answers 503.
 	Upgrade http.Handler
 }
 

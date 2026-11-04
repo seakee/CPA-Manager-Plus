@@ -193,3 +193,65 @@ func TestUnfinishedUpgradeServesOnlyTheUpgradeSurface(t *testing.T) {
 		t.Fatalf("absent operation = %q/%v, want none", stage, err)
 	}
 }
+
+// TestCompletedUpgradeStartsTheNormalProduct walks the other side of the
+// admission through the real process: a store whose operation the completion gate
+// recorded as complete no longer takes the Upgrade-only branch. The server reaches
+// the writable product bootstrap instead, which is the path every install takes
+// after admission — and the Upgrade surface is not what answers it.
+func TestCompletedUpgradeStartsTheNormalProduct(t *testing.T) {
+	dir := t.TempDir()
+	databasePath := filepath.Join(dir, "usage.sqlite")
+	writeOwnedProvisioningConfig(t, dir)
+	if db, err := sqliterepo.Open(databasePath); err != nil {
+		t.Fatalf("create copied store: %v", err)
+	} else if err := db.Close(); err != nil {
+		t.Fatalf("close copied store: %v", err)
+	}
+	// The gate continues a recorded operation, so the fixture records the
+	// connect position first and then the verdict, with the evidence it rests on.
+	recordUpgradeStage(t, databasePath, string(model.UpgradeStageExternalConnect))
+	recordUpgradeStage(t, databasePath, string(model.UpgradeStageComplete))
+	recorded, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
+	if err != nil || !found {
+		t.Fatalf("read fixture operation: found=%t err=%v", found, err)
+	}
+	if recorded.Stage != model.UpgradeStageComplete {
+		t.Fatalf("fixture stage = %q, want complete", recorded.Stage)
+	}
+	if _, err := recorded.VerificationEvidence(); err != nil {
+		t.Fatalf("the completed fixture carries no verification: %v", err)
+	}
+
+	process := startManagerServerProcessWithEnvironment(t, ownedPreflightEnvironment(dir, databasePath))
+	// The writable bootstrap's own verdict is the marker. The Upgrade-only branch
+	// is the one log line that must not appear: a completed operation is never
+	// held on that surface again.
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		logs := process.logs.String()
+		if strings.Contains(logs, "bootstrap manager server:") || strings.Contains(logs, "serving only the Upgrade surface") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	logs := process.logs.String()
+	if strings.Contains(logs, "serving only the Upgrade surface") {
+		t.Fatalf("a completed Upgrade still served the Upgrade surface:\n%s", logs)
+	}
+	// The product bootstrap replaces the Upgrade surface. With no host-controlled
+	// initialize run yet it stops on exactly that step, which is the same answer
+	// every admitted store gets; the point here is that the Upgrade surface is no
+	// longer the branch startup took.
+	if !strings.Contains(logs, "bootstrap manager server:") {
+		t.Fatalf("a completed Upgrade did not enter the product bootstrap:\n%s", logs)
+	}
+	// The process leaves the upgrade-only branch, so it ends after the bootstrap
+	// refusal; its exit belongs to that verdict, not to this test.
+	select {
+	case <-process.done:
+	case <-time.After(20 * time.Second):
+		process.stop(t)
+		t.Fatal("the product bootstrap did not return after a completed Upgrade")
+	}
+}

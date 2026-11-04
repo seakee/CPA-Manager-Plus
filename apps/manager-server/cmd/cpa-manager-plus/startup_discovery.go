@@ -56,9 +56,10 @@ func newStartupHTTPHandler(result bootstrap.PublicDiscovery) *startupHTTPHandler
 }
 
 // The blocked/pre-ready operator may inspect the same bounded public discovery
-// in a read-only shell. The separate Upgrade surface mounts its entry leaf and
-// its two read-only wizard routes; no Bootstrap API or Upgrade writer is
-// mounted.
+// in a read-only shell. The separate Upgrade surface mounts its entry leaf, its
+// two read-only wizard routes and the one verify action; no Bootstrap API is
+// mounted, and the only write the surface can reach is the completion gate the
+// action delegates to.
 func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == bootstrap.FixedBootstrapDiscoveryPath {
 		h.discovery.ServeHTTP(w, r)
@@ -108,17 +109,18 @@ func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.
 	h.readOnlyShell.ServeHTTP(w, r)
 }
 
-// upgradeWizardNamespace is the one namespace the wizard reads own on the fixed
-// Bootstrap API. The namespace, not a pair of exact resources, is what the fixed
+// upgradeWizardNamespace is the one namespace the wizard owns on the fixed
+// Bootstrap API. The namespace, not a list of exact resources, is what the fixed
 // carrier routes to the reader: an unknown route inside it has to meet the same
 // credential gate, so a caller cannot map the surface by asking for a path that
 // does not exist. The reader answers 404 for an unknown route only after the
-// credential and the browser's origin are decided.
+// credential and the browser's origin are decided, and it answers the verb rule
+// itself: the two reads take GET and HEAD, the verify action takes POST.
 const upgradeWizardNamespace = bootstrap.FixedBootstrapAPIPath + "installation/upgrade/"
 
 // fixedUpgradeSurfaceLeaf reports whether a fixed-surface path belongs to the
-// Upgrade surface: its authentication entry and every route in its read
-// namespace, all under the fixed Bootstrap carrier.
+// Upgrade surface: its authentication entry and every route in its namespace,
+// all under the fixed Bootstrap carrier.
 func fixedUpgradeSurfaceLeaf(value string) bool {
 	return value == upgradeauth.Path || strings.HasPrefix(value, upgradeWizardNamespace)
 }
@@ -164,7 +166,7 @@ func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.Inspection
 		// leaf resolved it for `paths` at startup. They are mounted with the
 		// leaf and closed with it: an unfinished Upgrade operation has no Fresh
 		// record, so the fixed surface is the only carrier that can still show
-		// what it recorded.
+		// what it recorded — and the only one that can run the completion gate.
 		h.upgradeWizard = &upgradewizard.Handler{
 			LegacyRoot:   configuredLegacyRoot,
 			PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),

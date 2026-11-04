@@ -1,13 +1,18 @@
-// Package upgradewizard serves the two read-only routes of the Full Web Upgrade
-// wizard: the preflight report and the persisted operation projection.
+// Package upgradewizard serves the routes of the Full Web Upgrade wizard: the
+// read-only preflight report, the persisted operation projection, and the one
+// action that runs the completion gate.
 //
-// Nothing here advances the operation, opens a writable store, migrates, or
-// writes anything. Authentication proves the caller's key by reading one
-// credential row from the surface's single resolved source; the status
-// projection then reads the Manager store, and the preflight inspects the 1.x
-// source. Both selects are bounded: the projection names its columns, so a value
-// this package never selected (a source fingerprint, a backup digest, a data
-// key, a filesystem path) cannot reach the browser even if the row carries it.
+// The two reads never advance the operation, open a writable store, migrate, or
+// write anything. The action is the same gate the command line runs
+// (upgradeservice.Verify): it re-derives the operation's evidence and records the
+// one verdict the recorded target supports, so the page and the command line
+// cannot disagree about whether the upgrade finished. Authentication proves the
+// caller's key by reading one credential row from the surface's single resolved
+// source; the status projection then reads the Manager store, and the preflight
+// inspects the 1.x source. Both selects are bounded: the projection names its
+// columns, so a value this package never selected (a source fingerprint, a backup
+// digest, a data key, a filesystem path) cannot reach the browser even if the row
+// carries it.
 package upgradewizard
 
 import (
@@ -46,6 +51,10 @@ const Contract = "cpamp.upgrade-wizard.v1"
 const (
 	PreflightSuffix = "/installation/upgrade/preflight"
 	StatusSuffix    = "/installation/upgrade/status"
+	// VerifySuffix is the one action route: it runs the completion gate the CLI
+	// runs. GET and HEAD on it are refused, so every read of the surface stays a
+	// read, and it is the only route here that writes.
+	VerifySuffix = "/installation/upgrade/verify"
 )
 
 // DefaultTimeout bounds one read-only preflight. A 1.x source is inspected
@@ -139,10 +148,6 @@ const (
 	ActionVerify          = "verify"
 	ActionComplete        = "complete"
 	ActionRolledBack      = "rolled_back"
-	// ActionManualItems is the decision after an import that deferred every item:
-	// this build copies nothing, so repeating the step writes nothing and cannot
-	// finish the copy. The decision it can offer is the manual work the row names.
-	ActionManualItems = "manual_items"
 )
 
 // externalConnectRefusals are the typed codes the External connect step records
@@ -176,9 +181,17 @@ var externalConnectStages = map[string]bool{
 // by an External CPA it could not connect to must offer that step:
 // reconciliation is not what resolves a v7 CPA or a rejected key, and offering it
 // would send the operator past a stop that is still standing.
+//
+// A verified row carries the gate's own reason. The Managed position — waiting
+// for the trusted re-pin — is not a completion and not a failure: the operator
+// waits, then runs the same verification again, because only the gate may record
+// what follows it.
 func nextActionForRecordedStage(stage, errorCode string, domains, manualItems []string) string {
 	if externalConnectStages[stage] && externalConnectRefusals[errorCode] {
 		return ActionExternalConnect
+	}
+	if stage == StageVerify && errorCode == string(upgradeservice.UpgradeErrorVerifyWaitingForRepin) {
+		return ActionVerify
 	}
 	return nextAction(stage, domains, manualItems)
 }
@@ -209,7 +222,10 @@ const domainSourceCopy = "source_copy"
 // wizard verification is next rather than a repeated import.
 const domainCPAConfig = "cpa_config"
 
-// Handler serves both routes. It has no write path at all.
+// Handler serves every route of the surface. The two reads have no write path at
+// all, and the one action delegates to the shared completion gate rather than
+// writing the store itself: this package decides no verdict, it reports the one
+// the gate recorded.
 //
 // Authentication is the Upgrade surface's own credential: the source
 // administrator key the bootstrap Upgrade entry already verified, presented as
@@ -331,13 +347,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Path
-	var preflight bool
+	var preflight, verify bool
 	switch {
 	case strings.HasSuffix(path, PreflightSuffix) && path != PreflightSuffix:
 		preflight = true
 	case strings.HasSuffix(path, StatusSuffix) && path != StatusSuffix:
+	case strings.HasSuffix(path, VerifySuffix) && path != VerifySuffix:
+		verify = true
 	default:
 		http.NotFound(w, r)
+		return
+	}
+	// The two reads stay reads: GET and HEAD only. The action takes POST and
+	// nothing else, so a browser prefetch, a link or a bookmark of the action's
+	// address can never advance the operation.
+	if verify {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		h.serveVerify(w, r, mount)
 		return
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -859,6 +889,144 @@ func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount moun
 	writeJSON(w, http.StatusOK, document)
 }
 
+// verifyDocument is the action's answer: the position the gate recorded, in the
+// vocabulary the status projection uses, so a page that posts and a page that
+// polls read the same verdict.
+//
+// Nothing the gate observed for itself is repeated here: no source fingerprint,
+// no backup digest, no connection secret and no filesystem path. The evidence is
+// in the operation row, and this route reports the decision it supports.
+type verifyDocument struct {
+	ContractVersion string   `json:"contractVersion"`
+	Recorded        bool     `json:"recorded"`
+	Stage           string   `json:"stage"`
+	StageKnown      bool     `json:"stageKnown"`
+	NextAction      string   `json:"nextAction"`
+	Complete        bool     `json:"complete"`
+	TargetMode      string   `json:"targetMode"`
+	DomainsDone     []string `json:"domainsDone"`
+	ReasonCode      string   `json:"reasonCode,omitempty"`
+	Reason          string   `json:"reason,omitempty"`
+	ManualItems     []string `json:"manualItems"`
+	AlreadyVerified bool     `json:"alreadyVerified"`
+	UpdatedAtMS     int64    `json:"updatedAtMs"`
+}
+
+// serveVerify runs the one completion gate the CLI runs.
+//
+// It is an action, not a read: it holds the v2 data root's ownership fence, the
+// stopped source's read-only ownership marker and one write transaction, all
+// inside upgradeservice.Verify. This handler decides only what the operation
+// recorded looks like on the wire, so the page cannot disagree with the command
+// line about whether the upgrade finished.
+//
+// The mounted 1.x root is the one this request already inspected, never a fresh
+// unbounded filesystem call and never a value the caller supplied: the
+// fingerprint is the proof that the volume the copy-in read was not written, and
+// a root taken from the request would be exactly the claim this step exists to
+// check. A request whose lookup never answered is refused with the deadline's
+// own code instead of verifying a source nobody named.
+func (h *Handler) serveVerify(w http.ResponseWriter, r *http.Request, mount mountResolution) {
+	// The action takes no input. A body would be a caller's attempt to name the
+	// source, the target or the authority, and none of those is this caller's to
+	// state; it is refused rather than ignored.
+	if r.ContentLength != 0 {
+		writeError(w, http.StatusBadRequest, CodeRequestInvalid)
+		return
+	}
+	target := h.managerDatabase()
+	if target == "" {
+		writeError(w, http.StatusServiceUnavailable, CodeOperationUnread)
+		return
+	}
+	if !mount.rootKnown {
+		// The lookup never resolved the configured root, so this request cannot
+		// name the tree the verification would observe. That is the deadline's
+		// verdict, never a credential error and never a verified source.
+		writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
+		return
+	}
+	if mount.database == "" {
+		// The mount holds no database the shared file policy accepts, so the
+		// volume the operation copied cannot be observed. The gate refuses a
+		// verification that skipped the fingerprint; this route names the mount
+		// condition the preflight names for the same tree.
+		writeError(w, http.StatusServiceUnavailable, mount.state())
+		return
+	}
+	timeout := h.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	result, err := upgradeservice.Verify(ctx, upgradeservice.VerifyOptions{
+		LegacyRoot: mount.root,
+		TargetRoot: filepath.Dir(target),
+	})
+	if err != nil {
+		writeError(w, actionFailureStatus(err), actionFailureCode(err))
+		return
+	}
+	document := verifyDocument{
+		ContractVersion: Contract,
+		Recorded:        true,
+		Stage:           string(result.Stage),
+		StageKnown:      knownStage(string(result.Stage)),
+		Complete:        result.Complete,
+		TargetMode:      result.TargetMode,
+		DomainsDone:     append([]string{}, result.DomainsDone...),
+		ReasonCode:      result.ReasonCode,
+		// The recorded instruction is operator text written by another step, so
+		// it goes through the same scrubber the projection applies to error
+		// detail: a reason is evidence, a path or a key inside it is not.
+		Reason:          newScrubber(mount.root).detail(result.Reason),
+		ManualItems:     scrubList(result.ManualItems),
+		AlreadyVerified: result.AlreadyVerified,
+		UpdatedAtMS:     result.UpdatedAtMS,
+	}
+	document.NextAction = nextActionForRecordedStage(document.Stage, document.ReasonCode, document.DomainsDone, document.ManualItems)
+	writeJSON(w, http.StatusOK, document)
+}
+
+// CodeRequestInvalid is the action's own negative verdict on its request: it
+// takes no input at all, so a body is refused rather than read.
+const CodeRequestInvalid = "upgrade_request_invalid"
+
+// actionFailureStatus maps a gate refusal onto the status code that says what
+// the caller may do: retry once the named condition is gone (503), or look at
+// the operation and its target (409). It never turns a typed refusal into a 500:
+// the store is readable and the verdict is a decision, not a fault.
+func actionFailureStatus(err error) int {
+	code, ok := upgradeservice.UpgradeErrorCodeOf(err)
+	if !ok {
+		return http.StatusServiceUnavailable
+	}
+	switch code {
+	case upgradeservice.UpgradeErrorVerifyV2Running,
+		upgradeservice.UpgradeErrorVerifySourceUnavailable,
+		upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusConflict
+	}
+}
+
+// actionFailureCode names the refusal on the wire. A failure the gate did not
+// type is reported as its own condition so the page can say "the verification
+// failed" instead of inventing a code, and it never quotes the underlying error:
+// that text can carry a host path.
+func actionFailureCode(err error) string {
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); ok {
+		return string(code)
+	}
+	return CodeVerifyFailed
+}
+
+// CodeVerifyFailed is the untyped action failure: the gate could not finish and
+// the reason is not one of the codes this surface names.
+const CodeVerifyFailed = "upgrade_verify_failed"
+
 type statusRow struct {
 	Stage         string
 	Domains       string
@@ -1082,13 +1250,19 @@ func knownStage(stage string) bool {
 // Recording `cpa_import` with the `cpa_config` domain means the destination was
 // copied and proved, so the next decision is verification — repeating the
 // import would ask the operator to redo work the row already proves. Recording
-// `cpa_import` without that domain only means the step ran: this build copies
-// nothing and defers every item, so the row's manual items carry the import's
-// typed reason, and the decision is the manual work they name instead of an
-// import that would write nothing again. A failed operation resumes at
-// reconciliation, and a stage this build does not know keeps the empty string:
-// the caller must show the recorded stage verbatim rather than claim a step that
-// may not be the real position.
+// `cpa_import` without that domain is the deferred import this build records: it
+// copied nothing, so it owns no `cpa_config`, and its manual items carry the
+// typed reason. The verification is still the next step, because the gate is what
+// names the position such an operation stands at ("waiting for the trusted re-pin
+// ") and refuses to pretend it finished; offering the import again would write
+// nothing and strand the operation on a step that cannot advance.
+//
+// Recording `verify` means the gate ran: an External target is one statement from
+// completion, and a Managed one carries the reason it may not be promoted, so
+// the next decision is the same verification once the re-pin has happened. A
+// failed operation resumes at reconciliation, and a stage this build does not
+// know keeps the empty string: the caller must show the recorded stage verbatim
+// rather than claim a step that may not be the real position.
 func nextAction(stage string, domains, manualItems []string) string {
 	switch stage {
 	case "":
@@ -1104,7 +1278,7 @@ func nextAction(stage string, domains, manualItems []string) string {
 			return ActionVerify
 		}
 		if cpaImportDeferred(manualItems) {
-			return ActionManualItems
+			return ActionVerify
 		}
 		return ActionCPAImport
 	case StageExternal:

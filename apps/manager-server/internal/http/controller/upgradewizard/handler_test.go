@@ -911,11 +911,13 @@ func TestStatusStageToNextAction(t *testing.T) {
 		{stage: StageCPAImport, domains: []string{domainSourceCopy}, action: ActionCPAImport, stageKnown: true},
 		// The deferral is read from the items the import wrote: this build never
 		// records cpa_config, so an item with its typed reason is the record that
-		// the step ran and copied nothing.
+		// the step ran and copied nothing. Repeating the step would write nothing
+		// again, so the next decision is the completion gate — which records the
+		// waiting position for a Managed target instead of completing it.
 		{
 			stage: StageCPAImport, domains: []string{domainSourceCopy},
 			manualItems: []string{"section:ampcode: re-create it (" + upgradeservice.CPAImportRequiresQualification + ")"},
-			action:      ActionManualItems, stageKnown: true,
+			action:      ActionVerify, stageKnown: true,
 		},
 		{stage: StageCPAImport, domains: []string{domainSourceCopy}, manualItems: []string{"reimport_cpa_keys"}, action: ActionCPAImport, stageKnown: true},
 		{stage: StageCPAImport, domains: []string{domainSourceCopy, domainCPAConfig}, action: ActionVerify, stageKnown: true},
@@ -962,7 +964,7 @@ func TestStatusRecordedStageGuidesTheNextStep(t *testing.T) {
 			name: "deferred", stage: model.UpgradeStageCPAImport,
 			domains:     []string{model.UpgradeDomainSourceCopy},
 			manualItems: []string{"section:ampcode: re-create it (" + upgradeservice.CPAImportRequiresQualification + ")"},
-			action:      ActionManualItems,
+			action:      ActionVerify,
 		},
 	}
 	for _, testCase := range cases {

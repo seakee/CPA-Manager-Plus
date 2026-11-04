@@ -324,8 +324,10 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	if os.Getenv("CPAMP_PRIVATE_A3_PROFILE") != "" {
 		a.externalPermit = privateFreshExternalAdmitted
 	}
-	// One Upgrade reader for the whole application: both carriers serve it, and
-	// its per-handler mount flight is what keeps a hung mount to one lookup.
+	// One Upgrade surface for the whole application: both carriers serve it, and
+	// its per-handler mount flight is what keeps a hung mount to one lookup. The
+	// two reads and the one verify action share that handler, so the page and
+	// the command line cannot disagree about whether the upgrade finished.
 	a.upgradeWizard = a.newUpgradeWizard()
 	a.fixed = freshbootstrap.Handler{Authority: a.authority, Routing: a.routing, Current: a.current,
 		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime),
