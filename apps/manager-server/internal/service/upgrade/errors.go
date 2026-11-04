@@ -190,6 +190,79 @@ const (
 	// the process and run the step again.
 	UpgradeErrorExternalV2Running UpgradeErrorCode = "upgrade_external_connect_v2_running"
 
+	// --- Verify / complete (U1-9) ---
+	//
+	// This group is the one completion gate's vocabulary. `verify` proves the
+	// recorded operation and either completes it (an External target) or parks it
+	// at verify with the reason this build may not promote a Managed one. Every
+	// value below is a refusal that wrote nothing except where it says the stage
+	// was recorded.
+	//
+	// UpgradeErrorVerifyNotApplicable reports a recorded operation the gate may
+	// not run from: no recorded copy-in, a stage before the target step the
+	// target mode needs, or the terminal rolled_back verdict. Nothing was
+	// written.
+	UpgradeErrorVerifyNotApplicable UpgradeErrorCode = "upgrade_verify_not_applicable"
+	// UpgradeErrorVerifyV2Running reports that another writer owns the v2 data
+	// root: a running Manager process, or a second step that already holds the
+	// fence. The gate refuses rather than sharing the store. Nothing was written.
+	UpgradeErrorVerifyV2Running UpgradeErrorCode = "upgrade_verify_v2_running"
+	// UpgradeErrorVerifySourceUnavailable reports that the 1.x source the
+	// operation recorded cannot be observed: the operator mounted no directory,
+	// the named directory holds no source database, or it carries no ownership
+	// marker. The source fingerprint cannot be taken, and a verification that
+	// skipped it would claim the volume was unchanged without looking. Nothing was
+	// written.
+	UpgradeErrorVerifySourceUnavailable UpgradeErrorCode = "upgrade_verify_source_unavailable"
+	// UpgradeErrorVerifySourceMismatch reports that the mounted 1.x source is not
+	// the volume the recorded copy-in and reconciliation observed: its manifest
+	// digest differs. Nothing was written.
+	UpgradeErrorVerifySourceMismatch UpgradeErrorCode = "upgrade_verify_source_mismatch"
+	// UpgradeErrorVerifyReconciliationInvalid reports a recorded reconciliation
+	// this build cannot accept: no evidence at all, a body that is not the
+	// recorded evidence, a run that established no operation domain, or one whose
+	// non-applicable domains carry no reason. Nothing was written.
+	UpgradeErrorVerifyReconciliationInvalid UpgradeErrorCode = "upgrade_verify_reconciliation_invalid"
+	// UpgradeErrorVerifyReconciliationUnacknowledged reports days the recorded
+	// reconciliation left undecided, or days it marked incomplete without a
+	// durable coverage mark, or data it recorded as unrecoverable. The
+	// reconciliation contract is re-derived here, so an acknowledgement can never
+	// be read as an unconditional pass. Nothing was written.
+	UpgradeErrorVerifyReconciliationUnacknowledged UpgradeErrorCode = "upgrade_verify_reconciliation_unacknowledged"
+	// UpgradeErrorVerifyDomainsIncomplete reports an operation domain this
+	// operation must hold and does not: the copy-in domain, a domain the recorded
+	// reconciliation established, or a domain the target step records. The
+	// applicable set is derived; no fixed list of domains is required. Nothing was
+	// written.
+	UpgradeErrorVerifyDomainsIncomplete UpgradeErrorCode = "upgrade_verify_domains_incomplete"
+	// UpgradeErrorVerifyBindingMissing reports an External operation whose row
+	// reached the connect stage without the target binding that stage records, so
+	// the CPA it connected cannot be named. Nothing was written.
+	UpgradeErrorVerifyBindingMissing UpgradeErrorCode = "upgrade_verify_binding_missing"
+	// UpgradeErrorVerifyBindingDrifted reports a recorded External binding that is
+	// not the connection the Manager itself stores: another address, another
+	// identity, or a configuration with no connection at all. The binding is
+	// compared against the real configuration, never against a caller's claim.
+	// Nothing was written.
+	UpgradeErrorVerifyBindingDrifted UpgradeErrorCode = "upgrade_verify_binding_drifted"
+	// UpgradeErrorVerifyConnectionUnproven reports a Managed operation whose
+	// imported destination connection did not survive: no recorded attempt, an
+	// attempt no run proved, or a Manager connection that no longer names the
+	// destination with the secret the import handed over. Nothing was written.
+	UpgradeErrorVerifyConnectionUnproven UpgradeErrorCode = "upgrade_verify_connection_unproven"
+	// UpgradeErrorVerifyWaitingForRepin is the reason recorded at verify for a
+	// Managed operation. It is not a failure: the Managed authority promotion and
+	// the CPA copy qualification are deferred to the trusted re-pin step, so this
+	// build records the position and the reason instead of completing the
+	// operation. It is never returned as an error.
+	UpgradeErrorVerifyWaitingForRepin UpgradeErrorCode = "upgrade_verify_waiting_for_repin"
+	// UpgradeErrorVerifyConflict reports that the recorded operation changed
+	// between the read this run proved and the statement that would have recorded
+	// the verdict, so the revision check refused it. Nothing was written: the
+	// verdict this run held was about a row that no longer exists, and re-running
+	// the verification re-proves the current one.
+	UpgradeErrorVerifyConflict UpgradeErrorCode = "upgrade_verify_conflict"
+
 	// UpgradeErrorStoreLocked reports that the Manager store's process lock is
 	// held, so an offline migration cannot run. The lock is the proof that the
 	// writable Manager is still serving the store.
@@ -270,6 +343,20 @@ var (
 	// ErrExternalV2Running is a refusal, not a transient failure: the operator
 	// stops the process that owns the store and reruns the step.
 	ErrExternalV2Running = &UpgradeError{Code: UpgradeErrorExternalV2Running}
+
+	// Verify / complete (U1-9). Every one is a refusal that wrote nothing; the
+	// Managed outcome is a recorded position, not an error, and has no sentinel.
+	ErrVerifyNotApplicable         = &UpgradeError{Code: UpgradeErrorVerifyNotApplicable}
+	ErrVerifyV2Running             = &UpgradeError{Code: UpgradeErrorVerifyV2Running}
+	ErrVerifySourceUnavailable     = &UpgradeError{Code: UpgradeErrorVerifySourceUnavailable}
+	ErrVerifySourceMismatch        = &UpgradeError{Code: UpgradeErrorVerifySourceMismatch}
+	ErrVerifyReconciliationInvalid = &UpgradeError{Code: UpgradeErrorVerifyReconciliationInvalid}
+	ErrVerifyReconciliationUnacked = &UpgradeError{Code: UpgradeErrorVerifyReconciliationUnacknowledged}
+	ErrVerifyDomainsIncomplete     = &UpgradeError{Code: UpgradeErrorVerifyDomainsIncomplete}
+	ErrVerifyBindingMissing        = &UpgradeError{Code: UpgradeErrorVerifyBindingMissing}
+	ErrVerifyBindingDrifted        = &UpgradeError{Code: UpgradeErrorVerifyBindingDrifted}
+	ErrVerifyConnectionUnproven    = &UpgradeError{Code: UpgradeErrorVerifyConnectionUnproven}
+	ErrVerifyConflict              = &UpgradeError{Code: UpgradeErrorVerifyConflict}
 
 	// StoreLocked and MigrateNotCopiedIn belong to the offline migration the
 	// rollback acceptance needs: the first reports the live Manager still

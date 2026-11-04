@@ -221,8 +221,16 @@ func loadCPAImportDestinationRecord(ctx context.Context, databasePath, dataKeyPa
 		return cpaImportDestinationRecord{}, "", false, fmt.Errorf("open the v2 database to read the destination attempt: %w", err)
 	}
 	defer func() { _ = db.Close() }()
+	return loadCPAImportDestinationRecordFrom(ctx, db, dataKeyPath)
+}
+
+// loadCPAImportDestinationRecordFrom is the same read through a connection the
+// caller already holds. A step that owns the v2 data root fence already has the
+// database open and must not open it a second time: the store it manages is the
+// one it reads.
+func loadCPAImportDestinationRecordFrom(ctx context.Context, db *sql.DB, dataKeyPath string) (cpaImportDestinationRecord, string, bool, error) {
 	var raw string
-	err = db.QueryRowContext(ctx, `select value from settings where key = ?`, cpaImportDestinationKeySetting).Scan(&raw)
+	err := db.QueryRowContext(ctx, `select value from settings where key = ?`, cpaImportDestinationKeySetting).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return cpaImportDestinationRecord{}, "", false, nil
 	}
