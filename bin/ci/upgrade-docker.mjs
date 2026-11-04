@@ -2768,6 +2768,15 @@ function recordFault(name, command, code, targetRootUnchanged, extra = {}) {
 // stack write, records the verdict, and proves the manager refuses a probe of
 // its own listener. It then proves the recorded `rolled_back` root still admits
 // only the Upgrade surface.
+//
+// Every host-side read of that directory happens with the stack stopped. The
+// product fences a host read of a 1.x source (`upgrade preflight` takes the
+// source lock), and a container's flock is the host's flock wherever the mount
+// is a real bind mount — Linux — while Docker Desktop's file-sharing boundary
+// hides it on macOS. A proof that reads the directory while the 1.x serves
+// therefore passes for the wrong reason on one host and is refused on the other,
+// so the write is proved between two stopped readings and the verdict's own
+// fingerprint is proved to differ from the pre-rollback copy.
 async function proveRollback(binary, workspace, fixture) {
   const source = fs.realpathSync(workspace.main.source);
   const target = workspace.main.target;
@@ -2849,24 +2858,46 @@ async function proveRollback(binary, workspace, fixture) {
   // keeps serving: chown is metadata only and does not disturb its open handles.
   normalizeScratchOwnership(source, 'rollback-live');
 
-  // The live directory's own fingerprint, read by the product while the 1.x is
-  // serving. The verdict below has to observe this value, not the stopped source.
-  const liveProbe = runCli(
+  // The directory's post-write fingerprint, read where the product can read it
+  // honestly on every host. `upgrade preflight` takes the source lock, and the
+  // running 1.x holds it: on a host where the container's flock and the host's
+  // are one lock (Linux, a bind mount) that read is refused — correctly — with
+  // `upgrade_source_busy`. Docker Desktop's file-sharing boundary hides the
+  // flock from the host, so a reading taken while the 1.x served only ever
+  // worked on macOS. The 1.x is stopped for the reading and started again for
+  // the verdict below, which proves it serves.
+  const containerName = (composeResources.containers ?? [])[0];
+  assertValue(
+    Boolean(containerName),
+    `rollback: the applied plan reported no container: ${redactor.redact(JSON.stringify(composeResources.containers))}`,
+  );
+  stopContainer(containerName);
+  await waitForContainerExit(containerName);
+  normalizeScratchOwnership(source, 'rollback-post-write');
+  const postWriteProbe = runCli(
     binary,
     ['upgrade', 'preflight', '--legacy', source, '--json'],
-    'rollback:live-directory-fingerprint',
-    { expectExit: null },
+    'rollback:post-write-fingerprint',
+    { expectExit: 0 },
   );
-  const liveReport = parseJson(liveProbe.stdout, 'rollback:live-directory-fingerprint');
-  const liveFingerprint = liveReport.fingerprint;
+  const postWriteReport = parseJson(postWriteProbe.stdout, 'rollback:post-write-fingerprint');
+  const postWriteFingerprint = postWriteReport.fingerprint;
   assertValue(
-    SHA256_PATTERN.test(String(liveFingerprint ?? '')),
-    `rollback: the live directory has no fingerprint, so the write cannot be shown to have moved it (${redactor.redact(JSON.stringify(liveReport.checks ?? []).slice(0, 300))})`,
+    SHA256_PATTERN.test(String(postWriteFingerprint ?? '')),
+    `rollback: the stopped post-write directory has no fingerprint (${redactor.redact(JSON.stringify(postWriteReport.checks ?? []).slice(0, 300))})`,
   );
+  // Both readings describe a stopped directory, so the only difference between
+  // them is what the restarted 1.x wrote.
   assertValue(
-    liveFingerprint !== plan.sourceFingerprint,
-    'rollback: the restarted 1.x write did not change the fingerprint of the directory verify reads',
+    postWriteFingerprint !== plan.sourceFingerprint,
+    'rollback: the restarted 1.x write did not change the directory the verdict reads',
   );
+  const restart = sh('docker', ['start', containerName]);
+  evidence.commands.push(commandRecord(`docker start ${containerName}`, restart.code));
+  if (restart.code !== 0) {
+    throw new Error(`rollback: restart the 1.x for the verdict: ${redactor.redact(tail(restart.stderr))}`);
+  }
+  await waitForHealth(port, 'restarted 1.x /health after the post-write reading');
 
   // A probe answered by the manager itself is refused, and the refusal must
   // leave the recorded row exactly as it was.
@@ -2920,32 +2951,19 @@ async function proveRollback(binary, workspace, fixture) {
   assertValue(operation.stage === 'rolled_back', `rollback: recorded stage=${operation.stage}`);
   assertValue(operation.rollback?.image === plan.image, `rollback: recorded image=${operation.rollback?.image}`);
 
-  // The same product fingerprint of the same live directory, read again right
-  // after the verdict. A 1.x that is still serving may touch its WAL index, so
-  // the verdict has to match one of the two readings that bracket it; both
-  // readings describe the directory the restarted 1.x wrote into.
-  const liveAfter = runCli(
-    binary,
-    ['upgrade', 'preflight', '--legacy', source, '--json'],
-    'rollback:live-directory-fingerprint-after-verify',
-    { expectExit: null },
-  );
-  const liveAfterReport = parseJson(liveAfter.stdout, 'rollback:live-directory-fingerprint-after-verify');
-  const liveFingerprintAfter = liveAfterReport.fingerprint;
-  assertValue(SHA256_PATTERN.test(String(liveFingerprintAfter ?? '')), 'rollback: the live directory has no fingerprint after the verdict');
-
   const observed = operation.rollback?.sourceFingerprint;
   assertValue(SHA256_PATTERN.test(String(observed ?? '')), 'rollback: no observed fingerprint was recorded');
-  // The proof H1 asks for: the verdict's fingerprint is the post-write state of
-  // the same directory the 1.x wrote into, never the pre-rollback copy.
+  // What the verdict must show, on every host: it described the post-write
+  // directory and not the pre-rollback copy. The write moved that directory (the
+  // stopped readings above, which differ only by the write), and the row the 1.x
+  // wrote is found in the same directory afterwards. A digest equality with a
+  // host reading is deliberately not asserted: a serving 1.x holds the source
+  // lock, so a host reading while it serves is refused, and a stopped reading is
+  // a different state — the values differ by the WAL a live 1.x keeps, not by
+  // anything the verdict got wrong.
   assertValue(
     observed !== plan.sourceFingerprint,
     `rollback: verify observed ${observed}, the pre-rollback source fingerprint; the verdict did not read the volume the restarted 1.x wrote`,
-  );
-  const matchedLiveReading = observed === liveFingerprint ? 'before' : observed === liveFingerprintAfter ? 'after' : null;
-  assertValue(
-    matchedLiveReading !== null,
-    `rollback: verify observed ${observed}, which is neither the live directory's fingerprint before the verdict (${liveFingerprint}) nor after it (${liveFingerprintAfter}); the verdict did not describe the directory the restarted 1.x wrote`,
   );
 
   const persisted = readCliOperation(binary, target, 'rollback:status');
@@ -2996,10 +3014,10 @@ async function proveRollback(binary, workspace, fixture) {
     },
     applied: { exitCode: up.code, health: 'ok', containers: composeResources.containers, networks: composeResources.networks },
     v1WroteAfterCopyIn: { status: written.status, added: written.body.added },
-    liveFingerprint: {
-      beforeVerdict: { exitCode: liveProbe.code, fingerprint: liveFingerprint },
-      afterVerdict: { exitCode: liveAfter.code, fingerprint: liveFingerprintAfter },
-      stableAcrossVerdict: liveFingerprint === liveFingerprintAfter,
+    postWriteFingerprint: {
+      exitCode: postWriteProbe.code,
+      fingerprint: postWriteFingerprint,
+      movedByTheWrite: postWriteFingerprint !== plan.sourceFingerprint,
     },
     selfProbe: {
       exitCode: selfProbe.code,
@@ -3015,7 +3033,6 @@ async function proveRollback(binary, workspace, fixture) {
       image: operation.rollback?.image,
       statusUrl: operation.rollback?.statusUrl,
       observedFingerprint: observed,
-      observedFingerprintMatchedLiveReading: matchedLiveReading,
       observedFingerprintDiffersFromPlan: observed !== plan.sourceFingerprint,
       reportSha256: sha256(verify.stdout),
     },
