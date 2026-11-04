@@ -2696,8 +2696,13 @@ async function faultBusySource(binary, workspace) {
   const target = path.join(SCRATCH, 'work', 'busy', 'target');
   copyTree(workspace.main.source, source);
   // A real v2 store on the target, so "the blocked write changed nothing" is a
-  // claim about data, not about an empty directory.
+  // claim about data, not about an empty directory. Its recorded row is cleared
+  // first: a target whose row is already past the copy-in is reported and left
+  // alone, because the run owns only the preflight and the copy-in, so the fence
+  // would never be reached. With no row the store is data the copy-in would
+  // write into, which is what the busy source has to stop.
   copyTree(workspace.main.target, target);
+  sqliteExec(path.join(target, 'usage.sqlite'), 'delete from upgrade_operations');
   const holder = spawn(
     'python3',
     [
@@ -2737,12 +2742,12 @@ async function faultBusySource(binary, workspace) {
     assertValue(runReport.preflight?.ready === false, 'busy: copy-in ran a blocked preflight');
     assertValue(dirDigest(target) === digestBefore, 'busy: the refused copy-in wrote the v2 data root');
     const recorded = readCliOperation(binary, target, 'busy:status');
-    assertValue(recorded.operation?.stage === 'reconcile', `busy: the refused copy-in changed the recorded stage to ${recorded.operation?.stage}`);
+    assertValue(recorded.recorded === false, `busy: the refused copy-in recorded ${JSON.stringify(recorded.operation)}`);
     recordFault('natively-busy-source', run, check.code, true, {
       fence: 'flock(LOCK_EX) on usage.sqlite.manager.lock',
       writePath: 'upgrade run --legacy <busy source> --target <v2 root>',
       preflightExitCode: blocked.code,
-      persistedStage: recorded.operation?.stage,
+      persistedStage: recorded.recorded === false ? null : recorded.operation?.stage,
     });
   } finally {
     holder.kill('SIGKILL');
