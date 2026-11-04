@@ -294,7 +294,13 @@ func runServerWithOptions(options legacypreflight.Options) {
 		if err := databaseLock.Close(); err != nil {
 			log.Printf("close upgrade admission fence: %v", err)
 		}
-		startupHandler.EnableReadOnlyDiscovery(paths, options, inspectionTimeout)
+		// The projection is the inspection this admission was granted on. The
+		// copied store is a v2 WAL database, which the rollback-mode discovery
+		// snapshot refuses; re-inspecting it here would hide the source behind
+		// "observation unavailable" and strand the one surface that can finish
+		// the operation. The report is the same fenced evidence startup already
+		// acted on, and the projection itself stays the bounded public contract.
+		startupHandler.EnableAdmittedDiscovery(paths, options, inspectionTimeout, databaseLock.Report)
 		if databaseLock.UpgradeReason != "" {
 			log.Printf("Upgrade operation %s is unfinished (reason %s); serving only the Upgrade surface",
 				databaseLock.UpgradeStage, databaseLock.UpgradeReason)

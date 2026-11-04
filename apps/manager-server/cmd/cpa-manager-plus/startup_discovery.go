@@ -140,6 +140,22 @@ func (h *startupHTTPHandler) serveDiscovery(w http.ResponseWriter, r *http.Reque
 // databases may use a bounded rollback-mode SQLite read snapshot without
 // creating a Manager marker; WAL/journal recovery remains unavailable here.
 func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.InspectionPaths, options legacypreflight.Options, timeout time.Duration) {
+	h.enableReadOnlyDiscovery(paths, options, timeout, nil)
+}
+
+// EnableAdmittedDiscovery projects the inspection this process was already
+// admitted on. The store was fenced, classified and read under the process lock
+// before the surface was chosen, so its report is current evidence about the
+// source — while the rollback-mode discovery snapshot would refuse the v2 WAL
+// journal a running Manager writes, which is a fact about the snapshot and not
+// about the source. Only a caller that holds that admission may pass a report
+// here; every other shape keeps the fenced inspection and its fail-closed
+// answer, so no WAL source outside a granted admission becomes observable.
+func (h *startupHTTPHandler) EnableAdmittedDiscovery(paths sqliterepo.InspectionPaths, options legacypreflight.Options, timeout time.Duration, admitted legacypreflight.Report) {
+	h.enableReadOnlyDiscovery(paths, options, timeout, &admitted)
+}
+
+func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.InspectionPaths, options legacypreflight.Options, timeout time.Duration, admitted *legacypreflight.Report) {
 	h.projectionMu.Lock()
 	defer h.projectionMu.Unlock()
 	// Entropy failure leaves this leaf closed without weakening discovery.
@@ -173,6 +189,15 @@ func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.Inspection
 			Database:     func() string { return paths.Database },
 			Timeout:      upgradewizard.DefaultTimeout,
 		}
+	}
+	if admitted != nil {
+		// The projection is a pure function of the granted inspection, so it is
+		// computed once and served without touching the store again.
+		result := bootstrapdiscovery.Project(bootstrapdiscovery.Input{Report: *admitted})
+		h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			bootstrapdiscovery.Handler{Discovery: result}.ServeHTTP(w, r)
+		})
+		return
 	}
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)

@@ -2,20 +2,52 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	bootstrapcontract "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/contract/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradeauth"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
+
+// admissionAdminKey is the copied store's administrator credential: a real
+// copy-in carries the source's credential, which is what makes the administrator
+// entry the right public projection for an unfinished operation.
+const admissionAdminKey = "cpamp_Admission_Key_0001"
+
+// seedCopiedStore creates the store a copy-in leaves behind: a fully migrated v2
+// database in WAL mode that already carries the administrator credential.
+func seedCopiedStore(t *testing.T, databasePath string) {
+	t.Helper()
+	db, err := sqliterepo.Open(databasePath)
+	if err != nil {
+		t.Fatalf("create copied store: %v", err)
+	}
+	credential, err := security.NewAdminCredential(admissionAdminKey, "admission-test")
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("build the administrator credential: %v", err)
+	}
+	if err := setting.New(db).SaveAdminCredential(t.Context(), credential); err != nil {
+		_ = db.Close()
+		t.Fatalf("store the administrator credential: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close copied store: %v", err)
+	}
+}
 
 // recordUpgradeStage writes the single Operation row into a v2 store, which is
 // the shape a copy-in leaves behind: a fully migrated schema, the stage and the
@@ -97,11 +129,7 @@ func TestUnfinishedUpgradeServesOnlyTheUpgradeSurface(t *testing.T) {
 	dir := t.TempDir()
 	databasePath := filepath.Join(dir, "usage.sqlite")
 	writeOwnedProvisioningConfig(t, dir)
-	if db, err := sqliterepo.Open(databasePath); err != nil {
-		t.Fatalf("create copied store: %v", err)
-	} else if err := db.Close(); err != nil {
-		t.Fatalf("close copied store: %v", err)
-	}
+	seedCopiedStore(t, databasePath)
 	recordUpgradeStage(t, databasePath, string(model.UpgradeStageCopyIn))
 	before, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
 	if err != nil || !found {
@@ -127,21 +155,35 @@ func TestUnfinishedUpgradeServesOnlyTheUpgradeSurface(t *testing.T) {
 		t.Fatalf("Upgrade authentication leaf status=%d, want 401", status)
 	}
 
-	// Discovery status reads are served. A copied store keeps the v2 WAL mode,
-	// which public discovery deliberately refuses to snapshot, so the honest
-	// answer for this source is a bounded "unavailable" without a mode. What
-	// matters here is that the read is answered by the Upgrade surface and that
-	// it never advertises a finished install.
+	// Discovery status reads project the inspection this process was admitted on.
+	// A copied store keeps the v2 WAL journal, which the rollback-mode discovery
+	// snapshot refuses — a fact about the snapshot, not about the source — so a
+	// gate that re-inspected the store would answer "observation unavailable" and
+	// the browser could never reach the administrator entry that opens the one
+	// surface able to finish the operation. The answer must be the bounded
+	// administrator-entry projection, and it must still never advertise a
+	// finished install.
 	status, body := waitForManagerResponse(t, process.addr, http.MethodGet, bootstrapdiscovery.Path)
-	if status != http.StatusOK && status != http.StatusServiceUnavailable {
+	if status != http.StatusOK {
 		process.stop(t)
-		t.Fatalf("upgrade-only discovery status=%d body=%s", status, body)
+		t.Fatalf("upgrade-only discovery status=%d body=%s, want 200", status, body)
 	}
-	for _, forbidden := range []string{`"mode":"fresh"`, `"mode":"upgrade"`, `"mode":"completed"`} {
-		if strings.Contains(body, forbidden) {
-			process.stop(t)
-			t.Fatalf("unfinished Upgrade advertised %s: %s", forbidden, body)
-		}
+	var discovery bootstrapcontract.DiscoveryDTO
+	if err := json.Unmarshal([]byte(body), &discovery); err != nil {
+		process.stop(t)
+		t.Fatalf("decode discovery: %v; body=%s", err, body)
+	}
+	if discovery.Status != bootstrap.PublicUnsupportedUpgrade ||
+		discovery.Mode == nil || *discovery.Mode != bootstrap.UnsupportedUpgrade ||
+		discovery.AuthEntry != bootstrap.AuthEntryAdminSession ||
+		discovery.Reason != bootstrap.ReasonQualificationUnavailable ||
+		!discovery.AuthenticationRequired {
+		process.stop(t)
+		t.Fatalf("upgrade-only discovery = %+v, want the administrator entry", discovery)
+	}
+	if err := discovery.Validate(); err != nil {
+		process.stop(t)
+		t.Fatalf("upgrade-only discovery is not a valid public projection: %v", err)
 	}
 
 	// Console, gateway and lifecycle routes stay closed, and the process is

@@ -73,6 +73,11 @@ type Admission struct {
 	// UpgradeReason explains a surface restriction; empty when the admission
 	// restricts nothing or has no more specific explanation.
 	UpgradeReason UpgradeReason
+	// Report is the inspection this admission was granted on: the source was
+	// fenced, classified and read under the process lock, and the caller may
+	// project public discovery from it instead of re-inspecting a store this
+	// process is already the owner of. It is the evidence, never a grant.
+	Report Report
 }
 
 // RetainMarker makes the ownership marker permanent after writable DB open.
@@ -417,7 +422,7 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 		return freshAdmission, nil
 	}
 	return &Admission{Lock: lock, ConnectionStorage: before.Observed.ConnectionStorage,
-		UpgradeStage: upgradeStage, UpgradeReason: upgradeReason}, nil
+		UpgradeStage: upgradeStage, UpgradeReason: upgradeReason, Report: before}, nil
 }
 
 func acquireStartupLock(databasePath string, fresh bool) (*processlock.Lock, error) {
