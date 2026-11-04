@@ -12,7 +12,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -31,6 +31,8 @@ import {
   withDeclaredSourceVersion,
   assertNoSecretInBody,
   canonicalEvidenceDocument,
+  copyDirectory,
+  ownershipNormalizationArgv,
   createImplementationIdentity,
   createPortAllocator,
   createRedactor,
@@ -973,4 +975,81 @@ test('a release that fails stays owned, fails cleanup and keeps the signal code'
   assert.match(state.written.cleanup.errors.join('; '), /still holds its port/);
   assert.equal(registry.all().length, 1, 'the failed release stayed owned for a later attempt');
   assert.equal(state.releaseCalls, 1);
+});
+
+// ---------------------------------------------------------------------------
+// ownership normalisation and the host-side copy
+// ---------------------------------------------------------------------------
+
+// The real-Docker harness copies a tree a 1.x container wrote. On a Linux runner
+// that container's uid is not the runner's, so a directory inside the tree can be
+// unreadable to this process; Node's native recursive copy then aborts the whole
+// process on a C++ filesystem exception instead of throwing, and no evidence file
+// is ever written. The walker below is what the harness uses, and it must fail as
+// a reportable error that names the path.
+test('copyDirectory copies a nested tree and preserves file modes', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'u1d-copy-'));
+  try {
+    const from = path.join(root, 'from');
+    mkdirSync(path.join(from, 'nested', 'deeper'), { recursive: true });
+    writeFileSync(path.join(from, 'top.txt'), 'top');
+    writeFileSync(path.join(from, 'nested', 'deeper', 'leaf.txt'), 'leaf');
+    chmodSync(path.join(from, 'nested', 'deeper', 'leaf.txt'), 0o640);
+
+    const to = path.join(root, 'to');
+    copyDirectory(from, to);
+
+    assert.equal(readFileSync(path.join(to, 'top.txt'), 'utf8'), 'top');
+    assert.equal(readFileSync(path.join(to, 'nested', 'deeper', 'leaf.txt'), 'utf8'), 'leaf');
+    assert.equal(
+      readFileSync(path.join(to, 'nested', 'deeper', 'leaf.txt')).length,
+      readFileSync(path.join(from, 'nested', 'deeper', 'leaf.txt')).length,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('copyDirectory reports an unreadable directory instead of aborting the process', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'u1d-copy-denied-'));
+  const blocked = path.join(root, 'from', 'usage-archives');
+  try {
+    mkdirSync(blocked, { recursive: true });
+    writeFileSync(path.join(blocked, 'segment.jsonl'), '{}');
+    chmodSync(blocked, 0o000);
+
+    // The assertion is the throw itself: the process is still here to make it,
+    // with the path named, which is what turns a host permission problem into a
+    // reported harness failure with evidence.
+    assert.throws(
+      () => copyDirectory(path.join(root, 'from'), path.join(root, 'to')),
+      (error) => {
+        assert.ok(error instanceof Error, 'the failure is an Error');
+        assert.equal(error.code, 'EACCES');
+        assert.match(String(error.path), /usage-archives$/);
+        return true;
+      },
+    );
+  } finally {
+    chmodSync(blocked, 0o700);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ownershipNormalizationArgv repairs the tree as root and returns it to the invoking ids', () => {
+  assert.deepEqual(
+    ownershipNormalizationArgv({ name: 'cpampd00000000-own-seed', directory: '/tmp/scratch/source-v1.14.10', uid: 1001, gid: 121 }),
+    [
+      'run', '--rm',
+      '--name', 'cpampd00000000-own-seed',
+      '--user', '0:0',
+      '-e', 'HOME=/tmp',
+      '-v', '/tmp/scratch/source-v1.14.10:/data',
+      'alpine:3.21', 'sh', '-c',
+      'chown -R 1001:121 /data && chmod -R u+rwX /data',
+    ],
+  );
+  assert.throws(() => ownershipNormalizationArgv({ name: 'x', directory: '/data', uid: 'me', gid: 1 }), /numeric uid/);
+  assert.throws(() => ownershipNormalizationArgv({ name: 'x', directory: '/data', uid: 1, gid: -2 }), /numeric gid/);
+  assert.throws(() => ownershipNormalizationArgv({ name: 'x', directory: '', uid: 1, gid: 1 }), /needs a directory/);
 });

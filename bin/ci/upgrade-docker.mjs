@@ -110,6 +110,10 @@ export const IMAGE_REPOSITORY = 'cpampd-fixture/legacy-v1';
 // this run left them unchanged.
 const SHARED_ROLLBACK_IMAGE_REPOSITORY = 'cpampd-fixture/upgrade';
 const REDACTED = '[redacted]';
+// The helper image the harness already runs for a container that only touches a
+// mount (the same-volume probe). Ownership normalization is the same shape, and
+// it must not need a second image contract.
+const OWNERSHIP_HELPER_IMAGE = 'alpine:3.21';
 
 const isEntryPoint = (() => {
   try {
@@ -1228,6 +1232,10 @@ async function seedSource(fixture) {
   const archivedSnapshot = path.join(SCRATCH, `source-archived-${fixture.tag}`);
   stopContainer(name);
   await waitForContainerExit(name);
+  // The seed ran in a container. Before the host copies the tree it wrote, the
+  // tree is given back to this process, so the copy is a normal read instead of
+  // a permission failure — or, on Node's native recursive copy, a native abort.
+  normalizeScratchOwnership(root, 'seed-archived');
   copyTree(root, archivedSnapshot);
   await removeContainer(name);
 
@@ -1241,6 +1249,7 @@ async function seedSource(fixture) {
   const counts = v1Counts(port, events.length);
   stopContainer(name);
   await waitForContainerExit(name);
+  normalizeScratchOwnership(root, 'seed-final');
   await removeContainer(name);
 
   const dataset = {
@@ -2469,6 +2478,12 @@ async function proveRollback(binary, workspace, fixture) {
   );
   assertValue(written.body?.added === 1, `rollback: the restarted 1.x did not accept the new row: ${redactor.redact(JSON.stringify(written.body))}`);
 
+  // The restarted 1.x wrote through the plan's bind mount as its own user. The
+  // host reads that same directory next (preflight, the verdict and the row
+  // count), so the tree is given back to this process first while the stack
+  // keeps serving: chown is metadata only and does not disturb its open handles.
+  normalizeScratchOwnership(source, 'rollback-live');
+
   // The live directory's own fingerprint, read by the product while the 1.x is
   // serving. The verdict below has to observe this value, not the stopped source.
   const liveProbe = runCli(
@@ -2519,6 +2534,7 @@ async function proveRollback(binary, workspace, fixture) {
     `rollback: the refused self-probe changed the recorded row (stage ${beforeSelfProbe.operation?.stage}→${afterSelfProbe.operation?.stage}, updatedAtMs ${beforeSelfProbe.operation?.updatedAtMs}→${afterSelfProbe.operation?.updatedAtMs})`,
   );
 
+  normalizeScratchOwnership(source, 'rollback-verify');
   // The v2 stack is down, so the probe can only be answered by the restarted 1.x.
   const verify = runCli(
     binary,
@@ -2966,6 +2982,19 @@ async function waitForContainerExitOrHealth(name, port) {
 // containers
 // ---------------------------------------------------------------------------
 
+// containerUserArgv gives a container that writes a harness-owned mount the
+// invoking identity. A 1.x image runs as its own user — root on a Linux runner —
+// so whatever it writes through the bind mount comes back owned by a uid this
+// process does not have, and every host read of that tree then fails: Node's
+// native recursive copy aborts the whole process on the C++ directory iterator
+// instead of throwing. The mount is the harness's own scratch tree, so the
+// container is given exactly the identity that owns it.
+function containerUserArgv() {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const gid = typeof process.getgid === 'function' ? process.getgid() : null;
+  return uid === null || gid === null ? [] : ['--user', `${uid}:${gid}`];
+}
+
 function startContainer({ name, image, port, dataDir, adminKey }) {
   // Tracked before `docker run`: a command that fails after creating the
   // container still leaves it in the cleanup set.
@@ -2981,6 +3010,7 @@ function startContainer({ name, image, port, dataDir, adminKey }) {
     '-e', `CPA_MANAGER_ADMIN_KEY=${adminKey}`,
     '-e', 'USAGE_COLLECTOR_MODE=disabled',
     '-e', 'USAGE_CORS_ORIGINS=*',
+    ...containerUserArgv(),
     '-v', `${dataDir}:/data`,
     image,
   ]);
@@ -3346,10 +3376,89 @@ function assertValue(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+// copyTree copies a harness-owned tree on the host. It walks the tree itself
+// because Node's native recursive copy aborts the process — not throws — when a
+// subdirectory cannot be read: `std::filesystem::recursive_directory_iterator`
+// raises a C++ exception in that path, and the process dies with it before any
+// evidence is written. A walk that throws keeps the failure inside the harness,
+// where it is reported with the path that produced it.
+export function copyDirectory(from, to) {
+  fs.mkdirSync(to, { recursive: true });
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const source = path.join(from, entry.name);
+    const destination = path.join(to, entry.name);
+    if (entry.isDirectory()) {
+      copyDirectory(source, destination);
+      continue;
+    }
+    if (entry.isSymbolicLink()) {
+      fs.symlinkSync(fs.readlinkSync(source), destination);
+      continue;
+    }
+    if (!entry.isFile()) {
+      // Sockets, FIFOs and devices are not content; a scratch tree the harness
+      // owns never holds one, and copying one would hang the run.
+      continue;
+    }
+    fs.copyFileSync(source, destination);
+    const stat = fs.lstatSync(source);
+    fs.chmodSync(destination, stat.mode & 0o7777);
+    fs.utimesSync(destination, stat.atime, stat.mtime);
+  }
+}
+
 function copyTree(from, to) {
   fs.rmSync(to, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(to), { recursive: true });
-  fs.cpSync(from, to, { recursive: true, force: true, preserveTimestamps: true });
+  try {
+    copyDirectory(from, to);
+  } catch (error) {
+    const reason = error?.code || error?.message || String(error);
+    const where = error?.path ? ` at ${path.relative(ROOT, error.path)}` : '';
+    throw new Error(`copy the harness tree ${path.relative(ROOT, from)}: ${reason}${where}`);
+  }
+}
+
+// ownershipNormalizationArgv is the command that repairs a tree a container
+// wrote: it runs the helper image as root with the directory mounted, and gives
+// the tree back to the invoking uid:gid with owner access. It is a pure function
+// so its exact shape is testable without Docker.
+export function ownershipNormalizationArgv({ name, directory, uid, gid, image = OWNERSHIP_HELPER_IMAGE }) {
+  for (const [label, value] of [['uid', uid], ['gid', gid]]) {
+    if (!Number.isInteger(value) || value < 0) {
+      throw new Error(`ownership normalization needs a numeric ${label}: ${JSON.stringify(value)}`);
+    }
+  }
+  if (typeof directory !== 'string' || directory === '') {
+    throw new Error('ownership normalization needs a directory');
+  }
+  return [
+    'run', '--rm',
+    '--name', name,
+    '--user', '0:0',
+    '-e', 'HOME=/tmp',
+    '-v', `${directory}:/data`,
+    image, 'sh', '-c', `chown -R ${uid}:${gid} /data && chmod -R u+rwX /data`,
+  ];
+}
+
+// normalizeScratchOwnership returns a directory a container wrote to the
+// invoking user before the host reads it. A container that ignores --user, or an
+// image that keeps its own uid, still leaves host-unreadable files; this makes
+// the read succeed instead of turning it into a reported failure.
+function normalizeScratchOwnership(directory, label) {
+  if (!fs.existsSync(directory)) return false;
+  if (typeof process.getuid !== 'function' || typeof process.getgid !== 'function') return false;
+  const name = `${PREFIX}-own-${String(label).replace(/[^a-z0-9]/gi, '').slice(0, 20)}`;
+  const argv = ownershipNormalizationArgv({ name, directory, uid: process.getuid(), gid: process.getgid() });
+  registry.track('container', name, () => releaseDockerResource('container', name));
+  const result = sh('docker', argv, { timeout: 180_000 });
+  evidence.commands.push(commandRecord(`docker run ${name} (ownership)`, result.code));
+  if (result.code !== 0) {
+    throw new Error(`normalize the ownership of ${path.relative(ROOT, directory)}: ${redactor.redact(tail(result.stderr))}`);
+  }
+  registry.untrack('container', name);
+  return true;
 }
 
 // dirDigest is the content digest of a directory: every entry, its size and its
