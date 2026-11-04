@@ -161,6 +161,24 @@ var refusalCodes = []upgradeservice.UpgradeErrorCode{
 	upgradeservice.UpgradeErrorCPAConnectionConflict,
 	upgradeservice.UpgradeErrorCPAImportTargetForeign,
 	upgradeservice.UpgradeErrorCPAImportUnproven,
+	// A decision about the recorded operation the completion gate proves: a
+	// position it may not run from, a held fence, a source that is not mounted or
+	// not the volume the copy-in read, a reconciliation it cannot accept, a
+	// domain, binding or connection the operation does not hold. Each one needs
+	// the operator to act, so none is read as a transient error. A revision
+	// conflict — upgrade_verify_conflict — is the one retryable verdict and stays
+	// out of the table: it says another writer changed the row, so running the
+	// verification again is the whole repair.
+	upgradeservice.UpgradeErrorVerifyNotApplicable,
+	upgradeservice.UpgradeErrorVerifyV2Running,
+	upgradeservice.UpgradeErrorVerifySourceUnavailable,
+	upgradeservice.UpgradeErrorVerifySourceMismatch,
+	upgradeservice.UpgradeErrorVerifyReconciliationInvalid,
+	upgradeservice.UpgradeErrorVerifyReconciliationUnacknowledged,
+	upgradeservice.UpgradeErrorVerifyDomainsIncomplete,
+	upgradeservice.UpgradeErrorVerifyBindingMissing,
+	upgradeservice.UpgradeErrorVerifyBindingDrifted,
+	upgradeservice.UpgradeErrorVerifyConnectionUnproven,
 }
 
 func IsHelp(err error) bool { return errors.Is(err, flag.ErrHelp) }
@@ -187,6 +205,8 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return runExternalConnect(ctx, args[1:], stdout, stderr)
 	case "cpa-import":
 		return runCPAImport(ctx, args[1:], stdout, stderr)
+	case "verify":
+		return runVerify(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		writeUsage(stdout)
 		return nil
@@ -221,9 +241,13 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "             [--destination-management-key-file <file>] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      import a stopped 1.x stack's managed CPA state into the")
 	_, _ = fmt.Fprintln(w, "                                      v2 destination and prove it")
+	_, _ = fmt.Fprintln(w, "  verify --legacy <dir> [--target <dir>] [--json]")
+	_, _ = fmt.Fprintln(w, "                                      verify the recorded operation and record the one verdict the")
+	_, _ = fmt.Fprintln(w, "                                      target supports: complete for an External CPA, or the position")
+	_, _ = fmt.Fprintln(w, "                                      that waits for the trusted re-pin for a Managed one")
 	_, _ = fmt.Fprintln(w, "The scratch copy is never the source or the target volume: --scratch-dir,")
 	_, _ = fmt.Fprintln(w, "and the default OS temporary directory, are checked the same way.")
-	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, an unacknowledged day, a held fence (1.x source or v2 data root), a rollback decision, or a decision about the External CPA or the CPA import; 2 usage, environment or retryable error.")
+	_, _ = fmt.Fprintln(w, "Exit codes: 0 ready, 1 blocked, refused, an unacknowledged day, a held fence (1.x source or v2 data root), a rollback decision, a decision about the External CPA or the CPA import, or a verification the recorded operation does not support; 2 usage, environment or retryable error.")
 }
 
 func runPreflight(ctx context.Context, args []string, stdout, stderr io.Writer) error {
