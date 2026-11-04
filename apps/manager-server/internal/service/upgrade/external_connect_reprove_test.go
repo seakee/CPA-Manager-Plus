@@ -114,11 +114,13 @@ func TestExternalConnectReproofRefusesARejectedKey(t *testing.T) {
 //     --cpa-version declaration (N5: declared version never substitutes for a
 //     live version header during re-proof or backfill).
 //   - Because CPA v8 exposes no instance identifier separate from BaseURL,
-//     advertised CPAVersion and config.yaml, a replacement or reconfigured v8
-//     instance at the same canonical URL that advertises the same CPAVersion
-//     header is refused without --reprove, and is accepted in place only when
-//     the operator explicitly passes --reprove with a valid management key for
-//     that target (N4).
+//     advertised CPAVersion and config.yaml, a live-probing call without
+//     --reprove (such as an unsealed-key backfill or a failed-stage resume)
+//     requires the exact recorded ServerFingerprint, whereas an explicit
+//     --reprove authorizes updating the binding in place for the v8 endpoint
+//     answering the recorded canonical URL with the recorded CPAVersion header
+//     (N4). (A default repeat at stage=external_connect with a sealed key is a
+//     local idempotent credential check and does not issue live probes.)
 func TestExternalConnectReproofTargetIdentityAndObservedVersion(t *testing.T) {
 	target := newExternalTarget(t)
 	if _, err := target.connect(t); err != nil {
@@ -247,5 +249,84 @@ func TestExternalConnectReproofRefusesATerminalRow(t *testing.T) {
 	}
 	if after := completed.operation(t); after.Revision != before.Revision || after.Stage != model.UpgradeStageComplete {
 		t.Fatalf("the refused reproof rewrote the completed row: %+v -> %+v", before, after)
+	}
+}
+
+// TestExternalConnectFailedRecoveryRequiresReproveToRotateKey is the M1
+// regression: a row parked at stage=failed with last_forward_stage=external_connect
+// and an already-sealed binding may resume with the same key, must refuse a
+// different key without --reprove before probing or rewriting the binding, may
+// rotate its key when --reprove is explicitly set, and must refuse before
+// probing when last_forward_stage has already advanced to verify.
+func TestExternalConnectFailedRecoveryRequiresReproveToRotateKey(t *testing.T) {
+	target := newExternalTarget(t)
+	if _, err := target.connect(t); err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+	execTarget(t, target.databasePath(),
+		`update upgrade_operations set stage = 'failed', last_forward_stage = 'external_connect',
+			error_code = 'upgrade_external_authority_unavailable', error_detail = 'transient outage' where id = 1`)
+	before := operationRow(t, target.databasePath())
+	probesBefore := target.probes
+
+	// 1. Supplying a different key without --reprove on a failed row must be
+	// refused without probing the CPA or replacing the sealed key.
+	unapproved := target.options
+	unapproved.ManagementKey = rotatedManagementKey
+	_, err := target.connectWith(t, unapproved)
+	if !errors.Is(err, ErrExternalManagementRejected) || !strings.Contains(err.Error(), "--reprove") {
+		t.Fatalf("failed-row key rotation without --reprove = %v, want ErrExternalManagementRejected naming --reprove", err)
+	}
+	if target.probes != probesBefore {
+		t.Fatalf("unapproved key rotation on failed row probed the CPA %d -> %d", probesBefore, target.probes)
+	}
+	if _, secret := sealedBinding(t, target.databasePath()); secret != externalTestKey {
+		t.Fatalf("unapproved key rotation on failed row overwrote sealed key with %q", secret)
+	}
+	if after := operationRow(t, target.databasePath()); after.Revision != before.Revision || after.Stage != model.UpgradeStageFailed {
+		t.Fatalf("unapproved key rotation on failed row mutated operation: %+v -> %+v", before, after)
+	}
+
+	// 2. Resuming the failed row with the same key re-proves the target and
+	// advances back to external_connect.
+	resumed, err := target.connect(t)
+	if err != nil {
+		t.Fatalf("resume failed row with original key: %v", err)
+	}
+	if resumed.AlreadyComplete || resumed.Stage != model.UpgradeStageExternalConnect {
+		t.Fatalf("resumed result = %+v, want live recovery to external_connect", resumed)
+	}
+
+	// 3. Parking at failed again and passing --reprove with the rotated key
+	// re-proves the target, seals the rotated key, and recovers to external_connect.
+	execTarget(t, target.databasePath(),
+		`update upgrade_operations set stage = 'failed', last_forward_stage = 'external_connect',
+			error_code = 'upgrade_external_management_rejected', error_detail = 'key rotated' where id = 1`)
+	target.configSHA256 = strings.Repeat("b", 64)
+	approved := target.options
+	approved.ManagementKey = rotatedManagementKey
+	approved.Reprove = true
+	reproved, err := target.connectWith(t, approved)
+	if err != nil {
+		t.Fatalf("reprove failed row with rotated key: %v", err)
+	}
+	if reproved.Stage != model.UpgradeStageExternalConnect {
+		t.Fatalf("reproved stage = %q, want external_connect", reproved.Stage)
+	}
+	if _, secret := sealedBinding(t, target.databasePath()); secret != rotatedManagementKey {
+		t.Fatalf("reproved failed row sealed %q, want %q", secret, rotatedManagementKey)
+	}
+
+	// 4. A failed row whose high-water mark is already verify cannot re-enter
+	// external_connect and must be refused before any network probe runs.
+	execTarget(t, target.databasePath(),
+		`update upgrade_operations set stage = 'failed', last_forward_stage = 'verify',
+			error_code = 'upgrade_verify_connection_unproven', error_detail = 'verify failed' where id = 1`)
+	probesBeforeVerifyGuard := target.probes
+	if _, err := target.connectWith(t, approved); !errors.Is(err, ErrExternalNotApplicable) {
+		t.Fatalf("failed row at high-water verify refused with %v, want ErrExternalNotApplicable", err)
+	}
+	if target.probes != probesBeforeVerifyGuard {
+		t.Fatalf("failed row at high-water verify probed the CPA %d -> %d", probesBeforeVerifyGuard, target.probes)
 	}
 }

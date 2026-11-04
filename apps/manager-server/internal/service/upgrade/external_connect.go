@@ -276,19 +276,23 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalNotApplicable,
 			"--reprove re-proves a recorded External connection, and this operation has none; nothing was connected and the operation did not advance", nil)
 	}
-	// Repeating the step against the same target records nothing new: the row
-	// already carries this stage, and a second record would only churn the
-	// generation. The supplied credential must still be the one the recorded
-	// connection proved, or the step would continue a binding the Manager cannot
-	// use.
-	//
-	// A binding recorded before the connect step sealed its secret carries none,
-	// and --reprove is the explicit decision to prove the CPA again and seal the
-	// credential it answers with now. Both fall through to the live proof below:
-	// neither can be answered from a record that proves no credential.
-	if hasBinding && recorded.Stage == model.UpgradeStageExternalConnect && !options.Reprove &&
+	// When a sealed management secret is already recorded and --reprove is not
+	// set, the supplied credential must match the sealed one regardless of
+	// whether the row sits at external_connect or is resuming from failed. At
+	// external_connect this is a local idempotent check (it does not re-probe
+	// the live CPA or compare its current ServerFingerprint; live verification
+	// happens on --reprove or in Verify); a failed row that supplies the same
+	// key falls through to re-run the live probes and recover the stage. An
+	// unsealed pre-R2 binding or an explicit --reprove also falls through to
+	// the live proof below.
+	if hasBinding && !options.Reprove &&
 		security.IsValidProtectedEnvelope(strings.TrimSpace(binding.ManagementKey)) {
-		return externalConnectAlreadyConnected(ctx, db, targetRoot, recorded, binding, protector, managementKey)
+		if err := requireRecordedManagementKey(binding, protector, managementKey); err != nil {
+			return ExternalConnectResult{}, err
+		}
+		if recorded.Stage == model.UpgradeStageExternalConnect {
+			return externalConnectAlreadyConnected(ctx, db, targetRoot, recorded, binding)
+		}
 	}
 
 	probeOptions := options
@@ -345,8 +349,9 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	// configuration digest, client-key count and sealed key in place for the
 	// endpoint at the recorded canonical URL that advertises the recorded build
 	// version header. A changed or missing advertised CPA build version behind
-	// the URL is refused as a moved target, and an implicit backfill without
-	// --reprove still requires the exact recorded server fingerprint.
+	// the URL is refused as a moved target, and any live-probing call without
+	// --reprove (such as an unsealed-key backfill or a failed-stage recovery)
+	// still requires the exact recorded server fingerprint.
 	if hasBinding {
 		if binding.BaseURL != baseURL {
 			return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(UpgradeErrorExternalTargetMoved,
@@ -448,18 +453,22 @@ func readRecordedCopyInFrom(ctx context.Context, repository *upgradeoperation.Re
 // The published evidence is repaired from the row when it is missing or stale,
 // because the row is the record and the file is its projection: a rerun after a
 // lost publication costs this repair, not a second proof of the CPA.
-func externalConnectAlreadyConnected(ctx context.Context, db *sql.DB, targetRoot string, recorded model.UpgradeOperation,
-	binding upgradeoperation.ExternalBinding, protector *security.Protector, managementKey string) (ExternalConnectResult, error) {
+func requireRecordedManagementKey(binding upgradeoperation.ExternalBinding, protector *security.Protector, managementKey string) error {
 	recordedSecret, err := protector.UnprotectString(binding.ManagementKey)
 	if err != nil {
-		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalManagementRejected,
+		return newUpgradeError(UpgradeErrorExternalManagementRejected,
 			"the recorded management key cannot be read with this Manager data key, so the connection cannot be continued; nothing was connected and the operation did not advance", err)
 	}
 	if !security.EqualHMAC(strings.TrimSpace(recordedSecret), managementKey) {
-		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalManagementRejected,
+		return newUpgradeError(UpgradeErrorExternalManagementRejected,
 			fmt.Sprintf("the management key supplied for %s is not the one this operation connected with; pass --reprove to re-verify the External CPA and seal a rotated management key, and nothing was connected and the operation did not advance",
 				redactExternalAddress(binding.BaseURL)), nil)
 	}
+	return nil
+}
+
+func externalConnectAlreadyConnected(ctx context.Context, db *sql.DB, targetRoot string, recorded model.UpgradeOperation,
+	binding upgradeoperation.ExternalBinding) (ExternalConnectResult, error) {
 	evidence := externalConnectEvidence(binding)
 	operation := recorded
 	if externalConnectRefusalRecorded(recorded.ErrorCode) {

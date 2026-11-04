@@ -652,11 +652,15 @@ func copyInRecorded(recorded model.UpgradeOperation) bool {
 	if !recorded.HasDomain(model.UpgradeDomainSourceCopy) {
 		return false
 	}
-	switch recorded.Stage {
+	position := recorded.Stage
+	if position == model.UpgradeStageFailed {
+		position = recorded.HighWater()
+	}
+	switch position {
 	case "", model.UpgradeStagePreflight, model.UpgradeStageFailed:
 		return false
 	}
-	return model.UpgradeStageCopyIn.CanAdvanceTo(recorded.Stage)
+	return model.UpgradeStageCopyIn.CanAdvanceTo(position)
 }
 
 // completedResult returns the stored outcome of a recorded copy-in, but only
