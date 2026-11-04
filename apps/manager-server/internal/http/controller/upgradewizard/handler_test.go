@@ -253,6 +253,57 @@ func TestPreflightMissingLegacyRootIsTyped(t *testing.T) {
 	}
 }
 
+// TestPreflightNamesTheDirectoryConditionTheMountResolved is the same contract
+// on the real path: a configured root that is missing or unusable is the mount
+// lookup's answer, and the preflight answers with that code instead of replacing
+// it with a generic failure. The credential is the Manager store, as it is on a
+// copied root, so the request reaches servePreflight — with no store at all the
+// credential read answers for the mount first and the preflight is never asked,
+// which is why TestPreflightMissingLegacyRootIsTyped cannot see this.
+func TestPreflightNamesTheDirectoryConditionTheMountResolved(t *testing.T) {
+	const managerKey = "manager-store-key-for-a-directory-condition"
+	database := managerCredentialStore(t, managerKey)
+	unusable := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(unusable, []byte("a file where a 1.x data directory belongs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, testCase := range []struct {
+		name string
+		root string
+		code string
+	}{
+		{name: "absent", root: filepath.Join(t.TempDir(), "absent-source"), code: CodeLegacyRootMissing},
+		{name: "unusable", root: unusable, code: CodeLegacyRootUnusable},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			handler := newHandler(testCase.root, database)
+			_, statusBody := request(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(managerKey), http.StatusOK)
+			var status statusDocument
+			if err := json.Unmarshal([]byte(statusBody), &status); err != nil {
+				t.Fatalf("decode status: %v: %s", err, statusBody)
+			}
+			if status.SourceRoot != testCase.code {
+				t.Fatalf("status sourceRoot = %q, want the mount's own condition %q", status.SourceRoot, testCase.code)
+			}
+			// The preflight names the same condition as the status projection. A
+			// generic failure here would tell the operator nothing about what to
+			// repair and would disagree with the read beside it.
+			_, refused := request(t, handler, http.MethodGet, testPrefix+PreflightSuffix, bearer(managerKey), http.StatusServiceUnavailable)
+			var refusal struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(refused), &refusal); err != nil {
+				t.Fatalf("decode refusal: %v: %s", err, refused)
+			}
+			if refusal.Error.Code != testCase.code {
+				t.Fatalf("preflight refusal code = %q, want the mount's own condition %q: %s", refusal.Error.Code, testCase.code, refused)
+			}
+		})
+	}
+}
+
 // TestStatusReportsAnAbsentSourceWithItsOwnCode proves a missing source is named
 // as a missing source on both routes, with a typed code the wizard can describe,
 // rather than as an ownership marker the mount does not have.

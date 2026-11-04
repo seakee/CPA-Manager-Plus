@@ -751,11 +751,14 @@ func (h *Handler) servePreflight(w http.ResponseWriter, r *http.Request, mount m
 		writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
 		return
 	}
-	// Without a configured directory there is nothing to inspect: the mount's own
-	// condition (a missing or unusable root) is the answer. A file-level refusal
-	// keeps its root and is reported by the preflight itself, with the same code
-	// the mount lookup named.
-	if mount.root == "" {
+	// The configured directory's own condition is the answer: there is nothing
+	// inside a root that is missing or unusable to inspect, and the preflight's
+	// own failure would replace that condition with a generic code. The mount
+	// lookup keeps the root string on every branch (the credential snapshot needs
+	// it), so the condition — not the presence of a root — is what short-circuits.
+	// A file-level refusal keeps its root and is reported by the preflight itself,
+	// with the same code the mount lookup named.
+	if mount.rootInspects() || mount.root == "" {
 		code := mount.code
 		if code == "" {
 			code = CodeLegacyRootMissing
