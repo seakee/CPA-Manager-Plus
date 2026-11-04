@@ -84,6 +84,27 @@ function unrecordedStatus() {
   return statusDocument({ recorded: false, stage: '', nextAction: 'preflight', domainsDone: [] });
 }
 
+// The action's own reply. The gate records exactly two positions — complete on an
+// External target and verify (waiting) on a Managed one — so the fixture is
+// written as the Managed waiting position and every test overrides from there.
+function verifyDocument(overrides: Record<string, unknown> = {}) {
+  return {
+    contractVersion: CONTRACT,
+    recorded: true,
+    stage: 'verify',
+    stageKnown: true,
+    complete: false,
+    targetMode: 'managed',
+    domainsDone: [],
+    reasonCode: 'upgrade_verify_waiting_for_repin',
+    reason: 'wait for the trusted U1-1b re-pin',
+    manualItems: [],
+    alreadyVerified: false,
+    updatedAtMs: 40,
+    ...overrides,
+  };
+}
+
 describe('Full Web upgrade wizard', () => {
   let renderer: ReactTestRenderer | undefined;
 
@@ -718,21 +739,10 @@ describe('Full Web upgrade wizard', () => {
     const read = resumeRead(() => current);
     const verify = vi.fn<UpgradeWizardVerify>(async () => {
       current = verified;
-      return {
-        contractVersion: CONTRACT,
-        recorded: true,
-        stage: 'verify',
-        stageKnown: true,
-        nextAction: 'verify',
-        complete: false,
-        targetMode: 'managed',
+      return verifyDocument({
         domainsDone: verified.domainsDone,
-        reasonCode: 'upgrade_verify_waiting_for_repin',
-        reason: 'wait for the trusted U1-1b re-pin',
         manualItems: verified.manualItems,
-        alreadyVerified: false,
-        updatedAtMs: 40,
-      };
+      });
     });
     await mount(read, verify);
     const statusReadsBefore = vi.mocked(read).mock.calls.filter(
@@ -775,6 +785,57 @@ describe('Full Web upgrade wizard', () => {
     expect(
       vi.mocked(read).mock.calls.filter(([resource]) => resource === 'installation/upgrade/status')
     ).toHaveLength(statusReadsBefore);
+  });
+
+  it('refuses a verification reply whose position contradicts itself', () => {
+    // The action records exactly two positions: `complete` on an External target
+    // and `verify` (the Managed waiting position, which always carries a reason).
+    // Anything else is a reply this build cannot present as a position.
+    const contradictions: Array<Record<string, unknown>> = [
+      // A finished stage that is not reported as complete.
+      { stage: 'verify', complete: true },
+      // A complete flag without the stage that means it.
+      { stage: 'complete', complete: false },
+      // Completion can only belong to an External target.
+      { stage: 'complete', complete: true, targetMode: 'managed' },
+      // The Managed waiting position can only belong to a Managed target.
+      { complete: false, targetMode: 'external' },
+      // The waiting position always names the reason it waits.
+      { complete: false, reasonCode: '' },
+      // A stage this build cannot name is not a position it may present.
+      { stageKnown: false },
+      { stage: 'copy_in' },
+    ];
+    for (const contradiction of contradictions) {
+      expect({ contradiction, parsed: parseUpgradeVerify(verifyDocument(contradiction)) }).toEqual({
+        contradiction,
+        parsed: null,
+      });
+    }
+
+    // The two positions the gate really records are read as they are.
+    expect(parseUpgradeVerify(verifyDocument())).not.toBeNull();
+    expect(
+      parseUpgradeVerify(
+        verifyDocument({ stage: 'complete', complete: true, targetMode: 'external', reasonCode: '' })
+      )
+    ).not.toBeNull();
+  });
+
+  it('reports a contradictory verification reply instead of presenting a completion', async () => {
+    // `stage: 'verify'` with `complete: true` would render the completion note
+    // for a position the gate never records: the reply must be a read failure.
+    const read = resumeRead(() => statusDocument({ stage: 'cpa_import', nextAction: 'verify' }));
+    const verify = vi.fn<UpgradeWizardVerify>(async () =>
+      verifyDocument({ stage: 'complete', complete: true, targetMode: 'managed' })
+    );
+    await mount(read, verify);
+
+    await press('upgrade-verify-action');
+    expect(byTestId('upgrade-verify-failed')).toBeTruthy();
+    expect(view()).toContain(t('errorResponse', 'en'));
+    expect(allByTestId('upgrade-verify-done')).toHaveLength(0);
+    expect(view()).not.toContain(t('verifyComplete', 'en'));
   });
 
   it('asks the verification route with a POST and the same credential, never a cookie', async () => {

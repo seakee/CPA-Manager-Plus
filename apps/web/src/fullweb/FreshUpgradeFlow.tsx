@@ -259,6 +259,9 @@ export interface UpgradeVerifyOutcome {
 // Only a document this build can read is presented. The action wrote something
 // when it answered 200, so a reply that does not describe a position is a read
 // failure: the page then re-reads the row rather than guessing what happened.
+// The gate records exactly two positions, and the reply must be one of them: a
+// completed stage can only mean an External target, and the Managed waiting
+// position can only mean an unfinished one that names its reason.
 export function parseUpgradeVerify(value: unknown): UpgradeVerifyOutcome | null {
   if (!value || typeof value !== 'object') return null;
   const document = value as Record<string, unknown>;
@@ -267,13 +270,26 @@ export function parseUpgradeVerify(value: unknown): UpgradeVerifyOutcome | null 
   if (typeof document.stage !== 'string' || typeof document.stageKnown !== 'boolean') return null;
   if (typeof document.complete !== 'boolean') return null;
   if (typeof document.alreadyVerified !== 'boolean') return null;
+  // The action only ever answers from a stage it can name, and only the two
+  // stages the gate records are positions this page may present.
+  if (document.stageKnown !== true) return null;
+  if (document.stage !== 'complete' && document.stage !== 'verify') return null;
+  if (document.complete !== (document.stage === 'complete')) return null;
+  const targetMode = text(document.targetMode);
+  if (targetMode !== 'external' && targetMode !== 'managed') return null;
+  const reasonCode = text(document.reasonCode);
+  if (document.complete) {
+    if (targetMode !== 'external') return null;
+  } else if (targetMode !== 'managed' || reasonCode === '') {
+    return null;
+  }
   return {
     stage: document.stage,
     stageKnown: document.stageKnown,
     complete: document.complete,
-    targetMode: text(document.targetMode),
+    targetMode,
     domainsDone: strings(document.domainsDone),
-    reasonCode: text(document.reasonCode),
+    reasonCode,
     reason: text(document.reason),
     manualItems: strings(document.manualItems),
     alreadyVerified: document.alreadyVerified,
