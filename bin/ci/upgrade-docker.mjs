@@ -2525,14 +2525,27 @@ async function faultInterruptedCopyIn(binary, workspace) {
       withDeclaredSourceVersion(['upgrade', 'run', '--legacy', source, '--target', target, '--json'], acceptedRelease),
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
+    // The marker is published before the first member moves, and its phase says
+    // how far the materialization got. Killing at the first sight of it catches
+    // a stage where restoring is the right answer, so the fault waits for
+    // `migrating`: every member is in place and the row is not committed yet.
+    // That is the window a resume has to adopt instead of restoring again.
     let killed = false;
+    let caughtPhase = '';
     const timer = setInterval(() => {
-      if (!killed && fs.existsSync(markerPath)) {
-        killed = true;
-        clearInterval(timer);
-        child.kill('SIGKILL');
+      if (killed) return;
+      try {
+        const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+        caughtPhase = marker?.phase ?? caughtPhase;
+        if (marker?.phase === 'migrating') {
+          killed = true;
+          clearInterval(timer);
+          child.kill('SIGKILL');
+        }
+      } catch {
+        // No marker yet, or it is being written: the next tick retries.
       }
-    }, 10);
+    }, 2);
     const deadline = setTimeout(() => {
       clearInterval(timer);
       child.kill('SIGKILL');
@@ -2543,7 +2556,7 @@ async function faultInterruptedCopyIn(binary, workspace) {
       clearTimeout(deadline);
       evidence.commands.push(commandRecord('upgrade run (SIGKILL after the marker)', code ?? -1));
       if (!killed) {
-        rejectPromise(new Error(`interrupted copy-in: the run finished before the marker could be caught (code=${code} signal=${signal})`));
+        rejectPromise(new Error(`interrupted copy-in: the run finished before the migrating marker could be caught (code=${code} signal=${signal} lastPhase=${caughtPhase})`));
         return;
       }
       resolvePromise();
