@@ -58,6 +58,13 @@ type CoverageState struct {
 	Reason string `json:"reason"`
 }
 
+// IncompleteDay is one UTC day whose numbers are a permanent lower bound: a v2
+// Upgrade marked it because the 1.x source can never be read again for it.
+type IncompleteDay struct {
+	Day    string `json:"day"`
+	Reason string `json:"reason"`
+}
+
 // Totals are published only when the coverage can bound them.
 type Totals struct {
 	Calls        int64  `json:"calls"`
@@ -86,6 +93,10 @@ type DetailResponse struct {
 	Coverage Coverage      `json:"coverage"`
 	Totals   *Totals       `json:"totals"`
 	Series   []SeriesPoint `json:"series"`
+	// IncompleteDays names the UTC days inside the window that a v2 Upgrade
+	// marked incomplete. The totals above are then a lower bound, never a
+	// measurement of a complete window.
+	IncompleteDays []IncompleteDay `json:"incompleteDays,omitempty"`
 }
 
 // SummaryItem is one row of the Key list usage column.
@@ -102,6 +113,9 @@ type SummaryResponse struct {
 	ToMS     int64         `json:"toMs"`
 	Coverage CoverageState `json:"coverage"`
 	Items    []SummaryItem `json:"items"`
+	// IncompleteDays names the UTC days inside the list window that a v2
+	// Upgrade marked incomplete, so the summed column is a lower bound.
+	IncompleteDays []IncompleteDay `json:"incompleteDays,omitempty"`
 }
 
 // Service reads attributable usage for Canonical Keys of the Fresh workspace.
@@ -139,6 +153,9 @@ type evidence struct {
 	bindingErr   error
 	window       ports.Window
 	rawDeleted   bool
+	// incompleteDays are the Upgrade marks overlapping the read range. They are
+	// permanent, so they bound the window for the life of the store.
+	incompleteDays []ports.IncompleteDay
 	// requestedFromMS is the window the caller asked for; windowFromMS is the
 	// earliest instant Manager can actually prove. A window that starts before
 	// the latter is a lower bound, never a complete observation.
@@ -185,6 +202,11 @@ func evaluate(in evidence) (ports.State, string) {
 		return ports.StatePartial, "window_partial"
 	case in.window.UnmappedEvents > 0:
 		return ports.StatePartial, "identity_unmapped"
+	case len(in.incompleteDays) > 0:
+		// A v2 Upgrade marked a day inside the window, so it can never become
+		// complete; this outranks the raw-delete evidence, which a later
+		// cleanup may remove.
+		return ports.StatePartial, "upgrade_incomplete"
 	case in.rawDeleted:
 		return ports.StatePartial, "raw_deleted"
 	}
@@ -240,12 +262,22 @@ func (s *Service) Detail(ctx context.Context, id identity.APIKeyID, fromMS, toMS
 			if in.rawDeleted, err = s.repo.RawDeletedIn(ctx, in.windowFromMS, toMS); err != nil {
 				return DetailResponse{}, err
 			}
+			incompleteDays, err := s.repo.IncompleteDaysIn(ctx, in.windowFromMS, toMS)
+			if err != nil {
+				return DetailResponse{}, err
+			}
+			// The mark bounds this window only when it falls inside it: a day
+			// before the key existed says nothing about the key's numbers.
+			in.incompleteDays = daysWithin(incompleteDays, in.windowFromMS, toMS)
 		}
 	}
 	state, reason := evaluate(in)
 	response.Coverage = Coverage{
 		State: string(state), Reason: reason, CollectingSinceMS: in.collectingAt,
 		LastProcessedEventID: in.projection.LastProcessedEventID, TargetEventID: in.projection.LatestEventID,
+	}
+	if state == ports.StateComplete || state == ports.StatePartial {
+		response.IncompleteDays = incompleteDaysView(in.incompleteDays)
 	}
 	// Unknown and unavailable windows publish no totals at all: a zero must never
 	// stand in for "not measured".
@@ -308,6 +340,7 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 	}
 	windows := map[identity.APIKeyID]ports.Window{}
 	rawDeleted := false
+	var incompleteDays []ports.IncompleteDay
 	if len(attributable) > 0 && collectingAt > 0 {
 		if windows, err = s.repo.Windows(ctx, attributable, fromMS, toMS); err != nil {
 			return SummaryResponse{}, err
@@ -315,6 +348,10 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 		if rawDeleted, err = s.repo.RawDeletedIn(ctx, fromMS, toMS); err != nil {
 			return SummaryResponse{}, err
 		}
+		if incompleteDays, err = s.repo.IncompleteDaysIn(ctx, fromMS, toMS); err != nil {
+			return SummaryResponse{}, err
+		}
+		response.IncompleteDays = incompleteDaysView(incompleteDays)
 	}
 	items := make([]SummaryItem, 0, len(ids))
 	for _, id := range ids {
@@ -333,7 +370,10 @@ func (s *Service) Summary(ctx context.Context, ids []identity.APIKeyID) (Summary
 		}
 		window := windows[id]
 		in := evidence{phase: phase, collectingAt: collectingAt, binding: bindings[id],
-			window: window, rawDeleted: rawDeleted, projection: projection,
+			window: window, rawDeleted: rawDeleted,
+			// Only the days inside this key's provable window bound it: a mark
+			// before the key existed says nothing about its numbers.
+			incompleteDays: daysWithin(incompleteDays, windowFromMS, toMS), projection: projection,
 			projectionOK: projectionOK, requestedFromMS: fromMS,
 			windowFromMS: windowFromMS, windowToMS: toMS}
 		state, reason := evaluate(in)
@@ -420,6 +460,96 @@ func (s *Service) projection(ctx context.Context) (ports.ProjectionState, bool) 
 		return ports.ProjectionState{}, false
 	}
 	return state, true
+}
+
+// daysWithin keeps the marks whose UTC day overlaps [fromMS, toMS). Stored
+// days are YYYY-MM-DD, so the comparison is chronological as text. The bounds
+// use the same day arithmetic as coverageincomplete.DaysIn: the upper label is
+// computed without adding a day to toMS, because a window that ends near the
+// largest int64 would wrap to a day before every mark and hide all of them.
+func daysWithin(days []ports.IncompleteDay, fromMS, toMS int64) []ports.IncompleteDay {
+	if len(days) == 0 || toMS <= fromMS {
+		return nil
+	}
+	lower, upper, hasUpper := dayLabels(fromMS, toMS)
+	if lower == "" {
+		return nil
+	}
+	within := make([]ports.IncompleteDay, 0, len(days))
+	for _, day := range days {
+		if day.Day < lower || (hasUpper && day.Day >= upper) {
+			continue
+		}
+		within = append(within, day)
+	}
+	if len(within) == 0 {
+		return nil
+	}
+	return within
+}
+
+// The day indexes the stored text form can hold; see coverageincomplete. They
+// are the bounds ParseDay accepts, including year zero, so a mark the writer
+// accepted stays readable by a window that covers its day.
+const (
+	utcDayMilliseconds = int64(24 * time.Hour / time.Millisecond)
+	minStoredDayIndex  = int64(-719528) // 0000-01-01
+	maxStoredDayIndex  = int64(2932896) // 9999-12-31
+)
+
+// dayLabels renders [fromMS, toMS) as an inclusive lower day label and an
+// exclusive upper one. The upper label is dropped once the window reaches past
+// the last day the stored form can hold: no mark can sit above it, and the
+// rendered five-digit year would sort before every stored day. A lower label of
+// "" means no stored day can fall inside the window.
+func dayLabels(fromMS, toMS int64) (string, string, bool) {
+	lower := floorDayIndex(fromMS)
+	if lower > maxStoredDayIndex {
+		return "", "", false
+	}
+	if lower < minStoredDayIndex {
+		lower = minStoredDayIndex
+	}
+	upper := ceilDayIndex(toMS)
+	if upper <= lower {
+		return "", "", false
+	}
+	if upper > maxStoredDayIndex {
+		return storedDayLabel(lower), "", false
+	}
+	return storedDayLabel(lower), storedDayLabel(upper), true
+}
+
+func floorDayIndex(timestampMS int64) int64 {
+	day := timestampMS / utcDayMilliseconds
+	if timestampMS%utcDayMilliseconds != 0 && timestampMS < 0 {
+		day--
+	}
+	return day
+}
+
+func ceilDayIndex(timestampMS int64) int64 {
+	day := timestampMS / utcDayMilliseconds
+	if timestampMS%utcDayMilliseconds > 0 {
+		day++
+	}
+	return day
+}
+
+func storedDayLabel(dayIndex int64) string {
+	return time.UnixMilli(dayIndex * utcDayMilliseconds).UTC().Format("2006-01-02")
+}
+
+// incompleteDaysView converts the storage vocabulary into the response one.
+func incompleteDaysView(days []ports.IncompleteDay) []IncompleteDay {
+	if len(days) == 0 {
+		return nil
+	}
+	view := make([]IncompleteDay, 0, len(days))
+	for _, day := range days {
+		view = append(view, IncompleteDay{Day: day.Day, Reason: day.Reason})
+	}
+	return view
 }
 
 func bindingReason(err error) string {

@@ -18,17 +18,42 @@ import (
 const digestChunkSize = 64 << 10
 
 // sourceFingerprintFiles are the fixed v1 data files, in the order the v1
-// Manager owns them. Optional files are skipped when absent.
+// Manager owns them. Optional files are skipped when absent. The rollback
+// journal is covered because a nonempty one changes what the database means on
+// its first open, so a copy that ignored it would not describe its source.
 var sourceFingerprintFiles = []string{
 	databaseFileName,
 	databaseFileName + "-wal",
 	databaseFileName + "-shm",
+	databaseFileName + "-journal",
 	dataKeyFileName,
+}
+
+// sourceRootReserved are the names the 1.x data root owns itself. Every other
+// entry of the root is reported as unexpected, so a new file appearing beside
+// the source changes the fingerprint even when no covered file changed.
+var sourceRootReserved = map[string]bool{
+	databaseFileName:              true,
+	databaseFileName + "-wal":     true,
+	databaseFileName + "-shm":     true,
+	databaseFileName + "-journal": true,
+	dataKeyFileName:               true,
+	archivesDirName:               true,
+	// The ownership fence is taken by every reader of this volume and its
+	// content is the holder's, not the source's: including it would make two
+	// consecutive inspections of an unchanged source disagree.
+	databaseFileName + ".manager.lock": true,
 }
 
 type manifestEntry struct {
 	relative string
 	size     int64
+	// directory marks an entry covered by name only: it is not copied, so it has
+	// no content digest and no bytes to budget for.
+	directory bool
+	// uncopied marks an entry the copy neither carries nor budgets for. It still
+	// contributes to the digest so its appearance or change is detected.
+	uncopied bool
 }
 
 // sourceFingerprint is the deterministic manifest of a source tree: relative
@@ -38,11 +63,22 @@ type sourceFingerprint struct {
 	Bytes  int64
 }
 
+// symlinkedSourceFile is one covered source file the shared file policy refused
+// because it is a link. Carrying the name lets the preflight report data.key or
+// usage.sqlite-wal rather than the lock package's database wording, which would
+// describe a key or a WAL sidecar as the database.
+type symlinkedSourceFile struct{ name string }
+
+func (e *symlinkedSourceFile) Error() string { return "source file " + e.name + " is a symbolic link" }
+
+func (e *symlinkedSourceFile) Unwrap() error { return ErrSourceSymlinked }
+
 // fingerprintSource hashes a stable manifest of the source tree. Repeating it on
 // an unchanged stopped source always returns the same value, and any change to
-// a covered file, including a -wal/-shm file appearing, changes it. It reads
-// only, and observes ctx between the bounded read batches so a cancelled
-// preflight stops instead of hashing a multi-gigabyte archive to the end.
+// a covered file, including a -wal/-shm file appearing, changes it; so does a
+// file the 1.x layout does not own appearing beside them. It reads only, and
+// observes ctx between the bounded read batches so a cancelled preflight stops
+// instead of hashing a multi-gigabyte archive to the end.
 func fingerprintSource(ctx context.Context, root string) (sourceFingerprint, error) {
 	if err := ctx.Err(); err != nil {
 		return sourceFingerprint{}, err
@@ -61,6 +97,14 @@ func fingerprintSource(ctx context.Context, root string) (sourceFingerprint, err
 			return sourceFingerprint{}, err
 		}
 		if !info.Mode().IsRegular() {
+			// A link is refused by the shared database file policy, not merely
+			// unreadable: the file inspected and the file read have to be the
+			// same one. The preflight names that as its own code and names this
+			// exact file, so the report never calls a policy refusal an
+			// unreadable database or a different file.
+			if info.Mode()&os.ModeSymlink != 0 {
+				return sourceFingerprint{}, &symlinkedSourceFile{name: name}
+			}
 			return sourceFingerprint{}, fmt.Errorf("source file %s is not a regular file", name)
 		}
 		entries = append(entries, manifestEntry{relative: name, size: info.Size()})
@@ -70,6 +114,11 @@ func fingerprintSource(ctx context.Context, root string) (sourceFingerprint, err
 		return sourceFingerprint{}, err
 	}
 	entries = append(entries, archives...)
+	unexpected, err := collectUnexpectedRootEntries(root)
+	if err != nil {
+		return sourceFingerprint{}, err
+	}
+	entries = append(entries, unexpected...)
 	sort.Slice(entries, func(i, j int) bool { return entries[i].relative < entries[j].relative })
 
 	manifest := sha256.New()
@@ -78,14 +127,19 @@ func fingerprintSource(ctx context.Context, root string) (sourceFingerprint, err
 		if err := ctx.Err(); err != nil {
 			return sourceFingerprint{}, err
 		}
-		content, err := fileContentDigest(ctx, filepath.Join(root, filepath.FromSlash(entry.relative)))
-		if err != nil {
-			return sourceFingerprint{}, err
+		content := ""
+		if !entry.directory {
+			var err error
+			if content, err = fileContentDigest(ctx, filepath.Join(root, filepath.FromSlash(entry.relative))); err != nil {
+				return sourceFingerprint{}, err
+			}
 		}
 		if _, err := fmt.Fprintf(manifest, "%s\x00%d\x00%s\n", entry.relative, entry.size, content); err != nil {
 			return sourceFingerprint{}, err
 		}
-		total += entry.size
+		if !entry.uncopied {
+			total += entry.size
+		}
 	}
 	return sourceFingerprint{Digest: hex.EncodeToString(manifest.Sum(nil)), Bytes: total}, nil
 }
@@ -131,6 +185,36 @@ func collectArchiveEntries(ctx context.Context, root string, archivesRoot string
 	})
 	if walkErr != nil {
 		return nil, walkErr
+	}
+	return entries, nil
+}
+
+// collectUnexpectedRootEntries describes every entry of the source root that the
+// 1.x data layout does not own. A file appearing beside the source is a change
+// to the source, so it must change the fingerprint; it is not part of the copy,
+// so it never contributes to the copied byte total.
+func collectUnexpectedRootEntries(root string) ([]manifestEntry, error) {
+	listing, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]manifestEntry, 0, len(listing))
+	for _, entry := range listing {
+		name := filepath.ToSlash(entry.Name())
+		if sourceRootReserved[entry.Name()] {
+			continue
+		}
+		if entry.IsDir() {
+			// Directories are covered by name only: their content is not copied
+			// and is not the 1.x data layout's to describe.
+			entries = append(entries, manifestEntry{relative: name, directory: true, uncopied: true})
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, manifestEntry{relative: name, size: info.Size(), uncopied: true})
 	}
 	return entries, nil
 }

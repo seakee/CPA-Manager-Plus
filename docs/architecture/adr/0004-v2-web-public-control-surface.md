@@ -202,8 +202,11 @@ Manager administrator key** in `Authorization: Bearer <key>`. It is outside
 session, claim, backup, migration, route or completion receipt. CPA keys, cookies
 and browser logged-in flags are not credentials for it.
 
-The leaf uses the current bounded, fenced, no-migrate source inspection and the
-persisted credential verifier. Only a safely observed, initialized legacy or
+The leaf uses the current bounded, no-migrate source inspection and the
+persisted credential verifier. The ownership marker is only probed — a shared,
+non-blocking read of the same file — never fenced, so a 1.x volume mounted
+read-only (0555 directories, 0444 files including the marker) authenticates and
+the leaf writes nothing there. Only a safely observed, initialized legacy or
 unowned native-v2 source projecting `unsupported_upgrade` can authenticate;
 Fresh-owned sources remain unavailable. Its success DTO is
 `{contract_version:"cpamp.upgrade-auth.v1", authenticated:true,
@@ -224,19 +227,113 @@ same-origin Manager base/runtime provenance require manual login.
 
 Errors use `{contract_version:"cpamp.upgrade-auth.v1", error:{code:<code>}}`:
 401 `admin_unauthorized`, 403 `origin_rejected`, 409 `source_changed`,
-503 `source_unavailable`, 405 `method_not_allowed` (`Allow: POST`). Browser
+503 `source_unavailable`, 405 `method_not_allowed` (`Allow: POST`). The
+credential is answered before the verb, exactly as on the wizard's two read
+routes: a caller without one receives 401 whatever its method, and only a proved
+key sees 405. Browser
 requests must be same-origin; there is no CORS/cookie authentication. The
 origin is checked against the existing trusted `CPAMP_PUBLIC_ORIGIN` deployment
 setting when supplied (including TLS termination), otherwise direct TLS/Host.
-Forwarded headers cannot establish this trust. Query
-strings, unknown paths and aliases are generic 404. Responses are `no-store`.
+Forwarded headers cannot establish this trust. The same rule is applied by the
+wizard's two read routes through the same helper, so the page that authenticates
+and the reads behind it cannot accept different browser origins.
+Query strings, unknown paths and aliases are generic 404 for a proved credential.
+Responses are `no-store`.
 Writable startup, readiness, Fresh takeover or canonical commit/completion
 retires this leaf to the captured generic 404 behavior. It never delegates to
 Gateway, normal login/config loading, `store.Open`, bootstrap initialization or
 collector startup. This narrow auth contract does not resolve the future
-migration executor or widen the Fresh-only fixed API.
+migration executor. The same fixed surface also serves the Upgrade wizard's two
+read-only routes (`installation/upgrade/preflight` and
+`installation/upgrade/status`) while the operation is unfinished — the copied-in
+v2 root carries no Fresh record for the canonical continuation. They share this
+leaf's gate and retire with it; no write route widens the Fresh-only fixed API.
 The fixed asset carrier admits only the Upgrade entry's static manifest closure
 in addition to its initial graph; dynamic Console imports remain unavailable.
+
+#### One credential for the whole Upgrade surface (2026-10-30)
+
+The entry leaf and both wizard reads resolve exactly one administrator
+credential: the database inside the configured 1.x data directory
+(`CPAMP_LEGACY_ROOT`, otherwise `/legacy`) when that mount actually holds
+`usage.sqlite`, and otherwise the Manager's own store. "Actually holds" is the
+shared database file policy the credential read applies — the path names the
+file itself, never a symbolic or hard link, with content — so a mount whose
+`usage.sqlite` is a link holds no database as far as the surface is concerned:
+the credential falls back to the Manager store instead of pointing the read at a
+file it would refuse, and the surface stays reachable instead of answering 503 on
+every leaf. The rule is implemented once (`upgrade.CredentialDatabaseFrom`:
+mount database, else Manager store, with `upgrade.MountDatabase` as its only
+mount question) and both leaves verify the resolved file with the same credential
+read (`upgrade.VerifyAdminSource`), which compares one persisted credential row
+and never the whole source. The reads take no credential argument of their own:
+they apply that rule to the one mount they inspected for the request, so no
+caller-supplied path can point authentication at a file the policy refused.
+
+The resolution is asked at two different times, and that bounds the "one key
+accepted everywhere" claim. The entry leaf resolves once, when it is
+constructed; the wizard's two reads resolve per request. While the mount is
+unchanged, a key the entry page accepted is the key the reads accept and a key
+kept in the other file is refused by all of them, so two files with different
+keys cannot split the surface. A mount that appears, disappears or is repointed
+after the entry leaf was built is seen by the reads first: they fall back to the
+Manager store immediately, and the entry leaf keeps its startup resolution until
+it is rebuilt.
+
+The wizard reads decide the credential's shape and the browser's origin from the
+request alone, and only then inspect the mount: a caller that presents no
+credential, and a cross-site caller whatever it presents, performs no filesystem
+work at all. A caller that does present a credential shape is tested against the
+surface's resolved file — the mount's own database when the shared file policy
+accepts it — so it pays one lookup, which the authentication and the status
+marker share for that request. The lookup runs under a bound
+(`MountLookupTimeout`, 2s), and at most one lookup per handler is in flight: the
+filesystem calls behind it cannot be cancelled, so the lookup runs on its own
+goroutine, the request stops waiting at the bound, and a poll that arrives while
+a hung lookup is still running joins that same lookup instead of starting
+another. A mount that never answers therefore holds one goroutine however many
+polls arrive, and reports `upgrade_mount_timeout` — a retry — instead of holding
+every status poll open or naming an unreadable database. The lookup itself is a
+handler field, so the package holds no mutable state and a test's substitution
+belongs to one handler.
+
+The entry leaf additionally runs the bounded public observation to project
+`unsupported_upgrade`. That observation deliberately refuses a WAL source as
+recovery-owned. When it refuses, the leaf re-checks the key with the surface's
+credential read and answers 503 `source_unavailable` for a proved key and 401
+only when the credential itself rejects it: a source that cannot be observed is
+never reported as a wrong key, and never as an accepted one either.
+
+`status` is answered from the Manager store and does not require the source
+mount. It reports the recorded stage plus a typed `sourceRoot` marker:
+`available`, or the code the mount lookup reached —
+`upgrade_legacy_root_missing` / `upgrade_legacy_root_unusable` for the
+configured directory, `upgrade_source_missing` / `upgrade_source_symlinked` /
+`upgrade_source_lock_unavailable` from the shared database file policy, and
+`upgrade_mount_timeout` when the lookup outlived its bound. Those are the
+only values, and the list is exactly the reachable ones. The marker answers the
+file policy, which is the same question the credential resolution asks — that is
+why a mount whose database is a link is named `upgrade_source_symlinked` while
+the surface keeps answering. It is not the preflight's verdict and does not
+mirror it: a mount whose ownership marker is absent, whose writer is busy or
+whose database fails its integrity check still reads `available` here and is
+refused by the preflight, which is the step that qualifies the source. The
+`preflight` route answers `upgrade_legacy_root_missing` / `_unusable` without the
+mount, and otherwise inspects the mount the operator supplied rather than the
+credential file the surface fell back to.
+
+The marker is visible only to a caller who holds the resolved credential. When
+the mount is refused, the credential is the Manager store, so the mount's own
+administrator key gets 401 and cannot read the marker that explains the refusal;
+the operator has to reach the surface with the credential the surface actually
+verifies before it can be told why the mount is not being used.
+
+Before the operation row commits, the copy-in publishes its provenance marker.
+A marker that names this database with no row is an in-progress operation:
+`status` reports `recorded:true`, `evidence:"copy_in_marker"`, stage `copy_in`
+and next action `copy_in` — the same position startup admission reads — instead
+of the pre-operation `preflight` projection. A marker that names another file
+describes nothing here.
 
 Administrator initialization is independent of Bootstrap classification. A
 matching durable Fresh installation, generation and OperationID checkpoint can

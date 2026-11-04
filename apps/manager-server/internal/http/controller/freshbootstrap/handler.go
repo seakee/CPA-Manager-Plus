@@ -30,6 +30,10 @@ type Handler struct {
 	// adoption this carrier's own claim committed, so it is delegated exactly as
 	// the runtime observation is, and never served by this package.
 	Adoption http.Handler
+	// Upgrade serves the Upgrade wizard routes: the two reads and the one verify
+	// action that runs the completion gate. Nil keeps them closed, so an
+	// installation that mounts no Upgrade reader answers 503.
+	Upgrade http.Handler
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -68,6 +72,18 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resource := strings.TrimPrefix(r.URL.Path, bootstrap.FixedBootstrapAPIPath)
+	// The Upgrade reads are the one pair of resources on this carrier that is
+	// not session-authorized: the Upgrade surface holds its own credential (the
+	// source administrator key), so the reader it mounts decides both the method
+	// and the caller. A missing reader keeps the resources closed.
+	if upgradeResource(resource) {
+		if h.Upgrade == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		h.Upgrade.ServeHTTP(w, r)
+		return
+	}
 	if resource == "claim/exchange" {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -190,6 +206,18 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.Adoption.ServeHTTP(w, r)
 	}
+}
+
+// upgradeNamespace is the one namespace the Upgrade surface owns on this
+// carrier. Every route in it goes to the reader, which answers the credential and
+// the browser's origin before it answers the path: an unknown route inside the
+// namespace must not be the one resource that leaks its own non-existence.
+const upgradeNamespace = "installation/upgrade/"
+
+// upgradeResource reports whether a fixed-carrier resource belongs to the
+// Upgrade surface's own credential instead of the installation session.
+func upgradeResource(resource string) bool {
+	return strings.HasPrefix(resource, upgradeNamespace)
 }
 
 // SessionToken deliberately uses a distinct scheme. Bearer Admin/CPA keys and

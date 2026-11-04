@@ -212,20 +212,41 @@ type Response struct {
 }
 
 type AnalyticsCoverage struct {
-	Scope                           string                   `json:"scope"`
-	Mode                            string                   `json:"mode"`
-	RawComplete                     bool                     `json:"raw_complete"`
-	CoreAggregateUsed               bool                     `json:"core_aggregate_used"`
-	RawEventCount                   int64                    `json:"raw_event_count,omitempty"`
-	RawDeletedEventCount            int64                    `json:"raw_deleted_event_count"`
-	MinDeletedTimestampMS           int64                    `json:"min_deleted_timestamp_ms"`
-	MaxDeletedTimestampMS           int64                    `json:"max_deleted_timestamp_ms"`
-	ComparisonRawEventCount         int64                    `json:"comparison_raw_event_count,omitempty"`
-	ComparisonRawDeletedEventCount  int64                    `json:"comparison_raw_deleted_event_count,omitempty"`
-	ComparisonMinDeletedTimestampMS int64                    `json:"comparison_min_deleted_timestamp_ms,omitempty"`
-	ComparisonMaxDeletedTimestampMS int64                    `json:"comparison_max_deleted_timestamp_ms,omitempty"`
-	AuxiliaryRanges                 []AnalyticsCoverageRange `json:"auxiliary_ranges,omitempty"`
-	FidelityLimitations             []string                 `json:"fidelity_limitations"`
+	Scope                           string `json:"scope"`
+	Mode                            string `json:"mode"`
+	RawComplete                     bool   `json:"raw_complete"`
+	CoreAggregateUsed               bool   `json:"core_aggregate_used"`
+	RawEventCount                   int64  `json:"raw_event_count,omitempty"`
+	RawDeletedEventCount            int64  `json:"raw_deleted_event_count"`
+	MinDeletedTimestampMS           int64  `json:"min_deleted_timestamp_ms"`
+	MaxDeletedTimestampMS           int64  `json:"max_deleted_timestamp_ms"`
+	ComparisonRawEventCount         int64  `json:"comparison_raw_event_count,omitempty"`
+	ComparisonRawDeletedEventCount  int64  `json:"comparison_raw_deleted_event_count,omitempty"`
+	ComparisonMinDeletedTimestampMS int64  `json:"comparison_min_deleted_timestamp_ms,omitempty"`
+	ComparisonMaxDeletedTimestampMS int64  `json:"comparison_max_deleted_timestamp_ms,omitempty"`
+	// ComparisonIncomplete reports whether any day of the comparison window
+	// carries a permanent Upgrade mark, and ComparisonIncompleteDays names each
+	// of them: the previous window is a lower bound too, so it cannot be shown
+	// as a measurement beside an incomplete current range.
+	ComparisonIncomplete     bool                             `json:"comparison_incomplete"`
+	ComparisonIncompleteDays []AnalyticsCoverageIncompleteDay `json:"comparison_incomplete_days,omitempty"`
+	AuxiliaryRanges          []AnalyticsCoverageRange         `json:"auxiliary_ranges,omitempty"`
+	// Incomplete reports whether any day in the requested range carries a
+	// permanent Upgrade mark, and IncompleteDays names each of those days with
+	// its reason. A marked day is a lower bound, not a measurement; an
+	// unmarked range leaves both fields at their zero value. Every auxiliary
+	// range carries its own marks in AuxiliaryRanges.
+	Incomplete          bool                             `json:"incomplete"`
+	IncompleteDays      []AnalyticsCoverageIncompleteDay `json:"incomplete_days,omitempty"`
+	FidelityLimitations []string                         `json:"fidelity_limitations"`
+}
+
+// AnalyticsCoverageIncompleteDay is one UTC day whose covered numbers are a
+// permanent lower bound: the v2 Upgrade marked it because the 1.x source can
+// never be read again for it.
+type AnalyticsCoverageIncompleteDay struct {
+	Day    string `json:"day"`
+	Reason string `json:"reason"`
 }
 
 type AnalyticsCoverageRange struct {
@@ -236,6 +257,11 @@ type AnalyticsCoverageRange struct {
 	RawDeletedEventCount  int64  `json:"raw_deleted_event_count"`
 	MinDeletedTimestampMS int64  `json:"min_deleted_timestamp_ms,omitempty"`
 	MaxDeletedTimestampMS int64  `json:"max_deleted_timestamp_ms,omitempty"`
+	// Incomplete and IncompleteDays carry the permanent Upgrade marks of this
+	// range, so a drilldown or a rolling window cannot present a marked day as
+	// complete just because it is not the requested range.
+	Incomplete     bool                             `json:"incomplete"`
+	IncompleteDays []AnalyticsCoverageIncompleteDay `json:"incomplete_days,omitempty"`
 }
 
 type HeaderSnapshotsRequest struct {
@@ -974,10 +1000,12 @@ func (s *Service) analytics(ctx context.Context, req Request) (Response, error) 
 			Coverage: coverage,
 		})
 	}
-	coverageWarningRequired := rawCoverage.RawDeletedEventCount > 0 ||
-		(comparisonRawCoverage != nil && comparisonRawCoverage.RawDeletedEventCount > 0)
+	// A marked day needs the coverage object even when nothing was deleted in
+	// range: the numbers are a lower bound, and that has to reach the operator.
+	coverageWarningRequired := rawCoverage.RawDeletedEventCount > 0 || rawCoverage.Incomplete ||
+		(comparisonRawCoverage != nil && (comparisonRawCoverage.RawDeletedEventCount > 0 || comparisonRawCoverage.Incomplete))
 	for _, auxiliary := range auxiliaryRawCoverage {
-		if auxiliary.Coverage.RawDeletedEventCount > 0 {
+		if auxiliary.Coverage.RawDeletedEventCount > 0 || auxiliary.Coverage.Incomplete {
 			coverageWarningRequired = true
 			break
 		}
@@ -1691,18 +1719,28 @@ func buildAnalyticsCoverage(
 		RawDeletedEventCount:  coverage.RawDeletedEventCount,
 		MinDeletedTimestampMS: coverage.MinDeletedTimestampMS,
 		MaxDeletedTimestampMS: coverage.MaxDeletedTimestampMS,
+		Incomplete:            coverage.Incomplete,
 		FidelityLimitations:   limitations,
+	}
+	if len(coverage.IncompleteDays) > 0 {
+		result.IncompleteDays = incompleteDayViews(coverage.IncompleteDays)
 	}
 	if comparisonCoverage != nil {
 		result.ComparisonRawEventCount = comparisonCoverage.RawEventCount
 		result.ComparisonRawDeletedEventCount = comparisonCoverage.RawDeletedEventCount
 		result.ComparisonMinDeletedTimestampMS = comparisonCoverage.MinDeletedTimestampMS
 		result.ComparisonMaxDeletedTimestampMS = comparisonCoverage.MaxDeletedTimestampMS
+		// The previous window is shown beside the current one, so its marks
+		// have to travel with it: a marked day there is a lower bound too.
+		result.ComparisonIncomplete = comparisonCoverage.Incomplete
+		if len(comparisonCoverage.IncompleteDays) > 0 {
+			result.ComparisonIncompleteDays = incompleteDayViews(comparisonCoverage.IncompleteDays)
+		}
 	}
 	if len(auxiliaryCoverage) > 0 {
 		result.AuxiliaryRanges = make([]AnalyticsCoverageRange, 0, len(auxiliaryCoverage))
 		for _, auxiliary := range auxiliaryCoverage {
-			result.AuxiliaryRanges = append(result.AuxiliaryRanges, AnalyticsCoverageRange{
+			analyticsRange := AnalyticsCoverageRange{
 				Scope:                 auxiliary.Scope,
 				FromMS:                auxiliary.Coverage.FromTimestampMS,
 				ToMS:                  auxiliary.Coverage.ToTimestampMS,
@@ -1710,10 +1748,25 @@ func buildAnalyticsCoverage(
 				RawDeletedEventCount:  auxiliary.Coverage.RawDeletedEventCount,
 				MinDeletedTimestampMS: auxiliary.Coverage.MinDeletedTimestampMS,
 				MaxDeletedTimestampMS: auxiliary.Coverage.MaxDeletedTimestampMS,
-			})
+				Incomplete:            auxiliary.Coverage.Incomplete,
+			}
+			if len(auxiliary.Coverage.IncompleteDays) > 0 {
+				analyticsRange.IncompleteDays = incompleteDayViews(auxiliary.Coverage.IncompleteDays)
+			}
+			result.AuxiliaryRanges = append(result.AuxiliaryRanges, analyticsRange)
 		}
 	}
 	return result
+}
+
+// incompleteDayViews copies the store's marked days into the response shape, so
+// no range can be rendered complete without its marks.
+func incompleteDayViews(days []store.UsageArchiveCoverageIncompleteDay) []AnalyticsCoverageIncompleteDay {
+	views := make([]AnalyticsCoverageIncompleteDay, 0, len(days))
+	for _, day := range days {
+		views = append(views, AnalyticsCoverageIncompleteDay{Day: day.Day, Reason: day.Reason})
+	}
+	return views
 }
 
 func summaryComparisonRange(req Request) (int64, int64, bool) {

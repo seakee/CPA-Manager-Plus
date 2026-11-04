@@ -1,0 +1,353 @@
+package main
+
+import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradeauth"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+)
+
+// TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere is the M1 contract at
+// the process boundary. The Upgrade surface resolves one credential file: the
+// configured 1.x source when it holds a database, otherwise the Manager's own
+// store. Two sources with two different keys must therefore not split the
+// surface: the resolved key opens the entry leaf and both reads, and the key in
+// the other file is refused by all three.
+//
+// The entry leaf additionally runs the public discovery observation, which
+// deliberately refuses a WAL source as recovery-owned. The "unobservable" case
+// below records what that boundary does: the reads still verify the key, and the
+// entry leaf names the source instead of blaming the credential.
+func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
+	const (
+		legacyKey  = "legacy-source-administrator-key"
+		managerKey = "manager-store-administrator-key"
+	)
+	base := bootstrap.FixedBootstrapAPIPath + "installation/upgrade"
+	cases := []struct {
+		name             string
+		mountLegacy      bool
+		symlinkDatabase  bool
+		observable       bool
+		accepted         string
+		refused          string
+		entryStatus      int
+		entryCode        string
+		entryObservation string
+		preflight        int
+		preflightErr     string
+		sourceRoot       string
+	}{
+		{
+			name: "legacy mount wins", mountLegacy: true, observable: false,
+			accepted: legacyKey, refused: managerKey,
+			entryStatus: http.StatusOK,
+			preflight:   http.StatusOK,
+			sourceRoot:  "available",
+		},
+		{
+			// The mount holds no database the shared file policy accepts, so it does
+			// not count as a source: the surface must stay reachable through the
+			// Manager store and name the condition instead of answering 503.
+			name: "symlinked mount database falls back to the manager store", mountLegacy: true, symlinkDatabase: true, observable: true,
+			accepted: managerKey, refused: legacyKey,
+			entryStatus:  http.StatusOK,
+			preflight:    http.StatusOK,
+			preflightErr: "upgrade_source_symlinked",
+			sourceRoot:   "upgrade_source_symlinked",
+		},
+		{
+			name: "manager store without a mount", mountLegacy: false, observable: true,
+			accepted: managerKey, refused: legacyKey,
+			entryStatus:  http.StatusOK,
+			preflight:    http.StatusServiceUnavailable,
+			preflightErr: "upgrade_legacy_root_missing",
+			sourceRoot:   "upgrade_legacy_root_missing",
+		},
+		{
+			// The public observation refuses a WAL store, but the presented key is
+			// proved against the resolved file. The entry therefore answers
+			// authenticated with the observation named as unavailable: a refused
+			// observation is not a credential verdict, and closing the read-only
+			// operation view on it is what stranded a resumable operation.
+			name: "unobservable manager store is not a credential verdict", mountLegacy: false, observable: false,
+			accepted: managerKey, refused: legacyKey,
+			entryStatus:      http.StatusOK,
+			entryObservation: "observation_unavailable",
+			preflight:        http.StatusServiceUnavailable,
+			preflightErr:     "upgrade_legacy_root_missing",
+			sourceRoot:       "upgrade_legacy_root_missing",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			legacyRoot, _ := upgradeAuthSource(t, legacyKey)
+			if testCase.mountLegacy {
+				if testCase.symlinkDatabase {
+					symlinkMountDatabase(t, legacyRoot)
+				}
+				t.Setenv(legacyRootEnvironment, legacyRoot)
+			} else {
+				t.Setenv(legacyRootEnvironment, "")
+				if configuredLegacyRoot() != "" {
+					t.Skipf("this host mounts %s, so there is no unmounted case", defaultLegacyRoot)
+				}
+			}
+			database := upgradeSurfaceManagerStore(t, managerKey, testCase.observable)
+
+			h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+			h.EnableReadOnlyDiscovery(legacypreflight.DefaultPaths(database), legacypreflight.Options{}, 5*time.Second)
+			if h.upgradeAuth == nil || h.upgradeWizard == nil {
+				t.Fatal("the Upgrade surface was not mounted")
+			}
+			server := httptest.NewServer(h)
+			defer server.Close()
+
+			request := func(method, path, authorization, origin string) (int, string) {
+				t.Helper()
+				req, err := http.NewRequest(method, server.URL+path, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if authorization != "" {
+					req.Header.Set("Authorization", "Bearer "+authorization)
+				}
+				if origin != "" {
+					req.Header.Set("Origin", origin)
+				}
+				response, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer response.Body.Close()
+				body, err := io.ReadAll(response.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return response.StatusCode, string(body)
+			}
+
+			// The resolved key is the surface's credential. The entry leaf names
+			// an unobservable source as a source condition, never as a wrong key.
+			status, body := request(http.MethodPost, upgradeauth.Path, testCase.accepted, "")
+			if status != testCase.entryStatus {
+				t.Fatalf("entry page with the resolved key = %d want %d: %s", status, testCase.entryStatus, body)
+			}
+			if testCase.entryCode != "" && !strings.Contains(body, `"`+testCase.entryCode+`"`) {
+				t.Fatalf("entry page did not name %s: %s", testCase.entryCode, body)
+			}
+			if testCase.entryStatus == http.StatusOK {
+				// A proved credential is authenticated and claims no migration
+				// permission, whether or not the public observation could describe
+				// the source.
+				for _, want := range []string{`"authenticated":true`, `"migration_available":false`} {
+					if !strings.Contains(body, want) {
+						t.Fatalf("entry page accepted the key without %s: %s", want, body)
+					}
+				}
+				observation := "unsupported_upgrade"
+				if testCase.entryObservation != "" {
+					observation = testCase.entryObservation
+				}
+				if !strings.Contains(body, `"status":"`+observation+`"`) {
+					t.Fatalf("entry page did not answer %s: %s", observation, body)
+				}
+			}
+
+			// Both reads answer the recorded operation from the Manager store,
+			// mounted source or not.
+			status, body = request(http.MethodGet, base+"/status", testCase.accepted, "")
+			if status != http.StatusOK {
+				t.Fatalf("status with the resolved key = %d: %s", status, body)
+			}
+			for _, want := range []string{
+				`"recorded":true`, `"evidence":"operation_row"`, `"stage":"copy_in"`,
+				`"nextAction":"copy_in"`, `"sourceRoot":"` + testCase.sourceRoot + `"`,
+			} {
+				if !strings.Contains(body, want) {
+					t.Fatalf("status with the resolved key is missing %s: %s", want, body)
+				}
+			}
+			status, body = request(http.MethodGet, base+"/preflight", testCase.accepted, "")
+			if status != testCase.preflight {
+				t.Fatalf("preflight with the resolved key = %d want %d: %s", status, testCase.preflight, body)
+			}
+			if testCase.preflightErr != "" && !strings.Contains(body, `"`+testCase.preflightErr+`"`) {
+				t.Fatalf("preflight did not name %s: %s", testCase.preflightErr, body)
+			}
+
+			// The other file's key is a wrong key on every leaf, never a source
+			// verdict: the surface has one credential, not two.
+			for name, target := range map[string][2]string{
+				"entry page": {http.MethodPost, upgradeauth.Path},
+				"preflight":  {http.MethodGet, base + "/preflight"},
+				"status":     {http.MethodGet, base + "/status"},
+			} {
+				status, body = request(target[0], target[1], testCase.refused, "")
+				if status != http.StatusUnauthorized || !strings.Contains(body, `"admin_unauthorized"`) {
+					t.Fatalf("%s with the other file's key = %d: %s", name, status, body)
+				}
+			}
+
+			// L4 at the surface boundary: a cross-site browser gets the entry
+			// leaf's answer on the reads as well, with the resolved key.
+			for _, resource := range []string{"/preflight", "/status"} {
+				status, body = request(http.MethodGet, base+resource, testCase.accepted, "https://attacker.test")
+				if status != http.StatusForbidden || !strings.Contains(body, `"origin_rejected"`) {
+					t.Fatalf("%s from another site = %d: %s", resource, status, body)
+				}
+			}
+		})
+	}
+}
+
+// symlinkMountDatabase replaces the mount's usage.sqlite with a symbolic link to
+// a file beside it. The directory still looks like a 1.x data directory, but the
+// file behind usage.sqlite is reached through a link, which the shared database
+// file policy refuses on both the mount lookup and the credential read.
+func symlinkMountDatabase(t *testing.T, root string) {
+	t.Helper()
+	database := filepath.Join(root, "usage.sqlite")
+	target := filepath.Join(root, "usage.actual.sqlite")
+	if err := os.Rename(database, target); err != nil {
+		t.Fatalf("move the mount database: %v", err)
+	}
+	if err := os.Symlink(target, database); err != nil {
+		t.Skipf("create the mount database symlink: %v", err)
+	}
+}
+
+// upgradeSurfaceManagerStore writes a v2 Manager store that carries both the
+// administrator credential and the recorded copy_in operation row. observable
+// switches the file to the rollback journal: the entry leaf additionally runs
+// the public discovery observation, which refuses a WAL source as
+// recovery-owned, so only that journal mode can prove the accepted key end to
+// end. A Manager that has actually run writes WAL, which the reads accept.
+func upgradeSurfaceManagerStore(t *testing.T, key string, observable bool) string {
+	t.Helper()
+	database := filepath.Join(t.TempDir(), "usage.sqlite")
+	db, err := sqliterepo.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := security.NewAdminCredential(key, "test")
+	if err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := setting.New(db).SaveAdminCredential(t.Context(), credential); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := upgradeoperation.New(db).Put(t.Context(), model.UpgradeOperation{
+		Stage:                   model.UpgradeStageCopyIn,
+		DomainsDone:             []string{model.UpgradeDomainSourceCopy},
+		SourceKind:              "upgraded-legacy",
+		SourceVersion:           "1.14.4",
+		SourceFingerprintBefore: "fingerprint-before-value",
+		SourceFingerprintAfter:  "fingerprint-after-value",
+		BackupManifestSHA256:    "backup-manifest-value",
+		ManualItems:             []string{},
+	}); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if observable {
+		if _, err := db.Exec(`pragma journal_mode = delete`); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The ownership marker is read-only evidence: the credential inspection
+	// probes it, so the fixture carries one like a real stopped source.
+	if err := os.WriteFile(database+".manager.lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return database
+}
+
+// TestStartupUpgradeNamespaceAnswersTheCredentialBeforeThePath is M3 at the
+// startup carrier. The fixed surface routes the whole Upgrade read namespace to
+// the reader, so an unknown route inside it — and the entry leaf's query string —
+// must meet the same credential and origin gates as a real resource. Only a
+// proved credential may learn that the route does not exist.
+func TestStartupUpgradeNamespaceAnswersTheCredentialBeforeThePath(t *testing.T) {
+	const key = "legacy-source-administrator-key"
+	source, _ := upgradeAuthSource(t, key)
+	t.Setenv(legacyRootEnvironment, source)
+	database := upgradeSurfaceManagerStore(t, "manager-store-not-used-for-this-read", true)
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(legacypreflight.DefaultPaths(database), legacypreflight.Options{}, 5*time.Second)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	request := func(method, path, authorization, origin string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(method, server.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if authorization != "" {
+			req.Header.Set("Authorization", authorization)
+		}
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		response, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response.StatusCode, string(body)
+	}
+
+	unknown := bootstrap.FixedBootstrapAPIPath + "installation/upgrade/not-a-route"
+	entryQuery := upgradeauth.Path + "?resource=1"
+	for name, authorization := range map[string]string{
+		"absent":       "",
+		"other scheme": "Basic b3BlcmF0b3I6cGFzcw==",
+		"foreign key":  "Bearer another-Manager-key",
+	} {
+		if status, body := request(http.MethodGet, unknown, authorization, ""); status != http.StatusUnauthorized {
+			t.Fatalf("unknown Upgrade route with the %s credential = %d: %s", name, status, body)
+		}
+		if status, body := request(http.MethodPost, entryQuery, authorization, ""); status != http.StatusUnauthorized {
+			t.Fatalf("entry query with the %s credential = %d: %s", name, status, body)
+		}
+	}
+	if status, body := request(http.MethodGet, unknown, "Bearer "+key, "https://attacker.test"); status != http.StatusForbidden {
+		t.Fatalf("unknown Upgrade route from another site = %d: %s", status, body)
+	}
+	if status, body := request(http.MethodPost, entryQuery, "Bearer "+key, "https://attacker.test"); status != http.StatusForbidden {
+		t.Fatalf("entry query from another site = %d: %s", status, body)
+	}
+	// Only the proved credential learns the route or the query string is unknown.
+	if status, body := request(http.MethodGet, unknown, "Bearer "+key, ""); status != http.StatusNotFound {
+		t.Fatalf("unknown Upgrade route with the proved credential = %d: %s", status, body)
+	}
+	if status, body := request(http.MethodPost, entryQuery, "Bearer "+key, ""); status != http.StatusNotFound {
+		t.Fatalf("entry query with the proved credential = %d: %s", status, body)
+	}
+}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identityusage"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/coverageincomplete"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 )
 
@@ -217,6 +218,21 @@ func (r *repository) RawDeletedIn(ctx context.Context, fromMS, toMS int64) (bool
 		return false, fmt.Errorf("inspect archived raw usage coverage: %w", err)
 	}
 	return deleted, nil
+}
+
+func (r *repository) IncompleteDaysIn(ctx context.Context, fromMS, toMS int64) ([]ports.IncompleteDay, error) {
+	days := []ports.IncompleteDay{}
+	if toMS <= fromMS {
+		return days, nil
+	}
+	marks, err := coverageincomplete.DaysIn(ctx, r.db, fromMS, toMS)
+	if err != nil {
+		return nil, fmt.Errorf("read the incomplete coverage days: %w", err)
+	}
+	for _, mark := range marks {
+		days = append(days, ports.IncompleteDay{Day: mark.Day, Reason: mark.Reason})
+	}
+	return days, nil
 }
 
 func (r *repository) CollectionStartedAtMS(ctx context.Context) (int64, error) {

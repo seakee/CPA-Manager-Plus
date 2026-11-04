@@ -30,8 +30,11 @@ describe('upgrade authentication lifecycle', () => {
     setFullWebLanguage('en');
     await loginI18n.changeLanguage('en');
     mocks.candidate.mockReset().mockReturnValue('');
-    mocks.verify.mockReset().mockResolvedValue('a'.repeat(64));
+    mocks.verify
+      .mockReset()
+      .mockResolvedValue({ revision: 'a'.repeat(64), observation: 'unsupported_upgrade' });
     mocks.remember.mockReset();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')));
     vi.stubGlobal('window', {
       location: new URL('https://manager.test'),
       setTimeout,
@@ -81,6 +84,18 @@ describe('upgrade authentication lifecycle', () => {
       1
     );
     expect(JSON.stringify(renderer.toJSON())).toContain('Migration is not available');
+    // The wizard is mounted only behind a verified session, and it is a reader.
+    // Its first request is the recorded operation — the preflight is a step that
+    // only an empty record opens — and every request it makes stays on the two
+    // Upgrade read routes.
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
+    const readRoutes = [
+      'https://manager.test/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/status',
+      'https://manager.test/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/preflight',
+    ];
+    const requested = vi.mocked(fetch).mock.calls.map(([url]) => String(url));
+    expect(requested[0]).toBe(readRoutes[0]);
+    for (const url of requested) expect(readRoutes).toContain(url);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(30_000);
     });
@@ -105,9 +120,9 @@ describe('upgrade authentication lifecycle', () => {
     expect(focus).toHaveBeenCalledTimes(1);
 
     for (let index = 0; index < 3; index++) {
-      let finish!: (value: string) => void;
+      let finish!: (value: { revision: string; observation: string }) => void;
       mocks.verify.mockReturnValueOnce(
-        new Promise<string>((resolve) => {
+        new Promise<{ revision: string; observation: string }>((resolve) => {
           finish = resolve;
         })
       );
@@ -122,10 +137,12 @@ describe('upgrade authentication lifecycle', () => {
         0
       );
       expect(renderer.root.findByType('h1')).toBe(heading);
-      expect(renderer.root.findByProps({ className: 'btn btn-primary' }).props.disabled).toBe(true);
+      expect(renderer.root.findByProps({ 'data-testid': 'upgrade-verify' }).props.disabled).toBe(
+        true
+      );
       expect(JSON.stringify(renderer.toJSON())).not.toContain('Administrator identity verified');
       await act(async () => {
-        finish('a'.repeat(64));
+        finish({ revision: 'a'.repeat(64), observation: 'unsupported_upgrade' });
       });
       expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-authenticated' })).toHaveLength(
         1
@@ -148,9 +165,9 @@ describe('upgrade authentication lifecycle', () => {
     await act(async () => {
       await adapter().authenticate('old-key', false);
     });
-    let finish!: (value: string) => void;
+    let finish!: (value: { revision: string; observation: string }) => void;
     mocks.verify.mockReturnValueOnce(
-      new Promise<string>((resolve) => {
+      new Promise<{ revision: string; observation: string }>((resolve) => {
         finish = resolve;
       })
     );
@@ -166,7 +183,7 @@ describe('upgrade authentication lifecycle', () => {
     });
     expect(mocks.verify.mock.calls[mocks.verify.mock.calls.length - 1][1].aborted).toBe(true);
     await act(async () => {
-      finish('a'.repeat(64));
+      finish({ revision: 'a'.repeat(64), observation: 'unsupported_upgrade' });
     });
     expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-authenticated' })).toHaveLength(
       0
@@ -202,9 +219,9 @@ describe('upgrade authentication lifecycle', () => {
   });
 
   it('ignores a late response after a newer login or unmount', async () => {
-    let late!: (value: string) => void;
+    let late!: (value: { revision: string; observation: string }) => void;
     mocks.verify.mockReturnValueOnce(
-      new Promise<string>((resolve) => {
+      new Promise<{ revision: string; observation: string }>((resolve) => {
         late = resolve;
       })
     );
@@ -219,12 +236,88 @@ describe('upgrade authentication lifecycle', () => {
       await adapter().authenticate('current-key', false);
     });
     await act(async () => {
-      late('b'.repeat(64));
+      late({ revision: 'b'.repeat(64), observation: 'unsupported_upgrade' });
       await first;
     });
     expect(mocks.remember).toHaveBeenCalledTimes(1);
     expect(mocks.remember).toHaveBeenCalledWith('current-key', false);
     await act(async () => renderer.unmount());
     expect(mocks.verify.mock.calls[0][1].aborted).toBe(true);
+  });
+
+  it('accepts a proved key whose public observation is unavailable as a read-only entry', async () => {
+    mocks.verify.mockResolvedValueOnce({
+      revision: 'c'.repeat(64),
+      observation: 'observation_unavailable',
+    });
+    await act(async () => {
+      renderer = create(<UpgradeAuthenticationEntry />);
+    });
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+
+    // A refused observation is not a credential verdict: the entry stays
+    // authenticated, names the source condition, and mounts the read-only view.
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-authenticated' })).toHaveLength(1);
+    expect(
+      renderer.root.findByProps({ 'data-testid': 'upgrade-entry-status' }).props['data-observation']
+    ).toBe('observation_unavailable');
+    const page = JSON.stringify(renderer.toJSON());
+    expect(page).toContain('The source cannot be summarized publicly.');
+    expect(page).not.toContain('Migration is not available for this source yet.');
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
+  });
+
+  it('does not claim there is no migration path once the wizard reads a recorded operation', async () => {
+    mocks.verify.mockResolvedValueOnce({
+      revision: 'd'.repeat(64),
+      observation: 'observation_unavailable',
+    });
+    const recorded = {
+      contractVersion: 'cpamp.upgrade-wizard.v1',
+      recorded: true,
+      stage: 'external_connect',
+      stageKnown: true,
+      nextAction: 'verify',
+      domainsDone: ['source_copy'],
+      sourceKind: 'upgraded-legacy',
+      sourceVersion: 'v1.14.4',
+      manualItems: [],
+      errorCode: '',
+      errorDetail: '',
+      reconciliation: { mismatchDays: [], mismatchDaysTotal: 0, mismatchDaysTruncated: false },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        const payload = url.includes('/installation/upgrade/status') ? recorded : {};
+        return { ok: true, status: 200, json: async () => payload } as Response;
+      })
+    );
+    await act(async () => {
+      renderer = create(<UpgradeAuthenticationEntry />);
+    });
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    // The wizard's boot read is one promise deep: flush it before reading the page.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const page = JSON.stringify(renderer.toJSON());
+    // A recorded operation is a migration that is already under way. The entry
+    // must not tell the operator nothing was written, that migration is
+    // unavailable, or that further decisions wait for a future path — with the
+    // recorded row on screen those sentences contradict it.
+    expect(page).not.toContain('Nothing was written and migration is not available');
+    expect(page).not.toContain('Further upgrade decisions will become available');
+    expect(page).toContain('it is the record this page acts on');
+    expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
   });
 });

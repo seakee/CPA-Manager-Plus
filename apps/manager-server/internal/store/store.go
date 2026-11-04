@@ -125,6 +125,7 @@ type UsageArchiveRecord = usagearchive.Record
 type UsageArchiveRecordRef = usagearchive.RecordRef
 type UsageArchiveDeleteBatchResult = usagearchive.DeleteBatchResult
 type UsageArchiveRawCoverage = usagearchive.RawCoverage
+type UsageArchiveCoverageIncompleteDay = usagearchive.CoverageIncompleteDay
 type UsageMaintenanceLock = usagearchive.MaintenanceLock
 type UsageMaintenanceCounts = usagearchive.MaintenanceCounts
 type SQLitePageStats = sqliterepo.PageStats

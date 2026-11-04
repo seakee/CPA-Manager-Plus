@@ -16,6 +16,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/freshbootstrap"
 	healthcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/health"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradewizard"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/router"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
@@ -107,6 +108,11 @@ type freshApplication struct {
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
 	legacy           http.Handler
+	// upgradeWizard is the one Upgrade reader this application serves. It is
+	// built once: the handler owns the per-request mount flight and the one
+	// bounded lookup a poll joins, so constructing one per request would give
+	// every request its own flight and its own filesystem calls.
+	upgradeWizard *upgradewizard.Handler
 	// legacyCredentialGate serializes the legacy requests that present the saved
 	// management credential. A console page opens several at once, and five
 	// failed authentications ban this address, so the first refusal has to be
@@ -318,9 +324,15 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	if os.Getenv("CPAMP_PRIVATE_A3_PROFILE") != "" {
 		a.externalPermit = privateFreshExternalAdmitted
 	}
+	// One Upgrade surface for the whole application: both carriers serve it, and
+	// its per-handler mount flight is what keeps a hung mount to one lookup. The
+	// two reads and the one verify action share that handler, so the page and
+	// the command line cannot disagree about whether the upgrade finished.
+	a.upgradeWizard = a.newUpgradeWizard()
 	a.fixed = freshbootstrap.Handler{Authority: a.authority, Routing: a.routing, Current: a.current,
 		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime),
-		Adoption: http.HandlerFunc(a.fixedAdoption)}
+		Adoption: http.HandlerFunc(a.fixedAdoption),
+		Upgrade:  a.upgradeWizard}
 	return a
 }
 
@@ -427,6 +439,18 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 	// It authenticates no browser and cannot mutate the pending installation.
 	if resource == "bootstrap/identity" && r.Method == http.MethodGet {
 		writeFreshJSON(w, freshrouting.StateFor(op))
+		return
+	}
+	// The Upgrade reads own their credential. They are neither the installation
+	// session's nor the Fresh Admin's, so they are answered before either gate and
+	// the reader decides the caller. A completed installation has no Upgrade step
+	// at all, so the resources stop existing with the operation.
+	if upgradeWizardResource(resource) {
+		if op.ProductComplete {
+			http.NotFound(w, r)
+			return
+		}
+		a.upgradeWizard.ServeHTTP(w, r)
 		return
 	}
 	continuation, freshAuth := freshbootstrap.SessionToken(r)

@@ -121,10 +121,31 @@ func TestUpgradeOperationColumnsUpgradeLegacyRow(t *testing.T) {
 		_ = db.Close()
 		t.Fatalf("migrated domains = %v, want usage_events", operation.DomainsDone)
 	}
-	operation.Stage = model.UpgradeStageComplete
-	if err := repository.Put(ctx, operation); err != nil {
+	// The migrated row is now writable through the repository, and the verdict
+	// it may reach is recorded by the gate: the evidence and the stage land in
+	// one statement behind the revision the transaction read.
+	verification := model.UpgradeVerification{
+		TargetMode:          model.UpgradeTargetExternal,
+		SourceFingerprint:   "sha256:source-manifest",
+		Domains:             []string{model.UpgradeDomainUsageEvents},
+		BindingIdentity:     "https://cpa.example",
+		BindingGeneration:   "https://cpa.example",
+		BindingObservedAtMS: 1001,
+		ObservedAtMS:        1002,
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
 		_ = db.Close()
-		t.Fatalf("put migrated row: %v", err)
+		t.Fatalf("begin completion: %v", err)
+	}
+	if _, err := upgradeoperation.RecordCompletionTx(ctx, tx, verification); err != nil {
+		_ = tx.Rollback()
+		_ = db.Close()
+		t.Fatalf("record completion on the migrated row: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		_ = db.Close()
+		t.Fatalf("commit completion: %v", err)
 	}
 	committed, _, err := repository.Get(ctx)
 	if err != nil {
@@ -135,6 +156,8 @@ func TestUpgradeOperationColumnsUpgradeLegacyRow(t *testing.T) {
 		_ = db.Close()
 		t.Fatalf("committed row = revision %d high-water %q", committed.Revision, committed.LastForwardStage)
 	}
+	// The migrated write spent the token it read: a second write that still holds
+	// revision 0 is refused instead of overwriting the verdict.
 	if err := repository.Put(ctx, operation); !errors.Is(err, upgradeoperation.ErrConflict) {
 		_ = db.Close()
 		t.Fatalf("second write with the migrated token error = %v, want ErrConflict", err)

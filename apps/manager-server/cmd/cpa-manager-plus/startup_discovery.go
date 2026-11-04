@@ -12,6 +12,7 @@ import (
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	routingdomain "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/routing"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradeauth"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradewizard"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/httpapi"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
@@ -31,6 +32,7 @@ type startupHTTPHandler struct {
 	projection        bootstrap.PublicDiscovery
 	readOnlyDiscovery http.Handler
 	upgradeAuth       http.Handler
+	upgradeWizard     http.Handler
 	next              atomic.Value // *startupHandlerTarget
 	lifecycle         atomic.Value // routingdomain.DiscoveryLifecycle
 	ready             atomic.Bool
@@ -54,19 +56,35 @@ func newStartupHTTPHandler(result bootstrap.PublicDiscovery) *startupHTTPHandler
 }
 
 // The blocked/pre-ready operator may inspect the same bounded public discovery
-// in a read-only shell. The separate Upgrade leaf authenticates only; no
-// Bootstrap API or Upgrade writer is mounted.
+// in a read-only shell. The separate Upgrade surface mounts its entry leaf, its
+// two read-only wizard routes and the one verify action; no Bootstrap API is
+// mounted, and the only write the surface can reach is the completion gate the
+// action delegates to.
 func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == bootstrap.FixedBootstrapDiscoveryPath {
 		h.discovery.ServeHTTP(w, r)
 		return
 	}
-	if r.URL.Path == upgradeauth.Path {
+	// The Upgrade surface owns one gate: not ready, discovery still active and
+	// the Upgrade entry leaf present. Its entry authenticates only; its wizard
+	// routes read the operation this process has not finished. An unfinished
+	// operation has no Fresh record for the canonical continuation to carry, so
+	// the two reads are mounted here, beside the entry leaf, on the one resolved
+	// credential and with the same credential-before-verb order.
+	if fixedUpgradeSurfaceLeaf(r.URL.Path) {
 		h.projectionMu.RLock()
 		defer h.projectionMu.RUnlock()
-		if !h.ready.Load() && h.discoveryLifecycle() == routingdomain.DiscoveryActive && h.readOnlyDiscovery != nil && h.upgradeAuth != nil {
+		if h.ready.Load() || h.discoveryLifecycle() != routingdomain.DiscoveryActive ||
+			h.readOnlyDiscovery == nil || h.upgradeAuth == nil {
+			http.NotFound(w, r)
+			return
+		}
+		switch {
+		case r.URL.Path == upgradeauth.Path:
 			h.upgradeAuth.ServeHTTP(w, r)
-		} else {
+		case h.upgradeWizard != nil:
+			h.upgradeWizard.ServeHTTP(w, r)
+		default:
 			http.NotFound(w, r)
 		}
 		return
@@ -91,6 +109,22 @@ func (h *startupHTTPHandler) serveFixedBootstrap(w http.ResponseWriter, r *http.
 	h.readOnlyShell.ServeHTTP(w, r)
 }
 
+// upgradeWizardNamespace is the one namespace the wizard owns on the fixed
+// Bootstrap API. The namespace, not a list of exact resources, is what the fixed
+// carrier routes to the reader: an unknown route inside it has to meet the same
+// credential gate, so a caller cannot map the surface by asking for a path that
+// does not exist. The reader answers 404 for an unknown route only after the
+// credential and the browser's origin are decided, and it answers the verb rule
+// itself: the two reads take GET and HEAD, the verify action takes POST.
+const upgradeWizardNamespace = bootstrap.FixedBootstrapAPIPath + "installation/upgrade/"
+
+// fixedUpgradeSurfaceLeaf reports whether a fixed-surface path belongs to the
+// Upgrade surface: its authentication entry and every route in its namespace,
+// all under the fixed Bootstrap carrier.
+func fixedUpgradeSurfaceLeaf(value string) bool {
+	return value == upgradeauth.Path || strings.HasPrefix(value, upgradeWizardNamespace)
+}
+
 func (h *startupHTTPHandler) serveDiscovery(w http.ResponseWriter, r *http.Request) {
 	h.projectionMu.RLock()
 	defer h.projectionMu.RUnlock()
@@ -106,12 +140,64 @@ func (h *startupHTTPHandler) serveDiscovery(w http.ResponseWriter, r *http.Reque
 // databases may use a bounded rollback-mode SQLite read snapshot without
 // creating a Manager marker; WAL/journal recovery remains unavailable here.
 func (h *startupHTTPHandler) EnableReadOnlyDiscovery(paths sqliterepo.InspectionPaths, options legacypreflight.Options, timeout time.Duration) {
+	h.enableReadOnlyDiscovery(paths, options, timeout, nil)
+}
+
+// EnableAdmittedDiscovery projects the inspection this process was already
+// admitted on. The store was fenced, classified and read under the process lock
+// before the surface was chosen, so its report is current evidence about the
+// source — while the rollback-mode discovery snapshot would refuse the v2 WAL
+// journal a running Manager writes, which is a fact about the snapshot and not
+// about the source. Only a caller that holds that admission may pass a report
+// here; every other shape keeps the fenced inspection and its fail-closed
+// answer, so no WAL source outside a granted admission becomes observable.
+func (h *startupHTTPHandler) EnableAdmittedDiscovery(paths sqliterepo.InspectionPaths, options legacypreflight.Options, timeout time.Duration, admitted legacypreflight.Report) {
+	h.enableReadOnlyDiscovery(paths, options, timeout, &admitted)
+}
+
+func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.InspectionPaths, options legacypreflight.Options, timeout time.Duration, admitted *legacypreflight.Report) {
 	h.projectionMu.Lock()
 	defer h.projectionMu.Unlock()
 	// Entropy failure leaves this leaf closed without weakening discovery.
 	h.upgradeAuth = nil
-	if handler, err := upgradeauth.New(paths, os.Getenv("CPAMP_PUBLIC_ORIGIN")); err == nil {
+	h.upgradeWizard = nil
+	// One credential resolution for the whole surface: the entry leaf and both
+	// wizard reads verify the key against the same file, so a key the entry page
+	// accepts is a key the reads accept, and the key kept in the other file is
+	// refused by all three. The resolution also says which file it landed on,
+	// because a preserved source and this process's own store are read
+	// differently.
+	// The configured 1.x data directory is resolved once and used twice: it is
+	// the surface's credential rule's mount, and it is the second tree the
+	// entry leaf must keep its private snapshot out of when the rule falls back
+	// to the Manager store. Resolving it here, where the leaf is built, is what
+	// lets the entry name the root on every authentication without a
+	// per-request filesystem call it cannot bound.
+	legacyRoot := configuredLegacyRoot()
+	credentialPaths, mountSource := upgradeCredentialPaths(legacyRoot, paths)
+	if handler, err := upgradeauth.New(credentialPaths, os.Getenv("CPAMP_PUBLIC_ORIGIN"), mountSource, legacyRoot); err == nil {
 		h.upgradeAuth = handler
+		// The wizard routes resolve the credential with the surface's one rule
+		// from the mount they inspect and this database, exactly as the entry
+		// leaf resolved it for `paths` at startup. They are mounted with the
+		// leaf and closed with it: an unfinished Upgrade operation has no Fresh
+		// record, so the fixed surface is the only carrier that can still show
+		// what it recorded — and the only one that can run the completion gate.
+		h.upgradeWizard = &upgradewizard.Handler{
+			LegacyRoot:   configuredLegacyRoot,
+			PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
+			Database:     func() string { return paths.Database },
+			Timeout:      upgradewizard.DefaultTimeout,
+		}
+	}
+	if admitted != nil {
+		// The projection is a pure function of the granted inspection, so it is
+		// computed once and served without touching the store again.
+		result := bootstrapdiscovery.Project(bootstrapdiscovery.Input{Report: *admitted})
+		h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			bootstrapdiscovery.Handler{Discovery: result}.ServeHTTP(w, r)
+		})
+		return
 	}
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
@@ -131,6 +217,7 @@ func (h *startupHTTPHandler) BeginWritableStartup() {
 	h.projection = bootstrapdiscovery.Unavailable()
 	h.readOnlyDiscovery = nil
 	h.upgradeAuth = nil
+	h.upgradeWizard = nil
 }
 
 func (h *startupHTTPHandler) discoveryLifecycle() routingdomain.DiscoveryLifecycle {

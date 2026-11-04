@@ -5,17 +5,41 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/datamigration"
+	_ "modernc.org/sqlite"
 )
 
 var (
+	// ErrSourceDatabaseMissing is the credential read's environment verdict: the
+	// configured root holds no database to read a credential from. It is never a
+	// verdict on the presented key, so a route that reports it must not answer
+	// 401.
+	ErrSourceDatabaseMissing = errors.New("source database is missing")
+	// errDatabaseMissing is the copy-in reader's own missing-file verdict for a
+	// database it was handed by path (its copied target, a backup member).
 	errDatabaseMissing = errors.New("database file is missing")
 	errSourceIntegrity = errors.New("source database integrity check failed")
+	// ErrSourceDatabaseChanged is the credential read's before-read verdict: the
+	// path no longer names the file that was inspected, or the source was
+	// written while its private copy was being taken, so the row that was read is
+	// not the credential this step assessed. Nothing was compared and nothing was
+	// written.
+	ErrSourceDatabaseChanged = errors.New("source database changed during the credential read")
+	// ErrSourceSymlinked is the shared file policy's verdict, exported here so a
+	// caller of this package does not have to reach into the lock package for it:
+	// the configured database is a symbolic link, so the file that would be
+	// inspected is not the file that would be read. The preflight and the
+	// credential read refuse it with the same code.
+	ErrSourceSymlinked = processlock.ErrSymlinkedDatabase
 )
 
 // VersionUnknown is reported when the operator declared no source release.
@@ -116,6 +140,7 @@ func quickCheckSource(ctx context.Context, db *sql.DB) error {
 
 func readSourceSchema(ctx context.Context, db *sql.DB) (sourceSchema, error) {
 	schema := sourceSchema{tables: map[string]bool{}, indexes: map[string]bool{}, settings: map[string]string{}}
+
 	rows, err := db.QueryContext(ctx, `select type, name from sqlite_master where type in ('table', 'index')`)
 	if err != nil {
 		return sourceSchema{}, err
@@ -160,6 +185,164 @@ func readSourceSchema(ctx context.Context, db *sql.DB) (sourceSchema, error) {
 	return schema, settingRows.Err()
 }
 
+// openImmutableSource reads a byte-for-byte snapshot nobody writes, such as a
+// verified backup member. immutable keeps SQLite from creating a WAL index
+// beside it, which would make the snapshot disagree with its own manifest.
+func openImmutableSource(ctx context.Context, path string) (*sql.DB, sourceSchema, error) {
+	return openSource(ctx, path, true)
+}
+
+// openSource opens a bounded read of a database file and verifies integrity
+// with a single quick_check. immutable must stay false only for a store that
+// may still have a live WAL to join: it is the copy-in's own copied target,
+// never a source volume.
+func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sourceSchema, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, sourceSchema{}, errDatabaseMissing
+		}
+		return nil, sourceSchema{}, err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 {
+		return nil, sourceSchema{}, errDatabaseMissing
+	}
+	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, immutable))
+	if err != nil {
+		return nil, sourceSchema{}, err
+	}
+	fail := func(err error) (*sql.DB, sourceSchema, error) {
+		_ = db.Close()
+		return nil, sourceSchema{}, err
+	}
+	if err := quickCheckSource(ctx, db); err != nil {
+		return fail(err)
+	}
+	schema, err := readSourceSchema(ctx, db)
+	if err != nil {
+		return fail(err)
+	}
+	return db, schema, nil
+}
+
+// inspectSourceDatabase applies the shared database file policy and rejects a
+// file with no content, which is not a readable source. A missing database is
+// ErrSourceDatabaseMissing rather than a host error, because it is the
+// operator's mount that has to change.
+func inspectSourceDatabase(path string) (os.FileInfo, error) {
+	info, err := processlock.InspectDatabaseFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrSourceDatabaseMissing
+		}
+		return nil, err
+	}
+	if info.Size() == 0 {
+		return nil, ErrSourceDatabaseMissing
+	}
+	return info, nil
+}
+
+// credentialSource is the read-only handle of one credential read: a private
+// copy of a preserved source and its sidecars, taken and proved by OpenSnapshot.
+// Nothing is ever opened in place, so SQLite cannot create or update a sidecar
+// beside the source and cannot miss one that appears while the copy is taken.
+type credentialSource struct {
+	snapshot *Snapshot
+}
+
+func (s *credentialSource) database() *sql.DB {
+	if s == nil || s.snapshot == nil {
+		return nil
+	}
+	return s.snapshot.DB()
+}
+
+func (s *credentialSource) close() error {
+	if s == nil {
+		return nil
+	}
+	return s.snapshot.Close()
+}
+
+// openCredentialSource opens the one row a credential check reads without ever
+// opening the 1.x source in place.
+//
+// Every open of the source is a write risk, not only a WAL one. `mode=ro` plus
+// query_only forbids SQL writes but still lets SQLite create a -wal/-shm beside
+// the database, and an immutable handle on a file that was cold when it was
+// inspected reads a state that a writer may already have replaced with a newer
+// one (the new WAL is simply not seen). The source is therefore always read
+// through the same private snapshot the preflight takes: the copy is digested
+// before and after it is made, so a source that gains a WAL, a checkpoint or a
+// rewrite while the read is being set up is refused with ErrSourceDatabaseChanged
+// instead of answering from a stale or mixed state.
+//
+// It deliberately runs no quick_check: that read scans every page of the file,
+// and every authenticated request — including every status poll — proves the
+// credential, so an integrity scan here would make a large source time out on a
+// route that never sees the database otherwise. The full preflight keeps the
+// check where the source is actually being qualified.
+func openCredentialSource(ctx context.Context, path string, extraRoots ...string) (*credentialSource, error) {
+	if _, err := inspectSourceDatabase(path); err != nil {
+		return nil, err
+	}
+	// The private copy must never land in the tree this step preserves, whichever
+	// state the source is in: the default scratch directory is checked too,
+	// because a host whose TMPDIR points into the source root would otherwise
+	// hide a full database copy there. extraRoots is the second tree a
+	// materialized Manager target must stay out of: the configured 1.x source
+	// volume the copy-in was reading.
+	if err := ValidateScratchDir("", filepath.Dir(path), ""); err != nil {
+		return nil, credentialSourceError(err)
+	}
+	for _, root := range extraRoots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		if err := ValidateScratchDir("", root, ""); err != nil {
+			return nil, credentialSourceError(err)
+		}
+	}
+	snapshot, err := OpenSnapshot(ctx, path, "")
+	if err != nil {
+		return nil, credentialSourceError(err)
+	}
+	return &credentialSource{snapshot: snapshot}, nil
+}
+
+// credentialSourceError translates the shared readers' verdicts into the
+// credential read's own vocabulary, so a route can answer for the mount instead
+// of guessing at the key.
+func credentialSourceError(err error) error {
+	switch {
+	case errors.Is(err, errDatabaseMissing):
+		return ErrSourceDatabaseMissing
+	case errors.Is(err, processlock.ErrSymlinkedDatabase):
+		return ErrSourceSymlinked
+	case errors.Is(err, ErrSourceChanged):
+		return ErrSourceDatabaseChanged
+	default:
+		return err
+	}
+}
+
+func readOnlyDataSourceName(path string, immutable bool) string {
+	uriPath := filepath.ToSlash(path)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsn := &url.URL{Scheme: "file", Path: uriPath}
+	q := dsn.Query()
+	q.Set("mode", "ro")
+	q.Add("_pragma", "query_only(1)")
+	if immutable {
+		q.Set("immutable", "1")
+	}
+	dsn.RawQuery = q.Encode()
+	return dsn.String()
+}
+
 func stringArgs(values []string) []any {
 	args := make([]any, len(values))
 	for index, value := range values {
@@ -195,7 +378,7 @@ func declaredVersion(declared string) string {
 // Printing "expected=v1.14.4 declared=v1.14.4" next to a refusal reads as if the
 // check contradicted itself; what actually decided it is the marker, so the
 // detail names the marker and the release that introduced it.
-func versionCheck(kind string, v2Tables []string, missingTables []string, newer []markerEvidence, declared string, pinned string) Check {
+func versionCheck(kind string, v2Tables []string, missingTables []string, newer []markerEvidence, declared string, pinned string, acceptUndeclared bool) Check {
 	check := Check{Name: CheckSourceVersion, Status: StatusPass}
 	switch {
 	case kind == SourceKindNativeV2:
@@ -211,6 +394,15 @@ func versionCheck(kind string, v2Tables []string, missingTables []string, newer 
 		check.Code = CodeSourceVersionUnsupported
 		check.Detail = fmt.Sprintf("expected=%s declared=%s missingTables=%s; the source does not carry the v1.14 structure",
 			pinned, declaredVersion(declared), strings.Join(missingTables, ","))
+	case strings.TrimSpace(declared) == "" && acceptUndeclared:
+		// A read-only caller cannot declare the release, and the version is not
+		// recoverable from the database. Saying so is the honest answer; calling
+		// it a refusal would make a source that is otherwise sound unusable from
+		// the one surface that can finish the operation.
+		check.Status = StatusPending
+		check.Code = CodeSourceVersionDeclaredAtCopyIn
+		check.ExpectedVersion = pinned
+		check.Detail = fmt.Sprintf("expected=%s declared=none; a read-only check cannot declare it — the CLI copy-in declares the release with --source-version %s", pinned, pinned)
 	case strings.TrimSpace(declared) == "":
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUndeclared

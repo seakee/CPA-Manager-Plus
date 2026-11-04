@@ -80,11 +80,23 @@ export class UpgradeAuthenticationError extends Error {
   }
 }
 
+// The entry status the server answered for a proved credential. `unsupported_upgrade`
+// is the public observation of a source this build can classify. `observation_unavailable`
+// means the credential was proved but the public observation refused the source (a
+// live WAL is recovery-owned): it authenticates the operator read-only and is never
+// a migration permission, and it is never a credential verdict.
+export type UpgradeEntryObservation = 'unsupported_upgrade' | 'observation_unavailable';
+
+export interface VerifiedUpgradeCredential {
+  revision: string;
+  observation: UpgradeEntryObservation;
+}
+
 export async function verifyUpgradeCredential(
   credential: string,
   signal: AbortSignal,
   source?: string
-): Promise<string> {
+): Promise<VerifiedUpgradeCredential> {
   const headers: Record<string, string> = {
     Accept: 'application/json',
     Authorization: `Bearer ${credential}`,
@@ -107,10 +119,15 @@ export async function verifyUpgradeCredential(
   const data: unknown = await response.json();
   if (!data || typeof data !== 'object') throw new UpgradeAuthenticationError('network');
   const result = data as Record<string, unknown>;
+  // A proved credential answers one of exactly two entry statuses. Anything else
+  // is a reply this build cannot read, never a status it guesses at.
+  const observation = result.status;
+  if (observation !== 'unsupported_upgrade' && observation !== 'observation_unavailable') {
+    throw new UpgradeAuthenticationError('network');
+  }
   if (
     result.contract_version !== UPGRADE_AUTH_CONTRACT ||
     result.authenticated !== true ||
-    result.status !== 'unsupported_upgrade' ||
     result.migration_available !== false ||
     result.expires_in_seconds !== 60 ||
     typeof result.source_revision !== 'string' ||
@@ -119,5 +136,5 @@ export async function verifyUpgradeCredential(
   ) {
     throw new UpgradeAuthenticationError('network');
   }
-  return result.source_revision;
+  return { revision: result.source_revision, observation };
 }

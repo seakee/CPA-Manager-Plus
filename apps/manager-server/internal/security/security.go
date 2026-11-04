@@ -137,6 +137,24 @@ func LoadOrCreateDataKey(rawValue string, keyPath string) ([]byte, bool, error) 
 	return key, true, nil
 }
 
+// LoadExistingDataKey resolves the Manager data key without ever creating one on
+// disk. Read-only inspection and upgrade verification use it so a missing or
+// concurrently removed key file fails closed instead of minting a new key.
+func LoadExistingDataKey(rawValue string, keyPath string) ([]byte, error) {
+	if strings.TrimSpace(rawValue) != "" {
+		return deriveDataKey(rawValue)
+	}
+	keyPath = strings.TrimSpace(keyPath)
+	if keyPath == "" {
+		return nil, errors.New("data key path is required")
+	}
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read data key %s: %w", keyPath, err)
+	}
+	return parseStoredDataKey(strings.TrimSpace(string(data)))
+}
+
 type Protector struct {
 	key []byte
 }

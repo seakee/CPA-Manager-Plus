@@ -140,6 +140,51 @@ func TestInspectionCopyPreservesCancellationCauseAndSource(t *testing.T) {
 	}
 }
 
+// TestReadOnlySnapshotReadsAPrivateCopyOfTheColdSource is the entry leaf's
+// physical contract. The leaf authenticates a cold source through a read-only
+// snapshot; a read-only open in place still creates -wal/-shm beside a database
+// whose header says WAL, and a controlled writer switches the source to WAL in
+// exactly the window between the header check and the first credential SQL. The
+// snapshot must be a private copy: the source keeps the entries, bytes, sizes
+// and modification times it had when the read started, and no sidecar appears.
+func TestReadOnlySnapshotReadsAPrivateCopyOfTheColdSource(t *testing.T) {
+	paths := coldInspectionFixture(t)
+	var atAuthorize map[string]string
+	_, err := InspectLegacySourceForAdmin(context.Background(), paths, InspectionOptions{ReadOnlySnapshot: true}, func(db *sql.DB) error {
+		writer, err := sql.Open("sqlite", paths.Database)
+		if err != nil {
+			return err
+		}
+		if _, err := writer.Exec(`pragma journal_mode=wal`); err != nil {
+			_ = writer.Close()
+			return err
+		}
+		if err := writer.Close(); err != nil {
+			return err
+		}
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if _, err := os.Lstat(paths.Database + suffix); !os.IsNotExist(err) {
+				t.Fatalf("the controlled writer left %s: %v", suffix, err)
+			}
+		}
+		// Everything below belongs to the reader.
+		atAuthorize = inspectionSnapshot(t, filepath.Dir(paths.Database))
+		var rows int
+		return db.QueryRowContext(context.Background(), `select count(*) from settings`).Scan(&rows)
+	})
+	t.Logf("inspection error=%v", err)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if info, statErr := os.Lstat(paths.Database + suffix); statErr == nil {
+			t.Fatalf("the inspection created %s beside the source (bytes=%d)", suffix, info.Size())
+		} else if !os.IsNotExist(statErr) {
+			t.Fatal(statErr)
+		}
+	}
+	if after := inspectionSnapshot(t, filepath.Dir(paths.Database)); !reflect.DeepEqual(atAuthorize, after) {
+		t.Fatalf("the inspection changed the source: before=%v after=%v", atAuthorize, after)
+	}
+}
+
 func TestLegacyInspectionWALReadsCommittedRowOnlyUnderOwnershipFence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "usage.sqlite")

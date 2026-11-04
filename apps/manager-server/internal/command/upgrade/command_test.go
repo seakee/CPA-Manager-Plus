@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -19,8 +20,10 @@ import (
 
 	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/usageidentity"
 )
@@ -38,6 +41,7 @@ func readySource(t *testing.T) string {
 		`create table usage_monitoring_event_projection_v1 (event_id integer primary key, timestamp_ms integer not null)`,
 		`create table usage_monitoring_rollup_state (rollup_name text primary key, schema_version integer not null, structure_revision text not null default '', status text not null, coverage_event_id integer not null default 0, updated_at_ms integer not null default 0)`,
 		`create table usage_archive_event_refs (event_hash text primary key, run_id text not null, segment_sequence integer not null, raw_event_id integer not null, timestamp_ms integer not null, archived_at_ms integer not null, raw_deleted_at_ms integer)`,
+		// Every 1.14.x release creates the deleted-raw summary, v1.14.0 included.
 		`create table usage_archive_deleted_coverage_daily (utc_day integer primary key, deleted_event_count integer not null, min_timestamp_ms integer not null, max_timestamp_ms integer not null)`,
 		`insert into usage_monitoring_rollup_state (rollup_name, schema_version, structure_revision, status, coverage_event_id) values ('projection_v1', 1, '` + usageidentity.MonitoringProjectionStructureRevision() + `', 'ready', 1)`,
 	}
@@ -196,19 +200,226 @@ func TestStatusWithoutMigrationReportsNoRecord(t *testing.T) {
 	}
 }
 
-func TestExitCodeMapping(t *testing.T) {
-	if code := ExitCode(nil); code != 0 {
-		t.Fatalf("nil exit code = %d, want 0", code)
+// exitCodeContract is the whole typed vocabulary the service exports, one row
+// per code: the exit every subcommand must report for it. The table is the
+// contract, so a code that moves between the decision and retryable sets — or a
+// new code that ships without a row — fails the test below instead of only a
+// script that branches on the value.
+var exitCodeContract = []struct {
+	name string
+	code upgradeservice.UpgradeErrorCode
+	want int
+}{
+	// A decision the operator has to look at: exit 1 on every subcommand.
+	{name: "source busy", code: upgradeservice.UpgradeErrorCode(upgradeservice.CodeSourceBusy), want: 1},
+	{name: "v2 root running", code: upgradeservice.UpgradeErrorV2Running, want: 1},
+	{name: "target locked", code: upgradeservice.UpgradeErrorTargetLocked, want: 1},
+	{name: "reconcile mismatch", code: upgradeservice.UpgradeErrorReconcileMismatch, want: 1},
+	{name: "reconcile target incomplete", code: upgradeservice.UpgradeErrorReconcileTargetIncomplete, want: 1},
+	{name: "reconcile nothing compared", code: upgradeservice.UpgradeErrorReconcileNothingCompared, want: 1},
+	{name: "reconcile not copied in", code: upgradeservice.UpgradeErrorReconcileNotCopiedIn, want: 1},
+	{name: "reconcile stage closed", code: upgradeservice.UpgradeErrorReconcileStageClosed, want: 1},
+	{name: "reconcile record incomplete", code: upgradeservice.UpgradeErrorReconcileRecordIncomplete, want: 1},
+	{name: "store schema outdated", code: upgradeservice.UpgradeErrorStoreSchemaOutdated, want: 1},
+	{name: "store locked", code: upgradeservice.UpgradeErrorStoreLocked, want: 1},
+	{name: "migrate not copied in", code: upgradeservice.UpgradeErrorMigrateNotCopiedIn, want: 1},
+	{name: "rollback not applicable", code: upgradeservice.UpgradeErrorRollbackNotApplicable, want: 1},
+	{name: "rollback unproven", code: upgradeservice.UpgradeErrorRollbackUnproven, want: 1},
+	{name: "rollback image unpinned", code: upgradeservice.UpgradeErrorRollbackImageUnpinned, want: 1},
+	{name: "rollback image family", code: upgradeservice.UpgradeErrorRollbackImageFamily, want: 1},
+	{name: "rollback volume unbound", code: upgradeservice.UpgradeErrorRollbackVolumeUnbound, want: 1},
+	{name: "rollback roots overlap", code: upgradeservice.UpgradeErrorRollbackRootsOverlap, want: 1},
+	{name: "rollback evidence stale", code: upgradeservice.UpgradeErrorRollbackEvidenceStale, want: 1},
+	{name: "rollback probe endpoint", code: upgradeservice.UpgradeErrorRollbackProbeEndpoint, want: 1},
+	{name: "rollback identity foreign", code: upgradeservice.UpgradeErrorRollbackIdentityForeign, want: 1},
+	{name: "rollback probe self", code: upgradeservice.UpgradeErrorRollbackProbeSelf, want: 1},
+	{name: "rollback port collision", code: upgradeservice.UpgradeErrorRollbackPortCollision, want: 1},
+	{name: "rollback port busy", code: upgradeservice.UpgradeErrorRollbackPortBusy, want: 1},
+	{name: "rollback v2 running", code: upgradeservice.UpgradeErrorRollbackV2Running, want: 1},
+	{name: "external version unsupported", code: upgradeservice.UpgradeErrorExternalVersionUnsupported, want: 1},
+	{name: "external document invalid", code: upgradeservice.UpgradeErrorExternalConfigDocumentInvalid, want: 1},
+	{name: "external management rejected", code: upgradeservice.UpgradeErrorExternalManagementRejected, want: 1},
+	{name: "external target moved", code: upgradeservice.UpgradeErrorExternalTargetMoved, want: 1},
+	{name: "external v2 running", code: upgradeservice.UpgradeErrorExternalV2Running, want: 1},
+	// Retryable or environmental: exit 2 on every subcommand, including the
+	// source that moved, which the copy-in lane has always kept retryable.
+	{name: "source changed", code: upgradeservice.UpgradeErrorSourceChanged, want: 2},
+	{name: "target modified", code: upgradeservice.UpgradeErrorTargetModified, want: 2},
+	{name: "target conflict", code: upgradeservice.UpgradeErrorTargetConflict, want: 2},
+	{name: "snapshot failed", code: upgradeservice.UpgradeErrorSnapshotFailed, want: 2},
+	{name: "external authority unavailable", code: upgradeservice.UpgradeErrorExternalAuthorityUnavailable, want: 2},
+	{name: "external not applicable", code: upgradeservice.UpgradeErrorExternalNotApplicable, want: 2},
+}
+
+// TestExitCodePinsEveryRefusal pins the CLI contract one row per typed code.
+// The rows carry a message like the service sends, so the mapping is proven for
+// a real typed error and not just for the bare sentinel.
+func TestExitCodePinsEveryRefusal(t *testing.T) {
+	typed := func(code upgradeservice.UpgradeErrorCode) error {
+		return &upgradeservice.UpgradeError{Code: code, Message: "pinned by the exit-code table"}
 	}
-	if code := ExitCode(ErrBlocked); code != 1 {
-		t.Fatalf("blocked exit code = %d, want 1", code)
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "ready", err: nil, want: 0},
+		{name: "blocked preflight (sentinel)", err: ErrBlocked, want: 1},
+		{name: "nothing compared (sentinel)", err: upgradeservice.ErrReconcileNothingCompared, want: 1},
+		{name: "usage", err: ErrUsage, want: 2},
 	}
-	if code := ExitCode(ErrUsage); code != 2 {
-		t.Fatalf("usage exit code = %d, want 2", code)
+	for _, contract := range exitCodeContract {
+		cases = append(cases, struct {
+			name string
+			err  error
+			want int
+		}{name: contract.name, err: typed(contract.code), want: contract.want})
 	}
-	if !errors.Is(ErrBlocked, ErrBlocked) {
-		t.Fatal("blocked error lost its identity")
+	seen := map[upgradeservice.UpgradeErrorCode]bool{}
+	for _, contract := range exitCodeContract {
+		if seen[contract.code] {
+			t.Fatalf("exit-code table lists %q twice", contract.code)
+		}
+		seen[contract.code] = true
 	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if code := ExitCode(testCase.err); code != testCase.want {
+				code2, _ := upgradeservice.UpgradeErrorCodeOf(testCase.err)
+				t.Fatalf("exit code for %q = %d, want %d", code2, code, testCase.want)
+			}
+		})
+	}
+}
+
+// TestEverySubcommandUsesTheExitCodeTable feeds each typed code through every
+// way a subcommand reports it. The reporting helpers must keep the typed code in
+// the chain and mark it reported without choosing an exit code; a helper that
+// mapped every typed failure to exit 1 — as the rollback path did — fails here
+// even though ExitCode itself is correct.
+func TestEverySubcommandUsesTheExitCodeTable(t *testing.T) {
+	reporters := []struct {
+		subcommands string
+		report      func(io.Writer, error) error
+	}{
+		{subcommands: "run, status, migrate, rollback", report: refuseTyped},
+		{subcommands: "external-connect", report: reportExternalConnectFailure},
+		{subcommands: "reconcile", report: func(_ io.Writer, err error) error { return err }},
+	}
+	for _, contract := range exitCodeContract {
+		typed := &upgradeservice.UpgradeError{Code: contract.code, Message: "pinned by the exit-code table"}
+		want := ExitCode(typed)
+		for _, reporter := range reporters {
+			reported := reporter.report(io.Discard, typed)
+			if got := ExitCode(reported); got != want {
+				t.Fatalf("%s reported %s as exit %d, want the table's %d", reporter.subcommands, contract.code, got, want)
+			}
+			if got, ok := upgradeservice.UpgradeErrorCodeOf(reported); !ok || got != contract.code {
+				t.Fatalf("%s lost the typed code %s (got %q)", reporter.subcommands, contract.code, got)
+			}
+			if reporter.subcommands != "reconcile" && !errors.Is(reported, ErrReported) {
+				t.Fatalf("%s did not mark %s reported, so the entry point prints it twice", reporter.subcommands, contract.code)
+			}
+		}
+	}
+}
+
+// copyReadySource builds a stopped 1.x volume that both the preflight and the
+// backup accept: the carried-forward usage schema with rows, no v2-only tables,
+// a real data key, archives and the v1 ownership marker.
+func copyReadySource(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve fixture root: %v", err)
+	}
+	databasePath := filepath.Join(root, "usage.sqlite")
+	db, err := sqliterepo.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open fixture database: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_events (event_hash, timestamp_ms, timestamp, model, requested_model, created_at_ms)
+		values ('legacy-event-1', 1000, '1000', 'gpt-test', 'gpt-test', 1000)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed fixture event: %v", err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("open fixture connection: %v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `pragma foreign_keys = off`); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		t.Fatalf("disable fixture foreign keys: %v", err)
+	}
+	for _, pattern := range []string{`gateway\_%`, `fresh\_%`, `upgrade_operations`} {
+		rows, err := conn.QueryContext(context.Background(),
+			`select name from sqlite_master where type = 'table' and name like ? escape '\'`, pattern)
+		if err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("list v2-only fixture tables: %v", err)
+		}
+		names := []string{}
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				_ = rows.Close()
+				_ = conn.Close()
+				_ = db.Close()
+				t.Fatalf("scan v2-only fixture table: %v", err)
+			}
+			names = append(names, name)
+		}
+		if err := rows.Close(); err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("close v2-only table list: %v", err)
+		}
+		for _, name := range names {
+			if _, err := conn.ExecContext(context.Background(), `drop table `+name); err != nil {
+				_ = conn.Close()
+				_ = db.Close()
+				t.Fatalf("drop v2-only fixture table %s: %v", name, err)
+			}
+		}
+	}
+	// The cache-accounting revision and the latency-covering index arrived after
+	// the pinned release; a source that carries them is a different source than
+	// the one this pin accepts, so the fixture must not have them. The
+	// deleted-raw summary is not one of them: every 1.14.x release creates it,
+	// the pinned one included, so it stays.
+	for _, statement := range []string{
+		`drop index if exists idx_usage_events_ts_latency_ttft_cover`,
+		`delete from settings where key = 'usage_cache_accounting_semantics_revision'`,
+	} {
+		if _, err := conn.ExecContext(context.Background(), statement); err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("strip post-pin marker %q: %v", statement, err)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		_ = db.Close()
+		t.Fatalf("close fixture connection: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture database: %v", err)
+	}
+	if _, _, err := security.LoadOrCreateDataKey("", filepath.Join(root, "data.key")); err != nil {
+		t.Fatalf("create fixture data key: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "usage-archives", "2026-03"), 0o755); err != nil {
+		t.Fatalf("create fixture archives: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "usage-archives", "2026-03", "segment-000001.jsonl"), []byte(`{"events":1}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write fixture archive: %v", err)
+	}
+	if err := os.WriteFile(databasePath+".manager.lock", nil, 0o600); err != nil {
+		t.Fatalf("write fixture source lock: %v", err)
+	}
+	return root
 }
 
 func TestPreflightBlocksWithoutADeclaredSourceVersion(t *testing.T) {
@@ -646,5 +857,849 @@ func TestPreflightRequiresTargetDirWhenTheManagerPathCannotBeDerived(t *testing.
 	}
 	if code := ExitCode(runErr); code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
+	}
+}
+
+// copyReadyRunSource builds a stopped 1.x volume the preflight and the backup
+// both accept: the carried-forward usage schema, the v1.14 structure the version
+// check requires, no v2-only tables, a real data key, archives and the v1
+// ownership marker.
+func copyReadyRunSource(t *testing.T) string {
+	t.Helper()
+	root := canonicalFixtureRoot(t)
+	databasePath := filepath.Join(root, "usage.sqlite")
+	db, err := sqliterepo.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open fixture database: %v", err)
+	}
+	if _, err := db.Exec(`insert into usage_events (event_hash, timestamp_ms, timestamp, model, requested_model, created_at_ms)
+		values ('legacy-event-1', 1000, '1000', 'gpt-test', 'gpt-test', 1000)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("seed fixture event: %v", err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("open fixture connection: %v", err)
+	}
+	if _, err := conn.ExecContext(context.Background(), `pragma foreign_keys = off`); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		t.Fatalf("disable fixture foreign keys: %v", err)
+	}
+	for _, pattern := range []string{`gateway\_%`, `fresh\_%`, `upgrade_operations`} {
+		names, err := fixtureTableNames(conn, pattern)
+		if err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("list v2-only fixture tables: %v", err)
+		}
+		for _, name := range names {
+			if _, err := conn.ExecContext(context.Background(), `drop table `+name); err != nil {
+				_ = conn.Close()
+				_ = db.Close()
+				t.Fatalf("drop v2-only fixture table %s: %v", name, err)
+			}
+		}
+	}
+	// The v1.14.6 and v1.14.7 markers arrived after the pinned release; a source
+	// that carries them is a different source than the one this pin accepts.
+	for _, statement := range []string{
+		`drop index if exists idx_usage_events_ts_latency_ttft_cover`,
+		`delete from settings where key = 'usage_cache_accounting_semantics_revision'`,
+	} {
+		if _, err := conn.ExecContext(context.Background(), statement); err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			t.Fatalf("strip post-pin marker %q: %v", statement, err)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		_ = db.Close()
+		t.Fatalf("close fixture connection: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close fixture database: %v", err)
+	}
+	if _, _, err := security.LoadOrCreateDataKey("", filepath.Join(root, "data.key")); err != nil {
+		t.Fatalf("create fixture data key: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "usage-archives", "2026-03"), 0o755); err != nil {
+		t.Fatalf("create fixture archives: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "usage-archives", "2026-03", "segment-000001.jsonl"),
+		[]byte(`{"events":1}`+"\n"), 0o600); err != nil {
+		t.Fatalf("write fixture archive: %v", err)
+	}
+	if err := os.WriteFile(databasePath+".manager.lock", nil, 0o600); err != nil {
+		t.Fatalf("write fixture source lock: %v", err)
+	}
+	return root
+}
+
+// canonicalFixtureRoot is a temporary directory with every symlink resolved:
+// maintenancebundle refuses any bundle path below a symbolic link.
+func canonicalFixtureRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve fixture root: %v", err)
+	}
+	return root
+}
+
+func fixtureTableNames(db *sql.Conn, pattern string) ([]string, error) {
+	rows, err := db.QueryContext(context.Background(),
+		`select name from sqlite_master where type = 'table' and name like ? escape '\'`, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	names := []string{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, rows.Err()
+}
+
+// startLiveWalWriter leaves the 1.x fixture exactly as a killed 1.x process does:
+// WAL mode, uncheckpointed frames in usage.sqlite-wal and a WAL index on disk.
+// The writer handle stays open so those frames cannot be checkpointed away.
+func startLiveWalWriter(t *testing.T, root string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(root, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the 1.x fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, statement := range []string{
+		`pragma journal_mode = wal`,
+		`pragma wal_autocheckpoint = 0`,
+		`insert into settings (key, value, updated_at_ms) values ('wal_frame_probe', '1', 1)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatalf("prepare a live source WAL: %v", err)
+		}
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if info, err := os.Lstat(filepath.Join(root, "usage.sqlite"+suffix)); err != nil || info.Size() == 0 {
+			t.Fatalf("the live source holds no %s (err=%v)", suffix, err)
+		}
+	}
+}
+
+func sourceDatabaseDigests(t *testing.T, root string) map[string]string {
+	t.Helper()
+	digests := map[string]string{}
+	for _, name := range []string{"usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm"} {
+		path := filepath.Join(root, name)
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		digest := sha256.Sum256(data)
+		digests[name] = hex.EncodeToString(digest[:])
+	}
+	return digests
+}
+
+// TestRunPreflightLeavesALiveWALSourceUnchanged is the M3 regression: `upgrade
+// run` used to call the preflight first, and the preflight opened the 1.x
+// database in place with a plain read-only open. SQLite created or rewrote the
+// source's -shm for that read, so a command that promises to write nothing into
+// the 1.x volume had already written into it before the copy ran.
+func TestRunPreflightLeavesALiveWALSourceUnchanged(t *testing.T) {
+	source := copyReadyRunSource(t)
+	startLiveWalWriter(t, source)
+	before := sourceDatabaseDigests(t, source)
+	if before["usage.sqlite-wal"] == "" || before["usage.sqlite-shm"] == "" {
+		t.Fatalf("the fixture is not a live WAL source: %v", before)
+	}
+
+	target := t.TempDir()
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	if after := sourceDatabaseDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the run changed the 1.x volume: before %v, after %v", before, after)
+	}
+}
+
+// TestRunCopiesAStoppedSourceAndRecordsTheStage walks the whole CLI path: the
+// preflight runs, the copy-in writes the v2 layout, the stage is recorded and a
+// second run reports the record instead of copying again.
+func TestRunCopiesAStoppedSourceAndRecordsTheStage(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "backup")
+
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var output runOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode run output: %v; output: %s", err, stdout)
+	}
+	if output.Preflight == nil || !output.Preflight.Ready {
+		t.Fatalf("preflight = %+v, want a ready report", output.Preflight)
+	}
+	if output.Result == nil {
+		t.Fatalf("run output has no result: %s", stdout)
+	}
+	if output.Result.Stage != model.UpgradeStageCopyIn || output.Result.SourceKind != upgradeservice.SourceKindUpgradedLegacy {
+		t.Fatalf("result stage/kind = %q/%q", output.Result.Stage, output.Result.SourceKind)
+	}
+	if output.Result.SourceVersion != bootstrap.PlannedDirectRelease {
+		t.Fatalf("recorded source version = %q, want the declaration", output.Result.SourceVersion)
+	}
+	for _, path := range []string{
+		filepath.Join(target, "usage.sqlite"),
+		filepath.Join(target, "data.key"),
+		filepath.Join(target, "usage-archives", "2026-03", "segment-000001.jsonl"),
+		bundle,
+	} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("copy-in did not produce %s: %v", path, err)
+		}
+	}
+
+	code, statusJSON, stderr := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite"))
+	if code != 0 {
+		t.Fatalf("status exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var status statusOutput
+	if err := json.Unmarshal([]byte(statusJSON), &status); err != nil {
+		t.Fatalf("decode status: %v; output: %s", err, statusJSON)
+	}
+	if !status.Recorded || status.Operation == nil || status.Operation.Stage != model.UpgradeStageCopyIn {
+		t.Fatalf("status = %+v, want a recorded copy_in", status)
+	}
+	if status.Operation.BackupManifestSHA256 != output.Result.BackupManifestSHA256 {
+		t.Fatalf("recorded manifest = %q, want %q", status.Operation.BackupManifestSHA256, output.Result.BackupManifestSHA256)
+	}
+	if status.Operation.SourceFingerprintBefore != output.Result.SourceFingerprintBefore {
+		t.Fatalf("recorded fingerprint = %q, want %q", status.Operation.SourceFingerprintBefore, output.Result.SourceFingerprintBefore)
+	}
+
+	// A second run reports the recorded copy-in instead of copying again.
+	code, again, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("second run exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	var repeated runOutput
+	if err := json.Unmarshal([]byte(again), &repeated); err != nil {
+		t.Fatalf("decode second run: %v", err)
+	}
+	if repeated.Result == nil || !repeated.Result.AlreadyComplete || repeated.Result.Restored {
+		t.Fatalf("second run = %+v, want an already complete copy-in", repeated.Result)
+	}
+}
+
+func TestRunRefusesABlockedSourceAndWritesNothing(t *testing.T) {
+	source := copyReadyRunSource(t)
+	// Removing the ownership marker makes the source unprovably stopped.
+	if err := os.Remove(filepath.Join(source, "usage.sqlite.manager.lock")); err != nil {
+		t.Fatalf("remove source lock: %v", err)
+	}
+	target := t.TempDir()
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
+	}
+	var output runOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode blocked run: %v; output: %s", err, stdout)
+	}
+	if output.Preflight == nil || output.Preflight.Ready || output.Result != nil {
+		t.Fatalf("blocked run = %+v, want a blocked report and no result", output)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("blocked run wrote %v into the v2 data root", entries)
+	}
+}
+
+// reconcileRoots returns a v2 data root and a backup destination with every
+// symlink resolved: the bundle verifier refuses a path below a symbolic link,
+// and every macOS temporary directory is one.
+func reconcileRoots(t *testing.T) (string, string) {
+	t.Helper()
+	target, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve the v2 data root: %v", err)
+	}
+	bundle, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve the backup destination: %v", err)
+	}
+	return target, filepath.Join(bundle, "backup")
+}
+
+func TestReconcileReportsTheCopiedStoreAndRecordsTheStage(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("reconcile exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
+	}
+	if output.Preflight == nil || !output.Preflight.Ready {
+		t.Fatalf("preflight = %+v, want a ready report", output.Preflight)
+	}
+	if output.Report == nil || !output.Report.Recorded {
+		t.Fatalf("reconcile output = %+v, want a recorded report", output)
+	}
+	if output.Report.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("stage = %q, want %q", output.Report.Stage, model.UpgradeStageReconcile)
+	}
+	if len(output.Report.IncompleteDays) != 0 {
+		t.Fatalf("incomplete days = %+v, want none", output.Report.IncompleteDays)
+	}
+	// The fixture source holds the retained event and the derived/coverage
+	// tables with no rows of their own. A table both sides hold is established
+	// even with no source day — there is nothing to lose — while a table the
+	// source does not hold is never recorded, so this is the whole set the step
+	// can claim it compared.
+	want := []string{
+		model.UpgradeDomainSourceCopy,
+		model.UpgradeDomainRetainedProjection,
+		model.UpgradeDomainPricing,
+		model.UpgradeDomainCoverage,
+	}
+	if !reflect.DeepEqual(output.Report.DomainsDone, want) {
+		t.Fatalf("domains done = %v, want %v", output.Report.DomainsDone, want)
+	}
+}
+
+func TestReconcileExitsOneOnAnUnacknowledgedMismatch(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	// A token total that no longer matches the source: the day has to be
+	// acknowledged before anything may be marked.
+	db, err := sql.Open("sqlite", filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the copied store: %v", err)
+	}
+	if _, err := db.Exec(`update usage_events set total_tokens = total_tokens + 1`); err != nil {
+		_ = db.Close()
+		t.Fatalf("change one token total: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the copied store: %v", err)
+	}
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorReconcileMismatch) {
+		t.Fatalf("error code = %q, want %q", output.ErrorCode, upgradeservice.UpgradeErrorReconcileMismatch)
+	}
+	if output.Report == nil || output.Report.Recorded || len(output.Report.UnacknowledgedDays) != 1 {
+		t.Fatalf("reconcile output = %+v, want one unacknowledged day and no record", output)
+	}
+
+	// Acknowledging the reported day marks it and completes the step.
+	day := output.Report.UnacknowledgedDays[0]
+	code, stdout, stderr = run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle, "--acknowledge", day)
+	if code != 0 {
+		t.Fatalf("acknowledged exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var acknowledged reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &acknowledged); err != nil {
+		t.Fatalf("decode acknowledged output: %v; output: %s", err, stdout)
+	}
+	if acknowledged.Report == nil || !acknowledged.Report.Recorded ||
+		acknowledged.Report.NewlyMarkedDays != 1 ||
+		acknowledged.Report.IncompleteDays[0].Day != day {
+		t.Fatalf("acknowledged reconcile = %+v, want the day marked once", acknowledged.Report)
+	}
+}
+
+// TestReconcileRefusesAStoreAnotherProcessHolds reproduces review M3/P5 at the
+// CLI: a v2 data root another owner had locked was written anyway, because the
+// command took no lock at all.
+func TestReconcileRefusesAStoreAnotherProcessHolds(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	holder, err := processlock.Acquire(filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("take the v2 data-root lock as another owner: %v", err)
+	}
+	defer func() { _ = holder.Close() }()
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle)
+	if code != 1 {
+		t.Fatalf("reconcile exit code = %d, want 1; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; stderr: %s; output: %s", err, stderr, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorTargetLocked) {
+		t.Fatalf("error code = %q, want %q; output: %s", output.ErrorCode, upgradeservice.UpgradeErrorTargetLocked, stdout)
+	}
+	if output.Report != nil && output.Report.Recorded {
+		t.Fatalf("reconcile recorded under another owner's lock: %+v", output.Report)
+	}
+	if code, _, stdout := run(t, "status", "--json", "--db-path", filepath.Join(target, "usage.sqlite")); code != 0 {
+		t.Fatalf("status exit code = %d; stdout: %s", code, stdout)
+	}
+}
+
+// TestReconcileKeepsAChangedSourceRetryable pins the contract table's split: a
+// source that moved is retryable (exit 2, upgrade_source_changed), while a
+// refusal about the store or a day is exit 1.
+func TestReconcileKeepsAChangedSourceRetryable(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("open the 1.x source: %v", err)
+	}
+	if _, err := db.Exec(`insert into settings (key, value, updated_at_ms) values ('drifted', '1', 1)`); err != nil {
+		_ = db.Close()
+		t.Fatalf("drift the 1.x source: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close the 1.x source: %v", err)
+	}
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+		"--target", target, "--bundle", bundle)
+	if code != 2 {
+		t.Fatalf("reconcile exit code = %d, want the retryable 2; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	var output reconcileOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+		t.Fatalf("decode reconcile output: %v; stderr: %s; output: %s", err, stderr, stdout)
+	}
+	if output.ErrorCode != string(upgradeservice.UpgradeErrorSourceChanged) {
+		t.Fatalf("error code = %q, want %q; output: %s", output.ErrorCode, upgradeservice.UpgradeErrorSourceChanged, stdout)
+	}
+}
+
+// TestEverySubcommandKeepsAChangedSourceRetryable is the M-1 regression through
+// the CLI dispatcher: one typed code, one exit code. A source that moved is
+// `upgrade_source_changed` in run, rollback --prepare and reconcile, and every
+// one of them must report the table's retryable 2. The rollback path used to
+// wrap every typed failure as a refusal (exit 1), so the same code exited 1
+// there and 2 in run and reconcile.
+func TestEverySubcommandKeepsAChangedSourceRetryable(t *testing.T) {
+	const (
+		sourceChanged = string(upgradeservice.UpgradeErrorSourceChanged)
+		wantExit      = 2
+	)
+
+	// run: the copy-in fingerprints the source before and after the copy, so a
+	// source that changes after the backup and before the post-copy fingerprint
+	// is the real refusal. The mutation starts only once the backup manifest is
+	// published (after the preflight and after the pre-copy fingerprint) and
+	// keeps going until Run returns, so both fingerprints cannot agree.
+	t.Run("run", func(t *testing.T) {
+		source := copyReadySource(t)
+		// A larger archive widens the remaining copy so the mutation lands
+		// before the post-copy fingerprint rather than after it.
+		archive := filepath.Join(source, "usage-archives", "2026-03", "segment-000001.jsonl")
+		if err := os.WriteFile(archive, bytes.Repeat([]byte("x"), 8<<20), 0o600); err != nil {
+			t.Fatalf("enlarge the fixture archive: %v", err)
+		}
+		target := t.TempDir()
+		stop := make(chan struct{})
+		mutated := make(chan struct{})
+		go func() {
+			defer close(mutated)
+			manifest := filepath.Join(target, "upgrade-backup", "manifest.json")
+			for {
+				if _, err := os.Stat(manifest); err == nil {
+					break
+				}
+				select {
+				case <-stop:
+					return
+				case <-time.After(time.Millisecond):
+				}
+			}
+			for {
+				file, err := os.OpenFile(archive, os.O_APPEND|os.O_WRONLY, 0)
+				if err == nil {
+					_, _ = file.WriteString("{\"events\":1}\n")
+					_ = file.Close()
+				}
+				select {
+				case <-stop:
+					return
+				case <-time.After(time.Millisecond):
+				}
+			}
+		}()
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		err := Run(context.Background(), []string{"run", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+			"--target", target}, &stdout, &stderr)
+		close(stop)
+		<-mutated
+		code := ExitCode(err)
+		if code != wantExit {
+			t.Fatalf("run exit code = %d, want %d (error %v); stderr: %s; stdout: %s", code, wantExit, err, stderr.String(), stdout.String())
+		}
+		if !strings.Contains(stderr.String(), sourceChanged) {
+			t.Fatalf("run stderr does not name %s (error %v): %s", sourceChanged, err, stderr.String())
+		}
+	})
+
+	// rollback --prepare: the recorded copy-in names a source fingerprint this
+	// directory no longer reproduces, so the plan refuses before writing.
+	t.Run("rollback-prepare", func(t *testing.T) {
+		source := readySource(t)
+		target := t.TempDir()
+		db, err := sqliterepo.Open(filepath.Join(target, "usage.sqlite"))
+		if err != nil {
+			t.Fatalf("open the v2 store: %v", err)
+		}
+		repository := upgradeoperation.New(db)
+		if err := repository.Put(context.Background(), model.UpgradeOperation{
+			Stage:                   model.UpgradeStageCopyIn,
+			DomainsDone:             []string{model.UpgradeDomainSourceCopy},
+			SourceKind:              string(upgradeservice.SourceKindUpgradedLegacy),
+			SourceVersion:           bootstrap.PlannedDirectRelease,
+			SourceRoot:              source,
+			SourceFingerprintBefore: strings.Repeat("0", 64),
+			SourceFingerprintAfter:  strings.Repeat("0", 64),
+			BackupManifestSHA256:    strings.Repeat("0", 64),
+		}); err != nil {
+			_ = db.Close()
+			t.Fatalf("record the copy-in: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close the v2 store: %v", err)
+		}
+		code, _, stderr := run(t, "rollback", "--prepare", "--legacy", source, "--target", target)
+		if code != wantExit {
+			t.Fatalf("rollback --prepare exit code = %d, want %d; stderr: %s", code, wantExit, stderr)
+		}
+		if !strings.Contains(stderr, sourceChanged) {
+			t.Fatalf("rollback --prepare stderr does not name %s: %s", sourceChanged, stderr)
+		}
+	})
+
+	// reconcile: a clean copy-in, then the source drifts, so the recorded
+	// fingerprint and the directory no longer agree.
+	t.Run("reconcile", func(t *testing.T) {
+		source := copyReadyRunSource(t)
+		target, bundle := reconcileRoots(t)
+		if code, _, stderr := run(t, "run", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease,
+			"--target", target, "--bundle", bundle); code != 0 {
+			t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+		}
+		db, err := sql.Open("sqlite", filepath.Join(source, "usage.sqlite"))
+		if err != nil {
+			t.Fatalf("open the 1.x source: %v", err)
+		}
+		if _, err := db.Exec(`insert into settings (key, value, updated_at_ms) values ('drifted', '1', 1)`); err != nil {
+			_ = db.Close()
+			t.Fatalf("drift the 1.x source: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatalf("close the 1.x source: %v", err)
+		}
+		code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source,
+			"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+		if code != wantExit {
+			t.Fatalf("reconcile exit code = %d, want %d; stderr: %s; stdout: %s", code, wantExit, stderr, stdout)
+		}
+		var output reconcileOutput
+		if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+			t.Fatalf("decode reconcile output: %v; output: %s", err, stdout)
+		}
+		if output.ErrorCode != sourceChanged {
+			t.Fatalf("reconcile error code = %q, want %q; output: %s", output.ErrorCode, sourceChanged, stdout)
+		}
+	})
+}
+
+// TestReconcileTakesTheSourceFenceReadOnly proves the reconcile step opens the
+// 1.x source for its ownership lock without write access: the marker belongs to
+// the stopped source, and a source preserved on a read-only mount must still
+// prove exclusivity. The check is the marker's own mode — an O_RDWR open of a
+// 0400 file fails for its owner, so this run could not complete through the old
+// descriptor. A read-only mount itself (EROFS) is only qualified on Linux; the
+// Darwin test host has no such mount.
+func TestReconcileTakesTheSourceFenceReadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not restrict root")
+	}
+	source := copyReadyRunSource(t)
+	target, bundle := reconcileRoots(t)
+	if code, _, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle); code != 0 {
+		t.Fatalf("copy in exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	marker := filepath.Join(source, "usage.sqlite.manager.lock")
+	if err := os.Chmod(marker, 0o400); err != nil {
+		t.Fatalf("make the source fence read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+	before := treeDigests(t, source)
+
+	code, stdout, stderr := run(t, "reconcile", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("reconcile exit code = %d, want 0; stderr: %s; stdout: %s", code, stderr, stdout)
+	}
+	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the reconciliation changed the source volume: %v -> %v", before, after)
+	}
+}
+
+// TestReconcileRefusesATargetInsideTheSourceBeforeItTouchesIt reproduces review
+// F3: the CLI took the v2 data-root fence before the service rejected a target
+// inside the source, so the fence created the child directory and its marker
+// inside the source tree it promises not to touch. That new entry also entered
+// the source fingerprint, so the next run with a correct target refused with
+// upgrade_source_changed until the child was removed by hand.
+func TestReconcileRefusesATargetInsideTheSourceBeforeItTouchesIt(t *testing.T) {
+	source := readySource(t)
+	before := treeDigests(t, source)
+	child := filepath.Join(source, "new-child")
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	err := Run(context.Background(), []string{"reconcile", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", child}, stdout, stderr)
+	if err == nil {
+		t.Fatalf("reconcile succeeded, want a refusal; stdout: %s", stdout)
+	}
+	if code := ExitCode(err); code != 2 {
+		t.Fatalf("reconcile exit code = %d, want the usage 2; stderr: %s", code, stderr)
+	}
+	if !strings.Contains(err.Error(), "must not contain each other") {
+		t.Fatalf("refusal %q does not name the containment rule", err)
+	}
+	if _, statErr := os.Stat(child); !os.IsNotExist(statErr) {
+		t.Fatalf("the refused run created the target inside the source: %v", statErr)
+	}
+	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the refused run changed the source volume: %v -> %v", before, after)
+	}
+}
+
+func TestReconcileUsageErrors(t *testing.T) {
+	if code, _, _ := run(t, "reconcile"); code != 2 {
+		t.Fatalf("missing --legacy exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "reconcile", "--legacy", t.TempDir(), "extra"); code != 2 {
+		t.Fatalf("positional argument exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "reconcile", "--legacy", filepath.Join(t.TempDir(), "missing")); code != 2 {
+		t.Fatalf("missing source exit code = %d, want 2", code)
+	}
+}
+
+func TestRunUsageErrors(t *testing.T) {
+	if code, _, _ := run(t, "run"); code != 2 {
+		t.Fatalf("missing --legacy exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "run", "--legacy", t.TempDir(), "extra"); code != 2 {
+		t.Fatalf("positional argument exit code = %d, want 2", code)
+	}
+	if code, _, _ := run(t, "run", "--legacy", filepath.Join(t.TempDir(), "missing")); code != 2 {
+		t.Fatalf("missing source exit code = %d, want 2", code)
+	}
+}
+
+// TestTargetDefaultsToTheManagerDataDirectory covers the default target: a
+// Manager configuration where the database, the data key and the archive tree
+// all resolve to the canonical names inside one directory.
+func TestTargetDefaultsToTheManagerDataDirectory(t *testing.T) {
+	dataDir := canonicalFixtureRoot(t)
+	t.Setenv("USAGE_DATA_DIR", dataDir)
+	t.Setenv("USAGE_DB_PATH", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY_PATH", "")
+	t.Setenv("CPA_MANAGER_CONFIG", filepath.Join(t.TempDir(), "absent-config.json"))
+	root, err := resolveTargetRoot("")
+	if err != nil {
+		t.Fatalf("resolve default target: %v", err)
+	}
+	if root != dataDir {
+		t.Fatalf("default target = %q, want the Manager data directory %q", root, dataDir)
+	}
+}
+
+// TestTargetRefusesAManagerLayoutTheCopyCannotPopulate is the M4 regression. The
+// default target used to be filepath.Dir(cfg.DBPath) and nothing else, while the
+// service reads the data key from cfg.DataKeyPath, the archive tree from
+// cfg.UsageArchiveDir and an inline key from the environment. Copying a data key
+// the service never loads means the 1.x encrypted fields cannot be decrypted, so
+// the run has to refuse a layout it cannot populate and ask for --target.
+func TestTargetRefusesAManagerLayoutTheCopyCannotPopulate(t *testing.T) {
+	dataDir := canonicalFixtureRoot(t)
+	elsewhere := canonicalFixtureRoot(t)
+	t.Setenv("CPA_MANAGER_CONFIG", filepath.Join(t.TempDir(), "absent-config.json"))
+	t.Setenv("CPA_MANAGER_DATA_KEY", "")
+	t.Setenv("CPA_MANAGER_DATA_KEY_PATH", "")
+	t.Setenv("USAGE_DATA_DIR", dataDir)
+
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{
+			name: "manager database beside another key",
+			setup: func(t *testing.T) {
+				t.Setenv("USAGE_DB_PATH", filepath.Join(elsewhere, "usage.sqlite"))
+			},
+		},
+		{
+			name: "inline environment key overrides the copied key",
+			setup: func(t *testing.T) {
+				t.Setenv("USAGE_DB_PATH", "")
+				t.Setenv("CPA_MANAGER_DATA_KEY", "an-inline-key")
+			},
+		},
+		{
+			name: "manager database is not the canonical file name",
+			setup: func(t *testing.T) {
+				t.Setenv("USAGE_DB_PATH", filepath.Join(dataDir, "manager.sqlite"))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.setup(t)
+			root, err := resolveTargetRoot("")
+			if err == nil {
+				t.Fatalf("resolved target %q, want a refusal", root)
+			}
+			if !errors.Is(err, ErrUsage) {
+				t.Fatalf("error = %v, want ErrUsage", err)
+			}
+			if !strings.Contains(err.Error(), upgradeservice.CodeTargetLayoutMismatch) {
+				t.Fatalf("error %q does not carry %s", err, upgradeservice.CodeTargetLayoutMismatch)
+			}
+			if !strings.Contains(err.Error(), "--target") {
+				t.Fatalf("error %q does not ask for --target", err)
+			}
+
+			// An explicit --target states the layout, so it is never second-guessed.
+			explicit := canonicalFixtureRoot(t)
+			root, err = resolveTargetRoot(explicit)
+			if err != nil || root != explicit {
+				t.Fatalf("explicit target = %q/%v, want %q", root, err, explicit)
+			}
+		})
+	}
+}
+
+// TestRunHonorsTheV2DataRootFence is the CLI half of the shared-target
+// regression. `upgrade run` used to take only the 1.x source fence, so it
+// created, restored and migrated the v2 data root while another Manager process
+// held that root's process lock. The refusal is typed and exits 1, and nothing
+// the copy-in would write appears in the held root.
+func TestRunHonorsTheV2DataRootFence(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := canonicalFixtureRoot(t)
+	owner, err := processlock.Acquire(filepath.Join(target, "usage.sqlite"))
+	if err != nil {
+		t.Fatalf("take the v2 data root fence: %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Close() })
+	before := treeDigests(t, target)
+	sourceBefore := treeDigests(t, source)
+
+	err = Run(context.Background(), []string{"run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target},
+		&bytes.Buffer{}, &bytes.Buffer{})
+	if !errors.Is(err, upgradeservice.ErrV2Running) {
+		t.Fatalf("run under a held v2 data root = %v, want %s", err, upgradeservice.ErrV2Running)
+	}
+	if code, ok := upgradeservice.UpgradeErrorCodeOf(err); !ok || code != upgradeservice.UpgradeErrorV2Running {
+		t.Fatalf("run error code = %q/%t, want %s", code, ok, upgradeservice.UpgradeErrorV2Running)
+	}
+	if exit := ExitCode(err); exit != 1 {
+		t.Fatalf("exit code = %d, want 1", exit)
+	}
+	after := treeDigests(t, target)
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("the refused run changed the held v2 data root: %v -> %v", before, after)
+	}
+	for _, absent := range []string{"usage.sqlite", "data.key", "upgrade-backup", ".upgrade-copy-in"} {
+		if _, statErr := os.Lstat(filepath.Join(target, absent)); !os.IsNotExist(statErr) {
+			t.Fatalf("the refused run wrote %s (err=%v)", absent, statErr)
+		}
+	}
+	if sourceAfter := treeDigests(t, source); !reflect.DeepEqual(sourceBefore, sourceAfter) {
+		t.Fatalf("the refused run changed the 1.x source: %v -> %v", sourceBefore, sourceAfter)
+	}
+}
+
+// TestRunTakesTheSourceFenceReadOnly proves the 1.x source is opened for its
+// ownership lock without write access: the marker is a stopped source's own
+// file, and a source preserved on a read-only mount must still prove
+// exclusivity. The check is the marker's own mode — an O_RDWR open of a 0400
+// file fails for its owner, so this run could not complete through the old
+// descriptor. A read-only mount itself (EROFS) is only qualified on Linux; the
+// Darwin test host has no such mount.
+func TestRunTakesTheSourceFenceReadOnly(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not restrict root")
+	}
+	source := copyReadyRunSource(t)
+	marker := filepath.Join(source, "usage.sqlite.manager.lock")
+	if err := os.Chmod(marker, 0o400); err != nil {
+		t.Fatalf("make the source fence read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(marker, 0o600) })
+	before := treeDigests(t, source)
+	target := t.TempDir()
+	bundle := filepath.Join(t.TempDir(), "backup")
+
+	code, _, stderr := run(t, "run", "--json", "--legacy", source,
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--bundle", bundle)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr)
+	}
+	if after := treeDigests(t, source); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the copy-in changed the source volume: %v -> %v", before, after)
 	}
 }

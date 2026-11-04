@@ -12,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	_ "modernc.org/sqlite"
 )
 
@@ -26,10 +28,82 @@ var (
 	// inspect a WAL database. It is also the code for a scratch directory that
 	// would land inside a tree the operation must not write to.
 	ErrSnapshotFailed = errors.New("upgrade database snapshot could not be created")
-	// ErrSourceChanged reports a source that was modified while its snapshot was
-	// taken. The copy is discarded and the report blocks.
-	ErrSourceChanged = errors.New("source changed while it was being snapshotted")
+
+	// ErrSnapshotRootUnknown reports a read that would have to stage a private
+	// copy but cannot name the configured source root it must stay out of — a
+	// mount lookup that outlived its bound before it resolved the root, for
+	// example. It fails closed: the unnamed root may hold the temporary
+	// directory, and a snapshot abandoned by a killed process would stay in a
+	// tree this operation must not write to.
+	ErrSnapshotRootUnknown = errors.New("upgrade credential snapshot root is unknown")
+
+	// ErrSnapshotRootTimedOut reports a read that would have to stage a private
+	// copy while the configured source root is known but was never inspected:
+	// the mount lookup that would have inspected it outlived its bound.
+	// Canonicalizing that root for the exclusion check is the filesystem call the
+	// bound exists to stop, so the read fails closed instead of re-entering the
+	// mount; the caller answers the mount's deadline, which is a retry and never
+	// a verdict on the source or the presented key.
+	ErrSnapshotRootTimedOut = errors.New("upgrade credential snapshot root timed out")
+
+	// afterSnapshotCopy is the package's synchronous test seam. It runs once
+	// between the copy and the source's second digest, so a test can prove that
+	// a source which gains a WAL or a rewrite at exactly that moment is refused
+	// instead of answering from the state it held before. Production never sets
+	// it.
+	afterSnapshotCopy func()
 )
+
+// SnapshotAttempts bounds how often a snapshot of a database a writer may still
+// be serving is retried. A live writer commits in bursts, so a handful of
+// attempts across roughly a second normally finds a quiet window. Only
+// ErrSourceChanged is retried; a writer that never pauses is reported, never
+// read in place.
+const (
+	SnapshotAttempts  = 8
+	SnapshotBaseDelay = 20 * time.Millisecond
+	SnapshotMaxDelay  = 200 * time.Millisecond
+)
+
+// OpenSnapshotWithRetry copies a database with the bounded retry every caller of
+// a possibly-live store uses. The open function is a parameter so a caller can
+// keep its own seam; production passes OpenSnapshot.
+//
+// This is the one retry policy for a store that may still be written. A missing
+// database, an unusable scratch directory or any other failure does not get
+// better by waiting, so only ErrSourceChanged is attempted again.
+func OpenSnapshotWithRetry(ctx context.Context, open func(context.Context, string, string) (*Snapshot, error),
+	databasePath string, scratchBase string) (*Snapshot, error) {
+	delay := SnapshotBaseDelay
+	var lastErr error
+	for attempt := 1; attempt <= SnapshotAttempts; attempt++ {
+		snapshot, err := open(ctx, databasePath, scratchBase)
+		if err == nil {
+			return snapshot, nil
+		}
+		if !errors.Is(err, ErrSourceChanged) {
+			return nil, err
+		}
+		lastErr = err
+		if attempt == SnapshotAttempts {
+			break
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		if delay < SnapshotMaxDelay {
+			delay *= 2
+			if delay > SnapshotMaxDelay {
+				delay = SnapshotMaxDelay
+			}
+		}
+	}
+	return nil, lastErr
+}
 
 // databaseSidecars are the files SQLite needs to see every committed row of a
 // WAL database: the database, its write-ahead log and the WAL index.
@@ -76,6 +150,14 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	snapshot := &Snapshot{dir: dir, path: filepath.Join(dir, filepath.Base(databasePath))}
 	copied, err := copyDatabaseFiles(ctx, databasePath, dir)
 	if err == nil {
+		// A source that starts writing while its private copy is being taken
+		// must be refused, not read as the state it held before the write. The
+		// second digest is what proves it, so a test places the write between the
+		// copy and that digest through this synchronous seam. Production never
+		// sets it.
+		if afterSnapshotCopy != nil {
+			afterSnapshotCopy()
+		}
 		var after map[string]databaseFileDigest
 		if after, err = digestDatabaseFiles(ctx, databasePath); err == nil {
 			if !sameDigests(before, after) || !sameDigests(before, copied) {
@@ -110,6 +192,26 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	return snapshot, nil
 }
 
+// ReadRecordFromSnapshot reads the recorded operation row from a private copy of
+// the Manager database. It exists for the resume guard: a target a copy-in has
+// not finished must never be opened in place, because that open creates or
+// rewrites the WAL index the resume compares by file identity. A missing
+// database is "no record", not a failure.
+func ReadRecordFromSnapshot(ctx context.Context, databasePath string, scratchBase string) (model.UpgradeOperation, bool, error) {
+	if _, err := os.Lstat(databasePath); err != nil {
+		if os.IsNotExist(err) {
+			return model.UpgradeOperation{}, false, nil
+		}
+		return model.UpgradeOperation{}, false, err
+	}
+	snapshot, err := OpenSnapshotWithRetry(ctx, OpenSnapshot, databasePath, scratchBase)
+	if err != nil {
+		return model.UpgradeOperation{}, false, err
+	}
+	defer func() { _ = snapshot.Close() }()
+	return ReadRecordFrom(ctx, snapshot.DB())
+}
+
 // ValidateScratchDir refuses a scratch directory that lies inside a root this
 // operation must not write to.
 //
@@ -142,16 +244,21 @@ func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) 
 		if dir == "" {
 			continue
 		}
-		if pathWithin(scratchPath, canonicalPath(dir)) {
+		if pathWithin(scratchPath, canonicalExclusionRoot(dir)) {
 			// The default is named as such: an operator who never passed
 			// --scratch-dir has to learn that the OS temporary directory is the
 			// one that landed inside the root.
 			origin := "scratch directory"
+			// The hint names only the control that every caller has: rollback
+			// and migrate take no --scratch-dir flag, so naming one here would
+			// send the operator to an argument the command cannot accept.
+			hint := "choose a scratch directory on a separate volume"
 			if defaulted {
 				origin = "default scratch directory (the OS temporary directory)"
+				hint = "point TMPDIR at a directory on a separate volume"
 			}
-			return fmt.Errorf("%w: %s is inside %s; pass a --scratch-dir on a separate volume",
-				ErrSnapshotFailed, origin, root.label)
+			return fmt.Errorf("%w: %s is inside %s; %s",
+				ErrSnapshotFailed, origin, root.label, hint)
 		}
 	}
 	return nil
@@ -159,11 +266,25 @@ func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) 
 
 // pathWithin reports whether child is parent itself or lies underneath it. Both
 // paths must already be canonical.
+//
+// The separator is added only when the parent does not already end in one. The
+// filesystem root is a parent of every absolute path, and appending a separator
+// to "/" would build the "//" prefix that no cleaned path starts with — so an
+// operator who set the source root to "/" (or to any aliased spelling of it)
+// would pass the exclusion check and stage the whole database copy inside that
+// root. A parent with a trailing separator, such as "/a/", names the same tree
+// as "/a" and is handled by cleaning both sides first.
 func pathWithin(child string, parent string) bool {
+	child = filepath.Clean(child)
+	parent = filepath.Clean(parent)
 	if child == parent {
 		return true
 	}
-	return strings.HasPrefix(child, parent+string(filepath.Separator))
+	prefix := parent
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	return strings.HasPrefix(child, prefix)
 }
 
 // canonicalPath makes a path absolute and resolves the symlinks of the deepest
@@ -189,6 +310,12 @@ func canonicalPath(path string) string {
 		current = parent
 	}
 }
+
+// canonicalExclusionRoot resolves one root whose subtree the scratch directory
+// must stay out of. It is the package's synchronous seam for that single
+// filesystem call: a test substitutes it to prove that a root whose mount lookup
+// already timed out is never resolved again. Production never sets it.
+var canonicalExclusionRoot = canonicalPath
 
 // DB returns the read-only handle on the private copy.
 func (s *Snapshot) DB() *sql.DB {
