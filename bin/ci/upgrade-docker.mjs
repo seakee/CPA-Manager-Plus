@@ -3813,7 +3813,13 @@ function normalizeScratchOwnership(directory, label) {
 
 // dirDigest is the content digest of a directory: every entry, its size and its
 // file digest. It is what "the target root is unchanged" means for a fault case.
-function dirDigest(root) {
+// dirDigest is the content digest the fault cases compare. It covers every
+// regular file under the root except SQLite's lock sidecars: `-shm` is SQLite's
+// shared-memory index, and an empty `-wal` is what a connection leaves behind
+// when it opens a WAL-mode store and closes without writing. Both are the open,
+// not a write; a non-empty `-wal` is content and stays in the digest, so a
+// step that really wrote through the journal still trips the comparison.
+export function dirDigest(root) {
   if (!fs.existsSync(root)) return 'missing';
   const lines = [];
   const walk = (dir) => {
@@ -3831,6 +3837,11 @@ function dirDigest(root) {
         continue;
       }
       const stat = fs.statSync(full);
+      if (entry.name.endsWith('-wal') && stat.size === 0) {
+        // An empty journal is the sidecar of an open, not a write; a step that
+        // committed anything leaves it non-empty and is still caught.
+        continue;
+      }
       lines.push(`f ${relative} ${stat.size} ${sha256(fs.readFileSync(full))}`);
     }
   };

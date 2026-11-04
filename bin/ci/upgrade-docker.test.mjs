@@ -32,6 +32,7 @@ import {
   assertNoSecretInBody,
   canonicalEvidenceDocument,
   copyDirectory,
+  dirDigest,
   evidenceDirectory,
   expectedNextAction,
   ownershipNormalizationArgv,
@@ -1123,5 +1124,28 @@ test('expectedNextAction mirrors the product ladder instead of expecting a stage
   ];
   for (const [stage, options, want] of cases) {
     assert.equal(expectedNextAction(stage, options), want, `expectedNextAction(${JSON.stringify(stage)}, ${JSON.stringify(options)})`);
+  }
+});
+
+test('dirDigest counts content, not the sidecars SQLite leaves behind when it opens a store', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'upgrade-docker-digest-'));
+  try {
+    writeFileSync(path.join(root, 'usage.sqlite'), 'store');
+    const base = dirDigest(root);
+    // Opening a WAL-mode store and closing it without writing leaves an empty
+    // journal and a shared-memory index. A refused step that only read the store
+    // must not be reported as having written the data root.
+    writeFileSync(path.join(root, 'usage.sqlite-shm'), Buffer.alloc(32 * 1024));
+    writeFileSync(path.join(root, 'usage.sqlite-wal'), '');
+    assert.equal(dirDigest(root), base, 'an empty journal and a lock index are the open, not a write');
+    // A committed write lands in the journal, and any other file a step wrote is
+    // content: both still change the digest.
+    writeFileSync(path.join(root, 'usage.sqlite-wal'), 'committed frames');
+    assert.notEqual(dirDigest(root), base, 'a journal with frames is a write');
+    writeFileSync(path.join(root, 'usage.sqlite-wal'), '');
+    writeFileSync(path.join(root, 'rollback-plan.json'), '{}');
+    assert.notEqual(dirDigest(root), base, 'a written file is a write');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
