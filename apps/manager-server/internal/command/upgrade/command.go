@@ -236,7 +236,7 @@ func writeUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "                                      plan a 1.x restart, or record a proven one")
 	_, _ = fmt.Fprintln(w, "  external-connect --cpa-base-url <url> --management-key-file <path> [--target <dir>] [--cpa-version <v>] [--reprove] [--json]")
 	_, _ = fmt.Fprintln(w, "                                      connect the External CPA and record its identity; a v7 CPA stops,")
-	_, _ = fmt.Fprintln(w, "                                      and --reprove re-proves a recorded CPA to seal a rotated key")
+	_, _ = fmt.Fprintln(w, "                                      and --reprove re-proves the recorded URL and build version to seal a rotated key")
 	_, _ = fmt.Fprintln(w, "  cpa-import --legacy <dir> --plugins <true|false> [--cpa-dir <dir>] [--cpa-version <release>]")
 	_, _ = fmt.Fprintln(w, "             [--cpa-auth-dir <dir>] [--target <dir>] [--destination-url <url>]")
 	_, _ = fmt.Fprintln(w, "             [--destination-management-key-file <file>] [--json]")

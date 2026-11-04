@@ -105,11 +105,21 @@ func TestExternalConnectReproofRefusesARejectedKey(t *testing.T) {
 	}
 }
 
-// TestExternalConnectReproofRefusesAChangedServer proves the reproof lands on the
-// server the connect step observed, not merely on an address that answers: two
-// CPAs can hide behind one URL, and sealing a key for the wrong one would hand
-// the Manager a credential the recorded target never accepted.
-func TestExternalConnectReproofRefusesAChangedServer(t *testing.T) {
+// TestExternalConnectReproofTargetIdentityAndObservedVersion locks down the
+// N4/N5 target-identity and version-observation contract for existing bindings:
+//   - A changed server-advertised CPAVersion behind the recorded URL is refused
+//     with ErrExternalTargetMoved even when --reprove is set.
+//   - A missing server version header on an existing binding is refused with
+//     ErrExternalTargetMoved even when the caller supplies a matching
+//     --cpa-version declaration (N5: declared version never substitutes for a
+//     live version header during re-proof or backfill).
+//   - Because CPA v8 exposes no instance identifier separate from BaseURL,
+//     advertised CPAVersion and config.yaml, a replacement or reconfigured v8
+//     instance at the same canonical URL that advertises the same CPAVersion
+//     header is refused without --reprove, and is accepted in place only when
+//     the operator explicitly passes --reprove with a valid management key for
+//     that target (N4).
+func TestExternalConnectReproofTargetIdentityAndObservedVersion(t *testing.T) {
 	target := newExternalTarget(t)
 	if _, err := target.connect(t); err != nil {
 		t.Fatalf("first connect: %v", err)
@@ -121,7 +131,7 @@ func TestExternalConnectReproofRefusesAChangedServer(t *testing.T) {
 
 	_, err := target.connectWith(t, options)
 	if !errors.Is(err, ErrExternalTargetMoved) {
-		t.Fatalf("a changed server refused with %v", err)
+		t.Fatalf("a changed CPA build version refused with %v", err)
 	}
 	if !strings.Contains(err.Error(), "version") {
 		t.Fatalf("the refusal does not name the changed CPA build version: %v", err)
@@ -131,9 +141,38 @@ func TestExternalConnectReproofRefusesAChangedServer(t *testing.T) {
 		t.Fatalf("a refused reproof sealed %q", secret)
 	}
 
-	// An implicit unsealed-key backfill (without --reprove) still requires the
-	// exact recorded server fingerprint and tells the operator to pass --reprove
-	// when config.yaml changed.
+	// N5: when the server behind the recorded URL omits the version header,
+	// passing a matching --cpa-version declaration must not satisfy the
+	// recorded build-version check on --reprove or on an unsealed backfill.
+	missingHeaderTarget := newExternalTarget(t)
+	if _, err := missingHeaderTarget.connect(t); err != nil {
+		t.Fatalf("first connect before missing-header reproof: %v", err)
+	}
+	beforeMissing := operationRow(t, missingHeaderTarget.databasePath())
+	missingHeaderTarget.version = cpa.ClassifyExternalVersion("")
+	missingHeaderTarget.configSHA256 = strings.Repeat("b", 64)
+	missingOptions := missingHeaderTarget.options
+	missingOptions.ManagementKey = rotatedManagementKey
+	missingOptions.CPAVersion = "v8.0.13"
+	missingOptions.Reprove = true
+	_, missingErr := missingHeaderTarget.connectWith(t, missingOptions)
+	if !errors.Is(missingErr, ErrExternalTargetMoved) {
+		t.Fatalf("reproof without a live version header and with matching --cpa-version = %v, want ErrExternalTargetMoved", missingErr)
+	}
+	if !strings.Contains(missingErr.Error(), "--cpa-version") {
+		t.Fatalf("missing-header reproof refusal %q does not explain that --cpa-version cannot substitute for a live header", missingErr)
+	}
+	bindingAfterMissing, secretAfterMissing := sealedBinding(t, missingHeaderTarget.databasePath())
+	if secretAfterMissing != externalTestKey || bindingAfterMissing.ServerFingerprint != freshkeyapply.ExternalServerFingerprint("v8.0.13", strings.Repeat("a", 64)) {
+		t.Fatalf("missing-header reproof mutated the binding: %+v (secret %q)", bindingAfterMissing, secretAfterMissing)
+	}
+	if afterMissing := operationRow(t, missingHeaderTarget.databasePath()); afterMissing.Stage != beforeMissing.Stage {
+		t.Fatalf("missing-header reproof moved the stage: %q -> %q", beforeMissing.Stage, afterMissing.Stage)
+	}
+
+	// N4: an implicit unsealed-key backfill (without --reprove) against a same-URL,
+	// same-CPAVersion endpoint whose config.yaml changed is refused and tells the
+	// operator to pass --reprove.
 	backfillTarget := newExternalTarget(t)
 	if _, err := backfillTarget.connect(t); err != nil {
 		t.Fatalf("first connect for backfill: %v", err)

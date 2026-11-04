@@ -113,16 +113,22 @@ type ExternalConnectOptions struct {
 	// used for the two authenticated reads and never recorded.
 	ManagementKey string
 	// CPAVersion is the version the operator declares for the target. It is
-	// only consulted when the CPA answers without a version header, so a probe
-	// that reads a version is never overridden by a declaration.
+	// consulted only on an initial connection when the CPA answers without a
+	// version header; re-proving or backfilling an existing binding always
+	// requires the CPA to advertise its own version header so a declaration
+	// cannot impersonate the recorded build version.
 	CPAVersion string
-	// Reprove is the operator's explicit decision to prove the recorded External
-	// CPA again and seal the credential it now answers with, in place. It is the
-	// one way a rotated management key reaches a connection this operation
-	// already recorded: the default repeat refuses a different key, because a
-	// step that accepted any credential would continue a binding the Manager
-	// cannot use. A row that already carries a sealed secret keeps that secret
-	// unless this is set, and a terminal row is refused either way.
+	// Reprove is the operator's explicit authorization to re-prove the External
+	// CPA serving the recorded canonical URL and build version, refresh its
+	// configuration fingerprint and client-key count, and seal the supplied
+	// management credential in place. Because CPA v8 exposes no server instance
+	// identifier independent of BaseURL, advertised CPAVersion and config.yaml,
+	// --reprove authorizes an in-place re-proof of whatever v8 endpoint answers
+	// the recorded URL with the recorded version header and passes all four live
+	// capability probes under the supplied key, while refusing any change in URL
+	// or advertised build version. A row that already carries a sealed secret
+	// keeps that secret unless this is set, and a terminal row is refused either
+	// way.
 	Reprove bool
 
 	// observeExternalVersion is the version probe seam. Production leaves it
@@ -285,9 +291,17 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 		return externalConnectAlreadyConnected(ctx, db, targetRoot, recorded, binding, protector, managementKey)
 	}
 
-	report, err := externalConnectVersion(ctx, options, baseURL, managementKey)
+	probeOptions := options
+	if hasBinding {
+		probeOptions.CPAVersion = ""
+	}
+	report, err := externalConnectVersion(ctx, probeOptions, baseURL, managementKey)
 	if err != nil {
 		return ExternalConnectResult{}, externalConnectRefused(ctx, db, err)
+	}
+	if hasBinding && strings.TrimSpace(report.Version) == "" {
+		return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(UpgradeErrorExternalTargetMoved,
+			fmt.Sprintf("the CPA at %s did not advertise its version header while re-proving the recorded %q connection; an in-place re-proof requires a server-advertised version header and cannot substitute --cpa-version, so nothing was connected and the operation did not advance", redactExternalAddress(baseURL), strings.TrimSpace(binding.CPAVersion)), nil))
 	}
 	if report.WriteBlocked {
 		version := strings.TrimSpace(report.Version)
@@ -325,12 +339,14 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	serverFingerprint := freshkeyapply.ExternalServerFingerprint(report.Version, snapshot.SourceSHA256)
 	// ExternalServerFingerprint hashes the CPA build version and the raw
 	// GET /v8/management/config.yaml body (freshkeyapply.ExternalServerFingerprint).
-	// Rotating the management key or client keys on the External CPA rewrites its
-	// config.yaml, so an explicit --reprove on the same canonical URL and same CPA
-	// build version refreshes the recorded configuration digest alongside the newly
-	// proved key. A changed CPA build version behind the URL is still refused as a
-	// moved target, and an implicit backfill without --reprove still requires the
-	// exact recorded server fingerprint.
+	// Because CPA v8 exposes no instance identifier separate from BaseURL, the
+	// advertised version header and config.yaml (which changes whenever keys are
+	// rotated), an explicit --reprove authorizes updating the recorded
+	// configuration digest, client-key count and sealed key in place for the
+	// endpoint at the recorded canonical URL that advertises the recorded build
+	// version header. A changed or missing advertised CPA build version behind
+	// the URL is refused as a moved target, and an implicit backfill without
+	// --reprove still requires the exact recorded server fingerprint.
 	if hasBinding {
 		if binding.BaseURL != baseURL {
 			return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(UpgradeErrorExternalTargetMoved,
@@ -391,7 +407,8 @@ func externalConnectEntry(recorded model.UpgradeOperation, found bool) error {
 		return newUpgradeError(UpgradeErrorExternalNotApplicable,
 			"the v2 data root holds no recorded copy-in, so there is no operation for the External connect step to continue; nothing was written", nil)
 	}
-	if !recorded.Stage.CanAdvanceTo(model.UpgradeStageExternalConnect) {
+	if !recorded.Stage.CanAdvanceTo(model.UpgradeStageExternalConnect) ||
+		(recorded.Stage == model.UpgradeStageFailed && !recorded.CanLeaveFailedTo(model.UpgradeStageExternalConnect)) {
 		return newUpgradeError(UpgradeErrorExternalNotApplicable,
 			fmt.Sprintf("the recorded operation is at stage %q, which cannot enter the External connect step; nothing was written", recorded.Stage), nil)
 	}

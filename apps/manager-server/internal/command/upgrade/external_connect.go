@@ -25,8 +25,8 @@ func runExternalConnect(ctx context.Context, args []string, stdout, stderr io.Wr
 	target := flags.String("target", "", "v2 data directory; defaults to the Manager data directory")
 	baseURL := flags.String("cpa-base-url", "", "address of the CPA the upgraded install points at")
 	managementKeyFile := flags.String("management-key-file", "", "file containing the External CPA management key")
-	cpaVersion := flags.String("cpa-version", "", "version the CPA serves, used only when the CPA answers without one")
-	reprove := flags.Bool("reprove", false, "re-verify the recorded External CPA and seal a rotated management key in place")
+	cpaVersion := flags.String("cpa-version", "", "version the CPA serves, used only on initial connection when the CPA answers without a version header")
+	reprove := flags.Bool("reprove", false, "re-prove the External CPA at the recorded URL and build version, updating its config fingerprint and sealed management key in place")
 	asJSON := flags.Bool("json", false, "print the result as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err

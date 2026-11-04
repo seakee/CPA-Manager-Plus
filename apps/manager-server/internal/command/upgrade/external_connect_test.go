@@ -25,6 +25,7 @@ type externalCPAServer struct {
 	// configDocument is what /v8/management/config answers. It defaults to a v8
 	// document; a translated target answers a v7 one while still advertising v8.
 	configDocument string
+	configYAML     string
 	// acceptedKey is the management key the server authenticates. It starts as
 	// the key the fixture connects with and is rotated by a test whose CPA has
 	// replaced its credential.
@@ -42,7 +43,7 @@ const v8ConfigDocument = `{"config-version":8,"server":{"port":8317},"oauth":{"a
 
 func newExternalCPAServer(t *testing.T, version string) *externalCPAServer {
 	t.Helper()
-	server := &externalCPAServer{version: version, configDocument: v8ConfigDocument, acceptedKey: cliManagementKey}
+	server := &externalCPAServer{version: version, configDocument: v8ConfigDocument, configYAML: "port: 8317\n", acceptedKey: cliManagementKey}
 	server.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		server.requests = append(server.requests, r.Method+" "+r.URL.Path)
 		if r.URL.Path == "/v1/models" {
@@ -69,7 +70,7 @@ func newExternalCPAServer(t *testing.T, version string) *externalCPAServer {
 			_, _ = w.Write([]byte(`["client-key-1"]`))
 		case "/v8/management/config.yaml":
 			w.Header().Set("Content-Type", "application/yaml")
-			_, _ = w.Write([]byte("port: 8317\n"))
+			_, _ = w.Write([]byte(server.configYAML))
 		default:
 			http.NotFound(w, r)
 		}
@@ -429,6 +430,7 @@ func TestExternalConnectCLIReprovesARotatedKey(t *testing.T) {
 
 	// The CPA rotates its management key, and the Manager follows it.
 	server.acceptedKey = cliRotatedManagementKey
+	server.configYAML = "port: 8317\napi-keys:\n  - client-key-1\n"
 	code, stdout, stderr := run(t, "external-connect", "--json", "--target", target,
 		"--cpa-base-url", server.URL, "--management-key-file", managementKeyFile(t, cliRotatedManagementKey))
 	if code != 1 {
@@ -445,6 +447,23 @@ func TestExternalConnectCLIReprovesARotatedKey(t *testing.T) {
 		t.Fatalf("the refusal does not name the recovery: %q", refused.Error)
 	}
 
+	// N5: --cpa-version cannot substitute for a missing server version header
+	// when re-proving an already-recorded connection.
+	server.version = ""
+	code, stdout, stderr = run(t, "external-connect", "--json", "--reprove", "--cpa-version", "v8.0.13", "--target", target,
+		"--cpa-base-url", server.URL, "--management-key-file", managementKeyFile(t, cliRotatedManagementKey))
+	if code != 1 {
+		t.Fatalf("missing-header reproof with --cpa-version exit code = %d, want 1; stderr: %s", code, stderr)
+	}
+	var missingHeader externalConnectOutput
+	if err := json.Unmarshal([]byte(stdout), &missingHeader); err != nil {
+		t.Fatalf("decode missing-header output: %v; output: %s", err, stdout)
+	}
+	if missingHeader.ErrorCode != string(upgradeservice.UpgradeErrorExternalTargetMoved) {
+		t.Fatalf("missing-header reproof error code = %q, want %s", missingHeader.ErrorCode, upgradeservice.UpgradeErrorExternalTargetMoved)
+	}
+
+	server.version = "v8.0.13"
 	code, stdout, stderr = run(t, "external-connect", "--json", "--reprove", "--target", target,
 		"--cpa-base-url", server.URL, "--management-key-file", managementKeyFile(t, cliRotatedManagementKey))
 	if code != 0 {
