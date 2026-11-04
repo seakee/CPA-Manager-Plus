@@ -1005,10 +1005,62 @@ func TestCompletedOperationAdmissionRequiresTheProvedCredential(t *testing.T) {
 	// carries, so the row is refused rather than admitted on the envelope shape.
 	noKey := newCompletedOperationFixture(t)
 	noKey.record(t)
-	if err := os.Remove(filepath.Join(filepath.Dir(noKey.paths.Database), "data.key")); err != nil {
+	missingKeyPath := filepath.Join(filepath.Dir(noKey.paths.Database), "data.key")
+	if err := os.Remove(missingKeyPath); err != nil {
 		t.Fatalf("remove the fixture data key: %v", err)
 	}
 	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: noKey.paths.Database}).Admitted(ctx); err == nil {
 		t.Fatalf("a complete row without its data key was read as %q", stage)
+	}
+	if _, err := os.Lstat(missingKeyPath); !os.IsNotExist(err) {
+		t.Fatalf("read-only admission created %s on disk: err=%v", missingKeyPath, err)
+	}
+
+	// A deployment that configures its data key outside the database directory
+	// (CPA_MANAGER_DATA_KEY_PATH or config dataKeyPath) still carries the key
+	// that sealed the binding, so AdmitStartup must resolve that configured path
+	// instead of demanding a sibling data.key beside usage.sqlite.
+	relocatedKey := newCompletedOperationFixture(t)
+	relocatedKey.record(t)
+	customKeyPath := filepath.Join(t.TempDir(), "secrets", "custom-data.key")
+	if err := os.MkdirAll(filepath.Dir(customKeyPath), 0o700); err != nil {
+		t.Fatalf("create custom key dir: %v", err)
+	}
+	if err := os.Rename(relocatedKey.paths.DataKey, customKeyPath); err != nil {
+		t.Fatalf("relocate fixture data key: %v", err)
+	}
+	relocatedKey.paths.DataKey = customKeyPath
+	admittedRelocated, err := AdmitStartup(ctx, relocatedKey.paths, Options{
+		UpgradeAdmission: DatabaseUpgradeAdmission{DatabasePath: relocatedKey.paths.Database},
+	})
+	if err != nil {
+		t.Fatalf("admit completed store with relocated dataKeyPath: %v", err)
+	}
+	surfaceRelocated := admittedRelocated.Surface()
+	_ = admittedRelocated.Close()
+	if surfaceRelocated != SurfaceFull {
+		t.Fatalf("relocated dataKeyPath surface = %q, want %q", surfaceRelocated, SurfaceFull)
+	}
+	if stage, err := (DatabaseUpgradeAdmission{
+		DatabasePath: relocatedKey.paths.Database,
+		DataKeyPath:  customKeyPath,
+	}).Admitted(ctx); err != nil || stage != UpgradeStageComplete {
+		t.Fatalf("DatabaseUpgradeAdmission with DataKeyPath = %q/%v, want complete", stage, err)
+	}
+	rawKey, err := os.ReadFile(customKeyPath)
+	if err != nil {
+		t.Fatalf("read relocated data key: %v", err)
+	}
+	if err := os.Remove(customKeyPath); err != nil {
+		t.Fatalf("remove relocated data key: %v", err)
+	}
+	if stage, err := (DatabaseUpgradeAdmission{
+		DatabasePath: relocatedKey.paths.Database,
+		DataKey:      string(rawKey),
+	}).Admitted(ctx); err != nil || stage != UpgradeStageComplete {
+		t.Fatalf("DatabaseUpgradeAdmission with inline DataKey = %q/%v, want complete", stage, err)
+	}
+	if _, err := os.Lstat(customKeyPath); !os.IsNotExist(err) {
+		t.Fatalf("inline DataKey admission created %s on disk: err=%v", customKeyPath, err)
 	}
 }

@@ -170,7 +170,17 @@ func admittedKind(classified string, stage UpgradeStage) string {
 // Manager database and, when the row is missing, the copy-in provenance marker
 // the copy-in published beside it. It opens the store read-only, never creates
 // it, applies no pragma that persists state and never migrates.
-type DatabaseUpgradeAdmission struct{ DatabasePath string }
+type DatabaseUpgradeAdmission struct {
+	DatabasePath string
+	// DataKey is the inline or secret-file Manager data key from configuration
+	// (CPA_MANAGER_DATA_KEY / CPA_MANAGER_DATA_KEY_FILE). When non-empty, it takes
+	// precedence over DataKeyPath, matching security.LoadOrCreateDataKey.
+	DataKey string
+	// DataKeyPath is the configured Manager data-key file path
+	// (CPA_MANAGER_DATA_KEY_PATH or config dataKeyPath). When empty, it defaults
+	// to "data.key" in the database's directory.
+	DataKeyPath string
+}
 
 func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, error) {
 	path := strings.TrimSpace(a.DatabasePath)
@@ -196,7 +206,7 @@ func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, e
 	// is republished `migrating` before the migration and removed only after
 	// the row commits, so a process death in between leaves a valid row beside
 	// a valid marker and the row is the stronger evidence.
-	record, found, err := readRecordedUpgrade(ctx, path)
+	record, found, err := readRecordedUpgrade(ctx, a)
 	if err != nil {
 		return UpgradeStageNone, err
 	}
@@ -214,7 +224,8 @@ func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, e
 // readRecordedUpgrade reads the row the admission decides on. Before the
 // incremental migration has ever run the table is absent, which is not an error:
 // no Upgrade operation has been recorded.
-func readRecordedUpgrade(ctx context.Context, path string) (upgradeRecord, bool, error) {
+func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgradeRecord, bool, error) {
+	path := strings.TrimSpace(a.DatabasePath)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) || info != nil && (!info.Mode().IsRegular() || info.Size() == 0) {
 		return upgradeRecord{}, false, nil
@@ -293,7 +304,7 @@ func readRecordedUpgrade(ctx context.Context, path string) (upgradeRecord, bool,
 		// Manager can still read it and still holds it. A row recorded before
 		// that column existed carries none, and it is refused here instead of
 		// unlocking a product whose next start would meet 401.
-		if err := requireSealedBindingAuthority(ctx, db, path, record); err != nil {
+		if err := requireSealedBindingAuthority(ctx, db, a, record); err != nil {
 			return upgradeRecord{}, false, err
 		}
 	}
@@ -569,7 +580,7 @@ const admissionDataKeyFileName = "data.key"
 // connection does not. Both are the same failure at startup — the Manager would
 // present a credential the CPA never accepted — so both are refused here, before
 // the row can unlock the writable product.
-func requireSealedBindingAuthority(ctx context.Context, db *sql.DB, databasePath string, record upgradeRecord) error {
+func requireSealedBindingAuthority(ctx context.Context, db *sql.DB, a DatabaseUpgradeAdmission, record upgradeRecord) error {
 	binding := record.Binding
 	if !binding.Found {
 		// The evidence check reports the missing binding; there is no secret to
@@ -580,13 +591,13 @@ func requireSealedBindingAuthority(ctx context.Context, db *sql.DB, databasePath
 	if !security.IsValidProtectedEnvelope(sealed) {
 		return errors.New("a complete Upgrade record's External binding carries no sealed management secret, so the credential the Manager would present was never proved")
 	}
-	dataKeyPath := filepath.Join(filepath.Dir(databasePath), admissionDataKeyFileName)
-	if _, err := os.Stat(dataKeyPath); err != nil {
-		return fmt.Errorf("a complete Upgrade record's sealed management secret cannot be read because the Manager data key is missing: %w", err)
+	dataKeyPath := strings.TrimSpace(a.DataKeyPath)
+	if dataKeyPath == "" {
+		dataKeyPath = filepath.Join(filepath.Dir(strings.TrimSpace(a.DatabasePath)), admissionDataKeyFileName)
 	}
-	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
+	key, err := security.LoadExistingDataKey(a.DataKey, dataKeyPath)
 	if err != nil {
-		return fmt.Errorf("load the Manager data key: %w", err)
+		return fmt.Errorf("a complete Upgrade record's sealed management secret cannot be read because the Manager data key is missing: %w", err)
 	}
 	protector, err := security.NewProtector(key)
 	if err != nil {

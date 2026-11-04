@@ -224,7 +224,11 @@ func runServerWithOptions(options legacypreflight.Options) {
 	// The Upgrade operation row is the one explicit admission input beyond the
 	// schema classification. It is read read-only, before any store is opened.
 	if options.UpgradeAdmission == nil {
-		options.UpgradeAdmission = legacypreflight.DatabaseUpgradeAdmission{DatabasePath: cfg.DBPath}
+		options.UpgradeAdmission = legacypreflight.DatabaseUpgradeAdmission{
+			DatabasePath: cfg.DBPath,
+			DataKey:      cfg.DataKey,
+			DataKeyPath:  cfg.DataKeyPath,
+		}
 	}
 	// The listener comes up before product/data mutation. Discovery starts
 	// unavailable, then switches only to current read-only evidence: missing-DB

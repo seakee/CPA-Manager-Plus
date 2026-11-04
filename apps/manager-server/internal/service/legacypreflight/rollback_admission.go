@@ -59,7 +59,7 @@ func (a DatabaseUpgradeAdmission) AdmittedReason(ctx context.Context) (UpgradeSt
 	if inFlight && marker.Phase == copyinmarker.PhaseMaterializing {
 		return UpgradeStageInProgress, "", nil
 	}
-	record, found, err := readRecordedUpgrade(ctx, path)
+	record, found, err := readRecordedUpgrade(ctx, a)
 	if err != nil {
 		return UpgradeStageNone, "", err
 	}

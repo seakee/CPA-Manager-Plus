@@ -356,7 +356,7 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 	options.SourceStopped = true // provisional cold read; WAL still requires a fence
 	// The Upgrade operation is read once, before any classification, so an
 	// unreadable record blocks startup instead of being mistaken for "none".
-	upgradeStage, upgradeReason, upgradeErr := upgradeAdmissionStageAndReason(ctx, options.UpgradeAdmission)
+	upgradeStage, upgradeReason, upgradeErr := upgradeAdmissionStageAndReason(ctx, bindUpgradeAdmissionPaths(options.UpgradeAdmission, paths))
 	if upgradeErr != nil {
 		return nil, upgradeErr
 	}
@@ -434,4 +434,17 @@ func acquireStartupLock(databasePath string, fresh bool) (*processlock.Lock, err
 
 func DefaultPaths(database string) sqlite.InspectionPaths {
 	return sqlite.InspectionPaths{Database: database, DataKey: filepath.Join(filepath.Dir(database), "data.key"), Archives: filepath.Join(filepath.Dir(database), "usage-archives")}
+}
+
+// bindUpgradeAdmissionPaths supplies the inspection's DataKey path when the
+// caller passed a DatabaseUpgradeAdmission with only DatabasePath set.
+func bindUpgradeAdmissionPaths(reader UpgradeAdmission, paths sqlite.InspectionPaths) UpgradeAdmission {
+	dbAdmission, ok := reader.(DatabaseUpgradeAdmission)
+	if !ok {
+		return reader
+	}
+	if strings.TrimSpace(dbAdmission.DataKey) == "" && strings.TrimSpace(dbAdmission.DataKeyPath) == "" && strings.TrimSpace(paths.DataKey) != "" {
+		dbAdmission.DataKeyPath = paths.DataKey
+	}
+	return dbAdmission
 }

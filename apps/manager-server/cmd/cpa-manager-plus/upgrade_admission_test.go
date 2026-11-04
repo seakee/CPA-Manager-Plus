@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -362,4 +363,63 @@ func TestCompletedUpgradeStartsTheNormalProduct(t *testing.T) {
 		t.Fatalf("a completed Upgrade did not enter the product bootstrap:\n%s", logs)
 	}
 	process.stop(t)
+
+	// Relocate data.key outside the database directory and pass it via
+	// CPA_MANAGER_DATA_KEY_PATH: the process must still admit the completed
+	// store using the configured data key authority rather than failing closed
+	// on a missing sibling data.key.
+	customKeyPath := filepath.Join(t.TempDir(), "custom-data.key")
+	if err := os.Rename(filepath.Join(dir, "data.key"), customKeyPath); err != nil {
+		t.Fatalf("move data.key to custom path: %v", err)
+	}
+	envWithCustomKeyPath := append(ownedPreflightEnvironment(dir, databasePath), "CPA_MANAGER_DATA_KEY_PATH="+customKeyPath)
+	processCustom := startManagerServerProcessWithEnvironment(t, envWithCustomKeyPath)
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		logs := processCustom.logs.String()
+		if strings.Contains(logs, "administrator authority loaded") ||
+			strings.Contains(logs, "bootstrap manager server:") ||
+			strings.Contains(logs, "serving only the Upgrade surface") ||
+			strings.Contains(logs, "Manager writable startup is not authorized") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	customLogs := processCustom.logs.String()
+	processCustom.stop(t)
+	if !strings.Contains(customLogs, "administrator authority loaded") {
+		t.Fatalf("completed Upgrade with CPA_MANAGER_DATA_KEY_PATH did not enter product bootstrap:\n%s", customLogs)
+	}
+
+	// Remove the key file on disk and pass the same key material inline via
+	// CPA_MANAGER_DATA_KEY: admission must honour the inline key without
+	// requiring or creating any data.key file on disk.
+	rawKeyBytes, err := os.ReadFile(customKeyPath)
+	if err != nil {
+		t.Fatalf("read custom data.key: %v", err)
+	}
+	if err := os.Remove(customKeyPath); err != nil {
+		t.Fatalf("remove custom data.key: %v", err)
+	}
+	envWithInlineKey := append(ownedPreflightEnvironment(dir, databasePath), "CPA_MANAGER_DATA_KEY="+strings.TrimSpace(string(rawKeyBytes)))
+	processInline := startManagerServerProcessWithEnvironment(t, envWithInlineKey)
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		logs := processInline.logs.String()
+		if strings.Contains(logs, "administrator authority loaded") ||
+			strings.Contains(logs, "bootstrap manager server:") ||
+			strings.Contains(logs, "serving only the Upgrade surface") ||
+			strings.Contains(logs, "Manager writable startup is not authorized") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	inlineLogs := processInline.logs.String()
+	processInline.stop(t)
+	if !strings.Contains(inlineLogs, "administrator authority loaded") {
+		t.Fatalf("completed Upgrade with inline CPA_MANAGER_DATA_KEY did not enter product bootstrap:\n%s", inlineLogs)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "data.key")); !os.IsNotExist(err) {
+		t.Fatalf("inline CPA_MANAGER_DATA_KEY startup created a sibling data.key on disk: err=%v", err)
+	}
 }

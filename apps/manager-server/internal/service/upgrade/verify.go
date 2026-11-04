@@ -671,14 +671,10 @@ func verifyTargetConfiguration(ctx context.Context, db *sql.DB, paths targetPath
 // stored secrets. It never creates one: a verify that minted a key could not
 // decrypt the envelope it is looking at and would leave a second key behind.
 func verifyTargetProtector(paths targetPaths) (*security.Protector, error) {
-	if _, err := os.Stat(paths.DataKey); err != nil {
-		return nil, newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the Manager data key is missing, so the stored CPA connection cannot be read; nothing was written", err)
-	}
-	key, _, err := security.LoadOrCreateDataKey("", paths.DataKey)
+	key, err := security.LoadExistingDataKey("", paths.DataKey)
 	if err != nil {
 		return nil, newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the Manager data key could not be loaded, so the stored CPA connection cannot be read; nothing was written", err)
+			"the Manager data key is missing, so the stored CPA connection cannot be read; nothing was written", err)
 	}
 	protector, err := security.NewProtector(key)
 	if err != nil {
