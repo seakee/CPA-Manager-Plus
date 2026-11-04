@@ -1287,6 +1287,7 @@ func Migrate(db *sql.DB) error {
 			cpa_version text not null default '',
 			support text not null default '',
 			client_keys integer not null default 0,
+			management_key text not null default '',
 			observed_at_ms integer not null
 		)`,
 		// A UTC day the v2 Upgrade reconciliation permanently marked incomplete:
@@ -1328,6 +1329,9 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 	if err := ensureUpgradeOperationRollbackColumns(db); err != nil {
+		return err
+	}
+	if err := ensureUpgradeExternalConnectColumns(db); err != nil {
 		return err
 	}
 	if err := ensureUsageEventSnapshotColumns(db); err != nil {
@@ -3115,6 +3119,29 @@ func ensureUpgradeOperationRollbackColumns(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// ensureUpgradeExternalConnectColumns adds the encrypted management secret the
+// External connect step proved to a binding table written before the column
+// existed. The column stays empty for such a row, which is the fact the
+// completion gate refuses: nothing in the record says which credential the step
+// proved, so the Manager's own stored key is not known to be the one that worked.
+func ensureUpgradeExternalConnectColumns(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	found, err := tableHasColumn(tx, "upgrade_external_connect", "management_key")
+	if err != nil {
+		return err
+	}
+	if !found {
+		if _, err := tx.Exec(`alter table upgrade_external_connect add column management_key text not null default ''`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func ensureCodexInspectionOwnershipColumns(db *sql.DB) error {

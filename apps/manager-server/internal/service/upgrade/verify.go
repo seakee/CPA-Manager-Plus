@@ -91,6 +91,16 @@ type VerifyOptions struct {
 	// TargetRoot is the v2 data directory holding usage.sqlite and the copy-in
 	// work area.
 	TargetRoot string
+
+	// The four seams below are the ones ExternalConnectOptions exposes. Production
+	// leaves them nil and the cpa package's probes run on the External transport,
+	// so the gate proves the recorded target with the same reads the connect step
+	// made. A test supplies them so it can prove the refused cases without a
+	// network.
+	observeExternalVersion func(ctx context.Context, baseURL, managementKey string) (cpa.ExternalVersionReport, error)
+	readExternalKeys       func(ctx context.Context, baseURL, managementKey string) (cpa.ExternalKeySnapshot, error)
+	proveModelSurface      func(ctx context.Context, baseURL, clientKey string) error
+	readV8Config           func(ctx context.Context, baseURL, managementKey string) (cpa.V8ConfigObservation, error)
 }
 
 // VerifyResult is the observable outcome of the gate. It reports what the row
@@ -231,6 +241,16 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	}
 	if err := requireVerifyTarget(mode, binding, target); err != nil {
 		return VerifyResult{}, err
+	}
+	// The stored-key equality above proves the Manager holds the credential the
+	// connect step proved. This proves that credential still administers the CPA
+	// right now: the same reads the connect step made, made with the secret the
+	// Manager itself will present after a restart. It runs before the write
+	// transaction, so a refused live proof leaves the operation row unadvanced.
+	if mode == model.UpgradeTargetExternal {
+		if err := proveVerifyExternalTarget(ctx, options, target, binding); err != nil {
+			return VerifyResult{}, err
+		}
 	}
 
 	before, err := fingerprintSource(ctx, sourceRoot)
@@ -537,6 +557,10 @@ type verifyTarget struct {
 	// connection is the Manager's own CPA connection, when the store holds one.
 	connection managerconfig.LegacyConnection
 	found      bool
+	// protector is the Manager secret protector the connection was read with. It
+	// decrypts the sealed secret the External connect step recorded, so the two
+	// credentials can be compared without either being re-derived from a caller.
+	protector *security.Protector
 	// attempt is the destination the CPA import recorded for a Managed target.
 	attempt       cpaImportDestinationRecord
 	attemptSecret string
@@ -579,6 +603,7 @@ func verifyTargetConfiguration(ctx context.Context, db *sql.DB, paths targetPath
 	}
 	target.connection = resolution.Connection
 	target.found = true
+	target.protector = protector
 	if mode != model.UpgradeTargetManaged {
 		return target, nil
 	}
@@ -638,6 +663,31 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 			return newUpgradeError(UpgradeErrorVerifyBindingDrifted,
 				"the CPA the Manager connects to is not the target the External connect step recorded; nothing was written", nil)
 		}
+		// The address is not the connection. The Manager presents the credential
+		// its own store holds, so a completion has to prove that credential is the
+		// one the connect step proved against this CPA. Comparing only the address
+		// recorded a verdict for a Manager that would meet 401 on its next start.
+		if !cpa.ValidV8ManagementKey(strings.TrimSpace(target.connection.ManagementKey)) {
+			return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+				"the Manager's stored CPA connection carries no usable management secret, so the External target it names cannot be administered; nothing was written", nil)
+		}
+		if strings.TrimSpace(binding.ManagementKey) == "" {
+			return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+				"the External connect record carries no proved management secret, so the credential the Manager would present cannot be confirmed; run the External connect step again with this build, and nothing was written", nil)
+		}
+		if target.protector == nil {
+			return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+				"the Manager data key is unavailable, so the management secret the External connect step proved cannot be read; nothing was written", nil)
+		}
+		bindingSecret, err := target.protector.UnprotectString(binding.ManagementKey)
+		if err != nil {
+			return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+				"the management secret the External connect step proved cannot be read with this Manager data key, so the stored connection cannot be compared with it; nothing was written", err)
+		}
+		if !security.EqualHMAC(strings.TrimSpace(target.connection.ManagementKey), strings.TrimSpace(bindingSecret)) {
+			return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+				"the Manager connection does not carry the management secret the External connect step proved, so a restarted Manager could not administer the CPA this run verified; nothing was written", nil)
+		}
 		return nil
 	}
 	if !target.attemptFound {
@@ -655,6 +705,61 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 	if !security.EqualHMAC(strings.TrimSpace(target.connection.ManagementKey), strings.TrimSpace(target.attemptSecret)) {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the Manager connection no longer carries the management secret the CPA import handed over; nothing was written", nil)
+	}
+	return nil
+}
+
+// proveVerifyExternalTarget proves the live External target with the Manager's
+// own stored credential.
+//
+// Stored-key equality says the Manager holds the secret the connect step proved;
+// it does not say the CPA still accepts it, nor that the host behind the recorded
+// address is still the server that was proved. So the gate repeats the connect
+// step's four reads with that stored credential: the version, the v8
+// configuration, the authenticated client-key list and the gateway model surface.
+// A CPA that rotated its key, a host that changed behind the address, or a
+// management contract that no longer answers is a refusal here — before the
+// verdict is recorded, because a completion is exactly the claim that a restarted
+// Manager can administer this target.
+func proveVerifyExternalTarget(ctx context.Context, options VerifyOptions, target verifyTarget, binding upgradeoperation.ExternalBinding) error {
+	managementKey := strings.TrimSpace(target.connection.ManagementKey)
+	probes := ExternalConnectOptions{
+		BaseURL:                binding.BaseURL,
+		ManagementKey:          managementKey,
+		observeExternalVersion: options.observeExternalVersion,
+		readExternalKeys:       options.readExternalKeys,
+		proveModelSurface:      options.proveModelSurface,
+		readV8Config:           options.readV8Config,
+	}
+	report, err := externalConnectVersion(ctx, probes, binding.BaseURL, managementKey)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the management secret the Manager stores did not authenticate against the CPA the External connect step recorded, so a restarted Manager could not administer it; nothing was written", err)
+	}
+	if report.WriteBlocked {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the CPA the External connect step recorded no longer serves the v8 management contract this Manager writes, so a restarted Manager could not administer it; nothing was written", nil)
+	}
+	if err := externalConnectConfig(ctx, probes, binding.BaseURL, managementKey); err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the CPA the External connect step recorded did not answer the authenticated configuration read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", err)
+	}
+	snapshot, err := externalConnectKeys(ctx, probes, binding.BaseURL, managementKey)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the CPA the External connect step recorded did not answer the authenticated client-key read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", err)
+	}
+	clientKey := ""
+	if len(snapshot.Keys) > 0 {
+		clientKey = snapshot.Keys[0]
+	}
+	if err := externalConnectModelSurface(ctx, probes, binding.BaseURL, clientKey); err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the gateway behind the CPA the External connect step recorded did not answer its model surface, so the target a restarted Manager would administer is not serving; nothing was written", err)
+	}
+	if freshkeyapply.ExternalServerFingerprint(report.Version, snapshot.SourceSHA256) != binding.ServerFingerprint {
+		return newUpgradeError(UpgradeErrorVerifyBindingDrifted,
+			"the CPA answering the recorded address is not the server the External connect step proved, so the verdict cannot name the connection it rests on; nothing was written", nil)
 	}
 	return nil
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
@@ -220,6 +221,14 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	if err != nil {
 		return ExternalConnectResult{}, fmt.Errorf("read the External connect binding: %w", err)
 	}
+	// The proved management secret is sealed with the Manager's own data key, so
+	// the connection this step records is the credential the Manager itself will
+	// present after a restart. The key is loaded, never minted: a second key could
+	// not decrypt the connection the store already holds.
+	protector, err := externalConnectProtector(paths)
+	if err != nil {
+		return ExternalConnectResult{}, err
+	}
 	// A recorded target that is not this address is a moved target, not a new
 	// connection: the owner's CPA changed behind a committed pointer, and only an
 	// explicit rebind may reach it again. The binding is the comparison, never the
@@ -238,9 +247,11 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	}
 	// Repeating the step against the same target records nothing new: the row
 	// already carries this stage, and a second record would only churn the
-	// generation.
+	// generation. The supplied credential must still be the one the recorded
+	// connection proved, or the step would continue a binding the Manager cannot
+	// use.
 	if hasBinding && recorded.Stage == model.UpgradeStageExternalConnect {
-		return externalConnectAlreadyConnected(ctx, db, targetRoot, recorded, binding)
+		return externalConnectAlreadyConnected(ctx, db, targetRoot, recorded, binding, protector, managementKey)
 	}
 
 	report, err := externalConnectVersion(ctx, options, baseURL, managementKey)
@@ -293,10 +304,18 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	}
 	// The stage, the domains and the target they connected commit in one
 	// transaction, so the record can never claim the step without naming its
-	// target. The evidence file is published afterwards as a projection: a lost
-	// reply or a failed publication costs a rerun that repairs the file from the
-	// row, while a changed target is refused before anything is written.
-	operation, err := recordExternalConnect(ctx, db, externalConnectBinding(evidence))
+	// target. The proved secret is sealed into that same record: a binding that
+	// names a credential nobody wrote down cannot prove the Manager can still use
+	// the target. The evidence file is published afterwards as a projection: a
+	// lost reply or a failed publication costs a rerun that repairs the file from
+	// the row, while a changed target is refused before anything is written.
+	sealedKey, err := protector.ProtectString(managementKey)
+	if err != nil {
+		return ExternalConnectResult{}, fmt.Errorf("seal the proved management key for the operation record: %w", err)
+	}
+	recordedBinding := externalConnectBinding(evidence)
+	recordedBinding.ManagementKey = sealedKey
+	operation, err := recordExternalConnect(ctx, db, recordedBinding)
 	if err != nil {
 		return ExternalConnectResult{}, err
 	}
@@ -342,6 +361,11 @@ func readRecordedCopyInFrom(ctx context.Context, repository *upgradeoperation.Re
 // operation recorded: nothing is probed and the row keeps its stage, generation
 // and timestamps.
 //
+// The supplied credential has to be the one the recorded connection proved. A
+// repeat that accepted any key would continue a binding the Manager cannot use:
+// the Manager presents its own stored secret, so a connection recorded under
+// another one is not a connection this installation has.
+//
 // A refusal this step recorded earlier is cleared in the same transaction as the
 // read, because the binding it just re-proved is exactly the fact that refusal
 // said was missing: a target reported moved is not moved when the recorded target
@@ -352,7 +376,22 @@ func readRecordedCopyInFrom(ctx context.Context, repository *upgradeoperation.Re
 // The published evidence is repaired from the row when it is missing or stale,
 // because the row is the record and the file is its projection: a rerun after a
 // lost publication costs this repair, not a second proof of the CPA.
-func externalConnectAlreadyConnected(ctx context.Context, db *sql.DB, targetRoot string, recorded model.UpgradeOperation, binding upgradeoperation.ExternalBinding) (ExternalConnectResult, error) {
+func externalConnectAlreadyConnected(ctx context.Context, db *sql.DB, targetRoot string, recorded model.UpgradeOperation,
+	binding upgradeoperation.ExternalBinding, protector *security.Protector, managementKey string) (ExternalConnectResult, error) {
+	if strings.TrimSpace(binding.ManagementKey) == "" {
+		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalManagementRejected,
+			"the recorded connection carries no proved management key, so this step cannot confirm which credential the Manager would present; nothing was connected and the operation did not advance", nil)
+	}
+	recordedSecret, err := protector.UnprotectString(binding.ManagementKey)
+	if err != nil {
+		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalManagementRejected,
+			"the recorded management key cannot be read with this Manager data key, so the connection cannot be continued; nothing was connected and the operation did not advance", err)
+	}
+	if !security.EqualHMAC(strings.TrimSpace(recordedSecret), managementKey) {
+		return ExternalConnectResult{}, newUpgradeError(UpgradeErrorExternalManagementRejected,
+			fmt.Sprintf("the management key supplied for %s is not the one this operation connected with; nothing was connected and the operation did not advance",
+				redactExternalAddress(binding.BaseURL)), nil)
+	}
 	evidence := externalConnectEvidence(binding)
 	operation := recorded
 	if externalConnectRefusalRecorded(recorded.ErrorCode) {
@@ -367,6 +406,19 @@ func externalConnectAlreadyConnected(ctx context.Context, db *sql.DB, targetRoot
 			"the External connection is recorded and this target is unchanged, but its evidence file could not be refreshed: %w", err)
 	}
 	return externalConnectResult(operation, evidence, true), nil
+}
+
+// externalConnectProtector loads the Manager data key the External binding seals
+// its proved management secret with. It never mints one: a second key would not
+// decrypt the connection the Manager store already holds, and the sealed secret
+// this step writes has to be readable by the same Manager.
+func externalConnectProtector(paths targetPaths) (*security.Protector, error) {
+	protector, err := verifyTargetProtector(paths)
+	if err == nil {
+		return protector, nil
+	}
+	return nil, newUpgradeError(UpgradeErrorExternalAuthorityUnavailable,
+		"the Manager data key is missing or unreadable, so the proved management secret cannot be sealed for the Manager store; nothing was connected and the operation did not advance", err)
 }
 
 // clearExternalConnectRefusal removes a stale refusal this step left on the row.

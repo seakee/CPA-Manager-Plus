@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,9 +220,29 @@ func newManagedVerifyFixture(t *testing.T) *verifyFixture {
 	return fixture
 }
 
+// verifyOptions is the gate invocation with the same synthetic probe seams the
+// connect step used, so an offline test proves the recorded target without
+// dialing its address. Production leaves the seams nil.
+func (f *verifyFixture) verifyOptions() VerifyOptions {
+	return VerifyOptions{
+		LegacyRoot: f.volume.root,
+		TargetRoot: f.target,
+		observeExternalVersion: func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+			return cpa.ClassifyExternalVersion("v8.0.13"), nil
+		},
+		readExternalKeys: func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
+			return cpa.ExternalKeySnapshot{Keys: []string{"client-key-1"}, SourceSHA256: strings.Repeat("a", 64)}, nil
+		},
+		readV8Config: func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
+			return cpa.V8ConfigObservation{BaseURL: verifyExternalAddress, ClientKeyCount: 1}, nil
+		},
+		proveModelSurface: func(context.Context, string, string) error { return nil },
+	}
+}
+
 func (f *verifyFixture) verify(t *testing.T) (VerifyResult, error) {
 	t.Helper()
-	return Verify(context.Background(), VerifyOptions{LegacyRoot: f.volume.root, TargetRoot: f.target})
+	return Verify(context.Background(), f.verifyOptions())
 }
 
 func (f *verifyFixture) operation(t *testing.T) model.UpgradeOperation {
@@ -700,7 +723,7 @@ func TestVerifyStoreFaultLeavesNoCompleteWithoutEvidence(t *testing.T) {
 func TestVerifyConcurrentRunsRecordOneVerdict(t *testing.T) {
 	fixture := newExternalVerifyFixture(t)
 	before := fixture.operation(t)
-	options := VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target}
+	options := fixture.verifyOptions()
 
 	var wait sync.WaitGroup
 	results := make([]VerifyResult, 2)
@@ -1052,3 +1075,114 @@ func TestVerifyRefusesACompletedRowWithoutTheGateEvidence(t *testing.T) {
 	}
 }
 
+// verifyRotatingManagementKey is the key the synthetic External CPA accepts until
+// a test rotates it. It has the shape the production validator accepts.
+const verifyRotatingManagementKey = "rotating-management-key"
+
+// externalVerifyCPAServer is a synthetic External CPA serving the v8 management
+// reads the connect step and the completion gate make: the version header, the
+// configuration document, the client-key list and the gateway model list. It
+// authenticates with verifyRotatingManagementKey and can start refusing that key,
+// which is what a CPA whose owner rotated its credential does.
+type externalVerifyCPAServer struct {
+	*httptest.Server
+	version  string
+	rejected atomic.Bool
+}
+
+const externalVerifyConfigDocument = `{"config-version":8,"server":{"port":8317},"oauth":{"auth-dir":"/auth"},` +
+	`"access":{"api-keys":["client-key-1"]}}`
+
+func newExternalVerifyCPAServer(t *testing.T, version string) *externalVerifyCPAServer {
+	t.Helper()
+	server := &externalVerifyCPAServer{version: version}
+	server.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"gpt-test"}]}`))
+			return
+		}
+		if server.rejected.Load() || r.Header.Get("Authorization") != "Bearer "+verifyRotatingManagementKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/v0/management/config":
+			if server.version != "" {
+				w.Header().Set("X-CPA-Version", server.version)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		case "/v8/management/config":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(externalVerifyConfigDocument))
+		case "/v8/management/config/access/api-keys":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`["client-key-1"]`))
+		case "/v8/management/config.yaml":
+			w.Header().Set("Content-Type", "application/yaml")
+			_, _ = w.Write([]byte("port: 8317\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestVerifyRefusesAManagerKeyTheConnectStepDidNotProve is the R2 regression for
+// the stored credential: the External connect step proved K_new, while the
+// Manager's own connection still carries K_old for the same address. Comparing
+// only the address recorded a complete verdict, and the restarted Manager then
+// met 401 against the CPA.
+func TestVerifyRefusesAManagerKeyTheConnectStepDidNotProve(t *testing.T) {
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	// The Manager keeps an older credential for the same CPA.
+	fixture.handManagerConnection(t, verifyExternalAddress, "stale-management-key")
+	// The connect step proves the current one.
+	fixture.connectExternal(t)
+	before := fixture.operation(t)
+	_, err := fixture.verify(t)
+	if !errors.Is(err, ErrVerifyConnectionUnproven) {
+		t.Fatalf("verify with a stale Manager credential error = %v, want ErrVerifyConnectionUnproven", err)
+	}
+	if stage := fixture.operation(t).Stage; stage != model.UpgradeStageExternalConnect {
+		t.Fatalf("stage after the refusal = %q, want external_connect", stage)
+	}
+	assertVerifyRefusalWroteNothing(t, fixture, before)
+}
+
+// TestVerifyRefusesAnExternalKeyTheCPANoLongerAccepts proves the capability half
+// of the same gate against a real CPA server: the connect step proved the key,
+// the Manager stores it, and the CPA then rotates it. The stored-key equality is
+// satisfied and the live authenticated read is not, so the gate must refuse
+// instead of recording a completion the restarted Manager cannot use.
+func TestVerifyRefusesAnExternalKeyTheCPANoLongerAccepts(t *testing.T) {
+	server := newExternalVerifyCPAServer(t, "v8.0.13")
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	// The connect step runs against the real CPA, so the binding records the
+	// server fingerprint and the target address it answered from.
+	if _, err := ExternalConnect(context.Background(), ExternalConnectOptions{
+		TargetRoot:    fixture.target,
+		BaseURL:       server.URL,
+		ManagementKey: verifyRotatingManagementKey,
+	}); err != nil {
+		t.Fatalf("external connect: %v", err)
+	}
+	fixture.handManagerConnection(t, server.URL, verifyRotatingManagementKey)
+	// The CPA rotates its management key after the connect step committed.
+	server.rejected.Store(true)
+	before := fixture.operation(t)
+	// No seam is supplied, so the gate's own probes run against the CPA server:
+	// this is the production read that has to fail.
+	_, err := Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target})
+	if !errors.Is(err, ErrVerifyConnectionUnproven) {
+		t.Fatalf("verify after the CPA rotated its key error = %v, want ErrVerifyConnectionUnproven", err)
+	}
+	if stage := fixture.operation(t).Stage; stage != model.UpgradeStageExternalConnect {
+		t.Fatalf("stage after the refusal = %q, want external_connect", stage)
+	}
+	assertVerifyRefusalWroteNothing(t, fixture, before)
+}

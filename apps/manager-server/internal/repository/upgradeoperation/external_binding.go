@@ -39,7 +39,14 @@ type ExternalBinding struct {
 	CPAVersion        string
 	Support           string
 	ClientKeys        int
-	ObservedAtMS      int64
+	// ManagementKey is the management secret the connect step proved against this
+	// target, sealed with the Manager data key. It is the credential the Manager
+	// itself must still hold for the target to be manageable after a restart, so
+	// the completion gate compares the stored connection against it. It is the
+	// encrypted envelope, never the secret, and it is never part of the evidence
+	// file the data root publishes.
+	ManagementKey string
+	ObservedAtMS  int64
 }
 
 // Validate reports whether the binding names a target a rerun could compare
@@ -63,7 +70,8 @@ func (b ExternalBinding) Validate() error {
 // the binding table simply has none, because a writable open creates the table.
 func (r *Repository) ExternalBinding(ctx context.Context) (ExternalBinding, bool, error) {
 	return readExternalBinding(ctx, r.db.QueryRowContext(ctx,
-		`select base_url, identity, generation, server_fingerprint, cpa_version, support, client_keys, observed_at_ms
+		`select base_url, identity, generation, server_fingerprint, cpa_version, support, client_keys,
+		management_key, observed_at_ms
 		from `+externalBindingTableName+` where id = 1`))
 }
 
@@ -73,14 +81,15 @@ func (r *Repository) ExternalBinding(ctx context.Context) (ExternalBinding, bool
 // caller's earlier read cannot authorize this write.
 func ExternalBindingTx(ctx context.Context, tx Tx) (ExternalBinding, bool, error) {
 	return readExternalBinding(ctx, tx.QueryRowContext(ctx,
-		`select base_url, identity, generation, server_fingerprint, cpa_version, support, client_keys, observed_at_ms
+		`select base_url, identity, generation, server_fingerprint, cpa_version, support, client_keys,
+		management_key, observed_at_ms
 		from `+externalBindingTableName+` where id = 1`))
 }
 
 func readExternalBinding(ctx context.Context, row *sql.Row) (ExternalBinding, bool, error) {
 	var binding ExternalBinding
 	err := row.Scan(&binding.BaseURL, &binding.Identity, &binding.Generation, &binding.ServerFingerprint,
-		&binding.CPAVersion, &binding.Support, &binding.ClientKeys, &binding.ObservedAtMS)
+		&binding.CPAVersion, &binding.Support, &binding.ClientKeys, &binding.ManagementKey, &binding.ObservedAtMS)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ExternalBinding{}, false, nil
 	}
@@ -102,8 +111,9 @@ func RecordExternalBindingTx(ctx context.Context, tx Tx, binding ExternalBinding
 		return err
 	}
 	_, err := tx.ExecContext(ctx, `insert into `+externalBindingTableName+` (
-		id, base_url, identity, generation, server_fingerprint, cpa_version, support, client_keys, observed_at_ms
-	) values (1, ?, ?, ?, ?, ?, ?, ?, ?)
+		id, base_url, identity, generation, server_fingerprint, cpa_version, support, client_keys,
+		management_key, observed_at_ms
+	) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	on conflict(id) do update set
 		base_url = excluded.base_url,
 		identity = excluded.identity,
@@ -112,9 +122,10 @@ func RecordExternalBindingTx(ctx context.Context, tx Tx, binding ExternalBinding
 		cpa_version = excluded.cpa_version,
 		support = excluded.support,
 		client_keys = excluded.client_keys,
+		management_key = excluded.management_key,
 		observed_at_ms = excluded.observed_at_ms`,
 		binding.BaseURL, binding.Identity, binding.Generation, binding.ServerFingerprint,
-		binding.CPAVersion, binding.Support, binding.ClientKeys, binding.ObservedAtMS)
+		binding.CPAVersion, binding.Support, binding.ClientKeys, binding.ManagementKey, binding.ObservedAtMS)
 	return err
 }
 
