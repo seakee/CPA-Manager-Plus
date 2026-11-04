@@ -9,6 +9,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 )
 
 // rotatedManagementKey is the credential a CPA answers with after its owner
@@ -27,6 +28,11 @@ func TestExternalConnectReprovesARotatedKey(t *testing.T) {
 	}
 	before := operationRow(t, target.databasePath())
 	probes := target.probes
+	// Rotating the management key or client keys on the External CPA rewrites
+	// its config.yaml, changing SourceSHA256 while the canonical URL and CPA
+	// build version stay the same.
+	target.configSHA256 = strings.Repeat("b", 64)
+	target.keys = []string{"client-key-1", "client-key-2"}
 	options := target.options
 	options.ManagementKey = rotatedManagementKey
 	options.Reprove = true
@@ -51,12 +57,16 @@ func TestExternalConnectReprovesARotatedKey(t *testing.T) {
 	if after.ErrorCode != "" || after.ErrorDetail != "" {
 		t.Fatalf("the reproof left a refusal on the row: %q / %q", after.ErrorCode, after.ErrorDetail)
 	}
+	wantFingerprint := freshkeyapply.ExternalServerFingerprint("v8.0.13", strings.Repeat("b", 64))
 	binding, secret := sealedBinding(t, target.databasePath())
 	if secret != rotatedManagementKey || !security.IsValidProtectedEnvelope(binding.ManagementKey) {
 		t.Fatalf("the reproof sealed %q (%q), want the rotated key", binding.ManagementKey, secret)
 	}
+	if binding.ServerFingerprint != wantFingerprint || binding.ClientKeys != 2 {
+		t.Fatalf("the reproof did not refresh the binding config snapshot: %+v, want fingerprint %s and 2 keys", binding, wantFingerprint)
+	}
 	evidence, found, err := readExternalConnectEvidence(target.copied.target)
-	if err != nil || !found || evidence.Identity != first.Identity {
+	if err != nil || !found || evidence.Identity != first.Identity || evidence.ServerFingerprint != wantFingerprint || evidence.ClientKeys != 2 {
 		t.Fatalf("the reproof left the evidence stale: %+v, found %t, err %v", evidence, found, err)
 	}
 }
@@ -113,12 +123,26 @@ func TestExternalConnectReproofRefusesAChangedServer(t *testing.T) {
 	if !errors.Is(err, ErrExternalTargetMoved) {
 		t.Fatalf("a changed server refused with %v", err)
 	}
-	if !strings.Contains(err.Error(), "server fingerprint") {
-		t.Fatalf("the refusal does not name what changed: %v", err)
+	if !strings.Contains(err.Error(), "version") {
+		t.Fatalf("the refusal does not name the changed CPA build version: %v", err)
 	}
 	_, secret := sealedBinding(t, target.databasePath())
 	if secret != externalTestKey {
 		t.Fatalf("a refused reproof sealed %q", secret)
+	}
+
+	// An implicit unsealed-key backfill (without --reprove) still requires the
+	// exact recorded server fingerprint and tells the operator to pass --reprove
+	// when config.yaml changed.
+	backfillTarget := newExternalTarget(t)
+	if _, err := backfillTarget.connect(t); err != nil {
+		t.Fatalf("first connect for backfill: %v", err)
+	}
+	execTarget(t, backfillTarget.databasePath(), `update upgrade_external_connect set management_key = '' where id = 1`)
+	backfillTarget.configSHA256 = strings.Repeat("b", 64)
+	_, backfillErr := backfillTarget.connect(t)
+	if !errors.Is(backfillErr, ErrExternalTargetMoved) || !strings.Contains(backfillErr.Error(), "--reprove") {
+		t.Fatalf("implicit backfill with changed config.yaml = %v, want ErrExternalTargetMoved naming --reprove", backfillErr)
 	}
 }
 

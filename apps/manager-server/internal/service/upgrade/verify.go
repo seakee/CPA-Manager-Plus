@@ -813,7 +813,7 @@ func proveVerifyExternalTarget(ctx context.Context, options VerifyOptions, targe
 	}
 	if freshkeyapply.ExternalServerFingerprint(report.Version, snapshot.SourceSHA256) != binding.ServerFingerprint {
 		return newUpgradeError(UpgradeErrorVerifyBindingDrifted,
-			"the CPA answering the recorded address is not the server the External connect step proved, so the verdict cannot name the connection it rests on; nothing was written", nil)
+			"the CPA answering the recorded address no longer matches the server and configuration fingerprint the External connect step proved; run upgrade external-connect --reprove if its key or configuration changed intentionally, and nothing was written", nil)
 	}
 	return nil
 }

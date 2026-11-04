@@ -323,19 +323,26 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	}
 
 	serverFingerprint := freshkeyapply.ExternalServerFingerprint(report.Version, snapshot.SourceSHA256)
-	// A re-proof seals a credential for the target this operation recorded, so it
-	// has to land on that target: the same canonical address, and the same server
-	// the connect step observed behind it. Two CPAs can hide behind one address,
-	// and sealing a rotated key for the wrong one would hand the Manager a
-	// credential the recorded CPA never accepted.
+	// ExternalServerFingerprint hashes the CPA build version and the raw
+	// GET /v8/management/config.yaml body (freshkeyapply.ExternalServerFingerprint).
+	// Rotating the management key or client keys on the External CPA rewrites its
+	// config.yaml, so an explicit --reprove on the same canonical URL and same CPA
+	// build version refreshes the recorded configuration digest alongside the newly
+	// proved key. A changed CPA build version behind the URL is still refused as a
+	// moved target, and an implicit backfill without --reprove still requires the
+	// exact recorded server fingerprint.
 	if hasBinding {
 		if binding.BaseURL != baseURL {
 			return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(UpgradeErrorExternalTargetMoved,
 				fmt.Sprintf("the CPA at %s is not the target this operation recorded; nothing was connected and the operation did not advance", redactExternalAddress(baseURL)), nil))
 		}
-		if serverFingerprint != binding.ServerFingerprint {
+		if strings.TrimSpace(report.Version) != strings.TrimSpace(binding.CPAVersion) {
 			return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(UpgradeErrorExternalTargetMoved,
-				fmt.Sprintf("the CPA at %s no longer matches the server fingerprint the External connect step recorded; nothing was connected and the operation did not advance", redactExternalAddress(baseURL)), nil))
+				fmt.Sprintf("the CPA at %s now reports version %q instead of the recorded %q; an in-place re-proof requires the same CPA build version, so nothing was connected and the operation did not advance", redactExternalAddress(baseURL), strings.TrimSpace(report.Version), strings.TrimSpace(binding.CPAVersion)), nil))
+		}
+		if !options.Reprove && serverFingerprint != binding.ServerFingerprint {
+			return ExternalConnectResult{}, externalConnectRefused(ctx, db, newUpgradeError(UpgradeErrorExternalTargetMoved,
+				fmt.Sprintf("the CPA at %s no longer matches the server fingerprint the External connect step recorded; pass --reprove if its configuration changed intentionally, and nothing was connected", redactExternalAddress(baseURL)), nil))
 		}
 	}
 
@@ -348,7 +355,7 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 		CPAVersion:        strings.TrimSpace(report.Version),
 		Support:           report.Support,
 		ClientKeys:        len(snapshot.Keys),
-		ObservedAtMS:      time.Now().UnixMilli(),
+		ObservedAtMS:      max(time.Now().UnixMilli(), binding.ObservedAtMS),
 	}
 	// The stage, the domains and the target they connected commit in one
 	// transaction, so the record can never claim the step without naming its

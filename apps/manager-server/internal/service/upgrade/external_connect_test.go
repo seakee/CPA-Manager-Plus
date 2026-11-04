@@ -24,8 +24,9 @@ type externalTarget struct {
 	options   ExternalConnectOptions
 	version   cpa.ExternalVersionReport
 	probErr   error
-	keys      []string
-	keyErr    error
+	keys         []string
+	configSHA256 string
+	keyErr       error
 	configErr error
 	modelErr  error
 	probes    int
@@ -39,7 +40,8 @@ func newExternalTarget(t *testing.T) *externalTarget {
 	target := &externalTarget{
 		copied:  copied,
 		version: cpa.ClassifyExternalVersion("v8.0.13"),
-		keys:    []string{"client-key-1"},
+		keys:         []string{"client-key-1"},
+		configSHA256: strings.Repeat("a", 64),
 	}
 	target.options = ExternalConnectOptions{
 		TargetRoot:    copied.target,
@@ -53,7 +55,7 @@ func newExternalTarget(t *testing.T) *externalTarget {
 			if target.keyErr != nil {
 				return cpa.ExternalKeySnapshot{}, target.keyErr
 			}
-			return cpa.ExternalKeySnapshot{Keys: target.keys, SourceSHA256: strings.Repeat("a", 64)}, nil
+			return cpa.ExternalKeySnapshot{Keys: target.keys, SourceSHA256: target.configSHA256}, nil
 		},
 		readV8Config: func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
 			if target.configErr != nil {

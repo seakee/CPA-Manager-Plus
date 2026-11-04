@@ -1291,28 +1291,56 @@ func TestVerifyCompletesAfterAnExternalConnectBackfill(t *testing.T) {
 func TestVerifyCompletesAfterAReproofedRotatedKey(t *testing.T) {
 	const rotated = "rotated-management-key"
 	fixture := newExternalVerifyFixture(t)
+	rotatedConfigSHA := strings.Repeat("b", 64)
+	rotatedKeys := []string{"client-key-1", "client-key-2"}
+	verifyWithRotatedConfig := func() (VerifyResult, error) {
+		opts := fixture.verifyOptions()
+		opts.readExternalKeys = func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
+			return cpa.ExternalKeySnapshot{Keys: rotatedKeys, SourceSHA256: rotatedConfigSHA}, nil
+		}
+		opts.readV8Config = func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
+			return cpa.V8ConfigObservation{BaseURL: verifyExternalAddress, ClientKeyCount: len(rotatedKeys)}, nil
+		}
+		return Verify(context.Background(), opts)
+	}
+	// Before key rotation, if config.yaml changed on the External CPA without
+	// --reprove, Verify refuses with binding drift and names --reprove.
+	if _, driftErr := verifyWithRotatedConfig(); !errors.Is(driftErr, ErrVerifyBindingDrifted) || !strings.Contains(driftErr.Error(), "--reprove") {
+		t.Fatalf("verify on unacknowledged config.yaml drift = %v, want ErrVerifyBindingDrifted naming --reprove", driftErr)
+	}
 	// The Manager follows the CPA's rotation; the binding still seals K1.
 	fixture.handManagerConnection(t, verifyExternalAddress, rotated)
-	_, verifyErr := fixture.verify(t)
+	_, verifyErr := verifyWithRotatedConfig()
 	if !errors.Is(verifyErr, ErrVerifyConnectionUnproven) {
 		t.Fatalf("verify after the rotation error = %v, want ErrVerifyConnectionUnproven", verifyErr)
 	}
 	if !strings.Contains(verifyErr.Error(), "--reprove") {
 		t.Fatalf("the refusal does not name the recovery: %v", verifyErr)
 	}
+	connectOpts := func(reprove bool) ExternalConnectOptions {
+		opts := externalConnectOptionsFor(fixture, rotated, reprove)
+		opts.readExternalKeys = func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
+			return cpa.ExternalKeySnapshot{Keys: rotatedKeys, SourceSHA256: rotatedConfigSHA}, nil
+		}
+		opts.readV8Config = func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
+			return cpa.V8ConfigObservation{BaseURL: verifyExternalAddress, ClientKeyCount: len(rotatedKeys)}, nil
+		}
+		return opts
+	}
 	// The default repeat refuses a credential the operation did not connect with.
-	if _, err := ExternalConnect(context.Background(), externalConnectOptionsFor(fixture, rotated, false)); !errors.Is(err, ErrExternalManagementRejected) {
+	if _, err := ExternalConnect(context.Background(), connectOpts(false)); !errors.Is(err, ErrExternalManagementRejected) {
 		t.Fatalf("the default repeat of a rotated key refused with %v", err)
 	}
-	// The explicit re-proof seals the key the CPA now answers with.
-	reproved, err := ExternalConnect(context.Background(), externalConnectOptionsFor(fixture, rotated, true))
+	// The explicit re-proof seals K2 and refreshes the config.yaml digest on the
+	// same CPA build so the next verification completes.
+	reproved, err := ExternalConnect(context.Background(), connectOpts(true))
 	if err != nil {
-		t.Fatalf("reprove the rotated key: %v", err)
+		t.Fatalf("reprove the rotated key and updated config.yaml: %v", err)
 	}
 	if reproved.AlreadyComplete {
 		t.Fatalf("the reproof answered from the recorded connection: %+v", reproved)
 	}
-	verified, err := fixture.verify(t)
+	verified, err := verifyWithRotatedConfig()
 	if err != nil {
 		t.Fatalf("verify after the reproof: %v", err)
 	}
