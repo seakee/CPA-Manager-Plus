@@ -67,6 +67,16 @@ func (r *Repository) ExternalBinding(ctx context.Context) (ExternalBinding, bool
 		from `+externalBindingTableName+` where id = 1`))
 }
 
+// ExternalBindingTx returns the recorded binding inside the caller's
+// transaction, so a step that decides on the target reads the row its own
+// statement will commit beside: a binding another writer replaced after the
+// caller's earlier read cannot authorize this write.
+func ExternalBindingTx(ctx context.Context, tx Tx) (ExternalBinding, bool, error) {
+	return readExternalBinding(ctx, tx.QueryRowContext(ctx,
+		`select base_url, identity, generation, server_fingerprint, cpa_version, support, client_keys, observed_at_ms
+		from `+externalBindingTableName+` where id = 1`))
+}
+
 func readExternalBinding(ctx context.Context, row *sql.Row) (ExternalBinding, bool, error) {
 	var binding ExternalBinding
 	err := row.Scan(&binding.BaseURL, &binding.Identity, &binding.Generation, &binding.ServerFingerprint,

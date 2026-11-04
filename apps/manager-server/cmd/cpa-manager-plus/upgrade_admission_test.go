@@ -46,9 +46,47 @@ func recordUpgradeStage(t *testing.T, databasePath, stage string) {
 	operation.SourceFingerprintBefore = "source-fingerprint"
 	operation.SourceFingerprintAfter = "source-fingerprint"
 	operation.BackupManifestSHA256 = "backup-manifest-sha256"
+	if operation.Stage == model.UpgradeStageComplete {
+		// The complete verdict is the gate's record, and it is never a bare
+		// stage: this fixture writes the same whole observation the gate would, so
+		// the startup reader sees the row a finished operation actually holds.
+		// RecordCompletionTx only continues an operation, and this fixture has
+		// already created one above.
+		verification := model.UpgradeVerification{
+			TargetMode:          model.UpgradeTargetExternal,
+			SourceFingerprint:   operation.SourceFingerprintAfter,
+			Domains:             fixtureDomains(operation.DomainsDone),
+			BindingIdentity:     "https://cpa.example",
+			BindingGeneration:   "https://cpa.example",
+			BindingObservedAtMS: 1_700_000_000_000,
+			ObservedAtMS:        1_700_000_000_001,
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin fixture completion: %v", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := upgradeoperation.RecordCompletionTx(ctx, tx, verification); err != nil {
+			t.Fatalf("record fixture completion: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit fixture completion: %v", err)
+		}
+		return
+	}
 	if err := repository.Put(ctx, operation); err != nil {
 		t.Fatalf("record fixture stage %q: %v", stage, err)
 	}
+}
+
+// fixtureDomains is the domain list a completion fixture names: the recorded
+// domains, never an invented set. The copy-in domain stands in when the fixture
+// created no operation beforehand.
+func fixtureDomains(domains []string) []string {
+	if len(domains) == 0 {
+		return []string{model.UpgradeDomainSourceCopy}
+	}
+	return append([]string{}, domains...)
 }
 
 // TestUnfinishedUpgradeServesOnlyTheUpgradeSurface is the startup boundary of

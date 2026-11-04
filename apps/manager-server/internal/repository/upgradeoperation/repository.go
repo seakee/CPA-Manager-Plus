@@ -47,6 +47,18 @@ var (
 	// A read-only reader cannot repair it and reports the store as the outdated
 	// one it is instead of as a malformed row.
 	ErrRollbackEvidenceMissing = errors.New("upgrade operation rolled_back row carries no evidence")
+	// ErrCompleteRequiresGate reports an attempt to write the complete stage
+	// through a generic writer. Completing is the one verdict the operation has,
+	// and it is only sound together with the verification evidence that justified
+	// it, so Put, Advance and AdvanceTx refuse the stage itself: there is one
+	// production writer of `complete`, and it is RecordCompletionTx.
+	ErrCompleteRequiresGate = errors.New("complete is written only by the upgrade verification gate")
+	// ErrVerificationEvidenceMissing reports a stored complete row that carries
+	// none of, or only part of, the verification it rests on. Every writer below
+	// refuses such a row before it reaches the table, so a store that holds one
+	// was written by a build that had no gate; a reader cannot re-prove it and
+	// says so instead of presenting the stage as an observation.
+	ErrVerificationEvidenceMissing = errors.New("upgrade operation complete row carries no verification evidence")
 )
 
 type Repository struct{ db *sql.DB }
@@ -55,7 +67,7 @@ func New(db *sql.DB) *Repository { return &Repository{db: db} }
 
 const selectColumns = `stage, last_forward_stage, revision, domains_done, source_kind, source_version, source_root,
 	source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
-	reconciliation, manual_items, error_code, error_detail,
+	reconciliation, verification, manual_items, error_code, error_detail,
 	rollback_image, rollback_image_source, rollback_image_form,
 	rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
 	created_at_ms, updated_at_ms`
@@ -67,7 +79,7 @@ const selectColumns = `stage, last_forward_stage, revision, domains_done, source
 var requiredColumns = []string{
 	"stage", "domains_done", "source_kind", "source_version", "source_root",
 	"source_fingerprint_before", "source_fingerprint_after", "backup_manifest_sha256",
-	"reconciliation", "manual_items", "error_code", "error_detail",
+	"reconciliation", "verification", "manual_items", "error_code", "error_detail",
 	"rollback_image", "rollback_image_source", "rollback_image_form",
 	"rollback_status_url", "rollback_source_fingerprint", "rollback_observed_at_ms",
 	"created_at_ms", "updated_at_ms",
@@ -118,7 +130,7 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	var (
 		op                                                    model.UpgradeOperation
 		stage, lastForwardStage                               string
-		domains, reconciliation                               string
+		domains, reconciliation, verification                 string
 		manualItems                                           string
 		sourceKind, sourceVersion, sourceRoot                 sql.NullString
 		fingerprintBefore, fingerprintAfter                   sql.NullString
@@ -129,7 +141,7 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 	)
 	err := row.Scan(&stage, &lastForwardStage, &op.Revision, &domains, &sourceKind, &sourceVersion, &sourceRoot,
 		&fingerprintBefore, &fingerprintAfter, &backupManifest,
-		&reconciliation, &manualItems, &errorCode, &errorDetail,
+		&reconciliation, &verification, &manualItems, &errorCode, &errorDetail,
 		&rollbackImage, &rollbackImageSource, &rollbackImageForm,
 		&rollbackStatusURL, &rollbackFpr, &rollbackObservedAtMS,
 		&op.CreatedAtMS, &op.UpdatedAtMS)
@@ -173,12 +185,26 @@ func scanOperation(row rowScanner) (model.UpgradeOperation, bool, error) {
 		return model.UpgradeOperation{}, false, fmt.Errorf("%w: reconciliation is not a JSON object", ErrInvalidRow)
 	}
 	op.Reconciliation = json.RawMessage(reconciliation)
+	// A verification block is a JSON object on disk, exactly like the
+	// reconciliation: an empty string is corruption, not "never verified".
+	if verification == "" {
+		return model.UpgradeOperation{}, false, fmt.Errorf("%w: verification is not a JSON object", ErrInvalidRow)
+	}
+	op.Verification = json.RawMessage(verification)
 	// The verdict and its evidence are written together, so a store that holds
 	// the terminal stage without a whole observation was written by a build that
 	// did not. Validate would report it as a malformed row; naming the case lets
 	// a reader report the store the operator can act on.
 	if op.Stage == model.UpgradeStageRolledBack && (op.Rollback == nil || !op.Rollback.Complete()) {
 		return model.UpgradeOperation{}, false, ErrRollbackEvidenceMissing
+	}
+	// The completion verdict is the same kind of record: the one writer stores
+	// the stage and the evidence in one statement, so a complete row without a
+	// whole verification was written by a build that had no gate.
+	if op.Stage == model.UpgradeStageComplete {
+		if evidence, err := op.VerificationEvidence(); err != nil || !evidence.Complete() {
+			return model.UpgradeOperation{}, false, ErrVerificationEvidenceMissing
+		}
 	}
 	// Validate the stored row before normalization. A duplicate domain, an
 	// unknown domain or a non-object reconciliation on disk is corruption the
@@ -237,36 +263,6 @@ func rowCreated(result sql.Result) (bool, error) {
 	return affected == 1, nil
 }
 
-// sameStoredContent reports whether proposed would store exactly the values the
-// completed row already holds. created_at_ms, updated_at_ms and revision are
-// repository-owned and checked separately, so they are not compared here.
-func sameStoredContent(stored, proposed model.UpgradeOperation) bool {
-	return stored.Stage == proposed.Stage &&
-		stored.LastForwardStage == proposed.LastForwardStage &&
-		slices.Equal(stored.DomainsDone, proposed.DomainsDone) &&
-		stored.SourceKind == proposed.SourceKind &&
-		stored.SourceVersion == proposed.SourceVersion &&
-		stored.SourceRoot == proposed.SourceRoot &&
-		stored.SourceFingerprintBefore == proposed.SourceFingerprintBefore &&
-		stored.SourceFingerprintAfter == proposed.SourceFingerprintAfter &&
-		stored.BackupManifestSHA256 == proposed.BackupManifestSHA256 &&
-		bytes.Equal(stored.Reconciliation, proposed.Reconciliation) &&
-		slices.Equal(stored.ManualItems, proposed.ManualItems) &&
-		stored.ErrorCode == proposed.ErrorCode &&
-		stored.ErrorDetail == proposed.ErrorDetail &&
-		sameRollbackEvidence(stored.Rollback, proposed.Rollback)
-}
-
-// sameRollbackEvidence reports whether both rows carry the same recorded
-// verdict evidence. The pointer itself must not be compared: two reads of the
-// same row allocate different values.
-func sameRollbackEvidence(stored, proposed *model.RollbackEvidence) bool {
-	if stored == nil || proposed == nil {
-		return stored == nil && proposed == nil
-	}
-	return *stored == *proposed
-}
-
 // Put replaces the single row exactly once per read. op.Revision is the
 // compare-and-set token: it must equal the revision Get returned, and a caller
 // whose revision is stale gets ErrConflict with the stored row untouched. A
@@ -279,10 +275,14 @@ func sameRollbackEvidence(stored, proposed *model.RollbackEvidence) bool {
 // repository owns created_at_ms, updated_at_ms and LastForwardStage: caller
 // proposals for those fields are dropped before validation.
 //
-// A stored complete row is frozen. The first write into complete (including
-// the write that creates the row) succeeds; afterwards an exactly identical
-// proposal succeeds without writing anything, and any other proposal returns
-// ErrStageRegression with the stored row untouched.
+// The complete stage is refused outright (ErrCompleteRequiresGate): it is the
+// verification gate's verdict and only RecordCompletionTx may store it, together
+// with the evidence it rests on. A proposal naming that stage is refused before
+// the row is read; every other proposal against a stored complete row is refused
+// as well (ErrStageRegression), with the row untouched, so the verdict is frozen
+// once recorded. The stored verification block is repository-owned like the
+// timestamps: a whole-row proposal carries it forward instead of erasing the
+// evidence.
 //
 // Precedence: typed input errors (unknown stage/domain, duplicate domain,
 // non-object reconciliation) are reported before the row is read; a stale
@@ -300,6 +300,12 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 		op.LastForwardStage = ""
 	} else {
 		op.LastForwardStage = op.Stage
+	}
+	// The one verdict the whole operation rests on is written by the gate, with
+	// the observation that justifies it. A generic stage write cannot produce
+	// that pair, so the stage itself is refused here, before the row is read.
+	if op.Stage == model.UpgradeStageComplete {
+		return fmt.Errorf("%w: record the verdict with RecordCompletionTx", ErrCompleteRequiresGate)
 	}
 	// This is one of the two paths that write a stage, so the terminal verdict's
 	// evidence invariant is enforced here, before the model's shape check turns
@@ -355,12 +361,9 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	if !created {
 		if current.Stage == model.UpgradeStageComplete {
 			// A stored complete row is frozen: it may not gain or lose a
-			// domain, and no observation may be replaced. An exactly identical
-			// repeat is the one allowed call, and it writes nothing at all,
-			// not even a revision or a timestamp.
-			if sameStoredContent(current, op) {
-				return nil
-			}
+			// domain, and no observation may be replaced. The verdict has
+			// already been recorded with its evidence by the gate, and nothing
+			// this writer stores could re-prove it.
 			return fmt.Errorf("%w: completed operation is frozen at %q", ErrStageRegression, current.Stage)
 		}
 		if err := requireTransition(current, op.Stage); err != nil {
@@ -376,6 +379,10 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	if op.CreatedAtMS == 0 {
 		op.CreatedAtMS = now
 	}
+	// The verification block is the gate's record, never a caller's. This write
+	// replaces every column, so the stored value is carried forward: erasing it
+	// would leave a Managed verify row with a stage no reader could re-check.
+	op.Verification = current.Verification
 	op.UpdatedAtMS = nextUpdatedAtMS(now, current)
 	op.Revision = current.Revision + 1
 	if op.Stage == model.UpgradeStageFailed || op.Stage == model.UpgradeStageRolledBack {
@@ -441,14 +448,18 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 			rollbackObservedAtMS = op.Rollback.ObservedAtMS
 		}
 	}
+	verification := op.Verification
+	if len(bytes.TrimSpace(verification)) == 0 {
+		verification = json.RawMessage("{}")
+	}
 	_, err = writer.ExecContext(ctx, `insert into `+tableName+` (
 		id, stage, last_forward_stage, revision, domains_done, source_kind, source_version, source_root,
 		source_fingerprint_before, source_fingerprint_after, backup_manifest_sha256,
-		reconciliation, manual_items, error_code, error_detail,
+		reconciliation, verification, manual_items, error_code, error_detail,
 		rollback_image, rollback_image_source, rollback_image_form,
 		rollback_status_url, rollback_source_fingerprint, rollback_observed_at_ms,
 		created_at_ms, updated_at_ms
-	) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	on conflict(id) do update set
 		stage = excluded.stage,
 		last_forward_stage = excluded.last_forward_stage,
@@ -461,6 +472,7 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 		source_fingerprint_after = excluded.source_fingerprint_after,
 		backup_manifest_sha256 = excluded.backup_manifest_sha256,
 		reconciliation = excluded.reconciliation,
+		verification = excluded.verification,
 		manual_items = excluded.manual_items,
 		error_code = excluded.error_code,
 		error_detail = excluded.error_detail,
@@ -475,7 +487,7 @@ func writeOperation(ctx context.Context, writer operationWriter, op model.Upgrad
 		string(op.Stage), string(op.LastForwardStage), op.Revision, string(domains), nullString(op.SourceKind), nullString(op.SourceVersion),
 		nullString(op.SourceRoot),
 		nullString(op.SourceFingerprintBefore), nullString(op.SourceFingerprintAfter),
-		nullString(op.BackupManifestSHA256), string(op.Reconciliation), string(manualItems),
+		nullString(op.BackupManifestSHA256), string(op.Reconciliation), string(verification), string(manualItems),
 		nullString(op.ErrorCode), nullString(op.ErrorDetail),
 		rollbackImage, rollbackImageSource, rollbackImageForm,
 		rollbackStatusURL, rollbackFingerprint, rollbackObservedAtMS,
@@ -523,10 +535,11 @@ func nextUpdatedAtMS(nowMS int64, stored model.UpgradeOperation) int64 {
 // updated_at_ms only moves forward (see nextUpdatedAtMS) and the row is
 // revalidated inside the transaction, so advancing a row written by a clock that
 // ran ahead still leaves a row Get accepts.
-// A stored complete row is frozen: the transition that reaches complete (or
-// creates the row there) commits once, and a later Advance may only repeat that
-// exact call, which writes nothing. Adding a domain or moving to another stage
-// returns ErrStageRegression and leaves the row untouched.
+// A stage argument naming complete is refused (ErrCompleteRequiresGate):
+// completing is the verification gate's verdict, and only RecordCompletionTx may
+// store it with the evidence it rests on. Every advance against a stored complete
+// row is refused as well: the verdict is frozen, so ErrStageRegression comes back
+// and the row is left untouched.
 // Advancing does not imply that later stages are authorized.
 func (r *Repository) Advance(ctx context.Context, domain string, stage model.UpgradeStage) (model.UpgradeOperation, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -562,6 +575,12 @@ func AdvanceTx(ctx context.Context, tx Tx, domain string, stage model.UpgradeSta
 	if stage == model.UpgradeStageRolledBack {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: record the verdict with its evidence instead", ErrRollbackEvidenceRequired)
 	}
+	// Completion is the same kind of record as the rollback verdict: the stage
+	// is only sound together with the verification observation, and Advance
+	// carries none.
+	if stage == model.UpgradeStageComplete {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: record the verdict with RecordCompletionTx", ErrCompleteRequiresGate)
+	}
 	now := time.Now().UnixMilli()
 	lastForwardStage := stage
 	if stage == model.UpgradeStageFailed {
@@ -590,13 +609,9 @@ func AdvanceTx(ctx context.Context, tx Tx, domain string, stage model.UpgradeSta
 	highWater := current.HighWater()
 	if !created {
 		if current.Stage == model.UpgradeStageComplete {
-			// A stored complete row is frozen. The first transition into
-			// complete (including the one that creates the row) already ran
-			// above; from here on only an identical repeat is accepted, and it
-			// records nothing: no domain, no revision, no timestamp.
-			if stage == model.UpgradeStageComplete && (domain == "" || current.HasDomain(domain)) {
-				return current, nil
-			}
+			// A stored complete row is frozen: its domains, timestamps and
+			// evidence were accepted by the gate, and no later step may add to
+			// or re-describe the completed operation.
 			return current, fmt.Errorf("%w: completed operation is frozen at %q", ErrStageRegression, current.Stage)
 		}
 		if err := requireTransition(current, stage); err != nil {
@@ -846,6 +861,176 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 		return err
 	}
 	return revisionGuard(result, expectedRevision)
+}
+
+// RecordErrorTx records the typed refusal inside the caller's transaction, so a
+// step that cannot finish commits the reason beside the position it recorded.
+// Only the error columns, the revision and the update time move, and the stamp is
+// computed from the row as this transaction sees it. It is the transactional
+// form of RecordError and the only writer of these columns besides ClearErrorTx.
+func RecordErrorTx(ctx context.Context, tx Tx, code, detail string) (model.UpgradeOperation, error) {
+	if strings.TrimSpace(code) == "" {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: the refusal code is empty", ErrInvalidRow)
+	}
+	now := time.Now().UnixMilli()
+	current, found, err := scanOperation(tx.QueryRowContext(ctx,
+		`select `+selectColumns+` from `+tableName+` where id = 1`))
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
+	}
+	current.ErrorCode = code
+	current.ErrorDetail = strings.TrimSpace(detail)
+	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
+	expectedRevision := current.Revision
+	current.Revision = expectedRevision + 1
+	if err := current.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set error_code = ?, error_detail = ?, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		current.ErrorCode, nullString(current.ErrorDetail), current.Revision, current.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return current, nil
+}
+
+// lockOperationRow takes the write lock on the single row before any gate
+// comparison reads it, so the state this transaction judges is the state its
+// statement replaces. The placeholder carries no stage and never creates an
+// operation: a gate only ever continues one that a step already recorded.
+func lockOperationRow(ctx context.Context, tx Tx, nowMS int64) error {
+	inserted, err := tx.ExecContext(ctx, `insert into `+tableName+`
+		(id, stage, created_at_ms, updated_at_ms) values (1, ?, ?, ?)
+		on conflict(id) do nothing`, "", nowMS, nowMS)
+	if err != nil {
+		return err
+	}
+	if created, err := inserted.RowsAffected(); err == nil && created > 0 {
+		return fmt.Errorf("%w: no recorded operation to verify", ErrInvalidRow)
+	}
+	return nil
+}
+
+// RecordCompletionTx is the one production writer of the complete stage. It
+// stores the verification evidence and the stage in one statement, behind the
+// revision this transaction read, so a store can never hold `complete` without
+// the observation that justified it and a crash between the two is impossible.
+//
+// Put, Advance and AdvanceTx refuse this stage (ErrCompleteRequiresGate), so
+// every other writer reaches a complete row only to find it frozen. The
+// verification is validated here, before the row is read, so an incomplete
+// observation is an input error rather than a stored claim. A repeated call with
+// the same evidence writes nothing: the stage and its record are already on the
+// row, and a second write would only move the timestamp of a verdict that did
+// not change.
+func RecordCompletionTx(ctx context.Context, tx Tx, verification model.UpgradeVerification) (model.UpgradeOperation, error) {
+	return recordVerificationTx(ctx, tx, model.UpgradeStageComplete, verification, "", "", nil)
+}
+
+// RecordWaitingVerificationTx records the verify position a Managed operation
+// reaches: the evidence this run proved, the typed reason this build may not
+// promote its authority, and the operator instructions that say what remains.
+// Nothing is cleared — the manual items and the refusals earlier steps recorded
+// stay exactly as they were — because a position that is waiting is not a
+// position that succeeded.
+//
+// It is not a completion: the stage is verify, which the operation can leave
+// only towards complete, and only RecordCompletionTx may write that.
+func RecordWaitingVerificationTx(ctx context.Context, tx Tx, verification model.UpgradeVerification, code, detail string, manualItems []string) (model.UpgradeOperation, error) {
+	if strings.TrimSpace(code) == "" {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: the verify reason code is empty", ErrInvalidRow)
+	}
+	return recordVerificationTx(ctx, tx, model.UpgradeStageVerify, verification, code, detail, manualItems)
+}
+
+// recordVerificationTx is the shared body of the two gate writers: one
+// statement, one revision, one timestamp, and an idempotent repeat that writes
+// nothing at all.
+func recordVerificationTx(ctx context.Context, tx Tx, stage model.UpgradeStage, verification model.UpgradeVerification,
+	code, detail string, manualItems []string) (model.UpgradeOperation, error) {
+	if stage != model.UpgradeStageComplete && stage != model.UpgradeStageVerify {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: the gate records only verify and complete", ErrUnknownStage)
+	}
+	if err := verification.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	payload, err := json.Marshal(verification)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	now := time.Now().UnixMilli()
+	if err := lockOperationRow(ctx, tx, now); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	current, found, err := GetTx(ctx, tx)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if !found {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: no recorded operation to verify", ErrInvalidRow)
+	}
+	if current.Stage == model.UpgradeStageComplete {
+		return current, fmt.Errorf("%w: completed operation is frozen at %q", ErrStageRegression, current.Stage)
+	}
+	if err := requireTransition(current, stage); err != nil {
+		return current, err
+	}
+	next := current
+	added := []string{}
+	for _, item := range manualItems {
+		line := strings.TrimSpace(item)
+		if line == "" || slices.Contains(next.ManualItems, line) || slices.Contains(added, line) {
+			continue
+		}
+		added = append(added, line)
+	}
+	// The repeat of the verdict already on the row stores nothing: not the
+	// evidence, not a revision, not a timestamp. A run only observes again, so
+	// the observation time is the one field a repeat may change; every other
+	// field says what was proven and a difference there is a new record.
+	if current.Stage == stage && current.ErrorCode == code &&
+		current.ErrorDetail == strings.TrimSpace(detail) && len(added) == 0 {
+		if stored, decodeErr := current.VerificationEvidence(); decodeErr == nil && stored.SameVerdict(verification) {
+			return current, nil
+		}
+	}
+	next.Stage = stage
+	next.LastForwardStage = stage
+	next.Verification = payload
+	next.ErrorCode = code
+	next.ErrorDetail = strings.TrimSpace(detail)
+	next.ManualItems = append(next.ManualItems, added...)
+	next.UpdatedAtMS = nextUpdatedAtMS(now, next)
+	expectedRevision := next.Revision
+	next.Revision = expectedRevision + 1
+	if err := next.Validate(); err != nil {
+		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
+	}
+	manual, err := json.Marshal(next.ManualItems)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	result, err := tx.ExecContext(ctx, `update `+tableName+`
+		set stage = ?, last_forward_stage = ?, verification = ?, manual_items = ?,
+			error_code = ?, error_detail = ?, revision = ?, updated_at_ms = ?
+		where id = 1 and revision = ?`,
+		string(next.Stage), string(next.LastForwardStage), string(payload), string(manual),
+		nullString(next.ErrorCode), nullString(next.ErrorDetail), next.Revision, next.UpdatedAtMS, expectedRevision)
+	if err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	if err := revisionGuard(result, expectedRevision); err != nil {
+		return model.UpgradeOperation{}, err
+	}
+	return next, nil
 }
 
 // requireVerdictEvidence keeps the terminal verdict and its observation

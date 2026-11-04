@@ -65,6 +65,46 @@ func recordedCopyIn(t *testing.T, repository *upgradeoperation.Repository) model
 	return stored
 }
 
+// completionEvidence is a whole verification observation: every field the
+// complete verdict rests on. Nothing here is a stage claim — a test that stores
+// `complete` stores this beside it, exactly as the gate does.
+func completionEvidence(domains ...string) model.UpgradeVerification {
+	if len(domains) == 0 {
+		domains = []string{model.UpgradeDomainSourceCopy}
+	}
+	return model.UpgradeVerification{
+		TargetMode:          model.UpgradeTargetExternal,
+		SourceFingerprint:   "sha256:source-manifest",
+		Domains:             domains,
+		BindingIdentity:     "https://cpa.example",
+		BindingGeneration:   "https://cpa.example",
+		BindingObservedAtMS: 1_700_000_000_000,
+		ObservedAtMS:        1_700_000_000_001,
+	}
+}
+
+// recordCompletion drives the one production path into the complete stage: the
+// gate's evidence and the verdict in a single transaction. A test that needs a
+// completed row asks for one here instead of writing the stage itself, which the
+// repository refuses.
+func recordCompletion(t *testing.T, db *sql.DB, verification model.UpgradeVerification) model.UpgradeOperation {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin the completion transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	operation, err := upgradeoperation.RecordCompletionTx(ctx, tx, verification)
+	if err != nil {
+		t.Fatalf("record the completion verdict: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit the completion verdict: %v", err)
+	}
+	return operation
+}
+
 // TestAdvanceAfterAClockRollbackKeepsTheRowReadable pins the repository-owned
 // updated_at_ms. A row whose recorded time lies ahead of the wall clock — the host
 // clock moved back, or the store was restored from a backup written later — used
@@ -174,19 +214,25 @@ func TestAdvanceRejectsStageRegressionWithoutChangingTheRow(t *testing.T) {
 }
 
 func TestAdvanceRefusesToLeaveCompleted(t *testing.T) {
-	repository, _ := newRepository(t)
+	repository, db := newRepository(t)
 	ctx := context.Background()
-	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
-		t.Fatalf("advance complete: %v", err)
+	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("advance verify: %v", err)
 	}
+	recordCompletion(t, db, completionEvidence(model.UpgradeDomainSourceCopy))
 	before, _, err := repository.Get(ctx)
 	if err != nil {
 		t.Fatalf("get completed row: %v", err)
 	}
-	for _, stage := range []model.UpgradeStage{model.UpgradeStageVerify, model.UpgradeStageFailed, model.UpgradeStageComplete} {
+	for _, stage := range []model.UpgradeStage{model.UpgradeStageVerify, model.UpgradeStageFailed} {
 		if _, err := repository.Advance(ctx, model.UpgradeDomainCoverage, stage); !errors.Is(err, upgradeoperation.ErrStageRegression) {
 			t.Fatalf("advance complete -> %q error = %v, want ErrStageRegression", stage, err)
 		}
+	}
+	// Naming the verdict again is the stage-level refusal, not a stage move: a
+	// generic advance carries no verification, so it could only claim the stage.
+	if _, err := repository.Advance(ctx, model.UpgradeDomainCoverage, model.UpgradeStageComplete); !errors.Is(err, upgradeoperation.ErrCompleteRequiresGate) {
+		t.Fatalf("advance into complete error = %v, want ErrCompleteRequiresGate", err)
 	}
 	stored, _, err := repository.Get(ctx)
 	if err != nil {
@@ -846,11 +892,12 @@ func TestPutResumesFailedAtOrAboveHighWater(t *testing.T) {
 // TestPutRefusesToLeaveCompleted closes the other end of R3: complete is
 // terminal for both write APIs, including complete -> failed.
 func TestPutRefusesToLeaveCompleted(t *testing.T) {
-	repository, _ := newRepository(t)
+	repository, db := newRepository(t)
 	ctx := context.Background()
-	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
-		t.Fatalf("advance complete: %v", err)
+	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("advance verify: %v", err)
 	}
+	recordCompletion(t, db, completionEvidence(model.UpgradeDomainSourceCopy))
 	complete, _, err := repository.Get(ctx)
 	if err != nil {
 		t.Fatalf("get complete row: %v", err)
@@ -861,6 +908,11 @@ func TestPutRefusesToLeaveCompleted(t *testing.T) {
 		if err := repository.Put(ctx, candidate); !errors.Is(err, upgradeoperation.ErrStageRegression) {
 			t.Fatalf("put complete -> %q error = %v, want ErrStageRegression", stage, err)
 		}
+	}
+	// A whole-row proposal that names the verdict is refused before the row is
+	// read: Put carries no verification, so it could only claim the stage.
+	if err := repository.Put(ctx, complete); !errors.Is(err, upgradeoperation.ErrCompleteRequiresGate) {
+		t.Fatalf("put complete error = %v, want ErrCompleteRequiresGate", err)
 	}
 	after, _, err := repository.Get(ctx)
 	if err != nil {
@@ -1007,29 +1059,22 @@ func TestAdvanceRepeatsDuplicateDomainIdempotently(t *testing.T) {
 	}
 }
 
-// TestAdvanceIntoCompleteThenFreezesTheRow is the R10 regression for Advance:
-// complete was compared after the same-stage shortcut, so a completed row could
-// still append a domain, move its revision and rewrite its timestamp. The first
-// entry into complete succeeds; afterwards only an exactly identical repeat is
-// accepted, and it writes nothing.
-func TestAdvanceIntoCompleteThenFreezesTheRow(t *testing.T) {
-	repository, _ := newRepository(t)
+// TestAdvanceCannotRewindACompletedRow is the R10 regression for Advance, kept
+// under the gate rule: complete is no longer reachable from Advance at all, and a
+// stored completed row is frozen. Appending a domain, parking the row, or naming
+// the verdict again leaves the row exactly as the gate recorded it.
+func TestAdvanceCannotRewindACompletedRow(t *testing.T) {
+	repository, db := newRepository(t)
 	ctx := context.Background()
 	if _, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageVerify); err != nil {
 		t.Fatalf("advance verify: %v", err)
 	}
-	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
-		t.Fatalf("first advance into complete: %v", err)
-	}
-	complete, found, err := repository.Get(ctx)
-	if err != nil || !found {
-		t.Fatalf("get completed row: found=%t err=%v", found, err)
-	}
+	complete := recordCompletion(t, db, completionEvidence(model.UpgradeDomainUsageEvents))
 	if complete.Stage != model.UpgradeStageComplete {
 		t.Fatalf("stage = %q, want complete", complete.Stage)
 	}
-	if _, err := repository.Advance(ctx, model.UpgradeDomainCoverage, model.UpgradeStageComplete); !errors.Is(err, upgradeoperation.ErrStageRegression) {
-		t.Fatalf("advance complete -> complete with a new domain error = %v, want ErrStageRegression", err)
+	if _, err := repository.Advance(ctx, model.UpgradeDomainCoverage, model.UpgradeStageComplete); !errors.Is(err, upgradeoperation.ErrCompleteRequiresGate) {
+		t.Fatalf("advance complete with a new domain error = %v, want ErrCompleteRequiresGate", err)
 	}
 	assertStoredOperation(t, repository, complete)
 
@@ -1038,53 +1083,65 @@ func TestAdvanceIntoCompleteThenFreezesTheRow(t *testing.T) {
 	}
 	assertStoredOperation(t, repository, complete)
 
-	repeat, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageComplete)
-	if err != nil {
-		t.Fatalf("identical repeated advance into complete: %v", err)
-	}
-	if !reflect.DeepEqual(complete, repeat) {
-		t.Fatalf("identical repeat changed the completed row:\n want %+v\n got  %+v", complete, repeat)
-	}
-	assertStoredOperation(t, repository, complete)
-
-	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
-		t.Fatalf("identical completed advance without a domain: %v", err)
+	// The repeat is refused too: the verdict and its evidence are one record
+	// written by the gate, and a generic advance has no evidence to repeat.
+	if _, err := repository.Advance(ctx, model.UpgradeDomainUsageEvents, model.UpgradeStageComplete); !errors.Is(err, upgradeoperation.ErrCompleteRequiresGate) {
+		t.Fatalf("repeated advance into complete error = %v, want ErrCompleteRequiresGate", err)
 	}
 	assertStoredOperation(t, repository, complete)
 }
 
-// TestFirstAdvanceIntoCompleteCreatesTheRow keeps the other half of the R10
-// contract: refusal applies to a stored complete row, not to the write that
-// creates the operation in complete.
-func TestFirstAdvanceIntoCompleteCreatesTheRow(t *testing.T) {
-	repository, _ := newRepository(t)
-	created, err := repository.Advance(context.Background(), "", model.UpgradeStageComplete)
+// TestGenericWritersRefuseCompleteBeforeTheRowExists closes the creation side:
+// there is no write, first or repeated, that creates an operation in complete.
+// The stage is only sound with the verification the gate records beside it, so
+// both generic writers refuse it before the row is read and nothing is created.
+func TestGenericWritersRefuseCompleteBeforeTheRowExists(t *testing.T) {
+	repository, db := newRepository(t)
+	ctx := context.Background()
+	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); !errors.Is(err, upgradeoperation.ErrCompleteRequiresGate) {
+		t.Fatalf("first advance into complete error = %v, want ErrCompleteRequiresGate", err)
+	}
+	if err := repository.Put(ctx, model.UpgradeOperation{
+		Stage:                model.UpgradeStageComplete,
+		DomainsDone:          []string{model.UpgradeDomainCoverage},
+		BackupManifestSHA256: "sha256:first",
+		Reconciliation:       json.RawMessage(`{"checked":true}`),
+		ManualItems:          []string{"hand over the copied database"},
+	}); !errors.Is(err, upgradeoperation.ErrCompleteRequiresGate) {
+		t.Fatalf("first put into complete error = %v, want ErrCompleteRequiresGate", err)
+	}
+	if _, found, err := repository.Get(ctx); err != nil || found {
+		t.Fatalf("a refused completion left a row behind: found=%t err=%v", found, err)
+	}
+	// The gate itself continues an operation, it never creates one: a store with
+	// no recorded operation has nothing to complete.
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatalf("first advance into complete: %v", err)
+		t.Fatalf("begin the completion transaction: %v", err)
 	}
-	if created.Stage != model.UpgradeStageComplete || created.LastForwardStage != model.UpgradeStageComplete {
-		t.Fatalf("created row = %q high-water %q, want complete/complete", created.Stage, created.LastForwardStage)
+	defer func() { _ = tx.Rollback() }()
+	if _, err := upgradeoperation.RecordCompletionTx(ctx, tx, completionEvidence()); !errors.Is(err, upgradeoperation.ErrInvalidRow) {
+		t.Fatalf("completion on an empty store error = %v, want ErrInvalidRow", err)
 	}
-	if created.Revision != 1 {
-		t.Fatalf("created row revision = %d, want 1", created.Revision)
-	}
-	assertStoredOperation(t, repository, created)
 }
 
 // TestPutCannotChangeAStoredCompleteRow is the R10 regression for Put: a
 // same-stage Put replaced observations on a completed row because the stage
-// comparison accepted complete -> complete.
+// comparison accepted complete -> complete. The verdict is frozen now, and the
+// stage itself is refused before the row is even read.
 func TestPutCannotChangeAStoredCompleteRow(t *testing.T) {
-	repository, _ := newRepository(t)
+	repository, db := newRepository(t)
 	ctx := context.Background()
-	if _, err := repository.Advance(ctx, "", model.UpgradeStageComplete); err != nil {
-		t.Fatalf("advance complete: %v", err)
+	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("advance verify: %v", err)
 	}
+	recordCompletion(t, db, completionEvidence(model.UpgradeDomainSourceCopy))
 	complete, found, err := repository.Get(ctx)
 	if err != nil || !found {
 		t.Fatalf("get completed row: found=%t err=%v", found, err)
 	}
 	changedManifest := complete
+	changedManifest.Stage = model.UpgradeStageVerify
 	changedManifest.BackupManifestSHA256 = "sha256:later"
 	changedManifest.ManualItems = []string{"confirm the archive copy"}
 	if err := repository.Put(ctx, changedManifest); !errors.Is(err, upgradeoperation.ErrStageRegression) {
@@ -1092,48 +1149,73 @@ func TestPutCannotChangeAStoredCompleteRow(t *testing.T) {
 	}
 	assertStoredOperation(t, repository, complete)
 
-	changedDomains := complete
+	changedDomains := changedManifest
 	changedDomains.DomainsDone = []string{model.UpgradeDomainCoverage}
 	if err := repository.Put(ctx, changedDomains); !errors.Is(err, upgradeoperation.ErrStageRegression) {
 		t.Fatalf("put adding a domain to a completed row error = %v, want ErrStageRegression", err)
 	}
 	assertStoredOperation(t, repository, complete)
 
-	// An exactly identical repeat is the one accepted call, and it must not
-	// bump the revision or the timestamp.
-	if err := repository.Put(ctx, complete); err != nil {
-		t.Fatalf("identical put on a completed row: %v", err)
+	// A proposal that keeps the verdict's stage is refused by the stage rule
+	// before the row is read: Put carries no verification, so it could only
+	// claim the stage again.
+	if err := repository.Put(ctx, complete); !errors.Is(err, upgradeoperation.ErrCompleteRequiresGate) {
+		t.Fatalf("identical put on a completed row error = %v, want ErrCompleteRequiresGate", err)
 	}
 	assertStoredOperation(t, repository, complete)
 }
 
-// TestPutIntoCompleteCreatesTheRowOnce covers the creation side of the R10 Put
-// rule: the first write may store complete, the next may only repeat it.
-func TestPutIntoCompleteCreatesTheRowOnce(t *testing.T) {
-	repository, _ := newRepository(t)
+// TestPutCarriesTheRecordedVerificationForward keeps the evidence the gate wrote
+// out of every generic writer's reach. A whole-row Put replaces every column, so
+// a caller that proposed its own verification block — or none — would leave a
+// verify row with a record no reader could re-check.
+func TestPutCarriesTheRecordedVerificationForward(t *testing.T) {
+	repository, db := newRepository(t)
 	ctx := context.Background()
-	if err := repository.Put(ctx, model.UpgradeOperation{
-		Stage:                model.UpgradeStageComplete,
-		DomainsDone:          []string{model.UpgradeDomainCoverage},
-		BackupManifestSHA256: "sha256:first",
-		Reconciliation:       json.RawMessage(`{"checked":true}`),
-		ManualItems:          []string{"hand over the copied database"},
-	}); err != nil {
-		t.Fatalf("first put into complete: %v", err)
+	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCPAImport); err != nil {
+		t.Fatalf("advance cpa_import: %v", err)
 	}
-	complete, found, err := repository.Get(ctx)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin the verification transaction: %v", err)
+	}
+	waiting := completionEvidence(model.UpgradeDomainSourceCopy)
+	if _, err := upgradeoperation.RecordWaitingVerificationTx(ctx, tx, waiting,
+		"upgrade_verify_waiting_for_repin", "wait for the re-pin", []string{"manual: keep this"}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("record the waiting position: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit the waiting position: %v", err)
+	}
+	recorded, found, err := repository.Get(ctx)
 	if err != nil || !found {
-		t.Fatalf("get completed row: found=%t err=%v", found, err)
+		t.Fatalf("get the waiting row: found=%t err=%v", found, err)
 	}
-	if complete.Stage != model.UpgradeStageComplete || !complete.HasDomain(model.UpgradeDomainCoverage) {
-		t.Fatalf("completed row = %q %v", complete.Stage, complete.DomainsDone)
+	if recorded.Stage != model.UpgradeStageVerify {
+		t.Fatalf("stage = %q, want verify", recorded.Stage)
 	}
-	changed := complete
-	changed.BackupManifestSHA256 = "sha256:second"
-	if err := repository.Put(ctx, changed); !errors.Is(err, upgradeoperation.ErrStageRegression) {
-		t.Fatalf("second put into complete error = %v, want ErrStageRegression", err)
+
+	proposal := recorded
+	proposal.Verification = json.RawMessage(`{"targetMode":"managed"}`)
+	proposal.ManualItems = append(append([]string{}, recorded.ManualItems...), "manual: a second instruction")
+	if err := repository.Put(ctx, proposal); err != nil {
+		t.Fatalf("put on the verify row: %v", err)
 	}
-	assertStoredOperation(t, repository, complete)
+	stored, found, err := repository.Get(ctx)
+	if err != nil || !found {
+		t.Fatalf("get the verify row: found=%t err=%v", found, err)
+	}
+	evidence, err := stored.VerificationEvidence()
+	if err != nil {
+		t.Fatalf("decode the stored verification: %v", err)
+	}
+	if !evidence.SameVerdict(waiting) {
+		t.Fatalf("generic write replaced the recorded verification: %+v", evidence)
+	}
+	if len(stored.ManualItems) != 2 {
+		t.Fatalf("manual items = %v, want the recorded line plus the new one", stored.ManualItems)
+	}
 }
 
 // TestGetRejectsCorruptedStoredJSON is the R11 regression: defaults belong to

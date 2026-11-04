@@ -1,9 +1,11 @@
 package model
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // UpgradeStage is the durable position of the single v2 Upgrade operation.
@@ -169,6 +171,112 @@ func (e RollbackEvidence) Complete() bool {
 		e.StatusURL != "" && e.SourceFingerprint != "" && e.ObservedAtMS > 0
 }
 
+// Upgrade target modes. The mode is a fact about where the v2 installation's CPA
+// lives, not a claim a caller may make: External means the CPA behind the
+// recorded connection is administered by the owner, Managed means this Manager
+// owns it. The verification step records which one it proved, so a reader can
+// tell an External completion from a Managed one without re-deriving it.
+const (
+	UpgradeTargetExternal = "external"
+	UpgradeTargetManaged  = "managed"
+)
+
+func validUpgradeTargetMode(mode string) bool {
+	return mode == UpgradeTargetExternal || mode == UpgradeTargetManaged
+}
+
+// UpgradeVerification is the observation the complete verdict rests on. The
+// operation's last two stages are the only ones a verification authorizes, and
+// this value is what lets a later reader re-check the verdict instead of trusting
+// the stage: it names the source volume that was observed unchanged around the
+// write, the operation domains that were proven done, and — for an External
+// target — the binding the connection was recorded under.
+//
+// It is written whole or not at all, in the same statement as the stage it
+// authorizes, so a store can never hold `complete` without the proof.
+type UpgradeVerification struct {
+	// TargetMode is UpgradeTargetExternal or UpgradeTargetManaged.
+	TargetMode string `json:"targetMode"`
+	// SourceFingerprint is the manifest digest of the 1.x source observed while
+	// the read-only source ownership fence was held. It is the same digest the
+	// recorded copy-in and reconciliation name.
+	SourceFingerprint string `json:"sourceFingerprint"`
+	// Domains is the operation domain set this run proved done: the domains the
+	// reconciliation established plus the ones the target step recorded. It never
+	// names a domain the source could not provide.
+	Domains []string `json:"domains"`
+	// BindingIdentity, BindingGeneration and BindingObservedAtMS are the External
+	// target binding this run confirmed. They are empty for a Managed target,
+	// which has no External connection to bind.
+	BindingIdentity     string `json:"bindingIdentity,omitempty"`
+	BindingGeneration   string `json:"bindingGeneration,omitempty"`
+	BindingObservedAtMS int64  `json:"bindingObservedAtMs,omitempty"`
+	// ObservedAtMS is when the verification observed the source and the target.
+	ObservedAtMS int64 `json:"observedAtMs"`
+}
+
+// Validate reports whether the verification names everything a verdict rests on.
+func (v UpgradeVerification) Validate() error {
+	if !validUpgradeTargetMode(v.TargetMode) {
+		return fmt.Errorf("upgrade verification target mode %q is not supported", v.TargetMode)
+	}
+	if strings.TrimSpace(v.SourceFingerprint) == "" {
+		return errors.New("upgrade verification names no source fingerprint")
+	}
+	if len(v.Domains) == 0 {
+		return errors.New("upgrade verification names no completed domain")
+	}
+	for index, domain := range v.Domains {
+		if !ValidUpgradeDomain(domain) {
+			return fmt.Errorf("upgrade verification domain %q is not supported", domain)
+		}
+		for _, earlier := range v.Domains[:index] {
+			if earlier == domain {
+				return fmt.Errorf("upgrade verification domain %q is named twice", domain)
+			}
+		}
+	}
+	if v.ObservedAtMS <= 0 {
+		return errors.New("upgrade verification names no observation time")
+	}
+	if v.TargetMode == UpgradeTargetExternal {
+		if strings.TrimSpace(v.BindingIdentity) == "" || strings.TrimSpace(v.BindingGeneration) == "" {
+			return errors.New("an External upgrade verification names no target binding")
+		}
+		if v.BindingObservedAtMS <= 0 {
+			return errors.New("an External upgrade verification names no binding observation time")
+		}
+	}
+	return nil
+}
+
+// Complete reports whether the verification holds everything a verdict rests on.
+func (v UpgradeVerification) Complete() bool { return v.Validate() == nil }
+
+// SameVerdict reports whether two verifications prove the same thing. The
+// observation time is the only field left out: it says when this run looked,
+// while every other field says what it found. Re-running the verification of an
+// unchanged operation therefore re-proves the recorded verdict and stores
+// nothing, and only a verdict that actually changed is a new record.
+func (v UpgradeVerification) SameVerdict(other UpgradeVerification) bool {
+	if v.TargetMode != other.TargetMode || v.SourceFingerprint != other.SourceFingerprint {
+		return false
+	}
+	if v.BindingIdentity != other.BindingIdentity || v.BindingGeneration != other.BindingGeneration ||
+		v.BindingObservedAtMS != other.BindingObservedAtMS {
+		return false
+	}
+	if len(v.Domains) != len(other.Domains) {
+		return false
+	}
+	for index := range v.Domains {
+		if v.Domains[index] != other.Domains[index] {
+			return false
+		}
+	}
+	return true
+}
+
 // UpgradeOperation is the whole persistent state of the v2 Upgrade operation:
 // one row, one operation, no history rows. It carries observations (source
 // kind/version/fingerprints, backup manifest, manual items) and never an
@@ -194,9 +302,14 @@ type UpgradeOperation struct {
 	SourceFingerprintAfter  string          `json:"sourceFingerprintAfter,omitempty"`
 	BackupManifestSHA256    string          `json:"backupManifestSha256,omitempty"`
 	Reconciliation          json.RawMessage `json:"reconciliation"`
-	ManualItems             []string        `json:"manualItems"`
-	ErrorCode               string          `json:"errorCode,omitempty"`
-	ErrorDetail             string          `json:"errorDetail,omitempty"`
+	// Verification is the observation the verify/complete verdict rests on. It
+	// is written only by the completion gate, in the same statement as the stage
+	// it authorizes, and is `{}` for every step before it. The repository owns
+	// this column on every other write, so no generic write can erase it.
+	Verification json.RawMessage `json:"verification,omitempty"`
+	ManualItems  []string        `json:"manualItems"`
+	ErrorCode    string          `json:"errorCode,omitempty"`
+	ErrorDetail  string          `json:"errorDetail,omitempty"`
 	// Revision is the row's compare-and-set token. Put only commits when the
 	// caller's Revision equals the stored one, and every committed write stores
 	// one more, so two writes in the same millisecond stay distinguishable.
@@ -222,6 +335,23 @@ func (o *UpgradeOperation) Normalize() {
 	if len(o.Reconciliation) == 0 {
 		o.Reconciliation = json.RawMessage("{}")
 	}
+	if len(o.Verification) == 0 {
+		o.Verification = json.RawMessage("{}")
+	}
+}
+
+// VerificationEvidence decodes the recorded verification block. A row that
+// carries none is reported instead of decoded into the zero value, so a caller
+// cannot mistake "never verified" for "verified nothing".
+func (o UpgradeOperation) VerificationEvidence() (UpgradeVerification, error) {
+	var evidence UpgradeVerification
+	if len(bytes.TrimSpace(o.Verification)) == 0 {
+		return evidence, errors.New("the upgrade operation carries no verification evidence")
+	}
+	if err := json.Unmarshal(o.Verification, &evidence); err != nil {
+		return evidence, fmt.Errorf("decode the upgrade verification: %w", err)
+	}
+	return evidence, nil
 }
 
 func (o *UpgradeOperation) HasDomain(domain string) bool {
@@ -322,6 +452,26 @@ func (o UpgradeOperation) Validate() error {
 		var object map[string]json.RawMessage
 		if err := json.Unmarshal(o.Reconciliation, &object); err != nil || object == nil {
 			return errors.New("upgrade operation reconciliation must be a JSON object")
+		}
+	}
+	if len(o.Verification) > 0 {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(o.Verification, &object); err != nil || object == nil {
+			return errors.New("upgrade operation verification must be a JSON object")
+		}
+	}
+	// The complete verdict is the one stage whose whole justification is this
+	// block, so it is refused without it. No generic writer can reach the stage
+	// (the repository refuses it), and the gate writes both in one statement, so
+	// a complete row without evidence is a store written by a build that predates
+	// the gate and is reported as the outdated one it is by every reader.
+	if o.Stage == UpgradeStageComplete {
+		evidence, err := o.VerificationEvidence()
+		if err != nil {
+			return errors.New("a complete upgrade operation must carry its verification evidence")
+		}
+		if err := evidence.Validate(); err != nil {
+			return fmt.Errorf("complete upgrade operation verification is incomplete: %w", err)
 		}
 	}
 	// A rolled_back operation is terminal, so it can never be re-proven. It must

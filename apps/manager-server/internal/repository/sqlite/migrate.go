@@ -1260,6 +1260,7 @@ func Migrate(db *sql.DB) error {
 			source_fingerprint_after text,
 			backup_manifest_sha256 text,
 			reconciliation text not null default '{}',
+			verification text not null default '{}',
 			manual_items text not null default '[]',
 			error_code text,
 			error_detail text,
@@ -1398,6 +1399,11 @@ func ensureUpgradeOperationColumns(db *sql.DB) error {
 	for _, column := range []struct{ name, ddl string }{
 		{"revision", "revision integer not null default 0"},
 		{"last_forward_stage", "last_forward_stage text not null default ''"},
+		// The verification the completion gate records beside the stage it
+		// authorizes. A row that predates the gate keeps an empty object: no
+		// build may present a `complete` row as verified without it, and the
+		// gate is the only writer that fills it.
+		{"verification", "verification text not null default '{}'"},
 	} {
 		found, err := tableHasColumn(tx, "upgrade_operations", column.name)
 		if err != nil {
