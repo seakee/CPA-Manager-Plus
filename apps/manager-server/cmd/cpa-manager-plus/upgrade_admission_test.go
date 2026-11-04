@@ -20,6 +20,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 // admissionAdminKey is the copied store's administrator credential: a real
@@ -47,6 +48,26 @@ func seedCopiedStore(t *testing.T, databasePath string) {
 	if err := db.Close(); err != nil {
 		t.Fatalf("close copied store: %v", err)
 	}
+}
+
+// admissionFixtureManagementKey is the External management key the completed
+// fixture proves and the Manager itself stores.
+const admissionFixtureManagementKey = "fixture-management-key"
+
+// admissionFixtureProtector loads the Manager data key beside the fixture store,
+// creating it when the fixture has none: a completed store always holds the key
+// its sealed secrets were written with.
+func admissionFixtureProtector(t *testing.T, databasePath string) *security.Protector {
+	t.Helper()
+	key, _, err := security.LoadOrCreateDataKey("", filepath.Join(filepath.Dir(databasePath), "data.key"))
+	if err != nil {
+		t.Fatalf("load the fixture data key: %v", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		t.Fatalf("initialize the fixture protector: %v", err)
+	}
+	return protector
 }
 
 // recordUpgradeStage writes the single Operation row into a v2 store, which is
@@ -115,16 +136,33 @@ func recordUpgradeStage(t *testing.T, databasePath, stage string) {
 			BindingObservedAtMS: 1_700_000_000_000,
 			ObservedAtMS:        1_700_000_000_001,
 		}
+		// The verdict rests on a credential, so the fixture records the one the
+		// connect step proves and the Manager itself stores: the completed store a
+		// real operation leaves always holds both.
+		protector := admissionFixtureProtector(t, databasePath)
+		sealedKey, err := protector.ProtectString(admissionFixtureManagementKey)
+		if err != nil {
+			t.Fatalf("seal the fixture management key: %v", err)
+		}
+		if err := store.New(db, protector).SaveManagerConfig(ctx, model.ManagerConfig{
+			CPAConnection: model.ManagerCPAConnectionConfig{
+				CPABaseURL:    "https://cpa.example",
+				ManagementKey: admissionFixtureManagementKey,
+			},
+		}); err != nil {
+			t.Fatalf("store the fixture CPA connection: %v", err)
+		}
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			t.Fatalf("begin fixture completion: %v", err)
 		}
 		defer func() { _ = tx.Rollback() }()
 		if err := upgradeoperation.RecordExternalBindingTx(ctx, tx, upgradeoperation.ExternalBinding{
-			BaseURL:      "https://cpa.example",
-			Identity:     verification.BindingIdentity,
-			Generation:   verification.BindingGeneration,
-			ObservedAtMS: verification.BindingObservedAtMS,
+			BaseURL:       "https://cpa.example",
+			Identity:      verification.BindingIdentity,
+			Generation:    verification.BindingGeneration,
+			ManagementKey: sealedKey,
+			ObservedAtMS:  verification.BindingObservedAtMS,
 		}); err != nil {
 			t.Fatalf("record fixture binding: %v", err)
 		}
@@ -302,28 +340,26 @@ func TestCompletedUpgradeStartsTheNormalProduct(t *testing.T) {
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		logs := process.logs.String()
-		if strings.Contains(logs, "bootstrap manager server:") || strings.Contains(logs, "serving only the Upgrade surface") {
+		if strings.Contains(logs, "administrator authority loaded") ||
+			strings.Contains(logs, "bootstrap manager server:") ||
+			strings.Contains(logs, "serving only the Upgrade surface") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	logs := process.logs.String()
 	if strings.Contains(logs, "serving only the Upgrade surface") {
+		process.stop(t)
 		t.Fatalf("a completed Upgrade still served the Upgrade surface:\n%s", logs)
 	}
-	// The product bootstrap replaces the Upgrade surface. With no host-controlled
-	// initialize run yet it stops on exactly that step, which is the same answer
-	// every admitted store gets; the point here is that the Upgrade surface is no
-	// longer the branch startup took.
-	if !strings.Contains(logs, "bootstrap manager server:") {
+	// The product bootstrap replaces the Upgrade surface. The completed store
+	// carries the CPA connection the verdict proved — a real one always does — so
+	// the bootstrap finishes and the process is admitted to the writable product
+	// instead of stopping on the host-controlled initialize step an empty store
+	// meets. The point here is the branch startup took, not where it then stopped.
+	if !strings.Contains(logs, "administrator authority loaded") {
+		process.stop(t)
 		t.Fatalf("a completed Upgrade did not enter the product bootstrap:\n%s", logs)
 	}
-	// The process leaves the upgrade-only branch, so it ends after the bootstrap
-	// refusal; its exit belongs to that verdict, not to this test.
-	select {
-	case <-process.done:
-	case <-time.After(20 * time.Second):
-		process.stop(t)
-		t.Fatal("the product bootstrap did not return after a completed Upgrade")
-	}
+	process.stop(t)
 }

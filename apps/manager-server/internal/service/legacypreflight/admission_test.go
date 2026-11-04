@@ -8,8 +8,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 // upgradeAdmissionFixture creates a stopped 1.x source: the carried-forward
@@ -110,6 +113,39 @@ func recordFixtureStage(t *testing.T, databasePath, stage string) {
 	recordFixtureOperation(t, databasePath, stage, fullCopyInEvidence)
 }
 
+// fixtureManagementKey is the External management key a completed fixture's
+// binding proves and the Manager's own connection stores. It has the shape the
+// production validator accepts.
+const fixtureManagementKey = "fixture-management-key"
+
+// fixtureProtector loads the Manager data key beside the fixture store, creating
+// it when the fixture has none. The completed row's secret is sealed with this
+// key, exactly as the External connect step seals the one it proved.
+func fixtureProtector(t *testing.T, databasePath string) *security.Protector {
+	t.Helper()
+	key, _, err := security.LoadOrCreateDataKey("", filepath.Join(filepath.Dir(databasePath), "data.key"))
+	if err != nil {
+		t.Fatalf("load the fixture data key: %v", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		t.Fatalf("initialize the fixture protector: %v", err)
+	}
+	return protector
+}
+
+// recordFixtureConnection stores the CPA connection the Manager itself resolves.
+// The admission compares the completed binding against it, so a fixture without
+// one describes an install the Manager could not administer.
+func recordFixtureConnection(t *testing.T, db *sql.DB, protector *security.Protector, baseURL, managementKey string) {
+	t.Helper()
+	if err := store.New(db, protector).SaveManagerConfig(context.Background(), model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{CPABaseURL: baseURL, ManagementKey: managementKey},
+	}); err != nil {
+		t.Fatalf("store the fixture CPA connection: %v", err)
+	}
+}
+
 func recordFixtureOperation(t *testing.T, databasePath, stage string, evidence recordEvidence) {
 	t.Helper()
 	db, err := sql.Open("sqlite", databasePath)
@@ -154,13 +190,23 @@ func recordFixtureOperation(t *testing.T, databasePath, stage string, evidence r
 		return
 	}
 	binding := evidence.recordedBinding()
+	protector := fixtureProtector(t, databasePath)
+	sealedKey, err := protector.ProtectString(fixtureManagementKey)
+	if err != nil {
+		t.Fatalf("seal the fixture management key: %v", err)
+	}
+	// The completed row is admitted only against the connection the Manager
+	// itself stores, so the fixture records the same credential the binding
+	// proved.
+	recordFixtureConnection(t, db, protector, binding.baseURL, fixtureManagementKey)
 	if _, err := db.Exec(`insert into upgrade_external_connect (
-		id, base_url, identity, generation, observed_at_ms
-	) values (1, ?, ?, ?, ?)
+		id, base_url, identity, generation, observed_at_ms, management_key
+	) values (1, ?, ?, ?, ?, ?)
 	on conflict(id) do update set
 		base_url = excluded.base_url, identity = excluded.identity,
-		generation = excluded.generation, observed_at_ms = excluded.observed_at_ms`,
-		binding.baseURL, binding.identity, binding.generation, binding.observedAtMS); err != nil {
+		generation = excluded.generation, observed_at_ms = excluded.observed_at_ms,
+		management_key = excluded.management_key`,
+		binding.baseURL, binding.identity, binding.generation, binding.observedAtMS, sealedKey); err != nil {
 		t.Fatalf("record fixture binding: %v", err)
 	}
 }
@@ -646,7 +692,48 @@ type completedBinding struct {
 	identity     string
 	generation   string
 	observedAtMS int64
+	// secret selects how the binding's management secret is written. The zero
+	// value is the record a real connect step leaves.
+	secret bindingSecret
+	// managerSecret is the secret the Manager's own CPA connection holds. An
+	// empty value stores the key the binding proves.
+	managerSecret string
 }
+
+// bindingSecret is how a completed fixture writes the binding's management
+// secret. Each value is a shape a store can really hold, and each is one the
+// admission has to refuse unless it is the sealed, decryptable, matching one.
+type bindingSecret int
+
+const (
+	// bindingSecretSealed seals the proved key with the target data key.
+	bindingSecretSealed bindingSecret = iota
+	// bindingSecretMissing writes the empty value a row recorded before the
+	// column existed carries after the migration backfills it.
+	bindingSecretMissing
+	// bindingSecretPlaintext writes the key without an envelope, which
+	// UnprotectString would otherwise hand back as if it were readable.
+	bindingSecretPlaintext
+	// bindingSecretColumnAbsent writes the pre-R2 table: no column at all.
+	bindingSecretColumnAbsent
+	// bindingSecretForeignKey seals the key with a data key this Manager does
+	// not hold.
+	bindingSecretForeignKey
+)
+
+// preR2BindingSchema is the External connect table a build that predates the
+// sealed management secret created.
+const preR2BindingSchema = `create table upgrade_external_connect (
+	id integer primary key check(id = 1),
+	base_url text not null,
+	identity text not null,
+	generation text not null,
+	server_fingerprint text not null default '',
+	cpa_version text not null default '',
+	support text not null default '',
+	client_keys integer not null default 0,
+	observed_at_ms integer not null
+)`
 
 const completedVerification = `{"targetMode":"external","sourceFingerprint":"source-fingerprint",` +
 	`"domains":["source_copy","cpa_config","identity"],` +
@@ -735,11 +822,56 @@ func (f completedOperationFixture) record(t *testing.T) {
 	if f.binding == nil {
 		return
 	}
+	protector := fixtureProtector(t, f.paths.Database)
+	if f.binding.secret == bindingSecretColumnAbsent {
+		for _, statement := range []string{`drop table upgrade_external_connect`, preR2BindingSchema} {
+			if _, err := db.Exec(statement); err != nil {
+				t.Fatalf("write the pre-R2 binding schema: %v", err)
+			}
+		}
+	}
+	managerSecret := f.binding.managerSecret
+	if managerSecret == "" {
+		managerSecret = fixtureManagementKey
+	}
+	recordFixtureConnection(t, db, protector, f.binding.baseURL, managerSecret)
+	if f.binding.secret == bindingSecretColumnAbsent {
+		if _, err := db.Exec(`insert into upgrade_external_connect (
+			id, base_url, identity, generation, observed_at_ms
+		) values (1, ?, ?, ?, ?)`,
+			f.binding.baseURL, f.binding.identity, f.binding.generation, f.binding.observedAtMS); err != nil {
+			t.Fatalf("record the pre-R2 binding: %v", err)
+		}
+		return
+	}
+	stored, err := f.binding.storedSecret(protector)
+	if err != nil {
+		t.Fatalf("seal the fixture binding secret: %v", err)
+	}
 	if _, err := db.Exec(`insert into upgrade_external_connect (
-		id, base_url, identity, generation, observed_at_ms
-	) values (1, ?, ?, ?, ?)`,
-		f.binding.baseURL, f.binding.identity, f.binding.generation, f.binding.observedAtMS); err != nil {
+		id, base_url, identity, generation, observed_at_ms, management_key
+	) values (1, ?, ?, ?, ?, ?)`,
+		f.binding.baseURL, f.binding.identity, f.binding.generation, f.binding.observedAtMS, stored); err != nil {
 		t.Fatalf("record the completed fixture binding: %v", err)
+	}
+}
+
+// storedSecret is the value the fixture writes into the binding's
+// management_key column, exactly as the shape under test would hold it.
+func (b completedBinding) storedSecret(protector *security.Protector) (string, error) {
+	switch b.secret {
+	case bindingSecretMissing:
+		return "", nil
+	case bindingSecretPlaintext:
+		return fixtureManagementKey, nil
+	case bindingSecretForeignKey:
+		foreign, err := security.NewProtector([]byte("a-data-key-this-manager-does-not-hold"))
+		if err != nil {
+			return "", err
+		}
+		return foreign.ProtectString(fixtureManagementKey)
+	default:
+		return protector.ProtectString(fixtureManagementKey)
 	}
 }
 
@@ -817,5 +949,66 @@ func TestCompletedOperationAdmissionRequiresTheGateEvidence(t *testing.T) {
 				t.Fatalf("a complete row with %s was admitted to startup", test.name)
 			}
 		})
+	}
+}
+
+// TestCompletedOperationAdmissionRequiresTheProvedCredential is the F1
+// regression: the R1 evidence check proves the binding, never the credential the
+// connect step proved against it.
+//
+// A store that reached `complete` before the connect step sealed its secret
+// carries a full verification and an empty `management_key`, and the admission
+// used to unlock the writable product on it. The restarted Manager then met 401
+// against the CPA the operation called complete. Every shape below is one such a
+// real store can hold, and each has to be refused before startup.
+func TestCompletedOperationAdmissionRequiresTheProvedCredential(t *testing.T) {
+	ctx := context.Background()
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*completedOperationFixture)
+	}{
+		{name: "no sealed management secret", mutate: func(f *completedOperationFixture) {
+			f.binding.secret = bindingSecretMissing
+		}},
+		{name: "a binding table without the secret column", mutate: func(f *completedOperationFixture) {
+			f.binding.secret = bindingSecretColumnAbsent
+		}},
+		{name: "a plaintext management secret", mutate: func(f *completedOperationFixture) {
+			f.binding.secret = bindingSecretPlaintext
+		}},
+		{name: "a secret sealed with another data key", mutate: func(f *completedOperationFixture) {
+			f.binding.secret = bindingSecretForeignKey
+		}},
+		{name: "a Manager connection holding another key", mutate: func(f *completedOperationFixture) {
+			f.binding.managerSecret = "another-management-key"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCompletedOperationFixture(t)
+			test.mutate(&fixture)
+			fixture.record(t)
+			if stage, err := (DatabaseUpgradeAdmission{DatabasePath: fixture.paths.Database}).Admitted(ctx); err == nil {
+				t.Fatalf("a complete row with %s was read as %q", test.name, stage)
+			}
+			refused, err := AdmitStartup(ctx, fixture.paths, Options{
+				UpgradeAdmission: DatabaseUpgradeAdmission{DatabasePath: fixture.paths.Database},
+			})
+			if err == nil {
+				_ = refused.Close()
+				t.Fatalf("a complete row with %s was admitted to startup", test.name)
+			}
+		})
+	}
+
+	// A completed store with no data key beside it cannot decrypt the secret it
+	// carries, so the row is refused rather than admitted on the envelope shape.
+	noKey := newCompletedOperationFixture(t)
+	noKey.record(t)
+	if err := os.Remove(filepath.Join(filepath.Dir(noKey.paths.Database), "data.key")); err != nil {
+		t.Fatalf("remove the fixture data key: %v", err)
+	}
+	if stage, err := (DatabaseUpgradeAdmission{DatabasePath: noKey.paths.Database}).Admitted(ctx); err == nil {
+		t.Fatalf("a complete row without its data key was read as %q", stage)
 	}
 }

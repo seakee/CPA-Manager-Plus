@@ -1186,3 +1186,55 @@ func TestVerifyRefusesAnExternalKeyTheCPANoLongerAccepts(t *testing.T) {
 	}
 	assertVerifyRefusalWroteNothing(t, fixture, before)
 }
+
+// TestVerifyRefusesACompletedRowWithoutTheProvedCredential is the F1 regression
+// on the read side: the completed path re-checked the verification against the
+// row, but never against the credential the Manager itself holds.
+//
+// A store that reached `complete` before the connect step sealed its secret
+// carries a full verdict and an empty management_key, and a repeat of the gate
+// reported it as a finished install. Every shape below is one such a real store
+// can hold, and each is refused without writing.
+func TestVerifyRefusesACompletedRowWithoutTheProvedCredential(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, fixture *verifyFixture)
+	}{
+		{name: "no sealed management secret", mutate: func(t *testing.T, fixture *verifyFixture) {
+			execTarget(t, fixture.databasePath(), `update upgrade_external_connect set management_key = '' where id = 1`)
+		}},
+		{name: "a plaintext management secret", mutate: func(t *testing.T, fixture *verifyFixture) {
+			execTarget(t, fixture.databasePath(), `update upgrade_external_connect set management_key = '`+externalTestKey+`' where id = 1`)
+		}},
+		{name: "a secret sealed with another data key", mutate: func(t *testing.T, fixture *verifyFixture) {
+			foreign, err := security.NewProtector([]byte("a-data-key-this-manager-does-not-hold"))
+			if err != nil {
+				t.Fatalf("initialize the foreign protector: %v", err)
+			}
+			sealed, err := foreign.ProtectString(externalTestKey)
+			if err != nil {
+				t.Fatalf("seal the secret with another data key: %v", err)
+			}
+			execTarget(t, fixture.databasePath(), `update upgrade_external_connect set management_key = '`+sealed+`' where id = 1`)
+		}},
+		{name: "a Manager connection holding another key", mutate: func(t *testing.T, fixture *verifyFixture) {
+			fixture.handManagerConnection(t, verifyExternalAddress, "stale-management-key")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newExternalVerifyFixture(t)
+			if _, err := fixture.verify(t); err != nil {
+				t.Fatalf("complete the fixture operation: %v", err)
+			}
+			test.mutate(t, fixture)
+			before, beforeBinding := snapshotCompletedTarget(t, fixture.databasePath())
+			if _, err := fixture.verify(t); !errors.Is(err, ErrVerifyNotApplicable) {
+				t.Fatalf("verify on a completed row with %s error = %v, want ErrVerifyNotApplicable", test.name, err)
+			}
+			after, afterBinding := snapshotCompletedTarget(t, fixture.databasePath())
+			if after != before || afterBinding != beforeBinding {
+				t.Fatalf("a refused re-verification wrote the store: %q/%q -> %q/%q", before, beforeBinding, after, afterBinding)
+			}
+		})
+	}
+}

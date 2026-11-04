@@ -44,8 +44,10 @@ package upgrade
 // instead of a verification that skipped the volume. A store another process
 // owns is a typed refusal, never a second writer. A rolled_back operation is
 // terminal and is never resumed. Repeating the call on a completed operation
-// returns the recorded verdict without writing, and nothing in this file rewrites
-// the recorded source observations or the target binding.
+// returns the recorded verdict without writing — but only after re-checking that
+// verdict against the credential and target the Manager itself stores, because a
+// completion this installation cannot administer is not a finished install. Nothing
+// in this file rewrites the recorded source observations or the target binding.
 
 import (
 	"context"
@@ -166,11 +168,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	// touches neither the store nor the source. The product is admitted normally
 	// from here, so it must not need the 1.x volume to answer this call.
 	if recorded.Stage == model.UpgradeStageComplete {
-		binding, hasBinding, err := readVerifyBinding(ctx, paths.Database)
-		if err != nil {
-			return VerifyResult{}, err
-		}
-		return completedVerifyResult(recorded, binding, hasBinding)
+		return completedVerifyResultFromStore(ctx, paths, recorded)
 	}
 	if err := verifyEntry(recorded); err != nil {
 		return VerifyResult{}, err
@@ -214,7 +212,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		if err != nil {
 			return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
 		}
-		return completedVerifyResult(recorded, binding, hasBinding)
+		return completedVerifyResultForStore(ctx, db, paths, recorded, binding, hasBinding)
 	}
 	if err := verifyEntry(recorded); err != nil {
 		return VerifyResult{}, err
@@ -286,7 +284,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		if err != nil {
 			return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
 		}
-		return completedVerifyResult(current, binding, hasBinding)
+		return completedVerifyResultForStore(ctx, db, paths, current, binding, hasBinding)
 	}
 	if err := verifyEntry(current); err != nil {
 		return VerifyResult{}, err
@@ -384,10 +382,10 @@ func verifyWaitingManualItem() string {
 //
 // The stage is not the verdict on its own. This reader re-checks the record the
 // gate wrote against the row it was written to: an External target, the source
-// volume the copy-in observed, every domain the verdict names, and the External
-// binding the verdict bound. A row that fails any of them is a store whose
-// `complete` label no gate ever proved, and it is reported as unusable instead of
-// as a finished install.
+// volume the copy-in observed, every domain the verdict names, the External
+// binding the verdict bound, and the sealed credential that binding proved. A row
+// that fails any of them is a store whose `complete` label no gate ever proved,
+// and it is reported as unusable instead of as a finished install.
 func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeoperation.ExternalBinding, hasBinding bool) (VerifyResult, error) {
 	evidence, err := recorded.VerificationEvidence()
 	if err != nil {
@@ -433,6 +431,14 @@ func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeopera
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
 			"the recorded operation is complete but carries no External connect binding, so the target its verdict names cannot be checked; restore the v2 store from its backup", nil)
 	}
+	if !security.IsValidProtectedEnvelope(strings.TrimSpace(binding.ManagementKey)) {
+		// The verdict proves the binding, never the credential the connect step
+		// proved against it. A row completed before that secret was sealed carries
+		// none, and UnprotectString would hand an unsealed value back as if it
+		// were readable, so the shape is checked before anything decrypts it.
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but its External binding carries no sealed management secret, so the credential the Manager would present was never proved; restore the v2 store from its backup", nil)
+	}
 	if evidence.BindingIdentity != binding.Identity ||
 		evidence.BindingGeneration != binding.Generation ||
 		evidence.BindingObservedAtMS != binding.ObservedAtMS {
@@ -442,26 +448,71 @@ func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeopera
 	return verifyResult(recorded, evidence.TargetMode, true), nil
 }
 
-// readVerifyBinding reads the recorded External binding without opening the store
-// for writes: a completed operation is answered from a read-only handle, exactly
-// like the operation row it is checked against. A store whose connect step never
-// ran, or one written before the binding table existed, simply has none.
-func readVerifyBinding(ctx context.Context, databasePath string) (upgradeoperation.ExternalBinding, bool, error) {
+// openVerifyStoreReadOnly opens the v2 store through the read-only snapshot a
+// completed operation is answered from. It never creates or migrates it.
+func openVerifyStoreReadOnly(databasePath string) (*sql.DB, error) {
 	if _, err := os.Lstat(databasePath); err != nil {
-		return upgradeoperation.ExternalBinding{}, false, err
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", readOnlySnapshotName(databasePath))
 	if err != nil {
-		return upgradeoperation.ExternalBinding{}, false, err
+		return nil, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	defer func() { _ = db.Close() }()
+	return db, nil
+}
+
+// readExternalBindingFrom reads the recorded External binding from an open
+// connection. A store whose connect step never ran, or one written before the
+// binding table existed, simply has none.
+func readExternalBindingFrom(ctx context.Context, db *sql.DB) (upgradeoperation.ExternalBinding, bool, error) {
 	present, err := tablePresent(ctx, db, "upgrade_external_connect")
 	if err != nil || !present {
 		return upgradeoperation.ExternalBinding{}, false, err
 	}
 	return upgradeoperation.New(db).ExternalBinding(ctx)
+}
+
+// completedVerifyResultFromStore answers a completed operation from a read-only
+// handle: the stored verdict, then the target the Manager itself stores.
+func completedVerifyResultFromStore(ctx context.Context, paths targetPaths, recorded model.UpgradeOperation) (VerifyResult, error) {
+	db, err := openVerifyStoreReadOnly(paths.Database)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	defer func() { _ = db.Close() }()
+	binding, hasBinding, err := readExternalBindingFrom(ctx, db)
+	if err != nil {
+		return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)
+	}
+	return completedVerifyResultForStore(ctx, db, paths, recorded, binding, hasBinding)
+}
+
+// completedVerifyResultForStore is the completed-row contract: the stored
+// verdict first, then the credential and target it rests on.
+//
+// A repeat of the gate on a completed operation used to report the verdict from
+// the row alone, so a row that reached `complete` before the connect step sealed
+// its secret was answered as a finished install even though the Manager would
+// meet 401 on its next start. The stored connection is therefore compared here
+// too, from the same read-only handle: nothing is written either way.
+func completedVerifyResultForStore(ctx context.Context, db *sql.DB, paths targetPaths, recorded model.UpgradeOperation,
+	binding upgradeoperation.ExternalBinding, hasBinding bool) (VerifyResult, error) {
+	result, err := completedVerifyResult(recorded, binding, hasBinding)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	target, err := verifyTargetConfiguration(ctx, db, paths, model.UpgradeTargetExternal)
+	if err != nil {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but the CPA connection its verdict rests on cannot be read, so its verdict cannot be reported; restore the v2 store from its backup", err)
+	}
+	if err := requireVerifyTarget(model.UpgradeTargetExternal, binding, target); err != nil {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but the credential its verdict proved is not the one the Manager stores, so its verdict cannot be reported; restore the v2 store from its backup", err)
+	}
+	return result, nil
 }
 
 // verifyRecordReadError maps the one stored-row failure the gate cannot report as
@@ -674,6 +725,13 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 		if strings.TrimSpace(binding.ManagementKey) == "" {
 			return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 				"the External connect record carries no proved management secret, so the credential the Manager would present cannot be confirmed; run the External connect step again with this build, and nothing was written", nil)
+		}
+		if !security.IsValidProtectedEnvelope(strings.TrimSpace(binding.ManagementKey)) {
+			// UnprotectString returns a value that is not an envelope as-is, so a
+			// plaintext secret would compare equal to the Manager's own plaintext
+			// and be reported as a proved credential. Only a sealed value is one.
+			return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+				"the External connect record does not carry a sealed management secret, so the credential the Manager would present cannot be confirmed; run the External connect step again with this build, and nothing was written", nil)
 		}
 		if target.protector == nil {
 			return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,

@@ -13,8 +13,18 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
+
+// actionFixtureAddress is the External CPA address the completed fixture
+// records, and actionFixtureIdentity is the identity the connect step derives
+// from it: the binding names the CPA by that digest, never by the address.
+const actionFixtureAddress = "https://cpa.example"
+
+var actionFixtureIdentity = freshkeyapply.ExternalIdentity(actionFixtureAddress)
 
 // actionVerification is a whole verification observation: every field the verdict
 // rests on. It is the value the completion gate writes beside the stage, on the
@@ -27,11 +37,31 @@ func actionVerification(domains ...string) model.UpgradeVerification {
 		TargetMode:          model.UpgradeTargetExternal,
 		SourceFingerprint:   "fingerprint-after-secret-value",
 		Domains:             domains,
-		BindingIdentity:     "https://cpa.example",
-		BindingGeneration:   "https://cpa.example",
+		BindingIdentity:     actionFixtureIdentity,
+		BindingGeneration:   actionFixtureIdentity,
 		BindingObservedAtMS: 1_700_000_000_000,
 		ObservedAtMS:        1_700_000_000_001,
 	}
+}
+
+// actionFixtureManagementKey is the External management key the completed
+// fixture proves and the Manager itself stores.
+const actionFixtureManagementKey = "fixture-management-key"
+
+// actionFixtureProtector loads the Manager data key beside the fixture store,
+// creating it when the fixture has none: a completed store always holds the key
+// its sealed secrets were written with.
+func actionFixtureProtector(t *testing.T, database string) *security.Protector {
+	t.Helper()
+	key, _, err := security.LoadOrCreateDataKey("", filepath.Join(filepath.Dir(database), "data.key"))
+	if err != nil {
+		t.Fatalf("load the fixture data key: %v", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		t.Fatalf("initialize the fixture protector: %v", err)
+	}
+	return protector
 }
 
 // recordCompletedOperation leaves the row a finished operation holds: the stage
@@ -57,17 +87,35 @@ func recordCompletedOperation(t *testing.T, database string, domains ...string) 
 			t.Fatalf("record the fixture domain %q: %v", domain, err)
 		}
 	}
+	verification := actionVerification(domains...)
+	// A completed verdict rests on a credential: the fixture seals the one the
+	// connect step proves and stores the same one in the Manager's own connection,
+	// which is the record a real completed operation leaves. Both writes happen
+	// before the completion transaction, which holds the write lock.
+	protector := actionFixtureProtector(t, database)
+	sealedKey, err := protector.ProtectString(actionFixtureManagementKey)
+	if err != nil {
+		t.Fatalf("seal the fixture management key: %v", err)
+	}
+	if err := store.New(db, protector).SaveManagerConfig(ctx, model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{
+			CPABaseURL:    actionFixtureAddress,
+			ManagementKey: actionFixtureManagementKey,
+		},
+	}); err != nil {
+		t.Fatalf("store the fixture CPA connection: %v", err)
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("begin the fixture completion: %v", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	verification := actionVerification(domains...)
 	if err := upgradeoperation.RecordExternalBindingTx(ctx, tx, upgradeoperation.ExternalBinding{
-		BaseURL:      "https://cpa.example",
-		Identity:     verification.BindingIdentity,
-		Generation:   verification.BindingGeneration,
-		ObservedAtMS: verification.BindingObservedAtMS,
+		BaseURL:       actionFixtureAddress,
+		Identity:      verification.BindingIdentity,
+		Generation:    verification.BindingGeneration,
+		ManagementKey: sealedKey,
+		ObservedAtMS:  verification.BindingObservedAtMS,
 	}); err != nil {
 		t.Fatalf("record the fixture binding: %v", err)
 	}

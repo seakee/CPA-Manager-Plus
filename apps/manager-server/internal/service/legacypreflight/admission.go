@@ -21,8 +21,13 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 // Source kinds. Only fresh and native-v2 are admitted on their own; a 1.x
@@ -282,6 +287,15 @@ func readRecordedUpgrade(ctx context.Context, path string) (upgradeRecord, bool,
 			return upgradeRecord{}, false, err
 		}
 		record.Binding = binding
+		// The verification the gate writes names a binding, but it never carries
+		// the credential that binding proved. That credential is the sealed
+		// secret on the row, and a completed store is admitted only when this
+		// Manager can still read it and still holds it. A row recorded before
+		// that column existed carries none, and it is refused here instead of
+		// unlocking a product whose next start would meet 401.
+		if err := requireSealedBindingAuthority(ctx, db, path, record); err != nil {
+			return upgradeRecord{}, false, err
+		}
 	}
 	return record, true, nil
 }
@@ -290,7 +304,15 @@ func readRecordedUpgrade(ctx context.Context, path string) (upgradeRecord, bool,
 // pre-gate schema is not an error: the missing evidence is what the admission
 // then refuses, not a read failure a process could mistake for "no record".
 func recordedUpgradeColumns(ctx context.Context, db *sql.DB) (map[string]bool, error) {
-	rows, err := db.QueryContext(ctx, `pragma table_info(upgrade_operations)`)
+	return recordedTableColumns(ctx, db, "upgrade_operations")
+}
+
+// recordedTableColumns reports the columns a stored table has. A reader selects
+// only what the writing build created, so a store that predates a column answers
+// "the column is absent" instead of failing on SQL. The table name is an
+// internal constant at every call site, never caller input.
+func recordedTableColumns(ctx context.Context, db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `pragma table_info("`+table+`")`)
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +341,10 @@ func recordedUpgradeColumns(ctx context.Context, db *sql.DB) (map[string]bool, e
 // readRecordedExternalBinding reads the External connect row the completion
 // evidence has to name. A store whose connect step never ran, or one written
 // before the table existed, has no binding at all.
+//
+// The management secret is read only when the writing build created its column:
+// a binding recorded before that column existed carries no sealed credential,
+// and the admission refuses it instead of treating the empty value as proof.
 func readRecordedExternalBinding(ctx context.Context, db *sql.DB) (upgradeRecordBinding, error) {
 	var present int
 	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
@@ -328,12 +354,22 @@ func readRecordedExternalBinding(ctx context.Context, db *sql.DB) (upgradeRecord
 	if present == 0 {
 		return upgradeRecordBinding{}, nil
 	}
+	columns, err := recordedTableColumns(ctx, db, "upgrade_external_connect")
+	if err != nil {
+		return upgradeRecordBinding{}, err
+	}
 	var (
-		baseURL, identity, generation sql.NullString
-		observedAtMS                  sql.NullInt64
+		baseURL, bindingIdentity, generation, managementKey sql.NullString
+		observedAtMS                                        sql.NullInt64
 	)
-	err := db.QueryRowContext(ctx, `select base_url, identity, generation, observed_at_ms
-		from upgrade_external_connect where id = 1`).Scan(&baseURL, &identity, &generation, &observedAtMS)
+	selected := []string{"base_url", "identity", "generation", "observed_at_ms"}
+	destinations := []any{&baseURL, &bindingIdentity, &generation, &observedAtMS}
+	if columns["management_key"] {
+		selected = append(selected, "management_key")
+		destinations = append(destinations, &managementKey)
+	}
+	err = db.QueryRowContext(ctx, `select `+strings.Join(selected, ", ")+
+		` from upgrade_external_connect where id = 1`).Scan(destinations...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return upgradeRecordBinding{}, nil
 	}
@@ -341,11 +377,12 @@ func readRecordedExternalBinding(ctx context.Context, db *sql.DB) (upgradeRecord
 		return upgradeRecordBinding{}, err
 	}
 	return upgradeRecordBinding{
-		Found:        true,
-		BaseURL:      baseURL.String,
-		Identity:     identity.String,
-		Generation:   generation.String,
-		ObservedAtMS: observedAtMS.Int64,
+		Found:         true,
+		BaseURL:       baseURL.String,
+		Identity:      bindingIdentity.String,
+		Generation:    generation.String,
+		ManagementKey: managementKey.String,
+		ObservedAtMS:  observedAtMS.Int64,
 	}, nil
 }
 
@@ -402,11 +439,16 @@ type upgradeRecord struct {
 // operation's verification names. Found is false before the connect step
 // recorded one, which is also the state of a store that predates the table.
 type upgradeRecordBinding struct {
-	Found        bool
-	BaseURL      string
-	Identity     string
-	Generation   string
-	ObservedAtMS int64
+	Found      bool
+	BaseURL    string
+	Identity   string
+	Generation string
+	// ManagementKey is the sealed credential the connect step proved, exactly as
+	// stored. It is empty for a binding recorded before the column existed, and
+	// the admission refuses such a completed row: nothing on disk says which
+	// secret the Manager would present to the CPA it just verified.
+	ManagementKey string
+	ObservedAtMS  int64
 }
 
 // upgradeStageFromRecord maps the durable row onto the two admission stages.
@@ -440,7 +482,8 @@ func upgradeStageFromRecord(record upgradeRecord) (UpgradeStage, error) {
 // The stage alone is not a verdict. The completion gate writes the observation
 // it rests on beside the stage, so this reader proves the same facts the gate
 // proved: an External target, the source volume the copy-in observed, every
-// domain the verdict names, and the External binding that verdict bound. A row
+// domain the verdict names, and the External binding that verdict bound —
+// including the sealed credential the connect step proved against it. A row
 // written before the gate existed carries none of that, and it is refused here
 // instead of admitting a store the gate never verified.
 func requireCompleteEvidence(record upgradeRecord) error {
@@ -502,7 +545,99 @@ func requireCompleteEvidence(record upgradeRecord) error {
 		evidence.BindingObservedAtMS != binding.ObservedAtMS {
 		return errors.New("a complete Upgrade record's verification names a different External binding than the recorded one")
 	}
+	if !security.IsValidProtectedEnvelope(strings.TrimSpace(binding.ManagementKey)) {
+		// The verification proves the binding, not the credential the connect step
+		// proved against it. Without a sealed secret on the row the Manager's own
+		// key is not known to be the one that worked, so a restart could meet 401
+		// against a CPA this operation called complete.
+		return errors.New("a complete Upgrade record's External binding carries no sealed management secret, so the credential the Manager would present was never proved")
+	}
 	return nil
+}
+
+// admissionDataKeyFileName names the Manager data key beside the database. The
+// admission only ever reads it: a store a completed operation left behind always
+// holds the key its secrets were sealed with, and minting one here would leave a
+// second key that cannot decrypt the record it just admitted.
+const admissionDataKeyFileName = "data.key"
+
+// requireSealedBindingAuthority proves the completed row's External binding
+// carries a credential this Manager can read and still holds.
+//
+// The sealed envelope alone is structural: a valid envelope can be written with
+// another data key, and a decryptable secret can name a key the Manager's own
+// connection does not. Both are the same failure at startup — the Manager would
+// present a credential the CPA never accepted — so both are refused here, before
+// the row can unlock the writable product.
+func requireSealedBindingAuthority(ctx context.Context, db *sql.DB, databasePath string, record upgradeRecord) error {
+	binding := record.Binding
+	if !binding.Found {
+		// The evidence check reports the missing binding; there is no secret to
+		// compare.
+		return nil
+	}
+	sealed := strings.TrimSpace(binding.ManagementKey)
+	if !security.IsValidProtectedEnvelope(sealed) {
+		return errors.New("a complete Upgrade record's External binding carries no sealed management secret, so the credential the Manager would present was never proved")
+	}
+	dataKeyPath := filepath.Join(filepath.Dir(databasePath), admissionDataKeyFileName)
+	if _, err := os.Stat(dataKeyPath); err != nil {
+		return fmt.Errorf("a complete Upgrade record's sealed management secret cannot be read because the Manager data key is missing: %w", err)
+	}
+	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
+	if err != nil {
+		return fmt.Errorf("load the Manager data key: %w", err)
+	}
+	protector, err := security.NewProtector(key)
+	if err != nil {
+		return fmt.Errorf("initialize the Manager secret protector: %w", err)
+	}
+	secret, err := protector.UnprotectString(sealed)
+	if err != nil {
+		return fmt.Errorf("decrypt the External binding's sealed management secret: %w", err)
+	}
+	secret = strings.TrimSpace(secret)
+	if !cpa.ValidV8ManagementKey(secret) {
+		return errors.New("a complete Upgrade record's External binding carries no usable management secret")
+	}
+	st := store.New(db, protector)
+	managerCfg, managerOK, err := st.LoadManagerConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("read the Manager configuration: %w", err)
+	}
+	setup, setupOK, err := st.LoadSetup(ctx)
+	if err != nil {
+		return fmt.Errorf("read the Manager setup: %w", err)
+	}
+	resolution, err := managerconfig.ResolveLegacyConnectionAuthority(managerCfg, managerOK, setup, setupOK)
+	if err != nil {
+		return fmt.Errorf("resolve the Manager's stored CPA connection: %w", err)
+	}
+	if resolution.Authority == managerconfig.LegacyConnectionAuthorityNone {
+		return errors.New("a complete Upgrade record's External binding names a CPA the Manager stores no connection for")
+	}
+	canonical, err := canonicalAdmissionAddress(resolution.Connection.BaseURL)
+	if err != nil {
+		return fmt.Errorf("the CPA address the Manager stores is not a usable endpoint: %w", err)
+	}
+	if canonical != strings.TrimSpace(binding.BaseURL) {
+		return errors.New("a complete Upgrade record's External binding names a CPA address the Manager's own connection does not")
+	}
+	if !security.EqualHMAC(strings.TrimSpace(resolution.Connection.ManagementKey), secret) {
+		return errors.New("a complete Upgrade record's External binding proved a management secret the Manager's own connection does not carry")
+	}
+	return nil
+}
+
+// canonicalAdmissionAddress applies the two functions the External connect step
+// applies to a target address, so the admission compares spellings of one
+// endpoint rather than an operator's spelling against a stored one.
+func canonicalAdmissionAddress(address string) (string, error) {
+	normalized, err := cpa.NormalizeV8BaseURL(strings.TrimSpace(address))
+	if err != nil {
+		return "", err
+	}
+	return identity.CanonicalExternalURL(normalized)
 }
 
 // decodeRecordedDomains parses the stored completed-domain list. The column is a
