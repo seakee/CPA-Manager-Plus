@@ -2200,7 +2200,25 @@ async function completeThroughTheGate(binary, completedRoot, sourceRoot, databas
   }
 }
 
-// startSyntheticCPA serves the four reads the External connect step makes, with
+// syntheticCPAConfigYAML is the v8 configuration document the synthetic CPA
+// serves at /v8/management/config.yaml, shaped like the YAML a v8 CPA writes.
+// Its bytes are what the connect step digests, so it names the same client key
+// and port the other routes answer with.
+function syntheticCPAConfigYAML(port) {
+  return [
+    'config-version: 8',
+    'server:',
+    `  port: ${port}`,
+    'oauth:',
+    '  auth-dir: /auth',
+    'access:',
+    '  api-keys:',
+    `    - ${SYNTHETIC_CPA_CLIENT_KEY}`,
+    '',
+  ].join('\n');
+}
+
+// startSyntheticCPA serves the five reads the External connect step makes, with
 // the version header and the management credential it expects. It is the
 // harness's own CPA, on a port this run allocated, closed before the run ends.
 function startSyntheticCPA() {
@@ -2235,6 +2253,15 @@ function startSyntheticCPA() {
     }
     if (url === '/v8/management/config/access/api-keys') {
       send(200, JSON.stringify([SYNTHETIC_CPA_CLIENT_KEY]));
+      return;
+    }
+    if (url === '/v8/management/config.yaml') {
+      // The External connect step digests this whole document and records the
+      // digest as the server fingerprint the gate compares later, so it has to
+      // answer with a stable v8 document. A 404 here is read as a CPA whose key
+      // source the step cannot prove, and the step stops as
+      // external_cpa_authority_unavailable before anything is connected.
+      send(200, syntheticCPAConfigYAML(port), { 'content-type': 'application/yaml' });
       return;
     }
     send(404, JSON.stringify({ error: 'not found' }));
