@@ -33,6 +33,7 @@ import {
   canonicalEvidenceDocument,
   copyDirectory,
   evidenceDirectory,
+  expectedNextAction,
   ownershipNormalizationArgv,
   createImplementationIdentity,
   createPortAllocator,
@@ -1076,4 +1077,51 @@ test('evidenceDirectory keeps CI on the published path and a local run out of th
     path.join(path.sep, 'tmp', 'e'),
   );
   assert.equal(evidenceDirectory({ env: { UPGRADE_DOCKER_EVIDENCE_DIR: '   ' }, root }), local);
+});
+
+test('expectedNextAction mirrors the product ladder instead of expecting a stage to name itself', () => {
+  // The cases are the product's own tables:
+  // internal/http/controller/upgradewizard/external_connect_test.go
+  // (TestNextActionForAnExternalConnectRefusal) and verify_action_test.go
+  // (TestVerifiedRowOffersTheGateAgain), plus the stage table they run against.
+  const cases = [
+    // the stage table
+    ['', {}, 'preflight'],
+    ['preflight', {}, 'preflight'],
+    ['copy_in', {}, 'copy_in'],
+    // a stage is a checkpoint, not a pending step: reconciliation is done, so the
+    // projection offers the CPA import that follows it
+    ['reconcile', {}, 'cpa_import'],
+    ['cpa_import', {}, 'cpa_import'],
+    ['external_connect', {}, 'verify'],
+    ['verify', {}, 'complete'],
+    ['complete', {}, 'complete'],
+    ['failed', {}, 'reconcile'],
+    ['rolled_back', {}, 'rolled_back'],
+    // a recorded External refusal keeps offering the step that resolves it, from
+    // every stage that step can run from
+    ['cpa_import', { errorCode: 'external_cpa_version_unsupported' }, 'external_connect'],
+    ['cpa_import', { errorCode: 'external_cpa_config_document_invalid' }, 'external_connect'],
+    ['cpa_import', { errorCode: 'external_management_key_rejected' }, 'external_connect'],
+    ['cpa_import', { errorCode: 'external_target_moved' }, 'external_connect'],
+    ['copy_in', { errorCode: 'external_cpa_version_unsupported' }, 'external_connect'],
+    ['reconcile', { errorCode: 'external_management_key_rejected' }, 'external_connect'],
+    ['reconcile', { errorCode: 'external_target_moved' }, 'external_connect'],
+    // the same code at a stage the step cannot run from keeps the stage table
+    ['verify', { errorCode: 'external_cpa_version_unsupported' }, 'complete'],
+    // an unrelated refusal keeps the stage table
+    ['cpa_import', { errorCode: 'upgrade_reconcile_blocked' }, 'cpa_import'],
+    // the import has run when it recorded the domain…
+    ['cpa_import', { domains: ['source_copy', 'cpa_config'] }, 'verify'],
+    // …and it stands deferred when the row carries its typed item
+    ['cpa_import', { manualItems: ['Managed CPA import deferred (upgrade_cpa_import_requires_qualification)'] }, 'verify'],
+    ['cpa_import', { manualItems: ['reconcile the retained projection'] }, 'cpa_import'],
+    // a verify row that stopped waiting for a re-pin offers the gate again
+    ['verify', { errorCode: 'upgrade_verify_waiting_for_repin' }, 'verify'],
+    // an unknown stage projects nothing rather than a guessed action
+    ['never-recorded', {}, ''],
+  ];
+  for (const [stage, options, want] of cases) {
+    assert.equal(expectedNextAction(stage, options), want, `expectedNextAction(${JSON.stringify(stage)}, ${JSON.stringify(options)})`);
+  }
 });

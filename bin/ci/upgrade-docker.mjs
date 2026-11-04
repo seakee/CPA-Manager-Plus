@@ -1757,7 +1757,10 @@ async function assertWizard(binary, sourceRoot) {
   const status = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V1}` } });
   assertValue(status.status === 200, `wizard status = ${status.status}`);
   assertValue(status.body?.recorded === false, `wizard status recorded = ${status.body?.recorded}`);
-  assertValue(status.body?.nextAction === 'preflight', `wizard status nextAction = ${status.body?.nextAction}`);
+  assertValue(
+    status.body?.nextAction === expectedNextAction(''),
+    `wizard status nextAction = ${status.body?.nextAction} want ${expectedNextAction('')} for an unrecorded operation`,
+  );
   const origin = assertOriginRule(port, base, ['preflight', 'status'], 'wizard', { fetchVerdict: 'transport_refusal' });
 
   // No secret in either body: the source administrator key, the data key
@@ -1772,7 +1775,17 @@ async function assertWizard(binary, sourceRoot) {
     fragment: `${fragment.split('#')[0]}#handoff=redacted`,
     port,
     contracts: {
-      preflight: { exitCode: preflight.status, contractVersion: preflight.body?.contractVersion, ready: preflight.body?.ready, sourceKind: preflight.body?.sourceKind },
+      preflight: {
+        exitCode: preflight.status,
+        contractVersion: preflight.body?.contractVersion,
+        ready: preflight.body?.ready,
+        sourceKind: preflight.body?.sourceKind,
+        // The read cannot declare the release, so it reports the declaration as
+        // pending and names the release the copy-in must be told. The document
+        // records the pair it asserted, not only their hash.
+        pendingDeclaration: preflight.body?.pendingDeclaration,
+        expectedVersion: preflight.body?.expectedVersion,
+      },
       status: { exitCode: status.status, recorded: status.body?.recorded, nextAction: status.body?.nextAction, stage: status.body?.stage },
     },
     credential: {
@@ -1785,7 +1798,7 @@ async function assertWizard(binary, sourceRoot) {
     origin,
     bodySha256: { preflight: sha256(JSON.stringify(preflight.body)), status: sha256(JSON.stringify(status.body)) },
   };
-  stableFacts.push(`wizard:${preflight.body.ready}:${status.body.nextAction}`);
+  stableFacts.push(`wizard:${preflight.body.ready}:${preflight.body.pendingDeclaration}:${preflight.body.expectedVersion}:${status.body.nextAction}`);
   stableFacts.push(`wizard:origin:${origin.preflight.crossSiteOrigin}:${origin.preflight.sameOrigin}:${origin.status.crossSiteOrigin}:${origin.status.sameOrigin}`);
 
   await stopHostManager(name);
@@ -1794,6 +1807,53 @@ async function assertWizard(binary, sourceRoot) {
 // ---------------------------------------------------------------------------
 // admission: the Upgrade surface
 // ---------------------------------------------------------------------------
+
+// The wizard's stage→action ladder, mirrored from the product's
+// `nextActionForRecordedStage`
+// (apps/manager-server/internal/http/controller/upgradewizard/handler.go, which
+// projects every recorded row through it). A stage is a checkpoint, not a pending
+// step: a recorded `reconcile` offers the CPA import that follows it, so "the next
+// action is the recorded stage" was only ever true for `copy_in`. The product's
+// own tables are the authority for the mirror —
+// `TestNextActionForAnExternalConnectRefusal` (a refusal on
+// `copy_in`/`reconcile`/`cpa_import` offers the connect step again) and
+// `TestVerifiedRowOffersTheGateAgain` (a waiting verify row offers the gate) — and
+// the harness test repeats their cases, so a change to the ladder fails the run as
+// staleness instead of passing a guess.
+const WIZARD_STAGE_ACTIONS = Object.freeze({
+  '': 'preflight',
+  preflight: 'preflight',
+  copy_in: 'copy_in',
+  reconcile: 'cpa_import',
+  external_connect: 'verify',
+  verify: 'complete',
+  complete: 'complete',
+  failed: 'reconcile',
+  rolled_back: 'rolled_back',
+});
+const WIZARD_EXTERNAL_CONNECT_STAGES = Object.freeze(['copy_in', 'reconcile', 'cpa_import']);
+const WIZARD_EXTERNAL_CONNECT_REFUSALS = Object.freeze([
+  'external_cpa_version_unsupported',
+  'external_cpa_config_document_invalid',
+  'external_management_key_rejected',
+  'external_target_moved',
+]);
+const WIZARD_VERIFY_WAITING_FOR_REPIN = 'upgrade_verify_waiting_for_repin';
+const WIZARD_CPA_IMPORT_DEFERRED_MARKER = '(upgrade_cpa_import_requires_qualification)';
+
+export function expectedNextAction(stage, { errorCode = '', domains = [], manualItems = [] } = {}) {
+  if (WIZARD_EXTERNAL_CONNECT_STAGES.includes(stage) && WIZARD_EXTERNAL_CONNECT_REFUSALS.includes(errorCode)) {
+    return 'external_connect';
+  }
+  if (stage === 'verify' && errorCode === WIZARD_VERIFY_WAITING_FOR_REPIN) return 'verify';
+  if (stage === 'cpa_import') {
+    // The import has run when it recorded the domain, and it stands deferred when
+    // the row carries its typed item; both leave only the verification.
+    const deferred = manualItems.some((item) => String(item).includes(WIZARD_CPA_IMPORT_DEFERRED_MARKER));
+    return domains.includes('cpa_config') || deferred ? 'verify' : 'cpa_import';
+  }
+  return WIZARD_STAGE_ACTIONS[stage] ?? '';
+}
 
 // proveWizardReadContract asserts the contract of both read routes on a manager
 // the harness already started. The source administrator key is proved before any
@@ -1831,7 +1891,11 @@ function proveWizardReadContract(port, label, expectedStage, sourceRoot) {
     // the stage it just reached from the copied root alone.
     assertValue(proved.body?.recorded === true, `${label}: status recorded = ${proved.body?.recorded}`);
     assertValue(proved.body?.stage === expectedStage, `${label}: status stage = ${proved.body?.stage} want ${expectedStage}`);
-    assertValue(proved.body?.nextAction === expectedStage, `${label}: status nextAction = ${proved.body?.nextAction} want ${expectedStage}`);
+    const wantAction = expectedNextAction(expectedStage);
+    assertValue(
+      proved.body?.nextAction === wantAction,
+      `${label}: status nextAction = ${proved.body?.nextAction} want ${wantAction} for a recorded ${expectedStage}`,
+    );
     read.status = {
       status: proved.status,
       contractVersion: proved.body.contractVersion,
@@ -1910,7 +1974,11 @@ async function proveMountlessStatus(binary, root, stage) {
     assertValue(status.body?.recorded === true, `${label}: status recorded without the source mount = ${status.body?.recorded}`);
     assertValue(status.body?.evidence === 'operation_row', `${label}: status evidence = ${status.body?.evidence} want operation_row`);
     assertValue(status.body?.stage === stage, `${label}: status stage without the source mount = ${status.body?.stage} want ${stage}`);
-    assertValue(status.body?.nextAction === stage, `${label}: status nextAction without the source mount = ${status.body?.nextAction} want ${stage}`);
+    const wantAction = expectedNextAction(stage);
+    assertValue(
+      status.body?.nextAction === wantAction,
+      `${label}: status nextAction without the source mount = ${status.body?.nextAction} want ${wantAction} for a recorded ${stage}`,
+    );
     // The mount is named, not hidden: the projection says what the operator has
     // to supply, with the same code the preflight reports.
     assertValue(
@@ -1985,7 +2053,11 @@ async function proveRefusedMountStatus(binary, root, stage, sourceRoot) {
     assertValue(status.body?.recorded === true, `${label}: status recorded with a symlinked mount database = ${status.body?.recorded}`);
     assertValue(status.body?.evidence === 'operation_row', `${label}: status evidence = ${status.body?.evidence} want operation_row`);
     assertValue(status.body?.stage === stage, `${label}: status stage = ${status.body?.stage} want ${stage}`);
-    assertValue(status.body?.nextAction === stage, `${label}: status nextAction = ${status.body?.nextAction} want ${stage}`);
+    const wantAction = expectedNextAction(stage);
+    assertValue(
+      status.body?.nextAction === wantAction,
+      `${label}: status nextAction = ${status.body?.nextAction} want ${wantAction} for a recorded ${stage}`,
+    );
     // The refused mount is named on the successful projection, with the code the
     // preflight reports for the same mount.
     assertValue(
@@ -2359,8 +2431,8 @@ async function proveCopyInMarkerWindow(binary, target, sourceRoot) {
     assertValue(status.body?.evidence === 'copy_in_marker', `${label}: status evidence = ${status.body?.evidence} want copy_in_marker`);
     assertValue(status.body?.stage === 'copy_in', `${label}: status stage = ${status.body?.stage} want copy_in`);
     assertValue(
-      status.body?.nextAction === 'copy_in',
-      `${label}: status nextAction = ${status.body?.nextAction} want copy_in, not the step before any work started`,
+      status.body?.nextAction === expectedNextAction('copy_in'),
+      `${label}: status nextAction = ${status.body?.nextAction} want ${expectedNextAction('copy_in')}, not the step before any work started`,
     );
     assertValue(status.body?.sourceRoot === 'available', `${label}: status sourceRoot = ${status.body?.sourceRoot} want available`);
     assertNoSecretInBody(`${label}: status`, status.body, [ADMIN_V1, ADMIN_V2, sourceRoot, target, SCRATCH]);
@@ -3086,7 +3158,10 @@ async function proveRolledBackSurface(binary, target, sourceRoot) {
     assertValue(status.status === 200, `${label}: status = ${status.status} want 200 from the Manager store`);
     assertValue(status.body?.recorded === true, `${label}: status recorded = ${status.body?.recorded}`);
     assertValue(status.body?.stage === 'rolled_back', `${label}: status stage = ${status.body?.stage} want rolled_back`);
-    assertValue(status.body?.nextAction === 'rolled_back', `${label}: status nextAction = ${status.body?.nextAction} want rolled_back`);
+    assertValue(
+      status.body?.nextAction === expectedNextAction('rolled_back'),
+      `${label}: status nextAction = ${status.body?.nextAction} want ${expectedNextAction('rolled_back')}`,
+    );
     assertNoSecretInBody(`${label}: status`, status.body, [ADMIN_V1, ADMIN_V2, sourceRoot, SCRATCH, target]);
     const foreign = httpJson('GET', `${base}/status`, { headers: { Authorization: `Bearer ${ADMIN_V2}` } });
     assertValue(foreign.status === 401, `${label}: status with the v2 Admin key = ${foreign.status} want 401`);
