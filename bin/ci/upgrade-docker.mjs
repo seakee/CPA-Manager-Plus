@@ -2200,6 +2200,69 @@ async function completeThroughTheGate(binary, completedRoot, sourceRoot, databas
   }
 }
 
+// syntheticCPAProgram is the standalone server the harness starts for the
+// External connect step: the CLI runs under spawnSync, which blocks this
+// process's event loop, so a server living in this process could accept the TCP
+// connection and then never answer it. The program serves the five authenticated
+// reads the step makes — the version probe, the v8 document, the client-key
+// list, the config YAML the step digests into the server fingerprint, and the
+// model surface — with the credential and version it expects.
+function syntheticCPAProgram({ port, model, configYAML }) {
+  return `import http from 'node:http';
+
+const port = ${JSON.stringify(port)};
+const model = ${JSON.stringify(model)};
+const configYAML = ${JSON.stringify(configYAML)};
+const management = process.env.CPA_MANAGEMENT_KEY;
+const clientKey = process.env.CPA_CLIENT_KEY;
+
+const send = (response, status, payload, headers = {}) => {
+  response.writeHead(status, { 'content-type': 'application/json', ...headers });
+  response.end(payload);
+};
+
+const server = http.createServer((request, response) => {
+  const url = request.url ?? '';
+  // The model surface is a gateway read with a client credential, not a
+  // management read: it answers before the management credential is checked.
+  if (url === '/v1/models') {
+    send(response, 200, JSON.stringify({ object: 'list', data: [{ id: model }] }));
+    return;
+  }
+  if (request.headers.authorization !== 'Bearer ' + management) {
+    send(response, 401, JSON.stringify({ error: 'unauthorized' }));
+    return;
+  }
+  if (url === '/v0/management/config') {
+    send(response, 200, '{}', { 'x-cpa-version': 'v8.0.13' });
+    return;
+  }
+  if (url === '/v8/management/config') {
+    send(response, 200, JSON.stringify({
+      'config-version': 8,
+      server: { port },
+      oauth: { 'auth-dir': '/auth' },
+      access: { 'api-keys': [clientKey] },
+    }));
+    return;
+  }
+  if (url === '/v8/management/config/access/api-keys') {
+    send(response, 200, JSON.stringify([clientKey]));
+    return;
+  }
+  if (url === '/v8/management/config.yaml') {
+    send(response, 200, configYAML, { 'content-type': 'application/yaml' });
+    return;
+  }
+  send(response, 404, JSON.stringify({ error: 'not found' }));
+});
+
+server.listen(port, '127.0.0.1', () => {
+  console.log('synthetic CPA listening on 127.0.0.1:' + port);
+});
+`;
+}
+
 // syntheticCPAConfigYAML is the v8 configuration document the synthetic CPA
 // serves at /v8/management/config.yaml, shaped like the YAML a v8 CPA writes.
 // Its bytes are what the connect step digests, so it names the same client key
@@ -2218,70 +2281,39 @@ function syntheticCPAConfigYAML(port) {
   ].join('\n');
 }
 
-// startSyntheticCPA serves the five reads the External connect step makes, with
-// the version header and the management credential it expects. It is the
-// harness's own CPA, on a port this run allocated, closed before the run ends.
-function startSyntheticCPA() {
+// startSyntheticCPA starts the program above as its own process, on a port this
+// run allocated, and returns a handle that stops it. It is a host process in the
+// registry's vocabulary: nothing about it outlives the run.
+async function startSyntheticCPA() {
   const port = ports.take();
   const name = `${PREFIX}-cpa`;
-  const server = http.createServer((request, response) => {
-    const url = request.url ?? '';
-    const send = (status, payload, headers = {}) => {
-      response.writeHead(status, { 'content-type': 'application/json', ...headers });
-      response.end(payload);
-    };
-    if (url === '/v1/models') {
-      send(200, JSON.stringify({ object: 'list', data: [{ id: DATASET_MODELS[0].model }] }));
-      return;
-    }
-    if (request.headers.authorization !== `Bearer ${SYNTHETIC_CPA_MANAGEMENT_KEY}`) {
-      send(401, JSON.stringify({ error: 'unauthorized' }));
-      return;
-    }
-    if (url === '/v0/management/config') {
-      send(200, '{}', { 'x-cpa-version': 'v8.0.13' });
-      return;
-    }
-    if (url === '/v8/management/config') {
-      send(200, JSON.stringify({
-        'config-version': 8,
-        server: { port },
-        oauth: { 'auth-dir': '/auth' },
-        access: { 'api-keys': [SYNTHETIC_CPA_CLIENT_KEY] },
-      }));
-      return;
-    }
-    if (url === '/v8/management/config/access/api-keys') {
-      send(200, JSON.stringify([SYNTHETIC_CPA_CLIENT_KEY]));
-      return;
-    }
-    if (url === '/v8/management/config.yaml') {
-      // The External connect step digests this whole document and records the
-      // digest as the server fingerprint the gate compares later, so it has to
-      // answer with a stable v8 document. A 404 here is read as a CPA whose key
-      // source the step cannot prove, and the step stops as
-      // external_cpa_authority_unavailable before anything is connected.
-      send(200, syntheticCPAConfigYAML(port), { 'content-type': 'application/yaml' });
-      return;
-    }
-    send(404, JSON.stringify({ error: 'not found' }));
+  registry.assertCreationAllowed('hostProcess', name);
+  const program = path.join(SCRATCH, 'synthetic-cpa.mjs');
+  fs.mkdirSync(SCRATCH, { recursive: true });
+  fs.writeFileSync(program, syntheticCPAProgram({
+    port,
+    model: DATASET_MODELS[0].model,
+    configYAML: syntheticCPAConfigYAML(port),
+  }));
+  const logFile = path.join(SCRATCH, `${name}.log`);
+  const out = fs.openSync(logFile, 'w');
+  const child = spawn(process.execPath, [program], {
+    env: {
+      ...process.env,
+      CPA_MANAGEMENT_KEY: SYNTHETIC_CPA_MANAGEMENT_KEY,
+      CPA_CLIENT_KEY: SYNTHETIC_CPA_CLIENT_KEY,
+    },
+    stdio: ['ignore', out, out],
+    detached: true,
   });
-  registry.track('hostProcess', name, () => new Promise((resolve) => server.close(() => resolve(undefined))));
-  return new Promise((resolve, reject) => {
-    server.once('error', (error) => {
-      registry.untrack('hostProcess', name);
-      reject(new Error(`synthetic CPA on 127.0.0.1:${port}: ${error?.message || error}`));
-    });
-    server.listen(port, '127.0.0.1', () => {
-      resolve({
-        url: `http://127.0.0.1:${port}`,
-        close: () => new Promise((done) => {
-          registry.untrack('hostProcess', name);
-          server.close(() => done());
-        }),
-      });
-    });
-  });
+  child.unref();
+  hostManagers.set(name, { child, logFile, port });
+  registry.track('hostProcess', name, () => stopHostProcess(name), { pid: child.pid, port });
+  await waitFor(async () => portOpen(port), `synthetic CPA on 127.0.0.1:${port}`, 30_000);
+  return {
+    url: `http://127.0.0.1:${port}`,
+    close: () => stopHostManager(name),
+  };
 }
 
 function readRowJson(dbPath, sql) {
