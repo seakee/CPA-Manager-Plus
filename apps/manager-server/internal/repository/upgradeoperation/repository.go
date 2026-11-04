@@ -401,6 +401,24 @@ func (r *Repository) Put(ctx context.Context, op model.UpgradeOperation) error {
 	return tx.Commit()
 }
 
+// requireMutableStage refuses a write against a row whose verdict is final.
+//
+// A completed operation is frozen: the completion gate wrote the stage together
+// with the observation it rests on, and no later column write may replace that
+// observation while the row still claims the verdict. A rolled-back operation is
+// terminal for the same reason: the v2 root was abandoned and its evidence is
+// the record of that decision. The revision CAS only keeps concurrent writers
+// apart; it does not make a final record mutable.
+func requireMutableStage(current model.UpgradeOperation) error {
+	switch current.Stage {
+	case model.UpgradeStageComplete:
+		return fmt.Errorf("%w: completed operation is frozen at %q", ErrStageRegression, current.Stage)
+	case model.UpgradeStageRolledBack:
+		return fmt.Errorf("%w: rolled-back operation is terminal at %q", ErrStageRegression, current.Stage)
+	}
+	return nil
+}
+
 // requireTransition enforces forward-only progress, including the high-water
 // rule for a parked row. current is the row read inside the write transaction.
 // A failed row with no recorded forward stage cannot resume: its position is
@@ -704,6 +722,9 @@ func (r *Repository) RecordError(ctx context.Context, code, detail string) error
 	if !found {
 		return fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
 	}
+	if err := requireMutableStage(current); err != nil {
+		return err
+	}
 	current.ErrorCode = code
 	current.ErrorDetail = strings.TrimSpace(detail)
 	current.UpdatedAtMS = nextUpdatedAtMS(now, current)
@@ -743,6 +764,9 @@ func AppendManualItemsTx(ctx context.Context, tx Tx, items []string) (model.Upgr
 	}
 	if !found {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: no operation row to record the manual items on", ErrInvalidRow)
+	}
+	if err := requireMutableStage(current); err != nil {
+		return model.UpgradeOperation{}, err
 	}
 	for _, item := range items {
 		line := strings.TrimSpace(item)
@@ -789,6 +813,9 @@ func ClearErrorTx(ctx context.Context, tx Tx) error {
 	}
 	if !found {
 		return fmt.Errorf("%w: no operation row to clear the refusal on", ErrInvalidRow)
+	}
+	if err := requireMutableStage(current); err != nil {
+		return err
 	}
 	current.ErrorCode = ""
 	current.ErrorDetail = ""
@@ -848,6 +875,13 @@ func RecordReconciliationTx(ctx context.Context, tx Tx, report json.RawMessage) 
 	if !found {
 		return fmt.Errorf("%w: no operation row to record the reconciliation on", ErrInvalidRow)
 	}
+	if err := requireMutableStage(current); err != nil {
+		return err
+	}
+	// The report is assigned before validation, so the row that is validated is
+	// the row this statement writes: checking the replaced value only proves the
+	// record the write discards.
+	current.Reconciliation = report
 	current.UpdatedAtMS = nextUpdatedAtMS(time.Now().UnixMilli(), current)
 	expectedRevision := current.Revision
 	current.Revision = expectedRevision + 1
@@ -880,6 +914,9 @@ func RecordErrorTx(ctx context.Context, tx Tx, code, detail string) (model.Upgra
 	}
 	if !found {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: no operation row to record the refusal on", ErrInvalidRow)
+	}
+	if err := requireMutableStage(current); err != nil {
+		return model.UpgradeOperation{}, err
 	}
 	current.ErrorCode = code
 	current.ErrorDetail = strings.TrimSpace(detail)
@@ -977,12 +1014,6 @@ func recordVerificationTx(ctx context.Context, tx Tx, stage model.UpgradeStage, 
 	if !found {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: no recorded operation to verify", ErrInvalidRow)
 	}
-	if current.Stage == model.UpgradeStageComplete {
-		return current, fmt.Errorf("%w: completed operation is frozen at %q", ErrStageRegression, current.Stage)
-	}
-	if err := requireTransition(current, stage); err != nil {
-		return current, err
-	}
 	next := current
 	added := []string{}
 	for _, item := range manualItems {
@@ -995,12 +1026,23 @@ func recordVerificationTx(ctx context.Context, tx Tx, stage model.UpgradeStage, 
 	// The repeat of the verdict already on the row stores nothing: not the
 	// evidence, not a revision, not a timestamp. A run only observes again, so
 	// the observation time is the one field a repeat may change; every other
-	// field says what was proven and a difference there is a new record.
+	// field says what was proven and a difference there is a new record. It is
+	// asked before the frozen check below, because re-proving the recorded
+	// verdict is not a write to a completed row.
 	if current.Stage == stage && current.ErrorCode == code &&
 		current.ErrorDetail == strings.TrimSpace(detail) && len(added) == 0 {
 		if stored, decodeErr := current.VerificationEvidence(); decodeErr == nil && stored.SameVerdict(verification) {
 			return current, nil
 		}
+	}
+	// A completed operation is frozen: only the identical repeat above is
+	// allowed. Any other gate call would replace the evidence a stored verdict
+	// rests on.
+	if current.Stage == model.UpgradeStageComplete {
+		return current, fmt.Errorf("%w: completed operation is frozen at %q", ErrStageRegression, current.Stage)
+	}
+	if err := requireTransition(current, stage); err != nil {
+		return current, err
 	}
 	next.Stage = stage
 	next.LastForwardStage = stage
@@ -1064,6 +1106,11 @@ func (r *Repository) RecordSourceRoot(ctx context.Context, sourceRoot string) (m
 	}
 	if !found {
 		return model.UpgradeOperation{}, errors.New("no upgrade operation is recorded, so there is no source root to record")
+	}
+	// The guard runs before the empty-value early return: a completed row must not
+	// be touched even by a backfill that would change nothing.
+	if err := requireMutableStage(current); err != nil {
+		return model.UpgradeOperation{}, err
 	}
 	if current.SourceRoot != "" {
 		// Another path recorded it first, so this one changed nothing.

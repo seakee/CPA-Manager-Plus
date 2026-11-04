@@ -1326,6 +1326,7 @@ func readRawOperation(t *testing.T, db *sql.DB) string {
 		'|' || quote(domains_done) || '|' || quote(source_kind) || '|' || quote(source_version) ||
 		'|' || quote(source_fingerprint_before) || '|' || quote(source_fingerprint_after) ||
 		'|' || quote(backup_manifest_sha256) || '|' || quote(reconciliation) ||
+		'|' || quote(verification) ||
 		'|' || quote(manual_items) || '|' || quote(error_code) || '|' || quote(error_detail) ||
 		'|' || quote(created_at_ms) || '|' || quote(updated_at_ms)
 		from upgrade_operations where id = 1`).Scan(&row); err != nil {
@@ -1960,6 +1961,111 @@ func TestStaleRevisionWriteIsRejectedAfterAnIntegratedWriter(t *testing.T) {
 			}
 			if !reflect.DeepEqual(after, advanced) {
 				t.Fatalf("the refused write changed the row:\nbefore %+v\nafter  %+v", advanced, after)
+			}
+		})
+	}
+}
+
+// TestCompletedOperationIsFrozenForEveryColumnWriter is the R4 regression: the
+// completion gate froze the verdict, but the column writers could still replace
+// the reconciliation, the refusal, the manual items, the source root or the
+// External binding of a completed row through the revision CAS. A completed
+// verdict is terminal, so every one of them refuses it and leaves the row and the
+// bound target byte-for-byte unchanged.
+func TestCompletedOperationIsFrozenForEveryColumnWriter(t *testing.T) {
+	ctx := context.Background()
+	repository, db := newRepository(t)
+	recordedCopyIn(t, repository)
+	if _, err := repository.Advance(ctx, model.UpgradeDomainCoverage, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("advance to verify: %v", err)
+	}
+	seedTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin the binding transaction: %v", err)
+	}
+	if err := upgradeoperation.RecordExternalBindingTx(ctx, seedTx, upgradeoperation.ExternalBinding{
+		BaseURL:      "https://cpa.example",
+		Identity:     "https://cpa.example",
+		Generation:   "https://cpa.example",
+		ObservedAtMS: 1_700_000_000_000,
+	}); err != nil {
+		_ = seedTx.Rollback()
+		t.Fatalf("record the fixture binding: %v", err)
+	}
+	if err := seedTx.Commit(); err != nil {
+		t.Fatalf("commit the fixture binding: %v", err)
+	}
+	recordCompletion(t, db, completionEvidence(model.UpgradeDomainSourceCopy, model.UpgradeDomainCoverage))
+
+	readBinding := func() string {
+		t.Helper()
+		var row string
+		if err := db.QueryRow(`select quote(base_url) || '|' || quote(identity) || '|' || quote(generation) ||
+			'|' || quote(server_fingerprint) || '|' || quote(cpa_version) || '|' || quote(support) ||
+			'|' || quote(client_keys) || '|' || quote(observed_at_ms)
+			from upgrade_external_connect where id = 1`).Scan(&row); err != nil {
+			t.Fatalf("read the raw binding: %v", err)
+		}
+		return row
+	}
+	rowBefore := readRawOperation(t, db)
+	bindingBefore := readBinding()
+
+	transaction := func(t *testing.T) *sql.Tx {
+		t.Helper()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin the writer transaction: %v", err)
+		}
+		t.Cleanup(func() { _ = tx.Rollback() })
+		return tx
+	}
+	for _, test := range []struct {
+		name string
+		call func(t *testing.T) error
+	}{
+		{name: "RecordReconciliationTx", call: func(t *testing.T) error {
+			return upgradeoperation.RecordReconciliationTx(ctx, transaction(t), json.RawMessage(`{"replaced":true}`))
+		}},
+		{name: "RecordReconciliation", call: func(t *testing.T) error {
+			return repository.RecordReconciliation(ctx, json.RawMessage(`{"replaced":true}`))
+		}},
+		{name: "RecordError", call: func(t *testing.T) error {
+			return repository.RecordError(ctx, "upgrade_reconcile_blocked", "a refusal after the verdict")
+		}},
+		{name: "RecordErrorTx", call: func(t *testing.T) error {
+			_, err := upgradeoperation.RecordErrorTx(ctx, transaction(t), "upgrade_reconcile_blocked", "a refusal after the verdict")
+			return err
+		}},
+		{name: "ClearErrorTx", call: func(t *testing.T) error {
+			return upgradeoperation.ClearErrorTx(ctx, transaction(t))
+		}},
+		{name: "AppendManualItemsTx", call: func(t *testing.T) error {
+			_, err := upgradeoperation.AppendManualItemsTx(ctx, transaction(t), []string{"manual: after the verdict"})
+			return err
+		}},
+		{name: "RecordSourceRoot", call: func(t *testing.T) error {
+			_, err := repository.RecordSourceRoot(ctx, "/srv/other-data")
+			return err
+		}},
+		{name: "RecordExternalBindingTx", call: func(t *testing.T) error {
+			return upgradeoperation.RecordExternalBindingTx(ctx, transaction(t), upgradeoperation.ExternalBinding{
+				BaseURL:      "https://other-cpa.example",
+				Identity:     "https://other-cpa.example",
+				Generation:   "https://other-cpa.example",
+				ObservedAtMS: 1_700_000_000_999,
+			})
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(t); !errors.Is(err, upgradeoperation.ErrStageRegression) {
+				t.Fatalf("%s on a completed row error = %v, want ErrStageRegression", test.name, err)
+			}
+			if after := readRawOperation(t, db); after != rowBefore {
+				t.Fatalf("%s changed the completed row:\n before %s\n after  %s", test.name, rowBefore, after)
+			}
+			if after := readBinding(); after != bindingBefore {
+				t.Fatalf("%s changed the bound target:\n before %s\n after  %s", test.name, bindingBefore, after)
 			}
 		})
 	}

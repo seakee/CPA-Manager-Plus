@@ -110,7 +110,19 @@ func RecordExternalBindingTx(ctx context.Context, tx Tx, binding ExternalBinding
 	if err := binding.Validate(); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `insert into `+externalBindingTableName+` (
+	// The binding is the target a verdict rests on, so a stored verdict owns it:
+	// a completed or rolled-back operation must keep the target its evidence
+	// names. A store with no operation row yet has nothing to freeze.
+	current, found, err := GetTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if found {
+		if err := requireMutableStage(current); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `insert into `+externalBindingTableName+` (
 		id, base_url, identity, generation, server_fingerprint, cpa_version, support, client_keys,
 		management_key, observed_at_ms
 	) values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
