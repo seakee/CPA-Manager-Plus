@@ -51,14 +51,20 @@
 // `cpamp.panel-lite.run=<runToken>` with a per-run CSPRNG token that is not
 // reused and appears nowhere in the names. `releaseAll()` inspects that label
 // before removing anything and leaves any foreign object in place, so a name
-// conflict can never turn into "remove someone else's container".
+// conflict can never turn into "remove someone else's container". An object whose
+// label cannot be read -- daemon unreachable, permission denied -- is reported
+// the same way and also left in place. Objects are registered before the call
+// that creates them, so a daemon that acted before the CLI failed is still
+// released, and only after its label proves this run created it.
 //
 // The CPA executable is the one `Dockerfile.runtime` pins (`cpa-v8-download`
 // stage): the harness reads the version and amd64 executable sha256 from that
 // file, refuses any image whose `/usr/local/bin/cli-proxy-api` differs, and so
-// follows a re-pin without edits. `--build-cpa-image` is an optional build phase
-// that may fetch build dependencies; it is reported separately from the isolated
-// runtime phase and is not part of the isolation claim.
+// follows a re-pin without edits. That identity probe runs with `--network none`,
+// so an unverified image can reach nothing while it is being read.
+// `--build-cpa-image` is an optional build phase that may fetch build
+// dependencies; it is reported separately from the isolated runtime phase and is
+// not part of the isolation claim.
 //
 // Everything the run created is released on success, on failure and on
 // SIGINT/SIGTERM, through a single idempotent cleanup; a release that fails --
@@ -563,6 +569,9 @@ export function identityProbeArgs({ name, runToken, image }) {
     'run', '--rm', '--pull', 'never', '--platform', 'linux/amd64',
     '--name', name,
     '--label', `${RUN_LABEL}=${runToken}`,
+    // The probe exists to read what the image contains; it must not be able to
+    // reach anything before the executable digest has been verified.
+    '--network', 'none',
     '--entrypoint', 'sh', image, '-c',
     `sha256sum ${CPA_BINARY} && cat ${CPA_MANIFEST} && ${CPA_BINARY} -help 2>&1 | head -n 1`,
   ];
@@ -595,14 +604,22 @@ export function createDocker({ exec = defaultDockerExec, runToken } = {}) {
     }
     return result.stdout.trim();
   };
+  // Only a genuine "it does not exist" answer means there is nothing to release.
+  // Every other failure (daemon unreachable, permission denied, timeout) leaves
+  // ownership unknown, and an unverified object is never removed.
+  const NOT_FOUND = /No such (?:container|object|network)|not found/i;
   const labelOf = (kind, name) => {
     const format = kind === 'network' ? '{{index .Labels "cpamp.panel-lite.run"}}' : '{{index .Config.Labels "cpamp.panel-lite.run"}}';
     const args = kind === 'network'
       ? ['network', 'inspect', '--format', format, name]
       : ['inspect', '--format', format, name];
     const result = exec(args, { timeoutMs: 60_000 });
-    if (result.status !== 0) return { exists: false };
-    return { exists: true, token: String(result.stdout).trim() };
+    if (result.status === 0) return { exists: true, token: String(result.stdout ?? '').trim() };
+    const detail =
+      `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() ||
+      result.error?.message ||
+      `exit ${result.status}`;
+    return NOT_FOUND.test(detail) ? { exists: false } : { exists: 'unknown', error: detail };
   };
   return {
     owned,
@@ -626,10 +643,14 @@ export function createDocker({ exec = defaultDockerExec, runToken } = {}) {
       );
     },
     createNetwork(name) {
-      must(['network', 'create', '--internal', '--label', `${RUN_LABEL}=${runToken}`, assertOwnedName(name)], {
+      assertOwnedName(name);
+      // Registered before the call, like `start()`: the daemon can create the
+      // network and the CLI can still fail (timeout, lost output). `releaseAll()`
+      // then inspects the label and removes it only if this run created it.
+      networks.add(name);
+      must(['network', 'create', '--internal', '--label', `${RUN_LABEL}=${runToken}`, name], {
         timeoutMs: 60_000,
       });
-      networks.add(name);
     },
     probeImage({ name, image }) {
       owned.add(assertOwnedName(name));
@@ -666,7 +687,11 @@ export function createDocker({ exec = defaultDockerExec, runToken } = {}) {
       const failures = [];
       for (const name of owned) {
         const label = labelOf('container', name);
-        if (!label.exists) continue;
+        if (label.exists === false) continue;
+        if (label.exists !== true) {
+          failures.push(`${name}: could not verify ${RUN_LABEL} (${label.error}); left in place`);
+          continue;
+        }
         if (label.token !== runToken) {
           failures.push(`${name}: carries ${RUN_LABEL}="${label.token}", not this run's token; left in place`);
           continue;
@@ -680,7 +705,11 @@ export function createDocker({ exec = defaultDockerExec, runToken } = {}) {
       owned.clear();
       for (const name of networks) {
         const label = labelOf('network', name);
-        if (!label.exists) continue;
+        if (label.exists === false) continue;
+        if (label.exists !== true) {
+          failures.push(`${name}: could not verify ${RUN_LABEL} (${label.error}); left in place`);
+          continue;
+        }
         if (label.token !== runToken) {
           failures.push(`${name}: carries ${RUN_LABEL}="${label.token}", not this run's token; left in place`);
           continue;

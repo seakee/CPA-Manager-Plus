@@ -475,6 +475,11 @@ test('the identity probe is a throw-away container carrying the run label', () =
   const args = identityProbeArgs({ name: `${CONTAINER_PREFIX}${RUN}-image-probe`, runToken: TOKEN, image: 'img' });
   assert(args.includes('--rm') && args.includes('--pull'));
   assert.deepEqual(args.slice(args.indexOf('--label'), args.indexOf('--label') + 2), ['--label', `${RUN_LABEL}=${TOKEN}`]);
+  assert.deepEqual(
+    args.slice(args.indexOf('--network'), args.indexOf('--network') + 2),
+    ['--network', 'none'],
+    'the identity probe runs with no network at all'
+  );
   assert.deepEqual(args.slice(args.indexOf('--entrypoint'), args.indexOf('--entrypoint') + 3), ['--entrypoint', 'sh', 'img']);
   assert.match(
     args.at(-1),
@@ -562,11 +567,10 @@ test('a network is removed only when it carries this run token', () => {
     networkLabels: new Map([[`${CONTAINER_PREFIX}${RUN}-net`, 'ff'.repeat(16)]]),
   });
   const docker = createDocker({ exec: model.exec, runToken: TOKEN });
-  // A name that exists without this run's label is never created by us and must
-  // survive even if it ends up in the owned set.
+  // A name that exists without this run's label is never created by us; it is
+  // registered before the call so releaseAll can verify it, and must then survive.
   assert.throws(() => docker.createNetwork(`${CONTAINER_PREFIX}${RUN}-net`), /already exists/);
-  assert.equal(docker.networks.size, 0);
-  docker.networks.add(`${CONTAINER_PREFIX}${RUN}-net`);
+  assert(docker.networks.has(`${CONTAINER_PREFIX}${RUN}-net`), 'registered before the call so releaseAll can verify it');
 
   const failures = docker.releaseAll();
   assert.deepEqual(model.calls.filter((args) => args[0] === 'network' && args[1] === 'rm'), []);
@@ -592,6 +596,83 @@ test('this run network is created internal, labelled and removed after its conta
   );
   assert.equal(model.labels.size, 0);
   assert.equal(model.networkLabels.size, 0);
+});
+
+test('an inspect failure leaves ownership unknown and the object in place', () => {
+  const container = `cpampd-lite-${RUN}-legacy-sibling-enabled`;
+  const calls = [];
+  const exec = (args) => {
+    calls.push(args);
+    if (args[0] === 'inspect') {
+      return {
+        status: 1,
+        stdout: '',
+        stderr: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?',
+      };
+    }
+    if (args[0] === 'network' && args[1] === 'inspect') {
+      return { status: 1, stdout: '', stderr: 'permission denied while trying to connect to the Docker daemon socket' };
+    }
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  const docker = createDocker({ exec, runToken: TOKEN });
+  docker.start({ name: container, args: ['run', '-d', '--name', container] });
+  docker.networks.add(NETWORK);
+
+  assert.deepEqual(docker.releaseAll(), [
+    `${container}: could not verify ${RUN_LABEL} (Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?); left in place`,
+    `${NETWORK}: could not verify ${RUN_LABEL} (permission denied while trying to connect to the Docker daemon socket); left in place`,
+  ]);
+  assert.deepEqual(
+    calls.filter((args) => args[0] === 'rm' || (args[0] === 'network' && args[1] === 'rm')),
+    [],
+    'nothing is removed while ownership is unverified'
+  );
+});
+
+test('a genuine not-found answer is still treated as already gone', () => {
+  const container = `cpampd-lite-${RUN}-legacy-sibling-enabled`;
+  for (const detail of ['Error: No such container: x', 'Error: No such object: x', 'Error: No such network: x', 'not found']) {
+    const docker = createDocker({
+      exec: (args) =>
+        args[0] === 'inspect' ? { status: 1, stdout: '', stderr: detail } : { status: 0, stdout: '', stderr: '' },
+      runToken: TOKEN,
+    });
+    docker.start({ name: container, args: ['run', '-d', '--name', container] });
+    assert.deepEqual(docker.releaseAll(), [], detail);
+  }
+});
+
+test('a network created before the CLI failed is still released when it is ours', () => {
+  const model = ownedDockerDouble();
+  const exec = (args) => {
+    const result = model.exec(args);
+    if (args[0] === 'network' && args[1] === 'create') {
+      // The daemon created the network and the CLI never reported success.
+      return { status: null, stdout: '', stderr: '', error: new Error('spawnSync docker ETIMEDOUT') };
+    }
+    return result;
+  };
+  const docker = createDocker({ exec, runToken: TOKEN });
+
+  assert.throws(() => docker.createNetwork(NETWORK), /docker network failed/);
+  assert(model.networkLabels.has(NETWORK), 'the daemon did create the network');
+  assert.equal(model.networkLabels.get(NETWORK), TOKEN, 'and it carries this run label');
+
+  assert.deepEqual(docker.releaseAll(), []);
+  assert(!model.networkLabels.has(NETWORK), 'the run-owned network is removed');
+});
+
+test('a pre-existing foreign network that blocks creation is never removed', () => {
+  const model = ownedDockerDouble({ networkLabels: new Map([[NETWORK, 'ff'.repeat(16)]]) });
+  const docker = createDocker({ exec: model.exec, runToken: TOKEN });
+
+  assert.throws(() => docker.createNetwork(NETWORK), /already exists/);
+  const failures = docker.releaseAll();
+  assert.deepEqual(model.calls.filter((args) => args[0] === 'network' && args[1] === 'rm'), []);
+  assert.equal(model.networkLabels.get(NETWORK), 'ff'.repeat(16), 'the foreign network is still there');
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /not this run's token; left in place/);
 });
 
 test('an already-gone container is not a cleanup failure, a stuck one is reported', () => {
@@ -1536,6 +1617,59 @@ test('a cleanup failure is reported and forces exit 1 even when every check pass
     failures: ['cpampd-lite-stuck: device busy'],
     runId: report.cleanup.runId,
   });
+});
+
+test('an unverifiable release fails the run and deletes nothing', async (t) => {
+  const panelPath = path.join(tempDir(t), 'management.html');
+  fs.writeFileSync(panelPath, GOOD_HTML);
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'cpampd-lite-test-base-'));
+  t.after(() => fs.rmSync(tmpBase, { recursive: true, force: true }));
+  const fake = fakeAcceptanceDocker();
+  // The daemon answers "created" but cannot be asked who owns what afterwards.
+  const wrapper = createDocker({
+    runToken: TOKEN,
+    exec: (args) => {
+      if (args[0] === 'inspect') return { status: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' };
+      if (args[0] === 'network' && args[1] === 'inspect') {
+        return { status: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    },
+  });
+  const docker = {
+    ...fake,
+    start(spec) {
+      fake.start(spec);
+      wrapper.start(spec);
+    },
+    createNetwork(name) {
+      fake.createNetwork(name);
+      wrapper.createNetwork(name);
+    },
+    releaseAll: () => wrapper.releaseAll(),
+  };
+  const run = capture();
+
+  const code = await runAcceptance(failingArgs(panelPath), {
+    dockerFactory: () => docker,
+    certificateFactory: () => ({ key: 'k', cert: 'c' }),
+    stdout: run.stdout,
+    stderr: run.stderr,
+    tmpBase,
+    signals: new EventEmitter(),
+    caseRunner: async () => ({ configLayout: 'legacy', staticPathMode: 'config-sibling-static' }),
+    isolationRunner: async () => ({ skipped: true }),
+  });
+
+  assert.equal(code, 1);
+  const report = JSON.parse(run.streams.out);
+  assert.equal(report.verdict, 'fail');
+  assert.equal(report.cleanup.ok, false);
+  assert.equal(report.cleanup.failures.length, 2, 'one container and one network stayed unverified');
+  for (const failure of report.cleanup.failures) {
+    assert.match(failure, /could not verify cpamp\.panel-lite\.run \(Cannot connect to the Docker daemon\); left in place/);
+  }
+  assert.deepEqual(fake.rm, [], 'an unverified object is never removed');
 });
 
 test('a temporary-directory removal error is reported and still writes the report', async (t) => {
