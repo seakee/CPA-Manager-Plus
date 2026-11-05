@@ -298,6 +298,12 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 		if err := requireSealedBindingAuthority(ctx, db, a, record); err != nil {
 			return upgradeRecord{}, false, err
 		}
+		// A Managed completion has no External binding; the handoff it rests on is
+		// the import's recorded destination and the Manager's own sealed connection
+		// for it. Both are read here, before the row can unlock the product.
+		if err := requireManagedDestinationAuthority(ctx, db, a, record); err != nil {
+			return upgradeRecord{}, false, err
+		}
 	}
 	return record, true, nil
 }
@@ -481,11 +487,11 @@ func upgradeStageFromRecord(record upgradeRecord) (UpgradeStage, error) {
 //
 // The stage alone is not a verdict. The completion gate writes the observation
 // it rests on beside the stage, so this reader proves the same facts the gate
-// proved: an External target, the source volume the copy-in observed, every
-// domain the verdict names, and the External binding that verdict bound —
-// including the sealed credential the connect step proved against it. A row
-// written before the gate existed carries none of that, and it is refused here
-// instead of admitting a store the gate never verified.
+// proved: the source volume the copy-in observed, every domain the verdict names,
+// and the target binding that verdict proved — the External connect binding with
+// its sealed credential, or the Managed import's destination. A row written
+// before the gate existed carries none of that, and it is refused here instead of
+// admitting a store the gate never verified.
 func requireCompleteEvidence(record upgradeRecord) error {
 	switch {
 	case record.SourceKind != SourceKindUpgradedLegacy:
@@ -502,12 +508,6 @@ func requireCompleteEvidence(record upgradeRecord) error {
 	if err := evidence.Validate(); err != nil {
 		return fmt.Errorf("a complete Upgrade record carries verification this build cannot accept: %w", err)
 	}
-	if evidence.TargetMode != model.UpgradeTargetExternal {
-		// A Managed operation stops at verify until the trusted U1-1b re-pin
-		// promotes its authority, so this build can never have recorded one as
-		// complete.
-		return fmt.Errorf("a complete Upgrade record must name an external target, not %q", evidence.TargetMode)
-	}
 	if strings.TrimSpace(evidence.SourceFingerprint) != strings.TrimSpace(record.SourceFingerprintAfter) {
 		return errors.New("a complete Upgrade record's verification names a different source volume than the recorded copy-in")
 	}
@@ -520,12 +520,28 @@ func requireCompleteEvidence(record upgradeRecord) error {
 			return fmt.Errorf("a complete Upgrade record's verification names the %q domain the row never recorded", domain)
 		}
 	}
-	for _, required := range []string{
-		model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig, model.UpgradeDomainIdentity,
-	} {
+	// `cpa_config` is the domain both target steps record; `identity` is the
+	// External connect step's own observation and has no Managed producer.
+	requiredDomains := []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig}
+	switch evidence.TargetMode {
+	case model.UpgradeTargetExternal:
+		requiredDomains = append(requiredDomains, model.UpgradeDomainIdentity)
+	case model.UpgradeTargetManaged:
+		if record.Binding.Found {
+			// The Managed verdict names the import's destination. A stored
+			// External binding contradicts it, so the row describes two targets.
+			return errors.New("a complete Managed Upgrade record carries an External connect binding")
+		}
+	default:
+		return fmt.Errorf("a complete Upgrade record names an unsupported target mode %q", evidence.TargetMode)
+	}
+	for _, required := range requiredDomains {
 		if !containsRecordedDomain(evidence.Domains, required) {
 			return fmt.Errorf("a complete Upgrade record's verification does not name the %q domain", required)
 		}
+	}
+	if evidence.TargetMode != model.UpgradeTargetExternal {
+		return nil
 	}
 	binding := record.Binding
 	switch {
@@ -580,17 +596,9 @@ func requireSealedBindingAuthority(ctx context.Context, db *sql.DB, a DatabaseUp
 	if !security.IsValidProtectedEnvelope(sealed) {
 		return errors.New("a complete Upgrade record's External binding carries no sealed management secret, so the credential the Manager would present was never proved")
 	}
-	dataKeyPath := strings.TrimSpace(a.DataKeyPath)
-	if dataKeyPath == "" {
-		dataKeyPath = filepath.Join(filepath.Dir(strings.TrimSpace(a.DatabasePath)), admissionDataKeyFileName)
-	}
-	key, err := security.LoadExistingDataKey(a.DataKey, dataKeyPath)
+	protector, err := admissionProtector(a)
 	if err != nil {
 		return fmt.Errorf("a complete Upgrade record's sealed management secret cannot be read because the Manager data key is missing: %w", err)
-	}
-	protector, err := security.NewProtector(key)
-	if err != nil {
-		return fmt.Errorf("initialize the Manager secret protector: %w", err)
 	}
 	secret, err := protector.UnprotectString(sealed)
 	if err != nil {
@@ -627,6 +635,162 @@ func requireSealedBindingAuthority(ctx context.Context, db *sql.DB, a DatabaseUp
 		return errors.New("a complete Upgrade record's External binding proved a management secret the Manager's own connection does not carry")
 	}
 	return nil
+}
+
+// admissionImportDestinationKeySetting names the settings row the Managed CPA
+// import writes for its destination attempt and completion evidence.
+// `upgrade.cpaImportDestinationKeySetting` is the producer; the admission reads
+// the same bytes and must not depend on the writer's package.
+const admissionImportDestinationKeySetting = "upgrade_cpa_import_destination_v1"
+
+// managedImportDestination is the part of that row the admission re-checks: the
+// address a run proved, the source identity the destination was staged for, and
+// the server fingerprint that run observed. The management secret the row also
+// carries is not this check's business — the Manager's own connection is.
+type managedImportDestination struct {
+	BaseURL           string `json:"baseUrl"`
+	URLProved         bool   `json:"urlProved"`
+	ServerFingerprint string `json:"serverFingerprint"`
+	ManagementKey     string `json:"managementKey"`
+	Intent            struct {
+		SourceIdentity string `json:"sourceIdentity"`
+	} `json:"intent"`
+}
+
+// admissionProtector loads the Manager data key the store's secrets are sealed
+// with. It never creates one.
+func admissionProtector(a DatabaseUpgradeAdmission) (*security.Protector, error) {
+	dataKeyPath := strings.TrimSpace(a.DataKeyPath)
+	if dataKeyPath == "" {
+		dataKeyPath = filepath.Join(filepath.Dir(strings.TrimSpace(a.DatabasePath)), admissionDataKeyFileName)
+	}
+	key, err := security.LoadExistingDataKey(a.DataKey, dataKeyPath)
+	if err != nil {
+		return nil, err
+	}
+	return security.NewProtector(key)
+}
+
+// requireManagedDestinationAuthority proves the completed Managed row's handoff
+// survives a restart: the store holds the destination evidence the import wrote,
+// and the Manager's own connection carries the sealed credential for exactly that
+// address.
+//
+// The sealed envelope is checked, not merely the decrypted value: a plaintext
+// secret left on the row is not a credential this Manager sealed, and the next
+// start must read the same bytes this check read. Nothing here creates a key or
+// repairs a row — a completed store is read-only.
+func requireManagedDestinationAuthority(ctx context.Context, db *sql.DB, a DatabaseUpgradeAdmission, record upgradeRecord) error {
+	evidence, err := (model.UpgradeOperation{Verification: json.RawMessage(record.Verification)}).VerificationEvidence()
+	if err != nil || evidence.TargetMode != model.UpgradeTargetManaged {
+		// requireCompleteEvidence reports an unreadable block, and only a Managed
+		// verdict has a destination row to prove.
+		return nil
+	}
+	var raw string
+	err = db.QueryRowContext(ctx,
+		`select value from settings where key = ?`, admissionImportDestinationKeySetting).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("a complete Managed Upgrade record names no CPA import destination the store holds")
+	}
+	if err != nil {
+		return fmt.Errorf("read the recorded CPA import destination: %w", err)
+	}
+	var destination managedImportDestination
+	if err := json.Unmarshal([]byte(raw), &destination); err != nil {
+		return fmt.Errorf("decode the recorded CPA import destination: %w", err)
+	}
+	switch {
+	case strings.TrimSpace(destination.BaseURL) == "":
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no address")
+	case !destination.URLProved:
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no address a run proved")
+	case strings.TrimSpace(destination.Intent.SourceIdentity) == "":
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no source identity")
+	case !validManagedServerFingerprint(destination.ServerFingerprint):
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no proved server fingerprint")
+	}
+	destinationAddress, err := canonicalAdmissionAddress(destination.BaseURL)
+	if err != nil {
+		return fmt.Errorf("the recorded CPA import destination names an address that is not a usable endpoint: %w", err)
+	}
+	protector, err := admissionProtector(a)
+	if err != nil {
+		return fmt.Errorf("a complete Managed Upgrade record's sealed connection cannot be read with this Manager data key: %w", err)
+	}
+	var managerRaw string
+	err = db.QueryRowContext(ctx, `select value from settings where key = 'manager_config_v1'`).Scan(&managerRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("a complete Managed Upgrade record names a CPA the Manager stores no connection for")
+	}
+	if err != nil {
+		return fmt.Errorf("read the Manager's stored CPA connection: %w", err)
+	}
+	var stored model.ManagerConfig
+	if err := json.Unmarshal([]byte(managerRaw), &stored); err != nil {
+		return fmt.Errorf("decode the Manager's stored CPA connection: %w", err)
+	}
+	sealed := strings.TrimSpace(stored.CPAConnection.ManagementKey)
+	if !security.IsValidProtectedEnvelope(sealed) {
+		return errors.New("a complete Managed Upgrade record's Manager connection carries no sealed management secret")
+	}
+	secret, err := protector.UnprotectString(sealed)
+	if err != nil {
+		return fmt.Errorf("decrypt the Manager's sealed management secret: %w", err)
+	}
+	secret = strings.TrimSpace(secret)
+	if !cpa.ValidV8ManagementKey(secret) {
+		return errors.New("a complete Managed Upgrade record's Manager connection carries no usable management secret")
+	}
+	// The destination was handed a secret by the import, and the Manager holds the
+	// one it will present after a restart. If the two differ, the store describes a
+	// handoff between them that never happened.
+	destinationSealed := strings.TrimSpace(destination.ManagementKey)
+	if !security.IsValidProtectedEnvelope(destinationSealed) {
+		return errors.New("a complete Managed Upgrade record's CPA import destination carries no sealed management secret")
+	}
+	destinationSecret, err := protector.UnprotectString(destinationSealed)
+	if err != nil {
+		return fmt.Errorf("decrypt the recorded destination's sealed management secret: %w", err)
+	}
+	if !security.EqualHMAC(strings.TrimSpace(destinationSecret), secret) {
+		return errors.New("a complete Managed Upgrade record's CPA import destination holds a management secret the Manager does not")
+	}
+	st := store.New(db, protector)
+	managerCfg, managerOK, err := st.LoadManagerConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("read the Manager configuration: %w", err)
+	}
+	setup, setupOK, err := st.LoadSetup(ctx)
+	if err != nil {
+		return fmt.Errorf("read the Manager setup: %w", err)
+	}
+	resolution, err := managerconfig.ResolveLegacyConnectionAuthority(managerCfg, managerOK, setup, setupOK)
+	if err != nil {
+		return fmt.Errorf("resolve the Manager's stored CPA connection: %w", err)
+	}
+	if resolution.Authority == managerconfig.LegacyConnectionAuthorityNone {
+		return errors.New("a complete Managed Upgrade record names a CPA the Manager stores no connection for")
+	}
+	connectionAddress, err := canonicalAdmissionAddress(resolution.Connection.BaseURL)
+	if err != nil {
+		return fmt.Errorf("the CPA address the Manager stores is not a usable endpoint: %w", err)
+	}
+	if connectionAddress != destinationAddress {
+		return errors.New("a complete Managed Upgrade record's CPA import destination names a CPA address the Manager's own connection does not")
+	}
+	if !security.EqualHMAC(strings.TrimSpace(resolution.Connection.ManagementKey), secret) {
+		return errors.New("a complete Managed Upgrade record's Manager connection does not carry the sealed management secret this store holds")
+	}
+	return nil
+}
+
+// validManagedServerFingerprint accepts exactly the shape
+// freshkeyapply.ExternalServerFingerprint produces: the shared identity prefix
+// and a lowercase SHA-256 digest.
+func validManagedServerFingerprint(value string) bool {
+	digest, ok := strings.CutPrefix(strings.TrimSpace(value), "external:sha256:")
+	return ok && identity.IsValidSHA256Hex(digest)
 }
 
 // canonicalAdmissionAddress applies the two functions the External connect step

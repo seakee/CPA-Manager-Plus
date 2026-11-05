@@ -278,11 +278,9 @@ export function parseUpgradeVerify(value: unknown): UpgradeVerifyOutcome | null 
   const targetMode = text(document.targetMode);
   if (targetMode !== 'external' && targetMode !== 'managed') return null;
   const reasonCode = text(document.reasonCode);
-  if (document.complete) {
-    if (targetMode !== 'external') return null;
-  } else if (targetMode !== 'managed' || reasonCode === '') {
-    return null;
-  }
+  // Both target modes complete through the gate, and this build has no waiting
+  // position: a reply that is not a completion is a position it never records.
+  if (!document.complete) return null;
   return {
     stage: document.stage,
     stageKnown: document.stageKnown,
@@ -967,11 +965,7 @@ export function FreshUpgradeFlow({
               <FullWebIcon name="check" size={24} />
               <div>
                 <h3>{t('verifyDoneTitle', language)}</h3>
-                <p data-testid="upgrade-verify-outcome">
-                  {verification.value.complete
-                    ? t('verifyComplete', language)
-                    : t('verifyWaiting', language)}
-                </p>
+                <p data-testid="upgrade-verify-outcome">{t('verifyComplete', language)}</p>
                 {verification.value.alreadyVerified && (
                   <p data-testid="upgrade-verify-already">{t('verifyAlready', language)}</p>
                 )}
@@ -981,9 +975,6 @@ export function FreshUpgradeFlow({
                       ? t('verifyTargetExternal', language)
                       : t('verifyTargetManaged', language)}
                   </p>
-                )}
-                {!verification.value.complete && verification.value.reason && (
-                  <p data-testid="upgrade-verify-reason">{verification.value.reason}</p>
                 )}
               </div>
             </div>

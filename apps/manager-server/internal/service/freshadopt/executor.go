@@ -24,9 +24,9 @@
 // One authority drives a run: the per-reference decisions a Fresh adoption's
 // qualification produced. A reference without a migrate verdict from that chain is
 // recorded with the rule table's manual action and never written, so an unproven
-// source cannot copy anything. A caller that holds no decisions at all — the
-// Upgrade surface holds no qualification record, so it passes none — gets a run in
-// which every item is recorded as manual work and nothing is written.
+// source cannot copy anything. A caller that holds no decisions at all — a zero
+// Authorization — gets a run in which every item is recorded as manual work and
+// nothing is written.
 package freshadopt
 
 import (
@@ -118,7 +118,20 @@ type Executor struct {
 
 // New builds an executor over an already-authenticated source and destination
 // and the per-reference decisions of the operation record this run serves.
+//
+// It is the Fresh adoption's constructor: those decisions were already read from
+// the operation checkpoint, which is the record that authority was accepted into.
+// A caller that must prove its authority first builds an Authorization
+// (NewAuthorization) and uses NewExecutor.
 func New(source Source, destination Destination, decisions []bootstrap.AdoptionResourceDecision) *Executor {
+	return NewExecutor(source, destination, Authorization{decisions: decisions})
+}
+
+// NewExecutor builds an executor over an already-authenticated source and
+// destination and a verified authorization. A zero Authorization authorizes
+// nothing, so every item is recorded as manual work and nothing is written.
+func NewExecutor(source Source, destination Destination, auth Authorization) *Executor {
+	decisions := auth.decisionsOf()
 	indexed := make(map[bootstrap.ResourceRef]bootstrap.AdoptionResourceDecision, len(decisions))
 	for _, decision := range decisions {
 		indexed[decision.ResourceRef] = decision

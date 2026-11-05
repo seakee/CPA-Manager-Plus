@@ -990,17 +990,9 @@ func TestStatusStageToNextAction(t *testing.T) {
 		{stage: StagePreflight, action: ActionPreflight, stageKnown: true},
 		{stage: StageCopyIn, action: ActionCopyIn, stageKnown: true},
 		{stage: StageReconcile, domains: []string{domainSourceCopy}, action: ActionCPAImport, stageKnown: true},
+		// The import records `cpa_config` only once every item is settled, so a
+		// row without it has not finished and still offers the import.
 		{stage: StageCPAImport, domains: []string{domainSourceCopy}, action: ActionCPAImport, stageKnown: true},
-		// The deferral is read from the items the import wrote: this build never
-		// records cpa_config, so an item with its typed reason is the record that
-		// the step ran and copied nothing. Repeating the step would write nothing
-		// again, so the next decision is the completion gate — which records the
-		// waiting position for a Managed target instead of completing it.
-		{
-			stage: StageCPAImport, domains: []string{domainSourceCopy},
-			manualItems: []string{"section:ampcode: re-create it (" + upgradeservice.CPAImportRequiresQualification + ")"},
-			action:      ActionVerify, stageKnown: true,
-		},
 		{stage: StageCPAImport, domains: []string{domainSourceCopy}, manualItems: []string{"reimport_cpa_keys"}, action: ActionCPAImport, stageKnown: true},
 		{stage: StageCPAImport, domains: []string{domainSourceCopy, domainCPAConfig}, action: ActionVerify, stageKnown: true},
 		{stage: StageExternal, action: ActionVerify, stageKnown: true},
@@ -1011,8 +1003,8 @@ func TestStatusStageToNextAction(t *testing.T) {
 		{stage: "quantum", action: "", stageKnown: false},
 	}
 	for _, testCase := range cases {
-		if got := nextAction(testCase.stage, testCase.domains, testCase.manualItems); got != testCase.action {
-			t.Fatalf("nextAction(%q, %v, %v) = %q, want %q", testCase.stage, testCase.domains, testCase.manualItems, got, testCase.action)
+		if got := nextAction(testCase.stage, testCase.domains); got != testCase.action {
+			t.Fatalf("nextAction(%q, %v) = %q, want %q", testCase.stage, testCase.domains, got, testCase.action)
 		}
 		if got := knownStage(testCase.stage); got != testCase.stageKnown {
 			t.Fatalf("knownStage(%q) = %t, want %t", testCase.stage, got, testCase.stageKnown)
@@ -1026,11 +1018,10 @@ func TestStatusStageToNextAction(t *testing.T) {
 // repeat the stage they had just finished.
 func TestStatusRecordedStageGuidesTheNextStep(t *testing.T) {
 	cases := []struct {
-		name        string
-		stage       model.UpgradeStage
-		domains     []string
-		manualItems []string
-		action      string
+		name    string
+		stage   model.UpgradeStage
+		domains []string
+		action  string
 	}{
 		{
 			name: "reconciled", stage: model.UpgradeStageReconcile,
@@ -1042,19 +1033,12 @@ func TestStatusRecordedStageGuidesTheNextStep(t *testing.T) {
 			domains: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig},
 			action:  ActionVerify,
 		},
-		{
-			name: "deferred", stage: model.UpgradeStageCPAImport,
-			domains:     []string{model.UpgradeDomainSourceCopy},
-			manualItems: []string{"section:ampcode: re-create it (" + upgradeservice.CPAImportRequiresQualification + ")"},
-			action:      ActionVerify,
-		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			database := managerStoreWithOperation(t, testAdminKey, model.UpgradeOperation{
 				Stage:       testCase.stage,
 				DomainsDone: testCase.domains,
-				ManualItems: testCase.manualItems,
 			})
 			_, body := request(t, newHandler(legacySourceDir(t), database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
 			var status statusDocument

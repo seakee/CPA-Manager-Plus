@@ -188,9 +188,10 @@ func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
 		SourceIdentity: "legacy-managed:sha256:fixture",
 		DestinationURL: "http://127.0.0.1:8317",
 		PluginsEnabled: true,
-		ClientKeys:     1,
+		ClientKeys:    1,
+		MigratedCount: 5,
 		ManualItems: []upgradeservice.CPAImportManualItem{
-			{Item: "section:ampcode", Reason: upgradeservice.CPAImportRequiresQualification, Instruction: "re-create it"},
+			{Item: "section:ampcode", Reason: "reconfigure_after_adoption", Instruction: "re-create it"},
 		},
 		UpdatedAtMS: 1700000000000,
 	}
@@ -214,7 +215,8 @@ func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
 	allowedResult := map[string]bool{
 		"stage": true, "domainsDone": true, "sourceVersion": true, "sourceLayout": true,
 		"sourceIdentity": true, "destinationUrl": true, "pluginsEnabled": true,
-		"clientKeys": true, "manualItems": true, "alreadyComplete": true, "updatedAtMs": true,
+		"clientKeys": true, "migratedCount": true, "serverFingerprint": true,
+		"manualItems": true, "alreadyComplete": true, "updatedAtMs": true,
 	}
 	for key := range encodedResult {
 		if !allowedResult[key] {

@@ -247,15 +247,11 @@ const (
 	UpgradeErrorVerifyBindingDrifted UpgradeErrorCode = "upgrade_verify_binding_drifted"
 	// UpgradeErrorVerifyConnectionUnproven reports a Managed operation whose
 	// imported destination connection did not survive: no recorded attempt, an
-	// attempt no run proved, or a Manager connection that no longer names the
-	// destination with the secret the import handed over. Nothing was written.
+	// attempt no run proved, a Manager connection that no longer names the
+	// destination with the secret the import handed over, or a destination whose
+	// live server fingerprint is not the one the import recorded. Nothing was
+	// written.
 	UpgradeErrorVerifyConnectionUnproven UpgradeErrorCode = "upgrade_verify_connection_unproven"
-	// UpgradeErrorVerifyWaitingForRepin is the reason recorded at verify for a
-	// Managed operation. It is not a failure: the Managed authority promotion and
-	// the CPA copy qualification are deferred to the trusted re-pin step, so this
-	// build records the position and the reason instead of completing the
-	// operation. It is never returned as an error.
-	UpgradeErrorVerifyWaitingForRepin UpgradeErrorCode = "upgrade_verify_waiting_for_repin"
 	// UpgradeErrorVerifyConflict reports that the recorded operation changed
 	// between the read this run proved and the statement that would have recorded
 	// the verdict, so the revision check refused it. Nothing was written: the

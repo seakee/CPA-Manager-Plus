@@ -85,19 +85,19 @@ function unrecordedStatus() {
 }
 
 // The action's own reply. The gate records exactly two positions — complete on an
-// External target and verify (waiting) on a Managed one — so the fixture is
-// written as the Managed waiting position and every test overrides from there.
+// External target and a Managed completion — so the fixture is written as the
+// Managed completed operation and every test overrides from there.
 function verifyDocument(overrides: Record<string, unknown> = {}) {
   return {
     contractVersion: CONTRACT,
     recorded: true,
-    stage: 'verify',
+    stage: 'complete',
     stageKnown: true,
-    complete: false,
+    complete: true,
     targetMode: 'managed',
     domainsDone: [],
-    reasonCode: 'upgrade_verify_waiting_for_repin',
-    reason: 'wait for the trusted U1-1b re-pin',
+    reasonCode: '',
+    reason: '',
     manualItems: [],
     alreadyVerified: false,
     updatedAtMs: 40,
@@ -724,17 +724,18 @@ describe('Full Web upgrade wizard', () => {
 
   it('presents the action verdict and then re-reads what the store recorded', async () => {
     const verified = statusDocument({
-      stage: 'verify',
-      nextAction: 'verify',
-      domainsDone: ['source_copy', 'usage_events', 'identity'],
-      errorCode: 'upgrade_verify_waiting_for_repin',
-      errorDetail: 'wait for the trusted U1-1b re-pin',
-      manualItems: ['verification: wait (upgrade_verify_waiting_for_repin)'],
+      stage: 'complete',
+      nextAction: 'complete',
+      domainsDone: ['source_copy', 'usage_events', 'cpa_config'],
+      errorCode: '',
+      errorDetail: '',
+      manualItems: ['section:ampcode: re-create it (removed_upstream)'],
     });
     let current = statusDocument({
       stage: 'cpa_import',
       nextAction: 'verify',
-      manualItems: ['section:ampcode: re-create it (upgrade_cpa_import_requires_qualification)'],
+      domainsDone: ['source_copy', 'usage_events', 'cpa_config'],
+      manualItems: ['section:ampcode: re-create it (removed_upstream)'],
     });
     const read = resumeRead(() => current);
     const verify = vi.fn<UpgradeWizardVerify>(async () => {
@@ -751,20 +752,17 @@ describe('Full Web upgrade wizard', () => {
 
     await press('upgrade-verify-action');
     expect(verify).toHaveBeenCalledTimes(1);
-    // The action's own answer is shown, and the row is read again so the page
-    // presents the record rather than this reply.
-    expect(byTestId('upgrade-verify-done')).toBeTruthy();
-    expect(byTestId('upgrade-verify-outcome').children.join('')).toContain(t('verifyWaiting', 'en'));
-    expect(byTestId('upgrade-verify-target').children.join('')).toContain(
-      t('verifyTargetManaged', 'en')
-    );
+    // The row is read again so the page presents the record rather than the
+    // reply, and that record is the completion the gate recorded.
     expect(
       vi.mocked(read).mock.calls.filter(([resource]) => resource === 'installation/upgrade/status')
     ).toHaveLength(statusReadsBefore + 1);
-    expect(byTestId('upgrade-progress-reason')).toBeTruthy();
-    expect(view()).toContain('upgrade_verify_waiting_for_repin');
-    // The Managed position is never presented as a completion.
-    expect(allByTestId('upgrade-result-complete')).toHaveLength(0);
+    // The re-read completes the operation, so the page presents the completion
+    // the gate recorded rather than the Managed waiting position.
+    expect(allByTestId('upgrade-result-complete')).toHaveLength(1);
+    expect(view()).toContain(t('resultCompleteHelp', 'en'));
+    expect(allByTestId('upgrade-progress-reason')).toHaveLength(0);
+    expect(view()).not.toContain('upgrade_verify_waiting_for_repin');
   });
 
   it('reports a refused verification instead of moving the operation on', async () => {
@@ -796,12 +794,11 @@ describe('Full Web upgrade wizard', () => {
       { stage: 'verify', complete: true },
       // A complete flag without the stage that means it.
       { stage: 'complete', complete: false },
-      // Completion can only belong to an External target.
-      { stage: 'complete', complete: true, targetMode: 'managed' },
-      // The Managed waiting position can only belong to a Managed target.
+      // The gate completes both target modes; a non-completion is a position
+      // this build never records, with or without a reason.
       { complete: false, targetMode: 'external' },
-      // The waiting position always names the reason it waits.
       { complete: false, reasonCode: '' },
+      { stage: 'verify', complete: false, targetMode: 'managed', reasonCode: 'upgrade_verify_waiting_for_repin' },
       // A stage this build cannot name is not a position it may present.
       { stageKnown: false },
       { stage: 'copy_in' },
@@ -813,7 +810,7 @@ describe('Full Web upgrade wizard', () => {
       });
     }
 
-    // The two positions the gate really records are read as they are.
+    // Both completions the gate records are read as they are.
     expect(parseUpgradeVerify(verifyDocument())).not.toBeNull();
     expect(
       parseUpgradeVerify(
@@ -827,7 +824,7 @@ describe('Full Web upgrade wizard', () => {
     // for a position the gate never records: the reply must be a read failure.
     const read = resumeRead(() => statusDocument({ stage: 'cpa_import', nextAction: 'verify' }));
     const verify = vi.fn<UpgradeWizardVerify>(async () =>
-      verifyDocument({ stage: 'complete', complete: true, targetMode: 'managed' })
+      verifyDocument({ stage: 'verify', complete: true, targetMode: 'managed' })
     );
     await mount(read, verify);
 

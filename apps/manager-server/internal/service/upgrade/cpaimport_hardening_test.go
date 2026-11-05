@@ -75,14 +75,14 @@ func TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the retry against a ready destination was refused: %v", err)
 	}
-	if result.Stage != model.UpgradeStageCPAImport || containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
-		t.Fatalf("the retry recorded stage %q with domains %v, want cpa_import and no cpa_config", result.Stage, result.DomainsDone)
+	if result.Stage != model.UpgradeStageCPAImport || !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the retry recorded stage %q with domains %v, want cpa_import and cpa_config", result.Stage, result.DomainsDone)
 	}
 	if runtime.stageCall != first {
 		t.Fatal("the retry staged the destination again")
 	}
-	// The attempt stays recorded: this build records no cpa_config, so a rerun
-	// must still replay the same request and the same secret.
+	// The attempt stays recorded: it is the evidence the completion gate re-reads
+	// and it holds the same secret the destination was staged with.
 	_, keptKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
 	if err != nil || !found || keptKey != first.ManagementKey {
 		t.Fatalf("the recorded attempt (found %t) no longer holds the staged secret: %v", found, err)
@@ -131,8 +131,8 @@ func TestImportCPASupersedesATerminallyFailedAttempt(t *testing.T) {
 	if record.Attempt != 1 || !record.TerminalFailure || record.OperationID != first.OperationID {
 		t.Fatalf("recorded attempt = %+v, want attempt 1, terminal, under %q", record, first.OperationID)
 	}
-	if result.Stage != model.UpgradeStageCPAImport || containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
-		t.Fatalf("the retry recorded stage %q with domains %v, want cpa_import and no cpa_config", result.Stage, result.DomainsDone)
+	if result.Stage != model.UpgradeStageCPAImport || !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the retry recorded stage %q with domains %v, want cpa_import and cpa_config", result.Stage, result.DomainsDone)
 	}
 	retried := runtime.stageCall
 	if retried == nil || retried.OperationID == first.OperationID {
@@ -350,9 +350,19 @@ func TestImportCPAAllowsACorrectedDestinationURLAfterAForeignRefusal(t *testing.
 		t.Fatalf("the proved URL was not recorded: %+v", attempt)
 	}
 
-	// A proved URL is as immutable as the request: swapping it afterwards would
-	// send another CPA the secret this destination was staged with.
+	// The finished step is recorded, so a later run is a replay: another address is
+	// not contacted at all.
 	other := newFakeDestinationCPA(t, "")
+	replayed, err := ImportCPA(context.Background(), importOptions(fixture, runtime, other.url(), boolPointer(true)))
+	if err != nil || !replayed.AlreadyComplete {
+		t.Fatalf("a swayed URL after the completed import = %+v / %v, want the recorded position", replayed, err)
+	}
+	if requests := other.requests(); len(requests) != 0 {
+		t.Fatalf("the other CPA answered %v, want no request", requests)
+	}
+	// An attempt that proved a URL but never recorded the copy — the row an
+	// interrupted run leaves — is still bound to it.
+	writeOperationStage(t, fixture.targetRoot, model.UpgradeStageCPAImport, []string{model.UpgradeDomainSourceCopy})
 	_, err = ImportCPA(context.Background(), importOptions(fixture, runtime, other.url(), boolPointer(true)))
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
 		t.Fatalf("a swapped URL after the proof produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
@@ -484,7 +494,9 @@ func TestImportCPAUnreachableAfterAProofKeepsTheProvedURL(t *testing.T) {
 		t.Fatalf("the finished run did not record the proved URL: %+v", attempt)
 	}
 
-	// The destination stops answering, and the same URL is retried.
+	// An interrupted run leaves the proved attempt without the recorded copy; the
+	// destination then stops answering, and the same URL is retried.
+	writeOperationStage(t, fixture.targetRoot, model.UpgradeStageCPAImport, []string{model.UpgradeDomainSourceCopy})
 	staged.server.Close()
 	_, err = ImportCPA(context.Background(), importOptions(fixture, runtime, staged.url(), boolPointer(true)))
 	code, ok := UpgradeErrorCodeOf(err)
@@ -608,8 +620,15 @@ func TestImportCPARecordsTheProofWhenItReplaysARecordedAttempt(t *testing.T) {
 		t.Fatal("the replay replaced the secret the destination was staged with")
 	}
 
-	// A later run cannot silently swap the URL the replay proved.
+	// The replay recorded the copy, so a later run is a replay and never contacts
+	// another address; the attempt that proved a URL is still bound to it once the
+	// recorded copy is removed.
 	other := newFakeDestinationCPA(t, "")
+	replayedAgain, err := ImportCPA(ctx, importOptions(fixture, runtime, other.url(), boolPointer(true)))
+	if err != nil || !replayedAgain.AlreadyComplete {
+		t.Fatalf("a swapped URL after the completed replay = %+v / %v, want the recorded position", replayedAgain, err)
+	}
+	writeOperationStage(t, fixture.targetRoot, model.UpgradeStageCPAImport, []string{model.UpgradeDomainSourceCopy})
 	_, err = ImportCPA(ctx, importOptions(fixture, runtime, other.url(), boolPointer(true)))
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
 		t.Fatalf("a swapped URL after the replay produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
@@ -924,9 +943,8 @@ func TestImportCPARefusesASourceRootOtherThanTheRecordedOne(t *testing.T) {
 // TestBoundedManualItemTruncatesOnARuneBoundary pins the non-ASCII case and the
 // half that must survive it: a long instruction must stay valid UTF-8 when it is
 // bounded, and the item name and typed reason are never what gets cut. The reason
-// is what the wizard reads back to tell a deferred import from one that never ran,
-// so a bounded line is not a prefix of the full line — it is the full head and
-// tail with the instruction shortened between them.
+// is the rule's own manual action, so a bounded line is not a prefix of the full
+// line — it is the full head and tail with the instruction shortened between them.
 func TestBoundedManualItemTruncatesOnARuneBoundary(t *testing.T) {
 	instruction := strings.Repeat("配置路径", 120)
 	line := boundedManualItem(CPAImportManualItem{Item: "section:café", Reason: "not_in_import_scope", Instruction: instruction})
@@ -946,13 +964,13 @@ func TestBoundedManualItemTruncatesOnARuneBoundary(t *testing.T) {
 	if !strings.HasPrefix(instruction, kept) {
 		t.Fatalf("the bounded instruction %q is not a prefix of the full one", kept)
 	}
-	// The import's own deferral reason is preserved for a full-size instruction,
-	// which is what the wizard's next decision depends on.
-	deferred := boundedManualItem(CPAImportManualItem{
-		Item: "section:ampcode", Reason: CPAImportRequiresQualification, Instruction: instruction,
+	// A rule's own manual action is preserved for a full-size instruction, which
+	// is what tells the operator what the item still needs.
+	manual := boundedManualItem(CPAImportManualItem{
+		Item: "section:ampcode", Reason: "reconfigure_after_adoption", Instruction: instruction,
 	})
-	if !strings.HasSuffix(deferred, "("+CPAImportRequiresQualification+")") {
-		t.Fatalf("the bounded deferral lost its reason: %q", deferred)
+	if !strings.HasSuffix(manual, "(reconfigure_after_adoption)") {
+		t.Fatalf("the bounded manual item lost its reason: %q", manual)
 	}
 }
 

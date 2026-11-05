@@ -22,6 +22,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -166,11 +167,17 @@ func (f *verifyFixture) handManagerConnection(t *testing.T, address, secret stri
 	}
 }
 
+// verifyManagedFingerprint is the server fingerprint the synthetic probe seams
+// below report, so the evidence the fixture records is the one the live re-proof
+// derives.
+func verifyManagedFingerprint() string {
+	return freshkeyapply.ExternalServerFingerprint("v8.0.13", strings.Repeat("a", 64))
+}
+
 // recordManagedImport records what the CPA import leaves behind for a Managed
-// target: the handoff connection, the proved destination attempt, the
-// cpa_import stage and the manual items it defers. It records no cpa_config
-// domain, because this build copies nothing — that omission is the fact the
-// verification has to survive.
+// target: the handoff connection, the proved destination attempt with the server
+// facts the run observed, the cpa_import stage with its cpa_config domain, and the
+// manual items the adoption rules keep manual.
 func (f *verifyFixture) recordManagedImport(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -181,23 +188,26 @@ func (f *verifyFixture) recordManagedImport(t *testing.T) {
 		t.Fatalf("hand the destination connection over: %v", err)
 	}
 	if err := saveCPAImportDestinationRecord(ctx, f.databasePath(), f.paths.DataKey, cpaImportDestinationRecord{
-		BaseURL:     cpa.NormalizeBaseURL(verifyManagedAddress),
-		URLProved:   true,
-		Intent:      cpaImportDestinationIntent{SourceIdentity: verifyDestinationSource},
-		OperationID: cpaImportDestinationOperationID(verifyDestinationSource, 1),
-		Attempt:     1,
+		BaseURL:           cpa.NormalizeBaseURL(verifyManagedAddress),
+		URLProved:         true,
+		ServerFingerprint: verifyManagedFingerprint(),
+		Intent:            cpaImportDestinationIntent{SourceIdentity: verifyDestinationSource},
+		OperationID:       cpaImportDestinationOperationID(verifyDestinationSource, 1),
+		Attempt:           1,
 	}, verifyManagedSecret); err != nil {
 		t.Fatalf("record the destination attempt: %v", err)
 	}
-	if _, err := recordCPAImportDeferral(ctx, f.databasePath(), CPAImportResult{
-		Stage: model.UpgradeStageCPAImport,
+	if _, err := recordCPAImportCompletion(ctx, f.databasePath(), CPAImportResult{
+		Stage:             model.UpgradeStageCPAImport,
+		DestinationURL:    verifyManagedAddress,
+		ServerFingerprint: verifyManagedFingerprint(),
 		ManualItems: []CPAImportManualItem{{
 			Item:        "section:ampcode",
-			Reason:      CPAImportRequiresQualification,
+			Reason:      "reconfigure_after_adoption",
 			Instruction: "re-create it in the destination CPA",
 		}},
 	}); err != nil {
-		t.Fatalf("record the CPA import deferral: %v", err)
+		t.Fatalf("record the CPA import completion: %v", err)
 	}
 }
 
@@ -337,50 +347,50 @@ func TestVerifyCompletesTheExternalOperation(t *testing.T) {
 	}
 }
 
-// TestVerifyRecordsTheManagedWaitingPosition is the decision-4 contract: a
-// Managed operation whose comparison and connection hold is recorded at verify
-// with the typed reason, and never completes.
-func TestVerifyRecordsTheManagedWaitingPosition(t *testing.T) {
+// TestVerifyCompletesTheManagedOperation is the Managed contract end to end: the
+// recorded copy-in, reconciliation, imported destination and Manager connection
+// are re-proved against the live CPA, and the verdict and its evidence are
+// recorded as `complete` in one statement.
+func TestVerifyCompletesTheManagedOperation(t *testing.T) {
 	fixture := newManagedVerifyFixture(t)
 	before := fixture.operation(t)
 	if before.Stage != model.UpgradeStageCPAImport {
 		t.Fatalf("fixture stage = %q, want cpa_import", before.Stage)
 	}
-	if before.HasDomain(model.UpgradeDomainCPAConfig) {
-		t.Fatal("fixture recorded cpa_config, which this build must not claim")
+	if !before.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatal("fixture recorded no cpa_config, so the import never settled its copy")
 	}
 
 	result, err := fixture.verify(t)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if result.Complete {
-		t.Fatalf("a Managed operation completed before the re-pin: %+v", result)
-	}
-	if result.Stage != model.UpgradeStageVerify {
-		t.Fatalf("stage = %q, want verify", result.Stage)
+	if !result.Complete || result.Stage != model.UpgradeStageComplete {
+		t.Fatalf("result = %+v, want a completed operation", result)
 	}
 	if result.TargetMode != model.UpgradeTargetManaged {
 		t.Fatalf("target mode = %q, want managed", result.TargetMode)
 	}
-	if result.ReasonCode != string(UpgradeErrorVerifyWaitingForRepin) {
-		t.Fatalf("reason code = %q, want the re-pin reason", result.ReasonCode)
+	if result.ReasonCode != "" || result.Reason != "" {
+		t.Fatalf("a completed operation reported a reason: %+v", result)
 	}
-	if !strings.Contains(result.Reason, "U1-1b") {
-		t.Fatalf("reason = %q, want it to name the trusted re-pin", result.Reason)
+	wantDomains := []string{
+		model.UpgradeDomainSourceCopy,
+		model.UpgradeDomainRetainedProjection,
+		model.UpgradeDomainPricing,
+		model.UpgradeDomainCoverage,
+		model.UpgradeDomainCPAConfig,
+	}
+	if !hasDomains(result.DomainsDone, wantDomains...) {
+		t.Fatalf("domains = %v, want %v", result.DomainsDone, wantDomains)
+	}
+	if slicesContain(result.DomainsDone, model.UpgradeDomainIdentity) {
+		t.Fatalf("a Managed completion claimed the External identity domain: %v", result.DomainsDone)
 	}
 
 	recorded := fixture.operation(t)
-	if recorded.Stage != model.UpgradeStageVerify {
-		t.Fatalf("recorded stage = %q, want verify", recorded.Stage)
-	}
-	if recorded.ErrorCode != string(UpgradeErrorVerifyWaitingForRepin) {
-		t.Fatalf("recorded reason code = %q", recorded.ErrorCode)
-	}
-	// The deferred cpa_config domain stays missing, honestly: the waiting record
-	// is not a claim that the destination holds the copied state.
-	if recorded.HasDomain(model.UpgradeDomainCPAConfig) {
-		t.Fatal("the waiting record claimed cpa_config")
+	if recorded.Stage != model.UpgradeStageComplete {
+		t.Fatalf("recorded stage = %q, want complete", recorded.Stage)
 	}
 	evidence, err := recorded.VerificationEvidence()
 	if err != nil {
@@ -392,34 +402,23 @@ func TestVerifyRecordsTheManagedWaitingPosition(t *testing.T) {
 	if evidence.BindingIdentity != "" || evidence.BindingGeneration != "" {
 		t.Fatalf("a Managed verification named a binding: %+v", evidence)
 	}
-	// Every manual item the import recorded survives, and the waiting
-	// instruction is added beside them rather than replacing them.
-	if len(recorded.ManualItems) != len(before.ManualItems)+1 {
-		t.Fatalf("manual items = %v, want the import's %v plus the waiting line", recorded.ManualItems, before.ManualItems)
-	}
-	for _, item := range before.ManualItems {
-		if !slicesContain(recorded.ManualItems, item) {
-			t.Fatalf("manual item %q was lost: %v", item, recorded.ManualItems)
-		}
+	// Every manual item the import recorded survives: completion is not a
+	// statement that the operator's remaining work disappeared.
+	if len(recorded.ManualItems) != len(before.ManualItems) {
+		t.Fatalf("manual items = %v, want the import's %v", recorded.ManualItems, before.ManualItems)
 	}
 
-	// A repeat records nothing: the position and its evidence are already there.
+	// A repeat is the same verdict, not a new record: nothing is written.
 	repeat, err := fixture.verify(t)
 	if err != nil {
 		t.Fatalf("repeat verify: %v", err)
 	}
-	if repeat.Complete || !repeat.AlreadyVerified {
-		t.Fatalf("repeat = %+v, want the recorded waiting position", repeat)
+	if !repeat.Complete || !repeat.AlreadyVerified {
+		t.Fatalf("repeat = %+v, want the recorded verdict reported", repeat)
 	}
 	after := fixture.operation(t)
 	if after.Revision != recorded.Revision || after.UpdatedAtMS != recorded.UpdatedAtMS {
 		t.Fatalf("repeat wrote the row: %d/%d -> %d/%d", recorded.Revision, recorded.UpdatedAtMS, after.Revision, after.UpdatedAtMS)
-	}
-	if len(after.ManualItems) != len(recorded.ManualItems) {
-		t.Fatalf("repeat duplicated manual items: %v -> %v", recorded.ManualItems, after.ManualItems)
-	}
-	if after.Stage == model.UpgradeStageComplete {
-		t.Fatal("a Managed operation reached complete")
 	}
 }
 
@@ -928,11 +927,11 @@ func TestVerifyTargetModeDerivesFromTheDurableRecord(t *testing.T) {
 // model vocabulary, never a caller's list.
 func TestVerifyRequiredDomainsAreDerived(t *testing.T) {
 	managed := verifyRequiredDomains(model.UpgradeTargetManaged, []string{model.UpgradeDomainPricing})
-	if !slices.Equal(managed, []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainPricing}) {
+	if !slices.Equal(managed, []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainPricing, model.UpgradeDomainCPAConfig}) {
 		t.Fatalf("managed required domains = %v", managed)
 	}
-	if slicesContain(managed, model.UpgradeDomainUsageEvents) || slicesContain(managed, model.UpgradeDomainCPAConfig) {
-		t.Fatalf("managed required domains = %v, want no unperformed domain", managed)
+	if slicesContain(managed, model.UpgradeDomainUsageEvents) || slicesContain(managed, model.UpgradeDomainIdentity) {
+		t.Fatalf("managed required domains = %v, want no domain no Managed step records", managed)
 	}
 	external := verifyRequiredDomains(model.UpgradeTargetExternal, nil)
 	want := []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig}

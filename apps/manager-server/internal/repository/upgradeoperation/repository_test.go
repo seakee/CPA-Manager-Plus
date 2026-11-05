@@ -8,6 +8,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -1165,35 +1166,32 @@ func TestPutCannotChangeAStoredCompleteRow(t *testing.T) {
 	assertStoredOperation(t, repository, complete)
 }
 
+// emptyVerification reports the schema default and the empty value, neither of
+// which is a verdict the gate wrote.
+func emptyVerification(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed == "" || trimmed == "{}"
+}
+
 // TestPutCarriesTheRecordedVerificationForward keeps the evidence the gate wrote
 // out of every generic writer's reach. A whole-row Put replaces every column, so
-// a caller that proposed its own verification block — or none — would leave a
-// verify row with a record no reader could re-check.
+// a caller that proposed its own verification block would otherwise leave the row
+// carrying a record no reader could re-check.
 func TestPutCarriesTheRecordedVerificationForward(t *testing.T) {
-	repository, db := newRepository(t)
+	repository, _ := newRepository(t)
 	ctx := context.Background()
-	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageCPAImport); err != nil {
-		t.Fatalf("advance cpa_import: %v", err)
-	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("begin the verification transaction: %v", err)
-	}
-	waiting := completionEvidence(model.UpgradeDomainSourceCopy)
-	if _, err := upgradeoperation.RecordWaitingVerificationTx(ctx, tx, waiting,
-		"upgrade_verify_waiting_for_repin", "wait for the re-pin", []string{"manual: keep this"}); err != nil {
-		_ = tx.Rollback()
-		t.Fatalf("record the waiting position: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("commit the waiting position: %v", err)
+	if _, err := repository.Advance(ctx, model.UpgradeDomainSourceCopy, model.UpgradeStageVerify); err != nil {
+		t.Fatalf("advance verify: %v", err)
 	}
 	recorded, found, err := repository.Get(ctx)
 	if err != nil || !found {
-		t.Fatalf("get the waiting row: found=%t err=%v", found, err)
+		t.Fatalf("get the verify row: found=%t err=%v", found, err)
 	}
 	if recorded.Stage != model.UpgradeStageVerify {
 		t.Fatalf("stage = %q, want verify", recorded.Stage)
+	}
+	if !emptyVerification(recorded.Verification) {
+		t.Fatalf("a generic advance recorded verification: %s", recorded.Verification)
 	}
 
 	proposal := recorded
@@ -1206,15 +1204,11 @@ func TestPutCarriesTheRecordedVerificationForward(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("get the verify row: found=%t err=%v", found, err)
 	}
-	evidence, err := stored.VerificationEvidence()
-	if err != nil {
-		t.Fatalf("decode the stored verification: %v", err)
+	if !emptyVerification(stored.Verification) {
+		t.Fatalf("generic write fabricated a verification the gate never wrote: %s", stored.Verification)
 	}
-	if !evidence.SameVerdict(waiting) {
-		t.Fatalf("generic write replaced the recorded verification: %+v", evidence)
-	}
-	if len(stored.ManualItems) != 2 {
-		t.Fatalf("manual items = %v, want the recorded line plus the new one", stored.ManualItems)
+	if len(stored.ManualItems) != 1 {
+		t.Fatalf("manual items = %v, want the one new instruction", stored.ManualItems)
 	}
 }
 

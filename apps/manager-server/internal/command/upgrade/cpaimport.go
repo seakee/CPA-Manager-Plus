@@ -132,13 +132,13 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		writeCPAImportOutput(stdout, *asJSON, output)
 		return refuseTyped(stderr, err)
 	}
-	// The import stops at cpa_import by contract. This build copies no
-	// configuration or credential: every item is recorded as manual work with a
-	// typed reason, and the automatic copy belongs to the trusted re-pin step. The
-	// External connection is a separate, authorized step, so the exact command that
-	// continues is printed rather than run.
+	// The import records `cpa_config` once the copy settles. Credential files,
+	// gateway routing configuration and provider runtime state are copied and
+	// read back; anything the adoption rules keep manual is listed in manualItems
+	// with its own action. The External connection is a separate, authorized
+	// step, so the exact command that continues is printed rather than run.
 	if string(result.Stage) == cpaImportStage() {
-		output.Next = "the destination is staged, bound and stored in the Manager connection; provider configuration and OAuth credentials are not copied by this build — every item is recorded in manualItems with reason " + upgradeservice.CPAImportRequiresQualification + ", and the automatic copy is deferred to the trusted re-pin step. Apply those items by hand for now; the operation stays at cpa_import until that step can copy and prove them"
+		output.Next = "the destination is staged, bound and stored in the Manager connection, and the copied CPA state is recorded under cpa_config; any item this source cannot copy is listed in manualItems and must be applied by hand. Run `upgrade verify` to prove the destination and complete the operation"
 	}
 	writeCPAImportOutput(stdout, *asJSON, output)
 	return nil
@@ -208,6 +208,7 @@ func writeCPAImportOutput(w io.Writer, asJSON bool, output cpaImportOutput) {
 		// proved nothing, and printing a count beside it is the claim that it did.
 		if output.Error == "" {
 			_, _ = fmt.Fprintf(w, "  client keys proved: %d\n", result.ClientKeys)
+			_, _ = fmt.Fprintf(w, "  items copied: %d\n", result.MigratedCount)
 		}
 		_, _ = fmt.Fprintf(w, "  manual items: %d\n", len(result.ManualItems))
 		for _, item := range result.ManualItems {
