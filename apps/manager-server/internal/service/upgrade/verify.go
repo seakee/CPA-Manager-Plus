@@ -1023,10 +1023,8 @@ func proveManagedVerifyRuntimeAuthority(ctx context.Context, runtimeClient Verif
 	// offline and starting, so an artifact match alone does not prove it is
 	// running the destination CPA now. Only a Ready Supervisor is administering
 	// the CPA that answers the probes below.
-	if status.State != model.RuntimeStateReady {
-		return unproven(fmt.Sprintf(
-			"the Manager-owned Runtime reported state %q rather than %q, so the Supervisor is not running a ready Managed destination CPA; nothing was written",
-			status.State, model.RuntimeStateReady), nil)
+	if reason := managedRuntimeReadyFailure(status); reason != "" {
+		return unproven(reason+"; nothing was written", nil)
 	}
 	// The running artifact has to be the one this build's authority accepted and
 	// the one the stage request was published against. Either difference means the
@@ -1052,6 +1050,24 @@ func proveManagedVerifyRuntimeAuthority(ctx context.Context, runtimeClient Verif
 			staged, running), nil)
 	}
 	return nil
+}
+
+// managedRuntimeReadyFailure names why a Supervisor status does not prove that a
+// ready destination CPA is running, and reports "" when it does.
+//
+// The Supervisor reports its observed artifact in every state — offline and
+// starting included — so an artifact, identity and URL that all match still say
+// nothing about whether the destination CPA answers now. Both steps that address
+// the destination on the strength of that status, the completion gate and a replay
+// of a recorded import, refuse the same states with this one reason; they differ
+// only in the error code they type it with and in what they say about writes.
+func managedRuntimeReadyFailure(status model.RuntimeObservedStatus) string {
+	if status.State == model.RuntimeStateReady {
+		return ""
+	}
+	return fmt.Sprintf(
+		"the Manager-owned Runtime reported state %q rather than %q, so the Supervisor is not running a ready Managed destination CPA",
+		status.State, model.RuntimeStateReady)
 }
 
 // proveVerifyManagedTarget proves the live Managed destination with the Manager's

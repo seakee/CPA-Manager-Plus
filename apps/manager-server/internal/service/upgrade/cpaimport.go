@@ -413,11 +413,11 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 // `cpa_config` says the destination holds the copied state; it says nothing about
 // whether the Manager still holds the sealed credential that state was proved
 // with, nor about the configuration the destination serves now. The replay
-// therefore proves four things: this build still carries the compiled adoption
-// authority the copy ran under, the Supervisor still runs the one artifact that
-// authority was qualified against, the recorded destination is still the one the
-// Manager connects to, and the live CPA at the recorded address still answers as
-// the destination this import staged.
+// therefore proves, in order: this build still carries the compiled adoption
+// authority the copy ran under, the Supervisor is ready and still runs the one
+// artifact that authority was qualified against, the recorded destination is still
+// the one the Manager connects to, and the live CPA at the recorded address still
+// answers as the destination this import staged.
 //
 // The artifact check is the one that cannot be inferred from the row. A Supervisor
 // that switched to an unqualified artifact B while keeping the same URL, management
@@ -426,6 +426,13 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 // for a destination no accepted chain describes. The recorded attempt names the
 // artifact its stage request carried, and the Runtime reports the one it runs, so
 // the two are compared before the destination is addressed.
+//
+// The artifact is reported in every Supervisor state, so a match alone does not
+// prove the destination CPA is answering: the replay requires the same `ready`
+// state the completion gate requires, with the gate's own reason. A Supervisor that
+// is offline, unknown or still starting leaves the recorded fingerprint and the
+// operation row untouched rather than reporting a completion the gate would refuse
+// a moment later.
 //
 // The caller's own inputs are compared with the recorded attempt as well, because a
 // replay that accepted a different plugin choice, source root, destination URL or
@@ -467,6 +474,16 @@ func replayRecordedManagedImport(
 		return newUpgradeError(UpgradeErrorCPAImportUnproven,
 			"the Manager-owned Runtime did not report a staged destination CPA, so this run cannot confirm the artifact the recorded import was qualified against; nothing was written", err)
 	}
+	// The Supervisor reports its observed artifact in every state, so the artifact
+	// comparison below would accept an offline or starting Supervisor running the
+	// qualified artifact. Only a Ready Supervisor is administering the destination
+	// CPA that the fingerprint refresh contacts, and the completion gate refuses
+	// the other states for that reason; a replay that refreshed the recorded
+	// fingerprint and reported the import complete from a status the gate would
+	// refuse would publish a verdict the gate cannot repeat.
+	if reason := managedRuntimeReadyFailure(status); reason != "" {
+		return newUpgradeError(UpgradeErrorCPAImportUnproven, reason+"; nothing was written", nil)
+	}
 	if artifact := status.ActiveGatewayArtifact.ArtifactID; artifact != qualifiedArtifact {
 		return newUpgradeError(UpgradeErrorCPAImportUnproven, fmt.Sprintf(
 			"the Runtime's active gateway artifact is %q, and this build's accepted CPA adoption record is for %q; the recorded import copied only into the artifact its staging transition and replay chain were qualified against, so this run cannot report it as complete and nothing was written",
@@ -476,6 +493,9 @@ func replayRecordedManagedImport(
 	// operation's own record: a run pointed at another installation's tree would
 	// otherwise report that tree's import under this operation's verdict.
 	if err := requireRecordedSourceRoot(recorded, options.LegacyRoot); err != nil {
+		return err
+	}
+	if err := requireRecoveredCopyIn(paths.Database); err != nil {
 		return err
 	}
 	db, err := managersqlite.Open(paths.Database)

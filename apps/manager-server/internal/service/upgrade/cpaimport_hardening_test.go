@@ -624,7 +624,12 @@ func TestImportCPARecordsTheProofWhenItReplaysARecordedAttempt(t *testing.T) {
 
 	// The replay recorded the copy, so a later run is a replay and a swapped URL
 	// is refused before that address is contacted; the attempt that proved a URL is
-	// still bound to it once the recorded copy is removed.
+	// still bound to it once the recorded copy is removed. The replay reads the
+	// Supervisor first and requires it to be ready, so the state the finished step
+	// leaves is restored here.
+	runtime.mu.Lock()
+	runtime.state = model.RuntimeStateReady
+	runtime.mu.Unlock()
 	other := newFakeDestinationCPA(t, "")
 	_, err = ImportCPA(ctx, importOptions(fixture, runtime, other.url(), boolPointer(true)))
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {

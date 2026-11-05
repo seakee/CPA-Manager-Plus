@@ -1734,6 +1734,72 @@ func TestImportCPAReplayRefusesWhenRuntimeArtifactChanges(t *testing.T) {
 	}
 }
 
+// TestImportCPAReplayRefusesWhenTheRuntimeIsNotReady pins the remaining replay
+// precondition. The Supervisor reports its artifact in every state, so an offline,
+// unknown or starting Supervisor that still names the qualified artifact, the
+// recorded identity and the recorded destination passes every artifact and
+// identity check the replay makes. The destination CPA can answer the recorded URL
+// with the recorded secret while the Supervisor says it is not running one, and a
+// replay that refreshed the fingerprint from that status would report
+// AlreadyComplete for a completion gate that refuses the same state. Each state
+// therefore fails closed before the destination is addressed, and neither the
+// operation row nor the stored fingerprint moves.
+func TestImportCPAReplayRefusesWhenTheRuntimeIsNotReady(t *testing.T) {
+	states := []model.RuntimeState{
+		model.RuntimeStateOffline,
+		model.RuntimeStateUnknown,
+		model.RuntimeStateStarting,
+	}
+	for _, state := range states {
+		t.Run(string(state), func(t *testing.T) {
+			fixture := newVerifyFixture(t)
+			fixture.reconcile(t)
+			destination := newFakeDestinationCPA(t, "")
+			runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+			runtime.staged = destination
+			credentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
+
+			if _, err := runManagedImport(t, fixture, runtime, destination.url(), credentials); err != nil {
+				t.Fatalf("import the fixture CPA: %v", err)
+			}
+			beforeOperation := readOperation(t, fixture.target)
+			beforeRecord := recordedDestinationRecord(t, fixture)
+
+			// The operator applies one recorded manual item, which is the work the
+			// verification instruction asks for and the reason the fingerprint would
+			// be refreshed. The destination answers the recorded URL and secret, so
+			// only the Supervisor's state stands between the replay and a new digest.
+			destination.mu.Lock()
+			destination.config["ampcode"] = map[string]any{"upstream-url": "https://amp.example"}
+			destination.mu.Unlock()
+			if destinationFingerprint(t, destination) == beforeRecord.ServerFingerprint {
+				t.Fatal("the fixture destination did not move, so a contacted destination would not change the fingerprint")
+			}
+			beforeRequests := len(destination.requests())
+			runtime.mu.Lock()
+			runtime.state = state
+			runtime.mu.Unlock()
+
+			result, err := runManagedImport(t, fixture, runtime, destination.url(), credentials)
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportUnproven {
+				t.Fatalf("a replay under Runtime state %q produced %v (code %q), want %s", state, err, code, UpgradeErrorCPAImportUnproven)
+			}
+			if result.AlreadyComplete {
+				t.Fatal("the refused replay reported the recorded import as complete")
+			}
+			if requests := destination.requests()[beforeRequests:]; len(requests) != 0 {
+				t.Fatalf("the refused replay contacted the destination: %v", requests)
+			}
+			if afterRecord := recordedDestinationRecord(t, fixture); !reflect.DeepEqual(afterRecord, beforeRecord) {
+				t.Fatalf("the refused replay changed the recorded destination:\nbefore %+v\nafter  %+v", beforeRecord, afterRecord)
+			}
+			if afterOperation := readOperation(t, fixture.target); !reflect.DeepEqual(afterOperation, beforeOperation) {
+				t.Fatalf("the refused replay changed the operation row:\nbefore %+v\nafter  %+v", beforeOperation, afterOperation)
+			}
+		})
+	}
+}
+
 // TestImportCPAReplayRefusesAChangedCallerRequest pins the Medium finding: the
 // plugin choice, the destination URL and the supplied management secret are the
 // inputs the recorded request was staged with. A replay that named a different one
