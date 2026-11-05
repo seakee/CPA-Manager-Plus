@@ -32,7 +32,10 @@ import type {
   AccountDetailQuotaWindow,
   AccountDetailWindowUsageSummary,
 } from '@/features/accounts/model/accountDetailViewModel';
-import { formatQuotaResetDisplay } from '@/features/accounts/model/accountsPagePresentation';
+import {
+  formatQuotaResetDisplay,
+  formatQuotaResetTimestamp,
+} from '@/features/accounts/model/accountsPagePresentation';
 import { formatCompactNumber, formatUsd } from '@/utils/usage';
 import { QuotaProgressBar } from './QuotaProgressBar';
 import styles from './QuotaWindowCard.module.scss';
@@ -46,6 +49,8 @@ interface QuotaWindowCardProps {
   /** 渲染风格：抽屉用 drawer（更紧凑），列表用 compact（单行）。 */
   variant?: 'drawer' | 'compact';
   locale?: string;
+  /** 是否展示“按当前速度何时用完”的预测；默认展示。 */
+  showPace?: boolean;
 }
 
 type MetricTone = 'blue' | 'green' | 'teal' | 'amber';
@@ -381,6 +386,7 @@ export const QuotaWindowCard = ({
   mode,
   variant = 'drawer',
   locale,
+  showPace = true,
 }: QuotaWindowCardProps): JSX.Element => {
   const { t, i18n } = useTranslation();
   const resolvedLocale = locale ?? i18n.language;
@@ -421,6 +427,43 @@ export const QuotaWindowCard = ({
   const forecastEmptyMessage = t('accounts.detail_forecast_unavailable', {
     defaultValue: '暂无可用预测依据，暂不预测',
   });
+  const pace = showPace ? q.pace : null;
+  const paceIsWarning =
+    pace !== null && (pace.status === 'exhausts_before_reset' || pace.status === 'exhausted');
+  const paceNotice =
+    pace === null ? null : (
+      <div
+        className={[styles.paceNotice, paceIsWarning ? styles.paceNoticeWarning : '']
+          .filter(Boolean)
+          .join(' ')}
+        data-quota-pace={pace.status}
+        role={paceIsWarning ? 'status' : undefined}
+      >
+        <span className={styles.paceNoticeIcon} aria-hidden="true">
+          {paceIsWarning ? <IconTriangleAlert size={13} /> : <IconClock size={13} />}
+        </span>
+        <span>
+          {pace.status === 'exhausts_before_reset'
+            ? t('accounts.detail_quota_pace_exhausts_before_reset', {
+                defaultValue: '按当前速度，预计 {{time}} 用完，早于 {{reset}} 重置。',
+                time: formatQuotaResetTimestamp(pace.exhaustsAtMs, resolvedLocale),
+                reset: formatQuotaResetTimestamp(pace.resetsAtMs, resolvedLocale),
+              })
+            : pace.status === 'exhausted'
+              ? t('accounts.detail_quota_pace_exhausted', {
+                  defaultValue: '本窗口额度已用完，将于 {{reset}} 重置。',
+                  reset: formatQuotaResetTimestamp(pace.resetsAtMs, resolvedLocale),
+                })
+              : pace.status === 'no_usage'
+                ? t('accounts.detail_quota_pace_no_usage', {
+                    defaultValue: '本窗口暂无消耗，暂不预测。',
+                  })
+                : t('accounts.detail_quota_pace_lasts_until_reset', {
+                    defaultValue: '按当前速度，重置前不会用完。',
+                  })}
+        </span>
+      </div>
+    );
   const currentWindowBoundaryUnconfirmed = t(
     'accounts.detail_current_window_boundary_unconfirmed',
     { defaultValue: '周期边界尚未确认' }
@@ -725,6 +768,7 @@ export const QuotaWindowCard = ({
       >
         {header}
         {progress}
+        {paceNotice}
         {modelWarning}
         {modelEmptyUsage}
         {modelHasUsableUsage && !modelBoundaryIncomplete ? (
@@ -789,6 +833,7 @@ export const QuotaWindowCard = ({
     >
       {header}
       {progress}
+        {paceNotice}
       {q.windowMode !== 'unknown' ? (
         <div className={styles.compareColumns} data-quota-standard-comparison="true">
           <UsageColumn

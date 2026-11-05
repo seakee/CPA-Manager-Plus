@@ -36,6 +36,7 @@ import {
   AccountQuotaCycleDefinition,
 } from './accountQuotaWindowDefinitions';
 import type { WindowUsageForecast } from './estimateWindowUsage';
+import { estimateWindowPace, type WindowPaceEstimate } from './estimateWindowPace';
 import { resolveAccountQuotaWindowUsageAndForecast } from './accountQuotaWindowUsagePresentation';
 import { accountOperationalItemMatchesRow } from './accountOperationalScope';
 import {
@@ -136,6 +137,7 @@ export interface AccountDetailQuotaWindow extends Omit<
   previousUsage: AccountDetailWindowUsageSummary | null;
   previousPeriod: 'previous' | 'previous_equal_range' | null;
   forecast: WindowUsageForecast | null;
+  pace: WindowPaceEstimate | null;
 }
 
 export interface AccountDetailResetCreditExpiry {
@@ -358,6 +360,7 @@ export interface BuildAccountDetailViewModelOptions {
   diagnosticsRecentFailure?: MonitoringAnalyticsRecentFailure | null;
   diagnosticsEvents?: MonitoringAnalyticsEventRow[];
   diagnosticsTotalCount?: number | null;
+  nowMs?: number;
 }
 
 const normalizeAuthIndexKey = (value: unknown): string => {
@@ -603,10 +606,35 @@ const buildValueSummary = (
   };
 };
 
+const resolveWindowPace = (
+  window: AccountDetailQuotaWindowInput,
+  resetAtMs: number | null,
+  nowMs: number
+): WindowPaceEstimate | null => {
+  if (window.availability !== undefined && window.availability !== 'active') return null;
+  // A lifecycle cycle that the server does not consider forecast-eligible has a
+  // provisional or unreliable boundary, which makes the reset comparison moot.
+  if (window.currentCycle && !window.currentCycle.forecastEligible) return null;
+  return estimateWindowPace({
+    usedPercent: window.usedPercent,
+    windowMode: window.windowMode,
+    cycleStartMs: window.cycleStartMs,
+    cycleEndMs: window.cycleEndMs,
+    resetAtMs,
+    limitWindowSeconds: window.limitWindowSeconds,
+    quotaProgressObservedAtMs: window.quotaProgressObservedAtMs,
+    observedAtMs: window.observedAtMs,
+    boundaryAccuracy: window.currentCycle?.boundaryAccuracy ?? window.boundaryAccuracy,
+    stale: window.stale,
+    nowMs,
+  });
+};
+
 const buildQuotaWindows = (
   row: AccountRow,
   quotaWindows: AccountDetailQuotaWindowInput[],
-  windowUsageByKey: Map<string, MonitoringAccountWindowUsageItem>
+  windowUsageByKey: Map<string, MonitoringAccountWindowUsageItem>,
+  nowMs: number
 ): AccountDetailQuotaWindow[] =>
   quotaWindows.map((window) => {
     const resetAtMs = isValidQuotaResetAtMs(window.resetAtMs) ? window.resetAtMs : null;
@@ -625,6 +653,7 @@ const buildQuotaWindows = (
       previousUsage: usagePresentation.previousUsage,
       previousPeriod: usagePresentation.previousPeriod,
       forecast: usagePresentation.forecast,
+      pace: resolveWindowPace(window, resetAtMs, nowMs),
     };
   });
 
@@ -1529,7 +1558,12 @@ export const buildAccountDetailViewModel = (
       sourceShortLabelKey: listItem.quota.sourceShortLabelKey,
       fields: buildQuotaFields(row, listItem),
       diagnostics: buildQuotaDiagnostics(row, options.xaiQuota),
-      windows: buildQuotaWindows(row, quotaWindows, options.windowUsageByKey ?? new Map()),
+      windows: buildQuotaWindows(
+        row,
+        quotaWindows,
+        options.windowUsageByKey ?? new Map(),
+        options.nowMs ?? Date.now()
+      ),
       cooldown: quotaCooldown,
       resetCreditsAvailableCount: options.codexQuota?.rateLimitResetCreditsAvailableCount ?? null,
       resetCreditExpiries: getSortedCodexResetCreditExpiries(

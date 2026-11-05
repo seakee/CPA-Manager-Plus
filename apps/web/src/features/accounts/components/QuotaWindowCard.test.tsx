@@ -100,16 +100,20 @@ const makeWindow = (overrides: Partial<AccountDetailQuotaWindow> = {}): AccountD
     previousUsage: usage({ fromMs: -17_999_000, toMs: 1_000, successRate: 98 }),
     previousPeriod: 'previous',
     forecast: { requests: 200, tokens: 2_000_000, cost: 200, basis: 'quota' },
+    pace: null,
     ...overrides,
   }) as AccountDetailQuotaWindow;
 
 const renderCard = (
   window: AccountDetailQuotaWindow,
-  mode?: 'standard' | 'model' | 'other'
+  mode?: 'standard' | 'model' | 'other',
+  options: { showPace?: boolean } = {}
 ): ReactTestRenderer => {
   let renderer!: ReactTestRenderer;
   act(() => {
-    renderer = create(<QuotaWindowCard window={window} mode={mode} locale="en-US" />);
+    renderer = create(
+      <QuotaWindowCard window={window} mode={mode} locale="en-US" {...options} />
+    );
   });
   return renderer;
 };
@@ -773,5 +777,102 @@ describe('QuotaWindowCard', () => {
     expect(readText(renderer.root.findByProps({ 'data-quota-model-warning': 'true' }))).toContain(
       'accounts.detail_scope_unknown'
     );
+  });
+
+  it('renders the pace warning when the window runs out before the reset', () => {
+    const renderer = renderCard(
+      makeWindow({
+        pace: {
+          status: 'exhausts_before_reset',
+          exhaustsAtMs: Date.UTC(2026, 9, 31, 22, 0),
+          resetsAtMs: Date.UTC(2026, 10, 1, 0, 0),
+          remainingPercent: 40,
+        },
+      })
+    );
+
+    const notice = renderer.root.findByProps({ 'data-quota-pace': 'exhausts_before_reset' });
+    expect(readText(notice)).toContain('accounts.detail_quota_pace_exhausts_before_reset');
+    expect(notice.props.role).toBe('status');
+  });
+
+  it('renders the quiet pace notice when the window outlives the reset', () => {
+    const renderer = renderCard(
+      makeWindow({
+        pace: {
+          status: 'lasts_until_reset',
+          exhaustsAtMs: Date.UTC(2026, 10, 3, 8, 0),
+          resetsAtMs: Date.UTC(2026, 10, 1, 0, 0),
+          remainingPercent: 80,
+        },
+      })
+    );
+
+    const notice = renderer.root.findByProps({ 'data-quota-pace': 'lasts_until_reset' });
+    expect(readText(notice)).toContain('accounts.detail_quota_pace_lasts_until_reset');
+    expect(notice.props.role).toBeUndefined();
+  });
+
+  it('renders the exhausted notice with the reset time', () => {
+    const renderer = renderCard(
+      makeWindow({
+        remainingPercent: 0,
+        usedPercent: 100,
+        pace: {
+          status: 'exhausted',
+          exhaustsAtMs: Date.UTC(2026, 10, 2, 0, 0),
+          resetsAtMs: Date.UTC(2026, 10, 9, 17, 0),
+          remainingPercent: 0,
+        },
+      })
+    );
+
+    const notice = renderer.root.findByProps({ 'data-quota-pace': 'exhausted' });
+    expect(readText(notice)).toContain('accounts.detail_quota_pace_exhausted');
+    expect(notice.props.role).toBe('status');
+  });
+
+  it('renders the no-usage notice for an untouched window', () => {
+    const renderer = renderCard(
+      makeWindow({
+        remainingPercent: 100,
+        usedPercent: 0,
+        pace: {
+          status: 'no_usage',
+          exhaustsAtMs: null,
+          resetsAtMs: Date.UTC(2026, 10, 9, 17, 0),
+          remainingPercent: 100,
+        },
+      })
+    );
+
+    const notice = renderer.root.findByProps({ 'data-quota-pace': 'no_usage' });
+    expect(readText(notice)).toContain('accounts.detail_quota_pace_no_usage');
+    expect(notice.props.role).toBeUndefined();
+  });
+
+  it('hides the pace notice when the preference is disabled', () => {
+    const renderer = renderCard(
+      makeWindow({
+        pace: {
+          status: 'exhausts_before_reset',
+          exhaustsAtMs: Date.UTC(2026, 9, 31, 22, 0),
+          resetsAtMs: Date.UTC(2026, 10, 1, 0, 0),
+          remainingPercent: 40,
+        },
+      }),
+      undefined,
+      { showPace: false }
+    );
+
+    expect(
+      renderer.root.findAllByProps({ 'data-quota-pace': 'exhausts_before_reset' })
+    ).toHaveLength(0);
+  });
+
+  it('omits the pace notice when no projection is available', () => {
+    const renderer = renderCard(makeWindow({ pace: null }));
+
+    expect(renderer.root.findAll((node) => 'data-quota-pace' in node.props)).toHaveLength(0);
   });
 });

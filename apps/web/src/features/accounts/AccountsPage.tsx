@@ -1685,6 +1685,9 @@ export function AccountsPage() {
   const [layoutMode, setLayoutMode] = useState<AccountsLayoutMode>(
     () => initialWorkspaceUrlState.current.layoutMode
   );
+  const [quotaPaceEnabled, setQuotaPaceEnabled] = useState(
+    () => initialWorkspaceUrlState.current.quotaPaceEnabled
+  );
   const isCompactScreen = useMediaQuery('(max-width: 1024px)');
   const effectiveLayoutMode = isCompactScreen ? 'grid' : layoutMode;
   const [copiedIdentityKey, setCopiedIdentityKey] = useState<string | null>(null);
@@ -5143,12 +5146,14 @@ export function AccountsPage() {
       pageSize,
       accountDisplayMode,
       layoutMode,
+      quotaPaceEnabled,
     });
   }, [
     accountDisplayMode,
     accountSort,
     layoutMode,
     operationalFilter,
+    quotaPaceEnabled,
     pageSize,
     planFilter,
     providerFilter,
@@ -5169,6 +5174,7 @@ export function AccountsPage() {
       pageSize,
       accountDisplayMode,
       layoutMode,
+      quotaPaceEnabled,
       view: activeView,
       healthMode,
       account: selectedRowKey,
@@ -5188,6 +5194,7 @@ export function AccountsPage() {
       detailTab,
       healthMode,
       layoutMode,
+      quotaPaceEnabled,
       oauthExcludedEditorProvider,
       oauthModelAliasEditorProvider,
       operationalFilter,
@@ -5289,6 +5296,7 @@ export function AccountsPage() {
       setPageSize(next.pageSize);
       setAccountDisplayMode(next.accountDisplayMode);
       setLayoutMode(next.layoutMode);
+      setQuotaPaceEnabled(next.quotaPaceEnabled);
       setSelectedRowKey(next.account);
       setDetailTab(next.detailTab);
       setOauthExcludedEditorProvider(next.editor === 'excluded' ? next.editorProvider : null);
@@ -8292,8 +8300,8 @@ export function AccountsPage() {
       variant="secondary"
       size="sm"
       className={[
-        styles.accountDisplayButton,
-        accountDisplayMode === 'full' ? styles.accountDisplayButtonActive : '',
+        styles.toolbarToggle,
+        accountDisplayMode === 'full' ? styles.toolbarToggleActive : '',
       ]
         .filter(Boolean)
         .join(' ')}
@@ -8307,6 +8315,26 @@ export function AccountsPage() {
           ? 'accounts.account_display_masked'
           : 'accounts.account_display_full'
       )}
+    </Button>
+  );
+
+  const quotaPaceHint = t(
+    quotaPaceEnabled ? 'accounts.quota_pace_hide_hint' : 'accounts.quota_pace_show_hint'
+  );
+  const renderQuotaPaceToggle = () => (
+    <Button
+      variant="secondary"
+      size="sm"
+      className={[styles.toolbarToggle, quotaPaceEnabled ? styles.toolbarToggleActive : '']
+        .filter(Boolean)
+        .join(' ')}
+      onClick={() => setQuotaPaceEnabled((enabled) => !enabled)}
+      title={quotaPaceHint}
+      aria-label={quotaPaceHint}
+      aria-pressed={quotaPaceEnabled}
+    >
+      <IconTrendingUp size={15} />
+      {t('accounts.quota_pace_toggle')}
     </Button>
   );
 
@@ -8345,6 +8373,7 @@ export function AccountsPage() {
           <div className={styles.mobileFilterBody}>
             <div className={styles.mobileFilterDisplayMode}>
               {renderAccountDisplayToggle()}
+              {renderQuotaPaceToggle()}
               {renderViewModeSwitcher()}
             </div>
             {renderAccountFilterFields()}
@@ -8408,6 +8437,7 @@ export function AccountsPage() {
           ) : null}
           {showSelectionControls ? renderSelectionControls() : null}
           <div className={styles.batchDisplayToggle}>{renderAccountDisplayToggle()}</div>
+          <div className={styles.batchDisplayToggle}>{renderQuotaPaceToggle()}</div>
           {!hasSelection && !isSelectionMode ? (
             <Button
               variant="secondary"
@@ -10047,6 +10077,8 @@ export function AccountsPage() {
             resetQuotaDisabled={
               !canResetCodexQuota(selectedRow) || resettingSelectedQuota || configurationSaving
             }
+            showQuotaPace={quotaPaceEnabled}
+            onToggleQuotaPace={() => setQuotaPaceEnabled((enabled) => !enabled)}
           />
         );
       }

@@ -373,6 +373,40 @@
   color: var(--primary-contrast);
 }
 
+.paceNotice {
+  display: flex;
+  align-items: center;
+  gap: $spacing-xs;
+  margin-top: $spacing-sm;
+  padding: 6px $spacing-sm;
+  border-radius: $radius-sm;
+  background: var(--color-surface-muted);
+  color: var(--color-text-tertiary, var(--gray-500));
+  font-size: 10px;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
+}
+
+.paceNoticeIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  color: currentColor;
+}
+
+.paceNoticeWarning {
+  border: 1px solid var(--color-warning-light-5);
+  background: var(--color-warning-light-9);
+  color: var(--color-warning-dark-2);
+
+  .paceNoticeIcon {
+    color: var(--color-warning);
+  }
+}
+
 .sourceMeta {
   display: flex;
   flex-direction: column;
