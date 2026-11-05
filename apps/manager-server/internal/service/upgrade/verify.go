@@ -93,6 +93,9 @@ type VerifyOptions struct {
 	// TargetRoot is the v2 data directory holding usage.sqlite and the copy-in
 	// work area.
 	TargetRoot string
+	// ScratchDir holds private copies outside both preserved roots. Empty uses
+	// the OS temporary directory, subject to the same two-root validation.
+	ScratchDir string
 
 	// The four seams below are the ones ExternalConnectOptions exposes. Production
 	// leaves them nil and the cpa package's probes run on the External transport,
@@ -156,9 +159,18 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	if err := RefuseOverlappingRoots(sourceRoot, targetRoot, DefaultBundleDirectory(targetRoot)); err != nil {
 		return VerifyResult{}, err
 	}
-	recorded, found, err := readRecordedCopyIn(ctx, paths.Database)
+	if err := requireRecoveredCopyIn(paths.Database); err != nil {
+		return VerifyResult{}, err
+	}
+	if err := ValidateScratchDir(options.ScratchDir, sourceRoot, targetRoot); err != nil {
+		return VerifyResult{}, snapshotReadError(ctx, err)
+	}
+	recorded, found, snapshot, err := readCopyInCandidate(ctx, paths.Database, sourceRoot, targetRoot, options.ScratchDir)
+	if snapshot != nil {
+		defer func() { _ = snapshot.Close() }()
+	}
 	if err != nil {
-		return VerifyResult{}, verifyRecordReadError(err)
+		return VerifyResult{}, verifyRecordReadError(snapshotReadError(ctx, err))
 	}
 	if !found {
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
@@ -168,7 +180,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	// touches neither the store nor the source. The product is admitted normally
 	// from here, so it must not need the 1.x volume to answer this call.
 	if recorded.Stage == model.UpgradeStageComplete {
-		return completedVerifyResultFromStore(ctx, paths, recorded)
+		return completedVerifyResultFromStore(ctx, snapshot.DB(), paths, recorded)
 	}
 	if err := verifyEntry(recorded); err != nil {
 		return VerifyResult{}, err
@@ -191,6 +203,9 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	}
 	defer func() { _ = targetLock.Close() }()
 
+	if err := requireRecoveredCopyIn(paths.Database); err != nil {
+		return VerifyResult{}, err
+	}
 	db, err := managersqlite.Open(paths.Database)
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("open the v2 database for the verification: %w", err)
@@ -448,21 +463,6 @@ func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeopera
 	return verifyResult(recorded, evidence.TargetMode, true), nil
 }
 
-// openVerifyStoreReadOnly opens the v2 store through the read-only snapshot a
-// completed operation is answered from. It never creates or migrates it.
-func openVerifyStoreReadOnly(databasePath string) (*sql.DB, error) {
-	if _, err := os.Lstat(databasePath); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", readOnlySnapshotName(databasePath))
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	return db, nil
-}
-
 // readExternalBindingFrom reads the recorded External binding from an open
 // connection. A store whose connect step never ran, or one written before the
 // binding table existed, simply has none.
@@ -476,12 +476,7 @@ func readExternalBindingFrom(ctx context.Context, db *sql.DB) (upgradeoperation.
 
 // completedVerifyResultFromStore answers a completed operation from a read-only
 // handle: the stored verdict, then the target the Manager itself stores.
-func completedVerifyResultFromStore(ctx context.Context, paths targetPaths, recorded model.UpgradeOperation) (VerifyResult, error) {
-	db, err := openVerifyStoreReadOnly(paths.Database)
-	if err != nil {
-		return VerifyResult{}, err
-	}
-	defer func() { _ = db.Close() }()
+func completedVerifyResultFromStore(ctx context.Context, db *sql.DB, paths targetPaths, recorded model.UpgradeOperation) (VerifyResult, error) {
 	binding, hasBinding, err := readExternalBindingFrom(ctx, db)
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)

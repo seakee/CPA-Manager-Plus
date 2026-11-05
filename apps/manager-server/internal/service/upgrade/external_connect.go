@@ -225,6 +225,9 @@ func ExternalConnect(ctx context.Context, options ExternalConnectOptions) (Exter
 	// the same writable connection: the store is migrated once and the state the
 	// step decides on is the one its transaction will write into. Nothing else
 	// can write it while the fence is held.
+	if err := requireRecoveredCopyIn(paths.Database); err != nil {
+		return ExternalConnectResult{}, err
+	}
 	db, err := managersqlite.Open(paths.Database)
 	if err != nil {
 		return ExternalConnectResult{}, fmt.Errorf("open the v2 database for the External connect step: %w", err)

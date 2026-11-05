@@ -152,7 +152,7 @@ func queryTargetInt(t *testing.T, path, query string) int {
 
 func operationRow(t *testing.T, path string) model.UpgradeOperation {
 	t.Helper()
-	recorded, found, err := recordedOperation(context.Background(), path, true)
+	recorded, found, err := ReadRecord(context.Background(), path)
 	if err != nil || !found {
 		if err != nil {
 			t.Fatalf("read the recorded operation: %v", err)
@@ -628,11 +628,11 @@ func seedSourceRetention(t *testing.T, volume legacyVolume) {
 	)
 }
 
-// assertNoScratch proves the reconciliation copy of the 1.x database is gone.
+// assertNoScratch proves the target contains no private database snapshots.
 func assertNoScratch(t *testing.T, targetRoot string) {
 	t.Helper()
-	if _, err := os.Stat(filepath.Join(targetRoot, reconcileScratchDirectory)); !os.IsNotExist(err) {
-		t.Fatalf("the reconciliation scratch area survived: %v", err)
+	if names := snapshotDirsIn(t, targetRoot); len(names) != 0 {
+		t.Fatalf("private database snapshots survived: %v", names)
 	}
 }
 
@@ -1290,10 +1290,9 @@ func TestReconcileRecordsARowWhoseClockRanAhead(t *testing.T) {
 	}
 }
 
-// TestReconcileRejectsAScratchAreaThatOverlapsTheSource reproduces the round
-// three review's M6: only a scratch area inside the source was refused, while
-// the message claimed "inside or above".
-func TestReconcileRejectsAScratchAreaThatOverlapsTheSource(t *testing.T) {
+// Scratch admission refuses both preserved roots and an explicitly named
+// ancestor of the source before creating any private copy.
+func TestReconcileRejectsAScratchAreaThatOverlapsPreservedRoots(t *testing.T) {
 	copied := newCopiedVolume(t)
 	cases := []struct {
 		name    string
@@ -1302,19 +1301,26 @@ func TestReconcileRejectsAScratchAreaThatOverlapsTheSource(t *testing.T) {
 		{name: "inside the source", scratch: filepath.Join(copied.volume.root, "scratch")},
 		{name: "the source itself", scratch: copied.volume.root},
 		{name: "above the source", scratch: filepath.Dir(copied.volume.root)},
+		{name: "inside the target", scratch: filepath.Join(copied.target, "scratch")},
+		{name: "the target itself", scratch: copied.target},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			sourceBefore := fingerprintTree(t, copied.volume.root)
+			targetBefore := fingerprintTree(t, copied.target)
 			options := copied.reconcileOptions()
 			options.ScratchDir = testCase.scratch
 
-			if report, err := Reconcile(context.Background(), options); err == nil {
-				t.Fatalf("reconcile accepted the scratch area %q: %+v", testCase.scratch, report)
+			report, err := Reconcile(context.Background(), options)
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorSnapshotFailed {
+				t.Fatalf("reconcile scratch refusal = %q/%t/%v: %+v", code, ok, err, report)
 			}
-			if _, err := os.Stat(filepath.Join(testCase.scratch, reconcileScratchDirectory)); !os.IsNotExist(err) {
-				t.Fatalf("the rejected scratch area was created: %v", err)
+			if _, err := os.Lstat(testCase.scratch); err == nil {
+				assertNoScratch(t, testCase.scratch)
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
 			}
+			assertTreeUnchanged(t, "v2 target", targetBefore, fingerprintTree(t, copied.target))
 			assertTreeUnchanged(t, "1.x source", sourceBefore, fingerprintTree(t, copied.volume.root))
 			if got := markedDays(t, copied.databasePath()); len(got) != 0 {
 				t.Fatalf("marked days = %v, want none", got)
@@ -1323,9 +1329,8 @@ func TestReconcileRejectsAScratchAreaThatOverlapsTheSource(t *testing.T) {
 	}
 }
 
-// TestReconcileOnlyRemovesItsOwnScratchDirectory proves the other half of M6: a
-// caller-supplied scratch root holds the tool-owned subdirectory and is never
-// itself the path this step deletes.
+// A caller-supplied scratch root can hold unrelated files; only the unique
+// private snapshot directories created by this call may be removed.
 func TestReconcileOnlyRemovesItsOwnScratchDirectory(t *testing.T) {
 	copied := newCopiedVolume(t)
 	scratchRoot := filepath.Join(canonicalTempDir(t), "operator-scratch")
@@ -1346,9 +1351,7 @@ func TestReconcileOnlyRemovesItsOwnScratchDirectory(t *testing.T) {
 	if err != nil || string(content) != "keep" {
 		t.Fatalf("the caller's file did not survive: %q %v", content, err)
 	}
-	if _, err := os.Stat(filepath.Join(scratchRoot, reconcileScratchDirectory)); !os.IsNotExist(err) {
-		t.Fatalf("the tool-owned subdirectory survived: %v", err)
-	}
+	assertNoScratch(t, scratchRoot)
 }
 
 // TestReconcileTypesItsRecordRefusals reproduces review L6: these refusals were
@@ -1892,4 +1895,84 @@ func domainReport(t *testing.T, report ReconcileReport, domain string) Reconcile
 	}
 	t.Fatalf("report holds no %q domain: %+v", domain, report.Domains)
 	return ReconcileDomainReport{}
+}
+
+func TestReconcileReadsTargetWALOnlyThroughPrivateSnapshots(t *testing.T) {
+	for _, outcome := range []string{"success", "mismatch"} {
+		t.Run(outcome, func(t *testing.T) {
+			copied := newCopiedVolume(t)
+			donorPath := filepath.Join(canonicalTempDir(t), databaseFileName)
+			data, err := os.ReadFile(copied.databasePath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(donorPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			donor, err := sql.Open("sqlite", donorPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer donor.Close()
+			statements := `pragma journal_mode=wal; pragma wal_checkpoint(truncate); pragma wal_autocheckpoint=0; update usage_events set total_tokens=total_tokens+1`
+			if outcome == "success" {
+				statements += `; update usage_events set total_tokens=total_tokens-1`
+			}
+			if _, err := donor.Exec(statements); err != nil {
+				t.Fatal(err)
+			}
+			wal, err := os.ReadFile(donorPath + "-wal")
+			if err != nil || len(wal) == 0 {
+				t.Fatalf("non-empty target WAL = %v", err)
+			}
+			if err := os.WriteFile(copied.databasePath()+"-wal", wal, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			options := copied.reconcileOptions()
+			options.ScratchDir = canonicalTempDir(t)
+			t.Setenv("TMPDIR", copied.target)
+			targetBefore, sourceBefore := fingerprintTree(t, copied.target), fingerprintTree(t, copied.volume.root)
+			readPhaseObserved := false
+			options.checkpoint = func(phase string) error {
+				if phase != "reconcile-compared" {
+					return nil
+				}
+				readPhaseObserved = true
+				assertTreeUnchanged(t, "target before authorized reconciliation write", targetBefore, fingerprintTree(t, copied.target))
+				assertTreeUnchanged(t, "source after comparison", sourceBefore, fingerprintTree(t, copied.volume.root))
+				return nil
+			}
+			report, err := Reconcile(context.Background(), options)
+			assertTreeUnchanged(t, "reconciliation source", sourceBefore, fingerprintTree(t, copied.volume.root))
+			if outcome == "mismatch" {
+				if !errors.Is(err, ErrReconcileMismatch) || report.Recorded {
+					t.Errorf("WAL mismatch = %+v/%v", report, err)
+				}
+				assertTreeUnchanged(t, "refused reconciliation target", targetBefore, fingerprintTree(t, copied.target))
+			} else {
+				if err != nil || !report.Recorded || report.Stage != model.UpgradeStageReconcile {
+					t.Fatalf("WAL success = %+v/%v", report, err)
+				}
+				if !readPhaseObserved {
+					t.Fatal("authorized write was not preceded by the unchanged read-phase observation")
+				}
+				snapshot, err := OpenSnapshot(context.Background(), copied.databasePath(), options.ScratchDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				row, found, readErr := ReadRecordFrom(context.Background(), snapshot.DB())
+				marks, markErr := coverageincomplete.New(snapshot.DB()).DaysIn(context.Background(), 0, 1<<42)
+				closeErr := snapshot.Close()
+				if readErr != nil || markErr != nil || closeErr != nil || !found || row.Stage != report.Stage || row.UpdatedAtMS != report.UpdatedAtMS || !reflect.DeepEqual(row.DomainsDone, report.DomainsDone) || len(marks) != len(report.IncompleteDays) {
+					t.Fatalf("authorized reconciliation persistence = %+v/%v/%v/%v/%v, report %+v", row, marks, readErr, markErr, closeErr, report)
+				}
+			}
+			if _, err := os.Lstat(copied.databasePath() + "-shm"); !os.IsNotExist(err) {
+				t.Fatalf("target SHM appeared: %v", err)
+			}
+			if entries, err := os.ReadDir(options.ScratchDir); err != nil || len(entries) != 0 {
+				t.Fatalf("reconciliation left private scratch: %v/%v", entries, err)
+			}
+		})
+	}
 }

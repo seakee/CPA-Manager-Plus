@@ -61,10 +61,6 @@ func TestWriteRefusesAMarkerThatDescribesNothing(t *testing.T) {
 		{name: "unknown version", change: func(m *Marker) { m.Version = Version + 1 }},
 		{name: "no phase", change: func(m *Marker) { m.Phase = "" }},
 		{name: "unknown phase", change: func(m *Marker) { m.Phase = "copying" }},
-		{name: "migrating without identity", change: func(m *Marker) {
-			m.Phase = PhaseMigrating
-			m.TargetDatabaseIdentity = FileIdentity{}
-		}},
 		{name: "relative target", change: func(m *Marker) { m.TargetDatabase = "usage.sqlite" }},
 		{name: "no source kind", change: func(m *Marker) { m.SourceKind = "" }},
 		{name: "no fingerprints", change: func(m *Marker) { m.SourceFingerprintBefore = "" }},
@@ -90,8 +86,8 @@ func TestReadRefusesAnUnreadableMarker(t *testing.T) {
 		content string
 	}{
 		{name: "not json", content: "{"},
-		{name: "trailing content", content: strings.TrimSpace(`{"version":1,"targetDatabase":"/x/usage.sqlite","sourceKind":"k","sourceFingerprintBefore":"b","sourceFingerprintAfter":"a","backupManifestSha256":"d","writtenAtMs":1}`) + "{}"},
-		{name: "unknown field", content: strings.TrimSpace(`{"version":1,"targetDatabase":"/x/usage.sqlite","sourceKind":"k","sourceFingerprintBefore":"b","sourceFingerprintAfter":"a","backupManifestSha256":"d","writtenAtMs":1,"stage":"complete"}`)},
+		{name: "trailing content", content: strings.TrimSpace(`{"version":3,"phase":"materializing","targetDatabase":"/x/usage.sqlite","sourceKind":"k","sourceFingerprintBefore":"b","sourceFingerprintAfter":"a","backupManifestSha256":"d","writtenAtMs":1}`) + "{}"},
+		{name: "unknown field", content: strings.TrimSpace(`{"version":3,"phase":"materializing","targetDatabase":"/x/usage.sqlite","sourceKind":"k","sourceFingerprintBefore":"b","sourceFingerprintAfter":"a","backupManifestSha256":"d","writtenAtMs":1,"stage":"complete"}`)},
 		{name: "unknown version", content: strings.TrimSpace(`{"version":7,"targetDatabase":"/x/usage.sqlite","sourceKind":"k","sourceFingerprintBefore":"b","sourceFingerprintAfter":"a","backupManifestSha256":"d","writtenAtMs":1}`)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -137,10 +133,8 @@ func TestReadAcceptsThePublishedForm(t *testing.T) {
 	}
 }
 
-// TestIdentitySurvivesARenameAndARewriteAndDetectsAnotherFile is the property
-// the marker depends on: moving a member into the v2 layout and rewriting it in
-// place both keep the file the marker recorded, while a different file under the
-// same name does not.
+// Identity is only used for short-lived credential cache invalidation; it is
+// deliberately not part of the marker or copy-in provenance contract.
 func TestIdentitySurvivesARenameAndARewriteAndDetectsAnotherFile(t *testing.T) {
 	root := t.TempDir()
 	original := filepath.Join(root, "usage.sqlite")
@@ -215,5 +209,33 @@ func TestSameTargetComparesTheRootLocalIdentity(t *testing.T) {
 				t.Fatalf("SameTarget(%q, %q) = %t, want %t", test.recorded, test.actual, got, test.want)
 			}
 		})
+	}
+}
+
+func TestMarkerAccessRefusesASymlinkedWorkDirectory(t *testing.T) {
+	root, unrelatedRoot := t.TempDir(), t.TempDir()
+	data, err := json.Marshal(validMarker(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(unrelatedRoot, FileName)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(unrelatedRoot, Directory(root)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Read(root); err == nil {
+		t.Error("Read followed the work-directory symlink")
+	}
+	if err := Write(root, validMarker(root)); err == nil {
+		t.Error("Write followed the work-directory symlink")
+	}
+	if after, err := os.ReadFile(path); err != nil || string(after) != string(data) {
+		t.Fatalf("marker access changed unrelated data: %q/%v", after, err)
+	}
+	entries, err := os.ReadDir(unrelatedRoot)
+	if err != nil || len(entries) != 1 || entries[0].Name() != FileName {
+		t.Fatalf("marker access wrote through work link: %v/%v", entries, err)
 	}
 }

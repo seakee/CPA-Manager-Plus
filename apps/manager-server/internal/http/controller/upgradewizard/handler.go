@@ -1098,26 +1098,18 @@ func validateStatusRow(row statusRow) error {
 // no row is not the same as no operation: the copy-in publishes its provenance
 // before the row commits, and that window must not read "preflight".
 //
-// The marker is read before the store, exactly like the startup admission. A
-// `materializing` marker was published before the first member was moved and
-// before the migration that creates the operation table, so no row can be
-// committed in such a target: reading it decides nothing and costs the resume
-// everything. A read-only open of a target that still holds the copied WAL joins
-// that WAL and rewrites `-shm`, the member the resumed move compares with the
-// backup. This route is a status poll: it must not be the reason an interrupted
-// copy-in can never be resumed.
+// The marker is read before the store, exactly like startup admission. Staging
+// is never polled; absent targets and foreign sidecars remain resume evidence.
 func readStatus(ctx context.Context, databasePath string) (statusDocument, error) {
 	document := emptyStatusDocument()
 	marker, inFlight, err := readCopyInMarker(databasePath)
 	if err != nil {
 		return statusDocument{}, err
 	}
-	if inFlight && marker.Phase == copyinmarker.PhaseMaterializing {
+	if inFlight && marker.AwaitingCommit(databasePath) {
 		return withCopyInMarker(document, marker), nil
 	}
-	// A `migrating` marker leaves the possibility that the row committed, and
-	// the row is the stronger evidence, so it is read first — the same order the
-	// admission uses.
+	// A committing marker may outlive the atomically published operation row.
 	recorded, found, err := readRecordedStatus(ctx, databasePath, document)
 	if err != nil {
 		return statusDocument{}, err
@@ -1222,15 +1214,18 @@ func readRecordedStatus(ctx context.Context, databasePath string, document statu
 // readCopyInMarker reads the provenance marker that describes this database.
 // The marker sits in this data root's own reserved work directory, so it
 // describes this root even when the root is mounted at another absolute path;
-// a marker naming a different database file is evidence for some other run and
-// is not applied here, the same rule the startup admission applies.
+// a marker naming a different database file blocks status without opening the
+// store, matching startup admission and preserving all recovery evidence.
 func readCopyInMarker(databasePath string) (copyinmarker.Marker, bool, error) {
 	marker, found, err := copyinmarker.Read(filepath.Dir(databasePath))
 	if err != nil {
 		return copyinmarker.Marker{}, false, fmt.Errorf("read the copy-in provenance marker: %w", err)
 	}
-	if !found || !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
+	if !found {
 		return copyinmarker.Marker{}, false, nil
+	}
+	if !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
+		return copyinmarker.Marker{}, false, errors.New("the copy-in marker names a different database; preserve the target and marker and recover with `cpa-manager-plus upgrade run` before reading this store")
 	}
 	return marker, true, nil
 }

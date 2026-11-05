@@ -1027,12 +1027,18 @@ func TestRecordRollbackRefusesAScratchDirectoryInsideTheV2Root(t *testing.T) {
 	if err := os.Mkdir(scratch, 0o755); err != nil {
 		t.Fatalf("create the scratch directory: %v", err)
 	}
+	readScratch := canonicalTempDir(t)
+	targetBefore := fingerprintTree(t, fixture.targetRoot)
 	setOSTempDir(t, scratch)
 	observation := fixture.observation(t)
 	if _, err := RecordRollback(context.Background(), observation); !errors.Is(err, ErrSnapshotFailed) {
 		t.Fatalf("scratch inside the v2 data root = %v, want %v", err, ErrSnapshotFailed)
 	}
-	if after := fixture.recordedRow(t); after.Rollback != nil {
+	after, found, err := ReadRecordFromSnapshot(context.Background(), filepath.Join(fixture.targetRoot, databaseFileName), readScratch)
+	if err != nil || !found {
+		t.Fatalf("read refused rollback through external scratch: %t/%v", found, err)
+	}
+	if after.Rollback != nil {
 		t.Fatalf("a verdict was recorded under refused scratch: %+v", after.Rollback)
 	}
 	assertNoPlan(t, fixture.targetRoot)
@@ -1042,6 +1048,10 @@ func TestRecordRollbackRefusesAScratchDirectoryInsideTheV2Root(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("the snapshot copy was written into the v2 data root: %v", entries)
+	}
+	assertTreeUnchanged(t, "refused rollback target", targetBefore, fingerprintTree(t, fixture.targetRoot))
+	if names := snapshotDirsIn(t, readScratch); len(names) != 0 {
+		t.Fatalf("rollback observation left private snapshots: %v", names)
 	}
 }
 

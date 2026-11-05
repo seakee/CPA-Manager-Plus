@@ -1,15 +1,7 @@
-// Package copyinmarker is the durable provenance of an in-flight copy-in.
-//
-// The copy-in materializes the v2 layout first and migrates the copied store
-// second; the operation row that describes that work can only be written after
-// the migration commits. A process death between those two commits leaves a v2
-// store whose schema says "native-v2" while no row describes it at all. This
-// marker closes that window: it is written before the migration starts and
-// names the exact backup the target was materialized from, so both the copy-in
-// resume and the startup admission can see that the work is unfinished.
-//
-// It carries provenance only. It is not an authorization, it names no operation
-// stage, and it is removed only after the row that supersedes it commits.
+// Package copyinmarker describes an unfinished copy-in. Migration and its
+// operation row live in private staging until one synced database rename commits
+// them together. The marker binds staging to a verified backup; it never proves
+// an unrecorded target database's provenance.
 package copyinmarker
 
 import (
@@ -23,20 +15,15 @@ import (
 )
 
 // Version is the marker contract. An unknown version is refused, never guessed.
-const Version = 2
+const Version = 3
 
-// Phases of an in-flight copy-in. The marker is published before the first
-// target member is moved and republished once every member is in place, so a
-// resume knows whether an interrupted run may still hold members in its staging
-// tree without opening the database it is resuming.
+// Phases describe preparation, not a database identity or an authorization.
 const (
-	// PhaseMaterializing means the run may still be moving members into the v2
-	// layout. A resume continues the move from its own staging tree.
+	// PhaseMaterializing covers moving non-DB members and rebuilding staging.
 	PhaseMaterializing = "materializing"
-	// PhaseMigrating means every member is in place and the migration may have
-	// started rewriting the copied database. A resume adopts the target instead
-	// of restoring again.
-	PhaseMigrating = "migrating"
+	// PhaseCommitting means the staged database is migrated, recorded, closed
+	// and sidecar-free. Its rename may or may not have committed yet.
+	PhaseCommitting = "committing"
 )
 
 const (
@@ -55,30 +42,20 @@ const (
 // It always names its phase, target, source kind, the source fingerprint the
 // copy started from and the backup manifest digest; a marker that cannot do so
 // describes nothing and is refused.
-//
-// Phase says how far the materialization got, and TargetDatabaseIdentity names
-// the database file this copy-in moved. Both are what let a resume decide
-// whether the target is the store a previous run placed: a relocated path and a
-// database swapped in beside the marker are the two cases a name and a SQLite
-// header cannot tell apart.
 type Marker struct {
-	Version                 int          `json:"version"`
-	Phase                   string       `json:"phase"`
-	TargetDatabase          string       `json:"targetDatabase"`
-	TargetDatabaseIdentity  FileIdentity `json:"targetDatabaseIdentity"`
-	SourceKind              string       `json:"sourceKind"`
-	SourceVersion           string       `json:"sourceVersion,omitempty"`
-	SourceFingerprintBefore string       `json:"sourceFingerprintBefore"`
-	SourceFingerprintAfter  string       `json:"sourceFingerprintAfter,omitempty"`
-	BackupManifestSHA256    string       `json:"backupManifestSha256"`
-	BackupDirectory         string       `json:"backupDirectory,omitempty"`
-	WrittenAtMS             int64        `json:"writtenAtMs"`
+	Version                 int    `json:"version"`
+	Phase                   string `json:"phase"`
+	TargetDatabase          string `json:"targetDatabase"`
+	SourceKind              string `json:"sourceKind"`
+	SourceVersion           string `json:"sourceVersion,omitempty"`
+	SourceFingerprintBefore string `json:"sourceFingerprintBefore"`
+	SourceFingerprintAfter  string `json:"sourceFingerprintAfter,omitempty"`
+	BackupManifestSHA256    string `json:"backupManifestSha256"`
+	BackupDirectory         string `json:"backupDirectory,omitempty"`
+	WrittenAtMS             int64  `json:"writtenAtMs"`
 }
 
-// FileIdentity names one file by the volume and inode the filesystem assigned
-// it. A rename keeps both, so it survives a member being moved into the v2
-// layout and the migration rewriting that file in place; a different file left
-// under the same name has a different identity.
+// FileIdentity is a cache invalidation observation, not durable provenance.
 type FileIdentity struct {
 	Device uint64 `json:"device"`
 	Inode  uint64 `json:"inode"`
@@ -100,28 +77,62 @@ func Path(targetRoot string) string {
 	return filepath.Join(Directory(targetRoot), FileName)
 }
 
+// ValidateDirectory refuses a linked or special work path before any marker
+// access. Its fixed child must itself be a real directory when it exists.
+func ValidateDirectory(targetRoot string) error {
+	info, err := os.Lstat(Directory(targetRoot))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect the copy-in work directory: %w", err)
+	}
+	if !info.IsDir() {
+		return errors.New("the copy-in work path must be a real directory, not a symbolic link or special file")
+	}
+	return nil
+}
+
+// DatabaseSidecarsAbsent is the publication boundary shared by resume and
+// admission. Even an empty or linked sidecar is not a published member.
+func DatabaseSidecarsAbsent(databasePath string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Lstat(databasePath + suffix); err == nil {
+			return fmt.Errorf("the copy-in target has an unexpected %s database sidecar", suffix)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect the copy-in target %s sidecar: %w", suffix, err)
+		}
+	}
+	return nil
+}
+
+// RequirePublishedDatabase accepts only a regular database with no sidecars.
+// A committed row alone cannot authorize foreign bytes beside that database.
+func RequirePublishedDatabase(databasePath string) error {
+	info, err := os.Lstat(databasePath)
+	if err != nil {
+		return fmt.Errorf("inspect the published copy-in database: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("the published copy-in database must be a regular file")
+	}
+	return DatabaseSidecarsAbsent(databasePath)
+}
+
 // Validate rejects a marker that cannot establish provenance for a copy-in.
 func (m Marker) Validate() error {
 	if m.Version != Version {
-		return fmt.Errorf("copy-in marker version %d is not supported", m.Version)
+		return fmt.Errorf("copy-in marker version %d is not supported; preserve the data root and verified bundle and recover into an empty v2 root with `cpa-manager-plus upgrade run`", m.Version)
 	}
 	switch m.Phase {
-	case PhaseMaterializing, PhaseMigrating:
+	case PhaseMaterializing, PhaseCommitting:
 	case "":
 		return errors.New("copy-in marker must name its phase")
 	default:
-		return fmt.Errorf("copy-in marker phase %q is not supported", m.Phase)
+		return fmt.Errorf("copy-in marker phase %q is not supported; preserve the data root and verified bundle and recover into an empty v2 root with `cpa-manager-plus upgrade run`", m.Phase)
 	}
 	if !filepath.IsAbs(m.TargetDatabase) {
 		return errors.New("copy-in marker must name an absolute target database")
-	}
-	if m.Phase == PhaseMigrating {
-		// A migrating marker claims the database beside it is the one this
-		// copy-in moved. Without that identity the claim is only a file name and
-		// a SQLite header, which any v2 store satisfies.
-		if !m.TargetDatabaseIdentity.Valid() {
-			return errors.New("a migrating copy-in marker must name the database it materialized")
-		}
 	}
 	if m.SourceKind == "" {
 		return errors.New("copy-in marker must name the source kind")
@@ -149,8 +160,14 @@ func Write(targetRoot string, marker Marker) error {
 	if err != nil {
 		return err
 	}
+	if err := ValidateDirectory(targetRoot); err != nil {
+		return err
+	}
 	directory := Directory(targetRoot)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return err
+	}
+	if err := ValidateDirectory(targetRoot); err != nil {
 		return err
 	}
 	next := Path(targetRoot) + tempSuffix
@@ -177,10 +194,23 @@ func Write(targetRoot string, marker Marker) error {
 	return syncDirectory(directory)
 }
 
+// SyncDirectory persists the database publication on platforms supporting
+// directory fsync, using the same durability boundary as marker publication.
+func SyncDirectory(path string) error { return syncDirectory(path) }
+
+// AwaitingCommit keeps readers away from a database that cannot be the atomic
+// publication: materializing has no target, and committing publishes no sidecars.
+func (m Marker) AwaitingCommit(databasePath string) bool {
+	return m.Phase == PhaseMaterializing || RequirePublishedDatabase(databasePath) != nil
+}
+
 // Read returns the marker of a v2 data root. found is false when no copy-in is
 // in flight; a marker that exists but does not validate is an error, because
 // refusing startup is the only safe reading of an unreadable provenance record.
 func Read(targetRoot string) (Marker, bool, error) {
+	if err := ValidateDirectory(targetRoot); err != nil {
+		return Marker{}, false, err
+	}
 	path := Path(targetRoot)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
@@ -203,6 +233,17 @@ func Read(targetRoot string) (Marker, bool, error) {
 	}
 	if len(data) > maxMarkerBytes {
 		return Marker{}, false, errors.New("copy-in marker exceeds its bound")
+	}
+	// Older contracts may contain fields deliberately removed from this one.
+	// Inspect their version first to give recovery guidance, never a shim.
+	var header struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return Marker{}, false, fmt.Errorf("decode the copy-in marker version: %w", err)
+	}
+	if header.Version != Version {
+		return Marker{}, false, fmt.Errorf("copy-in marker version %d is not supported; preserve the data root and verified bundle and recover into an empty v2 root with `cpa-manager-plus upgrade run`", header.Version)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

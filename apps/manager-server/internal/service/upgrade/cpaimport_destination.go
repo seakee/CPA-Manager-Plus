@@ -137,6 +137,9 @@ func nextCPAImportDestinationAttempt(record cpaImportDestinationRecord) cpaImpor
 // JSON field and the settings column are written from that one value, so they
 // always agree, and a caller's proposed time is discarded.
 func saveCPAImportDestinationRecord(ctx context.Context, databasePath, dataKeyPath string, record cpaImportDestinationRecord, managementKey string) error {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return err
+	}
 	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
 	if err != nil {
 		return fmt.Errorf("load the Manager data key: %w", err)
@@ -216,6 +219,9 @@ func nextDestinationUpdatedAtMS(nowMS, storedColumnMS, storedJSONMS int64) int64
 // "not found" would let this run mint a second secret and overwrite the record,
 // which is how the staged secret was lost before.
 func loadCPAImportDestinationRecord(ctx context.Context, databasePath, dataKeyPath string) (cpaImportDestinationRecord, string, bool, error) {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return cpaImportDestinationRecord{}, "", false, err
+	}
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {
 		return cpaImportDestinationRecord{}, "", false, fmt.Errorf("open the v2 database to read the destination attempt: %w", err)

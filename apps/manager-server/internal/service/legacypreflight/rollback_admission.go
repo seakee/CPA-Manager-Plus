@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
-	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // UpgradeReason is the typed, operator-facing explanation attached to an
@@ -48,15 +47,12 @@ func (a DatabaseUpgradeAdmission) AdmittedReason(ctx context.Context) (UpgradeSt
 	if path == "" {
 		return UpgradeStageNone, "", errors.New("upgrade admission requires the Manager database path")
 	}
-	// The marker is read first, exactly as Admitted does: a `materializing`
-	// marker must be decided without opening the target read-only, or admission
-	// itself rewrites `-shm` and strands the resume. That phase carries no
-	// rollback reason.
+	// Do not open an unpublished target or any foreign database sidecars.
 	marker, inFlight, err := readCopyInMarker(path)
 	if err != nil {
 		return UpgradeStageNone, "", err
 	}
-	if inFlight && marker.Phase == copyinmarker.PhaseMaterializing {
+	if inFlight && marker.AwaitingCommit(path) {
 		return UpgradeStageInProgress, "", nil
 	}
 	record, found, err := readRecordedUpgrade(ctx, a)

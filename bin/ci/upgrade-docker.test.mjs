@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -1161,4 +1162,76 @@ test('stableImageRef keeps the tag and drops the run prefix a stable fact cannot
   // A reference this run does not own is recorded exactly as printed.
   assert.equal(stableImageRef('cpampd-fixture/legacy-v1:1.14.4', 'cpampd01234567'), 'cpampd-fixture/legacy-v1:1.14.4');
   assert.equal(stableImageRef(undefined, 'cpampd01234567'), '');
+});
+
+async function interruptedCopyInHarness(mode) {
+  const root = mkdtempSync(path.join(tmpdir(), 'cpampd-copyin-test-'));
+  const source = path.join(root, 'source-fixture');
+  mkdirSync(source);
+  writeFileSync(path.join(source, 'source-data'), 'preserved source');
+  const target = path.join(root, 'work', 'interrupted', 'target');
+  const work = path.join(target, '.upgrade-copy-in');
+  const staged = path.join(work, 'restored', 'database');
+  let invalidStagingSeen = false;
+  const context = vm.createContext({
+    fs, path, Buffer, setInterval, clearInterval, setTimeout, clearTimeout,
+    SCRATCH: root, acceptedRelease: 'v1.14.10',
+    evidence: { commands: [], faults: [] }, stableFacts: [],
+    copyTree: copyDirectory, dirDigest, withDeclaredSourceVersion,
+    assertValue: (value, message) => { if (!value) throw new Error(message); },
+    parseJson: (text) => JSON.parse(text), commandRecord: () => ({}),
+    proveCopyInMarkerWindow: async () => ({ status: 200, recorded: true, evidence: 'copy_in_marker', stage: 'copy_in', nextAction: 'copy_in' }),
+    spawn: () => {
+      const child = new EventEmitter();
+      child.kill = () => { setImmediate(() => child.emit('exit', null, 'SIGKILL')); };
+      queueMicrotask(() => {
+        mkdirSync(path.dirname(staged), { recursive: true });
+        writeFileSync(staged, 'stale staging must not be adopted');
+        writeFileSync(path.join(work, 'copy-in.json'), JSON.stringify({ version: 3, phase: 'materializing' }));
+        mkdirSync(path.join(target, 'upgrade-backup'));
+        writeFileSync(path.join(target, 'upgrade-backup', 'manifest.json'), JSON.stringify({ entries: { 'data-key': { present: true }, 'usage-archives': { present: true } } }));
+        writeFileSync(path.join(target, 'data.key'), 'copied key');
+        mkdirSync(path.join(target, 'usage-archives'));
+        if (mode === 'published-too-early') writeFileSync(path.join(target, 'usage.sqlite'), 'unexpected published database');
+        if (mode === 'dangling-sidecar') fs.symlinkSync(path.join(root, 'missing-sidecar'), path.join(target, 'usage.sqlite-journal'));
+      });
+      return child;
+    },
+    runCli: (_binary, _args, label) => {
+      if (label === 'interrupted:recorded') return { stdout: JSON.stringify({ operation: { stage: 'copy_in' } }) };
+      assert.equal(label, 'interrupted:resume');
+      const stagedBytes = readFileSync(staged);
+      invalidStagingSeen = stagedBytes.toString().includes('deliberately invalid staged database');
+      writeFileSync(path.join(target, 'usage.sqlite'), mode === 'reuse-staging' ? stagedBytes : Buffer.from('SQLite format 3\0rebuilt from verified backup'));
+      rmSync(work, { recursive: true });
+      return { code: 0, stdout: JSON.stringify({ result: { stage: 'copy_in', restored: mode === 'misreport-moves' } }) };
+    },
+  });
+  vm.runInContext(harnessFunction('faultInterruptedCopyIn'), context);
+  try {
+    await context.faultInterruptedCopyIn('/fake/manager', { main: { source } });
+    return { invalidStagingSeen };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('copy-in interruption rejects reused invalid staging, not merely a boolean result', async () => {
+  await assert.rejects(interruptedCopyInHarness('reuse-staging'), /staged|SQLite|rebuilt/);
+});
+
+test('copy-in interruption checks the actual non-database moves', async () => {
+  await assert.rejects(interruptedCopyInHarness('misreport-moves'), /non-database|restored/);
+});
+
+test('copy-in interruption replaces invalid staging with a rebuilt database', async () => {
+  assert.equal((await interruptedCopyInHarness('rebuilt')).invalidStagingSeen, true);
+});
+
+test('copy-in interruption requires the target database to remain absent before resume', async () => {
+  await assert.rejects(interruptedCopyInHarness('published-too-early'), /absent|unpublished/);
+});
+
+test('copy-in interruption refuses a dangling database sidecar symlink', async () => {
+  await assert.rejects(interruptedCopyInHarness('dangling-sidecar'), /absent|unpublished/);
 });

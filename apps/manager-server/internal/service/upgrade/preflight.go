@@ -135,21 +135,15 @@ type Options struct {
 	// is the only exact version signal; it must equal the pinned release. An
 	// empty value blocks the source.
 	DeclaredVersion string
-	// ScratchDir is the base directory for the transient copies this package
-	// makes. Preflight copies the source database into a private directory under
-	// it before reading; CopyIn and Reconcile work there as well, Reconcile in
-	// its own .upgrade-reconcile directory. It has to be writable and big enough
-	// to hold the source database. Empty uses the OS temporary directory. A
-	// scratch directory inside the legacy source root or inside TargetDir is
-	// refused with upgrade_snapshot_failed before anything is created, and
-	// Reconcile also refuses one that is, sits inside, or contains the 1.x
-	// source root: the transient copy must never land in a tree that is supposed
-	// to stay untouched or that will receive the upgrade.
-	//
-	// Reconcile reads the source through the same snapshot and works in
-	// <ScratchDir>/.upgrade-reconcile (the v2 data root when this is unset), so
-	// the directory named here is never itself removed. The named directory must
-	// not be, sit inside, or contain the 1.x source root.
+	// ScratchDir is the writable base for transient database copies. Preflight,
+	// CopyIn and Reconcile read through unique private snapshot directories under
+	// it; Reconcile uses the same configured base for its target and source.
+	// Empty uses the OS temporary directory. The base must have enough space for
+	// those database copies and must lie outside the legacy source and target
+	// roots. An invalid base is refused with upgrade_snapshot_failed before any
+	// private directory is created. Reconcile additionally refuses an explicitly
+	// named ancestor of the source. Each snapshot removes only its own private
+	// directory on every return path, never the caller-owned base or its files.
 	ScratchDir string
 	// TargetDir is the directory on the volume that will receive the upgrade
 	// copy. The disk probe measures free space there. Empty probes the scratch
@@ -995,18 +989,14 @@ func VerifyManagerCredential(ctx context.Context, databasePath string, roots Cre
 	return nil
 }
 
-// materializingManagerTarget reports whether databasePath is the target of a
-// copy-in that has not finished moving its members. The marker is read before
-// the store is opened, the same order the admission and the status projection
-// use; a marker that names another database file describes another run and is
-// not this store. A marker that cannot be read fails closed: an unreadable
-// provenance record could hide exactly the phase this check exists for.
+// materializingManagerTarget protects both preparation and commit windows.
+// Authentication uses a private snapshot, never an in-place unfinished store.
 func materializingManagerTarget(databasePath string) (bool, error) {
 	marker, inFlight, err := copyinmarker.Read(filepath.Dir(databasePath))
 	if err != nil {
 		return false, err
 	}
-	if !inFlight || marker.Phase != copyinmarker.PhaseMaterializing {
+	if !inFlight {
 		return false, nil
 	}
 	return copyinmarker.SameTarget(marker.TargetDatabase, databasePath), nil

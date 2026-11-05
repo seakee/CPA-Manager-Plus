@@ -375,18 +375,26 @@ writes only inside the v2 data root. `UpgradeAuthorized` and `TrustedHopReceipt`
 stay hard `false`; the recorded operation grants startup surface, never
 migration authority.
 
-- **Pipeline, fixed order:** fingerprint the 1.x source (`source_fingerprint_before`)
-  → `maintenancebundle.Create` into the backup destination → `Verify` → validate
-  the manifest digest → check the target for members this run did not place →
-  publish `.upgrade-copy-in/copy-in.json` in its `materializing` phase →
-  `RestoreNew` into `.upgrade-copy-in/restored` inside the v2 data root →
-  `os.Rename` each restored member into the v2 layout
-  (`database`→`usage.sqlite`, its WAL/SHM/journal, `data-key`→`data.key`,
-  `usage-archives`→`usage-archives/`) → republish the marker in its `migrating`
-  phase, naming the database file it moved → open the copied store, run the
-  incremental v2 migration and commit `copy_in` → remove the work directory,
-  marker included, only after that commit. Everything is on one filesystem, so
-  no member is ever copied.
+- **Pipeline, fixed order:** fingerprint the 1.x source → create/reuse and verify
+  the maintenance bundle and manifest digest → require an absent target database
+  and all three sidecars → publish version-3 `materializing` marker → `RestoreNew`
+  into `.upgrade-copy-in/restored` → rename only `data-key`→`data.key` and
+  `usage-archives`→`usage-archives/` into the target (existing members must be
+  byte-identical) → fingerprint the source again → migrate the **staged**
+  `database` and record `copy_in` there → `pragma wal_checkpoint(truncate)` →
+  close every connection → require no staged WAL/SHM/journal → fsync the staged
+  database → publish `committing` marker → recheck that the target database and
+  all its sidecars are absent → recheck staging's real directories, regular DB
+  and absent sidecars → recheck target sidecars after the final checkpoint → one
+  atomic same-filesystem **no-replace** rename of staged `database` to target
+  `usage.sqlite` → fsync the target directory → require a regular,
+  sidecar-free published database → remove the work directory and marker only
+  after repeating that publication check. The rename is the database commit
+  point: schema migration and its provenance row become visible together.
+  Publication uses Linux `RENAME_NOREPLACE`, Darwin `RENAME_EXCL`, or Windows
+  `MoveFileEx` without replacement/copy flags. An arriving destination is a
+  typed conflict and is preserved; unsupported rename semantics fail without
+  falling back to an overwriting rename or a copy.
 - **V2 data-root fence.** `CopyIn` takes the v2 data root's own ownership
   lock (`processlock.Acquire` on `<target>/usage.sqlite`) in the service,
   before its first write to that root, and holds it for the whole mutating
@@ -401,28 +409,54 @@ migration authority.
   fence excludes cooperating Manager writers; it does not claim anything
   about a process that ignores the marker. `upgrade preflight` and
   `upgrade status` remain read-only and take no exclusive target lock.
-- **Crash windows.** Two interruptions matter. Inside the move, some members are
-  in the v2 layout and the rest are in the staging tree; the marker's
-  `materializing` phase says so, and the resume continues the move from its own
-  staging tree. Between the migration commit and the operation row, every member
-  is in place and the database has already been rewritten; the marker's
-  `migrating` phase says so, and the resume adopts the target instead of
-  restoring over it. Both markers are removed only once the row commits.
-- **Marker trust.** The marker always names its phase, the target database, the
-  source kind, the source fingerprint the copy started from and the backup
-  manifest digest. A `migrating` marker additionally names the device and inode
-  (`copyinmarker.FileIdentity`, volume serial and file index on Windows) of the
-  database this copy-in moved: a rename and the migration's in-place rewrite both
-  keep that identity, and a database swapped in beside the marker does not. A
-  marker that names a different database file or a different backup does not
-  vouch for this target, and a `migrating` marker whose identity no longer
-  matches — or whose data key, archive tree or archive contents no longer match
-  the backup — fails closed with `upgrade_target_conflict`. Nothing is deleted,
-  restored or moved before that decision: clearing the work directory would take
-  the marker with it, and a migrated store with no row and no marker is admitted
-  as a finished install. A marker that names the same database file under another
-  absolute path is accepted, because a relocated mount changes the path, not the
-  store.
+- **Filesystem boundary.** Marker reads/writes reject a symlinked or special
+  `.upgrade-copy-in` directory. Staging must also be a real directory inside
+  that work directory. Before migration, the staged database and any restored
+  sidecars must be regular files, never symlinks; before rename the database
+  must again be regular and have no sidecars. Cleanup classifies every work
+  child with `Lstat` and proves root-local containment before deleting anything;
+  linked/special children are preserved as typed conflicts. A work-directory
+  symlink never authorizes reading or deleting its unrelated destination.
+- **Crash windows.** `materializing` covers non-database moves, staging restore
+  and staging migration; `committing` means staging has been migrated, recorded,
+  checkpointed, closed and synced, with its rename pending or just completed.
+  Neither phase authorizes reading staging. Before the rename the target DB is
+  absent; on resume staging and all its sidecars are discarded and restored
+  again from the **verified bundle**, even if staging appears valid. Existing
+  non-database members are compared byte-for-byte and never overwritten.
+  While the target DB is absent, wholly absent non-database members can be moved
+  from fresh staging in either phase; a present but incomplete/edited archive
+  tree is never overlaid. `Result.restored` reports non-database moves, not the
+  unconditional rebuilding of staging. A completed target with missing members
+  still fails verification instead of being repaired.
+- **Marker trust.** Version 3 carries phase, target database name, source kind,
+  source fingerprints and backup manifest digest, not device/inode identity.
+  No inode reuse assumption, schema/content heuristic, event count or max-id
+  establishes provenance. Only a **`committing` marker with a regular,
+  sidecar-free target** and this marker's committed `copy_in` row follows the
+  completed path. Its row and schema are inspected through **one private
+  snapshot**, even when the main database is sidecar-free; the target is never
+  opened in place. It verifies non-database members before cleaning up. With a
+  marker present, **any** target WAL, SHM or journal (including empty files and
+  symlinks) is an `upgrade_target_conflict`, even if the main database has the
+  expected row. The target and marker remain untouched; no SQLite target open,
+  migration or row write occurs. Admission keeps those same bytes `in_progress`.
+  Sidecars appearing after rename or just before cleanup likewise retain the
+  marker and cause a typed conflict. Preserve refused evidence, move unexpected
+  DB and sidecars aside, then rerun `cpa-manager-plus upgrade run`. Older-version,
+  unknown-phase, unreadable, different-database or different-backup markers
+  are unresumable; preserve the data root and verified backup and recover into
+  an empty v2 root with `upgrade run`. Deleting the marker is not recovery.
+  Root relocation remains supported by comparing the database's root-local name.
+- **Recovery precedes later steps.** Reconcile, Verify, CPA import and External
+  connect share a pre-read/pre-write guard: any surviving or unreadable marker
+  requires `upgrade run` recovery first, including a sidecar-free published
+  `committing` marker. Without a marker, rollback-journal entries and linked or
+  non-regular WAL/SHM entries are still conflicts. Regular WAL/SHM members may be
+  consumed only through private snapshots during qualification. Verify validates
+  default or configured scratch against both roots before its first snapshot;
+  completed verdicts reuse that same private target copy. Wizard status rejects
+  a differently bound marker with recovery guidance instead of opening the store.
 - **Source immutability.** The 1.x volume is never opened in place. Preflight
   copies the database and its WAL sidecars into private scratch space, proves the
   source did not change while the copy was taken and reads only that copy, so a
@@ -436,25 +470,36 @@ migration authority.
   the database, its WAL/SHM/journal, `data.key`, every archive file and every
   other entry of the source root (the ownership marker is the one deliberate
   exception: it belongs to the holder, not the source). It is recomputed after
-  the copy; a difference rolls back the members this run moved plus the work
-  directory and aborts with `upgrade_source_changed`. The read-only descriptor
+  the copy; a difference rolls back only moved members that still match the
+  manifest, including regular-file digests and the exact archive entry set,
+  before removing the work directory and returning `upgrade_source_changed`.
+  Replaced, linked, modified or additional members instead preserve the entire
+  target and marker with `upgrade_target_conflict` for manual recovery. The read-only descriptor
   is proven on the test host with a `0400` source marker; an actual Linux
   read-only (EROFS) bind mount was not exercised, so that mount qualification
   remains unverified.
-- **Resumability.** A verified bundle is reused instead of recreated. A target
-  whose members already match the manifest is not restored again. A published
-  staging tree that still describes the backup is adopted rather than restored
-  twice. The resume never opens the target database before the migration that
-  owns it: a read-only open of a WAL database rewrites or creates its `-shm`,
-  which would make the member the resume has to move disagree with the backup and
-  leave a live-WAL source unresumable forever. A committed `copy_in` (or later
-  stage) is verified against the v2 layout before it is reported: the data key
-  and the archive tree must still match the backup, the archive tree must hold
-  nothing the backup does not describe, and the database must be the migrated
-  store — otherwise the run fails with `upgrade_target_modified` instead of a
-  false success. A target that holds *different* bytes under a member name is
-  never replaced. A rerun that finds its own marker after the row committed
-  reports the recorded outcome and removes the marker.
+- **Resumability.** The verified bundle is reused, but staging is always rebuilt
+  from it. A live-WAL source remains resumable: its WAL/SHM/journal stay in staging
+  until migration consumes them, never becoming target members. Startup,
+  rollback admission and wizard status never open an unpublished target or
+  foreign sidecars. Terminal CLI guards use only private snapshots. A committed `copy_in` (or later stage)
+  is verified against the v2 layout: data key and archive bytes must match the
+  backup with no extra archive entries, and the database must carry the migrated
+  schema. A changed completed target fails `upgrade_target_modified`. A crash
+  after the atomic rename follows that completed path and cleans the marker;
+  a crash before it never adopts partially migrated staging or an unrecorded DB.
+  All completed CopyIn inspections share one private snapshot for the row and
+  schema. Its scratch root is validated outside both the current source and
+  target roots before creation, including when the OS temporary directory is
+  used by default; the snapshot is closed and removed on success and every
+  refusal. With no in-flight marker, an already recorded target may have a live
+  WAL, which is read only in that private snapshot. The Docker interruption
+  drill writes invalid staged DB/sidecar bytes before
+  resuming, checks actual non-database moves against the manifest, requires a
+  rebuilt SQLite database plus its committed row, and verifies source/backup
+  digests stayed unchanged; it does not accept a boolean result as proof.
+  Its pre-resume absence check uses `Lstat`, so a dangling database or sidecar
+  symlink is present evidence, never an absent member.
 - **Recorded fields** in `upgrade_operations`: `stage=copy_in`,
   `domains_done+=[source_copy]`, `source_kind=upgraded-legacy`,
   `source_version` (the operator's declaration; 1.x never recorded it, so an
@@ -480,11 +525,10 @@ migration authority.
   service never loads leaves the 1.x encrypted fields undecryptable.
   `upgrade preflight` and `upgrade status` remain read-only. Before the
   preflight, `run` reports a recorded stage past `copy_in` without changing
-  anything. That guard reads the copy-in marker first and steps aside while a
-  copy-in is in flight (or its marker is unreadable): the marker and the member
-  digests are what a resume compares, never an open of the target, because a
-  read-only open of the materializing database would create its `-shm` and
-  strand the resume. The run stops at the copy-in and prints
+  anything. That guard steps aside for `materializing` or unreadable markers;
+  `committing` targets are inspected only through private snapshots.
+  Both marker phases use private snapshots for Manager credential fallback;
+  staging itself is never a credential authority. The run stops at copy-in and prints
   `cpa-manager-plus upgrade status --db-path <v2 database>` plus a note that
   reconciliation is a separate authorised step this build does not ship; it
   prints no command that this build cannot dispatch. Every subcommand shares the
@@ -500,17 +544,14 @@ classifies a source. The reader consults the `.upgrade-copy-in/copy-in.json`
 marker beside the database first, because the marker is the only evidence that
 can be read without opening the target:
 
-- A valid `materializing` marker is decided from the marker alone. That marker is
-  published before the first member is moved and before the migration that
-  creates the operation table, so no row can describe such a target; opening it
-  read-only joins the copied WAL and rewrites `usage-sqlite-shm`, the member the
-  resumed move compares with the backup. Admission would otherwise make an
-  interrupted live-WAL copy-in unresumable.
-- Any other marker state reads the `upgrade_operations` row next, so a committed
-  row outlives its marker: the marker turns `migrating` before the migration and
-  is removed only after the row commits, and a death between those events leaves
-  both, where the row is the stronger evidence.
-- Without a row, a marker still answers `in_progress`.
+- `materializing` is decided from the marker alone; a target DB beside that phase
+  cannot be completed recovery. `committing` with no regular target DB, or any
+  target sidecar, is likewise `in_progress` without opening a DB.
+- `committing` with a published sidecar-free DB can read the operation row; a
+  committed row outlives the marker. Without a row the marker still means
+  `in_progress`; only `upgrade run` may resolve its conflict or resume it.
+- Older versions and unknown phases fail closed with recovery guidance; they
+  are never translated to version 3 or treated as an absent marker.
 
 A reader error fails closed, including an unreadable marker beside a readable
 row; a `nil` reader keeps the historical rule. `Surface()` then selects what the
@@ -519,8 +560,9 @@ process serves:
 | Recorded state | Admission | Startup surface |
 | --- | --- | --- |
 | no table, no row and no marker for this database (or `nil` reader) | `none` | unchanged: only `fresh` and `native-v2` are admitted; a 1.x source stays blocked |
-| `materializing` marker, no row (the members are being moved, the migration has not run) | `in_progress` | Upgrade surface only, and the target is not opened: the resume keeps the `-shm` it restored |
-| `migrating` marker, no row (the members moved, the row did not) | `in_progress` | Upgrade surface only |
+| version-3 `materializing` marker | `in_progress` | Upgrade surface only; target and staging are not opened |
+| version-3 `committing` marker, target absent/non-regular or any target sidecar present | `in_progress` | Upgrade surface only; no target DB open; resume rebuilds staging when absent, otherwise refuses foreign bytes even if a committed row exists |
+| version-3 `committing` marker, published sidecar-free target with committed row | row decides | normal row rules below; `upgrade run` verifies members and cleans the marker |
 | the same marker under another absolute path, or a root relocated to another mount | `in_progress` | Upgrade surface only: the marker belongs to the data root it sits in, so a relocated volume is never read as "no record" |
 | a marker naming a different database file | — | not admitted (fail closed): it is evidence for another run |
 | `preflight`, `copy_in`, `reconcile`, `cpa_import`, `external_connect`, `verify`, `failed` | `in_progress` | Upgrade surface only: fixed Bootstrap discovery status reads, the read-only shell, the Upgrade authentication leaf and the wizard's two read-only routes. Console, Key workspace, gateway configuration, lifecycle and model traffic answer 404; health stays 503 and no writable subsystem starts |
@@ -630,9 +672,9 @@ on both surfaces at once, and no write route exists.
   source. `VerifyAdminSource` takes no fence. The Manager store's live credential
   is not cached: it is this process's live database, whose WAL and file change
   under ordinary traffic, and its credential is one indexed row in an already
-  open store. Only a target read as a preserved source because it is still
-  `materializing` participates in the state-keyed cache, and only for the exact
-  byte state it was proved against.
+  open store. Only a target read as a preserved source because it still has a
+  `materializing` or `committing` marker participates in the state-keyed cache,
+  and only for the exact byte state it was proved against.
   A read that outlives the bound — or a caller whose own deadline had passed —
   is `503 upgrade_credential_timeout`: a slow but healthy volume is a retry, not
   a repair.
@@ -816,17 +858,22 @@ The source fingerprint recorded by the copy-in is re-checked first, before and
 after the comparison; a source that moved fails with `upgrade_source_changed`
 and nothing is compared. The database is read through the same private snapshot
 preflight and status use (`upgrade.OpenSnapshot`): the database and its
-`-wal`/`-shm` sidecars are copied into `<ScratchDir>/.upgrade-reconcile` and the
-*snapshot* digests the source before and after taking the copy, so a source that
-was written while it was being copied is refused instead of compared. Opening
-the original, even read-only, would create a WAL index beside it and change the
-fingerprint the copy-in recorded. The scratch area is
-`<ScratchDir>/.upgrade-reconcile` (the v2 data root by default): only that
-tool-owned subdirectory is created and removed, so the directory the caller
-named is never the path the step deletes. The named root must not be, sit inside,
-or contain the source root, and the copy is removed on every return path — a
-clean comparison, a mismatch, or a failure before the comparison finished — so
-nothing but the report survives the step.
+`-wal`/`-shm` sidecars are copied into a unique private directory under the
+configured scratch base and the *snapshot* digests the source before and after
+taking the copy, so a source that was written while it was being copied is
+refused instead of compared. Opening the original, even read-only, would create
+a WAL index beside it and change the fingerprint the copy-in recorded.
+Reconcile resolves the scratch base before its first target read. The target
+operation row, schema qualification and comparison observations all use one
+private target snapshot through the same API, so none joins the original target
+WAL or creates a target SHM. The later authorized mark/record writes remain
+under the target fence. Both snapshots use `ScratchDir`, or the OS temporary
+directory when unset; the base must be outside both the source and target roots.
+An explicitly named ancestor of the source is also refused. Each snapshot owns
+and removes only its unique private directory, never the caller-owned base or
+its other files. Copies are removed on every return path — a clean comparison,
+a mismatch, or a failure before comparison finished — so nothing but the report
+survives the step.
 
 The report carries no credential and no raw failure body, but it is not
 row-free: a mismatch names the dimension that moved, which for a retained bucket
@@ -1290,10 +1337,9 @@ socket, so it *prepares* an exact invocation and *records* a proven verdict.
   names no subcommand this build cannot dispatch. A recorded stage beyond
   `copy_in` — including a terminal `rolled_back` — is reported as-is with no
   write and no next-step hint. The guard that reads that row never opens the
-  data root in place: it skips the read only for a materializing marker (that
-  target belongs to the resume, which compares members by file digest), and
-  reads every other state — no marker, a migrating marker, or a marker that
-  outlived its committed row — through a private snapshot. A terminal row is
+  data root in place: it skips unreadable and `materializing` markers. A
+  `committing` target (including one with sidecars), or a root with no marker,
+  is read only through a private snapshot. A terminal row is
   therefore reported without a writable open even when a stale marker survives
   it, and that marker is left in place: only the run that finishes the copy-in
   removes it. A blocked preflight still writes nothing.
