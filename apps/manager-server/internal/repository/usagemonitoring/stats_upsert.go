@@ -125,7 +125,7 @@ func upsertAccountDailyBatch(ctx context.Context, tx *sql.Tx, revision string, a
 		max(timestamp_ms),
 		?
 	from banded_events
-	group by 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+	group by 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
 	on conflict(
 		structure_revision, bucket_ms, account_snapshot, auth_label_snapshot,
 		provider, auth_provider_snapshot, auth_account_id_snapshot, auth_index, source, source_hash,
@@ -213,7 +213,7 @@ func upsertAPIKeyDailyBatch(ctx context.Context, tx *sql.Tx, revision string, af
 		max(timestamp_ms),
 		?
 	from banded_events
-	group by 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+	group by 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
 	on conflict(
 		structure_revision, bucket_ms, api_key_hash, account_snapshot,
 		auth_label_snapshot, provider, auth_provider_snapshot, auth_account_id_snapshot, auth_index,
