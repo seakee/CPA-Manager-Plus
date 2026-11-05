@@ -168,7 +168,7 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	// touches neither the store nor the source. The product is admitted normally
 	// from here, so it must not need the 1.x volume to answer this call.
 	if recorded.Stage == model.UpgradeStageComplete {
-		return completedVerifyResultFromStore(ctx, paths, recorded)
+		return completedVerifyResultFromStore(ctx, paths, recorded, sourceRoot)
 	}
 	if err := verifyEntry(recorded); err != nil {
 		return VerifyResult{}, err
@@ -448,21 +448,6 @@ func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeopera
 	return verifyResult(recorded, evidence.TargetMode, true), nil
 }
 
-// openVerifyStoreReadOnly opens the v2 store through the read-only snapshot a
-// completed operation is answered from. It never creates or migrates it.
-func openVerifyStoreReadOnly(databasePath string) (*sql.DB, error) {
-	if _, err := os.Lstat(databasePath); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", readOnlySnapshotName(databasePath))
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	return db, nil
-}
-
 // readExternalBindingFrom reads the recorded External binding from an open
 // connection. A store whose connect step never ran, or one written before the
 // binding table existed, simply has none.
@@ -476,12 +461,16 @@ func readExternalBindingFrom(ctx context.Context, db *sql.DB) (upgradeoperation.
 
 // completedVerifyResultFromStore answers a completed operation from a read-only
 // handle: the stored verdict, then the target the Manager itself stores.
-func completedVerifyResultFromStore(ctx context.Context, paths targetPaths, recorded model.UpgradeOperation) (VerifyResult, error) {
-	db, err := openVerifyStoreReadOnly(paths.Database)
-	if err != nil {
-		return VerifyResult{}, err
+func completedVerifyResultFromStore(ctx context.Context, paths targetPaths, recorded model.UpgradeOperation, sourceRoot string) (VerifyResult, error) {
+	if err := ValidateScratchDir("", sourceRoot, paths.Root); err != nil {
+		return VerifyResult{}, snapshotReadError(ctx, err)
 	}
-	defer func() { _ = db.Close() }()
+	snapshot, err := OpenSnapshot(ctx, paths.Database, "")
+	if err != nil {
+		return VerifyResult{}, snapshotReadError(ctx, err)
+	}
+	defer func() { _ = snapshot.Close() }()
+	db := snapshot.DB()
 	binding, hasBinding, err := readExternalBindingFrom(ctx, db)
 	if err != nil {
 		return VerifyResult{}, fmt.Errorf("read the External connect binding: %w", err)

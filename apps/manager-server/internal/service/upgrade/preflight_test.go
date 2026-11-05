@@ -1884,7 +1884,7 @@ func TestVerifyAdminReadsOnlyTheCredentialRow(t *testing.T) {
 	const key = "legacy-manager-credential"
 	fixture := largeCredentialSource(t, key, credentialFixtureMegabytes)
 	// The corruption is real: the qualification path cannot read this file.
-	if db, _, err := openSource(context.Background(), fixture.dbPath, true); err == nil {
+	if db, _, err := openImmutableSource(context.Background(), fixture.dbPath); err == nil {
 		_ = db.Close()
 		t.Fatal("the fixture passed the whole-database integrity check")
 	}

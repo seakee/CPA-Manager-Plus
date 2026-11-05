@@ -187,25 +187,17 @@ func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, e
 	if path == "" {
 		return UpgradeStageNone, errors.New("upgrade admission requires the Manager database path")
 	}
-	// The marker is read before the store. A `materializing` marker was
-	// published before the first member was moved and before the migration that
-	// creates the operation table, so no row can be committed in such a target:
-	// reading it decides nothing and costs the resume everything. A read-only
-	// open of a target that still holds the copied WAL joins that WAL and
-	// rewrites `-shm`, the member the resumed move is about to compare with the
-	// backup. Admission would then be the reason an interrupted copy-in can
-	// never be resumed, so that phase is decided from the marker alone.
+	// Staging is private. Until atomic publication readers use only the marker;
+	// an absent target or foreign sidecar must never provoke a SQLite open.
 	marker, inFlight, err := readCopyInMarker(path)
 	if err != nil {
 		return UpgradeStageNone, err
 	}
-	if inFlight && marker.Phase == copyinmarker.PhaseMaterializing {
+	if inFlight && marker.AwaitingCommit(path) {
 		return UpgradeStageInProgress, nil
 	}
-	// The row is read next, so a committed row outlives its marker: the marker
-	// is republished `migrating` before the migration and removed only after
-	// the row commits, so a process death in between leaves a valid row beside
-	// a valid marker and the row is the stronger evidence.
+	// A committing marker can outlive its published database. The row then
+	// remains the stronger evidence; CopyIn owns verification and cleanup.
 	record, found, err := readRecordedUpgrade(ctx, a)
 	if err != nil {
 		return UpgradeStageNone, err
@@ -214,8 +206,7 @@ func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, e
 		return upgradeStageFromRecord(record)
 	}
 	if inFlight {
-		// A `migrating` marker with no row: every member is in place and the
-		// migration may have committed, but nothing recorded it yet.
+		// No published row: the copy-in must be resumed.
 		return UpgradeStageInProgress, nil
 	}
 	return UpgradeStageNone, nil
@@ -397,10 +388,8 @@ func readRecordedExternalBinding(ctx context.Context, db *sql.DB) (upgradeRecord
 	}, nil
 }
 
-// readCopyInMarker reads the provenance marker of an in-flight copy-in. The
-// copy-in writes it before the first member is moved and removes it only after
-// the operation row commits, so its presence means the v2 store is unfinished:
-// the schema may already say "native-v2" while no row describes the copy.
+// readCopyInMarker reads preparation evidence before any database open. A row
+// and migrated schema become visible together; only cleanup may remain pending.
 func readCopyInMarker(databasePath string) (copyinmarker.Marker, bool, error) {
 	marker, found, err := copyinmarker.Read(filepath.Dir(databasePath))
 	if err != nil {

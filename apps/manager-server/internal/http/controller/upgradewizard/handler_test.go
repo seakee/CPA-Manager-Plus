@@ -1966,3 +1966,47 @@ func TestStatusScrubsTheShapesTheReviewProvedLeak(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusKeepsBothCopyInPhasesAwayFromUnpublishedDatabases(t *testing.T) {
+	for _, phase := range []string{copyinmarker.PhaseMaterializing, copyinmarker.PhaseCommitting} {
+		for _, sidecar := range []string{"", "-wal", "-shm", "-journal"} {
+			t.Run(phase+sidecar, func(t *testing.T) {
+				root := t.TempDir()
+				database := filepath.Join(root, "usage.sqlite")
+				if sidecar != "" {
+					if err := os.WriteFile(database, []byte("not an admitted SQLite store"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(database+sidecar, []byte("foreign sidecar"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := copyinmarker.Write(root, copyinmarker.Marker{
+					Version: copyinmarker.Version, Phase: phase, TargetDatabase: database,
+					SourceKind: "upgraded-legacy", SourceFingerprintBefore: "before", BackupManifestSHA256: "backup",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				before, err := os.ReadFile(copyinmarker.Path(root))
+				if err != nil {
+					t.Fatal(err)
+				}
+				status, err := readStatus(context.Background(), database)
+				if err != nil || status.Evidence != EvidenceCopyInMarker || status.Stage != StageCopyIn {
+					t.Fatalf("unpublished projection = %+v/%v", status, err)
+				}
+				after, err := os.ReadFile(copyinmarker.Path(root))
+				if err != nil || string(before) != string(after) {
+					t.Fatalf("status changed marker: %v", err)
+				}
+				if sidecar == "" {
+					if _, err := os.Lstat(database); !os.IsNotExist(err) {
+						t.Fatalf("status created target: %v", err)
+					}
+				} else if data, err := os.ReadFile(database + sidecar); err != nil || string(data) != "foreign sidecar" {
+					t.Fatalf("status touched sidecar: %q/%v", data, err)
+				}
+			})
+		}
+	}
+}

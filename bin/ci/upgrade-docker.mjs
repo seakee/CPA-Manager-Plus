@@ -2509,9 +2509,8 @@ async function proveCopyInMarkerWindow(binary, target, sourceRoot) {
   }
 }
 
-// 2. The copy-in is killed after materialize and before the operation row
-// commits. The provenance marker must stay, the row must be absent, and a
-// resumed run must adopt the materialized store instead of restoring again.
+// 2. Kill during preparation, before the atomic database publication. Staging
+// is disposable; the marker survives and resume rebuilds from the verified bundle.
 async function faultInterruptedCopyIn(binary, workspace) {
   const source = path.join(SCRATCH, 'work', 'interrupted', 'source');
   const target = path.join(SCRATCH, 'work', 'interrupted', 'target');
@@ -2525,11 +2524,8 @@ async function faultInterruptedCopyIn(binary, workspace) {
       withDeclaredSourceVersion(['upgrade', 'run', '--legacy', source, '--target', target, '--json'], acceptedRelease),
       { stdio: ['ignore', 'pipe', 'pipe'] },
     );
-    // The marker is published before the first member moves, and its phase says
-    // how far the materialization got. Killing at the first sight of it catches
-    // a stage where restoring is the right answer, so the fault waits for
-    // `migrating`: every member is in place and the row is not committed yet.
-    // That is the window a resume has to adopt instead of restoring again.
+    // Catch preparation rather than the very short atomic-rename window. The
+    // deterministic Go tests stop immediately before and after the rename.
     let killed = false;
     let caughtPhase = '';
     const timer = setInterval(() => {
@@ -2537,7 +2533,7 @@ async function faultInterruptedCopyIn(binary, workspace) {
       try {
         const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
         caughtPhase = marker?.phase ?? caughtPhase;
-        if (marker?.phase === 'migrating') {
+        if (marker?.phase === 'materializing') {
           killed = true;
           clearInterval(timer);
           child.kill('SIGKILL');
@@ -2556,7 +2552,7 @@ async function faultInterruptedCopyIn(binary, workspace) {
       clearTimeout(deadline);
       evidence.commands.push(commandRecord('upgrade run (SIGKILL after the marker)', code ?? -1));
       if (!killed) {
-        rejectPromise(new Error(`interrupted copy-in: the run finished before the migrating marker could be caught (code=${code} signal=${signal} lastPhase=${caughtPhase})`));
+        rejectPromise(new Error(`interrupted copy-in: the run finished before the materializing marker could be caught (code=${code} signal=${signal} lastPhase=${caughtPhase})`));
         return;
       }
       resolvePromise();
@@ -2564,17 +2560,37 @@ async function faultInterruptedCopyIn(binary, workspace) {
   });
 
   assertValue(fs.existsSync(markerPath), 'interrupted: the provenance marker is missing');
-  const status = runCli(binary, ['upgrade', 'status', '--db-path', path.join(target, 'usage.sqlite'), '--json'], 'interrupted:status', { expectExit: 0 });
-  const statusReport = parseJson(status.stdout, 'interrupted:status');
-  assertValue(statusReport.recorded === false, 'interrupted: an operation row was committed before the migration finished');
+  // The database is unpublished at this kill point. `upgrade status` requires
+  // an existing database, so absence is the evidence here; the marker-backed
+  // HTTP projection below remains available without opening a target store.
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    assertValue(!fs.existsSync(path.join(target, 'usage.sqlite' + suffix)), `interrupted: unpublished database member usage.sqlite${suffix} must be absent before resume`);
+  }
 
   // The window the marker covers, read over the projection the operator uses.
   const markerWindow = await proveCopyInMarkerWindow(binary, target, source);
 
+  const bundle = path.join(target, 'upgrade-backup');
+  const manifest = parseJson(fs.readFileSync(path.join(bundle, 'manifest.json'), 'utf8'), 'interrupted:manifest');
+  const expectedRestored = [['data-key', 'data.key'], ['usage-archives', 'usage-archives']]
+    .some(([member, destination]) => manifest.entries?.[member]?.present && !fs.existsSync(path.join(target, destination)));
+  const sourceBeforeResume = dirDigest(source);
+  const backupBeforeResume = dirDigest(bundle);
+  // Force the resume to prove it rebuilt staging. A boolean result alone
+  // cannot distinguish restoration from trusting a partly migrated database.
+  const stagedDatabase = path.join(target, '.upgrade-copy-in', 'restored', 'database');
+  fs.mkdirSync(path.dirname(stagedDatabase), { recursive: true });
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    fs.writeFileSync(stagedDatabase + suffix, `deliberately invalid staged database${suffix}\n`);
+  }
+
   const resume = runCli(binary, ['upgrade', 'run', '--legacy', source, '--target', target, '--json'], 'interrupted:resume', { expectExit: 0 });
   const resumeReport = parseJson(resume.stdout, 'interrupted:resume');
   assertValue(resumeReport.result?.stage === 'copy_in', `interrupted: resume stage=${resumeReport.result?.stage}`);
-  assertValue(resumeReport.result?.restored === false, 'interrupted: the resume restored the members again');
+  assertValue(resumeReport.result?.restored === expectedRestored, `interrupted: restored=${resumeReport.result?.restored} does not match the actual non-database moves (${expectedRestored})`);
+  assertValue(fs.readFileSync(path.join(target, 'usage.sqlite')).subarray(0, 16).equals(Buffer.from('SQLite format 3\0')), 'interrupted: invalid staged bytes were reused instead of a rebuilt SQLite database');
+  assertValue(dirDigest(source) === sourceBeforeResume, 'interrupted: resume changed the preserved source');
+  assertValue(dirDigest(bundle) === backupBeforeResume, 'interrupted: resume changed the verified backup');
   assertValue(!fs.existsSync(path.join(target, '.upgrade-copy-in')), 'interrupted: the resume left the work directory behind');
   const recorded = runCli(binary, ['upgrade', 'status', '--db-path', path.join(target, 'usage.sqlite'), '--json'], 'interrupted:recorded', { expectExit: 0 });
   assertValue(parseJson(recorded.stdout, 'interrupted:recorded').operation?.stage === 'copy_in', 'interrupted: the resume did not record copy_in');

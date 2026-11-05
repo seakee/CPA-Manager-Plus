@@ -485,16 +485,13 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// owns preflight and the copy-in, so a later recorded stage is reported and
 	// left alone: re-running the copy would rewrite a store a later step already
 	// advanced.
-	// A materializing marker is the one state that must not read the row first:
-	// CopyIn resumes it from the marker and the members beside it by file
-	// digest, and an in-place open would create or rewrite the WAL index the
-	// resume compares. Every other state (no marker, a migrating marker, or a
-	// marker that outlived its committed row) is read through a private
-	// snapshot: a terminal row is reported without any write, and a copy_in row
-	// reaches CopyIn, which owns the resume.
+	// An unreadable, differently bound, or unpublished marker belongs to
+	// CopyIn. Do not let a later row override the same marker admission keeps
+	// unfinished; only a published target can supply the terminal-stage guard.
 	marker, markerPresent, markerErr := copyinmarker.Read(targetRoot)
-	materializing := markerErr == nil && markerPresent && marker.Phase == copyinmarker.PhaseMaterializing
-	if !materializing && upgradeservice.ValidateScratchDir(*scratchDir, legacyRoot, targetRoot) == nil {
+	databasePath := upgradeservice.TargetDatabasePath(targetRoot)
+	unpublished := markerErr != nil || markerPresent && (!copyinmarker.SameTarget(marker.TargetDatabase, databasePath) || marker.AwaitingCommit(databasePath))
+	if !unpublished && upgradeservice.ValidateScratchDir(*scratchDir, legacyRoot, targetRoot) == nil {
 		if operation, found, err := recordedOperationAt(ctx, targetRoot, *scratchDir); err != nil {
 			return refuseTyped(stderr, err)
 		} else if found && stagePastCopyIn(operation.Stage) {
@@ -532,6 +529,7 @@ func runCopyIn(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		DeclaredVersion: *sourceVersion,
 		TargetRoot:      targetRoot,
 		BundleDir:       bundleDir,
+		ScratchDir:      *scratchDir,
 		Lock:            lock,
 	})
 	if err != nil {

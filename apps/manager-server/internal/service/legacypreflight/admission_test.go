@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -595,14 +596,7 @@ func assertUpgradeAdmission(t *testing.T, databasePath string, wantStage Upgrade
 	}
 }
 
-// TestMaterializingMarkerIsDecidedWithoutReadingTheStore is the H2 regression at
-// the admission seam. Startup used to read the operation row from the copied
-// store before it looked at the marker; in the crash window between the last
-// member rename and the migrating marker, that read joined the copied WAL and
-// rewrote usage.sqlite-shm, which made the resumed move refuse the sidecar it
-// had just restored. A materializing marker is therefore decided from the marker
-// alone: the target cannot hold a committed row (the migration that creates the
-// table has not run), and opening it is what stranded the resume.
+// Unpublished targets are never opened, even if a foreign file appears there.
 func TestMaterializingMarkerIsDecidedWithoutReadingTheStore(t *testing.T) {
 	paths := fixturePaths(t)
 	// A target no reader can open stands in for "the store was not read at
@@ -631,11 +625,8 @@ func TestMaterializingMarkerIsDecidedWithoutReadingTheStore(t *testing.T) {
 	}
 }
 
-// TestCommittedRowOutlivesTheMigratingMarker keeps the other half of the
-// ordering: a valid committed row is stronger evidence than a marker that
-// survived the row's commit, because a process death between the two leaves
-// exactly that pair. The row decides the surface, not the stale marker.
-func TestCommittedRowOutlivesTheMigratingMarker(t *testing.T) {
+// A committed row outlives the committing marker after atomic publication.
+func TestCommittedRowOutlivesTheCommittingMarker(t *testing.T) {
 	paths := fixturePaths(t)
 	store, err := sqlite.Open(paths.Database)
 	if err != nil {
@@ -645,15 +636,10 @@ func TestCommittedRowOutlivesTheMigratingMarker(t *testing.T) {
 		t.Fatalf("close the migrated v2 store: %v", err)
 	}
 	recordFixtureStage(t, paths.Database, "complete")
-	identity, err := copyinmarker.Identity(paths.Database)
-	if err != nil {
-		t.Fatalf("read the target database identity: %v", err)
-	}
 	marker := copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
-		Phase:                   copyinmarker.PhaseMigrating,
+		Phase:                   copyinmarker.PhaseCommitting,
 		TargetDatabase:          paths.Database,
-		TargetDatabaseIdentity:  identity,
 		SourceKind:              SourceKindUpgradedLegacy,
 		SourceFingerprintBefore: "source-fingerprint",
 		SourceFingerprintAfter:  "source-fingerprint",
@@ -661,7 +647,7 @@ func TestCommittedRowOutlivesTheMigratingMarker(t *testing.T) {
 		WrittenAtMS:             1,
 	}
 	if err := copyinmarker.Write(filepath.Dir(paths.Database), marker); err != nil {
-		t.Fatalf("write the migrating marker: %v", err)
+		t.Fatalf("write the committing marker: %v", err)
 	}
 	assertUpgradeAdmission(t, paths.Database, UpgradeStageComplete, SurfaceFull)
 }
@@ -1062,5 +1048,36 @@ func TestCompletedOperationAdmissionRequiresTheProvedCredential(t *testing.T) {
 	}
 	if _, err := os.Lstat(customKeyPath); !os.IsNotExist(err) {
 		t.Fatalf("inline DataKey admission created %s on disk: err=%v", customKeyPath, err)
+	}
+}
+
+func TestCopyInAdmissionRejectsOlderAndUnknownMarkerContracts(t *testing.T) {
+	for index, content := range []string{
+		`{"version":2,"phase":"migrating","targetDatabase":"/data/usage.sqlite","targetDatabaseIdentity":{"device":1,"inode":2},"sourceKind":"upgraded-legacy","sourceFingerprintBefore":"before","backupManifestSha256":"backup","writtenAtMs":1}`,
+		`{"version":3,"phase":"future-phase","targetDatabase":"/data/usage.sqlite","sourceKind":"upgraded-legacy","sourceFingerprintBefore":"before","backupManifestSha256":"backup","writtenAtMs":1}`,
+	} {
+		t.Run([]string{"version-two", "unknown-phase"}[index], func(t *testing.T) {
+			root := t.TempDir()
+			database := filepath.Join(root, "usage.sqlite")
+			if err := os.MkdirAll(copyinmarker.Directory(root), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(copyinmarker.Path(root), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			admission := DatabaseUpgradeAdmission{DatabasePath: database}
+			if _, err := admission.Admitted(context.Background()); err == nil || !strings.Contains(err.Error(), "empty v2 root") || !strings.Contains(err.Error(), "upgrade run") {
+				t.Errorf("unsupported-marker admission lacks recovery: %v", err)
+			}
+			if _, _, err := admission.AdmittedReason(context.Background()); err == nil || !strings.Contains(err.Error(), "upgrade run") {
+				t.Errorf("unsupported-marker reason admission lacks recovery: %v", err)
+			}
+			if _, err := os.Lstat(database); !os.IsNotExist(err) {
+				t.Fatalf("admission created a target: %v", err)
+			}
+			if got, err := os.ReadFile(copyinmarker.Path(root)); err != nil || string(got) != content {
+				t.Fatalf("admission changed marker: %q/%v", got, err)
+			}
+		})
 	}
 }

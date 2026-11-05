@@ -212,6 +212,26 @@ func ReadRecordFromSnapshot(ctx context.Context, databasePath string, scratchBas
 	return ReadRecordFrom(ctx, snapshot.DB())
 }
 
+// snapshotReadError keeps context and existing Upgrade errors intact while
+// giving private-copy failures the shared, actionable snapshot code.
+func snapshotReadError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	var upgradeErr *UpgradeError
+	if errors.As(err, &upgradeErr) {
+		return err
+	}
+	if errors.Is(err, ErrSnapshotFailed) {
+		return newUpgradeError(UpgradeErrorSnapshotFailed,
+			"the private database snapshot could not be created; choose writable scratch space outside the preserved data roots", err)
+	}
+	return err
+}
+
 // ValidateScratchDir refuses a scratch directory that lies inside a root this
 // operation must not write to.
 //

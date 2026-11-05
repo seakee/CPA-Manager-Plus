@@ -1098,26 +1098,18 @@ func validateStatusRow(row statusRow) error {
 // no row is not the same as no operation: the copy-in publishes its provenance
 // before the row commits, and that window must not read "preflight".
 //
-// The marker is read before the store, exactly like the startup admission. A
-// `materializing` marker was published before the first member was moved and
-// before the migration that creates the operation table, so no row can be
-// committed in such a target: reading it decides nothing and costs the resume
-// everything. A read-only open of a target that still holds the copied WAL joins
-// that WAL and rewrites `-shm`, the member the resumed move compares with the
-// backup. This route is a status poll: it must not be the reason an interrupted
-// copy-in can never be resumed.
+// The marker is read before the store, exactly like startup admission. Staging
+// is never polled; absent targets and foreign sidecars remain resume evidence.
 func readStatus(ctx context.Context, databasePath string) (statusDocument, error) {
 	document := emptyStatusDocument()
 	marker, inFlight, err := readCopyInMarker(databasePath)
 	if err != nil {
 		return statusDocument{}, err
 	}
-	if inFlight && marker.Phase == copyinmarker.PhaseMaterializing {
+	if inFlight && marker.AwaitingCommit(databasePath) {
 		return withCopyInMarker(document, marker), nil
 	}
-	// A `migrating` marker leaves the possibility that the row committed, and
-	// the row is the stronger evidence, so it is read first — the same order the
-	// admission uses.
+	// A committing marker may outlive the atomically published operation row.
 	recorded, found, err := readRecordedStatus(ctx, databasePath, document)
 	if err != nil {
 		return statusDocument{}, err

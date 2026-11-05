@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
@@ -593,9 +595,9 @@ func TestRunAfterARollbackReportsTheTerminalStage(t *testing.T) {
 // TestRunReportsARolledBackRowWithASurvivingMarkerWithoutWriting is the N2
 // regression: a marker that outlived its committed row used to skip the
 // preflight guard entirely, so `upgrade run` reopened the abandoned store,
-// migrated it once more and rewrote the terminal row. The guard now skips only a
-// materializing marker; every other state is read through a private snapshot and
-// a later stage is reported with no write.
+// migrated it once more and rewrote the terminal row. The guard now reads a
+// committing target only through a private snapshot and reports later stages
+// with no write.
 func TestRunReportsARolledBackRowWithASurvivingMarkerWithoutWriting(t *testing.T) {
 	source := copyReadyRunSource(t)
 	target := rollbackReadyTarget(t, source)
@@ -622,17 +624,11 @@ func TestRunReportsARolledBackRowWithASurvivingMarkerWithoutWriting(t *testing.T
 	if err != nil || !found {
 		t.Fatalf("read the rolled-back row: found=%t err=%v", found, err)
 	}
-	identity, err := copyinmarker.Identity(databasePath)
-	if err != nil {
-		t.Fatalf("identity the v2 database: %v", err)
-	}
-	// The marker a crash between the record commit and the work-directory
-	// removal can leave: migrating, and naming exactly this database and backup.
+	// A committing marker may outlive the database's atomic publication.
 	if err := copyinmarker.Write(target, copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
-		Phase:                   copyinmarker.PhaseMigrating,
+		Phase:                   copyinmarker.PhaseCommitting,
 		TargetDatabase:          databasePath,
-		TargetDatabaseIdentity:  identity,
 		SourceKind:              rolled.SourceKind,
 		SourceVersion:           rolled.SourceVersion,
 		SourceFingerprintBefore: rolled.SourceFingerprintBefore,
@@ -1328,12 +1324,8 @@ func copyTestTree(t *testing.T, source, destination string) {
 	}
 }
 
-// interruptedCopyInTarget rebuilds the v2 data root a copy-in leaves at its
-// target-restored checkpoint: every member restored from the verified backup and
-// the materializing marker published, but no operation row yet. It is built
-// from a real copy-in's backup, so the marker names the backup the resume will
-// verify, which is what makes the following resume a real resume and not a
-// second copy.
+// interruptedCopyInTarget reproduces target-restored: non-DB members moved,
+// the verified database and its sidecars in staging, no target database or row.
 func interruptedCopyInTarget(t *testing.T, source string) (string, model.UpgradeOperation) {
 	t.Helper()
 	reference := rollbackReadyTarget(t, source)
@@ -1345,10 +1337,10 @@ func interruptedCopyInTarget(t *testing.T, source string) (string, model.Upgrade
 	bundle := filepath.Join(reference, "upgrade-backup")
 	copyTestTree(t, bundle, filepath.Join(target, "upgrade-backup"))
 	for _, member := range []struct{ bundle, target string }{
-		{"database", "usage.sqlite"},
-		{"database-wal", "usage.sqlite-wal"},
-		{"database-shm", "usage.sqlite-shm"},
-		{"database-journal", "usage.sqlite-journal"},
+		{"database", ".upgrade-copy-in/restored/database"},
+		{"database-wal", ".upgrade-copy-in/restored/database-wal"},
+		{"database-shm", ".upgrade-copy-in/restored/database-shm"},
+		{"database-journal", ".upgrade-copy-in/restored/database-journal"},
 		{"data-key", "data.key"},
 	} {
 		copyTestTree(t, filepath.Join(bundle, member.bundle), filepath.Join(target, member.target))
@@ -1386,7 +1378,7 @@ func TestRollbackRefusesAMaterializingTargetAndTheResumeStillFinishes(t *testing
 					holdSourceWAL(t, source)
 				}
 				target, _ := interruptedCopyInTarget(t, source)
-				databasePath := filepath.Join(target, "usage.sqlite")
+				databasePath := filepath.Join(target, ".upgrade-copy-in", "restored", "database")
 				shmPath := databasePath + "-shm"
 				walPath := databasePath + "-wal"
 				shmBefore, shmErr := os.Lstat(shmPath)
@@ -1438,7 +1430,7 @@ func TestRollbackRefusesAMaterializingTargetAndTheResumeStillFinishes(t *testing
 				if code != 0 {
 					t.Fatalf("resume after rollback --%s exit code = %d; stdout: %s stderr: %s", mode, code, resumeOut, resumeErr)
 				}
-				operation, found, err := upgradeservice.ReadRecord(context.Background(), databasePath)
+				operation, found, err := upgradeservice.ReadRecord(context.Background(), filepath.Join(target, "usage.sqlite"))
 				if err != nil || !found {
 					t.Fatalf("read the resumed operation: found=%t err=%v", found, err)
 				}
@@ -1507,5 +1499,130 @@ func writeMaterializingTarget(t *testing.T, targetRoot, sourceRoot string) {
 		WrittenAtMS:             time.Now().UnixMilli(),
 	}); err != nil {
 		t.Fatalf("publish the materializing marker: %v", err)
+	}
+}
+
+func TestRunDefersUnpublishedTargetsToCopyIn(t *testing.T) {
+	for _, condition := range []string{"journal", "wal", "different-target"} {
+		t.Run(condition, func(t *testing.T) {
+			source := copyReadyRunSource(t)
+			target := rollbackReadyTarget(t, source)
+			database := filepath.Join(target, "usage.sqlite")
+			db, err := sqliterepo.Open(database)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, recordErr := upgradeoperation.New(db).RecordRollback(context.Background(), model.RollbackEvidence{
+				Image: upgradeservice.LegacyImageRepository + ":v1.14.7", ImageSource: upgradeservice.RollbackImageSourceOperator,
+				ImageForm: upgradeservice.RollbackImageFormReleaseTag, StatusURL: upgradeservice.LegacyHealthURL(),
+				SourceFingerprint: "observed", ObservedAtMS: time.Now().UnixMilli(),
+			})
+			closeErr := db.Close()
+			if recordErr != nil || closeErr != nil {
+				t.Fatalf("later row = %v/%v", recordErr, closeErr)
+			}
+			row, found, err := upgradeservice.ReadRecordFromSnapshot(context.Background(), database, "")
+			if err != nil || !found {
+				t.Fatalf("later row = %t/%v", found, err)
+			}
+			markerTarget := database
+			if condition == "different-target" {
+				markerTarget = filepath.Join(target, "other.sqlite")
+			}
+			if err := copyinmarker.Write(target, copyinmarker.Marker{
+				Version: copyinmarker.Version, Phase: copyinmarker.PhaseCommitting, TargetDatabase: markerTarget,
+				SourceKind: row.SourceKind, SourceVersion: row.SourceVersion, SourceFingerprintBefore: row.SourceFingerprintBefore,
+				SourceFingerprintAfter: row.SourceFingerprintAfter, BackupManifestSHA256: row.BackupManifestSHA256,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if condition == "journal" {
+				if err := os.WriteFile(database+"-journal", []byte("unexpected journal"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if condition == "wal" {
+				donorPath := filepath.Join(t.TempDir(), "usage.sqlite")
+				copyTestTree(t, database, donorPath)
+				donor, err := sql.Open("sqlite", donorPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer donor.Close()
+				if _, err := donor.Exec(`pragma journal_mode=wal; pragma wal_checkpoint(truncate); pragma wal_autocheckpoint=0; update usage_events set model='unexpected-row'`); err != nil {
+					t.Fatal(err)
+				}
+				wal, err := os.ReadFile(donorPath + "-wal")
+				if err != nil || len(wal) == 0 {
+					t.Fatalf("non-empty WAL = %v", err)
+				}
+				if err := os.WriteFile(database+"-wal", wal, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := treeDigests(t, target)
+			code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target)
+			if code == 0 || !strings.Contains(stderr, string(upgradeservice.UpgradeErrorTargetConflict)) {
+				t.Errorf("unpublished run = %d/%s/%s, want typed conflict", code, stdout, stderr)
+			}
+			if after := treeDigests(t, target); !reflect.DeepEqual(before, after) {
+				t.Fatalf("CLI changed unpublished target: %v -> %v", before, after)
+			}
+			stage, err := (legacypreflight.DatabaseUpgradeAdmission{DatabasePath: database}).Admitted(context.Background())
+			if condition == "different-target" {
+				if err == nil {
+					t.Fatal("admission accepted a different target marker")
+				}
+			} else if err != nil || stage != legacypreflight.UpgradeStageInProgress {
+				t.Fatalf("unpublished admission = %q/%v", stage, err)
+			}
+		})
+	}
+}
+
+func TestRunUsesTheConfiguredScratchForCompletedCopyIn(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target := rollbackReadyTarget(t, source)
+	database := filepath.Join(target, "usage.sqlite")
+	row, found, err := upgradeservice.ReadRecordFromSnapshot(context.Background(), database, "")
+	if err != nil || !found {
+		t.Fatalf("copy-in row = %t/%v", found, err)
+	}
+	if err := copyinmarker.Write(target, copyinmarker.Marker{
+		Version: copyinmarker.Version, Phase: copyinmarker.PhaseCommitting, TargetDatabase: database,
+		SourceKind: row.SourceKind, SourceVersion: row.SourceVersion, SourceFingerprintBefore: row.SourceFingerprintBefore,
+		SourceFingerprintAfter: row.SourceFingerprintAfter, BackupManifestSHA256: row.BackupManifestSHA256,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	scratch := canonicalFixtureRoot(t)
+	before := sourceDatabaseDigests(t, target)
+	t.Setenv("TMPDIR", target)
+	code, stdout, stderr := run(t, "run", "--json", "--legacy", source, "--source-version", bootstrap.PlannedDirectRelease, "--target", target, "--scratch-dir", scratch)
+	if code != 0 {
+		t.Fatalf("configured scratch run = %d/%s/%s", code, stdout, stderr)
+	}
+	var output runOutput
+	if err := json.Unmarshal([]byte(stdout), &output); err != nil || output.Result == nil || !output.Result.AlreadyComplete {
+		t.Fatalf("completed result = %+v/%v", output, err)
+	}
+	if after := sourceDatabaseDigests(t, target); !reflect.DeepEqual(before, after) {
+		t.Fatalf("completed database changed: %v -> %v", before, after)
+	}
+	if entries, err := os.ReadDir(scratch); err != nil || len(entries) != 0 {
+		t.Fatalf("private scratch survived: %v/%v", entries, err)
+	}
+}
+
+func TestStatusRequiresAnExistingDatabaseAtAMaterializingTarget(t *testing.T) {
+	source := copyReadyRunSource(t)
+	target, _ := interruptedCopyInTarget(t, source)
+	database := filepath.Join(target, "usage.sqlite")
+	before := treeDigests(t, target)
+	code, stdout, stderr := run(t, "status", "--db-path", database, "--json")
+	if code == 0 {
+		t.Fatalf("status accepted an absent unpublished database: %s/%s", stdout, stderr)
+	}
+	if after := treeDigests(t, target); !reflect.DeepEqual(before, after) {
+		t.Fatal("status changed unpublished target")
 	}
 }

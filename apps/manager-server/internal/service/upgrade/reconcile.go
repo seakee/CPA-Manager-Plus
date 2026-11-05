@@ -105,13 +105,6 @@ const (
 )
 
 const (
-	// reconcileScratchDirectory is this step's reserved scratch area. It is the
-	// only path Reconcile creates and removes: it sits inside the caller's
-	// scratch root (the v2 data root by default), so the directory a caller
-	// named is never the thing deleted. The copy of the 1.x database exists only
-	// for the length of the comparison, and the report (which names counts and
-	// days, never rows) is what survives.
-	reconcileScratchDirectory = ".upgrade-reconcile"
 	// utcDayMilliseconds is the width of the day buckets every compared table
 	// keys on.
 	utcDayMilliseconds = int64(24 * 60 * 60 * 1000)
@@ -265,9 +258,16 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 
-	recorded, found, err := readRecordedCopyIn(ctx, paths.Database)
+	scratch, err := reconcileScratchRoot(targetRoot, sourceRoot, options.ScratchDir)
 	if err != nil {
 		return ReconcileReport{}, err
+	}
+	recorded, found, targetSnapshot, err := readCopyInCandidate(ctx, paths.Database, sourceRoot, targetRoot, scratch)
+	if targetSnapshot != nil {
+		defer func() { _ = targetSnapshot.Close() }()
+	}
+	if err != nil {
+		return ReconcileReport{}, snapshotReadError(ctx, err)
 	}
 	if !found {
 		return ReconcileReport{}, newUpgradeError(UpgradeErrorReconcileNotCopiedIn,
@@ -284,7 +284,11 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 			"the recorded operation is at stage %q, which cannot enter the reconcile step; nothing was compared and nothing was marked",
 			recorded.Stage), nil)
 	}
-	if err := verifyCompletedTarget(ctx, paths, bundleDir, recorded); err != nil {
+	if err := verifyCompletedMembers(ctx, paths, bundleDir, recorded); err != nil {
+		return ReconcileReport{}, err
+	}
+	targetSchema, err := copiedDatabaseSchema(ctx, targetSnapshot.DB())
+	if err != nil {
 		return ReconcileReport{}, err
 	}
 
@@ -301,22 +305,9 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 			"the 1.x source is not the volume the recorded copy-in copied; nothing was compared and nothing was marked", nil)
 	}
 
-	scratch, err := reconcileScratchRoot(targetRoot, sourceRoot, options.ScratchDir)
-	if err != nil {
-		return ReconcileReport{}, err
-	}
-	// The copy of the 1.x database is scratch, never evidence: whoever leaves
-	// this function, the area is gone and only the sanitized report survives.
-	// The snapshot makes its own private directory below this one and removes
-	// it on close; this removes the tool-owned directory on every return path.
-	if err := os.RemoveAll(scratch); err != nil {
-		return ReconcileReport{}, fmt.Errorf("clear the reconciliation scratch area: %w", err)
-	}
-	if err := os.MkdirAll(scratch, 0o700); err != nil {
-		return ReconcileReport{}, fmt.Errorf("create the reconciliation scratch area: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(scratch) }()
-	domains, parityDays, compareErr := compareStores(ctx, sourceRoot, paths.Database, scratch)
+	// Both observations use unique private directories outside both roots.
+	// Each snapshot owns its cleanup; no caller directory is cleared or removed.
+	domains, parityDays, compareErr := compareStores(ctx, sourceRoot, targetSnapshot.DB(), targetSchema, scratch)
 	if compareErr != nil {
 		return ReconcileReport{ReconcileEvidence: newReconcileEvidence(before.Digest, domains, parityDays)}, compareErr
 	}
@@ -354,6 +345,9 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 	}
 	evidence.IncompleteDays = incompleteDays(evidence.AcknowledgedDays, measured, derived)
 
+	if err := runCheckpoint(options, "reconcile-compared"); err != nil {
+		return ReconcileReport{ReconcileEvidence: evidence}, err
+	}
 	operation, inserted, err := recordReconciliation(ctx, paths.Database, evidence, established)
 	if err != nil {
 		return ReconcileReport{ReconcileEvidence: evidence}, err
@@ -412,27 +406,26 @@ func reconcileRoots(options Options) (string, string, string, error) {
 	return sourceRoot, targetRoot, bundleDir, nil
 }
 
-// reconcileScratchRoot resolves this step's scratch area. The caller names a
-// directory it owns; the tool-owned subdirectory below it is the only path this
-// step ever removes, so a mistaken configuration can never delete a caller's
-// tree. The named root must not be the 1.x source root, sit inside it or
-// contain it: anything else would let the working copy of the source land where
-// the source itself lives.
+// reconcileScratchRoot resolves the private snapshot base before any target
+// read. Empty uses the OS temporary directory, never the target data root.
 func reconcileScratchRoot(targetRoot, sourceRoot, configured string) (string, error) {
+	if err := ValidateScratchDir(configured, sourceRoot, targetRoot); err != nil {
+		return "", snapshotReadError(context.Background(), err)
+	}
 	callerRoot := strings.TrimSpace(configured)
 	if callerRoot == "" {
-		callerRoot = targetRoot
+		callerRoot = os.TempDir()
 	}
 	absolute, err := filepath.Abs(callerRoot)
 	if err != nil {
-		return "", fmt.Errorf("resolve the reconciliation scratch area: %w", err)
+		return "", err
 	}
-	canonicalRoot := canonicalPath(absolute)
-	canonicalSource := canonicalPath(sourceRoot)
-	if within(canonicalSource, canonicalRoot) || within(canonicalRoot, canonicalSource) {
-		return "", errors.New("the reconciliation scratch area must not be the 1.x source root, sit inside it or contain it")
+	// Preserve the explicit-root guard: naming an ancestor of the source is
+	// not an authorization to use that caller-owned tree for scratch.
+	if strings.TrimSpace(configured) != "" && within(canonicalPath(absolute), canonicalPath(sourceRoot)) {
+		return "", newUpgradeError(UpgradeErrorSnapshotFailed, "the reconciliation scratch area must not contain the 1.x source root", ErrSnapshotFailed)
 	}
-	return filepath.Join(absolute, reconcileScratchDirectory), nil
+	return absolute, nil
 }
 
 // acknowledgedDays validates the operator's acknowledgement list. Anything that
@@ -455,7 +448,7 @@ var ErrUsage = errors.New("invalid upgrade request")
 
 // compareStores reads both stores and returns the per-domain comparison plus
 // the days the 1.x source can never complete again.
-func compareStores(ctx context.Context, sourceRoot, targetDatabase, scratchRoot string) ([]ReconcileDomainReport, []string, error) {
+func compareStores(ctx context.Context, sourceRoot string, targetDB *sql.DB, targetTables sourceSchema, scratchRoot string) ([]ReconcileDomainReport, []string, error) {
 	// The source is read through the package's private snapshot: the database
 	// and its WAL sidecars are copied into the reconciliation scratch area, the
 	// source is digested before and after the copy, and only the copy is opened.
@@ -487,11 +480,7 @@ func compareStores(ctx context.Context, sourceRoot, targetDatabase, scratchRoot 
 		return nil, nil, fmt.Errorf("read the 1.x source: %w", err)
 	}
 
-	targetDB, targetTables, err := openTargetSnapshot(ctx, targetDatabase)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read the copied v2 database: %w", err)
-	}
-	defer func() { _ = targetDB.Close() }()
+	// The target row and schema were already read from this same private copy.
 	target, err := observeSide(ctx, targetDB, targetTables)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read the v2 store: %w", err)

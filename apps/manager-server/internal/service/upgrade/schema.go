@@ -189,14 +189,6 @@ func readSourceSchema(ctx context.Context, db *sql.DB) (sourceSchema, error) {
 // verified backup member. immutable keeps SQLite from creating a WAL index
 // beside it, which would make the snapshot disagree with its own manifest.
 func openImmutableSource(ctx context.Context, path string) (*sql.DB, sourceSchema, error) {
-	return openSource(ctx, path, true)
-}
-
-// openSource opens a bounded read of a database file and verifies integrity
-// with a single quick_check. immutable must stay false only for a store that
-// may still have a live WAL to join: it is the copy-in's own copied target,
-// never a source volume.
-func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sourceSchema, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -207,7 +199,7 @@ func openSource(ctx context.Context, path string, immutable bool) (*sql.DB, sour
 	if !info.Mode().IsRegular() || info.Size() == 0 {
 		return nil, sourceSchema{}, errDatabaseMissing
 	}
-	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, immutable))
+	db, err := sql.Open("sqlite", readOnlyDataSourceName(path, true))
 	if err != nil {
 		return nil, sourceSchema{}, err
 	}
