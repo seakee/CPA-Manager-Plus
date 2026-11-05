@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -57,24 +58,123 @@ type verifyFixture struct {
 // newVerifyFixture copies a real 1.x fixture into a fresh v2 data root. The
 // copy-in takes the source fence; it is released as soon as the step returns, so
 // the fixture never presents the source as a live writer.
+var (
+	verifyTemplateOnce       sync.Once
+	verifyTemplateLegacyDB   []byte
+	verifyTemplateDataKey    []byte
+	verifyTemplateCopyInDB   []byte
+	verifyTemplateReconciled []byte
+	verifyTemplateReport     ReconcileReport
+	verifyTemplateErr        error
+)
+
+func ensureVerifyTemplates(t *testing.T) {
+	t.Helper()
+	verifyTemplateOnce.Do(func() {
+		volume := newLegacyVolume(t)
+		targetRoot := canonicalTempDir(t)
+		options := copyInOptions(volume, targetRoot)
+		lock, err := processlock.AcquireExisting(volume.databasePath())
+		if err != nil {
+			verifyTemplateErr = err
+			return
+		}
+		options.Lock = lock
+		_, copyErr := CopyIn(context.Background(), options)
+		if closeErr := lock.Close(); closeErr != nil && copyErr == nil {
+			copyErr = closeErr
+		}
+		if copyErr != nil {
+			verifyTemplateErr = copyErr
+			return
+		}
+		paths := newTargetPaths(targetRoot)
+		checkpointSQLite(volume.databasePath())
+		checkpointSQLite(paths.Database)
+		if verifyTemplateLegacyDB, verifyTemplateErr = os.ReadFile(volume.databasePath()); verifyTemplateErr != nil {
+			return
+		}
+		if verifyTemplateDataKey, verifyTemplateErr = os.ReadFile(filepath.Join(volume.root, dataKeyFileName)); verifyTemplateErr != nil {
+			return
+		}
+		if verifyTemplateCopyInDB, verifyTemplateErr = os.ReadFile(paths.Database); verifyTemplateErr != nil {
+			return
+		}
+		sourceLock, err := processlock.AcquireExisting(volume.databasePath())
+		if err != nil {
+			verifyTemplateErr = err
+			return
+		}
+		targetLock, err := processlock.Acquire(paths.Database)
+		if err != nil {
+			_ = sourceLock.Close()
+			verifyTemplateErr = err
+			return
+		}
+		report, recErr := Reconcile(context.Background(), Options{
+			LegacyRoot: volume.root,
+			TargetRoot: targetRoot,
+			BundleDir:  DefaultBundleDirectory(targetRoot),
+			Lock:       sourceLock,
+			TargetLock: targetLock,
+		})
+		if closeErr := errors.Join(sourceLock.Close(), targetLock.Close()); closeErr != nil && recErr == nil {
+			recErr = closeErr
+		}
+		if recErr != nil {
+			verifyTemplateErr = recErr
+			return
+		}
+		checkpointSQLite(paths.Database)
+		verifyTemplateReport = report
+		verifyTemplateReconciled, verifyTemplateErr = os.ReadFile(paths.Database)
+	})
+	if verifyTemplateErr != nil {
+		t.Fatalf("initialize verify fixture templates: %v", verifyTemplateErr)
+	}
+}
+
+func checkpointSQLite(databasePath string) {
+	if db, err := sql.Open("sqlite", databasePath); err == nil {
+		_, _ = db.Exec(`pragma wal_checkpoint(TRUNCATE)`)
+		_ = db.Close()
+	}
+}
+
+func materializeCachedLegacyVolume(t *testing.T) legacyVolume {
+	t.Helper()
+	ensureVerifyTemplates(t)
+	root := canonicalTempDir(t)
+	volume := legacyVolume{root: root}
+	databasePath := volume.databasePath()
+	if err := os.WriteFile(databasePath, verifyTemplateLegacyDB, 0o600); err != nil {
+		t.Fatalf("write 1.x fixture database: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, dataKeyFileName), verifyTemplateDataKey, 0o600); err != nil {
+		t.Fatalf("write 1.x fixture data key: %v", err)
+	}
+	for index, path := range volume.archives() {
+		writeFixtureTree(t, path, fmt.Sprintf("{\"segment\":%d}\n", index+1))
+	}
+	if err := os.WriteFile(databasePath+".manager.lock", nil, 0o600); err != nil {
+		t.Fatalf("create 1.x fixture ownership marker: %v", err)
+	}
+	return volume
+}
+
 func newVerifyFixture(t *testing.T) *verifyFixture {
 	t.Helper()
-	volume := newLegacyVolume(t)
+	volume := materializeCachedLegacyVolume(t)
 	targetRoot := canonicalTempDir(t)
-	options := copyInOptions(volume, targetRoot)
-	lock, err := processlock.AcquireExisting(volume.databasePath())
-	if err != nil {
-		t.Fatalf("acquire the copy-in source fence: %v", err)
+	paths := newTargetPaths(targetRoot)
+	if err := os.WriteFile(paths.Database, verifyTemplateCopyInDB, 0o600); err != nil {
+		t.Fatalf("write v2 fixture database: %v", err)
 	}
-	options.Lock = lock
-	_, copyErr := CopyIn(context.Background(), options)
-	if err := lock.Close(); err != nil {
-		t.Fatalf("release the copy-in source fence: %v", err)
+	if err := os.WriteFile(paths.DataKey, verifyTemplateDataKey, 0o600); err != nil {
+		t.Fatalf("write v2 fixture data key: %v", err)
 	}
-	if copyErr != nil {
-		t.Fatalf("copy in: %v", copyErr)
-	}
-	return &verifyFixture{volume: volume, target: targetRoot, paths: newTargetPaths(targetRoot), runtime: newFakeVerifyRuntime(t)}
+	execTarget(t, paths.Database, fmt.Sprintf("update upgrade_operations set source_root = '%s' where id = 1", canonicalPath(volume.root)))
+	return &verifyFixture{volume: volume, target: targetRoot, paths: paths, runtime: newFakeVerifyRuntime(t)}
 }
 
 func (f *verifyFixture) databasePath() string { return f.paths.Database }
@@ -103,25 +203,12 @@ func (f *verifyFixture) targetLock(t *testing.T) *processlock.Lock {
 // releases them, so the verification finds both free.
 func (f *verifyFixture) reconcile(t *testing.T) ReconcileReport {
 	t.Helper()
-	sourceLock := f.sourceLock(t)
-	targetLock := f.targetLock(t)
-	report, err := Reconcile(context.Background(), Options{
-		LegacyRoot: f.volume.root,
-		TargetRoot: f.target,
-		BundleDir:  DefaultBundleDirectory(f.target),
-		Lock:       sourceLock,
-		TargetLock: targetLock,
-	})
-	if closeErr := errors.Join(sourceLock.Close(), targetLock.Close()); closeErr != nil {
-		t.Fatalf("release the reconciliation fences: %v", closeErr)
+	ensureVerifyTemplates(t)
+	if err := os.WriteFile(f.paths.Database, verifyTemplateReconciled, 0o600); err != nil {
+		t.Fatalf("write reconciled v2 fixture database: %v", err)
 	}
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if !report.Recorded {
-		t.Fatalf("reconcile did not record its evidence: %+v", report)
-	}
-	return report
+	execTarget(t, f.paths.Database, fmt.Sprintf("update upgrade_operations set source_root = '%s' where id = 1", canonicalPath(f.volume.root)))
+	return verifyTemplateReport
 }
 
 // connectExternal runs the real External connect step against a synthetic v8
@@ -537,14 +624,36 @@ func TestVerifyManagedRefusesLiveSupervisorArtifactDriftWithIdenticalVersionAndC
 			},
 			want: "unreachable",
 		},
+		{
+			name: "a Supervisor in state offline with the qualified artifact",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.State = model.RuntimeStateOffline
+			},
+			want: string(model.RuntimeStateOffline),
+		},
+		{
+			name: "a Supervisor in state unknown with the qualified artifact",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.State = model.RuntimeStateUnknown
+			},
+			want: string(model.RuntimeStateUnknown),
+		},
+		{
+			name: "a Supervisor in state starting with the qualified artifact",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.State = model.RuntimeStateStarting
+			},
+			want: string(model.RuntimeStateStarting),
+		},
+	}
+	fixture := newManagedVerifyFixture(t)
+	before := fixture.operation(t)
+	if before.Stage != model.UpgradeStageCPAImport {
+		t.Fatalf("fixture stage = %q, want cpa_import", before.Stage)
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			fixture := newManagedVerifyFixture(t)
-			before := fixture.operation(t)
-			if before.Stage != model.UpgradeStageCPAImport {
-				t.Fatalf("fixture stage = %q, want cpa_import", before.Stage)
-			}
+			fixture.runtime = newFakeVerifyRuntime(t)
 			options := fixture.verifyOptions()
 			if options.Runtime == nil {
 				t.Fatal("the fixture supplied no Supervisor, so this test would prove the configuration fallback instead")
@@ -805,19 +914,16 @@ func TestVerifyRefusesAnIncompleteManagedDestinationProvenance(t *testing.T) {
 			record.Intent.PluginsEnabled = nil
 		}},
 	}
+	fixture := newManagedVerifyFixture(t)
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			fixture := newManagedVerifyFixture(t)
-			record, _, found, err := loadCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey)
-			if err != nil || !found {
-				t.Fatalf("read the recorded destination (found %t): %v", found, err)
-			}
+			record := managedDestinationRecord(t)
 			testCase.mutate(&record)
 			if err := saveCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey, record, verifyManagedSecret); err != nil {
 				t.Fatalf("rewrite the recorded destination: %v", err)
 			}
 			before := fixture.operation(t)
-			_, err = fixture.verify(t)
+			_, err := fixture.verify(t)
 			if !errors.Is(err, ErrVerifyConnectionUnproven) {
 				t.Fatalf("a Managed destination with %s verified as %v, want ErrVerifyConnectionUnproven", testCase.name, err)
 			}

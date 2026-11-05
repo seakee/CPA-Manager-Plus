@@ -436,12 +436,15 @@ const (
 
 	// UpgradeErrorCPADestinationRequestChanged reports that an earlier run of this
 	// step already submitted a different request to this destination — another
-	// secret, plugin choice or client key set, a changed source identity or class,
-	// a Runtime identity, generation or active artifact the recorded authority no
-	// longer matches, or a destination URL that an earlier run proved to be the
-	// staged destination — and the Supervisor replays the journalled attempt as it
-	// was submitted. The run refuses instead of overwriting the record, and it
-	// wrote nothing to the destination.
+	// secret, plugin choice or client key set, a changed source identity, class or
+	// credential set, a Runtime identity, generation or active artifact the
+	// recorded authority no longer matches, or a destination URL that an earlier
+	// run proved to be the staged destination — and the Supervisor replays the
+	// journalled attempt as it was submitted. It also reports an attempt that
+	// published its full request without the credential snapshot this build
+	// compares, because that attempt's credentials cannot be proved and are never
+	// re-derived from the files as they are now. The run refuses instead of
+	// overwriting the record, and it wrote nothing to the destination.
 	UpgradeErrorCPADestinationRequestChanged UpgradeErrorCode = "upgrade_cpa_destination_request_changed"
 
 	// UpgradeErrorCPAImportTargetForeign reports that the CPA answering at the

@@ -1204,7 +1204,21 @@ func requireSameDestinationRequest(
 	// destination, so a retry that read different credential bytes or a different
 	// set of uploadable files would write credentials the recorded attempt never
 	// described under an operation the Supervisor replays as identical.
-	if record.SourceCredentialsDigest != "" && record.SourceCredentialsDigest != sourceCredentialsDigest {
+	//
+	// Every record reaching this comparison carries the request it submitted:
+	// stageDestination fills in only the attempts whose full request was never
+	// published, and stamps the credential digest in the same write. A complete
+	// attempt without one was staged by a build that did not snapshot the
+	// credential set, so nothing records what the destination was handed. The
+	// digest of today's files would only describe today; recording it now would
+	// sign the past stage with present bytes, and skipping the comparison would
+	// copy whatever the files hold now under the old operation. Either way the
+	// attempt is unprovable, so it is refused whether or not the files changed.
+	if record.SourceCredentialsDigest == "" {
+		return newUpgradeError(UpgradeErrorCPADestinationRequestChanged,
+			"the recorded destination attempt was staged by a build that did not record a snapshot of the source credential files, so this build cannot prove a retry would hand the destination the credentials that attempt was staged with, and it does not re-derive that snapshot from the files as they are now; this run refused before contacting the destination and wrote nothing. To recover, roll this upgrade back (cpa-manager-plus upgrade rollback) and run it again with this build, which records the credential snapshot before anything is staged", nil)
+	}
+	if record.SourceCredentialsDigest != sourceCredentialsDigest {
 		return refuse("different source credentials")
 	}
 	if !pluginsChoiceEqual(record.Intent.PluginsEnabled, intent.PluginsEnabled) {

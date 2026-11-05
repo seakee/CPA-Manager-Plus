@@ -64,18 +64,18 @@ type importFixture struct {
 // step leaves it.
 func newImportFixture(t *testing.T, config string, credentials map[string]string) importFixture {
 	t.Helper()
-	volume := newLegacyVolume(t)
+	volume := materializeCachedLegacyVolume(t)
 	targetRoot := canonicalTempDir(t)
 	lock := volume.lock(t)
-	if _, err := CopyIn(context.Background(), Options{
-		LegacyRoot: volume.root,
-		TargetRoot: targetRoot,
-		BundleDir:  DefaultBundleDirectory(targetRoot),
-		Lock:       lock,
-	}); err != nil {
-		t.Fatalf("copy the fixture 1.x volume in: %v", err)
+	paths := newTargetPaths(targetRoot)
+	if err := os.WriteFile(paths.Database, verifyTemplateReconciled, 0o600); err != nil {
+		t.Fatalf("materialize the fixture v2 database: %v", err)
 	}
-	writeOperationStage(t, targetRoot, model.UpgradeStageReconcile, []string{model.UpgradeDomainSourceCopy})
+	if err := os.WriteFile(paths.DataKey, verifyTemplateDataKey, 0o600); err != nil {
+		t.Fatalf("materialize the fixture v2 data key: %v", err)
+	}
+	execTarget(t, paths.Database, fmt.Sprintf("update upgrade_operations set source_root = '%s', stage = '%s', domains_done = '[\"source_copy\"]' where id = 1",
+		canonicalPath(volume.root), model.UpgradeStageReconcile))
 	return importFixture{
 		legacyRoot:  volume.root,
 		targetRoot:  targetRoot,
@@ -100,6 +100,10 @@ type fakeDestinationCPA struct {
 	// that cannot take the file, so a test can stop a run after the attempt was
 	// recorded and before cpa_config is.
 	failCredentialUpload bool
+	// failConfigWrite makes the config endpoints answer as a destination that
+	// cannot take a configuration write, so a test with a zero-credential source
+	// can stop a run after the attempt was recorded and before cpa_config is.
+	failConfigWrite      bool
 	server               *httptest.Server
 }
 
@@ -305,6 +309,14 @@ func (c *fakeDestinationCPA) writeConfig(w http.ResponseWriter, r *http.Request,
 	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	fail := c.failConfigWrite
+	c.mu.Unlock()
+	if fail {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"temporarily unavailable"}`))
 		return
 	}
 	c.mu.Lock()
@@ -1742,19 +1754,18 @@ func TestImportCPAReplayRefusesAChangedCallerRequest(t *testing.T) {
 			options.DestinationManagementKey = "another-management-secret-0123456789abcdef"
 		}},
 	}
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	credentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
+	if _, err := runManagedImport(t, fixture, runtime, destination.url(), credentials); err != nil {
+		t.Fatalf("import the fixture CPA: %v", err)
+	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			fixture := newVerifyFixture(t)
-			fixture.reconcile(t)
-			destination := newFakeDestinationCPA(t, "")
-			runtime := newFakeImportRuntime(model.RuntimeStateOffline)
-			runtime.staged = destination
-			credentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
-			if _, err := runManagedImport(t, fixture, runtime, destination.url(), credentials); err != nil {
-				t.Fatalf("import the fixture CPA: %v", err)
-			}
 			before := len(destination.requests())
-
 			_, err := runManagedImportWithOptions(t, fixture, runtime, credentials, func(options *CPAImportOptions) {
 				options.DestinationURL = destination.url()
 				testCase.mutate(t, options)
@@ -1874,6 +1885,120 @@ func TestImportCPARetryRefusesModifiedSourceCredentialsWithUnchangedConfig(t *te
 	result, err := runManagedImport(t, fixture, runtime, destination.url(), credentials)
 	if err != nil {
 		t.Fatalf("the retry with the original credentials failed: %v", err)
+	}
+	if !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the retry recorded no cpa_config: %v", result.DomainsDone)
+	}
+}
+
+// TestImportCPARetryRefusesCompleteAttemptWithoutSourceCredentialsDigest pins R3
+// M1: an attempt recorded by an earlier build has a valid OperationID and a
+// complete Intent, and an empty sourceCredentialsDigest. A retry must refuse
+// with UpgradeErrorCPADestinationRequestChanged before contacting the
+// destination or running the executor, whether the credential files changed or
+// stayed identical, and must never backfill the digest from current source
+// files.
+func TestImportCPARetryRefusesCompleteAttemptWithoutSourceCredentialsDigest(t *testing.T) {
+	originalCredentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
+	changedCredentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"rotated-token"}`}
+	fixture := newVerifyFixture(t)
+	writeOperationStage(t, fixture.target, model.UpgradeStageReconcile, []string{model.UpgradeDomainSourceCopy})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+
+	destination.mu.Lock()
+	destination.failCredentialUpload = true
+	destination.mu.Unlock()
+	if _, err := runManagedImport(t, fixture, runtime, destination.url(), originalCredentials); err == nil {
+		t.Fatal("a destination that refused the credential upload was recorded as a successful import")
+	}
+	destination.mu.Lock()
+	destination.failCredentialUpload = false
+	destination.mu.Unlock()
+
+	// Simulate a complete attempt recorded by a build before credential
+	// snapshotting existed: OperationID and Intent are complete, and
+	// SourceCredentialsDigest is empty.
+	attempt, key, found, err := loadCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("read the recorded destination attempt (found %t): %v", found, err)
+	}
+	if attempt.OperationID == "" || !attempt.complete() {
+		t.Fatalf("the recorded attempt is not complete: %+v", attempt)
+	}
+	attempt.SourceCredentialsDigest = ""
+	if err := saveCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey, attempt, key); err != nil {
+		t.Fatalf("rewrite the recorded attempt without sourceCredentialsDigest: %v", err)
+	}
+	recorded := readOperation(t, fixture.target)
+
+	for _, testCase := range []struct {
+		name        string
+		credentials map[string]string
+	}{
+		{name: "changed credential", credentials: changedCredentials},
+		{name: "unchanged credential", credentials: originalCredentials},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			before := len(destination.requests())
+			_, err = runManagedImport(t, fixture, runtime, destination.url(), testCase.credentials)
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+				t.Fatalf("retry of a complete attempt without sourceCredentialsDigest (%s) = %v (code %q), want %s",
+					testCase.name, err, code, UpgradeErrorCPADestinationRequestChanged)
+			}
+			if !strings.Contains(err.Error(), "rollback") {
+				t.Fatalf("the refusal does not explain how to recover: %v", err)
+			}
+			for _, secret := range []string{key, "token", "rotated-token"} {
+				if secret != "" && strings.Contains(err.Error(), secret) {
+					t.Fatalf("the refusal leaked secret %q: %v", secret, err)
+				}
+			}
+			if requests := destination.requests()[before:]; len(requests) != 0 {
+				t.Fatalf("the refused retry contacted the destination: %v", requests)
+			}
+			afterAttempt := recordedDestinationRecord(t, fixture)
+			if afterAttempt.SourceCredentialsDigest != "" {
+				t.Fatalf("the refused retry backfilled sourceCredentialsDigest = %q", afterAttempt.SourceCredentialsDigest)
+			}
+			if after := readOperation(t, fixture.target); after.Stage != recorded.Stage || after.HasDomain(model.UpgradeDomainCPAConfig) {
+				t.Fatalf("the refused retry moved the row: %q/%v -> %q/%v", recorded.Stage, recorded.DomainsDone, after.Stage, after.DomainsDone)
+			}
+		})
+	}
+}
+
+// TestImportCPAZeroCredentialSourceRecordsNonEmptyDigestAndSucceedsOnStageAndRetry
+// pins the empty-set invariant of R3 M1: a valid 1.x source with zero
+// credentials still stamps a non-empty deterministic digest (the digest of the
+// empty credential set), so its first stage and any retry with the same empty
+// credential set succeed without hitting the missing-digest refusal.
+func TestImportCPAZeroCredentialSourceRecordsNonEmptyDigestAndSucceedsOnStageAndRetry(t *testing.T) {
+	fixture := newVerifyFixture(t)
+	writeOperationStage(t, fixture.target, model.UpgradeStageReconcile, []string{model.UpgradeDomainSourceCopy})
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+
+	destination.mu.Lock()
+	destination.failConfigWrite = true
+	destination.mu.Unlock()
+	if _, err := runManagedImport(t, fixture, runtime, destination.url(), nil); err == nil {
+		t.Fatal("a destination that refused the configuration write was recorded as a successful import")
+	}
+	destination.mu.Lock()
+	destination.failConfigWrite = false
+	destination.mu.Unlock()
+
+	attempt := recordedDestinationRecord(t, fixture)
+	if attempt.SourceCredentialsDigest == "" {
+		t.Fatal("a zero-credential source left an empty sourceCredentialsDigest on the recorded attempt")
+	}
+
+	result, err := runManagedImport(t, fixture, runtime, destination.url(), nil)
+	if err != nil {
+		t.Fatalf("retry of a zero-credential source failed: %v", err)
 	}
 	if !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
 		t.Fatalf("the retry recorded no cpa_config: %v", result.DomainsDone)

@@ -1135,6 +1135,9 @@ func (s *cpaManagedSource) credentialSetDigest() string {
 // sourceCredentialsDigest is the digest readCredentials stamped. A retry compares
 // it with the attempt's record before anything is staged.
 func (s *cpaManagedSource) sourceCredentialsDigest() string {
+	if s.credentialsDigest == "" {
+		return s.credentialSetDigest()
+	}
 	return s.credentialsDigest
 }
 

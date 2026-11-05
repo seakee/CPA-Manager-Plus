@@ -1019,6 +1019,15 @@ func proveManagedVerifyRuntimeAuthority(ctx context.Context, runtimeClient Verif
 	if status.ProtocolVersion != "v1" || status.ActiveGatewayArtifact == nil {
 		return unproven("the Manager-owned Runtime did not report an active gateway artifact, so the destination CPA this operation imported into cannot be confirmed; nothing was written", nil)
 	}
+	// The Supervisor reports its observed artifact in every state, including
+	// offline and starting, so an artifact match alone does not prove it is
+	// running the destination CPA now. Only a Ready Supervisor is administering
+	// the CPA that answers the probes below.
+	if status.State != model.RuntimeStateReady {
+		return unproven(fmt.Sprintf(
+			"the Manager-owned Runtime reported state %q rather than %q, so the Supervisor is not running a ready Managed destination CPA; nothing was written",
+			status.State, model.RuntimeStateReady), nil)
+	}
 	// The running artifact has to be the one this build's authority accepted and
 	// the one the stage request was published against. Either difference means the
 	// destination the Supervisor runs is not the destination this operation
