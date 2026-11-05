@@ -38,6 +38,7 @@ CPAMP 轻量面板由 CPA 直接托管，用 CPA Manager Plus 的界面替换官
 - CPA 必须配置 `remote-management.secret-key`，否则 Management API 和面板无法使用。
 - `remote-management.disable-control-panel` 必须为 `false`。
 - CPA 需要能够访问 GitHub Release，或通过它已经配置的代理下载 `management.html`。
+- CPA v8 可用：v2 Beta 的轻量面板通过 CPA v8 仍然提供的 `/v0/management` 工作，详见下文「v2 Beta 与轻量面板的连续性」。
 
 ## 配置 CPA
 
@@ -63,6 +64,8 @@ remote-management:
 
 `allow-remote: true` 会开放远程 Management API。只在可信网络、VPN 或受保护的反向代理后使用，不要把管理端口和密钥暴露到不可信网络。
 
+CPA v8 也读取新的配置布局：`config-version: 8` 加顶层 `management:`，字段与上面的 `remote-management` 相同。两种写法都已在 CPA v8 上验证。
+
 ## 启动和登录
 
 1. 保存配置并重启或重载 CPA。
@@ -75,7 +78,7 @@ http://<cpa-host>:8317/management.html
 3. 使用 CPA Management Key 登录。
 4. 确认 Dashboard、配置中心、Provider、凭证管理、OAuth 和日志能够正常读取。
 
-CPA 首次访问时会从指定 GitHub 仓库的最新 Release 查找名为 `management.html` 的资源，并缓存到 CPA 工作目录。
+CPA 会从指定 GitHub 仓库的 `releases/latest`（最新的正式 Release，不含预发布）查找名为 `management.html` 的资源，并缓存为 CPA `config.yaml` 所在目录旁的 `static/management.html`（即 `config.yaml` 同级的 `static/` 文件夹；设置了 `MANAGEMENT_STATIC_PATH` 或 `WRITABLE_PATH` 时以它们为准）。
 
 ## 更新与缓存
 
@@ -83,7 +86,7 @@ CPA 首次访问时会从指定 GitHub 仓库的最新 Release 查找名为 `man
 
 1. 确认 `panel-github-repository` 仍指向 CPA Manager Plus。
 2. 停止 CPA。
-3. 删除 CPA 工作目录中的面板缓存：
+3. 删除 CPA `config.yaml` 同级 `static/` 文件夹中的面板缓存：
 
 ```bash
 rm static/management.html
@@ -92,6 +95,26 @@ rm static/management.html
 4. 重新启动 CPA 并访问 `/management.html`。
 
 如果启用了 `disable-auto-update-panel: true`，CPA 只会在缓存文件不存在时下载面板，不会定期自动更新。
+
+## v2 Beta 与轻量面板的连续性
+
+以下是 CPAMP v2 Beta 对轻量面板的发布约定；首个 v2 Beta 预发布发布之前，Releases 页面上还没有对应文件。
+
+- **`releases/latest` 继续指向 1.x。** v2 Beta 以 GitHub 预发布（prerelease）发布，而 GitHub 的 `releases/latest` 不包含预发布。CPA 只读取 `releases/latest`，所以按本页配置了 `panel-github-repository` 的 CPA 在 Beta 期间继续下载并更新 1.x 轻量面板，不会被自动切换到 v2。
+- **预发布附带 `management.html`。** 每个 v2 Beta 预发布同样附带单文件 `management.html`（`npm run build:panel` 的产物，不引用任何 `assets/` 资源）。CPA 不会自动下载它。
+- **管理接口仍是 `/v0/management`。** v2 Beta 的轻量面板通过 CPA v8 继续提供的 `/v0/management` 读写配置，使用 CPA v8 的 Management Key 登录。改用 `/v8/management` 属于 Stable 之后的工作，不在首个 Beta 范围内。
+- **发布前验收。** `bin/ci/panel-lite-cpa-v8.mjs` 在固定版本的 CPA v8 上验证：CPA 取得的 `static/management.html` 与构建产物逐字节一致，`/management.html` 返回 200，用 Management Key 访问 `/v0/management/config` 并修改一个配置字段后写入 `config.yaml`，`disable-control-panel: true` 时 `/management.html` 返回 404。
+
+### 在 CPA 上试用 v2 Beta 面板
+
+CPA 无法从预发布自动安装面板：`panel-github-repository` 只会被解析为仓库的 `releases/latest`。`api.github.com` 形式的地址若不以 `/releases/latest` 结尾，CPA 会在其后追加该后缀，所以 `.../releases/tags/<tag>` 会变成 `.../releases/tags/<tag>/releases/latest` 而获取失败；浏览器形式的 `github.com/<owner>/<repo>/releases/tag/<tag>` 只取前两段，等同于 `repos/<owner>/<repo>/releases/latest`，得到的仍是 1.x 面板（均已对照 CPA v8.0.13 验证）。获取失败且本地没有文件时，CPA 会改为安装上游的备用面板（来自 `cpamc.router-for.me`）。要试用 v2 Beta 面板，手动放置文件：
+
+1. 从 v2 Beta 预发布页面下载 `management.html`。
+2. 在 CPA `config.yaml` 中设置 `disable-auto-update-panel: true`。否则 CPA 会用 `releases/latest` 的 1.x 面板覆盖手动放置的文件。
+3. 停止 CPA，把文件复制为 CPA `config.yaml` 同级 `static/` 文件夹中的 `management.html`，再启动 CPA。
+4. 打开 `http://<cpa-host>:8317/management.html`，使用 CPA Management Key 登录。
+
+回到 1.x 面板：删除 `static/management.html`，把 `disable-auto-update-panel` 改回 `false`，重启 CPA。
 
 ## 轻量面板支持什么
 
@@ -128,4 +151,5 @@ CPA 端口上的轻量面板可以继续保留，但完整功能只从 Manager S
 - 打不开面板：确认 `secret-key` 非空且 `disable-control-panel` 为 `false`。
 - 仍显示官方面板：检查 `panel-github-repository` 拼写并清理缓存。
 - 远程访问返回拒绝：检查 `allow-remote`、防火墙和反向代理。
+- 安装 v2 Beta 面板后又变回 1.x 界面：确认 `disable-auto-update-panel: true`；否则 CPA 会用 `releases/latest` 的 1.x 面板覆盖手动放置的文件。
 - 没有请求监控：这是轻量模式的预期行为；使用 Manager Server 面板。
