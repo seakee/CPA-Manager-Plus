@@ -260,23 +260,21 @@ var v1SchemaStatements = []string{
 // live events, one archive run with a projection-covered deleted event and the
 // matching deleted coverage day.
 //
-// usage_cache_accounting_semantics_revision=2 belongs to that shape. v1.14.4
-// and v1.14.5 wrote it themselves at startup (datamigration/repository.go at
-// those tags: CurrentUsageCacheAccountingSemanticsRevision = 2, written when the
-// migration finds no affected Devin row), so an install that upgraded through
-// those releases still carries the row and is a source the pinned release must
-// accept. Leaving it out of the fixture would test a shape most upgraded
-// installs do not have, and would let a check that refuses every pinned source
-// pass the suite. 3 is the value v1.14.6 raised it to (see
-// addCacheAccountingRevision); the pin accepts both (see
-// TestPreflightAcceptsBothLegitimatePinnedShapes).
+// usage_cache_accounting_semantics_revision=3 belongs to that shape. It is the
+// value the pinned release's own migration writes (datamigration/repository.go:
+// CurrentUsageCacheAccountingSemanticsRevision = 3, raised by v1.14.6; v1.14.4
+// and v1.14.5 wrote 2), so the fixture is a source the pin must accept rather
+// than one it has to refuse. 2 and an absent row are legitimate pinned shapes
+// too — an install that upgraded through v1.14.4/v1.14.5 still carries 2, and
+// one stopped before that migration wrote the row carries none — and
+// TestPreflightAcceptsBothLegitimatePinnedShapes covers all of them.
 var v1SeedStatements = []string{
 	`insert into settings (key, value, updated_at_ms) values
 		('bootstrap_state_v1', '{"version":1,"status":"ready","adminReady":true,"projectInit":true}', 1),
 		('usage_monitoring_model_format_version', '1', 1),
 		('usage_account_history_identity_format_version', '` + usageidentity.AccountHistoryStructureRevision() + `', 1),
 		('usage_dashboard_hourly_format_version', '3', 1),
-		('` + datamigration.UsageCacheAccountingSemanticsRevisionKey + `', '2', 1)`,
+		('` + datamigration.UsageCacheAccountingSemanticsRevisionKey + `', '3', 1)`,
 	`insert into usage_events (id, event_hash, timestamp_ms, timestamp, model, input_tokens, output_tokens, total_tokens, created_at_ms)
 		values (1, 'live-1', 1_772_000_000_000, '2026-02-01T00:00:00Z', 'gpt-5', 10, 5, 15, 1_772_000_000_000),
 		       (2, 'live-2', 1_772_000_060_000, '2026-02-01T00:01:00Z', 'gpt-5', 11, 6, 17, 1_772_000_060_000)`,
@@ -299,15 +297,26 @@ var v1SeedStatements = []string{
 		select timestamp_ms / 86400000, 1, timestamp_ms, timestamp_ms from usage_archive_event_refs where raw_deleted_at_ms is not null`,
 }
 
+// v1PinnedDerivedIndexStatements are the derived indexes a v1.14.10 install
+// carries once its offline `cleanup-derived` run has built them. The latency
+// index is the second marker the 1.x line introduced after v1.14.4 (v1.14.7),
+// so a fixture that carries it is the pinned release's real post-cleanup shape,
+// not a source that moved past the pin.
+var v1PinnedDerivedIndexStatements = []string{
+	`create index if not exists idx_usage_events_ts_latency_ttft_cover
+		on usage_events (timestamp_ms, latency_ms, ttft_ms)`,
+}
+
 type sourceFixture struct {
 	root   string
 	dbPath string
 }
 
 // newSourceFixture builds a realistic stopped v1.14.10 data directory: a WAL-mode
-// usage.sqlite with the released schema and rows, data.key, an archive tree and
-// the v1 ownership lock file. The returned source has no -wal/-shm sidecars,
-// exactly like a cleanly stopped v1 writer.
+// usage.sqlite with the released schema and rows — including the revision 3
+// setting and the latency covering index the pin's own shape carries — data.key,
+// an archive tree and the v1 ownership lock file. The returned source has no
+// -wal/-shm sidecars, exactly like a cleanly stopped v1 writer.
 func newSourceFixture(t *testing.T, configure func(t *testing.T, db *sql.DB)) sourceFixture {
 	t.Helper()
 	root := t.TempDir()
@@ -322,6 +331,7 @@ func newSourceFixture(t *testing.T, configure func(t *testing.T, db *sql.DB)) so
 	}
 	db.SetMaxOpenConns(1)
 	statements := append([]string{`pragma journal_mode = WAL`}, v1SchemaStatements...)
+	statements = append(statements, v1PinnedDerivedIndexStatements...)
 	statements = append(statements, v1SeedStatements...)
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -397,22 +407,13 @@ func setProjectionState(t *testing.T, db *sql.DB, revision string, status string
 }
 
 // setCacheAccountingRevision writes the settings row the v1 code owns. The
-// fixture seeds the value the pin wrote (2); a later value replaces it the way
+// fixture seeds the value the pin wrote (3); a later value replaces it the way
 // the v1 migration does — insert or update the same key.
 func setCacheAccountingRevision(t *testing.T, db *sql.DB, value string) {
 	t.Helper()
 	execFixture(t, db, `insert into settings (key, value, updated_at_ms) values (?, ?, 1)
 		on conflict(key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
 		datamigration.UsageCacheAccountingSemanticsRevisionKey, value)
-}
-
-// addCacheAccountingRevision raises the row to the revision v1.14.6 wrote. At
-// the v1.14.10 pin it is part of the accepted shape; it is only a marker a pin
-// lacks when the ladder is built for an earlier release, which is how
-// TestPreflightBlocksAMarkerThePinnedReleaseLacks exercises the refusal.
-func addCacheAccountingRevision(t *testing.T, db *sql.DB) {
-	t.Helper()
-	setCacheAccountingRevision(t, db, "3")
 }
 
 // removeCacheAccountingRevision drops the row entirely. A pinned install that
@@ -424,23 +425,14 @@ func removeCacheAccountingRevision(t *testing.T, db *sql.DB) {
 		datamigration.UsageCacheAccountingSemanticsRevisionKey)
 }
 
-// addLatencyCoveringIndex creates the index v1.14.7 added over the latency and
-// TTFT columns, the later of the two markers the 1.x line introduced after
-// v1.14.4.
-func addLatencyCoveringIndex(t *testing.T, db *sql.DB) {
+// removeLatencyCoveringIndex drops the index v1.14.7 added over the latency and
+// TTFT columns. An install that upgraded through v1.14.7 but never ran the
+// offline `cleanup-derived` command does not have it, and the pin accepts that
+// shape too: the index is positive evidence only, and its absence proves
+// nothing.
+func removeLatencyCoveringIndex(t *testing.T, db *sql.DB) {
 	t.Helper()
-	execFixture(t, db, `create index idx_usage_events_ts_latency_ttft_cover
-		on usage_events (timestamp_ms, latency_ms, ttft_ms)`)
-}
-
-// withNewerThanPinned adds every marker the 1.x line introduced after v1.14.4:
-// the cache-accounting semantics revision v1.14.6 wrote and the
-// latency-covering index v1.14.7 added. At the v1.14.10 pin this is the real
-// shape of the source the upgrade accepts, not a source that moved past it.
-func withNewerThanPinned(t *testing.T, db *sql.DB) {
-	t.Helper()
-	addCacheAccountingRevision(t, db)
-	addLatencyCoveringIndex(t, db)
+	execFixture(t, db, `drop index if exists idx_usage_events_ts_latency_ttft_cover`)
 }
 
 func declared() Options {
@@ -497,8 +489,9 @@ func requireBlocked(t *testing.T, report Report, want ...string) {
 // schema in every 1.14.x release, v1.14.0 included, so reading it as a marker of
 // a later release refused the pinned release itself and no real 1.x install
 // could pass. The fixture also carries the
-// usage_cache_accounting_semantics_revision=2 row the pin's own migration
-// writes, so the settings rule is exercised here on the accepting side too.
+// usage_cache_accounting_semantics_revision=3 row the pin's own migration
+// writes and the latency covering index its offline cleanup builds, so the
+// marker rule is exercised here on the accepting side too.
 func TestPreflightIsReadyOnThePinnedReleaseSchema(t *testing.T) {
 	fixture := newSourceFixture(t, nil)
 	report := preflight(t, fixture.root, declared())
@@ -862,21 +855,67 @@ func TestPreflightBlocksDeclaredVersionThatIsNotPinned(t *testing.T) {
 	}
 }
 
-// TestPreflightBlocksAMarkerThePinnedReleaseLacks is the second half of the
-// harness regression: the newer-marker rule still refuses a source that
-// genuinely moved past the pin the check is asked about, and it names only the
-// markers that pin lacks. The contract pins v1.14.10 now, whose own schema
-// already carries the v1.14.6 revision and the v1.14.7 index, so the refusal
-// branch is driven through versionCheck against the v1.14.4 ladder — the pin
-// those markers are genuinely later than. A full preflight cannot reach this
-// branch any more: a v1.14.4 declaration is refused before the markers are read
-// (see TestPreflightAcceptsBothLegitimatePinnedShapes).
+// TestPreflightBlocksAMarkerThePinnedReleaseLacks covers both directions of the
+// newer-marker rule.
 //
-// The deleted-raw summary is not a marker — it is base shape in every 1.14.x
+// At the live v1.14.10 pin the acceptance side is covered by
+// TestPreflightAcceptsBothLegitimatePinnedShapes; here a full preflight must
+// refuse what the pin genuinely cannot produce. The pin's own migration writes
+// revision 3 and its offline cleanup builds the latency index, so revision 4 —
+// which no 1.x release has written — and a settings row that is not a positive
+// integer at all both prove the source moved past the pin. This is the harness
+// regression that matters most: an empty ladder made the live pin accept
+// revision 4.
+//
+// The v1.14.4 ladder subtests keep the marker table itself honest at a pin the
+// markers are genuinely later than: revision 3 (v1.14.6) and
+// idx_usage_events_ts_latency_ttft_cover (v1.14.7) are refused and named. The
+// deleted-raw summary is not a marker — it is base shape in every 1.14.x
 // release — so the refusal must not blame it. The detail names the release that
 // introduced each marker instead of repeating the matching declaration, which
 // used to read as if the check contradicted itself.
 func TestPreflightBlocksAMarkerThePinnedReleaseLacks(t *testing.T) {
+	livePinCases := []struct {
+		name       string
+		revision   string
+		wantDetail string
+	}{
+		{
+			name:       "revision above the pin's own",
+			revision:   "4",
+			wantDetail: "usage_cache_accounting_semantics_revision=4 (after v1.14.10)",
+		},
+		{
+			name:       "non-integer revision",
+			revision:   "corrupt",
+			wantDetail: `usage_cache_accounting_semantics_revision="corrupt" (invalid)`,
+		},
+		{
+			name:       "zero revision",
+			revision:   "0",
+			wantDetail: `usage_cache_accounting_semantics_revision="0" (invalid)`,
+		},
+	}
+	for _, testCase := range livePinCases {
+		t.Run("live pin: "+testCase.name, func(t *testing.T) {
+			fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
+				setCacheAccountingRevision(t, db, testCase.revision)
+			})
+			report := preflight(t, fixture.root, declared())
+			requireBlocked(t, report, CodeSourceVersionUnsupported)
+			check, found := checkByName(report, CheckSourceVersion)
+			if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
+				t.Fatalf("version check = %+v, want blocked %s", check, CodeSourceVersionUnsupported)
+			}
+			if !strings.Contains(check.Detail, testCase.wantDetail) {
+				t.Fatalf("version detail %q does not name %q", check.Detail, testCase.wantDetail)
+			}
+			if strings.Contains(check.Detail, "expected=") || strings.Contains(check.Detail, "declared=") {
+				t.Fatalf("version detail %q repeats the matching declaration next to the refusal", check.Detail)
+			}
+		})
+	}
+
 	ladder, err := newVersionLadder("v1.14.4")
 	if err != nil {
 		t.Fatalf("version ladder for v1.14.4: %v", err)
@@ -980,13 +1019,16 @@ func TestPreflightAcceptsBothLegitimatePinnedShapes(t *testing.T) {
 		configure func(t *testing.T, db *sql.DB)
 	}{
 		{
+			// The pin's real startup state: revision 3 and the index its own
+			// offline cleanup built.
 			name:      "revision 3 with the latency covering index",
-			configure: withNewerThanPinned,
+			configure: nil,
 		},
 		{
 			name: "revision 2 written by the v1.14.4 migration it upgraded from",
 			configure: func(t *testing.T, db *sql.DB) {
 				setCacheAccountingRevision(t, db, "2")
+				removeLatencyCoveringIndex(t, db)
 			},
 		},
 		{name: "revision row absent", configure: removeCacheAccountingRevision},
@@ -1013,7 +1055,7 @@ func TestPreflightAcceptsBothLegitimatePinnedShapes(t *testing.T) {
 
 	// Declaring the release the contract replaced is refused by the declaration,
 	// not by a marker: the detail names the pin that is expected now.
-	fixture := newSourceFixture(t, withNewerThanPinned)
+	fixture := newSourceFixture(t, nil)
 	report := preflight(t, fixture.root, Options{DeclaredVersion: "v1.14.4"})
 	requireBlocked(t, report, CodeSourceVersionUnsupported)
 	check, found := checkByName(report, CheckSourceVersion)
@@ -1031,6 +1073,11 @@ func TestPreflightAcceptsBothLegitimatePinnedShapes(t *testing.T) {
 // would refuse its own source, which is exactly the defect the v1.14.10 re-pin
 // would have hit: both markers the v1.14.4 pin was defined by are at or below
 // the new pin.
+//
+// It also locks the ceiling that replaces the dropped revision floor. A pin at
+// or above v1.14.6 accepts revision 3, so the marker itself leaves the ladder;
+// without the ceiling the pinned ladder would be empty and a source holding
+// revision 4 — or a row no 1.x release wrote — would pass.
 func TestVersionLadderFollowsThePin(t *testing.T) {
 	if pin := pinnedSourceVersion(); pin != "v1.14.10" {
 		t.Fatalf("pinned source version = %q, want v1.14.10", pin)
@@ -1057,6 +1104,27 @@ func TestVersionLadderFollowsThePin(t *testing.T) {
 	}
 	if check := versionCheck(SourceKindLegacyManager, nil, nil, pinnedLadder.newer(source), pinnedSourceVersion(), pinnedSourceVersion(), false); check.Status != StatusPass {
 		t.Fatalf("version check against %s = %+v, want pass", pinnedSourceVersion(), check)
+	}
+	abovePin := source
+	abovePin.settings = map[string]string{"usage_cache_accounting_semantics_revision": "4"}
+	if newer := pinnedLadder.newer(abovePin); !reflect.DeepEqual(newer, []markerEvidence{
+		{label: "usage_cache_accounting_semantics_revision=4", release: "after " + pinnedSourceVersion()},
+	}) {
+		t.Fatalf("newer against %s with revision 4 = %v, want the post-pin ceiling", pinnedSourceVersion(), newer)
+	}
+	ceilingCheck := versionCheck(SourceKindLegacyManager, nil, nil, pinnedLadder.newer(abovePin), pinnedSourceVersion(), pinnedSourceVersion(), false)
+	if ceilingCheck.Status != StatusBlocked || ceilingCheck.Code != CodeSourceVersionUnsupported {
+		t.Fatalf("version check for revision 4 = %+v, want blocked %s", ceilingCheck, CodeSourceVersionUnsupported)
+	}
+	if wantDetail := "usage_cache_accounting_semantics_revision=4 (after " + pinnedSourceVersion() + ")"; !strings.Contains(ceilingCheck.Detail, wantDetail) {
+		t.Fatalf("version detail %q does not name %q", ceilingCheck.Detail, wantDetail)
+	}
+	unreadable := source
+	unreadable.settings = map[string]string{"usage_cache_accounting_semantics_revision": "corrupt"}
+	if newer := pinnedLadder.newer(unreadable); !reflect.DeepEqual(newer, []markerEvidence{
+		{label: `usage_cache_accounting_semantics_revision="corrupt" (invalid)`, release: "invalid"},
+	}) {
+		t.Fatalf("newer against %s with an unreadable revision = %v, want an invalid observation", pinnedSourceVersion(), newer)
 	}
 	fourLadder, err := newVersionLadder("v1.14.4")
 	if err != nil {

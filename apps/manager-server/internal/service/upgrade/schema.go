@@ -441,6 +441,12 @@ type sourceMarker struct {
 // observedLabel reports whether the source carries the marker and, when it
 // does, names what was actually observed: the index, or the setting with the
 // value the source holds rather than the floor the check looked for.
+//
+// A setting row that is present but not a positive integer is reported as an
+// invalid observation rather than as "no marker". The v1 code only ever writes
+// strconv.Itoa of a positive revision, so a row that cannot be read as one was
+// not written by a 1.x release this build knows; treating it as absent is the
+// fail-open direction — the source would pass as if it carried nothing newer.
 func (s sourceSchema) observedLabel(marker sourceMarker) (string, bool) {
 	switch marker.kind {
 	case markerIndex:
@@ -451,10 +457,13 @@ func (s sourceSchema) observedLabel(marker sourceMarker) (string, bool) {
 			return "", false
 		}
 		value, err := strconv.Atoi(strings.TrimSpace(observed))
-		if err != nil || value < marker.floor {
+		if err != nil || value < 1 {
+			return fmt.Sprintf("%s=%q (invalid)", marker.name, observed), true
+		}
+		if value < marker.floor {
 			return "", false
 		}
-		return marker.name + "=" + observed, true
+		return fmt.Sprintf("%s=%d", marker.name, value), true
 	default:
 		return marker.name, s.tables[marker.name]
 	}
@@ -481,6 +490,15 @@ type versionMarker struct {
 // marker to a value v2 is free to bump, and a bump to 4 would stop matching a
 // 1.14.6–1.14.10 source and silently let it through.
 const usageCacheAccountingSemanticsRevisionV1146 = 3
+
+// usageCacheAccountingSemanticsRevisionPostV11410 is the first revision above
+// the one the pin itself accepts. The v1.14.6 marker is a floor, so once a pin
+// accepts revision 3 the marker row cannot also prove that a source has not
+// moved past it. This ceiling is what restores that refusal: a source holding 4
+// or more was not written by the pinned release. It is a literal for the same
+// reason as the floor — a value this build happens to write must not decide
+// what a historical 1.x source can hold.
+const usageCacheAccountingSemanticsRevisionPostV11410 = usageCacheAccountingSemanticsRevisionV1146 + 1
 
 // laterSourceMarkers lists the markers the 1.x line introduced after the
 // pinned release, with the release that introduced each one. None of them is a
@@ -525,6 +543,12 @@ func (e markerEvidence) String() string {
 // so a malformed release is an error instead of a silently empty ladder: an
 // empty ladder accepts a source that has moved past the pin, which is exactly
 // the state the check exists to refuse.
+//
+// The revision setting needs one entry the marker table cannot express. Its
+// marker is a floor, so a pin at or above v1.14.6 accepts revision 3 and the
+// marker itself drops out of the ladder — leaving nothing at all to refuse
+// revision 4. The ladder therefore adds a ceiling entry, named after the pin,
+// holding the first revision above the one the pin accepts.
 type versionLadder struct {
 	after []versionMarker
 }
@@ -535,15 +559,35 @@ func newVersionLadder(pinned string) (versionLadder, error) {
 		return versionLadder{}, fmt.Errorf("pinned source release: %w", err)
 	}
 	ladder := versionLadder{}
+	ceiling := false
 	for _, candidate := range laterSourceMarkers {
 		rank, err := parseRelease(candidate.release)
 		if err != nil {
 			return versionLadder{}, fmt.Errorf("later marker release: %w", err)
 		}
-		if rank <= pinnedRank {
+		if rank > pinnedRank {
+			ladder.after = append(ladder.after, candidate)
 			continue
 		}
-		ladder.after = append(ladder.after, candidate)
+		// The pin already accepts this marker, so it is not evidence that a
+		// source moved past the pin. The cache-accounting revision is the one
+		// exception: dropping its floor would drop the only check the setting
+		// has, so it is replaced by the ceiling above the pin. At most one
+		// ceiling exists, and only when the pin is at or above the release
+		// that wrote the floor.
+		if ceiling || candidate.marker.kind != markerSetting ||
+			candidate.marker.name != datamigration.UsageCacheAccountingSemanticsRevisionKey {
+			continue
+		}
+		ladder.after = append(ladder.after, versionMarker{
+			release: "after " + pinned,
+			marker: sourceMarker{
+				kind:  markerSetting,
+				name:  datamigration.UsageCacheAccountingSemanticsRevisionKey,
+				floor: usageCacheAccountingSemanticsRevisionPostV11410,
+			},
+		})
+		ceiling = true
 	}
 	return ladder, nil
 }
@@ -552,6 +596,10 @@ func newVersionLadder(pinned string) (versionLadder, error) {
 // genuinely lacks, in the order the ladder lists them. A marker introduced at
 // or below the pin is part of the schema the pin already accepts, so it can
 // never prove that the source moved past it.
+//
+// An invalid setting row is named as invalid instead of as the release that
+// introduced the setting: the row is not a value any 1.x release wrote, so
+// blaming a release would misdescribe what was observed.
 func (l versionLadder) newer(s sourceSchema) []markerEvidence {
 	newer := []markerEvidence{}
 	for _, candidate := range l.after {
@@ -559,7 +607,11 @@ func (l versionLadder) newer(s sourceSchema) []markerEvidence {
 		if !ok {
 			continue
 		}
-		newer = append(newer, markerEvidence{label: label, release: candidate.release})
+		release := candidate.release
+		if strings.HasSuffix(label, " (invalid)") {
+			release = "invalid"
+		}
+		newer = append(newer, markerEvidence{label: label, release: release})
 	}
 	return newer
 }
