@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../..');
@@ -79,6 +80,153 @@ const isPidAlive = (pid) => {
     return true;
   } catch {
     return false;
+  }
+};
+
+const TAR_BLOCK_SIZE = 512;
+
+const readTarString = (buffer, offset, length) =>
+  buffer
+    .subarray(offset, offset + length)
+    .toString('utf8')
+    .replace(/\0[\s\S]*$/, '');
+
+/**
+ * Reads a tar header numeric field. Traditional archives store octal digits
+ * padded with spaces and NULs; GNU tar switches to a big-endian base-256
+ * integer when the value cannot be represented in the octal field.
+ */
+const readTarNumber = (header, offset, length) => {
+  const field = header.subarray(offset, offset + length);
+  if ((field[0] & 0x80) !== 0) {
+    let value = 0n;
+    for (const byte of field) value = (value << 8n) | BigInt(byte);
+    // Clear the base-256 marker bit; the rest is the unsigned magnitude.
+    value &= (1n << BigInt(length * 8 - 1)) - 1n;
+    return Number(value);
+  }
+  const digits = field
+    .toString('utf8')
+    .replace(/[\0 ]+$/, '')
+    .trim();
+  if (digits === '') return 0;
+  if (!/^[0-7]+$/.test(digits)) {
+    throw new Error(`unreadable tar numeric field: ${JSON.stringify(digits)}`);
+  }
+  return Number.parseInt(digits, 8);
+};
+
+/**
+ * Parses pax extended header records ("<length> <key>=<value>\n") into a Map.
+ */
+const parsePaxRecords = (buffer) => {
+  const records = new Map();
+  let offset = 0;
+  while (offset < buffer.length) {
+    const space = buffer.indexOf(0x20, offset);
+    if (space === -1) break;
+    const recordLength = Number.parseInt(buffer.subarray(offset, space).toString('utf8'), 10);
+    if (!Number.isInteger(recordLength) || recordLength <= 0) break;
+    if (offset + recordLength > buffer.length) break;
+    const record = buffer
+      .subarray(space + 1, offset + recordLength)
+      .toString('utf8')
+      .replace(/\n$/, '');
+    const equals = record.indexOf('=');
+    if (equals > 0) records.set(record.slice(0, equals), record.slice(equals + 1));
+    offset += recordLength;
+  }
+  return records;
+};
+
+/**
+ * Reads every archive member's recorded owner and group from the tar headers.
+ *
+ * The human-readable `tar -tv` listing is not parseable portably: GNU tar
+ * renders ownership as "0/0", while bsdtar prints uid and gid as separate
+ * columns. The ustar header fields are identical across GNU tar, bsdtar and
+ * pax archives, so ownership is read from the 512-byte headers themselves.
+ */
+const readTarMembers = (archivePath) => {
+  const raw = gunzipSync(readFileSync(archivePath));
+  const members = [];
+  const globalPax = new Map();
+  let pendingPax = new Map();
+  let pendingName = null;
+  let offset = 0;
+
+  while (offset + TAR_BLOCK_SIZE <= raw.length) {
+    const header = raw.subarray(offset, offset + TAR_BLOCK_SIZE);
+    if (header.every((byte) => byte === 0)) break; // end-of-archive zero blocks
+
+    const typeflag = header[156] === 0 ? '0' : String.fromCharCode(header[156]);
+    const size = readTarNumber(header, 124, 12);
+    const dataStart = offset + TAR_BLOCK_SIZE;
+    const dataEnd = dataStart + size;
+    if (dataEnd > raw.length) {
+      throw new Error(`truncated tar member header at byte ${offset}`);
+    }
+
+    if (typeflag === 'x' || typeflag === 'g') {
+      // Extended pax records: 'x' applies to the next member, 'g' to all
+      // following members. Long paths and names travel through these records.
+      for (const [key, value] of parsePaxRecords(raw.subarray(dataStart, dataEnd))) {
+        if (typeflag === 'g') globalPax.set(key, value);
+        else pendingPax.set(key, value);
+      }
+    } else if (typeflag === 'L' || typeflag === 'K') {
+      // GNU long name ('L') and long link name ('K') describe the next header.
+      if (typeflag === 'L') {
+        pendingName = readTarString(raw, dataStart, size);
+      }
+    } else {
+      // POSIX ustar splits long paths into a 155-byte prefix plus the 100-byte
+      // name field. GNU tar writes "ustar  " there and reuses that space for
+      // atime/ctime, so only a NUL-terminated magic has a real prefix.
+      const isPosixUstar = header.subarray(257, 265).toString('latin1').startsWith('ustar\0');
+      const prefix = isPosixUstar ? readTarString(header, 345, 155) : '';
+      const headerName = readTarString(header, 0, 100);
+      const name =
+        pendingName ?? pendingPax.get('path') ?? (prefix ? `${prefix}/${headerName}` : headerName);
+      const paxUid = pendingPax.get('uid') ?? globalPax.get('uid');
+      const paxGid = pendingPax.get('gid') ?? globalPax.get('gid');
+      members.push({
+        name,
+        uid: paxUid === undefined ? readTarNumber(header, 108, 8) : Number(paxUid),
+        gid: paxGid === undefined ? readTarNumber(header, 116, 8) : Number(paxGid),
+      });
+      pendingPax = new Map();
+      pendingName = null;
+    }
+
+    offset = dataStart + Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
+  }
+
+  return members;
+};
+
+/**
+ * Asserts that every archive member records numeric owner and group 0.
+ *
+ * The archive is unpacked by root, and GNU tar restores archived ownership, so
+ * a CI account's uid would otherwise own the launcher that systemd executes as
+ * root. Only the numeric fields are asserted: GNU tar leaves the name fields
+ * empty when --owner=0 --group=0 is used, while bsdtar records root there.
+ */
+const assertRootOwnedArchive = (archivePath) => {
+  const members = readTarMembers(archivePath);
+  assert.ok(members.length > 0, 'archive must contain members');
+  for (const member of members) {
+    assert.equal(
+      member.uid,
+      0,
+      `archive member must record uid 0, got uid ${member.uid} / gid ${member.gid}: ${member.name}`
+    );
+    assert.equal(
+      member.gid,
+      0,
+      `archive member must record gid 0, got uid ${member.uid} / gid ${member.gid}: ${member.name}`
+    );
   }
 };
 
@@ -1037,18 +1185,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     // Every member must record root:root. GNU tar run as root restores archived
     // ownership, so a CI account's UID would otherwise own the launcher that
     // systemd executes as root.
-    const listing = execFileSync('tar', ['--numeric-owner', '-tvzf', archivePath], {
-      encoding: 'utf8',
-    });
-    const listingLines = listing.trim().split('\n').filter(Boolean);
-    assert.ok(listingLines.length > 0, 'archive must contain members');
-    for (const line of listingLines) {
-      assert.match(
-        line,
-        /^\S+\s+(?:0\/0|root\/root)\s/,
-        `archive member must be root-owned: ${line}`
-      );
-    }
+    assertRootOwnedArchive(archivePath);
 
     // 4. Extract archive and validate complete directory & file layout
     const extractDir = path.join(baseDir, 'extracted');
@@ -1124,6 +1261,32 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       assert.match(stopOut, /cpa-manager-plus stopped/);
     } finally {
       spawnSync('bash', [pkgCtl, 'stop'], { cwd: pkgRoot, env: extractedEnv, encoding: 'utf8' });
+    }
+  });
+
+  it('rejects an archive whose members record a non-root owner', () => {
+    const baseDir = makeTempDir('cpamp-native-owner-');
+    const memberDir = path.join(baseDir, 'member');
+    mkdirSync(path.join(memberDir, 'bin'), { recursive: true });
+    writeFileSync(path.join(memberDir, 'bin', 'payload'), 'payload\n', { mode: 0o755 });
+
+    // Both tar flavors record an explicit numeric owner without root
+    // privileges, but they spell the flags differently.
+    const tarIsGnu = /GNU tar/.test(execFileSync('tar', ['--version'], { encoding: 'utf8' }));
+    const ownerFlags = (uid, gid) =>
+      tarIsGnu
+        ? [`--owner=${uid}`, `--group=${gid}`, '--numeric-owner']
+        : ['--uid', String(uid), '--gid', String(gid), '--uname', 'ci-user', '--gname', 'ci-group'];
+
+    // A non-zero uid and a non-zero gid are each rejected on their own, on real
+    // archive bytes rather than only for archives built by package-native.sh.
+    for (const [uid, gid, expected] of [
+      [1000, 1000, /must record uid 0/],
+      [0, 1000, /must record gid 0/],
+    ]) {
+      const archivePath = path.join(baseDir, `owner-${uid}-${gid}.tar.gz`);
+      execFileSync('tar', [...ownerFlags(uid, gid), '-czf', archivePath, '-C', baseDir, 'member']);
+      assert.throws(() => assertRootOwnedArchive(archivePath), expected);
     }
   });
 
