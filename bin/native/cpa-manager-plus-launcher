@@ -1,0 +1,1583 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+app_name="cpa-manager-plus"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+resolve_path() {
+  local path="$1"
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "${path}" 2>/dev/null || printf '%s\n' "${path}"
+    return
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "${path}" 2>/dev/null || printf '%s\n' "${path}"
+    return
+  fi
+
+  if [ -d "${path}" ]; then
+    (
+      cd "${path}" 2>/dev/null && pwd -P
+    ) || printf '%s\n' "${path}"
+    return
+  fi
+
+  (
+    cd "$(dirname "${path}")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "${path}")"
+  ) || printf '%s\n' "${path}"
+}
+
+if [ -n "${CPA_MANAGER_PLUS_HOME:-}" ]; then
+  home_dir="$(resolve_path "${CPA_MANAGER_PLUS_HOME}")"
+elif [ "$(basename "${script_dir}")" = "bin" ] && {
+  [ -e "${script_dir}/cpa-manager-plus" ] ||
+    [ -e "${script_dir}/../cpa-manager-plusctl" ] ||
+    [ -e "${script_dir}/../cpa-manager-plus.service" ]
+}; then
+  home_dir="$(cd "${script_dir}/.." && pwd -P)"
+else
+  home_dir="${script_dir}"
+fi
+
+bin_dir="${CPA_MANAGER_PLUS_BIN_DIR:-"${home_dir}/bin"}"
+default_data_dir="${home_dir}/data"
+default_run_dir="${home_dir}/run"
+default_log_dir="${home_dir}/logs"
+
+data_dir="${USAGE_DATA_DIR:-"${CPA_MANAGER_PLUS_DATA_DIR:-"${default_data_dir}"}"}"
+run_dir="${CPA_MANAGER_PLUS_RUN_DIR:-"${default_run_dir}"}"
+log_dir="${CPA_MANAGER_PLUS_LOG_DIR:-"${default_log_dir}"}"
+pid_file="${CPA_MANAGER_PLUS_PID_FILE:-"${run_dir}/${app_name}.pid"}"
+log_file="${CPA_MANAGER_PLUS_LOG_FILE:-"${log_dir}/${app_name}.log"}"
+
+manage_data_dir="false"
+manage_run_dir="false"
+manage_log_dir="false"
+
+if [ -z "${USAGE_DATA_DIR:-}" ] && [ -z "${CPA_MANAGER_PLUS_DATA_DIR:-}" ]; then
+  manage_data_dir="true"
+fi
+if [ -z "${CPA_MANAGER_PLUS_RUN_DIR:-}" ]; then
+  manage_run_dir="true"
+fi
+if [ -z "${CPA_MANAGER_PLUS_LOG_DIR:-}" ]; then
+  manage_log_dir="true"
+fi
+
+runtime_bin="${CPA_MANAGER_PLUS_RUNTIME_SUPERVISOR_BIN:-"${bin_dir}/cpa-manager-plus-runtime-supervisor"}"
+manager_bin="${CPA_MANAGER_PLUS_MANAGER_BIN:-"${CPA_MANAGER_PLUS_BIN:-"${bin_dir}/cpa-manager-plus"}"}"
+ingress_bin="${CPA_MANAGER_PLUS_INGRESS_BIN:-"${bin_dir}/cpa-manager-plus-ingress"}"
+cpa_bin="${CPAMP_CPA_EXECUTABLE:-"${bin_dir}/cli-proxy-api"}"
+
+startup_timeout_sec="${CPAMP_STARTUP_TIMEOUT_SEC:-30}"
+stop_timeout_sec="${CPAMP_STOP_TIMEOUT_SEC:-10}"
+max_restarts="${CPAMP_MAX_RESTARTS:-3}"
+
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") [run|--help]
+
+Starts and supervises the v2 3-process CPA Manager Plus native stack:
+  1. Runtime Supervisor (cpa-manager-plus-runtime-supervisor)
+  2. Manager Server     (cpa-manager-plus)
+  3. Ingress            (cpa-manager-plus-ingress)
+
+Directory layout under CPA_MANAGER_PLUS_HOME (default: ${home_dir}):
+  bin/   cpa-manager-plus, cpa-manager-plus-ingress,
+         cpa-manager-plus-runtime-supervisor, cli-proxy-api
+  data/  Manager SQLite + data.key and Runtime Supervisor state
+  run/   0600 runtime-token and process PID records
+  logs/  Service logs
+
+Privilege model (matches the Compose runtime):
+  Launcher, Runtime Supervisor, Manager and Ingress run as root under
+  systemd. Only the third-party CPA child is dropped to a dedicated
+  functional identity through CPAMP_RUNTIME_CPA_UID / CPAMP_RUNTIME_CPA_GID
+  (the cpamp-cpa account created by cpa-manager-plusctl install, or
+  10001:10001 when no such account exists). Private Supervisor state and the
+  0600 runtime token stay root-owned; data/runtime/gateway belongs to the CPA
+  identity so the child can write its own auth, logs, plugins and config.
+  data/ itself is root:<cpa gid> with mode 0710 (traverse only, never list)
+  because runtime_root lives inside it, exactly like Docker's 0711 /runtime
+  under a 0755 /. Manager files in data/ (usage.sqlite*, data.key,
+  usage-archives) stay 0:0 with 0600/0700 and are unreadable to the CPA child.
+
+Trust model and residual risk:
+  Native loopback is shared by every local account, unlike a container
+  network. The launcher therefore refuses to start when any internal or CPA
+  port is already bound, and it sends the Runtime bearer only after the
+  listening socket is proven to belong to its own child PID. Residual risk:
+  a local user who wins a bind race after that proof, or who is root, can
+  still reach the CPA loopback listener. CPA client authentication is never
+  disabled: the bootstrap seed is given a generated client key (0600 at
+  run/gateway-bootstrap-key) and Fresh staging replaces it with the
+  Manager-generated client key.
+EOF
+}
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ] || [ "${1:-}" = "help" ]; then
+  usage
+  exit 0
+fi
+
+if [ "${1:-}" = "run" ]; then
+  shift
+fi
+
+log_msg() {
+  printf '[cpamp-launcher] %s\n' "$*"
+}
+
+log_err() {
+  printf '[cpamp-launcher] %s\n' "$*" >&2
+}
+
+path_mode() {
+  local path="$1"
+  if stat -c '%a' "${path}" >/dev/null 2>&1; then
+    stat -c '%a' "${path}"
+    return
+  fi
+  stat -f '%Lp' "${path}"
+}
+
+is_group_or_world_writable_mode() {
+  local mode="$1"
+  local perms group other
+
+  perms="${mode}"
+  while [ "${#perms}" -lt 3 ]; do
+    perms="0${perms}"
+  done
+  perms="${perms: -3}"
+  group="${perms:1:1}"
+  other="${perms:2:1}"
+
+  [ $((10#${group} & 2)) -ne 0 ] || [ $((10#${other} & 2)) -ne 0 ]
+}
+
+reject_unsafe_custom_dir() {
+  local dir="$1"
+  local mode
+
+  mode="$(path_mode "${dir}")"
+  if is_group_or_world_writable_mode "${mode}"; then
+    log_err "Refusing to use unsafe runtime directory: ${dir} must not be group- or world-writable."
+    exit 1
+  fi
+}
+
+reject_unsafe_runtime_file() {
+  local file="$1"
+
+  if [ -L "${file}" ]; then
+    log_err "Refusing to use symlinked runtime file: ${file}"
+    exit 1
+  fi
+
+  if [ -e "${file}" ] && [ ! -f "${file}" ]; then
+    log_err "Refusing to use non-regular runtime file: ${file}"
+    exit 1
+  fi
+}
+
+# `gateway_dir` is owned and writable by the unprivileged CPA identity at
+# runtime. Root must never follow a path inside it: a planted symlink would let
+# the child redirect a privileged chown, chmod or write onto any root-owned
+# file. The scan runs before root touches the tree and again once root owns it.
+reject_symlinks_under() {
+  local dir="$1"
+  local found
+
+  [ -d "${dir}" ] || return 0
+  found="$(find "${dir}" -type l -print 2>/dev/null | sed -n '1p')"
+  if [ -n "${found}" ]; then
+    log_err "Refusing to continue: ${found} is a symlink inside ${dir}, which belongs to the CPA identity"
+    exit 1
+  fi
+}
+
+is_managed_dir() {
+  local dir="$1"
+  { [ "${dir}" = "${data_dir}" ] && [ "${manage_data_dir}" = "true" ]; } ||
+    { [ "${dir}" = "${run_dir}" ] && [ "${manage_run_dir}" = "true" ]; } ||
+    { [ "${dir}" = "${log_dir}" ] && [ "${manage_log_dir}" = "true" ]; }
+}
+
+reject_unsafe_runtime_file_parent() {
+  local file="$1"
+  local parent_dir
+
+  parent_dir="$(dirname "${file}")"
+  if [ -z "${parent_dir}" ] || [ ! -e "${parent_dir}" ]; then
+    return 0
+  fi
+
+  if [ -L "${parent_dir}" ]; then
+    log_err "Refusing to use symlinked runtime directory: ${parent_dir}"
+    exit 1
+  fi
+
+  if [ ! -d "${parent_dir}" ]; then
+    log_err "Refusing to use non-directory runtime path: ${parent_dir}"
+    exit 1
+  fi
+
+  if ! is_managed_dir "${parent_dir}"; then
+    reject_unsafe_custom_dir "${parent_dir}"
+  fi
+}
+
+ensure_private_dir() {
+  local dir="$1"
+  local manage_existing="${2:-false}"
+
+  if [ -z "${dir}" ]; then
+    return 0
+  fi
+
+  if [ "${dir}" = "." ]; then
+    dir="$(pwd -P)"
+  fi
+
+  if [ -e "${dir}" ] || [ -L "${dir}" ]; then
+    if [ -L "${dir}" ]; then
+      log_err "Refusing to use symlinked runtime directory: ${dir}"
+      exit 1
+    fi
+    if [ ! -d "${dir}" ]; then
+      log_err "Refusing to use non-directory runtime path: ${dir}"
+      exit 1
+    fi
+    if [ "${manage_existing}" = "true" ]; then
+      chmod 700 "${dir}"
+    else
+      reject_unsafe_custom_dir "${dir}"
+    fi
+    return 0
+  fi
+
+  (umask 077 && mkdir -p "${dir}")
+  chmod 700 "${dir}"
+}
+
+prepare_private_file() {
+  local file="$1"
+  local parent_dir
+
+  reject_unsafe_runtime_file "${file}"
+  reject_unsafe_runtime_file_parent "${file}"
+  parent_dir="$(dirname "${file}")"
+  if [ "${parent_dir}" = "${run_dir}" ]; then
+    ensure_private_dir "${parent_dir}" "${manage_run_dir}"
+  elif [ "${parent_dir}" = "${log_dir}" ]; then
+    ensure_private_dir "${parent_dir}" "${manage_log_dir}"
+  elif [ "${parent_dir}" = "${data_dir}" ]; then
+    ensure_private_dir "${parent_dir}" "${manage_data_dir}"
+  else
+    ensure_private_dir "${parent_dir}" "false"
+  fi
+
+  (umask 077 && touch "${file}")
+  chmod 600 "${file}"
+}
+
+validate_runtime_token() {
+  local candidate="$1"
+  local candidate_bytes
+
+  candidate_bytes="$(printf '%s' "${candidate}" | wc -c | tr -d ' ')"
+  case "${candidate}" in
+    *[![:graph:]]*)
+      log_err "Runtime transport secret must not contain whitespace"
+      return 1
+      ;;
+  esac
+  if [ "${candidate_bytes}" -lt 32 ]; then
+    log_err "Runtime transport secret must contain at least 32 bytes"
+    return 1
+  fi
+}
+
+extract_host_port_from_url() {
+  local raw="$1"
+  local stripped="${raw#http://}"
+  stripped="${stripped#https://}"
+  stripped="${stripped%%/*}"
+  printf '%s\n' "${stripped}"
+}
+
+split_host_port() {
+  local addr="$1"
+  local host port
+  if [[ "${addr}" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+    host="[${BASH_REMATCH[1]}]"
+    port="${BASH_REMATCH[2]}"
+  elif [[ "${addr}" =~ ^([^:]*):([0-9]+)$ ]]; then
+    host="${BASH_REMATCH[1]}"
+    port="${BASH_REMATCH[2]}"
+  else
+    return 1
+  fi
+  if [ "${port}" -lt 1 ] || [ "${port}" -gt 65535 ]; then
+    return 1
+  fi
+  printf '%s\n%s\n' "${host}" "${port}"
+}
+
+require_loopback_address() {
+  local label="$1"
+  local addr="$2"
+  local parsed host port
+
+  if ! parsed="$(split_host_port "${addr}")"; then
+    log_err "Invalid internal address for ${label}: ${addr}"
+    exit 1
+  fi
+  host="$(printf '%s\n' "${parsed}" | sed -n '1p')"
+  port="$(printf '%s\n' "${parsed}" | sed -n '2p')"
+
+  case "${host}" in
+    127.0.0.1 | localhost | "[::1]")
+      ;;
+    *)
+      log_err "Refusing non-loopback internal address for ${label}: ${addr} (must bind 127.0.0.1)"
+      exit 1
+      ;;
+  esac
+  printf '%s\n' "${port}"
+}
+
+process_start_marker() {
+  local pid="$1"
+  if [ -r "/proc/${pid}/stat" ]; then
+    awk '{print $22}' "/proc/${pid}/stat" 2>/dev/null
+    return
+  fi
+  ps -ww -p "${pid}" -o lstart= 2>/dev/null | awk '{$1=$1;print}'
+}
+
+process_executable_path() {
+  local pid="$1"
+  local resolved_process
+  if [ -L "/proc/${pid}/exe" ]; then
+    resolved_process="$(resolve_path "/proc/${pid}/exe")"
+    [ -n "${resolved_process}" ] && printf '%s\n' "${resolved_process}"
+    return
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -a -p "${pid}" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+    return
+  fi
+}
+
+process_command_line() {
+  local pid="$1"
+  ps -ww -p "${pid}" -o command= 2>/dev/null | sed 's/^[[:space:]]*//'
+}
+
+write_pid_record_to() {
+  local target_file="$1"
+  local pid="$2"
+  local current_binary current_command current_start tmp_file
+
+  current_start="$(process_start_marker "${pid}" || true)"
+  current_binary="$(process_executable_path "${pid}" || true)"
+  current_command="$(process_command_line "${pid}" || true)"
+
+  if [ -z "${current_start}" ] || { [ -z "${current_binary}" ] && [ -z "${current_command}" ]; }; then
+    return 1
+  fi
+
+  tmp_file="${target_file}.tmp.$$"
+  prepare_private_file "${tmp_file}"
+  {
+    printf 'pid=%s\n' "${pid}"
+    printf 'start=%s\n' "${current_start}"
+    printf 'binary=%s\n' "${current_binary}"
+    printf 'command=%s\n' "${current_command}"
+  } >"${tmp_file}"
+  chmod 600 "${tmp_file}"
+  mv -f "${tmp_file}" "${target_file}"
+  chmod 600 "${target_file}"
+}
+
+is_pid_running() {
+  local pid="$1"
+  [ -n "${pid}" ] && kill -0 "${pid}" >/dev/null 2>&1
+}
+
+# Loopback on a native host is shared by every local account, so the launcher
+# must prove a listener belongs to its own child before it sends the Runtime
+# bearer to it. These helpers return non-zero when that cannot be proven, which
+# fails closed: no secret is sent on an unproven connection.
+listening_socket_inodes_for_port() {
+  local port="$1"
+  local hex_port file
+
+  hex_port="$(printf '%04X' "${port}")"
+  for file in /proc/net/tcp /proc/net/tcp6; do
+    [ -r "${file}" ] || continue
+    # inode 0 is not an open socket (it is the "unhashed/timewait" placeholder),
+    # so it can never prove ownership of a listener.
+    awk -v wanted="${hex_port}" '
+      NR > 1 && $4 == "0A" && $10 != "0" && $10 != "" {
+        count = split($2, parts, ":")
+        if (count >= 2 && parts[count] == wanted) print $10
+      }
+    ' "${file}"
+  done
+}
+
+pid_owns_socket_inode() {
+  local pid="$1"
+  local inode="$2"
+  local fd readlink_bin
+
+  if [ ! -d "/proc/${pid}/fd" ]; then
+    return 1
+  fi
+
+  if command -v readlink >/dev/null 2>&1; then
+    readlink_bin="readlink"
+  else
+    return 1
+  fi
+
+  for fd in "/proc/${pid}/fd/"*; do
+    [ -L "${fd}" ] || continue
+    if [ "$("${readlink_bin}" "${fd}" 2>/dev/null || true)" = "socket:[${inode}]" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+process_listens_on_port() {
+  local pid="$1"
+  local port="$2"
+  local inodes inode listeners
+
+  if [ -n "${pid}" ] && [ -d /proc/net ]; then
+    inodes="$(listening_socket_inodes_for_port "${port}")"
+    [ -n "${inodes}" ] || return 1
+    # Every listening socket on the port must belong to the child. A single
+    # foreign listener on the other address family (or a second address) would
+    # otherwise satisfy a "some inode is mine" test while `curl` may reach it.
+    while IFS= read -r inode; do
+      [ -n "${inode}" ] || continue
+      if ! pid_owns_socket_inode "${pid}" "${inode}"; then
+        return 1
+      fi
+    done <<<"${inodes}"
+    return 0
+  fi
+
+  if [ -n "${pid}" ] && command -v lsof >/dev/null 2>&1; then
+    listeners="$(lsof -nP -iTCP:"${port}" -sTCP:LISTEN -t 2>/dev/null | sort -u || true)"
+    [ -n "${listeners}" ] || return 1
+    [ "${listeners}" = "${pid}" ] || return 1
+    return 0
+  fi
+
+  return 1
+}
+
+port_has_listener() {
+  local port="$1"
+  local output
+
+  if [ -d /proc/net ]; then
+    [ -n "$(listening_socket_inodes_for_port "${port}")" ] && return 0
+    return 1
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    output="$(lsof -nP -a -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true)"
+    [ -n "${output}" ]
+    return $?
+  fi
+
+  return 1
+}
+
+port_accepts_connections() {
+  local host="$1"
+  local port="$2"
+
+  if (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+listening_pids_for_port() {
+  local port="$1"
+  local inodes inode pid fd target
+
+  if [ -d /proc/net ]; then
+    inodes="$(listening_socket_inodes_for_port "${port}")"
+    [ -n "${inodes}" ] || return 0
+    for pid in /proc/[0-9]*; do
+      pid="${pid#/proc/}"
+      [ -d "/proc/${pid}/fd" ] || continue
+      for fd in "/proc/${pid}/fd/"*; do
+        [ -L "${fd}" ] || continue
+        target="$(readlink "${fd}" 2>/dev/null || true)"
+        case "${target}" in
+          socket:\[*\])
+            inode="${target#socket:[}"
+            inode="${inode%]}"
+            ;;
+          *) continue ;;
+        esac
+        if printf '%s\n' "${inodes}" | grep -qx "${inode}"; then
+          printf '%s\n' "${pid}"
+          break
+        fi
+      done
+    done
+    return 0
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -a -iTCP:"${port}" -sTCP:LISTEN -t 2>/dev/null || true
+  fi
+}
+
+# The Supervisor deliberately never stops its CPA child (its Close contract
+# says so); a container runtime reaps the process tree instead. Natively the
+# launcher must do it, or `ctl stop` would report success while the Gateway
+# keeps serving. A candidate is either the listener on our configured CPA port
+# or a non-root process whose argv names our configured CPA executable. When a
+# dedicated identity is configured, only its owner is eligible.
+collect_orphan_cpa_pids() {
+  local pids
+
+  pids="$(listening_pids_for_port "${cpa_port}")"
+  pids="${pids}
+$(ps -eo pid=,uid=,args= 2>/dev/null | awk -v uid="${cpa_uid}" -v exe="${cpa_bin}" '
+    exe == "" || index($0, exe) == 0 || $2 == 0 { next }
+    uid != "" && $2 != uid { next }
+    { print $1 }
+  ')"
+
+  printf '%s\n' "${pids}" | sed '/^[[:space:]]*$/d' | sort -u
+}
+
+process_owner_uid() {
+  local pid="$1"
+  ps -o uid= -p "${pid}" 2>/dev/null | tr -d ' ' || true
+}
+
+# Only processes we can positively attribute to the CPA child may be signalled.
+# A candidate that happens to listen on the CPA port but is owned by some other
+# account is left completely alone: it must neither delay shutdown for the full
+# budget nor receive a root-owned SIGKILL.
+is_eligible_cpa_pid() {
+  local pid="$1"
+  local owner
+
+  [ -n "${pid}" ] || return 1
+  [ "${pid}" = "$$" ] && return 1
+  is_pid_running "${pid}" || return 1
+
+  owner="$(process_owner_uid "${pid}")"
+  [ -n "${owner}" ] || return 1
+
+  if [ -n "${cpa_uid}" ]; then
+    [ "${owner}" = "${cpa_uid}" ]
+    return $?
+  fi
+
+  # No dedicated identity configured (non-root launcher): only our own
+  # processes can be claimed, never another account's listener.
+  [ "${owner}" = "$(id -u)" ]
+}
+
+stop_orphaned_cpa_processes() {
+  local deadline="$1"
+  local pids pid eligible_pids="" remaining
+
+  pids="$(collect_orphan_cpa_pids)"
+  [ -n "${pids}" ] || return 0
+
+  for pid in ${pids}; do
+    if ! is_eligible_cpa_pid "${pid}"; then
+      log_err "Leaving PID ${pid} on ${cpa_addr} alone: owner $(process_owner_uid "${pid}") is not the dedicated CPA identity ${cpa_uid:-$(id -u)}"
+      continue
+    fi
+    eligible_pids="${eligible_pids}${pid}
+"
+    log_msg "Stopping orphaned CPA child (PID ${pid}) on ${cpa_addr}"
+    kill -TERM "${pid}" >/dev/null 2>&1 || true
+  done
+
+  [ -n "${eligible_pids}" ] || return 0
+
+  while [ "$(date +%s)" -lt "${deadline}" ]; do
+    remaining=0
+    for pid in ${eligible_pids}; do
+      if is_pid_running "${pid}"; then
+        remaining=1
+      fi
+    done
+    [ "${remaining}" -eq 0 ] && return 0
+    sleep 0.1
+  done
+
+  for pid in ${eligible_pids}; do
+    if is_pid_running "${pid}"; then
+      log_err "Orphaned CPA child (PID ${pid}) did not exit within the shutdown budget; sending SIGKILL"
+      kill -KILL "${pid}" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+require_port_available() {
+  local label="$1"
+  local host="$2"
+  local port="$3"
+
+  if port_has_listener "${port}" || port_accepts_connections "${host}" "${port}"; then
+    log_err "Refusing to start: ${label} port ${host}:${port} is already bound; another local process could capture Runtime traffic"
+    exit 1
+  fi
+}
+
+assert_listener_port_available() {
+  local label="$1"
+  local addr="$2"
+  local parsed host port
+
+  parsed="$(split_host_port "${addr}")" || {
+    log_err "Invalid internal address for ${label}: ${addr}"
+    exit 1
+  }
+  host="$(printf '%s\n' "${parsed}" | sed -n '1p')"
+  port="$(printf '%s\n' "${parsed}" | sed -n '2p')"
+  host="${host#[}"
+  host="${host%]}"
+  case "${host}" in
+    "" | "0.0.0.0" | "::") host="127.0.0.1" ;;
+  esac
+  require_port_available "${label}" "${host}" "${port}"
+}
+
+probe_implementation() {
+  local requested="${CPAMP_PROBE_IMPLEMENTATION:-auto}"
+
+  case "${requested}" in
+    curl | node)
+      printf '%s\n' "${requested}"
+      return 0
+      ;;
+    auto) ;;
+    *)
+      log_err "Unsupported CPAMP_PROBE_IMPLEMENTATION: ${requested} (expected auto, curl or node)"
+      exit 1
+      ;;
+  esac
+
+  if command -v curl >/dev/null 2>&1; then
+    printf 'curl\n'
+    return 0
+  fi
+  if command -v node >/dev/null 2>&1; then
+    printf 'node\n'
+    return 0
+  fi
+  printf 'none\n'
+}
+
+# http_status_code never places the runtime bearer in a child process argv.
+# curl receives the Authorization header through `-K -` (stdin), and the node
+# fallback reads it from stdin, so `ps`/`/proc/<pid>/cmdline` cannot capture it.
+http_status_code() {
+  local url="$1"
+  local bearer="${2:-}"
+  local extra_header="${3:-}"
+  local code=""
+  local implementation config
+
+  implementation="$(probe_implementation)"
+
+  if [ "${implementation}" = "curl" ]; then
+    config=""
+    if [ -n "${bearer}" ]; then
+      config="header = \"Authorization: Bearer ${bearer}\""$'\n'
+    fi
+    if [ -n "${extra_header}" ]; then
+      config="${config}header = \"${extra_header}\""$'\n'
+    fi
+    if [ -n "${config}" ]; then
+      code="$(printf '%s' "${config}" | curl -sS -K - -o /dev/null -w '%{http_code}' --max-time 2 --connect-timeout 1 "${url}" 2>/dev/null || true)"
+    else
+      code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 --connect-timeout 1 "${url}" 2>/dev/null || true)"
+    fi
+    printf '%s\n' "${code:-000}"
+    return 0
+  fi
+
+  if [ "${implementation}" = "node" ]; then
+    code="$(printf '%s' "${bearer}" | CPAMP_PROBE_HEADER="${extra_header}" node -e '
+      const http = require("node:http");
+      const url = new URL(process.argv[1]);
+      const headers = {};
+      let token = "";
+      process.stdin.on("data", (chunk) => { token += chunk; });
+      process.stdin.on("end", () => {
+        if (token) headers["Authorization"] = "Bearer " + token;
+        const extra = process.env.CPAMP_PROBE_HEADER || "";
+        if (extra) {
+          const idx = extra.indexOf(":");
+          if (idx > 0) headers[extra.slice(0, idx).trim()] = extra.slice(idx + 1).trim();
+        }
+        const req = http.get(url, { headers, timeout: 1500 }, (res) => {
+          res.resume();
+          process.stdout.write(String(res.statusCode || "000"));
+        });
+        req.on("error", () => process.stdout.write("000"));
+        req.on("timeout", () => { req.destroy(); process.stdout.write("000"); });
+      });
+    ' "${url}" 2>/dev/null || true)"
+    printf '%s\n' "${code:-000}"
+    return 0
+  fi
+
+  printf '000\n'
+}
+
+detect_cpa_identity() {
+  local uid="${CPAMP_RUNTIME_CPA_UID:-}"
+  local gid="${CPAMP_RUNTIME_CPA_GID:-}"
+  local cpa_user="${CPAMP_CPA_USER:-cpamp-cpa}"
+
+  # The account name reaches `id` (and, from the ctl, `useradd`) as an operand;
+  # anything outside a safe POSIX login name is refused outright.
+  if ! [[ "${cpa_user}" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    log_err "Invalid CPAMP_CPA_USER: ${cpa_user} (must match [a-z_][a-z0-9_-]*)"
+    exit 1
+  fi
+
+  if [ -z "${uid}" ] && [ -z "${gid}" ]; then
+    if [ "$(id -u)" -eq 0 ] && [ "$(uname -s)" = "Linux" ]; then
+      if id -u "${cpa_user}" >/dev/null 2>&1; then
+        uid="$(id -u "${cpa_user}")"
+        gid="$(id -g "${cpa_user}")"
+      else
+        uid="10001"
+        gid="10001"
+      fi
+    fi
+  fi
+
+  if [ -z "${uid}" ] && [ -z "${gid}" ]; then
+    return 0
+  fi
+
+  if [ -z "${uid}" ] || [ -z "${gid}" ]; then
+    log_err "CPAMP_RUNTIME_CPA_UID and CPAMP_RUNTIME_CPA_GID must be configured together"
+    exit 1
+  fi
+
+  case "${uid}" in
+    '' | *[!0-9]*)
+      log_err "CPAMP_RUNTIME_CPA_UID must be a positive decimal integer"
+      exit 1
+      ;;
+  esac
+  case "${gid}" in
+    '' | *[!0-9]*)
+      log_err "CPAMP_RUNTIME_CPA_GID must be a positive decimal integer"
+      exit 1
+      ;;
+  esac
+  if [ "${uid}" -eq 0 ] || [ "${gid}" -eq 0 ]; then
+    log_err "The CPA child identity must not be root: CPAMP_RUNTIME_CPA_UID/GID must be non-zero"
+    exit 1
+  fi
+  if [ "$(id -u)" -ne 0 ]; then
+    log_err "Dropping CPA to UID ${uid} requires the launcher to run as root"
+    exit 1
+  fi
+
+  cpa_uid="${uid}"
+  cpa_gid="${gid}"
+}
+
+# Docker runs the Supervisor as root and drops only CPA. Native matches that
+# layout: private Supervisor state stays root-owned (group-readable only where
+# the CPA child must traverse it), while the Gateway tree belongs to the CPA
+# identity so the child can write its own auth, logs, plugins and config.
+#
+# NH1: the CPA child is an ordinary unprivileged account, so every directory on
+# the path to its config, auth dir and executable needs a traverse bit for
+# ${cpa_gid}. In Docker /runtime is `0711 root:root` directly under `/ 0755`;
+# natively runtime_root sits inside data_dir, so data_dir is handed to
+# `root:${cpa_gid}` with mode `0710` (traverse, never list/read). Manager data
+# inside it - usage.sqlite*, data.key, usage-archives and anything else - is
+# forced back to `0:0` with `0600`/`0700`.
+apply_cpa_ownership() {
+  local path manager_data_path
+
+  if [ -z "${cpa_uid}" ]; then
+    return 0
+  fi
+
+  for path in \
+    "${run_dir}" \
+    "${log_dir}" \
+    "${token_file}" \
+    "${runtime_root}" \
+    "${supervisor_dir}" \
+    "${supervisor_dir}/active" \
+    "${supervisor_dir}/active/cpa"; do
+    [ -e "${path}" ] || continue
+    if ! chown -h 0:0 "${path}"; then
+      log_err "Failed to keep ${path} owned by root"
+      exit 1
+    fi
+  done
+
+  for manager_data_path in "${data_dir}"/*; do
+    [ -e "${manager_data_path}" ] || continue
+    [ "${manager_data_path}" = "${runtime_root}" ] && continue
+    if [ -L "${manager_data_path}" ]; then
+      log_err "Refusing to continue: ${manager_data_path} is a symlink inside the Manager data directory"
+      exit 1
+    fi
+    if [ -d "${manager_data_path}" ]; then
+      # Recursively drop every group/other bit so nothing Manager-owned inside
+      # the (now group-traversable) data directory is reachable by cpamp-cpa.
+      if ! chown -R -h 0:0 "${manager_data_path}" ||
+        ! chmod 0700 "${manager_data_path}" ||
+        ! chmod -R go-rwx "${manager_data_path}"; then
+        log_err "Failed to keep ${manager_data_path} root-only"
+        exit 1
+      fi
+    else
+      if ! chown -h 0:0 "${manager_data_path}" || ! chmod 0600 "${manager_data_path}"; then
+        log_err "Failed to keep ${manager_data_path} root-only"
+        exit 1
+      fi
+    fi
+  done
+
+  for path in "${supervisor_dir}" "${supervisor_dir}/artifacts" "${supervisor_dir}/artifacts/cpa"; do
+    [ -e "${path}" ] || continue
+    if ! chown -h 0:"${cpa_gid}" "${path}" || ! chmod 0710 "${path}"; then
+      log_err "Failed to hand ${path} to root:${cpa_gid} with mode 0710"
+      exit 1
+    fi
+  done
+
+  for path in \
+    "${run_dir}" \
+    "${log_dir}" \
+    "${supervisor_dir}/active" \
+    "${supervisor_dir}/active/cpa"; do
+    [ -e "${path}" ] || continue
+    chmod 0700 "${path}"
+  done
+  chmod 0711 "${runtime_root}"
+  if ! chown -h 0:"${cpa_gid}" "${data_dir}" || ! chmod 0710 "${data_dir}"; then
+    log_err "Failed to make ${data_dir} traversable for group ${cpa_gid} (mode 0710)"
+    exit 1
+  fi
+
+  # Take the Gateway tree back from the CPA identity while it is mutated, so the
+  # child cannot swap entries under root (TOCTOU), then hand it over last.
+  reject_symlinks_under "${gateway_dir}"
+  if ! chown -h 0:0 "${gateway_dir}" || ! chmod 0700 "${gateway_dir}"; then
+    log_err "Failed to take temporary ownership of ${gateway_dir}"
+    exit 1
+  fi
+  for path in "${gateway_dir}" "${gateway_dir}/auth" "${gateway_dir}/logs" "${gateway_dir}/plugins"; do
+    [ -d "${path}" ] || continue
+    if [ -L "${path}" ] || ! chmod 0700 "${path}"; then
+      log_err "Failed to restrict ${path} to the CPA identity"
+      exit 1
+    fi
+  done
+  for path in "${gateway_dir}"/*; do
+    [ -f "${path}" ] && [ ! -L "${path}" ] || continue
+    chmod 0600 "${path}"
+  done
+  if ! chown -R -h "${cpa_uid}:${cpa_gid}" "${gateway_dir}"; then
+    log_err "Failed to hand the Gateway directory ${gateway_dir} to ${cpa_uid}:${cpa_gid}"
+    exit 1
+  fi
+}
+
+cpa_uid=""
+cpa_gid=""
+detect_cpa_identity
+
+# Resolve and verify all 4 binaries
+if [[ "${runtime_bin}" != /* ]]; then
+  runtime_bin="$(resolve_path "${runtime_bin}")"
+fi
+if [[ "${manager_bin}" != /* ]]; then
+  manager_bin="$(resolve_path "${manager_bin}")"
+fi
+if [[ "${ingress_bin}" != /* ]]; then
+  ingress_bin="$(resolve_path "${ingress_bin}")"
+fi
+if [[ "${cpa_bin}" != /* ]]; then
+  cpa_bin="$(resolve_path "${cpa_bin}")"
+fi
+
+for pair in \
+  "runtime-supervisor:${runtime_bin}" \
+  "manager:${manager_bin}" \
+  "ingress:${ingress_bin}" \
+  "cli-proxy-api:${cpa_bin}"; do
+  comp_name="${pair%%:*}"
+  comp_bin="${pair#*:}"
+  if [ ! -f "${comp_bin}" ] || [ ! -x "${comp_bin}" ]; then
+    log_err "Binary for ${comp_name} is missing or not executable: ${comp_bin}"
+    exit 1
+  fi
+done
+
+if [[ "${data_dir}" != /* ]]; then
+  data_dir="$(resolve_path "${data_dir}")"
+fi
+if [[ "${run_dir}" != /* ]]; then
+  run_dir="$(resolve_path "${run_dir}")"
+fi
+if [[ "${log_dir}" != /* ]]; then
+  log_dir="$(resolve_path "${log_dir}")"
+fi
+
+ensure_private_dir "${data_dir}" "${manage_data_dir}"
+ensure_private_dir "${run_dir}" "${manage_run_dir}"
+ensure_private_dir "${log_dir}" "${manage_log_dir}"
+prepare_private_file "${log_file}"
+
+# Initialize Runtime Supervisor directory layout before starting any process
+runtime_data_dir="${CPAMP_RUNTIME_DATA_DIR:-"${data_dir}/runtime"}"
+if [[ "${runtime_data_dir}" != /* ]]; then
+  runtime_data_dir="$(resolve_path "${runtime_data_dir}")"
+fi
+journal_path="${CPAMP_RUNTIME_JOURNAL_PATH:-"${runtime_data_dir}/supervisor/operations.sqlite"}"
+if [[ "${journal_path}" != /* ]]; then
+  journal_path="$(resolve_path "${journal_path}")"
+fi
+supervisor_dir="$(dirname "${journal_path}")"
+runtime_root="$(dirname "${supervisor_dir}")"
+gateway_dir="${runtime_root}/gateway"
+
+for priv_dir in \
+  "${runtime_root}" \
+  "${supervisor_dir}" \
+  "${supervisor_dir}/artifacts" \
+  "${supervisor_dir}/artifacts/cpa" \
+  "${supervisor_dir}/active" \
+  "${supervisor_dir}/active/cpa" \
+  "${gateway_dir}" \
+  "${gateway_dir}/auth" \
+  "${gateway_dir}/logs" \
+  "${gateway_dir}/plugins"; do
+  ensure_private_dir "${priv_dir}" "true"
+done
+
+# The Gateway tree is writable by the CPA identity, so fail closed here - before
+# root chowns, chmods or seeds anything in it - if a symlink was planted there.
+reject_symlinks_under "${gateway_dir}"
+
+# Generate or validate 0600 runtime token file
+token_file="${CPAMP_RUNTIME_TOKEN_FILE:-"${run_dir}/runtime-token"}"
+if [[ "${token_file}" != /* ]]; then
+  token_file="$(resolve_path "${token_file}")"
+fi
+reject_unsafe_runtime_file "${token_file}"
+reject_unsafe_runtime_file_parent "${token_file}"
+ensure_private_dir "$(dirname "${token_file}")" "$(if [ "$(dirname "${token_file}")" = "${run_dir}" ]; then printf '%s' "${manage_run_dir}"; else printf 'false'; fi)"
+
+explicit_token="${CPAMP_RUNTIME_TOKEN:-}"
+if [ -n "${explicit_token}" ]; then
+  validate_runtime_token "${explicit_token}"
+fi
+
+if [ ! -f "${token_file}" ]; then
+  token_tmp="${token_file}.tmp.$$"
+  prepare_private_file "${token_tmp}"
+  if [ -n "${explicit_token}" ]; then
+    printf '%s' "${explicit_token}" >"${token_tmp}"
+  else
+    dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' >"${token_tmp}"
+  fi
+  chmod 0600 "${token_tmp}"
+  mv -f "${token_tmp}" "${token_file}"
+  chmod 0600 "${token_file}"
+fi
+
+chmod 0600 "${token_file}"
+runtime_token="$(cat "${token_file}")"
+validate_runtime_token "${runtime_token}"
+if [ -n "${explicit_token}" ] && [ "${runtime_token}" != "${explicit_token}" ]; then
+  log_err "Explicit Runtime transport secret does not match existing secret source"
+  exit 1
+fi
+# The Supervisor receives the secret explicitly below. Drop the inherited copy
+# so Manager and Ingress can never observe it through their environment.
+unset CPAMP_RUNTIME_TOKEN
+explicit_token=""
+
+# Resolve unified public Ingress address (default 0.0.0.0:18317, configurable via CPAMP_INGRESS_ADDR / HTTP_ADDR / PORT)
+if [ -n "${CPAMP_INGRESS_ADDR:-}" ]; then
+  ingress_addr="${CPAMP_INGRESS_ADDR}"
+elif [ -n "${HTTP_ADDR:-}" ]; then
+  ingress_addr="${HTTP_ADDR}"
+elif [ -n "${PORT:-}" ]; then
+  if [[ "${PORT}" == *:* ]]; then
+    ingress_addr="${PORT}"
+  else
+    ingress_addr="0.0.0.0:${PORT}"
+  fi
+elif [ -n "${CPAMP_PUBLIC_PORT:-}" ]; then
+  if [[ "${CPAMP_PUBLIC_PORT}" == *:* ]]; then
+    ingress_addr="${CPAMP_PUBLIC_PORT}"
+  else
+    ingress_addr="0.0.0.0:${CPAMP_PUBLIC_PORT}"
+  fi
+else
+  ingress_addr="0.0.0.0:18317"
+fi
+
+if [[ "${ingress_addr}" =~ ^[0-9]+$ ]]; then
+  ingress_addr="0.0.0.0:${ingress_addr}"
+elif [[ "${ingress_addr}" =~ ^:[0-9]+$ ]]; then
+  ingress_addr="0.0.0.0${ingress_addr}"
+fi
+
+if ! parsed_ingress="$(split_host_port "${ingress_addr}")"; then
+  log_err "Invalid public Ingress address: ${ingress_addr}"
+  exit 1
+fi
+ingress_host="$(printf '%s\n' "${parsed_ingress}" | sed -n '1p')"
+ingress_port="$(printf '%s\n' "${parsed_ingress}" | sed -n '2p')"
+
+case "${ingress_host}" in
+  "" | "0.0.0.0" | "::" | "[::]")
+    ingress_probe_host="127.0.0.1"
+    ;;
+  *)
+    ingress_probe_host="${ingress_host}"
+    ;;
+esac
+
+# Resolve internal loopback addresses
+if [ -n "${CPAMP_RUNTIME_ADDR:-}" ]; then
+  runtime_addr="${CPAMP_RUNTIME_ADDR}"
+elif [ -n "${CPAMP_RUNTIME_PORT:-}" ]; then
+  runtime_addr="127.0.0.1:${CPAMP_RUNTIME_PORT}"
+elif [ -n "${CPAMP_RUNTIME_URL:-}" ]; then
+  runtime_addr="$(extract_host_port_from_url "${CPAMP_RUNTIME_URL}")"
+else
+  runtime_addr="127.0.0.1:18318"
+fi
+
+if [ -n "${CPAMP_MANAGER_ADDR:-}" ]; then
+  manager_addr="${CPAMP_MANAGER_ADDR}"
+elif [ -n "${CPAMP_MANAGER_PORT:-}" ]; then
+  manager_addr="127.0.0.1:${CPAMP_MANAGER_PORT}"
+elif [ -n "${CPAMP_MANAGER_URL:-}" ]; then
+  manager_addr="$(extract_host_port_from_url "${CPAMP_MANAGER_URL}")"
+else
+  manager_addr="127.0.0.1:18319"
+fi
+
+if [ -n "${CPAMP_INGRESS_CONTROL_ADDR:-}" ]; then
+  ingress_control_addr="${CPAMP_INGRESS_CONTROL_ADDR}"
+elif [ -n "${CPAMP_INGRESS_CONTROL_PORT:-}" ]; then
+  ingress_control_addr="127.0.0.1:${CPAMP_INGRESS_CONTROL_PORT}"
+elif [ -n "${CPAMP_INGRESS_CONTROL_URL:-}" ]; then
+  ingress_control_addr="$(extract_host_port_from_url "${CPAMP_INGRESS_CONTROL_URL}")"
+else
+  ingress_control_addr="127.0.0.1:18320"
+fi
+
+if [ -n "${CPAMP_RUNTIME_CPA_ADDR:-}" ]; then
+  cpa_addr="${CPAMP_RUNTIME_CPA_ADDR}"
+elif [ -n "${CPAMP_CPA_PORT:-}" ]; then
+  cpa_addr="127.0.0.1:${CPAMP_CPA_PORT}"
+elif [ -n "${CPAMP_GATEWAY_URL:-}" ]; then
+  cpa_addr="$(extract_host_port_from_url "${CPAMP_GATEWAY_URL}")"
+elif [ -n "${CPA_UPSTREAM_URL:-}" ]; then
+  cpa_addr="$(extract_host_port_from_url "${CPA_UPSTREAM_URL}")"
+else
+  cpa_addr="127.0.0.1:8317"
+fi
+
+runtime_port="$(require_loopback_address "Runtime Supervisor" "${runtime_addr}")"
+manager_port="$(require_loopback_address "Manager Server" "${manager_addr}")"
+ingress_control_port="$(require_loopback_address "Ingress Control" "${ingress_control_addr}")"
+cpa_port="$(require_loopback_address "CPA Gateway" "${cpa_addr}")"
+cpa_host="$(printf '%s\n' "$(split_host_port "${cpa_addr}")" | sed -n '1p')"
+cpa_host="${cpa_host#[}"
+cpa_host="${cpa_host%]}"
+
+# Ensure no port collisions across the 5 listeners
+seen_ports=":"
+for port_entry in \
+  "ingress:${ingress_port}" \
+  "runtime-supervisor:${runtime_port}" \
+  "manager:${manager_port}" \
+  "ingress-control:${ingress_control_port}" \
+  "cpa:${cpa_port}"; do
+  p_val="${port_entry#*:}"
+  if [[ "${seen_ports}" == *":${p_val}:"* ]]; then
+    log_err "Port collision detected in native launcher configuration on port ${p_val}"
+    exit 1
+  fi
+  seen_ports="${seen_ports}${p_val}:"
+done
+
+runtime_identity="${CPAMP_RUNTIME_IDENTITY:-embedded-default}"
+runtime_url="${CPAMP_RUNTIME_URL:-http://${runtime_addr}}"
+manager_url="${CPAMP_MANAGER_URL:-http://${manager_addr}}"
+gateway_url="${CPAMP_GATEWAY_URL:-http://${cpa_addr}}"
+cpa_upstream_url="${CPA_UPSTREAM_URL:-http://${cpa_addr}}"
+ingress_control_url="${CPAMP_INGRESS_CONTROL_URL:-http://${ingress_control_addr}}"
+public_origin="${CPAMP_PUBLIC_ORIGIN:-}"
+
+db_path="${USAGE_DB_PATH:-"${data_dir}/usage.sqlite"}"
+data_key_path="${CPA_MANAGER_DATA_KEY_PATH:-"${data_dir}/data.key"}"
+
+cpa_manifest="${CPAMP_CPA_ARTIFACT_MANIFEST:-}"
+if [ -z "${cpa_manifest}" ] && [ -f "${home_dir}/share/cpamp/runtime/cpa-artifact.json" ]; then
+  cpa_manifest="${home_dir}/share/cpamp/runtime/cpa-artifact.json"
+fi
+
+# Seed initial Gateway config if seed template exists and gateway config is absent.
+# The bootstrap Gateway is never an admission surface: Ingress refuses Gateway
+# traffic until Fresh activation, and Fresh staging replaces this file with the
+# Manager-generated client key. It must still never carry an empty client-key
+# list, because CPA treats that as "client authentication disabled" and this
+# host's loopback listener is reachable by every local account.
+seed_config="${home_dir}/share/cpamp/runtime/config.seed.yaml"
+gateway_config="${gateway_dir}/config.yaml"
+bootstrap_gateway_key_file="${run_dir}/gateway-bootstrap-key"
+if [ -f "${seed_config}" ] && [ ! -e "${gateway_config}" ] && [ ! -L "${gateway_config}" ]; then
+  # Root seeds this file only while gateway_dir is root-owned. At runtime the
+  # directory belongs to cpamp-cpa, so writing through a tree the unprivileged
+  # child controls would let it redirect the write at a root-owned file (NH3).
+  if [ "$(id -u)" -eq 0 ] && { ! chown -h 0:0 "${gateway_dir}" || ! chmod 0700 "${gateway_dir}"; }; then
+    log_err "Failed to take temporary ownership of ${gateway_dir} before seeding ${gateway_config}"
+    exit 1
+  fi
+  config_tmp="${gateway_config}.tmp.$$"
+  prepare_private_file "${config_tmp}"
+
+  sed_escape_replacement() {
+    printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'
+  }
+  escaped_cpa_port="$(sed_escape_replacement "${cpa_port}")"
+  escaped_auth_dir="$(sed_escape_replacement "${gateway_dir}/auth")"
+  escaped_plugin_dir="$(sed_escape_replacement "${gateway_dir}/plugins")"
+  escaped_cpa_host="$(sed_escape_replacement "${cpa_host}")"
+
+  if grep -q 'api-keys: \[\]' "${seed_config}"; then
+    gateway_bootstrap_key="$(dd if=/dev/urandom bs=32 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    key_tmp="${bootstrap_gateway_key_file}.tmp.$$"
+    prepare_private_file "${key_tmp}"
+    printf '%s' "${gateway_bootstrap_key}" >"${key_tmp}"
+    chmod 0600 "${key_tmp}"
+    mv -f "${key_tmp}" "${bootstrap_gateway_key_file}"
+    chmod 0600 "${bootstrap_gateway_key_file}"
+    sed \
+      -e "s|port: 8317|port: ${escaped_cpa_port}|g" \
+      -e "s|host: \"127.0.0.1\"|host: \"${escaped_cpa_host}\"|g" \
+      -e "s|/runtime/gateway/auth|${escaped_auth_dir}|g" \
+      -e "s|/runtime/gateway/plugins|${escaped_plugin_dir}|g" \
+      -e "s|api-keys: \[\]|api-keys: [\"${gateway_bootstrap_key}\"]|" \
+      "${seed_config}" >"${config_tmp}"
+  else
+    sed \
+      -e "s|port: 8317|port: ${escaped_cpa_port}|g" \
+      -e "s|host: \"127.0.0.1\"|host: \"${escaped_cpa_host}\"|g" \
+      -e "s|/runtime/gateway/auth|${escaped_auth_dir}|g" \
+      -e "s|/runtime/gateway/plugins|${escaped_plugin_dir}|g" \
+      "${seed_config}" >"${config_tmp}"
+  fi
+  chmod 0600 "${config_tmp}"
+  mv -f "${config_tmp}" "${gateway_config}"
+fi
+
+apply_cpa_ownership
+
+runtime_pid_file="${run_dir}/runtime-supervisor.pid"
+manager_pid_file="${run_dir}/manager.pid"
+ingress_pid_file="${run_dir}/ingress.pid"
+ready_file="${run_dir}/launcher.ready"
+
+runtime_pid=""
+manager_pid=""
+ingress_pid=""
+shutting_down=0
+
+check_runtime_ready() {
+  local pid="$1"
+  local code
+
+  # Never send the Runtime bearer to an unproven listener: loopback is shared
+  # with every local account, so an impostor could capture it.
+  if ! process_listens_on_port "${pid}" "${runtime_port}"; then
+    return 1
+  fi
+
+  code="$(http_status_code "http://${runtime_addr}/v1/runtime/status" "${runtime_token}" "X-CPAMP-Runtime-Features: active-gateway-artifact-v1")"
+  if [ "${code}" = "200" ]; then
+    return 0
+  fi
+  if [ "${code}" = "404" ]; then
+    code="$(http_status_code "http://${runtime_addr}/health")"
+    [ "${code}" = "200" ] && return 0
+  fi
+  return 1
+}
+
+check_manager_ready() {
+  local pid="$1"
+  local code
+
+  if ! process_listens_on_port "${pid}" "${manager_port}"; then
+    return 1
+  fi
+
+  code="$(http_status_code "http://${manager_addr}/health")"
+  if [ "${code}" = "200" ]; then
+    return 0
+  fi
+  if [ "${code}" = "503" ]; then
+    local disc_code
+    disc_code="$(http_status_code "http://${manager_addr}/.well-known/cpamp-bootstrap")"
+    [ "${disc_code}" = "200" ] && return 0
+  fi
+  return 1
+}
+
+check_ingress_ready() {
+  local pid="$1"
+  local code
+
+  if ! process_listens_on_port "${pid}" "${ingress_port}"; then
+    return 1
+  fi
+  if ! process_listens_on_port "${pid}" "${ingress_control_port}"; then
+    return 1
+  fi
+
+  code="$(http_status_code "http://${ingress_probe_host}:${ingress_port}/health")"
+  if [ "${code}" = "200" ]; then
+    return 0
+  fi
+  if [ "${code}" = "503" ]; then
+    local ctrl_code
+    ctrl_code="$(http_status_code "http://${ingress_control_addr}/internal/routing/fresh")"
+    if [ "${ctrl_code}" = "200" ] || [ "${ctrl_code}" = "404" ]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+stop_child_process() {
+  local name="$1"
+  local pid="$2"
+  local child_pid_file="$3"
+  local deadline="$4"
+
+  if [ -n "${pid}" ] && is_pid_running "${pid}"; then
+    log_msg "Stopping ${name} (PID ${pid})"
+    kill -TERM "${pid}" >/dev/null 2>&1 || true
+    while is_pid_running "${pid}"; do
+      if [ "$(date +%s)" -ge "${deadline}" ]; then
+        break
+      fi
+      sleep 0.1
+    done
+    if is_pid_running "${pid}"; then
+      log_err "${name} (PID ${pid}) did not exit within the ${stop_timeout_sec}s shutdown budget; sending SIGKILL"
+      kill -KILL "${pid}" >/dev/null 2>&1 || true
+    fi
+    wait "${pid}" 2>/dev/null || true
+  fi
+  rm -f "${child_pid_file}"
+}
+
+shutdown_all_children() {
+  # One shutdown budget covers all three children so systemd's TimeoutStopSec
+  # can never expire in the middle of the sequence.
+  local deadline
+  deadline=$(( $(date +%s) + stop_timeout_sec ))
+
+  rm -f "${ready_file}"
+  # Reverse dependency order: Ingress -> Manager Server -> Runtime Supervisor
+  stop_child_process "ingress" "${ingress_pid}" "${ingress_pid_file}" "${deadline}"
+  ingress_pid=""
+  stop_child_process "manager" "${manager_pid}" "${manager_pid_file}" "${deadline}"
+  manager_pid=""
+  stop_child_process "runtime-supervisor" "${runtime_pid}" "${runtime_pid_file}" "${deadline}"
+  runtime_pid=""
+  stop_orphaned_cpa_processes "${deadline}"
+  rm -f "${pid_file}"
+}
+
+handle_shutdown_signal() {
+  local sig="$1"
+  if [ "${shutting_down}" -eq 1 ]; then
+    return 0
+  fi
+  shutting_down=1
+  log_msg "Received SIG${sig}; shutting down 3-process stack in reverse dependency order"
+  shutdown_all_children
+  exit 0
+}
+
+handle_reload_signal() {
+  log_msg "Received SIGHUP; the native stack has no reloadable configuration and keeps running"
+}
+
+trap 'handle_shutdown_signal TERM' TERM
+trap 'handle_shutdown_signal INT' INT
+trap 'handle_reload_signal' HUP
+
+wait_for_child_readiness() {
+  local name="$1"
+  local pid="$2"
+  local check_fn="$3"
+  local max_ticks=$((startup_timeout_sec * 10))
+  local tick=0
+
+  while [ "${tick}" -lt "${max_ticks}" ]; do
+    if [ "${shutting_down}" -eq 1 ]; then
+      return 1
+    fi
+    if ! is_pid_running "${pid}"; then
+      log_err "${name} (PID ${pid}) exited prematurely before becoming ready"
+      return 1
+    fi
+    if [ -n "${runtime_pid}" ] && [ "${pid}" != "${runtime_pid}" ] && ! is_pid_running "${runtime_pid}"; then
+      log_err "runtime-supervisor (PID ${runtime_pid}) exited while waiting for ${name}"
+      return 1
+    fi
+    if [ -n "${manager_pid}" ] && [ "${pid}" != "${manager_pid}" ] && ! is_pid_running "${manager_pid}"; then
+      log_err "manager (PID ${manager_pid}) exited while waiting for ${name}"
+      return 1
+    fi
+    if "${check_fn}" "${pid}"; then
+      return 0
+    fi
+    sleep 0.1
+    tick=$((tick + 1))
+  done
+
+  log_err "Timed out after ${startup_timeout_sec}s waiting for ${name} (PID ${pid}) readiness"
+  return 1
+}
+
+spawn_runtime_supervisor() {
+  assert_listener_port_available "runtime-supervisor" "${runtime_addr}"
+  log_msg "Starting runtime-supervisor on ${runtime_addr} (CPA loopback ${cpa_addr})"
+  (
+    cd "${gateway_dir}"
+    export CPAMP_RUNTIME_ADDR="${runtime_addr}"
+    export CPAMP_RUNTIME_IDENTITY="${runtime_identity}"
+    export CPAMP_RUNTIME_TOKEN="${runtime_token}"
+    export CPAMP_RUNTIME_TOKEN_FILE="${token_file}"
+    export CPAMP_RUNTIME_JOURNAL_PATH="${journal_path}"
+    export CPAMP_RUNTIME_CPA_ADDR="${cpa_addr}"
+    export CPAMP_CPA_EXECUTABLE="${cpa_bin}"
+    if [ -n "${cpa_uid}" ]; then
+      export CPAMP_RUNTIME_CPA_UID="${cpa_uid}"
+      export CPAMP_RUNTIME_CPA_GID="${cpa_gid}"
+    fi
+    if [ -n "${cpa_manifest}" ]; then
+      export CPAMP_CPA_ARTIFACT_MANIFEST="${cpa_manifest}"
+    fi
+    exec "${runtime_bin}"
+  ) >>"${log_file}" 2>&1 &
+  runtime_pid="$!"
+
+  if ! wait_for_child_readiness "runtime-supervisor" "${runtime_pid}" check_runtime_ready; then
+    return 1
+  fi
+  write_pid_record_to "${runtime_pid_file}" "${runtime_pid}"
+  log_msg "runtime-supervisor ready (PID ${runtime_pid})"
+}
+
+spawn_manager_server() {
+  assert_listener_port_available "manager" "${manager_addr}"
+  if [ -z "${public_origin}" ]; then
+    log_msg "CPAMP_PUBLIC_ORIGIN is unset: browser origin checks fall back to each request Host (Compose parity) and Fresh routing stays disabled until it names the external URL"
+  fi
+  log_msg "Starting manager on ${manager_addr}"
+  (
+    cd "${home_dir}"
+    unset CPAMP_RUNTIME_TOKEN
+    export HTTP_ADDR="${manager_addr}"
+    export USAGE_DATA_DIR="${data_dir}"
+    export USAGE_DB_PATH="${db_path}"
+    export CPA_MANAGER_DATA_KEY_PATH="${data_key_path}"
+    export CPA_UPSTREAM_URL="${cpa_upstream_url}"
+    export CPAMP_RUNTIME_URL="${runtime_url}"
+    export CPAMP_RUNTIME_TOKEN_FILE="${token_file}"
+    export CPAMP_INGRESS_CONTROL_URL="${ingress_control_url}"
+    if [ -n "${public_origin}" ]; then
+      export CPAMP_PUBLIC_ORIGIN="${public_origin}"
+    else
+      unset CPAMP_PUBLIC_ORIGIN
+    fi
+    export USAGE_COLLECTOR_MODE="${USAGE_COLLECTOR_MODE:-auto}"
+    export USAGE_RESP_QUEUE="${USAGE_RESP_QUEUE:-usage}"
+    export USAGE_RESP_POP_SIDE="${USAGE_RESP_POP_SIDE:-right}"
+    export USAGE_BATCH_SIZE="${USAGE_BATCH_SIZE:-100}"
+    export USAGE_POLL_INTERVAL_MS="${USAGE_POLL_INTERVAL_MS:-500}"
+    export USAGE_QUERY_LIMIT="${USAGE_QUERY_LIMIT:-50000}"
+    export USAGE_CORS_ORIGINS="${USAGE_CORS_ORIGINS:-*}"
+    exec "${manager_bin}"
+  ) >>"${log_file}" 2>&1 &
+  manager_pid="$!"
+
+  if ! wait_for_child_readiness "manager" "${manager_pid}" check_manager_ready; then
+    return 1
+  fi
+  write_pid_record_to "${manager_pid_file}" "${manager_pid}"
+  log_msg "manager ready (PID ${manager_pid})"
+}
+
+spawn_ingress() {
+  assert_listener_port_available "ingress" "${ingress_addr}"
+  assert_listener_port_available "ingress-control" "${ingress_control_addr}"
+  log_msg "Starting ingress on ${ingress_addr} (control ${ingress_control_addr})"
+  (
+    cd "${home_dir}"
+    unset CPAMP_RUNTIME_TOKEN
+    export CPAMP_INGRESS_ADDR="${ingress_addr}"
+    export CPAMP_MANAGER_URL="${manager_url}"
+    export CPAMP_GATEWAY_URL="${gateway_url}"
+    export CPAMP_INGRESS_CONTROL_ADDR="${ingress_control_addr}"
+    exec "${ingress_bin}"
+  ) >>"${log_file}" 2>&1 &
+  ingress_pid="$!"
+
+  if ! wait_for_child_readiness "ingress" "${ingress_pid}" check_ingress_ready; then
+    return 1
+  fi
+  write_pid_record_to "${ingress_pid_file}" "${ingress_pid}"
+  log_msg "ingress ready (PID ${ingress_pid})"
+}
+
+write_ready_state() {
+  local tmp_ready="${ready_file}.tmp.$$"
+  prepare_private_file "${tmp_ready}"
+  {
+    printf 'launcher_pid=%s\n' "$$"
+    printf 'runtime_pid=%s\n' "${runtime_pid}"
+    printf 'manager_pid=%s\n' "${manager_pid}"
+    printf 'ingress_pid=%s\n' "${ingress_pid}"
+    printf 'ingress_addr=%s\n' "${ingress_addr}"
+    printf 'manager_addr=%s\n' "${manager_addr}"
+    printf 'runtime_addr=%s\n' "${runtime_addr}"
+    printf 'ingress_control_addr=%s\n' "${ingress_control_addr}"
+    printf 'cpa_addr=%s\n' "${cpa_addr}"
+    printf 'token_file=%s\n' "${token_file}"
+  } >"${tmp_ready}"
+  chmod 0600 "${tmp_ready}"
+  mv -f "${tmp_ready}" "${ready_file}"
+  chmod 0600 "${ready_file}"
+}
+
+rm -f "${ready_file}" "${runtime_pid_file}" "${manager_pid_file}" "${ingress_pid_file}"
+write_pid_record_to "${pid_file}" "$$" || true
+
+assert_listener_port_available "cpa-gateway" "${cpa_addr}"
+
+if ! spawn_runtime_supervisor; then
+  shutdown_all_children
+  exit 1
+fi
+
+if ! spawn_manager_server; then
+  shutdown_all_children
+  exit 1
+fi
+
+if ! spawn_ingress; then
+  shutdown_all_children
+  exit 1
+fi
+
+write_ready_state
+log_msg "All 3 processes started and ready (unified port: ${ingress_addr})"
+
+restart_count=0
+
+while [ "${shutting_down}" -eq 0 ]; do
+  crashed_name=""
+  crashed_pid=""
+
+  if ! is_pid_running "${runtime_pid}"; then
+    crashed_name="runtime-supervisor"
+    crashed_pid="${runtime_pid}"
+  elif ! is_pid_running "${manager_pid}"; then
+    crashed_name="manager"
+    crashed_pid="${manager_pid}"
+  elif ! is_pid_running "${ingress_pid}"; then
+    crashed_name="ingress"
+    crashed_pid="${ingress_pid}"
+  fi
+
+  if [ -n "${crashed_name}" ] && [ "${shutting_down}" -eq 0 ]; then
+    exit_code=0
+    wait "${crashed_pid}" 2>/dev/null || exit_code="$?"
+    if [ "${exit_code}" -eq 0 ]; then
+      exit_code=1
+    fi
+
+    if [ "${restart_count}" -lt "${max_restarts}" ]; then
+      restart_count=$((restart_count + 1))
+      log_err "Child ${crashed_name} (PID ${crashed_pid}) exited unexpectedly (code ${exit_code}); restarting (${restart_count}/${max_restarts})"
+      restarted_ok=0
+      case "${crashed_name}" in
+        runtime-supervisor)
+          rm -f "${runtime_pid_file}"
+          runtime_pid=""
+          if spawn_runtime_supervisor; then
+            restarted_ok=1
+          fi
+          ;;
+        manager)
+          rm -f "${manager_pid_file}"
+          manager_pid=""
+          if spawn_manager_server; then
+            restarted_ok=1
+          fi
+          ;;
+        ingress)
+          rm -f "${ingress_pid_file}"
+          ingress_pid=""
+          if spawn_ingress; then
+            restarted_ok=1
+          fi
+          ;;
+      esac
+
+      if [ "${restarted_ok}" -eq 1 ]; then
+        write_ready_state
+        continue
+      fi
+    fi
+
+    log_err "Child ${crashed_name} (PID ${crashed_pid}) failed (code ${exit_code}); shutting down remaining processes"
+    shutdown_all_children
+    exit "${exit_code}"
+  fi
+
+  sleep 0.1
+done

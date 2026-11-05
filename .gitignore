@@ -1,5 +1,7 @@
 # Logs
 logs
+/bin/native/run/
+/bin/native/logs/
 !apps/web/src/features/logs/
 !apps/web/src/features/logs/**
 *.log

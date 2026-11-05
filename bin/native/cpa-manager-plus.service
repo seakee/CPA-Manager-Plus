@@ -1,0 +1,59 @@
+[Unit]
+Description=CPA Manager Plus v2 (3-Process Native Service: Runtime Supervisor, Manager, Ingress)
+Documentation=https://github.com/seakee/CPA-Manager-Plus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/cpa-manager-plus
+Environment="CPA_MANAGER_PLUS_HOME=/opt/cpa-manager-plus"
+Environment="HTTP_ADDR=0.0.0.0:18317"
+Environment="USAGE_DATA_DIR=/opt/cpa-manager-plus/data"
+Environment="USAGE_DB_PATH=/opt/cpa-manager-plus/data/usage.sqlite"
+Environment="CPA_MANAGER_DATA_KEY_PATH=/opt/cpa-manager-plus/data/data.key"
+Environment="CPA_MANAGER_PLUS_RUN_DIR=/opt/cpa-manager-plus/run"
+Environment="CPA_MANAGER_PLUS_LOG_DIR=/opt/cpa-manager-plus/logs"
+Environment="CPAMP_RUNTIME_TOKEN_FILE=/opt/cpa-manager-plus/run/runtime-token"
+Environment="CPAMP_CPA_EXECUTABLE=/opt/cpa-manager-plus/bin/cli-proxy-api"
+Environment="CPAMP_RUNTIME_ADDR=127.0.0.1:18318"
+Environment="CPAMP_MANAGER_ADDR=127.0.0.1:18319"
+Environment="CPAMP_INGRESS_CONTROL_ADDR=127.0.0.1:18320"
+Environment="CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317"
+# The launcher stays root so the Runtime Supervisor can drop only CPA. The
+# dedicated CPA identity defaults to cpamp-cpa (10001:10001); cpa-manager-plusctl
+# install rewrites these values with the created user's real UID/GID.
+Environment="CPAMP_RUNTIME_CPA_UID=10001"
+Environment="CPAMP_RUNTIME_CPA_GID=10001"
+EnvironmentFile=-/opt/cpa-manager-plus/cpa-manager-plus.env
+ExecStart=/opt/cpa-manager-plus/bin/cpa-manager-plus-launcher
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+# Filesystem and privilege hardening. The launcher and Supervisor need root
+# only to drop CPA and to own private state, never to escape their install
+# directories. SIGHUP is intentionally not a reload signal.
+ProtectSystem=strict
+ReadWritePaths=/opt/cpa-manager-plus/data /opt/cpa-manager-plus/run /opt/cpa-manager-plus/logs
+ProtectHome=true
+PrivateDevices=true
+PrivateTmp=true
+NoNewPrivileges=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_KILL CAP_SETGID CAP_SETUID
+
+[Install]
+WantedBy=multi-user.target

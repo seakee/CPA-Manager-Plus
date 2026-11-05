@@ -733,10 +733,15 @@ jobs:
       - name: Test native control scripts
         run: npx vitest run tests/nativeControlScripts.test.mjs
 
+      - name: Test v2 native linux/amd64 launcher and packaging
+        if: runner.os != 'Windows'
+        shell: bash
+        run: node --test bin/native/native-launcher.test.mjs
+
       - name: Validate native packaging script syntax
         if: runner.os != 'Windows'
         shell: bash
-        run: bash -n bin/release/package-native.sh
+        run: bash -n bin/native/cpa-manager-plus-launcher bin/native/cpa-manager-plusctl.sh bin/release/package-native.sh
 
   docker-build:
     name: Docker Build
