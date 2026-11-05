@@ -895,23 +895,39 @@ func TestPreflightBlocksAMarkerThePinnedReleaseLacks(t *testing.T) {
 			revision:   "0",
 			wantDetail: `usage_cache_accounting_semantics_revision="0" (invalid)`,
 		},
+		{
+			name:       "negative revision",
+			revision:   "-1",
+			wantDetail: `usage_cache_accounting_semantics_revision="-1" (invalid)`,
+		},
 	}
 	for _, testCase := range livePinCases {
 		t.Run("live pin: "+testCase.name, func(t *testing.T) {
 			fixture := newSourceFixture(t, func(t *testing.T, db *sql.DB) {
 				setCacheAccountingRevision(t, db, testCase.revision)
 			})
-			report := preflight(t, fixture.root, declared())
-			requireBlocked(t, report, CodeSourceVersionUnsupported)
-			check, found := checkByName(report, CheckSourceVersion)
-			if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
-				t.Fatalf("version check = %+v, want blocked %s", check, CodeSourceVersionUnsupported)
-			}
-			if !strings.Contains(check.Detail, testCase.wantDetail) {
-				t.Fatalf("version detail %q does not name %q", check.Detail, testCase.wantDetail)
-			}
-			if strings.Contains(check.Detail, "expected=") || strings.Contains(check.Detail, "declared=") {
-				t.Fatalf("version detail %q repeats the matching declaration next to the refusal", check.Detail)
+			wantFullDetail := "source is newer than the pinned release " + pinnedSourceVersion() + "; markers from later releases: " + testCase.wantDetail
+			for _, mode := range []struct {
+				name string
+				opts Options
+			}{
+				{name: "declared", opts: declared()},
+				{name: "read-only undeclared", opts: Options{AcceptUndeclaredVersion: true}},
+			} {
+				t.Run(mode.name, func(t *testing.T) {
+					report := preflight(t, fixture.root, mode.opts)
+					if report.Ready {
+						t.Fatalf("Ready = true for %s (%s), want false", testCase.name, mode.name)
+					}
+					requireBlocked(t, report, CodeSourceVersionUnsupported)
+					check, found := checkByName(report, CheckSourceVersion)
+					if !found || check.Status != StatusBlocked || check.Code != CodeSourceVersionUnsupported {
+						t.Fatalf("version check = %+v, want blocked %s", check, CodeSourceVersionUnsupported)
+					}
+					if check.Detail != wantFullDetail {
+						t.Fatalf("version detail = %q, want %q", check.Detail, wantFullDetail)
+					}
+				})
 			}
 		})
 	}
@@ -1122,9 +1138,12 @@ func TestVersionLadderFollowsThePin(t *testing.T) {
 	unreadable := source
 	unreadable.settings = map[string]string{"usage_cache_accounting_semantics_revision": "corrupt"}
 	if newer := pinnedLadder.newer(unreadable); !reflect.DeepEqual(newer, []markerEvidence{
-		{label: `usage_cache_accounting_semantics_revision="corrupt" (invalid)`, release: "invalid"},
+		{label: `usage_cache_accounting_semantics_revision="corrupt"`, release: "invalid"},
 	}) {
 		t.Fatalf("newer against %s with an unreadable revision = %v, want an invalid observation", pinnedSourceVersion(), newer)
+	}
+	if got := pinnedLadder.newer(unreadable)[0].String(); got != `usage_cache_accounting_semantics_revision="corrupt" (invalid)` {
+		t.Fatalf("invalid marker string = %q, want single (invalid) suffix", got)
 	}
 	fourLadder, err := newVersionLadder("v1.14.4")
 	if err != nil {

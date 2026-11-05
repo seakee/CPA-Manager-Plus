@@ -386,20 +386,7 @@ func versionCheck(kind string, v2Tables []string, missingTables []string, newer 
 		check.Code = CodeSourceVersionUnsupported
 		check.Detail = fmt.Sprintf("expected=%s declared=%s missingTables=%s; the source does not carry the v1.14 structure",
 			pinned, declaredVersion(declared), strings.Join(missingTables, ","))
-	case strings.TrimSpace(declared) == "" && acceptUndeclared:
-		// A read-only caller cannot declare the release, and the version is not
-		// recoverable from the database. Saying so is the honest answer; calling
-		// it a refusal would make a source that is otherwise sound unusable from
-		// the one surface that can finish the operation.
-		check.Status = StatusPending
-		check.Code = CodeSourceVersionDeclaredAtCopyIn
-		check.ExpectedVersion = pinned
-		check.Detail = fmt.Sprintf("expected=%s declared=none; a read-only check cannot declare it — the CLI copy-in declares the release with --source-version %s", pinned, pinned)
-	case strings.TrimSpace(declared) == "":
-		check.Status = StatusBlocked
-		check.Code = CodeSourceVersionUndeclared
-		check.Detail = fmt.Sprintf("expected=%s declared=none; pass the 1.x release the source was running", pinned)
-	case declared != pinned:
+	case strings.TrimSpace(declared) != "" && declared != pinned:
 		check.Status = StatusBlocked
 		check.Code = CodeSourceVersionUnsupported
 		check.Detail = fmt.Sprintf("expected=%s declared=%s", pinned, declared)
@@ -412,6 +399,20 @@ func versionCheck(kind string, v2Tables []string, missingTables []string, newer 
 		}
 		check.Detail = fmt.Sprintf("source is newer than the pinned release %s; markers from later releases: %s",
 			pinned, strings.Join(labels, ", "))
+	case strings.TrimSpace(declared) == "" && acceptUndeclared:
+		// A read-only caller cannot declare the release, and the version is not
+		// recoverable from the database. Saying so is the honest answer once the
+		// schema itself carries no newer or corrupt marker; calling it a refusal
+		// would make a source that is otherwise sound unusable from the one
+		// surface that can finish the operation.
+		check.Status = StatusPending
+		check.Code = CodeSourceVersionDeclaredAtCopyIn
+		check.ExpectedVersion = pinned
+		check.Detail = fmt.Sprintf("expected=%s declared=none; a read-only check cannot declare it — the CLI copy-in declares the release with --source-version %s", pinned, pinned)
+	case strings.TrimSpace(declared) == "":
+		check.Status = StatusBlocked
+		check.Code = CodeSourceVersionUndeclared
+		check.Detail = fmt.Sprintf("expected=%s declared=none; pass the 1.x release the source was running", pinned)
 	default:
 		check.Detail = fmt.Sprintf("expected=%s declared=%s; structural lower bound satisfied", pinned, declared)
 	}
@@ -447,25 +448,25 @@ type sourceMarker struct {
 // strconv.Itoa of a positive revision, so a row that cannot be read as one was
 // not written by a 1.x release this build knows; treating it as absent is the
 // fail-open direction — the source would pass as if it carried nothing newer.
-func (s sourceSchema) observedLabel(marker sourceMarker) (string, bool) {
+func (s sourceSchema) observedLabel(marker sourceMarker) (string, bool, bool) {
 	switch marker.kind {
 	case markerIndex:
-		return marker.name, s.indexes[marker.name]
+		return marker.name, false, s.indexes[marker.name]
 	case markerSetting:
 		observed, found := s.settings[marker.name]
 		if !found {
-			return "", false
+			return "", false, false
 		}
 		value, err := strconv.Atoi(strings.TrimSpace(observed))
 		if err != nil || value < 1 {
-			return fmt.Sprintf("%s=%q (invalid)", marker.name, observed), true
+			return fmt.Sprintf("%s=%q", marker.name, observed), true, true
 		}
 		if value < marker.floor {
-			return "", false
+			return "", false, false
 		}
-		return fmt.Sprintf("%s=%d", marker.name, value), true
+		return fmt.Sprintf("%s=%d", marker.name, value), false, true
 	default:
-		return marker.name, s.tables[marker.name]
+		return marker.name, false, s.tables[marker.name]
 	}
 }
 
@@ -603,12 +604,12 @@ func newVersionLadder(pinned string) (versionLadder, error) {
 func (l versionLadder) newer(s sourceSchema) []markerEvidence {
 	newer := []markerEvidence{}
 	for _, candidate := range l.after {
-		label, ok := s.observedLabel(candidate.marker)
+		label, invalid, ok := s.observedLabel(candidate.marker)
 		if !ok {
 			continue
 		}
 		release := candidate.release
-		if strings.HasSuffix(label, " (invalid)") {
+		if invalid {
 			release = "invalid"
 		}
 		newer = append(newer, markerEvidence{label: label, release: release})
