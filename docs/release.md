@@ -393,3 +393,100 @@ curated note body outside that directory.
 | chore    | Chore       |
 | ci       | CI          |
 | build    | Build       |
+
+## v2 image licenses and component provenance
+
+All three v2 Dockerfiles require explicit `VERSION` and `SOURCE_COMMIT` build
+arguments. The first build stage of each file validates both before any Web or
+Go build: `VERSION` must be 1-128 characters starting alphanumeric and limited
+to `[A-Za-z0-9._+-]`, must not be `unknown` (case-insensitive), and
+`SOURCE_COMMIT` must be an exact lowercase 40-hex commit. Empty, `unknown`, and
+malformed values therefore stop the build in the early guard instead of at the
+evidence stage. For example, from a clean, reviewed source tree:
+
+```sh
+docker buildx build --platform linux/amd64 \
+  --build-arg VERSION=2.0.0-beta.1 \
+  --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" \
+  -f Dockerfile.ingress .
+```
+
+The same arguments are required for `Dockerfile.manager-server` and every final
+target of `Dockerfile.runtime`. The Compose profiles forward `VERSION` (default
+`dev`) and `SOURCE_COMMIT` (no default, so Compose builds fail closed); export
+`SOURCE_COMMIT="$(git rev-parse HEAD)"` before `docker compose build`,
+`docker compose -f docker-compose.manager.yml up --build`, or the
+`docker-compose.fresh-auth-proof.yml` proof profile. `build-embedded-candidate.sh`
+forwards both to every image, not just Manager.
+
+Each final image sets the OCI version, revision,
+and source labels and includes `/usr/local/share/cpamp/provenance.json` (schema
+version 1). That JSON identifies the image role, platform, product version,
+repository, source commit, and SHA256 of each packaged component: Manager and
+the Full Web file-set manifest; Ingress; or Supervisor and the independently
+versioned CPA executable/artifact. CPA provenance links its upstream release;
+it does not misattribute CPA to CPAMP's source commit.
+
+`collect-third-party-licenses.py` performs deterministic, offline collection
+after the normal locked dependency installation. Original Go module licenses,
+nested NOTICE/copyright files, Go standard-library/vendor notices, and the Web
+production dependency closure (including installed peers and optional packages)
+are copied unchanged into `/usr/local/share/licenses/<component>/`. Docs and
+Web development-only dependencies are not shipped in this collection. Module
+replacements, unavailable declared modules, missing required npm dependencies,
+locked-version mismatches, and missing originals fail the build. Registry
+integrity is recorded when present in the lock; absent integrity is recorded as
+absent, never invented or described as independently verified artifact integrity.
+
+Three npm distributions omit original license files. Their exact upstream texts
+are vendored under `bin/release/third-party-license-sources/`, with immutable
+source URLs, SHA256, package version and available integrity in `manifest.json`.
+The two UIW notices match the registry's exact gitHead. For
+`html-parse-stringify@3.0.1`, upstream added the original LICENSE in the immediate
+child of its registry gitHead (license-only change, upstream issue #61). Both
+revisions and this distinction are recorded; no release-era notice is fabricated.
+Changing these package versions requires collecting and reviewing new originals,
+not copying a generic MIT template.
+
+The base-image component records **every package installed in the final base**,
+before installing audit-only tools in a separate stage. Debian records preserve
+the original packaged copyright files. Alpine records preserve exact package
+versions and installed APK SPDX license expressions, plus any packaged original
+notices. Alpine package metadata is explicitly **not** represented as a complete
+set of upstream license texts. Audit Python and its dependencies never enter the
+final image or its base-package inventory. Every image retains CPAMP's original
+MIT license at `/usr/local/share/licenses/cpamp/LICENSE`; every runtime target
+also retains the archive's original CPA license at
+`/usr/local/share/licenses/cli-proxy-api/LICENSE`.
+
+Each component has a nonempty `inventory.json` with dependency identities and
+SHA256 of copied originals. The aggregate
+`/usr/local/share/cpamp/release/third-party-inventory.txt` is JSON despite its
+historical filename: `VERIFIED_LICENSE_COLLECTION` means collection, identity,
+source-input and copied-byte checks passed, **not legal approval**. Its hash is
+bound into provenance. The checked-in file of the same name is the deterministic
+source-manifest ledger, embedded separately as `source-dependency-inventory.json`;
+it is not a pre-generated claim about mutable base-image packages. Regenerate it
+when the Go/Web manifests or lock change:
+
+```sh
+python3 bin/release/collect-third-party-licenses.py source --root . \
+  --output bin/release/embedded-third-party-inventory.txt
+```
+
+`verify-embedded-candidate.py` reads final OCI filesystem bytes without running
+entrypoints, verifies all inventoried notice hashes and declared module coverage,
+compares the source ledger with the checked source, and checks provenance against
+labels, packaged binary/Web-manifest hashes and the pinned CPA artifact. Existing
+`go version -m` binary/module and Manager linker-stamp checks remain enforced.
+Unsigned component source claims do not replace protected-producer attestations,
+independent legal acceptance, or release/readiness authorization.
+
+Focused offline tests (also wired into `npm run test:repo`):
+
+```sh
+python3 -m unittest discover -s tests -p image_evidence_test.py
+python3 -m unittest discover -s tests -p embedded_candidate_contract_test.py
+python3 bin/ci/test-check-v2-private-candidate.py
+```
+

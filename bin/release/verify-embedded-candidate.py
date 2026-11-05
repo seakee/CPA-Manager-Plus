@@ -7,6 +7,7 @@ A self-asserted build event is NOT protected-producer provenance.
 import argparse
 import hashlib
 import io
+import importlib.util
 import gzip
 import json
 import re
@@ -22,6 +23,9 @@ ROLES = ("manager", "ingress", "runtime")
 SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE = "https://github.com/seakee/CPA-Manager-Plus"
 CANDIDATE_VERSION = "2.0.0-r1candidate"
+evidence_spec = importlib.util.spec_from_file_location("image_evidence", Path(__file__).with_name("image-evidence.py"))
+image_evidence = importlib.util.module_from_spec(evidence_spec)
+evidence_spec.loader.exec_module(image_evidence)
 CPA_SHA = "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
 CPA_LICENSE_SHA = "879792e89cf1bdd6a8d446033ec87e30496f97dcafc4656dc53f641509b346a6"
 CPA_ARCHIVE_SHA = "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3"
@@ -43,6 +47,8 @@ WANTED = {
         LICENSE, NOTICE,
     ),
 }
+WANTED = {role: paths + (image_evidence.PROVENANCE, image_evidence.SOURCE_INVENTORY)
+          for role, paths in WANTED.items()}
 MAX_BLOB = 512 * 1024 * 1024
 MAX_FILE = 128 * 1024 * 1024
 MAX_UNCOMPRESSED_LAYER = 768 * 1024 * 1024
@@ -257,7 +263,7 @@ def final_files(archive, layers, diff_ids, wanted):
                             del result[target]
                             permissions.pop(target, None)
                     continue
-                if name not in wanted:
+                if name not in wanted and (not name.startswith(image_evidence.LICENSE_ROOT) or member.isdir()):
                     continue
                 require(member.isfile() and member.size <= MAX_FILE,
                         "missing regular file in final image: " + name)
@@ -265,7 +271,7 @@ def final_files(archive, layers, diff_ids, wanted):
                 require(stream is not None, "unreadable final image file: " + name)
                 result[name] = stream.read()
                 permissions[name] = member.mode
-    require(set(result) == set(wanted), "missing packaged files: " +
+    require(set(wanted) <= set(result), "missing packaged files: " +
             ", ".join(sorted(set(wanted) - set(result))))
     return result, permissions
 
@@ -318,7 +324,11 @@ def inspect(path, role, source_sha, event, root_license, seed, runtime_entrypoin
                 "candidate build event or role mismatch")
         files, modes = final_files(archive, layers, rootfs["diff_ids"], WANTED[role])
         require(files[LICENSE] == root_license, "CPAMP LICENSE differs from source")
-        require(files[NOTICE].startswith(b"NOT_VERIFIED"), "third-party inventory must explicitly remain unverified")
+        inventory = json_object(files[NOTICE], "third-party inventory")
+        image_evidence.validate_inventory(inventory, role, files.__getitem__)
+        provenance = json_object(files[image_evidence.PROVENANCE], "component provenance")
+        image_evidence.validate_provenance(provenance, role, CANDIDATE_VERSION, source_sha, files.__getitem__)
+        require(provenance["platform"] == "linux/amd64", "provenance platform mismatch")
         for path_ in WANTED[role]:
             if path_.startswith("/usr/local/bin/"):
                 require(modes[path_] & 0o111 and not modes[path_] & 0o6000,
@@ -384,8 +394,8 @@ def verify(paths, source_sha, event, root):
                             license_bytes, seed, runtime_entrypoint)
               for role in ROLES}
     for role in ROLES:
-        require(result[role]["packagedFiles"][NOTICE] == digest(inventory_bytes),
-                "final image third-party inventory differs from checked source: " + role)
+        require(result[role]["packagedFiles"][image_evidence.SOURCE_INVENTORY] == digest(inventory_bytes),
+                "final image source dependency inventory differs from checked source: " + role)
     require(result["manager"]["packagedFiles"][API_CONTRACT] == digest(api_contract_bytes),
             "final Manager public API transport contract differs from checked source")
     require(len({result[role]["platformManifestDigest"] for role in ROLES}) == 3,
@@ -405,7 +415,7 @@ def verify(paths, source_sha, event, root):
         "notVerified": [
             "trusted production producer identity or independent registry readback",
             "Full Web compiled embed and one source-paired Web/API transport fixture tested, but complete functional API compatibility",
-            "third-party LICENSE/NOTICE legal sufficiency (inventory only)",
+            "independent legal acceptance of collected third-party licenses and base-package records",
             "Host, network, startup, readiness, rollback (historical 1.x contract tested separately)",
             "production release, beta, mutable aliases or channels",
         ],

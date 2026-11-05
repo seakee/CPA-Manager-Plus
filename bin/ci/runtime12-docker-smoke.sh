@@ -2,6 +2,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The Dockerfiles fail closed on identity; bind a local build to this checkout.
+export VERSION="${VERSION:-dev}"
+export SOURCE_COMMIT="${SOURCE_COMMIT:-$(git -C "${repo_root}" rev-parse HEAD)}"
 project="${CPAMP_SMOKE_PROJECT:-cpamp-runtime13-${RANDOM}-$$}"
 public_port="${CPAMP_SMOKE_PORT:-28317}"
 skip_build="${CPAMP_SMOKE_SKIP_BUILD:-false}"

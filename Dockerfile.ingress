@@ -1,21 +1,59 @@
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS ingress-build
 
+ARG VERSION
+ARG SOURCE_COMMIT
 ARG TARGETOS
 ARG TARGETARCH
+# Fail closed on malformed identity before the Go build and license collection.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
+RUN apk add --no-cache python3
+COPY bin/release/collect-third-party-licenses.py /collect-third-party-licenses.py
 WORKDIR /src/apps/ingress
-COPY apps/ingress/go.mod ./
 COPY apps/ingress ./
+RUN go mod download
+RUN python3 /collect-third-party-licenses.py go --module /src/apps/ingress --component ingress --output /out/licenses/ingress
 RUN test "$TARGETOS" = "linux"
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/cpamp-ingress ./cmd/cpamp-ingress
 
-FROM alpine:3.21
+FROM alpine:3.21 AS ingress-base
 RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S cpamp \
     && adduser -S -G cpamp -H cpamp
+
+FROM ingress-base AS ingress-evidence
+ARG VERSION
+ARG SOURCE_COMMIT
+ARG TARGETOS
+ARG TARGETARCH
+RUN mkdir -p /base/lib/apk/db && cp /lib/apk/db/installed /base/lib/apk/db/installed \
+    && if test -d /usr/share/licenses; then mkdir -p /base/usr/share; cp -a /usr/share/licenses /base/usr/share/; fi
+RUN apk add --no-cache python3
+COPY bin/release/collect-third-party-licenses.py bin/release/image-evidence.py /tools/
+COPY bin/release/embedded-third-party-inventory.txt /source-inventory.json
+COPY LICENSE /image/usr/local/share/licenses/cpamp/LICENSE
+COPY --from=ingress-build /out/cpamp-ingress /image/usr/local/bin/cpamp-ingress
+COPY --from=ingress-build /out/licenses/ingress/ /image/usr/local/share/licenses/ingress/
+RUN python3 /tools/collect-third-party-licenses.py base --kind alpine --root /base --output /image/usr/local/share/licenses/base-image \
+    && python3 /tools/image-evidence.py --root /image --role ingress --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
+      --platform "$TARGETOS/$TARGETARCH" --source-inventory /source-inventory.json
+
+FROM ingress-base
+ARG VERSION
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.version=$VERSION \
+      org.opencontainers.image.revision=$SOURCE_COMMIT \
+      org.opencontainers.image.source="https://github.com/seakee/CPA-Manager-Plus"
 COPY --from=ingress-build /out/cpamp-ingress /usr/local/bin/cpamp-ingress
-COPY LICENSE /usr/local/share/licenses/cpamp/LICENSE
-COPY bin/release/embedded-third-party-inventory.txt /usr/local/share/cpamp/release/third-party-inventory.txt
+COPY --from=ingress-evidence /image/usr/local/share/licenses/ /usr/local/share/licenses/
+COPY --from=ingress-evidence /image/usr/local/share/cpamp/ /usr/local/share/cpamp/
 USER cpamp:cpamp
 EXPOSE 18317
 ENTRYPOINT ["/usr/local/bin/cpamp-ingress"]

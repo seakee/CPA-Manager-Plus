@@ -3,6 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ingress
+      # These images fail closed unless VERSION and a 40-hex SOURCE_COMMIT are
+      # supplied. Local builds must export SOURCE_COMMIT="$(git rev-parse HEAD)".
+      args:
+        VERSION: '${VERSION:-dev}'
+        SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
     image: seakee/cpamp-ingress:latest
     restart: unless-stopped
     ports:
@@ -22,6 +27,7 @@ services:
       dockerfile: Dockerfile.manager-server
       args:
         VERSION: '${VERSION:-dev}'
+        SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
     image: seakee/cpa-manager-plus:latest
     restart: unless-stopped
     expose:
@@ -56,6 +62,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.runtime
+      args:
+        VERSION: '${VERSION:-dev}'
+        SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
     image: seakee/cpamp-runtime:latest
     restart: unless-stopped
     expose:

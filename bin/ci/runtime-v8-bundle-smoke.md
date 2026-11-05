@@ -75,18 +75,23 @@ GOCACHE, then executed in a disposable `golang:1.26-bookworm` container with
 
 ## Commands and results
 
-Task scratch: `/tmp/cpamp-d1-Fkf0rI`. These are the actual build/smoke commands,
+Task scratch: `/tmp/cpamp-d1-Fkf0rI`. These are the recorded build/smoke commands,
 all exit **0** except the deliberate unsupported-platform negative (exit **1**).
-No custom build args; automatic TARGETOS/TARGETARCH=linux/amd64, explicit target
+The 2026-10-19 run predates the fail-closed identity guard, so the commands below
+now carry the required `--build-arg VERSION=dev --build-arg
+SOURCE_COMMIT="$revision"`; those arguments do not change the packaged bytes.
+`TARGETOS`/`TARGETARCH=linux/amd64` remain automatic and the explicit targets are
 as shown. Downloads and both hardcoded checks ran (not cached) in the first v8
 build: archive and `/out/cli-proxy-api` each report `OK`.
 
 ```sh
-docker buildx build --platform linux/amd64 --target v8-amd64-candidate -f Dockerfile.runtime --load -t cpamp-d1-runtime:local --metadata-file /tmp/cpamp-d1-Fkf0rI/build-metadata.json --progress plain .
-docker buildx build --platform linux/amd64 -f Dockerfile.ingress --load -t cpamp-d1-ingress:local --metadata-file /tmp/cpamp-d1-Fkf0rI/ingress-metadata.json --progress plain .
+revision=$(git rev-parse HEAD)
+docker buildx build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" --target v8-amd64-candidate -f Dockerfile.runtime --load -t cpamp-d1-runtime:local --metadata-file /tmp/cpamp-d1-Fkf0rI/build-metadata.json --progress plain .
+docker buildx build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" -f Dockerfile.ingress --load -t cpamp-d1-ingress:local --metadata-file /tmp/cpamp-d1-Fkf0rI/ingress-metadata.json --progress plain .
 python3 bin/ci/runtime-v8-bundle-smoke.py cpamp-d1-runtime:local cpamp-d1-ingress:local /tmp/cpamp-d1-Fkf0rI/smoke-final
+# Arch rejection stops inside cpa-v8-download, before any identity stage.
 docker buildx build --platform linux/arm64 --target cpa-v8-download -f Dockerfile.runtime --progress plain .
-docker buildx build --platform linux/amd64 -f Dockerfile.runtime --load -t cpamp-d1-runtime-v7:local --progress plain .
+docker buildx build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" -f Dockerfile.runtime --load -t cpamp-d1-runtime-v7:local --progress plain .
 docker run --rm --network none --entrypoint sh cpamp-d1-runtime-v7:local -ec 'cat /usr/local/share/cpamp/runtime/cpa-artifact.json; sha256sum /usr/local/bin/cli-proxy-api /usr/local/share/cpamp/runtime/config.seed.yaml'
 git diff --check
 ```

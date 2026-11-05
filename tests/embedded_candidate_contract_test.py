@@ -15,13 +15,13 @@ import sys
 from unittest.mock import patch
 from pathlib import Path
 
+from image_evidence_fixtures import SOURCE_BYTES, make_evidence
 VERIFIER = Path(__file__).resolve().parents[1] / "bin/release/verify-embedded-candidate.py"
 spec = importlib.util.spec_from_file_location("embedded_candidate", VERIFIER)
 subject = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(subject)
 SHA = "a" * 40
 EVENT = "local-test-event"
-MOCK_NOTICE = b"NOT_VERIFIED: license inventory only"
 MOCK_RUNTIME_ENTRYPOINT = b"#!/bin/sh\n"
 MOCK_API_CONTRACT = json.dumps({
     "schemaVersion": 1, "qualification": subject.API_CONTRACT_QUALIFICATION,
@@ -63,13 +63,12 @@ ROLE_BINARIES = {}
 def make_oci(destination, role, license_bytes, *,
              source=SHA, event=EVENT, arch="amd64", corrupt=False, missing=None,
              bad_descriptor_size=False, bad_descriptor_type=False, bad_diff_id=False,
-             notice_bytes=MOCK_NOTICE, api_contract=MOCK_API_CONTRACT,
+             source_inventory=SOURCE_BYTES, api_contract=MOCK_API_CONTRACT,
              bad_mode=None, invalid_elf=False, wrong_module=False, wrong_source_stamp=False,
              wrong_sha_suffix=False, wrong_version_suffix=False, wrong_entrypoint=False,
              wrong_cmd=False, runtime_script=MOCK_RUNTIME_ENTRYPOINT):
     files = {
         "/usr/local/share/licenses/cpamp/LICENSE": license_bytes,
-        subject.NOTICE: notice_bytes,
     }
     if role == "manager":
         files["/usr/local/bin/cpa-manager-plus"] = (
@@ -98,11 +97,12 @@ def make_oci(destination, role, license_bytes, *,
         files["/usr/local/bin/cli-proxy-api"] = ROLE_BINARIES["ingress"]
         files["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = json.dumps({
             "schemaVersion": 1, "engine": "cpa", "version": "8.0.13",
-            "artifactId": "sha256:" + subject.CPA_SHA,
+            "artifactId": blob(ROLE_BINARIES["ingress"]),
         }).encode()
         files["/usr/local/share/cpamp/runtime/config.seed.yaml"] = b"seed"
         files["/usr/local/bin/cpamp-runtime-v8-entrypoint"] = runtime_script
         files["/usr/local/share/licenses/cli-proxy-api/LICENSE"] = b"official"
+    files = make_evidence(role, files, source_inventory)
     if missing:
         files.pop(missing)
     uncompressed = tar_content(files, bad_mode=bad_mode)
@@ -224,7 +224,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         entrypoint.write_bytes(MOCK_RUNTIME_ENTRYPOINT)
         inventory = self.root / "bin/release/embedded-third-party-inventory.txt"
         inventory.parent.mkdir(parents=True)
-        inventory.write_bytes(MOCK_NOTICE)
+        inventory.write_bytes(SOURCE_BYTES)
         api = self.root / "tests/fixtures/r1-embedded-api-transport.json"
         api.parent.mkdir(parents=True)
         api.write_bytes(MOCK_API_CONTRACT)
@@ -245,8 +245,8 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             make_oci(archives["ingress"], "ingress", self.license, event="wrong-event")
             with self.assertRaisesRegex(ValueError, "build event"):
                 subject.verify(archives, SHA, EVENT, self.root)
-            make_oci(archives["ingress"], "ingress", self.license, notice_bytes=MOCK_NOTICE + b" tampered")
-            with self.assertRaisesRegex(ValueError, "third-party inventory differs"):
+            make_oci(archives["ingress"], "ingress", self.license, source_inventory=SOURCE_BYTES + b" ")
+            with self.assertRaisesRegex(ValueError, "source dependency inventory differs"):
                 subject.verify(archives, SHA, EVENT, self.root)
             make_oci(archives["ingress"], "ingress", self.license)
             make_oci(archives["manager"], "manager", self.license, api_contract=MOCK_API_CONTRACT + b" ")

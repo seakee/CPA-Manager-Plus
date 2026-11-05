@@ -59,12 +59,16 @@ for Linux/amd64, using the Runtime target `v8-amd64-loopback-proof` and the fixe
 official CPA v8.0.13 executable. Do not rebuild or modify CPA from source.
 
 ```sh
+revision=$(git rev-parse HEAD)
 docker buildx build --platform linux/amd64 --target v8-amd64-loopback-proof \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
   -f Dockerfile.runtime --load -t cpamp-s2a-runtime:private .
-docker buildx build --platform linux/amd64 -f Dockerfile.manager-server \
-  --load -t cpamp-s2a-manager:private .
-docker buildx build --platform linux/amd64 -f Dockerfile.ingress \
-  --load -t cpamp-s2a-ingress:private .
+docker buildx build --platform linux/amd64 \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.manager-server --load -t cpamp-s2a-manager:private .
+docker buildx build --platform linux/amd64 \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.ingress --load -t cpamp-s2a-ingress:private .
 CPAMP_PROOF_IMAGE_PREFIX=cpamp-s2a CPAMP_PROOF_IMAGE_TAG=private \
   python3 bin/ci/fresh-s1-docker-proof.py bin/tmp/s2a/new-main --s2a
 CPAMP_PROOF_IMAGE_PREFIX=cpamp-s2a CPAMP_PROOF_IMAGE_TAG=private \

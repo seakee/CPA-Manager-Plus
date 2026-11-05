@@ -70,9 +70,13 @@ External/Upgrade migration and production rollback qualification remain separate
 Use unique local tags and new disposable evidence directories. No image push.
 
 ~~~sh
-docker buildx build --platform linux/amd64 -f Dockerfile.runtime --load -t cpamp-default-v8:task-amd64 .
-docker buildx build --platform linux/amd64 -f Dockerfile.manager-server --load -t cpamp-default-v8-manager:task .
-docker buildx build --platform linux/amd64 -f Dockerfile.ingress --load -t cpamp-default-v8-ingress:task .
+revision=$(git rev-parse HEAD)
+docker buildx build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.runtime --load -t cpamp-default-v8:task-amd64 .
+docker buildx build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.manager-server --load -t cpamp-default-v8-manager:task .
+docker buildx build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.ingress --load -t cpamp-default-v8-ingress:task .
 docker pull python:3.13-alpine
 python3 bin/ci/runtime-v8-default-smoke.py \
   cpamp-default-v8:task-amd64 cpamp-default-v8-manager:task cpamp-default-v8-ingress:task \

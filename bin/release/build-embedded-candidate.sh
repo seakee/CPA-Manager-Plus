@@ -88,6 +88,8 @@ for role in manager ingress runtime; do
   esac
   args=(
     --platform linux/amd64
+    --build-arg "SOURCE_COMMIT=$source_sha"
+    --build-arg VERSION=2.0.0-r1candidate
     --tag "cpamp-r1-$role:candidate"
     --label "org.opencontainers.image.revision=$source_sha"
     --label "org.opencontainers.image.source=https://github.com/seakee/CPA-Manager-Plus"
@@ -103,9 +105,6 @@ for role in manager ingress runtime; do
     --output "type=docker,dest=$output/$role.docker.tar"
   )
   if [[ -n "$target" ]]; then args+=(--target "$target"); fi
-  if [[ "$role" == manager ]]; then
-    args+=(--build-arg "SOURCE_COMMIT=$source_sha" --build-arg VERSION=2.0.0-r1candidate)
-  fi
   # `${arr[@]+...}` keeps the empty array legal under `set -u` in bash 3.2.
   docker buildx build ${builder_args[@]+"${builder_args[@]}"} "${args[@]}" \
     --file "$snapshot/$file" "$snapshot"

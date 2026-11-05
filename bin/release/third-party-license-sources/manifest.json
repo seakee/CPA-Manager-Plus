@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "reason": "These published npm archives omit original MIT license files. Original upstream texts are pinned by immutable source revision and SHA256, never synthesized from SPDX expressions.",
+  "packages": [
+    {
+      "name": "@uiw/react-codemirror",
+      "version": "4.25.3",
+      "integrity": "sha512-1wtBZTXPIp8u6F/xjHvsUAYlEeF5Dic4xZBnqJyLzv7o7GjGYEUfSz9Z7bo9aK9GAx2uojG/AuBMfhA4uhvIVQ==",
+      "registry": "https://registry.npmjs.org/@uiw%2freact-codemirror/4.25.3",
+      "sourceCommit": "497bc041aeb9559cbebbe21a897955ca18b8f032",
+      "source": "https://raw.githubusercontent.com/uiwjs/react-codemirror/497bc041aeb9559cbebbe21a897955ca18b8f032/LICENSE",
+      "path": "react-codemirror-4.25.3/LICENSE",
+      "sha256": "sha256:fd1f049b3bb5cbaf5143516b72dbc6805cd30cca0cda94edb37160e37662fd17"
+    },
+    {
+      "name": "@uiw/codemirror-extensions-basic-setup",
+      "version": "4.25.3",
+      "integrity": "sha512-F1doRyD50CWScwGHG2bBUtUpwnOv/zqSnzkZqJcX5YAHQx6Z1CuX8jdnFMH6qktRrPU1tfpNYftTWu3QIoHiMA==",
+      "registry": "https://registry.npmjs.org/@uiw%2fcodemirror-extensions-basic-setup/4.25.3",
+      "sourceCommit": "497bc041aeb9559cbebbe21a897955ca18b8f032",
+      "source": "https://raw.githubusercontent.com/uiwjs/react-codemirror/497bc041aeb9559cbebbe21a897955ca18b8f032/LICENSE",
+      "path": "react-codemirror-4.25.3/LICENSE",
+      "sha256": "sha256:fd1f049b3bb5cbaf5143516b72dbc6805cd30cca0cda94edb37160e37662fd17"
+    },
+    {
+      "name": "html-parse-stringify",
+      "version": "3.0.1",
+      "integrity": "",
+      "registryIntegrity": "sha512-KknJ50kTInJ7qIScF3jeaFRpMpE8/lfiTdzf/twXyPBLAGrLRTmkz3AdTnKeh40X8k9L2fdYwEp/42WGXIRGcg==",
+      "registry": "https://registry.npmjs.org/html-parse-stringify/3.0.1",
+      "packageSourceCommit": "ce46022f537ef9b050fac592f9fcc30bf838e5ba",
+      "sourceCommit": "a2659e6eac3603ba8b46958e0bd35b337108261f",
+      "source": "https://raw.githubusercontent.com/HenrikJoreteg/html-parse-stringify/a2659e6eac3603ba8b46958e0bd35b337108261f/LICENSE",
+      "reason": "The lock records version but no integrity. The registry gitHead has only an MIT declaration; its immediate child adds the original LICENSE (upstream issue #61), with no code changes. Preserve this upstream-added notice and its distinct revision, not a fabricated release-era text.",
+      "path": "html-parse-stringify-3.0.1/LICENSE",
+      "sha256": "sha256:f51aa7a410f3d3ff9352a5422b76c072588ac76b63861f59447502caeacacc16"
+    }
+  ]
+}

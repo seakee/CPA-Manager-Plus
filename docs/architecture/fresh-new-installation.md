@@ -19,6 +19,9 @@ name and environment for every Compose invocation:
 export COMPOSE_PROJECT_NAME=cpamp-fresh-new-local
 export CPAMP_PUBLIC_PORT=127.0.0.1:18317
 export CPAMP_PUBLIC_ORIGIN=http://cpamp-ingress:18317
+# Image identity is fail-closed: both arguments are required.
+export VERSION=dev
+export SOURCE_COMMIT="$(git rev-parse HEAD)"
 docker compose build
 docker compose up -d --no-build
 ```
@@ -138,9 +141,13 @@ Build task-specific image tags from the selected source, without changing Runtim
 targets, seeds, networks or another task's state:
 
 ```sh
-docker build --platform linux/amd64 -f Dockerfile.runtime -t cpamp-fresh-e2e-runtime:local .
-docker build --platform linux/amd64 -f Dockerfile.ingress -t cpamp-fresh-e2e-ingress:local .
-docker build --platform linux/amd64 -f Dockerfile.manager-server -t cpamp-fresh-e2e-manager:local .
+revision=$(git rev-parse HEAD)
+docker build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.runtime -t cpamp-fresh-e2e-runtime:local .
+docker build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.ingress -t cpamp-fresh-e2e-ingress:local .
+docker build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.manager-server -t cpamp-fresh-e2e-manager:local .
 PLAYWRIGHT_MODULE=/absolute/path/to/node_modules/playwright \
 PLAYWRIGHT_CHANNEL=chrome \
 node bin/ci/fresh-new-installation.mjs \
@@ -224,9 +231,11 @@ and digest comparisons next to `candidate-evidence.json`; the transport note is
 repeated in both files.
 
 The three images are local-only evidence: they are not signed producer receipts,
-not a registry readback and not a Beta/Release qualification. The candidate
-inventory still records `NOTICE` as `NOT_VERIFIED` (third-party LICENSE/NOTICE
-legal sufficiency is out of scope).
+not a registry readback and not a Beta/Release qualification. The packaged
+`third-party-inventory.txt` (`NOTICE`) records `VERIFIED_LICENSE_COLLECTION` for
+the exact originals copied into each image, while independent legal acceptance of
+those third-party LICENSE/NOTICE terms remains unverified and out of scope.
+
 ## Default New Managed CPA authority
 
 The default Compose installation uses the Runtime `new_managed` destination.
@@ -693,12 +702,15 @@ confirm sends `{requestId, confirmEnableStatistics: true}`.
 ```sh
 revision=$(git rev-parse HEAD)
 docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
   --label "org.opencontainers.image.revision=$revision" \
   --target v8-amd64-candidate -f Dockerfile.runtime -t cpamp-d-runtime:local .
 docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
   --label "org.opencontainers.image.revision=$revision" \
   -f Dockerfile.manager-server -t cpamp-d-manager:local .
 docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
   --label "org.opencontainers.image.revision=$revision" \
   -f Dockerfile.ingress -t cpamp-d-ingress:local .
 
@@ -791,12 +803,15 @@ run's project is removed.
 # can name.
 revision=$(git rev-parse HEAD)
 docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
   --label "org.opencontainers.image.revision=$revision" \
   --target v8-amd64-candidate -f Dockerfile.runtime -t cpamp-d-runtime:local .
 docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
   --label "org.opencontainers.image.revision=$revision" \
   -f Dockerfile.manager-server -t cpamp-d-manager:local .
 docker buildx build --builder "$BUILDER" --platform linux/amd64 --load \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
   --label "org.opencontainers.image.revision=$revision" \
   -f Dockerfile.ingress -t cpamp-d-ingress:local .
 

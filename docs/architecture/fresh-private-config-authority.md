@@ -121,12 +121,16 @@ outcome do not become effective claims.
 Use Host `htpasswd`, Docker and locally available `python:3.13-alpine`:
 
 ```sh
+revision=$(git rev-parse HEAD)
 docker build --platform linux/amd64 --target v8-amd64-loopback-proof \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
   -f Dockerfile.runtime -t cpamp-b1-runtime:local .
-docker build --platform linux/amd64 -f Dockerfile.manager-server \
-  -t cpamp-b1-manager:local .
-docker build --platform linux/amd64 -f Dockerfile.ingress \
-  -t cpamp-b1-ingress:local .
+docker build --platform linux/amd64 \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.manager-server -t cpamp-b1-manager:local .
+docker build --platform linux/amd64 \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
+  -f Dockerfile.ingress -t cpamp-b1-ingress:local .
 python3 bin/ci/fresh-b1-docker-proof.py bin/tmp/b1/unique-s2a --s2a
 python3 bin/ci/fresh-b1-docker-proof.py bin/tmp/b1/unique-s2b --s2b-offline
 CPAMP_PROOF_IMAGE_PREFIX=cpamp-b1 python3 bin/ci/fresh-s1-docker-proof.py \

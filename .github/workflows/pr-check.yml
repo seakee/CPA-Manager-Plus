@@ -775,6 +775,7 @@ jobs:
           load: true
           build-args: |
             VERSION=ci
+            SOURCE_COMMIT=${{ github.sha }}
 
       - name: Build Ingress images
         if: needs.changes.outputs.docker_all_images == 'true'
@@ -784,6 +785,9 @@ jobs:
           file: Dockerfile.ingress
           platforms: linux/amd64,linux/arm64
           push: false
+          build-args: |
+            VERSION=ci
+            SOURCE_COMMIT=${{ github.sha }}
 
       - name: Build Runtime images with pinned CPA
         if: needs.changes.outputs.docker_all_images == 'true'
@@ -793,9 +797,15 @@ jobs:
           file: Dockerfile.runtime
           platforms: linux/amd64,linux/arm64
           push: false
+          build-args: |
+            VERSION=ci
+            SOURCE_COMMIT=${{ github.sha }}
 
       - name: Build native smoke images
         if: needs.changes.outputs.runtime_lifecycle == 'true'
+        env:
+          VERSION: ci
+          SOURCE_COMMIT: ${{ github.sha }}
         run: docker compose build
 
       - name: Run normal default CPA v8 Compose smoke
@@ -819,6 +829,9 @@ jobs:
       # update artifacts and anonymous passthrough. They do not qualify v8.
       - name: Select explicit v7 compatibility image for historical regressions
         if: needs.changes.outputs.runtime_lifecycle == 'true'
+        env:
+          VERSION: ci
+          SOURCE_COMMIT: ${{ github.sha }}
         run: docker compose -f docker-compose.yml -f bin/ci/runtime-v7-compatibility.compose.yml build cpamp-runtime
 
       - name: Run single-public-port Runtime smoke

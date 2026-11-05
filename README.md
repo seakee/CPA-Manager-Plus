@@ -227,6 +227,7 @@ go run ./cmd/cpa-manager-plus
 Build the Docker stack locally:
 
 ```bash
+export SOURCE_COMMIT="$(git rev-parse HEAD)"   # required; the build fails closed without it
 docker compose -f docker-compose.manager.yml up --build
 ```
 
