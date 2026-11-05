@@ -39,19 +39,27 @@ def make_evidence(role, files, source_bytes=SOURCE_BYTES):
         dependencies = [{"name": "example.test/module", "version": "v1.0.0", "notices": notices}]
         inputs, ecosystem, extra = {}, "go", {}
         if component in evidence.MODULES:
+            stdlib = b"original fixture Go standard library notice\n"
+            files[evidence.notice_path(component, "fixture/GO-LICENSE")] = stdlib
             dependencies.append({"name": "Go standard library and bundled sources", "version": "go1.24.0",
-                                 "notices": notices})
+                                 "notices": [{"path": "fixture/GO-LICENSE",
+                                              "sha256": evidence.digest(stdlib)}]})
             inputs = {"go.mod": SOURCE["inputs"][evidence.MODULES[component] + "/go.mod"]}
         elif component == "web":
             ecosystem = "npm"
             dependencies = [{"name": "example-web", "version": "1.0.0", "notices": notices}]
             inputs = {name: SOURCE["inputs"][name] for name in ("apps/web/package.json", "package-lock.json")}
         else:
-            ecosystem = "alpine"
-            dependencies = [{"name": "musl", "version": "1.2.5-r1", "licenseExpression": "MIT",
-                             "evidence": evidence.ALPINE_METADATA_ONLY, "notices": []}]
-            extra = {"coveragePolicy": evidence.ALPINE_POLICY,
-                     "coverage": evidence.alpine_coverage(dependencies)}
+            # The fixture base OS must match the role binding, otherwise every
+            # role could claim the Alpine metadata-only boundary.
+            ecosystem = evidence.BASE_ECOSYSTEMS[role]
+            if ecosystem == "alpine":
+                dependencies = [{"name": "musl", "version": "1.2.5-r1", "licenseExpression": "MIT",
+                                 "evidence": evidence.ALPINE_METADATA_ONLY, "notices": []}]
+                extra = {"coveragePolicy": evidence.ALPINE_POLICY,
+                         "coverage": evidence.alpine_coverage(dependencies)}
+            else:
+                dependencies = [{"name": "libc6", "version": "2.36-r1", "notices": notices}]
         value = {"schemaVersion": 1, "component": component, "ecosystem": ecosystem,
                  "inputs": inputs, "dependencies": dependencies, **extra}
         files[evidence.notice_path(component, "inventory.json")] = evidence.encoded(value)

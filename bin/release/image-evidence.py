@@ -32,6 +32,9 @@ ALPINE_POLICY = "apk-license-metadata-and-available-packaged-notices"
 ALPINE_METADATA_ONLY = "installed-apk-database-metadata-only"
 ALPINE_PACKAGED = "installed-apk-database-and-packaged-notices"
 ORIGINAL_TEXT_POLICY = "original-license-texts-fail-closed"
+# The base OS of each role is fixed by its Dockerfile. Binding it here keeps a
+# runtime image from being relabelled as Alpine database-metadata coverage.
+BASE_ECOSYSTEMS = {"manager": "alpine", "ingress": "alpine", "runtime": "debian"}
 
 
 def require(condition, message):
@@ -107,6 +110,9 @@ def validate_inventory(value, role, read_file, expected_source=None):
         require(inventory == entry.get("inventory") and inventory.get("schemaVersion") == 1 and
                 inventory.get("component") == component and isinstance(inventory.get("dependencies"), list)
                 and inventory["dependencies"], "empty or invalid license component: " + component)
+        if component == "base-image":
+            require(inventory.get("ecosystem") == BASE_ECOSYSTEMS[role],
+                    "base-image ecosystem differs from the image role: " + component)
         if component in MODULES:
             for name in ("go.mod", "go.sum"):
                 key = MODULES[component] + "/" + name
@@ -118,6 +124,7 @@ def validate_inventory(value, role, read_file, expected_source=None):
                     for name in ("apps/web/package.json", "package-lock.json")},
                     "Web license inputs differ from source")
         identities = set()
+        notice_paths = set()
         for dep in inventory["dependencies"]:
             require(isinstance(dep.get("name"), str) and dep["name"] and
                     isinstance(dep.get("version"), str) and dep["version"], "missing dependency identity")
@@ -130,10 +137,17 @@ def validate_inventory(value, role, read_file, expected_source=None):
                         "missing installed Alpine license expression: " + dep["name"])
                 require(dep.get("evidence") == (ALPINE_PACKAGED if dep["notices"] else ALPINE_METADATA_ONLY),
                         "invalid installed Alpine license evidence: " + dep["name"])
+                owner = (PurePosixPath("packaged-notices") / dep["name"]).parts
+                for notice in dep["notices"]:
+                    parts = PurePosixPath(str(notice.get("path", ""))).parts
+                    require(len(parts) > len(owner) and parts[:len(owner)] == owner,
+                            "Alpine notice path does not belong to its package: " + dep["name"])
             else:
                 require(dep["notices"], "missing original dependency license/NOTICE")
             for notice in dep["notices"]:
                 path = notice_path(component, notice.get("path"))
+                require(path not in notice_paths, "notice file claimed by multiple dependencies: " + path)
+                notice_paths.add(path)
                 require(SHA.fullmatch(notice.get("sha256", "")) and
                         digest(read_file(path)) == notice["sha256"], "license text hash mismatch: " + path)
         if component in MODULES:

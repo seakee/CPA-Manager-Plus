@@ -471,10 +471,14 @@ license expression, and states which evidence it actually has:
 The Alpine component inventory and the aggregate inventory/provenance record the
 policy `apk-license-metadata-and-available-packaged-notices`
 (`available-packaged-notices-only`) with counts of metadata-only and
-original-notice packages. A record that claims packaged notices without any, or
-that lacks an SPDX expression, fails validation. Audit Python and its
-dependencies never enter the final image or its base-package inventory. Every
-image retains CPAMP's original MIT license at
+original-notice packages. The verifier binds the base-image `ecosystem` to the
+image role (Manager and Ingress are Alpine, Runtime is Debian), so a runtime
+image cannot be relabelled as Alpine metadata, and every Alpine notice path must
+live under its own package's `packaged-notices/<package>/` directory. A record
+that claims packaged notices without any, points at another package's notice, or
+lacks an SPDX expression fails validation. Audit Python and its dependencies
+never enter the final image or its base-package inventory. Every image retains
+CPAMP's original MIT license at
 `/usr/local/share/licenses/cpamp/LICENSE`; every runtime target also retains the
 archive's original CPA license at
 `/usr/local/share/licenses/cli-proxy-api/LICENSE`.

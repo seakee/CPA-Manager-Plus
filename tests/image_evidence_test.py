@@ -308,6 +308,20 @@ class CollectorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "notice directory escapes its root"):
             collector.collect_base(self.root, "alpine", self.output)
 
+    def test_alpine_broken_packaged_notice_root_symlink_fails(self):
+        self.put("lib/apk/db/installed", "P:musl\nV:1.2.5-r9\nL:MIT\n")
+        (self.root / "usr/share").mkdir(parents=True)
+        (self.root / "usr/share/licenses").symlink_to(self.root / "usr/share/missing")
+        with self.assertRaisesRegex(ValueError, "broken Alpine packaged notice root symlink"):
+            collector.collect_base(self.root, "alpine", self.output)
+
+    def test_alpine_in_root_packaged_notice_symlink_is_bounded_and_copied(self):
+        self.put("lib/apk/db/installed", "P:musl\nV:1.2.5-r9\nL:MIT\n")
+        self.put("usr/share/licenses-real/musl/COPYING", "original musl license\n")
+        (self.root / "usr/share/licenses").symlink_to(self.root / "usr/share/licenses-real")
+        result = collector.collect_base(self.root, "alpine", self.output)
+        self.assertEqual(result["dependencies"][0]["notices"][0]["path"], "packaged-notices/musl/COPYING")
+
     def test_alpine_packaged_notices_inside_root_are_copied(self):
         self.put("lib/apk/db/installed", "P:musl\nV:1.2.5-r9\nL:MIT\n")
         self.put("usr/share/licenses/musl/COPYING", "original musl license\n")
@@ -398,6 +412,22 @@ class ImageEvidenceTests(unittest.TestCase):
         files[evidence.notice_path(component, "inventory.json")] = raw
         inventory["components"][component]["inventorySHA256"] = evidence.digest(raw)
 
+    def rewrite_base_image(self, inventory, files, change):
+        """Rewrite the base component and recompute every dependent digest.
+
+        The returned provenance and aggregate inventory are internally
+        consistent, so only a semantic rule can reject the rewritten image.
+        """
+        self.change_component(inventory, files, "base-image", change)
+        inventory["licenseCoverage"] = evidence.license_coverage(inventory["components"])
+        raw = evidence.encoded(inventory)
+        files[evidence.INVENTORY] = raw
+        provenance = json.loads(files[evidence.PROVENANCE])
+        provenance["licenseInventorySHA256"] = evidence.digest(raw)
+        provenance["licenseCoverage"] = inventory["licenseCoverage"]
+        files[evidence.PROVENANCE] = evidence.encoded(provenance)
+        return provenance
+
     def test_missing_go_module_coverage_fails_even_with_rehashed_inventory(self):
         files, inventory, _ = self.fixture()
         self.change_component(inventory, files, "manager", lambda value: value["dependencies"].pop(0))
@@ -463,6 +493,46 @@ class ImageEvidenceTests(unittest.TestCase):
         provenance["licenseCoverage"]["base-image"]["metadataOnlyPackages"] = 2
         with self.assertRaisesRegex(ValueError, "provenance license coverage differs"):
             evidence.validate_provenance(provenance, "manager", VERSION, SHA, files.__getitem__)
+
+    def test_runtime_base_image_cannot_be_reclassified_as_alpine_metadata(self):
+        files, inventory, _ = self.fixture("runtime")
+
+        def reclassify(value):
+            package = {"name": "musl", "version": "1.2.5-r1", "licenseExpression": "MIT",
+                       "evidence": evidence.ALPINE_METADATA_ONLY, "notices": []}
+            value.update(ecosystem="alpine", dependencies=[package],
+                         coveragePolicy=evidence.ALPINE_POLICY,
+                         coverage=evidence.alpine_coverage([package]))
+
+        provenance = self.rewrite_base_image(inventory, files, reclassify)
+        # Component, summary, and provenance digests all agree; only the
+        # role/ecosystem binding can reject this runtime image.
+        evidence.validate_provenance(provenance, "runtime", VERSION, SHA, files.__getitem__)
+        with self.assertRaisesRegex(ValueError, "base-image ecosystem differs from the image role"):
+            evidence.validate_inventory(inventory, "runtime", files.__getitem__)
+
+    def test_alpine_package_cannot_reuse_another_package_notice(self):
+        files, inventory, _ = self.fixture()
+        data = b"original busybox license\n"
+        shared = "packaged-notices/busybox/COPYING"
+        files[evidence.notice_path("base-image", shared)] = data
+
+        def cross_reference(value):
+            packages = [
+                {"name": "musl", "version": "1.2.5-r9", "licenseExpression": "MIT",
+                 "evidence": evidence.ALPINE_PACKAGED,
+                 "notices": [{"path": shared, "sha256": evidence.digest(data)}]},
+                {"name": "busybox", "version": "1.37-r1", "licenseExpression": "GPL-2.0-only",
+                 "evidence": evidence.ALPINE_PACKAGED,
+                 "notices": [{"path": shared, "sha256": evidence.digest(data)}]},
+            ]
+            value.update(dependencies=packages, coveragePolicy=evidence.ALPINE_POLICY,
+                         coverage=evidence.alpine_coverage(packages))
+
+        provenance = self.rewrite_base_image(inventory, files, cross_reference)
+        evidence.validate_provenance(provenance, "manager", VERSION, SHA, files.__getitem__)
+        with self.assertRaisesRegex(ValueError, "does not belong to its package"):
+            evidence.validate_inventory(inventory, "manager", files.__getitem__)
 
     def test_provenance_schema_identity_and_component_coverage_fail_closed(self):
         files, _, provenance = self.fixture()

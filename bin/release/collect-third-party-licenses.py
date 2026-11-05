@@ -273,6 +273,11 @@ def collect_base(root, kind, output):
         # promise original license texts for every installed binary package.
         # Each package states which kind of evidence it actually has.
         notices = root / "usr/share/licenses"
+        # A dangling link here must fail closed instead of being read as "the
+        # base ships no packaged notices"; an existing directory link is still
+        # resolved and bounded by copy_notices(root=root).
+        require(not notices.is_symlink() or notices.is_dir(),
+                "broken Alpine packaged notice root symlink")
         files = copy_notices(notices, output, "packaged-notices", root=root) if notices.is_dir() else []
         for item in dependencies:
             item["notices"] = [f for f in files if f["path"].startswith("packaged-notices/" + item["name"] + "/")]

@@ -249,8 +249,12 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                              subject.image_evidence.ALPINE_POLICY)
             for role, record in receipt["images"].items():
                 base = record["licenseCoverage"]["base-image"]
-                self.assertEqual((base["metadataOnlyPackages"], base["packagedNoticePackages"]),
-                                 (1, 0), role)
+                if role == "runtime":
+                    self.assertEqual(base["policy"], "debian-copyright-files-fail-closed")
+                    self.assertEqual(base["packages"], 1)
+                else:
+                    self.assertEqual((base["metadataOnlyPackages"], base["packagedNoticePackages"]),
+                                     (1, 0), role)
             make_oci(archives["ingress"], "ingress", self.license, event="wrong-event")
             with self.assertRaisesRegex(ValueError, "build event"):
                 subject.verify(archives, SHA, EVENT, self.root)
@@ -303,6 +307,69 @@ class EmbeddedCandidateContracts(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "invalid installed Alpine license evidence"):
             self.inspect("ingress", mutate_evidence=falsify)
+
+    @staticmethod
+    def rewrite_base_inventory(files, role, change):
+        """Rewrite the base component and recompute every dependent digest.
+
+        Provenance is re-validated here, so only a semantic rule may reject the
+        resulting image: no hash, summary, or identity check can be responsible.
+        """
+        image_evidence = subject.image_evidence
+        path = image_evidence.notice_path("base-image", "inventory.json")
+        inventory = json.loads(files[path])
+        change(inventory)
+        files[path] = image_evidence.encoded(inventory)
+        aggregate = json.loads(files[subject.NOTICE])
+        component = aggregate["components"]["base-image"]
+        component["inventory"] = inventory
+        component["inventorySHA256"] = image_evidence.digest(files[path])
+        aggregate["licenseCoverage"] = image_evidence.license_coverage(aggregate["components"])
+        files[subject.NOTICE] = image_evidence.encoded(aggregate)
+        provenance = json.loads(files[image_evidence.PROVENANCE])
+        provenance["licenseInventorySHA256"] = image_evidence.digest(files[subject.NOTICE])
+        provenance["licenseCoverage"] = aggregate["licenseCoverage"]
+        files[image_evidence.PROVENANCE] = image_evidence.encoded(provenance)
+        image_evidence.validate_provenance(provenance, role, subject.CANDIDATE_VERSION, SHA,
+                                           files.__getitem__)
+        return files
+
+    def test_receipt_rejects_runtime_base_image_downgraded_to_alpine(self):
+        def reclassify(files):
+            def change(value):
+                package = {"name": "musl", "version": "1.2.5-r1", "licenseExpression": "MIT",
+                           "evidence": subject.image_evidence.ALPINE_METADATA_ONLY, "notices": []}
+                value.update(ecosystem="alpine", dependencies=[package],
+                             coveragePolicy=subject.image_evidence.ALPINE_POLICY,
+                             coverage=subject.image_evidence.alpine_coverage([package]))
+            return self.rewrite_base_inventory(files, "runtime", change)
+
+        with self.assertRaisesRegex(ValueError, "base-image ecosystem differs from the image role"):
+            self.inspect("runtime", mutate_evidence=reclassify)
+
+    def test_receipt_rejects_alpine_package_reusing_another_package_notice(self):
+        data = b"original busybox license\n"
+        shared = "packaged-notices/busybox/COPYING"
+
+        def cross_reference(files):
+            files[subject.image_evidence.notice_path("base-image", shared)] = data
+
+            def change(value):
+                packages = [
+                    {"name": "musl", "version": "1.2.5-r9", "licenseExpression": "MIT",
+                     "evidence": subject.image_evidence.ALPINE_PACKAGED,
+                     "notices": [{"path": shared, "sha256": subject.image_evidence.digest(data)}]},
+                    {"name": "busybox", "version": "1.37-r1", "licenseExpression": "GPL-2.0-only",
+                     "evidence": subject.image_evidence.ALPINE_PACKAGED,
+                     "notices": [{"path": shared, "sha256": subject.image_evidence.digest(data)}]},
+                ]
+                value.update(dependencies=packages,
+                             coveragePolicy=subject.image_evidence.ALPINE_POLICY,
+                             coverage=subject.image_evidence.alpine_coverage(packages))
+            return self.rewrite_base_inventory(files, "manager", change)
+
+        with self.assertRaisesRegex(ValueError, "does not belong to its package"):
+            self.inspect("manager", mutate_evidence=cross_reference)
 
     def test_reject_invalid_descriptor_size(self):
         with self.assertRaisesRegex(ValueError, "descriptor size"):
