@@ -56,7 +56,7 @@ func TestImportCPARecordsTheDestinationSecretAndUsesItOnRetry(t *testing.T) {
 	if recorded != first.ManagementKey {
 		t.Fatal("the recorded secret is not the one the destination was staged with")
 	}
-	if record.BaseURL != destination.url() || !record.Intent.PluginsEnabled {
+	if record.BaseURL != destination.url() || !pluginsChoiceEqual(record.Intent.PluginsEnabled, boolPointer(true)) {
 		t.Fatalf("the recorded attempt = %+v, want the staged destination and plugin choice", record)
 	}
 	if !reflect.DeepEqual(record.Intent.APIKeys, first.APIKeys) {
@@ -350,12 +350,14 @@ func TestImportCPAAllowsACorrectedDestinationURLAfterAForeignRefusal(t *testing.
 		t.Fatalf("the proved URL was not recorded: %+v", attempt)
 	}
 
-	// The finished step is recorded, so a later run is a replay: another address is
-	// not contacted at all.
+	// The finished step is recorded, so a later run is a replay — and a replay that
+	// names another destination URL is refused as a changed request before that
+	// address is contacted: the recorded verdict belongs to the URL this operation
+	// bound, not to whatever address the caller names next.
 	other := newFakeDestinationCPA(t, "")
-	replayed, err := ImportCPA(context.Background(), importOptions(fixture, runtime, other.url(), boolPointer(true)))
-	if err != nil || !replayed.AlreadyComplete {
-		t.Fatalf("a swayed URL after the completed import = %+v / %v, want the recorded position", replayed, err)
+	_, err = ImportCPA(context.Background(), importOptions(fixture, runtime, other.url(), boolPointer(true)))
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+		t.Fatalf("a swayed URL after the completed import produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
 	}
 	if requests := other.requests(); len(requests) != 0 {
 		t.Fatalf("the other CPA answered %v, want no request", requests)
@@ -620,18 +622,13 @@ func TestImportCPARecordsTheProofWhenItReplaysARecordedAttempt(t *testing.T) {
 		t.Fatal("the replay replaced the secret the destination was staged with")
 	}
 
-	// The replay recorded the copy, so a later run is a replay and never contacts
-	// another address; the attempt that proved a URL is still bound to it once the
-	// recorded copy is removed.
+	// The replay recorded the copy, so a later run is a replay and a swapped URL
+	// is refused before that address is contacted; the attempt that proved a URL is
+	// still bound to it once the recorded copy is removed.
 	other := newFakeDestinationCPA(t, "")
-	replayedAgain, err := ImportCPA(ctx, importOptions(fixture, runtime, other.url(), boolPointer(true)))
-	if err != nil || !replayedAgain.AlreadyComplete {
-		t.Fatalf("a swapped URL after the completed replay = %+v / %v, want the recorded position", replayedAgain, err)
-	}
-	writeOperationStage(t, fixture.targetRoot, model.UpgradeStageCPAImport, []string{model.UpgradeDomainSourceCopy})
 	_, err = ImportCPA(ctx, importOptions(fixture, runtime, other.url(), boolPointer(true)))
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
-		t.Fatalf("a swapped URL after the replay produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
+		t.Fatalf("a swapped URL after the completed replay produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
 	}
 	if requests := other.requests(); len(requests) != 0 {
 		t.Fatalf("the other CPA answered %v, want no request", requests)
@@ -804,8 +801,8 @@ func TestImportCPADestinationAttemptNeverMovesItsTimestampBackwards(t *testing.T
 	record := cpaImportDestinationRecord{
 		BaseURL: "http://127.0.0.1:8317",
 		Intent: cpaImportDestinationIntent{
-			SourceIdentity: "legacy-managed:sha256:fixture", SourceClass: "legacy_managed",
-			APIKeys: []string{"legacy-client-key-1"}, PluginsEnabled: true,
+			SourceIdentity: "legacy-managed:sha256:fixture", SourceClass: managedDestinationSourceClass,
+			APIKeys: []string{"legacy-client-key-1"}, PluginsEnabled: boolPointer(true),
 		},
 		OperationID: "upgrade-cpa-import:fixture", Attempt: 1,
 	}

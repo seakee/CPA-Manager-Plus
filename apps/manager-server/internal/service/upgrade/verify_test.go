@@ -23,16 +23,21 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 const (
-	verifyExternalAddress   = "https://cpa.example"
-	verifyManagedAddress    = "http://127.0.0.1:28317"
-	verifyManagedSecret     = "managed-destination-secret"
-	verifyDestinationSource = "1x-managed-source-identity"
+	verifyExternalAddress = "https://cpa.example"
+	verifyManagedAddress  = "http://127.0.0.1:28317"
+	verifyManagedSecret   = "managed-destination-secret"
 )
+
+// verifyDestinationSource is the identity the managed source stamps: the
+// `legacy-managed:sha256:` prefix and the digest of the configuration bytes the
+// destination was staged for.
+var verifyDestinationSource = "legacy-managed:sha256:" + strings.Repeat("c", 64)
 
 // verifyFixture is a recorded operation driven through the real steps. Every
 // step runs its production entry point — CopyIn, Reconcile, ExternalConnect or
@@ -174,6 +179,40 @@ func verifyManagedFingerprint() string {
 	return freshkeyapply.ExternalServerFingerprint("v8.0.13", strings.Repeat("a", 64))
 }
 
+// managedDestinationRecord is the destination attempt a completed Managed import
+// leaves behind: the whole request the Supervisor published, the attempt identity
+// derived from the source it was staged for, and the evidence a run observed.
+func managedDestinationRecord(t *testing.T) cpaImportDestinationRecord {
+	t.Helper()
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		t.Fatalf("read the compiled adoption artifact: %v", err)
+	}
+	return cpaImportDestinationRecord{
+		BaseURL:           cpa.NormalizeBaseURL(verifyManagedAddress),
+		URLProved:         true,
+		ServerFingerprint: verifyManagedFingerprint(),
+		Intent: cpaImportDestinationIntent{
+			ExpectedRuntimeIdentity:   "runtime-identity-1",
+			ExpectedRuntimeGeneration: 4,
+			ExpectedActiveArtifactID:  qualifiedArtifact,
+			SourceIdentity:            verifyDestinationSource,
+			SourceClass:               managedDestinationSourceClass,
+			APIKeys:                   []string{"legacy-client-key-1"},
+			PluginsEnabled:            boolPointer(true),
+		},
+		OperationID:   cpaImportDestinationOperationID(verifyDestinationSource, 1),
+		Attempt:       1,
+		SourceVersion: "7.3.4",
+		SourceLayout:  "v7",
+		ManualItems: []CPAImportManualItem{{
+			Item:        "section:ampcode",
+			Reason:      "reconfigure_after_adoption",
+			Instruction: "re-create it in the destination CPA",
+		}},
+	}
+}
+
 // recordManagedImport records what the CPA import leaves behind for a Managed
 // target: the handoff connection, the proved destination attempt with the server
 // facts the run observed, the cpa_import stage with its cpa_config domain, and the
@@ -187,25 +226,17 @@ func (f *verifyFixture) recordManagedImport(t *testing.T) {
 	if err := handDestinationConnection(ctx, f.databasePath(), f.paths.DataKey, verifyManagedAddress, verifyManagedSecret); err != nil {
 		t.Fatalf("hand the destination connection over: %v", err)
 	}
-	if err := saveCPAImportDestinationRecord(ctx, f.databasePath(), f.paths.DataKey, cpaImportDestinationRecord{
-		BaseURL:           cpa.NormalizeBaseURL(verifyManagedAddress),
-		URLProved:         true,
-		ServerFingerprint: verifyManagedFingerprint(),
-		Intent:            cpaImportDestinationIntent{SourceIdentity: verifyDestinationSource},
-		OperationID:       cpaImportDestinationOperationID(verifyDestinationSource, 1),
-		Attempt:           1,
-	}, verifyManagedSecret); err != nil {
+	destination := managedDestinationRecord(t)
+	if err := saveCPAImportDestinationRecord(ctx, f.databasePath(), f.paths.DataKey, destination, verifyManagedSecret); err != nil {
 		t.Fatalf("record the destination attempt: %v", err)
 	}
 	if _, err := recordCPAImportCompletion(ctx, f.databasePath(), CPAImportResult{
 		Stage:             model.UpgradeStageCPAImport,
+		SourceVersion:     destination.SourceVersion,
+		SourceLayout:      destination.SourceLayout,
 		DestinationURL:    verifyManagedAddress,
 		ServerFingerprint: verifyManagedFingerprint(),
-		ManualItems: []CPAImportManualItem{{
-			Item:        "section:ampcode",
-			Reason:      "reconfigure_after_adoption",
-			Instruction: "re-create it in the destination CPA",
-		}},
+		ManualItems:       destination.ManualItems,
 	}); err != nil {
 		t.Fatalf("record the CPA import completion: %v", err)
 	}
@@ -591,6 +622,73 @@ func TestVerifyRefusesAManagedConnectionThatDidNotSurvive(t *testing.T) {
 		t.Fatalf("verify with a lost handoff error = %v, want ErrVerifyConnectionUnproven", err)
 	}
 	assertVerifyRefusalWroteNothing(t, fixture, before)
+}
+
+// TestVerifyRefusesAnIncompleteManagedDestinationProvenance pins the Medium
+// finding: the gate used to check only the address, the source identity's presence
+// and the fingerprint's shape, so a row whose attempt identity, source class,
+// Supervisor authority, artifact, client key list or plugin choice was missing or
+// tampered with still completed. Each field is the import's own statement about
+// the destination it staged, and a row that cannot produce it describes a stage
+// this operation never submitted.
+func TestVerifyRefusesAnIncompleteManagedDestinationProvenance(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*cpaImportDestinationRecord)
+	}{
+		{name: "no source identity", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.SourceIdentity = ""
+		}},
+		{name: "a source identity this import does not stamp", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.SourceIdentity = "external:sha256:" + strings.Repeat("d", 64)
+		}},
+		{name: "no source class", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.SourceClass = ""
+		}},
+		{name: "another source class", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.SourceClass = "network_existing"
+		}},
+		{name: "no attempt identity", mutate: func(record *cpaImportDestinationRecord) {
+			record.Attempt = 0
+		}},
+		{name: "an operation ID for another attempt", mutate: func(record *cpaImportDestinationRecord) {
+			record.OperationID = cpaImportDestinationOperationID(record.Intent.SourceIdentity, 2)
+		}},
+		{name: "no expected runtime identity", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.ExpectedRuntimeIdentity = ""
+		}},
+		{name: "no expected runtime generation", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.ExpectedRuntimeGeneration = 0
+		}},
+		{name: "an unqualified artifact", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.ExpectedActiveArtifactID = model.RuntimeArtifactID("sha256:" + strings.Repeat("b", 64))
+		}},
+		{name: "no client keys", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.APIKeys = nil
+		}},
+		{name: "no plugin choice", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.PluginsEnabled = nil
+		}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newManagedVerifyFixture(t)
+			record, _, found, err := loadCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey)
+			if err != nil || !found {
+				t.Fatalf("read the recorded destination (found %t): %v", found, err)
+			}
+			testCase.mutate(&record)
+			if err := saveCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey, record, verifyManagedSecret); err != nil {
+				t.Fatalf("rewrite the recorded destination: %v", err)
+			}
+			before := fixture.operation(t)
+			_, err = fixture.verify(t)
+			if !errors.Is(err, ErrVerifyConnectionUnproven) {
+				t.Fatalf("a Managed destination with %s verified as %v, want ErrVerifyConnectionUnproven", testCase.name, err)
+			}
+			assertVerifyRefusalWroteNothing(t, fixture, before)
+		})
+	}
 }
 
 // TestVerifyRefusesASourceThatWasWritten proves the mounted volume is the one

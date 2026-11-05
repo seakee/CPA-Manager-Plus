@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,6 +53,14 @@ import (
 // only after that proof and is what the completion gate re-derives from the live
 // CPA, so a destination that changed underneath the handoff is refused instead of
 // completed.
+//
+// SourceVersion, SourceLayout and ManualItems are what the completed step
+// reported about the source it read. They are the replay's only record of them:
+// the operation row keeps the manual items as bounded one-line text, which cannot
+// be turned back into an item, a reason and an instruction without guessing, so a
+// replay that reported zero manual items would tell the operator the opposite of
+// what the import found. They are written by the same statement that records the
+// completion, so a row that carries `cpa_config` carries them too.
 type cpaImportDestinationRecord struct {
 	BaseURL           string                     `json:"baseUrl"`
 	URLProved         bool                       `json:"urlProved"`
@@ -61,6 +70,9 @@ type cpaImportDestinationRecord struct {
 	OperationID       string                     `json:"operationId"`
 	Attempt           int                        `json:"attempt"`
 	TerminalFailure   bool                       `json:"terminalFailure"`
+	SourceVersion     string                     `json:"sourceVersion,omitempty"`
+	SourceLayout      string                     `json:"sourceLayout,omitempty"`
+	ManualItems       []CPAImportManualItem      `json:"manualItems,omitempty"`
 	UpdatedAtMS       int64                      `json:"updatedAtMs"`
 }
 
@@ -97,7 +109,20 @@ type cpaImportDestinationIntent struct {
 	SourceIdentity            string                  `json:"sourceIdentity"`
 	SourceClass               string                  `json:"sourceClass"`
 	APIKeys                   []string                `json:"apiKeys"`
-	PluginsEnabled            bool                    `json:"pluginsEnabled"`
+	// PluginsEnabled is v2's explicit plugin-runtime choice as it was submitted.
+	// It is a pointer so a row that carries no choice is distinguishable from a
+	// row that chose false: the step never defaults the choice, and a record that
+	// does not hold the one the destination was staged with cannot be replayed.
+	PluginsEnabled *bool `json:"pluginsEnabled,omitempty"`
+}
+
+// pluginsChoiceEqual compares two recorded plugin choices by value. A nil choice
+// equals nothing, because a record that holds none never submitted one.
+func pluginsChoiceEqual(left, right *bool) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 // complete reports whether this record holds the request it submitted. A record
@@ -204,22 +229,27 @@ func saveCPAImportDestinationRecord(ctx context.Context, databasePath, dataKeyPa
 	return nil
 }
 
-// recordCPAImportDestinationEvidenceTx merges the proved destination URL and the
-// server fingerprint this run observed into the attempt row, inside the caller's
-// transaction.
+// recordCPAImportDestinationEvidenceTx merges the proved destination URL, the
+// server fingerprint this run observed and the source facts it reported into the
+// attempt row, inside the caller's transaction.
 //
 // The row is the same one the stage recorded, so the management secret, the
 // request and the replay identity are preserved byte for byte; only the evidence
 // a run actually observed is added. A missing row is a refusal: the completion
 // gate reads this row, and writing a null entry would report a handoff the store
 // never held.
-func recordCPAImportDestinationEvidenceTx(ctx context.Context, tx *sql.Tx, baseURL, serverFingerprint string) error {
-	destinationURL, err := cpa.NormalizeV8BaseURL(strings.TrimSpace(baseURL))
+//
+// The source facts are written by this statement rather than by a second one so a
+// row carrying `cpa_config` always carries the manual items the step reported:
+// the replay answers from this row, and a completed import whose manual items were
+// dropped here would be reported back to the operator as "manual items: 0".
+func recordCPAImportDestinationEvidenceTx(ctx context.Context, tx *sql.Tx, result CPAImportResult) error {
+	destinationURL, err := cpa.NormalizeV8BaseURL(strings.TrimSpace(result.DestinationURL))
 	if err != nil {
 		return newUpgradeError(UpgradeErrorCPAImportUnproven,
 			"the import proved no usable destination URL, so it cannot claim the destination holds the copied state", err)
 	}
-	fingerprint := strings.TrimSpace(serverFingerprint)
+	fingerprint := strings.TrimSpace(result.ServerFingerprint)
 	if fingerprint == "" {
 		return newUpgradeError(UpgradeErrorCPAImportUnproven,
 			"the import proved no destination server fingerprint, so the completion gate could not re-prove the target it copied into", nil)
@@ -242,6 +272,9 @@ func recordCPAImportDestinationEvidenceTx(ctx context.Context, tx *sql.Tx, baseU
 	record.BaseURL = destinationURL
 	record.URLProved = true
 	record.ServerFingerprint = fingerprint
+	record.SourceVersion = strings.TrimSpace(result.SourceVersion)
+	record.SourceLayout = strings.TrimSpace(result.SourceLayout)
+	record.ManualItems = slices.Clone(result.ManualItems)
 	record.UpdatedAtMS = nextDestinationUpdatedAtMS(time.Now().UnixMilli(), storedColumnMS, record.UpdatedAtMS)
 	payload, err := json.Marshal(record)
 	if err != nil {

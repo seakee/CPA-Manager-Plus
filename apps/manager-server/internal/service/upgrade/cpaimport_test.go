@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -928,28 +929,49 @@ func TestImportCPARefusesARetryThatChangesTheStagedRequest(t *testing.T) {
 	}
 }
 
-// TestImportCPARefusesAReadyDestinationThatIsNotThisImportsTarget pins the
-// binding of a destination this run did not stage. A ready CPA carrying another
-// installation's client keys is not the target of this import; it used to receive
-// every configuration mutation and credential upload and only then fail the proof,
-// leaving another CPA's configuration rewritten by an operation that never
-// recorded the work.
-func TestImportCPARefusesAReadyDestinationThatIsNotThisImportsTarget(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
-	destination := newFakeDestinationCPA(t, "foreign-management-secret-value-0123456789")
-	destination.clientKeys = []string{"another-installation-client-key"}
+// TestImportCPARefusesUnrecordedReadyDestinationWithIdenticalKeys is the High
+// finding end to end. The Supervisor reports the artifact it runs as ready; that
+// report says nothing about the process behind the caller's URL. Here a second v8
+// CPA is configured with the exact same management key and the exact same ordered
+// client key list as the Supervisor's own CPA, so the destination proof would
+// accept it — and copying the 1.x source's configuration and credentials into it
+// would hand another installation the whole managed state.
+//
+// Without a recorded staging attempt, this operation never staged that URL, so the
+// run refuses before the URL is contacted at all: no read, no write, no attempt row
+// and no stage movement. The static key the caller supplied is exactly the input
+// that made the foreign CPA answerable, so it is refused with it.
+func TestImportCPARefusesUnrecordedReadyDestinationWithIdenticalKeys(t *testing.T) {
+	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
+		"codex-user.json": `{"type":"codex","access_token":"token"}`,
+	})
+	const sharedKey = "shared-destination-management-secret-0123456789abcdef"
+	clientKeys := []string{"legacy-client-key-1", "legacy-client-key-2"}
+	supervisorCPA := newFakeDestinationCPA(t, sharedKey)
+	supervisorCPA.clientKeys = slices.Clone(clientKeys)
+	foreignCPA := newFakeDestinationCPA(t, sharedKey)
+	foreignCPA.clientKeys = slices.Clone(clientKeys)
 	runtime := newFakeImportRuntime(model.RuntimeStateReady)
-	runtime.staged = destination
-	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
-	options.DestinationManagementKey = destination.management
+	runtime.staged = supervisorCPA
+	options := importOptions(fixture, runtime, foreignCPA.url(), boolPointer(true))
+	options.DestinationManagementKey = sharedKey
+
 	_, err := ImportCPA(context.Background(), options)
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetForeign {
-		t.Fatalf("a foreign ready destination produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetForeign)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationUnready {
+		t.Fatalf("an unrecorded ready destination with a shared key produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationUnready)
 	}
-	for _, request := range destination.requests() {
-		if strings.HasPrefix(request, http.MethodPatch+" ") || strings.HasPrefix(request, http.MethodPut+" ") || strings.HasPrefix(request, http.MethodPost+" ") {
-			t.Fatalf("a foreign target received a write: %s", request)
-		}
+	if requests := foreignCPA.requests(); len(requests) != 0 {
+		t.Fatalf("the foreign CPA at the destination URL answered %v, want no request at all", requests)
+	}
+	if requests := supervisorCPA.requests(); len(requests) != 0 {
+		t.Fatalf("the Supervisor's CPA answered %v, want no request at all", requests)
+	}
+	paths := newTargetPaths(fixture.targetRoot)
+	if _, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey); err != nil || found {
+		t.Fatalf("the refused run recorded a destination attempt (found %t): %v", found, err)
+	}
+	if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
+		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageReconcile)
 	}
 	if recorded := readOperation(t, fixture.targetRoot); recorded.HasDomain(model.UpgradeDomainCPAConfig) {
 		t.Fatalf("recorded domains = %v, want no cpa_config", recorded.DomainsDone)
@@ -963,19 +985,21 @@ func TestImportCPARefusesAReadyDestinationThatIsNotThisImportsTarget(t *testing.
 // and only then failed the proof. Every write branch now binds the URL to the
 // staged destination first, so the foreign CPA receives the authenticated read
 // that proves it is not this operation's target and no mutation at all.
+//
+// The foreign CPA is configured with the same ordered client key list as the
+// source. That is the point of the first stage minting its own secret: the keys a
+// CPA shares say nothing about which process it is, and only the per-attempt
+// 256-bit secret the stage writes into the Supervisor's CPA distinguishes them.
 func TestImportCPARefusesAForeignDestinationBeforeAnyWrite(t *testing.T) {
 	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{
 		"codex-user.json": `{"type":"codex","access_token":"token"}`,
 	})
-	const secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	staged := newFakeDestinationCPA(t, "")
-	foreign := newFakeDestinationCPA(t, secret)
-	foreign.clientKeys = []string{"another-installation-client-key"}
+	foreign := newFakeDestinationCPA(t, "")
+	foreign.clientKeys = []string{"legacy-client-key-1", "legacy-client-key-2"}
 	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
 	runtime.staged = staged
-	options := importOptions(fixture, runtime, foreign.url(), boolPointer(true))
-	options.DestinationManagementKey = secret
-	_, err := ImportCPA(context.Background(), options)
+	_, err := ImportCPA(context.Background(), importOptions(fixture, runtime, foreign.url(), boolPointer(true)))
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetForeign {
 		t.Fatalf("an offline stage with a foreign URL produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetForeign)
 	}
@@ -1013,13 +1037,25 @@ func TestImportCPARefusesAForeignDestinationBeforeAnyWrite(t *testing.T) {
 }
 
 // TestImportCPADoesNotRestageAnAlreadyRunningDestination pins the resume rule: a
-// destination that already answers ready is proved, never staged again.
+// destination that already answers ready is proved, never staged again — but only
+// because this operation recorded the attempt that staged it. The seeded row is
+// the state a crash between the start and the executor leaves: the attempt exists
+// (with the secret the destination was staged with) and the Supervisor reports the
+// CPA ready, so the retry proves the destination and finishes without submitting a
+// second stage or start.
 func TestImportCPADoesNotRestageAnAlreadyRunningDestination(t *testing.T) {
 	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
 	destination := newFakeDestinationCPA(t, "destination-management-secret-value-0123456789abcdef")
 	destination.clientKeys = []string{"legacy-client-key-1", "legacy-client-key-2"}
 	runtime := newFakeImportRuntime(model.RuntimeStateReady)
 	runtime.staged = destination
+	paths := newTargetPaths(fixture.targetRoot)
+	if err := saveCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey, cpaImportDestinationRecord{
+		OperationID: "upgrade-cpa-import:recorded-before-the-crash",
+		Attempt:     1,
+	}, destination.management); err != nil {
+		t.Fatalf("seed the recorded destination attempt: %v", err)
+	}
 	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
 	options.DestinationManagementKey = destination.management
 	result, err := ImportCPA(context.Background(), options)
@@ -1430,44 +1466,6 @@ func writeOperationStage(t *testing.T, targetRoot string, stage model.UpgradeSta
 	}
 }
 
-// TestImportCPAProvesAReadyDestinationBeforeRecordingItsSecret is the ready-arm
-// ordering: the attempt row is the store's only copy of the destination secret, so
-// a supplied secret that does not administer the CPA at this URL must never reach
-// it. Recording first sealed the wrong secret and every later retry replayed it.
-func TestImportCPAProvesAReadyDestinationBeforeRecordingItsSecret(t *testing.T) {
-	fixture := newImportFixture(t, v7FixtureConfig, map[string]string{"codex-user.json": `{"type":"codex"}`})
-	destination := newFakeDestinationCPA(t, "destination-management-secret-value-0123456789abcdef")
-	destination.clientKeys = []string{"legacy-client-key-1", "legacy-client-key-2"}
-	runtime := newFakeImportRuntime(model.RuntimeStateReady)
-	runtime.staged = destination
-	options := importOptions(fixture, runtime, destination.url(), boolPointer(true))
-	options.DestinationManagementKey = "wrong-management-secret-value-0123456789abcdef"
-	_, err := ImportCPA(context.Background(), options)
-	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetForeign {
-		t.Fatalf("a wrong ready-destination secret produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetForeign)
-	}
-	// The refused secret is not the attempt's own: no row was written, so the
-	// corrected secret below is what the store will hold.
-	paths := newTargetPaths(fixture.targetRoot)
-	if _, _, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey); err != nil || found {
-		t.Fatalf("a refused ready-destination proof recorded its secret (found %t): %v", found, err)
-	}
-	if recorded := readOperation(t, fixture.targetRoot); recorded.Stage != model.UpgradeStageReconcile {
-		t.Fatalf("recorded stage = %q, want the untouched %q", recorded.Stage, model.UpgradeStageReconcile)
-	}
-
-	// The operator's corrected secret completes the same run, and the row that is
-	// recorded now holds the secret the destination actually accepts.
-	options.DestinationManagementKey = destination.management
-	if _, err := ImportCPA(context.Background(), options); err != nil {
-		t.Fatalf("import into the ready destination with its own secret: %v", err)
-	}
-	if _, recordedKey, found, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey); err != nil || !found ||
-		recordedKey != destination.management {
-		t.Fatalf("the recorded attempt (found %t) does not hold the proved secret: %v", found, err)
-	}
-}
-
 // TestImportCPARefusesADestinationStagedOnAnotherArtifact is the qualified-artifact
 // gate: the Supervisor reports the artifact actually running, and a destination on
 // an artifact the compiled record was never accepted for is not the target of this
@@ -1503,20 +1501,32 @@ func TestImportCPARefusesADestinationStagedOnAnotherArtifact(t *testing.T) {
 // run and releasing it before the verification takes its own read-only one.
 func runManagedImport(t *testing.T, fixture *verifyFixture, runtime CPAImportRuntime, destinationURL string, credentials map[string]string) (CPAImportResult, error) {
 	t.Helper()
+	return runManagedImportWithOptions(t, fixture, runtime, credentials, func(options *CPAImportOptions) {
+		options.DestinationURL = destinationURL
+	})
+}
+
+// runManagedImportWithOptions is runManagedImport for a test that drives one caller
+// input, so a replay can name a value the recorded attempt did not.
+func runManagedImportWithOptions(t *testing.T, fixture *verifyFixture, runtime CPAImportRuntime, credentials map[string]string, mutate func(*CPAImportOptions)) (CPAImportResult, error) {
+	t.Helper()
 	lock, err := processlock.AcquireExisting(fixture.volume.databasePath())
 	if err != nil {
 		t.Fatalf("acquire the 1.x ownership fence: %v", err)
 	}
-	result, importErr := ImportCPA(context.Background(), CPAImportOptions{
+	options := CPAImportOptions{
 		LegacyRoot:     fixture.volume.root,
 		SourceLock:     lock,
 		CPADirectory:   writeCPABeside(t, fixture.volume.root, v7FixtureConfig, credentials),
 		CPAVersion:     "7.3.4",
 		TargetRoot:     fixture.target,
 		Runtime:        runtime,
-		DestinationURL: destinationURL,
 		PluginsEnabled: boolPointer(true),
-	})
+	}
+	if mutate != nil {
+		mutate(&options)
+	}
+	result, importErr := ImportCPA(context.Background(), options)
 	if closeErr := lock.Close(); closeErr != nil {
 		t.Fatalf("release the 1.x ownership fence: %v", closeErr)
 	}
@@ -1631,6 +1641,179 @@ func TestImportCPAReplayRefreshesADestinationThatMoved(t *testing.T) {
 	if !verified.Complete || verified.Stage != model.UpgradeStageComplete {
 		t.Fatalf("verification = %+v, want the completed operation", verified)
 	}
+}
+
+// TestImportCPAReplayRefusesWhenRuntimeArtifactChanges is the High finding: the
+// recorded import's authority was qualified against one v8 artifact, and the
+// Supervisor reports the artifact it runs now. A Supervisor that switched to an
+// unqualified artifact B while keeping the URL, the management key and the client
+// key list answers the destination proof exactly as A did, so a replay that only
+// re-proved the destination would refresh the stored fingerprint to B's digest and
+// report a finished import for a server no accepted chain describes.
+func TestImportCPAReplayRefusesWhenRuntimeArtifactChanges(t *testing.T) {
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	credentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
+
+	if _, err := runManagedImport(t, fixture, runtime, destination.url(), credentials); err != nil {
+		t.Fatalf("import the fixture CPA: %v", err)
+	}
+	before := recordedDestinationRecord(t, fixture)
+
+	// The Supervisor now runs an artifact no compiled record accepted, and the
+	// destination's configuration moved as it would after a manual item was applied.
+	// URL, management secret and client keys are unchanged, so only the artifact
+	// distinguishes this server from the one the import staged.
+	runtime.mu.Lock()
+	runtime.artifact = model.RuntimeArtifactID("sha256:" + strings.Repeat("b", 64))
+	runtime.mu.Unlock()
+	destination.mu.Lock()
+	destination.config["ampcode"] = map[string]any{"upstream-url": "https://amp.example"}
+	destination.mu.Unlock()
+	beforeRequests := len(destination.requests())
+
+	_, err := runManagedImport(t, fixture, runtime, destination.url(), credentials)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportUnproven {
+		t.Fatalf("a replay on an unqualified artifact produced %v (code %q), want %s", err, code, UpgradeErrorCPAImportUnproven)
+	}
+	if requests := destination.requests()[beforeRequests:]; len(requests) != 0 {
+		t.Fatalf("the refused replay contacted the destination: %v", requests)
+	}
+	after := recordedDestinationRecord(t, fixture)
+	if after.ServerFingerprint != before.ServerFingerprint {
+		t.Fatalf("the refused replay refreshed the stored fingerprint: %q -> %q", before.ServerFingerprint, after.ServerFingerprint)
+	}
+}
+
+// TestImportCPAReplayRefusesAChangedCallerRequest pins the Medium finding: the
+// plugin choice, the destination URL and the supplied management secret are the
+// inputs the recorded request was staged with. A replay that named a different one
+// would report the recorded verdict for a run the operator did not ask for, so each
+// is refused as a changed request before the destination is contacted.
+func TestImportCPAReplayRefusesAChangedCallerRequest(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*testing.T, *CPAImportOptions)
+	}{
+		{name: "a different plugin choice", mutate: func(_ *testing.T, options *CPAImportOptions) {
+			options.PluginsEnabled = boolPointer(false)
+		}},
+		{name: "a different destination URL", mutate: func(t *testing.T, options *CPAImportOptions) {
+			options.DestinationURL = newFakeDestinationCPA(t, "").url()
+		}},
+		{name: "a different management secret", mutate: func(_ *testing.T, options *CPAImportOptions) {
+			options.DestinationManagementKey = "another-management-secret-0123456789abcdef"
+		}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newVerifyFixture(t)
+			fixture.reconcile(t)
+			destination := newFakeDestinationCPA(t, "")
+			runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+			runtime.staged = destination
+			credentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
+			if _, err := runManagedImport(t, fixture, runtime, destination.url(), credentials); err != nil {
+				t.Fatalf("import the fixture CPA: %v", err)
+			}
+			before := len(destination.requests())
+
+			_, err := runManagedImportWithOptions(t, fixture, runtime, credentials, func(options *CPAImportOptions) {
+				options.DestinationURL = destination.url()
+				testCase.mutate(t, options)
+			})
+			if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+				t.Fatalf("a replay with %s produced %v (code %q), want %s", testCase.name, err, code, UpgradeErrorCPADestinationRequestChanged)
+			}
+			if requests := destination.requests()[before:]; len(requests) != 0 {
+				t.Fatalf("the refused replay contacted the destination: %v", requests)
+			}
+		})
+	}
+}
+
+// TestImportCPAReplayReportsTheRecordedSourceFacts pins the other half of the
+// Medium finding: a completed import used to be replayed with no source version, no
+// source layout and an empty manual-item list, so the CLI printed "manual items: 0"
+// for a store whose operation row lists them. The replay now answers with what the
+// attempt recorded, and the row holds it because the completion wrote it.
+func TestImportCPAReplayReportsTheRecordedSourceFacts(t *testing.T) {
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	credentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
+
+	first, err := runManagedImport(t, fixture, runtime, destination.url(), credentials)
+	if err != nil {
+		t.Fatalf("import the fixture CPA: %v", err)
+	}
+	if first.SourceVersion != "7.3.4" || first.SourceLayout != "v7" {
+		t.Fatalf("first result reports %q/%q, want the fixture source", first.SourceVersion, first.SourceLayout)
+	}
+	if len(first.ManualItems) == 0 {
+		t.Fatal("the fixture source recorded no manual items, so the replay proves nothing")
+	}
+	recorded := recordedDestinationRecord(t, fixture)
+	if !slices.Equal(recorded.ManualItems, first.ManualItems) {
+		t.Fatalf("the attempt recorded manual items %+v, want the run's %+v", recorded.ManualItems, first.ManualItems)
+	}
+	if recorded.SourceVersion != first.SourceVersion || recorded.SourceLayout != first.SourceLayout {
+		t.Fatalf("the attempt recorded source %q/%q, want %q/%q", recorded.SourceVersion, recorded.SourceLayout, first.SourceVersion, first.SourceLayout)
+	}
+
+	replayed, err := runManagedImport(t, fixture, runtime, destination.url(), credentials)
+	if err != nil {
+		t.Fatalf("replay the completed import: %v", err)
+	}
+	if !replayed.AlreadyComplete {
+		t.Fatal("the replay did not report the recorded import")
+	}
+	if len(replayed.ManualItems) != len(first.ManualItems) || !slices.Equal(replayed.ManualItems, first.ManualItems) {
+		t.Fatalf("the replay reported %d manual item(s) %+v, want the recorded %d %+v",
+			len(replayed.ManualItems), replayed.ManualItems, len(first.ManualItems), first.ManualItems)
+	}
+	if replayed.SourceVersion != first.SourceVersion || replayed.SourceLayout != first.SourceLayout {
+		t.Fatalf("the replay reported source %q/%q, want %q/%q", replayed.SourceVersion, replayed.SourceLayout, first.SourceVersion, first.SourceLayout)
+	}
+	if replayed.PluginsEnabled != first.PluginsEnabled {
+		t.Fatalf("the replay reported plugins %t, want the recorded %t", replayed.PluginsEnabled, first.PluginsEnabled)
+	}
+}
+
+// TestRestoreManualItemsFallsBackToTheRenderedRow covers a row written before the
+// attempt kept the items: the operation row's one-line render is parsed back, and a
+// line that does not have that shape is kept whole so the count never drops.
+func TestRestoreManualItemsFallsBackToTheRenderedRow(t *testing.T) {
+	item := CPAImportManualItem{Item: "section:ampcode", Reason: "reconfigure_after_adoption", Instruction: "re-create it"}
+	recorded := model.UpgradeOperation{ManualItems: []string{
+		boundedManualItem(item),
+		"a line this file did not write",
+	}}
+	restored := restoreManualItems(recorded, cpaImportDestinationRecord{})
+	if len(restored) != len(recorded.ManualItems) {
+		t.Fatalf("restored %d item(s), want %d", len(restored), len(recorded.ManualItems))
+	}
+	if restored[0] != item {
+		t.Fatalf("restored %+v, want %+v", restored[0], item)
+	}
+	if restored[1].Item != recorded.ManualItems[1] {
+		t.Fatalf("an unparsable line was not kept whole: %+v", restored[1])
+	}
+}
+
+// recordedDestinationRecord reads the destination attempt a completed import left.
+func recordedDestinationRecord(t *testing.T, fixture *verifyFixture) cpaImportDestinationRecord {
+	t.Helper()
+	record, _, found, err := loadCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey)
+	if err != nil || !found {
+		t.Fatalf("the recorded destination attempt could not be read (found %t): %v", found, err)
+	}
+	return record
 }
 
 // TestImportCPAReplayRefusesAnUnreachableDestination locks down R2-1: when the

@@ -12,7 +12,9 @@ package legacypreflight
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +27,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
@@ -644,17 +647,100 @@ func requireSealedBindingAuthority(ctx context.Context, db *sql.DB, a DatabaseUp
 const admissionImportDestinationKeySetting = "upgrade_cpa_import_destination_v1"
 
 // managedImportDestination is the part of that row the admission re-checks: the
-// address a run proved, the source identity the destination was staged for, and
-// the server fingerprint that run observed. The management secret the row also
-// carries is not this check's business — the Manager's own connection is.
+// attempt identity the import submitted, the whole request it published, the
+// address a run proved and the server fingerprint that run observed. The
+// management secret the row also carries is not this check's business — the
+// Manager's own connection is.
+//
+// The request is re-read field by field because the handoff is the claim that this
+// operation staged this destination: the attempt's operation ID is derived from
+// the source it was staged for, and the Supervisor replays the request against the
+// authority, artifact, key list and plugin choice recorded here. A row missing any
+// of them describes a stage the import never submitted, and admitting it would
+// start a Manager on an operation whose target nothing proved.
 type managedImportDestination struct {
 	BaseURL           string `json:"baseUrl"`
 	URLProved         bool   `json:"urlProved"`
 	ServerFingerprint string `json:"serverFingerprint"`
 	ManagementKey     string `json:"managementKey"`
+	OperationID       string `json:"operationId"`
+	Attempt           int    `json:"attempt"`
 	Intent            struct {
-		SourceIdentity string `json:"sourceIdentity"`
+		SourceIdentity            string   `json:"sourceIdentity"`
+		SourceClass               string   `json:"sourceClass"`
+		ExpectedRuntimeIdentity   string   `json:"expectedRuntimeIdentity"`
+		ExpectedRuntimeGeneration uint64   `json:"expectedRuntimeGeneration"`
+		ExpectedActiveArtifactID  string   `json:"expectedActiveArtifactId"`
+		APIKeys                   []string `json:"apiKeys"`
+		PluginsEnabled            *bool    `json:"pluginsEnabled"`
 	} `json:"intent"`
+}
+
+// requireManagedDestinationProvenance proves the recorded row describes a stage
+// this operation submitted, before any of it is compared with the Manager's own
+// connection.
+//
+// Every field is the import's own: the operation ID is the Supervisor's replay
+// identity for one attempt of one source, the source identity is the digest the
+// managed source stamps, the class selects the Supervisor's 1.x arm, and the
+// authority, artifact, key list and plugin choice are the request the destination
+// was staged with. The artifact is compared with the compiled adoption record this
+// build carries, so a store completed on another build's artifact is not admitted
+// by this one.
+func requireManagedDestinationProvenance(destination managedImportDestination) error {
+	switch {
+	case strings.TrimSpace(destination.BaseURL) == "":
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no address")
+	case !destination.URLProved:
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no address a run proved")
+	case !validManagedServerFingerprint(destination.ServerFingerprint):
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no proved server fingerprint")
+	case !validManagedSourceIdentity(destination.Intent.SourceIdentity):
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no source identity this import stamps")
+	case destination.Intent.SourceClass != managedDestinationSourceClass:
+		return errors.New("a complete Managed Upgrade record's CPA import destination does not name the legacy managed source class the import stages")
+	case destination.Attempt < 1:
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no attempt identity")
+	case destination.OperationID != managedDestinationOperationID(destination.Intent.SourceIdentity, destination.Attempt):
+		return errors.New("a complete Managed Upgrade record's CPA import destination operation ID does not resolve to its own source and attempt")
+	case strings.TrimSpace(destination.Intent.ExpectedRuntimeIdentity) == "" || destination.Intent.ExpectedRuntimeGeneration == 0:
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no Supervisor authority the stage request addressed")
+	case len(destination.Intent.APIKeys) == 0:
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no client key list the stage request published")
+	case destination.Intent.PluginsEnabled == nil:
+		return errors.New("a complete Managed Upgrade record's CPA import destination names no plugin choice the stage request published")
+	}
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		return fmt.Errorf("this build carries no accepted CPA adoption artifact to compare the recorded destination against: %w", err)
+	}
+	if model.RuntimeArtifactID(destination.Intent.ExpectedActiveArtifactID) != qualifiedArtifact {
+		return errors.New("a complete Managed Upgrade record's CPA import destination was staged on an artifact this build's adoption record is not qualified against")
+	}
+	return nil
+}
+
+// managedDestinationSourceClass is the source class every Managed destination
+// stage publishes; the import copies a 1.x stack's own CPA state.
+const managedDestinationSourceClass = "legacy_managed"
+
+// managedDestinationOperationID mirrors the import's derivation of the Supervisor
+// operation ID. The admission reads the same bytes the writer wrote and must not
+// depend on the writer's package, so the derivation is repeated here.
+func managedDestinationOperationID(sourceIdentity string, attempt int) string {
+	sum := sha256.Sum256([]byte(sourceIdentity))
+	base := "upgrade-cpa-import:" + hex.EncodeToString(sum[:])[:32]
+	if attempt <= 1 {
+		return base
+	}
+	return fmt.Sprintf("%s:attempt:%d", base, attempt)
+}
+
+// validManagedSourceIdentity accepts exactly the identity the managed source
+// stamps: the `legacy-managed:sha256:` prefix and a lowercase SHA-256 digest.
+func validManagedSourceIdentity(value string) bool {
+	digest, ok := strings.CutPrefix(strings.TrimSpace(value), "legacy-managed:sha256:")
+	return ok && identity.IsValidSHA256Hex(digest)
 }
 
 // admissionProtector loads the Manager data key the store's secrets are sealed
@@ -700,15 +786,8 @@ func requireManagedDestinationAuthority(ctx context.Context, db *sql.DB, a Datab
 	if err := json.Unmarshal([]byte(raw), &destination); err != nil {
 		return fmt.Errorf("decode the recorded CPA import destination: %w", err)
 	}
-	switch {
-	case strings.TrimSpace(destination.BaseURL) == "":
-		return errors.New("a complete Managed Upgrade record's CPA import destination names no address")
-	case !destination.URLProved:
-		return errors.New("a complete Managed Upgrade record's CPA import destination names no address a run proved")
-	case strings.TrimSpace(destination.Intent.SourceIdentity) == "":
-		return errors.New("a complete Managed Upgrade record's CPA import destination names no source identity")
-	case !validManagedServerFingerprint(destination.ServerFingerprint):
-		return errors.New("a complete Managed Upgrade record's CPA import destination names no proved server fingerprint")
+	if err := requireManagedDestinationProvenance(destination); err != nil {
+		return err
 	}
 	destinationAddress, err := canonicalAdmissionAddress(destination.BaseURL)
 	if err != nil {

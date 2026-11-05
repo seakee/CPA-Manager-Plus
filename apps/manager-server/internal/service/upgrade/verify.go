@@ -70,6 +70,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -799,10 +800,20 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 }
 
 // requireManagedDestinationEvidence proves the recorded destination row is the
-// whole evidence a Managed handoff rests on: a proved address, the source identity
-// the destination was staged for, and the server fingerprint a run observed with
-// the authenticated proof. A row missing any of them describes a destination no
-// run proved, so the live re-proof has nothing to compare against.
+// whole evidence a Managed handoff rests on: a proved address, the source
+// identity and class the destination was staged for, the Supervisor authority and
+// artifact the stage request named, the client keys it published, the plugin
+// choice the operator made, and the server fingerprint a run observed with the
+// authenticated proof. A row missing any of them describes a destination no run
+// of this operation proved, so the live re-proof has nothing to compare against.
+//
+// The provenance is checked field by field rather than by presence, because the
+// handoff is the claim that this operation staged this destination: the attempt
+// identity is derived from the source it was staged for, and the request is
+// replayed by the Supervisor against the authority and artifact recorded here. A
+// row whose operation ID does not resolve to its own source and attempt, or whose
+// recorded artifact is not the one this build's adoption record was qualified
+// against, describes a stage this operation never submitted.
 //
 // The fingerprint is checked by shape, exactly as the admission checks it: a value
 // that is not the digest freshkeyapply.ExternalServerFingerprint produces can
@@ -815,13 +826,53 @@ func requireManagedDestinationEvidence(destination cpaImportDestinationRecord) e
 	if !destination.urlProved() {
 		return errors.New("the recorded destination names no address a run proved")
 	}
-	if strings.TrimSpace(destination.Intent.SourceIdentity) == "" {
-		return errors.New("the recorded destination names no source identity")
-	}
 	if !validManagedServerFingerprint(destination.ServerFingerprint) {
 		return errors.New("the recorded destination names no proved server fingerprint")
 	}
+	intent := destination.Intent
+	if !validManagedSourceIdentity(intent.SourceIdentity) {
+		return errors.New("the recorded destination names no source identity this import stamps")
+	}
+	if intent.SourceClass != managedDestinationSourceClass {
+		return errors.New("the recorded destination does not name the legacy managed source class the import stages")
+	}
+	if destination.Attempt < 1 {
+		return errors.New("the recorded destination names no attempt identity")
+	}
+	if destination.OperationID != cpaImportDestinationOperationID(intent.SourceIdentity, destination.Attempt) {
+		return errors.New("the recorded destination's operation ID does not resolve to its own source and attempt")
+	}
+	if strings.TrimSpace(string(intent.ExpectedRuntimeIdentity)) == "" || intent.ExpectedRuntimeGeneration == 0 {
+		return errors.New("the recorded destination names no Supervisor authority the stage request addressed")
+	}
+	if len(intent.APIKeys) == 0 {
+		return errors.New("the recorded destination names no client key list the stage request published")
+	}
+	if intent.PluginsEnabled == nil {
+		return errors.New("the recorded destination names no plugin choice the stage request published")
+	}
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		return fmt.Errorf("this build carries no accepted CPA adoption artifact to compare the recorded destination against: %w", err)
+	}
+	if intent.ExpectedActiveArtifactID != qualifiedArtifact {
+		return errors.New("the recorded destination was staged on an artifact this build's adoption record is not qualified against")
+	}
 	return nil
+}
+
+// managedDestinationSourceClass is the source class every Managed destination
+// stage publishes. The import copies a 1.x stack's own CPA state, and the class is
+// what makes the Supervisor apply that arm; a row naming another one was written
+// by a request this step never submitted.
+const managedDestinationSourceClass = "legacy_managed"
+
+// validManagedSourceIdentity accepts exactly the identity the managed source
+// stamps: the `legacy-managed:sha256:` prefix and a lowercase SHA-256 digest. A
+// destination staged for anything else was staged for another source.
+func validManagedSourceIdentity(value string) bool {
+	digest, ok := strings.CutPrefix(strings.TrimSpace(value), "legacy-managed:sha256:")
+	return ok && identity.IsValidSHA256Hex(digest)
 }
 
 // validManagedServerFingerprint accepts exactly the shape

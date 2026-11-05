@@ -14,6 +14,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
@@ -709,9 +710,15 @@ func managedFixtureFingerprint() string {
 	return freshkeyapply.ExternalServerFingerprint("v8.0.13", strings.Repeat("a", 64))
 }
 
+// managedFixtureSourceIdentity is the identity the managed source stamps: the
+// `legacy-managed:sha256:` prefix and the digest of the configuration bytes the
+// destination was staged for.
+var managedFixtureSourceIdentity = "legacy-managed:sha256:" + strings.Repeat("c", 64)
+
 // managedFixtureDestination builds the destination evidence a completed Managed
 // import writes, sealed with the same protector that seals the Manager
-// connection.
+// connection. It carries the whole provenance the admission re-checks: the attempt
+// identity derived from the source, and the request the Supervisor published.
 func (f completedOperationFixture) managedFixtureDestination(protector *security.Protector, sealedSecret string) (string, error) {
 	sealedDestination := sealedSecret
 	if f.managedTarget.destinationSecret != "" {
@@ -721,15 +728,27 @@ func (f completedOperationFixture) managedFixtureDestination(protector *security
 		}
 		sealedDestination = sealed
 	}
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		return "", err
+	}
 	document := map[string]any{
 		"baseUrl":           managedFixtureAddress,
 		"urlProved":         true,
 		"serverFingerprint": managedFixtureFingerprint(),
 		"managementKey":     sealedDestination,
-		"intent":            map[string]any{"sourceIdentity": managedFixtureAddress},
-		"operationId":       "cpa-import:fixture:attempt:1",
-		"attempt":           1,
-		"updatedAtMs":       1,
+		"intent": map[string]any{
+			"sourceIdentity":            managedFixtureSourceIdentity,
+			"sourceClass":               "legacy_managed",
+			"expectedRuntimeIdentity":   "runtime-identity-1",
+			"expectedRuntimeGeneration": 4,
+			"expectedActiveArtifactId":  string(qualifiedArtifact),
+			"apiKeys":                   []string{"legacy-client-key-1"},
+			"pluginsEnabled":            true,
+		},
+		"operationId": managedDestinationOperationID(managedFixtureSourceIdentity, 1),
+		"attempt":     1,
+		"updatedAtMs": 1,
 	}
 	if f.managedTarget.mutate != nil {
 		f.managedTarget.mutate(document)
@@ -739,6 +758,19 @@ func (f completedOperationFixture) managedFixtureDestination(protector *security
 		return "", err
 	}
 	return string(payload), nil
+}
+
+// mutateManagedIntent reaches into the destination document's request, which is
+// where the provenance fields the admission re-checks live.
+func mutateManagedIntent(mutate func(intent map[string]any)) func(document map[string]any) {
+	return func(document map[string]any) {
+		intent, ok := document["intent"].(map[string]any)
+		if !ok {
+			intent = map[string]any{}
+			document["intent"] = intent
+		}
+		mutate(intent)
+	}
 }
 
 // completedBinding is the External connect row a completed External operation
@@ -1136,6 +1168,42 @@ func TestCompletedOperationAdmissionRequiresTheManagedHandoff(t *testing.T) {
 		}},
 		{name: "a destination with no source identity", mutate: func(f *completedOperationFixture) {
 			f.managedTarget.mutate = func(document map[string]any) { document["intent"] = map[string]any{} }
+		}},
+		{name: "a destination whose source identity is not this import's", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = mutateManagedIntent(func(intent map[string]any) {
+				intent["sourceIdentity"] = "external:sha256:" + strings.Repeat("d", 64)
+			})
+		}},
+		{name: "a destination with no source class", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = mutateManagedIntent(func(intent map[string]any) { delete(intent, "sourceClass") })
+		}},
+		{name: "a destination with another source class", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = mutateManagedIntent(func(intent map[string]any) { intent["sourceClass"] = "network_existing" })
+		}},
+		{name: "a destination with no expected runtime identity", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = mutateManagedIntent(func(intent map[string]any) { delete(intent, "expectedRuntimeIdentity") })
+		}},
+		{name: "a destination with no expected runtime generation", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = mutateManagedIntent(func(intent map[string]any) { intent["expectedRuntimeGeneration"] = 0 })
+		}},
+		{name: "a destination with an unqualified artifact", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = mutateManagedIntent(func(intent map[string]any) {
+				intent["expectedActiveArtifactId"] = "sha256:" + strings.Repeat("b", 64)
+			})
+		}},
+		{name: "a destination with no client keys", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = mutateManagedIntent(func(intent map[string]any) { intent["apiKeys"] = []string{} })
+		}},
+		{name: "a destination with no plugin choice", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = mutateManagedIntent(func(intent map[string]any) { delete(intent, "pluginsEnabled") })
+		}},
+		{name: "a destination with no operation ID", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = func(document map[string]any) { delete(document, "operationId") }
+		}},
+		{name: "a destination whose operation ID names another attempt", mutate: func(f *completedOperationFixture) {
+			f.managedTarget.mutate = func(document map[string]any) {
+				document["operationId"] = managedDestinationOperationID(managedFixtureSourceIdentity, 2)
+			}
 		}},
 		{name: "a destination holding a secret the Manager does not", mutate: func(f *completedOperationFixture) {
 			f.managedTarget.destinationSecret = "another-management-key"
