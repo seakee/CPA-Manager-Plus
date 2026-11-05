@@ -819,7 +819,9 @@ jobs:
       - name: Reject unsupported CPA v8 architecture without fallback
         if: needs.changes.outputs.runtime_lifecycle == 'true'
         run: |
-          if docker buildx build --platform linux/riscv64 --target cpa-v8-download -f Dockerfile.runtime . > /tmp/cpamp-unsupported-cpa-v8.log 2>&1; then
+          if docker buildx build --platform linux/riscv64 --target cpa-v8-download \
+              --build-arg VERSION=ci --build-arg SOURCE_COMMIT=${{ github.sha }} \
+              -f Dockerfile.runtime . > /tmp/cpamp-unsupported-cpa-v8.log 2>&1; then
             echo "Unsupported CPA architecture unexpectedly built"
             exit 1
           fi

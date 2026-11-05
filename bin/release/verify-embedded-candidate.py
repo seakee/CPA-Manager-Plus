@@ -378,6 +378,7 @@ def inspect(path, role, source_sha, event, root_license, seed, runtime_entrypoin
             "imageConfigDigest": config_id,
             "platform": "linux/amd64",
             "goBinaryIdentity": compiled_identity,
+            "licenseCoverage": inventory["licenseCoverage"],
             "packagedFiles": {key: digest(value) for key, value in sorted(files.items())},
         }
 
@@ -408,6 +409,11 @@ def verify(paths, source_sha, event, root):
         "candidateVersionClaim": CANDIDATE_VERSION,
         "platform": "linux/amd64",
         "images": result,
+        "licenseCoverage": {role: result[role]["licenseCoverage"] for role in ROLES},
+        "licenseCoveragePolicy": {
+            "originalTextsFailClosed": "Go modules and standard library, Web dependency closure, Debian base packages",
+            "alpineBasePackages": image_evidence.ALPINE_POLICY,
+        },
         "officialCPA": {
             "version": "8.0.13", "dockerBuildPinArchiveSHA256": CPA_ARCHIVE_SHA,
             "verifiedFinalImageExecutableSHA256": CPA_SHA,

@@ -66,7 +66,7 @@ def make_oci(destination, role, license_bytes, *,
              source_inventory=SOURCE_BYTES, api_contract=MOCK_API_CONTRACT,
              bad_mode=None, invalid_elf=False, wrong_module=False, wrong_source_stamp=False,
              wrong_sha_suffix=False, wrong_version_suffix=False, wrong_entrypoint=False,
-             wrong_cmd=False, runtime_script=MOCK_RUNTIME_ENTRYPOINT):
+             wrong_cmd=False, runtime_script=MOCK_RUNTIME_ENTRYPOINT, mutate_evidence=None):
     files = {
         "/usr/local/share/licenses/cpamp/LICENSE": license_bytes,
     }
@@ -103,6 +103,8 @@ def make_oci(destination, role, license_bytes, *,
         files["/usr/local/bin/cpamp-runtime-v8-entrypoint"] = runtime_script
         files["/usr/local/share/licenses/cli-proxy-api/LICENSE"] = b"official"
     files = make_evidence(role, files, source_inventory)
+    if mutate_evidence is not None:
+        files = mutate_evidence(files)
     if missing:
         files.pop(missing)
     uncompressed = tar_content(files, bad_mode=bad_mode)
@@ -242,6 +244,13 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                              "STRUCTURAL_CANDIDATE_EVIDENCE_ONLY_NOT_RELEASE_QUALIFIED")
             self.assertEqual(set(receipt["images"]), set(subject.ROLES))
             self.assertEqual(len({x["platformManifestDigest"] for x in receipt["images"].values()}), 3)
+            self.assertEqual(set(receipt["licenseCoverage"]), set(subject.ROLES))
+            self.assertEqual(receipt["licenseCoveragePolicy"]["alpineBasePackages"],
+                             subject.image_evidence.ALPINE_POLICY)
+            for role, record in receipt["images"].items():
+                base = record["licenseCoverage"]["base-image"]
+                self.assertEqual((base["metadataOnlyPackages"], base["packagedNoticePackages"]),
+                                 (1, 0), role)
             make_oci(archives["ingress"], "ingress", self.license, event="wrong-event")
             with self.assertRaisesRegex(ValueError, "build event"):
                 subject.verify(archives, SHA, EVENT, self.root)
@@ -264,6 +273,36 @@ class EmbeddedCandidateContracts(unittest.TestCase):
     def test_ingress_positive(self):
         evidence = self.inspect("ingress")
         self.assertIn("/usr/local/bin/cpamp-ingress", evidence["packagedFiles"])
+
+    def test_receipt_records_explicit_alpine_metadata_coverage(self):
+        receipt = self.inspect("ingress")
+        base = receipt["licenseCoverage"]["base-image"]
+        self.assertEqual(base["policy"], subject.image_evidence.ALPINE_POLICY)
+        self.assertEqual(base["originalTexts"], "available-packaged-notices-only")
+        self.assertEqual(base["metadataOnlyPackages"], 1)
+        self.assertEqual(base["packagedNoticePackages"], 0)
+        self.assertEqual(receipt["licenseCoverage"]["ingress"]["policy"],
+                         subject.image_evidence.ORIGINAL_TEXT_POLICY)
+
+    def test_receipt_rejects_false_alpine_packaged_notice_claim(self):
+        def falsify(files):
+            path = subject.image_evidence.notice_path("base-image", "inventory.json")
+            inventory = json.loads(files[path])
+            inventory["dependencies"][0]["evidence"] = subject.image_evidence.ALPINE_PACKAGED
+            files[path] = subject.image_evidence.encoded(inventory)
+            aggregate = json.loads(files[subject.NOTICE])
+            aggregate["components"]["base-image"] = {
+                "inventory": inventory, "inventorySHA256": subject.image_evidence.digest(files[path])}
+            files[subject.NOTICE] = subject.image_evidence.encoded(aggregate)
+            # Rebind provenance to the rewritten aggregate inventory so only the
+            # false packaged-notice claim can be responsible for the rejection.
+            provenance = json.loads(files[subject.image_evidence.PROVENANCE])
+            provenance["licenseInventorySHA256"] = subject.image_evidence.digest(files[subject.NOTICE])
+            files[subject.image_evidence.PROVENANCE] = subject.image_evidence.encoded(provenance)
+            return files
+
+        with self.assertRaisesRegex(ValueError, "invalid installed Alpine license evidence"):
+            self.inspect("ingress", mutate_evidence=falsify)
 
     def test_reject_invalid_descriptor_size(self):
         with self.assertRaisesRegex(ValueError, "descriptor size"):

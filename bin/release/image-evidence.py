@@ -24,6 +24,14 @@ BINARIES = {"manager": (("manager", "cpa-manager-plus"),),
 MODULES = {"manager": "apps/manager-server", "ingress": "apps/ingress",
            "runtime-supervisor": "apps/runtime-supervisor"}
 SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
+# Go, Web and Debian base-image components must carry original license or
+# copyright texts, so a missing original fails the build. Alpine's installed
+# APK database only promises an SPDX expression per package; its evidence
+# states whether packaged originals were also available.
+ALPINE_POLICY = "apk-license-metadata-and-available-packaged-notices"
+ALPINE_METADATA_ONLY = "installed-apk-database-metadata-only"
+ALPINE_PACKAGED = "installed-apk-database-and-packaged-notices"
+ORIGINAL_TEXT_POLICY = "original-license-texts-fail-closed"
 
 
 def require(condition, message):
@@ -51,6 +59,33 @@ def notice_path(component, relative):
             ".." not in PurePosixPath(relative).parts and "\\" not in relative,
             "unsafe license inventory path")
     return LICENSE_ROOT + component + "/" + relative
+
+
+def alpine_coverage(dependencies):
+    with_notices = sum(1 for dep in dependencies if dep["notices"])
+    return {"packages": len(dependencies), "metadataOnlyPackages": len(dependencies) - with_notices,
+            "packagedNoticePackages": with_notices}
+
+
+def license_coverage(components):
+    # The aggregate inventory and provenance must state, per component, whether
+    # full original texts are enforced or only the Alpine metadata boundary.
+    result = {}
+    for name, entry in components.items():
+        inventory = entry["inventory"]
+        dependencies = inventory["dependencies"]
+        if name == "base-image" and inventory.get("ecosystem") == "alpine":
+            result[name] = {"policy": ALPINE_POLICY, "originalTexts": "available-packaged-notices-only",
+                            **alpine_coverage(dependencies)}
+        elif name == "base-image":
+            result[name] = {"policy": "debian-copyright-files-fail-closed",
+                            "originalTexts": "complete-for-installed-packages",
+                            "packages": len(dependencies)}
+        else:
+            result[name] = {"policy": ORIGINAL_TEXT_POLICY,
+                            "originalTexts": "complete-for-installed-dependencies",
+                            "packages": len(dependencies)}
+    return result
 
 
 def validate_inventory(value, role, read_file, expected_source=None):
@@ -91,8 +126,10 @@ def validate_inventory(value, role, read_file, expected_source=None):
             identities.add(key)
             require(isinstance(dep.get("notices"), list), "missing dependency notices")
             if component == "base-image" and inventory.get("ecosystem") == "alpine":
-                require(dep.get("licenseExpression") and dep.get("evidence") == "installed-apk-database",
-                        "missing installed Alpine license record")
+                require(isinstance(dep.get("licenseExpression"), str) and dep["licenseExpression"].strip(),
+                        "missing installed Alpine license expression: " + dep["name"])
+                require(dep.get("evidence") == (ALPINE_PACKAGED if dep["notices"] else ALPINE_METADATA_ONLY),
+                        "invalid installed Alpine license evidence: " + dep["name"])
             else:
                 require(dep["notices"], "missing original dependency license/NOTICE")
             for notice in dep["notices"]:
@@ -107,6 +144,12 @@ def validate_inventory(value, role, read_file, expected_source=None):
         elif component == "web":
             require(set(source["webDependencies"]) <= {name for name, _ in identities},
                     "incomplete direct Web dependency coverage")
+        if component == "base-image" and inventory.get("ecosystem") == "alpine":
+            require(inventory.get("coveragePolicy") == ALPINE_POLICY and
+                    inventory.get("coverage") == alpine_coverage(inventory["dependencies"]),
+                    "Alpine license coverage summary mismatch: " + component)
+    require(value.get("licenseCoverage") == license_coverage(value["components"]),
+            "license coverage summary differs from component inventories")
     require(read_file(LICENSE_ROOT + "cpamp/LICENSE"), "missing CPAMP LICENSE")
     if role == "runtime":
         require(read_file(LICENSE_ROOT + "cli-proxy-api/LICENSE"), "missing CPA LICENSE")
@@ -120,7 +163,11 @@ def validate_provenance(value, role, version, commit, read_file):
             value.get("sourceCommit") == commit and value.get("source") == SOURCE,
             "provenance source/version identity mismatch")
     require(value.get("platform") in ("linux/amd64", "linux/arm64"), "invalid provenance platform")
-    require(value.get("licenseInventorySHA256") == digest(read_file(INVENTORY)), "provenance inventory hash mismatch")
+    aggregate = read_file(INVENTORY)
+    require(value.get("licenseInventorySHA256") == digest(aggregate), "provenance inventory hash mismatch")
+    coverage = json.loads(aggregate).get("licenseCoverage")
+    require(isinstance(coverage, dict) and coverage and value.get("licenseCoverage") == coverage,
+            "provenance license coverage differs from aggregate inventory")
     components = value.get("components")
     expected = [name for name, _ in BINARIES[role]] + (["web"] if role == "manager" else [])
     require(isinstance(components, list) and [item.get("name") for item in components] == expected,
@@ -157,7 +204,10 @@ def build(root, role, version, commit, platform, source_inventory):
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_bytes(source_inventory.read_bytes())
     inventory = {"schemaVersion": 1, "status": "VERIFIED_LICENSE_COLLECTION", "role": role,
-                 "scope": "Original Go/Web notices; installed base-package license records; not legal approval",
+                 "scope": ("Original Go/Web notices and Debian copyright files fail closed; Alpine base "
+                           "packages record APK SPDX expressions plus available packaged originals; "
+                           "not legal approval"),
+                 "licenseCoverage": license_coverage(components),
                  "sourceInventorySHA256": digest(source_path.read_bytes()), "components": components}
     validate_inventory(inventory, role, read_file)
     (root / INVENTORY.lstrip("/")).write_bytes(encoded(inventory))
@@ -179,6 +229,7 @@ def build(root, role, version, commit, platform, source_inventory):
                       "version": version, "source": SOURCE, "sourceCommit": commit})
     provenance = {"schemaVersion": 1, "role": role, "version": version, "sourceCommit": commit,
                   "source": SOURCE, "platform": platform, "components": items,
+                  "licenseCoverage": inventory["licenseCoverage"],
                   "licenseInventorySHA256": digest(read_file(INVENTORY))}
     validate_provenance(provenance, role, version, commit, read_file)
     (root / PROVENANCE.lstrip("/")).write_bytes(encoded(provenance))

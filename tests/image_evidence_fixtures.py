@@ -37,7 +37,7 @@ def make_evidence(role, files, source_bytes=SOURCE_BYTES):
         data = b"original fixture dependency notice\n"
         notices = [{"path": "fixture/LICENSE", "sha256": evidence.digest(data)}]
         dependencies = [{"name": "example.test/module", "version": "v1.0.0", "notices": notices}]
-        inputs, ecosystem = {}, "go"
+        inputs, ecosystem, extra = {}, "go", {}
         if component in evidence.MODULES:
             dependencies.append({"name": "Go standard library and bundled sources", "version": "go1.24.0",
                                  "notices": notices})
@@ -49,9 +49,11 @@ def make_evidence(role, files, source_bytes=SOURCE_BYTES):
         else:
             ecosystem = "alpine"
             dependencies = [{"name": "musl", "version": "1.2.5-r1", "licenseExpression": "MIT",
-                             "evidence": "installed-apk-database", "notices": []}]
+                             "evidence": evidence.ALPINE_METADATA_ONLY, "notices": []}]
+            extra = {"coveragePolicy": evidence.ALPINE_POLICY,
+                     "coverage": evidence.alpine_coverage(dependencies)}
         value = {"schemaVersion": 1, "component": component, "ecosystem": ecosystem,
-                 "inputs": inputs, "dependencies": dependencies}
+                 "inputs": inputs, "dependencies": dependencies, **extra}
         files[evidence.notice_path(component, "inventory.json")] = evidence.encoded(value)
         files[evidence.notice_path(component, "fixture/LICENSE")] = data
     with tempfile.TemporaryDirectory() as temp:

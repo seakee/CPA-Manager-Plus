@@ -397,12 +397,15 @@ curated note body outside that directory.
 ## v2 image licenses and component provenance
 
 All three v2 Dockerfiles require explicit `VERSION` and `SOURCE_COMMIT` build
-arguments. The first build stage of each file validates both before any Web or
-Go build: `VERSION` must be 1-128 characters starting alphanumeric and limited
+arguments. Every stage that performs network or build work — including the
+`cpa-download`/`cpa-v8-download` stages, the base-image stages and the
+evidence stages — validates both before its first `apk add`, `apt-get`,
+`wget`, `npm ci`/`npm run build`, or `go mod download`/`go build`:
+`VERSION` must be 1-128 characters starting alphanumeric and limited
 to `[A-Za-z0-9._+-]`, must not be `unknown` (case-insensitive), and
 `SOURCE_COMMIT` must be an exact lowercase 40-hex commit. Empty, `unknown`, and
-malformed values therefore stop the build in the early guard instead of at the
-evidence stage. For example, from a clean, reviewed source tree:
+malformed values therefore stop the build in the earliest guard instead of at
+the evidence stage. For example, from a clean, reviewed source tree:
 
 ```sh
 docker buildx build --platform linux/amd64 \
@@ -450,22 +453,44 @@ not copying a generic MIT template.
 
 The base-image component records **every package installed in the final base**,
 before installing audit-only tools in a separate stage. Debian records preserve
-the original packaged copyright files. Alpine records preserve exact package
-versions and installed APK SPDX license expressions, plus any packaged original
-notices. Alpine package metadata is explicitly **not** represented as a complete
-set of upstream license texts. Audit Python and its dependencies never enter the
-final image or its base-package inventory. Every image retains CPAMP's original
-MIT license at `/usr/local/share/licenses/cpamp/LICENSE`; every runtime target
-also retains the archive's original CPA license at
+the original packaged copyright files and fail the build when one is missing.
+Go modules and the standard library, the Web dependency closure, and Debian base
+packages therefore enforce full original-text coverage fail-closed.
+
+Alpine base packages (`alpine:3.21` in Manager and Ingress) are an explicit,
+approved Scope 2 boundary rather than a claim of complete upstream license
+texts. Each package records its exact installed version and the APK `L:` SPDX
+license expression, and states which evidence it actually has:
+
+- `installed-apk-database-metadata-only`: the APK database carries an SPDX
+  expression and the base image ships no packaged original text.
+- `installed-apk-database-and-packaged-notices`: the base image also ships
+  original files under `/usr/share/licenses/<package>/`; every copied file is
+  hashed and verified on disk.
+
+The Alpine component inventory and the aggregate inventory/provenance record the
+policy `apk-license-metadata-and-available-packaged-notices`
+(`available-packaged-notices-only`) with counts of metadata-only and
+original-notice packages. A record that claims packaged notices without any, or
+that lacks an SPDX expression, fails validation. Audit Python and its
+dependencies never enter the final image or its base-package inventory. Every
+image retains CPAMP's original MIT license at
+`/usr/local/share/licenses/cpamp/LICENSE`; every runtime target also retains the
+archive's original CPA license at
 `/usr/local/share/licenses/cli-proxy-api/LICENSE`.
 
 Each component has a nonempty `inventory.json` with dependency identities and
 SHA256 of copied originals. The aggregate
 `/usr/local/share/cpamp/release/third-party-inventory.txt` is JSON despite its
 historical filename: `VERIFIED_LICENSE_COLLECTION` means collection, identity,
-source-input and copied-byte checks passed, **not legal approval**. Its hash is
-bound into provenance. The checked-in file of the same name is the deterministic
-source-manifest ledger, embedded separately as `source-dependency-inventory.json`;
+source-input and copied-byte checks passed, **not legal approval**. It asserts
+full original-text coverage for Go modules and the standard library, the Web
+dependency closure, and Debian base packages; for Alpine base packages it
+asserts only the APK SPDX metadata plus available packaged originals boundary
+described above, with the metadata-only and original-notice counts recorded in
+`licenseCoverage`. Its hash is bound into provenance. The checked-in file of the
+same name is the deterministic source-manifest ledger, embedded separately as
+`source-dependency-inventory.json`;
 it is not a pre-generated claim about mutable base-image packages. Regenerate it
 when the Go/Web manifests or lock change:
 

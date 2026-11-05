@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -200,6 +201,70 @@ class CollectorTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "notice directory escapes its root"):
             collector.collect_go(module, self.output, "manager")
 
+    def test_go_broken_toolchain_subtree_symlink_fails(self):
+        module, _, fake = self.go_fixture()
+        shutil.rmtree(self.root / "go/src/vendor")
+        (self.root / "go/src/vendor").symlink_to(self.root / "go/src/missing-vendor")
+        with patch.object(collector, "command", fake), \
+                self.assertRaisesRegex(ValueError, "broken Go toolchain subtree symlink"):
+            collector.collect_go(module, self.output, "manager")
+
+    def test_broken_nested_directory_symlink_in_toolchain_fails(self):
+        module, _, fake = self.go_fixture()
+        (self.root / "go/src/vendor/example.test/broken").symlink_to(
+            self.root / "go/src/vendor/example.test/missing")
+        with patch.object(collector, "command", fake), \
+                self.assertRaisesRegex(ValueError, "broken symlink rejected"):
+            collector.collect_go(module, self.output, "manager")
+
+    def test_nested_module_directory_symlink_escape_fails(self):
+        module, _, fake = self.go_fixture()
+        external = tempfile.TemporaryDirectory()
+        self.addCleanup(external.cleanup)
+        nested = Path(external.name) / "nested"
+        nested.mkdir()
+        (nested / "LICENSE").write_text("external nested license\n")
+        (self.root / "lib/sub-link").symlink_to(nested)
+        with patch.object(collector, "command", fake), \
+                self.assertRaisesRegex(ValueError, "symlinked notice directory rejected"):
+            collector.collect_go(module, self.output, "manager")
+
+    def test_dangling_symlink_in_module_tree_fails(self):
+        module, _, fake = self.go_fixture()
+        (self.root / "lib/dangling").symlink_to(self.root / "lib/missing")
+        with patch.object(collector, "command", fake), \
+                self.assertRaisesRegex(ValueError, "broken symlink rejected"):
+            collector.collect_go(module, self.output, "manager")
+
+    def test_nested_web_package_directory_symlink_escape_fails(self):
+        self.npm_fixture()
+        external = tempfile.TemporaryDirectory()
+        self.addCleanup(external.cleanup)
+        (Path(external.name) / "LICENSE").write_text("external nested license\n")
+        (self.root / "node_modules/direct/sub-link").symlink_to(Path(external.name))
+        with self.assertRaisesRegex(ValueError, "symlinked notice directory rejected"):
+            collector.collect_web(self.root, self.output)
+
+    def test_in_root_directory_symlink_is_rejected_instead_of_pruned(self):
+        source = self.root / "dependency"
+        self.put("dependency/LICENSE", "original dependency license\n")
+        (source / "nested").mkdir()
+        (source / "alias").symlink_to(source / "nested")
+        with self.assertRaisesRegex(ValueError, "symlinked notice directory rejected"):
+            collector.copy_notices(source, self.output, "dependency")
+
+    def test_cli_exits_when_notice_walk_finds_a_symlinked_directory(self):
+        self.npm_fixture()
+        (self.root / "node_modules/direct/sub-link").symlink_to(self.root / "node_modules/peer")
+        process = subprocess.run(
+            [sys.executable, str(ROOT / "bin/release/collect-third-party-licenses.py"), "web",
+             "--root", str(self.root), "--output", str(self.output)],
+            capture_output=True, text=True,
+            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+        self.assertEqual(process.returncode, 1, process.stderr)
+        self.assertIn("STOP: license inventory incomplete", process.stderr)
+        self.assertIn("symlinked notice directory rejected", process.stderr)
+
     def test_notice_symlink_escape_fails(self):
         self.put("outside", "not a dependency original")
         source = self.root / "dependency"
@@ -213,7 +278,20 @@ class CollectorTests(unittest.TestCase):
         result = collector.collect_base(self.root, "alpine", self.output)
         self.assertEqual([item["name"] for item in result["dependencies"]], ["busybox", "musl"])
         self.assertEqual(result["dependencies"][0]["licenseExpression"], "GPL-2.0-only")
-        self.assertTrue(all(item["evidence"] == "installed-apk-database" for item in result["dependencies"]))
+        self.assertTrue(all(item["evidence"] == "installed-apk-database-metadata-only"
+                            for item in result["dependencies"]))
+        self.assertEqual(result["coveragePolicy"], "apk-license-metadata-and-available-packaged-notices")
+        self.assertEqual(result["coverage"], {"packages": 2, "metadataOnlyPackages": 2,
+                                              "packagedNoticePackages": 0})
+
+    def test_alpine_package_without_packaged_notices_is_metadata_only(self):
+        self.put("lib/apk/db/installed", "P:musl\nV:1.2.5-r9\nL:MIT\n")
+        result = collector.collect_base(self.root, "alpine", self.output)
+        package = result["dependencies"][0]
+        self.assertEqual(package["notices"], [])
+        self.assertEqual(package["evidence"], "installed-apk-database-metadata-only")
+        self.assertEqual(result["coverage"], {"packages": 1, "metadataOnlyPackages": 1,
+                                              "packagedNoticePackages": 0})
 
     def test_alpine_missing_license_metadata_fails(self):
         database = self.put("lib/apk/db/installed", "P:musl\nV:1.2.5-r9\n")
@@ -235,6 +313,18 @@ class CollectorTests(unittest.TestCase):
         self.put("usr/share/licenses/musl/COPYING", "original musl license\n")
         result = collector.collect_base(self.root, "alpine", self.output)
         self.assertEqual(result["dependencies"][0]["notices"][0]["path"], "packaged-notices/musl/COPYING")
+        self.assertEqual(result["dependencies"][0]["evidence"],
+                         "installed-apk-database-and-packaged-notices")
+        self.assertEqual(result["coverage"], {"packages": 1, "metadataOnlyPackages": 0,
+                                              "packagedNoticePackages": 1})
+
+    def test_alpine_coverage_counts_metadata_only_and_packaged_packages(self):
+        self.put("lib/apk/db/installed",
+                 "P:musl\nV:1.2.5-r9\nL:MIT\n\nP:busybox\nV:1.37-r1\nL:GPL-2.0-only\n")
+        self.put("usr/share/licenses/busybox/COPYING", "original busybox license\n")
+        result = collector.collect_base(self.root, "alpine", self.output)
+        self.assertEqual(result["coverage"], {"packages": 2, "metadataOnlyPackages": 1,
+                                              "packagedNoticePackages": 1})
 
     def test_debian_original_copyright_including_relative_symlink(self):
         self.put("base-packages.tsv", "libc6:amd64\t2.36-r1\tglibc\nlibc-bin\t2.36-r1\tglibc\n")
@@ -332,6 +422,48 @@ class ImageEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe license inventory path"):
             evidence.validate_inventory(inventory, "manager", files.__getitem__)
 
+    def test_alpine_metadata_only_coverage_is_explicit_and_validated(self):
+        files, inventory, _ = self.fixture()
+        base = inventory["components"]["base-image"]["inventory"]
+        self.assertEqual([dep["evidence"] for dep in base["dependencies"]],
+                         ["installed-apk-database-metadata-only"])
+        self.assertEqual(base["coveragePolicy"],
+                         "apk-license-metadata-and-available-packaged-notices")
+        self.assertEqual(inventory["licenseCoverage"]["base-image"],
+                         {"policy": "apk-license-metadata-and-available-packaged-notices",
+                          "originalTexts": "available-packaged-notices-only",
+                          "packages": 1, "metadataOnlyPackages": 1, "packagedNoticePackages": 0})
+        self.assertEqual(inventory["licenseCoverage"]["manager"],
+                         {"policy": "original-license-texts-fail-closed",
+                          "originalTexts": "complete-for-installed-dependencies", "packages": 2})
+        evidence.validate_inventory(inventory, "manager", files.__getitem__)
+
+    def test_false_alpine_packaged_notice_claim_fails(self):
+        files, inventory, _ = self.fixture()
+        self.change_component(inventory, files, "base-image", lambda value: value["dependencies"][0].update(
+            evidence="installed-apk-database-and-packaged-notices"))
+        with self.assertRaisesRegex(ValueError, "invalid installed Alpine license evidence"):
+            evidence.validate_inventory(inventory, "manager", files.__getitem__)
+
+    def test_missing_alpine_license_expression_fails(self):
+        files, inventory, _ = self.fixture()
+        self.change_component(inventory, files, "base-image",
+                              lambda value: value["dependencies"][0].update(licenseExpression=""))
+        with self.assertRaisesRegex(ValueError, "missing installed Alpine license expression"):
+            evidence.validate_inventory(inventory, "manager", files.__getitem__)
+
+    def test_license_coverage_summary_must_match_component_inventories(self):
+        files, inventory, _ = self.fixture()
+        inventory["licenseCoverage"]["base-image"]["metadataOnlyPackages"] = 2
+        with self.assertRaisesRegex(ValueError, "license coverage summary differs"):
+            evidence.validate_inventory(inventory, "manager", files.__getitem__)
+
+    def test_provenance_binds_license_coverage(self):
+        files, _, provenance = self.fixture()
+        provenance["licenseCoverage"]["base-image"]["metadataOnlyPackages"] = 2
+        with self.assertRaisesRegex(ValueError, "provenance license coverage differs"):
+            evidence.validate_provenance(provenance, "manager", VERSION, SHA, files.__getitem__)
+
     def test_provenance_schema_identity_and_component_coverage_fail_closed(self):
         files, _, provenance = self.fixture()
         for key, value in (("schemaVersion", True), ("schemaVersion", 2), ("sourceCommit", "b" * 40),
@@ -360,6 +492,20 @@ class ImageEvidenceTests(unittest.TestCase):
 class DockerContracts(unittest.TestCase):
     GUARD = re.compile(r'RUN set -eu; \\\n(?:    [^\n]+\n)*?    case "\$SOURCE_COMMIT" in [^\n]*\n')
     IDENTITY_ARGS = ("VERSION", "SOURCE_COMMIT", "TARGETOS", "TARGETARCH")
+    # External fetches and release-artifact compilation. The web-package-test
+    # stage only runs Go tests against the module cache prepared by its parent.
+    NETWORK_OR_BUILD = ("apk add", "apt-get", "wget", "npm ci", "npm run build",
+                        "go mod download", "go build")
+
+    @staticmethod
+    def stages(text):
+        # ARG values are stage-scoped, so both the declaration and the guard
+        # must be asserted inside the stage that performs the work.
+        result = []
+        for part in re.split(r"(?m)^FROM ", text)[1:]:
+            header, _, body = part.partition("\n")
+            result.append((header.split(" AS ")[-1].strip(), body))
+        return result
 
     def test_all_dockerfiles_guard_identity_label_and_package_evidence(self):
         identity_cases = (
@@ -384,12 +530,9 @@ class DockerContracts(unittest.TestCase):
                 self.assertIn("/image/usr/local/share/cpamp/ /usr/local/share/cpamp/", text)
                 self.assertIn("/tools/image-evidence.py", text)
                 guards = self.GUARD.findall(text)
-                self.assertEqual(len(guards), 1, "expected exactly one early identity guard")
-                guard = guards[0]
-                # The guard must run before the first Web or Go compile.
-                marker = min(text.index(needle) for needle in ("npm run build", "go build") if needle in text)
-                self.assertLess(text.index(guard), marker, "identity guard must precede the first build")
-                shell = guard[len("RUN "):]
+                self.assertTrue(guards, "no strict early identity guard")
+                self.assertEqual(set(guards), {guards[0]}, "identity guards must be identical")
+                shell = guards[0][len("RUN "):]
                 for version, commit, success in identity_cases:
                     result = subprocess.run(
                         ["sh", "-c", shell],
@@ -400,12 +543,33 @@ class DockerContracts(unittest.TestCase):
         self.assertIn('RUN VERSION="$VERSION" npm run build',
                       (ROOT / "Dockerfile.manager-server").read_text())
 
+    def test_every_network_or_build_stage_validates_identity_first(self):
+        for file_name in ("Dockerfile.manager-server", "Dockerfile.ingress", "Dockerfile.runtime"):
+            stages = self.stages((ROOT / file_name).read_text())
+            for stage, body in stages:
+                commands = [body.index(marker) for marker in self.NETWORK_OR_BUILD if marker in body]
+                if not commands:
+                    continue
+                with self.subTest(image=file_name, stage=stage):
+                    declared = re.findall(r"^ARG (\w+)$", body, re.M)
+                    self.assertIn("VERSION", declared, "stage must declare VERSION")
+                    self.assertIn("SOURCE_COMMIT", declared, "stage must declare SOURCE_COMMIT")
+                    guards = list(self.GUARD.finditer(body))
+                    self.assertTrue(guards, "stage must validate identity before network/build work")
+                    self.assertLess(guards[0].start(), min(commands),
+                                    "identity guard must precede the first network or build command")
+            if file_name == "Dockerfile.runtime":
+                guarded = {stage for stage, body in stages if self.GUARD.search(body)}
+                # The CPA download stages fetch third-party bytes even when they
+                # are built alone as an unsupported-architecture probe.
+                self.assertLessEqual({"cpa-download", "cpa-v8-download"}, guarded)
+
     def test_every_image_evidence_stage_declares_identity_args(self):
-        # ARG is stage-scoped: a stage that runs image-evidence.py must declare
-        # the arguments it reads in its own FROM block.
+        # ARG is stage-scoped: a stage that runs the evidence generator must
+        # declare the arguments it reads in its own FROM block.
         for name in ("manager-server", "ingress", "runtime"):
             text = (ROOT / ("Dockerfile." + name)).read_text()
-            stages = [block for block in text.split("\nFROM ")[1:] if "image-evidence.py" in block]
+            stages = [block for block in text.split("\nFROM ")[1:] if "/tools/image-evidence.py" in block]
             with self.subTest(image=name):
                 self.assertTrue(stages, "no stage runs the evidence generator")
             for block in stages:

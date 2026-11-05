@@ -31,6 +31,15 @@ RUN mkdir -p /out && node /app/bin/release/hash-fullweb.mjs /app/apps/web/dist/f
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS service-build
 ARG VERSION
 ARG SOURCE_COMMIT
+# Fail closed on malformed identity before the Go build and license collection.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 RUN apk add --no-cache python3
 COPY bin/release/collect-third-party-licenses.py /collect-third-party-licenses.py
 ARG TARGETOS
@@ -55,6 +64,17 @@ RUN CPAMP_FULLWEB_PACKAGED_TEST=1 go test -run '^TestPackagedFullWeb(Dist|Manife
 RUN go test -run '^TestR1EmbeddedPublicAPITransportFixture$' ./internal/domain/routing
 
 FROM alpine:3.21 AS manager-base
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before any package or network operation.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 RUN apk add --no-cache ca-certificates wget tzdata
 
 # Snapshot the final package database before adding the audit-only interpreter.
@@ -63,6 +83,15 @@ ARG VERSION
 ARG SOURCE_COMMIT
 ARG TARGETOS
 ARG TARGETARCH
+# Fail closed on malformed identity before the snapshot and audit install.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 RUN mkdir -p /base/lib/apk/db && cp /lib/apk/db/installed /base/lib/apk/db/installed \
     && if test -d /usr/share/licenses; then mkdir -p /base/usr/share; cp -a /usr/share/licenses /base/usr/share/; fi
 RUN apk add --no-cache python3

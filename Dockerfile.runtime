@@ -1,5 +1,16 @@
 FROM --platform=$BUILDPLATFORM alpine:3.21 AS cpa-download
 
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before any package or network operation.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 ARG TARGETOS
 ARG TARGETARCH
 RUN set -eu; \
@@ -29,6 +40,17 @@ RUN set -eu; \
 # No version/hash override is accepted for this pin.
 FROM --platform=$BUILDPLATFORM alpine:3.21 AS cpa-v8-download
 
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before any package or network operation.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 ARG TARGETOS
 ARG TARGETARCH
 RUN set -eu; \
@@ -83,7 +105,17 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/cpamp-runtime-supervisor ./cmd/cpamp-runtime-supervisor
 
 FROM debian:bookworm-slim AS runtime-os
-
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before any package or network operation.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/* \
@@ -97,6 +129,15 @@ ARG VERSION
 ARG SOURCE_COMMIT
 ARG TARGETOS
 ARG TARGETARCH
+# Fail closed on malformed identity before the snapshot and audit install.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 RUN mkdir -p /base/usr/share \
     && dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\n' > /base/base-packages.tsv \
     && cp -a /usr/share/doc /base/usr/share/doc

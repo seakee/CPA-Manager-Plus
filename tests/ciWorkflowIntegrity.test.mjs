@@ -180,6 +180,10 @@ describe('GitHub Actions workflow integrity', () => {
     expect(lifecycleSteps[0]).toContain('run: docker compose build');
     expect(lifecycleSteps[1]).toContain('python3 bin/ci/runtime-v8-default-smoke.py');
     expect(lifecycleSteps[2]).toContain('--platform linux/riscv64 --target cpa-v8-download');
+    // The refusal must still exercise the architecture check, so the build
+    // carries valid identity instead of failing the early identity guard.
+    expect(lifecycleSteps[2]).toContain('--build-arg VERSION=ci');
+    expect(lifecycleSteps[2]).toContain('--build-arg SOURCE_COMMIT=${{ github.sha }}');
     expect(lifecycleSteps[2]).toContain(
       'unsupported official CPA v8 target: linux/riscv64 (no v7 fallback)'
     );
@@ -245,18 +249,54 @@ describe('GitHub Actions workflow integrity', () => {
       expect(step.env?.SOURCE_COMMIT, step.name).toBe(mergeCommit);
     }
 
-    // Release images are built from the tagged commit and must carry it.
-    for (const file of [
-      '.github/workflows/release.yml',
-      '.github/workflows/release-publish-recovery.yml',
-    ]) {
+    // Release images are built from the tagged commit and must carry the exact
+    // expected expressions; a truncated or emptied value must not pass.
+    const expectedIdentity = {
+      '.github/workflows/release.yml': {
+        VERSION: '${{ env.RELEASE_TAG }}',
+        SOURCE_COMMIT: '${{ github.sha }}',
+      },
+      '.github/workflows/release-publish-recovery.yml': {
+        VERSION: '${{ env.RELEASE_TAG }}',
+        SOURCE_COMMIT: '${{ env.RELEASE_SHA }}',
+      },
+    };
+    const identityLines = (args) =>
+      String(args ?? '')
+        .trim()
+        .split('\n')
+        .map((line) => line.trim());
+    const hasExactIdentity = (args, expected) => {
+      const lines = identityLines(args);
+      return (
+        lines.length === 2 &&
+        lines[0] === `VERSION=${expected.VERSION}` &&
+        lines[1] === `SOURCE_COMMIT=${expected.SOURCE_COMMIT}`
+      );
+    };
+    for (const [file, expected] of Object.entries(expectedIdentity)) {
       const releaseBuilds = imageBuilds(readYaml(file));
       expect(releaseBuilds.length, file).toBeGreaterThan(0);
       for (const step of releaseBuilds) {
-        const args = step.with['build-args'];
-        expect(args, `${file}: ${step.name}`).toContain('VERSION=');
-        expect(args, `${file}: ${step.name}`).toContain('SOURCE_COMMIT=');
+        expect(identityLines(step.with['build-args']), `${file}: ${step.name}`).toEqual([
+          `VERSION=${expected.VERSION}`,
+          `SOURCE_COMMIT=${expected.SOURCE_COMMIT}`,
+        ]);
+        expect(hasExactIdentity(step.with['build-args'], expected), `${file}: ${step.name}`).toBe(
+          true
+        );
       }
+      const exact = `VERSION=${expected.VERSION}\nSOURCE_COMMIT=${expected.SOURCE_COMMIT}`;
+      expect(hasExactIdentity(exact, expected), file).toBe(true);
+      // Mutating or emptying either expression must fail the exact check.
+      expect(hasExactIdentity(`VERSION=\nSOURCE_COMMIT=${expected.SOURCE_COMMIT}`, expected), file).toBe(
+        false
+      );
+      expect(hasExactIdentity(`VERSION=${expected.VERSION}\nSOURCE_COMMIT=`, expected), file).toBe(
+        false
+      );
+      expect(hasExactIdentity(`SOURCE_COMMIT=${expected.SOURCE_COMMIT}`, expected), file).toBe(false);
+      expect(hasExactIdentity(`VERSION=${expected.VERSION}`, expected), file).toBe(false);
     }
 
     // Every buildable Compose service forwards both args. The empty

@@ -14,6 +14,12 @@ from pathlib import Path
 
 SCHEMA = 1
 NOTICE_NAME = re.compile(r"^(licen[cs]e|copying|notice|copyright|patents)([._-].*)?$", re.I)
+# Alpine's installed APK database promises an SPDX license expression per
+# package, not an upstream license text. The recorded evidence distinguishes
+# metadata-only packages from packages that also ship packaged originals.
+ALPINE_METADATA_ONLY = "installed-apk-database-metadata-only"
+ALPINE_PACKAGED = "installed-apk-database-and-packaged-notices"
+ALPINE_COVERAGE_POLICY = "apk-license-metadata-and-available-packaged-notices"
 
 
 def require(condition, message):
@@ -46,16 +52,29 @@ def json_stream(text):
         text = text.lstrip()[end:]
 
 
-def notice_files(directory):
+def notice_files(directory, bound):
     # Include nested originals (e.g. modernc SQLite and bundled npm sublibraries).
-    # Never follow directory links or escape the dependency's source directory.
-    directory = directory.resolve()
+    # Directory links are rejected rather than pruned: inside a dependency or
+    # notice tree a link is either redundant or an attempt to widen the scanned
+    # boundary, and silently skipping it would drop originals from the inventory.
+    directory = Path(directory).resolve()
+    bound = Path(bound).resolve()
+    require(directory.is_relative_to(bound), "notice directory escapes its root: " + directory.as_posix())
     for current, dirs, files in os.walk(directory):
-        dirs[:] = sorted(d for d in dirs if d not in (".git", "node_modules")
-                         and not (Path(current) / d).is_symlink())
+        for name in sorted(dirs):
+            candidate = Path(current) / name
+            require(not candidate.is_symlink(),
+                    "symlinked notice directory rejected: " + candidate.relative_to(directory).as_posix())
+        dirs[:] = sorted(d for d in dirs if d not in (".git", "node_modules"))
         for name in sorted(files):
+            file = Path(current) / name
+            if file.is_symlink():
+                # os.walk classifies a dangling link as a file, so a missing
+                # target must be rejected here rather than silently skipped
+                # like an ordinary non-notice file.
+                require(file.exists(),
+                        "broken symlink rejected in notice tree: " + file.relative_to(directory).as_posix())
             if NOTICE_NAME.fullmatch(name):
-                file = Path(current) / name
                 require(file.resolve().is_relative_to(directory), "notice symlink escapes source: " + name)
                 if file.is_file() and file.stat().st_size:
                     yield file
@@ -66,11 +85,12 @@ def copy_notices(source, output, prefix, root=None):
     # notice_files() yields canonical paths, so the prefix must be canonical too
     # (macOS /var -> /private/var, Homebrew- or symlink-relocated module caches).
     source = source.resolve()
+    bound = source if root is None else Path(root).resolve()
     # A symlinked top-level directory must not adopt its external target as the
     # allowed boundary; callers that know the owning tree pass it as `root`.
     if root is not None:
-        require(source.is_relative_to(Path(root).resolve()), "notice directory escapes its root: " + prefix)
-    for file in notice_files(source):
+        require(source.is_relative_to(bound), "notice directory escapes its root: " + prefix)
+    for file in notice_files(source, bound):
         relative = Path(prefix) / file.relative_to(source)
         data = file.read_bytes()
         target = output / relative
@@ -86,12 +106,13 @@ def dependency_id(name, version):
     return re.sub(r"[^A-Za-z0-9._-]", "_", key) + "-" + hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
-def finish(output, component, ecosystem, dependencies, inputs):
+def finish(output, component, ecosystem, dependencies, inputs, extra=None):
     require(not output.joinpath("inventory.json").exists(), "output inventory already exists")
     identities = [(item["name"], item["version"]) for item in dependencies]
     require(len(set(identities)) == len(identities), "duplicate dependency identity")
     value = {"schemaVersion": SCHEMA, "component": component, "ecosystem": ecosystem,
              "inputs": inputs, "dependencies": sorted(dependencies, key=lambda item: (item["name"], item["version"]))}
+    value.update(extra or {})
     write_json(output / "inventory.json", value)
     return value
 
@@ -131,8 +152,17 @@ def collect_go(module, output, component):
     require(any(item["path"].endswith("/LICENSE") for item in files), "missing Go standard-library license")
     for subtree in ("src/vendor", "src/crypto/internal/boring"):
         source = goroot / subtree
-        if source.is_dir():
-            files.extend(copy_notices(source, output, "go-toolchain/" + subtree, root=goroot))
+        # Inspect the entry kind before is_dir(): a dangling or external link
+        # here would otherwise be skipped and the toolchain originals would
+        # disappear from the inventory without any diagnostic.
+        if source.is_symlink():
+            target = source.resolve()
+            require(target.is_relative_to(goroot),
+                    "notice directory escapes its root: go-toolchain/" + subtree)
+            require(target.is_dir(), "broken Go toolchain subtree symlink: " + subtree)
+        elif not source.is_dir():
+            continue
+        files.extend(copy_notices(source, output, "go-toolchain/" + subtree, root=goroot))
     dependencies.append({"name": "Go standard library and bundled sources", "version": toolchain,
                          "notices": sorted(files, key=lambda item: item["path"])})
     inputs = {name: sha256((module / name).read_bytes()) for name in ("go.mod", "go.sum")
@@ -228,23 +258,29 @@ def alpine_packages(database):
         require(all(fields.get(key) for key in ("P", "V", "L")), "Alpine package lacks identity/license metadata")
         result.append({"name": fields["P"], "version": fields["V"], "licenseExpression": fields["L"],
                        "source": fields.get("U", ""), "origin": fields.get("o", fields["P"]),
-                       "notices": [], "evidence": "installed-apk-database"})
+                       "notices": [], "evidence": ALPINE_METADATA_ONLY})
     require(result, "empty installed Alpine package database")
     return result
 
 
 def collect_base(root, kind, output):
     root = root.resolve()
+    extra = None
     if kind == "alpine":
         database = root / "lib/apk/db/installed"
         dependencies = alpine_packages(database)
         # Alpine records SPDX expressions in APK; unlike Debian it does not
         # promise original license texts for every installed binary package.
+        # Each package states which kind of evidence it actually has.
         notices = root / "usr/share/licenses"
-        if notices.is_dir():
-            files = copy_notices(notices, output, "packaged-notices", root=root)
-            for item in dependencies:
-                item["notices"] = [f for f in files if f["path"].startswith("packaged-notices/" + item["name"] + "/")]
+        files = copy_notices(notices, output, "packaged-notices", root=root) if notices.is_dir() else []
+        for item in dependencies:
+            item["notices"] = [f for f in files if f["path"].startswith("packaged-notices/" + item["name"] + "/")]
+            item["evidence"] = ALPINE_PACKAGED if item["notices"] else ALPINE_METADATA_ONLY
+        extra = {"coveragePolicy": ALPINE_COVERAGE_POLICY,
+                 "coverage": {"packages": len(dependencies),
+                              "metadataOnlyPackages": sum(1 for item in dependencies if not item["notices"]),
+                              "packagedNoticePackages": sum(1 for item in dependencies if item["notices"])}}
         inputs = {"lib/apk/db/installed": sha256(database.read_bytes())}
     else:
         database = root / "base-packages.tsv"
@@ -263,7 +299,7 @@ def collect_base(root, kind, output):
                                  "evidence": "installed-dpkg-database-and-copyright"})
         require(dependencies, "empty installed Debian package database")
         inputs = {"base-packages.tsv": sha256(database.read_bytes())}
-    return finish(output, "base-image", kind, dependencies, inputs)
+    return finish(output, "base-image", kind, dependencies, inputs, extra)
 
 
 def source_inventory(root):
