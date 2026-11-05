@@ -385,21 +385,12 @@ func copyReadySource(t *testing.T) string {
 			}
 		}
 	}
-	// The cache-accounting revision and the latency-covering index arrived after
-	// the pinned release; a source that carries them is a different source than
-	// the one this pin accepts, so the fixture must not have them. The
-	// deleted-raw summary is not one of them: every 1.14.x release creates it,
-	// the pinned one included, so it stays.
-	for _, statement := range []string{
-		`drop index if exists idx_usage_events_ts_latency_ttft_cover`,
-		`delete from settings where key = 'usage_cache_accounting_semantics_revision'`,
-	} {
-		if _, err := conn.ExecContext(context.Background(), statement); err != nil {
-			_ = conn.Close()
-			_ = db.Close()
-			t.Fatalf("strip post-pin marker %q: %v", statement, err)
-		}
-	}
+	// The pinned release is v1.14.10, whose own startup state includes the
+	// cache-accounting semantics revision (3, raised by v1.14.6) and the
+	// latency-covering index its offline cleanup builds (v1.14.7). Both are
+	// part of the shape this pin accepts, so the fixture is not stripped of
+	// them. The deleted-raw summary is not a marker at all: every 1.14.x
+	// release creates it, the pinned one included.
 	if err := conn.Close(); err != nil {
 		_ = db.Close()
 		t.Fatalf("close fixture connection: %v", err)
@@ -902,18 +893,10 @@ func copyReadyRunSource(t *testing.T) string {
 			}
 		}
 	}
-	// The v1.14.6 and v1.14.7 markers arrived after the pinned release; a source
-	// that carries them is a different source than the one this pin accepts.
-	for _, statement := range []string{
-		`drop index if exists idx_usage_events_ts_latency_ttft_cover`,
-		`delete from settings where key = 'usage_cache_accounting_semantics_revision'`,
-	} {
-		if _, err := conn.ExecContext(context.Background(), statement); err != nil {
-			_ = conn.Close()
-			_ = db.Close()
-			t.Fatalf("strip post-pin marker %q: %v", statement, err)
-		}
-	}
+	// The pinned release is v1.14.10, whose own startup state includes the
+	// cache-accounting semantics revision (3, raised by v1.14.6) and the
+	// latency-covering index its offline cleanup builds (v1.14.7). Both belong
+	// to the source this pin accepts, so nothing is stripped here.
 	if err := conn.Close(); err != nil {
 		_ = db.Close()
 		t.Fatalf("close fixture connection: %v", err)

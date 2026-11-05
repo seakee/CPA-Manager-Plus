@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	bootstrap "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
@@ -98,7 +99,7 @@ func TestUpgradeCLITypedRefusalsExitOneAndPrintOnce(t *testing.T) {
 	target := t.TempDir()
 	writeOldUpgradeStore(t, filepath.Join(target, "usage.sqlite"))
 	code, stdout, stderr = runUpgradeCLI(t, "upgrade", "run", "--legacy", t.TempDir(),
-		"--source-version", "v1.14.4", "--target", target)
+		"--source-version", bootstrap.PlannedDirectRelease, "--target", target)
 	if code != 1 {
 		t.Fatalf("run refusal exit code = %d, want 1; stdout: %s stderr: %s", code, stdout, stderr)
 	}

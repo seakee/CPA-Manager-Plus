@@ -254,23 +254,33 @@ hard `false`; the new surface grants no migration authority.
   lacks has already moved past the pin, and blocks with
   `upgrade_source_version_unsupported` even when the declaration matches. The
   detail reads `source is newer than the pinned release <pin>` and names every
-  carried marker with the release that introduced it, e.g.
-  `usage_cache_accounting_semantics_revision=3 (v1.14.6)`; it no longer repeats
-  the matching `expected`/`declared` pair next to the refusal. For a v1.14.4 pin
-  those markers are the revision v1.14.6 raised to `3` (v1.14.4 and v1.14.5
-  write `2`) and the `idx_usage_events_ts_latency_ttft_cover` index v1.14.7
-  added. The revision is compared as a floor, not for equality: v1 only ever
-  raises it, so any value at or above `3` is evidence of v1.14.6 or later and a
-  value of `4` is refused rather than silently accepted. The floor is a literal
-  that names its release, not
-  `datamigration.CurrentUsageCacheAccountingSemanticsRevision`: that constant
-  tracks this build, and a future v2 bump would stop matching a 1.14.6–1.14.10
-  source and let it through. The list is keyed by the release that introduced
-  each marker, so a later re-pin drops the markers its own schema accepts
-  instead of refusing its own source. No base table is a later marker: every
-  1.14.x release creates `usage_archive_deleted_coverage_daily`, the pinned one
-  included, so reading it as a v1.14.6 marker would refuse the pin's own source —
-  the defect the real-Docker harness found.
+  carried marker; it no longer repeats the matching `expected`/`declared` pair
+  next to the refusal. For a v1.14.4 pin those markers are the revision v1.14.6
+  raised to `3` (v1.14.4 and v1.14.5 write `2`) and the
+  `idx_usage_events_ts_latency_ttft_cover` index v1.14.7 added, and the detail
+  names the release that introduced each one. The pinned release is v1.14.10,
+  whose own startup state already carries both, so at the live pin the
+  revision `3` floor and the index are accepted evidence rather than markers,
+  and what remains is the ceiling above them. A revision of `4` or more — a
+  value no 1.x release has written — blocks as
+  `usage_cache_accounting_semantics_revision=4 (after v1.14.10)`, and a row that
+  is not a positive integer (e.g. `corrupt`, `0`, `-1`) blocks as
+  `usage_cache_accounting_semantics_revision="corrupt" (invalid)`. Both fail
+  closed: an unreadable row is not treated as an absent one, which would let a
+  source the check cannot read pass as if it carried nothing newer. The
+  revision is compared as a floor, not for equality: v1 only ever raises it.
+  When the pin is at or above the release that wrote the floor, the ladder drops
+  that marker — the pin accepts it — and replaces it with a ceiling entry named
+  `after <pin>` at the next revision up, so a re-pin never leaves an empty
+  ladder that accepts everything. The floor is a literal that names its release,
+  not `datamigration.CurrentUsageCacheAccountingSemanticsRevision`: that
+  constant tracks this build, and a future v2 bump would stop matching a
+  1.14.6–1.14.10 source and let it through. The list is keyed by the release
+  that introduced each marker, so a later re-pin drops the markers its own
+  schema accepts instead of refusing its own source. No base table is a later
+  marker: every 1.14.x release creates `usage_archive_deleted_coverage_daily`,
+  the pinned one included, so reading it as a v1.14.6 marker would refuse the
+  pin's own source — the defect the real-Docker harness found.
 - **What each marker can prove.** The two markers are not equally strong. The
   settings revision is written by the v1.14.6 migration itself, so a 1.14.6+
   source that ran it carries the value: present is reliable positive evidence,
@@ -286,9 +296,11 @@ hard `false`; the new surface grants no migration authority.
   present index is therefore reliable positive evidence of v1.14.7 or later; an
   absent one is no evidence at all, because most upgraded installs never built
   it. The ladder keeps it for the positive direction only. The preflight fixture
-  therefore carries the pin's own `usage_cache_accounting_semantics_revision=2`
-  row, plus a case with the row absent, so neither a key-exists rule nor a plain
-  `!= 3` comparison can pass the suite.
+  therefore carries the pin's own startup shape —
+  `usage_cache_accounting_semantics_revision=3` and the latency index — plus a
+  case with revision `2` and no index, and a case with the row absent, so
+  neither a key-exists rule, nor a plain `!= 3` comparison, nor an absent-index
+  rule can pass the suite.
 - **Limit of the gate.** The version check refuses on evidence; it does not
   prove identity. Sources that are not the pinned release are accepted, and two
   are enough to show it: v1.14.5, whose schema, settings values and structure
@@ -309,8 +321,8 @@ hard `false`; the new surface grants no migration authority.
   discriminator — all v1.14 releases pass it, some v1.13 shapes do not — so a
   correct declaration cannot make a structurally older source ready. A source
   that already carries a v2-only table (`gateway_*`, `fresh_*`,
-  `upgrade_operations`) blocks with `upgrade_source_already_v2`. Re-pinning to
-  v1.14.10 is U1-1b, not this slice.
+  `upgrade_operations`) blocks with `upgrade_source_already_v2`. The v1.14.10
+  pin itself is U1-1b; this slice is the precondition contract it re-pins.
 - **Parity trust.** The `projection_v1` watermark is trusted only when
   `schema_version = 1`, `structure_revision` equals
   `usageidentity.MonitoringProjectionStructureRevision()` and the status is set
@@ -364,9 +376,8 @@ hard `false`; the new surface grants no migration authority.
   and only an exhausted budget is reported, with the same code and the retryable
   marker instead of a generic usage error. Preflight never retries: a legacy
   source that is still being written remains a stop condition.
-- **Deferred:** v1.14.10 re-pin and its qualification evidence (U1-1b),
-  reconciliation execution and CPA import (U1-3) and route cutover/rollback
-  (U1-3).
+- **Deferred:** reconciliation execution and CPA import (U1-3) and route
+  cutover/rollback (U1-3).
 
 ## U1-2: copy-in and the two-stage admission gate
 

@@ -241,7 +241,7 @@ describe('Full Web upgrade wizard', () => {
                 name: 'source_version',
                 status: 'pending',
                 code: 'upgrade_source_version_declared_at_copy_in',
-                detail: 'expected=v1.14.4 declared=none',
+                detail: 'expected=v1.14.10 declared=none',
               },
               { name: 'fingerprint', status: 'pass', code: '', detail: 'sha256 over source manifest' },
               { name: 'disk', status: 'pass', code: '', detail: 'needs 12 GiB, has 40 GiB' },
@@ -249,13 +249,13 @@ describe('Full Web upgrade wizard', () => {
               { name: 'parity', status: 'pass', code: '', detail: 'no gaps' },
             ],
             pendingDeclaration: true,
-            expectedVersion: 'v1.14.4',
+            expectedVersion: 'v1.14.10',
           }),
       })
     );
 
     expect(byTestId('upgrade-preflight-pending-declaration')).toBeTruthy();
-    expect(view()).toContain('--source-version v1.14.4');
+    expect(view()).toContain('--source-version v1.14.10');
     expect(view()).toContain('declared at copy-in');
     // The row is labelled pending, in the same vocabulary as every other check.
     expect(byTestId('upgrade-check-source_version').props['data-status']).toBe('pending');
@@ -270,7 +270,7 @@ describe('Full Web upgrade wizard', () => {
   it('treats a pending flag that disagrees with its row as a typed read failure', async () => {
     await mount(
       wizardRead({
-        preflight: () => preflightDocument({ pendingDeclaration: true, expectedVersion: 'v1.14.4' }),
+        preflight: () => preflightDocument({ pendingDeclaration: true, expectedVersion: 'v1.14.10' }),
       })
     );
     expect(byTestId('upgrade-preflight-error')).toBeTruthy();
@@ -289,7 +289,7 @@ describe('Full Web upgrade wizard', () => {
             name: 'source_version',
             status: 'pending',
             code: 'upgrade_source_version_declared_at_copy_in',
-            detail: 'expected=v1.14.4 declared=none',
+            detail: 'expected=v1.14.10 declared=none',
           },
           {
             name: 'disk',
@@ -301,13 +301,13 @@ describe('Full Web upgrade wizard', () => {
         blocked: ['upgrade_insufficient_disk_space'],
         ready: false,
         pendingDeclaration: true,
-        expectedVersion: 'v1.14.4',
+        expectedVersion: 'v1.14.10',
       })
     );
 
     expect(parsed).not.toBeNull();
     expect(parsed?.pendingDeclaration).toBe(true);
-    expect(parsed?.expectedVersion).toBe('v1.14.4');
+    expect(parsed?.expectedVersion).toBe('v1.14.10');
     expect(parsed?.ready).toBe(false);
     expect(parsed?.blocked).toEqual(['upgrade_insufficient_disk_space']);
   });
@@ -334,7 +334,7 @@ describe('Full Web upgrade wizard', () => {
           blocked: ['upgrade_source_version_undeclared'],
           ready: false,
           pendingDeclaration: true,
-          expectedVersion: 'v1.14.4',
+          expectedVersion: 'v1.14.10',
         })
       )
     ).toBeNull();
@@ -348,7 +348,7 @@ describe('Full Web upgrade wizard', () => {
           blocked: ['upgrade_source_version_unsupported'],
           ready: false,
           pendingDeclaration: true,
-          expectedVersion: 'v1.14.4',
+          expectedVersion: 'v1.14.10',
         })
       )
     ).toBeNull();
@@ -370,7 +370,7 @@ describe('Full Web upgrade wizard', () => {
                 name: 'source_version',
                 status: 'pending',
                 code: 'upgrade_source_version_declared_at_copy_in',
-                detail: 'expected=v1.14.4 declared=none',
+                detail: 'expected=v1.14.10 declared=none',
               },
               {
                 name: 'disk',
@@ -382,7 +382,7 @@ describe('Full Web upgrade wizard', () => {
             blocked: ['upgrade_insufficient_disk_space'],
             ready: false,
             pendingDeclaration: true,
-            expectedVersion: 'v1.14.4',
+            expectedVersion: 'v1.14.10',
           }),
       })
     );
@@ -390,7 +390,7 @@ describe('Full Web upgrade wizard', () => {
     // Both facts the document states are shown: the version this read cannot
     // declare and the check that actually stops the upgrade.
     expect(byTestId('upgrade-preflight-pending-declaration')).toBeTruthy();
-    expect(view()).toContain('--source-version v1.14.4');
+    expect(view()).toContain('--source-version v1.14.10');
     expect(view()).toContain(t('preflightPendingTitle', 'en'));
     expect(byTestId('upgrade-preflight-blocked')).toBeTruthy();
     expect(view()).toContain(blockedCodeText('upgrade_insufficient_disk_space', 'en'));

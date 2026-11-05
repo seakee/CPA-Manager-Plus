@@ -42,7 +42,7 @@
 // reads the published path) and in the ignored bin/tmp/u1-docker/evidence
 // locally, so one local run's output cannot make the next local run refuse the
 // tree. UPGRADE_DOCKER_EVIDENCE_DIR overrides both.
-//                                  [--source-tag v1.14.4]
+//                                  [--source-tag v1.14.10]
 //   node bin/ci/upgrade-docker.mjs --verify-evidence <file> [--expect-head <sha>]
 //
 // `--reuse-fixture` skips `git worktree` + `docker build` and uses the recorded
@@ -68,13 +68,24 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MANAGER_SERVER = path.join(ROOT, 'apps', 'manager-server');
 
-// The planned direct-upgrade release. It is the fixture the U1-1b re-pin
-// reuses, so it is built and recorded on every run.
+// The planned direct-upgrade release. It is also the release the contract
+// pins, so the whole acceptance chain runs against this one fixture instead of
+// recording a version gap.
 const DEFAULT_V1_TAG = 'v1.14.10';
-// The release the running contract accepts. It is only the fallback: the real
-// value is read from the product's own preflight report, so a re-pin needs no
-// change here.
-const DEFAULT_SOURCE_TAG = 'v1.14.4';
+// The upstream commit that tag must resolve to. It is bootstrap
+// `PlannedDirectSourceCommit`, and it is asserted against the fixture's own
+// recorded commit: a moved tag is a different source than the one the contract
+// qualified, and the run must be refused instead of qualifying the new bytes.
+const EXPECTED_V1_COMMIT = 'a67ed8834a914ab24c36d2490fa6bb6d4166724c';
+// The release the v1.14.10 contract replaced. The acceptance run declares it
+// against the same source that just passed under the pinned declaration, so the
+// declared-version rule is proved against the real binary and not only read out
+// of a report.
+const STALE_DECLARATION_TAG = 'v1.14.4';
+// The tag this harness inspects beside the planned fixture. It is an input to
+// the shared-image snapshot only: the accepted release is always the one the
+// product's preflight report names, never this value.
+const DEFAULT_SOURCE_TAG = 'v1.14.10';
 
 const ADMIN_V1 = 'Cpamp_U1D_Harness_Legacy_Admin_Key_11410';
 const ADMIN_V2 = 'Cpamp_U1D_Harness_V2_Admin_Key_11410';
@@ -753,9 +764,15 @@ async function runAcceptance() {
   // receives.
   acceptedRelease = args.v1Tag;
   const probe = runCli(binary, ['upgrade', 'preflight', '--legacy', nextSource.sourceRoot, '--json'], 'preflight(next-fixture)');
-  const expected = expectedReleaseOf(probe) || args.sourceTag;
-  if (!RELEASE_TAG_PATTERN.test(String(expected ?? ''))) {
-    throw new Error(`could not read the release the contract accepts from the preflight report (got ${JSON.stringify(expected)})`);
+  // The report's `expected=` value is the single declared version every later
+  // command receives. It is required: falling back to the tag this harness
+  // planned would let the run agree with itself while the product accepts
+  // something else, which is the one disagreement a re-pin has to surface.
+  const expected = expectedReleaseOf(probe);
+  if (!expected || !RELEASE_TAG_PATTERN.test(String(expected))) {
+    throw new Error(
+      `could not read the release the contract accepts from the preflight report (got ${JSON.stringify(expected)}; report: ${preview(probe.stdout)})`,
+    );
   }
   acceptedRelease = expected;
   evidence.mode.acceptedRelease = expected;
@@ -764,15 +781,18 @@ async function runAcceptance() {
   let sourceFixture = nextFixture;
   let source = nextSource;
   if (expected !== args.v1Tag) {
-    // The planned fixture is newer than what the contract accepts. The next
-    // re-pin (U1-1b) is what closes this, so the harness records the typed
-    // refusal and proves the chain against the accepted release instead of
-    // pretending the planned one works.
+    // The planned fixture is not the release the contract accepts. The U1-1b
+    // re-pin closed that gap for v1.14.10, so this branch is the guard for the
+    // next one: the harness records the typed refusal and proves the chain
+    // against the accepted release instead of pretending the planned one works.
     assertVersionGap(binary, probe, expected, nextFixture, nextSource);
     sourceFixture = await acceptanceStep('accepted-fixture', () => ensureFixture(expected));
     source = await acceptanceStep('accepted-seed', () => seedSource(sourceFixture));
     stableFacts.push(`version-gap:${args.v1Tag}>${expected}`);
   } else {
+    // The planned fixture is the accepted release, and that is proved from the
+    // product's own report rather than assumed from the tag this run passed in.
+    assertAcceptedFixture({ binary, probe, expected, tag: args.v1Tag, fixture: nextFixture, sourceRoot: nextSource.sourceRoot });
     evidence.mode.sourceFixture = 'same';
   }
   evidence.fixtures.push({ role: 'source', ...sourceFixture, dataset: source.dataset });
@@ -1548,13 +1568,13 @@ function chain(binary, sourceRoot, targetRoot, label, { sourceDays = null, domai
 
 function assertVersionGap(binary, probe, expected, fixture, source) {
   const report = parseJson(probe.stdout, 'preflight(next-fixture)');
-  const versionCheck = (report.checks ?? []).find((check) => check.name === 'source_version');
+  const versionCheck = sourceVersionCheckOf(probe, 'preflight(next-fixture)');
   assertValue(probe.code === 1, `preflight of ${fixture.tag}: exit=${probe.code} want 1`);
   assertValue(versionCheck?.code === 'upgrade_source_version_unsupported', `preflight of ${fixture.tag}: code=${versionCheck?.code}`);
   assertValue(report.ready === false, `preflight of ${fixture.tag}: ready=${report.ready}`);
   assertValue(
-    !/observed=/.test(versionCheck.detail) || versionCheck.detail.includes(`expected=${expected}`),
-    `preflight of ${fixture.tag}: accepted release not named (${preview(versionCheck.detail)})`,
+    Boolean(versionCheck?.detail) && versionCheck.detail.includes(versionMismatchDetail(expected, fixture.tag)),
+    `preflight of ${fixture.tag}: the refusal does not name ${versionMismatchDetail(expected, fixture.tag)} (${preview(versionCheck?.detail)})`,
   );
 
   // The target root was never created: a blocked preflight writes nothing.
@@ -1585,16 +1605,92 @@ function assertVersionGap(binary, probe, expected, fixture, source) {
   };
   evidence.findings.push({
     code: 'upgrade_source_version_pinned',
-    severity: 'blocker-for-u1-1b',
-    detail: `the contract accepts ${expected}, so a real ${fixture.tag} source is refused with upgrade_source_version_unsupported; the U1-1b re-pin is what makes the planned fixture usable`,
+    severity: 'blocker-for-re-pin',
+    detail: `the contract accepts ${expected}, so a real ${fixture.tag} source is refused with upgrade_source_version_unsupported; a re-pin to ${expected} is what makes the planned fixture usable`,
     file: 'apps/manager-server/internal/domain/bootstrap/contract.go:12',
     fixtureReusedForRePin: `${fixture.image} (${fixture.imageId})`,
   });
 }
 
-function expectedReleaseOf(command) {
-  const report = parseJson(command.stdout, 'preflight(next-fixture)');
-  const check = (report.checks ?? []).find((entry) => entry.name === 'source_version');
+// assertAcceptedFixture proves that the planned fixture is the release the
+// product says it accepts, and that the product refuses the release the
+// contract replaced.
+//
+// The report is the authority: the run declares the tag it planned, so a passing
+// preflight whose detail binds that declaration to the pin is what makes the
+// fixture usable. The fixture's own source commit is checked against the pin as
+// well, so a moved tag cannot be qualified as the bytes the contract names.
+//
+// The second probe is the declared-version rule end to end: the same source that
+// just passed under the pinned declaration is refused, by the real binary, when
+// the operator declares v1.14.4 instead. It is read-only and takes one
+// preflight, and without it the re-pin would only be visible in the contract
+// constant, not in what the product does.
+function assertAcceptedFixture({ binary, probe, expected, tag, fixture, sourceRoot }) {
+  const versionCheck = sourceVersionCheckOf(probe, 'preflight(next-fixture)');
+  assertValue(probe.code === 0, `preflight of ${tag}: exit=${probe.code} want 0`);
+  assertValue(versionCheck?.status === 'pass', `preflight of ${tag}: status=${versionCheck?.status} want pass`);
+  assertValue(
+    Boolean(versionCheck?.detail) && versionCheck.detail.includes(versionMismatchDetail(expected, tag)),
+    `preflight of ${tag}: the report does not bind the declaration to the pin (${preview(versionCheck?.detail)})`,
+  );
+  if (tag === DEFAULT_V1_TAG) {
+    assertValue(
+      fixture.commit === EXPECTED_V1_COMMIT,
+      `the ${tag} fixture resolved to ${fixture.commit}, want ${EXPECTED_V1_COMMIT} (bootstrap.PlannedDirectSourceCommit)`,
+    );
+  }
+  const staleProbe = runCli(
+    binary,
+    ['upgrade', 'preflight', '--legacy', sourceRoot, '--source-version', STALE_DECLARATION_TAG, '--json'],
+    `preflight(stale-${STALE_DECLARATION_TAG}-declaration)`,
+    { expectExit: 1 },
+  );
+  const staleLabel = `preflight(stale-${STALE_DECLARATION_TAG}-declaration)`;
+  const staleCheck = sourceVersionCheckOf(staleProbe, staleLabel);
+  const mismatch = versionMismatchDetail(expected, STALE_DECLARATION_TAG);
+  assertValue(
+    staleCheck?.code === 'upgrade_source_version_unsupported',
+    `${staleLabel}: code=${staleCheck?.code} want upgrade_source_version_unsupported`,
+  );
+  assertValue(
+    Boolean(staleCheck?.detail) && staleCheck.detail.includes(mismatch),
+    `${staleLabel}: detail ${preview(staleCheck?.detail)} does not name ${mismatch}`,
+  );
+  evidence.versionMismatch = {
+    expected,
+    declared: STALE_DECLARATION_TAG,
+    exitCode: staleProbe.code,
+    code: staleCheck?.code,
+    detail: staleCheck?.detail,
+    reportSha256: sha256(staleProbe.stdout),
+  };
+}
+
+// sourceVersionCheckOf returns the `source_version` check of a preflight report
+// parsed from the command that produced it. Every refusal this harness asserts
+// is read from that one check, so the shape of "which check decides the
+// version" lives here instead of in each caller.
+function sourceVersionCheckOf(command, label) {
+  const report = parseJson(command.stdout, label);
+  return (report.checks ?? []).find((check) => check.name === 'source_version') ?? null;
+}
+
+// versionMismatchDetail is the exact detail a preflight prints when the
+// declaration is not the pinned release. The harness asserts the whole string
+// instead of a loose `expected=` substring: a report that names the pin but not
+// the declaration it refused would not prove the declared-version rule.
+export function versionMismatchDetail(expected, declared) {
+  return `expected=${expected} declared=${declared}`;
+}
+
+// expectedReleaseOf reads the release the product says it accepts out of a
+// preflight report. Every refusal that is about the declaration names it as
+// `expected=<release>`; the newer-marker refusal deliberately does not, and an
+// empty answer means the report cannot bind this run to a release at all. The
+// caller must fail instead of substituting a planned tag.
+export function expectedReleaseOf(command) {
+  const check = sourceVersionCheckOf(command, 'preflight(next-fixture)');
   const match = /expected=(v\d+\.\d+\.\d+)/.exec(check?.detail ?? '');
   return match ? match[1] : null;
 }

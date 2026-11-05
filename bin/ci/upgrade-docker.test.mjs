@@ -43,6 +43,8 @@ import {
   createRedactor,
   createResourceRegistry,
   evidenceHash,
+  expectedReleaseOf,
+  versionMismatchDetail,
   finalExitCode,
   installSignalGuard,
   isOwnedResourceName,
@@ -502,6 +504,53 @@ test('every source-reading invocation in the harness runs through the declaratio
   assert.match(HARNESS_SOURCE, /withDeclaredSourceVersion\(\['upgrade', 'run'/);
 });
 
+test('the accepted release is read from the report and a mismatch names both releases', () => {
+  const report = (detail, code = 'ok') =>
+    JSON.stringify({
+      ready: code === 'ok',
+      checks: [{ name: 'source_version', status: code === 'ok' ? 'pass' : 'blocked', code, detail }],
+    });
+
+  // The pass detail binds the declaration to the pin.
+  assert.equal(
+    expectedReleaseOf({ stdout: report('expected=v1.14.10 declared=v1.14.10; structural lower bound satisfied') }),
+    'v1.14.10',
+  );
+  // A declaration refusal names both releases, which is what a version gap is
+  // read from: the tag this run planned against and the one the product accepts.
+  assert.equal(
+    expectedReleaseOf({ stdout: report('expected=v1.14.10 declared=v1.14.6', 'upgrade_source_version_unsupported') }),
+    'v1.14.10',
+  );
+  // The newer-marker refusal deliberately names no accepted release. An empty
+  // answer must fail the run instead of falling back to the planned tag.
+  assert.equal(
+    expectedReleaseOf({
+      stdout: report(
+        'source is newer than the pinned release v1.14.10; markers from later releases: idx_usage_events_ts_latency_ttft_cover (v1.14.7)',
+        'upgrade_source_version_unsupported',
+      ),
+    }),
+    null,
+  );
+  // A report without a source_version check cannot bind a release either.
+  assert.equal(expectedReleaseOf({ stdout: JSON.stringify({ ready: true, checks: [] }) }), null);
+
+  // The mismatch detail is exact: naming the pin without the refused
+  // declaration would not prove the declared-version rule.
+  assert.equal(versionMismatchDetail('v1.14.10', 'v1.14.4'), 'expected=v1.14.10 declared=v1.14.4');
+  assert.notEqual(versionMismatchDetail('v1.14.10', 'v1.14.4'), 'expected=v1.14.10');
+
+  // The fixture commit pin lives in the harness and matches the contract's
+  // PlannedDirectSourceCommit, so a moved tag cannot be qualified silently.
+  assert.match(HARNESS_SOURCE, /const EXPECTED_V1_COMMIT = 'a67ed8834a914ab24c36d2490fa6bb6d4166724c';/);
+  assert.match(HARNESS_SOURCE, /fixture\.commit === EXPECTED_V1_COMMIT/);
+  // The planned tag is never a fallback for the report: an unreadable
+  // `expected=` throws instead of accepting the tag this run was asked to use.
+  assert.doesNotMatch(HARNESS_SOURCE, /expectedReleaseOf\(probe\) \|\|/);
+  assert.match(HARNESS_SOURCE, /if \(!expected \|\| !RELEASE_TAG_PATTERN\.test\(String\(expected\)\)\)/);
+});
+
 // ---------------------------------------------------------------------------
 // rollback alias: run-owned, vX.Y.Z, removed with the run
 // ---------------------------------------------------------------------------
@@ -833,6 +882,7 @@ function createLifecycleHarness({ failWizardRelease = false } = {}) {
     seedSource: async () => ({ sourceRoot: '/fake/source', dataset: {} }),
     runCli: () => ({}),
     expectedReleaseOf: () => 'v1.14.10',
+    assertAcceptedFixture: noop,
     createWorkspace: () => ({ main: { source: '/fake/source', target: '/fake/target' }, snapshots: {} }),
     DATASET_DAYS: [1, 2, 3],
     CHAIN_DOMAINS_DONE: [],
