@@ -46,7 +46,7 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	cpaVersion := flags.String("cpa-version", "", "release of the source CPA; a v7 configuration carries no version of its own")
 	target := flags.String("target", "", "v2 data directory holding the recorded operation; defaults to the Manager data directory")
 	destination := flags.String("destination-url", "", "destination CPA base URL; defaults to CPA_UPSTREAM_URL")
-	destinationKeyFile := flags.String("destination-management-key-file", "", "file holding the management secret of an already-running destination CPA; only needed when no earlier run of this step recorded one")
+	destinationKeyFile := flags.String("destination-management-key-file", "", "file holding the management secret of a recorded destination attempt when resuming")
 	plugins := flags.String("plugins", "", "v2's plugin-runtime choice for the destination: true or false; required")
 	asJSON := flags.Bool("json", false, "print the import result as JSON")
 	if err := flags.Parse(args); err != nil {

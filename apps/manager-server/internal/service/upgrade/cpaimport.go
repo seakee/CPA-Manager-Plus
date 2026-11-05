@@ -827,7 +827,7 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		// bind it under a per-attempt secret only this operation knows.
 		if supplied == "" {
 			return newUpgradeError(UpgradeErrorCPADestinationKeyRequired,
-				"the destination CPA is already running and this run holds no management secret for it; pass the secret the Manager stored with --destination-management-key-file, or stage the destination from a stopped state", nil)
+				"the destination CPA is already running and this run holds no management secret for it; stop the destination so cpa-import can stage and bind it under a per-attempt secret (or pass --destination-management-key-file when resuming a recorded attempt)", nil)
 		}
 		return newUpgradeError(UpgradeErrorCPADestinationUnready,
 			"the destination CPA is already running, but this upgrade holds no recorded Supervisor staging attempt for it; stop the destination so cpa-import can stage and bind it under a per-attempt secret, and nothing was written", nil)
@@ -1197,6 +1197,12 @@ func requireSameDestinationRequest(
 	if !pluginsChoiceEqual(record.Intent.PluginsEnabled, intent.PluginsEnabled) {
 		return refuse("a different plugin choice")
 	}
+	if record.Intent.ExpectedRuntimeIdentity != intent.ExpectedRuntimeIdentity {
+		return refuse("a different Runtime identity")
+	}
+	if record.Intent.ExpectedActiveArtifactID != intent.ExpectedActiveArtifactID {
+		return refuse("a different active Runtime artifact")
+	}
 	if ready {
 		// A destination that is already answering is proved by
 		// requireStagedDestinationIdentity, not resubmitted. A restarted Supervisor
@@ -1206,12 +1212,6 @@ func requireSameDestinationRequest(
 	}
 	if record.Intent.ExpectedRuntimeGeneration != intent.ExpectedRuntimeGeneration {
 		return refuse("a different Runtime generation: the Supervisor restarted after this attempt was recorded, so the journalled operation belongs to an authority this run cannot address")
-	}
-	if record.Intent.ExpectedRuntimeIdentity != intent.ExpectedRuntimeIdentity {
-		return refuse("a different Runtime identity")
-	}
-	if record.Intent.ExpectedActiveArtifactID != intent.ExpectedActiveArtifactID {
-		return refuse("a different active Runtime artifact")
 	}
 	return nil
 }

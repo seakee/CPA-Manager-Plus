@@ -711,9 +711,9 @@ func managedFixtureFingerprint() string {
 }
 
 // managedFixtureSourceIdentity is the identity the managed source stamps: the
-// `legacy-managed:sha256:` prefix and the digest of the configuration bytes the
+// `external:sha256:` prefix and the digest of the configuration bytes the
 // destination was staged for.
-var managedFixtureSourceIdentity = "legacy-managed:sha256:" + strings.Repeat("c", 64)
+var managedFixtureSourceIdentity = "external:sha256:" + strings.Repeat("c", 64)
 
 // managedFixtureDestination builds the destination evidence a completed Managed
 // import writes, sealed with the same protector that seals the Manager
@@ -1171,7 +1171,7 @@ func TestCompletedOperationAdmissionRequiresTheManagedHandoff(t *testing.T) {
 		}},
 		{name: "a destination whose source identity is not this import's", mutate: func(f *completedOperationFixture) {
 			f.managedTarget.mutate = mutateManagedIntent(func(intent map[string]any) {
-				intent["sourceIdentity"] = "external:sha256:" + strings.Repeat("d", 64)
+				intent["sourceIdentity"] = "managed:sha256:" + strings.Repeat("d", 64)
 			})
 		}},
 		{name: "a destination with no source class", mutate: func(f *completedOperationFixture) {

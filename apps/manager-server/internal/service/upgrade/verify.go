@@ -867,11 +867,12 @@ func requireManagedDestinationEvidence(destination cpaImportDestinationRecord) e
 // by a request this step never submitted.
 const managedDestinationSourceClass = "legacy_managed"
 
-// validManagedSourceIdentity accepts exactly the identity the managed source
-// stamps: the `legacy-managed:sha256:` prefix and a lowercase SHA-256 digest. A
-// destination staged for anything else was staged for another source.
+// validManagedSourceIdentity accepts the identity the managed source stamps and
+// the Runtime Supervisor validates for `legacy_managed`: the `external:sha256:`
+// prefix and a lowercase SHA-256 digest. A destination staged for anything else
+// was staged for another source.
 func validManagedSourceIdentity(value string) bool {
-	digest, ok := strings.CutPrefix(strings.TrimSpace(value), "legacy-managed:sha256:")
+	digest, ok := strings.CutPrefix(strings.TrimSpace(value), "external:sha256:")
 	return ok && identity.IsValidSHA256Hex(digest)
 }
 

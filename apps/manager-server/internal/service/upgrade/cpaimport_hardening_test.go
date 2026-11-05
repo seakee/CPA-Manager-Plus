@@ -801,7 +801,7 @@ func TestImportCPADestinationAttemptNeverMovesItsTimestampBackwards(t *testing.T
 	record := cpaImportDestinationRecord{
 		BaseURL: "http://127.0.0.1:8317",
 		Intent: cpaImportDestinationIntent{
-			SourceIdentity: "legacy-managed:sha256:fixture", SourceClass: managedDestinationSourceClass,
+			SourceIdentity: "external:sha256:fixture", SourceClass: managedDestinationSourceClass,
 			APIKeys: []string{"legacy-client-key-1"}, PluginsEnabled: boolPointer(true),
 		},
 		OperationID: "upgrade-cpa-import:fixture", Attempt: 1,

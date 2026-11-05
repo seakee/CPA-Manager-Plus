@@ -35,9 +35,9 @@ const (
 )
 
 // verifyDestinationSource is the identity the managed source stamps: the
-// `legacy-managed:sha256:` prefix and the digest of the configuration bytes the
+// `external:sha256:` prefix and the digest of the configuration bytes the
 // destination was staged for.
-var verifyDestinationSource = "legacy-managed:sha256:" + strings.Repeat("c", 64)
+var verifyDestinationSource = "external:sha256:" + strings.Repeat("c", 64)
 
 // verifyFixture is a recorded operation driven through the real steps. Every
 // step runs its production entry point — CopyIn, Reconcile, ExternalConnect or
@@ -640,7 +640,7 @@ func TestVerifyRefusesAnIncompleteManagedDestinationProvenance(t *testing.T) {
 			record.Intent.SourceIdentity = ""
 		}},
 		{name: "a source identity this import does not stamp", mutate: func(record *cpaImportDestinationRecord) {
-			record.Intent.SourceIdentity = "external:sha256:" + strings.Repeat("d", 64)
+			record.Intent.SourceIdentity = "managed:sha256:" + strings.Repeat("d", 64)
 		}},
 		{name: "no source class", mutate: func(record *cpaImportDestinationRecord) {
 			record.Intent.SourceClass = ""

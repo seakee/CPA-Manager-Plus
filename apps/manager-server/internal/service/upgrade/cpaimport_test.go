@@ -23,6 +23,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
@@ -479,6 +480,13 @@ func (f *fakeImportRuntime) StageDestination(_ context.Context, request model.Ru
 	f.stageCall = &request
 	if err := f.validateSubmissionLocked(request.ExpectedRuntimeIdentity, request.ExpectedRuntimeGeneration); err != nil {
 		return model.RuntimeOperationResult{}, err
+	}
+	// Mirror runtime-supervisor lifecycle.DestinationRequest.Validate(): a
+	// legacy_managed request must carry an external:sha256:<64 lowercase hex>
+	// SourceIdentity, or the real Supervisor rejects StageDestination with 400.
+	if digest, ok := strings.CutPrefix(request.SourceIdentity, "external:sha256:"); !ok || !identity.IsValidSHA256Hex(digest) {
+		f.refusal = "invalid_request: sourceIdentity must have prefix external:sha256: and 64 lowercase hex characters"
+		return model.RuntimeOperationResult{}, errors.New(f.refusal)
 	}
 	// Resolve first, exactly as the journal does: an existing ID answers with its
 	// journalled operation, but only when the request fingerprint is the same one.

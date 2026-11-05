@@ -1166,7 +1166,7 @@ func (s *cpaManagedSource) ReadConfigDocument(_ context.Context) (map[string]any
 // imported. It names the exact configuration bytes, so a later stage can tell
 // the source it was staged from apart from a different one.
 func (s *cpaManagedSource) sourceIdentity() string {
-	return "legacy-managed:sha256:" + s.fingerprint
+	return "external:sha256:" + s.fingerprint
 }
 
 // groupLegacyAPIKeys reproduces CPA's own v7 -> v8 grouping of one `*-api-key`
