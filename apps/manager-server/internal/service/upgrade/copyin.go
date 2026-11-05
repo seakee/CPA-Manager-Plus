@@ -180,7 +180,7 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 			if err := requirePublishedCopyIn(paths); err != nil {
 				return Result{}, err
 			}
-			recorded, found, snapshot, readErr := readCopyInCandidate(ctx, paths.Database, sourceRoot, targetRoot, options.ScratchDir)
+			recorded, found, snapshot, readErr := readCopyInSnapshot(ctx, paths.Database, sourceRoot, targetRoot, options.ScratchDir)
 			if snapshot != nil {
 				defer func() { _ = snapshot.Close() }()
 			}
@@ -260,8 +260,8 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	if after != before {
 		aborted := newUpgradeError(UpgradeErrorSourceChanged,
 			"the 1.x source changed during the copy-in; the members this run moved were rolled back and nothing was recorded", nil)
-		if rollbackErr := rollbackMaterialized(paths, moved); rollbackErr != nil {
-			return Result{}, errors.Join(aborted, fmt.Errorf("roll back the copy-in: %w", rollbackErr))
+		if rollbackErr := rollbackMaterialized(ctx, paths, moved, manifest); rollbackErr != nil {
+			return Result{}, unresumable("the source changed and materialized members could not be safely removed; preserve the target, marker and verified bundle for manual recovery", rollbackErr)
 		}
 		return Result{}, aborted
 	}
@@ -287,8 +287,14 @@ func CopyIn(ctx context.Context, options Options) (Result, error) {
 	if err := validateStagedDatabase(paths, stagedDatabase, true); err != nil {
 		return Result{}, err
 	}
-	if err := os.Rename(stagedDatabase, paths.Database); err != nil {
-		return Result{}, fmt.Errorf("publish the staged database: %w", err)
+	if err := copyinmarker.DatabaseSidecarsAbsent(paths.Database); err != nil {
+		return Result{}, unresumable("an unexpected database sidecar arrived before publication; preserve the target and marker for recovery", err)
+	}
+	if err := publishDatabase(stagedDatabase, paths.Database); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return Result{}, unresumable("an unexpected database arrived before publication; preserve the existing target and marker for recovery", err)
+		}
+		return Result{}, fmt.Errorf("publish the staged database without replacement: %w", err)
 	}
 	if err := copyinmarker.SyncDirectory(paths.Root); err != nil {
 		return Result{}, fmt.Errorf("sync the committed data root: %w", err)
@@ -361,6 +367,9 @@ func MigrateOperationStore(ctx context.Context, databasePath string) error {
 		return fmt.Errorf("take the v2 database process lock: %w", err)
 	}
 	defer func() { _ = lock.Close() }()
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return err
+	}
 	if err := requireCopiedInStore(ctx, databasePath); err != nil {
 		return err
 	}
@@ -666,6 +675,9 @@ func acquireTargetFence(targetRoot string) (*processlock.Lock, error) {
 }
 
 func readRecordedCopyIn(ctx context.Context, databasePath string) (model.UpgradeOperation, bool, error) {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return model.UpgradeOperation{}, false, err
+	}
 	if _, err := os.Lstat(databasePath); os.IsNotExist(err) {
 		return model.UpgradeOperation{}, false, nil
 	} else if err != nil {
@@ -685,6 +697,18 @@ func readRecordedCopyIn(ctx context.Context, databasePath string) (model.Upgrade
 // for a sidecar-free candidate. On a recorded copy the caller owns the snapshot
 // and uses that same database for schema verification before closing it.
 func readCopyInCandidate(ctx context.Context, databasePath, sourceRoot, targetRoot, scratchDir string) (model.UpgradeOperation, bool, *Snapshot, error) {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return model.UpgradeOperation{}, false, nil, err
+	}
+	return readCopyInSnapshot(ctx, databasePath, sourceRoot, targetRoot, scratchDir)
+}
+
+// CopyIn alone may inspect a surviving committing marker's published database,
+// after its stricter marker binding and sidecar-free publication checks.
+func readCopyInSnapshot(ctx context.Context, databasePath, sourceRoot, targetRoot, scratchDir string) (model.UpgradeOperation, bool, *Snapshot, error) {
+	if err := requireCandidateSidecars(databasePath); err != nil {
+		return model.UpgradeOperation{}, false, nil, err
+	}
 	info, err := os.Lstat(databasePath)
 	if os.IsNotExist(err) {
 		return model.UpgradeOperation{}, false, nil, nil
@@ -693,7 +717,7 @@ func readCopyInCandidate(ctx context.Context, databasePath, sourceRoot, targetRo
 		return model.UpgradeOperation{}, false, nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return model.UpgradeOperation{}, false, nil, errors.New("the target database is not a regular file")
+		return model.UpgradeOperation{}, false, nil, unresumable("the target database is not a regular file; preserve it for manual recovery", nil)
 	}
 	if err := ValidateScratchDir(scratchDir, sourceRoot, targetRoot); err != nil {
 		return model.UpgradeOperation{}, false, nil, err
@@ -1151,15 +1175,35 @@ func moveMembers(ctx context.Context, paths targetPaths, staging string, manifes
 	return moved, nil
 }
 
-// rollbackMaterialized removes exactly what this run moved into the v2 layout
-// and the work directory that carried it. Paths that existed before this run
-// are never in the list, so nothing older is touched.
-func rollbackMaterialized(paths targetPaths, moved []string) error {
+// rollbackMaterialized validates every moved member before removing any of
+// them. A replaced member or additional archive entry is preserved for recovery.
+func rollbackMaterialized(ctx context.Context, paths targetPaths, moved []string, manifest maintenancebundle.Manifest) error {
 	if len(moved) == 0 {
 		return nil
 	}
 	if err := validateCopyInWork(paths, false); err != nil {
 		return err
+	}
+	for _, path := range moved {
+		member := ""
+		for _, candidate := range copyInMembers {
+			if path == filepath.Join(paths.Root, candidate.target) {
+				member = candidate.bundle
+				break
+			}
+		}
+		if member == "" {
+			return unresumable("a materialized member is outside the expected target layout; preserve it for manual recovery", nil)
+		}
+		matching, err := targetMemberMatches(ctx, paths.Root, manifest, member)
+		if err != nil || !matching {
+			return unresumable("a materialized member changed after restoration; preserve the target and marker for manual recovery", err)
+		}
+		if member == archivesDirName {
+			if err := refuseExtraTargetEntries(paths, manifest); err != nil {
+				return unresumable("the materialized archive tree changed after restoration; preserve it for manual recovery", err)
+			}
+		}
 	}
 	var err error
 	for index := len(moved) - 1; index >= 0; index-- {

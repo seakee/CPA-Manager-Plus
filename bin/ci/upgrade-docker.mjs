@@ -2564,7 +2564,14 @@ async function faultInterruptedCopyIn(binary, workspace) {
   // an existing database, so absence is the evidence here; the marker-backed
   // HTTP projection below remains available without opening a target store.
   for (const suffix of ['', '-wal', '-shm', '-journal']) {
-    assertValue(!fs.existsSync(path.join(target, 'usage.sqlite' + suffix)), `interrupted: unpublished database member usage.sqlite${suffix} must be absent before resume`);
+    let present = true;
+    try {
+      fs.lstatSync(path.join(target, 'usage.sqlite' + suffix));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      present = false;
+    }
+    assertValue(!present, `interrupted: unpublished database member usage.sqlite${suffix} must be absent before resume`);
   }
 
   // The window the marker covers, read over the projection the operator uses.

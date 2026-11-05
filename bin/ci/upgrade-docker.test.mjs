@@ -1193,6 +1193,7 @@ async function interruptedCopyInHarness(mode) {
         writeFileSync(path.join(target, 'data.key'), 'copied key');
         mkdirSync(path.join(target, 'usage-archives'));
         if (mode === 'published-too-early') writeFileSync(path.join(target, 'usage.sqlite'), 'unexpected published database');
+        if (mode === 'dangling-sidecar') fs.symlinkSync(path.join(root, 'missing-sidecar'), path.join(target, 'usage.sqlite-journal'));
       });
       return child;
     },
@@ -1229,4 +1230,8 @@ test('copy-in interruption replaces invalid staging with a rebuilt database', as
 
 test('copy-in interruption requires the target database to remain absent before resume', async () => {
   await assert.rejects(interruptedCopyInHarness('published-too-early'), /absent|unpublished/);
+});
+
+test('copy-in interruption refuses a dangling database sidecar symlink', async () => {
+  await assert.rejects(interruptedCopyInHarness('dangling-sidecar'), /absent|unpublished/);
 });

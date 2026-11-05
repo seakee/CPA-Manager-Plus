@@ -1622,10 +1622,10 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	if err != nil || stage != legacypreflight.UpgradeStageInProgress {
 		t.Fatalf("admission = %q err=%v", stage, err)
 	}
-	// A marker that names another database file describes nothing here. The
-	// name is what identifies the store inside its data root (see SameTarget), so
-	// a marker whose file name differs is the only foreign evidence: the same
-	// name at another absolute path is a relocated root.
+	// A marker that names another database file blocks the projection before any
+	// target read. The name is what identifies the store inside its data root (see
+	// SameTarget), so a marker whose file name differs is foreign evidence: the
+	// same name at another absolute path is a relocated root.
 	foreign := filepath.Join(t.TempDir(), "other.sqlite")
 	if err := copyinmarker.Write(filepath.Dir(database), copyinmarker.Marker{
 		Version:                 copyinmarker.Version,
@@ -1638,12 +1638,9 @@ func TestStatusReportsTheCopyInMarkerWindow(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, body = request(t, newHandler(root, database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
-	if err := json.Unmarshal([]byte(body), &status); err != nil {
-		t.Fatal(err)
-	}
-	if status.Recorded || status.Stage != "" || status.NextAction != ActionPreflight || status.Evidence != EvidenceNone {
-		t.Fatalf("a foreign marker was read as this operation: %+v", status)
+	_, body = request(t, newHandler(root, database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusServiceUnavailable)
+	if !strings.Contains(body, `"`+CodeOperationUnread+`"`) {
+		t.Fatalf("a foreign marker was not refused as unreadable: %s", body)
 	}
 }
 
@@ -1877,19 +1874,39 @@ func TestRelocatedRootKeepsTheMarkerForTheWizardAndTheAdmission(t *testing.T) {
 		t.Fatalf("status lost the recorded source evidence: %+v", document)
 	}
 
-	// A marker that names another database file is evidence for a different run.
-	// The admission refuses it and the projection reads it as no record: neither
-	// guesses that this store is the one that marker describes.
+	// A differently bound marker blocks the projection before any target read.
 	writeMarker(filepath.Join(t.TempDir(), "other.sqlite"))
+	recordOperation(t, database, model.UpgradeOperation{Stage: model.UpgradeStageCopyIn})
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if err := os.WriteFile(database+suffix, []byte("preserved sidecar"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	preserved := map[string][]byte{}
+	for _, path := range []string{database, database + "-wal", database + "-shm", database + "-journal", copyinmarker.Path(filepath.Dir(database))} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		preserved[path] = data
+	}
 	if stage, err := (legacypreflight.DatabaseUpgradeAdmission{DatabasePath: database}).Admitted(context.Background()); err == nil {
 		t.Fatalf("a foreign marker was admitted as %q", stage)
 	}
 	document, err = readStatus(context.Background(), database)
-	if err != nil {
-		t.Fatalf("status with a foreign marker: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "different database") || !strings.Contains(err.Error(), "upgrade run") {
+		t.Fatalf("foreign marker did not block status with recovery guidance: %+v/%v", document, err)
 	}
-	if document.Recorded || document.Evidence != EvidenceNone || document.NextAction != ActionPreflight {
-		t.Fatalf("a foreign marker was read as this operation: %+v", document)
+	recorder := httptest.NewRecorder()
+	newHandler("", database).serveStatus(recorder, httptest.NewRequest(http.MethodGet, testPrefix+StatusSuffix, nil), mountResolution{})
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), CodeOperationUnread) {
+		t.Fatalf("foreign marker HTTP status = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	for path, before := range preserved {
+		after, err := os.ReadFile(path)
+		if err != nil || string(after) != string(before) {
+			t.Fatalf("foreign marker status changed %s: %v", filepath.Base(path), err)
+		}
 	}
 }
 

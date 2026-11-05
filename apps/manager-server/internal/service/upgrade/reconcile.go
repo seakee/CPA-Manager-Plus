@@ -250,6 +250,9 @@ func Reconcile(ctx context.Context, options Options) (ReconcileReport, error) {
 		return ReconcileReport{}, err
 	}
 	paths := newTargetPaths(targetRoot)
+	if err := requireRecoveredCopyIn(paths.Database); err != nil {
+		return ReconcileReport{}, err
+	}
 	// The step reads a stopped 1.x source and writes the v2 store, so the caller
 	// must hold both fences for the whole run. Refusing here keeps a programmatic
 	// caller from marking a store a live Manager or a second reconciliation is
@@ -1479,6 +1482,9 @@ func cutReconcileRecording(point string) error {
 // the step again writes the whole result, which is also how a store torn by an
 // earlier release that wrote the three steps separately repairs itself.
 func recordReconciliation(ctx context.Context, databasePath string, evidence ReconcileEvidence, established []string) (model.UpgradeOperation, int, error) {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return model.UpgradeOperation{}, 0, err
+	}
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {
 		return model.UpgradeOperation{}, 0, fmt.Errorf("open the v2 database to record the reconciliation: %w", err)

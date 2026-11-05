@@ -41,6 +41,9 @@ import (
 // connection that names a different CPA is refused instead of repointed, and two
 // partial rows are never combined into one inferred connection.
 func handDestinationConnection(ctx context.Context, databasePath, dataKeyPath, baseURL, managementKey string) error {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return err
+	}
 	destinationURL := cpa.NormalizeBaseURL(baseURL)
 	secret := strings.TrimSpace(managementKey)
 	if destinationURL == "" || secret == "" {

@@ -1214,15 +1214,18 @@ func readRecordedStatus(ctx context.Context, databasePath string, document statu
 // readCopyInMarker reads the provenance marker that describes this database.
 // The marker sits in this data root's own reserved work directory, so it
 // describes this root even when the root is mounted at another absolute path;
-// a marker naming a different database file is evidence for some other run and
-// is not applied here, the same rule the startup admission applies.
+// a marker naming a different database file blocks status without opening the
+// store, matching startup admission and preserving all recovery evidence.
 func readCopyInMarker(databasePath string) (copyinmarker.Marker, bool, error) {
 	marker, found, err := copyinmarker.Read(filepath.Dir(databasePath))
 	if err != nil {
 		return copyinmarker.Marker{}, false, fmt.Errorf("read the copy-in provenance marker: %w", err)
 	}
-	if !found || !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
+	if !found {
 		return copyinmarker.Marker{}, false, nil
+	}
+	if !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
+		return copyinmarker.Marker{}, false, errors.New("the copy-in marker names a different database; preserve the target and marker and recover with `cpa-manager-plus upgrade run` before reading this store")
 	}
 	return marker, true, nil
 }

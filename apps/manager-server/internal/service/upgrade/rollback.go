@@ -445,13 +445,22 @@ func PrepareRollback(ctx context.Context, options RollbackOptions) (Plan, error)
 // identity and member digest. The refusal names the command that finishes the
 // work instead of leaving the operator without a recoverable path.
 func refuseUnfinishedCopyIn(targetRoot string) error {
-	_, found, err := copyinmarker.Read(targetRoot)
+	databasePath := filepath.Join(targetRoot, databaseFileName)
+	marker, found, err := copyinmarker.Read(targetRoot)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorTargetConflict,
 			"the copy-in marker in this v2 data root is unreadable, so no rollback can decide against the store it describes; inspect the marker and run `cpa-manager-plus upgrade run` to resolve the unfinished copy-in", err)
 	}
 	if !found {
-		return nil
+		return requireCandidateSidecars(databasePath)
+	}
+	if !copyinmarker.SameTarget(marker.TargetDatabase, databasePath) {
+		return unresumable("the copy-in marker names a different database; preserve the target and marker and recover with `cpa-manager-plus upgrade run`", nil)
+	}
+	if marker.Phase == copyinmarker.PhaseCommitting {
+		if err := copyinmarker.RequirePublishedDatabase(databasePath); err != nil {
+			return unresumable("the committing copy-in target is not a sidecar-free regular database; preserve the target and marker and recover with `cpa-manager-plus upgrade run`", err)
+		}
 	}
 	return newUpgradeError(UpgradeErrorRollbackNotApplicable,
 		"a copy-in in this v2 data root has not finished, so there is no recorded state to roll back yet; run `cpa-manager-plus upgrade run --legacy <dir> --target <dir>` to resume it, then prepare or verify the rollback", nil)
@@ -505,6 +514,9 @@ func requireBoundedSourceRoot(recorded model.UpgradeOperation, sourceRoot, finge
 func bindSourceRootLocked(ctx context.Context, recorded model.UpgradeOperation, targetRoot, sourceRoot string) (model.UpgradeOperation, error) {
 	if sourceRootRecorded(recorded) {
 		return recorded, nil
+	}
+	if err := requireRecoveredCopyIn(filepath.Join(targetRoot, databaseFileName)); err != nil {
+		return recorded, err
 	}
 	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
@@ -1142,6 +1154,9 @@ func RecordRollback(ctx context.Context, observation RollbackObservation) (model
 	defer func() { _ = lock.Close() }()
 	// The binding may write a backfill, and it is still the only write before the
 	// verdict: it happens under the same lock, through the same writable open.
+	if err := requireRecoveredCopyIn(filepath.Join(targetRoot, databaseFileName)); err != nil {
+		return model.UpgradeOperation{}, err
+	}
 	db, err := managersqlite.Open(filepath.Join(targetRoot, databaseFileName))
 	if err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("open the v2 database to record the rollback: %w", err)

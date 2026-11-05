@@ -919,6 +919,9 @@ func requireCPAImportSettled(summary freshstore.AdoptionSummary) error {
 // domain is the claim that the destination holds the copied state, and this build
 // does not copy, so it never records that domain.
 func enterCPAImportStage(ctx context.Context, databasePath string) error {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return err
+	}
 	db, err := managersqlite.Open(databasePath)
 	if err != nil {
 		return fmt.Errorf("open the v2 database to enter the CPA import: %w", err)
@@ -950,6 +953,9 @@ func enterCPAImportStage(ctx context.Context, databasePath string) error {
 // recorded request and secret, and clearing it would let the run mint a second
 // secret for a destination that already holds the first.
 func recordCPAImportDeferral(ctx context.Context, databasePath string, result CPAImportResult) (model.UpgradeOperation, error) {
+	if err := requireRecoveredCopyIn(databasePath); err != nil {
+		return model.UpgradeOperation{}, err
+	}
 	// This step appends its instructions and replaces nothing. The append runs on
 	// the row the repository reads inside the write transaction, so a rerun can
 	// neither duplicate its own line nor drop one an earlier step wrote, and the

@@ -385,11 +385,16 @@ migration authority.
   close every connection → require no staged WAL/SHM/journal → fsync the staged
   database → publish `committing` marker → recheck that the target database and
   all its sidecars are absent → recheck staging's real directories, regular DB
-  and absent sidecars → one same-filesystem `os.Rename` of staged `database` to
-  target `usage.sqlite` → fsync the target directory → require a regular,
+  and absent sidecars → recheck target sidecars after the final checkpoint → one
+  atomic same-filesystem **no-replace** rename of staged `database` to target
+  `usage.sqlite` → fsync the target directory → require a regular,
   sidecar-free published database → remove the work directory and marker only
   after repeating that publication check. The rename is the database commit
   point: schema migration and its provenance row become visible together.
+  Publication uses Linux `RENAME_NOREPLACE`, Darwin `RENAME_EXCL`, or Windows
+  `MoveFileEx` without replacement/copy flags. An arriving destination is a
+  typed conflict and is preserved; unsupported rename semantics fail without
+  falling back to an overwriting rename or a copy.
 - **V2 data-root fence.** `CopyIn` takes the v2 data root's own ownership
   lock (`processlock.Acquire` on `<target>/usage.sqlite`) in the service,
   before its first write to that root, and holds it for the whole mutating
@@ -443,6 +448,15 @@ migration authority.
   are unresumable; preserve the data root and verified backup and recover into
   an empty v2 root with `upgrade run`. Deleting the marker is not recovery.
   Root relocation remains supported by comparing the database's root-local name.
+- **Recovery precedes later steps.** Reconcile, Verify, CPA import and External
+  connect share a pre-read/pre-write guard: any surviving or unreadable marker
+  requires `upgrade run` recovery first, including a sidecar-free published
+  `committing` marker. Without a marker, rollback-journal entries and linked or
+  non-regular WAL/SHM entries are still conflicts. Regular WAL/SHM members may be
+  consumed only through private snapshots during qualification. Verify validates
+  default or configured scratch against both roots before its first snapshot;
+  completed verdicts reuse that same private target copy. Wizard status rejects
+  a differently bound marker with recovery guidance instead of opening the store.
 - **Source immutability.** The 1.x volume is never opened in place. Preflight
   copies the database and its WAL sidecars into private scratch space, proves the
   source did not change while the copy was taken and reads only that copy, so a
@@ -456,8 +470,11 @@ migration authority.
   the database, its WAL/SHM/journal, `data.key`, every archive file and every
   other entry of the source root (the ownership marker is the one deliberate
   exception: it belongs to the holder, not the source). It is recomputed after
-  the copy; a difference rolls back the members this run moved plus the work
-  directory and aborts with `upgrade_source_changed`. The read-only descriptor
+  the copy; a difference rolls back only moved members that still match the
+  manifest, including regular-file digests and the exact archive entry set,
+  before removing the work directory and returning `upgrade_source_changed`.
+  Replaced, linked, modified or additional members instead preserve the entire
+  target and marker with `upgrade_target_conflict` for manual recovery. The read-only descriptor
   is proven on the test host with a `0400` source marker; an actual Linux
   read-only (EROFS) bind mount was not exercised, so that mount qualification
   remains unverified.
@@ -481,6 +498,8 @@ migration authority.
   resuming, checks actual non-database moves against the manifest, requires a
   rebuilt SQLite database plus its committed row, and verifies source/backup
   digests stayed unchanged; it does not accept a boolean result as proof.
+  Its pre-resume absence check uses `Lstat`, so a dangling database or sidecar
+  symlink is present evidence, never an absent member.
 - **Recorded fields** in `upgrade_operations`: `stage=copy_in`,
   `domains_done+=[source_copy]`, `source_kind=upgraded-legacy`,
   `source_version` (the operator's declaration; 1.x never recorded it, so an

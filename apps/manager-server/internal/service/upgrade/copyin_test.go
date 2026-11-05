@@ -187,6 +187,14 @@ func fingerprintTree(t *testing.T, root string) map[string]string {
 		if err != nil {
 			return err
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			entries[filepath.ToSlash(relative)] = fmt.Sprintf("link %s %s", target, info.Mode())
+			return nil
+		}
 		if entry.IsDir() {
 			entries[filepath.ToSlash(relative)] = "dir " + info.Mode().String()
 			return nil
