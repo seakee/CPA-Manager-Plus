@@ -335,6 +335,18 @@ describe('GitHub Actions workflow integrity', () => {
     );
   });
 
+  it('runs the Panel Lite harness suite in the Frontend job', () => {
+    const frontendJob = jobBlock(readWorkflow('pr-check.yml'), 'frontend');
+    const testStep = stepBlock(frontendJob, 'Test Panel Lite acceptance harness');
+
+    expect(testStep).toContain('run: node --test bin/ci/panel-lite-cpa-v8.test.mjs');
+    expect(testStep).not.toMatch(/^\s+if:/m);
+    expect(testStep).not.toContain('continue-on-error');
+    expect(frontendJob.indexOf('- name: Test D harness lifecycle')).toBeLessThan(
+      frontendJob.indexOf('- name: Test Panel Lite acceptance harness')
+    );
+  });
+
   it('uses NUL-delimited Git paths before classification and release validation', () => {
     const workflow = readWorkflow('pr-check.yml');
 

@@ -120,6 +120,12 @@ jobs:
       - name: Test D harness lifecycle
         run: node --test bin/ci/fresh-adopt-lifecycle.test.mjs
 
+      # Same reason as above: the Panel Lite acceptance harness under bin/ci is
+      # native node:test, so `npm run test` never collects it. These cases need
+      # neither Docker nor a CPA.
+      - name: Test Panel Lite acceptance harness
+        run: node --test bin/ci/panel-lite-cpa-v8.test.mjs
+
       - name: Build
         run: npm --workspace apps/web run build:bundle
         env:
