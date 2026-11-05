@@ -5,10 +5,10 @@ package upgrade
 // It is the Upgrade step that stages, binds and connects the destination, so it
 // shares the refusals contract of the other steps instead of inventing one: a
 // typed refusal the operator has to act on exits 1, a usage or environment
-// failure exits 2, and success exits 0. This build copies no provider
-// configuration or OAuth credential; the source is inventoried and every item is
-// reported as deferred manual work. Nothing here reaches a CPA before the service
-// layer's version gate has passed.
+// failure exits 2, and success exits 0. It copies the qualified routing,
+// API-key provider sections and OAuth credential files under the compiled
+// adoption authority, and records any unsupported item as manual work. Nothing
+// here reaches a CPA before the service layer's version gate has passed.
 
 import (
 	"context"
@@ -208,7 +208,9 @@ func writeCPAImportOutput(w io.Writer, asJSON bool, output cpaImportOutput) {
 		// proved nothing, and printing a count beside it is the claim that it did.
 		if output.Error == "" {
 			_, _ = fmt.Fprintf(w, "  client keys proved: %d\n", result.ClientKeys)
-			_, _ = fmt.Fprintf(w, "  items copied: %d\n", result.MigratedCount)
+			if !result.AlreadyComplete {
+				_, _ = fmt.Fprintf(w, "  items copied: %d\n", result.MigratedCount)
+			}
 		}
 		_, _ = fmt.Fprintf(w, "  manual items: %d\n", len(result.ManualItems))
 		for _, item := range result.ManualItems {

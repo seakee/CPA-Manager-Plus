@@ -422,9 +422,9 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 // destination, and applying one changes the configuration the CPA serves, so the
 // fingerprint the import recorded is stale exactly when the operator followed that
 // instruction. Refreshing it here is the recovery; refusing the handoff instead
-// would leave the operation permanently unverifiable. A destination that cannot be
-// reached is left alone — this step never refreshes from nothing, and the gate's
-// own live proof is what refuses a destination that never comes back.
+// would leave the operation permanently unverifiable. An unreachable destination
+// fails closed as `upgrade_cpa_import_target_unreachable` rather than pretending
+// the stale fingerprint is current.
 func replayRecordedManagedImport(ctx context.Context, paths targetPaths, result *CPAImportResult) error {
 	db, err := managersqlite.Open(paths.Database)
 	if err != nil {
@@ -459,10 +459,10 @@ func replayRecordedManagedImport(ctx context.Context, paths targetPaths, result 
 	result.DestinationURL = target.attempt.BaseURL
 	result.ServerFingerprint = fingerprint
 	result.SourceIdentity = target.attempt.Intent.SourceIdentity
+	result.ClientKeys = len(target.attempt.Intent.APIKeys)
 	// The manual items are not repopulated: the row holds their rendered one-line
 	// form, which cannot be reversed into an item, a reason and an instruction
 	// without guessing. The recorded operation is their record, and this result
-	// reports only what the replay itself observed.
 	return nil
 }
 
@@ -473,16 +473,13 @@ func replayRecordedManagedImport(ctx context.Context, paths targetPaths, result 
 // attempt staged with these client keys, and the fingerprint is re-derived with the
 // secret the Manager itself will present after a restart. When the destination
 // moved, the attempt row keeps its secret and replay identity and takes the new
-// fingerprint, so the completion gate compares against what the CPA holds now. An
-// unreachable destination is not a reason to rewrite the record: the recorded
-// fingerprint stands and the gate refuses the target it cannot prove.
+// fingerprint, so the completion gate compares against what the CPA holds now.
+// An unreachable destination is refused as `upgrade_cpa_import_target_unreachable`
+// so a stopped or restarting CPA never reports a stale fingerprint as refreshed.
 func refreshRecordedManagedDestination(ctx context.Context, paths targetPaths, target verifyTarget, managementKey string) (string, error) {
 	baseURL := target.attempt.BaseURL
 	run := &cpaImportRun{databasePath: paths.Database, dataKeyPath: paths.DataKey}
 	if err := run.requireStagedDestinationIdentity(ctx, baseURL, managementKey, target.attempt.Intent.APIKeys, true); err != nil {
-		if code, ok := UpgradeErrorCodeOf(err); ok && code == UpgradeErrorCPAImportTargetUnreachable {
-			return target.attempt.ServerFingerprint, nil
-		}
 		return "", err
 	}
 	if err := run.proveDestinationFingerprint(ctx, baseURL, managementKey); err != nil {

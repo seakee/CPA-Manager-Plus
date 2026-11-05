@@ -1913,7 +1913,7 @@ async function assertWizard(binary, sourceRoot) {
 // own tables are the authority for the mirror —
 // `TestNextActionForAnExternalConnectRefusal` (a refusal on
 // `copy_in`/`reconcile`/`cpa_import` offers the connect step again) and
-// `TestVerifiedRowOffersTheGateAgain` (a waiting verify row offers the gate) — and
+// `TestVerifiedRowOffersCompletion` (a verify row offers completion) — and
 // the harness test repeats their cases, so a change to the ladder fails the run as
 // staleness instead of passing a guess.
 const WIZARD_STAGE_ACTIONS = Object.freeze({

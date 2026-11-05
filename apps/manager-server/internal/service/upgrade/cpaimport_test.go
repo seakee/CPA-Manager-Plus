@@ -1632,3 +1632,26 @@ func TestImportCPAReplayRefreshesADestinationThatMoved(t *testing.T) {
 		t.Fatalf("verification = %+v, want the completed operation", verified)
 	}
 }
+
+// TestImportCPAReplayRefusesAnUnreachableDestination locks down R2-1: when the
+// recorded destination CPA is down, re-running ImportCPA must fail closed with
+// UpgradeErrorCPAImportTargetUnreachable instead of reporting AlreadyComplete
+// with a stale ServerFingerprint.
+func TestImportCPAReplayRefusesAnUnreachableDestination(t *testing.T) {
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	credentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
+
+	if _, err := runManagedImport(t, fixture, runtime, destination.url(), credentials); err != nil {
+		t.Fatalf("import the fixture CPA: %v", err)
+	}
+	destination.server.Close()
+
+	_, err := runManagedImport(t, fixture, runtime, destination.url(), credentials)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPAImportTargetUnreachable {
+		t.Fatalf("replay against an unreachable destination = %v (code %q), want %s", err, code, UpgradeErrorCPAImportTargetUnreachable)
+	}
+}
