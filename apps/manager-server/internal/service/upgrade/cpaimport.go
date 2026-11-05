@@ -36,7 +36,9 @@ package upgrade
 // consumers `freshstrategy.VerifyCompiledUpgradeAdoption` proves: the accepted
 // `CPA8-STAGE-r1` staging transition and the accepted `CPA8-ADOPT-RESOURCE-r1`
 // replay chain on the same v8 artifact. A build whose record does not prove both
-// refuses with upgrade_cpa_import_unproven before the destination is staged.
+// refuses with upgrade_cpa_import_unproven before the destination is staged, and
+// the executor is only built once that authorization reports itself verified —
+// the decision slice alone is not the proof that produced it.
 //
 // # What is never inherited
 //
@@ -51,8 +53,13 @@ package upgrade
 //     and is held for the whole read path through a read-only descriptor;
 //   - the version gate runs before anything is written;
 //   - an absent plugin choice refuses the run — it is never defaulted;
+//   - the Runtime's active artifact must be the one the compiled record was
+//     accepted for, so the copy cannot land on a destination no chain described;
 //   - a destination URL that does not prove itself as the staged destination is
 //     refused before the executor reads or writes anything;
+//   - the server fingerprint is re-observed after the executor's writes settled,
+//     because the configuration the destination serves is then a different
+//     document than the one proved before the copy;
 //   - an unknown source key or provider section becomes a manual item with its
 //     rule's own action, never a silent drop;
 //   - the `cpa_config` domain is recorded only after the executor settled every
@@ -214,6 +221,12 @@ type cpaImportRun struct {
 	managementKey     string
 	serverFingerprint string
 	auth              freshadopt.Authorization
+	// qualifiedArtifactID is the v8 artifact both accepted adoption consumers were
+	// qualified against. The Supervisor reports the artifact actually active, and a
+	// destination staged on another one is an artifact no chain accepted, so the
+	// import refuses it instead of copying under a verdict that does not describe
+	// the destination it writes.
+	qualifiedArtifactID model.RuntimeArtifactID
 }
 
 // ImportCPA prepares the v2 destination for a 1.x stack's managed CPA state
@@ -264,10 +277,11 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	// advanced. It is checked before the entry gate because a recorded import is
 	// not a position to refuse — but the recorded verdict is only reported after
 	// the destination evidence and the Manager's own sealed connection are
-	// re-read, so a store whose handoff did not survive is not answered as a
-	// finished import.
+	// re-read and the live destination is re-proved, so a store whose handoff did
+	// not survive, and a destination whose configuration moved after the import,
+	// are not answered as a finished import.
 	if recorded.Stage == model.UpgradeStageCPAImport && recorded.HasDomain(model.UpgradeDomainCPAConfig) {
-		if err := requireRecordedManagedImport(ctx, paths); err != nil {
+		if err := replayRecordedManagedImport(ctx, paths, &result); err != nil {
 			return result, err
 		}
 		result.Stage = recorded.Stage
@@ -301,10 +315,17 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	}
 	// The authority is proved before anything else is staged: a build whose
 	// compiled record does not authorize the copy refuses here, with the source
-	// still unread and the destination untouched.
+	// still unread and the destination untouched. The artifact the record was
+	// accepted on is proved with it, because the destination the Supervisor
+	// reports is only this import's target when it runs on that artifact.
 	auth, err := qualifiedUpgradeAdoption()
 	if err != nil {
 		return result, err
+	}
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		return result, newUpgradeError(UpgradeErrorCPAImportUnproven,
+			"this build carries no accepted CPA adoption artifact for an Upgrade-derived source, so the import cannot prove the destination it would stage; nothing was staged or written", err)
 	}
 
 	// The source is read and gated before the destination is touched: a source
@@ -320,6 +341,7 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	}
 	run := &cpaImportRun{
 		options: options, source: source, databasePath: paths.Database, dataKeyPath: paths.DataKey, auth: auth,
+		qualifiedArtifactID: qualifiedArtifact,
 	}
 	result.SourceVersion = source.version
 	result.SourceLayout = source.layout
@@ -353,6 +375,16 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	if err := requireCPAImportSettled(summary); err != nil {
 		return result, err
 	}
+	// The executor wrote routing settings, payload rule families and provider
+	// sections into the destination, and a real CPA serves the digest of the
+	// configuration it now holds. The fingerprint proved before the copy therefore
+	// describes a document that no longer exists, and recording it would make the
+	// completion gate compare the destination against the state it had before this
+	// step wrote into it. The proof is repeated once the writes settled, on the URL
+	// this run already proved is the staged destination.
+	if err := run.proveDestinationFingerprint(ctx, result.DestinationURL, run.managementKey); err != nil {
+		return result, err
+	}
 
 	// The Manager's own connection takes the destination and the same secret this
 	// run staged with, before the operation row records the completion. A crash
@@ -374,15 +406,26 @@ func ImportCPA(ctx context.Context, options CPAImportOptions) (CPAImportResult, 
 	return result, nil
 }
 
-// requireRecordedManagedImport re-reads the evidence a recorded Managed import
-// left behind before its verdict is reported.
+// replayRecordedManagedImport re-reads and re-proves the evidence a recorded
+// Managed import left behind before its verdict is reported.
 //
-// `cpa_config` says the destination holds the copied state; it does not say the
-// Manager still holds the sealed credential that state was proved with. A store
-// whose destination record or Manager connection was removed or repointed is a
-// store this step cannot answer as a finished import, so the replay refuses
-// instead of returning AlreadyComplete over a handoff that did not survive.
-func requireRecordedManagedImport(ctx context.Context, paths targetPaths) error {
+// `cpa_config` says the destination holds the copied state; it says nothing about
+// whether the Manager still holds the sealed credential that state was proved
+// with, nor about the configuration the destination serves now. The replay
+// therefore proves three things: the recorded destination is still the one the
+// Manager connects to, the Manager's own connection is still the sealed secret the
+// import handed over, and the live CPA at the recorded address still answers as
+// the destination this import staged.
+//
+// The last one is why this step contacts the destination at all. The verification
+// tells the operator to re-run `cpa-import` after applying a manual item to the
+// destination, and applying one changes the configuration the CPA serves, so the
+// fingerprint the import recorded is stale exactly when the operator followed that
+// instruction. Refreshing it here is the recovery; refusing the handoff instead
+// would leave the operation permanently unverifiable. A destination that cannot be
+// reached is left alone — this step never refreshes from nothing, and the gate's
+// own live proof is what refuses a destination that never comes back.
+func replayRecordedManagedImport(ctx context.Context, paths targetPaths, result *CPAImportResult) error {
 	db, err := managersqlite.Open(paths.Database)
 	if err != nil {
 		return newUpgradeError(UpgradeErrorCPAImportUnproven,
@@ -402,7 +445,53 @@ func requireRecordedManagedImport(ctx context.Context, paths targetPaths) error 
 		return newUpgradeError(UpgradeErrorCPAImportUnproven,
 			"the recorded CPA import names no proved destination server, so this run cannot confirm the copy it claims; nothing was written", err)
 	}
+	// What the next start reads is the envelope on disk, not the plaintext a store
+	// happens to return. A handoff whose sealed credential was removed or replaced
+	// is not one this step may answer as finished.
+	if err := verifyStoredManagedConnection(ctx, db, target); err != nil {
+		return newUpgradeError(UpgradeErrorCPAImportUnproven,
+			"the Manager's stored CPA connection is not the sealed credential the CPA import handed the destination, so this run cannot report the handoff as complete; nothing was written", err)
+	}
+	fingerprint, err := refreshRecordedManagedDestination(ctx, paths, target, strings.TrimSpace(target.connection.ManagementKey))
+	if err != nil {
+		return err
+	}
+	result.DestinationURL = target.attempt.BaseURL
+	result.ServerFingerprint = fingerprint
+	result.SourceIdentity = target.attempt.Intent.SourceIdentity
+	// The manual items are not repopulated: the row holds their rendered one-line
+	// form, which cannot be reversed into an item, a reason and an instruction
+	// without guessing. The recorded operation is their record, and this result
+	// reports only what the replay itself observed.
 	return nil
+}
+
+// refreshRecordedManagedDestination re-proves the live destination a recorded
+// import proved and returns the server fingerprint it currently serves.
+//
+// The proof is the import's own: the URL must still answer as the destination this
+// attempt staged with these client keys, and the fingerprint is re-derived with the
+// secret the Manager itself will present after a restart. When the destination
+// moved, the attempt row keeps its secret and replay identity and takes the new
+// fingerprint, so the completion gate compares against what the CPA holds now. An
+// unreachable destination is not a reason to rewrite the record: the recorded
+// fingerprint stands and the gate refuses the target it cannot prove.
+func refreshRecordedManagedDestination(ctx context.Context, paths targetPaths, target verifyTarget, managementKey string) (string, error) {
+	baseURL := target.attempt.BaseURL
+	run := &cpaImportRun{databasePath: paths.Database, dataKeyPath: paths.DataKey}
+	if err := run.requireStagedDestinationIdentity(ctx, baseURL, managementKey, target.attempt.Intent.APIKeys, true); err != nil {
+		if code, ok := UpgradeErrorCodeOf(err); ok && code == UpgradeErrorCPAImportTargetUnreachable {
+			return target.attempt.ServerFingerprint, nil
+		}
+		return "", err
+	}
+	if err := run.proveDestinationFingerprint(ctx, baseURL, managementKey); err != nil {
+		return "", err
+	}
+	if err := run.recordProvedDestination(ctx, target.attempt, baseURL, managementKey); err != nil {
+		return "", err
+	}
+	return run.serverFingerprint, nil
 }
 
 // requireCPAImportSourceLock proves the caller holds the 1.x ownership marker of
@@ -514,6 +603,20 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		return newUpgradeError(UpgradeErrorCPADestinationUnready,
 			"this Runtime cannot stage a destination CPA, so the import has nowhere to write", nil)
 	}
+	// The destination the Supervisor reports is only this import's target when it
+	// runs on the artifact the compiled record was accepted for. Staging onto
+	// another one would copy source configuration and credentials under a verdict
+	// that never described that destination, so the mismatch is refused before the
+	// attempt is read and before anything is submitted.
+	if r.qualifiedArtifactID == "" {
+		return newUpgradeError(UpgradeErrorCPAImportUnproven,
+			"this run carries no qualified CPA adoption artifact, so it cannot prove the destination the Runtime reports is the one the record authorizes; nothing was staged or written", nil)
+	}
+	if artifact := status.ActiveGatewayArtifact.ArtifactID; artifact != "" && artifact != r.qualifiedArtifactID {
+		return newUpgradeError(UpgradeErrorCPAImportUnproven, fmt.Sprintf(
+			"the Runtime's active gateway artifact is %q, and this build's accepted CPA adoption record is for %q; the import copies only into the artifact its staging transition and replay chain were qualified against, so nothing was staged or written",
+			artifact, r.qualifiedArtifactID), nil)
+	}
 	clientKeys := slices.Clone(r.source.clientKeys)
 	supplied := strings.TrimSpace(r.options.DestinationManagementKey)
 	// The whole request this run would submit is fixed here, before the recorded
@@ -600,10 +703,11 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 		// The Supervisor's CPA is already the staged destination and this Manager
 		// did not stage it. Its secret is the caller's to supply — the import never
 		// invents a second secret for a destination it did not stage — and the
-		// target is proved before the executor writes anything. The attempt is
-		// recorded with the same secret anyway: the completion gate re-proves the
-		// destination from the store, and a proof-only run that recorded nothing
-		// would leave the handoff unverifiable.
+		// target is proved before the executor writes anything. The attempt row is
+		// written by that proof, never before it: a supplied secret that does not
+		// administer the CPA at this URL would otherwise be sealed into the store as
+		// the attempt's own and every retry would replay a secret this destination
+		// never accepted.
 		if supplied == "" {
 			return newUpgradeError(UpgradeErrorCPADestinationKeyRequired,
 				"the destination CPA is already running and this run holds no management secret for it; pass the secret the Manager stored with --destination-management-key-file, or stage the destination from a stopped state", nil)
@@ -612,10 +716,6 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			Intent:      intent,
 			OperationID: cpaImportDestinationOperationID(intent.SourceIdentity, 1),
 			Attempt:     1,
-		}
-		if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, supplied); err != nil {
-			return newUpgradeError(UpgradeErrorCPADestinationUnready,
-				"the destination management secret could not be recorded, so the destination was not proved", err)
 		}
 		return r.proveStagedDestination(ctx, record, baseURL, supplied, clientKeys, false)
 	}
@@ -999,6 +1099,15 @@ func requireSameDestinationRequest(
 // credential identity is derived from its unscubbed name and must not cross the
 // result boundary.
 func (r *cpaImportRun) runExecutor(ctx context.Context, result *CPAImportResult) (freshstore.AdoptionSummary, error) {
+	// The executor copies what its decisions mark migrate, and a decision set is
+	// not the proof that produced it: the value a caller can build by hand and the
+	// value NewAuthorization proves are indistinguishable once the decisions are
+	// extracted. The proof is therefore asserted here, before the destination is
+	// opened, so a run whose authority never ran writes nothing.
+	if !r.auth.Verified() {
+		return freshstore.AdoptionSummary{}, newUpgradeError(UpgradeErrorCPAImportUnproven,
+			"this run holds no verified CPA adoption authority, so it cannot copy the source's configuration or credentials; nothing was read from the source and nothing was written to the destination", nil)
+	}
 	destination, err := freshadopt.NewDestination(ctx, freshadopt.Endpoint{BaseURL: r.options.DestinationURL, ManagementKey: r.managementKey})
 	if err != nil {
 		return freshstore.AdoptionSummary{}, newUpgradeError(UpgradeErrorCPADestinationUnready,
@@ -1127,11 +1236,11 @@ func recordCPAImportCompletion(ctx context.Context, databasePath string, result 
 // the same one-line shape the other steps write.
 //
 // Only the instruction is bounded. The item name and the typed reason are short
-// and are the machine-readable half — the wizard reads the reason back to tell a
-// deferred import from one that never ran — so cutting them would make the row's
-// own record unusable. The cut is still on a rune boundary: the instruction names
-// a source path, which may be non-ASCII, and slicing bytes would put an invalid
-// UTF-8 sequence in the operation row.
+// and are the machine-readable half — the reason is the adoption rule's own
+// manual action, which the operator and the wizard read back — so cutting them
+// would make the row's own record unusable. The cut is still on a rune boundary:
+// the instruction names a source path, which may be non-ASCII, and slicing bytes
+// would put an invalid UTF-8 sequence in the operation row.
 func boundedManualItem(item CPAImportManualItem) string {
 	head := item.Item + ": "
 	tail := ""

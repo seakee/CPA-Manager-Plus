@@ -33,6 +33,12 @@ var (
 // arbitrary reference list as a substitute.
 type Authorization struct {
 	decisions []bootstrap.AdoptionResourceDecision
+	// verified records that this value was produced by NewAuthorization. The
+	// decision slice alone is not the proof: New (the Fresh adoption's
+	// constructor) and the zero value both carry decisions without one, so a step
+	// that must not copy under an unproven set asks Verified instead of inferring
+	// it from the slice being non-empty.
+	verified bool
 }
 
 // NewAuthorization builds an authorization from decisions produced by verify.
@@ -76,7 +82,16 @@ func NewAuthorization(decisions []bootstrap.AdoptionResourceDecision, verify fun
 	if !indexed[bootstrap.AdoptionRefClientAPIKeys] {
 		return Authorization{}, ErrAuthorizationInvalid
 	}
-	return Authorization{decisions: slices.Clone(decisions)}, nil
+	return Authorization{decisions: slices.Clone(decisions), verified: true}, nil
+}
+
+// Verified reports whether this value carries the proof NewAuthorization
+// produced: the producing authority ran and accepted the decision set. It is what
+// a step that must copy under a proven authority asks before it builds an
+// executor, because a constructor that took a bare reference list would otherwise
+// be indistinguishable from this one.
+func (a Authorization) Verified() bool {
+	return a.verified && len(a.decisions) > 0
 }
 
 // decisionsOf returns the authorization's decisions for the executor's index. A

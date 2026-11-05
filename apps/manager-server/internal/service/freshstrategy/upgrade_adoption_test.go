@@ -3,9 +3,11 @@ package freshstrategy
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 )
 
 // TestVerifyCompiledUpgradeAdoptionAcceptsTheCarriedRecord pins the positive
@@ -91,5 +93,64 @@ func TestUpgradeAdoptionRefusesARefusedRecord(t *testing.T) {
 	delete(consumers, consumerKey{Strategy: bootstrap.AdoptExisting, Class: bootstrap.AdoptNetworkExisting})
 	if _, err := qualifiedUpgradeAdoptionFrom(consumers); !errors.Is(err, errProductionQualification) {
 		t.Fatalf("a record without the replay authority produced %v, want the opaque refusal", err)
+	}
+}
+
+// TestQualifiedUpgradeAdoptionReturnsExactlyTheCopySet pins the returned set: the
+// derivation hands the executor the four references the import copies, in the
+// table's own order, and refuses a record that would authorize fewer — a partial
+// set is a chain the import cannot finish, not a narrower copy.
+func TestQualifiedUpgradeAdoptionReturnsExactlyTheCopySet(t *testing.T) {
+	decisions, err := qualifiedUpgradeAdoption()
+	if err != nil {
+		t.Fatalf("read the decisions: %v", err)
+	}
+	got := make([]bootstrap.ResourceRef, 0, len(decisions))
+	for _, decision := range decisions {
+		got = append(got, decision.ResourceRef)
+	}
+	if !slices.Equal(got, upgradeAdoptionRefs) {
+		t.Fatalf("decisions = %v, want exactly %v", got, upgradeAdoptionRefs)
+	}
+
+	consumers, err := loadProductionQualification(productionEvidence)
+	if err != nil {
+		t.Fatalf("load the carried qualification: %v", err)
+	}
+	key := consumerKey{Strategy: bootstrap.AdoptExisting, Class: bootstrap.AdoptNetworkExisting}
+	network := consumers[key]
+	network.AdoptionResources = network.AdoptionResources[:len(network.AdoptionResources)-1]
+	consumers[key] = network
+	if _, err := qualifiedUpgradeAdoptionFrom(consumers); !errors.Is(err, errProductionQualification) {
+		t.Fatalf("a record missing one copied reference produced %v, want the opaque refusal", err)
+	}
+}
+
+// TestQualifiedUpgradeAdoptionArtifactIDNamesTheQualifiedArtifact pins the other
+// half of the authority: the artifact the import may stage its destination on is
+// the one both consumers were accepted against, and a record whose consumers do
+// not share it is refused.
+func TestQualifiedUpgradeAdoptionArtifactIDNamesTheQualifiedArtifact(t *testing.T) {
+	artifact, err := QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		t.Fatalf("read the qualified artifact: %v", err)
+	}
+	consumers, err := loadProductionQualification(productionEvidence)
+	if err != nil {
+		t.Fatalf("load the carried qualification: %v", err)
+	}
+	legacy := consumers[consumerKey{Strategy: bootstrap.AdoptExisting, Class: bootstrap.AdoptLegacyManaged}]
+	network := consumers[consumerKey{Strategy: bootstrap.AdoptExisting, Class: bootstrap.AdoptNetworkExisting}]
+	if artifact == "" || artifact != legacy.ArtifactID || artifact != network.ArtifactID {
+		t.Fatalf("qualified artifact = %q, want the one both consumers name (%q / %q)", artifact, legacy.ArtifactID, network.ArtifactID)
+	}
+
+	// A record whose replay authority was accepted on another artifact cannot
+	// name a destination this build may stage: the copy would land on an artifact
+	// no chain was accepted for.
+	network.ArtifactID = model.RuntimeArtifactID("sha256:" + strings.Repeat("cd", 32))
+	consumers[consumerKey{Strategy: bootstrap.AdoptExisting, Class: bootstrap.AdoptNetworkExisting}] = network
+	if _, _, err := qualifiedUpgradeAdoptionAuthorityFrom(consumers); !errors.Is(err, errProductionQualification) {
+		t.Fatalf("a record qualified on another artifact produced %v, want the opaque refusal", err)
 	}
 }

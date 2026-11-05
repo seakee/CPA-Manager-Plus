@@ -389,6 +389,23 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 // one. A row that fails any of them is a store whose `complete` label no gate ever
 // proved, and it is reported as unusable instead of as a finished install.
 func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeoperation.ExternalBinding, hasBinding bool) (VerifyResult, error) {
+	// The stage alone is not a verdict. The row must still describe the copy-in the
+	// gate observed — the upgraded-legacy label, both source fingerprints and the
+	// backup manifest digest — because without them this store cannot be told apart
+	// from any other database that happens to carry a `complete` row. This is the
+	// same set the startup admission requires before it unlocks the normal surfaces.
+	if recorded.SourceKind != SourceKindUpgradedLegacy {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but does not name the upgraded-legacy source kind, so its verdict cannot be reported; restore the v2 store from its backup", nil)
+	}
+	if strings.TrimSpace(recorded.SourceFingerprintBefore) == "" || strings.TrimSpace(recorded.SourceFingerprintAfter) == "" {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but does not carry both source fingerprints, so the volume its verdict describes cannot be identified; restore the v2 store from its backup", nil)
+	}
+	if strings.TrimSpace(recorded.BackupManifestSHA256) == "" {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but does not carry the backup manifest digest, so the copy it claims cannot be identified; restore the v2 store from its backup", nil)
+	}
 	evidence, err := recorded.VerificationEvidence()
 	if err != nil {
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
@@ -756,7 +773,21 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the CPA import's recorded destination does not describe a proved server, so the connection it handed over cannot be confirmed; nothing was written", err)
 	}
-	if cpa.NormalizeBaseURL(target.attempt.BaseURL) != target.connection.BaseURL {
+	// The address comparison is canonical, by the same two functions the External
+	// arm and the startup admission apply: "127.0.0.1:8317" and
+	// "http://127.0.0.1:8317/" name one endpoint, and comparing spellings would
+	// refuse a handoff that is intact.
+	destinationAddress, err := canonicalVerifyAddress(target.attempt.BaseURL)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the destination the CPA import recorded is not a usable endpoint, so the connection it handed over cannot be confirmed; nothing was written", err)
+	}
+	connectionAddress, err := canonicalVerifyAddress(target.connection.BaseURL)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the CPA address the Manager stores is not a usable endpoint, so the connection the CPA import handed over cannot be confirmed; nothing was written", err)
+	}
+	if destinationAddress != connectionAddress {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the Manager connection no longer names the destination the CPA import recorded, so the handoff did not survive; nothing was written", nil)
 	}
@@ -772,6 +803,11 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 // the destination was staged for, and the server fingerprint a run observed with
 // the authenticated proof. A row missing any of them describes a destination no
 // run proved, so the live re-proof has nothing to compare against.
+//
+// The fingerprint is checked by shape, exactly as the admission checks it: a value
+// that is not the digest freshkeyapply.ExternalServerFingerprint produces can
+// never equal the one the gate derives from the live CPA, so reporting it as
+// evidence would be a comparison that always fails for the wrong reason.
 func requireManagedDestinationEvidence(destination cpaImportDestinationRecord) error {
 	if strings.TrimSpace(destination.BaseURL) == "" {
 		return errors.New("the recorded destination names no address")
@@ -782,10 +818,18 @@ func requireManagedDestinationEvidence(destination cpaImportDestinationRecord) e
 	if strings.TrimSpace(destination.Intent.SourceIdentity) == "" {
 		return errors.New("the recorded destination names no source identity")
 	}
-	if strings.TrimSpace(destination.ServerFingerprint) == "" {
-		return errors.New("the recorded destination names no server fingerprint")
+	if !validManagedServerFingerprint(destination.ServerFingerprint) {
+		return errors.New("the recorded destination names no proved server fingerprint")
 	}
 	return nil
+}
+
+// validManagedServerFingerprint accepts exactly the shape
+// freshkeyapply.ExternalServerFingerprint produces: the shared identity prefix and
+// a lowercase SHA-256 digest.
+func validManagedServerFingerprint(value string) bool {
+	digest, ok := strings.CutPrefix(strings.TrimSpace(value), "external:sha256:")
+	return ok && identity.IsValidSHA256Hex(digest)
 }
 
 // proveVerifyExternalTarget proves the live External target with the Manager's
@@ -859,6 +903,18 @@ func proveVerifyExternalTarget(ctx context.Context, options VerifyOptions, targe
 func proveVerifyManagedTarget(ctx context.Context, options VerifyOptions, db *sql.DB, target verifyTarget) error {
 	destination := target.attempt
 	managementKey := strings.TrimSpace(target.connection.ManagementKey)
+	if !cpa.ValidV8ManagementKey(managementKey) {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the Manager's stored CPA connection carries no usable management secret, so the destination the CPA import handed over could not be administered by a restarted Manager; nothing was written", nil)
+	}
+	// The two stored secrets must be the same one: the Manager presents the
+	// connection it resolved, and the destination accepts the secret the import
+	// staged. Comparing them here is what makes the four reads below a proof about
+	// this Manager rather than about any credential that happens to answer.
+	if !security.EqualHMAC(managementKey, strings.TrimSpace(target.attemptSecret)) {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the Manager's stored CPA connection does not carry the management secret the CPA import recorded for this destination, so a restarted Manager could not administer the CPA this run would verify; nothing was written", nil)
+	}
 	if err := verifyStoredManagedConnection(ctx, db, target); err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the Manager's stored CPA connection is not the sealed credential the CPA import handed the destination, so a restarted Manager could not administer the CPA this run would verify; nothing was written", err)
@@ -939,11 +995,15 @@ func verifyStoredManagedConnection(ctx context.Context, db *sql.DB, target verif
 	if !security.EqualHMAC(strings.TrimSpace(target.connection.ManagementKey), secret) {
 		return errors.New("the sealed management secret is not the connection the Manager resolved")
 	}
-	connectionURL := cpa.NormalizeBaseURL(target.connection.BaseURL)
-	if connectionURL == "" {
-		return errors.New("the Manager's stored CPA connection names no address")
+	connectionAddress, err := canonicalVerifyAddress(target.connection.BaseURL)
+	if err != nil || connectionAddress == "" {
+		return errors.New("the Manager's stored CPA connection names no usable address")
 	}
-	if connectionURL != cpa.NormalizeBaseURL(target.attempt.BaseURL) {
+	destinationAddress, err := canonicalVerifyAddress(target.attempt.BaseURL)
+	if err != nil {
+		return fmt.Errorf("the recorded destination names an address that is not a usable endpoint: %w", err)
+	}
+	if connectionAddress != destinationAddress {
 		return errors.New("the Manager's stored CPA connection names a different address than the recorded destination")
 	}
 	return nil

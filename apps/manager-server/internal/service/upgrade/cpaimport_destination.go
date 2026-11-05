@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -309,12 +308,18 @@ func loadCPAImportDestinationRecordFrom(ctx context.Context, db *sql.DB, dataKey
 	}
 	// The key is never created here: a read that minted a data key could not
 	// decrypt the envelope it is looking at, and would leave a second key behind.
-	if _, err := os.Stat(dataKeyPath); err != nil {
-		return cpaImportDestinationRecord{}, "", false, fmt.Errorf("read the Manager data key: %w", err)
-	}
-	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
+	// LoadExistingDataKey is that read in one step, so the absence check and the
+	// load cannot disagree with a key another writer created between them.
+	key, err := security.LoadExistingDataKey("", dataKeyPath)
 	if err != nil {
 		return cpaImportDestinationRecord{}, "", false, fmt.Errorf("load the Manager data key: %w", err)
+	}
+	// The recorded secret is only a secret while it is sealed. UnprotectString
+	// hands back a value that is not an envelope unchanged, so an unsealed key
+	// written by an older build would read as a decrypted credential; the shape is
+	// checked before anything decrypts it, exactly as the admission does.
+	if !security.IsValidProtectedEnvelope(strings.TrimSpace(record.ManagementKey)) {
+		return cpaImportDestinationRecord{}, "", false, errors.New("the recorded destination attempt carries no sealed management secret")
 	}
 	protector, err := security.NewProtector(key)
 	if err != nil {

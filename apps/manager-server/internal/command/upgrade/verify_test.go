@@ -282,7 +282,7 @@ func TestVerifyCLIUsageNamesTheCommand(t *testing.T) {
 	for _, expected := range []string{
 		"verify --legacy <dir>",
 		"the one verdict the",
-		"waits for the trusted re-pin",
+		"complete for both a Managed destination and",
 		"a verification the recorded operation does not support",
 	} {
 		if !strings.Contains(usage, expected) {

@@ -259,9 +259,8 @@ export interface UpgradeVerifyOutcome {
 // Only a document this build can read is presented. The action wrote something
 // when it answered 200, so a reply that does not describe a position is a read
 // failure: the page then re-reads the row rather than guessing what happened.
-// The gate records exactly two positions, and the reply must be one of them: a
-// completed stage can only mean an External target, and the Managed waiting
-// position can only mean an unfinished one that names its reason.
+// The gate completes both target modes, so the only position a reply may carry is
+// `complete`; there is no waiting position to present.
 export function parseUpgradeVerify(value: unknown): UpgradeVerifyOutcome | null {
   if (!value || typeof value !== 'object') return null;
   const document = value as Record<string, unknown>;

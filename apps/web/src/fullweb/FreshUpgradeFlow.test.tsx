@@ -690,17 +690,18 @@ describe('Full Web upgrade wizard', () => {
   });
 
   it('offers the verification exactly where the recorded operation asks for it', async () => {
-    // A deferred CPA import is the position this build hands to the gate: it
-    // recorded no cpa_config, so the next decision is the verification that names
+    // A recorded CPA import is the position this build hands to the gate: it
+    // recorded cpa_config, so the next decision is the verification that names
     // where the operation really stands.
-    const deferred = resumeRead(() =>
+    const recordedImport = resumeRead(() =>
       statusDocument({
         stage: 'cpa_import',
         nextAction: 'verify',
-        manualItems: ['section:ampcode: re-create it (upgrade_cpa_import_requires_qualification)'],
+        domainsDone: ['source_copy', 'cpa_config'],
+        manualItems: ['section:ampcode: re-create it (reconfigure_after_adoption)'],
       })
     );
-    await mount(deferred, vi.fn());
+    await mount(recordedImport, vi.fn());
     expect(byTestId('upgrade-verify-action')).toBeTruthy();
     expect(byTestId('upgrade-verify-offer')).toBeTruthy();
     await act(async () => renderer!.unmount());
@@ -718,7 +719,7 @@ describe('Full Web upgrade wizard', () => {
     // A wizard mounted without the action stays a reader, even at a position the
     // gate would accept.
     renderer = undefined;
-    await mount(deferred);
+    await mount(recordedImport);
     expect(allByTestId('upgrade-verify-action')).toHaveLength(0);
   });
 

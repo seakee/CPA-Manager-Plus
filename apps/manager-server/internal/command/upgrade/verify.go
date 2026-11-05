@@ -83,10 +83,10 @@ func writeVerifyOutput(w io.Writer, asJSON bool, output verifyOutput) {
 		_, _ = fmt.Fprintf(w, "  domains done: %s\n", strings.Join(result.DomainsDone, ","))
 		if result.Complete {
 			_, _ = fmt.Fprintln(w, "  the operation is complete; the normal product starts on the next start")
-		} else if result.ReasonCode != "" {
-			_, _ = fmt.Fprintf(w, "  waiting: %s\n", result.ReasonCode)
-		}
-		if !result.Complete && result.Reason != "" {
+		} else if result.Reason != "" {
+			// Both target modes complete through this gate, so a row that is not
+			// complete carries the refusal that stopped it, never a waiting
+			// position: there is no state the CLI reports as "waiting".
 			_, _ = fmt.Fprintf(w, "  %s\n", result.Reason)
 		}
 		if len(result.ManualItems) > 0 {

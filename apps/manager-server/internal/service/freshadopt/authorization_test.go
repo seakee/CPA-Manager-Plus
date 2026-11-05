@@ -69,6 +69,29 @@ func TestNewAuthorizationAcceptsTheQualifiedSet(t *testing.T) {
 	}
 }
 
+// TestAuthorizationVerifiedDistinguishesProofFromADecisionList pins the Medium
+// finding: a decision list is not the proof. Only NewAuthorization's value reports
+// itself verified, so a step that must copy under a proven authority can tell the
+// two apart instead of inferring proof from a non-empty slice.
+func TestAuthorizationVerifiedDistinguishesProofFromADecisionList(t *testing.T) {
+	auth, err := NewAuthorization(authorizedSet(), func() error { return nil })
+	if err != nil {
+		t.Fatalf("authorize the qualified set: %v", err)
+	}
+	if !auth.Verified() {
+		t.Fatal("a verified authorization does not report itself verified")
+	}
+	// New — the Fresh adoption's constructor — builds exactly this value from a
+	// bare decision list: the decisions are there, the producing authority's proof
+	// is not.
+	if (Authorization{decisions: authorizedSet()}).Verified() {
+		t.Fatal("a bare decision list reported a verified authority")
+	}
+	if (Authorization{}).Verified() {
+		t.Fatal("the zero authorization reported itself verified")
+	}
+}
+
 func TestNewAuthorizationRefusesAnIncompleteCopySet(t *testing.T) {
 	verify := func() error { return nil }
 	for _, test := range []struct {
