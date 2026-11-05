@@ -113,6 +113,16 @@ Trust model and residual risk:
   disabled: the bootstrap seed is given a generated client key (0600 at
   run/gateway-bootstrap-key) and Fresh staging replaces it with the
   Manager-generated client key.
+
+CPA process provenance:
+  The Runtime Supervisor never stops its CPA child, so the launcher reaps it.
+  Only a process that proves it belongs to this installation is signalled: it
+  must run under the CPA identity, be this installation's cli-proxy-api, and
+  carry this instance's runtime config (-config under data/runtime, or the
+  Gateway directory as its working directory), pinned by the pid/start record
+  in run/cpa-instance.provenance and re-checked before any escalation. A
+  same-UID process that merely occupies the CPA port is never signalled or
+  waited on; start fails closed until an operator clears it.
 EOF
 }
 
@@ -320,7 +330,17 @@ split_host_port() {
   else
     return 1
   fi
-  if [ "${port}" -lt 1 ] || [ "${port}" -gt 65535 ]; then
+  # A port reaches $((...)) and printf '%04X' as a numeric operand; a
+  # non-canonical string such as "08317" would be read as octal (or rejected by
+  # the shell) instead of the decimal the operator meant, so only canonical
+  # decimal spellings are accepted.
+  case "${port}" in
+    '' | 0*) return 1 ;;
+  esac
+  if [ "${#port}" -gt 5 ]; then
+    return 1
+  fi
+  if [ "$((10#${port}))" -lt 1 ] || [ "$((10#${port}))" -gt 65535 ]; then
     return 1
   fi
   printf '%s\n%s\n' "${host}" "${port}"
@@ -416,7 +436,7 @@ listening_socket_inodes_for_port() {
   local port="$1"
   local hex_port file
 
-  hex_port="$(printf '%04X' "${port}")"
+  hex_port="$(printf '%04X' "$((10#${port}))")"
   for file in /proc/net/tcp /proc/net/tcp6; do
     [ -r "${file}" ] || continue
     # inode 0 is not an open socket (it is the "unhashed/timewait" placeholder),
@@ -546,66 +566,323 @@ listening_pids_for_port() {
   fi
 }
 
-# The Supervisor deliberately never stops its CPA child (its Close contract
-# says so); a container runtime reaps the process tree instead. Natively the
-# launcher must do it, or `ctl stop` would report success while the Gateway
-# keeps serving. A candidate is either the listener on our configured CPA port
-# or a non-root process whose argv names our configured CPA executable. When a
-# dedicated identity is configured, only its owner is eligible.
-collect_orphan_cpa_pids() {
-  local pids
-
-  pids="$(listening_pids_for_port "${cpa_port}")"
-  pids="${pids}
-$(ps -eo pid=,uid=,args= 2>/dev/null | awk -v uid="${cpa_uid}" -v exe="${cpa_bin}" '
-    exe == "" || index($0, exe) == 0 || $2 == 0 { next }
-    uid != "" && $2 != uid { next }
-    { print $1 }
-  ')"
-
-  printf '%s\n' "${pids}" | sed '/^[[:space:]]*$/d' | sort -u
-}
-
 process_owner_uid() {
   local pid="$1"
   ps -o uid= -p "${pid}" 2>/dev/null | tr -d ' ' || true
 }
 
-# Only processes we can positively attribute to the CPA child may be signalled.
-# A candidate that happens to listen on the CPA port but is owned by some other
-# account is left completely alone: it must neither delay shutdown for the full
-# budget nor receive a root-owned SIGKILL.
-is_eligible_cpa_pid() {
+# /proc/<pid>/stat wraps the executable name in parentheses that may contain
+# spaces, so the numeric fields are read after stripping the "pid (comm) "
+# prefix instead of by fixed column number.
+process_stat_field() {
   local pid="$1"
-  local owner
+  local field="$2"
+  local line
 
+  [ -r "/proc/${pid}/stat" ] || return 1
+  line="$(sed 's/^[0-9]* (.*) //' "/proc/${pid}/stat" 2>/dev/null || true)"
+  [ -n "${line}" ] || return 1
+  printf '%s\n' "${line}" | awk -v field="${field}" '{print $field}'
+}
+
+process_parent_pid() {
+  local pid="$1"
+  local parent=""
+
+  parent="$(process_stat_field "${pid}" 2 || true)"
+  if [ -n "${parent}" ]; then
+    printf '%s\n' "${parent}"
+    return 0
+  fi
+  ps -o ppid= -p "${pid}" 2>/dev/null | tr -d ' ' || true
+}
+
+process_session_id() {
+  local pid="$1"
+  local session=""
+
+  session="$(process_stat_field "${pid}" 4 || true)"
+  if [ -n "${session}" ]; then
+    printf '%s\n' "${session}"
+    return 0
+  fi
+  ps -o sess= -p "${pid}" 2>/dev/null | tr -d ' ' || true
+}
+
+process_is_descendant_of() {
+  local pid="$1"
+  local ancestor="$2"
+  local current="${pid}"
+  local depth=0
+
+  while [ -n "${current}" ] && [ "${depth}" -lt 32 ]; do
+    if [ "${current}" = "${ancestor}" ]; then
+      return 0
+    fi
+    case "${current}" in
+      0 | 1) return 1 ;;
+    esac
+    current="$(process_parent_pid "${current}" || true)"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# Each argv entry on its own line, so provenance is compared as whole tokens and
+# never as a substring of an unrelated command line.
+process_argv_tokens() {
+  local pid="$1"
+
+  if [ -r "/proc/${pid}/cmdline" ]; then
+    tr '\0' '\n' <"/proc/${pid}/cmdline" 2>/dev/null || true
+    return 0
+  fi
+  ps -ww -p "${pid}" -o args= 2>/dev/null | tr ' ' '\n'
+}
+
+process_working_directory() {
+  local pid="$1"
+  local cwd=""
+
+  if [ -L "/proc/${pid}/cwd" ]; then
+    cwd="$(resolve_path "/proc/${pid}/cwd")"
+    [ -n "${cwd}" ] && printf '%s\n' "${cwd}"
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+  fi
+}
+
+list_child_pids() {
+  local parent="$1"
+  local pids=""
+
+  if [ -r "/proc/${parent}/task/${parent}/children" ]; then
+    pids="$(tr ' ' '\n' <"/proc/${parent}/task/${parent}/children" 2>/dev/null || true)"
+  fi
+  # The per-thread `children` list can miss a child forked by another thread of
+  # the parent, so the parent/child scan is always unioned in.
+  pids="${pids}
+$(ps -o pid= -o ppid= -A 2>/dev/null | awk -v parent="${parent}" '$2 == parent { print $1 }')"
+
+  printf '%s\n' "${pids}" | sed '/^[[:space:]]*$/d' | sort -u
+}
+
+# The Supervisor deliberately never stops its CPA child (its Close contract says
+# so); a container runtime reaps the process tree instead. Natively the launcher
+# must do it, or `ctl stop` would report success while the Gateway keeps
+# serving. Merely listening on the CPA port, or merely carrying the CPA binary
+# path somewhere in argv, is not evidence that the process belongs to this
+# installation, so an instance-scoped tuple is required instead:
+#
+#   1. it runs under the expected CPA identity,
+#   2. its entry point is this installation's CPA executable, and
+#   3. its runtime configuration is this installation's - either the
+#      `-config <runtime_root>/.../config.yaml` the Supervisor passes, or the
+#      ${runtime_root} working directory the bootstrap start inherits.
+cpa_process_matches_instance() {
+  local pid="$1"
+  local owner exe cwd token previous
+  local entry_ok=0
+  local config_ok=0
+
+  [ -n "${runtime_root}" ] || return 1
   [ -n "${pid}" ] || return 1
   [ "${pid}" = "$$" ] && return 1
   is_pid_running "${pid}" || return 1
 
   owner="$(process_owner_uid "${pid}")"
   [ -n "${owner}" ] || return 1
-
   if [ -n "${cpa_uid}" ]; then
-    [ "${owner}" = "${cpa_uid}" ]
+    [ "${owner}" = "${cpa_uid}" ] || return 1
+  else
+    # No dedicated identity configured (non-root launcher): only our own
+    # processes can be claimed, never another account's listener.
+    [ "${owner}" = "$(id -u)" ] || return 1
+  fi
+
+  exe="$(process_executable_path "${pid}" || true)"
+  if [ -n "${exe}" ] && [ "${exe}" = "${cpa_bin}" ]; then
+    entry_ok=1
+  fi
+
+  previous=""
+  while IFS= read -r token; do
+    if [ "${entry_ok}" -eq 0 ] && [ "${token}" = "${cpa_bin}" ]; then
+      entry_ok=1
+    fi
+    case "${token}" in
+      -config=*)
+        case "${token#-config=}" in
+          "${runtime_root}"/*) config_ok=1 ;;
+        esac
+        ;;
+      *)
+        if [ "${previous}" = "-config" ]; then
+          case "${token}" in
+            "${runtime_root}"/*) config_ok=1 ;;
+          esac
+        fi
+        ;;
+    esac
+    previous="${token}"
+  done <<<"$(process_argv_tokens "${pid}")"
+
+  if [ "${config_ok}" -eq 0 ]; then
+    cwd="$(process_working_directory "${pid}" || true)"
+    case "${cwd}" in
+      "${runtime_root}" | "${runtime_root}"/*) config_ok=1 ;;
+    esac
+  fi
+
+  [ "${entry_ok}" -eq 1 ] && [ "${config_ok}" -eq 1 ]
+}
+
+cpa_provenance_record_start() {
+  local wanted="$1"
+  local record_pid record_start record_rest
+
+  [ -f "${cpa_provenance_file}" ] || return 1
+  while IFS='|' read -r record_pid record_start record_rest; do
+    case "${record_pid}" in
+      '' | '#'* | instance) continue ;;
+    esac
+    if [ "${record_pid}" = "${wanted}" ]; then
+      printf '%s\n' "${record_start}"
+      return 0
+    fi
+  done <"${cpa_provenance_file}"
+  return 1
+}
+
+write_cpa_provenance_records() {
+  local content="$1"
+  local payload existing tmp_file
+
+  [ -d "${run_dir}" ] || return 0
+  payload="$(printf 'instance|%s\n%s' "${runtime_root}" "${content}")"
+  if [ -f "${cpa_provenance_file}" ] && [ ! -L "${cpa_provenance_file}" ]; then
+    existing="$(cat "${cpa_provenance_file}" 2>/dev/null || true)"
+    if [ "${existing}" = "${payload}" ]; then
+      return 0
+    fi
+  fi
+
+  tmp_file="${cpa_provenance_file}.tmp.$$"
+  prepare_private_file "${tmp_file}"
+  printf '%s\n' "${payload}" >"${tmp_file}"
+  chmod 600 "${tmp_file}"
+  mv -f "${tmp_file}" "${cpa_provenance_file}"
+  chmod 600 "${cpa_provenance_file}"
+}
+
+# Pins (pid, start time) for every CPA child this launcher can currently see, so
+# a child that outlives its Supervisor (and is reparented to init) stays
+# attributable without ever trusting a bare port listener. A record survives
+# only while the recorded process is alive with the same start time, so a reused
+# PID can never inherit an earlier pin.
+refresh_cpa_instance_provenance() {
+  local pid marker content="" known=" " record_pid record_start record_rest
+
+  [ -n "${runtime_root}" ] || return 0
+  [ -d "${run_dir}" ] || return 0
+
+  if [ -f "${cpa_provenance_file}" ]; then
+    while IFS='|' read -r record_pid record_start record_rest; do
+      case "${record_pid}" in
+        '' | '#'* | instance) continue ;;
+      esac
+      [ -n "${record_start}" ] || continue
+      is_pid_running "${record_pid}" || continue
+      marker="$(process_start_marker "${record_pid}" || true)"
+      [ "${marker}" = "${record_start}" ] || continue
+      content="${content}${record_pid}|${marker}
+"
+      known="${known}${record_pid} "
+    done <"${cpa_provenance_file}"
+  fi
+
+  if [ -n "${runtime_pid}" ] && is_pid_running "${runtime_pid}"; then
+    for pid in $(list_child_pids "${runtime_pid}"); do
+      case "${known}" in
+        *" ${pid} "*) continue ;;
+      esac
+      if ! cpa_process_matches_instance "${pid}"; then
+        continue
+      fi
+      marker="$(process_start_marker "${pid}" || true)"
+      [ -n "${marker}" ] || continue
+      content="${content}${pid}|${marker}
+"
+      known="${known}${pid} "
+    done
+  fi
+
+  write_cpa_provenance_records "${content}"
+}
+
+# A candidate is attributable only when the instance tuple holds and the process
+# is bound to a concrete identity: either a pin this launcher recorded earlier
+# (re-checked against the live start time) or a live place in the launcher's own
+# process tree or session. Everything else fails closed and is left untouched.
+cpa_process_is_instance_owned() {
+  local pid="$1"
+  local recorded sid self_sid
+
+  cpa_process_matches_instance "${pid}" || return 1
+
+  recorded="$(cpa_provenance_record_start "${pid}" || true)"
+  if [ -n "${recorded}" ]; then
+    [ "${recorded}" = "$(process_start_marker "${pid}" || true)" ]
     return $?
   fi
 
-  # No dedicated identity configured (non-root launcher): only our own
-  # processes can be claimed, never another account's listener.
-  [ "${owner}" = "$(id -u)" ]
+  if [ -n "${runtime_pid}" ] && process_is_descendant_of "${pid}" "${runtime_pid}"; then
+    return 0
+  fi
+
+  sid="$(process_session_id "${pid}" || true)"
+  self_sid="$(process_session_id "$$" || true)"
+  if [ -n "${sid}" ] && [ -n "${self_sid}" ] && [ "${sid}" = "${self_sid}" ]; then
+    return 0
+  fi
+  return 1
+}
+
+collect_orphan_cpa_pids() {
+  local pids
+
+  pids="$(listening_pids_for_port "${cpa_port}")"
+  # The entry point travels through the environment: passing it as an awk
+  # operand would make the collector's own command line a substring match and
+  # every shutdown would report itself.
+  pids="${pids}
+$(
+    ps -eo pid=,args= 2>/dev/null |
+      CPAMP_CPA_ENTRY_POINT="${cpa_bin}" awk '
+        index($0, ENVIRON["CPAMP_CPA_ENTRY_POINT"]) == 0 { next }
+        { print $1 }
+      '
+  )"
+
+  printf '%s\n' "${pids}" | sed '/^[[:space:]]*$/d' | sort -u
 }
 
 stop_orphaned_cpa_processes() {
   local deadline="$1"
   local pids pid eligible_pids="" remaining
 
+  # Pin anything that still hangs off the Supervisor before it is stopped; the
+  # pin is what keeps a reparented child attributable afterwards.
+  refresh_cpa_instance_provenance
+
   pids="$(collect_orphan_cpa_pids)"
   [ -n "${pids}" ] || return 0
 
   for pid in ${pids}; do
-    if ! is_eligible_cpa_pid "${pid}"; then
-      log_err "Leaving PID ${pid} on ${cpa_addr} alone: owner $(process_owner_uid "${pid}") is not the dedicated CPA identity ${cpa_uid:-$(id -u)}"
+    if ! cpa_process_is_instance_owned "${pid}"; then
+      log_err "Refusing to signal PID ${pid} on ${cpa_addr}: it cannot be attributed to this installation (uid $(process_owner_uid "${pid}")); operator intervention required"
       continue
     fi
     eligible_pids="${eligible_pids}${pid}
@@ -629,10 +906,45 @@ stop_orphaned_cpa_processes() {
 
   for pid in ${eligible_pids}; do
     if is_pid_running "${pid}"; then
+      # Re-validate the exact same identity on the exact same PID: a PID reused
+      # after the SIGTERM must never receive this launcher's SIGKILL.
+      if ! cpa_process_is_instance_owned "${pid}"; then
+        log_err "Refusing to SIGKILL PID ${pid} on ${cpa_addr}: its instance provenance no longer matches"
+        continue
+      fi
       log_err "Orphaned CPA child (PID ${pid}) did not exit within the shutdown budget; sending SIGKILL"
       kill -KILL "${pid}" >/dev/null 2>&1 || true
     fi
   done
+}
+
+cpa_port_is_free() {
+  if port_has_listener "${cpa_port}"; then
+    return 1
+  fi
+  if port_accepts_connections "${cpa_host}" "${cpa_port}"; then
+    return 1
+  fi
+  return 0
+}
+
+# `runtime-supervisor` never stops CPA on exit and builds an incarnation-local
+# child manager, so a Supervisor that died unexpectedly can leave its old CPA
+# child serving on our configured port while a replacement would start without
+# owning it. Drain every attributable child and only accept a replacement once
+# the port is provably free; an unattributable occupant fails closed.
+prepare_cpa_listener_for_supervisor() {
+  local context="$1"
+  local deadline
+
+  deadline=$(( $(date +%s) + stop_timeout_sec ))
+  stop_orphaned_cpa_processes "${deadline}"
+
+  if ! cpa_port_is_free; then
+    log_err "CPA port ${cpa_addr} is already bound by a process that cannot be attributed to this installation; ${context}"
+    return 1
+  fi
+  return 0
 }
 
 require_port_available() {
@@ -1137,6 +1449,19 @@ for port_entry in \
   seen_ports="${seen_ports}${p_val}:"
 done
 
+# Persist the resolved CPA address next to the other 0600 runtime records so
+# `cpa-manager-plusctl` targets exactly the listener this launcher configured,
+# even when the caller's shell does not repeat the override and even though the
+# default 8317 is only one of five accepted inputs.
+cpa_address_file="${run_dir}/cpa.address"
+reject_unsafe_runtime_file "${cpa_address_file}"
+cpa_address_tmp="${cpa_address_file}.tmp.$$"
+prepare_private_file "${cpa_address_tmp}"
+printf '%s\n' "${cpa_addr}" >"${cpa_address_tmp}"
+chmod 600 "${cpa_address_tmp}"
+mv -f "${cpa_address_tmp}" "${cpa_address_file}"
+chmod 600 "${cpa_address_file}"
+
 runtime_identity="${CPAMP_RUNTIME_IDENTITY:-embedded-default}"
 runtime_url="${CPAMP_RUNTIME_URL:-http://${runtime_addr}}"
 manager_url="${CPAMP_MANAGER_URL:-http://${manager_addr}}"
@@ -1214,11 +1539,14 @@ runtime_pid_file="${run_dir}/runtime-supervisor.pid"
 manager_pid_file="${run_dir}/manager.pid"
 ingress_pid_file="${run_dir}/ingress.pid"
 ready_file="${run_dir}/launcher.ready"
+# Root-owned pin of (pid, start time) for every CPA child this launcher observed.
+cpa_provenance_file="${run_dir}/cpa-instance.provenance"
 
 runtime_pid=""
 manager_pid=""
 ingress_pid=""
 shutting_down=0
+provenance_refresh_at=0
 
 check_runtime_ready() {
   local pid="$1"
@@ -1317,6 +1645,9 @@ shutdown_all_children() {
   deadline=$(( $(date +%s) + stop_timeout_sec ))
 
   rm -f "${ready_file}"
+  # Pin the CPA children while their Supervisor is still alive; after it is
+  # stopped they are reparented and only the recorded identity remains.
+  refresh_cpa_instance_provenance
   # Reverse dependency order: Ingress -> Manager Server -> Runtime Supervisor
   stop_child_process "ingress" "${ingress_pid}" "${ingress_pid_file}" "${deadline}"
   ingress_pid=""
@@ -1382,6 +1713,12 @@ wait_for_child_readiness() {
 }
 
 spawn_runtime_supervisor() {
+  # A replacement Supervisor builds an incarnation-local child manager and never
+  # adopts a previously started CPA, so the old child must be gone (and the port
+  # provably free) before it starts.
+  if ! prepare_cpa_listener_for_supervisor "refusing to start a replacement runtime-supervisor and stopping the stack"; then
+    return 1
+  fi
   assert_listener_port_available "runtime-supervisor" "${runtime_addr}"
   log_msg "Starting runtime-supervisor on ${runtime_addr} (CPA loopback ${cpa_addr})"
   (
@@ -1496,6 +1833,14 @@ write_ready_state() {
 rm -f "${ready_file}" "${runtime_pid_file}" "${manager_pid_file}" "${ingress_pid_file}"
 write_pid_record_to "${pid_file}" "$$" || true
 
+# A previous incarnation may have left its own CPA child behind. Only an
+# attributable child is drained; anything else on the port fails closed.
+if ! prepare_cpa_listener_for_supervisor "refusing to start (another local process could capture Runtime traffic)"; then
+  exit 1
+fi
+# The pins describe the previous stack's children; new ones are recorded as the
+# monitor loop observes them.
+rm -f "${cpa_provenance_file}"
 assert_listener_port_available "cpa-gateway" "${cpa_addr}"
 
 if ! spawn_runtime_supervisor; then
@@ -1521,6 +1866,14 @@ restart_count=0
 while [ "${shutting_down}" -eq 0 ]; do
   crashed_name=""
   crashed_pid=""
+
+  # Re-pin the CPA children of this incarnation once per second so a Supervisor
+  # that dies between checks still leaves an attributable record behind.
+  now_second="$(date +%s)"
+  if [ "${now_second}" != "${provenance_refresh_at}" ]; then
+    refresh_cpa_instance_provenance
+    provenance_refresh_at="${now_second}"
+  fi
 
   if ! is_pid_running "${runtime_pid}"; then
     crashed_name="runtime-supervisor"

@@ -575,7 +575,7 @@ listening_pids_on_port() {
   local hex_port inodes inode pid fd target file
 
   if [ -d /proc/net ]; then
-    hex_port="$(printf '%04X' "${port}")"
+    hex_port="$(printf '%04X' "$((10#${port}))")"
     inodes="$(
       for file in /proc/net/tcp /proc/net/tcp6; do
         [ -r "${file}" ] || continue
@@ -615,32 +615,213 @@ listening_pids_on_port() {
   fi
 }
 
-reap_orphaned_cpa_processes() {
-  local address="${CPAMP_RUNTIME_CPA_ADDR:-127.0.0.1:8317}"
-  local port="${address##*:}"
-  local uid candidates pid owner pids="" i alive
+# Instance-scoped provenance for the CPA child, mirroring the launcher. The
+# Supervisor spawns CPA with `-config <runtime_root>/.../config.yaml` once a
+# destination is staged and otherwise inherits the Gateway directory as its
+# working directory, so both the entry point and the runtime configuration lie
+# inside this installation. A process that only listens on the CPA port, or only
+# carries a matching argv substring under the same UID, is untrusted and is left
+# untouched for the operator.
+cpa_runtime_root() {
+  local runtime_data_dir="${CPAMP_RUNTIME_DATA_DIR:-"${data_dir}/runtime"}"
+  local journal_path="${CPAMP_RUNTIME_JOURNAL_PATH:-"${runtime_data_dir}/supervisor/operations.sqlite"}"
 
+  dirname "$(dirname "${journal_path}")"
+}
+
+cpa_provenance_file() {
+  printf '%s\n' "${run_dir}/cpa-instance.provenance"
+}
+
+process_stat_field() {
+  local pid="$1"
+  local field="$2"
+  local line
+
+  [ -r "/proc/${pid}/stat" ] || return 1
+  line="$(sed 's/^[0-9]* (.*) //' "/proc/${pid}/stat" 2>/dev/null || true)"
+  [ -n "${line}" ] || return 1
+  printf '%s\n' "${line}" | awk -v field="${field}" '{print $field}'
+}
+
+process_parent_pid() {
+  local pid="$1"
+  local parent=""
+
+  parent="$(process_stat_field "${pid}" 2 || true)"
+  if [ -n "${parent}" ]; then
+    printf '%s\n' "${parent}"
+    return 0
+  fi
+  ps -o ppid= -p "${pid}" 2>/dev/null | tr -d ' ' || true
+}
+
+process_is_descendant_of() {
+  local pid="$1"
+  local ancestor="$2"
+  local current="${pid}"
+  local depth=0
+
+  [ -n "${ancestor}" ] || return 1
+  while [ -n "${current}" ] && [ "${depth}" -lt 32 ]; do
+    if [ "${current}" = "${ancestor}" ]; then
+      return 0
+    fi
+    case "${current}" in
+      0 | 1) return 1 ;;
+    esac
+    current="$(process_parent_pid "${current}" || true)"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+process_argv_tokens() {
+  local pid="$1"
+
+  if [ -r "/proc/${pid}/cmdline" ]; then
+    tr '\0' '\n' <"/proc/${pid}/cmdline" 2>/dev/null || true
+    return 0
+  fi
+  ps -ww -p "${pid}" -o args= 2>/dev/null | tr ' ' '\n'
+}
+
+process_working_directory() {
+  local pid="$1"
+  local cwd=""
+
+  if [ -L "/proc/${pid}/cwd" ]; then
+    cwd="$(resolve_path "/proc/${pid}/cwd")"
+    [ -n "${cwd}" ] && printf '%s\n' "${cwd}"
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -a -p "${pid}" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1
+  fi
+}
+
+cpa_provenance_record_start() {
+  local provenance_file="$1"
+  local wanted="$2"
+  local record_pid record_start record_rest
+
+  [ -f "${provenance_file}" ] || return 1
+  while IFS='|' read -r record_pid record_start record_rest; do
+    case "${record_pid}" in
+      '' | '#'* | instance) continue ;;
+    esac
+    if [ "${record_pid}" = "${wanted}" ]; then
+      printf '%s\n' "${record_start}"
+      return 0
+    fi
+  done <"${provenance_file}"
+  return 1
+}
+
+cpa_process_matches_instance() {
+  local pid="$1"
+  local runtime_root="$2"
+  local owner exe cwd token previous
+  local entry_ok=0
+  local config_ok=0
+
+  [ -n "${runtime_root}" ] || return 1
+  [ -n "${pid}" ] || return 1
+  [ "${pid}" = "$$" ] && return 1
+  is_pid_running "${pid}" || return 1
+
+  owner="$(ps -o uid= -p "${pid}" 2>/dev/null | tr -d ' ' || true)"
+  [ -n "${owner}" ] && [ "${owner}" = "$(expected_cpa_uid)" ] || return 1
+
+  exe="$(process_executable_path "${pid}" || true)"
+  if [ -n "${exe}" ] && [ "${exe}" = "${cpa_bin}" ]; then
+    entry_ok=1
+  fi
+
+  previous=""
+  while IFS= read -r token; do
+    if [ "${entry_ok}" -eq 0 ] && [ "${token}" = "${cpa_bin}" ]; then
+      entry_ok=1
+    fi
+    case "${token}" in
+      -config=*)
+        case "${token#-config=}" in
+          "${runtime_root}"/*) config_ok=1 ;;
+        esac
+        ;;
+      *)
+        if [ "${previous}" = "-config" ]; then
+          case "${token}" in
+            "${runtime_root}"/*) config_ok=1 ;;
+          esac
+        fi
+        ;;
+    esac
+    previous="${token}"
+  done <<<"$(process_argv_tokens "${pid}")"
+
+  if [ "${config_ok}" -eq 0 ]; then
+    cwd="$(process_working_directory "${pid}" || true)"
+    case "${cwd}" in
+      "${runtime_root}" | "${runtime_root}"/*) config_ok=1 ;;
+    esac
+  fi
+
+  [ "${entry_ok}" -eq 1 ] && [ "${config_ok}" -eq 1 ]
+}
+
+# Attribution requires the instance tuple *and* a pin written by the launcher, or
+# a live place in the running Supervisor's process tree. Without one of those the
+# process is not this installation's child and must not be signalled.
+cpa_process_is_instance_owned() {
+  local pid="$1"
+  local runtime_root="$2"
+  local provenance_file="$3"
+  local recorded supervisor_pid
+
+  cpa_process_matches_instance "${pid}" "${runtime_root}" || return 1
+
+  recorded="$(cpa_provenance_record_start "${provenance_file}" "${pid}" || true)"
+  if [ -n "${recorded}" ]; then
+    [ "${recorded}" = "$(process_start_marker "${pid}")" ]
+    return $?
+  fi
+
+  supervisor_pid="$(child_pid_if_active "${run_dir}/runtime-supervisor.pid" 2>/dev/null || true)"
+  process_is_descendant_of "${pid}" "${supervisor_pid}"
+}
+
+reap_orphaned_cpa_processes() {
+  local address runtime_root provenance_file
+  local port candidates pid pids="" i alive
+
+  address="$(resolve_cpa_address)"
+  runtime_root="$(cpa_runtime_root)"
+  provenance_file="$(cpa_provenance_file)"
+
+  port="$(printf '%s\n' "${address}" | sed -n 's/.*://p')"
   case "${port}" in
     '' | *[!0-9]*) return 0 ;;
   esac
 
-  uid="$(expected_cpa_uid)"
   candidates="$(
     listening_pids_on_port "${port}"
-    ps -eo pid=,uid=,args= 2>/dev/null | awk -v uid="${uid}" -v exe="${cpa_bin}" '
-      exe == "" || index($0, exe) == 0 || $2 == 0 { next }
-      uid != "" && $2 != uid { next }
-      { print $1 }
-    '
+    # The entry point travels through the environment: as an awk operand it
+    # would match the command line of the collector itself.
+    ps -eo pid=,args= 2>/dev/null |
+      CPAMP_CPA_ENTRY_POINT="${cpa_bin}" awk '
+        index($0, ENVIRON["CPAMP_CPA_ENTRY_POINT"]) == 0 { next }
+        { print $1 }
+      '
   )"
 
   for pid in $(printf '%s\n' "${candidates}" | sed '/^[[:space:]]*$/d' | sort -u); do
     [ "${pid}" = "$$" ] && continue
     is_pid_running "${pid}" || continue
-    owner="$(ps -o uid= -p "${pid}" 2>/dev/null | tr -d ' ' || true)"
-    # Only processes positively attributable to the CPA identity are signalled;
-    # a foreign listener on the port is left alone.
-    [ -n "${owner}" ] && [ "${owner}" = "${uid}" ] || continue
+    if ! cpa_process_is_instance_owned "${pid}" "${runtime_root}" "${provenance_file}"; then
+      echo "Refusing to signal PID ${pid} on ${address}: it cannot be attributed to this installation; operator intervention required" >&2
+      continue
+    fi
     echo "Stopping orphaned CPA child (PID ${pid}) on ${address}" >&2
     kill -TERM "${pid}" >/dev/null 2>&1 || true
     pids="${pids}${pid}"$'\n'
@@ -661,6 +842,12 @@ reap_orphaned_cpa_processes() {
   done
   for pid in ${pids}; do
     if is_pid_running "${pid}"; then
+      # Re-validate the same identity on the same PID: a reused PID must never
+      # receive this escalation.
+      if ! cpa_process_is_instance_owned "${pid}" "${runtime_root}" "${provenance_file}"; then
+        echo "Refusing to SIGKILL PID ${pid} on ${address}: its instance provenance no longer matches" >&2
+        continue
+      fi
       echo "Orphaned CPA child (PID ${pid}) did not exit; sending SIGKILL" >&2
       kill -KILL "${pid}" >/dev/null 2>&1 || true
     fi
@@ -736,6 +923,13 @@ start_v2_app() {
     export CPA_MANAGER_PLUS_LOG_DIR="${log_dir}"
     export CPA_MANAGER_PLUS_PID_FILE="${pid_file}"
     export CPA_MANAGER_PLUS_LOG_FILE="${log_file}"
+    # Hand the launcher the address this installation resolves, so `start` and
+    # `stop` always agree and neither falls back to a hardcoded 8317.
+    launcher_cpa_address="${CPAMP_RUNTIME_CPA_ADDR:-}"
+    if [ -z "${launcher_cpa_address}" ]; then
+      launcher_cpa_address="$(resolve_cpa_address_for_start)"
+    fi
+    export CPAMP_RUNTIME_CPA_ADDR="${launcher_cpa_address}"
     exec nohup "${launcher_bin}" "$@"
   ) >>"${log_file}" 2>&1 &
   pid="$!"
@@ -982,10 +1176,79 @@ split_host_port() {
   else
     return 1
   fi
-  if [ "${port}" -lt 1 ] || [ "${port}" -gt 65535 ]; then
+  # A port reaches $((...)) and printf '%04X' as a numeric operand; a
+  # non-canonical string such as "08317" would be read as octal (or rejected by
+  # the shell) instead of the decimal the operator meant, so only canonical
+  # decimal spellings are accepted.
+  case "${port}" in
+    '' | 0*) return 1 ;;
+  esac
+  if [ "${#port}" -gt 5 ]; then
+    return 1
+  fi
+  if [ "$((10#${port}))" -lt 1 ] || [ "$((10#${port}))" -gt 65535 ]; then
     return 1
   fi
   printf '%s\n%s\n' "${host}" "${port}"
+}
+
+read_persisted_cpa_address() {
+  local persisted="${run_dir}/cpa.address"
+  local candidate=""
+
+  if [ -f "${persisted}" ] && [ ! -L "${persisted}" ]; then
+    candidate="$(sed -n '1p' "${persisted}" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "${candidate}" ] && split_host_port "${candidate}" >/dev/null 2>&1; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+cpa_address_from_environment() {
+  local candidate
+
+  if [ -n "${CPAMP_RUNTIME_CPA_ADDR:-}" ]; then
+    candidate="${CPAMP_RUNTIME_CPA_ADDR}"
+  elif [ -n "${CPAMP_CPA_PORT:-}" ]; then
+    candidate="127.0.0.1:${CPAMP_CPA_PORT}"
+  elif [ -n "${CPAMP_GATEWAY_URL:-}" ]; then
+    candidate="$(extract_host_port_from_url "${CPAMP_GATEWAY_URL}")"
+  elif [ -n "${CPA_UPSTREAM_URL:-}" ]; then
+    candidate="$(extract_host_port_from_url "${CPA_UPSTREAM_URL}")"
+  else
+    candidate="127.0.0.1:8317"
+  fi
+  printf '%s\n' "${candidate}"
+}
+
+# One resolver for the CPA loopback address so `ctl` and the launcher can never
+# disagree. The launcher records the address it actually used in
+# ${run_dir}/cpa.address; that record wins because a stop must target the running
+# instance, not whatever this shell happens to export.
+resolve_cpa_address() {
+  read_persisted_cpa_address || cpa_address_from_environment
+}
+
+# `start` honours an explicit override first, then the address this installation
+# last ran with, then the default. The resolved value is exported to the
+# launcher, so a restart can never drift back to the hardcoded 8317.
+resolve_cpa_address_for_start() {
+  if [ -n "${CPAMP_RUNTIME_CPA_ADDR:-}" ] || [ -n "${CPAMP_CPA_PORT:-}" ] ||
+    [ -n "${CPAMP_GATEWAY_URL:-}" ] || [ -n "${CPA_UPSTREAM_URL:-}" ]; then
+    cpa_address_from_environment
+    return 0
+  fi
+  read_persisted_cpa_address || printf '%s\n' "127.0.0.1:8317"
+}
+
+extract_host_port_from_url() {
+  local raw="$1"
+  local stripped="${raw#http://}"
+  stripped="${stripped#https://}"
+  stripped="${stripped%%/*}"
+  printf '%s\n' "${stripped}"
 }
 
 require_safe_unit_value() {
@@ -1379,7 +1642,8 @@ install_service() {
   local runtime_addr="${CPAMP_RUNTIME_ADDR:-127.0.0.1:18318}"
   local manager_addr="${CPAMP_MANAGER_ADDR:-127.0.0.1:18319}"
   local ingress_control_addr="${CPAMP_INGRESS_CONTROL_ADDR:-127.0.0.1:18320}"
-  local cpa_addr="${CPAMP_RUNTIME_CPA_ADDR:-127.0.0.1:8317}"
+  local cpa_addr
+  cpa_addr="$(resolve_cpa_address)"
 
   require_unit_address "public ingress" "${public_http_addr}" "false"
   require_unit_address "runtime" "${runtime_addr}" "true"

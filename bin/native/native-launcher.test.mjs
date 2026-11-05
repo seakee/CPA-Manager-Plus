@@ -258,7 +258,46 @@ const createMockNativeHome = (baseDir) => {
   chmodSync(path.join(homeDir, 'cpa-manager-plus.service'), 0o644);
 
   const cpaBin = path.join(binDir, 'cli-proxy-api');
-  const cpaContent = '#!/usr/bin/env bash\nexit 0\n';
+  // The mock CPA is a real listener so instance-provenance and shutdown paths
+  // are exercised against actual process state: argv carries `-config <path>`
+  // exactly like the Supervisor's spawn, and the port comes from that file.
+  const cpaContent = [
+    '#!/usr/bin/env node',
+    'const http = require("node:http");',
+    'const fs = require("node:fs");',
+    '',
+    'const args = process.argv.slice(2);',
+    'const configIndex = args.indexOf("-config");',
+    'const configPath = configIndex >= 0 ? args[configIndex + 1] : "";',
+    'let host = "127.0.0.1";',
+    'let port = 0;',
+    'if (configPath) {',
+    '  const text = fs.readFileSync(configPath, "utf8");',
+    '  const portMatch = text.match(/^[ \\t]*port:[ \\t]*(\\d+)/m);',
+    '  const hostMatch = text.match(/^[ \\t]*host:[ \\t]*"?([0-9a-fA-F:.]+)"?/m);',
+    '  if (portMatch) port = Number(portMatch[1]);',
+    '  if (hostMatch) host = hostMatch[1];',
+    '}',
+    'if (!port) { process.exit(2); }',
+    'const eventLog = process.env.MOCK_EVENT_LOG || "";',
+    'const record = (event) => {',
+    '  if (eventLog) {',
+    '    fs.appendFileSync(eventLog, JSON.stringify({ ts: Date.now(), role: "cpa", pid: process.pid, event }) + "\\n");',
+    '  }',
+    '};',
+    'const server = http.createServer((req, res) => { res.writeHead(200); res.end("cpa"); });',
+    'server.listen(port, host, () => { record("ready"); });',
+    'server.on("error", (err) => { record("error:" + err.code); process.exit(3); });',
+    'const shutdown = (sig) => {',
+    '  record("sig:" + sig);',
+    '  server.close(() => { record("exit"); process.exit(0); });',
+    '  setTimeout(() => { record("exit"); process.exit(0); }, 1000).unref();',
+    '};',
+    'process.on("SIGTERM", () => shutdown("SIGTERM"));',
+    'process.on("SIGINT", () => shutdown("SIGINT"));',
+    'setInterval(() => {}, 60000);',
+    '',
+  ].join('\n');
   writeFileSync(cpaBin, cpaContent, { mode: 0o755 });
   chmodSync(cpaBin, 0o755);
   const cpaSha = createHash('sha256').update(cpaContent).digest('hex');
@@ -284,6 +323,7 @@ const createMockNativeHome = (baseDir) => {
     mockServiceJs,
     [
       'import { appendFileSync, writeFileSync } from "node:fs";',
+      'import { spawn } from "node:child_process";',
       'import http from "node:http";',
       'import path from "node:path";',
       '',
@@ -344,6 +384,16 @@ const createMockNativeHome = (baseDir) => {
       '  });',
       '  srv.listen(port, host);',
       '  servers.push(srv);',
+      '  // Mirrors the real Supervisor: CPA is a direct child started with',
+      '  // `-config <gateway>/config.yaml`, and Close never stops it.',
+      '  if (process.env.MOCK_SUPERVISOR_SPAWN_CPA === "1") {',
+      '    const configPath = path.join(process.cwd(), "config.yaml");',
+      '    const child = spawn(process.env.CPAMP_CPA_EXECUTABLE, ["-config", configPath], { stdio: "ignore" });',
+      '    recordEvent("cpa-spawn:" + child.pid);',
+      '    if (process.env.MOCK_CPA_PID_FILE) {',
+      '      writeFileSync(process.env.MOCK_CPA_PID_FILE, String(child.pid));',
+      '    }',
+      '  }',
       '} else if (role === "manager") {',
       '  const { host, port } = parseHostPort(process.env.HTTP_ADDR);',
       '  const discoveryOnly = process.env.MOCK_MANAGER_DISCOVERY_ONLY === "1";',
@@ -448,6 +498,85 @@ const waitForFile = async (filePath, timeoutMs = 8000) => {
   }
   return false;
 };
+
+const waitFor = async (predicate, timeoutMs = 8000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await sleep(50);
+  }
+  return false;
+};
+
+const waitForPortAccepting = async (port, timeoutMs = 8000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/`);
+      await res.text();
+      return true;
+    } catch {
+      await sleep(50);
+    }
+  }
+  return false;
+};
+
+const readReadyState = (runDir) => {
+  const readyFile = path.join(runDir, 'launcher.ready');
+  if (!existsSync(readyFile)) return null;
+  return Object.fromEntries(
+    readFileSync(readyFile, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => line.split('='))
+  );
+};
+
+/**
+ * PIDs recorded in the launcher's instance-provenance file. The launcher pins
+ * every CPA child it observed so a child that outlives its Supervisor stays
+ * attributable to this installation.
+ */
+const readProvenancePids = (homeDir) => {
+  const file = path.join(homeDir, 'run/cpa-instance.provenance');
+  if (!existsSync(file)) return [];
+  return readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((line) => line && !line.startsWith('#') && !line.startsWith('instance|'))
+    .map((line) => Number(line.split('|')[0]))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+};
+
+/** Waits until the mock Supervisor has spawned its CPA child and it is listening. */
+const waitForSpawnedCpa = async (pidFile, port, timeoutMs = 10000) => {
+  const ok = await waitFor(() => {
+    if (!existsSync(pidFile)) return false;
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    return Number.isInteger(pid) && pid > 0 && isPidAlive(pid);
+  }, timeoutMs);
+  assert.equal(ok, true, 'the mock Supervisor should have spawned a CPA child');
+  const pid = Number(readFileSync(pidFile, 'utf8').trim());
+  assert.equal(await waitForPortAccepting(port), true, 'the CPA child should be listening');
+  return pid;
+};
+
+/**
+ * Spawns an unrelated same-UID TCP listener that carries no instance
+ * provenance. `argvHint` is embedded in its command line so the process also
+ * matches a naive "argv contains the CPA binary path" substring scan.
+ */
+const spawnForeignListener = (port, argvHint = '') =>
+  spawn(
+    process.execPath,
+    [
+      '-e',
+      `// argv probe: ${argvHint}
+       const http = require("node:http");
+       http.createServer((req, res) => res.end("foreign")).listen(${port}, "127.0.0.1");`,
+    ],
+    { stdio: 'ignore' }
+  );
 
 afterEach(() => {
   for (const proc of activeProcesses.splice(0)) {
@@ -734,54 +863,232 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.equal(exitCode, 0);
   });
 
-  it('stops an orphaned CPA child that outlives the Supervisor on shutdown', async () => {
+  it('reaps an instance-attributable CPA child that outlives the Supervisor on shutdown', async () => {
     const baseDir = makeTempDir('cpamp-native-orphan-');
     const { homeDir, binDir, runDir } = createMockNativeHome(baseDir);
+    const cpaPidFile = path.join(baseDir, 'cpa.pid');
+    const rawEnv = await buildPortEnv(homeDir, {
+      CPAMP_STOP_TIMEOUT_SEC: '5',
+      MOCK_SUPERVISOR_SPAWN_CPA: '1',
+      MOCK_CPA_PID_FILE: cpaPidFile,
+    });
+    const { _ports: ports, ...env } = rawEnv;
+
+    const proc = spawn('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    activeProcesses.push(proc);
+    let output = '';
+    proc.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    proc.stderr.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+
+    assert.equal(await waitForFile(path.join(runDir, 'launcher.ready')), true);
+
+    // The Supervisor's Close contract never stops the CPA child; a container
+    // runtime reaps the process tree, so the native launcher must. The child is
+    // started by the Supervisor with this installation's config, and the
+    // launcher pins its (pid, start time) while it is still a direct child.
+    const cpaPid = await waitForSpawnedCpa(cpaPidFile, ports.cpaPort);
+    const pinned = await waitFor(() => readProvenancePids(homeDir).includes(cpaPid), 5000);
+    assert.equal(pinned, true, 'the launcher must pin the observed CPA child');
+
+    proc.kill('SIGTERM');
+    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
+    assert.equal(exitCode, 0);
+    assert.equal(isPidAlive(cpaPid), false, 'orphaned instance CPA child must be reaped');
+    assert.match(
+      output,
+      new RegExp(`Stopping orphaned CPA child \\(PID ${cpaPid}\\)`),
+      'the reaped child must be the attributed instance child'
+    );
+  });
+
+  it('leaves an unrelated same-UID CPA-port listener alone and fails closed on start', async () => {
+    const baseDir = makeTempDir('cpamp-native-foreign-cpa-');
+    const { homeDir, binDir, runDir, cpaBin } = createMockNativeHome(baseDir);
     const rawEnv = await buildPortEnv(homeDir, { CPAMP_STOP_TIMEOUT_SEC: '5' });
     const { _ports: ports, ...env } = rawEnv;
 
     const proc = spawn('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
       env,
-      stdio: 'ignore',
+      stdio: ['ignore', 'ignore', 'pipe'],
     });
     activeProcesses.push(proc);
+    let stderr = '';
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
     assert.equal(await waitForFile(path.join(runDir, 'launcher.ready')), true);
 
-    // The Supervisor's Close contract never stops the CPA child; a container
-    // runtime reaps it, so the native launcher must.
-    const orphan = spawn(
-      process.execPath,
-      [
-        '-e',
-        `const http = require("node:http");
-         http.createServer((req, res) => res.end("cpa")).listen(${ports.cpaPort}, "127.0.0.1");`,
-      ],
-      { stdio: 'ignore' }
-    );
+    // Same UID, same port, the CPA binary path in its command line, and no
+    // instance provenance: it must never be signalled.
+    const foreign = spawnForeignListener(ports.cpaPort, cpaBin);
     try {
-      const deadline = Date.now() + 5000;
-      let listening = false;
-      while (Date.now() < deadline) {
-        try {
-          const res = await fetch(`http://127.0.0.1:${ports.cpaPort}/`);
-          await res.text();
-          listening = true;
-          break;
-        } catch {
-          await sleep(50);
-        }
-      }
-      assert.equal(listening, true, 'orphan CPA listener should be up');
+      assert.equal(
+        await waitForPortAccepting(ports.cpaPort),
+        true,
+        'foreign CPA-port listener should be up'
+      );
 
+      const startedAt = Date.now();
       proc.kill('SIGTERM');
       const [exitCode] = await new Promise((resolve) =>
         proc.once('exit', (code) => resolve([code]))
       );
+      const elapsedMs = Date.now() - startedAt;
+
       assert.equal(exitCode, 0);
-      assert.equal(isPidAlive(orphan.pid), false, 'orphaned CPA listener must be reaped');
+      assert.equal(isPidAlive(foreign.pid), true, 'an unattributable listener must not be signalled');
+      assert.match(
+        stderr,
+        /Refusing to signal PID \d+ on 127\.0\.0\.1:\d+: it cannot be attributed/
+      );
+      assert.ok(
+        elapsedMs < 4000,
+        `shutdown must not wait the full 5s budget on an unattributable listener (took ${elapsedMs}ms)`
+      );
+
+      // A start while that listener holds the CPA port must fail closed instead
+      // of signalling it or starting a stack behind it.
+      const startRes = spawnSync('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+        env,
+        encoding: 'utf8',
+      });
+      assert.notEqual(startRes.status, 0, 'start must fail closed on an unattributable CPA listener');
+      assert.match(startRes.stderr, /cpa-gateway.*already bound|already bound.*cpa-gateway|already bound/);
+      assert.equal(isPidAlive(foreign.pid), true);
+      assert.equal(existsSync(path.join(runDir, 'launcher.ready')), false);
     } finally {
       try {
-        orphan.kill('SIGKILL');
+        foreign.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  it('drains the previous CPA child before a replacement Supervisor becomes ready', async () => {
+    const baseDir = makeTempDir('cpamp-native-supervisor-crash-');
+    const { homeDir, binDir, runDir } = createMockNativeHome(baseDir);
+    const eventLog = path.join(baseDir, 'events.jsonl');
+    const cpaPidFile = path.join(baseDir, 'cpa.pid');
+    const rawEnv = await buildPortEnv(homeDir, {
+      CPAMP_MAX_RESTARTS: '1',
+      MOCK_EVENT_LOG: eventLog,
+      MOCK_SUPERVISOR_SPAWN_CPA: '1',
+      MOCK_CPA_PID_FILE: cpaPidFile,
+    });
+    const { _ports: ports, ...env } = rawEnv;
+
+    let stderr = '';
+    const proc = spawn('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    activeProcesses.push(proc);
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    assert.equal(await waitForFile(path.join(runDir, 'launcher.ready')), true);
+    const first = readReadyState(runDir);
+    const firstCpaPid = await waitForSpawnedCpa(cpaPidFile, ports.cpaPort);
+    const pinned = await waitFor(() => readProvenancePids(homeDir).includes(firstCpaPid), 5000);
+    assert.equal(pinned, true, 'the running CPA child must be pinned before the crash');
+
+    // The Supervisor dies without stopping CPA (its Close contract).
+    process.kill(Number(first.runtime_pid), 'SIGKILL');
+
+    const restarted = await waitFor(() => {
+      const state = readReadyState(runDir);
+      return (
+        state &&
+        Number(state.runtime_pid) > 0 &&
+        state.runtime_pid !== first.runtime_pid &&
+        isPidAlive(Number(state.runtime_pid))
+      );
+    }, 10000);
+    assert.equal(restarted, true, 'the launcher must restart the Supervisor');
+    assert.equal(isPidAlive(firstCpaPid), false, 'the old CPA child must be terminated');
+
+    const events = readFileSync(eventLog, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const oldCpaExit = events.find((e) => e.role === 'cpa' && e.pid === firstCpaPid && e.event === 'exit');
+    assert.ok(oldCpaExit, 'the old CPA child must have been drained');
+    const replacementStart = events.find(
+      (e) => e.role === 'runtime-supervisor' && e.event === 'start' && e.pid !== Number(first.runtime_pid)
+    );
+    assert.ok(replacementStart, 'a replacement Supervisor must have started');
+    assert.ok(
+      oldCpaExit.ts <= replacementStart.ts,
+      'the CPA port must be drained before the replacement Supervisor starts'
+    );
+    assert.equal(
+      existsSync(path.join(runDir, 'launcher.ready')),
+      true,
+      'the launcher must be ready again'
+    );
+
+    proc.kill('SIGTERM');
+    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
+    assert.equal(exitCode, 0);
+    assert.doesNotMatch(stderr, /is already bound by a process that cannot be attributed/);
+  });
+
+  it('fails closed and stops the stack when an unattributable listener holds the CPA port after a Supervisor crash', async () => {
+    const baseDir = makeTempDir('cpamp-native-supervisor-crash-foreign-');
+    const { homeDir, binDir, runDir, cpaBin } = createMockNativeHome(baseDir);
+    const cpaPidFile = path.join(baseDir, 'cpa.pid');
+    const rawEnv = await buildPortEnv(homeDir, {
+      CPAMP_MAX_RESTARTS: '2',
+      MOCK_SUPERVISOR_SPAWN_CPA: '1',
+      MOCK_CPA_PID_FILE: cpaPidFile,
+    });
+    const { _ports: ports, ...env } = rawEnv;
+
+    let stderr = '';
+    const proc = spawn('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+      env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    activeProcesses.push(proc);
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    assert.equal(await waitForFile(path.join(runDir, 'launcher.ready')), true);
+    const ready = readReadyState(runDir);
+    const cpaPid = await waitForSpawnedCpa(cpaPidFile, ports.cpaPort);
+
+    // The instance child dies and an unattributable same-UID listener takes the
+    // port; then the Supervisor crashes.
+    process.kill(cpaPid, 'SIGKILL');
+    assert.equal(await waitFor(() => !isPidAlive(cpaPid), 5000), true);
+    const foreign = spawnForeignListener(ports.cpaPort, cpaBin);
+    try {
+      assert.equal(await waitForPortAccepting(ports.cpaPort), true);
+
+      process.kill(Number(ready.runtime_pid), 'SIGKILL');
+      const [exitCode] = await new Promise((resolve) =>
+        proc.once('exit', (code) => resolve([code]))
+      );
+
+      assert.notEqual(exitCode, 0, 'the launcher must fail closed instead of restarting');
+      assert.match(stderr, /is already bound by a process that cannot be attributed/);
+      assert.equal(isPidAlive(foreign.pid), true, 'the foreign listener must not be signalled');
+      assert.equal(isPidAlive(Number(ready.manager_pid)), false, 'the manager must be stopped');
+      assert.equal(isPidAlive(Number(ready.ingress_pid)), false, 'the ingress must be stopped');
+      assert.equal(existsSync(path.join(runDir, 'launcher.ready')), false);
+    } finally {
+      try {
+        foreign.kill('SIGKILL');
       } catch {
         // ignore
       }
@@ -1388,57 +1695,38 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.match(unsafeBackslash.stderr, /Refusing to write CPA executable into the systemd unit/);
   });
 
-  it('reaps an orphaned CPA child from ctl stop after the launcher died', async () => {
+  it('reaps an instance-attributable CPA child from ctl stop after the launcher died', async () => {
     const baseDir = makeTempDir('cpamp-native-ctl-orphan-');
     const { homeDir, runDir } = createMockNativeHome(baseDir);
     const ctl = path.join(homeDir, 'cpa-manager-plusctl');
-    const rawEnv = await buildPortEnv(homeDir, { CPAMP_STOP_TIMEOUT_SEC: '5' });
+    const cpaPidFile = path.join(baseDir, 'cpa.pid');
+    const rawEnv = await buildPortEnv(homeDir, {
+      CPAMP_STOP_TIMEOUT_SEC: '5',
+      MOCK_SUPERVISOR_SPAWN_CPA: '1',
+      MOCK_CPA_PID_FILE: cpaPidFile,
+    });
     const { _ports: ports, ...env } = rawEnv;
 
     const startOut = execFileSync('bash', [ctl, 'start'], { env, encoding: 'utf8' });
     assert.match(startOut, /cpa-manager-plus started with PID \d+/);
     const launcherPid = Number(readFileSync(path.join(runDir, 'cpa-manager-plus.pid'), 'utf8').match(/pid=(\d+)/)[1]);
 
-    // Simulate a crashed launcher: the Supervisor never stops its CPA child, so
-    // the Gateway listener survives and the next start would fail "already bound".
-    const orphan = spawn(
-      process.execPath,
-      [
-        '-e',
-        `const http = require("node:http");
-         http.createServer((req, res) => res.end("cpa")).listen(${ports.cpaPort}, "127.0.0.1");`,
-      ],
-      { stdio: 'ignore' }
-    );
-    try {
-      const deadline = Date.now() + 5000;
-      let listening = false;
-      while (Date.now() < deadline) {
-        try {
-          const res = await fetch(`http://127.0.0.1:${ports.cpaPort}/`);
-          await res.text();
-          listening = true;
-          break;
-        } catch {
-          await sleep(50);
-        }
-      }
-      assert.equal(listening, true, 'orphan CPA listener should be up');
+    // The Supervisor never stops its CPA child, so after both processes die the
+    // Gateway listener survives and the next start would fail "already bound".
+    const cpaPid = await waitForSpawnedCpa(cpaPidFile, ports.cpaPort);
+    const pinned = await waitFor(() => readProvenancePids(homeDir).includes(cpaPid), 5000);
+    assert.equal(pinned, true, 'the launcher must pin the CPA child before it dies');
 
-      process.kill(launcherPid, 'SIGKILL');
-      await sleep(300);
+    const ready = readReadyState(runDir);
+    process.kill(launcherPid, 'SIGKILL');
+    process.kill(Number(ready.runtime_pid), 'SIGKILL');
+    await sleep(300);
 
-      const stopOut = execFileSync('bash', [ctl, 'stop'], { env, encoding: 'utf8' });
-      assert.match(stopOut, /cpa-manager-plus stopped|Removed stale PID file/);
-      await sleep(300);
-      assert.equal(isPidAlive(orphan.pid), false, 'ctl must reap the orphaned CPA listener');
-    } finally {
-      try {
-        orphan.kill('SIGKILL');
-      } catch {
-        // ignore
-      }
-    }
+    // `ctl stop` reaps it from the pinned (pid, start time) identity plus the
+    // instance-scoped argv/config tuple - not from a bare port listener.
+    const stopOut = execFileSync('bash', [ctl, 'stop'], { env, encoding: 'utf8' });
+    assert.match(stopOut, /cpa-manager-plus stopped|Removed stale PID file/);
+    assert.equal(await waitFor(() => !isPidAlive(cpaPid), 5000), true, 'ctl must reap the orphaned instance CPA child');
   });
 
   it('refuses Runtime readiness when a second listener shares the port on another address family', async () => {
@@ -1499,6 +1787,268 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       assert.equal(existsSync(path.join(runDir, 'launcher.ready')), false);
     } finally {
       await new Promise((resolve) => foreign.close(resolve));
+    }
+  });
+
+  it('resolves the same CPA address in the launcher and ctl for every supported override', async () => {
+    const defaultListener = net.createServer();
+    const defaultBound = await new Promise((resolve) => {
+      defaultListener.once('error', () => resolve(false));
+      defaultListener.listen(8317, '127.0.0.1', () => resolve(true));
+    });
+
+    const overrides = [
+      ['CPAMP_RUNTIME_CPA_ADDR', (port) => ({ CPAMP_RUNTIME_CPA_ADDR: `127.0.0.1:${port}` })],
+      ['CPAMP_CPA_PORT', (port) => ({ CPAMP_CPA_PORT: String(port) })],
+      ['CPAMP_GATEWAY_URL', (port) => ({ CPAMP_GATEWAY_URL: `http://127.0.0.1:${port}` })],
+      ['CPA_UPSTREAM_URL', (port) => ({ CPA_UPSTREAM_URL: `http://127.0.0.1:${port}` })],
+    ];
+    const stripCpaOverrides = (source) => {
+      const copy = { ...source };
+      delete copy.CPAMP_RUNTIME_CPA_ADDR;
+      delete copy.CPAMP_CPA_PORT;
+      delete copy.CPAMP_GATEWAY_URL;
+      delete copy.CPA_UPSTREAM_URL;
+      return copy;
+    };
+
+    try {
+      for (const [label, build] of overrides) {
+        const baseDir = makeTempDir(`cpamp-native-cpa-address-${label}-`);
+        const { homeDir, runDir } = createMockNativeHome(baseDir);
+        const ctl = path.join(homeDir, 'cpa-manager-plusctl');
+        const cpaPidFile = path.join(baseDir, 'cpa.pid');
+        const rawEnv = await buildPortEnv(homeDir, {
+          MOCK_SUPERVISOR_SPAWN_CPA: '1',
+          MOCK_CPA_PID_FILE: cpaPidFile,
+        });
+        const { _ports: ports, ...baseEnv } = rawEnv;
+        const startEnv = { ...stripCpaOverrides(baseEnv), ...build(ports.cpaPort) };
+
+        const startOut = execFileSync('bash', [ctl, 'start'], { env: startEnv, encoding: 'utf8' });
+        assert.match(startOut, /cpa-manager-plus started with PID \d+/);
+
+        const expectedAddress = `127.0.0.1:${ports.cpaPort}`;
+        const ready = readReadyState(runDir);
+        assert.equal(ready.cpa_addr, expectedAddress, `${label} must select the configured CPA port`);
+        const addressFile = path.join(runDir, 'cpa.address');
+        assert.equal(existsSync(addressFile), true, 'the launcher must persist the resolved CPA address');
+        assert.equal(readFileSync(addressFile, 'utf8').trim(), expectedAddress);
+        assert.equal(statSync(addressFile).mode & 0o777, 0o600);
+
+        const cpaPid = await waitForSpawnedCpa(cpaPidFile, ports.cpaPort);
+        assert.equal(
+          await waitFor(() => readProvenancePids(homeDir).includes(cpaPid), 5000),
+          true,
+          'the CPA child must be pinned before the launcher dies'
+        );
+
+        const launcherPid = Number(
+          readFileSync(path.join(runDir, 'cpa-manager-plus.pid'), 'utf8').match(/pid=(\d+)/)[1]
+        );
+        process.kill(launcherPid, 'SIGKILL');
+        process.kill(Number(ready.runtime_pid), 'SIGKILL');
+        await sleep(300);
+
+        // `ctl stop` runs without any CPA override in its environment. It must
+        // use the persisted address, never the hardcoded 8317 default.
+        const stopRes = spawnSync('bash', [ctl, 'stop'], {
+          env: stripCpaOverrides(startEnv),
+          encoding: 'utf8',
+        });
+        assert.match(
+          stopRes.stderr,
+          new RegExp(`Stopping orphaned CPA child \\(PID ${cpaPid}\\) on ${expectedAddress}`),
+          `${label}: ctl must target the configured CPA port`
+        );
+        assert.equal(
+          await waitFor(() => !isPidAlive(cpaPid), 5000),
+          true,
+          `${label}: ctl must reap the CPA child on the configured port`
+        );
+
+        // Starting again with no CPA override must reuse the recorded address,
+        // never the hardcoded default.
+        const emptyEnv = stripCpaOverrides(startEnv);
+        const restartOut = execFileSync('bash', [ctl, 'start'], { env: emptyEnv, encoding: 'utf8' });
+        assert.match(restartOut, /cpa-manager-plus started with PID \d+/);
+        assert.equal(
+          readReadyState(runDir).cpa_addr,
+          expectedAddress,
+          `${label}: start must reuse the recorded CPA address`
+        );
+        const restartCpaPid = await waitForSpawnedCpa(cpaPidFile, ports.cpaPort);
+        execFileSync('bash', [ctl, 'stop'], { env: emptyEnv, encoding: 'utf8' });
+        assert.equal(
+          await waitFor(() => !isPidAlive(restartCpaPid), 8000),
+          true,
+          `${label}: the restarted stack must be reaped on stop`
+        );
+      }
+
+      // A listener on the untouched 8317 default is unrelated to this instance
+      // and must survive every stop above.
+      if (defaultBound) {
+        assert.equal(defaultListener.listening, true, 'the default-port listener must not be signalled');
+      }
+    } finally {
+      if (defaultBound) {
+        await new Promise((resolve) => defaultListener.close(resolve));
+      }
+    }
+  });
+
+  it('rejects non-canonical leading-zero ports and reads 08/09 digits as decimal', async () => {
+    const baseDir = makeTempDir('cpamp-native-port-');
+    const { homeDir, binDir } = createMockNativeHome(baseDir);
+    const ctl = path.join(homeDir, 'cpa-manager-plusctl');
+    const rawEnv = await buildPortEnv(homeDir);
+    const { _ports: _ports, ...env } = rawEnv;
+
+    const stripCpaOverrides = (source) => {
+      const copy = { ...source };
+      delete copy.CPAMP_RUNTIME_CPA_ADDR;
+      delete copy.CPAMP_CPA_PORT;
+      delete copy.CPAMP_GATEWAY_URL;
+      delete copy.CPA_UPSTREAM_URL;
+      return copy;
+    };
+    const bareEnv = stripCpaOverrides(env);
+
+    for (const overrides of [
+      { CPAMP_RUNTIME_CPA_ADDR: '127.0.0.1:08317' },
+      { CPAMP_CPA_PORT: '0080' },
+      { CPAMP_RUNTIME_CPA_ADDR: '127.0.0.1:08' },
+      { CPAMP_CPA_PORT: '09' },
+    ]) {
+      const res = spawnSync('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+        env: { ...bareEnv, ...overrides },
+        encoding: 'utf8',
+      });
+      assert.notEqual(res.status, 0, `leading-zero port must be refused: ${JSON.stringify(overrides)}`);
+      assert.match(res.stderr, /Invalid internal address for CPA Gateway/);
+      assert.doesNotMatch(res.stderr, /value too great for base/);
+    }
+
+    const unitDir = path.join(baseDir, 'systemd');
+    const installEnv = { ...env, CPAMP_CPA_PORT: '08317' };
+    delete installEnv.CPAMP_RUNTIME_CPA_ADDR;
+    const ctlRes = spawnSync('bash', [ctl, 'install', '--unit-dir', unitDir, '--no-systemctl'], {
+      env: installEnv,
+      encoding: 'utf8',
+    });
+    assert.notEqual(ctlRes.status, 0);
+    assert.match(ctlRes.stderr, /Invalid cpa address/);
+    assert.doesNotMatch(ctlRes.stderr, /value too great for base/);
+    assert.equal(existsSync(path.join(unitDir, 'cpa-manager-plus.service')), false);
+
+    // A canonical port that merely contains "08"/"09" digits must be accepted
+    // and reported verbatim: no octal interpretation anywhere.
+    const candidates = [1808, 1809, 1908, 1909, 1080, 1081, 2080, 2090, 3808, 3909];
+    let decimalPort = 0;
+    for (const candidate of candidates) {
+      const server = net.createServer();
+      const bound = await new Promise((resolve) => {
+        server.once('error', () => resolve(false));
+        server.listen(candidate, '127.0.0.1', () => resolve(true));
+      });
+      await new Promise((resolve) => server.close(resolve));
+      if (bound) {
+        decimalPort = candidate;
+        break;
+      }
+    }
+    assert.ok(decimalPort > 0, 'a free port containing 08/09 digits is required');
+
+    const startEnv = { ...env, CPAMP_CPA_PORT: String(decimalPort) };
+    delete startEnv.CPAMP_RUNTIME_CPA_ADDR;
+    const proc = spawn('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+      env: startEnv,
+      stdio: 'ignore',
+    });
+    activeProcesses.push(proc);
+    assert.equal(await waitForFile(path.join(homeDir, 'run/launcher.ready')), true);
+    assert.equal(
+      readFileSync(path.join(homeDir, 'run/cpa.address'), 'utf8').trim(),
+      `127.0.0.1:${decimalPort}`
+    );
+    assert.equal(readReadyState(path.join(homeDir, 'run')).cpa_addr, `127.0.0.1:${decimalPort}`);
+
+    proc.kill('SIGTERM');
+    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
+    assert.equal(exitCode, 0);
+  });
+
+  it('produces byte-identical native archives on every available tar implementation', async () => {
+    const tarCandidates = new Set();
+    for (const candidate of ['tar', 'gtar', '/usr/bin/tar', '/bin/tar']) {
+      try {
+        const resolved = execFileSync('bash', ['-c', `command -v ${candidate}`], {
+          encoding: 'utf8',
+        }).trim();
+        if (resolved) {
+          tarCandidates.add(realpathSync(resolved));
+        }
+      } catch {
+        // not installed
+      }
+    }
+    assert.ok(tarCandidates.size > 0, 'at least one tar implementation must be available');
+
+    const archiveName = 'cpa-manager-plus-native-v2_v2.0.0-beta.1_linux_amd64.tar.gz';
+    for (const tarPath of tarCandidates) {
+      const baseDir = makeTempDir(`cpamp-native-deterministic-${path.basename(tarPath)}-`);
+      const { binDir, cpaBin } = createMockNativeHome(baseDir);
+      const cpaLicensePath = path.join(baseDir, 'cli-proxy-api-LICENSE');
+      writeFileSync(cpaLicensePath, 'CLIProxyAPI license fixture\n');
+      const cpaSha = createHash('sha256').update(readFileSync(cpaBin)).digest('hex');
+
+      const pkgEnv = {
+        ...process.env,
+        VERSION: 'v2.0.0-beta.1',
+        PACKAGE_MODE: 'v2',
+        CPA_BINARY_PATH: cpaBin,
+        CPA_LICENSE_PATH: cpaLicensePath,
+        CPAMP_CPA_VERSION: '8.0.13',
+        CPAMP_CPA_EXECUTABLE_SHA256: cpaSha,
+        CPAMP_ALLOW_UNPINNED_CPA: '1',
+        CPAMP_PREBUILT_MANAGER_BIN: path.join(binDir, 'cpa-manager-plus'),
+        CPAMP_PREBUILT_INGRESS_BIN: path.join(binDir, 'cpa-manager-plus-ingress'),
+        CPAMP_PREBUILT_RUNTIME_SUPERVISOR_BIN: path.join(
+          binDir,
+          'cpa-manager-plus-runtime-supervisor'
+        ),
+        CPAMP_SKIP_PACKAGE_DOCS: '1',
+        // Force this exact tar implementation for both builds.
+        PATH: `${path.dirname(tarPath)}:${process.env.PATH}`,
+      };
+
+      const digests = [];
+      for (const stamp of ['202001020304.05', '202106070809.10']) {
+        execFileSync('touch', ['-t', stamp, cpaBin, cpaLicensePath]);
+        const outDir = path.join(baseDir, `dist-${stamp.replace(/[^0-9]/g, '')}`);
+        execFileSync('bash', [packageNativeScript], {
+          env: { ...pkgEnv, OUT_DIR: outDir },
+          encoding: 'utf8',
+        });
+        const archivePath = path.join(outDir, archiveName);
+        assert.equal(existsSync(archivePath), true);
+        digests.push(createHash('sha256').update(readFileSync(archivePath)).digest('hex'));
+        // The staging copies pick up "now" as their mtime; a fresh second
+        // guarantees the two builds would differ without normalization.
+        await sleep(1100);
+      }
+
+      assert.equal(
+        digests[0],
+        digests[1],
+        `archives built with ${tarPath} must be byte-identical across runs`
+      );
+      const archivePath = path.join(
+        baseDir,
+        `dist-${'202106070809.10'.replace(/[^0-9]/g, '')}/${archiveName}`
+      );
+      assert.ok(readTarMembers(archivePath).length > 10, 'normalization must not empty the archive');
     }
   });
 });

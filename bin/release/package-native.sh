@@ -30,20 +30,50 @@ compute_sha256() {
   fi
 }
 
+# Every member timestamp is pinned to the epoch, deepest path first so a
+# directory is never re-stamped after its children. This is what makes the
+# archive independent of when the staging tree happened to be written.
+normalize_archive_times() {
+  local member="$1"
+
+  TZ=UTC find "${member}" -depth -exec touch -h -t 197001010000.00 {} +
+}
+
 # Native archives are extracted by root into /opt/cpa-manager-plus. GNU tar
 # restores archived ownership, so a CI account's UID/GID would otherwise own
 # the launcher systemd runs as root. Always record root:root and a fixed mtime.
+#
+# The archive must also be byte-identical across runs and tar implementations,
+# so members are fed as a single C-sorted list (never in readdir order), macOS
+# metadata is suppressed, and gzip writes no name/timestamp header.
 tar_create_archive() {
   local archive="$1"
   local member="$2"
-  local tar_version
+  local tar_version member_list
+
+  if [ ! -e "${member}" ]; then
+    echo "Refusing to archive a missing member: ${member}" >&2
+    return 1
+  fi
+
+  normalize_archive_times "${member}"
+
+  member_list="$(mktemp "${TMPDIR:-/tmp}/cpamp-native-members.XXXXXX")"
+  find "${member}" -print | LC_ALL=C sort >"${member_list}"
 
   tar_version="$(tar --version 2>/dev/null || true)"
   if printf '%s' "${tar_version}" | grep -q 'GNU tar'; then
-    tar --owner=0 --group=0 --numeric-owner --sort=name --mtime=@0 -czf "${archive}" "${member}"
+    # GNU's posix format records atime/ctime in extended headers by default, and
+    # those change on every `touch`; delete them so only the pinned mtime remains.
+    tar --owner=0 --group=0 --numeric-owner --sort=name --mtime=@0 --format=posix \
+      --pax-option=delete=atime,delete=ctime --no-recursion \
+      -cf - -T "${member_list}" | gzip -n >"${archive}"
   else
-    tar --uid 0 --gid 0 --uname root --gname root -czf "${archive}" "${member}"
+    COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname root --gname root --no-mac-metadata \
+      --no-recursion -cf - -T "${member_list}" | gzip -n >"${archive}"
   fi
+
+  rm -f "${member_list}"
 }
 
 parse_dockerfile_cpa_v8_pin() {
