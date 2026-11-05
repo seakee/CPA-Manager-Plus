@@ -48,6 +48,10 @@ type verifyFixture struct {
 	volume legacyVolume
 	target string
 	paths  targetPaths
+	// runtime is the Supervisor the Managed gate observes. It reports the
+	// identity and artifact the recorded attempt names, so a test can change one
+	// of them and prove which comparison refused.
+	runtime *fakeVerifyRuntime
 }
 
 // newVerifyFixture copies a real 1.x fixture into a fresh v2 data root. The
@@ -70,7 +74,7 @@ func newVerifyFixture(t *testing.T) *verifyFixture {
 	if copyErr != nil {
 		t.Fatalf("copy in: %v", copyErr)
 	}
-	return &verifyFixture{volume: volume, target: targetRoot, paths: newTargetPaths(targetRoot)}
+	return &verifyFixture{volume: volume, target: targetRoot, paths: newTargetPaths(targetRoot), runtime: newFakeVerifyRuntime(t)}
 }
 
 func (f *verifyFixture) databasePath() string { return f.paths.Database }
@@ -268,6 +272,7 @@ func (f *verifyFixture) verifyOptions() VerifyOptions {
 	return VerifyOptions{
 		LegacyRoot: f.volume.root,
 		TargetRoot: f.target,
+		Runtime:    f.runtime,
 		observeExternalVersion: func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
 			return cpa.ClassifyExternalVersion("v8.0.13"), nil
 		},
@@ -279,6 +284,49 @@ func (f *verifyFixture) verifyOptions() VerifyOptions {
 		},
 		proveModelSurface: func(context.Context, string, string) error { return nil },
 	}
+}
+
+// fakeVerifyRuntime is the Supervisor the Managed gate observes. Its default
+// report is the one the recorded attempt names — the qualified artifact, the
+// fixture's Runtime identity and the version the destination proves — so a test
+// changes exactly one fact and the refusal it proves is about that fact.
+type fakeVerifyRuntime struct {
+	status model.RuntimeObservedStatus
+	err    error
+}
+
+// newFakeVerifyRuntime builds the truthful report. The artifact is the one this
+// build's adoption record was accepted for, which is what the fixture's stage
+// request carried.
+func newFakeVerifyRuntime(t *testing.T) *fakeVerifyRuntime {
+	t.Helper()
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		t.Fatalf("read the compiled adoption artifact: %v", err)
+	}
+	return &fakeVerifyRuntime{status: model.RuntimeObservedStatus{
+		Identity:              "runtime-identity-1",
+		Generation:            4,
+		ProtocolVersion:       "v1",
+		State:                 model.RuntimeStateReady,
+		CPAObservedVersion:    "v8.0.13",
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: qualifiedArtifact, Version: "v8.0.13"},
+		Capabilities:          model.RuntimeCapabilities{model.RuntimeCapabilityStart},
+	}}
+}
+
+func (f *fakeVerifyRuntime) Status(context.Context) (model.RuntimeObservedStatus, error) {
+	if f.err != nil {
+		return model.RuntimeObservedStatus{}, f.err
+	}
+	status := f.status
+	// The caller gets its own copy of the observation, so a gate that held the
+	// value could not be mistaken for the Supervisor changing its mind later.
+	if status.ActiveGatewayArtifact != nil {
+		artifact := *status.ActiveGatewayArtifact
+		status.ActiveGatewayArtifact = &artifact
+	}
+	return status, nil
 }
 
 func (f *verifyFixture) verify(t *testing.T) (VerifyResult, error) {
@@ -450,6 +498,93 @@ func TestVerifyCompletesTheManagedOperation(t *testing.T) {
 	after := fixture.operation(t)
 	if after.Revision != recorded.Revision || after.UpdatedAtMS != recorded.UpdatedAtMS {
 		t.Fatalf("repeat wrote the row: %d/%d -> %d/%d", recorded.Revision, recorded.UpdatedAtMS, after.Revision, after.UpdatedAtMS)
+	}
+}
+
+// TestVerifyManagedRefusesLiveSupervisorArtifactDriftWithIdenticalVersionAndConfig
+// is the High finding: the gate trusted the recorded attempt alone, so a Supervisor
+// that switched the active gateway artifact after the import — while keeping the
+// same URL, management secret, client keys, destination build and configuration —
+// still completed, and the Manager that started afterwards administered a CPA no
+// accepted record describes. The live Supervisor is now read before the four
+// management reads, and its artifact, identity and reachability are compared with
+// the recorded attempt.
+func TestVerifyManagedRefusesLiveSupervisorArtifactDriftWithIdenticalVersionAndConfig(t *testing.T) {
+	drifted := model.RuntimeArtifactID("sha256:" + strings.Repeat("b", 64))
+	testCases := []struct {
+		name   string
+		mutate func(*fakeVerifyRuntime)
+		want   string
+	}{
+		{
+			name: "an active artifact this build's record never accepted",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.ActiveGatewayArtifact.ArtifactID = drifted
+			},
+			want: string(drifted),
+		},
+		{
+			name: "another Runtime identity",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.Identity = "runtime-identity-2"
+			},
+			want: "runtime-identity-2",
+		},
+		{
+			name: "a Supervisor that does not answer",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.err = errors.New("the Runtime Supervisor is unreachable")
+			},
+			want: "unreachable",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newManagedVerifyFixture(t)
+			before := fixture.operation(t)
+			if before.Stage != model.UpgradeStageCPAImport {
+				t.Fatalf("fixture stage = %q, want cpa_import", before.Stage)
+			}
+			options := fixture.verifyOptions()
+			if options.Runtime == nil {
+				t.Fatal("the fixture supplied no Supervisor, so this test would prove the configuration fallback instead")
+			}
+			// The four management reads are the gate's contact with the
+			// destination. Counting them proves the refusal happened before it.
+			contacted := 0
+			options.observeExternalVersion = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+				contacted++
+				return cpa.ClassifyExternalVersion("v8.0.13"), nil
+			}
+			options.readExternalKeys = func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
+				contacted++
+				return cpa.ExternalKeySnapshot{Keys: []string{"client-key-1"}, SourceSHA256: strings.Repeat("a", 64)}, nil
+			}
+			options.readV8Config = func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
+				contacted++
+				return cpa.V8ConfigObservation{BaseURL: verifyManagedAddress, ClientKeyCount: 1}, nil
+			}
+			options.proveModelSurface = func(context.Context, string, string) error {
+				contacted++
+				return nil
+			}
+			testCase.mutate(fixture.runtime)
+
+			_, err := Verify(context.Background(), options)
+			if !errors.Is(err, ErrVerifyConnectionUnproven) {
+				t.Fatalf("verify against %s error = %v, want ErrVerifyConnectionUnproven", testCase.name, err)
+			}
+			if !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("the refusal %q does not name %q", err, testCase.want)
+			}
+			if contacted != 0 {
+				t.Fatalf("the refusal contacted the destination %d time(s), want the Supervisor comparison first", contacted)
+			}
+			assertVerifyRefusalWroteNothing(t, fixture, before)
+			if after := fixture.operation(t); after.Stage != model.UpgradeStageCPAImport {
+				t.Fatalf("stage after the refusal = %q, want the untouched %q", after.Stage, model.UpgradeStageCPAImport)
+			}
+		})
 	}
 }
 

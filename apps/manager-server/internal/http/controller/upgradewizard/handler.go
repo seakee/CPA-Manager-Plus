@@ -259,6 +259,11 @@ type Handler struct {
 	// MountTimeout bounds the per-request wait on the mount lookup. Zero uses
 	// MountLookupTimeout.
 	MountTimeout time.Duration
+	// Runtime is the Manager-owned Supervisor the verification observes for a
+	// Managed target. Optional: when nil, the gate resolves the client from the
+	// Manager's own configuration, exactly as the import does, so a handler built
+	// without it cannot observe a different authority than the CLI would.
+	Runtime upgradeservice.VerifyRuntime
 
 	// lookupMount is the test seam for the mount lookup: a test substitutes a
 	// lookup that never answers to prove the bound and the one-in-flight rule.
@@ -984,6 +989,7 @@ func (h *Handler) serveVerify(w http.ResponseWriter, r *http.Request, mount moun
 	result, err := upgradeservice.Verify(ctx, upgradeservice.VerifyOptions{
 		LegacyRoot: mount.root,
 		TargetRoot: filepath.Dir(target),
+		Runtime:    h.Runtime,
 	})
 	if err != nil {
 		writeError(w, actionFailureStatus(err), actionFailureCode(err))

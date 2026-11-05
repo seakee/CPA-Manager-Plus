@@ -530,6 +530,12 @@ type cpaManagedSource struct {
 	credentialData map[string][]byte
 	manual         []cpaManualItem
 	fingerprint    string
+	// credentialsDigest is the bounded identity of the credential set this run
+	// would copy: the uploadable files' exact bytes and the credential items the
+	// step reports as manual work. The source identity names only config.yaml, so
+	// without this a retry could hand a destination different credentials under
+	// the request the Supervisor already published.
+	credentialsDigest string
 }
 
 // cpaSourceOptions is the file half of one import run.
@@ -1014,6 +1020,10 @@ func (s *cpaManagedSource) addManual(item cpaManualItem) {
 func (s *cpaManagedSource) readCredentials(override string) error {
 	directory, ok := s.resolveAuthDirectory(override)
 	if !ok {
+		// A source with no auth directory still has a credential set — the empty
+		// one — and the digest is what a retry compares, so it is stamped here
+		// rather than left empty for a run that later adds one.
+		s.credentialsDigest = s.credentialSetDigest()
 		return nil
 	}
 	entries, err := os.ReadDir(directory)
@@ -1088,7 +1098,44 @@ func (s *cpaManagedSource) readCredentials(override string) error {
 		s.credentialData[entry.Name()] = data
 	}
 	sort.Slice(s.credentials, func(i, j int) bool { return s.credentials[i].Name < s.credentials[j].Name })
+	s.credentialsDigest = s.credentialSetDigest()
 	return nil
+}
+
+// credentialSetDigest is the deterministic identity of exactly what this run
+// would hand the destination: every uploadable credential's name and byte digest,
+// and every credential item the step reports as manual work instead. Manual items
+// are part of it because a file that stopped being uploadable is a credential the
+// destination would no longer receive, even though config.yaml is unchanged.
+func (s *cpaManagedSource) credentialSetDigest() string {
+	hasher := sha256.New()
+	for _, credential := range s.credentials {
+		// The file bytes enter through their digest: the hash never holds the
+		// credential itself, only a statement about it.
+		_, _ = hasher.Write([]byte("cred:" + credential.Name + "\x00" + digestBytes(s.credentialData[credential.Name]) + "\n"))
+	}
+	manual := make([]cpaManualItem, 0, len(s.manual))
+	for _, item := range s.manual {
+		if strings.HasPrefix(item.item, "credential:") {
+			manual = append(manual, item)
+		}
+	}
+	sort.Slice(manual, func(i, j int) bool {
+		if manual[i].item != manual[j].item {
+			return manual[i].item < manual[j].item
+		}
+		return manual[i].reason < manual[j].reason
+	})
+	for _, item := range manual {
+		_, _ = hasher.Write([]byte("manual:" + item.item + "\x00" + item.reason + "\n"))
+	}
+	return "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+}
+
+// sourceCredentialsDigest is the digest readCredentials stamped. A retry compares
+// it with the attempt's record before anything is staged.
+func (s *cpaManagedSource) sourceCredentialsDigest() string {
+	return s.credentialsDigest
 }
 
 // resolveAuthDirectory resolves the source auth directory inside the CPA tree.

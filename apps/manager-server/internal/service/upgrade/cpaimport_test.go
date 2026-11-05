@@ -34,6 +34,17 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 )
 
+// cleanSourceConfig is a 1.x CPA configuration whose every key this import
+// copies, so the step's own manual-item report is empty. It is the shape a test
+// needs to tell "this step reported none" apart from "the row lists another
+// step's work".
+const cleanSourceConfig = `host: "127.0.0.1"
+port: 8317
+api-keys:
+  - "legacy-client-key-1"
+request-retry: 3
+`
+
 // importFixture is a stopped 1.x volume with a recorded copy-in and the managed
 // CPA directory beside it.
 type importFixture struct {
@@ -85,7 +96,11 @@ type fakeDestinationCPA struct {
 	credentials map[string][]byte
 	types       map[string]string
 	config      map[string]any
-	server      *httptest.Server
+	// failCredentialUpload makes the credentials endpoint answer as a destination
+	// that cannot take the file, so a test can stop a run after the attempt was
+	// recorded and before cpa_config is.
+	failCredentialUpload bool
+	server               *httptest.Server
 }
 
 func newFakeDestinationCPA(t *testing.T, management string) *fakeDestinationCPA {
@@ -245,6 +260,17 @@ func (c *fakeDestinationCPA) uploadCredential(w http.ResponseWriter, r *http.Req
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	c.mu.Lock()
+	fail := c.failCredentialUpload
+	c.mu.Unlock()
+	if fail {
+		// 503 is neither CPA's "the file is bad" (500) nor its "the name is bad"
+		// (400): the transport reports it as an unknown apply, which the executor
+		// settles as a failed copy. That is the state a retry has to resume from.
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"temporarily unavailable"}`))
 		return
 	}
 	var stored struct {
@@ -1586,7 +1612,7 @@ func TestImportCPAThenVerifyCompletesTheManagedOperation(t *testing.T) {
 		t.Fatalf("recorded server fingerprint = %q, want the destination's own %q", result.ServerFingerprint, after)
 	}
 
-	verified, err := Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target})
+	verified, err := Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target, Runtime: runtime})
 	if err != nil {
 		t.Fatalf("verify the imported operation: %v", err)
 	}
@@ -1623,7 +1649,7 @@ func TestImportCPAReplayRefreshesADestinationThatMoved(t *testing.T) {
 	destination.config["ampcode"] = map[string]any{"upstream-url": "https://amp.example"}
 	destination.mu.Unlock()
 
-	_, err = Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target})
+	_, err = Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target, Runtime: runtime})
 	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorVerifyBindingDrifted {
 		t.Fatalf("a moved destination produced %v (code %q), want %s", err, code, UpgradeErrorVerifyBindingDrifted)
 	}
@@ -1642,7 +1668,7 @@ func TestImportCPAReplayRefreshesADestinationThatMoved(t *testing.T) {
 		t.Fatalf("replay result = %+v, want the destination and source identity of the first run", replayed)
 	}
 
-	verified, err := Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target})
+	verified, err := Verify(context.Background(), VerifyOptions{LegacyRoot: fixture.volume.root, TargetRoot: fixture.target, Runtime: runtime})
 	if err != nil {
 		t.Fatalf("verify after the refresh: %v", err)
 	}
@@ -1793,24 +1819,163 @@ func TestImportCPAReplayReportsTheRecordedSourceFacts(t *testing.T) {
 	}
 }
 
+// TestImportCPARetryRefusesModifiedSourceCredentialsWithUnchangedConfig pins the
+// Medium finding: the Supervisor's request carries config.yaml's digest and the
+// client key list, never the credential files, so a retry could hand the
+// destination different credential bytes under the request the recorded attempt
+// already published. The attempt now records the credential set's digest, and a
+// retry that reads another set is refused before the destination is contacted.
+func TestImportCPARetryRefusesModifiedSourceCredentialsWithUnchangedConfig(t *testing.T) {
+	fixture := newVerifyFixture(t)
+	fixture.reconcile(t)
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+	credentials := map[string]string{"codex-user.json": `{"type":"codex","access_token":"token"}`}
+
+	// The copy fails after the destination was staged and the attempt recorded:
+	// cpa_config is never written, so the next run resumes this attempt.
+	destination.mu.Lock()
+	destination.failCredentialUpload = true
+	destination.mu.Unlock()
+	if _, err := runManagedImport(t, fixture, runtime, destination.url(), credentials); err == nil {
+		t.Fatal("a destination that refused the credential upload was recorded as a successful import")
+	}
+	destination.mu.Lock()
+	destination.failCredentialUpload = false
+	destination.mu.Unlock()
+
+	recorded := readOperation(t, fixture.target)
+	if recorded.Stage != model.UpgradeStageCPAImport || recorded.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the failed copy left stage %q with domains %v, want cpa_import without cpa_config", recorded.Stage, recorded.DomainsDone)
+	}
+	attempt := recordedDestinationRecord(t, fixture)
+	if attempt.SourceCredentialsDigest == "" {
+		t.Fatal("the recorded attempt carries no source credentials digest, so a retry could hand over another credential set")
+	}
+	before := len(destination.requests())
+
+	// config.yaml and the client keys are byte-identical here; only the credential
+	// file changed, which is what a re-login on the 1.x stack looks like.
+	modified := map[string]string{"codex-user.json": `{"type":"codex","access_token":"rotated-token"}`}
+	_, err := runManagedImport(t, fixture, runtime, destination.url(), modified)
+	if code, ok := UpgradeErrorCodeOf(err); !ok || code != UpgradeErrorCPADestinationRequestChanged {
+		t.Fatalf("a retry with modified source credentials produced %v (code %q), want %s", err, code, UpgradeErrorCPADestinationRequestChanged)
+	}
+	if requests := destination.requests()[before:]; len(requests) != 0 {
+		t.Fatalf("the refused retry contacted the destination: %v", requests)
+	}
+	if after := readOperation(t, fixture.target); after.Stage != recorded.Stage || after.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the refused retry moved the row: %q/%v -> %q/%v", recorded.Stage, recorded.DomainsDone, after.Stage, after.DomainsDone)
+	}
+
+	// Restoring the exact bytes makes this the same request the attempt recorded,
+	// so the retry resumes it and records cpa_config.
+	result, err := runManagedImport(t, fixture, runtime, destination.url(), credentials)
+	if err != nil {
+		t.Fatalf("the retry with the original credentials failed: %v", err)
+	}
+	if !containsValue(result.DomainsDone, model.UpgradeDomainCPAConfig) {
+		t.Fatalf("the retry recorded no cpa_config: %v", result.DomainsDone)
+	}
+}
+
+// TestImportCPAReplayWithZeroImportManualItemsDoesNotEchoReconcileManualItems
+// pins the Low finding: the replay's legacy fallback parsed every line of the
+// shared operation row back into an import manual item, so a store whose
+// reconciliation had written an acknowledgement reported it as this step's own
+// finding on every replay — and did so with a count of one for an import that
+// reported none. The attempt now says whether it recorded its items at all, and
+// the fallback is filtered to the prefixes this step writes.
+func TestImportCPAReplayWithZeroImportManualItemsDoesNotEchoReconcileManualItems(t *testing.T) {
+	fixture := newImportFixture(t, cleanSourceConfig, map[string]string{
+		"codex-user.json": `{"type":"codex","access_token":"token"}`,
+	})
+	const reconcileLine = "reconcile:2026-03-15: accepted permanent gap (reconcile_acknowledged)"
+	seedManualItem(t, fixture.targetRoot, reconcileLine)
+
+	destination := newFakeDestinationCPA(t, "")
+	runtime := newFakeImportRuntime(model.RuntimeStateOffline)
+	runtime.staged = destination
+
+	first, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true)))
+	if err != nil {
+		t.Fatalf("import the clean fixture CPA: %v", err)
+	}
+	if len(first.ManualItems) != 0 {
+		t.Fatalf("the clean source reported %d manual item(s) %+v, want none", len(first.ManualItems), first.ManualItems)
+	}
+	recorded := readOperation(t, fixture.targetRoot)
+	if !slices.Contains(recorded.ManualItems, reconcileLine) {
+		t.Fatalf("the import dropped the reconciliation's manual item: %v", recorded.ManualItems)
+	}
+	paths := newTargetPaths(fixture.targetRoot)
+	attempt, _, attemptFound, err := loadCPAImportDestinationRecord(context.Background(), paths.Database, paths.DataKey)
+	if err != nil || !attemptFound {
+		t.Fatalf("read the recorded destination attempt (found %t): %v", attemptFound, err)
+	}
+	if !attempt.ManualItemsRecorded {
+		t.Fatal("the completed attempt did not record that it reported its manual items")
+	}
+
+	replay, err := ImportCPA(context.Background(), importOptions(fixture, runtime, destination.url(), boolPointer(true)))
+	if err != nil {
+		t.Fatalf("replay the completed import: %v", err)
+	}
+	if !replay.AlreadyComplete {
+		t.Fatal("the replay did not report the recorded import")
+	}
+	if len(replay.ManualItems) != 0 {
+		t.Fatalf("the replay echoed %d manual item(s) %+v for an import that reported none", len(replay.ManualItems), replay.ManualItems)
+	}
+}
+
+// seedManualItem appends one line to the operation row, exactly as the step that
+// wrote it would.
+func seedManualItem(t *testing.T, targetRoot, line string) {
+	t.Helper()
+	db, err := managersqlite.Open(newTargetPaths(targetRoot).Database)
+	if err != nil {
+		t.Fatalf("open the v2 database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin the manual-item transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := upgradeoperation.AppendManualItemsTx(context.Background(), tx, []string{line}); err != nil {
+		t.Fatalf("append the manual item: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit the manual item: %v", err)
+	}
+}
+
 // TestRestoreManualItemsFallsBackToTheRenderedRow covers a row written before the
-// attempt kept the items: the operation row's one-line render is parsed back, and a
-// line that does not have that shape is kept whole so the count never drops.
+// attempt kept the items: the operation row's one-line render is parsed back, and
+// only the lines this step wrote are reported — a line another step wrote is not
+// this step's finding.
 func TestRestoreManualItemsFallsBackToTheRenderedRow(t *testing.T) {
 	item := CPAImportManualItem{Item: "section:ampcode", Reason: "reconfigure_after_adoption", Instruction: "re-create it"}
+	excess := CPAImportManualItem{Item: cpaImportManualItemExcessCredential, Reason: "credential_inventory_excess", Instruction: "prune the source"}
 	recorded := model.UpgradeOperation{ManualItems: []string{
 		boundedManualItem(item),
-		"a line this file did not write",
+		"reconcile:2026-03-15: accepted permanent gap (reconcile_acknowledged)",
+		boundedManualItem(excess),
 	}}
 	restored := restoreManualItems(recorded, cpaImportDestinationRecord{})
-	if len(restored) != len(recorded.ManualItems) {
-		t.Fatalf("restored %d item(s), want %d", len(restored), len(recorded.ManualItems))
+	if len(restored) != 2 {
+		t.Fatalf("restored %d item(s) %+v, want only this step's", len(restored), restored)
 	}
-	if restored[0] != item {
-		t.Fatalf("restored %+v, want %+v", restored[0], item)
+	if restored[0] != item || restored[1] != excess {
+		t.Fatalf("restored %+v, want %+v", restored, []CPAImportManualItem{item, excess})
 	}
-	if restored[1].Item != recorded.ManualItems[1] {
-		t.Fatalf("an unparsable line was not kept whole: %+v", restored[1])
+	// A row that recorded its own items — including zero — answers with them and
+	// never falls back to the shared row.
+	recordedOnly := restoreManualItems(recorded, cpaImportDestinationRecord{ManualItemsRecorded: true})
+	if len(recordedOnly) != 0 {
+		t.Fatalf("an attempt that recorded no manual items reported %+v", recordedOnly)
 	}
 }
 

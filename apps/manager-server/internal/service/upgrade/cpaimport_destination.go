@@ -61,19 +61,31 @@ import (
 // replay that reported zero manual items would tell the operator the opposite of
 // what the import found. They are written by the same statement that records the
 // completion, so a row that carries `cpa_config` carries them too.
+// ManualItemsRecorded distinguishes an attempt that reported no manual items from
+// a row written before the items were kept: both leave the list empty, and only
+// the first may answer a replay with zero. It is the flag that lets the legacy
+// fallback refuse to echo another step's manual items back as this step's.
+// SourceCredentialsDigest is the digest of the credential set this run read, and
+// it is what a retry reproduces. The Supervisor's request carries the source
+// identity — the config.yaml digest — and the client keys, so a retry that found
+// the same configuration but a different credential file would pass every request
+// comparison while handing the destination credentials the recorded attempt never
+// described.
 type cpaImportDestinationRecord struct {
-	BaseURL           string                     `json:"baseUrl"`
-	URLProved         bool                       `json:"urlProved"`
-	ServerFingerprint string                     `json:"serverFingerprint"`
-	ManagementKey     string                     `json:"managementKey"`
-	Intent            cpaImportDestinationIntent `json:"intent"`
-	OperationID       string                     `json:"operationId"`
-	Attempt           int                        `json:"attempt"`
-	TerminalFailure   bool                       `json:"terminalFailure"`
-	SourceVersion     string                     `json:"sourceVersion,omitempty"`
-	SourceLayout      string                     `json:"sourceLayout,omitempty"`
-	ManualItems       []CPAImportManualItem      `json:"manualItems,omitempty"`
-	UpdatedAtMS       int64                      `json:"updatedAtMs"`
+	BaseURL                 string                     `json:"baseUrl"`
+	URLProved               bool                       `json:"urlProved"`
+	ServerFingerprint       string                     `json:"serverFingerprint"`
+	ManagementKey           string                     `json:"managementKey"`
+	Intent                  cpaImportDestinationIntent `json:"intent"`
+	OperationID             string                     `json:"operationId"`
+	Attempt                 int                        `json:"attempt"`
+	TerminalFailure         bool                       `json:"terminalFailure"`
+	SourceVersion           string                     `json:"sourceVersion,omitempty"`
+	SourceLayout            string                     `json:"sourceLayout,omitempty"`
+	ManualItems             []CPAImportManualItem      `json:"manualItems,omitempty"`
+	ManualItemsRecorded     bool                       `json:"manualItemsRecorded,omitempty"`
+	SourceCredentialsDigest string                     `json:"sourceCredentialsDigest,omitempty"`
+	UpdatedAtMS             int64                      `json:"updatedAtMs"`
 }
 
 // urlProved reports whether an earlier run proved BaseURL to be the destination
@@ -275,6 +287,7 @@ func recordCPAImportDestinationEvidenceTx(ctx context.Context, tx *sql.Tx, resul
 	record.SourceVersion = strings.TrimSpace(result.SourceVersion)
 	record.SourceLayout = strings.TrimSpace(result.SourceLayout)
 	record.ManualItems = slices.Clone(result.ManualItems)
+	record.ManualItemsRecorded = true
 	record.UpdatedAtMS = nextDestinationUpdatedAtMS(time.Now().UnixMilli(), storedColumnMS, record.UpdatedAtMS)
 	payload, err := json.Marshal(record)
 	if err != nil {
@@ -362,8 +375,12 @@ func loadCPAImportDestinationRecordFrom(ctx context.Context, db *sql.DB, dataKey
 	if err != nil {
 		return cpaImportDestinationRecord{}, "", false, fmt.Errorf("decrypt the destination management secret: %w", err)
 	}
-	if strings.TrimSpace(secret) == "" {
-		return cpaImportDestinationRecord{}, "", false, nil
+	// A secret that decrypted but is not a management key is not an attempt this
+	// build can replay or hand over. Reporting it as "no record" would let the
+	// next run mint a second secret for a destination that already holds the
+	// first, so the row is a refusal instead.
+	if !cpa.ValidV8ManagementKey(strings.TrimSpace(secret)) {
+		return cpaImportDestinationRecord{}, "", false, errors.New("the recorded destination attempt carries no usable management secret")
 	}
 	return record, secret, true, nil
 }

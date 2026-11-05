@@ -26,7 +26,13 @@ package upgrade
 //   - the target is what the Manager itself stores: an External operation's
 //     upgrade_external_connect binding is read in the same transaction and
 //     compared with the Manager's own CPA connection, and a Managed operation's
-//     imported destination connection is still the one the import recorded.
+//     imported destination connection is still the one the import recorded;
+//   - a Managed destination is the one the live Runtime Supervisor runs: the
+//     active gateway artifact it reports is the artifact this build's adoption
+//     record accepted and the one the stage request named, and its identity is
+//     the identity the attempt was staged under. The CPA at the recorded address
+//     answers the same reads whichever artifact it is, so this observation is the
+//     only thing that distinguishes the staged destination from a later one.
 //
 // # The two outcomes
 //
@@ -61,6 +67,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
@@ -72,6 +79,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
@@ -99,6 +107,21 @@ type VerifyOptions struct {
 	readExternalKeys       func(ctx context.Context, baseURL, managementKey string) (cpa.ExternalKeySnapshot, error)
 	proveModelSurface      func(ctx context.Context, baseURL, clientKey string) error
 	readV8Config           func(ctx context.Context, baseURL, managementKey string) (cpa.V8ConfigObservation, error)
+	// Runtime is the Manager-owned Supervisor the Managed destination was staged
+	// on. Production leaves it nil and the client is resolved from the Manager's
+	// own configuration; a caller that already holds the client — a test, or a
+	// handler built with one — supplies it, so the gate asks the Supervisor the
+	// Manager is running rather than a second client built from the same
+	// environment.
+	Runtime VerifyRuntime
+}
+
+// VerifyRuntime is the Supervisor observation the Managed gate needs: the
+// artifact it is running, the identity it runs under and the state of the CPA it
+// started. It is the read half of the import's own Runtime seam, so the gate and
+// the import observe the same authority.
+type VerifyRuntime interface {
+	Status(ctx context.Context) (model.RuntimeObservedStatus, error)
 }
 
 // VerifyResult is the observable outcome of the gate. It reports what the row
@@ -939,19 +962,104 @@ func proveVerifyExternalTarget(ctx context.Context, options VerifyOptions, targe
 	return nil
 }
 
+// resolveManagedVerifyRuntime returns the Supervisor client the Managed gate
+// observes.
+//
+// A caller that already holds the Manager's Runtime client supplies it. Everything
+// else, including the command line and a handler built without one, falls back to
+// the Manager's own configuration, which is the same client the import stages
+// through: a Manager not configured for the Manager-owned Runtime has no
+// Supervisor to report the destination, and the gate refuses instead of guessing
+// which CPA the operation ran.
+func resolveManagedVerifyRuntime(runtime VerifyRuntime) (VerifyRuntime, error) {
+	if runtime != nil {
+		return runtime, nil
+	}
+	cfg, err := config.LoadWithoutCreatingDefault()
+	if err != nil {
+		return nil, fmt.Errorf("load the Manager configuration: %w", err)
+	}
+	if !cfg.EmbeddedRuntimeConfigured() {
+		return nil, errors.New("this Manager is not configured for the Manager-owned Runtime (CPAMP_RUNTIME_URL and CPAMP_RUNTIME_TOKEN_FILE), so it cannot report the destination CPA the CPA import staged")
+	}
+	return runtimeservice.NewEmbeddedClientWithTokenSource(
+		cfg.RuntimeURL,
+		runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile),
+	), nil
+}
+
+// proveManagedVerifyRuntimeAuthority proves, against the live Supervisor, that
+// the destination this gate would complete is the one the record describes.
+//
+// The recorded attempt names the Runtime identity and the artifact its stage
+// request carried; the Supervisor names the identity it runs under and the
+// artifact it is executing now. A Supervisor that restarted under an artifact
+// this build's adoption record never accepted, or that is running another
+// identity, answers the destination's four management reads exactly as the
+// recorded one did — the URL, the management secret and the client key list are
+// unchanged — so the reads below cannot tell them apart. This comparison is
+// therefore the only proof that the CPA the Manager will administer after the
+// upgrade is the one the import staged, and it runs before any of those reads.
+// The artifact this build accepts is supplied by the caller, which derives it from
+// the compiled adoption authority the import proved.
+func proveManagedVerifyRuntimeAuthority(ctx context.Context, runtimeClient VerifyRuntime, qualifiedArtifact model.RuntimeArtifactID, destination cpaImportDestinationRecord) error {
+	unproven := func(reason string, cause error) error {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven, reason, cause)
+	}
+	if runtimeClient == nil {
+		return unproven("the Manager-owned Runtime is not configured, so the active gateway artifact of the Managed destination cannot be confirmed; nothing was written", nil)
+	}
+	status, err := runtimeClient.Status(ctx)
+	if err != nil {
+		return unproven("the Manager-owned Runtime did not answer, so the active gateway artifact of the Managed destination cannot be confirmed; nothing was written", err)
+	}
+	if err := status.Validate(); err != nil {
+		return unproven("the Manager-owned Runtime reported a status this build cannot read, so the active gateway artifact of the Managed destination cannot be confirmed; nothing was written", err)
+	}
+	if status.ProtocolVersion != "v1" || status.ActiveGatewayArtifact == nil {
+		return unproven("the Manager-owned Runtime did not report an active gateway artifact, so the destination CPA this operation imported into cannot be confirmed; nothing was written", nil)
+	}
+	// The running artifact has to be the one this build's authority accepted and
+	// the one the stage request was published against. Either difference means the
+	// destination the Supervisor runs is not the destination this operation
+	// staged, even when the CPA at the recorded address answers.
+	if running := status.ActiveGatewayArtifact.ArtifactID; running != qualifiedArtifact {
+		return unproven(fmt.Sprintf(
+			"the Manager-owned Runtime is running gateway artifact %q, and this build's accepted CPA adoption record is for %q, so the Managed destination cannot be confirmed; nothing was written",
+			running, qualifiedArtifact), nil)
+	}
+	if staged := destination.Intent.ExpectedActiveArtifactID; staged != status.ActiveGatewayArtifact.ArtifactID {
+		return unproven(fmt.Sprintf(
+			"the CPA import staged this destination on gateway artifact %q, and the Manager-owned Runtime is running %q, so the destination this operation wrote is not the one now serving; nothing was written",
+			staged, status.ActiveGatewayArtifact.ArtifactID), nil)
+	}
+	// The identity is the Supervisor's authority over its own destination: a
+	// different one never staged this request, and the secret the Manager stores
+	// was minted under the recorded one. The recorded identity is never empty — the
+	// attempt evidence refuses a row without one — so the comparison is exact.
+	if staged, running := destination.Intent.ExpectedRuntimeIdentity, status.Identity; staged != running {
+		return unproven(fmt.Sprintf(
+			"the CPA import staged this destination on Runtime %q, and the Supervisor running now reports %q, so the recorded destination belongs to an authority this Manager cannot administer; nothing was written",
+			staged, running), nil)
+	}
+	return nil
+}
+
 // proveVerifyManagedTarget proves the live Managed destination with the Manager's
 // own stored credential.
 //
 // The import handed the destination a secret only this Manager holds, and recorded
-// the server facts it observed. Two things can still be wrong at completion time:
+// the server facts it observed. Three things can still be wrong at completion time:
 // the stored connection may not be the sealed credential the Manager would
-// actually present after a restart, and the CPA answering the recorded address may
-// no longer be the server the import proved. So this gate re-reads the sealed
-// connection with the Manager data key, requires the URL both records name to be
-// the same endpoint, and repeats the four v8 management reads — version,
-// configuration document, authenticated client-key list, gateway model surface —
-// with that credential. The fingerprint those reads produce must equal the one the
-// import recorded.
+// actually present after a restart, the Supervisor may be running an artifact or
+// identity the stage request was never published under, and the CPA answering the
+// recorded address may no longer be the server the import proved. So this gate
+// asks the live Supervisor for its artifact and identity and compares them with
+// the recorded attempt, re-reads the sealed connection with the Manager data key,
+// requires the URL both records name to be the same endpoint, and repeats the four
+// v8 management reads — version, configuration document, authenticated client-key
+// list, gateway model surface — with that credential. The fingerprint those reads
+// produce must equal the one the import recorded.
 func proveVerifyManagedTarget(ctx context.Context, options VerifyOptions, db *sql.DB, target verifyTarget) error {
 	destination := target.attempt
 	managementKey := strings.TrimSpace(target.connection.ManagementKey)
@@ -970,6 +1078,30 @@ func proveVerifyManagedTarget(ctx context.Context, options VerifyOptions, db *sq
 	if err := verifyStoredManagedConnection(ctx, db, target); err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the Manager's stored CPA connection is not the sealed credential the CPA import handed the destination, so a restarted Manager could not administer the CPA this run would verify; nothing was written", err)
+	}
+	// What the Manager administers after the upgrade is the CPA the Supervisor
+	// started, not merely whatever answers the recorded address. The Supervisor's
+	// own report is the only statement about that, so it is read before the four
+	// management reads below: an artifact or identity that is not the recorded one
+	// would answer every one of them exactly as the staged destination did.
+	//
+	// The artifact this build accepts is derived first: a build whose compiled
+	// record authorizes no staging transition has nothing to compare the
+	// Supervisor's report with.
+	if _, err := qualifiedUpgradeAdoption(); err != nil {
+		return err
+	}
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		return err
+	}
+	runtimeClient, err := resolveManagedVerifyRuntime(options.Runtime)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the Manager-owned Runtime is not configured or reachable, so the active gateway artifact of the Managed destination cannot be confirmed; nothing was written", err)
+	}
+	if err := proveManagedVerifyRuntimeAuthority(ctx, runtimeClient, qualifiedArtifact, destination); err != nil {
+		return err
 	}
 	probes := ExternalConnectOptions{
 		BaseURL:                destination.BaseURL,

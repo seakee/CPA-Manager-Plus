@@ -766,10 +766,11 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 			// never as proved: that build recorded the caller's URL before proving
 			// it, so only a run that proves one may bind the attempt to it.
 			record = cpaImportDestinationRecord{
-				BaseURL:     record.BaseURL,
-				Intent:      intent,
-				OperationID: cpaImportDestinationOperationID(intent.SourceIdentity, 1),
-				Attempt:     1,
+				BaseURL:                 record.BaseURL,
+				Intent:                  intent,
+				OperationID:             cpaImportDestinationOperationID(intent.SourceIdentity, 1),
+				Attempt:                 1,
+				SourceCredentialsDigest: r.source.sourceCredentialsDigest(),
 			}
 			if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
 				return newUpgradeError(UpgradeErrorCPADestinationUnready,
@@ -787,12 +788,13 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 					"the recorded destination attempt predates the full request record, so this build cannot prove a replacement is the identical request; the Supervisor only supersedes a request it can compare, and this run changed nothing", nil)
 			}
 			record.Intent = intent
+			record.SourceCredentialsDigest = r.source.sourceCredentialsDigest()
 			if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, recordedKey); err != nil {
 				return newUpgradeError(UpgradeErrorCPADestinationUnready,
 					"the recorded destination attempt could not be completed with this run's request, so nothing was staged", err)
 			}
 		}
-		if err := requireSameDestinationRequest(record, intent, baseURL, recordedKey, supplied, status.State == model.RuntimeStateReady); err != nil {
+		if err := requireSameDestinationRequest(record, intent, baseURL, recordedKey, supplied, r.source.sourceCredentialsDigest(), status.State == model.RuntimeStateReady); err != nil {
 			return err
 		}
 		if status.State == model.RuntimeStateReady {
@@ -855,9 +857,10 @@ func (r *cpaImportRun) stageDestination(ctx context.Context, result *CPAImportRe
 	// mistyped address would refuse every later run that names the destination
 	// the Supervisor actually staged.
 	record = cpaImportDestinationRecord{
-		Intent:      intent,
-		OperationID: cpaImportDestinationOperationID(intent.SourceIdentity, 1),
-		Attempt:     1,
+		Intent:                  intent,
+		OperationID:             cpaImportDestinationOperationID(intent.SourceIdentity, 1),
+		Attempt:                 1,
+		SourceCredentialsDigest: r.source.sourceCredentialsDigest(),
 	}
 	if err := saveCPAImportDestinationRecord(ctx, r.databasePath, r.dataKeyPath, record, managementKey); err != nil {
 		return newUpgradeError(UpgradeErrorCPADestinationUnready,
@@ -1158,7 +1161,8 @@ func (r *cpaImportRun) markDestinationAttemptTerminal(
 // refused with its operation, attempt and destination exactly as they were, and
 // the Supervisor is never asked to reconcile a request it would reject. A ready
 // destination is compared only on the inputs a staged destination owns — the
-// proved URL, secret, source identity, key set and plugin choice — because it is
+// proved URL, secret, source identity, client key set, plugin choice, Runtime
+// identity, active artifact and source credentials digest — because it is
 // proved, not resubmitted, and a restarted Supervisor must not turn a resumable
 // destination into a refusal.
 func requireSameDestinationRequest(
@@ -1167,6 +1171,7 @@ func requireSameDestinationRequest(
 	baseURL string,
 	managementKey string,
 	supplied string,
+	sourceCredentialsDigest string,
 	ready bool,
 ) error {
 	refuse := func(what string) error {
@@ -1193,6 +1198,14 @@ func requireSameDestinationRequest(
 	}
 	if !slices.Equal(record.Intent.APIKeys, intent.APIKeys) {
 		return refuse("a different client key set")
+	}
+	// The Supervisor's request names the configuration digest and the client
+	// keys, never the credential files. They are part of what this step hands the
+	// destination, so a retry that read different credential bytes or a different
+	// set of uploadable files would write credentials the recorded attempt never
+	// described under an operation the Supervisor replays as identical.
+	if record.SourceCredentialsDigest != "" && record.SourceCredentialsDigest != sourceCredentialsDigest {
+		return refuse("different source credentials")
 	}
 	if !pluginsChoiceEqual(record.Intent.PluginsEnabled, intent.PluginsEnabled) {
 		return refuse("a different plugin choice")
@@ -1362,22 +1375,55 @@ func recordCPAImportCompletion(ctx context.Context, databasePath string, result 
 // restoreManualItems is the manual items a replay reports.
 //
 // The attempt row holds them as the step reported them, so a completed import that
-// found N items answers N on every later run. A row written before the attempt kept
-// them has only the operation row's rendered one-liners, and a replay must still
-// report the same count the import recorded — answering "manual items: 0" for a
-// store that lists them would tell the operator the opposite of what happened. The
-// rendered form is parsed back where it has the shape this file writes, and a line
-// that does not is kept whole as the item, because the count and the text are both
-// evidence.
+// found N items answers N on every later run — including zero, because the row
+// records that it reported them at all. A row written before the attempt kept them
+// has only the operation row's rendered one-liners, and a replay must still report
+// the items this step wrote — answering "manual items: 0" for a store that lists
+// them would tell the operator the opposite of what happened. That fallback is
+// filtered to the item prefixes this file's own manual items carry: the row is
+// shared with every other step, so a reconcile acknowledgement or a copy-in
+// instruction is not this step's report and must not be echoed back as one.
 func restoreManualItems(recorded model.UpgradeOperation, attempt cpaImportDestinationRecord) []CPAImportManualItem {
-	if len(attempt.ManualItems) > 0 {
-		return slices.Clone(attempt.ManualItems)
+	if attempt.ManualItemsRecorded || len(attempt.ManualItems) > 0 {
+		return append([]CPAImportManualItem{}, attempt.ManualItems...)
 	}
 	items := make([]CPAImportManualItem, 0, len(recorded.ManualItems))
 	for _, line := range recorded.ManualItems {
-		items = append(items, parseManualItemLine(line))
+		parsed := parseManualItemLine(line)
+		if !cpaImportOwnsManualItem(parsed.Item) {
+			continue
+		}
+		items = append(items, parsed)
 	}
 	return items
+}
+
+// cpaImportManualItemPrefixes are the identity prefixes this step's manual items
+// carry: the source's credential and configuration findings, the sections and
+// leaves the adoption rules keep manual, and the digest-only identity an earlier
+// executor gave an overlong credential name.
+var cpaImportManualItemPrefixes = [...]string{"credential:", "config:", "section:", "rules:", "credential-name-sha256:"}
+
+// cpaImportManualItemExactNames are the manual-item identities this step writes
+// with no colon prefix: the executor's credential-excess summary and the source
+// reader's unknown-config overflow summary.
+const (
+	cpaImportManualItemExcessCredential = "credential-inventory-excess"
+	cpaImportManualItemExcessConfig     = "cpa-config-unknown-remainder"
+)
+
+// cpaImportOwnsManualItem reports whether one rendered line belongs to this
+// step. A line another step wrote is not this step's report.
+func cpaImportOwnsManualItem(item string) bool {
+	if item == cpaImportManualItemExcessCredential || item == cpaImportManualItemExcessConfig {
+		return true
+	}
+	for _, prefix := range cpaImportManualItemPrefixes {
+		if strings.HasPrefix(item, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseManualItemLine reverses boundedManualItem where it can: the rendered line is
