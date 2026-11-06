@@ -5062,5 +5062,21 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "provider_names": {
+    "legacy_paused": "Legacy Provider editing, add/delete, enable/disable and batch health-check writes are paused in Full Web v2 to preserve native names and credential groups. Use the CPA native management interface for credential changes until native Provider management is available.",
+    "title": "Provider group names",
+    "hint": "Save an email or display label for codex, claude, gemini, interactions, xai or vertex groups. OpenAI-compatible identifiers and meta groups are not supported by this editor. Refresh discards the current draft.",
+    "refresh": "Refresh names",
+    "read_failed": "Could not read names. This editor requires config GET ETag and atomic If-Match writes (CPA v8.0.31+ contract); older v8 versions are unsupported.",
+    "save_failed": "Save could not be confirmed. Your draft is kept. Refresh before another edit; the write will not be retried.",
+    "loading": "Loading provider names…",
+    "read_only": "This installation is read-only.",
+    "empty": "No supported provider groups (codex, claude, gemini, interactions, xai, vertex). Other provider families are not shown.",
+    "unnamed": "Unnamed group",
+    "edit": "Edit name",
+    "name": "Email / display name",
+    "save": "Save",
+    "cancel": "Cancel"
   }
 }

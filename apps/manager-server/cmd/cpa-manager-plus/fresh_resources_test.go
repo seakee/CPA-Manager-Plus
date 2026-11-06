@@ -257,3 +257,23 @@ func TestLegacyBridgePathAllowlistCoversExistingReadAndAuthFlows(t *testing.T) {
 		})
 	}
 }
+
+func TestFreshProviderPausePreservesReadsAndUnrelatedWrites(t *testing.T) {
+	forwards := 0
+	handler := guardFreshLegacyWrites(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forwards++; w.WriteHeader(http.StatusNoContent) }), nil)
+	for _, request := range []struct{ method, path string }{
+		{http.MethodGet, "/v0/management/codex-api-key"},
+		{http.MethodHead, "/v0/management/openai-compatibility"},
+		{http.MethodPut, "/v0/management/api-keys"},
+		{http.MethodDelete, "/v0/management/auth-files?name=synthetic.json"},
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(request.method, request.path, nil))
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("unrelated request blocked: %+v", request)
+		}
+	}
+	if forwards != 4 {
+		t.Fatalf("forwarded %d unrelated requests", forwards)
+	}
+}

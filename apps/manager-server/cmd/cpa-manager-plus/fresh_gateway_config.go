@@ -133,6 +133,8 @@ func gatewayConfigReply(w http.ResponseWriter, v any, e error) {
 		code, status = "payload_rules_read_only", http.StatusConflict
 	case errors.Is(e, freshconfig.ErrReadOnly):
 		code, status = "gateway_config_read_only", http.StatusConflict
+	case errors.Is(e, cpa.ErrConfigChanged):
+		code, status = "source_or_operation_conflict", http.StatusConflict
 	case errors.Is(e, freshconfig.ErrGenerationMismatch):
 		// A typed conflict, not a moved baseline: the draft belongs to another
 		// CPA target and the page re-reads before offering the save again.

@@ -96,9 +96,14 @@ func NewTransportForEndpoint(endpoint string) *Transport {
 }
 
 func (t *Transport) request(ctx context.Context, method, path, managementKey string, payload []byte) (int, []byte, error) {
+	code, body, _, err := t.requestHeaders(ctx, method, path, managementKey, payload, nil)
+	return code, body, err
+}
+
+func (t *Transport) requestHeaders(ctx context.Context, method, path, managementKey string, payload []byte, headers http.Header) (int, []byte, http.Header, error) {
 	req, err := http.NewRequestWithContext(ctx, method, t.endpoint+path, bytes.NewReader(payload))
 	if err != nil {
-		return 0, nil, ErrProofUnavailable
+		return 0, nil, nil, ErrProofUnavailable
 	}
 	if managementKey != "" {
 		req.Header.Set("Authorization", "Bearer "+managementKey)
@@ -109,19 +114,24 @@ func (t *Transport) request(ctx context.Context, method, path, managementKey str
 	if len(payload) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return 0, nil, ErrProofUnavailable
+		return 0, nil, nil, ErrProofUnavailable
 	}
 	defer resp.Body.Close()
 	if resp.Header.Get("Content-Encoding") != "" && resp.Header.Get("Content-Encoding") != "identity" {
-		return 0, nil, ErrProofUnavailable
+		return 0, nil, nil, ErrProofUnavailable
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil || len(body) > maxResponseBytes {
-		return 0, nil, ErrProofUnavailable
+		return 0, nil, nil, ErrProofUnavailable
 	}
-	return resp.StatusCode, body, nil
+	return resp.StatusCode, body, resp.Header.Clone(), nil
 }
 
 // InstallOne makes at most one mutation and never retries. Its caller must

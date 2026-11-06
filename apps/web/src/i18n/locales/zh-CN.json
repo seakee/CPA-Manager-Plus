@@ -5060,5 +5060,21 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "provider_names": {
+    "legacy_paused": "为保护原生名称与凭证分组，Full Web v2 已暂停旧版提供商的编辑、新增、删除、启停及批量健康检查写入。原生提供商管理就绪前，请通过 CPA 原生管理界面修改凭证。",
+    "title": "提供商分组名称",
+    "hint": "可为 codex、claude、gemini、interactions、xai、vertex 分组保存邮箱或展示名称。本编辑器不支持 OpenAI 兼容身份名称及 meta 分组。刷新会丢弃当前草稿。",
+    "refresh": "刷新名称",
+    "read_failed": "无法读取名称。本编辑器需要配置 GET ETag 和原子 If-Match 写入能力（CPA v8.0.31+ 合同）；不支持更早的 v8 版本。",
+    "save_failed": "无法确认保存结果，草稿已保留。请先刷新再编辑，不会自动重试写入。",
+    "loading": "正在读取提供商名称…",
+    "read_only": "当前安装为只读。",
+    "empty": "暂无支持的提供商分组（codex、claude、gemini、interactions、xai、vertex）。其他提供商类型不在此显示。",
+    "unnamed": "未命名分组",
+    "edit": "编辑名称",
+    "name": "邮箱 / 展示名称",
+    "save": "保存",
+    "cancel": "取消"
   }
 }

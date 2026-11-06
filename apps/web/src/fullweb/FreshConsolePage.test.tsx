@@ -23,6 +23,7 @@ import { MainLayout } from '../components/layout/MainLayout';
 import { FreshManagedResources } from './FreshManagedResources';
 import { SystemPage } from '../features/system/SystemPage';
 import { FreshSystemWorkspace } from './FreshSystemWorkspace';
+import { FreshProviderNames } from './FreshProviderNames';
 import { useNotificationStore } from '../stores/useNotificationStore';
 import { configurationText as c } from '../i18n/configurationWorkspace';
 import { gatewayViewFixture } from './gatewayViewFixture';
@@ -303,7 +304,9 @@ describe('Fresh installation and Console authority boundary', () => {
       .find((button) => button.props.children === c('keep'))!;
     await act(async () => keep.props.onClick());
     await navigate('/config');
-    expect(find('gateway-field-routing.retry.request-retry').findByType('input').props.value).toBe('4');
+    expect(find('gateway-field-routing.retry.request-retry').findByType('input').props.value).toBe(
+      '4'
+    );
     await act(async () => logout().props.onClick());
     await act(async () => {
       await useNotificationStore.getState().confirmation.options!.onConfirm();
@@ -319,7 +322,9 @@ describe('Fresh installation and Console authority boundary', () => {
       await confirm();
     });
     expect(has('legacy-console')).toBe(true);
-    expect(find('gateway-field-routing.retry.request-retry').findByType('input').props.value).toBe('4');
+    expect(find('gateway-field-routing.retry.request-retry').findByType('input').props.value).toBe(
+      '4'
+    );
   });
   it('warns before clearing login storage and rechecks a newly started operation', async () => {
     await editGateway();
@@ -575,6 +580,31 @@ describe('Fresh installation and Console authority boundary', () => {
             link.props.href === '/console/system' && String(link.props.className).includes('active')
         )
     ).toBe(true);
+  });
+  it('retires legacy Provider writes on the list and every bookmarked editor route', async () => {
+    await mount();
+    await login();
+    const renderRoute = renderer.root.findByType(MainLayout).props.renderRoute;
+    for (const route of [
+      '/ai-providers',
+      '/ai-providers/',
+      '/ai-providers/codex/new',
+      '/ai-providers/claude/0',
+      '/ai-providers/claude/0/models',
+      '/ai-providers/openai/0/models',
+      '/ai-providers/vertex/0',
+    ]) {
+      const page = renderRoute(route);
+      expect(page.type).toBe(FreshProviderNames);
+    }
+    await navigate('/ai-providers');
+    expect(renderer.root.findAllByType(FreshProviderNames)).toHaveLength(1);
+    expect(JSON.stringify(renderer.toJSON())).toContain(i18n.t('provider_names.legacy_paused'));
+    expect(
+      read.mock.calls.some(
+        ([url, init]) => String(url).includes('-api-key') && init?.method === 'PUT'
+      )
+    ).toBe(false);
   });
   it('retires rejected authority from an already mounted editor', async () => {
     await mount();
