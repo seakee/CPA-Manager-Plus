@@ -353,6 +353,7 @@ def inspect(path, role, source_sha, event, root_license, seed, runtime_entrypoin
                     == CPA_LICENSE_SHA, "official CPA license mismatch")
             require(files["/usr/local/share/cpamp/runtime/config.seed.yaml"] == seed,
                     "official v8 default seed mismatch")
+        extra = {}
         if role == "manager":
             api_contract = json_object(files[API_CONTRACT], "Public API transport contract")
             require(api_contract.get("schemaVersion") == 1 and
@@ -370,6 +371,20 @@ def inspect(path, role, source_sha, event, root_license, seed, runtime_entrypoin
                     all(isinstance(item.get("sha256"), str) and SHA.fullmatch(item["sha256"])
                         for item in fullweb["files"]),
                     "invalid Full Web file-set evidence")
+            index_html = next(item["sha256"] for item in fullweb["files"]
+                              if item["path"] == "index.html")
+            extra["fullWebSummary"] = {
+                "manifestSHA256": digest(files[WEB_MANIFEST]),
+                "indexHtmlSHA256": index_html,
+                "assetCount": len(fullweb["files"]),
+            }
+            extra["apiTransportContract"] = {
+                "sha256": digest(files[API_CONTRACT]),
+                "contractId": api_contract.get("contractId"),
+                "qualification": api_contract["qualification"],
+                "apiSuffix": api_contract["apiSuffix"],
+                "expectedPath": api_contract["expectedPath"],
+            }
         return {
             "archive": path.name,
             "archiveSHA256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -380,8 +395,8 @@ def inspect(path, role, source_sha, event, root_license, seed, runtime_entrypoin
             "goBinaryIdentity": compiled_identity,
             "licenseCoverage": inventory["licenseCoverage"],
             "packagedFiles": {key: digest(value) for key, value in sorted(files.items())},
+            **extra,
         }
-
 
 def verify(paths, source_sha, event, root):
     require(re.fullmatch(r"[0-9a-f]{40}", source_sha) is not None, "invalid source SHA")
@@ -428,22 +443,164 @@ def verify(paths, source_sha, event, root):
     }
 
 
+def parse_compose_service_images(compose_text):
+    require(isinstance(compose_text, str) and compose_text.strip() != "",
+            "empty rendered compose file")
+    require(re.search(r":latest($|[\s'\"`@])", compose_text, re.IGNORECASE) is None,
+            "rendered compose must not reference :latest")
+    require(re.search(r"(?m)^\s*build\s*:", compose_text) is None,
+            "rendered compose must not contain local build blocks")
+    require("CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK" not in compose_text,
+            "rendered compose must not define CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK")
+    services = {}
+    in_services = False
+    current = None
+    for raw in compose_text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent == 0:
+            in_services = stripped == "services:"
+            current = None
+            continue
+        if in_services and indent == 2 and stripped.endswith(":"):
+            current = stripped[:-1]
+            require(current not in services, "duplicate compose service: " + current)
+            services[current] = None
+            continue
+        if in_services and current and indent == 4 and stripped.startswith("image:"):
+            value = stripped.split(":", 1)[1].strip()
+            if (value.startswith("'") and value.endswith("'")) or (
+                    value.startswith('"') and value.endswith('"')):
+                value = value[1:-1]
+            require(services[current] is None, "duplicate image key in " + current)
+            services[current] = value
+    expected_services = {"cpamp-" + role for role in ROLES}
+    require(set(services) == expected_services and all(services.values()),
+            "rendered compose must define image references for cpamp-ingress, cpamp-manager and cpamp-runtime")
+    return services
+
+
+def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=None):
+    require(type(evidence) is dict and evidence.get("schemaVersion") == 1,
+            "invalid candidate evidence for pairing verification")
+    require(compose_path.is_file(), "missing rendered compose file: " + str(compose_path))
+    require(pairing_path.is_file(), "missing rendered pairing file: " + str(pairing_path))
+    if archive_paths:
+        for role, archive in archive_paths.items():
+            if archive is not None:
+                require(archive.is_file(), "missing OCI archive: " + str(archive))
+                actual_archive_sha = digest(archive.read_bytes())
+                require(actual_archive_sha == evidence["images"][role]["archiveSHA256"],
+                        "OCI archive SHA256 mismatch against evidence: " + role)
+    compose_bytes = compose_path.read_bytes()
+    compose_text = compose_bytes.decode("utf-8")
+    service_images = parse_compose_service_images(compose_text)
+    pairing = json_object(pairing_path.read_bytes(), "embedded release pairing")
+    require(pairing.get("schema_version") == 1, "invalid pairing schema_version")
+    version = pairing.get("version")
+    source_commit = evidence.get("sourceCommitClaim")
+    image_evidence.identity(version, source_commit)
+    require(version.lower() != "latest", "pairing version must not be latest")
+    require(pairing.get("source_commit") == source_commit, "pairing source_commit mismatch")
+    require(evidence["images"]["manager"]["goBinaryIdentity"].get("managerCompiledSourceClaim") == source_commit,
+            "Manager compiled source commit mismatch")
+    require(pairing.get("platform") == "linux/amd64" and evidence.get("platform") == "linux/amd64",
+            "pairing platform mismatch")
+    cpa_exec = evidence.get("officialCPA", {}).get("verifiedFinalImageExecutableSHA256")
+    require(cpa_exec == CPA_SHA, "candidate evidence official CPA executable mismatch")
+    require(pairing.get("cpa") == {"version": "8.0.55", "artifact_id": "sha256:" + CPA_SHA},
+            "pairing CPA identity mismatch")
+    manager_record = evidence["images"]["manager"]
+    manager_files = manager_record["packagedFiles"]
+    fullweb = pairing.get("fullweb")
+    require(type(fullweb) is dict and
+            fullweb.get("manifest_sha256") == manager_files.get(WEB_MANIFEST) and
+            isinstance(fullweb.get("index_html_sha256"), str) and
+            SHA.fullmatch(fullweb["index_html_sha256"]) is not None and
+            type(fullweb.get("asset_count")) is int and fullweb["asset_count"] >= 2,
+            "pairing fullweb summary mismatch")
+    if "fullWebSummary" in manager_record:
+        require(fullweb["index_html_sha256"] == manager_record["fullWebSummary"]["indexHtmlSHA256"] and
+                fullweb["asset_count"] == manager_record["fullWebSummary"]["assetCount"],
+                "pairing fullweb summary differs from manager.fullWebSummary")
+    api_contract = pairing.get("api_contract")
+    require(type(api_contract) is dict and
+            api_contract.get("sha256") == manager_files.get(API_CONTRACT) and
+            api_contract.get("qualification") == API_CONTRACT_QUALIFICATION and
+            api_contract.get("api_suffix") == "/api/v2" and
+            api_contract.get("expected_path") == "/phase4-test/api/v2/technical",
+            "pairing api_contract mismatch")
+    compose_meta = pairing.get("compose")
+    require(compose_meta == {
+        "filename": "docker-compose.v2-embedded.yml",
+        "sha256": digest(compose_bytes),
+        "size": len(compose_bytes),
+    }, "pairing compose metadata mismatch")
+    images = pairing.get("images")
+    require(type(images) is dict and set(images) == set(ROLES),
+            "pairing images must contain manager, ingress and runtime")
+    for role in ROLES:
+        entry = images[role]
+        require(type(entry) is dict, "invalid pairing image entry: " + role)
+        ev_img = evidence["images"][role]
+        repo = entry.get("repository")
+        tag = entry.get("tag")
+        manifest_digest = entry.get("manifest_digest")
+        require(isinstance(repo, str) and "/" in repo and ":" not in repo and "@" not in repo,
+                "invalid pairing repository: " + role)
+        require(tag == version, "pairing image tag mismatch: " + role)
+        require(manifest_digest == ev_img["platformManifestDigest"],
+                "pairing manifest_digest mismatch: " + role)
+        require(entry.get("image_config_digest") == ev_img["imageConfigDigest"],
+                "pairing image_config_digest mismatch: " + role)
+        require(entry.get("binary_sha256") == ev_img["packagedFiles"][GO_BINARIES[role]],
+                "pairing binary_sha256 mismatch: " + role)
+        require(entry.get("release_provenance_sha256") == ev_img["packagedFiles"][image_evidence.PROVENANCE],
+                "pairing release_provenance_sha256 mismatch: " + role)
+        expected_ref = f"{repo}:{tag}@{manifest_digest}"
+        if "image_ref" in entry:
+            require(entry["image_ref"] == expected_ref, "pairing image_ref mismatch: " + role)
+        require(service_images["cpamp-" + role] == expected_ref,
+                "rendered compose image mismatch for cpamp-" + role)
+    return pairing
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manager", type=Path, required=True, help="OCI archive from same local build event")
-    parser.add_argument("--ingress", type=Path, required=True)
-    parser.add_argument("--runtime", type=Path, required=True)
-    parser.add_argument("--source-commit", required=True)
-    parser.add_argument("--build-event", required=True)
+    parser.add_argument("--manager", type=Path, help="OCI archive from same local build event")
+    parser.add_argument("--ingress", type=Path)
+    parser.add_argument("--runtime", type=Path)
+    parser.add_argument("--source-commit")
+    parser.add_argument("--build-event")
     parser.add_argument("--source-root", type=Path, default=Path("."))
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--evidence", type=Path, help="Existing candidate-evidence.json for rendered pairing check")
+    parser.add_argument("--verify-compose", type=Path, help="Rendered docker-compose.v2-embedded.yml to verify")
+    parser.add_argument("--verify-pairing", type=Path, help="Rendered embedded-release-pairing.json to verify")
     args = parser.parse_args()
+    if args.evidence and not args.out:
+        require(args.verify_compose is not None and args.verify_pairing is not None,
+                "--evidence mode requires --verify-compose and --verify-pairing")
+        evidence = json_object(args.evidence.read_bytes(), "candidate evidence")
+        archives = {role: getattr(args, role) for role in ROLES}
+        verify_rendered_pairing(evidence, args.verify_compose, args.verify_pairing, archives)
+        print("VERIFIED RENDERED COMPOSE AND PAIRING AGAINST CANDIDATE EVIDENCE: " + str(args.verify_pairing))
+        return
+    require(all(getattr(args, role) is not None for role in ROLES) and
+            args.source_commit and args.build_event and args.out is not None,
+            "--manager, --ingress, --runtime, --source-commit, --build-event and --out are required")
     evidence = verify({role: getattr(args, role) for role in ROLES},
                       args.source_commit, args.build_event, args.source_root)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.verify_compose is not None or args.verify_pairing is not None:
+        require(args.verify_compose is not None and args.verify_pairing is not None,
+                "both --verify-compose and --verify-pairing must be supplied together")
+        verify_rendered_pairing(evidence, args.verify_compose, args.verify_pairing,
+                                {role: getattr(args, role) for role in ROLES})
     print("STRUCTURAL CANDIDATE EVIDENCE ONLY; Release/Registry/Channel STOP: " + str(args.out))
-
 
 if __name__ == "__main__":
     try:

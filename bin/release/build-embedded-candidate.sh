@@ -117,6 +117,19 @@ python3 "$snapshot/bin/release/verify-embedded-candidate.py" \
   --runtime "$output/runtime.oci.tar" \
   --out "$output/candidate-evidence.json"
 
+node "$snapshot/bin/release/render-embedded-compose.mjs" \
+  --evidence "$output/candidate-evidence.json" \
+  --compose-out "$output/docker-compose.v2-embedded.yml" \
+  --pairing-out "$output/embedded-release-pairing.json"
+
+python3 "$snapshot/bin/release/verify-embedded-candidate.py" \
+  --evidence "$output/candidate-evidence.json" \
+  --manager "$output/manager.oci.tar" \
+  --ingress "$output/ingress.oci.tar" \
+  --runtime "$output/runtime.oci.tar" \
+  --verify-compose "$output/docker-compose.v2-embedded.yml" \
+  --verify-pairing "$output/embedded-release-pairing.json"
+
 # Opt-in local load. The OCI archive stays the verified evidence artifact; the
 # engine loads the docker-format tar exported by the SAME build invocation. The
 # loaded image ID must equal the recorded imageConfigDigest, and the transport's

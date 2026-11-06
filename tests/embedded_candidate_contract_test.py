@@ -464,6 +464,202 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "official CPA"):
             self.inspect("runtime")
 
+    def test_verify_rendered_compose_and_pairing_against_oci_receipt(self):
+        (self.root / "LICENSE").write_bytes(self.license)
+        seed = self.root / "docker/runtime/config.v8.default.seed.yaml"
+        seed.parent.mkdir(parents=True)
+        seed.write_bytes(b"seed")
+        entrypoint = self.root / "docker/runtime/v8-entrypoint.sh"
+        entrypoint.write_bytes(MOCK_RUNTIME_ENTRYPOINT)
+        inventory = self.root / "bin/release/embedded-third-party-inventory.txt"
+        inventory.parent.mkdir(parents=True)
+        inventory.write_bytes(SOURCE_BYTES)
+        api = self.root / "tests/fixtures/r1-embedded-api-transport.json"
+        api.parent.mkdir(parents=True)
+        api.write_bytes(MOCK_API_CONTRACT)
+        fake_cpa = hashlib.sha256(ROLE_BINARIES["ingress"]).hexdigest()
+        fake_license = hashlib.sha256(b"official").hexdigest()
+        renderer = VERIFIER.parent / "render-embedded-compose.mjs"
+        with patch.object(subject, "CPA_SHA", fake_cpa), patch.object(
+                subject, "CPA_LICENSE_SHA", fake_license):
+            archives = {}
+            for role in subject.ROLES:
+                archive = self.root / (role + ".oci.tar")
+                make_oci(archive, role, self.license)
+                archives[role] = archive
+            receipt = subject.verify(archives, SHA, EVENT, self.root)
+            # Rewrite runtime CPA hash in receipt to official pin for the Node renderer,
+            # while testing Python verifier with patched CPA_SHA.
+            receipt_for_node = json.loads(json.dumps(receipt))
+            real_cpa_sha = VERIFIER.read_text(encoding="utf-8").split(
+                'CPA_SHA = "', 1)[1].split('"', 1)[0]
+            receipt_for_node["officialCPA"]["verifiedFinalImageExecutableSHA256"] = real_cpa_sha
+            receipt_for_node["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
+                "sha256:" + real_cpa_sha
+            )
+            real_api_bytes = (VERIFIER.parents[2] / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
+            real_api_sha = blob(real_api_bytes)
+            receipt_for_node["images"]["manager"]["packagedFiles"][subject.API_CONTRACT] = real_api_sha
+            receipt_for_node["images"]["manager"]["apiTransportContract"]["sha256"] = real_api_sha
+            evidence_path = self.root / "candidate-evidence.json"
+            compose_path = self.root / "docker-compose.v2-embedded.yml"
+            pairing_path = self.root / "embedded-release-pairing.json"
+            evidence_path.write_text(json.dumps(receipt_for_node, indent=2) + "\n", encoding="utf-8")
+            # Remove manager.oci.tar temporarily so Node renderer uses fullWebSummary + real API fixture,
+            # then restore it for Python archive SHA verification.
+            saved_manager = archives["manager"].read_bytes()
+            archives["manager"].unlink()
+            rendered = subprocess.run(
+                ["node", str(renderer), "--evidence", str(evidence_path),
+                 "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
+                capture_output=True, text=True, timeout=20, check=False)
+            self.assertEqual(rendered.returncode, 0, rendered.stdout + "\n" + rendered.stderr)
+            archives["manager"].write_bytes(saved_manager)
+            with patch.object(subject, "CPA_SHA", real_cpa_sha):
+                verified = subject.verify_rendered_pairing(
+                    receipt_for_node, compose_path, pairing_path, archives)
+                self.assertEqual(verified["source_commit"], SHA)
+                self.assertEqual(verified["compose"]["filename"], "docker-compose.v2-embedded.yml")
+
+                # Negative 1: :latest in compose
+                original_compose = compose_path.read_text(encoding="utf-8")
+                compose_path.write_text(
+                    original_compose.replace(
+                        "@" + receipt_for_node["images"]["ingress"]["platformManifestDigest"],
+                        ":latest"),
+                    encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "must not reference :latest"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, archives)
+
+                # Negative 2: build block in compose
+                compose_path.write_text(
+                    original_compose + "    build:\n      context: .\n",
+                    encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "must not contain local build blocks"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, archives)
+
+                # Negative 3: loopback env in compose
+                compose_path.write_text(
+                    original_compose + "      CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: '1'\n",
+                    encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, archives)
+
+                compose_path.write_text(original_compose, encoding="utf-8")
+
+                # Negative 4: tampered pairing digest
+                bad_pairing = json.loads(pairing_path.read_text(encoding="utf-8"))
+                bad_pairing["images"]["manager"]["manifest_digest"] = "sha256:" + "f" * 64
+                pairing_path.write_text(json.dumps(bad_pairing), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "pairing manifest_digest mismatch"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, archives)
+
+
+
+def stage_mock_candidate_repo(source):
+    repo_root = VERIFIER.parents[2]
+    for rel in (
+        "bin/release/build-embedded-candidate.sh",
+        "bin/release/render-embedded-compose.mjs",
+        "bin/ci/validate-runtime12-compose.mjs",
+        "tests/fixtures/r1-embedded-api-transport.json",
+    ):
+        dst = source / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes((repo_root / rel).read_bytes())
+    qual = source / "tests/fixtures/cpa-v8-qualification/.keep"
+    qual.parent.mkdir(parents=True, exist_ok=True)
+    qual.write_bytes(b"")
+
+
+MOCK_VERIFIER_SCRIPT = """\
+import hashlib
+import json
+import pathlib
+import sys
+
+a = sys.argv
+if "--evidence" in a and "--out" not in a:
+    ev = json.loads(pathlib.Path(a[a.index("--evidence") + 1]).read_text(encoding="utf-8"))
+    compose = pathlib.Path(a[a.index("--verify-compose") + 1]).read_bytes()
+    pairing = json.loads(pathlib.Path(a[a.index("--verify-pairing") + 1]).read_text(encoding="utf-8"))
+    assert pairing["source_commit"] == ev["sourceCommitClaim"]
+    assert pairing["compose"]["sha256"] == "sha256:" + hashlib.sha256(compose).hexdigest()
+    sys.exit(0)
+
+commit = a[a.index("--source-commit") + 1] if "--source-commit" in a else "a" * 40
+event = a[a.index("--build-event") + 1] if "--build-event" in a else "local-test-event"
+root = pathlib.Path(a[a.index("--source-root") + 1]) if "--source-root" in a else pathlib.Path(".")
+{extra_checks}
+api_bytes = (root / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
+api_sha = "sha256:" + hashlib.sha256(api_bytes).hexdigest()
+cpa_sha = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+images = {{}}
+for idx, role in enumerate(("manager", "ingress", "runtime"), start=1):
+    archive = pathlib.Path(a[a.index("--" + role) + 1])
+    digest_file = archive.parent / (role + ".digest")
+    cfg = digest_file.read_text().strip() if digest_file.exists() else "sha256:" + str(idx) * 64
+    manifest_digest = "sha256:" + chr(ord("a") + idx) * 64
+    bin_path = {{
+        "manager": "/usr/local/bin/cpa-manager-plus",
+        "ingress": "/usr/local/bin/cpamp-ingress",
+        "runtime": "/usr/local/bin/cpamp-runtime-supervisor",
+    }}[role]
+    packaged = {{
+        bin_path: "sha256:" + str(idx + 3) * 64,
+        "/usr/local/share/cpamp/provenance.json": "sha256:" + str(idx + 6) * 64,
+    }}
+    extra = {{}}
+    if role == "manager":
+        web_sha = "sha256:" + "b" * 64
+        packaged["/usr/local/share/cpamp/release/fullweb-manifest.json"] = web_sha
+        packaged["/usr/local/share/cpamp/release/public-api-transport-contract.json"] = api_sha
+        extra["fullWebSummary"] = {{
+            "manifestSHA256": web_sha,
+            "indexHtmlSHA256": "sha256:" + "c" * 64,
+            "assetCount": 2,
+        }}
+        extra["apiTransportContract"] = {{
+            "sha256": api_sha,
+            "contractId": "cpamp-r1-embedded-public-api-transport-v1",
+            "qualification": "SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY",
+            "apiSuffix": "/api/v2",
+            "expectedPath": "/phase4-test/api/v2/technical",
+        }}
+    if role == "runtime":
+        packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + cpa_sha
+    images[role] = {{
+        "archive": archive.name,
+        "archiveSHA256": "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "platform": "linux/amd64",
+        "platformManifestDigest": manifest_digest,
+        "imageConfigDigest": cfg,
+        "goBinaryIdentity": {{
+            "managerCompiledSourceClaim": commit if role == "manager" else None,
+        }},
+        "packagedFiles": packaged,
+        **extra,
+    }}
+out = pathlib.Path(a[a.index("--out") + 1])
+out.write_text(json.dumps({{
+    "schemaVersion": 1,
+    "platform": "linux/amd64",
+    "sourceCommitClaim": commit,
+    "candidateBuildEventClaim": event,
+    "candidateVersionClaim": "2.0.0-r1candidate",
+    "officialCPA": {{
+        "version": "8.0.55",
+        "verifiedFinalImageExecutableSHA256": cpa_sha,
+    }},
+    "images": images,
+    "sourceRoot": str(root),
+    "testOnly": True,
+}}), encoding="utf-8")
+"""
 
 
 class CandidateBuilderSnapshotContracts(unittest.TestCase):
@@ -482,24 +678,15 @@ class CandidateBuilderSnapshotContracts(unittest.TestCase):
                 "source.txt": b"original source bytes\n",
             }.items():
                 (source / name).write_bytes(content)
-            build_script = VERIFIER.parent / "build-embedded-candidate.sh"
+            stage_mock_candidate_repo(source)
             script_in_source = source / "bin/release/build-embedded-candidate.sh"
-            script_in_source.parent.mkdir(parents=True)
-            script_in_source.write_bytes(build_script.read_bytes())
             verifier = source / "bin/release/verify-embedded-candidate.py"
-            verifier.write_text("""\
-import json
-import pathlib
-import sys
-a = sys.argv
-root = pathlib.Path(a[a.index("--source-root") + 1])
+            verifier.write_text(MOCK_VERIFIER_SCRIPT.format(extra_checks="""\
 assert (root / "source.txt").read_text() == "original source bytes\\n"
 for role in ("manager", "ingress", "runtime"):
     archive = pathlib.Path(a[a.index("--" + role) + 1])
     assert archive.read_text() == "fake OCI " + role
-out = pathlib.Path(a[a.index("--out") + 1])
-out.write_text(json.dumps({"sourceRoot": str(root), "testOnly": True}))
-""", encoding="utf-8")
+"""), encoding="utf-8")
             subprocess.run(["git", "init", "-q"], cwd=source, check=True)
             subprocess.run(["git", "add", "."], cwd=source, check=True)
             subprocess.run(["git", "-c", "user.name=CI Test",
@@ -578,7 +765,8 @@ if role == "manager":
             snapshot = Path(events[0]["context"])
             self.assertFalse(snapshot.exists(), "disposable source snapshot was not removed")
             self.assertTrue((output / "candidate-evidence.json").exists())
-
+            self.assertTrue((output / "docker-compose.v2-embedded.yml").exists())
+            self.assertTrue((output / "embedded-release-pairing.json").exists())
 
 class CandidateLoadContracts(unittest.TestCase):
     SCRIPT = VERIFIER.parent / "build-embedded-candidate.sh"
@@ -618,23 +806,10 @@ class CandidateLoadContracts(unittest.TestCase):
             for name in ("Dockerfile.manager-server", "Dockerfile.ingress", "Dockerfile.runtime"):
                 (source / name).write_bytes(b"FROM scratch\n")
             (source / "source.txt").write_bytes(b"original source bytes\n")
+            stage_mock_candidate_repo(source)
             script_in_source = source / "bin/release/build-embedded-candidate.sh"
-            script_in_source.parent.mkdir(parents=True)
-            script_in_source.write_bytes(self.SCRIPT.read_bytes())
-            (source / "bin/release/verify-embedded-candidate.py").write_text("""\
-import json
-import pathlib
-import sys
-a = sys.argv
-images = {}
-for role in ("manager", "ingress", "runtime"):
-    archive = pathlib.Path(a[a.index("--" + role) + 1])
-    images[role] = {
-        "imageConfigDigest": (archive.parent / (role + ".digest")).read_text().strip(),
-    }
-out = pathlib.Path(a[a.index("--out") + 1])
-out.write_text(json.dumps({"images": images}))
-""", encoding="utf-8")
+            (source / "bin/release/verify-embedded-candidate.py").write_text(
+                MOCK_VERIFIER_SCRIPT.format(extra_checks=""), encoding="utf-8")
             subprocess.run(["git", "init", "-q"], cwd=source, check=True)
             subprocess.run(["git", "add", "."], cwd=source, check=True)
             subprocess.run(["git", "-c", "user.name=CI Test", "-c", "user.email=ci@example.invalid",
@@ -742,18 +917,13 @@ class CandidateBuilderSelectionContracts(unittest.TestCase):
         source.mkdir()
         for name in ("Dockerfile.manager-server", "Dockerfile.ingress", "Dockerfile.runtime"):
             (source / name).write_bytes(b"FROM scratch\n")
+        stage_mock_candidate_repo(source)
         script = source / "bin/release/build-embedded-candidate.sh"
-        script.parent.mkdir(parents=True)
-        script.write_bytes((VERIFIER.parent / "build-embedded-candidate.sh").read_bytes())
-        (source / "bin/release/verify-embedded-candidate.py").write_text("""\
-import json, pathlib, sys
-a = sys.argv
-images = {role: {"imageConfigDigest": "sha256:" + "0" * 64}
-          for role in ("manager", "ingress", "runtime")}
-for role in images:
+        (source / "bin/release/verify-embedded-candidate.py").write_text(
+            MOCK_VERIFIER_SCRIPT.format(extra_checks="""\
+for role in ("manager", "ingress", "runtime"):
     assert pathlib.Path(a[a.index("--" + role) + 1]).exists()
-pathlib.Path(a[a.index("--out") + 1]).write_text(json.dumps({"images": images}))
-""", encoding="utf-8")
+"""), encoding="utf-8")
         subprocess.run(["git", "init", "-q"], cwd=source, check=True)
         subprocess.run(["git", "add", "."], cwd=source, check=True)
         subprocess.run(["git", "-c", "user.name=CI Test", "-c", "user.email=ci@example.invalid",

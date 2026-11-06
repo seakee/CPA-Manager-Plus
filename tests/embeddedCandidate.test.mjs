@@ -1,13 +1,23 @@
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { generateReleaseInfo } from '../bin/release/generate-release-info.mjs';
 import { verifyCandidate, verifyImage } from '../bin/release/publish-update-index.mjs';
+import {
+  COMPOSE_FILENAME,
+  composeYamlToRuntime12ConfigJson,
+  EXPECTED_CPA_SHA256,
+  PACKAGED_PATHS,
+  PAIRING_FILENAME,
+  renderEmbeddedReleaseArtifacts,
+  verifyEmbeddedReleaseArtifacts,
+} from '../bin/release/render-embedded-compose.mjs';
 import { expectedReleaseAssetNames } from '../bin/release/verify-published-release.mjs';
 import { repository, validateInfo } from '../bin/release/update-contract.mjs';
-
 describe('R1-1 local-only OCI candidate contracts', () => {
   it('keeps the no-push candidate builder syntactically valid', () => {
     execFileSync('bash', ['-n', 'bin/release/build-embedded-candidate.sh'], {
@@ -223,5 +233,316 @@ describe('Fresh New automated smoke contracts', () => {
     );
     // The anonymous peer may only be closed or 401.
     expect(smoke).toContain("['unreachable', '401'].includes(peerVerdict)");
+  });
+});
+
+describe('Immutable v2 Embedded compose and pairing contracts', () => {
+  const apiContractBytes = readFileSync(
+    new URL('./fixtures/r1-embedded-api-transport.json', import.meta.url)
+  );
+  const apiContractSha =
+    'sha256:' + createHash('sha256').update(apiContractBytes).digest('hex');
+  const sourceCommit = '8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc';
+
+  function makeCandidateEvidence() {
+    const webManifestSha = 'sha256:' + 'e'.repeat(64);
+    const indexHtmlSha = 'sha256:' + 'f'.repeat(64);
+    return {
+      schemaVersion: 1,
+      status: 'STRUCTURAL_CANDIDATE_EVIDENCE_ONLY_NOT_RELEASE_QUALIFIED',
+      sourceCommitClaim: sourceCommit,
+      candidateBuildEventClaim: 'local-r1-7d339900903248d580b067e35cdea3a9',
+      candidateVersionClaim: '2.0.0-r1candidate',
+      platform: 'linux/amd64',
+      officialCPA: {
+        version: '8.0.55',
+        dockerBuildPinArchiveSHA256:
+          '4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123',
+        verifiedFinalImageExecutableSHA256: EXPECTED_CPA_SHA256,
+      },
+      images: {
+        manager: {
+          archive: 'manager.oci.tar',
+          archiveSHA256: 'sha256:' + '1'.repeat(64),
+          platform: 'linux/amd64',
+          platformManifestDigest:
+            'sha256:be0dee922347da5e33bf9546bb86447a7afa9973e3bc77a965908a31e43a0258',
+          imageConfigDigest:
+            'sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86',
+          goBinaryIdentity: {
+            entrypoint:
+              'github.com/seakee/cpa-manager-plus/apps/manager-server/cmd/cpa-manager-plus',
+            goTarget: 'linux/amd64',
+            managerCompiledSourceClaim: sourceCommit,
+            module: 'github.com/seakee/cpa-manager-plus/apps/manager-server',
+          },
+          fullWebSummary: {
+            manifestSHA256: webManifestSha,
+            indexHtmlSHA256: indexHtmlSha,
+            assetCount: 14,
+          },
+          apiTransportContract: {
+            sha256: apiContractSha,
+            contractId: 'cpamp-r1-embedded-public-api-transport-v1',
+            qualification:
+              'SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY',
+            apiSuffix: '/api/v2',
+            expectedPath: '/phase4-test/api/v2/technical',
+          },
+          packagedFiles: {
+            [PACKAGED_PATHS.binaries.manager]: 'sha256:' + 'a'.repeat(64),
+            [PACKAGED_PATHS.provenance]: 'sha256:' + 'b'.repeat(64),
+            [PACKAGED_PATHS.webManifest]: webManifestSha,
+            [PACKAGED_PATHS.apiContract]: apiContractSha,
+          },
+        },
+        ingress: {
+          archive: 'ingress.oci.tar',
+          archiveSHA256: 'sha256:' + '2'.repeat(64),
+          platform: 'linux/amd64',
+          platformManifestDigest:
+            'sha256:ec2d8db9eca2c102a13f05667f01db2bf62c0208bcade582a05a23eedb276c4d',
+          imageConfigDigest:
+            'sha256:5cfa0720fb17822a3b682fe311b336aafe2ebca7c8a037b89ca1df679a7625fb',
+          goBinaryIdentity: {
+            entrypoint: 'github.com/seakee/cpa-manager-plus/apps/ingress/cmd/cpamp-ingress',
+            goTarget: 'linux/amd64',
+            managerCompiledSourceClaim: null,
+            module: 'github.com/seakee/cpa-manager-plus/apps/ingress',
+          },
+          packagedFiles: {
+            [PACKAGED_PATHS.binaries.ingress]: 'sha256:' + 'c'.repeat(64),
+            [PACKAGED_PATHS.provenance]: 'sha256:' + 'd'.repeat(64),
+          },
+        },
+        runtime: {
+          archive: 'runtime.oci.tar',
+          archiveSHA256: 'sha256:' + '3'.repeat(64),
+          platform: 'linux/amd64',
+          platformManifestDigest:
+            'sha256:9e334bf2941c959cf9220f2da126086673eff10fbab4da621a3477c138c967d1',
+          imageConfigDigest:
+            'sha256:8c6a7ed65a2c4cd15c5a65b57e0e296bb519c5f8e3130f87c77e1a3647861797',
+          goBinaryIdentity: {
+            entrypoint:
+              'github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/cmd/cpamp-runtime-supervisor',
+            goTarget: 'linux/amd64',
+            managerCompiledSourceClaim: null,
+            module: 'github.com/seakee/cpa-manager-plus/apps/runtime-supervisor',
+          },
+          packagedFiles: {
+            [PACKAGED_PATHS.binaries.runtime]: 'sha256:' + '4'.repeat(64),
+            [PACKAGED_PATHS.provenance]: 'sha256:' + '5'.repeat(64),
+            [PACKAGED_PATHS.cpaBinary]: 'sha256:' + EXPECTED_CPA_SHA256,
+          },
+        },
+      },
+    };
+  }
+
+  it('renders digest-pinned three-image compose and pairing manifest that pass Runtime 12/18 validation', () => {
+    const evidence = makeCandidateEvidence();
+    const { composeYaml, composeJson, pairing } = renderEmbeddedReleaseArtifacts(evidence, {
+      version: 'v2.0.0-beta.1',
+    });
+
+    expect(composeYaml).not.toContain(':latest');
+    expect(composeYaml).not.toMatch(/^\s*build\s*:/m);
+    expect(composeYaml).not.toContain('CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK');
+    expect(composeJson.services['cpamp-ingress'].image).toBe(
+      'seakee/cpamp-ingress:v2.0.0-beta.1@sha256:ec2d8db9eca2c102a13f05667f01db2bf62c0208bcade582a05a23eedb276c4d'
+    );
+    expect(composeJson.services['cpamp-manager'].image).toBe(
+      'seakee/cpa-manager-plus:v2.0.0-beta.1@sha256:be0dee922347da5e33bf9546bb86447a7afa9973e3bc77a965908a31e43a0258'
+    );
+    expect(composeJson.services['cpamp-runtime'].image).toBe(
+      'seakee/cpamp-runtime:v2.0.0-beta.1@sha256:9e334bf2941c959cf9220f2da126086673eff10fbab4da621a3477c138c967d1'
+    );
+
+    expect(pairing).toMatchObject({
+      schema_version: 1,
+      version: 'v2.0.0-beta.1',
+      source_commit: sourceCommit,
+      platform: 'linux/amd64',
+      cpa: {
+        version: '8.0.55',
+        artifact_id: `sha256:${EXPECTED_CPA_SHA256}`,
+      },
+      fullweb: {
+        manifest_sha256: 'sha256:' + 'e'.repeat(64),
+        index_html_sha256: 'sha256:' + 'f'.repeat(64),
+        asset_count: 14,
+      },
+      api_contract: {
+        sha256: apiContractSha,
+        qualification: 'SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY',
+        api_suffix: '/api/v2',
+        expected_path: '/phase4-test/api/v2/technical',
+      },
+      compose: {
+        filename: COMPOSE_FILENAME,
+        size: Buffer.byteLength(composeYaml, 'utf8'),
+      },
+    });
+    expect(pairing.images.manager.image_config_digest).toBe(
+      'sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86'
+    );
+    expect(pairing.images.ingress.image_config_digest).toBe(
+      'sha256:5cfa0720fb17822a3b682fe311b336aafe2ebca7c8a037b89ca1df679a7625fb'
+    );
+    expect(pairing.images.runtime.image_config_digest).toBe(
+      'sha256:8c6a7ed65a2c4cd15c5a65b57e0e296bb519c5f8e3130f87c77e1a3647861797'
+    );
+  });
+
+  it('fails closed on :latest, tag-only references, digest mismatches, source commit drift, and tampered Web/API or compose invariants', () => {
+    const evidence = makeCandidateEvidence();
+    const { composeYaml, pairing } = renderEmbeddedReleaseArtifacts(evidence, {
+      version: 'v2.0.0-beta.1',
+    });
+
+    // 1. :latest version or image reference
+    expect(() => renderEmbeddedReleaseArtifacts(evidence, { version: 'latest' })).toThrow(
+      /latest/i
+    );
+    expect(() =>
+      renderEmbeddedReleaseArtifacts(evidence, {
+        version: 'v2.0.0-beta.1',
+        imageRefs: {
+          manager:
+            'seakee/cpa-manager-plus:latest@sha256:be0dee922347da5e33bf9546bb86447a7afa9973e3bc77a965908a31e43a0258',
+        },
+      })
+    ).toThrow(/latest/i);
+
+    // 2. Tag-only reference without @sha256:<64-hex>
+    expect(() =>
+      renderEmbeddedReleaseArtifacts(evidence, {
+        version: 'v2.0.0-beta.1',
+        imageRefs: {
+          ingress: 'seakee/cpamp-ingress:v2.0.0-beta.1',
+        },
+      })
+    ).toThrow(/@sha256/);
+
+    // 3. Mismatched explicit digest for any role
+    expect(() =>
+      renderEmbeddedReleaseArtifacts(evidence, {
+        version: 'v2.0.0-beta.1',
+        digests: {
+          runtime: 'sha256:' + '9'.repeat(64),
+        },
+      })
+    ).toThrow(/manifest digest mismatch for runtime/);
+
+    // 4. Mismatched source_commit across roles / Manager binary
+    const driftedSourceEvidence = structuredClone(evidence);
+    driftedSourceEvidence.images.manager.goBinaryIdentity.managerCompiledSourceClaim =
+      '0'.repeat(40);
+    expect(() => renderEmbeddedReleaseArtifacts(driftedSourceEvidence)).toThrow(
+      /Manager compiled source commit/
+    );
+
+    const driftedRoleEvidence = structuredClone(evidence);
+    driftedRoleEvidence.images.ingress.sourceCommitClaim = '0'.repeat(40);
+    expect(() => renderEmbeddedReleaseArtifacts(driftedRoleEvidence)).toThrow(
+      /ingress sourceCommitClaim differs/
+    );
+
+    // 5. Tampered Full Web manifest or API contract digest in pairing
+    const badWebPairing = structuredClone(pairing);
+    badWebPairing.fullweb.manifest_sha256 = 'sha256:' + '0'.repeat(64);
+    expect(() =>
+      verifyEmbeddedReleaseArtifacts({
+        evidence,
+        composeText: composeYaml,
+        pairing: badWebPairing,
+      })
+    ).toThrow(/fullweb manifest summary mismatch/);
+
+    const badApiPairing = structuredClone(pairing);
+    badApiPairing.api_contract.sha256 = 'sha256:' + '0'.repeat(64);
+    expect(() =>
+      verifyEmbeddedReleaseArtifacts({
+        evidence,
+        composeText: composeYaml,
+        pairing: badApiPairing,
+      })
+    ).toThrow(/api_contract summary mismatch/);
+
+    // 6. Compose injected with CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK or extra port
+    const loopbackCompose = composeYaml.replace(
+      "      CPAMP_RUNTIME_CPA_GID: '10001'",
+      "      CPAMP_RUNTIME_CPA_GID: '10001'\n      CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: '1'"
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(loopbackCompose)).toThrow(
+      /CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK/
+    );
+
+    const extraPortCompose = composeYaml.replace(
+      "    expose:\n      - '18317'",
+      "    ports:\n      - '18318:18317'\n    expose:\n      - '18317'"
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(extraPortCompose)).toThrow(
+      /expected only cpamp-ingress 18317:18317/
+    );
+  });
+
+  it('runs the CLI renderer and --verify mode end-to-end', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cpamp-compose-pairing-'));
+    try {
+      const evidence = makeCandidateEvidence();
+      const evidencePath = join(dir, 'candidate-evidence.json');
+      const composePath = join(dir, COMPOSE_FILENAME);
+      const pairingPath = join(dir, PAIRING_FILENAME);
+      const composeJsonPath = join(dir, 'rendered-compose.json');
+      writeFileSync(evidencePath, JSON.stringify(evidence, null, 2) + '\n', 'utf8');
+
+      execFileSync(
+        process.execPath,
+        [
+          'bin/release/render-embedded-compose.mjs',
+          '--evidence',
+          evidencePath,
+          '--version',
+          'v2.0.0-beta.1',
+          '--compose-out',
+          composePath,
+          '--pairing-out',
+          pairingPath,
+          '--compose-json-out',
+          composeJsonPath,
+        ],
+        { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+      );
+
+      execFileSync(
+        process.execPath,
+        [
+          'bin/release/render-embedded-compose.mjs',
+          '--verify',
+          '--evidence',
+          evidencePath,
+          '--compose',
+          composePath,
+          '--pairing',
+          pairingPath,
+        ],
+        { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+      );
+
+      const validatorOut = execFileSync(
+        process.execPath,
+        ['bin/ci/validate-runtime12-compose.mjs'],
+        {
+          cwd: new URL('..', import.meta.url),
+          input: readFileSync(composeJsonPath, 'utf8'),
+          encoding: 'utf8',
+        }
+      );
+      expect(validatorOut).toContain('Runtime 18 Compose validation passed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
