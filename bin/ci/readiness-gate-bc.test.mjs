@@ -21,22 +21,32 @@ import test from 'node:test';
 
 import {
   READINESS_GATE_BC_CONTRACT,
+  checkCleanupHelper,
+  classifyDockerInspect,
   completeFixtureStore,
   createDockerReleaser,
+  createRedactor,
   createResourceRegistry,
+  dockerRunArgs,
   finalExitCode,
   fixtureRow,
   fixtureSummary,
   injectUnsupportedDerivedFormat,
   installSignalGuard,
   judgeDiagnostic,
+  judgeFixtureExercised,
+  judgeOfflineLock,
+  judgeSecretFreeMismatchedKey,
   leaksIn,
   percentile,
   protectSettingValue,
   removeRunWorkspace,
   seedFixture,
+  settleEphemeralTracking,
   summarizeLatencies,
+  summarizeQuerySamples,
   verifyReleaseProvenance,
+  verifyStartedImage,
 } from './readiness-gate-bc.mjs';
 
 const DAY_MS = 86_400_000;
@@ -298,10 +308,38 @@ test('the verdict is pass only when the run and its cleanup both succeeded', () 
   assert.equal(finalExitCode({ runOk: true, cleanupOk: true, signal: 'SIGINT' }), 130);
 });
 
-test('the docker releaser throws when removal fails and skips objects that are already gone', () => {
+test('only a positive not-found inspect may count as a released object', () => {
+  assert.deepEqual(classifyDockerInspect({ status: 0, stdout: '[]' }), { state: 'present', error: null });
+  assert.equal(
+    classifyDockerInspect({ status: 1, stderr: 'Error: No such container: cpampd1a2b3c4d-a' }).state,
+    'absent'
+  );
+  assert.equal(
+    classifyDockerInspect({ status: 1, stderr: 'Error: No such volume: cpampd1a2b3c4d-v' }).state,
+    'absent'
+  );
+  for (const failed of [
+    { status: 1, stderr: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock' },
+    { status: 1, stderr: 'permission denied while trying to connect to the Docker daemon socket' },
+    { status: 137, stderr: '' },
+    { status: null, stderr: '' },
+  ]) {
+    const classified = classifyDockerInspect(failed);
+    assert.equal(classified.state, 'unknown', JSON.stringify(classified));
+    assert.ok(classified.error.length > 0);
+  }
+});
+
+test('the docker releaser never treats an unreadable inspect or a failed removal as released', () => {
   const removed = [];
+  const states = new Map([
+    ['cpampd1a2b3c4d-mgr', { state: 'present' }],
+    ['cpampd1a2b3c4d-gone', { state: 'absent' }],
+    ['cpampd1a2b3c4d-daemon', { state: 'unknown', error: 'Cannot connect to the Docker daemon' }],
+    ['cpampd1a2b3c4d-stuck', { state: 'present' }],
+  ]);
   const release = createDockerReleaser({
-    objectExists: (kind, name) => name !== 'cpampd1a2b3c4d-gone',
+    inspect: (kind, name) => states.get(name) ?? { state: 'absent' },
     removeObject: (kind, name) => {
       removed.push(`${kind}:${name}`);
       return { status: name === 'cpampd1a2b3c4d-stuck' ? 1 : 0, stderr: 'volume is in use' };
@@ -312,17 +350,109 @@ test('the docker releaser throws when removal fails and skips objects that are a
     kind: 'container',
     name: 'cpampd1a2b3c4d-mgr',
     removed: true,
+    present: true,
   });
   assert.deepEqual(release('container', 'cpampd1a2b3c4d-gone'), {
     kind: 'container',
     name: 'cpampd1a2b3c4d-gone',
     removed: false,
+    present: false,
   });
-  assert.deepEqual(removed, ['container:cpampd1a2b3c4d-mgr']);
+  // A daemon that cannot answer must fail the release, never skip the object.
+  assert.throws(() => release('container', 'cpampd1a2b3c4d-daemon'), /Cannot connect to the Docker daemon/);
   assert.throws(() => release('volume', 'cpampd1a2b3c4d-stuck'), /exited 1: volume is in use/);
+  assert.deepEqual(removed, ['container:cpampd1a2b3c4d-mgr', 'volume:cpampd1a2b3c4d-stuck']);
 
-  // An unregistered kind must not silently succeed.
-  assert.throws(() => createDockerReleaser({ objectExists: null, removeObject: () => 0 }), /objectExists/);
+  // An unregistered releaser must not silently succeed.
+  assert.throws(() => createDockerReleaser({ inspect: null, removeObject: () => 0 }), /inspect/);
+});
+
+test('an unverifiable release makes the run exit non-zero instead of reporting a clean host', async () => {
+  const releaser = (inspect) =>
+    createDockerReleaser({ inspect, removeObject: () => ({ status: 0 }) });
+
+  // A container the daemon says is gone needs no removal and leaves nothing.
+  const goneRegistry = createResourceRegistry({ prefix: PREFIX });
+  goneRegistry.track('container', `${PREFIX}-mgr`, () => {});
+  const goneOutcome = await goneRegistry.releaseAll();
+  assert.equal(goneOutcome.ok, true);
+
+  // The same shape with an unreadable inspect: the entry stays in the registry,
+  // the cleanup result is a failure, and the process cannot exit 0 even though
+  // the run itself succeeded.
+  const stuckRegistry = createResourceRegistry({ prefix: PREFIX });
+  const stuckRelease = releaser(() => ({ state: 'unknown', error: 'Cannot connect to the Docker daemon' }));
+  stuckRegistry.track('container', `${PREFIX}-mgr`, () => stuckRelease('container', `${PREFIX}-mgr`));
+  const stuckOutcome = await stuckRegistry.releaseAll();
+  assert.equal(stuckOutcome.ok, false);
+  assert.match(stuckOutcome.errors.join(' '), /docker inspect container/);
+  assert.equal(finalExitCode({ runOk: true, cleanupOk: stuckOutcome.ok }), 1);
+
+  // A failed `docker rm` on a present container is the third failing shape.
+  const stuckRm = createResourceRegistry({ prefix: PREFIX });
+  const stuckRmRelease = createDockerReleaser({
+    inspect: () => ({ state: 'present' }),
+    removeObject: () => ({ status: 1, stderr: 'volume is in use' }),
+  });
+  stuckRm.track('volume', `${PREFIX}-bench`, () => stuckRmRelease('volume', `${PREFIX}-bench`));
+  const stuckRmOutcome = await stuckRm.releaseAll();
+  assert.equal(stuckRmOutcome.ok, false);
+  assert.match(stuckRmOutcome.errors.join(' '), /volume is in use/);
+  assert.equal(finalExitCode({ runOk: true, cleanupOk: stuckRmOutcome.ok }), 1);
+});
+
+test('the cleanup helper must be verified gone, not assumed', () => {
+  assert.deepEqual(checkCleanupHelper({ name: `${PREFIX}-cleanup`, inspected: { state: 'absent' } }), {
+    ok: true,
+    name: `${PREFIX}-cleanup`,
+  });
+  for (const inspected of [
+    { state: 'present' },
+    { state: 'unknown', error: 'Cannot connect to the Docker daemon' },
+    undefined,
+  ]) {
+    const checked = checkCleanupHelper({ name: `${PREFIX}-cleanup`, inspected });
+    assert.equal(checked.ok, false, JSON.stringify(inspected));
+    assert.match(checked.error, /cleanup helper .* still present/);
+  }
+});
+
+test('a run that cannot confirm its container is gone stays tracked', () => {
+  const registry = createResourceRegistry({ prefix: PREFIX });
+  registry.track('container', `${PREFIX}-initialize-ab12cd`, () => {});
+
+  // The daemon could not answer: the entry must survive so cleanup retries and
+  // fails loudly instead of reporting a clean host.
+  const unknown = settleEphemeralTracking({
+    registry,
+    name: `${PREFIX}-initialize-ab12cd`,
+    inspected: { state: 'unknown', error: 'Cannot connect to the Docker daemon' },
+  });
+  assert.equal(unknown.untracked, false);
+  assert.match(unknown.unverified, /Cannot connect/);
+  assert.equal(registry.has('container', `${PREFIX}-initialize-ab12cd`), true);
+
+  // A container that is still running is also kept, so the registry removes it.
+  const present = settleEphemeralTracking({
+    registry,
+    name: `${PREFIX}-initialize-ab12cd`,
+    inspected: { state: 'present' },
+  });
+  assert.equal(present.tracked, true);
+  assert.equal(registry.has('container', `${PREFIX}-initialize-ab12cd`), true);
+
+  // Only the positive "No such container" untracks it.
+  const absent = settleEphemeralTracking({
+    registry,
+    name: `${PREFIX}-initialize-ab12cd`,
+    inspected: { state: 'absent' },
+  });
+  assert.equal(absent.untracked, true);
+  assert.equal(registry.has('container', `${PREFIX}-initialize-ab12cd`), false);
+
+  // Another run's container is never touched by this registry.
+  const foreign = createResourceRegistry({ prefix: PREFIX });
+  assert.throws(() => foreign.track('container', 'cpampdffffffff-mgr', () => {}), /not one of this run/);
 });
 
 test('the run workspace remover reports a directory it could not remove', () => {
@@ -366,6 +496,11 @@ test('the run workspace remover reports a directory it could not remove', () => 
     });
     assert.equal(failed.ok, false);
     assert.match(failed.error, /run workspace remained/);
+    // The failure message is archived in evidence: an operator's scratch layout
+    // must not travel with it.
+    assert.equal(failed.error.includes(root), false);
+    assert.equal(failed.error.includes(os.tmpdir()), false);
+    assert.match(failed.error, /^[^/]*$/);
     fs.rmSync(stuck, { recursive: true, force: true });
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -444,4 +579,274 @@ test('the licence status assertion is bound to the provenance digest and fails c
   });
   assert.equal(wrongRole.ok, false);
   assert.match(wrongRole.failures.join(' '), /inventory_role:manager/);
+});
+
+test('the offline lock needs positive evidence and never infers release from a missing message', () => {
+  const healthy = judgeOfflineLock({
+    kind: 'unsupported_derived_format',
+    exitCode: 0,
+    output: '[derived-migration] creating index idx_usage_events_a',
+  });
+  assert.equal(healthy.ok, true);
+  assert.equal(healthy.released, true);
+  assert.equal(healthy.exitCode, 0);
+
+  // The healthy store's command must actually finish.
+  const healthyFailed = judgeOfflineLock({ kind: 'unsupported_derived_format', exitCode: 1, output: 'boom' });
+  assert.equal(healthyFailed.ok, false);
+  assert.match(healthyFailed.failures.join(' '), /offline_cleanup_failed:1/);
+
+  // A lock refusal is a failure whatever the exit code says.
+  const refused = judgeOfflineLock({
+    kind: 'unsupported_derived_format',
+    exitCode: 0,
+    output: 'could not acquire offline cleanup lock: database is locked',
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.released, false);
+  assert.match(refused.failures.join(' '), /offline_lock_unavailable:0/);
+
+  // Changed wording on a later release must not be read as "lock released".
+  const renamed = judgeOfflineLock({
+    kind: 'corrupted_database_bytes',
+    exitCode: 1,
+    output: 'refusing to run: the manager lock is held by process 42',
+  });
+  assert.equal(renamed.ok, false);
+  assert.match(renamed.failures.join(' '), /offline_cleanup_unexpected_failure:1/);
+
+  // The corrupted store must fail for its own reason, i.e. after it had the lock.
+  const corrupt = judgeOfflineLock({
+    kind: 'corrupted_database_bytes',
+    exitCode: 1,
+    output: 'cleanup-derived: open usage.sqlite: file is not a database (26)',
+  });
+  assert.equal(corrupt.ok, true);
+  assert.equal(corrupt.released, true);
+  assert.equal(corrupt.exitCode, 1);
+
+  // An unexpected success on a corrupt file, an empty non-zero, an unobserved
+  // status and an unknown scenario all fail.
+  for (const [expected, input] of [
+    [/offline_cleanup_unexpected_success/, { kind: 'corrupted_database_bytes', exitCode: 0, output: '' }],
+    [/offline_cleanup_unexpected_failure:1/, { kind: 'corrupted_database_bytes', exitCode: 1, output: '' }],
+    [/offline_status_unobserved/, { kind: 'unsupported_derived_format', exitCode: null, output: '' }],
+    [/offline_status_unobserved/, { kind: 'unsupported_derived_format', output: '' }],
+    [/offline_kind_unknown/, { kind: 'other', exitCode: 0, output: '' }],
+  ]) {
+    const judged = judgeOfflineLock(input);
+    assert.equal(judged.ok, false, JSON.stringify(input));
+    assert.equal(judged.released, false, JSON.stringify(input));
+    assert.match(judged.failures.join(' '), expected);
+  }
+});
+
+test('the per-query sampler validates every response, not only the last one', () => {
+  const query = {
+    name: 'monitoring_events_page',
+    validate: (body) => body?.items?.length === 50,
+  };
+  const good = JSON.stringify({ items: new Array(50).fill({ id: 1 }) });
+  const empty = JSON.stringify({ items: [] });
+
+  // Four empty answers and one good one is a broken fixture. Validating only the
+  // last response would report a clean run, so this sequence is the regression
+  // for the "validate only sample 5" mutation.
+  const fourBadOneGood = [empty, empty, empty, empty, good].map((body, index) => ({ ms: 10 + index, body }));
+  const summarised = summarizeQuerySamples({ query, responses: fourBadOneGood });
+  assert.equal(summarised.sampleCount, 5);
+  assert.equal(summarised.summary.count, 5);
+  assert.equal(summarised.validation.ok, false);
+  assert.deepEqual(
+    summarised.validationFailures,
+    ['monitoring_events_page#1', 'monitoring_events_page#2', 'monitoring_events_page#3', 'monitoring_events_page#4']
+  );
+  assert.deepEqual(
+    summarised.validation.failures.map((failure) => failure.sample),
+    [1, 2, 3, 4]
+  );
+
+  // The mirror case: one bad answer at the end is also a failure.
+  const fourGoodOneBad = [good, good, good, good, empty].map((body, index) => ({ ms: 10 + index, body }));
+  assert.deepEqual(
+    summarizeQuerySamples({ query, responses: fourGoodOneBad }).validationFailures,
+    ['monitoring_events_page#5']
+  );
+
+  const allGood = summarizeQuerySamples({ query, responses: fourGoodOneBad.map((r) => ({ ...r, body: good })) });
+  assert.equal(allGood.validation.ok, true);
+  assert.equal(allGood.validationFailures.length, 0);
+  assert.equal(allGood.summary.p50, 12);
+  assert.equal(allGood.summary.p95, 14);
+
+  // A query without a validator still contributes its latencies.
+  const bare = summarizeQuerySamples({
+    query: { name: 'noop' },
+    responses: [{ ms: 4, body: 'not json' }],
+  });
+  assert.deepEqual(bare.validation, { ok: true, failures: [] });
+  assert.equal(bare.summary.count, 1);
+
+  // Unparsable bodies fail a query that expects JSON, rather than throwing.
+  const unparsable = summarizeQuerySamples({ query, responses: [{ ms: 1, body: '<<html>>' }] });
+  assert.equal(unparsable.validation.ok, false);
+});
+
+test('the fixture-exercised verdict covers every sample of both measured runs', () => {
+  const run = (names, extra = {}) => ({
+    samples: Object.fromEntries(names.map((name) => [name, { count: 5 }])),
+    validationFailures: [],
+    ...extra,
+  });
+  const all = ['dashboard_summary', 'monitoring_header_snapshots', 'monitoring_events_page'];
+  const on = run(all);
+  const off = run(all);
+
+  // Same non-empty query set on both sides, five samples each.
+  assert.equal(judgeFixtureExercised({ rollupOn: on, rollupOff: off }).ok, true);
+  assert.equal(
+    judgeFixtureExercised({ rollupOn: on, rollupOff: off, expectedQueries: all, expectedSampleCount: 5 }).ok,
+    true
+  );
+
+  // One invalid response in the rollup-off run fails the whole check, even
+  // though the rollup-on run was clean.
+  const offFalse = run(all, { validationFailures: ['monitoring_events_page#3'] });
+  const offVerdict = judgeFixtureExercised({ rollupOn: on, rollupOff: offFalse });
+  assert.equal(offVerdict.ok, false);
+  assert.deepEqual(offVerdict.failures, ['rollupOff:monitoring_events_page#3']);
+
+  // Four empty responses and a fifth good one is a failure, not a pass.
+  const early = run(all, { validationFailures: ['dashboard_summary#1', 'dashboard_summary#2'] });
+  assert.equal(judgeFixtureExercised({ rollupOn: early, rollupOff: off }).ok, false);
+
+  // A run that sampled nothing cannot support a claim either.
+  assert.equal(judgeFixtureExercised({ rollupOn: on, rollupOff: run([]) }).ok, false);
+
+  // A query measured in one configuration but not the other fails, as does a
+  // set that is merely a subset.
+  const missing = [all[0], all[1]];
+  const offMissing = judgeFixtureExercised({ rollupOn: on, rollupOff: run(missing) });
+  assert.equal(offMissing.ok, false);
+  assert.match(offMissing.failures.join(' '), /query_sets_differ/);
+
+  // Every configured query must appear in both runs.
+  const abbreviated = judgeFixtureExercised({
+    rollupOn: run(missing),
+    rollupOff: run(missing),
+    expectedQueries: all,
+    expectedSampleCount: 5,
+  });
+  assert.equal(abbreviated.ok, false);
+  assert.match(abbreviated.failures.join(' '), /queries_missing:monitoring_events_page/);
+
+  // A run that kept only one response per query is not a five-sample run.
+  const thin = {
+    samples: Object.fromEntries(all.map((name) => [name, { count: 1 }])),
+    validationFailures: [],
+  };
+  const thinVerdict = judgeFixtureExercised({
+    rollupOn: thin,
+    rollupOff: off,
+    expectedQueries: all,
+    expectedSampleCount: 5,
+  });
+  assert.equal(thinVerdict.ok, false);
+  assert.match(thinVerdict.failures.join(' '), /dashboard_summary:sample_count:1/);
+});
+
+test('the secret-free mismatched key needs a healthy store, not merely silence', () => {
+  assert.deepEqual(judgeSecretFreeMismatchedKey({ healthStatus: 200, leakedSecretCount: 0 }), {
+    ok: true,
+    failures: [],
+  });
+
+  // The scenario the review names: no leak, but the process never became
+  // healthy — non-disclosure alone must not pass.
+  const unhealthy = judgeSecretFreeMismatchedKey({ healthStatus: 503, leakedSecretCount: 0 });
+  assert.equal(unhealthy.ok, false);
+  assert.deepEqual(unhealthy.failures, ['health_status:503']);
+
+  const leaking = judgeSecretFreeMismatchedKey({ healthStatus: 200, leakedSecretCount: 1 });
+  assert.equal(leaking.ok, false);
+  assert.deepEqual(leaking.failures, ['secret_leak']);
+
+  const both = judgeSecretFreeMismatchedKey({ healthStatus: 0, leakedSecretCount: 2 });
+  assert.equal(both.ok, false);
+  assert.deepEqual(both.failures, ['health_status:0', 'secret_leak']);
+
+  // An unobserved status is a failure too, not a pass by omission.
+  assert.equal(judgeSecretFreeMismatchedKey({}).ok, false);
+});
+
+test('every container this harness starts carries the same resource budget', () => {
+  const limits = READINESS_GATE_BC_CONTRACT.limits;
+  assert.deepEqual(limits, { cpus: 2, memory: '4g', memorySwap: '4g' });
+
+  const specs = {
+    manager: dockerRunArgs({
+      name: `${PREFIX}-benchon`,
+      image: 'sha256:' + 'a'.repeat(64),
+      detach: true,
+      mounts: ['/tmp/data:/data'],
+      ports: ['127.0.0.1:19319:18317'],
+      env: { HTTP_ADDR: '0.0.0.0:18317' },
+    }),
+    initialize: dockerRunArgs({
+      name: `${PREFIX}-initialize-ab12cd`,
+      image: 'sha256:' + 'a'.repeat(64),
+      rm: true,
+      network: 'none',
+      mounts: ['/tmp/data:/data'],
+    }),
+    cleanupHelper: dockerRunArgs({
+      name: `${PREFIX}-cleanup`,
+      image: 'sha256:' + 'a'.repeat(64),
+      rm: true,
+      entrypoint: 'sh',
+      mounts: ['/tmp:/w'],
+    }),
+  };
+
+  for (const [label, args] of Object.entries(specs)) {
+    const joined = args.join(' ');
+    assert.ok(joined.includes('--cpus=2'), `${label} has no cpu budget`);
+    assert.ok(joined.includes('--memory=4g'), `${label} has no memory budget`);
+    assert.ok(joined.includes('--memory-swap=4g'), `${label} has no swap budget`);
+    assert.ok(joined.includes('--pull=never'), `${label} could pull`);
+    assert.ok(joined.includes('--platform linux/amd64'), `${label} is not amd64`);
+  }
+  assert.ok(specs.manager.includes('-d'));
+  assert.ok(specs.initialize.includes('--rm'));
+  assert.ok(specs.cleanupHelper.includes('--entrypoint'));
+  assert.throws(() => dockerRunArgs({ name: `${PREFIX}-x` }), /image/);
+});
+
+test('a started container must run the pre-checked image id', () => {
+  const id = 'sha256:' + 'b'.repeat(64);
+  assert.deepEqual(verifyStartedImage({ name: 'cpampd1a2b3c4d-benchon', expected: id, actual: id }), {
+    name: 'cpampd1a2b3c4d-benchon',
+    image: id,
+  });
+  assert.throws(
+    () => verifyStartedImage({ name: 'cpampd1a2b3c4d-benchon', expected: id, actual: 'sha256:' + 'c'.repeat(64) }),
+    /pre-checked/
+  );
+  assert.throws(() => verifyStartedImage({ name: 'cpampd1a2b3c4d-benchon', expected: null, actual: id }), /no pre-checked/);
+});
+
+test('evidence redaction turns the run workspace into a placeholder', () => {
+  const redactor = createRedactor([]);
+  const workDir = '/tmp/pr3-work';
+  const runWorkDir = path.join(workDir, PREFIX);
+  for (const hostPath of [runWorkDir, workDir]) redactor.add(hostPath);
+
+  const document = JSON.stringify({
+    scenario: { dataDir: path.join(runWorkDir, 'benchmark', 'usage.sqlite') },
+    error: `could not inspect ${runWorkDir}: EPERM`,
+  });
+  const redacted = redactor.redact(document);
+  assert.equal(redacted.includes(workDir), false);
+  assert.equal(redacted.includes(os.tmpdir()), false);
+  assert.match(redacted, /\[redacted\]/);
 });

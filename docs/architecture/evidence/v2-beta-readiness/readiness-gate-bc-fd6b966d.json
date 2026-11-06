@@ -1,8 +1,12 @@
 {
   "contract": "cpamp.readiness-gate-bc.v1",
-  "generatedAt": "2026-11-06T08:29:37.630Z",
-  "runId": "29cb551d",
-  "prefix": "cpampd29cb551d",
+  "generatedAt": "2026-11-06T14:31:43.615Z",
+  "harness": {
+    "path": "bin/ci/readiness-gate-bc.mjs",
+    "sha256": "sha256:30f78e3609ae82eb37e33c8c8150eac33a19e7db61df0f9e516f2934a48410bb"
+  },
+  "runId": "fd6b966d",
+  "prefix": "cpampdfd6b966d",
   "candidateTag": "8935bce5",
   "candidateCommit": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
   "platform": "linux/amd64",
@@ -45,14 +49,14 @@
   },
   "representativeness": {
     "observed": "Docker Desktop VM on macOS x64; container limits --cpus=2 --memory=4g --memory-swap=4g",
-    "productionHostClaim": "[INFERENCE] not measured on a dedicated SSD Linux host"
+    "productionHostClaim": "cannot be extrapolated: this is not a dedicated SSD Linux host, and production performance must be re-measured there"
   },
   "fixtureConstruction": "candidate `initialize` creates the schema and data key; the harness removes the Fresh checkpoint rows, writes the bootstrap-state row and retires the Fresh marker so the benchmark serves the post-install Manager graph",
   "scenarios": {
     "disk": {
       "mount": "/",
       "totalBytes": 62671097856,
-      "availableBytes": 6351237120,
+      "availableBytes": 6350884864,
       "floorBytes": 3221225472
     },
     "provenance": {
@@ -152,11 +156,11 @@
     "storeOpenFailure": {
       "kind": "unsupported_derived_format",
       "container": {
-        "name": "cpampd29cb551d-storeopenfailure",
-        "id": "dda368e2dcea4550575df62f8948ca44e960f3b72b8b5540160619afa1af8f23",
-        "image": "cpampd-beta-manager:8935bce5"
+        "name": "cpampdfd6b966d-storeopenfailure",
+        "id": "0a5cca0fa276076a3dd76b676fcc77be289dfab51893e3c3145755749b87082c",
+        "image": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86"
       },
-      "elapsedMs": 164,
+      "elapsedMs": 21,
       "health": {
         "status": 503,
         "body": "{\"ok\":false}\n"
@@ -166,11 +170,12 @@
         "body": "{\"contract_version\":\"cpamp.phase4-01.discovery.v1\",\"status\":\"unavailable\",\"authentication_required\":false,\"auth_entry\":\"unavailable\",\"reason\":\"observation_unavailable\"}\n"
       },
       "businessStatus": 404,
-      "logTail": "2026/11/06 08:27:52 cpa-manager-plus listening on [::]:18317\n2026/11/06 08:27:52 Manager store could not be opened; keeping safe not-ready diagnostics available\n",
+      "logTail": "2026/11/06 14:29:52 cpa-manager-plus listening on [::]:18317\n2026/11/06 14:29:52 Manager store could not be opened; keeping safe not-ready diagnostics available\n",
       "lockProbe": {
         "exitCode": 0,
         "released": true,
-        "output": "08:27:53 [derived-migration] creating index idx_usage_monitoring_event_projection_account_window\n2026/11/06 08:27:53 [derived-migration] creating index idx_usage_monitoring_event_projection_model_timestamp\n2026/11/06 08:27:53 [derived-migration] creating index idx_usage_monitoring_header_latest_timestamp\n2026/11/06 08:27:53 [derived-migration] creating index idx_usage_event_identity_ledger_raw_event_id\n2026/11/06 08:27:53 [derived-migration] creating index idx_usage_event_identity_ledger_bucket\n"
+        "failures": [],
+        "output": "14:29:53 [derived-migration] creating index idx_usage_monitoring_event_projection_account_window\n2026/11/06 14:29:53 [derived-migration] creating index idx_usage_monitoring_event_projection_model_timestamp\n2026/11/06 14:29:53 [derived-migration] creating index idx_usage_monitoring_header_latest_timestamp\n2026/11/06 14:29:53 [derived-migration] creating index idx_usage_event_identity_ledger_raw_event_id\n2026/11/06 14:29:53 [derived-migration] creating index idx_usage_event_identity_ledger_bucket\n"
       },
       "oomKilled": false,
       "judgement": {
@@ -178,24 +183,31 @@
         "failures": [],
         "observed": {
           "label": "store-open-failure",
-          "elapsedMs": 164,
+          "elapsedMs": 21,
           "budgetMs": 10000,
           "healthStatus": 503,
           "discoveryStatus": 503,
           "businessStatus": 404,
           "logMarkerPresent": true,
           "leakedSecretCount": 0
+        },
+        "offline": {
+          "ok": true,
+          "failures": [],
+          "released": true,
+          "exitCode": 0,
+          "lockRefused": false
         }
       }
     },
     "corruptedDatabase": {
       "kind": "corrupted_database_bytes",
       "container": {
-        "name": "cpampd29cb551d-corrupteddatabase",
-        "id": "194f3861c77cc1187946ea436930e40d3f3669eef3d27df8a94ead683cfd8d0f",
-        "image": "cpampd-beta-manager:8935bce5"
+        "name": "cpampdfd6b966d-corrupteddatabase",
+        "id": "1b8fa28f2957bcc8c7201576904503a25d7f464b1e99ce80e9bbbe31a8868c91",
+        "image": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86"
       },
-      "elapsedMs": 56,
+      "elapsedMs": 4,
       "health": {
         "status": 503,
         "body": "{\"ok\":false}\n"
@@ -205,11 +217,12 @@
         "body": "{\"contract_version\":\"cpamp.phase4-01.discovery.v1\",\"status\":\"unavailable\",\"authentication_required\":false,\"auth_entry\":\"unavailable\",\"reason\":\"observation_unavailable\"}\n"
       },
       "businessStatus": 404,
-      "logTail": "2026/11/06 08:27:54 cpa-manager-plus listening on [::]:18317\n2026/11/06 08:27:54 Manager writable startup is not authorized; keeping read-only discovery available: read the Upgrade operation: file is not a database (26)\n",
+      "logTail": "2026/11/06 14:29:55 cpa-manager-plus listening on [::]:18317\n2026/11/06 14:29:55 Manager writable startup is not authorized; keeping read-only discovery available: read the Upgrade operation: file is not a database (26)\n",
       "lockProbe": {
         "exitCode": 1,
         "released": true,
-        "output": "2026/11/06 08:27:54 cleanup derived data: validate sqlite /data/usage.sqlite: file is not a database (26)\n"
+        "failures": [],
+        "output": "2026/11/06 14:29:55 cleanup derived data: validate sqlite /data/usage.sqlite: file is not a database (26)\n"
       },
       "oomKilled": false,
       "judgement": {
@@ -217,39 +230,46 @@
         "failures": [],
         "observed": {
           "label": "corrupted-database",
-          "elapsedMs": 56,
+          "elapsedMs": 4,
           "budgetMs": 10000,
           "healthStatus": 503,
           "discoveryStatus": 503,
           "businessStatus": 404,
           "logMarkerPresent": true,
           "leakedSecretCount": 0
+        },
+        "offline": {
+          "ok": true,
+          "failures": [],
+          "released": true,
+          "exitCode": 1,
+          "lockRefused": false
         }
       }
     },
     "mismatchedDataKey": {
       "secretFree": {
         "healthStatus": 200,
-        "settledAtMs": 208,
+        "settledAtMs": 146,
         "leakedSecretCount": 0,
-        "logTail": "teway_credential_binding_history_auth_id\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_timestamp\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_ts_latency_ttft_cover\n2026/11/06 08:27:56 http GET /health status=200 duration=46.207µs remote=172.17.0.1:60556\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_request_id\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_model\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_auth_index\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_endpoint\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_header_quota_recover\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_header_error_kind\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 08:27:56 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n",
+        "logTail": "2026/11/06 14:29:57 cpa-manager-plus listening on [::]:18317\n2026/11/06 14:29:57 CPA Manager Plus administrator authority loaded\n2026/11/06 14:29:57 [derived-migration] post-listen index preparation started\n2026/11/06 14:29:57 [derived-migration] creating index idx_gateway_api_key_binding_history_hash\n2026/11/06 14:29:57 http GET /health status=200 duration=25.627µs remote=172.17.0.1:58482\n2026/11/06 14:29:57 [derived-migration] creating index idx_gateway_credential_binding_history_auth_id\n",
         "note": "the secret-free fixture has no encrypted connection secret, so a mismatched data key does not reach RequireDataKeyForInspectedConnection or decryption; the candidate settles at /health 200"
       },
       "encrypted": {
         "exitCode": 1,
         "running": false,
-        "elapsedMs": 338,
+        "elapsedMs": 664,
         "healthStatus": 503,
         "failures": [],
         "leakedSecretCount": 0,
-        "logTail": "2026/11/06 08:27:57 cpa-manager-plus listening on [::]:18317\n2026/11/06 08:27:57 bootstrap manager server: decrypt secret: invalid data key or corrupted ciphertext\n",
+        "logTail": "2026/11/06 14:29:58 cpa-manager-plus listening on [::]:18317\n2026/11/06 14:29:59 bootstrap manager server: decrypt secret: invalid data key or corrupted ciphertext\n",
         "note": "RequireDataKeyForInspectedConnection only checks that data.key exists; the mismatched key is rejected when bootstrap.Run decrypts manager_config_v1/setup, and main.go fails closed with log.Fatalf"
       }
     },
     "benchmark": {
       "storage": {
         "kind": "docker-volume",
-        "volume": "cpampd29cb551d-bench"
+        "volume": "cpampdfd6b966d-bench"
       },
       "fixture": {
         "count": 100000,
@@ -258,12 +278,12 @@
         "providers": 3,
         "accounts": 100,
         "apiKeys": 10,
-        "minTimestampMs": 1783585678557,
-        "maxTimestampMs": 1793953574877,
+        "minTimestampMs": 1783607400592,
+        "maxTimestampMs": 1793975296912,
         "windowDays": 120,
         "rawBytes": 850
       },
-      "seedMs": 2192,
+      "seedMs": 2169,
       "dbBytes": 145870848,
       "limits": {
         "cpus": 2,
@@ -280,8 +300,8 @@
             "providers": 3,
             "accounts": 100,
             "apiKeys": 10,
-            "minTimestampMs": 1783585678557,
-            "maxTimestampMs": 1793953574877,
+            "minTimestampMs": 1783607400592,
+            "maxTimestampMs": 1793975296912,
             "windowDays": 120,
             "rawBytes": 850
           }
@@ -289,15 +309,15 @@
         "cold_start_within_budget": {
           "ok": true,
           "detail": {
-            "rollupOnMs": 278,
-            "rollupOffMs": 388,
+            "rollupOnMs": 294,
+            "rollupOffMs": 338,
             "budgetMs": 5000
           }
         },
         "derived_maintenance_finished": {
           "ok": true,
           "detail": {
-            "ms": 54493,
+            "ms": 55898,
             "coverageEventId": 100000,
             "status": {
               "databaseMaintenance": {
@@ -318,9 +338,9 @@
           "detail": {
             "offline": {
               "exitCode": 0,
-              "durationMs": 2417,
+              "durationMs": 2339,
               "preparedIndexes": 11,
-              "output": "2026/11/06 08:29:16 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 08:29:17 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 08:29:17 [derived-migration] creating index idx_usage_events_latest_request_source"
+              "output": "2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 14:31:22 [derived-migration] creating index idx_usage_events_latest_request_source"
             },
             "afterRestart": {
               "databaseMaintenance": {
@@ -336,21 +356,85 @@
         "fixture_exercised_by_queries": {
           "ok": true,
           "detail": {
-            "dashboard_summary": true,
-            "monitoring_header_snapshots": true,
-            "monitoring_events_page": true,
-            "usage_analytics_overview_30d": true,
-            "usage_analytics_overview_90d": true,
-            "usage_analytics_hourly_24h": true
+            "failures": [],
+            "rollupOn": {
+              "dashboard_summary": {
+                "ok": true,
+                "failures": []
+              },
+              "monitoring_header_snapshots": {
+                "ok": true,
+                "failures": []
+              },
+              "monitoring_events_page": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_overview_30d": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_overview_90d": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_hourly_24h": {
+                "ok": true,
+                "failures": []
+              }
+            },
+            "rollupOff": {
+              "dashboard_summary": {
+                "ok": true,
+                "failures": []
+              },
+              "monitoring_header_snapshots": {
+                "ok": true,
+                "failures": []
+              },
+              "monitoring_events_page": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_overview_30d": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_overview_90d": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_hourly_24h": {
+                "ok": true,
+                "failures": []
+              }
+            }
+          }
+        },
+        "index_states_recorded": {
+          "ok": true,
+          "detail": {
+            "rollupOn": {
+              "required": true,
+              "deferredIndexes": 11,
+              "performanceDegraded": true
+            },
+            "rollupOff": {
+              "required": false,
+              "deferredIndexes": 0,
+              "performanceDegraded": false
+            },
+            "comparable": false,
+            "note": "sequential observations: the rollup-on phase ran with 11 deferred indexes pending, the rollup-off phase after cleanup-derived prepared them; the difference is not attributable to the rollup flag alone"
           }
         },
         "peak_memory_within_budget": {
           "ok": true,
           "detail": {
-            "rollupOnRssBytes": 140099584,
-            "rollupOffRssBytes": 87629824,
-            "rollupOnCgroupBytes": 1418682368,
-            "rollupOffCgroupBytes": 74932224,
+            "rollupOnRssBytes": 139919360,
+            "rollupOffRssBytes": 87519232,
+            "rollupOnCgroupBytes": 1108193280,
+            "rollupOffCgroupBytes": 73715712,
             "budgetBytes": 1610612736,
             "metric": "process VmHWM (RSS)"
           }
@@ -365,10 +449,10 @@
               "Restarting": false,
               "OOMKilled": false,
               "Dead": false,
-              "Pid": 43456,
+              "Pid": 93773,
               "ExitCode": 0,
               "Error": "",
-              "StartedAt": "2026-11-06T08:28:01.844238362Z",
+              "StartedAt": "2026-11-06T14:30:03.512067935Z",
               "FinishedAt": "0001-01-01T00:00:00Z",
               "RestartCount": 0
             },
@@ -379,10 +463,10 @@
               "Restarting": false,
               "OOMKilled": false,
               "Dead": false,
-              "Pid": 43799,
+              "Pid": 94110,
               "ExitCode": 0,
               "Error": "",
-              "StartedAt": "2026-11-06T08:29:17.806086958Z",
+              "StartedAt": "2026-11-06T14:31:22.756985972Z",
               "FinishedAt": "0001-01-01T00:00:00Z",
               "RestartCount": 0
             }
@@ -392,8 +476,8 @@
       "runs": {
         "rollupOn": {
           "container": {
-            "name": "cpampd29cb551d-benchon",
-            "id": "35ecb84afac871499929ad86f55473ebccc0cc1690b7811aece9cb3c2eadbd5a"
+            "name": "cpampdfd6b966d-benchon",
+            "id": "67100bd8e0670893c7b79d931a129eef92232f8197bc4fc907f323b6b3f3a5c8"
           },
           "env": {
             "HTTP_ADDR": "0.0.0.0:18317",
@@ -402,8 +486,8 @@
             "CPA_MANAGER_ADMIN_KEY": "[redacted]",
             "CPAMP_UPDATE_CHECK_ENABLED": "false"
           },
-          "coldStartMs": 278,
-          "derivedMaintenanceMs": 54493,
+          "coldStartMs": 294,
+          "derivedMaintenanceMs": 55898,
           "derivedCoverageEventId": 100000,
           "maintenanceStatus": {
             "databaseMaintenance": {
@@ -420,57 +504,76 @@
           "samples": {
             "dashboard_summary": {
               "count": 5,
-              "p50": 308.7661870000011,
-              "p95": 318.36676499999885,
-              "min": 295.5957710000075,
-              "max": 318.36676499999885
+              "p50": 395.078388000009,
+              "p95": 430.6552559999982,
+              "min": 352.3334380000015,
+              "max": 430.6552559999982
             },
             "monitoring_header_snapshots": {
               "count": 5,
-              "p50": 2.442932000005385,
-              "p95": 2.649359999995795,
-              "min": 2.0611139999964507,
-              "max": 2.649359999995795
+              "p50": 3.4645480000035604,
+              "p95": 3.885498000003281,
+              "min": 2.793778999999631,
+              "max": 3.885498000003281
             },
             "monitoring_events_page": {
               "count": 5,
-              "p50": 114.84980399999768,
-              "p95": 118.2810649999883,
-              "min": 110.98628800000006,
-              "max": 118.2810649999883
+              "p50": 149.4587889999966,
+              "p95": 157.92979399999604,
+              "min": 146.9849910000048,
+              "max": 157.92979399999604
             },
             "usage_analytics_overview_30d": {
               "count": 5,
-              "p50": 1054.7551470000035,
-              "p95": 1086.0307759999996,
-              "min": 1053.2924950000015,
-              "max": 1086.0307759999996
+              "p50": 1164.745465999993,
+              "p95": 1335.6663079999998,
+              "min": 1089.4163049999916,
+              "max": 1335.6663079999998
             },
             "usage_analytics_overview_90d": {
               "count": 5,
-              "p50": 1889.9662740000058,
-              "p95": 1921.9240030000074,
-              "min": 1873.0854519999993,
-              "max": 1921.9240030000074
+              "p50": 2051.2191329999914,
+              "p95": 2086.760043999995,
+              "min": 1995.4045650000044,
+              "max": 2086.760043999995
             },
             "usage_analytics_hourly_24h": {
               "count": 5,
-              "p50": 279.48000799999863,
-              "p95": 377.5739300000132,
-              "min": 235.97009299999627,
-              "max": 377.5739300000132
+              "p50": 281.6372440000123,
+              "p95": 301.01147800000035,
+              "min": 267.5847919999942,
+              "max": 301.01147800000035
             }
           },
           "validations": {
-            "dashboard_summary": true,
-            "monitoring_header_snapshots": true,
-            "monitoring_events_page": true,
-            "usage_analytics_overview_30d": true,
-            "usage_analytics_overview_90d": true,
-            "usage_analytics_hourly_24h": true
+            "dashboard_summary": {
+              "ok": true,
+              "failures": []
+            },
+            "monitoring_header_snapshots": {
+              "ok": true,
+              "failures": []
+            },
+            "monitoring_events_page": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_overview_30d": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_overview_90d": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_hourly_24h": {
+              "ok": true,
+              "failures": []
+            }
           },
-          "peakMemoryBytes": 140099584,
-          "cgroupPeakMemoryBytes": 1418682368,
+          "validationFailures": [],
+          "peakMemoryBytes": 139919360,
+          "cgroupPeakMemoryBytes": 1108193280,
           "memoryMetric": "process VmHWM (RSS); cgroup memory.peak (includes page cache) recorded separately",
           "state": {
             "Status": "running",
@@ -479,18 +582,18 @@
             "Restarting": false,
             "OOMKilled": false,
             "Dead": false,
-            "Pid": 43456,
+            "Pid": 93773,
             "ExitCode": 0,
             "Error": "",
-            "StartedAt": "2026-11-06T08:28:01.844238362Z",
+            "StartedAt": "2026-11-06T14:30:03.512067935Z",
             "FinishedAt": "0001-01-01T00:00:00Z",
             "RestartCount": 0
           }
         },
         "rollupOff": {
           "container": {
-            "name": "cpampd29cb551d-benchoff",
-            "id": "f5bf165b8dd0e7a2856c15994e0cb9e275882e6fe5c0e4a6bde34081dc9b51cb"
+            "name": "cpampdfd6b966d-benchoff",
+            "id": "37b57d2b1d3f2afdb561903439974fdc2555c52515cc0cd45d04abe0d5cbea5a"
           },
           "env": {
             "HTTP_ADDR": "0.0.0.0:18317",
@@ -500,7 +603,7 @@
             "CPAMP_UPDATE_CHECK_ENABLED": "false",
             "USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED": "false"
           },
-          "coldStartMs": 388,
+          "coldStartMs": 338,
           "derivedMaintenanceMs": null,
           "derivedCoverageEventId": null,
           "maintenanceStatus": {
@@ -515,49 +618,76 @@
           "samples": {
             "dashboard_summary": {
               "count": 5,
-              "p50": 54.71328799999901,
-              "p95": 68.19610999998986,
-              "min": 36.69767999999749,
-              "max": 68.19610999998986
+              "p50": 63.595117999997456,
+              "p95": 87.61987700000464,
+              "min": 42.35069300000032,
+              "max": 87.61987700000464
             },
             "monitoring_header_snapshots": {
               "count": 5,
-              "p50": 2.3123059999925317,
-              "p95": 2.590173999997205,
-              "min": 2.1037559999967925,
-              "max": 2.590173999997205
+              "p50": 2.6502139999938663,
+              "p95": 3.9254389999987325,
+              "min": 2.3451289999939036,
+              "max": 3.9254389999987325
+            },
+            "monitoring_events_page": {
+              "count": 5,
+              "p50": 4.928862000000663,
+              "p95": 6.38224099999934,
+              "min": 4.831785000002128,
+              "max": 6.38224099999934
             },
             "usage_analytics_overview_30d": {
               "count": 5,
-              "p50": 1033.876722999994,
-              "p95": 1230.6351010000071,
-              "min": 1010.7630290000088,
-              "max": 1230.6351010000071
+              "p50": 1078.4931610000058,
+              "p95": 1189.4583989999956,
+              "min": 987.0691789999983,
+              "max": 1189.4583989999956
             },
             "usage_analytics_overview_90d": {
               "count": 5,
-              "p50": 2561.964863999994,
-              "p95": 2601.166421999995,
-              "min": 2470.8089150000014,
-              "max": 2601.166421999995
+              "p50": 2722.7507630000036,
+              "p95": 2883.206878000012,
+              "min": 2558.6311720000085,
+              "max": 2883.206878000012
             },
             "usage_analytics_hourly_24h": {
               "count": 5,
-              "p50": 7.757868999993661,
-              "p95": 10.353579000002355,
-              "min": 7.469539999990957,
-              "max": 10.353579000002355
+              "p50": 8.4834780000092,
+              "p95": 10.361147000003257,
+              "min": 8.049173000006704,
+              "max": 10.361147000003257
             }
           },
           "validations": {
-            "dashboard_summary": true,
-            "monitoring_header_snapshots": true,
-            "usage_analytics_overview_30d": true,
-            "usage_analytics_overview_90d": true,
-            "usage_analytics_hourly_24h": true
+            "dashboard_summary": {
+              "ok": true,
+              "failures": []
+            },
+            "monitoring_header_snapshots": {
+              "ok": true,
+              "failures": []
+            },
+            "monitoring_events_page": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_overview_30d": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_overview_90d": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_hourly_24h": {
+              "ok": true,
+              "failures": []
+            }
           },
-          "peakMemoryBytes": 87629824,
-          "cgroupPeakMemoryBytes": 74932224,
+          "validationFailures": [],
+          "peakMemoryBytes": 87519232,
+          "cgroupPeakMemoryBytes": 73715712,
           "memoryMetric": "process VmHWM (RSS); cgroup memory.peak (includes page cache) recorded separately",
           "state": {
             "Status": "running",
@@ -566,10 +696,10 @@
             "Restarting": false,
             "OOMKilled": false,
             "Dead": false,
-            "Pid": 43799,
+            "Pid": 94110,
             "ExitCode": 0,
             "Error": "",
-            "StartedAt": "2026-11-06T08:29:17.806086958Z",
+            "StartedAt": "2026-11-06T14:31:22.756985972Z",
             "FinishedAt": "0001-01-01T00:00:00Z",
             "RestartCount": 0
           }
@@ -577,9 +707,23 @@
       },
       "offlineCleanup": {
         "exitCode": 0,
-        "durationMs": 2417,
+        "durationMs": 2339,
         "preparedIndexes": 11,
-        "output": "2026/11/06 08:29:16 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 08:29:17 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 08:29:17 [derived-migration] creating index idx_usage_events_latest_request_source"
+        "output": "2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 14:31:22 [derived-migration] creating index idx_usage_events_latest_request_source"
+      },
+      "indexState": {
+        "rollupOn": {
+          "required": true,
+          "deferredIndexes": 11,
+          "performanceDegraded": true
+        },
+        "rollupOff": {
+          "required": false,
+          "deferredIndexes": 0,
+          "performanceDegraded": false
+        },
+        "comparable": false,
+        "note": "sequential observations: the rollup-on phase ran with 11 deferred indexes pending, the rollup-off phase after cleanup-derived prepared them; the difference is not attributable to the rollup flag alone"
       }
     }
   },
@@ -602,7 +746,7 @@
     {
       "name": "disk_guard",
       "result": "PASS",
-      "detail": "{\"mount\":\"/\",\"totalBytes\":62671097856,\"availableBytes\":6351237120,\"floorBytes\":3221225472}"
+      "detail": "{\"mount\":\"/\",\"totalBytes\":62671097856,\"availableBytes\":6350884864,\"floorBytes\":3221225472}"
     },
     {
       "name": "provenance:manager",
@@ -622,69 +766,74 @@
     {
       "name": "store_open_failure:safe_diagnostics",
       "result": "PASS",
-      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"store-open-failure\",\"elapsedMs\":164,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0}}"
+      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"store-open-failure\",\"elapsedMs\":21,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0},\"offline\":{\"ok\":true,\"failures\":[],\"released\":true,\"exitCode\":0,\"lockRefused\":false}}"
     },
     {
       "name": "corrupted_database:safe_diagnostics",
       "result": "PASS",
-      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"corrupted-database\",\"elapsedMs\":56,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0}}"
+      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"corrupted-database\",\"elapsedMs\":4,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0},\"offline\":{\"ok\":true,\"failures\":[],\"released\":true,\"exitCode\":1,\"lockRefused\":false}}"
     },
     {
       "name": "mismatched_data_key:secret_free_store",
       "result": "PASS",
-      "detail": "{\"healthStatus\":200,\"settledAtMs\":208,\"note\":\"the secret-free fixture has no encrypted connection secret, so a mismatched data key does not reach RequireDataKeyForInspectedConnection or decryption; the candidate settles at /health 200\"}"
+      "detail": "{\"healthStatus\":200,\"settledAtMs\":146,\"leakedSecretCount\":0,\"failures\":[],\"note\":\"the secret-free fixture has no encrypted connection secret, so a mismatched data key does not reach RequireDataKeyForInspectedConnection or decryption; the candidate settles at /health 200\"}"
     },
     {
       "name": "mismatched_data_key:encrypted_settings_fail_closed",
       "result": "PASS",
-      "detail": "{\"exitCode\":1,\"elapsedMs\":338,\"failures\":[],\"note\":\"RequireDataKeyForInspectedConnection only checks that data.key exists; the mismatched key is rejected when bootstrap.Run decrypts manager_config_v1/setup, and main.go fails closed with log.Fatalf\"}"
+      "detail": "{\"exitCode\":1,\"elapsedMs\":664,\"failures\":[],\"note\":\"RequireDataKeyForInspectedConnection only checks that data.key exists; the mismatched key is rejected when bootstrap.Run decrypts manager_config_v1/setup, and main.go fails closed with log.Fatalf\"}"
     },
     {
       "name": "benchmark:fixture_distribution",
       "result": "PASS",
-      "detail": "{\"count\":100000,\"uniqueHashes\":100000,\"models\":12,\"providers\":3,\"accounts\":100,\"apiKeys\":10,\"minTimestampMs\":1783585678557,\"maxTimestampMs\":1793953574877,\"windowDays\":120,\"rawBytes\":850}"
+      "detail": "{\"count\":100000,\"uniqueHashes\":100000,\"models\":12,\"providers\":3,\"accounts\":100,\"apiKeys\":10,\"minTimestampMs\":1783607400592,\"maxTimestampMs\":1793975296912,\"windowDays\":120,\"rawBytes\":850}"
     },
     {
       "name": "benchmark:cold_start_within_budget",
       "result": "PASS",
-      "detail": "{\"rollupOnMs\":278,\"rollupOffMs\":388,\"budgetMs\":5000}"
+      "detail": "{\"rollupOnMs\":294,\"rollupOffMs\":338,\"budgetMs\":5000}"
     },
     {
       "name": "benchmark:derived_maintenance_finished",
       "result": "PASS",
-      "detail": "{\"ms\":54493,\"coverageEventId\":100000,\"status\":{\"databaseMaintenance\":{\"required\":true,\"performanceDegraded\":true,\"deferredIndexes\":11,\"offlineJobs\":0,\"reasons\":[\"deferred_indexes\"],\"command\":\"cleanup-derived\"}}}"
+      "detail": "{\"ms\":55898,\"coverageEventId\":100000,\"status\":{\"databaseMaintenance\":{\"required\":true,\"performanceDegraded\":true,\"deferredIndexes\":11,\"offlineJobs\":0,\"reasons\":[\"deferred_indexes\"],\"command\":\"cleanup-derived\"}}}"
     },
     {
       "name": "benchmark:offline_maintenance_cleared_deferred_indexes",
       "result": "PASS",
-      "detail": "{\"offline\":{\"exitCode\":0,\"durationMs\":2417,\"preparedIndexes\":11,\"output\":\"2026/11/06 08:29:16 [derived-migration] creating index idx_usage_events_header_trace_id\\n2026/11/06 08:29:17 [derived-migration] creating index idx_usage_events_latest_request_auth_file\\n2026/11/06 08:29:17 [derived-migration] creating index idx_usage_events_latest_request_source\"},\"afterRestart\":{\"databaseMaintenance\":{\"required\":false,\"performanceDegraded\":false,\"deferredIndexes\":0,\"offlineJobs\":0,\"reasons\":[]}}}"
+      "detail": "{\"offline\":{\"exitCode\":0,\"durationMs\":2339,\"preparedIndexes\":11,\"output\":\"2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_header_trace_id\\n2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_latest_request_auth_file\\n2026/11/06 14:31:22 [derived-migration] creating index idx_usage_events_latest_request_source\"},\"afterRestart\":{\"databaseMaintenance\":{\"required\":false,\"performanceDegraded\":false,\"deferredIndexes\":0,\"offlineJobs\":0,\"reasons\":[]}}}"
     },
     {
       "name": "benchmark:fixture_exercised_by_queries",
       "result": "PASS",
-      "detail": "{\"dashboard_summary\":true,\"monitoring_header_snapshots\":true,\"monitoring_events_page\":true,\"usage_analytics_overview_30d\":true,\"usage_analytics_overview_90d\":true,\"usage_analytics_hourly_24h\":true}"
+      "detail": "{\"failures\":[],\"rollupOn\":{\"dashboard_summary\":{\"ok\":true,\"failures\":[]},\"monitoring_header_snapshots\":{\"ok\":true,\"failures\":[]},\"monitoring_events_page\":{\"ok\":true,\"failures\":[]},\"usage_analytics_overview_30d\":{\"ok\":true,\"failures\":[]},\"usage_analytics_overview_90d\":{\"ok\":true,\"failures\":[]},\"usage_analytics_hourly_24h\":{\"ok\":true,\"failures\":[]}},\"rollupOff\":{\"dashboard_summary\":{\"ok\":true,\"failures\":[]},\"monitoring_header_snapshots\":{\"ok\":true,\"failures\":[]},\"monitoring_events_page\":{\"ok\":true,\"failures\":[]},\"usage_analytics_overview_30d\":{\"ok\":true,\"failures\":[]},\"usage_analytics_overview_90d\":{\"ok\":true,\"failures\":[]},\"usage_analytics_hourly_24h\":{\"ok\":true,\"failures\":[]}}}"
+    },
+    {
+      "name": "benchmark:index_states_recorded",
+      "result": "PASS",
+      "detail": "{\"rollupOn\":{\"required\":true,\"deferredIndexes\":11,\"performanceDegraded\":true},\"rollupOff\":{\"required\":false,\"deferredIndexes\":0,\"performanceDegraded\":false},\"comparable\":false,\"note\":\"sequential observations: the rollup-on phase ran with 11 deferred indexes pending, the rollup-off phase after cleanup-derived prepared them; the difference is not attributable to the rollup flag alone\"}"
     },
     {
       "name": "benchmark:peak_memory_within_budget",
       "result": "PASS",
-      "detail": "{\"rollupOnRssBytes\":140099584,\"rollupOffRssBytes\":87629824,\"rollupOnCgroupBytes\":1418682368,\"rollupOffCgroupBytes\":74932224,\"budgetBytes\":1610612736,\"metric\":\"process VmHWM (RSS)\"}"
+      "detail": "{\"rollupOnRssBytes\":139919360,\"rollupOffRssBytes\":87519232,\"rollupOnCgroupBytes\":1108193280,\"rollupOffCgroupBytes\":73715712,\"budgetBytes\":1610612736,\"metric\":\"process VmHWM (RSS)\"}"
     },
     {
       "name": "benchmark:no_oom_and_no_restart",
       "result": "PASS",
-      "detail": "{\"rollupOn\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":43456,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T08:28:01.844238362Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0},\"rollupOff\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":43799,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T08:29:17.806086958Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0}}"
+      "detail": "{\"rollupOn\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":93773,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T14:30:03.512067935Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0},\"rollupOff\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":94110,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T14:31:22.756985972Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0}}"
     }
   ],
   "cleanup": {
     "ok": true,
     "released": [
-      "container:cpampd29cb551d-storeopenfailure",
-      "container:cpampd29cb551d-corrupteddatabase",
-      "container:cpampd29cb551d-mismatchedkeyempty",
-      "container:cpampd29cb551d-mismatchedkeyencrypted",
-      "container:cpampd29cb551d-benchon",
-      "container:cpampd29cb551d-benchoff",
-      "volume:cpampd29cb551d-bench"
+      "container:cpampdfd6b966d-storeopenfailure",
+      "container:cpampdfd6b966d-corrupteddatabase",
+      "container:cpampdfd6b966d-mismatchedkeyempty",
+      "container:cpampdfd6b966d-mismatchedkeyencrypted",
+      "container:cpampdfd6b966d-benchon",
+      "container:cpampdfd6b966d-benchoff",
+      "volume:cpampdfd6b966d-bench"
     ],
     "errors": [],
     "workspace": {
@@ -696,9 +845,9 @@
   "abortedSignal": null,
   "verdict": "pass",
   "exitCode": 0,
-  "redactions": 15,
+  "redactions": 18,
   "evidenceFiles": {
-    "runCopy": "readiness-gate-bc-29cb551d.json",
-    "repoCopy": "docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-29cb551d.json"
+    "runCopy": "readiness-gate-bc-fd6b966d.json",
+    "repoCopy": "docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-fd6b966d.json"
   }
 }

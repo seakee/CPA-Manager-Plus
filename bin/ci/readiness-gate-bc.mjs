@@ -126,6 +126,11 @@ export const READINESS_GATE_BC_CONTRACT = Object.freeze({
   safeHealthBody: Object.freeze({ ok: false }),
   storeOpenLogMarker: 'Manager store could not be opened; keeping safe not-ready diagnostics available',
   readOnlyDiscoveryLogMarker: 'keeping read-only discovery available',
+  // The offline maintenance command's own words. The lock refusal is what an
+  // unreleased admission looks like; the SQLite validation failure is the
+  // specific defect a corrupted file produces once the command has the lock.
+  offlineLockRefusal: 'acquire offline cleanup lock',
+  sqliteValidationFailure: 'file is not a database',
   diskFloorBytes: 3 * GIB,
 });
 
@@ -346,22 +351,70 @@ export function protectSettingValue(dataKeyBase64, plaintext) {
   return `enc:v1:${encode(nonce)}:${encode(ciphertext)}`;
 }
 
+// classifyDockerInspect separates the one outcome that means "this object is
+// gone" from every other inspect failure. A daemon that is unreachable, a
+// permission error or a renamed runtime all produce a non-zero exit too, and
+// treating those as "already removed" would let cleanup report a pass over an
+// object that is still on the host.
+export function classifyDockerInspect({ status, stdout = '', stderr = '' } = {}) {
+  if (status === 0) return { state: 'present', error: null };
+  const text = `${stderr || ''}${stdout || ''}`.trim();
+  if (/\bNo such (?:container|volume|object|image)\b/i.test(text)) {
+    return { state: 'absent', error: null };
+  }
+  const detail =
+    text.slice(0, 300) ||
+    `inspect exited ${status === null || status === undefined ? 'null' : status} with no output`;
+  return { state: 'unknown', error: detail };
+}
+
 // createDockerReleaser is the registry release callback used for containers and
-// volumes. A missing object is already released; any other failure throws, so
-// `cleanup.ok` becomes false instead of a failed `docker rm` being dropped.
-export function createDockerReleaser({ objectExists, removeObject }) {
-  if (typeof objectExists !== 'function' || typeof removeObject !== 'function') {
-    throw new TypeError('createDockerReleaser needs objectExists and removeObject');
+// volumes. Only an inspect that positively says the object is gone counts as
+// released; an inspect we cannot interpret and a failed `docker rm` both throw,
+// so `cleanup.ok` becomes false instead of a failed removal being dropped.
+export function createDockerReleaser({ inspect, removeObject }) {
+  if (typeof inspect !== 'function' || typeof removeObject !== 'function') {
+    throw new TypeError('createDockerReleaser needs inspect and removeObject');
   }
   return function release(kind, name) {
-    if (!objectExists(kind, name)) return { kind, name, removed: false };
+    const found = inspect(kind, name);
+    const state = typeof found === 'string' ? found : found?.state;
+    if (state === 'absent') return { kind, name, removed: false, present: false };
+    if (state !== 'present') {
+      const detail = typeof found === 'object' && found ? found.error : '';
+      throw new Error(`docker inspect ${kind} ${name} failed: ${detail || 'no classification'}`);
+    }
     const result = removeObject(kind, name);
     const status = typeof result === 'number' ? result : result?.status;
     if (status !== 0) {
       const stderr = typeof result === 'object' && result ? result.stderr || result.message || '' : '';
       throw new Error(`docker remove ${kind} ${name} exited ${status}: ${String(stderr).slice(0, 300)}`);
     }
-    return { kind, name, removed: true };
+    return { kind, name, removed: true, present: true };
+  };
+}
+
+// settleEphemeralTracking decides whether a finished `docker run --rm` may leave
+// the registry. Only a positive "no such container" untracks it: when the daemon
+// cannot answer, the entry stays, so the final cleanup tries again and fails
+// loudly instead of assuming the container is gone.
+export function settleEphemeralTracking({ registry, kind = 'container', name, inspected } = {}) {
+  const state = typeof inspected === 'string' ? inspected : inspected?.state;
+  if (state === 'absent') return { tracked: false, untracked: registry.untrack(kind, name) };
+  if (state === 'present') return { tracked: true, untracked: false };
+  return { tracked: true, untracked: false, unverified: inspected?.error ?? 'inspect did not answer' };
+}
+
+// checkCleanupHelper is the one fact the fallback helper must satisfy: it is
+// gone. The helper starts after the registry is fenced, so nothing else will
+// ever remove it, and a helper that outlives the run is a leak like any other.
+export function checkCleanupHelper({ name, inspected } = {}) {
+  const state = typeof inspected === 'string' ? inspected : inspected?.state;
+  if (state === 'absent') return { ok: true, name };
+  return {
+    ok: false,
+    name,
+    error: `cleanup helper ${name} is still present: ${inspected?.error ?? state ?? 'unknown'}`,
   };
 }
 
@@ -388,7 +441,63 @@ export function removeRunWorkspace(
     } catch {}
   }
   if (!exists(directory)) return { ok: true, method: 'fallback' };
-  return { ok: false, method: 'unremoved', error: `run workspace remained at ${directory}` };
+  // The directory's own path is deliberately absent: this message is archived in
+  // evidence on a failure path, and an operator's scratch layout is not
+  // evidence. The caller knows which run this was from `runId`.
+  return {
+    ok: false,
+    method: 'unremoved',
+    error: 'run workspace remained after filesystem and fallback removal',
+  };
+}
+
+// dockerRunArgs is the one place a container is described. Every container this
+// harness starts — the Manager under test, the offline helpers, the cleanup
+// helper — carries the same resource budget, so the run's resource claim covers
+// what the run actually started.
+export function dockerRunArgs({
+  name,
+  image,
+  limits = READINESS_GATE_BC_CONTRACT.limits,
+  detach = false,
+  rm = false,
+  mounts = [],
+  ports = [],
+  network = null,
+  entrypoint = null,
+  env = {},
+} = {}) {
+  if (!image) throw new Error('a run needs an image reference');
+  const args = ['run'];
+  if (rm) args.push('--rm');
+  if (detach) args.push('-d');
+  if (name) args.push('--name', name);
+  args.push(
+    '--pull=never',
+    '--platform',
+    PLATFORM,
+    `--cpus=${limits.cpus}`,
+    `--memory=${limits.memory}`,
+    `--memory-swap=${limits.memorySwap}`
+  );
+  if (network) args.push('--network', network);
+  for (const mount of mounts) args.push('-v', mount);
+  for (const port of ports) args.push('-p', port);
+  if (entrypoint) args.push('--entrypoint', entrypoint);
+  for (const [key, value] of Object.entries(env)) args.push('-e', `${key}=${value}`);
+  args.push(image);
+  return args;
+}
+
+// verifyStartedImage is the post-start check for a long-lived container: the
+// image it is actually running must be the one the evidence recorded, not a tag
+// that may have moved between the pre-check and the start.
+export function verifyStartedImage({ name, expected, actual }) {
+  if (!expected) throw new Error(`no pre-checked image id to verify ${name} against`);
+  if (actual !== expected) {
+    throw new Error(`${name} runs image ${actual}, not the pre-checked ${expected}`);
+  }
+  return { name, image: actual };
 }
 
 // verifyReleaseProvenance asserts the licence collection status the plan
@@ -469,6 +578,44 @@ function parsedBody(body) {
   }
 }
 
+// summarizeQuerySamples is the per-query measurement step as one pure decision:
+// it takes the query definition and the responses it was answered with and
+// validates EVERY sample, not just the last one. A run whose first four answers
+// are empty and whose fifth is good has a broken fixture, and only a per-sample
+// validator can see that.
+export function summarizeQuerySamples({ query, responses = [] } = {}) {
+  if (!query || !Array.isArray(responses)) {
+    throw new TypeError('summarizeQuerySamples needs a query definition and a response list');
+  }
+  const latencies = [];
+  const failures = [];
+  for (let index = 0; index < responses.length; index += 1) {
+    const response = responses[index] ?? {};
+    latencies.push(response.ms);
+    if (typeof query.validate !== 'function') continue;
+    const body = typeof response.body === 'string' ? parsedBody(response.body) : response.body;
+    if (query.validate(body) !== true) {
+      failures.push({ sample: index + 1, body: String(response.body ?? '').slice(0, 240) });
+    }
+  }
+  return {
+    sampleCount: responses.length,
+    summary: summarizeLatencies(latencies),
+    validation: { ok: failures.length === 0, failures },
+    validationFailures: failures.map((failure) => `${query.name}#${failure.sample}`),
+  };
+}
+
+// judgeSecretFreeMismatchedKey is the secret-free `data.key` variant as one
+// decision. Non-disclosure alone is not the claim: a process that never started
+// also discloses nothing, so the store must still settle at /health 200.
+export function judgeSecretFreeMismatchedKey({ healthStatus, leakedSecretCount } = {}) {
+  const failures = [];
+  if (healthStatus !== 200) failures.push(`health_status:${healthStatus}`);
+  if (leakedSecretCount !== 0) failures.push('secret_leak');
+  return { ok: failures.length === 0, failures };
+}
+
 // judgeDiagnostic is the Gate B1 contract as one pure decision. It fails closed:
 // an unreadable body, a missing marker, a business route that answers, an overrun
 // or any registered secret in a body or log line is a failure with a named code.
@@ -520,6 +667,100 @@ export function judgeDiagnostic({
       logMarkerPresent: requiredLogMarker ? String(logText).includes(requiredLogMarker) : null,
       leakedSecretCount: leaked.length,
     },
+  };
+}
+
+// judgeOfflineLock is the positive form of "the failed process released the
+// store's offline maintenance lock". It never infers release from the absence of
+// one error string:
+//
+//   * a lock refusal in the output means the lock was NOT free, whatever the
+//     exit code;
+//   * the healthy store must let `cleanup-derived` finish (exit 0) — anything
+//     else is a failure, because that command has real work to do here;
+//   * the corrupted store must fail for the corrupted file's own reason, i.e.
+//     the command acquired the lock and then hit SQLite's validation. Any other
+//     non-zero, an empty output or an unobserved status fails.
+export function judgeOfflineLock({ kind, exitCode, output = '' } = {}) {
+  const contract = READINESS_GATE_BC_CONTRACT;
+  const text = String(output ?? '');
+  const failures = [];
+  const status = typeof exitCode === 'number' && Number.isInteger(exitCode) ? exitCode : null;
+  const lockRefused = text.includes(contract.offlineLockRefusal);
+  if (lockRefused) failures.push(`offline_lock_unavailable:${status === null ? 'null' : status}`);
+  if (status === null) {
+    failures.push('offline_status_unobserved');
+  } else if (kind === 'unsupported_derived_format') {
+    if (status !== 0) failures.push(`offline_cleanup_failed:${status}`);
+  } else if (kind === 'corrupted_database_bytes') {
+    if (status === 0) {
+      failures.push('offline_cleanup_unexpected_success');
+    } else if (!text.includes(contract.sqliteValidationFailure)) {
+      failures.push(`offline_cleanup_unexpected_failure:${status}`);
+    }
+  } else {
+    failures.push(`offline_kind_unknown:${kind}`);
+  }
+  return {
+    ok: failures.length === 0,
+    failures,
+    // "released" is the positive statement: the command either completed its
+    // work or reached the store's own validation, and in both cases it held the
+    // lock. A refusal keeps it false even when the exit code looks benign.
+    released: failures.length === 0,
+    exitCode: status,
+    lockRefused,
+  };
+}
+
+// judgeFixtureExercised aggregates the body checks of BOTH measured runs. Every
+// sample of every query is validated where it is taken, so one bad response
+// among five fails the check instead of being overwritten by the next sample,
+// and the rollup-off run cannot hide behind the rollup-on run.
+export function judgeFixtureExercised({
+  rollupOn,
+  rollupOff,
+  expectedQueries = [],
+  expectedSampleCount = null,
+} = {}) {
+  const failures = [
+    ...(rollupOn?.validationFailures ?? []).map((entry) => `rollupOn:${entry}`),
+    ...(rollupOff?.validationFailures ?? []).map((entry) => `rollupOff:${entry}`),
+  ];
+  const sampled = (run) => Object.keys(run?.samples ?? {}).sort();
+  const on = sampled(rollupOn);
+  const off = sampled(rollupOff);
+  if (on.length === 0) failures.push('rollupOn:no_queries_sampled');
+  if (off.length === 0) failures.push('rollupOff:no_queries_sampled');
+  // Both configurations must have been measured on the same non-empty query set:
+  // a claim that the fixture is exercised cannot rest on one run alone.
+  if (on.join(',') !== off.join(',')) {
+    failures.push(`query_sets_differ:${on.join('+') || '-'}|${off.join('+') || '-'}`);
+  }
+  const expected = [...new Set(expectedQueries)].sort();
+  const missing = expected.filter((name) => !on.includes(name) || !off.includes(name));
+  if (missing.length > 0) failures.push(`queries_missing:${missing.join(',')}`);
+  // Each sampled query must carry the configured number of measurements, so a
+  // run that silently kept only one response per query cannot pass.
+  if (Number.isInteger(expectedSampleCount) && expectedSampleCount > 0) {
+    for (const [label, run, names] of [
+      ['rollupOn', rollupOn, on],
+      ['rollupOff', rollupOff, off],
+    ]) {
+      for (const name of names) {
+        const count = run?.samples?.[name]?.count;
+        if (count !== expectedSampleCount) {
+          failures.push(`${label}:${name}:sample_count:${count === undefined ? 'null' : count}`);
+        }
+      }
+    }
+  }
+  return {
+    ok: failures.length === 0,
+    failures,
+    rollupOnSampled: on,
+    rollupOffSampled: off,
+    expectedQueries: expected,
   };
 }
 
@@ -625,6 +866,11 @@ async function runMain(argv = process.argv.slice(2)) {
   // never inherit a half-initialised or corrupt store from the first.
   const runWorkDir = path.join(options.workDir, prefix);
   fs.mkdirSync(runWorkDir, { recursive: true });
+  // The run's own host paths become placeholders everywhere, including on the
+  // failure paths that archive an error message verbatim. The longest prefix is
+  // registered first by the redactor's own ordering, so a child path collapses
+  // with its parent.
+  for (const hostPath of [runWorkDir, options.workDir, options.output]) redactor.add(hostPath);
   let abortedSignal = null;
   let finalizing = false;
   let cleanup = { ok: true, released: [], errors: [] };
@@ -656,27 +902,49 @@ async function runMain(argv = process.argv.slice(2)) {
     return result;
   };
 
-  const objectExists = (kind, name) =>
-    docker([kind === 'container' ? 'container' : 'volume', 'inspect', name], { check: false }).status === 0;
+  // Only "No such container/volume" means the object is gone. Every other
+  // inspect failure keeps the object in the registry, so cleanup has to say it
+  // could not verify the removal instead of passing on an unanswered inspect.
+  const inspectObject = (kind, name) =>
+    classifyDockerInspect(
+      docker([kind === 'container' ? 'container' : 'volume', 'inspect', name], { check: false })
+    );
+
+  // Containers start by the image id the evidence recorded, never by the mutable
+  // tag, so a retag between the pre-check and the start cannot swap the build
+  // under test.
+  const startImage = (role) => imageEvidence[role]?.id || options.images[role];
 
   const releaseDocker = createDockerReleaser({
-    objectExists,
+    inspect: inspectObject,
     removeObject: (kind, name) =>
       docker(kind === 'container' ? ['rm', '-f', name] : ['volume', 'rm', '-f', name], { check: false }),
   });
 
-  // Every `docker run --rm` this harness starts is named inside the run prefix
-  // and registered before it starts. `--rm` normally removes it; if it survives
-  // (timeout, signal, daemon error) the registry removes it too.
-  const runEphemeral = (label, args) => {
+  // Every `docker run --rm` this harness starts is named inside the run prefix,
+  // registered before it starts and built through the same `dockerRunArgs`, so it
+  // carries the run's resource budget too. `--rm` normally removes it; if it
+  // survives (timeout, signal, daemon error) the registry removes it — and when
+  // the daemon cannot even answer whether it is gone, the entry stays so cleanup
+  // fails rather than assuming.
+  const runEphemeral = (label, spec, command = []) => {
     const suffix = randomBytes(3).toString('hex');
     const name = `${prefix}-${String(label)
       .replace(/[^a-z0-9]/gi, '')
       .toLowerCase()}-${suffix}`;
     registry.assertCreationAllowed('container', name);
     registry.track('container', name, () => releaseDocker('container', name));
-    const result = docker(['run', '--rm', '--name', name, ...args], { check: false });
-    if (!objectExists('container', name)) registry.untrack('container', name);
+    const result = docker([...dockerRunArgs({ ...spec, name, rm: true }), ...command], { check: false });
+    const settled = settleEphemeralTracking({
+      registry,
+      name,
+      inspected: inspectObject('container', name),
+    });
+    if (settled.unverified) {
+      // Kept in the registry on purpose: cleanup will retry the removal and fail
+      // with a named error if the container is really still there.
+      result.unverifiedRemoval = settled.unverified;
+    }
     return result;
   };
 
@@ -695,36 +963,45 @@ async function runMain(argv = process.argv.slice(2)) {
     registry.fence('finalizing the run');
     const outcome = await registry.releaseAll();
     const cleanupContainer = `${prefix}-cleanup`;
+    let helperFailure = null;
     const workspace = removeRunWorkspace(runWorkDir, {
       fallbackRemove: (directory) => {
         // A container user may own files the host user cannot unlink. The
         // candidate image removes the directory through the same mount. This is
         // the one container created after the registry is fenced, so it names
-        // itself inside the same prefix, uses `--rm`, and is explicitly removed
-        // again if it survived.
+        // itself inside the same prefix, uses `--rm`, carries the same resource
+        // budget, and is verified gone afterwards: a helper that outlives the
+        // cleanup is a leak like any other.
         docker(
           [
-            'run',
-            '--rm',
-            '--name',
-            cleanupContainer,
-            '--pull=never',
-            '--platform',
-            PLATFORM,
-            '--entrypoint',
-            'sh',
-            '-v',
-            `${path.dirname(directory)}:/w`,
-            options.images.manager,
+            ...dockerRunArgs({
+              name: cleanupContainer,
+              image: startImage('manager'),
+              rm: true,
+              entrypoint: 'sh',
+              mounts: [`${path.dirname(directory)}:/w`],
+            }),
             '-c',
             `rm -rf /w/${path.basename(directory)}`,
           ],
           { check: false }
         );
         docker(['rm', '-f', cleanupContainer], { check: false });
+        const helper = checkCleanupHelper({
+          name: cleanupContainer,
+          inspected: inspectObject('container', cleanupContainer),
+        });
+        if (!helper.ok) {
+          helperFailure = helper.error;
+          throw new Error(helperFailure);
+        }
       },
     });
     outcome.workspace = workspace;
+    if (helperFailure) {
+      outcome.ok = false;
+      outcome.errors.push(helperFailure);
+    }
     if (!workspace.ok) {
       outcome.ok = false;
       outcome.errors.push(workspace.error);
@@ -769,19 +1046,12 @@ async function runMain(argv = process.argv.slice(2)) {
     };
   }
 
-  function observeDisk(image) {
-    const result = runEphemeral('disk', [
-      '--pull=never',
-      '--platform',
-      PLATFORM,
-      '--network',
-      'none',
-      '--entrypoint',
-      'sh',
-      image,
-      '-c',
-      'df -Pk / | tail -1',
-    ]);
+  function observeDisk() {
+    const result = runEphemeral(
+      'disk',
+      { image: startImage('manager'), network: 'none', entrypoint: 'sh' },
+      ['-c', 'df -Pk / | tail -1']
+    );
     if (result.status !== 0) throw new Error(`could not read the Docker VM free space: ${redact(result.stderr)}`);
     const fields = result.stdout.trim().split(/\s+/);
     return {
@@ -792,29 +1062,23 @@ async function runMain(argv = process.argv.slice(2)) {
     };
   }
 
-  function startContainer({ name, mount, port, image, env }) {
+  function startContainer({ name, mount, port, env }) {
     registry.assertCreationAllowed('container', name);
     registry.track('container', name, () => releaseDocker('container', name));
-    const limits = READINESS_GATE_BC_CONTRACT.limits;
-    const args = [
-      'run',
-      '-d',
-      '--name',
+    const image = startImage('manager');
+    const args = dockerRunArgs({
       name,
-      '--pull=never',
-      '--platform',
-      PLATFORM,
-      '-v',
-      `${mount}:/data`,
-      '-p',
-      `127.0.0.1:${port}:18317`,
-      `--cpus=${limits.cpus}`,
-      `--memory=${limits.memory}`,
-      `--memory-swap=${limits.memorySwap}`,
-    ];
-    for (const [key, value] of Object.entries(env)) args.push('-e', `${key}=${value}`);
-    args.push(image);
-    return docker(args).stdout.trim();
+      image,
+      detach: true,
+      mounts: [`${mount}:/data`],
+      ports: [`127.0.0.1:${port}:18317`],
+      env,
+    });
+    docker(args);
+    // The evidence records the id, so the container that actually runs must be
+    // that id — not merely the tag it was started from.
+    const actual = docker(['inspect', name, '--format', '{{.Image}}']).stdout.trim();
+    return verifyStartedImage({ name, expected: imageEvidence.manager?.id ?? null, actual });
   }
 
   function containerId(name) {
@@ -893,17 +1157,11 @@ async function runMain(argv = process.argv.slice(2)) {
   }
 
   function initializeStore(dataDir) {
-    const result = runEphemeral('initialize', [
-      '--pull=never',
-      '--platform',
-      PLATFORM,
-      '--network',
-      'none',
-      '-v',
-      `${dataDir}:/data`,
-      options.images.manager,
+    const result = runEphemeral(
       'initialize',
-    ]);
+      { image: startImage('manager'), network: 'none', mounts: [`${dataDir}:/data`] },
+      ['initialize']
+    );
     if (result.status !== 0) {
       throw new Error(`initialize exited ${result.status}: ${redact(`${result.stderr || ''}${result.stdout || ''}`).slice(0, 800)}`);
     }
@@ -975,7 +1233,6 @@ async function runMain(argv = process.argv.slice(2)) {
       name: container,
       mount: dataDir,
       port,
-      image: options.images.manager,
       env: containerEnv(adminKey),
     });
 
@@ -1017,38 +1274,36 @@ async function runMain(argv = process.argv.slice(2)) {
 
     // The lock probe runs while the diagnostic process is still alive: a
     // release-on-exit would not prove host maintenance is unblocked.
-    const lockProbe = runEphemeral('lockprobe', [
-      '--pull=never',
-      '--platform',
-      PLATFORM,
-      '--network',
-      'none',
-      '-v',
-      `${dataDir}:/data`,
-      options.images.manager,
-      'cleanup-derived',
-      '--db-path',
-      '/data/usage.sqlite',
-    ]);
+    const lockProbe = runEphemeral(
+      'lockprobe',
+      { image: startImage('manager'), network: 'none', mounts: [`${dataDir}:/data`] },
+      ['cleanup-derived', '--db-path', '/data/usage.sqlite']
+    );
     const lockText = redact(`${lockProbe.stdout || ''}${lockProbe.stderr || ''}`);
-    // The proof is that the offline command reached its own work instead of
-    // refusing on the Manager lock. The command may still fail for the store's
-    // own defect (a corrupt file cannot be cleaned), which is a different fact
-    // and is recorded beside the release.
-    const lockRefused = lockText.includes('acquire offline cleanup lock');
-    if (lockRefused) judgement.failures.push(`offline_lock_unavailable:${lockProbe.status}`);
+    // Positive evidence only: the healthy store's offline command must finish,
+    // and the corrupted store's must reach SQLite's own validation. Any other
+    // non-zero, an empty output or an unobserved exit fails the scenario rather
+    // than counting as "the lock was free".
+    const lock = judgeOfflineLock({ kind, exitCode: lockProbe.status, output: lockText });
+    if (!lock.ok) judgement.failures.push(...lock.failures);
     judgement.ok = judgement.failures.length === 0;
+    judgement.offline = lock;
 
     const state = containerState(container);
     return {
       kind,
-      container: { name: container, id: containerId(container), image: options.images.manager },
+      container: { name: container, id: containerId(container), image: startImage('manager') },
       elapsedMs: Math.round(health.elapsedMs),
       health: { status: health.status, body: health.body.slice(0, 400) },
       discovery: { status: discovery.status, body: discovery.body.slice(0, 400) },
       businessStatus: business.status,
       logTail: logs.slice(-2000),
-      lockProbe: { exitCode: lockProbe.status, released: !lockRefused, output: lockText.slice(-500) },
+      lockProbe: {
+        exitCode: lockProbe.status,
+        released: lock.released,
+        failures: lock.failures,
+        output: lockText.slice(-500),
+      },
       oomKilled: state?.OOMKilled ?? null,
       judgement,
     };
@@ -1087,7 +1342,7 @@ async function runMain(argv = process.argv.slice(2)) {
 
       const container = `${prefix}-mismatchedkeyempty`;
       const port = await takePort();
-      startContainer({ name: container, mount: dataDir, port, image: options.images.manager, env: containerEnv(adminKey) });
+      startContainer({ name: container, mount: dataDir, port, env: containerEnv(adminKey) });
       const origin = `http://127.0.0.1:${port}`;
       let health = null;
       const startedAt = performance.now();
@@ -1153,7 +1408,7 @@ async function runMain(argv = process.argv.slice(2)) {
 
       const container = `${prefix}-mismatchedkeyencrypted`;
       const port = await takePort();
-      startContainer({ name: container, mount: dataDir, port, image: options.images.manager, env: containerEnv(adminKey) });
+      startContainer({ name: container, mount: dataDir, port, env: containerEnv(adminKey) });
       const origin = `http://127.0.0.1:${port}`;
       const startedAt = performance.now();
       let health = null;
@@ -1214,20 +1469,15 @@ async function runMain(argv = process.argv.slice(2)) {
     registry.assertCreationAllowed('volume', volume);
     registry.track('volume', volume, () => releaseDocker('volume', volume));
     docker(['volume', 'create', volume]);
-    runEphemeral('seedcopy', [
-      '--pull=never',
-      '--platform',
-      PLATFORM,
-      '--entrypoint',
-      'sh',
-      '-v',
-      `${dataDir}:/seed:ro`,
-      '-v',
-      `${volume}:/data`,
-      options.images.manager,
-      '-c',
-      'cp -a /seed/. /data/',
-    ]);
+    runEphemeral(
+      'seedcopy',
+      {
+        image: startImage('manager'),
+        entrypoint: 'sh',
+        mounts: [`${dataDir}:/seed:ro`, `${volume}:/data`],
+      },
+      ['-c', 'cp -a /seed/. /data/']
+    );
     const benchmarkMount = volume;
 
     const result = {
@@ -1243,7 +1493,7 @@ async function runMain(argv = process.argv.slice(2)) {
     const measureRun = async ({ label, container, env, waitForDerived, queries }) => {
       const port = await takePort();
       const startedAt = performance.now();
-      startContainer({ name: container, mount: benchmarkMount, port, image: options.images.manager, env });
+      startContainer({ name: container, mount: benchmarkMount, port, env });
       const origin = `http://127.0.0.1:${port}`;
       const auth = { Authorization: `Bearer ${adminKey}` };
 
@@ -1278,11 +1528,14 @@ async function runMain(argv = process.argv.slice(2)) {
       const status = await request(`${origin}/status?scope=database-maintenance`, { headers: auth });
       const maintenanceStatus = parsedBody(status.body);
 
+      // Every sample is validated where it is taken, by the same exported pure
+      // function the offline suite exercises: validating only the last body
+      // would let four empty responses hide behind a fifth good one.
       const samples = {};
       const validations = {};
+      const validationFailures = [];
       for (const query of queries) {
-        const observed = [];
-        let lastBody = null;
+        const responses = [];
         for (let index = 0; index < READINESS_GATE_BC_CONTRACT.sampleCount; index += 1) {
           const response = await request(`${origin}${query.path}`, {
             method: query.method,
@@ -1292,11 +1545,19 @@ async function runMain(argv = process.argv.slice(2)) {
           if (response.status !== 200) {
             throw new Error(`${label} ${query.name} answered ${response.status}: ${redact(response.body).slice(0, 400)}`);
           }
-          observed.push(response.ms);
-          lastBody = parsedBody(response.body);
+          responses.push({ ms: response.ms, body: response.body });
         }
-        samples[query.name] = summarizeLatencies(observed);
-        validations[query.name] = query.validate ? query.validate(lastBody) : null;
+        const measured = summarizeQuerySamples({ query, responses });
+        samples[query.name] = measured.summary;
+        validations[query.name] = {
+          ok: measured.validation.ok,
+          // Failure bodies are archived, so they go through the redactor.
+          failures: measured.validation.failures.map((failure) => ({
+            sample: failure.sample,
+            body: redact(failure.body),
+          })),
+        };
+        validationFailures.push(...measured.validationFailures);
       }
 
       const peak = processPeakRssBytes(container);
@@ -1311,6 +1572,7 @@ async function runMain(argv = process.argv.slice(2)) {
         maintenanceStatus,
         samples,
         validations,
+        validationFailures,
         peakMemoryBytes: peak,
         cgroupPeakMemoryBytes: cgroupPeak,
         memoryMetric: 'process VmHWM (RSS); cgroup memory.peak (includes page cache) recorded separately',
@@ -1400,19 +1662,11 @@ async function runMain(argv = process.argv.slice(2)) {
     // The deferred indexes are the plan's offline-maintenance step. It runs with
     // the Manager stopped, inside the candidate image, on the same mounted data.
     const cleanupStartedAt = performance.now();
-    const cleanupRun = runEphemeral('cleanupderived', [
-      '--pull=never',
-      '--platform',
-      PLATFORM,
-      '--network',
-      'none',
-      '-v',
-      `${benchmarkMount}:/data`,
-      options.images.manager,
-      'cleanup-derived',
-      '--db-path',
-      '/data/usage.sqlite',
-    ]);
+    const cleanupRun = runEphemeral(
+      'cleanupderived',
+      { image: startImage('manager'), network: 'none', mounts: [`${benchmarkMount}:/data`] },
+      ['cleanup-derived', '--db-path', '/data/usage.sqlite']
+    );
     const cleanupText = redact(`${cleanupRun.stdout || ''}${cleanupRun.stderr || ''}`);
     const preparedIndexes = (cleanupText.match(/\[derived-migration\] creating index /g) || []).length;
     result.offlineCleanup = {
@@ -1427,7 +1681,9 @@ async function runMain(argv = process.argv.slice(2)) {
       label: 'benchmark-rollup-off',
       container: `${prefix}-benchoff`,
       waitForDerived: false,
-      queries: baseQueries.filter((query) => query.name !== 'monitoring_events_page'),
+      // The same query set as the first run: a claim that the fixture is
+      // exercised must cover the queries both configurations were measured on.
+      queries: baseQueries,
       env: containerEnv(adminKey, { USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED: 'false' }),
     });
     result.runs.rollupOff = run2;
@@ -1463,10 +1719,36 @@ async function runMain(argv = process.argv.slice(2)) {
       result.offlineCleanup.exitCode === 0 && run2.maintenanceStatus?.databaseMaintenance?.required === false,
       { offline: result.offlineCleanup, afterRestart: run2.maintenanceStatus }
     );
+    const maintenancePhase = (run) => ({
+      required: run.maintenanceStatus?.databaseMaintenance?.required ?? null,
+      deferredIndexes: run.maintenanceStatus?.databaseMaintenance?.deferredIndexes ?? null,
+      performanceDegraded: run.maintenanceStatus?.databaseMaintenance?.performanceDegraded ?? null,
+    });
+    const exercised = judgeFixtureExercised({
+      rollupOn: run1,
+      rollupOff: run2,
+      expectedQueries: baseQueries.map((query) => query.name),
+      expectedSampleCount: READINESS_GATE_BC_CONTRACT.sampleCount,
+    });
+    check('fixture_exercised_by_queries', exercised.ok, {
+      failures: exercised.failures,
+      rollupOn: run1.validations,
+      rollupOff: run2.validations,
+    });
+    // The two runs are sequential observations under different index states, so
+    // the evidence records what each phase actually reported and never treats
+    // the difference as an effect of the rollup flag.
+    result.indexState = {
+      rollupOn: maintenancePhase(run1),
+      rollupOff: maintenancePhase(run2),
+      comparable: false,
+      note:
+        'sequential observations: the rollup-on phase ran with 11 deferred indexes pending, the rollup-off phase after cleanup-derived prepared them; the difference is not attributable to the rollup flag alone',
+    };
     check(
-      'fixture_exercised_by_queries',
-      Object.values(run1.validations).every((value) => value !== false),
-      run1.validations
+      'index_states_recorded',
+      result.indexState.rollupOn.required === true && result.indexState.rollupOff.required === false,
+      result.indexState
     );
     check(
       'peak_memory_within_budget',
@@ -1507,39 +1789,15 @@ async function runMain(argv = process.argv.slice(2)) {
   function runProvenanceCheck() {
     const roles = {};
     for (const [role, reference] of Object.entries(options.images)) {
-      const inventoryRun = runEphemeral(`inventory-${role}`, [
-        '--pull=never',
-        '--platform',
-        PLATFORM,
-        '--network',
-        'none',
-        '--entrypoint',
-        'cat',
-        reference,
-        PROVENANCE_PATHS.inventory,
-      ]);
-      const provenanceRun = runEphemeral(`provenance-${role}`, [
-        '--pull=never',
-        '--platform',
-        PLATFORM,
-        '--network',
-        'none',
-        '--entrypoint',
-        'cat',
-        reference,
-        PROVENANCE_PATHS.provenance,
-      ]);
-      const releaseProvenanceRun = runEphemeral(`releaseprovenance-${role}`, [
-        '--pull=never',
-        '--platform',
-        PLATFORM,
-        '--network',
-        'none',
-        '--entrypoint',
-        'cat',
-        reference,
-        PROVENANCE_PATHS.releaseProvenance,
-      ]);
+      const readFromImage = (label, target) =>
+        runEphemeral(
+          `${label}-${role}`,
+          { image: startImage(role), network: 'none', entrypoint: 'cat' },
+          [target]
+        );
+      const inventoryRun = readFromImage('inventory', PROVENANCE_PATHS.inventory);
+      const provenanceRun = readFromImage('provenance', PROVENANCE_PATHS.provenance);
+      const releaseProvenanceRun = readFromImage('releaseprovenance', PROVENANCE_PATHS.releaseProvenance);
       const inventory = inventoryRun.status === 0 ? inventoryRun.stdout : '';
       const provenance = provenanceRun.status === 0 ? provenanceRun.stdout : '';
       const verification = verifyReleaseProvenance({
@@ -1571,10 +1829,21 @@ async function runMain(argv = process.argv.slice(2)) {
 
   // -- execution and evidence ----------------------------------------------
 
+  // The harness's own bytes are part of the evidence: a document is only
+  // reproducible if a reader can tell which revision of the script produced it.
+  function harnessIdentity() {
+    const scriptPath = fileURLToPath(import.meta.url);
+    return {
+      path: path.relative(ROOT, scriptPath),
+      sha256: `sha256:${createHash('sha256').update(fs.readFileSync(scriptPath)).digest('hex')}`,
+    };
+  }
+
   function baseEvidence() {
     return {
       contract: READINESS_GATE_BC_CONTRACT.contract,
       generatedAt: new Date().toISOString(),
+      harness: harnessIdentity(),
       runId,
       prefix,
       candidateTag: READINESS_GATE_BC_CONTRACT.candidateTag,
@@ -1594,7 +1863,8 @@ async function runMain(argv = process.argv.slice(2)) {
       // inference, never an observation.
       representativeness: {
         observed: 'Docker Desktop VM on macOS x64; container limits --cpus=2 --memory=4g --memory-swap=4g',
-        productionHostClaim: '[INFERENCE] not measured on a dedicated SSD Linux host',
+        productionHostClaim:
+          'cannot be extrapolated: this is not a dedicated SSD Linux host, and production performance must be re-measured there',
       },
       fixtureConstruction:
         'candidate `initialize` creates the schema and data key; the harness removes the Fresh checkpoint rows, writes the bootstrap-state row and retires the Fresh marker so the benchmark serves the post-install Manager graph',
@@ -1628,7 +1898,7 @@ async function runMain(argv = process.argv.slice(2)) {
       record(`image:${role}`, 'PASS', { reference, id: inspected.stdout.trim() });
     }
 
-    const disk = observeDisk(options.images.manager);
+    const disk = observeDisk();
     if (disk.availableBytes < READINESS_GATE_BC_CONTRACT.diskFloorBytes) {
       record('disk_guard', 'BLOCKED', disk);
       scenarios.blocker = {
@@ -1670,9 +1940,15 @@ async function runMain(argv = process.argv.slice(2)) {
 
     const mismatched = await runMismatchedDataKey();
     scenarios.mismatchedDataKey = mismatched;
-    record('mismatched_data_key:secret_free_store', mismatched.secretFree.leakedSecretCount === 0 ? 'PASS' : 'FAIL', {
+    // The secret-free variant asserts the ordinary outcome it claims to show:
+    // the store settles at /health 200. Disclosure-free alone is not a pass — a
+    // process that never started also discloses nothing.
+    const secretFree = judgeSecretFreeMismatchedKey(mismatched.secretFree);
+    record('mismatched_data_key:secret_free_store', secretFree.ok ? 'PASS' : 'FAIL', {
       healthStatus: mismatched.secretFree.healthStatus,
       settledAtMs: mismatched.secretFree.settledAtMs,
+      leakedSecretCount: mismatched.secretFree.leakedSecretCount,
+      failures: secretFree.failures,
       note: mismatched.secretFree.note,
     });
     record(

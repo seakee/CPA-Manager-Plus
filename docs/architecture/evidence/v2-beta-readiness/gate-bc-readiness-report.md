@@ -17,10 +17,14 @@ already loaded on the Docker host.
 | Item | Value |
 | --- | --- |
 | Base commit | `8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc` |
-| Worktree branch | `test/v2-beta-readiness-evidence` |
-| Working tree | uncommitted PR-3 files (see “Changed files”) |
+| Branch | `test/v2-beta-readiness-evidence` (files listed under “Changed files”) |
 | Candidate version label | `2.0.0-r1candidate` (image provenance `version`) |
 | Platform | `linux/amd64` |
+
+Each evidence document carries `harness.sha256`, the digest of
+`bin/ci/readiness-gate-bc.mjs` read when the document was written, so a reader can
+tell which revision produced it. The archived run below was produced by
+`sha256:30f78e3609ae82eb37e33c8c8150eac33a19e7db61df0f9e516f2934a48410bb`.
 
 ## Candidate images (inspected, never built)
 
@@ -42,23 +46,35 @@ started), so every document below describes one candidate build.
 | Host OS | macOS `darwin 22.6.0`, x64, 8 logical CPUs, 32 GiB RAM |
 | Docker server | `linux/amd64 27.3.1` (Docker Desktop VM) |
 | Container limits | `--cpus=2 --memory=4g --memory-swap=4g` |
-| Docker VM free space at start | `6,351,237,120` bytes (5.92 GiB); the harness floor is 3 GiB |
+| Docker VM free space at start | `6,350,884,864` bytes (5.91 GiB); the harness floor is 3 GiB |
 | Benchmark storage | Docker volume inside the VM (the fixture is prepared on the host and copied into the volume, so measured I/O runs on the VM filesystem, not the macOS shared-folder layer) |
 
 The benchmark host is **Docker Desktop on macOS x64**, not a dedicated SSD Linux
-host. Any claim that these numbers represent a production Linux/SSD deployment
-is `[INFERENCE]`; the observed numbers are a lower bound for such a host, not a
-measurement of it.
+host. These numbers **cannot be extrapolated** to a production deployment: an
+unmeasured host has no warranted direction, so production performance must be
+re-measured there before any capacity claim is made.
 
 ## Method
 
 `node bin/ci/readiness-gate-bc.mjs` runs five scenario groups against the loaded
 candidate images. It creates one host directory `<work-dir>/cpampd<8 hex>`,
 publishes only loopback ports, names every container and volume under the same
-prefix, registers each object before creating it, and removes all of them — plus
-the host directory — on the normal path, every error path and SIGINT/SIGTERM. A
-cleanup that cannot remove what this run created fails the run instead of
-reporting a pass.
+prefix, and registers each object before creating it. Every container it starts —
+the Manager under test and each offline helper — is created through one argument
+builder and carries the same `--cpus=2 --memory=4g --memory-swap=4g` budget.
+Containers start from the image **id** the run pre-checked, not from the mutable
+tag, and each long-lived container's `.Image` is read back and must equal that
+id.
+
+Cleanup is fail-closed in both directions. Only an inspect that positively says
+"No such container/volume" counts as an object already gone; an inspect that
+answers anything else — daemon unreachable, permission denied, unparseable exit —
+keeps the object in the registry, so the run reports a failed cleanup instead of
+a clean host. The workspace-removal helper run after the registry is fenced is
+itself verified absent, and a helper that survives fails the cleanup. The
+archive registers the run's own host paths with the redactor before anything is
+created, so a failure document carries `[redacted]` where the scratch layout was
+and never an operator's local paths or a temp root.
 
 1. **Licence inventory** — `third-party-inventory.txt` and `provenance.json` are
    read out of each loaded image and checked: inventory `status`, role, the
@@ -73,16 +89,18 @@ reporting a pass.
    replaced with non-database bytes; inspection must refuse it into read-only
    discovery, never a partial graph.
 4. **Mismatched `data.key`**, in two variants:
-   - *secret-free store*: only the key is swapped, which is measured rather than
-     asserted;
+   - *secret-free store*: only the key is swapped; the check requires the
+     ordinary `/health 200` outcome **and** no disclosure, because a process that
+     never starts discloses nothing either;
    - *encrypted settings*: `manager_config_v1` and `setup` are written with the
      original key through the product's own envelope (HKDF-SHA256 + AES-256-GCM,
      AAD `settings-secret`), then `data.key` is replaced with a different key.
-     The candidate must fail closed and disclose neither key.
+     The candidate must exit non-zero with the bootstrap failure in its log and
+     disclose neither key.
 5. **2 vCPU / 4 GB benchmark** — 100,000 synthetic `usage_events` over 120 days
    (12 models, 3 providers, 100 accounts, 10 API keys, 850-byte synthetic
    `raw_json`, `timestamp_ms == created_at_ms` so the day rollups carry the same
-   spread). One transaction seeds the store (`2,192 ms`, 145,870,848 bytes), then
+   spread). One transaction seeds the store (`2,169 ms`, 145,870,848 bytes), then
    two limited runs are measured: hourly rollup enabled (default) and disabled
    (`USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false`), with `cleanup-derived`
    executed offline between them.
@@ -100,12 +118,18 @@ they are always observed samples. Peak memory is the Manager process's
 `/proc/1/status` `VmHWM` (RSS); the cgroup `memory.peak`, which also charges the
 page cache, is recorded beside it.
 
+Every measurement happens inside the container's own cgroup and filesystem. That
+is what the two-vCPU/4 GB budget constrains, but it is **not** a measurement of
+the host: page cache, scheduler and SSD behaviour outside the container are
+shared with whatever else this machine is doing, which is the second reason the
+numbers do not transfer to a production host.
+
 ## Results — Gate B1: Store/DB-open safe diagnostics (`<= 10 s`)
 
 | Scenario | Time to first `/health` response | `/health` | `/.well-known/cpamp-bootstrap` | Business route | Log marker | Offline lock |
 | --- | --- | --- | --- | --- | --- | --- |
-| `unsupported_derived_format` (real `Store.Open` failure) | **164 ms** | `503 {"ok":false}` | `503 status=unavailable` | `404` | `Manager store could not be opened; keeping safe not-ready diagnostics available` | released: `cleanup-derived` exited `0` |
-| `corrupted_database_bytes` | **56 ms** | `503 {"ok":false}` | `503 status=unavailable` | `404` | `keeping read-only discovery available` | released: `cleanup-derived` reached the file (`exit 1`, `file is not a database (26)`) without a lock refusal |
+| `unsupported_derived_format` (real `Store.Open` failure) | **21 ms** | `503 {"ok":false}` | `503 status=unavailable` | `404` | `Manager store could not be opened; keeping safe not-ready diagnostics available` | released: `cleanup-derived` exited `0` |
+| `corrupted_database_bytes` | **4 ms** | `503 {"ok":false}` | `503 status=unavailable` | `404` | `keeping read-only discovery available` | released: `cleanup-derived` reached the file (`exit 1`, `file is not a database (26)`) without a lock refusal |
 
 Both scenarios are far inside the 10,000 ms budget. No registered secret (admin
 key, injected untrusted text, host scratch path, data key) appeared in a response
@@ -113,17 +137,21 @@ body or the captured log tail (`leakedSecretCount: 0`), and neither container wa
 OOM-killed.
 
 The lock probe runs while the diagnostic process is still alive, so it proves
-admission was released rather than released-on-exit. In the corrupt-file case the
-offline command must fail — the database itself is unreadable — but it reaches
-validation instead of refusing on `usage.sqlite.manager.lock`; the harness
-records both facts separately.
+admission was released rather than released-on-exit, and it is judged on positive
+evidence only: a lock refusal in the output fails the scenario whatever the exit
+code, the healthy store's `cleanup-derived` must finish with exit `0`, and the
+corrupted store's must fail *for the corrupted file's own reason*
+(`file is not a database (26)`, i.e. after acquiring the lock and reaching
+SQLite's validation). An unexpected non-zero, an empty output or an unobserved
+exit status fails the scenario; the raw exit code is kept in both the check and
+the scenario record.
 
 ## Results — Gate B1(b): mismatched `data.key`
 
 | Variant | Observed | Secret leaks |
 | --- | --- | --- |
-| secret-free store | `/health` **200** after **208 ms** | 0 |
-| encrypted `manager_config_v1` + `setup` | **exit code 1** after **338 ms**, `running=false`; log: `bootstrap manager server: decrypt secret: invalid data key or corrupted ciphertext` | 0 |
+| secret-free store | `/health` **200** after **146 ms** | 0 |
+| encrypted `manager_config_v1` + `setup` | **exit code 1** after **664 ms**, `running=false`; log: `bootstrap manager server: decrypt secret: invalid data key or corrupted ciphertext` | 0 |
 
 Mechanism, as the code actually reads: `RequireDataKeyForInspectedConnection`
 only checks that `data.key` **exists** — it does not compare contents. With a
@@ -137,12 +165,12 @@ the log; it is not a 503 diagnostic.
 
 | Metric | Rollup on (default) | Rollup off |
 | --- | --- | --- |
-| Container start → `/health` 200 | **278 ms** | **388 ms** |
-| Derived rollups finished (pricing/monitoring/Codex, coverage `100000`) | **54,493 ms** | already covered (no rebuild) |
-| `databaseMaintenance` after rollups | `required=true`, `deferredIndexes=11`, `command=cleanup-derived` | `required=false`, `deferredIndexes=0` (after offline cleanup) |
-| Offline `cleanup-derived` (Manager stopped) | — | **2,417 ms**, `preparedIndexes=11` |
-| Peak process RSS (`VmHWM`) | **133.61 MiB** | **83.57 MiB** |
-| cgroup `memory.peak` (includes page cache) | 1,352.96 MiB | 71.46 MiB |
+| Container start → `/health` 200 | **294 ms** | **338 ms** |
+| Derived rollups finished (pricing/monitoring/Codex, coverage `100000`) | **55,898 ms** | already covered (no rebuild) |
+| `databaseMaintenance.required` **at measurement time** | `true` (`deferredIndexes=11`, `performanceDegraded=true`, `command=cleanup-derived`) | `false` (`deferredIndexes=0`, `performanceDegraded=false`) |
+| Offline `cleanup-derived` (Manager stopped) | — | **2,339 ms**, `preparedIndexes=11` |
+| Peak process RSS (`VmHWM`) | **133.44 MiB** | **83.46 MiB** |
+| cgroup `memory.peak` (includes page cache) | 1,056.86 MiB | 70.30 MiB |
 | OOM killed / restarts | `false` / `0` | `false` / `0` |
 
 Both cold starts are inside the 5,000 ms target, and peak RSS is far below the
@@ -153,32 +181,55 @@ Both cold starts are inside the 5,000 ms target, and peak RSS is far below the
 
 | Query | Rollup on P50 / P95 | Rollup off P50 / P95 |
 | --- | --- | --- |
-| Dashboard summary (`/v0/management/dashboard/summary`, today window) | **308.77 / 318.37** | **54.71 / 68.20** |
-| Monitoring header snapshots (`?days=30&limit=100`) | **2.44 / 2.65** | **2.31 / 2.59** |
-| Monitoring events page (50 rows, 30d) | **114.85 / 118.28** | not sampled (the rollup switch does not serve this path) |
-| Usage Analytics Overview, 30d / day | **1,054.76 / 1,086.03** | **1,033.88 / 1,230.64** |
-| Usage Analytics Overview, 90d / day | **1,889.97 / 1,921.92** | **2,561.96 / 2,601.17** |
-| Usage Analytics hourly, 24h | **279.48 / 377.57** | **7.76 / 10.35** |
+| Dashboard summary (`/v0/management/dashboard/summary`, today window) | **395.08 / 430.66** | **63.60 / 87.62** |
+| Monitoring header snapshots (`?days=30&limit=100`) | **3.46 / 3.89** | **2.65 / 3.93** |
+| Monitoring events page (50 rows, 30d) | **149.46 / 157.93** | **4.93 / 6.38** |
+| Usage Analytics Overview, 30d / day | **1,164.75 / 1,335.67** | **1,078.49 / 1,189.46** |
+| Usage Analytics Overview, 90d / day | **2,051.22 / 2,086.76** | **2,722.75 / 2,883.21** |
+| Usage Analytics hourly, 24h | **281.64 / 301.01** | **8.48 / 10.36** |
 
 The fixture is proven to be exercised by the queries themselves, not only by row
-counts: in the rollup-on run the 30d overview reported `total_calls >= 12,500`,
-the 90d overview a larger count, the 24h summary `> 0`, the dashboard today
-window `> 0`, and the events page exactly 50 rows. The rollup-off run validates
-the same queries it samples (all but the events page).
+counts, and **every one of the five samples is validated in both runs**: the 30d
+overview must report `total_calls >= 12,500`, the 90d overview a larger count,
+the 24h summary `> 0`, the dashboard today window `> 0`, and the events page
+exactly 50 rows. The per-sample validation is one exported pure function
+(`summarizeQuerySamples`), which the offline suite drives with four invalid and
+one valid response and with one invalid response in the fifth slot; the
+`benchmark:fixture_exercised_by_queries` check then requires both runs to have
+sampled the *same* six-query set, each query with the configured five
+measurements, and aggregates the failures of both — one invalid response anywhere
+fails Gate C instead of being overwritten by the next sample.
+
+### What the two phases are, and what they are not
+
+The two columns are **sequential observations under different index states**, not
+a controlled A/B comparison of the hourly-rollup flag:
+
+- the rollup-on phase was measured while `databaseMaintenance.required` was
+  `true` with `deferredIndexes=11`, i.e. before the offline index build;
+- `cleanup-derived` then prepared those 11 indexes with the Manager stopped, and
+  the rollup-off phase was measured with `required=false`, `deferredIndexes=0`.
+
+The difference between the columns therefore includes the index state, the page
+cache and whatever the first run left behind. **This document does not attribute
+any difference to the rollup flag**, and the evidence records the two phases'
+`databaseMaintenance` blocks side by side with `comparable: false`. A controlled
+comparison would need two copies of the same store in the same index state.
 
 Observed notes, recorded rather than smoothed:
 
 - The 30d/90d overview carries `summary_percentiles`, `summary_comparison`,
   `timeline`, `model_stats`, `channel_share`, `api_key_stats` and
   `anomaly_points` — the Usage Analytics Overview tab's include set — so it is
-  the heaviest read here: ~1.0 s (30d) and ~1.9–2.6 s (90d) on two vCPUs.
-- With the hourly rollup enabled the 24h hourly read is ~279 ms and the dashboard
-  summary ~309 ms; with it disabled the same reads fall back to the raw
-  `usage_events`/index path and answer in ~8 ms and ~55 ms. This is the observed
-  direction on this fixture; it is not a product recommendation.
-- The 90d P50 is higher with the rollup disabled than enabled. The hourly rollup
-  does not serve day-granularity queries, so this is sample variance on a
-  two-vCPU host, not an effect of the switch.
+  the heaviest read here: ~1.0–1.8 s (30d) and ~1.9–2.8 s (90d) on two vCPUs
+  across the two phases.
+- The 24h hourly read and the dashboard summary answered faster in the second
+  phase, and the 90d overview answered slower. Because the index state changed
+  between the phases, none of these differences can be attributed to the rollup
+  flag; they are what an operator sees in those two states, in that order.
+- The Monitoring events page is the one query whose two phases differ by more
+  than an order of magnitude (149.46 ms → 4.93 ms P50). The same caveat applies:
+  the second phase ran after the offline index build.
 
 ## Results — candidate licence inventory
 
@@ -203,7 +254,7 @@ names would have produced a check that always fails or, worse, a vacuous pass.
 
 | Item | Result | Evidence |
 | --- | --- | --- |
-| `node bin/ci/readiness-gate-bc.mjs` | **PASS**, `verdict: "pass"`, 18/18 checks, exit `0` | `readiness-gate-bc-29cb551d.json` |
+| `node bin/ci/readiness-gate-bc.mjs` | **PASS**, `verdict: "pass"`, 19/19 checks, exit `0` | `readiness-gate-bc-fd6b966d.json` |
 | `node bin/ci/fresh-new-installation.mjs` (same three images) | **PASS**, 30 PASS / 0 FAIL / 0 NOT RUN (3 further entries are harness request records, not checks) | `fresh-new-summary.json` |
 | `node bin/ci/fresh-external-management.mjs` (same three images) | **PASS**, 38 PASS / 0 FAIL / 2 NOT RUN (v7 CPA refusal needs `CPAMP_D_CPA_LEGACY`; no real Provider) | `fresh-external-summary.json` |
 | `node bin/ci/fresh-adopt-network.mjs` (same three images) | **PASS**, 22 PASS / 0 FAIL / 1 NOT RUN (the v7 source refusal needs `CPAMP_D_CPA_LEGACY`; no pinned v7 binary was supplied) | `fresh-adopt-summary.json` |
@@ -282,10 +333,10 @@ result rather than a gap this document hides.
 
 - `bin/ci/readiness-gate-bc.mjs` (new; Gate B1/C harness, licence inventory,
   provenance/scenario evidence, self-cleaning workspace)
-- `bin/ci/readiness-gate-bc.test.mjs` (new; 14 offline `node:test` cases)
+- `bin/ci/readiness-gate-bc.test.mjs` (new; 25 offline `node:test` cases)
 - `docs/architecture/evidence/v2-beta-readiness/gate-bc-readiness-report.md`
   (this report)
-- `docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-29cb551d.json`
+- `docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-fd6b966d.json`
   (redacted harness evidence)
 - `docs/architecture/evidence/v2-beta-readiness/fresh-new-summary.json`,
   `fresh-external-summary.json`, `fresh-adopt-summary.json`,
@@ -301,12 +352,12 @@ part of PR-3.
 
 ```bash
 node --test bin/ci/readiness-gate-bc.test.mjs
-# 14 tests, 14 pass, 0 fail
+# 25 tests, 25 pass, 0 fail
 
 node bin/ci/readiness-gate-bc.mjs \
   --output $SCRATCH/evidence \
   --work-dir $SCRATCH/work
-# verdict: pass (18/18 checks, exit 0)
+# verdict: pass (19/19 checks, exit 0)
 
 PLAYWRIGHT_MODULE=$PLAYWRIGHT \
   node bin/ci/fresh-new-installation.mjs \
@@ -349,14 +400,17 @@ go test -v ./cmd/cpa-manager-plus -run TestStoreOpenFailureKeepsSafeStartupListe
 
 ## Open risks
 
-- The benchmark ran on Docker Desktop on macOS x64. Absolute latencies are a
-  lower bound for a dedicated Linux/SSD host `[INFERENCE]`; carry forward the
-  shape (cold start, memory headroom, heavier 90d overview), not the numbers.
-- The two-vCPU host makes tail latencies sensitive to a single scheduling hiccup.
-  Repeating the same run on this host moved the 30d overview P50 by several
-  percent and the 90d P50 by more, with no change to images, fixture or limits.
-  With five samples per query, differences under ~30% are noise: the archived run
-  is one sample of that distribution, not a stable constant.
+- The benchmark ran on Docker Desktop on macOS x64. The numbers cannot be
+  extrapolated to a dedicated Linux/SSD host: production performance must be
+  re-measured there. What transfers is the shape of the workload (cold start,
+  memory headroom, the 90d overview as the heaviest read), not the values.
+- The two-vCPU host makes latencies sensitive to whatever else it is doing.
+  Repeating this run unchanged on the same images, fixture and limits moved the
+  30d overview P50 between ~1.0 s and ~1.8 s and the dashboard summary between
+  ~0.30 s and ~0.40 s. Five samples per query cannot smooth that: the archived run
+  is one sample of a wide distribution, and any single number here (including the
+  cold start and the 90d read) should be read as "order of magnitude" rather than
+  as a target.
 - After derived maintenance the Manager still reports `deferredIndexes=11` until
   the offline `cleanup-derived` runs. For an operator that is a required
   post-upgrade step (`command: cleanup-derived`), and the Manager stays ready and
@@ -374,7 +428,7 @@ go test -v ./cmd/cpa-manager-plus -run TestStoreOpenFailureKeepsSafeStartupListe
 
 ## Evidence paths (repo-relative)
 
-- `docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-29cb551d.json`
+- `docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-fd6b966d.json`
 - `docs/architecture/evidence/v2-beta-readiness/fresh-new-summary.json`
 - `docs/architecture/evidence/v2-beta-readiness/fresh-external-summary.json`
 - `docs/architecture/evidence/v2-beta-readiness/fresh-adopt-summary.json`
