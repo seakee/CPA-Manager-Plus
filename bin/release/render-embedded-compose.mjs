@@ -387,19 +387,32 @@ export function verifyOciArchiveAgainstRoleEvidence(ociTarPath, role, evidence) 
     ) {
       fail('OCI archive CPA artifact manifest digest mismatch against evidence for runtime');
     }
-    const cpaArtifact = JSON.parse(cpaArtifactBytes.toString('utf8'));
-    if (
-      !isPlainObject(cpaArtifact) ||
-      cpaArtifact.schemaVersion !== 1 ||
-      cpaArtifact.engine !== 'cpa' ||
-      cpaArtifact.version !== EXPECTED_CPA_VERSION ||
-      cpaArtifact.artifactId !== expectedCpaArtifactId ||
-      cpaArtifact.artifactId !== actualCpaSha
-    ) {
-      fail('OCI archive CPA artifact manifest mismatch for runtime');
-    }
+    assertCanonicalCpaArtifact(
+      JSON.parse(cpaArtifactBytes.toString('utf8')),
+      expectedCpaArtifactId,
+      actualCpaSha
+    );
   }
   return inspected;
+}
+
+const CPA_ARTIFACT_KEYS = ['artifactId', 'engine', 'schemaVersion', 'version'];
+
+// Mirrors verify-embedded-candidate.py: the runtime image's cpa-artifact.json
+// must be exactly the four-field document the candidate build writes, so both
+// verifiers reach the same verdict on the same archive.
+export function assertCanonicalCpaArtifact(cpaArtifact, expectedCpaArtifactId, actualCpaSha) {
+  if (
+    !isPlainObject(cpaArtifact) ||
+    Object.keys(cpaArtifact).sort().join(',') !== CPA_ARTIFACT_KEYS.join(',') ||
+    cpaArtifact.schemaVersion !== 1 ||
+    cpaArtifact.engine !== 'cpa' ||
+    cpaArtifact.version !== EXPECTED_CPA_VERSION ||
+    cpaArtifact.artifactId !== expectedCpaArtifactId ||
+    cpaArtifact.artifactId !== actualCpaSha
+  ) {
+    fail('OCI archive CPA artifact manifest mismatch for runtime');
+  }
 }
 
 export function validateVersionTag(version) {

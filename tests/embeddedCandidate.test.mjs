@@ -8,7 +8,9 @@ import { describe, expect, it } from 'vitest';
 import { generateReleaseInfo } from '../bin/release/generate-release-info.mjs';
 import { verifyCandidate, verifyImage } from '../bin/release/publish-update-index.mjs';
 import {
+  assertCanonicalCpaArtifact,
   COMPOSE_FILENAME,
+  EXPECTED_CPA_ARTIFACT_ID,
   composeYamlToRuntime12ConfigJson,
   EXPECTED_CPA_SHA256,
   PACKAGED_PATHS,
@@ -340,6 +342,27 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       },
     };
   }
+
+  it('accepts only the exact four-field CPA artifact document, like the Python verifier', () => {
+    const canonical = {
+      schemaVersion: 1,
+      engine: 'cpa',
+      version: '8.0.55',
+      artifactId: EXPECTED_CPA_ARTIFACT_ID,
+    };
+    expect(() =>
+      assertCanonicalCpaArtifact(canonical, EXPECTED_CPA_ARTIFACT_ID, EXPECTED_CPA_ARTIFACT_ID)
+    ).not.toThrow();
+    for (const artifact of [
+      { ...canonical, note: 'extra' },
+      { schemaVersion: 1, engine: 'cpa', version: '8.0.55' },
+      { ...canonical, version: '8.0.54' },
+    ]) {
+      expect(() =>
+        assertCanonicalCpaArtifact(artifact, EXPECTED_CPA_ARTIFACT_ID, EXPECTED_CPA_ARTIFACT_ID)
+      ).toThrow(/CPA artifact manifest mismatch for runtime/);
+    }
+  });
 
   it('renders digest-pinned three-image compose and pairing manifest that pass Runtime 12/18 validation', () => {
     const evidence = makeCandidateEvidence();
