@@ -162,6 +162,13 @@ const triggersRuntimeLifecycle = (filePath) =>
 const triggersNativeControl = (filePath) =>
   startsWithPath(filePath, 'bin/native') ||
   filePath === 'bin/release/package-native.sh' ||
+  // Native packaging consumes the same license collector and evidence
+  // generator as the images, so any change there must rerun its tests.
+  filePath === 'bin/release/collect-third-party-licenses.py' ||
+  filePath === 'bin/release/image-evidence.py' ||
+  filePath === 'bin/release/hash-fullweb.mjs' ||
+  filePath === 'bin/release/embedded-third-party-inventory.txt' ||
+  startsWithPath(filePath, 'bin/release/third-party-license-sources') ||
   filePath === 'tests/nativeControlScripts.test.mjs' ||
   filePath === 'package.json' ||
   filePath === 'package-lock.json';
