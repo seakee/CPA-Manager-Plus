@@ -1,0 +1,26 @@
+{
+  "harness": "bin/ci/runtime-v8-default-smoke.py",
+  "result": "PASS",
+  "scope": "normal Compose v8 bootstrap, not public Gateway qualification",
+  "architecture": "amd64",
+  "imageIds": {
+    "cpamp-runtime": "sha256:8c6a7ed65a2c4cd15c5a65b57e0e296bb519c5f8e3130f87c77e1a3647861797",
+    "cpamp-manager": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86",
+    "cpamp-ingress": "sha256:5cfa0720fb17822a3b682fe311b336aafe2ebca7c8a037b89ca1df679a7625fb"
+  },
+  "repoDigests": [],
+  "manifest": {
+    "schemaVersion": 1,
+    "engine": "cpa",
+    "version": "8.0.55",
+    "artifactId": "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+  },
+  "security": "Ingress pending; CPA loopback-only; native no-key CPA is not independently secure",
+  "notRun": [
+    "public admission",
+    "real provider",
+    "External/Upgrade migration",
+    "Beta/Release qualification"
+  ],
+  "eventCount": 113
+}

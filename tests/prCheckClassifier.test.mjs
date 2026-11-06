@@ -65,6 +65,23 @@ describe('PR check classifier', () => {
     expect(classifyChangedFiles(['bin/ci/fresh-adopt-network-other.mjs'])).toEqual(noChecks);
   });
 
+  // The Gate B/C readiness harness and its native `node:test` suite run in the
+  // Frontend job. A PR that changes only the harness, its suite or the report
+  // that quotes it must still schedule that job; a neighbouring evidence-free
+  // docs path must not.
+  it('runs the Gate B/C readiness harness when only its script, suite or report changes', () => {
+    for (const filePath of [
+      'bin/ci/readiness-gate-bc.mjs',
+      'bin/ci/readiness-gate-bc.test.mjs',
+      'docs/architecture/evidence/v2-beta-readiness/gate-bc-readiness-report.md',
+      'docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-1a2b3c4d.json',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({ ...noChecks, frontend: true });
+    }
+    expect(classifyChangedFiles(['bin/ci/readiness-gate-bc-other.mjs'])).toEqual(noChecks);
+    expect(classifyChangedFiles(['docs/architecture/other/readiness.md'])).toEqual(noChecks);
+  });
+
   // The Panel Lite acceptance and its native `node:test` suite run in the same
   // Frontend job. A PR that changes only one of them must still run that job.
   it('runs the Panel Lite harness suite when only a Panel Lite script changes', () => {

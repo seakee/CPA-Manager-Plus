@@ -1,0 +1,154 @@
+{
+  "harness": "bin/ci/panel-lite-cpa-v8.mjs",
+  "contract": "cpamp.panel-lite-cpa-v8.v2",
+  "result": "PASS",
+  "verdict": "pass",
+  "cpa": {
+    "image": "cpampd-beta-runtime:8935bce5",
+    "imageId": "sha256:8c6a7ed65a2c4cd15c5a65b57e0e296bb519c5f8e3130f87c77e1a3647861797",
+    "version": "8.0.55",
+    "executableSha256": "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+  },
+  "cpaPin": {
+    "version": "8.0.55",
+    "executableSha256": "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+  },
+  "panel": {
+    "path": "apps/web/dist/panel/management.html",
+    "bytes": 6095525,
+    "sha256": "96c6492beeb5cceb76ea9553e6799ea4fd990a3ed91833b716faa1fe47765889",
+    "singleFile": true
+  },
+  "panelSource": "worktree build of apps/web (vite --mode panel); no web source differs from 8935bce5 in this PR",
+  "phases": {
+    "build": {
+      "requested": false,
+      "built": false
+    },
+    "runtime": {
+      "network": "cpampd-lite-e8bdb79b-net",
+      "internal": true,
+      "publishedPorts": 0,
+      "probes": "docker-exec"
+    }
+  },
+  "cases": [
+    {
+      "configLayout": "legacy",
+      "staticPathMode": "config-sibling-static",
+      "enabled": {
+        "servedStatus": 200,
+        "servedSha256": "96c6492beeb5cceb76ea9553e6799ea4fd990a3ed91833b716faa1fe47765889",
+        "matchesBuild": true,
+        "releaseServerLatestServed": true,
+        "releaseServerAssetServed": true,
+        "managementAuthenticated": true,
+        "managementFieldPersisted": true,
+        "valueAfterRestart": 11,
+        "servedAfterRestartStatus": 200
+      },
+      "disabled": {
+        "status": 404,
+        "managementApi": 200,
+        "storedBundleUntouched": true,
+        "releaseServerRequests": 0
+      }
+    },
+    {
+      "configLayout": "legacy",
+      "staticPathMode": "explicit-management-static-path",
+      "enabled": {
+        "servedStatus": 200,
+        "servedSha256": "96c6492beeb5cceb76ea9553e6799ea4fd990a3ed91833b716faa1fe47765889",
+        "matchesBuild": true,
+        "releaseServerLatestServed": true,
+        "releaseServerAssetServed": true,
+        "managementAuthenticated": true,
+        "managementFieldPersisted": true,
+        "valueAfterRestart": 11,
+        "servedAfterRestartStatus": 200
+      },
+      "disabled": {
+        "status": 404,
+        "managementApi": 200,
+        "storedBundleUntouched": true,
+        "releaseServerRequests": 0
+      }
+    },
+    {
+      "configLayout": "v8",
+      "staticPathMode": "config-sibling-static",
+      "enabled": {
+        "servedStatus": 200,
+        "servedSha256": "96c6492beeb5cceb76ea9553e6799ea4fd990a3ed91833b716faa1fe47765889",
+        "matchesBuild": true,
+        "releaseServerLatestServed": true,
+        "releaseServerAssetServed": true,
+        "managementAuthenticated": true,
+        "managementFieldPersisted": true,
+        "valueAfterRestart": 11,
+        "servedAfterRestartStatus": 200
+      },
+      "disabled": {
+        "status": 404,
+        "managementApi": 200,
+        "storedBundleUntouched": true,
+        "releaseServerRequests": 0
+      }
+    },
+    {
+      "configLayout": "v8",
+      "staticPathMode": "explicit-management-static-path",
+      "enabled": {
+        "servedStatus": 200,
+        "servedSha256": "96c6492beeb5cceb76ea9553e6799ea4fd990a3ed91833b716faa1fe47765889",
+        "matchesBuild": true,
+        "releaseServerLatestServed": true,
+        "releaseServerAssetServed": true,
+        "managementAuthenticated": true,
+        "managementFieldPersisted": true,
+        "valueAfterRestart": 11,
+        "servedAfterRestartStatus": 200
+      },
+      "disabled": {
+        "status": 404,
+        "managementApi": 200,
+        "storedBundleUntouched": true,
+        "releaseServerRequests": 0
+      }
+    }
+  ],
+  "isolation": {
+    "unreachable": {
+      "releaseServer": "127.0.0.1 (unreachable)",
+      "panelServed": 404,
+      "stored": false,
+      "releaseServerReachable": "172.19.0.2:443",
+      "blocked": [
+        "1.1.1.1:443",
+        "93.184.216.34:443",
+        "github.com:443",
+        "cpamc.router-for.me:443"
+      ]
+    },
+    "releaseServerWithoutPanel": {
+      "releaseServer": "172.19.0.12 (serves no panel)",
+      "panelServed": 404,
+      "stored": false,
+      "releaseServerReachable": "172.19.0.2:443",
+      "blocked": [
+        "1.1.1.1:443",
+        "93.184.216.34:443",
+        "github.com:443",
+        "cpamc.router-for.me:443"
+      ]
+    }
+  },
+  "cleanup": {
+    "ok": true,
+    "failures": [],
+    "runId": "e8bdb79b"
+  },
+  "startedAt": "2026-11-06T08:36:11.229Z",
+  "finishedAt": "2026-11-06T08:37:06.662Z"
+}

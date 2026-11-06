@@ -71,6 +71,12 @@ const triggersFrontend = (filePath) =>
   // Frontend job as well.
   filePath === 'bin/ci/panel-lite-cpa-v8.mjs' ||
   filePath === 'bin/ci/panel-lite-cpa-v8.test.mjs' ||
+  // The Gate B/C readiness evidence harness and its native `node:test` suite run
+  // in the Frontend job; the report that quotes its observations is part of the
+  // same change and must keep that job scheduled.
+  filePath === 'bin/ci/readiness-gate-bc.mjs' ||
+  filePath === 'bin/ci/readiness-gate-bc.test.mjs' ||
+  startsWithPath(filePath, 'docs/architecture/evidence') ||
   startsWithPath(filePath, 'bin/release');
 
 const triggersManagerServer = (filePath) =>

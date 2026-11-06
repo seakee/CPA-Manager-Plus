@@ -1,0 +1,29 @@
+{
+  "source": "fresh new installation / external management / adopt network acceptance at 8935bce5",
+  "harness": "bin/ci/fresh-adopt-network.mjs",
+  "result": "PASS",
+  "gitHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
+  "imageSourceCommit": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
+  "images": {
+    "cpamp-runtime": "sha256:8c6a7ed65a2c4cd15c5a65b57e0e296bb519c5f8e3130f87c77e1a3647861797",
+    "cpamp-manager": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86",
+    "cpamp-ingress": "sha256:5cfa0720fb17822a3b682fe311b336aafe2ebca7c8a037b89ca1df679a7625fb"
+  },
+  "project": "cpampd-adopt-7c83bdd76b90",
+  "origin": "http://127.0.0.1:56097",
+  "checks": 23,
+  "checkResults": {
+    "PASS": 22,
+    "FAIL": 0,
+    "NOT RUN": 1
+  },
+  "failedChecks": [],
+  "notRun": [
+    "Real Provider model success (no Provider fixture or credential; the model request proves Client Key authentication only)",
+    "Natural ten-minute claim expiry",
+    "Adopt from a legacy-managed (CPAMP-owned) source: the product refuses every class except network_existing",
+    "Non-English locale layouts and other browser engines"
+  ],
+  "dataLayer": null,
+  "cleanup": null
+}
