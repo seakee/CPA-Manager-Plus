@@ -334,7 +334,7 @@ result rather than a gap this document hides.
 
 - `bin/ci/readiness-gate-bc.mjs` (new; Gate B1/C harness, licence inventory,
   provenance/scenario evidence, self-cleaning workspace)
-- `bin/ci/readiness-gate-bc.test.mjs` (new; 40 offline `node:test` cases)
+- `bin/ci/readiness-gate-bc.test.mjs` (new; 42 offline `node:test` cases)
 - `docs/architecture/evidence/v2-beta-readiness/gate-bc-readiness-report.md`
   (this report)
 - `docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-b3010e4c.json`
@@ -353,7 +353,7 @@ part of PR-3.
 
 ```bash
 node --test bin/ci/readiness-gate-bc.test.mjs
-# 40 tests, 40 pass, 0 fail
+# 42 tests, 42 pass, 0 fail
 
 node bin/ci/readiness-gate-bc.mjs \
   --output $SCRATCH/evidence \

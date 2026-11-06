@@ -1204,14 +1204,54 @@ test('a signal during the archive removes every file it had created', async (t) 
 // decision, not that the event loop gets a turn to deliver the signal before the
 // guard is detached. The child wires the same way the harness does — coordinator,
 // signal guard, awaitable archive — and the parent signals it while the archive
-// is provably in flight (after the run temp file is on disk).
-function runSignalledArchive(t, signalName) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `gate-bc-signal-${signalName}-`));
+// is provably in flight.
+//
+// Two windows are proven. `first-write` holds after the run temp file exists.
+// `last-rename` holds after the second `fs.promises.rename` has resolved, when
+// both final copies are on disk and the archive still owes its last
+// yield-and-check before it may report the pair as published — the window a
+// signal must roll back even though both PASS files are momentarily visible.
+function runSignalledArchive(t, signalName, window = 'first-write') {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `gate-bc-signal-${signalName}-${window}-`));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const output = path.join(root, 'run');
   const repoEvidenceDir = path.join(root, 'repo');
   const runId = 'feebdaed';
   const childPath = path.join(root, 'child.mjs');
+  const marker = window === 'last-rename' ? 'RENAMED_BOTH' : 'WROTE';
+  // The poll keeps the event loop alive while the archive is held: a bare pending
+  // promise lets Node exit before the signal is delivered.
+  const holdUntilSignalled = `await new Promise((resolve) => {
+      const timer = setInterval(() => {
+        if (seen.value) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 5);
+    });`;
+  const hooks =
+    window === 'last-rename'
+      ? `rename: async (from, to) => {
+      await fs.promises.rename(from, to);
+      renames += 1;
+      if (renames !== 2) return;
+      const finals = [
+        path.join(output, 'readiness-gate-bc-' + runId + '.json'),
+        path.join(repoDir, 'readiness-gate-bc-' + runId + '.json'),
+      ];
+      if (!finals.every((file) => fs.existsSync(file))) {
+        throw new Error('both final copies should be on disk after the second rename');
+      }
+      process.stdout.write('RENAMED_BOTH\\n');
+      ${holdUntilSignalled}
+    },`
+      : `// Hold the archive in flight after the run copy exists, so the signal lands
+    // in the middle of publishing rather than before it starts.
+    writeFile: async (file, data) => {
+      await fs.promises.writeFile(file, data);
+      process.stdout.write('WROTE ' + path.basename(file) + '\\n');
+      ${holdUntilSignalled}
+    },`;
   fs.writeFileSync(
     childPath,
     `import fs from 'node:fs';
@@ -1228,6 +1268,7 @@ process.on(signalName, () => {
   seen.value = true;
 });
 
+${window === 'last-rename' ? 'let renames = 0;' : ''}
 const redactor = createRedactor([]);
 redactor.add(output);
 redactor.add(repoDir);
@@ -1244,22 +1285,7 @@ const written = await coordinator.trackArchive(
     repoEvidenceDir: repoDir,
     runId,
     interrupted: () => signal,
-    // Hold the archive in flight after the run copy exists, so the signal lands
-    // in the middle of publishing rather than before it starts. The poll keeps
-    // the event loop alive: a bare pending promise lets Node exit before the
-    // signal is delivered.
-    writeFile: async (file, data) => {
-      await fs.promises.writeFile(file, data);
-      process.stdout.write('WROTE ' + path.basename(file) + '\\n');
-      await new Promise((resolve) => {
-        const timer = setInterval(() => {
-          if (seen.value) {
-            clearInterval(timer);
-            resolve();
-          }
-        }, 5);
-      });
-    },
+    ${hooks}
   })
 );
 guard.detach();
@@ -1284,7 +1310,7 @@ process.exitCode = written.aborted ? finalExitCode({ runOk: false, signal: guard
     }, 15_000);
     child.stdout.on('data', (chunk) => {
       stdout += String(chunk);
-      if (!signalled && stdout.includes('WROTE')) {
+      if (!signalled && stdout.includes(marker)) {
         signalled = true;
         process.kill(child.pid, signalName);
       }
@@ -1298,24 +1324,36 @@ process.exitCode = written.aborted ? finalExitCode({ runOk: false, signal: guard
       resolve({ code, bySignal, stdout, stderr });
     });
   }).then((result) => {
+    const label = `${signalName} after ${window}`;
+    assert.equal(result.stdout.includes(marker), true, `${label}: ${JSON.stringify(result)}`);
     const expected = signalName === 'SIGTERM' ? 143 : 130;
-    assert.equal(result.code, expected, `${signalName}: ${JSON.stringify(result)}`);
+    assert.equal(result.code, expected, `${label}: ${JSON.stringify(result)}`);
     for (const file of [
       path.join(output, `readiness-gate-bc-${runId}.json`),
       path.join(repoEvidenceDir, `readiness-gate-bc-${runId}.json`),
       path.join(output, `readiness-gate-bc-${runId}.json.tmp-${child.pid}`),
       path.join(repoEvidenceDir, `readiness-gate-bc-${runId}.json.tmp-${child.pid}`),
     ]) {
-      assert.equal(fs.existsSync(file), false, `${signalName} left ${file}`);
+      assert.equal(fs.existsSync(file), false, `${label} left ${file}`);
     }
-    assert.deepEqual(fs.readdirSync(output), [], signalName);
-    assert.deepEqual(fs.readdirSync(repoEvidenceDir), [], signalName);
+    assert.deepEqual(fs.readdirSync(output), [], label);
+    assert.deepEqual(fs.readdirSync(repoEvidenceDir), [], label);
   });
 }
 
 test('a real SIGTERM during the archive exits 143 with no file left behind', (t) => runSignalledArchive(t, 'SIGTERM'));
 
 test('a real SIGINT during the archive exits 130 with no file left behind', (t) => runSignalledArchive(t, 'SIGINT'));
+
+// The window the reviewer named: both final copies have been renamed into place
+// and are momentarily visible, but the archive has not reported the pair yet. The
+// last yield-and-check must still roll both copies back. Removing that check makes
+// these two tests fail with both PASS documents left on disk.
+test('a real SIGTERM after the second rename exits 143 and removes both copies', (t) =>
+  runSignalledArchive(t, 'SIGTERM', 'last-rename'));
+
+test('a real SIGINT after the second rename exits 130 and removes both copies', (t) =>
+  runSignalledArchive(t, 'SIGINT', 'last-rename'));
 
 test('the write probe never removes a file it did not create', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-probe-owner-'));
