@@ -572,6 +572,7 @@ describe('confirmed reauth Codex quota state merge', () => {
       providerQuota({
         planType: 'plus',
         rateLimitResetCreditsAvailableCount: 2,
+        resetCreditsCountSource: 'summary',
         rateLimitResetCredits: [
           {
             id: 'credit-1',
@@ -581,6 +582,10 @@ describe('confirmed reauth Codex quota state merge', () => {
           },
         ],
         rateLimitResetCreditsError: 'old refresh warning',
+        resetCreditsEvidenceAtMs: 1_000,
+        resetCreditsCountEvidenceAtMs: 1_000,
+        resetCreditsDetailEvidenceAtMs: 900,
+        resetCreditsDetailStale: true,
       }),
       {
         status: 'error',
@@ -600,8 +605,13 @@ describe('confirmed reauth Codex quota state merge', () => {
       errorStatus: 429,
       planType: 'plus',
       rateLimitResetCreditsAvailableCount: 2,
+      resetCreditsCountSource: 'summary',
       rateLimitResetCredits: [expect.objectContaining({ id: 'credit-1' })],
       rateLimitResetCreditsError: 'old refresh warning',
+      resetCreditsEvidenceAtMs: 1_000,
+      resetCreditsCountEvidenceAtMs: 1_000,
+      resetCreditsDetailEvidenceAtMs: 900,
+      resetCreditsDetailStale: true,
     });
   });
 

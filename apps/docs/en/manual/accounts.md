@@ -57,6 +57,8 @@ Provider quota refresh remains explicit. Opening Accounts, reading history, or p
 
 CPAMP reconciles evidence by credential identity and observation time. Newer healthy evidence can supersede older reauth, quota-limit, cooldown, and action-candidate state; a newer `401` or explicit quota exhaustion remains authoritative. After reauthentication, inspection and quota evidence from the replaced credential cannot reattach to the new credential.
 
+After a successful xAI OAuth quota refresh, CPAMP queries `/user?include=subscription` and `/settings` through CPA in the background to resolve plan names such as SuperGrok Heavy. Quota appears first; optional lookup failures retain existing data and do not edit auth files. The live subscription takes precedence over a potentially stale settings label. A plan name alone does not prove all models available: health still requires current quota or request evidence. Observed quota remains visible in the overview when the plan is unrecognized.
+
 | Provider        | Possible evidence                                                              | Boundary                                                                                            |
 | --------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
 | Codex           | Five-hour/weekly windows, reset, Headers, workspace, and inspection state      | Fields depend on plan and API responses.                                                            |
