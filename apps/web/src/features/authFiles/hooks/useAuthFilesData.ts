@@ -731,10 +731,15 @@ const readApiErrorStatus = (error: unknown): number | undefined => {
   return typeof status === 'number' ? status : undefined;
 };
 
+type StoredAuthFileProbe =
+  | { kind: 'found'; text: string }
+  | { kind: 'missing' }
+  | { kind: 'failed' };
+
 const probeStoredAuthFile = async (
   fileName: string,
   scope: Parameters<typeof authFilesApi.downloadText>[1]
-): Promise<{ kind: 'found'; text: string } | { kind: 'missing' } | { kind: 'failed' }> => {
+): Promise<StoredAuthFileProbe> => {
   try {
     const text = scope
       ? await authFilesApi.downloadText(fileName, scope)
@@ -745,21 +750,52 @@ const probeStoredAuthFile = async (
   }
 };
 
+const matchesStoredCredentialExclusions = (
+  text: string,
+  incomingValue: unknown,
+  incomingSignature: string | null
+): boolean => {
+  let currentValue: unknown;
+  try {
+    currentValue = JSON.parse(text) as unknown;
+  } catch {
+    return false;
+  }
+  const currentSignature = buildCredentialExclusionSignature(currentValue);
+  return (
+    Array.isArray(currentValue) === Array.isArray(incomingValue) &&
+    currentSignature !== null &&
+    incomingSignature !== null &&
+    currentSignature === incomingSignature
+  );
+};
+
+type ExistingAuthFileNames = {
+  // Every physical name exactly as reported, so two names differing only by case stay separate.
+  exactNames: Set<string>;
+  // Case-folded alias index; only used to find candidates, never to pick the probe target.
+  byLowerName: Map<string, string[]>;
+};
+
 const collectExistingAuthFileNames = async (
   files: AuthFileItem[],
   scope: Parameters<typeof authFilesApi.list>[0]
-): Promise<Map<string, string> | null> => {
-  const names = new Map<string, string>();
+): Promise<ExistingAuthFileNames | null> => {
+  const exactNames = new Set<string>();
+  const byLowerName = new Map<string, string[]>();
   const remember = (file: { name?: unknown } | null | undefined) => {
-    if (typeof file?.name === 'string' && file.name.trim()) {
-      names.set(file.name.toLowerCase(), file.name);
-    }
+    if (typeof file?.name !== 'string' || !file.name.trim()) return;
+    if (exactNames.has(file.name)) return;
+    exactNames.add(file.name);
+    const variants = byLowerName.get(file.name.toLowerCase());
+    if (variants) variants.push(file.name);
+    else byLowerName.set(file.name.toLowerCase(), [file.name]);
   };
   files.forEach(remember);
   try {
     const response = scope ? await authFilesApi.list(scope) : await authFilesApi.list();
     (response.files ?? []).forEach(remember);
-    return names;
+    return { exactNames, byLowerName };
   } catch {
     // Without a server list a new file cannot be told apart from an overwrite.
     return null;
@@ -1118,59 +1154,61 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
 
       const changedFileNames: string[] = [];
       const batchSignatures = new Map<string, string | null>();
+      const foldedBatchSignatures = new Map<string, string | null>();
+      const probeCache = new Map<string, StoredAuthFileProbe>();
       for (const item of incoming) {
         const fileName = item.fileName.trim();
         const normalizedName = fileName.toLowerCase();
         const incomingSignature = buildCredentialExclusionSignature(item.value);
 
         // Two entries of one batch writing the same name would race each other.
-        if (batchSignatures.has(normalizedName)) {
-          if (batchSignatures.get(normalizedName) !== incomingSignature) {
+        if (batchSignatures.has(fileName)) {
+          if (batchSignatures.get(fileName) !== incomingSignature) {
             changedFileNames.push(fileName);
           }
           continue;
         }
-        batchSignatures.set(normalizedName, incomingSignature);
+        batchSignatures.set(fileName, incomingSignature);
+        // Names differing only by case may reach one file on a case-insensitive backend, so a
+        // batch must not leave them with different contents. Both are still probed below.
+        const foldedConflict =
+          foldedBatchSignatures.has(normalizedName) &&
+          foldedBatchSignatures.get(normalizedName) !== incomingSignature;
+        if (!foldedBatchSignatures.has(normalizedName)) {
+          foldedBatchSignatures.set(normalizedName, incomingSignature);
+        }
 
         if (!isWritableAuthFileName(fileName)) {
           changedFileNames.push(fileName || item.fileName);
           continue;
         }
 
-        const listedAsExisting =
-          existingFileNames === null ? null : existingFileNames.has(normalizedName);
-        const downloadName = existingFileNames?.get(normalizedName) ?? fileName;
-
-        // The listing only reports the manager cache while the download reads the file on disk,
-        // so an unlisted name still has to be probed; only a definite 404 proves it is free.
-        const probe = await probeStoredAuthFile(downloadName, requestScope);
-        if (probe.kind === 'missing') {
-          if (listedAsExisting === false) continue;
-          changedFileNames.push(fileName);
-          continue;
-        }
-        if (probe.kind === 'failed') {
-          changedFileNames.push(fileName);
-          continue;
+        // Probe the physical name the upload will write first, then every listed name that only
+        // differs by case: a sibling credential must never vouch for the file being overwritten.
+        const probeTargets = [fileName];
+        for (const variant of existingFileNames?.byLowerName.get(normalizedName) ?? []) {
+          if (variant !== fileName) probeTargets.push(variant);
         }
 
-        let currentValue: unknown;
-        try {
-          currentValue = JSON.parse(probe.text) as unknown;
-        } catch {
-          changedFileNames.push(fileName);
-          continue;
-        }
+        let rejected = false;
+        for (const probeTarget of probeTargets) {
+          const listedAsExisting =
+            existingFileNames === null ? null : existingFileNames.exactNames.has(probeTarget);
 
-        const currentSignature = buildCredentialExclusionSignature(currentValue);
-        if (
-          Array.isArray(currentValue) !== Array.isArray(item.value) ||
-          currentSignature === null ||
-          incomingSignature === null ||
-          currentSignature !== incomingSignature
-        ) {
-          changedFileNames.push(fileName);
+          // The listing only reports the manager cache while the download reads the file on disk,
+          // so an unlisted name still has to be probed; only a definite 404 proves it is free.
+          // One batch can reach the same physical name through several case variants.
+          const probe =
+            probeCache.get(probeTarget) ?? (await probeStoredAuthFile(probeTarget, requestScope));
+          probeCache.set(probeTarget, probe);
+          rejected =
+            probe.kind === 'failed' ||
+            (probe.kind === 'missing'
+              ? listedAsExisting !== false
+              : !matchesStoredCredentialExclusions(probe.text, item.value, incomingSignature));
+          if (rejected) break;
         }
+        if (rejected || foldedConflict) changedFileNames.push(fileName);
       }
 
       if (changedFileNames.length > 0) {
