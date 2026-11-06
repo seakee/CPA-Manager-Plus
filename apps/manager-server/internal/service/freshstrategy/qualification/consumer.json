@@ -22,7 +22,7 @@
           ]
         }
       ],
-      "acceptanceSha256": "5e2c9dcc9bf2ad453cd9c4d5312eac9a2f1e8f79d408c806e55c7b18ac9758e5",
+      "acceptanceSha256": "025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d",
       "limitations": [
         "management_generation_v8",
         "exact_cpa_v8_artifact_identity",
@@ -61,7 +61,7 @@
           ]
         }
       ],
-      "acceptanceSha256": "5e2c9dcc9bf2ad453cd9c4d5312eac9a2f1e8f79d408c806e55c7b18ac9758e5",
+      "acceptanceSha256": "025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d",
       "limitations": [
         "management_generation_v8",
         "read_only_bounded_safe_read",
@@ -110,7 +110,7 @@
           ]
         }
       ],
-      "acceptanceSha256": "5e2c9dcc9bf2ad453cd9c4d5312eac9a2f1e8f79d408c806e55c7b18ac9758e5",
+      "acceptanceSha256": "025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d",
       "limitations": [
         "management_generation_v8",
         "read_only_bounded_safe_read",
@@ -170,7 +170,7 @@
           ]
         }
       ],
-      "acceptanceSha256": "5e2c9dcc9bf2ad453cd9c4d5312eac9a2f1e8f79d408c806e55c7b18ac9758e5",
+      "acceptanceSha256": "025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d",
       "limitations": [
         "management_generation_v8",
         "read_only_bounded_safe_read",
