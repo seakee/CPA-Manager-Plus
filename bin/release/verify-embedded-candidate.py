@@ -535,7 +535,10 @@ def verify_archive_anchor(path, role, evidence, pairing, source_commit):
         if role == "manager":
             wanted.update({WEB_MANIFEST, API_CONTRACT})
         if role == "runtime":
-            wanted.add("/usr/local/bin/cli-proxy-api")
+            wanted.update({
+                "/usr/local/bin/cli-proxy-api",
+                "/usr/local/share/cpamp/runtime/cpa-artifact.json",
+            })
         files, _ = final_files(archive, layers, rootfs.get("diff_ids") or [], wanted)
         compiled_identity = check_go_binary(files[GO_BINARIES[role]], role, source_commit)
         require(compiled_identity.get("managerCompiledSourceClaim") ==
@@ -589,8 +592,23 @@ def verify_archive_anchor(path, role, evidence, pairing, source_commit):
                     },
                     "OCI archive API transport contract mismatch against pairing")
         if role == "runtime":
-            require(hashlib.sha256(files["/usr/local/bin/cli-proxy-api"]).hexdigest() == CPA_SHA,
+            cpa_bytes = files["/usr/local/bin/cli-proxy-api"]
+            actual_cpa_digest = digest(cpa_bytes)
+            require(hashlib.sha256(cpa_bytes).hexdigest() == CPA_SHA and
+                    actual_cpa_digest == ev_img["packagedFiles"].get("/usr/local/bin/cli-proxy-api") and
+                    actual_cpa_digest == pairing["cpa"]["artifact_id"],
                     "OCI archive official CPA v8.0.55 executable hash mismatch")
+            cpa_artifact_path = "/usr/local/share/cpamp/runtime/cpa-artifact.json"
+            cpa_artifact_bytes = files[cpa_artifact_path]
+            require(digest(cpa_artifact_bytes) == ev_img["packagedFiles"].get(cpa_artifact_path),
+                    "OCI archive CPA artifact manifest digest mismatch against evidence")
+            cpa_artifact = json_object(cpa_artifact_bytes, "CPA artifact manifest")
+            require(cpa_artifact == {
+                "schemaVersion": 1,
+                "engine": "cpa",
+                "version": "8.0.55",
+                "artifactId": "sha256:" + CPA_SHA,
+            }, "OCI archive CPA artifact manifest mismatch for runtime")
 
 
 def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=None):
@@ -694,26 +712,34 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
         node_env["NODE_PATH"] = str(repo_node_modules) + (os.pathsep + existing if existing else "")
     official_cpa_sha = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
     with tempfile.TemporaryDirectory(prefix="cpamp-verify-pairing-") as temp_dir:
-        ev_for_node = json.loads(json.dumps(evidence))
-        pairing_for_node = json.loads(json.dumps(pairing))
-        if CPA_SHA != official_cpa_sha:
-            ev_for_node["officialCPA"]["verifiedFinalImageExecutableSHA256"] = official_cpa_sha
-            ev_for_node["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
-                "sha256:" + official_cpa_sha
-            )
-            pairing_for_node["cpa"]["artifact_id"] = "sha256:" + official_cpa_sha
         ev_file = Path(temp_dir) / "candidate-evidence.json"
-        ev_file.write_text(json.dumps(ev_for_node), encoding="utf-8")
+        ev_file.write_text(json.dumps(evidence), encoding="utf-8")
         pairing_file = Path(temp_dir) / "embedded-release-pairing.json"
-        pairing_file.write_text(json.dumps(pairing_for_node), encoding="utf-8")
-        cmd = [
-            "node", str(renderer), "--verify",
+        pairing_file.write_text(json.dumps(pairing), encoding="utf-8")
+        cli_args = [
+            "--verify",
             "--evidence", str(ev_file),
             "--compose", str(compose_path),
             "--pairing", str(pairing_file),
         ]
         for role in ROLES:
-            cmd.extend([f"--{role}-oci", str(archive_paths[role])])
+            cli_args.extend([f"--{role}-oci", str(archive_paths[role])])
+        if CPA_SHA == official_cpa_sha:
+            cmd = ["node", str(renderer), *cli_args]
+        else:
+            runner_file = Path(temp_dir) / "run-verify.mjs"
+            runner_file.write_text(
+                f"import {{ setExpectedCpaSha256ForTest, runCli }} from {json.dumps(renderer.resolve().as_uri())};\n"
+                f"setExpectedCpaSha256ForTest({json.dumps(CPA_SHA)});\n"
+                "try {\n"
+                "  runCli(process.argv.slice(2));\n"
+                "} catch (err) {\n"
+                "  console.error('STOP: ' + err.message);\n"
+                "  process.exit(1);\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            cmd = ["node", str(runner_file), *cli_args]
         proc = subprocess.run(
             cmd, env=node_env, capture_output=True, text=True, timeout=20, check=False,
         )

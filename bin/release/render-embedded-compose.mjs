@@ -45,6 +45,26 @@ export const EXPECTED_CPA_VERSION = '8.0.55';
 export const EXPECTED_CPA_SHA256 =
   'e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7';
 export const EXPECTED_CPA_ARTIFACT_ID = `sha256:${EXPECTED_CPA_SHA256}`;
+
+let activeExpectedCpaSha256 = EXPECTED_CPA_SHA256;
+
+export function setExpectedCpaSha256ForTest(sha256Hex = EXPECTED_CPA_SHA256) {
+  if (typeof sha256Hex !== 'string' || !/^[0-9a-f]{64}$/.test(sha256Hex)) {
+    throw new Error(
+      `Embedded compose/pairing contract failed: invalid test CPA sha256 pin: ${String(sha256Hex)}`
+    );
+  }
+  activeExpectedCpaSha256 = sha256Hex;
+}
+
+function getExpectedCpaSha256() {
+  return activeExpectedCpaSha256;
+}
+
+function getExpectedCpaArtifactId() {
+  return `sha256:${activeExpectedCpaSha256}`;
+}
+
 export const EXPECTED_API_CONTRACT_ID = 'cpamp-r1-embedded-public-api-transport-v1';
 export const EXPECTED_API_CONTRACT_QUALIFICATION =
   'SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY';
@@ -349,18 +369,34 @@ export function verifyOciArchiveAgainstRoleEvidence(ociTarPath, role, evidence) 
     );
   }
   if (role === 'runtime') {
+    const expectedCpaArtifactId = getExpectedCpaArtifactId();
     const cpaBinaryBytes = inspected.files.get(PACKAGED_PATHS.cpaBinary);
     const cpaArtifactBytes = inspected.files.get(PACKAGED_PATHS.cpaArtifact);
     const actualCpaSha = sha256Digest(cpaBinaryBytes);
+    if (
+      actualCpaSha !== expectedCpaArtifactId ||
+      actualCpaSha !== evImg.packagedFiles[PACKAGED_PATHS.cpaBinary]
+    ) {
+      fail('OCI archive official CPA v8.0.55 executable hash mismatch for runtime');
+    }
+    const actualCpaArtifactDocSha = sha256Digest(cpaArtifactBytes);
+    const expectedCpaArtifactDocSha = evImg.packagedFiles[PACKAGED_PATHS.cpaArtifact];
+    if (
+      !SHA256_DIGEST_RE.test(expectedCpaArtifactDocSha ?? '') ||
+      actualCpaArtifactDocSha !== expectedCpaArtifactDocSha
+    ) {
+      fail('OCI archive CPA artifact manifest digest mismatch against evidence for runtime');
+    }
     const cpaArtifact = JSON.parse(cpaArtifactBytes.toString('utf8'));
     if (
       !isPlainObject(cpaArtifact) ||
       cpaArtifact.schemaVersion !== 1 ||
       cpaArtifact.engine !== 'cpa' ||
       cpaArtifact.version !== EXPECTED_CPA_VERSION ||
+      cpaArtifact.artifactId !== expectedCpaArtifactId ||
       cpaArtifact.artifactId !== actualCpaSha
     ) {
-      fail('OCI archive CPA executable or artifact manifest mismatch for runtime');
+      fail('OCI archive CPA artifact manifest mismatch for runtime');
     }
   }
   return inspected;
@@ -431,7 +467,7 @@ export function validateCandidateEvidence(evidence) {
   }
   if (
     evidence.officialCPA.version !== EXPECTED_CPA_VERSION ||
-    evidence.officialCPA.verifiedFinalImageExecutableSHA256 !== EXPECTED_CPA_SHA256
+    evidence.officialCPA.verifiedFinalImageExecutableSHA256 !== getExpectedCpaSha256()
   ) {
     fail('candidate evidence officialCPA pin mismatch');
   }
@@ -505,8 +541,13 @@ export function validateCandidateEvidence(evidence) {
     }
 
     if (role === 'runtime') {
-      if (files[PACKAGED_PATHS.cpaBinary] !== EXPECTED_CPA_ARTIFACT_ID) {
+      if (files[PACKAGED_PATHS.cpaBinary] !== getExpectedCpaArtifactId()) {
         fail('Runtime packaged CPA executable hash mismatch');
+      }
+      if (!SHA256_DIGEST_RE.test(files[PACKAGED_PATHS.cpaArtifact] ?? '')) {
+        fail(
+          `Runtime missing packaged CPA artifact manifest digest (${PACKAGED_PATHS.cpaArtifact})`
+        );
       }
     }
   }
@@ -1143,7 +1184,7 @@ export function verifyEmbeddedReleaseArtifacts({
   if (
     !isPlainObject(pairing.cpa) ||
     pairing.cpa.version !== EXPECTED_CPA_VERSION ||
-    pairing.cpa.artifact_id !== EXPECTED_CPA_ARTIFACT_ID
+    pairing.cpa.artifact_id !== getExpectedCpaArtifactId()
   ) {
     fail('pairing CPA pin mismatch');
   }
@@ -1320,7 +1361,7 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
     platform: 'linux/amd64',
     cpa: {
       version: EXPECTED_CPA_VERSION,
-      artifact_id: EXPECTED_CPA_ARTIFACT_ID,
+      artifact_id: getExpectedCpaArtifactId(),
     },
     fullweb,
     api_contract,
@@ -1444,53 +1485,58 @@ function parseCliArgs(argv) {
   return args;
 }
 
+export function runCli(argv = process.argv.slice(2)) {
+  const cli = parseCliArgs(argv);
+  const evidenceFile = resolve(cli.evidencePath);
+  const evidence = JSON.parse(readFileSync(evidenceFile, 'utf8'));
+  const evidenceDir = dirname(evidenceFile);
+
+  if (cli.verify) {
+    const composeText = readFileSync(cli.composePath, 'utf8');
+    const pairing = JSON.parse(readFileSync(cli.pairingPath, 'utf8'));
+    const { composeDoc } = verifyEmbeddedReleaseArtifacts({
+      evidence,
+      composeText,
+      pairing,
+      evidenceDir,
+      roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
+      requireOciArchives: true,
+    });
+    if (cli.composeJsonPath) {
+      mkdirSync(dirname(cli.composeJsonPath), { recursive: true });
+      writeFileSync(cli.composeJsonPath, JSON.stringify(composeDoc, null, 2) + '\n', 'utf8');
+    }
+    console.log(
+      `Embedded compose/pairing verification passed: ${cli.composePath} + ${cli.pairingPath}`
+    );
+    return;
+  }
+
+  const { composeYaml, composeJson, pairing } = renderEmbeddedReleaseArtifacts(evidence, {
+    version: cli.version,
+    registryPrefix: cli.registryPrefix,
+    digests: Object.keys(cli.digests).length ? cli.digests : undefined,
+    imageRefs: Object.keys(cli.imageRefs).length ? cli.imageRefs : undefined,
+    evidenceDir,
+    roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
+    requireOciArchives: true,
+  });
+  mkdirSync(dirname(cli.composePath), { recursive: true });
+  mkdirSync(dirname(cli.pairingPath), { recursive: true });
+  writeFileSync(cli.composePath, composeYaml, 'utf8');
+  writeFileSync(cli.pairingPath, JSON.stringify(pairing, null, 2) + '\n', 'utf8');
+  if (cli.composeJsonPath) {
+    mkdirSync(dirname(cli.composeJsonPath), { recursive: true });
+    writeFileSync(cli.composeJsonPath, JSON.stringify(composeJson, null, 2) + '\n', 'utf8');
+  }
+  console.log(
+    `Rendered and verified immutable Embedded compose and pairing: ${cli.composePath} + ${cli.pairingPath}`
+  );
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
-    const cli = parseCliArgs(process.argv.slice(2));
-    const evidenceFile = resolve(cli.evidencePath);
-    const evidence = JSON.parse(readFileSync(evidenceFile, 'utf8'));
-    const evidenceDir = dirname(evidenceFile);
-
-    if (cli.verify) {
-      const composeText = readFileSync(cli.composePath, 'utf8');
-      const pairing = JSON.parse(readFileSync(cli.pairingPath, 'utf8'));
-      const { composeDoc } = verifyEmbeddedReleaseArtifacts({
-        evidence,
-        composeText,
-        pairing,
-        evidenceDir,
-        roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
-        requireOciArchives: true,
-      });
-      if (cli.composeJsonPath) {
-        mkdirSync(dirname(cli.composeJsonPath), { recursive: true });
-        writeFileSync(cli.composeJsonPath, JSON.stringify(composeDoc, null, 2) + '\n', 'utf8');
-      }
-      console.log(
-        `Embedded compose/pairing verification passed: ${cli.composePath} + ${cli.pairingPath}`
-      );
-    } else {
-      const { composeYaml, composeJson, pairing } = renderEmbeddedReleaseArtifacts(evidence, {
-        version: cli.version,
-        registryPrefix: cli.registryPrefix,
-        digests: Object.keys(cli.digests).length ? cli.digests : undefined,
-        imageRefs: Object.keys(cli.imageRefs).length ? cli.imageRefs : undefined,
-        evidenceDir,
-        roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
-        requireOciArchives: true,
-      });
-      mkdirSync(dirname(cli.composePath), { recursive: true });
-      mkdirSync(dirname(cli.pairingPath), { recursive: true });
-      writeFileSync(cli.composePath, composeYaml, 'utf8');
-      writeFileSync(cli.pairingPath, JSON.stringify(pairing, null, 2) + '\n', 'utf8');
-      if (cli.composeJsonPath) {
-        mkdirSync(dirname(cli.composeJsonPath), { recursive: true });
-        writeFileSync(cli.composeJsonPath, JSON.stringify(composeJson, null, 2) + '\n', 'utf8');
-      }
-      console.log(
-        `Rendered and verified immutable Embedded compose and pairing: ${cli.composePath} + ${cli.pairingPath}`
-      );
-    }
+    runCli(process.argv.slice(2));
   } catch (error) {
     console.error(`STOP: ${error.message}`);
     process.exit(1);

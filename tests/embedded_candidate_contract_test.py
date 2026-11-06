@@ -489,35 +489,99 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 make_oci(archive, role, self.license, api_contract=real_api_bytes)
                 archives[role] = archive
             receipt = subject.verify(archives, SHA, EVENT, self.root)
-            # Rewrite runtime CPA hash in receipt_for_node to official pin for the initial Node render,
-            # while keeping all three real OCI archives (manager.oci.tar, ingress.oci.tar, runtime.oci.tar) on disk.
-            receipt_for_node = json.loads(json.dumps(receipt))
             real_cpa_sha = VERIFIER.read_text(encoding="utf-8").split(
                 'CPA_SHA = "', 1)[1].split('"', 1)[0]
-            receipt_for_node["officialCPA"]["verifiedFinalImageExecutableSHA256"] = real_cpa_sha
-            receipt_for_node["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
-                "sha256:" + real_cpa_sha
-            )
             evidence_path = self.root / "candidate-evidence.json"
             compose_path = self.root / "docker-compose.v2-embedded.yml"
             pairing_path = self.root / "embedded-release-pairing.json"
-            evidence_path.write_text(json.dumps(receipt_for_node, indent=2) + "\n", encoding="utf-8")
-            rendered = subprocess.run(
+
+            # Round-4 P1 regression: unpatched CLI renderer must reject runtime.oci.tar whose CPA executable
+            # bytes (fake_cpa) do not match the official v8.0.55 pin even if cpa-artifact.json is self-consistent
+            mismatch_ev = json.loads(json.dumps(receipt))
+            mismatch_ev["officialCPA"]["verifiedFinalImageExecutableSHA256"] = real_cpa_sha
+            mismatch_ev["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
+                "sha256:" + real_cpa_sha
+            )
+            evidence_path.write_text(json.dumps(mismatch_ev, indent=2) + "\n", encoding="utf-8")
+            mismatch_render = subprocess.run(
                 ["node", str(renderer), "--evidence", str(evidence_path),
+                 "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
+                capture_output=True, text=True, timeout=20, check=False)
+            self.assertNotEqual(mismatch_render.returncode, 0)
+            self.assertIn(
+                "OCI archive official CPA v8.0.55 executable hash mismatch for runtime",
+                mismatch_render.stderr,
+            )
+
+            # Positive render with test-only pin seam matching the fixture's CPA bytes (fake_cpa)
+            receipt_for_node = json.loads(json.dumps(receipt))
+            evidence_path.write_text(json.dumps(receipt_for_node, indent=2) + "\n", encoding="utf-8")
+            render_runner = self.root / "run-render.mjs"
+            render_runner.write_text(
+                f"import {{ setExpectedCpaSha256ForTest, runCli }} from {json.dumps(renderer.resolve().as_uri())};\n"
+                f"setExpectedCpaSha256ForTest({json.dumps(fake_cpa)});\n"
+                "runCli(process.argv.slice(2));\n",
+                encoding="utf-8",
+            )
+            rendered = subprocess.run(
+                ["node", str(render_runner), "--evidence", str(evidence_path),
                  "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
                 capture_output=True, text=True, timeout=20, check=False)
             self.assertEqual(rendered.returncode, 0, rendered.stdout + "\n" + rendered.stderr)
 
-            receipt_for_node = json.loads(json.dumps(receipt))
-            rendered_pairing = json.loads(pairing_path.read_text(encoding="utf-8"))
-            rendered_pairing["cpa"]["artifact_id"] = "sha256:" + fake_cpa
-            pairing_path.write_text(json.dumps(rendered_pairing, indent=2) + "\n", encoding="utf-8")
+            # Round-4 P1 regression: unpatched CLI --verify and Python CLI must also reject the official-pin mismatch
+            mismatch_pairing = json.loads(pairing_path.read_text(encoding="utf-8"))
+            mismatch_pairing["cpa"]["artifact_id"] = "sha256:" + real_cpa_sha
+            mismatch_ev_path = self.root / "mismatch-evidence.json"
+            mismatch_pairing_path = self.root / "mismatch-pairing.json"
+            mismatch_ev_path.write_text(json.dumps(mismatch_ev, indent=2) + "\n", encoding="utf-8")
+            mismatch_pairing_path.write_text(json.dumps(mismatch_pairing, indent=2) + "\n", encoding="utf-8")
+            for role in subject.ROLES:
+                pass
+            mismatch_verify_node = subprocess.run(
+                ["node", str(renderer), "--verify",
+                 "--evidence", str(mismatch_ev_path),
+                 "--compose", str(compose_path),
+                 "--pairing", str(mismatch_pairing_path),
+                 "--manager-oci", str(archives["manager"]),
+                 "--ingress-oci", str(archives["ingress"]),
+                 "--runtime-oci", str(archives["runtime"])],
+                capture_output=True, text=True, timeout=20, check=False)
+            self.assertNotEqual(mismatch_verify_node.returncode, 0)
+            self.assertIn(
+                "OCI archive official CPA v8.0.55 executable hash mismatch for runtime",
+                mismatch_verify_node.stderr,
+            )
+            mismatch_verify_py = subprocess.run(
+                [sys.executable, str(VERIFIER),
+                 "--evidence", str(mismatch_ev_path),
+                 "--verify-compose", str(compose_path),
+                 "--verify-pairing", str(mismatch_pairing_path),
+                 "--manager", str(archives["manager"]),
+                 "--ingress", str(archives["ingress"]),
+                 "--runtime", str(archives["runtime"])],
+                capture_output=True, text=True, timeout=20, check=False)
+            self.assertNotEqual(mismatch_verify_py.returncode, 0)
+            self.assertIn(
+                "OCI archive official CPA v8.0.55 executable hash mismatch",
+                mismatch_verify_py.stderr,
+            )
 
             test_archives = dict(archives)
             verified = subject.verify_rendered_pairing(
                 receipt_for_node, compose_path, pairing_path, test_archives)
             self.assertEqual(verified["compose"]["filename"], "docker-compose.v2-embedded.yml")
 
+            # Round-4 P1 regression: tampered cpa-artifact.json digest in evidence fails closed
+            bad_cpa_art_ev = json.loads(json.dumps(receipt_for_node))
+            bad_cpa_art_ev["images"]["runtime"]["packagedFiles"][
+                "/usr/local/share/cpamp/runtime/cpa-artifact.json"
+            ] = "sha256:" + "7" * 64
+            with self.assertRaisesRegex(
+                ValueError, "OCI archive CPA artifact manifest digest mismatch against evidence"
+            ):
+                subject.verify_rendered_pairing(
+                    bad_cpa_art_ev, compose_path, pairing_path, test_archives)
             # Round-3 regression: missing any single role archive or archive=None/""/wrong fails closed
             with self.assertRaisesRegex(ValueError, "missing required OCI archive for runtime"):
                 subject.verify_rendered_pairing(
@@ -727,6 +791,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
 
 def stage_mock_candidate_repo(source):
     repo_root = VERIFIER.parents[2]
+    mock_cpa_sha = hashlib.sha256(b"mock-cpa-binary").hexdigest()
     for rel in (
         "bin/release/build-embedded-candidate.sh",
         "bin/release/render-embedded-compose.mjs",
@@ -735,11 +800,16 @@ def stage_mock_candidate_repo(source):
     ):
         dst = source / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes((repo_root / rel).read_bytes())
+        raw = (repo_root / rel).read_bytes()
+        if rel == "bin/release/render-embedded-compose.mjs":
+            raw = raw.replace(
+                b"e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
+                mock_cpa_sha.encode("ascii"),
+            )
+        dst.write_bytes(raw)
     qual = source / "tests/fixtures/cpa-v8-qualification/.keep"
     qual.parent.mkdir(parents=True, exist_ok=True)
     qual.write_bytes(b"")
-
 
 MOCK_VERIFIER_SCRIPT = """\
 import gzip
@@ -765,7 +835,7 @@ root = pathlib.Path(a[a.index("--source-root") + 1]) if "--source-root" in a els
 {extra_checks}
 api_bytes = (root / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
 api_sha = "sha256:" + hashlib.sha256(api_bytes).hexdigest()
-cpa_sha = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+cpa_sha = hashlib.sha256(b"mock-cpa-binary").hexdigest()
 
 def s256(data):
     return "sha256:" + hashlib.sha256(data).hexdigest()
@@ -837,6 +907,7 @@ for idx, role in enumerate(("manager", "ingress", "runtime"), start=1):
         layer_entries["usr/local/bin/cli-proxy-api"] = cpa_bytes
         layer_entries["usr/local/share/cpamp/runtime/cpa-artifact.json"] = cpa_art_bytes
         packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + cpa_sha
+        packaged["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = s256(cpa_art_bytes)
     layer_tar = build_tar_bytes(layer_entries)
     diff_id = s256(layer_tar)
     layer_gz = gzip.compress(layer_tar)

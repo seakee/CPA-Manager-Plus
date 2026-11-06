@@ -334,6 +334,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
             [PACKAGED_PATHS.binaries.runtime]: 'sha256:' + '4'.repeat(64),
             [PACKAGED_PATHS.provenance]: 'sha256:' + '5'.repeat(64),
             [PACKAGED_PATHS.cpaBinary]: 'sha256:' + EXPECTED_CPA_SHA256,
+            [PACKAGED_PATHS.cpaArtifact]: 'sha256:' + '6'.repeat(64),
           },
         },
       },
@@ -669,17 +670,24 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       ).toThrow(/missing required OCI archive for manager/);
 
       // Materialize valid 3-role OCI archives and matching candidate-evidence.json in dir
+      const cliRunnerPath = join(dir, 'run-cli.mjs');
+      const mismatchEvidencePath = join(dir, 'mismatch-evidence.json');
+      const mismatchPairingPath = join(dir, 'mismatch-pairing.json');
+      const rendererUrl = new URL('../bin/release/render-embedded-compose.mjs', import.meta.url).href;
       execFileSync(
         'python3',
         [
           '-c',
           `
-import gzip, hashlib, io, json, pathlib, sys, tarfile
+import gzip, hashlib, io, json, os, pathlib, subprocess, sys, tarfile
 out_dir = pathlib.Path(sys.argv[1])
 repo_root = pathlib.Path(sys.argv[2])
+renderer_url = sys.argv[3]
 commit = "${sourceCommit}"
 event = "local-r1-7d339900903248d580b067e35cdea3a9"
-cpa_sha = "${EXPECTED_CPA_SHA256}"
+official_cpa_sha = "${EXPECTED_CPA_SHA256}"
+cpa_bytes = b"cli-test-cpa"
+test_cpa_sha = hashlib.sha256(cpa_bytes).hexdigest()
 api_bytes = (repo_root / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
 def s256(b): return "sha256:" + hashlib.sha256(b).hexdigest()
 def mk_tar(entries):
@@ -690,13 +698,39 @@ def mk_tar(entries):
             ti.size = len(v)
             tf.addfile(ti, io.BytesIO(v))
     return buf.getvalue()
+go_modules = {
+    "manager": ("github.com/seakee/cpa-manager-plus/apps/manager-server", "cmd/cpa-manager-plus"),
+    "ingress": ("github.com/seakee/cpa-manager-plus/apps/ingress", "cmd/cpamp-ingress"),
+    "runtime": ("github.com/seakee/cpa-manager-plus/apps/runtime-supervisor", "cmd/cpamp-runtime-supervisor"),
+}
+def build_role_elf(role):
+    module, cmd_pkg = go_modules[role]
+    work = out_dir / ("go-" + role)
+    (work / cmd_pkg).mkdir(parents=True, exist_ok=True)
+    (work / "go.mod").write_text("module " + module + "\\n\\ngo 1.20\\n")
+    src = "package main\\nfunc main() {}\\n"
+    if role == "manager":
+        bi = work / "internal/buildinfo"
+        bi.mkdir(parents=True, exist_ok=True)
+        (bi / "buildinfo.go").write_text('package buildinfo\\nvar Version = "dev"\\nvar SourceCommit = "unknown"\\n')
+        src = 'package main\\nimport ("fmt"; "' + module + '/internal/buildinfo")\\nfunc main() { fmt.Println(buildinfo.Version, buildinfo.SourceCommit) }\\n'
+    (work / cmd_pkg / "main.go").write_text(src)
+    env = dict(os.environ, GOTOOLCHAIN="local", GOPROXY="off", GOSUMDB="off", GOOS="linux", GOARCH="amd64", CGO_ENABLED="0")
+    args = ["go", "build", "-o", str(work / "candidate")]
+    if role != "manager":
+        args.insert(2, "-trimpath")
+    else:
+        args += ["-ldflags", "-X " + module + "/internal/buildinfo.Version=2.0.0-r1candidate -X " + module + "/internal/buildinfo.SourceCommit=" + commit]
+    args += ["./" + cmd_pkg]
+    subprocess.run(args, cwd=work, env=env, check=True, capture_output=True)
+    return (work / "candidate").read_bytes()
 images = {}
 for role, bin_path in [
     ("manager", "/usr/local/bin/cpa-manager-plus"),
     ("ingress", "/usr/local/bin/cpamp-ingress"),
     ("runtime", "/usr/local/bin/cpamp-runtime-supervisor"),
 ]:
-    bin_bytes = ("cli-bin-" + role).encode()
+    bin_bytes = build_role_elf(role)
     prov_bytes = json.dumps({"sourceCommit": commit, "role": role}).encode()
     entries = {
         bin_path.lstrip("/"): bin_bytes,
@@ -732,11 +766,11 @@ for role, bin_path in [
             "expectedPath": "/phase4-test/api/v2/technical",
         }
     if role == "runtime":
-        cpa_bytes = b"cli-test-cpa"
         cpa_art = json.dumps({"schemaVersion": 1, "engine": "cpa", "version": "8.0.55", "artifactId": s256(cpa_bytes)}).encode()
         entries["usr/local/bin/cli-proxy-api"] = cpa_bytes
         entries["usr/local/share/cpamp/runtime/cpa-artifact.json"] = cpa_art
-        packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + cpa_sha
+        packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + test_cpa_sha
+        packaged["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = s256(cpa_art)
     layer_tar = mk_tar(entries)
     layer_gz = gzip.compress(layer_tar)
     cfg_bytes = json.dumps({
@@ -778,21 +812,57 @@ for role, bin_path in [
 ev = {
     "schemaVersion": 1, "platform": "linux/amd64",
     "sourceCommitClaim": commit, "candidateBuildEventClaim": event, "candidateVersionClaim": "2.0.0-r1candidate",
-    "officialCPA": {"version": "8.0.55", "verifiedFinalImageExecutableSHA256": cpa_sha},
+    "officialCPA": {"version": "8.0.55", "verifiedFinalImageExecutableSHA256": test_cpa_sha},
     "images": images,
 }
 (out_dir / "candidate-evidence.json").write_text(json.dumps(ev, indent=2) + "\\n")
+mismatch_ev = json.loads(json.dumps(ev))
+mismatch_ev["officialCPA"]["verifiedFinalImageExecutableSHA256"] = official_cpa_sha
+mismatch_ev["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = "sha256:" + official_cpa_sha
+(out_dir / "mismatch-evidence.json").write_text(json.dumps(mismatch_ev, indent=2) + "\\n")
+(out_dir / "run-cli.mjs").write_text(
+    f"import {{ setExpectedCpaSha256ForTest, runCli }} from {json.dumps(renderer_url)};\\n"
+    f"setExpectedCpaSha256ForTest({json.dumps(test_cpa_sha)});\\n"
+    "try {\\n"
+    "  runCli(process.argv.slice(2));\\n"
+    "} catch (err) {\\n"
+    "  console.error('STOP: ' + err.message);\\n"
+    "  process.exit(1);\\n"
+    "}\\n"
+)
 `,
           dir,
           fileURLToPath(new URL('..', import.meta.url)),
+          rendererUrl,
         ],
         { stdio: 'pipe' }
       );
 
+      // Round-4 P1: Unpatched CLI renderer rejects runtime.oci.tar whose CPA executable bytes
+      // do not match the official v8.0.55 pin (even when cpa-artifact.json inside the archive is self-consistent)
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            'bin/release/render-embedded-compose.mjs',
+            '--evidence',
+            mismatchEvidencePath,
+            '--version',
+            'v2.0.0-beta.1',
+            '--compose-out',
+            composePath,
+            '--pairing-out',
+            pairingPath,
+          ],
+          { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+        )
+      ).toThrow(/OCI archive official CPA v8\.0\.55 executable hash mismatch for runtime/);
+
+      // Positive CLI render with test-only pin seam matching the fixture's CPA bytes
       execFileSync(
         process.execPath,
         [
-          'bin/release/render-embedded-compose.mjs',
+          cliRunnerPath,
           '--evidence',
           evidencePath,
           '--version',
@@ -807,6 +877,42 @@ ev = {
         { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
       );
 
+      // Round-4 P1: Unpatched Node --verify and Python CLI both reject the official-pin mismatch sample
+      const mismatchPairing = JSON.parse(readFileSync(pairingPath, 'utf8'));
+      mismatchPairing.cpa.artifact_id = `sha256:${EXPECTED_CPA_SHA256}`;
+      writeFileSync(mismatchPairingPath, JSON.stringify(mismatchPairing, null, 2) + '\n', 'utf8');
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            'bin/release/render-embedded-compose.mjs',
+            '--verify',
+            '--evidence',
+            mismatchEvidencePath,
+            '--compose',
+            composePath,
+            '--pairing',
+            mismatchPairingPath,
+          ],
+          { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+        )
+      ).toThrow(/OCI archive official CPA v8\.0\.55 executable hash mismatch for runtime/);
+      expect(() =>
+        execFileSync(
+          'python3',
+          [
+            'bin/release/verify-embedded-candidate.py',
+            '--evidence',
+            mismatchEvidencePath,
+            '--verify-compose',
+            composePath,
+            '--verify-pairing',
+            mismatchPairingPath,
+          ],
+          { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+        )
+      ).toThrow(/OCI archive official CPA v8\.0\.55 executable hash mismatch/);
+
       // Round-3 P2: Verify passes deterministically whether CPAMP_PUBLIC_PORT is unset, 18317, or 18318
       for (const portEnv of [undefined, '18317', '18318']) {
         const childEnv = { ...process.env };
@@ -818,7 +924,7 @@ ev = {
         execFileSync(
           process.execPath,
           [
-            'bin/release/render-embedded-compose.mjs',
+            cliRunnerPath,
             '--verify',
             '--evidence',
             evidencePath,
@@ -831,6 +937,30 @@ ev = {
         );
       }
 
+      // Round-4 P1: Tampered cpa-artifact.json digest in evidence fails closed
+      const validEvidenceRaw = readFileSync(evidencePath, 'utf8');
+      const badCpaArtEv = JSON.parse(validEvidenceRaw);
+      badCpaArtEv.images.runtime.packagedFiles[PACKAGED_PATHS.cpaArtifact] =
+        'sha256:' + '7'.repeat(64);
+      writeFileSync(evidencePath, JSON.stringify(badCpaArtEv, null, 2) + '\n', 'utf8');
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            cliRunnerPath,
+            '--verify',
+            '--evidence',
+            evidencePath,
+            '--compose',
+            composePath,
+            '--pairing',
+            pairingPath,
+          ],
+          { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+        )
+      ).toThrow(/OCI archive CPA artifact manifest digest mismatch against evidence for runtime/);
+      writeFileSync(evidencePath, validEvidenceRaw, 'utf8');
+
       // Round-3 P1: Missing 1 of 3 role OCI archives fails closed on --verify
       const runtimeOciBackup = join(dir, 'runtime.oci.tar.bak');
       writeFileSync(runtimeOciBackup, readFileSync(join(dir, 'runtime.oci.tar')));
@@ -839,7 +969,7 @@ ev = {
         execFileSync(
           process.execPath,
           [
-            'bin/release/render-embedded-compose.mjs',
+            cliRunnerPath,
             '--verify',
             '--evidence',
             evidencePath,
@@ -854,7 +984,6 @@ ev = {
       writeFileSync(join(dir, 'runtime.oci.tar'), readFileSync(runtimeOciBackup));
 
       // Round-3 P1: archive=null / "" / wrong filename in candidate-evidence.json fails closed
-      const validEvidenceRaw = readFileSync(evidencePath, 'utf8');
       for (const badArchive of [null, '', 'wrong.tar']) {
         const mutatedEv = JSON.parse(validEvidenceRaw);
         mutatedEv.images.manager.archive = badArchive;
@@ -863,7 +992,7 @@ ev = {
           execFileSync(
             process.execPath,
             [
-              'bin/release/render-embedded-compose.mjs',
+              cliRunnerPath,
               '--verify',
               '--evidence',
               evidencePath,
@@ -877,7 +1006,6 @@ ev = {
         ).toThrow(/invalid or missing archive filename for manager/);
       }
       writeFileSync(evidencePath, validEvidenceRaw, 'utf8');
-
       const validatorOut = execFileSync(
         process.execPath,
         ['bin/ci/validate-runtime12-compose.mjs'],
