@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 from unittest.mock import patch
+from embedded_renderer_fixture import stage_renderer, redirect_fixture_node
 from pathlib import Path
 
 from image_evidence_fixtures import SOURCE_BYTES, make_evidence
@@ -495,6 +496,83 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             compose_path = self.root / "docker-compose.v2-embedded.yml"
             pairing_path = self.root / "embedded-release-pairing.json"
 
+            # Production surface contract: neither Python verifier nor Node renderer exposes any
+            # pin-override / test-setter attribute or export.
+            py_forbidden = [
+                name for name in dir(subject)
+                if any(tok in name.lower() for tok in ("fortest", "for_test", "setexpected", "set_expected", "activeexpected", "active_expected", "official_cpa_sha"))
+            ]
+            self.assertEqual(py_forbidden, [])
+            # Exact allowed export list for bin/release/render-embedded-compose.mjs
+            # (kept in sync with tests/embeddedCandidate.test.mjs), plus process.env Proxy probe.
+            expected_node_exports = [
+                "CANONICAL_INGRESS_PORT_SPEC",
+                "CLI_HELP_TEXT",
+                "COMPOSE_FILENAME",
+                "COMPOSE_SERVICES",
+                "DEFAULT_REGISTRY_PREFIX",
+                "DEFAULT_REPOSITORIES",
+                "EMBEDDED_VERIFIER_CONTRACT_NOTICE",
+                "EXPECTED_API_CONTRACT_ID",
+                "EXPECTED_API_CONTRACT_QUALIFICATION",
+                "EXPECTED_API_PATH",
+                "EXPECTED_API_SUFFIX",
+                "EXPECTED_CPA_ARTIFACT_ID",
+                "EXPECTED_CPA_SHA256",
+                "EXPECTED_CPA_VERSION",
+                "PACKAGED_PATHS",
+                "PAIRING_FILENAME",
+                "ROLES",
+                "assertCanonicalCpaArtifact",
+                "composeYamlToRuntime12ConfigJson",
+                "extractFilesFromOciArchive",
+                "parseEmbeddedComposeText",
+                "parsePinnedImageReference",
+                "renderEmbeddedComposeYaml",
+                "renderEmbeddedReleaseArtifacts",
+                "resolveFullWebAndApiMetadata",
+                "runCli",
+                "validateCandidateEvidence",
+                "validateRegistryPrefix",
+                "validateRuntime12ComposeDocument",
+                "validateVersionTag",
+                "verifyEmbeddedReleaseArtifacts",
+                "verifyOciArchiveAgainstRoleEvidence",
+            ]
+            node_probe_proc = subprocess.run(
+                [
+                    "node", "--input-type=module", "-e",
+                    "const allowed = new Set(['NODE_PATH']);\n"
+                    "const desc = Object.getOwnPropertyDescriptor(process, 'env');\n"
+                    f"const fake = {json.dumps(fake_cpa)};\n"
+                    "Object.defineProperty(process, 'env', {\n"
+                    "  ...desc,\n"
+                    "  value: new Proxy(process.env, {\n"
+                    "    get(t, p, r) { return typeof p === 'string' && !allowed.has(p) ? fake : Reflect.get(t, p, r); }\n"
+                    "  }),\n"
+                    "});\n"
+                    f"const m = await import({json.dumps(renderer.resolve().as_uri() + '?env-probe=1')});\n"
+                    "Object.defineProperty(process, 'env', desc);\n"
+                    f"const syntheticEv = {json.dumps(receipt)};\n"
+                    "let rejected = false;\n"
+                    "try { m.validateCandidateEvidence(syntheticEv); } catch (e) {\n"
+                    "  rejected = /officialCPA pin mismatch/.test(String(e));\n"
+                    "}\n"
+                    "console.log(JSON.stringify({ exports: Object.keys(m).sort(), rejected }));\n",
+                ],
+                capture_output=True, text=True, timeout=20, check=True,
+            )
+            node_probe = json.loads(node_probe_proc.stdout)
+            self.assertEqual(node_probe["exports"], expected_node_exports)
+            self.assertTrue(
+                node_probe["rejected"],
+                "production renderer accepted non-official CPA pin when process.env returned fixture sha",
+            )
+            self.assertEqual(
+                real_cpa_sha,
+                "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
+            )
+
             # Round-4 P1 regression: unpatched CLI renderer must reject runtime.oci.tar whose CPA executable
             # bytes (fake_cpa) do not match the official v8.0.55 pin even if cpa-artifact.json is self-consistent
             mismatch_ev = json.loads(json.dumps(receipt))
@@ -513,16 +591,10 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 mismatch_render.stderr,
             )
 
-            # Positive render with test-only pin seam matching the fixture's CPA bytes (fake_cpa)
+            # Positive synthetic render uses an isolated test module without public runCli.
             receipt_for_node = json.loads(json.dumps(receipt))
             evidence_path.write_text(json.dumps(receipt_for_node, indent=2) + "\n", encoding="utf-8")
-            render_runner = self.root / "run-render.mjs"
-            render_runner.write_text(
-                f"import {{ setExpectedCpaSha256ForTest, runCli }} from {json.dumps(renderer.resolve().as_uri())};\n"
-                f"setExpectedCpaSha256ForTest({json.dumps(fake_cpa)});\n"
-                "runCli(process.argv.slice(2));\n",
-                encoding="utf-8",
-            )
+            _, render_runner = stage_renderer(self.root / "synthetic-fixture", fake_cpa)
             rendered = subprocess.run(
                 ["node", str(render_runner), "--evidence", str(evidence_path),
                  "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
@@ -536,8 +608,6 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             mismatch_pairing_path = self.root / "mismatch-pairing.json"
             mismatch_ev_path.write_text(json.dumps(mismatch_ev, indent=2) + "\n", encoding="utf-8")
             mismatch_pairing_path.write_text(json.dumps(mismatch_pairing, indent=2) + "\n", encoding="utf-8")
-            for role in subject.ROLES:
-                pass
             mismatch_verify_node = subprocess.run(
                 ["node", str(renderer), "--verify",
                  "--evidence", str(mismatch_ev_path),
@@ -568,9 +638,51 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             )
 
             test_archives = dict(archives)
-            verified = subject.verify_rendered_pairing(
-                receipt_for_node, compose_path, pairing_path, test_archives)
+            with redirect_fixture_node(subject, render_runner):
+                verified = subject.verify_rendered_pairing(
+                    receipt_for_node, compose_path, pairing_path, test_archives)
             self.assertEqual(verified["compose"]["filename"], "docker-compose.v2-embedded.yml")
+
+            # Node's documented archive/topology checks do not certify Go metadata.
+            # Python certification must reject a role binary from a different Go module,
+            # even when its archive hashes, receipt, compose and pairing all agree.
+            valid_compose = compose_path.read_bytes()
+            valid_pairing = pairing_path.read_bytes()
+            for role in subject.ROLES:
+                archive = archives[role]
+                original_archive = archive.read_bytes()
+                try:
+                    wrong_binary = ROLE_BINARIES["runtime" if role == "ingress" else "ingress"]
+                    binary_path = subject.GO_BINARIES[role]
+                    make_oci(
+                        archive, role, self.license, api_contract=real_api_bytes,
+                        mutate_evidence=lambda files: {**files, binary_path: wrong_binary},
+                    )
+                    wrong_identity = json.loads(json.dumps(receipt_for_node))
+                    image = wrong_identity["images"][role]
+                    with tarfile.open(archive) as tf:
+                        index = json.load(tf.extractfile("index.json"))
+                        image["ociLayoutIndexDigest"] = blob(tf.extractfile("index.json").read())
+                        manifest_digest = index["manifests"][0]["digest"]
+                        manifest = json.load(tf.extractfile("blobs/" + manifest_digest.replace(":", "/")))
+                    image["archiveSHA256"] = blob(archive.read_bytes())
+                    image["platformManifestDigest"] = manifest_digest
+                    image["imageConfigDigest"] = manifest["config"]["digest"]
+                    image["packagedFiles"][binary_path] = blob(wrong_binary)
+                    evidence_path.write_text(json.dumps(wrong_identity))
+                    rendered_wrong = subprocess.run(
+                        ["node", str(render_runner), "--evidence", str(evidence_path),
+                         "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
+                        capture_output=True, text=True, timeout=20, check=False)
+                    self.assertEqual(rendered_wrong.returncode, 0, rendered_wrong.stderr)
+                    with self.assertRaisesRegex(ValueError, "Go compiled module/entrypoint mismatch: " + role):
+                        subject.verify_rendered_pairing(
+                            wrong_identity, compose_path, pairing_path, test_archives)
+                finally:
+                    archive.write_bytes(original_archive)
+                    compose_path.write_bytes(valid_compose)
+                    pairing_path.write_bytes(valid_pairing)
+                    evidence_path.write_text(json.dumps(receipt_for_node))
 
             # Round-4 P1 regression: tampered cpa-artifact.json digest in evidence fails closed
             bad_cpa_art_ev = json.loads(json.dumps(receipt_for_node))
@@ -594,7 +706,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     subject.verify_rendered_pairing(
                         bad_ev_arch, compose_path, pairing_path, test_archives)
 
-            if True:
+            with redirect_fixture_node(subject, render_runner):
                 # Negative 1: :latest in compose
                 original_compose = compose_path.read_text(encoding="utf-8")
                 compose_path.write_text(
@@ -794,19 +906,14 @@ def stage_mock_candidate_repo(source):
     mock_cpa_sha = hashlib.sha256(b"mock-cpa-binary").hexdigest()
     for rel in (
         "bin/release/build-embedded-candidate.sh",
-        "bin/release/render-embedded-compose.mjs",
         "bin/ci/validate-runtime12-compose.mjs",
         "tests/fixtures/r1-embedded-api-transport.json",
     ):
         dst = source / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        raw = (repo_root / rel).read_bytes()
-        if rel == "bin/release/render-embedded-compose.mjs":
-            raw = raw.replace(
-                b"e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
-                mock_cpa_sha.encode("ascii"),
-            )
-        dst.write_bytes(raw)
+        dst.write_bytes((repo_root / rel).read_bytes())
+    _, runner = stage_renderer(source / "bin/release", mock_cpa_sha)
+    (source / "bin/release/render-embedded-compose.mjs").write_bytes(runner.read_bytes())
     qual = source / "tests/fixtures/cpa-v8-qualification/.keep"
     qual.parent.mkdir(parents=True, exist_ok=True)
     qual.write_bytes(b"")

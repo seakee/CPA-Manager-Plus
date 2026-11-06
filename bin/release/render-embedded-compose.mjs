@@ -45,26 +45,6 @@ export const EXPECTED_CPA_VERSION = '8.0.55';
 export const EXPECTED_CPA_SHA256 =
   'e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7';
 export const EXPECTED_CPA_ARTIFACT_ID = `sha256:${EXPECTED_CPA_SHA256}`;
-
-let activeExpectedCpaSha256 = EXPECTED_CPA_SHA256;
-
-export function setExpectedCpaSha256ForTest(sha256Hex = EXPECTED_CPA_SHA256) {
-  if (typeof sha256Hex !== 'string' || !/^[0-9a-f]{64}$/.test(sha256Hex)) {
-    throw new Error(
-      `Embedded compose/pairing contract failed: invalid test CPA sha256 pin: ${String(sha256Hex)}`
-    );
-  }
-  activeExpectedCpaSha256 = sha256Hex;
-}
-
-function getExpectedCpaSha256() {
-  return activeExpectedCpaSha256;
-}
-
-function getExpectedCpaArtifactId() {
-  return `sha256:${activeExpectedCpaSha256}`;
-}
-
 export const EXPECTED_API_CONTRACT_ID = 'cpamp-r1-embedded-public-api-transport-v1';
 export const EXPECTED_API_CONTRACT_QUALIFICATION =
   'SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY';
@@ -369,12 +349,11 @@ export function verifyOciArchiveAgainstRoleEvidence(ociTarPath, role, evidence) 
     );
   }
   if (role === 'runtime') {
-    const expectedCpaArtifactId = getExpectedCpaArtifactId();
     const cpaBinaryBytes = inspected.files.get(PACKAGED_PATHS.cpaBinary);
     const cpaArtifactBytes = inspected.files.get(PACKAGED_PATHS.cpaArtifact);
     const actualCpaSha = sha256Digest(cpaBinaryBytes);
     if (
-      actualCpaSha !== expectedCpaArtifactId ||
+      actualCpaSha !== EXPECTED_CPA_ARTIFACT_ID ||
       actualCpaSha !== evImg.packagedFiles[PACKAGED_PATHS.cpaBinary]
     ) {
       fail('OCI archive official CPA v8.0.55 executable hash mismatch for runtime');
@@ -389,7 +368,7 @@ export function verifyOciArchiveAgainstRoleEvidence(ociTarPath, role, evidence) 
     }
     assertCanonicalCpaArtifact(
       JSON.parse(cpaArtifactBytes.toString('utf8')),
-      expectedCpaArtifactId,
+      EXPECTED_CPA_ARTIFACT_ID,
       actualCpaSha
     );
   }
@@ -480,7 +459,7 @@ export function validateCandidateEvidence(evidence) {
   }
   if (
     evidence.officialCPA.version !== EXPECTED_CPA_VERSION ||
-    evidence.officialCPA.verifiedFinalImageExecutableSHA256 !== getExpectedCpaSha256()
+    evidence.officialCPA.verifiedFinalImageExecutableSHA256 !== EXPECTED_CPA_SHA256
   ) {
     fail('candidate evidence officialCPA pin mismatch');
   }
@@ -554,7 +533,7 @@ export function validateCandidateEvidence(evidence) {
     }
 
     if (role === 'runtime') {
-      if (files[PACKAGED_PATHS.cpaBinary] !== getExpectedCpaArtifactId()) {
+      if (files[PACKAGED_PATHS.cpaBinary] !== EXPECTED_CPA_ARTIFACT_ID) {
         fail('Runtime packaged CPA executable hash mismatch');
       }
       if (!SHA256_DIGEST_RE.test(files[PACKAGED_PATHS.cpaArtifact] ?? '')) {
@@ -582,7 +561,6 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
 
   const evidenceDir = options.evidenceDir ?? null;
   const roleOciPaths = options.roleOciPaths ?? {};
-  const requireOciArchives = Boolean(options.requireOciArchives);
   const inspectedRoles = {};
   for (const role of ROLES) {
     const expectedArchiveName = `${role}.oci.tar`;
@@ -596,23 +574,18 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
     const candidateRolePath =
       explicitRolePath ??
       (evidenceDir ? resolve(evidenceDir, expectedArchiveName) : null);
-    if (explicitRolePath && !existsSync(explicitRolePath)) {
-      fail(`missing OCI archive for ${role}: ${explicitRolePath}`);
-    }
-    if (requireOciArchives && (!candidateRolePath || !existsSync(candidateRolePath))) {
+    if (!candidateRolePath || !existsSync(candidateRolePath)) {
       fail(
         `missing required OCI archive for ${role}: ${String(candidateRolePath ?? expectedArchiveName)}`
       );
     }
-    if (candidateRolePath && existsSync(candidateRolePath)) {
-      inspectedRoles[role] = verifyOciArchiveAgainstRoleEvidence(
-        candidateRolePath,
-        role,
-        evidence
-      );
-    }
+    inspectedRoles[role] = verifyOciArchiveAgainstRoleEvidence(
+      candidateRolePath,
+      role,
+      evidence
+    );
   }
-  const archiveFiles = inspectedRoles.manager?.files ?? null;
+  const archiveFiles = inspectedRoles.manager.files;
 
   let fullwebSummary = null;
   if (archiveFiles) {
@@ -739,6 +712,10 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
   return { fullweb: fullwebSummary, api_contract: apiContractSummary };
 }
 
+// Pure Compose YAML template renderer.
+// Static port contract: only cpamp-ingress defines '${CPAMP_PUBLIC_PORT:-18317}:18317'
+// (container target 18317/tcp, no other service or port mappings); the deployer may
+// set CPAMP_PUBLIC_PORT=[HOST_IP:]PORT at deployment time to choose host bind IP/port.
 export function renderEmbeddedComposeYaml(imageRefs) {
   for (const role of ROLES) {
     parsePinnedImageReference(imageRefs?.[role], role);
@@ -946,8 +923,10 @@ export function parseEmbeddedComposeText(composeText) {
             `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317 via canonical '${CANONICAL_INGRESS_PORT_SPEC}', got ${JSON.stringify(rawPortItem)}`
           );
         }
-        // Canonical template '${CPAMP_PUBLIC_PORT:-18317}:18317' verified above;
-        // project deterministically to 18317:18317/tcp without reading process.env.
+        // Static template '${CPAMP_PUBLIC_PORT:-18317}:18317' verified above:
+        // guarantees container target 18317/tcp and no other service/port mappings.
+        // Host bind address/port (CPAMP_PUBLIC_PORT=[HOST_IP:]PORT) are the deployer's
+        // choice at deployment time; the verifier never reads process.env.
         normalized.ports = [
           {
             mode: 'ingress',
@@ -1166,13 +1145,16 @@ export function composeYamlToRuntime12ConfigJson(composeText, options = {}) {
   return validateRuntime12ComposeDocument(document, options);
 }
 
+// Note: Node verification checks all three role OCI archives (manifest/config/layer digests,
+// OCI labels, provenance, official CPA v8.0.55 binary/manifest digests, Full Web/API contracts)
+// and the static Compose topology, but does NOT certify Go build identity (`go version -m`)
+// on its own. Full candidate certification requires `verify-embedded-candidate.py`.
 export function verifyEmbeddedReleaseArtifacts({
   evidence,
   composeText,
   pairing,
   evidenceDir = null,
   roleOciPaths = null,
-  requireOciArchives = false,
   apiContractPath = null,
   apiContractBytes = null,
   fullwebManifest = null,
@@ -1197,7 +1179,7 @@ export function verifyEmbeddedReleaseArtifacts({
   if (
     !isPlainObject(pairing.cpa) ||
     pairing.cpa.version !== EXPECTED_CPA_VERSION ||
-    pairing.cpa.artifact_id !== getExpectedCpaArtifactId()
+    pairing.cpa.artifact_id !== EXPECTED_CPA_ARTIFACT_ID
   ) {
     fail('pairing CPA pin mismatch');
   }
@@ -1205,7 +1187,6 @@ export function verifyEmbeddedReleaseArtifacts({
   const expectedMeta = resolveFullWebAndApiMetadata(evidence, {
     evidenceDir,
     roleOciPaths,
-    requireOciArchives,
     apiContractPath,
     apiContractBytes,
     fullwebManifest,
@@ -1374,7 +1355,7 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
     platform: 'linux/amd64',
     cpa: {
       version: EXPECTED_CPA_VERSION,
-      artifact_id: getExpectedCpaArtifactId(),
+      artifact_id: EXPECTED_CPA_ARTIFACT_ID,
     },
     fullweb,
     api_contract,
@@ -1392,7 +1373,6 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
     pairing,
     evidenceDir: options.evidenceDir ?? null,
     roleOciPaths: options.roleOciPaths ?? null,
-    requireOciArchives: Boolean(options.requireOciArchives),
     apiContractPath: options.apiContractPath ?? null,
     apiContractBytes: options.apiContractBytes ?? null,
     fullwebManifest: options.fullwebManifest ?? null,
@@ -1406,8 +1386,26 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
   };
 }
 
+export const EMBEDDED_VERIFIER_CONTRACT_NOTICE =
+  "static port template '${CPAMP_PUBLIC_PORT:-18317}:18317' -> container 18317/tcp only (deployer chooses host bind [HOST_IP:]PORT via CPAMP_PUBLIC_PORT); Node verifier does not certify Go build identity (go version -m) on its own — run verify-embedded-candidate.py for Go build metadata certification";
+
+export const CLI_HELP_TEXT = [
+  'Usage: node bin/release/render-embedded-compose.mjs --evidence <candidate-evidence.json> [options]',
+  '',
+  'Render or verify (`--verify`) immutable digest-pinned docker-compose.v2-embedded.yml and embedded-release-pairing.json.',
+  'Requires all three verified role OCI archives (manager.oci.tar, ingress.oci.tar, runtime.oci.tar).',
+  '',
+  'Contract guarantees and boundaries:',
+  "  - Port template: guarantees static '${CPAMP_PUBLIC_PORT:-18317}:18317' on cpamp-ingress, container side 18317/tcp,",
+  '    and no other service/port mappings. Host bind address/port (CPAMP_PUBLIC_PORT=[HOST_IP:]PORT) are the',
+  '    deployer choice at deployment time; this verifier never reads process.env.',
+  '  - Go build identity: this Node tool does NOT certify Go build identity (`go version -m`) on its own.',
+  '    Compiled Go build metadata is certified by `python3 bin/release/verify-embedded-candidate.py` (`verify_archive_anchor`).',
+].join('\n');
+
 function parseCliArgs(argv) {
   const args = {
+    help: false,
     verify: false,
     digests: {},
     imageRefs: {},
@@ -1421,6 +1419,10 @@ function parseCliArgs(argv) {
       return argv[i];
     };
     switch (token) {
+      case '--help':
+      case '-h':
+        args.help = true;
+        break;
       case '--verify':
         args.verify = true;
         break;
@@ -1478,6 +1480,9 @@ function parseCliArgs(argv) {
         fail(`unknown argument: ${token}`);
     }
   }
+  if (args.help) {
+    return args;
+  }
   if (!args.evidencePath) {
     fail('--evidence <candidate-evidence.json> is required');
   }
@@ -1500,6 +1505,10 @@ function parseCliArgs(argv) {
 
 export function runCli(argv = process.argv.slice(2)) {
   const cli = parseCliArgs(argv);
+  if (cli.help) {
+    console.log(CLI_HELP_TEXT);
+    return;
+  }
   const evidenceFile = resolve(cli.evidencePath);
   const evidence = JSON.parse(readFileSync(evidenceFile, 'utf8'));
   const evidenceDir = dirname(evidenceFile);
@@ -1513,14 +1522,13 @@ export function runCli(argv = process.argv.slice(2)) {
       pairing,
       evidenceDir,
       roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
-      requireOciArchives: true,
     });
     if (cli.composeJsonPath) {
       mkdirSync(dirname(cli.composeJsonPath), { recursive: true });
       writeFileSync(cli.composeJsonPath, JSON.stringify(composeDoc, null, 2) + '\n', 'utf8');
     }
     console.log(
-      `Embedded compose/pairing verification passed: ${cli.composePath} + ${cli.pairingPath}`
+      `Embedded compose/pairing verification passed: ${cli.composePath} + ${cli.pairingPath} (${EMBEDDED_VERIFIER_CONTRACT_NOTICE})`
     );
     return;
   }
@@ -1532,7 +1540,6 @@ export function runCli(argv = process.argv.slice(2)) {
     imageRefs: Object.keys(cli.imageRefs).length ? cli.imageRefs : undefined,
     evidenceDir,
     roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
-    requireOciArchives: true,
   });
   mkdirSync(dirname(cli.composePath), { recursive: true });
   mkdirSync(dirname(cli.pairingPath), { recursive: true });
@@ -1543,7 +1550,7 @@ export function runCli(argv = process.argv.slice(2)) {
     writeFileSync(cli.composeJsonPath, JSON.stringify(composeJson, null, 2) + '\n', 'utf8');
   }
   console.log(
-    `Rendered and verified immutable Embedded compose and pairing: ${cli.composePath} + ${cli.pairingPath}`
+    `Rendered and verified immutable Embedded compose and pairing: ${cli.composePath} + ${cli.pairingPath} (${EMBEDDED_VERIFIER_CONTRACT_NOTICE})`
   );
 }
 

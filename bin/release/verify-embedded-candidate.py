@@ -710,7 +710,6 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
     if repo_node_modules.is_dir():
         existing = node_env.get("NODE_PATH", "")
         node_env["NODE_PATH"] = str(repo_node_modules) + (os.pathsep + existing if existing else "")
-    official_cpa_sha = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
     with tempfile.TemporaryDirectory(prefix="cpamp-verify-pairing-") as temp_dir:
         ev_file = Path(temp_dir) / "candidate-evidence.json"
         ev_file.write_text(json.dumps(evidence), encoding="utf-8")
@@ -724,22 +723,7 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
         ]
         for role in ROLES:
             cli_args.extend([f"--{role}-oci", str(archive_paths[role])])
-        if CPA_SHA == official_cpa_sha:
-            cmd = ["node", str(renderer), *cli_args]
-        else:
-            runner_file = Path(temp_dir) / "run-verify.mjs"
-            runner_file.write_text(
-                f"import {{ setExpectedCpaSha256ForTest, runCli }} from {json.dumps(renderer.resolve().as_uri())};\n"
-                f"setExpectedCpaSha256ForTest({json.dumps(CPA_SHA)});\n"
-                "try {\n"
-                "  runCli(process.argv.slice(2));\n"
-                "} catch (err) {\n"
-                "  console.error('STOP: ' + err.message);\n"
-                "  process.exit(1);\n"
-                "}\n",
-                encoding="utf-8",
-            )
-            cmd = ["node", str(runner_file), *cli_args]
+        cmd = ["node", str(renderer), *cli_args]
         proc = subprocess.run(
             cmd, env=node_env, capture_output=True, text=True, timeout=20, check=False,
         )
@@ -750,7 +734,13 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=("Certifies Go build identity with go version -m via verify_archive_anchor for all three OCI archives. "
+                "Port verification guarantees the static ${CPAMP_PUBLIC_PORT:-18317}:18317 template, "
+                "container side 18317/tcp and no other ports. The deployer chooses host bind "
+                "address/port via CPAMP_PUBLIC_PORT=[HOST_IP:]PORT; verification does not read that variable."),
+    )
     parser.add_argument("--manager", type=Path, help="OCI archive from same local build event")
     parser.add_argument("--ingress", type=Path)
     parser.add_argument("--runtime", type=Path)
@@ -771,7 +761,9 @@ def main():
             for role in ROLES
         }
         verify_rendered_pairing(evidence, args.verify_compose, args.verify_pairing, archives)
-        print("VERIFIED RENDERED COMPOSE AND PAIRING AGAINST CANDIDATE EVIDENCE: " + str(args.verify_pairing))
+        print("VERIFIED RENDERED COMPOSE AND PAIRING AGAINST CANDIDATE EVIDENCE: " + str(args.verify_pairing) +
+              " (Go build identity certified via go version -m; static port template -> container 18317/tcp only; "
+              "host bind [HOST_IP:]PORT is the deployer choice via CPAMP_PUBLIC_PORT)")
         return
     require(all(getattr(args, role) is not None for role in ROLES) and
             args.source_commit and args.build_event and args.out is not None,
