@@ -3,7 +3,10 @@
  */
 
 import { apiClient } from './client';
-import { hasOpenAIKeyEntryConfiguration } from '@/utils/openAIKeyEntries';
+import {
+  hasOpenAIKeyEntryConfiguration,
+  isPersistedOpenAIKeyEntry,
+} from '@/utils/openAIKeyEntries';
 import { configApi } from './config';
 import {
   normalizeClaudeFingerprintProfile,
@@ -761,6 +764,9 @@ const serializeApiKeyEntry = (entry: ApiKeyEntry) => {
   if (entry.proxyUrl) payload['proxy-url'] = entry.proxyUrl;
   const headers = serializeHeaders(entry.headers);
   if (headers) payload.headers = headers;
+  if (Object.keys(payload).length === 0 && isPersistedOpenAIKeyEntry(entry)) {
+    payload['api-key'] = '';
+  }
   return payload;
 };
 

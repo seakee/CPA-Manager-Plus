@@ -106,6 +106,45 @@ describe('modelsApi request-level proxy', () => {
     );
   });
 
+  it('trims API keys in fetchModelsViaApiCall and omits Authorization for empty or whitespace-only keys', async () => {
+    mocks.request.mockResolvedValue(successfulResult({ data: [{ id: 'trimmed-model' }] }));
+
+    await modelsApi.fetchModelsViaApiCall('https://keyless.example.com/v1', '');
+    expect(mocks.request).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        url: 'https://keyless.example.com/v1/models',
+        header: undefined,
+      })
+    );
+
+    await modelsApi.fetchModelsViaApiCall(
+      'https://keyless.example.com/v1',
+      '   ',
+      {},
+      'auth-keyless',
+      undefined,
+      true
+    );
+    expect(mocks.request).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        authIndex: 'auth-keyless',
+        url: 'https://keyless.example.com/v1/models',
+        header: undefined,
+      })
+    );
+
+    await modelsApi.fetchModelsViaApiCall('https://keyed.example.com/v1', '  sk-padded-key  ');
+    expect(mocks.request).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        url: 'https://keyed.example.com/v1/models',
+        header: { Authorization: 'Bearer sk-padded-key' },
+      })
+    );
+  });
+
   it.each([
     ['v1', modelsApi.fetchV1ModelsViaApiCall, 'https://api.example.com/v1/models'],
     ['openai', modelsApi.fetchModelsViaApiCall, 'https://api.example.com/models'],

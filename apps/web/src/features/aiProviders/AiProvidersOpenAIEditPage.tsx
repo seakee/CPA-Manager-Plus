@@ -19,6 +19,7 @@ import { normalizeAuthIndex } from '@/utils/authIndex';
 import {
   getOpenAIKeyCount,
   getOpenAITestableKeyIndexes,
+  preservePersistedOpenAIKeyEntry,
   updateOpenAIApiKey,
 } from '@/utils/openAIKeyEntries';
 import { buildHeaderObject, hasHeader } from '@/utils/headers';
@@ -346,7 +347,7 @@ export function AiProvidersOpenAIEditPage() {
         i === idx
           ? field === 'apiKey'
             ? updateOpenAIApiKey(entry, value)
-            : { ...entry, [field]: value }
+            : preservePersistedOpenAIKeyEntry(entry, { ...entry, [field]: value })
           : entry
       );
       setForm((prev) => ({ ...prev, apiKeyEntries: next }));
@@ -357,7 +358,9 @@ export function AiProvidersOpenAIEditPage() {
 
     const updateEntryWeight = (idx: number, raw: string) => {
       const weight = toCredentialWeightInputValue(raw);
-      const next = list.map((entry, i) => (i === idx ? { ...entry, weight } : entry));
+      const next = list.map((entry, i) =>
+        i === idx ? preservePersistedOpenAIKeyEntry(entry, { ...entry, weight }) : entry
+      );
       setForm((prev) => ({ ...prev, apiKeyEntries: next }));
     };
 

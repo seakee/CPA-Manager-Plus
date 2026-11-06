@@ -27,6 +27,7 @@ import {
   getOpenAIModelDiscoveryEntry,
   getOpenAITestableKeyIndexes,
   hasOpenAIKeyEntryConfiguration,
+  preservePersistedOpenAIKeyEntry,
   updateOpenAIApiKey,
 } from '@/utils/openAIKeyEntries';
 import { areKeyValueEntriesEqual, areModelEntriesEqual } from '@/utils/compare';
@@ -117,7 +118,7 @@ const normalizeApiKeyEntries = (entries: OpenAIFormApiKeyEntry[]) =>
     const proxyUrl = String(entry?.proxyUrl ?? '').trim();
     const authIndex = normalizeAuthIndex(entry?.authIndex) ?? '';
     const headers = normalizeKeyHeaders(entry?.headers);
-    if (!apiKey && weight === null && !proxyUrl && !authIndex && headers.length === 0) return acc;
+    if (!hasOpenAIKeyEntryConfiguration(entry) && headers.length === 0) return acc;
     acc.push({ apiKey, weight, proxyUrl, authIndex, headers });
     return acc;
   }, []);
@@ -660,13 +661,15 @@ export function OpenAIEditDrawer({
         headers: buildHeaderObject(form.headers),
         apiKeyEntries: form.apiKeyEntries
           .filter((entry) => hasOpenAIKeyEntryConfiguration(entry))
-          .map((entry) => ({
-            apiKey: entry.apiKey.trim(),
-            weight: normalizeCredentialWeight(entry.weight),
-            proxyUrl: entry.proxyUrl?.trim() || undefined,
-            authIndex: normalizeAuthIndex(entry.authIndex) ?? undefined,
-            headers: entry.headers,
-          })),
+          .map((entry) =>
+            preservePersistedOpenAIKeyEntry(entry, {
+              apiKey: entry.apiKey.trim(),
+              weight: normalizeCredentialWeight(entry.weight),
+              proxyUrl: entry.proxyUrl?.trim() || undefined,
+              authIndex: normalizeAuthIndex(entry.authIndex) ?? undefined,
+              headers: entry.headers,
+            })
+          ),
       };
       if (form.priority !== undefined && Number.isFinite(form.priority))
         payload.priority = Math.trunc(form.priority);
@@ -746,7 +749,7 @@ export function OpenAIEditDrawer({
         i === idx
           ? field === 'apiKey'
             ? updateOpenAIApiKey(entry, value)
-            : { ...entry, [field]: value }
+            : preservePersistedOpenAIKeyEntry(entry, { ...entry, [field]: value })
           : entry
       );
       setForm((prev) => ({ ...prev, apiKeyEntries: next }));
@@ -758,7 +761,9 @@ export function OpenAIEditDrawer({
     };
     const updateEntryWeight = (idx: number, raw: string) => {
       const weight = toCredentialWeightInputValue(raw);
-      const next = list.map((entry, i) => (i === idx ? { ...entry, weight } : entry));
+      const next = list.map((entry, i) =>
+        i === idx ? preservePersistedOpenAIKeyEntry(entry, { ...entry, weight }) : entry
+      );
       setForm((prev) => ({ ...prev, apiKeyEntries: next }));
     };
     const removeEntry = (idx: number) => {

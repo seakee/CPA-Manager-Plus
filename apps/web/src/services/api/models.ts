@@ -190,11 +190,12 @@ export const modelsApi = {
       throw new Error('Invalid base url');
     }
 
+    const trimmedApiKey = apiKey?.trim() || undefined;
     const trimmedAuthIndex = authIndex?.trim() || undefined;
     const trimmedProxyUrl = proxyUrl?.trim() || undefined;
     const resolvedHeaders = { ...headers };
-    if (apiKey && !hasHeader(resolvedHeaders, 'authorization')) {
-      resolvedHeaders.Authorization = `Bearer ${apiKey}`;
+    if (trimmedApiKey && !hasHeader(resolvedHeaders, 'authorization')) {
+      resolvedHeaders.Authorization = `Bearer ${trimmedApiKey}`;
     } else if (trimmedAuthIndex && !keyless && !hasHeader(resolvedHeaders, 'authorization')) {
       resolvedHeaders.Authorization = 'Bearer $TOKEN$';
     }

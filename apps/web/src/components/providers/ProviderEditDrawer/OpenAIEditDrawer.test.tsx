@@ -5,6 +5,8 @@ import i18n from '@/i18n';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { hasModelThinkingLevelsClearMarker, hasModelThinkingLevelsEditMarker } from '@/types';
+import { normalizeOpenAIProvider } from '@/services/api/transformers';
+import { isPersistedOpenAIKeyEntry } from '@/utils/openAIKeyEntries';
 
 const authState = vi.hoisted(() => ({
   serverVersion: 'v7.2.93' as string | null,
@@ -193,6 +195,39 @@ describe('OpenAIEditDrawer model discovery', () => {
       0,
       expect.objectContaining({ apiKeyEntries: [] })
     );
+    act(() => renderer!.unmount());
+  });
+
+  it('keeps both entries when editing and saving a startup-disabled mixed provider without runtime auth-index', async () => {
+    const disabledMixed = normalizeOpenAIProvider({
+      name: 'disabled-mixed',
+      disabled: true,
+      'base-url': 'https://api.mixed.example/v1',
+      'api-key-entries': [{ 'api-key': '' }, { 'api-key': 'sk-compat-b' }],
+      models: [{ name: 'local-model' }],
+    })!;
+    mocks.getOpenAIProviders.mockResolvedValueOnce([disabledMixed]);
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <OpenAIEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />
+      );
+    });
+
+    await act(async () => {
+      await findSaveButton(renderer!.root)?.props.onClick();
+    });
+
+    expect(mocks.updateOpenAIProvider).toHaveBeenCalledTimes(1);
+    const [, , savedPayload] = mocks.updateOpenAIProvider.mock.calls[0] as [
+      string,
+      number,
+      { apiKeyEntries: Array<{ apiKey: string }> },
+    ];
+    expect(savedPayload.apiKeyEntries).toHaveLength(2);
+    expect(savedPayload.apiKeyEntries.map((entry) => entry.apiKey)).toEqual(['', 'sk-compat-b']);
+    expect(isPersistedOpenAIKeyEntry(savedPayload.apiKeyEntries[0])).toBe(true);
     act(() => renderer!.unmount());
   });
 

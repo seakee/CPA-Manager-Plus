@@ -28,7 +28,10 @@ import { normalizeAuthIndex } from '@/utils/authIndex';
 import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/utils/headers';
 import { areKeyValueEntriesEqual, areModelEntriesEqual } from '@/utils/compare';
 import { buildApiKeyEntry, toCommittedOpenAIProviderSnapshot } from '@/components/providers/utils';
-import { hasOpenAIKeyEntryConfiguration } from '@/utils/openAIKeyEntries';
+import {
+  hasOpenAIKeyEntryConfiguration,
+  preservePersistedOpenAIKeyEntry,
+} from '@/utils/openAIKeyEntries';
 import {
   buildProviderDraftKey,
   parseProviderIndexParam,
@@ -131,7 +134,7 @@ const normalizeApiKeyEntries = (entries: OpenAIFormApiKeyEntry[]) =>
     const proxyUrl = String(entry?.proxyUrl ?? '').trim();
     const authIndex = normalizeAuthIndex(entry?.authIndex) ?? '';
     const headers = normalizeKeyHeaders(entry?.headers);
-    if (!apiKey && weight === null && !proxyUrl && !authIndex && headers.length === 0) return acc;
+    if (!hasOpenAIKeyEntryConfiguration(entry) && headers.length === 0) return acc;
     acc.push({ apiKey, weight, proxyUrl, authIndex, headers });
     return acc;
   }, []);
@@ -538,13 +541,15 @@ export function AiProvidersOpenAIEditLayout() {
         headers: buildHeaderObject(form.headers),
         apiKeyEntries: form.apiKeyEntries
           .filter((entry) => hasOpenAIKeyEntryConfiguration(entry))
-          .map((entry) => ({
-            apiKey: entry.apiKey.trim(),
-            weight: normalizeCredentialWeight(entry.weight),
-            proxyUrl: entry.proxyUrl?.trim() || undefined,
-            authIndex: normalizeAuthIndex(entry.authIndex) ?? undefined,
-            headers: entry.headers,
-          })),
+          .map((entry) =>
+            preservePersistedOpenAIKeyEntry(entry, {
+              apiKey: entry.apiKey.trim(),
+              weight: normalizeCredentialWeight(entry.weight),
+              proxyUrl: entry.proxyUrl?.trim() || undefined,
+              authIndex: normalizeAuthIndex(entry.authIndex) ?? undefined,
+              headers: entry.headers,
+            })
+          ),
       };
       if (form.priority !== undefined && Number.isFinite(form.priority)) {
         payload.priority = Math.trunc(form.priority);

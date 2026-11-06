@@ -11,6 +11,7 @@ import {
 import type { Config } from '@/types/config';
 import { buildHeaderObject } from '@/utils/headers';
 import { normalizeCredentialWeight } from '@/utils/credentialWeight';
+import { markPersistedOpenAIKeyEntry } from '@/utils/openAIKeyEntries';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -180,9 +181,23 @@ const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
   const proxyUrl = record ? (record['proxy-url'] ?? record.proxyUrl) : undefined;
   const headers = record ? normalizeHeaders(record.headers) : undefined;
   const weight = normalizeCredentialWeight(record?.weight);
-  // CPA stores keyless entries as per-key proxies/weights with an empty api-key,
-  // so an empty credential is only dropped when no other entry field survives.
-  if (!trimmed && !authIndex && !String(proxyUrl ?? '').trim() && weight === undefined) {
+  const hasExplicitApiKey =
+    record !== null &&
+    (['api-key', 'apiKey', 'key'] as const).some(
+      (field) =>
+        Object.prototype.hasOwnProperty.call(record, field) && typeof record[field] === 'string'
+    );
+  // CPA stores keyless entries as {"api-key": ""} (with optional proxy-url/weight);
+  // providers disabled at startup have no runtime auth-index yet. Drop only entries
+  // that have neither an explicit api-key field (without unsupported-only headers)
+  // nor any other CPA-supported per-entry field.
+  if (
+    !trimmed &&
+    !authIndex &&
+    !String(proxyUrl ?? '').trim() &&
+    weight === undefined &&
+    (!hasExplicitApiKey || Boolean(headers))
+  ) {
     return null;
   }
 
@@ -193,7 +208,7 @@ const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
   };
   if (weight !== undefined) result.weight = weight;
   if (authIndex) result.authIndex = authIndex;
-  return result;
+  return markPersistedOpenAIKeyEntry(result);
 };
 
 const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => {
@@ -348,7 +363,7 @@ const normalizeOpenAIProvider = (provider: unknown): OpenAIProviderConfig | null
       .filter(Boolean) as ApiKeyEntry[];
   } else if (Array.isArray(provider['api-keys'])) {
     apiKeyEntries = provider['api-keys']
-      .map((key) => normalizeApiKeyEntry({ 'api-key': key }))
+      .map((key) => normalizeApiKeyEntry(key))
       .filter(Boolean) as ApiKeyEntry[];
   }
 

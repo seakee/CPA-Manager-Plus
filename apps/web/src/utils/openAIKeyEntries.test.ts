@@ -5,6 +5,9 @@ import {
   getOpenAITestableKeyIndexes,
   getOpenAIUsageStatsCoverage,
   hasOpenAIKeyEntryConfiguration,
+  isPersistedOpenAIKeyEntry,
+  markPersistedOpenAIKeyEntry,
+  preservePersistedOpenAIKeyEntry,
   updateOpenAIApiKey,
 } from './openAIKeyEntries';
 
@@ -19,6 +22,11 @@ describe('OpenAI-compatible keyless editor rows', () => {
     expect(hasOpenAIKeyEntryConfiguration({ apiKey: '', headers: { 'X-Test': 'value' } })).toBe(
       false
     );
+    const persistedKeyless = markPersistedOpenAIKeyEntry({ apiKey: '' });
+    expect(hasOpenAIKeyEntryConfiguration(persistedKeyless)).toBe(true);
+    expect(
+      isPersistedOpenAIKeyEntry(preservePersistedOpenAIKeyEntry(persistedKeyless, { apiKey: '' }))
+    ).toBe(true);
   });
 
   it('prefers a real API key over an earlier configured keyless entry for model discovery', () => {

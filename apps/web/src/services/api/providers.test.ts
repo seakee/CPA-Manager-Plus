@@ -255,6 +255,49 @@ describe('providersApi auth-index preservation', () => {
     ]);
   });
 
+  it('preserves a bare keyless entry on a startup-disabled mixed provider without runtime auth-index', async () => {
+    const cpaDisabledMixedProvider = {
+      name: 'disabled-mixed-upstream',
+      disabled: true,
+      'base-url': 'https://api.disabled-mixed.example/v1',
+      'api-key-entries': [{ 'api-key': '' }, { 'api-key': 'sk-compat-b' }],
+      models: [{ name: 'qwen-2.5-coder' }],
+    };
+    mocks.get.mockImplementation(async (url: string) => {
+      if (url === '/openai-compatibility') {
+        return { 'openai-compatibility': [cpaDisabledMixedProvider] };
+      }
+      if (url === '/config') {
+        return { 'openai-compatibility': [cpaDisabledMixedProvider] };
+      }
+      throw new Error(`unexpected url: ${url}`);
+    });
+    mocks.put.mockResolvedValue({});
+
+    const [provider] = await providersApi.getOpenAIProviders();
+    expect(provider.apiKeyEntries).toHaveLength(2);
+    expect(provider.apiKeyEntries).toEqual([
+      { apiKey: '', proxyUrl: undefined, headers: undefined },
+      { apiKey: 'sk-compat-b', proxyUrl: undefined, headers: undefined },
+    ]);
+
+    await providersApi.updateOpenAIProvider('disabled-mixed-upstream', 0, {
+      ...provider,
+      disabled: false,
+      apiKeyEntries: [...provider.apiKeyEntries, { apiKey: '' }],
+    });
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'disabled-mixed-upstream',
+        disabled: false,
+        'base-url': 'https://api.disabled-mixed.example/v1',
+        'api-key-entries': [{ 'api-key': '' }, { 'api-key': 'sk-compat-b' }],
+        models: [{ name: 'qwen-2.5-coder' }],
+      },
+    ]);
+  });
+
   it('normalizes credential weights without collapsing explicit zero into omission', async () => {
     mocks.get.mockResolvedValueOnce({
       'codex-api-key': [
