@@ -560,16 +560,39 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       })
     ).toThrow(/strict volume whitelist violation on cpamp-manager/);
 
-    // 9. P1-4: Env override, UDP protocol, long-syntax port object, literal different container port
-    expect(() =>
-      verifyEmbeddedReleaseArtifacts({
-        evidence,
-        composeText: composeYaml,
-        pairing,
-        env: { CPAMP_PUBLIC_PORT: '18318' },
-      })
-    ).toThrow(/expected only cpamp-ingress 18317:18317 after environment interpolation/);
+    // 9. P1-4 / Round-3 P2: Canonical port template verifies deterministically without reading process.env,
+    // while UDP protocol, long-syntax port object, or literal different container port fail closed.
+    const verifiedPort18317 = verifyEmbeddedReleaseArtifacts({
+      evidence,
+      composeText: composeYaml,
+      pairing,
+    });
+    expect(verifiedPort18317.composeDoc.services['cpamp-ingress'].ports).toEqual([
+      { mode: 'ingress', published: '18317', target: 18317, protocol: 'tcp' },
+    ]);
 
+    // Round-3 P1: Top-level volume overrides (name/external/driver/driver_opts/labels) fail closed
+    for (const badVolBlock of [
+      '  cpamp-manager-data:\n    name: cpamp-shared-state\n',
+      '  cpamp-manager-data:\n    external: true\n',
+      '  cpamp-manager-data:\n    driver: local\n',
+      '  cpamp-manager-data:\n    driver_opts:\n      o: bind\n',
+      '  cpamp-manager-data:\n    labels:\n      env: prod\n',
+    ]) {
+      const badVolCompose = composeYaml.replace('  cpamp-manager-data:\n', badVolBlock);
+      expect(() => composeYamlToRuntime12ConfigJson(badVolCompose)).toThrow(
+        /top-level volume cpamp-manager-data must be a canonical empty definition/
+      );
+    }
+
+    // Round-3 P1: Service mount volume sub-options fail closed
+    const badSubVolCompose = composeYaml.replace(
+      '      - cpamp-manager-data:/data',
+      '      - type: volume\n        source: cpamp-manager-data\n        target: /data\n        volume:\n          nocopy: true'
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(badSubVolCompose)).toThrow(
+      /volume sub-options on cpamp-manager mounts are forbidden/
+    );
     const udpPortCompose = composeYaml.replace(
       "      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
       "      - '${CPAMP_PUBLIC_PORT:-18317}:18317/udp'"
@@ -616,15 +639,155 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
     ).toThrow(/image_ref missing or mismatched for manager/);
   });
 
-  it('runs the CLI renderer and --verify mode end-to-end', () => {
+  it('runs the CLI renderer and --verify mode end-to-end with mandatory 3-role OCI archives', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cpamp-compose-pairing-'));
     try {
-      const evidence = makeCandidateEvidence();
+      const evidenceNoArchives = makeCandidateEvidence();
       const evidencePath = join(dir, 'candidate-evidence.json');
       const composePath = join(dir, COMPOSE_FILENAME);
       const pairingPath = join(dir, PAIRING_FILENAME);
       const composeJsonPath = join(dir, 'rendered-compose.json');
-      writeFileSync(evidencePath, JSON.stringify(evidence, null, 2) + '\n', 'utf8');
+      writeFileSync(evidencePath, JSON.stringify(evidenceNoArchives, null, 2) + '\n', 'utf8');
+
+      // Round-3 P1: Missing all 3 role OCI archives on CLI render fails closed
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            'bin/release/render-embedded-compose.mjs',
+            '--evidence',
+            evidencePath,
+            '--version',
+            'v2.0.0-beta.1',
+            '--compose-out',
+            composePath,
+            '--pairing-out',
+            pairingPath,
+          ],
+          { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+        )
+      ).toThrow(/missing required OCI archive for manager/);
+
+      // Materialize valid 3-role OCI archives and matching candidate-evidence.json in dir
+      execFileSync(
+        'python3',
+        [
+          '-c',
+          `
+import gzip, hashlib, io, json, pathlib, sys, tarfile
+out_dir = pathlib.Path(sys.argv[1])
+repo_root = pathlib.Path(sys.argv[2])
+commit = "${sourceCommit}"
+event = "local-r1-7d339900903248d580b067e35cdea3a9"
+cpa_sha = "${EXPECTED_CPA_SHA256}"
+api_bytes = (repo_root / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
+def s256(b): return "sha256:" + hashlib.sha256(b).hexdigest()
+def mk_tar(entries):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for k, v in entries.items():
+            ti = tarfile.TarInfo(k)
+            ti.size = len(v)
+            tf.addfile(ti, io.BytesIO(v))
+    return buf.getvalue()
+images = {}
+for role, bin_path in [
+    ("manager", "/usr/local/bin/cpa-manager-plus"),
+    ("ingress", "/usr/local/bin/cpamp-ingress"),
+    ("runtime", "/usr/local/bin/cpamp-runtime-supervisor"),
+]:
+    bin_bytes = ("cli-bin-" + role).encode()
+    prov_bytes = json.dumps({"sourceCommit": commit, "role": role}).encode()
+    entries = {
+        bin_path.lstrip("/"): bin_bytes,
+        "usr/local/share/cpamp/provenance.json": prov_bytes,
+    }
+    packaged = {
+        bin_path: s256(bin_bytes),
+        "/usr/local/share/cpamp/provenance.json": s256(prov_bytes),
+    }
+    extra = {}
+    if role == "manager":
+        idx_sha = "sha256:" + "f" * 64
+        web_bytes = json.dumps({
+            "schemaVersion": 1,
+            "indexHtmlSHA256": idx_sha,
+            "assetCount": 2,
+            "files": [
+                {"path": "index.html", "sha256": idx_sha, "size": 10},
+                {"path": "assets/app.js", "sha256": "sha256:" + "d" * 64, "size": 20},
+            ],
+        }).encode()
+        web_sha = s256(web_bytes)
+        entries["usr/local/share/cpamp/release/fullweb-manifest.json"] = web_bytes
+        entries["usr/local/share/cpamp/release/public-api-transport-contract.json"] = api_bytes
+        packaged["/usr/local/share/cpamp/release/fullweb-manifest.json"] = web_sha
+        packaged["/usr/local/share/cpamp/release/public-api-transport-contract.json"] = s256(api_bytes)
+        extra["fullWebSummary"] = {"manifestSHA256": web_sha, "indexHtmlSHA256": idx_sha, "assetCount": 2}
+        extra["apiTransportContract"] = {
+            "sha256": s256(api_bytes),
+            "contractId": "cpamp-r1-embedded-public-api-transport-v1",
+            "qualification": "SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY",
+            "apiSuffix": "/api/v2",
+            "expectedPath": "/phase4-test/api/v2/technical",
+        }
+    if role == "runtime":
+        cpa_bytes = b"cli-test-cpa"
+        cpa_art = json.dumps({"schemaVersion": 1, "engine": "cpa", "version": "8.0.55", "artifactId": s256(cpa_bytes)}).encode()
+        entries["usr/local/bin/cli-proxy-api"] = cpa_bytes
+        entries["usr/local/share/cpamp/runtime/cpa-artifact.json"] = cpa_art
+        packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + cpa_sha
+    layer_tar = mk_tar(entries)
+    layer_gz = gzip.compress(layer_tar)
+    cfg_bytes = json.dumps({
+        "architecture": "amd64", "os": "linux",
+        "config": {"Labels": {"org.opencontainers.image.revision": commit, "io.cpamp.candidate.role": role, "io.cpamp.candidate.event": event}},
+        "rootfs": {"type": "layers", "diff_ids": [s256(layer_tar)]},
+    }).encode()
+    cfg_dg = s256(cfg_bytes)
+    layer_dg = s256(layer_gz)
+    man_bytes = json.dumps({
+        "schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": cfg_dg, "size": len(cfg_bytes)},
+        "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": layer_dg, "size": len(layer_gz)}],
+    }).encode()
+    man_dg = s256(man_bytes)
+    idx_bytes = json.dumps({
+        "schemaVersion": 2,
+        "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": man_dg, "size": len(man_bytes), "platform": {"os": "linux", "architecture": "amd64"}}],
+    }).encode()
+    oci_bytes = mk_tar({
+        "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
+        "index.json": idx_bytes,
+        "blobs/sha256/" + man_dg.split(":", 1)[1]: man_bytes,
+        "blobs/sha256/" + cfg_dg.split(":", 1)[1]: cfg_bytes,
+        "blobs/sha256/" + layer_dg.split(":", 1)[1]: layer_gz,
+    })
+    (out_dir / f"{role}.oci.tar").write_bytes(oci_bytes)
+    images[role] = {
+        "archive": f"{role}.oci.tar",
+        "archiveSHA256": s256(oci_bytes),
+        "ociLayoutIndexDigest": s256(idx_bytes),
+        "platform": "linux/amd64",
+        "platformManifestDigest": man_dg,
+        "imageConfigDigest": cfg_dg,
+        "goBinaryIdentity": {"managerCompiledSourceClaim": commit if role == "manager" else None},
+        "packagedFiles": packaged,
+        **extra,
+    }
+ev = {
+    "schemaVersion": 1, "platform": "linux/amd64",
+    "sourceCommitClaim": commit, "candidateBuildEventClaim": event, "candidateVersionClaim": "2.0.0-r1candidate",
+    "officialCPA": {"version": "8.0.55", "verifiedFinalImageExecutableSHA256": cpa_sha},
+    "images": images,
+}
+(out_dir / "candidate-evidence.json").write_text(json.dumps(ev, indent=2) + "\\n")
+`,
+          dir,
+          fileURLToPath(new URL('..', import.meta.url)),
+        ],
+        { stdio: 'pipe' }
+      );
 
       execFileSync(
         process.execPath,
@@ -644,20 +807,76 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
         { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
       );
 
-      execFileSync(
-        process.execPath,
-        [
-          'bin/release/render-embedded-compose.mjs',
-          '--verify',
-          '--evidence',
-          evidencePath,
-          '--compose',
-          composePath,
-          '--pairing',
-          pairingPath,
-        ],
-        { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
-      );
+      // Round-3 P2: Verify passes deterministically whether CPAMP_PUBLIC_PORT is unset, 18317, or 18318
+      for (const portEnv of [undefined, '18317', '18318']) {
+        const childEnv = { ...process.env };
+        if (portEnv === undefined) {
+          delete childEnv.CPAMP_PUBLIC_PORT;
+        } else {
+          childEnv.CPAMP_PUBLIC_PORT = portEnv;
+        }
+        execFileSync(
+          process.execPath,
+          [
+            'bin/release/render-embedded-compose.mjs',
+            '--verify',
+            '--evidence',
+            evidencePath,
+            '--compose',
+            composePath,
+            '--pairing',
+            pairingPath,
+          ],
+          { cwd: new URL('..', import.meta.url), env: childEnv, stdio: 'pipe' }
+        );
+      }
+
+      // Round-3 P1: Missing 1 of 3 role OCI archives fails closed on --verify
+      const runtimeOciBackup = join(dir, 'runtime.oci.tar.bak');
+      writeFileSync(runtimeOciBackup, readFileSync(join(dir, 'runtime.oci.tar')));
+      rmSync(join(dir, 'runtime.oci.tar'));
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            'bin/release/render-embedded-compose.mjs',
+            '--verify',
+            '--evidence',
+            evidencePath,
+            '--compose',
+            composePath,
+            '--pairing',
+            pairingPath,
+          ],
+          { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+        )
+      ).toThrow(/missing required OCI archive for runtime/);
+      writeFileSync(join(dir, 'runtime.oci.tar'), readFileSync(runtimeOciBackup));
+
+      // Round-3 P1: archive=null / "" / wrong filename in candidate-evidence.json fails closed
+      const validEvidenceRaw = readFileSync(evidencePath, 'utf8');
+      for (const badArchive of [null, '', 'wrong.tar']) {
+        const mutatedEv = JSON.parse(validEvidenceRaw);
+        mutatedEv.images.manager.archive = badArchive;
+        writeFileSync(evidencePath, JSON.stringify(mutatedEv, null, 2) + '\n', 'utf8');
+        expect(() =>
+          execFileSync(
+            process.execPath,
+            [
+              'bin/release/render-embedded-compose.mjs',
+              '--verify',
+              '--evidence',
+              evidencePath,
+              '--compose',
+              composePath,
+              '--pairing',
+              pairingPath,
+            ],
+            { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+          )
+        ).toThrow(/invalid or missing archive filename for manager/);
+      }
+      writeFileSync(evidencePath, validEvidenceRaw, 'utf8');
 
       const validatorOut = execFileSync(
         process.execPath,

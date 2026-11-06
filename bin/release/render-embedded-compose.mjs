@@ -295,7 +295,7 @@ export function verifyOciArchiveAgainstRoleEvidence(ociTarPath, role, evidence) 
     wanted.push(PACKAGED_PATHS.webManifest, PACKAGED_PATHS.apiContract);
   }
   if (role === 'runtime') {
-    wanted.push(PACKAGED_PATHS.cpaBinary);
+    wanted.push(PACKAGED_PATHS.cpaBinary, PACKAGED_PATHS.cpaArtifact);
   }
   const inspected = extractFilesFromOciArchive(ociTarPath, wanted, { returnMetadata: true });
   if (evImg.archiveSHA256 && inspected.archiveSHA256 !== evImg.archiveSHA256) {
@@ -349,9 +349,18 @@ export function verifyOciArchiveAgainstRoleEvidence(ociTarPath, role, evidence) 
     );
   }
   if (role === 'runtime') {
-    const actualCpaSha = sha256Digest(inspected.files.get(PACKAGED_PATHS.cpaBinary));
-    if (actualCpaSha !== evImg.packagedFiles[PACKAGED_PATHS.cpaBinary]) {
-      fail('OCI archive CPA executable digest mismatch for runtime');
+    const cpaBinaryBytes = inspected.files.get(PACKAGED_PATHS.cpaBinary);
+    const cpaArtifactBytes = inspected.files.get(PACKAGED_PATHS.cpaArtifact);
+    const actualCpaSha = sha256Digest(cpaBinaryBytes);
+    const cpaArtifact = JSON.parse(cpaArtifactBytes.toString('utf8'));
+    if (
+      !isPlainObject(cpaArtifact) ||
+      cpaArtifact.schemaVersion !== 1 ||
+      cpaArtifact.engine !== 'cpa' ||
+      cpaArtifact.version !== EXPECTED_CPA_VERSION ||
+      cpaArtifact.artifactId !== actualCpaSha
+    ) {
+      fail('OCI archive CPA executable or artifact manifest mismatch for runtime');
     }
   }
   return inspected;
@@ -445,6 +454,14 @@ export function validateCandidateEvidence(evidence) {
     if (record.platform !== 'linux/amd64') {
       fail(`${role} image platform must be linux/amd64`);
     }
+    if (record.archive !== `${role}.oci.tar`) {
+      fail(
+        `invalid or missing archive filename for ${role} in candidate evidence: expected ${role}.oci.tar, got ${String(record.archive)}`
+      );
+    }
+    if (!SHA256_DIGEST_RE.test(record.archiveSHA256 ?? '')) {
+      fail(`invalid or missing archiveSHA256 for ${role} in candidate evidence`);
+    }
     if (!SHA256_DIGEST_RE.test(record.platformManifestDigest ?? '')) {
       fail(`invalid platformManifestDigest for ${role}`);
     }
@@ -511,17 +528,27 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
 
   const evidenceDir = options.evidenceDir ?? null;
   const roleOciPaths = options.roleOciPaths ?? {};
+  const requireOciArchives = Boolean(options.requireOciArchives);
   const inspectedRoles = {};
   for (const role of ROLES) {
+    const expectedArchiveName = `${role}.oci.tar`;
+    if (evidence.images[role].archive !== expectedArchiveName) {
+      fail(
+        `invalid or missing archive filename for ${role}: expected ${expectedArchiveName}, got ${String(evidence.images[role].archive)}`
+      );
+    }
     const explicitRolePath =
       roleOciPaths[role] ?? (role === 'manager' ? options.managerOciPath : null);
     const candidateRolePath =
       explicitRolePath ??
-      (evidenceDir && typeof evidence.images[role].archive === 'string'
-        ? resolve(evidenceDir, evidence.images[role].archive)
-        : null);
+      (evidenceDir ? resolve(evidenceDir, expectedArchiveName) : null);
     if (explicitRolePath && !existsSync(explicitRolePath)) {
       fail(`missing OCI archive for ${role}: ${explicitRolePath}`);
+    }
+    if (requireOciArchives && (!candidateRolePath || !existsSync(candidateRolePath))) {
+      fail(
+        `missing required OCI archive for ${role}: ${String(candidateRolePath ?? expectedArchiveName)}`
+      );
     }
     if (candidateRolePath && existsSync(candidateRolePath)) {
       inspectedRoles[role] = verifyOciArchiveAgainstRoleEvidence(
@@ -760,7 +787,9 @@ const ALLOWED_SERVICE_KEYS = new Set([
 const ALLOWED_VOLUME_OBJECT_KEYS = new Set(['type', 'source', 'target', 'read_only', 'volume']);
 const ALLOWED_PORT_OBJECT_KEYS = new Set(['mode', 'published', 'target', 'protocol']);
 
-export function parseEmbeddedComposeText(composeText, env = process.env) {
+const DEFAULT_TEMPLATE_ENV = Object.freeze({});
+
+export function parseEmbeddedComposeText(composeText) {
   if (typeof composeText !== 'string' || !composeText.trim()) {
     fail('compose YAML text must be a non-empty string');
   }
@@ -797,10 +826,15 @@ export function parseEmbeddedComposeText(composeText, env = process.env) {
 
   const volumes = {};
   for (const [volName, volConfig] of Object.entries(rawDoc.volumes)) {
-    if (volConfig !== null && !isPlainObject(volConfig)) {
-      fail(`invalid volume definition for ${volName}`);
+    if (
+      volConfig !== null &&
+      (!isPlainObject(volConfig) || Object.keys(volConfig).length > 0)
+    ) {
+      fail(
+        `top-level volume ${volName} must be a canonical empty definition without overrides (name/external/driver/driver_opts/labels are forbidden): ${JSON.stringify(volConfig)}`
+      );
     }
-    volumes[volName] = volConfig ?? {};
+    volumes[volName] = {};
   }
 
   const services = {};
@@ -858,13 +892,8 @@ export function parseEmbeddedComposeText(composeText, env = process.env) {
             `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317 via canonical '${CANONICAL_INGRESS_PORT_SPEC}', got ${JSON.stringify(rawPortItem)}`
           );
         }
-        const resolvedPort = interpolateComposeVars(rawPortItem, env);
-        const parts = resolvedPort.split(':');
-        if (parts.length !== 2 || parts[0] !== '18317' || parts[1] !== '18317') {
-          fail(
-            `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317 after environment interpolation, got ${JSON.stringify(resolvedPort)}`
-          );
-        }
+        // Canonical template '${CPAMP_PUBLIC_PORT:-18317}:18317' verified above;
+        // project deterministically to 18317:18317/tcp without reading process.env.
         normalized.ports = [
           {
             mode: 'ingress',
@@ -900,6 +929,13 @@ export function parseEmbeddedComposeText(composeText, env = process.env) {
                 fail(`unrecognized volume mount key ${serviceName}.volumes.${volKey}`);
               }
             }
+            if (
+              'volume' in item &&
+              item.volume !== null &&
+              (!isPlainObject(item.volume) || Object.keys(item.volume).length > 0)
+            ) {
+              fail(`volume sub-options on ${serviceName} mounts are forbidden`);
+            }
             if (item.type !== undefined && item.type !== 'volume') {
               fail(`unsupported volume mount type on ${serviceName}: ${String(item.type)}`);
             }
@@ -924,7 +960,7 @@ export function parseEmbeddedComposeText(composeText, env = process.env) {
         if (isPlainObject(value)) {
           const envMap = {};
           for (const [envKey, envVal] of Object.entries(value)) {
-            envMap[envKey] = interpolateComposeVars(String(envVal ?? ''), env);
+            envMap[envKey] = interpolateComposeVars(String(envVal ?? ''), DEFAULT_TEMPLATE_ENV);
           }
           normalized.environment = envMap;
         } else if (Array.isArray(value)) {
@@ -936,7 +972,7 @@ export function parseEmbeddedComposeText(composeText, env = process.env) {
             const eqIdx = entry.indexOf('=');
             const envKey = entry.slice(0, eqIdx);
             const envVal = entry.slice(eqIdx + 1);
-            envMap[envKey] = interpolateComposeVars(envVal, env);
+            envMap[envKey] = interpolateComposeVars(envVal, DEFAULT_TEMPLATE_ENV);
           }
           normalized.environment = envMap;
         } else {
@@ -962,11 +998,25 @@ export function validateRuntime12ComposeDocument(document, options = {}) {
     );
   }
 
-  const topVolumes = Object.keys(document?.volumes ?? {}).sort();
+  const rawTopVolumes = document?.volumes;
+  if (!isPlainObject(rawTopVolumes)) {
+    fail('compose must define a top-level volumes object');
+  }
+  const topVolumes = Object.keys(rawTopVolumes).sort();
   if (JSON.stringify(topVolumes) !== JSON.stringify(EXPECTED_TOP_VOLUMES)) {
     fail(
       `compose must define exact top-level volumes ${EXPECTED_TOP_VOLUMES.join(', ')}, got ${topVolumes.join(', ')}`
     );
+  }
+  for (const [volName, volConfig] of Object.entries(rawTopVolumes)) {
+    if (
+      volConfig !== null &&
+      (!isPlainObject(volConfig) || Object.keys(volConfig).length > 0)
+    ) {
+      fail(
+        `top-level volume ${volName} must be a canonical empty definition without overrides: ${JSON.stringify(volConfig)}`
+      );
+    }
   }
 
   for (const [serviceName, serviceConfig] of Object.entries(services)) {
@@ -1058,7 +1108,7 @@ export function validateRuntime12ComposeDocument(document, options = {}) {
 }
 
 export function composeYamlToRuntime12ConfigJson(composeText, options = {}) {
-  const document = parseEmbeddedComposeText(composeText, options.env);
+  const document = parseEmbeddedComposeText(composeText);
   return validateRuntime12ComposeDocument(document, options);
 }
 
@@ -1068,11 +1118,11 @@ export function verifyEmbeddedReleaseArtifacts({
   pairing,
   evidenceDir = null,
   roleOciPaths = null,
+  requireOciArchives = false,
   apiContractPath = null,
   apiContractBytes = null,
   fullwebManifest = null,
   validateComposeScript = true,
-  env = process.env,
 }) {
   validateCandidateEvidence(evidence);
   if (!isPlainObject(pairing)) {
@@ -1101,6 +1151,7 @@ export function verifyEmbeddedReleaseArtifacts({
   const expectedMeta = resolveFullWebAndApiMetadata(evidence, {
     evidenceDir,
     roleOciPaths,
+    requireOciArchives,
     apiContractPath,
     apiContractBytes,
     fullwebManifest,
@@ -1139,7 +1190,6 @@ export function verifyEmbeddedReleaseArtifacts({
 
   const composeDoc = composeYamlToRuntime12ConfigJson(composeText, {
     validateComposeScript,
-    env,
   });
 
   if (!isPlainObject(pairing.images)) {
@@ -1288,11 +1338,11 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
     pairing,
     evidenceDir: options.evidenceDir ?? null,
     roleOciPaths: options.roleOciPaths ?? null,
+    requireOciArchives: Boolean(options.requireOciArchives),
     apiContractPath: options.apiContractPath ?? null,
     apiContractBytes: options.apiContractBytes ?? null,
     fullwebManifest: options.fullwebManifest ?? null,
     validateComposeScript: options.validateComposeScript !== false,
-    env: options.env ?? process.env,
   });
 
   return {
@@ -1410,6 +1460,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
         pairing,
         evidenceDir,
         roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
+        requireOciArchives: true,
       });
       if (cli.composeJsonPath) {
         mkdirSync(dirname(cli.composeJsonPath), { recursive: true });
@@ -1426,6 +1477,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
         imageRefs: Object.keys(cli.imageRefs).length ? cli.imageRefs : undefined,
         evidenceDir,
         roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
+        requireOciArchives: true,
       });
       mkdirSync(dirname(cli.composePath), { recursive: true });
       mkdirSync(dirname(cli.pairingPath), { recursive: true });

@@ -490,7 +490,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 archives[role] = archive
             receipt = subject.verify(archives, SHA, EVENT, self.root)
             # Rewrite runtime CPA hash in receipt_for_node to official pin for the initial Node render,
-            # while keeping manager.oci.tar and ingress.oci.tar on disk for real OCI re-derivation.
+            # while keeping all three real OCI archives (manager.oci.tar, ingress.oci.tar, runtime.oci.tar) on disk.
             receipt_for_node = json.loads(json.dumps(receipt))
             real_cpa_sha = VERIFIER.read_text(encoding="utf-8").split(
                 'CPA_SHA = "', 1)[1].split('"', 1)[0]
@@ -498,7 +498,6 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             receipt_for_node["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
                 "sha256:" + real_cpa_sha
             )
-            receipt_for_node["images"]["runtime"]["archive"] = None
             evidence_path = self.root / "candidate-evidence.json"
             compose_path = self.root / "docker-compose.v2-embedded.yml"
             pairing_path = self.root / "embedded-release-pairing.json"
@@ -508,14 +507,30 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                  "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
                 capture_output=True, text=True, timeout=20, check=False)
             self.assertEqual(rendered.returncode, 0, rendered.stdout + "\n" + rendered.stderr)
-            receipt_for_node["images"]["runtime"]["archive"] = "runtime.oci.tar"
-            with patch.object(subject, "CPA_SHA", real_cpa_sha):
-                # Test with manager and ingress real OCI archives + patched runtime CPA pin
-                test_archives = {"manager": archives["manager"], "ingress": archives["ingress"], "runtime": None}
-                verified = subject.verify_rendered_pairing(
-                    receipt_for_node, compose_path, pairing_path, test_archives)
-                self.assertEqual(verified["compose"]["filename"], "docker-compose.v2-embedded.yml")
 
+            receipt_for_node = json.loads(json.dumps(receipt))
+            rendered_pairing = json.loads(pairing_path.read_text(encoding="utf-8"))
+            rendered_pairing["cpa"]["artifact_id"] = "sha256:" + fake_cpa
+            pairing_path.write_text(json.dumps(rendered_pairing, indent=2) + "\n", encoding="utf-8")
+
+            test_archives = dict(archives)
+            verified = subject.verify_rendered_pairing(
+                receipt_for_node, compose_path, pairing_path, test_archives)
+            self.assertEqual(verified["compose"]["filename"], "docker-compose.v2-embedded.yml")
+
+            # Round-3 regression: missing any single role archive or archive=None/""/wrong fails closed
+            with self.assertRaisesRegex(ValueError, "missing required OCI archive for runtime"):
+                subject.verify_rendered_pairing(
+                    receipt_for_node, compose_path, pairing_path,
+                    {"manager": archives["manager"], "ingress": archives["ingress"], "runtime": None})
+            for bad_archive_val in (None, "", "wrong.tar"):
+                bad_ev_arch = json.loads(json.dumps(receipt_for_node))
+                bad_ev_arch["images"]["manager"]["archive"] = bad_archive_val
+                with self.assertRaisesRegex(ValueError, "invalid or missing archive filename for manager"):
+                    subject.verify_rendered_pairing(
+                        bad_ev_arch, compose_path, pairing_path, test_archives)
+
+            if True:
                 # Negative 1: :latest in compose
                 original_compose = compose_path.read_text(encoding="utf-8")
                 compose_path.write_text(
@@ -630,6 +645,19 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     subject.verify_rendered_pairing(
                         receipt_for_node, compose_path, pairing_path, test_archives)
 
+                # Round-3 regression: top-level volume override (name/external/driver/driver_opts/labels)
+                write_resynced_compose(
+                    original_compose.replace(
+                        "  cpamp-manager-data:\n",
+                        "  cpamp-manager-data:\n    name: cpamp-shared-state\n",
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "top-level volume cpamp-manager-data must be a canonical empty definition"
+                ):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
                 # Restore valid compose and pairing, then test per-role sourceCommitClaim drift
                 compose_path.write_text(original_compose, encoding="utf-8")
                 pairing_path.write_text(json.dumps(original_pairing), encoding="utf-8")
@@ -714,10 +742,13 @@ def stage_mock_candidate_repo(source):
 
 
 MOCK_VERIFIER_SCRIPT = """\
+import gzip
 import hashlib
+import io
 import json
 import pathlib
 import sys
+import tarfile
 
 a = sys.argv
 if "--evidence" in a and "--out" not in a:
@@ -735,29 +766,57 @@ root = pathlib.Path(a[a.index("--source-root") + 1]) if "--source-root" in a els
 api_bytes = (root / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
 api_sha = "sha256:" + hashlib.sha256(api_bytes).hexdigest()
 cpa_sha = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+
+def s256(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+def build_tar_bytes(entries):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for name, content in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            tf.addfile(info, io.BytesIO(content))
+    return buf.getvalue()
+
 images = {{}}
 for idx, role in enumerate(("manager", "ingress", "runtime"), start=1):
     archive = pathlib.Path(a[a.index("--" + role) + 1])
-    digest_file = archive.parent / (role + ".digest")
-    cfg = digest_file.read_text().strip() if digest_file.exists() else "sha256:" + str(idx) * 64
-    manifest_digest = "sha256:" + chr(ord("a") + idx) * 64
     bin_path = {{
         "manager": "/usr/local/bin/cpa-manager-plus",
         "ingress": "/usr/local/bin/cpamp-ingress",
         "runtime": "/usr/local/bin/cpamp-runtime-supervisor",
     }}[role]
+    bin_bytes = ("mock-bin-" + role).encode("utf-8")
+    prov_bytes = json.dumps({{"sourceCommit": commit, "role": role}}).encode("utf-8")
+    layer_entries = {{
+        bin_path.lstrip("/"): bin_bytes,
+        "usr/local/share/cpamp/provenance.json": prov_bytes,
+    }}
     packaged = {{
-        bin_path: "sha256:" + str(idx + 3) * 64,
-        "/usr/local/share/cpamp/provenance.json": "sha256:" + str(idx + 6) * 64,
+        bin_path: s256(bin_bytes),
+        "/usr/local/share/cpamp/provenance.json": s256(prov_bytes),
     }}
     extra = {{}}
     if role == "manager":
-        web_sha = "sha256:" + "b" * 64
+        idx_sha = "sha256:" + "c" * 64
+        web_bytes = json.dumps({{
+            "schemaVersion": 1,
+            "indexHtmlSHA256": idx_sha,
+            "assetCount": 2,
+            "files": [
+                {{"path": "index.html", "sha256": idx_sha, "size": 10}},
+                {{"path": "assets/app.js", "sha256": "sha256:" + "d" * 64, "size": 20}},
+            ],
+        }}).encode("utf-8")
+        web_sha = s256(web_bytes)
+        layer_entries["usr/local/share/cpamp/release/fullweb-manifest.json"] = web_bytes
+        layer_entries["usr/local/share/cpamp/release/public-api-transport-contract.json"] = api_bytes
         packaged["/usr/local/share/cpamp/release/fullweb-manifest.json"] = web_sha
         packaged["/usr/local/share/cpamp/release/public-api-transport-contract.json"] = api_sha
         extra["fullWebSummary"] = {{
             "manifestSHA256": web_sha,
-            "indexHtmlSHA256": "sha256:" + "c" * 64,
+            "indexHtmlSHA256": idx_sha,
             "assetCount": 2,
         }}
         extra["apiTransportContract"] = {{
@@ -768,10 +827,77 @@ for idx, role in enumerate(("manager", "ingress", "runtime"), start=1):
             "expectedPath": "/phase4-test/api/v2/technical",
         }}
     if role == "runtime":
+        cpa_bytes = b"mock-cpa-binary"
+        cpa_art_bytes = json.dumps({{
+            "schemaVersion": 1,
+            "engine": "cpa",
+            "version": "8.0.55",
+            "artifactId": s256(cpa_bytes),
+        }}).encode("utf-8")
+        layer_entries["usr/local/bin/cli-proxy-api"] = cpa_bytes
+        layer_entries["usr/local/share/cpamp/runtime/cpa-artifact.json"] = cpa_art_bytes
         packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + cpa_sha
+    layer_tar = build_tar_bytes(layer_entries)
+    diff_id = s256(layer_tar)
+    layer_gz = gzip.compress(layer_tar)
+    layer_digest = s256(layer_gz)
+    config_bytes = json.dumps({{
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {{
+            "Labels": {{
+                "org.opencontainers.image.revision": commit,
+                "io.cpamp.candidate.role": role,
+                "io.cpamp.candidate.event": event,
+            }},
+        }},
+        "rootfs": {{"type": "layers", "diff_ids": [diff_id]}},
+    }}).encode("utf-8")
+    cfg = s256(config_bytes)
+    manifest_bytes = json.dumps({{
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {{
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": cfg,
+            "size": len(config_bytes),
+        }},
+        "layers": [{{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": layer_digest,
+            "size": len(layer_gz),
+        }}],
+    }}).encode("utf-8")
+    manifest_digest = s256(manifest_bytes)
+    index_bytes = json.dumps({{
+        "schemaVersion": 2,
+        "manifests": [{{
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": manifest_digest,
+            "size": len(manifest_bytes),
+            "platform": {{"os": "linux", "architecture": "amd64"}},
+        }}],
+    }}).encode("utf-8")
+    oci_bytes = build_tar_bytes({{
+        "oci-layout": b'{{"imageLayoutVersion":"1.0.0"}}',
+        "index.json": index_bytes,
+        "blobs/sha256/" + manifest_digest.split(":", 1)[1]: manifest_bytes,
+        "blobs/sha256/" + cfg.split(":", 1)[1]: config_bytes,
+        "blobs/sha256/" + layer_digest.split(":", 1)[1]: layer_gz,
+    }})
+    archive.write_bytes(oci_bytes)
+    docker_tar = archive.parent / (role + ".docker.tar")
+    if docker_tar.exists():
+        transport = json.dumps([{{
+            "Config": "blobs/" + cfg.replace(":", "/", 1),
+            "RepoTags": ["cpamp-r1-" + role + ":candidate"],
+            "Layers": ["blobs/" + layer_digest.replace(":", "/", 1)],
+        }}]).encode("utf-8")
+        docker_tar.write_bytes(build_tar_bytes({{"manifest.json": transport}}))
     images[role] = {{
-        "archive": None,
-        "archiveSHA256": "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "archive": role + ".oci.tar",
+        "archiveSHA256": s256(oci_bytes),
+        "ociLayoutIndexDigest": s256(index_bytes),
         "platform": "linux/amd64",
         "platformManifestDigest": manifest_digest,
         "imageConfigDigest": cfg,

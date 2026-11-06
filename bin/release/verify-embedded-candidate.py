@@ -650,6 +650,11 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
         entry = images[role]
         require(type(entry) is dict, "invalid pairing image entry: " + role)
         ev_img = evidence["images"][role]
+        require(ev_img.get("archive") == f"{role}.oci.tar",
+                f"invalid or missing archive filename for {role}: {ev_img.get('archive')!r}")
+        require(isinstance(ev_img.get("archiveSHA256"), str) and
+                SHA.fullmatch(ev_img["archiveSHA256"]) is not None,
+                f"invalid or missing archiveSHA256 for {role}")
         if "sourceCommitClaim" in ev_img and ev_img["sourceCommitClaim"] is not None:
             require(ev_img["sourceCommitClaim"] == source_commit,
                     f"{role} sourceCommitClaim differs from candidate sourceCommitClaim")
@@ -671,10 +676,15 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
         require(entry.get("image_ref") == expected_ref, "pairing image_ref mismatch: " + role)
         require(service_images["cpamp-" + role] == expected_ref,
                 "rendered compose image mismatch for cpamp-" + role)
-    if archive_paths:
-        for role, archive in archive_paths.items():
-            if archive is not None:
-                verify_archive_anchor(archive, role, evidence, pairing, source_commit)
+    if archive_paths is None:
+        archive_paths = {role: compose_path.parent / f"{role}.oci.tar" for role in ROLES}
+    require(type(archive_paths) is dict and set(archive_paths) == set(ROLES),
+            "archive_paths must provide all three role OCI archives (manager, ingress, runtime)")
+    for role in ROLES:
+        archive = archive_paths[role]
+        require(isinstance(archive, Path) and archive.is_file(),
+                f"missing required OCI archive for {role}: {archive}")
+        verify_archive_anchor(archive, role, evidence, pairing, source_commit)
     renderer = Path(__file__).with_name("render-embedded-compose.mjs")
     require(renderer.is_file(), "missing compose/pairing renderer: " + str(renderer))
     node_env = dict(os.environ)
@@ -702,10 +712,8 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
             "--compose", str(compose_path),
             "--pairing", str(pairing_file),
         ]
-        if archive_paths:
-            for role, archive in archive_paths.items():
-                if archive is not None and (role != "runtime" or CPA_SHA == official_cpa_sha):
-                    cmd.extend([f"--{role}-oci", str(archive)])
+        for role in ROLES:
+            cmd.extend([f"--{role}-oci", str(archive_paths[role])])
         proc = subprocess.run(
             cmd, env=node_env, capture_output=True, text=True, timeout=20, check=False,
         )
@@ -732,15 +740,10 @@ def main():
         require(args.verify_compose is not None and args.verify_pairing is not None,
                 "--evidence mode requires --verify-compose and --verify-pairing")
         evidence = json_object(args.evidence.read_bytes(), "candidate evidence")
-        archives = {}
-        for role in ROLES:
-            explicit = getattr(args, role)
-            if explicit is not None:
-                archives[role] = explicit
-            else:
-                rel_name = (evidence.get("images") or {}).get(role, {}).get("archive")
-                candidate_path = args.evidence.parent / rel_name if isinstance(rel_name, str) else None
-                archives[role] = candidate_path if candidate_path and candidate_path.is_file() else None
+        archives = {
+            role: getattr(args, role) or (args.evidence.parent / f"{role}.oci.tar")
+            for role in ROLES
+        }
         verify_rendered_pairing(evidence, args.verify_compose, args.verify_pairing, archives)
         print("VERIFIED RENDERED COMPOSE AND PAIRING AGAINST CANDIDATE EVIDENCE: " + str(args.verify_pairing))
         return
