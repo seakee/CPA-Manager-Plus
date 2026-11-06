@@ -310,3 +310,25 @@ describe('release topology validation', () => {
     }
   });
 });
+
+describe('v2 beta release content continuity', () => {
+  const v2Tag = 'v2.0.0-beta.1';
+  it('accepts v2 Beta note pairs and keeps the prerelease flag', () => {
+    expect(parseReleaseTag(v2Tag)).toEqual({ tag: v2Tag, prerelease: true });
+    const chinese = `# CPA Manager Plus ${v2Tag}
+
+[English ->](https://github.com/seakee/CPA-Manager-Plus/blob/${v2Tag}/docs/release-notes/${v2Tag}-en.md)
+`;
+    const english = `# CPA Manager Plus ${v2Tag}
+
+[中文 ->](https://github.com/seakee/CPA-Manager-Plus/blob/${v2Tag}/docs/release-notes/${v2Tag}-zh.md)
+`;
+    expect(validateReleaseNotes({ tag: v2Tag, chinese, english })).toMatchObject({
+      chineseCharacters: expect.any(Number),
+      englishCharacters: expect.any(Number),
+    });
+    expect(() =>
+      validateReleaseNotes({ tag: v2Tag, chinese, english: english.replaceAll(v2Tag, 'v2.0.0') })
+    ).toThrow();
+  });
+});

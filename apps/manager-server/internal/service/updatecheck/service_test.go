@@ -580,3 +580,144 @@ func TestReleasePolicyAndLinksFailClosed(t *testing.T) {
 		})
 	}
 }
+
+// The released v1.14.10 binary is the consumer that must never treat the v2
+// Beta as a directly installable 1.x upgrade. Its service.go discovery logic is
+// preserved in this package (only persistence helpers changed after v1.14.10),
+// and metadata.go/version.go are byte-identical to the v1.14.10 tag, so this
+// test exercises the real released gate against the v2 release-info fixture.
+func TestV11410ConsumerWithV2BetaIndexNeverOffersDirectV2Install(t *testing.T) {
+	ctx := context.Background()
+	clock := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	fixtureBytes, err := os.ReadFile("../../../../../tests/fixtures/release-v2.0.0-beta.1-info.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var beta ReleaseInfo
+	if err = json.Unmarshal(fixtureBytes, &beta); err != nil {
+		t.Fatal(err)
+	}
+	if beta.SchemaVersion != 2 || beta.Release.Version != "v2.0.0-beta.1" {
+		t.Fatalf("unexpected v2 fixture identity: schema=%d version=%q", beta.SchemaVersion, beta.Release.Version)
+	}
+	// The released 1.x validator rejects schema_version 2 outright.
+	if err = beta.Validate(beta.Release.Version); err == nil {
+		t.Fatal("v1.14.10 consumer accepted a schema_version 2 release info")
+	}
+	stableInfo := fixture("v1.14.10")
+	// Exact producer shape: a v2 Beta beta-channel target carries
+	// schema_version 2, which the 1.x consumer ignores at the index level and
+	// rejects when it reads the release info.
+	mixedIndexJSON := `{"schema_version":1,"revision":1,"generated_at":"2026-11-06T12:00:00Z","channels":{"stable":{"version":"v1.14.10"},"rc":null,"beta":{"version":"v2.0.0-beta.1","schema_version":2}}}`
+	var mixedIndex Index
+	if err = json.Unmarshal([]byte(mixedIndexJSON), &mixedIndex); err != nil {
+		t.Fatal(err)
+	}
+	if err = mixedIndex.Validate(); err != nil {
+		t.Fatalf("v1.14.10 consumer rejected the mixed update index: %v", err)
+	}
+	serve := func(t *testing.T, betaDownloads *atomic.Int32) *httptest.Server {
+		t.Helper()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/index":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(mixedIndexJSON))
+			case "/v1.14.10":
+				_ = json.NewEncoder(w).Encode(stableInfo)
+			case "/v2.0.0-beta.1":
+				betaDownloads.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(fixtureBytes)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+
+	for _, preference := range []string{"auto", "stable"} {
+		t.Run("prefers_"+preference, func(t *testing.T) {
+			var betaDownloads atomic.Int32
+			server := serve(t, &betaDownloads)
+			preferenceJSON := `{"schema_version":1,"channel_preference":"auto","releases":{}}`
+			if preference != "auto" {
+				preferenceJSON = `{"schema_version":1,"channel_preference":"` + preference + `","releases":{}}`
+			}
+			store := &memoryStore{data: []byte(preferenceJSON)}
+			s := New(store, "v1.14.10", "test", false)
+			s.now = func() time.Time { return clock }
+			s.client = server.Client()
+			s.indexURL = server.URL + "/index"
+			s.releaseURL = func(tag string) string { return server.URL + "/" + tag }
+
+			status, checkErr := s.Check(ctx)
+			if checkErr != nil {
+				t.Fatalf("check failed: %v", checkErr)
+			}
+			if status.LastError != "" {
+				t.Fatalf("default %s channel must stay error-free: %q", preference, status.LastError)
+			}
+			if status.State != "up_to_date" {
+				t.Fatalf("expected up_to_date on v1.14.10, got %q", status.State)
+			}
+			if status.UpgradeAction != "" {
+				t.Fatalf("v2 Beta leaked an upgrade action on the %s channel: %q", preference, status.UpgradeAction)
+			}
+			if status.Target == nil || status.Target.Release.Version != "v1.14.10" {
+				t.Fatalf("expected the 1.x stable target, got %+v", status.Target)
+			}
+			if betaDownloads.Load() != 0 {
+				t.Fatal("default channels must never fetch the v2 Beta release info")
+			}
+			if info, claimErr := s.Claim(ctx); info != nil || claimErr != nil {
+				t.Fatalf("v2 Beta must not raise a notification: %v %v", info, claimErr)
+			}
+		})
+	}
+
+	t.Run("manual_beta_fails_closed", func(t *testing.T) {
+		var betaDownloads atomic.Int32
+		server := serve(t, &betaDownloads)
+		store := &memoryStore{}
+		s := New(store, "v1.14.10", "test", false)
+		s.now = func() time.Time { return clock }
+		s.client = server.Client()
+		s.indexURL = server.URL + "/index"
+		s.releaseURL = func(tag string) string { return server.URL + "/" + tag }
+
+		status, setErr := s.SetChannel(ctx, "beta")
+		if setErr != nil {
+			t.Fatalf("channel switch must surface a status, not an error: %v", setErr)
+		}
+		if status.Channel != "beta" || status.ChannelPreference != "beta" {
+			t.Fatalf("beta channel was not selected: %+v", status)
+		}
+		if status.LastError == "" {
+			t.Fatal("schema_version 2 must fail closed on the beta channel")
+		}
+		if status.Target != nil {
+			t.Fatalf("v1.14.10 must not expose the v2 Beta target: %+v", status.Target)
+		}
+		if status.State == "update_available" {
+			t.Fatalf("v1.14.10 treated the v2 Beta as an available upgrade")
+		}
+		if status.UpgradeAction == "direct" {
+			t.Fatal("v1.14.10 must never offer a direct v2 install")
+		}
+		if betaDownloads.Load() == 0 {
+			t.Fatal("the beta target should be fetched and rejected, not silently skipped")
+		}
+		if info, claimErr := s.Claim(ctx); info != nil || claimErr != nil {
+			t.Fatalf("rejected v2 Beta must not raise a notification: %v %v", info, claimErr)
+		}
+		var persisted State
+		if err := json.Unmarshal(store.data, &persisted); err != nil {
+			t.Fatal(err)
+		}
+		if _, cached := persisted.Releases["v2.0.0-beta.1"]; cached {
+			t.Fatal("rejected v2 Beta release info must not be cached")
+		}
+	})
+}
