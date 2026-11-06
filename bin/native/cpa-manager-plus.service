@@ -20,6 +20,7 @@ Environment="CPAMP_RUNTIME_ADDR=127.0.0.1:18318"
 Environment="CPAMP_MANAGER_ADDR=127.0.0.1:18319"
 Environment="CPAMP_INGRESS_CONTROL_ADDR=127.0.0.1:18320"
 Environment="CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317"
+Environment="CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1"
 # The launcher stays root so the Runtime Supervisor can drop only CPA. The
 # dedicated CPA identity defaults to cpamp-cpa (10001:10001); cpa-manager-plusctl
 # install rewrites these values with the created user's real UID/GID.

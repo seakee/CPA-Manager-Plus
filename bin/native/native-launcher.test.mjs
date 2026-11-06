@@ -307,7 +307,7 @@ const createMockNativeHome = (baseDir) => {
     JSON.stringify({
       schemaVersion: 1,
       engine: 'cpa',
-      version: '8.0.13',
+      version: '8.0.55',
       artifactId: `sha256:${cpaSha}`,
     }) + '\n',
     { mode: 0o444 }
@@ -672,6 +672,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       path.join(dataDir, 'runtime/supervisor/operations.sqlite')
     );
     assert.equal(runtimeDump.env.CPAMP_RUNTIME_CPA_ADDR, `127.0.0.1:${ports.cpaPort}`);
+    assert.equal(runtimeDump.env.CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK, '1');
     assert.equal(runtimeDump.env.CPAMP_CPA_EXECUTABLE, cpaBin);
     assert.equal(
       runtimeDump.env.CPAMP_CPA_ARTIFACT_MANIFEST,
@@ -695,6 +696,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.equal(managerDump.env.CPAMP_PUBLIC_ORIGIN, undefined);
     // The explicit runtime secret must never reach Manager or Ingress.
     assert.equal(managerDump.env.CPAMP_RUNTIME_TOKEN, undefined);
+    assert.equal(managerDump.env.CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK, undefined);
 
     // Verify Ingress env wiring
     assert.equal(ingressDump.env.CPAMP_INGRESS_ADDR, `127.0.0.1:${ports.ingressPort}`);
@@ -702,6 +704,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.equal(ingressDump.env.CPAMP_GATEWAY_URL, `http://127.0.0.1:${ports.cpaPort}`);
     assert.equal(ingressDump.env.CPAMP_INGRESS_CONTROL_ADDR, `127.0.0.1:${ports.controlPort}`);
     assert.equal(ingressDump.env.CPAMP_RUNTIME_TOKEN, undefined);
+    assert.equal(ingressDump.env.CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK, undefined);
 
     // The bootstrap Gateway seed must never disable CPA client authentication.
     const gatewayConfig = readFileSync(
@@ -711,6 +714,8 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.match(gatewayConfig, /api-keys: \["[0-9a-f]{64}"\]/);
     assert.doesNotMatch(gatewayConfig, /api-keys: \[\]/);
     assert.equal(gatewayConfig.includes(`port: ${ports.cpaPort}`), true);
+    assert.equal(gatewayConfig.includes('host: "127.0.0.1"'), true);
+    assert.equal(gatewayConfig.includes('allow-remote: false'), true);
     const bootstrapKeyFile = path.join(runDir, 'gateway-bootstrap-key');
     assert.equal(existsSync(bootstrapKeyFile), true);
     assert.equal(statSync(bootstrapKeyFile).mode & 0o777, 0o600);
@@ -1268,6 +1273,12 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.doesNotMatch(unitContent, /^User=/m);
     assert.doesNotMatch(unitContent, /^Group=/m);
     assert.doesNotMatch(unitContent, /ExecReload=/);
+    assert.match(unitContent, /Environment="CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1"/);
+    const staticServiceContent = readFileSync(
+      path.join(repoRoot, 'bin/native/cpa-manager-plus.service'),
+      'utf8'
+    );
+    assert.match(staticServiceContent, /Environment="CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1"/);
     assert.match(unitContent, /CPAMP_RUNTIME_CPA_UID=\d+/);
     assert.match(unitContent, /CPAMP_RUNTIME_CPA_GID=\d+/);
     assert.match(unitContent, /KillMode=mixed/);
@@ -1614,7 +1625,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       OUT_DIR: outDir,
       CPA_BINARY_PATH: cpaBin,
       CPA_LICENSE_PATH: cpaLicensePath,
-      CPAMP_CPA_VERSION: '8.0.13',
+      CPAMP_CPA_VERSION: '8.0.55',
       CPAMP_CPA_EXECUTABLE_SHA256: cpaSha,
       // This fixture binary is not the released artifact, so the packaging
       // guard requires an explicit opt-in for the override.
@@ -1664,7 +1675,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     const noPluginResult = spawnSync('bash', [packageNativeScript], {
       env: {
         ...pkgEnv,
-        CPAMP_CPA_ASSET_NAME: 'CLIProxyAPI_8.0.13_linux_amd64_no-plugin.tar.gz',
+        CPAMP_CPA_ASSET_NAME: 'CLIProxyAPI_8.0.55_linux_amd64_no-plugin.tar.gz',
       },
       encoding: 'utf8',
     });
@@ -1732,7 +1743,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.deepEqual(artifactManifest, {
       schemaVersion: 1,
       engine: 'cpa',
-      version: '8.0.13',
+      version: '8.0.55',
       artifactId: `sha256:${cpaSha}`,
     });
 
@@ -2207,7 +2218,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
         PACKAGE_MODE: 'v2',
         CPA_BINARY_PATH: cpaBin,
         CPA_LICENSE_PATH: cpaLicensePath,
-        CPAMP_CPA_VERSION: '8.0.13',
+        CPAMP_CPA_VERSION: '8.0.55',
         CPAMP_CPA_EXECUTABLE_SHA256: cpaSha,
         CPAMP_ALLOW_UNPINNED_CPA: '1',
         CPAMP_PREBUILT_MANAGER_BIN: path.join(binDir, 'cpa-manager-plus'),
@@ -2247,6 +2258,56 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
         `dist-${'202106070809.10'.replace(/[^0-9]/g, '')}/${archiveName}`
       );
       assert.ok(readTarMembers(archivePath).length > 10, 'normalization must not empty the archive');
+    }
+  });
+
+  it('enforces NH2 CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1 across static unit, generated unit, ctl start, and supervisor subshell only', async () => {
+    const baseDir = makeTempDir('cpamp-native-nh2-');
+    const { homeDir, runDir } = createMockNativeHome(baseDir);
+    const ctl = path.join(homeDir, 'cpa-manager-plusctl');
+    const systemdDir = path.join(baseDir, 'systemd');
+    const envDumpDir = path.join(baseDir, 'env-dumps');
+    mkdirSync(envDumpDir, { recursive: true });
+
+    const staticUnit = readFileSync(
+      path.join(repoRoot, 'bin/native/cpa-manager-plus.service'),
+      'utf8'
+    );
+    assert.match(staticUnit, /^Environment="CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1"$/m);
+
+    const rawEnv = await buildPortEnv(homeDir, {
+      CPA_MANAGER_PLUS_SKIP_SYSTEMCTL: '1',
+      MOCK_ENV_DUMP_DIR: envDumpDir,
+    });
+    const { _ports: _ports, ...env } = rawEnv;
+
+    execFileSync('bash', [ctl, 'install', '--unit-dir', systemdDir, '--no-systemctl'], {
+      env,
+      encoding: 'utf8',
+    });
+    const generatedUnit = readFileSync(
+      path.join(systemdDir, 'cpa-manager-plus.service'),
+      'utf8'
+    );
+    assert.match(generatedUnit, /^Environment="CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1"$/m);
+
+    execFileSync('bash', [ctl, 'start'], { env, encoding: 'utf8' });
+    try {
+      assert.equal(await waitForFile(path.join(runDir, 'launcher.ready')), true);
+      const runtimeDump = JSON.parse(
+        readFileSync(path.join(envDumpDir, 'runtime-supervisor-env.json'), 'utf8')
+      );
+      const managerDump = JSON.parse(
+        readFileSync(path.join(envDumpDir, 'manager-env.json'), 'utf8')
+      );
+      const ingressDump = JSON.parse(
+        readFileSync(path.join(envDumpDir, 'ingress-env.json'), 'utf8')
+      );
+      assert.equal(runtimeDump.env.CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK, '1');
+      assert.equal(managerDump.env.CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK, undefined);
+      assert.equal(ingressDump.env.CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK, undefined);
+    } finally {
+      spawnSync('bash', [ctl, 'stop'], { env, encoding: 'utf8' });
     }
   });
 });

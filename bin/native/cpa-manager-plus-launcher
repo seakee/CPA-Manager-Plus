@@ -1320,9 +1320,10 @@ if [ -n "${explicit_token}" ] && [ "${runtime_token}" != "${explicit_token}" ]; 
   log_err "Explicit Runtime transport secret does not match existing secret source"
   exit 1
 fi
-# The Supervisor receives the secret explicitly below. Drop the inherited copy
-# so Manager and Ingress can never observe it through their environment.
-unset CPAMP_RUNTIME_TOKEN
+# The Supervisor receives the secret and loopback bind policy explicitly below.
+# Drop inherited copies so Manager and Ingress can never observe them through
+# their environment.
+unset CPAMP_RUNTIME_TOKEN CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK
 explicit_token=""
 
 # Resolve unified public Ingress address (default 0.0.0.0:18317, configurable via CPAMP_INGRESS_ADDR / HTTP_ADDR / PORT)
@@ -1743,6 +1744,7 @@ spawn_runtime_supervisor() {
     export CPAMP_RUNTIME_TOKEN_FILE="${token_file}"
     export CPAMP_RUNTIME_JOURNAL_PATH="${journal_path}"
     export CPAMP_RUNTIME_CPA_ADDR="${cpa_addr}"
+    export CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1
     export CPAMP_CPA_EXECUTABLE="${cpa_bin}"
     if [ -n "${cpa_uid}" ]; then
       export CPAMP_RUNTIME_CPA_UID="${cpa_uid}"
@@ -1770,7 +1772,7 @@ spawn_manager_server() {
   log_msg "Starting manager on ${manager_addr}"
   (
     cd "${home_dir}"
-    unset CPAMP_RUNTIME_TOKEN
+    unset CPAMP_RUNTIME_TOKEN CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK
     export HTTP_ADDR="${manager_addr}"
     export USAGE_DATA_DIR="${data_dir}"
     export USAGE_DB_PATH="${db_path}"
@@ -1808,7 +1810,7 @@ spawn_ingress() {
   log_msg "Starting ingress on ${ingress_addr} (control ${ingress_control_addr})"
   (
     cd "${home_dir}"
-    unset CPAMP_RUNTIME_TOKEN
+    unset CPAMP_RUNTIME_TOKEN CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK
     export CPAMP_INGRESS_ADDR="${ingress_addr}"
     export CPAMP_MANAGER_URL="${manager_url}"
     export CPAMP_GATEWAY_URL="${gateway_url}"

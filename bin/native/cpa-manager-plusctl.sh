@@ -935,6 +935,7 @@ start_v2_app() {
       launcher_cpa_address="$(resolve_cpa_address_for_instance "${run_dir}")"
     fi
     export CPAMP_RUNTIME_CPA_ADDR="${launcher_cpa_address}"
+    export CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1
     exec nohup "${launcher_bin}" "$@"
   ) >>"${log_file}" 2>&1 &
   pid="$!"
@@ -1693,6 +1694,7 @@ Environment="CPAMP_RUNTIME_ADDR=${runtime_addr}"
 Environment="CPAMP_MANAGER_ADDR=${manager_addr}"
 Environment="CPAMP_INGRESS_CONTROL_ADDR=${ingress_control_addr}"
 Environment="CPAMP_RUNTIME_CPA_ADDR=${cpa_addr}"
+Environment="CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1"
 Environment="CPAMP_RUNTIME_CPA_UID=${cpa_uid}"
 Environment="CPAMP_RUNTIME_CPA_GID=${cpa_gid}"
 EnvironmentFile=-${target_home}/cpa-manager-plus.env
