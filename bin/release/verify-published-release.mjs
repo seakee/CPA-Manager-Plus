@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
-import { validateInfo } from './update-contract.mjs';
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import {
+  validateInfo,
+  assertSupportedVersion,
+  assertV2AssetBindings,
+  expectedV2AssetNames,
+  parseVersion,
+  v2EmbeddedComposeFilename,
+  v2PairingFilename,
+} from './update-contract.mjs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseReleaseTag } from './validate-release.mjs';
@@ -15,8 +23,9 @@ const normalizeBody = (body) =>
     .trimEnd();
 const sha256DigestPattern = /^sha256:[0-9a-f]{64}$/i;
 
-export const expectedReleaseAssetNames = (tag) => {
+export const expectedReleaseAssetNames = (tag, options = {}) => {
   parseReleaseTag(tag);
+  if (assertSupportedVersion(tag, options).core[0] === '2') return expectedV2AssetNames(tag);
   const prefix = `cpa-manager-plus_${tag}`;
   return [
     'checksums.txt',
@@ -46,7 +55,59 @@ const assetRecord = (filePath) => {
   };
 };
 
-export const buildExpectedReleaseAssets = (assetsDir, tag) => {
+const buildExpectedV2ReleaseAssets = (assetsDir, tag) => {
+  const expected = expectedV2AssetNames(tag);
+  const locate = (name) => {
+    const candidates = [path.join(assetsDir, name), path.join(assetsDir, 'native', name)].filter(
+      (candidate) => existsSync(candidate)
+    );
+    if (candidates.length === 0) fail(`Missing expected v2 release asset: ${name}`);
+    if (candidates.length > 1) fail(`Duplicate v2 release asset: ${name}`);
+    return assetRecord(candidates[0]);
+  };
+  const collectNames = (directory, { root }) => {
+    if (!existsSync(directory)) return [];
+    const names = [];
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (root && entry.name === 'native') {
+          names.push(...collectNames(path.join(directory, entry.name), { root: false }));
+          continue;
+        }
+        fail(`Unexpected v2 release asset directory: ${entry.name}`);
+      }
+      if (!entry.isFile()) fail(`Unexpected v2 release asset entry: ${entry.name}`);
+      // release.yml stages the reviewed notes for `--body-path`; like 1.x it is
+      // never part of the published asset set.
+      if (root && entry.name === 'release-notes.md') continue;
+      names.push(entry.name);
+    }
+    return names;
+  };
+  const unexpected = collectNames(assetsDir, { root: true }).filter(
+    (name) => !expected.includes(name)
+  );
+  if (unexpected.length > 0)
+    fail(`v2 release assets directory contains unexpected assets: ${unexpected.sort().join(', ')}`);
+
+  return expected.map(locate).sort((left, right) => left.name.localeCompare(right.name));
+};
+
+export const buildExpectedReleaseAssets = (assetsDir, tag, options = {}) => {
+  if (assertSupportedVersion(tag, options).core[0] === '2') {
+    const info = JSON.parse(readFileSync(path.join(assetsDir, 'release-info.json'), 'utf8'));
+    validateInfo(info, tag, options);
+    const assets = buildExpectedV2ReleaseAssets(assetsDir, tag);
+    const byName = new Map(assets.map((asset) => [asset.name, asset]));
+    const compose = byName.get(v2EmbeddedComposeFilename);
+    const pairingRecord = byName.get(v2PairingFilename);
+    if (!compose || !pairingRecord) fail('v2 release assets are missing the compose pairing');
+    assertV2AssetBindings(info, {
+      composeSha256: compose.digest,
+      pairing: JSON.parse(readFileSync(pairingRecord.filePath, 'utf8')),
+    });
+    return assets;
+  }
   validateInfo(JSON.parse(readFileSync(path.join(assetsDir, 'release-info.json'), 'utf8')), tag);
   const managementPath = path.join(assetsDir, 'management.html');
   const nativeDir = path.join(assetsDir, 'native');
@@ -71,9 +132,17 @@ export const buildExpectedReleaseAssets = (assetsDir, tag) => {
   return assets;
 };
 
-const verifyReleaseIdentity = ({ release, tag, prerelease, body, draft }) => {
+const verifyReleaseIdentity = ({ release, tag, prerelease, body, draft, allowV2Beta = false }) => {
   parseReleaseTag(tag);
-  if (!/^v1\./.test(tag)) fail('Unqualified v2 Embedded release: publication STOP');
+  const version = assertSupportedVersion(tag, { allowV2Beta });
+  if (version.core[0] === '2') {
+    // Scope 9: the v2 first Beta is a GitHub Prerelease and must never take the
+    // `releases/latest` pointer, so CPA's latest/download/management.html path
+    // keeps serving the newest 1.x stable asset.
+    if (prerelease !== true) fail(`v2 Beta ${tag} must be published as a GitHub Prerelease`);
+    if (release?.make_latest === 'true' || release?.make_latest === true)
+      fail(`v2 Beta ${tag} must not be made Latest`);
+  }
   if (!release || typeof release !== 'object') fail('GitHub Release response must be an object');
   if (release.tag_name !== tag) {
     fail(`Existing GitHub Release tag mismatch: expected ${tag}, received ${release.tag_name}`);
@@ -174,8 +243,9 @@ export const verifyPublishedRelease = ({
   body,
   assets,
   allowMissingAssets = false,
+  allowV2Beta = false,
 }) => {
-  verifyReleaseIdentity({ release, tag, prerelease, body, draft: false });
+  verifyReleaseIdentity({ release, tag, prerelease, body, draft: false, allowV2Beta });
   return verifyReleaseAssets({ release, tag, assets, allowMissingAssets });
 };
 
@@ -186,8 +256,9 @@ export const verifyDraftRelease = ({
   body,
   assets,
   allowMissingAssets = false,
+  allowV2Beta = false,
 }) => {
-  verifyReleaseIdentity({ release, tag, prerelease, body, draft: true });
+  verifyReleaseIdentity({ release, tag, prerelease, body, draft: true, allowV2Beta });
   return verifyReleaseAssets({
     release,
     tag,
@@ -196,10 +267,16 @@ export const verifyDraftRelease = ({
   });
 };
 
-export const verifyPublishedReleaseMetadata = ({ release, tag, prerelease, body }) => {
-  verifyReleaseIdentity({ release, tag, prerelease, body, draft: false });
+export const verifyPublishedReleaseMetadata = ({
+  release,
+  tag,
+  prerelease,
+  body,
+  allowV2Beta = false,
+}) => {
+  verifyReleaseIdentity({ release, tag, prerelease, body, draft: false, allowV2Beta });
   const actualAssets = sortedPublishedAssets(release);
-  const expectedNames = expectedReleaseAssetNames(tag);
+  const expectedNames = expectedReleaseAssetNames(tag, { allowV2Beta });
   if (actualAssets.length !== expectedNames.length) {
     fail(
       `Existing GitHub Release asset count mismatch: expected ${expectedNames.length}, received ${actualAssets.length}`
@@ -260,12 +337,21 @@ const runCli = () => {
     'prerelease',
     'mode',
     'allow-missing-assets',
+    'allow-v2-beta',
+    'dry-run',
     'result-path',
   ]);
   const unknown = Object.keys(options).filter((key) => !allowed.has(key));
   if (unknown.length > 0) fail(`Unknown arguments: ${unknown.map((key) => `--${key}`).join(', ')}`);
 
   const tag = requiredOption(options, 'tag');
+  const allowV2Beta = booleanOption(options, 'allow-v2-beta');
+  const dryRun = booleanOption(options, 'dry-run', process.env.DRY_RUN === 'true');
+  // Gate M3: v2 verification is a rehearsal only, exactly like the producers.
+  if (parseVersion(tag).core[0] === '2' && !(allowV2Beta && dryRun))
+    fail(
+      'v2 release verification is fail-closed (Gate M3); DRY_RUN and --allow-v2-beta are both required'
+    );
   const bodyPath = requiredOption(options, 'body-path');
   const releaseJsonPath = requiredOption(options, 'release-json');
   const prerelease = booleanOption(options, 'prerelease');
@@ -278,23 +364,29 @@ const runCli = () => {
   const body = readFileSync(bodyPath, 'utf8');
   const result =
     mode === 'metadata'
-      ? verifyPublishedReleaseMetadata({ release, tag, prerelease, body })
+      ? verifyPublishedReleaseMetadata({ release, tag, prerelease, body, allowV2Beta })
       : mode === 'draft'
         ? verifyDraftRelease({
             release,
             tag,
             prerelease,
             body,
-            assets: buildExpectedReleaseAssets(requiredOption(options, 'assets-dir'), tag),
+            assets: buildExpectedReleaseAssets(requiredOption(options, 'assets-dir'), tag, {
+              allowV2Beta,
+            }),
             allowMissingAssets: booleanOption(options, 'allow-missing-assets'),
+            allowV2Beta,
           })
         : verifyPublishedRelease({
             release,
             tag,
             prerelease,
             body,
-            assets: buildExpectedReleaseAssets(requiredOption(options, 'assets-dir'), tag),
+            assets: buildExpectedReleaseAssets(requiredOption(options, 'assets-dir'), tag, {
+              allowV2Beta,
+            }),
             allowMissingAssets: booleanOption(options, 'allow-missing-assets'),
+            allowV2Beta,
           });
 
   if (options['result-path']) {
