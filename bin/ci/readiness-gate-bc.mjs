@@ -584,25 +584,91 @@ export function createCleanupCoordinator({
   };
 }
 
-// describeFatal formats an uncaught top-level failure without a stack: a stack
-// carries the operator's absolute paths, and this line is what a failed run
-// prints. Registered paths are replaced by the redactor's placeholder.
-// A POSIX absolute path in a stray message: two or more segments after the root,
-// which is what an fs error carries. Over-redacting a snippet of an error string
-// is the safe direction for a fatal line.
-const ABSOLUTE_PATH = /(?:\/(?:[\w.@+-]|%[0-9A-F]{2})+){2,}/g;
+// The redactor this run built, published for the top-level catch. The catch is
+// outside `runMain`, and a failed run has to print the same redacted message the
+// run itself would; without this it would have to fall back to pattern matching
+// alone.
+let fatalRedactor = null;
+
+// Paths in a stray error message. The redactor knows the paths this run was
+// given, but a message can also carry one the harness never saw: a Docker
+// socket, a temp directory, an operator's `--output /restricted`. Two shapes are
+// scrubbed — a quoted span containing a slash (so a path with spaces goes as one
+// unit) and any bare slash-led path, single-segment included. The error code in
+// front of the message is untouched. Over-redacting a snippet is the safe
+// direction for a fatal line.
+const QUOTED_SLASHY = /(['"`])[^'"`\n]*\/[^'"`\n]*\1/g;
+const ABSOLUTE_PATH = /(?:\/[\w.@+-]+)+/g;
 
 export function describeFatal(error, redactor = null) {
   const name = error?.name && error.name !== 'Error' ? `${error.name}: ` : '';
   const raw = error?.message || String(error ?? 'unknown failure');
   const message = redactor ? redactor.redact(raw) : raw;
-  return `readiness-gate-bc: ${name}${message.replace(ABSOLUTE_PATH, '[redacted-path]')}`;
+  const scrubbed = message.replace(QUOTED_SLASHY, '[redacted-path]').replace(ABSOLUTE_PATH, '[redacted-path]');
+  return `readiness-gate-bc: ${name}${scrubbed}`;
 }
 
-// writeEvidence writes the archived copy twice (the run copy and the versioned
-// repo copy) and treats them as one unit: if either write fails, neither file is
-// left behind, so a failed run cannot leave a half-written document that reads as
-// a PASS.
+// probeWritableDirectory proves a directory can hold an evidence file before the
+// run spends two minutes producing one. `mkdirSync` succeeds on an existing
+// read-only directory, so the only honest test is to create, write and remove a
+// private file; the probe removes itself even when the open fails.
+export function probeWritableDirectory(
+  directory,
+  {
+    mkdirSync = fs.mkdirSync,
+    openSync = fs.openSync,
+    writeSync = fs.writeSync,
+    closeSync = fs.closeSync,
+    unlinkSync = fs.unlinkSync,
+    token = randomBytes(4).toString('hex'),
+    pid = process.pid,
+  } = {}
+) {
+  mkdirSync(directory, { recursive: true });
+  const probe = path.join(directory, `.readiness-gate-bc-${pid}-${token}.probe`);
+  try {
+    // `wx` refuses to reuse a file: the probe only ever touches what it created.
+    const fd = openSync(probe, 'wx');
+    try {
+      writeSync(fd, 'readiness-gate-bc write probe\n');
+    } finally {
+      closeSync(fd);
+    }
+  } finally {
+    try {
+      unlinkSync(probe);
+    } catch {}
+  }
+  return { ok: true, directory };
+}
+
+// prepareRunDirectories is the run's first side effect: both archive directories
+// are proven writable before the run workspace — and therefore any Docker work —
+// exists. A directory that exists but refuses a file is the case a bare
+// `mkdirSync` check misses.
+export function prepareRunDirectories({
+  output,
+  repoEvidenceDir,
+  workDir,
+  prefix,
+  probe = probeWritableDirectory,
+  mkdirSync = fs.mkdirSync,
+} = {}) {
+  probe(output);
+  probe(repoEvidenceDir);
+  // One run owns one host directory under its own prefix, so a second run can
+  // never inherit a half-initialised or corrupt store from the first.
+  const runWorkDir = path.join(workDir, prefix);
+  mkdirSync(runWorkDir, { recursive: true });
+  return { runWorkDir };
+}
+
+// writeEvidence publishes the run copy and the versioned repo copy as one unit:
+// each file is written beside its target and renamed into place, and every path
+// this function may create is registered for rollback before the first byte, so
+// any failure — a short write, a failed rename, a signal mid-archive — leaves
+// neither a final file nor a temp file behind. A failed run therefore cannot
+// leave a document that reads as a PASS.
 export function writeEvidence({
   document,
   redactor,
@@ -610,44 +676,70 @@ export function writeEvidence({
   repoEvidenceDir,
   runId,
   root = ROOT,
+  interrupted = () => null,
   mkdirSync = fs.mkdirSync,
   writeFileSync = fs.writeFileSync,
+  renameSync = fs.renameSync,
   unlinkSync = fs.unlinkSync,
+  pid = process.pid,
 } = {}) {
-  const serialize = () => `${redactor.redact(JSON.stringify(document, null, 2))}\n`;
-  const written = [];
+  const runFile = path.join(output, `readiness-gate-bc-${runId}.json`);
+  const repoFile = path.join(repoEvidenceDir, `readiness-gate-bc-${runId}.json`);
+  // The temp names live in the target directory so the rename stays on one
+  // filesystem and is atomic.
+  const runTemp = `${runFile}.tmp-${pid}`;
+  const repoTemp = `${repoFile}.tmp-${pid}`;
+  // Registered before the first write: rollback has to attempt every path this
+  // call may have created, including the file a failing write left half-written.
+  const paths = [runFile, repoFile, runTemp, repoTemp];
   const removeAll = () => {
-    for (const file of written.reverse()) {
+    const stuck = [];
+    for (const file of [...paths].reverse()) {
       try {
         unlinkSync(file);
-      } catch {}
+      } catch (error) {
+        if (error?.code !== 'ENOENT') stuck.push(file);
+      }
     }
-    written.length = 0;
+    return stuck;
   };
+  const abortError = (signal) => {
+    const error = new Error(`interrupted by ${signal} while archiving the evidence`);
+    error.interrupted = true;
+    return error;
+  };
+  const checkInterrupt = () => {
+    const signal = interrupted();
+    if (signal) throw abortError(signal);
+  };
+
   try {
     mkdirSync(output, { recursive: true });
-    const runFile = path.join(output, `readiness-gate-bc-${runId}.json`);
-    writeFileSync(runFile, serialize());
-    written.push(runFile);
     mkdirSync(repoEvidenceDir, { recursive: true });
-    const repoFile = path.join(repoEvidenceDir, `readiness-gate-bc-${runId}.json`);
-    writeFileSync(repoFile, serialize());
-    written.push(repoFile);
+    checkInterrupt();
+    // Both target paths are known up front, so the document is serialised once
+    // and both copies carry the same bytes — there is no second rewrite window.
     document.evidenceFiles = {
       // The archived copy stays self-describing without carrying the operator's
       // absolute scratch path into the repository.
       runCopy: path.basename(runFile),
       repoCopy: path.relative(root, repoFile),
     };
-    // Rewrite both copies with the evidence-paths field so the archived copy is
-    // self-describing.
-    const finalSerialized = serialize();
-    writeFileSync(runFile, finalSerialized);
-    writeFileSync(repoFile, finalSerialized);
-    return { ok: true, runFile, repoFile };
+    const serialized = `${redactor.redact(JSON.stringify(document, null, 2))}\n`;
+    writeFileSync(runTemp, serialized);
+    checkInterrupt();
+    writeFileSync(repoTemp, serialized);
+    checkInterrupt();
+    renameSync(runTemp, runFile);
+    checkInterrupt();
+    renameSync(repoTemp, repoFile);
+    checkInterrupt();
+    return { ok: true, aborted: false, runFile, repoFile };
   } catch (error) {
-    removeAll();
-    return { ok: false, error: redactor.redact(error?.message || String(error)) };
+    const stuck = removeAll();
+    if (error?.interrupted) return { ok: false, aborted: true, error: error.message };
+    const unremovable = stuck.length > 0 ? `; ${stuck.length} file(s) could not be removed` : '';
+    return { ok: false, aborted: false, error: `${redactor.redact(error?.message || String(error))}${unremovable}` };
   }
 }
 
@@ -1008,6 +1100,9 @@ async function runMain(argv = process.argv.slice(2)) {
   const runId = randomBytes(4).toString('hex');
   const prefix = `cpampd${runId}`;
   const redactor = createRedactor([]);
+  // Published for the top-level catch: it lives outside this function, and a
+  // failed run must print the same redacted message the run would.
+  fatalRedactor = redactor;
   const registry = createResourceRegistry({ prefix });
   const checks = [];
   const scenarios = {};
@@ -1022,14 +1117,16 @@ async function runMain(argv = process.argv.slice(2)) {
     redactor.add(hostPath);
   }
   // Fail fast, before any Docker work or scratch directory: a run that cannot
-  // write its evidence is not worth two minutes of containers. The error reaches
-  // the top-level catch, which prints a path-free summary.
-  fs.mkdirSync(options.output, { recursive: true });
-  fs.mkdirSync(options.repoEvidenceDir, { recursive: true });
-  // One run owns one host directory under its own prefix, so a second run can
-  // never inherit a half-initialised or corrupt store from the first.
-  const runWorkDir = path.join(options.workDir, prefix);
-  fs.mkdirSync(runWorkDir, { recursive: true });
+  // write its evidence is not worth two minutes of containers. `mkdirSync`
+  // succeeds on an existing read-only directory, so both directories are probed
+  // with a private create/write/unlink. The error reaches the top-level catch,
+  // which prints a path-free summary.
+  const { runWorkDir } = prepareRunDirectories({
+    output: options.output,
+    repoEvidenceDir: options.repoEvidenceDir,
+    workDir: options.workDir,
+    prefix,
+  });
   redactor.add(runWorkDir);
   let abortedSignal = null;
   let cleanup = { ok: true, released: [], errors: [] };
@@ -2147,10 +2244,10 @@ async function runMain(argv = process.argv.slice(2)) {
     record('harness', 'FAIL', { error: redact(error?.message || String(error)) });
     runOk = false;
   } finally {
-    // Await the same promise the signal path awaits — cleanup runs once — and
-    // keep the guard attached until it has settled.
+    // Await the same promise the signal path awaits — cleanup runs once. The
+    // guard stays attached past this point: it also covers the evidence archive,
+    // which must not be interrupted half-way.
     cleanup = await cleanupCoordinator.run();
-    signalGuard.detach();
   }
 
   // A handled signal owns the exit code and is already exiting this process once
@@ -2185,8 +2282,18 @@ async function runMain(argv = process.argv.slice(2)) {
     output: options.output,
     repoEvidenceDir: options.repoEvidenceDir,
     runId,
+    interrupted: () => signalGuard.signal,
   });
-  if (!written.ok) throw new Error(`could not write the evidence: ${written.error}`);
+  // The archive is done: from here the signal guard has nothing left to protect.
+  signalGuard.detach();
+  if (!written.ok) {
+    // An interrupted archive is not a failed one: the signal owns the exit code,
+    // and `writeEvidence` has already removed every file it created.
+    if (written.aborted) {
+      return finalExitCode({ runOk: false, cleanupOk: cleanup.ok, signal: signalGuard.signal });
+    }
+    throw new Error(`could not write the evidence: ${written.error}`);
+  }
   process.stdout.write(`evidence: ${path.basename(written.runFile)}\n`);
   process.stdout.write(`repo evidence: ${path.relative(ROOT, written.repoFile)}\n`);
   process.stdout.write(`verdict: ${document.verdict}\n`);
@@ -2204,7 +2311,7 @@ if (isEntryPoint) {
     .catch((error) => {
       // No stack: it carries the operator's absolute paths, and a failed run
       // must not print them.
-      process.stderr.write(`${describeFatal(error)}\n`);
+      process.stderr.write(`${describeFatal(error, fatalRedactor)}\n`);
       process.exitCode = 1;
     });
 }

@@ -44,6 +44,8 @@ import {
   judgeSecretFreeMismatchedKey,
   leaksIn,
   percentile,
+  prepareRunDirectories,
+  probeWritableDirectory,
   protectSettingValue,
   removeRunWorkspace,
   seedFixture,
@@ -1027,68 +1029,209 @@ test('a fatal line carries the message and no stack or absolute path', () => {
   assert.equal(bare.includes('/Users/operator'), false);
   assert.match(bare, /\[redacted-path\]/);
 
+  // Single-segment paths and paths with spaces are host paths too, and the error
+  // code stays readable in front of the redacted location.
+  for (const [message, code] of [
+    [`EACCES: permission denied, mkdir '/restricted'`, 'EACCES'],
+    [`ENOTDIR: not a directory, open '/tmp'`, 'ENOTDIR'],
+    [`ENOSPC: no space left on device, write '/path with spaces/out'`, 'ENOSPC'],
+  ]) {
+    const line = describeFatal(new Error(message));
+    assert.match(line, new RegExp(`^readiness-gate-bc: ${code}:`), message);
+    assert.equal(line.includes('/restricted'), false, message);
+    assert.equal(line.includes('/tmp'), false, message);
+    assert.equal(line.includes('/path with spaces'), false, message);
+    assert.equal(line.includes('spaces/out'), false, message);
+    assert.match(line, /\[redacted-path\]/, message);
+  }
+
   const named = describeFatal(new TypeError('bad argument'), redactor);
   assert.match(named, /^readiness-gate-bc: TypeError: bad argument$/);
 });
 
-test('evidence is written as one unit and a failed write leaves no partial document', (t) => {
+test('evidence is published as one unit: both copies or neither', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-evidence-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const redactor = createRedactor([]);
+  for (const hostPath of [root]) redactor.add(hostPath);
   const output = path.join(root, 'run');
   const repoEvidenceDir = path.join(root, 'docs', 'evidence');
-  const redactor = createRedactor([]);
-  for (const hostPath of [root, output, repoEvidenceDir]) redactor.add(hostPath);
 
   const document = { schema_version: 1, verdict: 'pass', images: { manager: { id: 'sha256:abc' } } };
-  const written = writeEvidence({ document, redactor, output, repoEvidenceDir, runId: 'deadbeef', root });
+  const written = writeEvidence({ document, redactor, output, repoEvidenceDir, runId: 'deadbeef', root, pid: 1 });
   assert.equal(written.ok, true, written.error);
+  assert.equal(written.aborted, false);
   const runCopy = fs.readFileSync(written.runFile, 'utf8');
   const repoCopy = fs.readFileSync(written.repoFile, 'utf8');
   assert.equal(repoCopy, runCopy);
   assert.equal(runCopy.includes(root), false);
-  const archived = JSON.parse(repoCopy);
-  assert.equal(archived.verdict, 'pass');
-  assert.equal(archived.evidenceFiles.runCopy, 'readiness-gate-bc-deadbeef.json');
+  assert.equal(JSON.parse(repoCopy).verdict, 'pass');
+  assert.equal(JSON.parse(repoCopy).evidenceFiles.runCopy, 'readiness-gate-bc-deadbeef.json');
+  // No temp file survives a successful publish.
+  for (const entry of [...fs.readdirSync(output), ...fs.readdirSync(repoEvidenceDir)]) {
+    assert.equal(/\.tmp-/.test(entry), false, entry);
+  }
+});
 
-  const deniedOutput = path.join(root, 'denied');
-  const denied = writeEvidence({
+test('a write that fails after creating bytes leaves neither copy and no temp file', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-evidence-fail-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const redactor = createRedactor([]);
+  redactor.add(root);
+
+  // Each stage fails after it has really written bytes to disk, which is the case
+  // the earlier "throw before touching the file" test could not reach.
+  const stages = ['runTemp', 'repoTemp', 'runRename', 'repoRename'];
+  for (const stage of stages) {
+    const caseRoot = path.join(root, stage);
+    const output = path.join(caseRoot, 'run');
+    const repoEvidenceDir = path.join(caseRoot, 'repo');
+    const runId = 'cafebabe';
+    const runFile = path.join(output, `readiness-gate-bc-${runId}.json`);
+    const repoFile = path.join(repoEvidenceDir, `readiness-gate-bc-${runId}.json`);
+    let writes = 0;
+    let renames = 0;
+    const realWrite = fs.writeFileSync;
+    const realRename = fs.renameSync;
+    const result = writeEvidence({
+      document: { verdict: 'pass' },
+      redactor,
+      output,
+      repoEvidenceDir,
+      runId,
+      root: caseRoot,
+      pid: 1,
+      writeFileSync: (file, data) => {
+        realWrite(file, data);
+        writes += 1;
+        const failing = stage === 'runTemp' ? 1 : stage === 'repoTemp' ? 2 : 0;
+        if (writes === failing) throw new Error(`ENOSPC: no space left on device, write '${file}'`);
+      },
+      renameSync: (from, to) => {
+        realRename(from, to);
+        renames += 1;
+        const failing = stage === 'runRename' ? 1 : stage === 'repoRename' ? 2 : 0;
+        if (renames === failing) throw new Error(`EIO: i/o error, rename '${from}'`);
+      },
+    });
+    assert.equal(result.ok, false, stage);
+    assert.equal(result.aborted, false, stage);
+    assert.match(result.error, /ENOSPC|EIO/, stage);
+    assert.equal(result.error.includes(caseRoot), false, stage);
+    const left = [
+      runFile,
+      repoFile,
+      `${runFile}.tmp-1`,
+      `${repoFile}.tmp-1`,
+    ].filter((file) => fs.existsSync(file));
+    assert.deepEqual(left, [], `${stage} left ${left.join(', ')}`);
+    const listed = [
+      ...(fs.existsSync(output) ? fs.readdirSync(output) : []),
+      ...(fs.existsSync(repoEvidenceDir) ? fs.readdirSync(repoEvidenceDir) : []),
+    ];
+    assert.deepEqual(listed, [], `${stage} left ${listed.join(', ')}`);
+  }
+});
+
+test('a signal during the archive removes every file it had created', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-evidence-signal-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const redactor = createRedactor([]);
+  redactor.add(root);
+  const output = path.join(root, 'run');
+  const repoEvidenceDir = path.join(root, 'repo');
+  const runFile = path.join(output, 'readiness-gate-bc-feedface.json');
+  const repoFile = path.join(repoEvidenceDir, 'readiness-gate-bc-feedface.json');
+
+  let checks = 0;
+  const result = writeEvidence({
     document: { verdict: 'pass' },
     redactor,
-    output: deniedOutput,
+    output,
     repoEvidenceDir,
-    runId: 'deadbeef',
+    runId: 'feedface',
     root,
-    mkdirSync: () => {
-      throw new Error(`EACCES: permission denied, mkdir '${deniedOutput}'`);
+    pid: 1,
+    // The first check passes; the signal is seen once the run copy is on disk.
+    interrupted: () => {
+      checks += 1;
+      return checks >= 3 ? 'SIGTERM' : null;
     },
   });
-  assert.equal(denied.ok, false);
-  assert.equal(denied.error.includes(root), false);
-  assert.equal(fs.existsSync(path.join(deniedOutput, 'readiness-gate-bc-deadbeef.json')), false);
+  assert.equal(result.ok, false);
+  assert.equal(result.aborted, true);
+  assert.match(result.error, /interrupted by SIGTERM/);
+  assert.equal(fs.existsSync(runFile), false);
+  assert.equal(fs.existsSync(repoFile), false);
+  assert.deepEqual(fs.readdirSync(output), []);
+  assert.deepEqual(fs.readdirSync(repoEvidenceDir), []);
+});
 
-  // The repo copy failing after the run copy was written must remove the run copy
-  // too: a half-written pair is not evidence.
-  const failedRoot = path.join(root, 'failed');
-  const runFile = path.join(failedRoot, 'run', 'readiness-gate-bc-cafebabe.json');
-  const writes = [];
-  const removed = [];
-  const secondWrite = writeEvidence({
-    document: { verdict: 'pass' },
-    redactor,
-    output: path.dirname(runFile),
-    repoEvidenceDir: path.join(failedRoot, 'repo'),
-    runId: 'cafebabe',
-    root: failedRoot,
-    mkdirSync: () => {},
-    writeFileSync: (file) => {
-      writes.push(file);
-      if (writes.length === 2) throw new Error('ENOSPC: no space left on device');
-    },
-    unlinkSync: (file) => removed.push(file),
+test('the run workspace is only created after both archive directories are proven writable', () => {
+  const probes = [];
+  const created = [];
+  assert.throws(
+    () =>
+      prepareRunDirectories({
+        output: '/restricted/out',
+        repoEvidenceDir: '/restricted/repo',
+        workDir: '/tmp/gate-bc-work',
+        prefix: 'cpampd0badf00d',
+        probe: (directory) => {
+          probes.push(directory);
+          if (directory === '/restricted/repo') {
+            const error = new Error(`EACCES: permission denied, open '${directory}/.probe'`);
+            error.code = 'EACCES';
+            throw error;
+          }
+          return { ok: true };
+        },
+        mkdirSync: (directory) => created.push(directory),
+      }),
+    /EACCES/
+  );
+  // Both directories are probed, in order, and the workspace is never created:
+  // no scratch directory, and therefore no Docker call, follows a failed probe.
+  assert.deepEqual(probes, ['/restricted/out', '/restricted/repo']);
+  assert.deepEqual(created, []);
+
+  const ok = prepareRunDirectories({
+    output: '/out',
+    repoEvidenceDir: '/repo',
+    workDir: '/tmp/gate-bc-work',
+    prefix: 'cpampd0badf00d',
+    probe: () => ({ ok: true }),
+    mkdirSync: (directory) => created.push(directory),
   });
-  assert.equal(secondWrite.ok, false);
-  assert.match(secondWrite.error, /ENOSPC/);
-  assert.equal(removed.includes(runFile), true);
+  assert.deepEqual(created, [path.join('/tmp/gate-bc-work', 'cpampd0badf00d')]);
+  assert.equal(ok.runWorkDir, path.join('/tmp/gate-bc-work', 'cpampd0badf00d'));
+});
+
+test('the output preflight proves writability with a file it removes again', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-probe-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const target = path.join(root, 'evidence');
+  assert.deepEqual(probeWritableDirectory(target, { pid: 7, token: 'abcd' }), { ok: true, directory: target });
+  assert.deepEqual(fs.readdirSync(target), []);
+
+  // mkdir succeeding is not writability: an existing directory that refuses the
+  // probe file must stop the run before it creates a workspace or a container.
+  const denied = path.join(root, 'denied');
+  fs.mkdirSync(denied, { recursive: true });
+  assert.throws(
+    () =>
+      probeWritableDirectory(denied, {
+        pid: 7,
+        token: 'abcd',
+        openSync: () => {
+          throw Object.assign(new Error(`EACCES: permission denied, open '${denied}/.probe'`), {
+            code: 'EACCES',
+          });
+        },
+      }),
+    /EACCES/
+  );
+  assert.deepEqual(fs.readdirSync(denied), []);
 });
 
 test('the archived report cites evidence this harness build actually produced', () => {
