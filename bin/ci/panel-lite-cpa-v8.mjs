@@ -586,6 +586,27 @@ function defaultDockerExec(args, { timeoutMs = 300_000 } = {}) {
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', error: result.error };
 }
 
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Docker's explicit "that object does not exist" diagnostics -- and only those.
+ * The message must name the object that was inspected: a bare "not found" also
+ * comes from the CLI or a context helper ("Error initializing Docker context:
+ * helper not found"), and reading that as "the object is gone" would silently
+ * leave a container or network this run created behind.
+ */
+export function isMissingDockerObject(kind, name, detail) {
+  const text = String(detail ?? '');
+  if (typeof name !== 'string' || name === '' || !text.includes(name)) return false;
+  const quoted = escapeRegExp(name);
+  const end = '(?![\\w.-])';
+  const patterns =
+    kind === 'network'
+      ? [`No such network: ${quoted}${end}`, `No such object: ${quoted}${end}`, `network ${quoted} not found`]
+      : [`No such container: ${quoted}${end}`, `No such object: ${quoted}${end}`];
+  return patterns.some((pattern) => new RegExp(pattern).test(text));
+}
+
 /**
  * The Docker surface this harness uses, restricted to `cpampd-lite-*` names and
  * to objects labelled with this run's token. `releaseAll()` reads the label of
@@ -604,27 +625,30 @@ export function createDocker({ exec = defaultDockerExec, runToken } = {}) {
     }
     return result.stdout.trim();
   };
-  // Only a genuine "it does not exist" answer means there is nothing to release.
-  // Every other failure (daemon unreachable, permission denied, timeout) leaves
-  // ownership unknown, and an unverified object is never removed.
-  const NOT_FOUND = /No such (?:container|object|network)|not found/i;
+  // Only Docker's explicit missing-object diagnostic means there is nothing to
+  // release. A bare "not found" also comes from the CLI or a context helper and
+  // says nothing about the object, so every other failure leaves ownership
+  // unknown -- and an unverified object is never removed.
   const labelOf = (kind, name) => {
     const format = kind === 'network' ? '{{index .Labels "cpamp.panel-lite.run"}}' : '{{index .Config.Labels "cpamp.panel-lite.run"}}';
     const args = kind === 'network'
       ? ['network', 'inspect', '--format', format, name]
       : ['inspect', '--format', format, name];
     const result = exec(args, { timeoutMs: 60_000 });
-    if (result.status === 0) return { exists: true, token: String(result.stdout ?? '').trim() };
     const detail =
       `${result.stdout ?? ''}${result.stderr ?? ''}`.trim() ||
       result.error?.message ||
       `exit ${result.status}`;
-    return NOT_FOUND.test(detail) ? { exists: false } : { exists: 'unknown', error: detail };
+    // A CLI that died, timed out or never ran cannot answer the question at all.
+    if (result.error || typeof result.status !== 'number') return { exists: 'unknown', error: detail };
+    if (result.status === 0) return { exists: true, token: String(result.stdout ?? '').trim() };
+    return isMissingDockerObject(kind, name, detail) ? { exists: false } : { exists: 'unknown', error: detail };
   };
   return {
     owned,
     networks,
     runToken,
+    labelOf,
     available() {
       const result = exec(['version', '--format', '{{.Server.Os}}/{{.Server.Arch}}'], { timeoutMs: 30_000 });
       return result.status === 0 ? result.stdout.trim() : undefined;

@@ -52,6 +52,7 @@ import {
   generateReleaseCertificate,
   httpRequest,
   identityProbeArgs,
+  isMissingDockerObject,
   loadCpaV8Pin,
   networkName,
   parseArgs,
@@ -630,16 +631,83 @@ test('an inspect failure leaves ownership unknown and the object in place', () =
   );
 });
 
-test('a genuine not-found answer is still treated as already gone', () => {
+test('only a Docker missing-object diagnostic that names the object counts as gone', () => {
   const container = `cpampd-lite-${RUN}-legacy-sibling-enabled`;
-  for (const detail of ['Error: No such container: x', 'Error: No such object: x', 'Error: No such network: x', 'not found']) {
+  const positives = [
+    ['container', container, `Error: No such container: ${container}`],
+    ['container', container, `Error: No such object: ${container}`],
+    ['network', NETWORK, `Error: No such network: ${NETWORK}`],
+    ['network', NETWORK, `Error response from daemon: network ${NETWORK} not found`],
+  ];
+  for (const [kind, name, detail] of positives) {
+    assert.equal(isMissingDockerObject(kind, name, detail), true, detail);
     const docker = createDocker({
       exec: (args) =>
-        args[0] === 'inspect' ? { status: 1, stdout: '', stderr: detail } : { status: 0, stdout: '', stderr: '' },
+        args[0] === 'inspect' || (args[0] === 'network' && args[1] === 'inspect')
+          ? { status: 1, stdout: '', stderr: detail }
+          : { status: 0, stdout: '', stderr: '' },
       runToken: TOKEN,
     });
-    docker.start({ name: container, args: ['run', '-d', '--name', container] });
+    if (kind === 'container') docker.start({ name, args: ['run', '-d', '--name', name] });
+    else docker.networks.add(name);
+    assert.deepEqual(docker.labelOf(kind, name), { exists: false }, detail);
     assert.deepEqual(docker.releaseAll(), [], detail);
+  }
+
+  // Messages that do not name the object, name another one, or never mention the
+  // object type prove nothing about this run's resources.
+  const truncated = container.slice(0, -1);
+  const cross = (kind) => (kind === 'network' ? `Error: No such container: ${container}` : `Error: No such network: ${NETWORK}`);
+  for (const [kind, name] of [
+    ['container', container],
+    ['network', NETWORK],
+  ]) {
+    for (const detail of [
+      'Error initializing Docker context: helper not found',
+      'Docker CLI not found',
+      'not found',
+      `Error: No such object: ${name}-other`,
+      `Error: No such container: ${truncated}`,
+      cross(kind),
+    ]) {
+      assert.equal(isMissingDockerObject(kind, name, detail), false, `${kind}: ${detail}`);
+    }
+  }
+});
+
+test('a CLI, context or timeout failure is never read as a missing object', () => {
+  const container = `cpampd-lite-${RUN}-legacy-sibling-enabled`;
+  const fixtures = [
+    ['container', container, { status: 1, stdout: '', stderr: 'Error initializing Docker context: helper not found' }],
+    ['container', container, { status: 1, stdout: '', stderr: 'Docker CLI not found' }],
+    ['container', container, { status: null, stdout: '', stderr: '', error: new Error('spawnSync docker ETIMEDOUT') }],
+    ['network', NETWORK, { status: 1, stdout: '', stderr: 'Error initializing Docker context: helper not found' }],
+    ['network', NETWORK, { status: 1, stdout: '', stderr: 'Docker CLI not found' }],
+    ['network', NETWORK, { status: null, stdout: '', stderr: '', error: new Error('spawnSync docker ETIMEDOUT') }],
+  ];
+  for (const [kind, name, failure] of fixtures) {
+    const calls = [];
+    const exec = (args) => {
+      calls.push(args);
+      const inspecting = kind === 'container' ? args[0] === 'inspect' : args[0] === 'network' && args[1] === 'inspect';
+      return inspecting ? failure : { status: 0, stdout: '', stderr: '' };
+    };
+    const docker = createDocker({ exec, runToken: TOKEN });
+    const detail = `${failure.stderr}`.trim() || failure.error.message;
+    const label = `${kind}: ${detail}`;
+
+    assert.deepEqual(docker.labelOf(kind, name), { exists: 'unknown', error: detail }, label);
+    if (kind === 'container') docker.start({ name, args: ['run', '-d', '--name', name] });
+    else docker.networks.add(name);
+
+    const reported = docker.releaseAll();
+    assert.equal(reported.length, 1, label);
+    assert.equal(reported[0], `${name}: could not verify ${RUN_LABEL} (${detail}); left in place`, label);
+    assert.deepEqual(
+      calls.filter((args) => args[0] === 'rm' || (args[0] === 'network' && args[1] === 'rm')),
+      [],
+      `${label}: nothing is removed while ownership is unverified`
+    );
   }
 });
 
@@ -1624,52 +1692,60 @@ test('an unverifiable release fails the run and deletes nothing', async (t) => {
   fs.writeFileSync(panelPath, GOOD_HTML);
   const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'cpampd-lite-test-base-'));
   t.after(() => fs.rmSync(tmpBase, { recursive: true, force: true }));
-  const fake = fakeAcceptanceDocker();
-  // The daemon answers "created" but cannot be asked who owns what afterwards.
-  const wrapper = createDocker({
-    runToken: TOKEN,
-    exec: (args) => {
-      if (args[0] === 'inspect') return { status: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' };
-      if (args[0] === 'network' && args[1] === 'inspect') {
-        return { status: 1, stdout: '', stderr: 'Cannot connect to the Docker daemon' };
-      }
-      return { status: 0, stdout: '', stderr: '' };
-    },
-  });
-  const docker = {
-    ...fake,
-    start(spec) {
-      fake.start(spec);
-      wrapper.start(spec);
-    },
-    createNetwork(name) {
-      fake.createNetwork(name);
-      wrapper.createNetwork(name);
-    },
-    releaseAll: () => wrapper.releaseAll(),
-  };
-  const run = capture();
 
-  const code = await runAcceptance(failingArgs(panelPath), {
-    dockerFactory: () => docker,
-    certificateFactory: () => ({ key: 'k', cert: 'c' }),
-    stdout: run.stdout,
-    stderr: run.stderr,
-    tmpBase,
-    signals: new EventEmitter(),
-    caseRunner: async () => ({ configLayout: 'legacy', staticPathMode: 'config-sibling-static' }),
-    isolationRunner: async () => ({ skipped: true }),
-  });
+  // Neither an unreachable daemon nor a context helper that is itself "not
+  // found" says anything about who owns the container and network.
+  for (const detail of [
+    'Cannot connect to the Docker daemon',
+    'Error initializing Docker context: helper not found',
+  ]) {
+    const fake = fakeAcceptanceDocker();
+    const wrapper = createDocker({
+      runToken: TOKEN,
+      exec: (args) => {
+        const inspecting =
+          args[0] === 'inspect' || (args[0] === 'network' && args[1] === 'inspect');
+        return inspecting ? { status: 1, stdout: '', stderr: detail } : { status: 0, stdout: '', stderr: '' };
+      },
+    });
+    const docker = {
+      ...fake,
+      start(spec) {
+        fake.start(spec);
+        wrapper.start(spec);
+      },
+      createNetwork(name) {
+        fake.createNetwork(name);
+        wrapper.createNetwork(name);
+      },
+      releaseAll: () => wrapper.releaseAll(),
+    };
+    const run = capture();
 
-  assert.equal(code, 1);
-  const report = JSON.parse(run.streams.out);
-  assert.equal(report.verdict, 'fail');
-  assert.equal(report.cleanup.ok, false);
-  assert.equal(report.cleanup.failures.length, 2, 'one container and one network stayed unverified');
-  for (const failure of report.cleanup.failures) {
-    assert.match(failure, /could not verify cpamp\.panel-lite\.run \(Cannot connect to the Docker daemon\); left in place/);
+    const code = await runAcceptance(failingArgs(panelPath), {
+      dockerFactory: () => docker,
+      certificateFactory: () => ({ key: 'k', cert: 'c' }),
+      stdout: run.stdout,
+      stderr: run.stderr,
+      tmpBase,
+      signals: new EventEmitter(),
+      caseRunner: async () => ({ configLayout: 'legacy', staticPathMode: 'config-sibling-static' }),
+      isolationRunner: async () => ({ skipped: true }),
+    });
+
+    assert.equal(code, 1, detail);
+    const report = JSON.parse(run.streams.out);
+    assert.equal(report.verdict, 'fail', detail);
+    assert.equal(report.cleanup.ok, false, detail);
+    assert.equal(report.cleanup.failures.length, 2, `${detail}: one container and one network stayed unverified`);
+    for (const failure of report.cleanup.failures) {
+      assert(
+        failure.includes(`could not verify ${RUN_LABEL} (${detail}); left in place`),
+        `${detail}: ${failure}`
+      );
+    }
+    assert.deepEqual(fake.rm, [], `${detail}: an unverified object is never removed`);
   }
-  assert.deepEqual(fake.rm, [], 'an unverified object is never removed');
 });
 
 test('a temporary-directory removal error is reported and still writes the report', async (t) => {
