@@ -386,15 +386,26 @@ describe('CPA v8.0.55 pin consistency and NH2 network posture contract (§3 P10)
   });
 
   it('Check 7: enforces NH2 loopback opt-in posture in Supervisor and forbids CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK in Docker surfaces', () => {
-    const rootEntries = readdirSync(ROOT);
-    const dockerFiles = rootEntries.filter(
-      (name) =>
-        (name.startsWith('docker-compose') &&
-          (name.endsWith('.yml') || name.endsWith('.yaml'))) ||
-        name === 'Dockerfile' ||
-        name.startsWith('Dockerfile.')
-    );
-    expect(dockerFiles.length).toBeGreaterThan(0);
+    const isDockerSurface = (name) =>
+      ((name.startsWith('docker-compose') ||
+        name.endsWith('.compose.yml') ||
+        name.endsWith('.compose.yaml')) &&
+        (name.endsWith('.yml') || name.endsWith('.yaml'))) ||
+      name === 'Dockerfile' ||
+      name.startsWith('Dockerfile.');
+    const rootDockerFiles = readdirSync(ROOT).filter(isDockerSurface);
+    const ciDockerFiles = readdirSync(path.join(ROOT, 'bin', 'ci'))
+      .filter(isDockerSurface)
+      .map((name) => path.posix.join('bin/ci', name));
+    const qualDockerFiles = readdirSync(
+      path.join(ROOT, 'tests', 'fixtures', 'cpa-v8-qualification')
+    )
+      .filter(isDockerSurface)
+      .map((name) => path.posix.join('tests/fixtures/cpa-v8-qualification', name));
+    const dockerFiles = [...rootDockerFiles, ...ciDockerFiles, ...qualDockerFiles];
+    expect(rootDockerFiles.length).toBeGreaterThan(0);
+    expect(ciDockerFiles).toContain('bin/ci/runtime-v7-compatibility.compose.yml');
+    expect(qualDockerFiles).toContain('tests/fixtures/cpa-v8-qualification/Dockerfile.runner');
     for (const file of dockerFiles) {
       expect(readText(file), `${file} must not define CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK`).not.toContain(
         'CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK'
@@ -412,7 +423,9 @@ describe('CPA v8.0.55 pin consistency and NH2 network posture contract (§3 P10)
     expect(supervisorRuntime).toContain(
       'CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: CPAMP_RUNTIME_CPA_ADDR host must be 127.0.0.1, ::1, or localhost'
     );
-
+    expect(supervisorRuntime).toContain('cpaAddr = net.JoinHostPort(listenHost, port)');
+    expect(supervisorRuntime).toContain('readiness.New(child, cpaAddr)');
+    expect(supervisorRuntime).not.toContain('readiness.New(child, cfg.cpaAddr)');
     const destinationGo = readText('apps/runtime-supervisor/internal/lifecycle/destination.go');
     expect(destinationGo).toContain('func LoopbackListenHost(address string) (string, error)');
     expect(destinationGo).toContain('case d.listenLoopback:');

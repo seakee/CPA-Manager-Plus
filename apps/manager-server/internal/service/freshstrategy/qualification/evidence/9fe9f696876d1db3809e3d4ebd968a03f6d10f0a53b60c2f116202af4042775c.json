@@ -47,17 +47,17 @@
     {
       "id": "fresh-legacy-client-api-keys-read",
       "kind": "sanitized-trace",
-      "sha256": "0aeee83d13c8efc92949f1ff88bb7ee75df4a66fcf7e35aced24daac4351e907"
+      "sha256": "287648d3baa126adac58b83d8275da3de69af3ab11fbbd6d398d7aef820795f6"
     },
     {
       "id": "fresh-legacy-client-api-keys-replay",
       "kind": "sanitized-trace",
-      "sha256": "9f321eb113656bb42ef6c01f809eca7464370d26a3cb0ccabeb21542e6ed19f0"
+      "sha256": "001925fbc77ca98b8a9a9c43c86bbd896ef40e0e7a5f150e058660e8615a841e"
     },
     {
       "id": "fresh-legacy-client-api-keys-verify",
       "kind": "sanitized-trace",
-      "sha256": "033e8088dc8b4d1360adee2c7994f2ef903c316fa6eed4fb780f667871711f2c"
+      "sha256": "f3f428bffc3239dc5bcb4c80f6b2d1ef0cb444189591de3ffeab8339677f6da9"
     }
   ]
 }

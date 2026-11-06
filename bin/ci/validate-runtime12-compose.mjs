@@ -69,13 +69,18 @@ for (const [name, service] of Object.entries(services)) {
     fail(`${name} must not define CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK`);
   }
 }
+const isDockerSurfaceEntry = (entry) =>
+  /^Dockerfile($|\.)|(^|\.)docker-compose.*\.ya?ml$|compose.*\.ya?ml$/.test(entry);
 const dockerSurfaceFiles = [
   ...readdirSync(repoRoot)
-    .filter((entry) => /^Dockerfile($|\.)|^docker-compose.*\.ya?ml$/.test(entry))
+    .filter(isDockerSurfaceEntry)
     .map((entry) => resolve(repoRoot, entry)),
   ...readdirSync(resolve(repoRoot, 'bin', 'ci'))
-    .filter((entry) => /compose.*\.ya?ml$/.test(entry))
+    .filter(isDockerSurfaceEntry)
     .map((entry) => resolve(repoRoot, 'bin', 'ci', entry)),
+  ...readdirSync(resolve(repoRoot, 'tests', 'fixtures', 'cpa-v8-qualification'))
+    .filter(isDockerSurfaceEntry)
+    .map((entry) => resolve(repoRoot, 'tests', 'fixtures', 'cpa-v8-qualification', entry)),
 ];
 for (const filePath of dockerSurfaceFiles) {
   if (readFileSync(filePath, 'utf8').includes('CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK')) {

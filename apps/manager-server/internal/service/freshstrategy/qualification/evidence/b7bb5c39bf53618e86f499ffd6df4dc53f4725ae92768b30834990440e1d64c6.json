@@ -3,7 +3,7 @@
   "runId": "cpamp-fresh-adoption-resource-network-69ea7e9609f2",
   "caseRef": "fresh-network-client-api-keys-read",
   "sourceClass": "network_existing",
-  "consumerImplementationSha256": "282d580cd2d8e7ec97eee62a4c61c1230200c3be537c51dadc20d3a9d6345730",
+  "consumerImplementationSha256": "1c63d53a79903d09173918dd87fe71ac83808ba6e15a6b95115bbe7e0cc39cc0",
   "readVerified": true,
   "clientKeyCount": 2,
   "resourceCounts": {

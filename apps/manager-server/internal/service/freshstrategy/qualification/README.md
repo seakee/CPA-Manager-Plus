@@ -14,18 +14,21 @@ The single build-bound `consumer.json` controls authorization. No fixture, CI
 job, request, environment variable or Runtime observation can change it in a
 running Manager.
 
-The current [independent bounded acceptance](evidence/65eb659a172c9075afeddc959a9ab825d208cc728487186cce2514dd8d27050a.md)
-records each consumer's evidence and limits. External acceptance does not
-guarantee connectivity for every topology; Gateway remains pending.
+The current [pre-Beta maintainer acceptance record](evidence/eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5.md)
+records each consumer's evidence and limits for the pinned CPA `v8.0.55`
+candidate and the NH2 loopback-hardened Supervisor destination execution chain.
+External acceptance does not guarantee connectivity for every topology; Gateway
+remains pending.
 
-The pins below were recomputed for the CPA v8.0.55 pin + NH2 Supervisor lane
-(`runtime_destination_implementation.sha256`, `implementationSha256`, the AQ
-profile evidence, the adoption resource chain and the legacy transition chain)
-after that lane updated the pinned CPA candidate and Supervisor destination
-execution chain. The change is pending the maintainer's pre-Beta re-acceptance:
-`accepted` stays under review `65eb659a`, no new review record was written, and
-the re-emitted evidence is the same harness run against the pinned CPA v8.0.55
-and v7.0.12 candidates.
+The pins below (`runtime_destination_implementation.sha256`,
+`implementationSha256`, the AQ profile evidence, the adoption resource chain and
+the legacy transition chain) are bound in `consumer.json` under maintainer
+acceptance `eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5`
+(2026-11-06) from the re-emitted harness and real-process container runs against
+the pinned CPA `v8.0.55` and `v7.0.12` candidates. The earlier 2026-10-18
+independent review (`evidence/65eb659a172c9075afeddc959a9ab825d208cc728487186cce2514dd8d27050a.md`)
+and the 2026-10-09 pre-4A review (`evidence/ae378022a8d32455c9a3b36f2b5ddb8e1eb18e9d1ee9072171429cdf11706da5.md`)
+remain retained in `qualification/evidence/` as historical audit records.
 
 To accept a consumer, independent review must first identify the exact original
 case subset and explicitly accept its applicability to that consumer's actual
@@ -180,15 +183,16 @@ reference and never become durable upstream-controlled identities. The
 inventory and its decisions are written through the existing Fresh CAS before
 any destination mutation and are immutable afterwards.
 
-**Honest status of the widened kinds (2026-10-29).** Acceptance `65eb659a`
-covered client API keys only. The network consumer's migration of credentials,
-gateway configuration and provider sections is backed by real-CPA evidence but
-runs under a **maintainer waiver dated 2026-10-29**, not under a new acceptance:
-no new review record exists, `status` is still `accepted` under `65eb659a`, and
-the widened kinds are pending the single pre-Beta independent re-acceptance.
-Until that re-acceptance the four-kind breadth of `network_existing` is a
-waived claim, and the executor's per-item gate is what keeps it honest: an item is
-copied only when the record's decision for its own reference is `migrate`. The
+**Honest status of the widened kinds (2026-10-29 waiver carried forward under `eedd3243` on 2026-11-06).**
+Historical acceptance `65eb659a` covered client API keys only. The network
+consumer's migration of credentials, gateway configuration and provider sections
+was introduced under a **maintainer waiver dated 2026-10-29** and carries
+forward under the pre-Beta maintainer acceptance record
+`eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5`, backed by
+real-process CPA `v8.0.55` source-read, destination-replay and destination-verify
+evidence. The executor's per-item gate is what keeps the four-kind breadth of
+`network_existing` honest: an item is copied only when the record's decision for
+its own reference is `migrate`. The
 record and the gate are computed from one pinned resolver,
 `internal/service/cpa/adoption_ref.go` (its bytes and the `AdoptionUniverseDigest`
 of every item-to-reference pair are part of the consumer digest):

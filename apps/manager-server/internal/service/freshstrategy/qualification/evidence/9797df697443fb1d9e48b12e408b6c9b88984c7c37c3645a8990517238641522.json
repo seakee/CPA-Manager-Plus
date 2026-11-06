@@ -47,17 +47,17 @@
     {
       "id": "fresh-network-client-api-keys-read",
       "kind": "sanitized-trace",
-      "sha256": "81b98481527dd45aeba866f38dac029b28e6e43a8f8df39b6dada5318e458c10"
+      "sha256": "b7bb5c39bf53618e86f499ffd6df4dc53f4725ae92768b30834990440e1d64c6"
     },
     {
       "id": "fresh-network-client-api-keys-replay",
       "kind": "sanitized-trace",
-      "sha256": "416cfeb651e9ffbb434a61a0b0f0421bb23c34815851e0775bb461aad0408e04"
+      "sha256": "0a2a4fbd3039a46c484ef6aa3011e0190aec3b8e06b412879794c7078b8926cf"
     },
     {
       "id": "fresh-network-client-api-keys-verify",
       "kind": "sanitized-trace",
-      "sha256": "3584f5978a416881611c0c49a2dc19ef873f9438cf41b7758aebd697775d0fee"
+      "sha256": "807efef225f6812d0a2d7b2fbe8436a4f3d476f26551af5d33f9c3e87b998f90"
     }
   ]
 }
