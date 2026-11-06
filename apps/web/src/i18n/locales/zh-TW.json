@@ -5372,5 +5372,16 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "plugin_quota": {
+    "plan_label": "方案",
+    "missing_auth_index": "驗證檔案缺少 auth_index",
+    "probe_unsupported": "目前 CPA 版本不支援宣告式插件額度探測（quota_probe）",
+    "plugin_not_found": "找不到為 {{provider}} 提供額度查詢的已啟用插件",
+    "empty_data": "暫無可用額度資料",
+    "window_five_hour": "5 小時限額",
+    "window_daily": "日限額",
+    "window_weekly": "週限額",
+    "window_monthly": "月限額"
   }
 }

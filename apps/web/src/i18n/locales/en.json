@@ -5377,5 +5377,16 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "plugin_quota": {
+    "plan_label": "Plan",
+    "missing_auth_index": "Auth file is missing auth_index",
+    "probe_unsupported": "This CPA version does not support declarative plugin quota probing (quota_probe)",
+    "plugin_not_found": "No enabled plugin provides quota lookup for {{provider}}",
+    "empty_data": "No quota data available yet",
+    "window_five_hour": "5-hour limit",
+    "window_daily": "Daily limit",
+    "window_weekly": "Weekly limit",
+    "window_monthly": "Monthly limit"
   }
 }

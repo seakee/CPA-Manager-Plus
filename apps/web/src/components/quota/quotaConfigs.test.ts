@@ -1,6 +1,21 @@
 import type { TFunction } from 'i18next';
-import { describe, expect, it } from 'vitest';
-import type { CodexQuotaState } from '@/types';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { pluginsApiMocks } = vi.hoisted(() => ({
+  pluginsApiMocks: {
+    list: vi.fn(),
+    fetchQuota: vi.fn(),
+  },
+}));
+
+vi.mock('@/services/api/plugins', () => ({
+  pluginsApi: {
+    list: pluginsApiMocks.list,
+    fetchQuota: pluginsApiMocks.fetchQuota,
+  },
+}));
+
+import type { CodexQuotaState, PluginListEntry } from '@/types';
 import { buildCodexQuotaWindowInfos, CODEX_SPARK_MODEL_ID } from '@/utils/quota/codexQuota';
 import {
   ANTIGRAVITY_CONFIG,
@@ -12,6 +27,8 @@ import {
   getCodexQuotaStoreKey,
   KIMI_CONFIG,
   getSortedCodexResetCreditExpiries,
+  PLUGIN_CONFIG,
+  resetPluginQuotaCacheForTest,
   resolveQuotaDisplayState,
   XAI_CONFIG,
 } from './quotaConfigs';
@@ -1693,3 +1710,177 @@ describe('DEVIN_CONFIG', () => {
   });
 });
 
+
+const pluginQuotaT = ((key: string, params?: Record<string, string | number>) => {
+  const translations: Record<string, string> = {
+    'plugin_quota.missing_auth_index': 'missing auth_index',
+    'plugin_quota.probe_unsupported': 'quota_probe unsupported',
+    'plugin_quota.plugin_not_found': `no plugin for ${params?.provider ?? ''}`,
+    'plugin_quota.empty_data': 'empty quota data',
+  };
+  return translations[key] ?? key;
+}) as unknown as TFunction;
+
+const quotaPluginFixture = (): PluginListEntry => ({
+  id: 'clinepassbridge',
+  path: 'plugins/clinepassbridge-v0.4.0.so',
+  configured: true,
+  registered: true,
+  enabled: true,
+  effectiveEnabled: true,
+  supportsOAuth: false,
+  supportsQuota: true,
+  quotaProvider: 'cline-pass',
+  logo: '',
+  configFields: [],
+  menus: [],
+  metadata: null,
+});
+
+describe('PLUGIN_CONFIG', () => {
+  beforeEach(() => {
+    pluginsApiMocks.list.mockReset();
+    pluginsApiMocks.fetchQuota.mockReset();
+    resetPluginQuotaCacheForTest();
+  });
+
+  it('requires an auth index before probing plugin quota', async () => {
+    await expect(
+      PLUGIN_CONFIG.fetchQuota({ name: 'plugin.json' }, pluginQuotaT)
+    ).rejects.toThrow('missing auth_index');
+    expect(pluginsApiMocks.list).not.toHaveBeenCalled();
+    expect(pluginsApiMocks.fetchQuota).not.toHaveBeenCalled();
+  });
+
+  it('resolves the plugin id from the credential entry when present', async () => {
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: { plan: 'Cline Pass (Monthly)' },
+      summary: [],
+      groups: [
+        {
+          label: 'Cline Pass',
+          buckets: [{ id: 'monthly', label: 'monthly', remainingFraction: 0.14 }],
+        },
+      ],
+      serverTimeOffsetMs: null,
+    });
+    const data = await PLUGIN_CONFIG.fetchQuota(
+      {
+        name: 'plugin.json',
+        auth_index: 'auth-1',
+        quota_plugin_id: 'clinepassbridge',
+        quota_provider: 'cline-pass',
+      },
+      pluginQuotaT
+    );
+    expect(pluginsApiMocks.list).not.toHaveBeenCalled();
+    expect(pluginsApiMocks.fetchQuota).toHaveBeenCalledWith('clinepassbridge', 'auth-1');
+    expect(data.pluginId).toBe('clinepassbridge');
+    expect(data.groups[0]?.buckets[0]?.remainingFraction).toBe(0.14);
+  });
+
+  it('falls back to the plugin registry when no explicit plugin id exists', async () => {
+    pluginsApiMocks.list.mockResolvedValueOnce({
+      pluginsEnabled: true,
+      pluginsDir: 'plugins',
+      plugins: [quotaPluginFixture()],
+    });
+    pluginsApiMocks.fetchQuota.mockResolvedValueOnce({
+      subscription: null,
+      summary: [],
+      groups: [
+        {
+          label: 'Cline Pass',
+          buckets: [{ id: '7d', label: '7d', remainingFraction: 0.13 }],
+        },
+      ],
+      serverTimeOffsetMs: null,
+    });
+    const data = await PLUGIN_CONFIG.fetchQuota(
+      {
+        name: 'plugin.json',
+        auth_index: 'auth-2',
+        quota_provider: 'cline-pass',
+      },
+      pluginQuotaT
+    );
+    expect(pluginsApiMocks.list).toHaveBeenCalledTimes(1);
+    expect(pluginsApiMocks.fetchQuota).toHaveBeenCalledWith('clinepassbridge', 'auth-2');
+    expect(data.pluginId).toBe('clinepassbridge');
+    expect(data.quotaProvider).toBe('cline-pass');
+  });
+
+  it('caches the plugin registry lookup across credentials', async () => {
+    pluginsApiMocks.list.mockResolvedValue({
+      pluginsEnabled: true,
+      pluginsDir: 'plugins',
+      plugins: [quotaPluginFixture()],
+    });
+    pluginsApiMocks.fetchQuota.mockResolvedValue({
+      subscription: null,
+      summary: [],
+      groups: [{ label: 'g', buckets: [{ id: 'b', label: 'b', remainingFraction: 1 }] }],
+      serverTimeOffsetMs: null,
+    });
+    const file = { name: 'plugin.json', auth_index: 'auth-3', quota_provider: 'cline-pass' };
+    await PLUGIN_CONFIG.fetchQuota(file, pluginQuotaT);
+    await PLUGIN_CONFIG.fetchQuota(file, pluginQuotaT);
+    expect(pluginsApiMocks.list).toHaveBeenCalledTimes(1);
+    expect(pluginsApiMocks.fetchQuota).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails with plugin_not_found when the registry has no match', async () => {
+    pluginsApiMocks.list.mockResolvedValueOnce({
+      pluginsEnabled: true,
+      pluginsDir: 'plugins',
+      plugins: [],
+    });
+    await expect(
+      PLUGIN_CONFIG.fetchQuota(
+        { name: 'plugin.json', auth_index: 'auth-4', quota_provider: 'mystery-pass' },
+        pluginQuotaT
+      )
+    ).rejects.toThrow('no plugin for mystery-pass');
+  });
+
+  it('fails when the credential has no quota provider marker', async () => {
+    await expect(
+      PLUGIN_CONFIG.fetchQuota({ name: 'plugin.json', auth_index: 'auth-5' }, pluginQuotaT)
+    ).rejects.toThrow('quota_probe unsupported');
+  });
+
+  it('builds loading, success and error states bound to the credential identity', () => {
+    const file = { name: 'plugin.json', provider: 'cline-pass', authIndex: 'auth-6' };
+    const loading = PLUGIN_CONFIG.buildLoadingState(file);
+    expect(loading.status).toBe('loading');
+    expect(loading.groups).toEqual([]);
+
+    const success = PLUGIN_CONFIG.buildSuccessState(
+      {
+        groups: [
+          {
+            id: 'cline-pass',
+            label: 'Cline Pass',
+            buckets: [{ id: '5h', label: '5h', remainingFraction: 1 }],
+          },
+        ],
+        summary: [],
+        subscription: { plan: 'Pro', tierName: null, tierId: null },
+        serverTimeOffsetMs: null,
+        pluginId: 'clinepassbridge',
+        quotaProvider: 'cline-pass',
+      },
+      file
+    );
+    expect(success.status).toBe('success');
+    expect(success.pluginId).toBe('clinepassbridge');
+    expect(success.authFileKey).toBe('plugin.json::auth-6');
+    expect(typeof success.fetchedAtMs).toBe('number');
+
+    const error = PLUGIN_CONFIG.buildErrorState('boom', 502, file);
+    expect(error.status).toBe('error');
+    expect(error.error).toBe('boom');
+    expect(error.errorStatus).toBe(502);
+    expect(error.groups).toEqual([]);
+  });
+});

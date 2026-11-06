@@ -21,6 +21,12 @@ import {
   inferCodexQuotaScopeFromProviderWindowId,
   isCodexMainQuotaModelScope,
 } from '@/utils/quota/codexQuota';
+import { getPluginQuotaWindowLabelKey, parsePluginQuotaWindowSeconds } from '@/utils/quota/pluginQuota';
+import {
+  QUOTA_PROVIDER_TYPES,
+  normalizeProviderKey,
+  type QuotaProviderType,
+} from '@/features/authFiles/constants';
 import type { AccountRow } from './accountRows';
 import {
   hasConfirmedXaiBillingEntitlement,
@@ -47,6 +53,7 @@ export type AccountQuotaWindowSource =
   | 'kimi'
   | 'meta'
   | 'xai'
+  | 'plugin'
   | 'summary';
 
 export interface AccountQuotaDisplayWindow {
@@ -826,6 +833,51 @@ const buildSummaryQuotaDisplayWindow = (
   ];
 };
 
+const buildPluginQuotaDisplayWindows = (
+  row: AccountRow,
+  options: BuildAccountQuotaDisplayWindowsOptions
+): AccountQuotaDisplayWindow[] => {
+  const quota = options.stores.pluginQuota
+    ? getCredentialScopedQuotaState(options.stores.pluginQuota, row.raw)
+    : undefined;
+  const groups = quota?.groups ?? [];
+  return groups.flatMap((group) =>
+    group.buckets.map((bucket) => {
+      const reset = resolveAbsoluteQuotaReset(bucket.resetTime);
+      // Fractions like 0.14 scale to 14.000000000000002; normalize to 0.1%
+      // precision so progress bars and labels stay stable.
+      const remainingPercent = clampDisplayPercent(
+        Math.round(bucket.remainingFraction * 1000) / 10
+      );
+      const labelKey = getPluginQuotaWindowLabelKey(bucket.window);
+      const label = labelKey
+        ? options.translateQuotaWindowLabel(bucket.label, `plugin_quota.${labelKey}`)
+        : bucket.label;
+      return buildAccountQuotaDisplayWindow({
+        key: `${group.id}:${bucket.id}`,
+        label,
+        kind:
+          inferAccountQuotaWindowKind({
+            key: bucket.window ?? '',
+            label,
+          }) ?? undefined,
+        remainingPercent,
+        usedPercent: clampDisplayPercent(100 - remainingPercent),
+        resetLabel: formatDisplayResetTime(bucket.resetTime),
+        resetAtMs: reset.resetAtMs,
+        resetAccuracy: reset.resetAccuracy,
+        limitWindowSeconds: parsePluginQuotaWindowSeconds(bucket.window),
+        description: bucket.description ?? group.description,
+        groupLabel: group.label,
+        source: 'plugin',
+        modelScope: { kind: 'all', complete: true },
+        observedAtMs: quota?.fetchedAtMs ?? null,
+        nowMs: options.nowMs,
+      });
+    })
+  );
+};
+
 export const buildAccountQuotaDisplayWindows = (
   row: AccountRow,
   options: BuildAccountQuotaDisplayWindowsOptions
@@ -862,6 +914,13 @@ export const buildAccountQuotaDisplayWindows = (
 
   if (row.provider === 'meta') {
     const windows = buildMetaQuotaDisplayWindows(row, options);
+    if (windows.length) return windows;
+  }
+
+  // Plugin-served credentials keep the built-in providers above in priority,
+  // mirroring the upstream management center's adapter order.
+  if (!QUOTA_PROVIDER_TYPES.has(normalizeProviderKey(row.provider) as QuotaProviderType)) {
+    const windows = buildPluginQuotaDisplayWindows(row, options);
     if (windows.length) return windows;
   }
 

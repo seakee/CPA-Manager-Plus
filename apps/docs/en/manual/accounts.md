@@ -66,7 +66,12 @@ After a successful xAI OAuth quota refresh, CPAMP queries `/user?include=subscri
 | Claude          | Base quota, weekly quota, and model-scoped limits                              | Scoped limits can be duplicated, missing, or inactive; CPAMP groups them by identity and freshness. |
 | xAI/Grok OAuth  | CLI billing weekly/monthly data, official API identity, and request exhaustion | Official API identity does not provide queryable cost or remaining percentages.                     |
 | Muse / Meta     | `meta:window`, `meta:weekly`, and reset/period metadata                         | Missing usage percentages remain unknown rather than becoming `0%`; DCA is limited to account/quota flows. |
+| Plugin providers | Credential entry with `supports_quota` plus the owning plugin's quota probe  | Requires a CPA plugin that declares the `quota_provider` capability (for example ClinePassBridge).   |
 | Other providers | CPA credential metadata or recent response Headers                             | No common active quota API is assumed.                                                              |
+
+### Plugin credentials
+
+CPA plugins can declare a `quota_provider` capability. When a credential entry advertises `supports_quota`, Accounts shows the regular quota refresh actions for it. Refreshing resolves the owning plugin from the credential entry (`quota_plugin_id`) or the plugin registry (`quota_provider`), then queries CPA's generic plugin quota endpoint, which asks the plugin for live data. Plugin quota windows follow the same refresh, caching, and evidence rules as built-in providers.
 
 ## Quota Cooldown And Account Actions
 

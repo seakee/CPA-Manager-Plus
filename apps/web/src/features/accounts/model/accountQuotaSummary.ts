@@ -7,6 +7,7 @@ import type {
   DevinQuotaState,
   KimiQuotaState,
   MetaQuotaState,
+  PluginQuotaState,
   QuotaResetAccuracy,
   XaiBillingSummary,
   XaiQuotaState,
@@ -80,6 +81,7 @@ export interface AccountQuotaStores {
   devinQuota: Record<string, DevinQuotaState>;
   kimiQuota: Record<string, KimiQuotaState>;
   metaQuota: Record<string, MetaQuotaState>;
+  pluginQuota?: Record<string, PluginQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
 }
 
