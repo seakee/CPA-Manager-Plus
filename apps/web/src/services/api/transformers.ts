@@ -11,6 +11,7 @@ import {
 import type { Config } from '@/types/config';
 import { buildHeaderObject } from '@/utils/headers';
 import { normalizeCredentialWeight } from '@/utils/credentialWeight';
+import { markPersistedOpenAIKeyEntry } from '@/utils/openAIKeyEntries';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -165,7 +166,7 @@ const normalizeAuthIndex = (value: unknown): string | undefined => {
   return trimmed ? trimmed : undefined;
 };
 
-const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
+const normalizeApiKeyEntry = (entry: unknown, persistedIndex?: number): ApiKeyEntry | null => {
   if (entry === undefined || entry === null) return null;
   const record = isRecord(entry) ? entry : null;
   const apiKey =
@@ -177,20 +178,37 @@ const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
   const authIndex = normalizeAuthIndex(
     record?.['auth-index'] ?? record?.authIndex ?? record?.['auth_index']
   );
-  if (!trimmed && !authIndex) return null;
-
   const proxyUrl = record ? (record['proxy-url'] ?? record.proxyUrl) : undefined;
   const headers = record ? normalizeHeaders(record.headers) : undefined;
+  const weight = normalizeCredentialWeight(record?.weight);
+  const hasExplicitApiKey =
+    record !== null &&
+    (['api-key', 'apiKey', 'key'] as const).some(
+      (field) =>
+        Object.prototype.hasOwnProperty.call(record, field) && typeof record[field] === 'string'
+    );
+  // CPA stores keyless entries as {"api-key": ""} (with optional proxy-url/weight);
+  // providers disabled at startup have no runtime auth-index yet. Drop only entries
+  // that have neither an explicit api-key field (without unsupported-only headers)
+  // nor any other CPA-supported per-entry field.
+  if (
+    !trimmed &&
+    !authIndex &&
+    !String(proxyUrl ?? '').trim() &&
+    weight === undefined &&
+    (!hasExplicitApiKey || Boolean(headers))
+  ) {
+    return null;
+  }
 
   const result: ApiKeyEntry = {
     apiKey: trimmed,
     proxyUrl: proxyUrl ? String(proxyUrl) : undefined,
     headers,
   };
-  const weight = normalizeCredentialWeight(record?.weight);
   if (weight !== undefined) result.weight = weight;
   if (authIndex) result.authIndex = authIndex;
-  return result;
+  return markPersistedOpenAIKeyEntry(result, persistedIndex, hasExplicitApiKey);
 };
 
 const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => {
@@ -341,11 +359,11 @@ const normalizeOpenAIProvider = (provider: unknown): OpenAIProviderConfig | null
   let apiKeyEntries: ApiKeyEntry[] = [];
   if (Array.isArray(provider['api-key-entries'])) {
     apiKeyEntries = provider['api-key-entries']
-      .map((entry) => normalizeApiKeyEntry(entry))
+      .map((entry, index) => normalizeApiKeyEntry(entry, index))
       .filter(Boolean) as ApiKeyEntry[];
   } else if (Array.isArray(provider['api-keys'])) {
     apiKeyEntries = provider['api-keys']
-      .map((key) => normalizeApiKeyEntry({ 'api-key': key }))
+      .map((key, index) => normalizeApiKeyEntry(key, index))
       .filter(Boolean) as ApiKeyEntry[];
   }
 

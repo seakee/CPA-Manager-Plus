@@ -38,6 +38,8 @@ Fields vary by provider, but they generally cover the base URL, credential, mode
 5. Save, then run a low-cost key test or real request.
 6. Confirm the provider, model, and account in [Monitoring](./monitoring.md).
 
+OpenAI-compatible upstreams can operate without an API key. Keyless entries loaded from CPA are preserved. Clearing a previously non-empty key removes that entry even if its proxy or weight (including `0`) remains; it does not automatically convert the entry to keyless. To add a keyless entry with a proxy or weight, add a new row and leave its key empty. Completely blank new rows are not saved. Deleting, clearing, or reordering mixed entries keeps the remaining entries' connection-pool and other configuration associated with their original entries.
+
 ## xAI API Keys
 
 The panel manages CPA `xai-api-key` entries, including:

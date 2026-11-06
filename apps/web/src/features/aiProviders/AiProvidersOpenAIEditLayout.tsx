@@ -29,6 +29,10 @@ import { buildHeaderObject, headersToEntries, normalizeHeaderEntries } from '@/u
 import { areKeyValueEntriesEqual, areModelEntriesEqual } from '@/utils/compare';
 import { buildApiKeyEntry, toCommittedOpenAIProviderSnapshot } from '@/components/providers/utils';
 import {
+  hasOpenAIKeyEntryConfiguration,
+  preservePersistedOpenAIKeyEntry,
+} from '@/utils/openAIKeyEntries';
+import {
   buildProviderDraftKey,
   parseProviderIndexParam,
 } from '@/features/aiProviders/model/routeParams';
@@ -130,7 +134,7 @@ const normalizeApiKeyEntries = (entries: OpenAIFormApiKeyEntry[]) =>
     const proxyUrl = String(entry?.proxyUrl ?? '').trim();
     const authIndex = normalizeAuthIndex(entry?.authIndex) ?? '';
     const headers = normalizeKeyHeaders(entry?.headers);
-    if (!apiKey && weight === null && !proxyUrl && !authIndex && headers.length === 0) return acc;
+    if (!hasOpenAIKeyEntryConfiguration(entry) && headers.length === 0) return acc;
     acc.push({ apiKey, weight, proxyUrl, authIndex, headers });
     return acc;
   }, []);
@@ -160,11 +164,14 @@ const areNormalizedApiKeyEntriesEqual = (
     const left = a[i];
     const right = b[i];
     if (!left || !right) return false;
+    // auth-index is server-generated runtime identity, not user configuration.
+    // Editing a key intentionally clears it; restoring the original visible
+    // configuration must therefore not remain dirty solely because the old
+    // runtime identity is gone.
     if (
       left.apiKey !== right.apiKey ||
       left.weight !== right.weight ||
-      left.proxyUrl !== right.proxyUrl ||
-      left.authIndex !== right.authIndex
+      left.proxyUrl !== right.proxyUrl
     ) {
       return false;
     }
@@ -532,13 +539,17 @@ export function AiProvidersOpenAIEditLayout() {
         prefix: form.prefix?.trim() || undefined,
         baseUrl,
         headers: buildHeaderObject(form.headers),
-        apiKeyEntries: form.apiKeyEntries.map((entry) => ({
-          apiKey: entry.apiKey.trim(),
-          weight: normalizeCredentialWeight(entry.weight),
-          proxyUrl: entry.proxyUrl?.trim() || undefined,
-          authIndex: normalizeAuthIndex(entry.authIndex) ?? undefined,
-          headers: entry.headers,
-        })),
+        apiKeyEntries: form.apiKeyEntries
+          .filter((entry) => hasOpenAIKeyEntryConfiguration(entry))
+          .map((entry) =>
+            preservePersistedOpenAIKeyEntry(entry, {
+              apiKey: entry.apiKey.trim(),
+              weight: normalizeCredentialWeight(entry.weight),
+              proxyUrl: entry.proxyUrl?.trim() || undefined,
+              authIndex: normalizeAuthIndex(entry.authIndex) ?? undefined,
+              headers: entry.headers,
+            })
+          ),
       };
       if (form.priority !== undefined && Number.isFinite(form.priority)) {
         payload.priority = Math.trunc(form.priority);

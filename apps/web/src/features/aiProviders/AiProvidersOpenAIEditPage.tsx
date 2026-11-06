@@ -16,6 +16,12 @@ import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
 import { useNotificationStore } from '@/stores';
 import { apiCallApi, getApiCallErrorDetails } from '@/services/api';
 import { normalizeAuthIndex } from '@/utils/authIndex';
+import {
+  getOpenAIKeyCount,
+  getOpenAITestableKeyIndexes,
+  preservePersistedOpenAIKeyEntry,
+  updateOpenAIApiKey,
+} from '@/utils/openAIKeyEntries';
 import { buildHeaderObject, hasHeader } from '@/utils/headers';
 import { buildApiKeyEntry, buildOpenAIChatCompletionsEndpoint } from '@/components/providers/utils';
 import {
@@ -98,9 +104,7 @@ export function AiProvidersOpenAIEditPage() {
     !hasInvalidWeight &&
     !hasInvalidThinkingLevels(form.modelEntries);
   const hasConfiguredModels = form.modelEntries.some((entry) => entry.name.trim());
-  const hasTestableKeys = form.apiKeyEntries.some(
-    (entry) => entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex)
-  );
+  const hasTestableKeys = form.apiKeyEntries.length > 0;
   const modelSelectOptions = useMemo(() => {
     const seen = new Set<string>();
     return form.modelEntries.reduce<Array<{ value: string; label: string }>>((acc, entry) => {
@@ -158,14 +162,8 @@ export function AiProvidersOpenAIEditPage() {
       }
 
       const keyEntry = form.apiKeyEntries[keyIndex];
-      const keyAuthIndex = normalizeAuthIndex(keyEntry?.authIndex) ?? undefined;
-      if (!keyEntry?.apiKey?.trim() && !keyAuthIndex) {
-        setDraftKeyTestStatus(keyIndex, {
-          status: 'error',
-          message: t('notification.openai_test_key_required'),
-        });
-        return false;
-      }
+      if (!keyEntry) return false;
+      const keyAuthIndex = normalizeAuthIndex(keyEntry.authIndex) ?? undefined;
 
       const modelName = testModel.trim() || availableModels[0] || '';
       if (!modelName) {
@@ -179,9 +177,11 @@ export function AiProvidersOpenAIEditPage() {
         ...customHeaders,
       };
       if (!hasHeader(headers, 'authorization')) {
-        headers.Authorization = keyAuthIndex
-          ? 'Bearer $TOKEN$'
-          : `Bearer ${keyEntry.apiKey.trim()}`;
+        if (keyEntry.apiKey.trim()) {
+          headers.Authorization = keyAuthIndex
+            ? 'Bearer $TOKEN$'
+            : `Bearer ${keyEntry.apiKey.trim()}`;
+        }
       }
 
       // Set loading state for this key
@@ -191,6 +191,7 @@ export function AiProvidersOpenAIEditPage() {
         const result = await apiCallApi.request(
           {
             authIndex: keyAuthIndex,
+            proxyUrl: keyEntry.proxyUrl?.trim() || undefined,
             method: 'POST',
             url: endpoint,
             header: Object.keys(headers).length ? headers : undefined,
@@ -280,18 +281,7 @@ export function AiProvidersOpenAIEditPage() {
       return;
     }
 
-    const validKeyIndexes = form.apiKeyEntries
-      .map((entry, index) =>
-        entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex) ? index : -1
-      )
-      .filter((index) => index >= 0);
-    if (validKeyIndexes.length === 0) {
-      const message = t('notification.openai_test_key_required');
-      setTestStatus('error');
-      setTestMessage(message);
-      showNotification(message, 'error');
-      return;
-    }
+    const validKeyIndexes = getOpenAITestableKeyIndexes(form.apiKeyEntries);
 
     setIsTestingKeys(true);
     setTestStatus('loading');
@@ -353,7 +343,13 @@ export function AiProvidersOpenAIEditPage() {
     const list = entries.length ? entries : [buildApiKeyEntry()];
 
     const updateEntry = (idx: number, field: keyof OpenAIFormApiKeyEntry, value: string) => {
-      const next = list.map((entry, i) => (i === idx ? { ...entry, [field]: value } : entry));
+      const next = list.map((entry, i) =>
+        i === idx
+          ? field === 'apiKey'
+            ? updateOpenAIApiKey(entry, value)
+            : preservePersistedOpenAIKeyEntry(entry, { ...entry, [field]: value })
+          : entry
+      );
       setForm((prev) => ({ ...prev, apiKeyEntries: next }));
       setDraftKeyTestStatus(idx, { status: 'idle', message: '' });
       setTestStatus('idle');
@@ -362,7 +358,9 @@ export function AiProvidersOpenAIEditPage() {
 
     const updateEntryWeight = (idx: number, raw: string) => {
       const weight = toCredentialWeightInputValue(raw);
-      const next = list.map((entry, i) => (i === idx ? { ...entry, weight } : entry));
+      const next = list.map((entry, i) =>
+        i === idx ? preservePersistedOpenAIKeyEntry(entry, { ...entry, weight }) : entry
+      );
       setForm((prev) => ({ ...prev, apiKeyEntries: next }));
     };
 
@@ -388,7 +386,7 @@ export function AiProvidersOpenAIEditPage() {
       <div className={styles.keyEntriesList}>
         <div className={styles.keyEntriesToolbar}>
           <span className={styles.keyEntriesCount}>
-            {t('ai_providers.openai_keys_count')}: {list.length}
+            {t('ai_providers.openai_keys_count')}: {getOpenAIKeyCount(list)}
           </span>
           <Button
             variant="secondary"
@@ -415,8 +413,8 @@ export function AiProvidersOpenAIEditPage() {
             const keyStatus = keyTestStatuses[index]?.status ?? 'idle';
             const weightError = getCredentialWeightError(entry.weight);
             const canTestKey =
-              Boolean(entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex)) &&
-              hasConfiguredModels;
+              hasConfiguredModels &&
+              getOpenAITestableKeyIndexes(form.apiKeyEntries).includes(index);
 
             return (
               <div key={index} className={styles.keyTableRow}>

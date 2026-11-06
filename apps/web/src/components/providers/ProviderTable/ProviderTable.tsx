@@ -272,7 +272,9 @@ export function ProviderTable({
             </div>
 
             <div className={styles.cellRecent} role="cell">
-              {row.stats.success + row.stats.failure > 0 ? (
+              {row.usageStatsCoverage === 'unavailable' ? (
+                <span className={styles.noRecent}>{t('ai_providers.usage_stats_unavailable')}</span>
+              ) : row.stats.success + row.stats.failure > 0 ? (
                 <>
                   <span className={styles.statSuccess} title={t('stats.success')}>
                     <IconCheck size={12} /> {row.stats.success}
@@ -283,9 +285,16 @@ export function ProviderTable({
                   <div className={styles.recentBarWrap}>
                     <ProviderStatusBar statusData={row.statusData} />
                   </div>
+                  {row.usageStatsCoverage === 'partial' && (
+                    <span className={styles.noRecent}>{t('ai_providers.usage_stats_partial')}</span>
+                  )}
                 </>
               ) : (
-                <span className={styles.noRecent}>{t('status_bar.no_requests')}</span>
+                <span className={styles.noRecent}>
+                  {row.usageStatsCoverage === 'partial'
+                    ? t('ai_providers.usage_stats_partial')
+                    : t('status_bar.no_requests')}
+                </span>
               )}
             </div>
 
