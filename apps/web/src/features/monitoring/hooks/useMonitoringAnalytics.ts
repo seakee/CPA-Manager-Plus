@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   useRequestMonitoringAvailability,
   type RequestMonitoringUnavailableReason,
@@ -91,6 +91,7 @@ export function useMonitoringAnalytics({
   throttleMs = DEFAULT_REFRESH_THROTTLE_MS,
 }: UseMonitoringAnalyticsParams): UseMonitoringAnalyticsReturn {
   const managementKey = useAuthStore((state) => state.managementKey);
+  const apiBase = useAuthStore((state) => state.apiBase);
   const availability = useRequestMonitoringAvailability();
   const [data, setData] = useState<MonitoringAnalyticsResponse | null>(null);
   const [dataScopeStateKey, setDataScopeStateKey] = useState('');
@@ -159,9 +160,28 @@ export function useMonitoringAnalytics({
   const activeDataScopeKey = dataScopeKey || requestKey;
   const serviceBase = availability.serviceBase;
   const enabled = availability.available && Boolean(serviceBase) && Boolean(request);
+  const connectionScope = JSON.stringify([apiBase, serviceBase, managementKey]);
+  const connectionScopeRef = useRef(connectionScope);
+  connectionScopeRef.current = connectionScope;
+  useLayoutEffect(() => {
+    requestIdRef.current += 1;
+    abortControllerRef.current?.abort();
+    inFlightRequestIdentityKeyRef.current = '';
+    inFlightRequestIdRef.current = 0;
+    lastRequestKeyRef.current = '';
+    lastStartedAtRef.current = 0;
+    setData(null);
+    setDataScopeStateKey('');
+    setLastRefreshedAt(null);
+    setError('');
+    return () => {
+      requestIdRef.current += 1;
+    };
+  }, [connectionScope]);
 
   const refresh = useCallback(
     async (options: MonitoringAnalyticsRefreshOptions = {}) => {
+      if (connectionScopeRef.current !== connectionScope) return;
       if (!enabled || !request || !serviceBase) {
         abortControllerRef.current?.abort();
         abortControllerRef.current = null;
@@ -208,13 +228,15 @@ export function useMonitoringAnalytics({
           request,
           controller.signal
         );
-        if (requestIdRef.current !== requestId) return;
+        if (requestIdRef.current !== requestId || connectionScopeRef.current !== connectionScope)
+          return;
         setData(response);
         setDataScopeStateKey(activeDataScopeKey);
         setLastRefreshedAt(new Date());
       } catch (err) {
         if (controller.signal.aborted) return;
-        if (requestIdRef.current !== requestId) return;
+        if (requestIdRef.current !== requestId || connectionScopeRef.current !== connectionScope)
+          return;
         setError(err instanceof Error ? err.message : String(err));
       } finally {
         if (inFlightRequestIdRef.current === requestId) {
@@ -231,6 +253,7 @@ export function useMonitoringAnalytics({
     },
     [
       activeDataScopeKey,
+      connectionScope,
       enabled,
       inFlightRequestIdentityKey,
       managementKey,

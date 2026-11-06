@@ -323,8 +323,12 @@ export function useMonitoringData({
   activeDataTab = 'accounts',
 }: UseMonitoringDataParams): UseMonitoringDataReturn {
   const connectionScopeKeyRef = useRef<string | null>(connectionScopeKey ?? null);
+  const authFilesLoadedRef = useRef(false);
+  const channelsLoadedRef = useRef(false);
   useLayoutEffect(() => {
     connectionScopeKeyRef.current = connectionScopeKey ?? null;
+    authFilesLoadedRef.current = false;
+    channelsLoadedRef.current = false;
   }, [connectionScopeKey]);
   const [authFiles, setAuthFiles] = useState<AuthFileItem[]>([]);
   const [authFilesLoaded, setAuthFilesLoaded] = useState(false);
@@ -371,10 +375,16 @@ export function useMonitoringData({
         return null;
       }
 
-      setAuthFiles(payload.authFiles);
-      setAuthFilesLoaded(payload.authFilesLoaded);
-      setChannels(payload.channels);
-      setChannelsLoaded(payload.channelsLoaded);
+      // A refresh that has not loaded one side yet must not blank the rows an
+      // earlier successful response already provides.
+      const replaceAuthFiles = payload.authFilesLoaded || !authFilesLoadedRef.current;
+      const replaceChannels = payload.channelsLoaded || !channelsLoadedRef.current;
+      if (replaceAuthFiles) setAuthFiles(payload.authFiles);
+      if (replaceChannels) setChannels(payload.channels);
+      if (payload.authFilesLoaded) authFilesLoadedRef.current = true;
+      if (payload.channelsLoaded) channelsLoadedRef.current = true;
+      setAuthFilesLoaded(authFilesLoadedRef.current);
+      setChannelsLoaded(channelsLoadedRef.current);
       setError(payload.error);
       setLoading(false);
       setEventsPageState((previous) =>
@@ -402,8 +412,10 @@ export function useMonitoringData({
         return;
       }
       setAuthFiles(payload.authFiles);
+      authFilesLoadedRef.current = payload.authFilesLoaded;
       setAuthFilesLoaded(payload.authFilesLoaded);
       setChannels(payload.channels);
+      channelsLoadedRef.current = payload.channelsLoaded;
       setChannelsLoaded(payload.channelsLoaded);
       setError(payload.error);
       setLoading(false);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useRequestMonitoringAvailability } from '@/hooks/useRequestMonitoringAvailability';
 import { dashboardApi, type DashboardSummaryResponse } from '@/services/api/usageService';
 import { useAuthStore } from '@/stores';
@@ -42,6 +42,17 @@ export function useDashboardUsageSummary(): UseDashboardUsageSummaryReturn {
   const enabled = availability.available && Boolean(availability.serviceBase);
   const serviceBase = availability.serviceBase;
 
+  useLayoutEffect(() => {
+    requestIdRef.current += 1;
+    setSummary(null);
+    setLastRefreshedAt(null);
+    setError('');
+    setLoading(enabled);
+    return () => {
+      requestIdRef.current += 1;
+    };
+  }, [enabled, managementKey, serviceBase]);
+
   const refresh = useCallback(async () => {
     if (!enabled || !serviceBase) {
       setSummary(null);
@@ -67,7 +78,6 @@ export function useDashboardUsageSummary(): UseDashboardUsageSummaryReturn {
       setLastRefreshedAt(new Date());
     } catch (err) {
       if (requestIdRef.current !== requestId) return;
-      setSummary(null);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       if (requestIdRef.current === requestId) {

@@ -31,6 +31,8 @@ interface ModelsState {
   isCacheValid: (apiBase: string, apiKey?: string, managementKey?: string) => boolean;
 }
 
+let requestGeneration = 0;
+
 export const useModelsStore = create<ModelsState>((set, get) => ({
   models: [],
   loading: false,
@@ -38,17 +40,25 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   cache: null,
 
   fetchModels: async (apiBase, apiKey, forceRefresh = false, managementKey) => {
+    const generation = ++requestGeneration;
     const { cache, isCacheValid } = get();
     const apiKeyScope = apiKey?.trim() || '';
     const managementKeyScope = managementKey?.trim() || '';
 
     // 检查缓存
     if (!forceRefresh && isCacheValid(apiBase, apiKeyScope, managementKeyScope) && cache) {
-      set({ models: cache.data, error: null });
+      set({ models: cache.data, error: null, loading: false });
       return cache.data;
     }
 
-    set({ loading: true, error: null });
+    const sameScope =
+      cache?.apiBase === apiBase &&
+      cache.apiKey === apiKeyScope &&
+      cache.managementKey === managementKeyScope;
+    // A refresh keeps the last successful list for the same scope visible;
+    // switching connection scope clears it immediately instead of showing
+    // another server's models while the new list is pending.
+    set({ loading: true, error: null, ...(sameScope ? {} : { models: [], cache: null }) });
 
     try {
       // The Fresh Console bridge is a same-origin Manager API. Its canonical
@@ -60,6 +70,8 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
         ? { Authorization: `Bearer ${managementKeyScope}` }
         : {};
       const list = await modelsApi.fetchModels(apiBase, apiKeyScope || undefined, requestHeaders);
+      // A later request (or clearCache) owns the state now.
+      if (generation !== requestGeneration) return list;
       const now = Date.now();
 
       set({
@@ -76,23 +88,25 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
 
       return list;
     } catch (error: unknown) {
+      if (generation !== requestGeneration) throw error;
       const message =
         error instanceof Error
           ? error.message
           : typeof error === 'string'
             ? error
             : 'Failed to fetch models';
+      // Keep the last successful list on failure; only the error is new.
       set({
         error: message,
         loading: false,
-        models: [],
       });
       throw error;
     }
   },
 
   clearCache: () => {
-    set({ cache: null, models: [] });
+    requestGeneration += 1;
+    set({ cache: null, models: [], loading: false, error: null });
   },
 
   isCacheValid: (apiBase, apiKey, managementKey) => {

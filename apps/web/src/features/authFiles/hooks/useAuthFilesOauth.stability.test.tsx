@@ -12,6 +12,7 @@ const { mocks } = vi.hoisted(() => {
       getModelDefinitions: vi.fn(),
       saveOauthModelAlias: vi.fn(),
       deleteOauthModelAlias: vi.fn(),
+      deleteOauthExcludedEntry: vi.fn(),
       showNotification: vi.fn(),
       showConfirmation: vi.fn(),
       // Stable like production react-i18next `t` / store actions.
@@ -41,6 +42,7 @@ vi.mock('@/services/api', () => ({
     getModelDefinitions: mocks.getModelDefinitions,
     saveOauthModelAlias: mocks.saveOauthModelAlias,
     deleteOauthModelAlias: mocks.deleteOauthModelAlias,
+    deleteOauthExcludedEntry: mocks.deleteOauthExcludedEntry,
   },
 }));
 
@@ -186,6 +188,7 @@ describe('useAuthFilesOauth loader reference stability', () => {
     mocks.getModelDefinitions.mockReset();
     mocks.saveOauthModelAlias.mockReset();
     mocks.deleteOauthModelAlias.mockReset();
+    mocks.deleteOauthExcludedEntry.mockReset().mockResolvedValue(undefined);
     mocks.showNotification.mockReset();
     mocks.showConfirmation.mockReset();
 
@@ -200,6 +203,39 @@ describe('useAuthFilesOauth loader reference stability', () => {
     harness?.unmount();
     harness = null;
   });
+
+  it.each(['excluded', 'alias'] as const)(
+    'reports failed %s reconciliation after a successful delete and guards writes until recovery',
+    async (kind) => {
+      const original = kind === 'excluded' ? { codex: ['old-model'] } : { codex: [{ name: 'old-model', alias: 'old-alias' }] };
+      const get = kind === 'excluded' ? mocks.getOauthExcludedModels : mocks.getOauthModelAlias;
+      const remove = kind === 'excluded' ? mocks.deleteOauthExcludedEntry : mocks.deleteOauthModelAlias;
+      get.mockResolvedValue(original);
+      harness = mountHarness();
+      await flushAsync();
+      const open = () => kind === 'excluded' ? harness!.getLatest().deleteExcluded('codex') : harness!.getLatest().deleteModelAlias('codex');
+      const reload = () => kind === 'excluded' ? harness!.getLatest().loadExcluded() : harness!.getLatest().loadModelAlias();
+      if (kind === 'alias') get.mockResolvedValueOnce(original); // Mutation reads latest before DELETE.
+      get.mockRejectedValueOnce(new Error('reconciliation offline'));
+      act(open);
+      await act(async () => { await mocks.showConfirmation.mock.lastCall![0].onConfirm(); });
+      expect(remove).toHaveBeenCalledOnce();
+      const state = harness.getLatest();
+      expect(kind === 'excluded' ? state.excluded : state.modelAlias).toEqual(original);
+      expect(kind === 'excluded' ? state.excludedLoaded : state.modelAliasLoaded).toBe(true);
+      expect(kind === 'excluded' ? state.excludedError : state.modelAliasError).toBe('error');
+      expect(mocks.showNotification).toHaveBeenCalledWith('notification.refresh_failed', 'warning');
+      expect(mocks.showNotification).toHaveBeenCalledWith(kind === 'excluded' ? 'oauth_excluded.delete_success' : 'oauth_model_alias.delete_success', 'success');
+      act(open);
+      await act(async () => { await mocks.showConfirmation.mock.lastCall![0].onConfirm(); });
+      expect(remove).toHaveBeenCalledOnce();
+      await act(async () => { await reload(); });
+      expect(kind === 'excluded' ? harness.getLatest().excludedError : harness.getLatest().modelAliasError).toBe('ready');
+      act(open);
+      await act(async () => { await mocks.showConfirmation.mock.lastCall![0].onConfirm(); });
+      expect(remove).toHaveBeenCalledTimes(2);
+    }
+  );
 
   it('loads each OAuth config endpoint once and keeps loader identities stable across re-renders', async () => {
     harness = mountHarness();
@@ -223,6 +259,38 @@ describe('useAuthFilesOauth loader reference stability', () => {
     expect(afterRerender.loadModelAlias).toBe(loadModelAliasBeforeRerender);
     expect(mocks.getOauthExcludedModels).toHaveBeenCalledTimes(1);
     expect(mocks.getOauthModelAlias).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats successful empty rule responses as loaded through refresh failure', async () => {
+    harness = mountHarness(); await flushAsync();
+    expect(harness.getLatest().excludedLoaded).toBe(true);
+    expect(harness.getLatest().modelAliasLoaded).toBe(true);
+    mocks.getOauthExcludedModels.mockRejectedValueOnce(new Error('offline'));
+    mocks.getOauthModelAlias.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => { await Promise.all([harness!.getLatest().loadExcluded(), harness!.getLatest().loadModelAlias()]); });
+    expect(harness.getLatest()).toMatchObject({ excluded: {}, modelAlias: {}, excludedLoaded: true, modelAliasLoaded: true, excludedError: 'error', modelAliasError: 'error' });
+    harness.switchConnection('connection-b');
+    expect(harness.getLatest().excludedLoaded).toBe(false);
+    expect(harness.getLatest().modelAliasLoaded).toBe(false);
+  });
+
+  it('retains model definitions when re-entering the same diagram fails', async () => {
+    let latest!: UseAuthFilesOauthResult;
+    function Diagram({ visible }: { visible: boolean }) {
+      const result = useAuthFilesOauth({ viewMode: visible ? 'diagram' : 'list', files: DIAGRAM_FILES, connectionKey: 'connection-a', requestScope: { apiBase: 'http://connection-a.local:8317', managementKey: 'connection-a-key' } });
+      useEffect(() => { latest = result; }, [result]);
+      return null;
+    }
+    mocks.getModelDefinitions.mockResolvedValue([{ id: 'retained-model' }]);
+    let renderer!: ReactTestRenderer;
+    await act(async () => { renderer = create(<Diagram visible />); });
+    expect(latest.allProviderModels.codex).toEqual([{ id: 'retained-model' }]);
+    act(() => { renderer.update(<Diagram visible={false} />); });
+    mocks.getModelDefinitions.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => { renderer.update(<Diagram visible />); });
+    expect(latest.allProviderModels.codex).toEqual([{ id: 'retained-model' }]);
+    expect(mocks.showNotification).toHaveBeenCalledWith('notification.refresh_failed', 'error');
+    act(() => renderer.unmount());
   });
 
   it('pins OAuth diagram model requests to the captured CPA connection', async () => {

@@ -78,6 +78,19 @@ export function PageTransition({
   const currentLayerKey = currentLayer?.key ?? location.key;
   const currentLayerPathname = currentLayer?.location.pathname;
 
+  // Same-page navigation (search, hash or a replaced history entry) keeps the
+  // layer, so the page is not remounted, but must still reach the page. Store it
+  // on the layer so an exiting or stacked page keeps its own latest location.
+  if (
+    currentLayer?.status === 'current' &&
+    currentLayerPathname === location.pathname &&
+    currentLayer.location !== location
+  ) {
+    setLayers((prev) =>
+      prev.map((layer) => (layer.status === 'current' ? { ...layer, location } : layer))
+    );
+  }
+
   const resolveScrollContainer = useCallback(() => {
     if (scrollContainerRef?.current) return scrollContainerRef.current;
     if (typeof document === 'undefined') return null;

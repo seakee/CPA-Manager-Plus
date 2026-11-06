@@ -1,6 +1,7 @@
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
+import type { ComponentProps } from 'react';
 import type { ConnectionStatus } from '@/types';
 import type { PanelFeatureAvailability } from '@/hooks/usePanelFeatureAvailability';
 import { VersionCard } from './VersionCard';
@@ -137,6 +138,7 @@ const renderCard = async ({
     },
   },
   mockUpdateIndex,
+  health = {},
 }: {
   appVersion?: string;
   apiVersion?: string;
@@ -151,6 +153,7 @@ const renderCard = async ({
   managerServiceAvailable?: boolean;
   updateIndexData?: unknown;
   mockUpdateIndex?: () => Promise<unknown>;
+  health?: Partial<ComponentProps<typeof VersionCard>>;
 } = {}) => {
   mocks.panelFeatureAvailability = {
     checking: false,
@@ -200,6 +203,8 @@ const renderCard = async ({
           collectorLoading={false}
           errorLogCount={0}
           errorLogsLoading={false}
+          errorLogsLoaded={true}
+          {...health}
         />
       </MemoryRouter>
     );
@@ -222,6 +227,33 @@ afterEach(() => {
 });
 
 describe('VersionCard release links', () => {
+  it.each([false, true])('distinguishes unknown error-log count from known zero (loaded=%s)', async (loaded) => {
+    const renderer = await renderCard({ health: { errorLogsLoaded: loaded, errorLogCount: 0, errorLogsError: 'logs offline' } });
+    const logs = getText(renderer.root.find(n =>
+      (n.type === 'div' || n.type === 'a') && n.props.className?.split(' ').includes(styles.healthItem) && getText(n).includes('dashboard.health_error_logs')
+    ));
+    expect(logs).toContain(loaded ? 'notification.refresh_failed' : 'notification.load_failed');
+    expect(logs.includes('dashboard.health_status_normal')).toBe(loaded);
+  });
+  it('shows stale error-log count with refresh failure without marking Collector or Queue unavailable', async () => {
+    const renderer = await renderCard({
+      health: { usageEnabled: true, errorLogCount: 3, errorLogsError: 'logs offline' },
+    });
+    const healthItem = (label: string) =>
+      renderer.root.find(
+        (n) =>
+          (n.type === 'div' || n.type === 'a') &&
+          n.props.className?.split(' ').includes(styles.healthItem) &&
+          getText(n).includes(label)
+      );
+    const logs = getText(healthItem('dashboard.health_error_logs'));
+    expect(logs).toContain('dashboard.health_error_log_count');
+    expect(logs).toContain('notification.refresh_failed');
+    for (const label of ['dashboard.collector_status_title', 'dashboard.health_queue_status']) {
+      expect(getText(healthItem(label))).not.toContain('dashboard.collector_unavailable');
+    }
+  });
+
   it('keeps current Manager and Core versions linked to their installed releases', async () => {
     const renderer = await renderCard();
 
@@ -716,6 +748,7 @@ describe('VersionCard external panel fallback', () => {
             collectorLoading={false}
             errorLogCount={0}
             errorLogsLoading={false}
+            errorLogsLoaded={true}
           />
         </MemoryRouter>
       );
@@ -795,6 +828,7 @@ describe('VersionCard external panel fallback', () => {
             collectorLoading={false}
             errorLogCount={0}
             errorLogsLoading={false}
+            errorLogsLoaded={true}
           />
         </MemoryRouter>
       );

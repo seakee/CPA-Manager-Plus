@@ -59,15 +59,28 @@ const MODEL_CATEGORY_ICONS: Record<string, string | { light: string; dark: strin
 
 const DATABASE_STATUS_REFRESH_INTERVAL_MS = 60_000;
 
-export function SystemPage({
-  logoutDisabled = false,
-  hasUnsavedChanges = false,
-  workspace,
-}: {
+interface SystemPageProps {
   logoutDisabled?: boolean;
   hasUnsavedChanges?: boolean;
   workspace?: React.ReactNode;
-} = {}) {
+}
+
+export function SystemPage(props: SystemPageProps = {}) {
+  // Remount on a different connection so no previous server's data survives.
+  const connectionScope = useAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  const { managerServiceBase } = usePanelFeatureAvailability();
+  return (
+    <SystemPageContent key={`${connectionScope}:${managerServiceBase}`} {...props} />
+  );
+}
+
+function SystemPageContent({
+  logoutDisabled = false,
+  hasUnsavedChanges = false,
+  workspace,
+}: SystemPageProps) {
   const { t, i18n } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
@@ -83,6 +96,8 @@ export function SystemPage({
 
   const models = useModelsStore((state) => state.models);
   const modelsLoading = useModelsStore((state) => state.loading);
+  const modelsError = useModelsStore((state) => state.error);
+  const modelsCache = useModelsStore((state) => state.cache);
   const fetchModelsFromStore = useModelsStore((state) => state.fetchModels);
 
   const [modelStatus, setModelStatus] = useState<{
@@ -94,6 +109,14 @@ export function SystemPage({
   const [databaseLoading, setDatabaseLoading] = useState(false);
   const [databaseError, setDatabaseError] = useState('');
   const databaseRequestId = useRef(0);
+  const modelRequestId = useRef(0);
+  useEffect(
+    () => () => {
+      databaseRequestId.current += 1;
+      modelRequestId.current += 1;
+    },
+    []
+  );
 
   const apiKeysCache = useRef<string[]>([]);
 
@@ -159,6 +182,7 @@ export function SystemPage({
   }, [config?.apiKeys]);
 
   const fetchModels = async ({ forceRefresh = false }: { forceRefresh?: boolean } = {}) => {
+    const requestId = ++modelRequestId.current;
     if (auth.connectionStatus !== 'connected') {
       setModelStatus({
         type: 'warning',
@@ -179,6 +203,7 @@ export function SystemPage({
     setModelStatus({ type: 'muted', message: t('system_info.models_loading') });
     try {
       const apiKeys = await resolveApiKeysForModels();
+      if (requestId !== modelRequestId.current) return;
       const primaryKey = apiKeys[0];
       const managerCredential =
         auth.sessionMode === 'manager_embedded' && /\/api\/v2\/cpamp$/i.test(auth.apiBase)
@@ -190,6 +215,7 @@ export function SystemPage({
         forceRefresh,
         managerCredential
       );
+      if (requestId !== modelRequestId.current) return;
       const hasModels = list.length > 0;
       setModelStatus({
         type: hasModels ? 'success' : 'warning',
@@ -198,6 +224,7 @@ export function SystemPage({
           : t('system_info.models_empty'),
       });
     } catch (err: unknown) {
+      if (requestId !== modelRequestId.current) return;
       const code = getUsageServiceErrorCode(err);
       const detail = isGatewayPendingError(err)
         ? t('system_info.models_gateway_pending')
@@ -242,7 +269,6 @@ export function SystemPage({
       setDatabaseStatus(status);
     } catch (err: unknown) {
       if (databaseRequestId.current !== requestId) return;
-      setDatabaseStatus(null);
       setDatabaseError(err instanceof Error ? err.message : String(err));
     } finally {
       if (databaseRequestId.current === requestId) {
@@ -409,9 +435,10 @@ export function SystemPage({
             {modelStatus && (
               <div className={`status-badge ${modelStatus.type}`}>{modelStatus.message}</div>
             )}
-            {modelsLoading ? (
+            {modelsError && <div className="error-box">{modelsError}</div>}
+            {modelsLoading && !modelsCache ? (
               <div className="hint">{t('common.loading')}</div>
-            ) : models.length === 0 ? (
+            ) : !modelsCache ? null : models.length === 0 ? (
               <div className="hint">{t('system_info.models_empty')}</div>
             ) : (
               <div className="item-list">

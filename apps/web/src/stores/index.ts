@@ -21,3 +21,4 @@ export {
   publishAccountCredentialMutationRevision,
   useAccountCredentialMutationRevisionStore,
 } from './useAccountCredentialMutationRevisionStore';
+export { usePinnedAccountsStore } from './usePinnedAccountsStore';

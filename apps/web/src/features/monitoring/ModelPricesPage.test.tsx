@@ -12,6 +12,11 @@ const mocks = vi.hoisted(() => {
     prices: {} as Record<string, ModelPrice>,
     save: vi.fn(async (_prices: Record<string, ModelPrice>) => undefined),
     notify: vi.fn(),
+    availability: { modelPricesAvailable: false } as {
+      modelPricesAvailable: boolean;
+      managerServiceBase?: string;
+    },
+    usageSummary: vi.fn(),
   };
 });
 
@@ -26,8 +31,18 @@ vi.mock('@/stores', () => ({
   useNotificationStore: () => ({ showNotification: mocks.notify }),
 }));
 vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
-  usePanelFeatureAvailability: () => ({ modelPricesAvailable: false }),
+  usePanelFeatureAvailability: () => mocks.availability,
 }));
+vi.mock('@/services/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/api')>();
+  return {
+    ...actual,
+    usageServiceApi: {
+      ...actual.usageServiceApi,
+      getModelPriceUsageSummary: mocks.usageSummary,
+    },
+  };
+});
 vi.mock('@/features/monitoring/hooks/useUsageData', () => ({
   useUsageData: () => ({
     loading: false,
@@ -107,6 +122,8 @@ const save = async () => {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.prices = { 'tiered-model': tieredPrice() };
+  mocks.availability = { modelPricesAvailable: false };
+  mocks.usageSummary.mockResolvedValue({ summary: {} });
 });
 afterEach(async () => {
   await act(async () => {
@@ -195,5 +212,25 @@ describe('ModelPricesPage base price edits', () => {
     const saved = await save();
     expect(saved['tiered-model'].contextTiers).toEqual(mocks.prices['tiered-model'].contextTiers);
     expect(saved['tiered-model'].serviceTiers).toEqual([]);
+  });
+});
+
+describe('ModelPricesPage usage summary revalidation', () => {
+  it('keeps the existing model price table mounted while the usage summary loads', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.usageSummary.mockReturnValue(new Promise(() => {}));
+    await act(async () => {
+      renderer = create(<ModelPricesPage />);
+    });
+
+    expect(renderer.root.findAllByType('table')).toHaveLength(1);
+    expect(
+      renderer.root
+        .findAllByType('div')
+        .some((node) => node.children.includes('common.loading'))
+    ).toBe(false);
   });
 });

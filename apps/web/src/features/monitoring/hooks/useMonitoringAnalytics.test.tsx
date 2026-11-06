@@ -12,20 +12,24 @@ import {
   type UseMonitoringAnalyticsReturn,
 } from './useMonitoringAnalytics';
 
+const connection = vi.hoisted(() => ({
+  apiBase: 'http://cpa.local',
+  managementKey: 'admin-key',
+  serviceBase: 'http://manager.local',
+}));
 vi.mock('@/hooks/useRequestMonitoringAvailability', () => ({
   useRequestMonitoringAvailability: () => ({
     checking: false,
     available: true,
     managerServiceAvailable: true,
     modelPricesAvailable: true,
-    serviceBase: 'http://manager.local',
+    serviceBase: connection.serviceBase,
     reason: '',
   }),
 }));
 
 vi.mock('@/stores', () => ({
-  useAuthStore: (selector: (state: { managementKey: string }) => unknown) =>
-    selector({ managementKey: 'admin-key' }),
+  useAuthStore: (selector: (state: { managementKey: string }) => unknown) => selector(connection),
 }));
 
 vi.mock('@/services/api/usageService', () => ({
@@ -96,6 +100,9 @@ describe('useMonitoringAnalytics', () => {
     renderer = null;
     latestResult = null;
     getAnalyticsMock.mockReset();
+    connection.apiBase = 'http://cpa.local';
+    connection.managementKey = 'admin-key';
+    connection.serviceBase = 'http://manager.local';
   });
 
   function Harness({
@@ -151,6 +158,40 @@ describe('useMonitoringAnalytics', () => {
 
     expect(getAnalyticsMock).toHaveBeenCalledTimes(2);
   });
+
+  it.each(['apiBase', 'managementKey', 'serviceBase'] as const)(
+    'invalidates prior snapshots and late replies on %s change',
+    async (field) => {
+      const requests = installDeferredAnalyticsMock();
+      await act(async () => {
+        renderer = create(<Harness />);
+      });
+      await act(async () => {
+        requests[0].resolve(createResponse(1));
+        await flushPromises();
+      });
+      expect(latestResult?.data?.generated_at_ms).toBe(1);
+      let pending!: Promise<void>;
+      await act(async () => {
+        pending = latestResult!.refresh();
+      });
+      connection[field] = 'changed';
+      await act(async () => {
+        renderer?.update(<Harness />);
+      });
+      expect(latestResult?.data).toBeNull();
+      await act(async () => {
+        requests[1].resolve(createResponse(2));
+        await pending;
+      });
+      expect(latestResult?.data).toBeNull();
+      await act(async () => {
+        requests[2].resolve(createResponse(3));
+        await flushPromises();
+      });
+      expect(latestResult?.data?.generated_at_ms).toBe(3);
+    }
+  );
 
   it('starts a new request when the analytics scope changes', async () => {
     installDeferredAnalyticsMock();

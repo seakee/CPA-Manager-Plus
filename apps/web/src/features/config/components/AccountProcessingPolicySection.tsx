@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
@@ -35,6 +35,14 @@ const toneClassByStatus: Record<AccountPolicyViewItem['statusTone'], string> = {
 };
 
 export function AccountProcessingPolicySection() {
+  const connectionScope = useAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  const { managerServiceBase } = usePanelFeatureAvailability();
+  return <AccountProcessingPolicyContent key={`${connectionScope}:${managerServiceBase}`} />;
+}
+
+function AccountProcessingPolicyContent() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const managementKey = useAuthStore((state) => state.managementKey);
@@ -53,6 +61,7 @@ export function AccountProcessingPolicySection() {
   const [confirmAutoDisableOpen, setConfirmAutoDisableOpen] = useState(false);
 
   const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     if (!managerServiceBase || !managementKey) return;
     setLoading(true);
     setLoadError('');
@@ -62,8 +71,10 @@ export function AccountProcessingPolicySection() {
         managerServiceBase,
         managementKey
       );
+      if (requestId !== requestIdRef.current) return;
       setStatus(data);
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       const message = err instanceof Error ? err.message : String(err || 'request failed');
       setLoadError(message);
       showNotification(
@@ -71,10 +82,19 @@ export function AccountProcessingPolicySection() {
         'error'
       );
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [managerServiceBase, managementKey, showNotification, t]);
 
+  const requestIdRef = useRef(0);
+  const scopeActiveRef = useRef(false);
+  useLayoutEffect(() => {
+    scopeActiveRef.current = true;
+    return () => {
+      scopeActiveRef.current = false;
+      requestIdRef.current += 1;
+    };
+  }, []);
   useEffect(() => {
     void load();
   }, [load]);
@@ -83,6 +103,8 @@ export function AccountProcessingPolicySection() {
     async (key: AccountPolicyCapabilityKey, value: boolean) => {
       if (!managerServiceBase || !managementKey) return;
       setSavingKey(key);
+      requestIdRef.current += 1;
+      setLoading(false);
       setSaveError(null);
       try {
         const patch: AccountProcessingPolicyPatch = { [patchKeyByCapability[key]]: value };
@@ -91,12 +113,14 @@ export function AccountProcessingPolicySection() {
           managementKey,
           patch
         );
+        if (!scopeActiveRef.current) return;
         setStatus(data);
         showNotification(
           t('accountPolicy.save_success', { defaultValue: 'Account processing policy updated.' }),
           'success'
         );
       } catch (err) {
+        if (!scopeActiveRef.current) return;
         const code = getUsageServiceErrorCode(err);
         const message =
           code === 'account_processing_policy_env_locked'
@@ -113,7 +137,7 @@ export function AccountProcessingPolicySection() {
           'error'
         );
       } finally {
-        setSavingKey(null);
+        if (scopeActiveRef.current) setSavingKey(null);
       }
     },
     [managerServiceBase, managementKey, showNotification, t]

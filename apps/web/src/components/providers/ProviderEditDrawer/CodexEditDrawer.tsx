@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAuthStore as useDiscoveryAuthStore } from '@/stores/useAuthStore';
+import { useLayoutEffect, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Drawer } from '@/components/ui/Drawer';
@@ -141,6 +142,7 @@ export function CodexEditDrawer({
   const [modelDiscoveryFetching, setModelDiscoveryFetching] = useState(false);
   const [modelDiscoveryError, setModelDiscoveryError] = useState('');
   const [discoveredModels, setDiscoveredModels] = useState<ModelInfo[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [modelDiscoverySearch, setModelDiscoverySearch] = useState('');
   const [modelDiscoverySelected, setModelDiscoverySelected] = useState<Set<string>>(new Set());
   const [testModel, setTestModel] = useState('');
@@ -363,9 +365,41 @@ export function CodexEditDrawer({
     [showNotification, t]
   );
 
-  const fetchModelDiscovery = useCallback(async () => {
-    setModelDiscoveryFetching(true);
+  const discoveryConnection = useDiscoveryAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  const discoveryScope = JSON.stringify([
+    discoveryConnection,
+    open,
+    editIndex,
+    form.baseUrl,
+    form.apiKey,
+    form.authIndex,
+    form.proxyUrl,
+    buildHeaderObject(form.headers),
+  ]);
+  const activeDiscoveryScopeRef = useRef(discoveryScope);
+  activeDiscoveryScopeRef.current = discoveryScope;
+  const modelDiscoveryRequestIdRef = useRef(0);
+  useLayoutEffect(() => {
+    modelDiscoveryRequestIdRef.current += 1;
+    setDiscoveredModels([]);
+    setModelsLoaded(false);
     setModelDiscoveryError('');
+    setModelDiscoveryFetching(false);
+    return () => {
+      modelDiscoveryRequestIdRef.current += 1;
+    };
+  }, [discoveryScope]);
+
+  const fetchModelDiscovery = useCallback(async () => {
+    const requestId = ++modelDiscoveryRequestIdRef.current;
+    const requestScope = discoveryScope;
+    const isCurrentDiscovery = () =>
+      modelDiscoveryRequestIdRef.current === requestId &&
+      activeDiscoveryScopeRef.current === requestScope;
+    setModelDiscoveryError('');
+    setModelDiscoveryFetching(true);
     try {
       const headerObject = buildHeaderObject(form.headers);
       const hasCustomAuthorization = Object.keys(headerObject).some(
@@ -379,16 +413,18 @@ export function CodexEditDrawer({
         normalizeAuthIndex(form.authIndex) ?? undefined,
         form.proxyUrl
       );
+      if (!isCurrentDiscovery()) return;
       setDiscoveredModels(list);
+      setModelsLoaded(true);
     } catch (err: unknown) {
-      setDiscoveredModels([]);
+      if (!isCurrentDiscovery()) return;
       setModelDiscoveryError(
         `${t('ai_providers.codex_models_fetch_error')}: ${getErrorMessage(err)}`
       );
     } finally {
-      setModelDiscoveryFetching(false);
+      if (isCurrentDiscovery()) setModelDiscoveryFetching(false);
     }
-  }, [form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
+  }, [discoveryScope, form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
 
   const runCodexConnectivityTest = useCallback(async () => {
     if (isTesting) return;
@@ -583,7 +619,6 @@ export function CodexEditDrawer({
 
   useEffect(() => {
     if (!modelDiscoveryOpen) return;
-    setDiscoveredModels([]);
     setModelDiscoverySearch('');
     setModelDiscoverySelected(new Set());
     setModelDiscoveryError('');
@@ -943,11 +978,11 @@ export function CodexEditDrawer({
                   </div>
                 )}
                 {modelDiscoveryError && <div className="error-box">{modelDiscoveryError}</div>}
-                {modelDiscoveryFetching ? (
+                {modelDiscoveryFetching && !modelsLoaded ? (
                   <div className={styles.sectionHint}>
                     {t('ai_providers.codex_models_fetch_loading')}
                   </div>
-                ) : discoveredModels.length === 0 ? (
+                ) : !modelsLoaded ? null : discoveredModels.length === 0 ? (
                   <div className={styles.sectionHint}>
                     {t('ai_providers.codex_models_fetch_empty')}
                   </div>

@@ -128,6 +128,34 @@ const renderTab = (
 };
 
 describe('AccountConfigurationTab', () => {
+  it.each([true, false])(
+    'retains the loaded form during reload or failure (loading=%s)',
+    (loading) => {
+      const editor = makeEditor('codex', makeDraft({ prefix: 'retained-prefix' }));
+      editor.state = { ...editor.state!, loading, error: loading ? '' : 'refresh offline' };
+      const renderer = renderTab(makeRow(), editor);
+      expect(
+        renderer.root.findAllByType(Input).some((node) => node.props.value === 'retained-prefix')
+      ).toBe(true);
+      expect(findLoadingSpinners(renderer)).toHaveLength(0);
+      expect(renderer.root.findAllByType(Input).every((node) => node.props.disabled)).toBe(true);
+      if (!loading) {
+        expect(readText(renderer.toJSON())).toContain('refresh offline');
+        expect(
+          renderer.root
+            .findAllByType('button')
+            .filter((node) => node.props['data-account-config-reload'] === 'retry')
+        ).toHaveLength(1);
+      }
+      editor.state = { ...editor.state!, loading: false, error: '' };
+      act(() => renderer.update(
+        <AccountConfigurationTab row={makeRow()} disableControls={false} editor={editor} onCopyText={vi.fn()} />
+      ));
+      expect(renderer.root.findAllByType(Input).some((node) => !node.props.disabled)).toBe(true);
+      act(() => renderer.unmount());
+    }
+  );
+
   it('keeps the initial configuration state free of animated loading icons', () => {
     const editor = makeEditor('codex');
     editor.state = null;
