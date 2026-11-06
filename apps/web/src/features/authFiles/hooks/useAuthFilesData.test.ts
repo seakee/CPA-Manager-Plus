@@ -4095,6 +4095,10 @@ describe('useAuthFilesData raw credential import exclusions', () => {
     return mountUseAuthFilesData();
   };
 
+  const mockMissingAuthFile = () => {
+    mocks.downloadText.mockRejectedValue(Object.assign(new Error('Not Found'), { status: 404 }));
+  };
+
   const uploadCredentialFile = async (
     hook: UseAuthFilesDataHarness,
     record: unknown,
@@ -4171,6 +4175,7 @@ describe('useAuthFilesData raw credential import exclusions', () => {
 
   it('allows a new credential paste on an unrecognized CPA version', async () => {
     const hook = mountWithExistingCredential(null, []);
+    mockMissingAuthFile();
     const incoming = {
       type: 'codex',
       email: 'new@example.com',
@@ -4237,6 +4242,7 @@ describe('useAuthFilesData raw credential import exclusions', () => {
 
   it('allows a new credential upload on an unrecognized CPA version', async () => {
     const hook = mountWithExistingCredential(null, []);
+    mockMissingAuthFile();
 
     await uploadCredentialFile(hook, {
       type: 'codex',
@@ -4293,14 +4299,21 @@ describe('useAuthFilesData raw credential import exclusions', () => {
     hook.unmount();
   });
 
-  it('refuses an overwrite whose exclusion aliases disagree', async () => {
+  it('refuses when a legacy alias becomes effective because the canonical key is gone', async () => {
+    // CPA ignores `excludedModels`, so the stored file has no effective exclusions while the
+    // incoming file has one.
     mockAuthState.serverVersion = null;
     mocks.list.mockResolvedValue({ files: [{ name: 'custom-auth.json', type: 'codex' }] });
     mocks.downloadText.mockResolvedValue(
-      JSON.stringify({ ...existingCredential, excluded_models: [], 'excluded-models': [] })
+      JSON.stringify({ type: 'codex', email: 'user@example.com', excludedModels: ['gpt-4o'] })
     );
     const hook = mountUseAuthFilesData();
-    const incoming = { ...existingCredential, excluded_models: [], 'excluded-models': ['gpt-5'] };
+    const incoming = {
+      type: 'codex',
+      email: 'user@example.com',
+      access_token: 'next-access-token',
+      'excluded-models': ['gpt-4o'],
+    };
 
     await expect(
       hook.getCurrent().savePastedAuthJson('cpa', 'custom-auth.json', JSON.stringify(incoming))
@@ -4310,7 +4323,78 @@ describe('useAuthFilesData raw credential import exclusions', () => {
     hook.unmount();
   });
 
-  it('refuses an overwrite whose exclusion alias is not a list', async () => {
+  it('refuses when a null canonical key stops shadowing the legacy alias', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [{ name: 'custom-auth.json', type: 'codex' }] });
+    mocks.downloadText.mockResolvedValue(
+      JSON.stringify({
+        type: 'codex',
+        email: 'user@example.com',
+        excluded_models: null,
+        'excluded-models': ['gpt-4o'],
+      })
+    );
+    const hook = mountUseAuthFilesData();
+    const incoming = {
+      type: 'codex',
+      email: 'user@example.com',
+      access_token: 'next-access-token',
+      'excluded-models': ['gpt-4o'],
+    };
+
+    await expect(
+      hook.getCurrent().savePastedAuthJson('cpa', 'custom-auth.json', JSON.stringify(incoming))
+    ).rejects.toThrow('auth_files.paste_error_exclusions_locked:custom-auth.json');
+
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
+  it('refuses an overwrite that swaps a non-string exclusion element for its text', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [{ name: 'custom-auth.json', type: 'codex' }] });
+    mocks.downloadText.mockResolvedValue(
+      JSON.stringify({ type: 'codex', email: 'user@example.com', excluded_models: ['gpt-4o', 5] })
+    );
+    const hook = mountUseAuthFilesData();
+    const incoming = {
+      type: 'codex',
+      email: 'user@example.com',
+      access_token: 'next-access-token',
+      excluded_models: ['gpt-4o', '5'],
+    };
+
+    await expect(
+      hook.getCurrent().savePastedAuthJson('cpa', 'custom-auth.json', JSON.stringify(incoming))
+    ).rejects.toThrow('auth_files.paste_error_exclusions_locked:custom-auth.json');
+
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
+  it('refuses an overwrite whose stored exclusion list has a non-string element', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [{ name: 'custom-auth.json', type: 'codex' }] });
+    mocks.downloadText.mockResolvedValue(
+      JSON.stringify({ type: 'codex', email: 'user@example.com', excluded_models: [5] })
+    );
+    const hook = mountUseAuthFilesData();
+    const incoming = {
+      type: 'codex',
+      email: 'user@example.com',
+      access_token: 'next-access-token',
+      excluded_models: [],
+    };
+
+    await expect(
+      hook.getCurrent().savePastedAuthJson('cpa', 'custom-auth.json', JSON.stringify(incoming))
+    ).rejects.toThrow('auth_files.paste_error_exclusions_locked:custom-auth.json');
+
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
+  it('refuses an overwrite whose canonical exclusion key is not a list', async () => {
     mockAuthState.serverVersion = null;
     mocks.list.mockResolvedValue({ files: [{ name: 'custom-auth.json', type: 'codex' }] });
     mocks.downloadText.mockResolvedValue(
@@ -4325,7 +4409,7 @@ describe('useAuthFilesData raw credential import exclusions', () => {
       type: 'codex',
       email: 'user@example.com',
       access_token: 'next-access-token',
-      excludedModels: 'gpt-4o',
+      excluded_models: 'gpt-4o',
     };
 
     await expect(
@@ -4453,5 +4537,173 @@ describe('useAuthFilesData raw credential import exclusions', () => {
       'error'
     );
     hook.unmount();
+  });
+
+  it('refuses when the name is absent from the listing but exists on disk', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [] });
+    mocks.downloadText.mockResolvedValue(JSON.stringify(existingCredential));
+    const hook = mountUseAuthFilesData();
+    const incoming = { ...existingCredential, 'excluded-models': ['gpt-5'] };
+
+    await expect(
+      hook.getCurrent().savePastedAuthJson('cpa', 'custom-auth.json', JSON.stringify(incoming))
+    ).rejects.toThrow('auth_files.paste_error_exclusions_locked:custom-auth.json');
+
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
+  it('allows a new name only after the probe returns a definite 404', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [] });
+    mockMissingAuthFile();
+    const hook = mountUseAuthFilesData();
+    const incoming = {
+      type: 'codex',
+      email: 'new@example.com',
+      access_token: 'new-access-token',
+      'excluded-models': ['gpt-5'],
+    };
+
+    await act(async () => {
+      await hook.getCurrent().savePastedAuthJson('cpa', 'brand-new.json', JSON.stringify(incoming));
+    });
+
+    expect(mocks.downloadText).toHaveBeenCalledWith('brand-new.json');
+    expect(mocks.saveJsonObject).toHaveBeenCalledTimes(1);
+    hook.unmount();
+  });
+
+  it('fails closed when the probe of an unlisted name returns a server error', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [] });
+    mocks.downloadText.mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }));
+    const hook = mountUseAuthFilesData();
+
+    await expect(
+      hook
+        .getCurrent()
+        .savePastedAuthJson('cpa', 'brand-new.json', JSON.stringify(existingCredential))
+    ).rejects.toThrow('auth_files.paste_error_exclusions_locked:brand-new.json');
+
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
+  it('fails closed when the probe of an unlisted name fails without a status', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [] });
+    mocks.downloadText.mockRejectedValue(new Error('timeout'));
+    const hook = mountUseAuthFilesData();
+
+    await expect(
+      hook
+        .getCurrent()
+        .savePastedAuthJson('cpa', 'brand-new.json', JSON.stringify(existingCredential))
+    ).rejects.toThrow('auth_files.paste_error_exclusions_locked:brand-new.json');
+
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
+  it('aborts a paste when the connection switches while the guard is probing', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [] });
+    let rejectProbe: (error: unknown) => void = () => {};
+    mocks.downloadText.mockImplementation(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectProbe = reject;
+        })
+    );
+    const hook = mountUseAuthFilesData('connection-a');
+
+    let pastePromise: Promise<string[]> | null = null;
+    await act(async () => {
+      pastePromise = hook
+        .getCurrent()
+        .savePastedAuthJson('cpa', 'custom-auth.json', JSON.stringify(existingCredential));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // Flush the connection switch on its own so the guard resumes only afterwards.
+    act(() => {
+      hook.rerender('connection-b');
+    });
+
+    await act(async () => {
+      rejectProbe(Object.assign(new Error('Not Found'), { status: 404 }));
+      await pastePromise;
+    });
+
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
+  it('aborts an upload when the connection switches while the guard is probing', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [] });
+    let rejectProbe: (error: unknown) => void = () => {};
+    mocks.downloadText.mockImplementation(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectProbe = reject;
+        })
+    );
+    const hook = mountUseAuthFilesData('connection-a');
+    const file = new File([JSON.stringify(existingCredential)], 'fresh-auth.json', {
+      type: 'application/json',
+    });
+
+    let uploadPromise: Promise<void> | null = null;
+    await act(async () => {
+      uploadPromise = hook.getCurrent().handleFileChange({
+        target: { files: [file] as unknown as FileList, value: 'fresh-auth.json' },
+      } as unknown as Parameters<ReturnType<typeof useAuthFilesData>['handleFileChange']>[0]);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // Flush the connection switch on its own so the guard resumes only afterwards.
+    act(() => {
+      hook.rerender('connection-b');
+    });
+
+    await act(async () => {
+      rejectProbe(Object.assign(new Error('Not Found'), { status: 404 }));
+      await uploadPromise;
+    });
+
+    expect(mocks.uploadFiles).not.toHaveBeenCalled();
+    hook.unmount();
+  });
+
+  it('aborts a paste when the view unmounts while the guard is probing', async () => {
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [] });
+    let rejectProbe: (error: unknown) => void = () => {};
+    mocks.downloadText.mockImplementation(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectProbe = reject;
+        })
+    );
+    const hook = mountUseAuthFilesData('connection-a');
+
+    let pastePromise: Promise<string[]> | null = null;
+    await act(async () => {
+      pastePromise = hook
+        .getCurrent()
+        .savePastedAuthJson('cpa', 'custom-auth.json', JSON.stringify(existingCredential));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    hook.unmount();
+    await act(async () => {
+      rejectProbe(Object.assign(new Error('Not Found'), { status: 404 }));
+      await expect(pastePromise).resolves.toEqual([]);
+    });
+
+    expect(mocks.saveJsonObject).not.toHaveBeenCalled();
   });
 });

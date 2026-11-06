@@ -31,7 +31,7 @@ import {
   type AuthJsonFilePayload,
   type AuthJsonInputType,
 } from '@/features/authFiles/sessionAuthConverter';
-import { isRuntimeOnlyAuthFile, normalizeExcludedModels } from '@/features/authFiles/constants';
+import { isRuntimeOnlyAuthFile } from '@/features/authFiles/constants';
 import {
   getAuthFileNameFromSelectionKey,
   getAuthFilePatchTarget,
@@ -658,25 +658,27 @@ class CredentialExclusionLockedError extends Error {
 }
 
 // Raw JSON import can overwrite a credential without going through the configuration editor,
-// so the same exclusion comparison has to be reproduced here: missing and empty lists are equal,
-// and every alias of the field has to agree before the lists can be compared.
-const CREDENTIAL_EXCLUSION_FIELDS = [
-  'excluded_models',
-  'excluded-models',
-  'excludedModels',
-] as const;
+// so the effective exclusion list has to be resolved exactly like CPA does it.
+const CPA_EXCLUSION_KEYS = ['excluded_models', 'excluded-models'] as const;
+// `excludedModels` is not a CPA metadata key, but the web client can still patch or delete it.
+const CREDENTIAL_EXCLUSION_PATCH_FIELDS = [...CPA_EXCLUSION_KEYS, 'excludedModels'] as const;
 
-const readCredentialExclusionList = (record: Record<string, unknown>): string[] | null => {
-  const declared = CREDENTIAL_EXCLUSION_FIELDS.map((field) => record[field]).filter(
-    (value) => value !== undefined && value !== null
+// CPA reads `excluded_models` first and only falls back to the legacy `excluded-models` alias when
+// the canonical key is absent, so a present-but-empty canonical key really means "no exclusions".
+const readCpaExclusionList = (record: Record<string, unknown>): string[] | null => {
+  for (const key of CPA_EXCLUSION_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+    const value = record[key];
+    if (value === undefined || value === null) continue;
+    // CPA only understands a list of model names; anything else cannot be compared safely.
+    if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) return null;
+  }
+  const effectiveKey = CPA_EXCLUSION_KEYS.find((key) =>
+    Object.prototype.hasOwnProperty.call(record, key)
   );
-  if (declared.length === 0) return [];
-  // A scalar cannot describe an exclusion list, and aliases that disagree make the stored
-  // value ambiguous, so neither can be proven unchanged.
-  if (declared.some((value) => !Array.isArray(value))) return null;
-  const lists = declared.map((value) => normalizeExcludedModels(value).sort().join('\u0000'));
-  if (new Set(lists).size > 1) return null;
-  return normalizeExcludedModels(declared[0]).sort();
+  const effective = effectiveKey ? record[effectiveKey] : null;
+  if (!Array.isArray(effective)) return [];
+  return effective.filter((entry): entry is string => typeof entry === 'string').sort();
 };
 
 const buildCredentialIdentityTuple = (record: Record<string, unknown>) => {
@@ -707,7 +709,7 @@ const buildCredentialExclusionSignature = (value: unknown): string | null => {
     for (const record of value) {
       if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
       const fields = record as Record<string, unknown>;
-      const exclusions = readCredentialExclusionList(fields);
+      const exclusions = readCpaExclusionList(fields);
       if (exclusions === null) return null;
       entries.push(`${buildCredentialIdentityTuple(fields)}=${exclusions.join('\u0000')}`);
     }
@@ -716,12 +718,32 @@ const buildCredentialExclusionSignature = (value: unknown): string | null => {
   // A single credential compares only its exclusion list: renaming or re-identifying it does
   // not move any exclusion to another account.
   if (!value || typeof value !== 'object') return null;
-  const exclusions = readCredentialExclusionList(value as Record<string, unknown>);
+  const exclusions = readCpaExclusionList(value as Record<string, unknown>);
   return exclusions === null ? null : `object:${exclusions.join('\u0000')}`;
 };
 
 const isWritableAuthFileName = (fileName: string) =>
   fileName.length > 0 && !/[\\/]/.test(fileName) && !fileName.startsWith('.');
+
+const readApiErrorStatus = (error: unknown): number | undefined => {
+  if (error === null || typeof error !== 'object' || !('status' in error)) return undefined;
+  const status = error.status;
+  return typeof status === 'number' ? status : undefined;
+};
+
+const probeStoredAuthFile = async (
+  fileName: string,
+  scope: Parameters<typeof authFilesApi.downloadText>[1]
+): Promise<{ kind: 'found'; text: string } | { kind: 'missing' } | { kind: 'failed' }> => {
+  try {
+    const text = scope
+      ? await authFilesApi.downloadText(fileName, scope)
+      : await authFilesApi.downloadText(fileName);
+    return { kind: 'found', text };
+  } catch (err: unknown) {
+    return readApiErrorStatus(err) === 404 ? { kind: 'missing' } : { kind: 'failed' };
+  }
+};
 
 const collectExistingAuthFileNames = async (
   files: AuthFileItem[],
@@ -1115,26 +1137,26 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
           continue;
         }
 
-        // Only a successful listing proves the target is new; without it the write could
-        // overwrite an existing credential whose exclusions we cannot read.
         const listedAsExisting =
           existingFileNames === null ? null : existingFileNames.has(normalizedName);
-        if (listedAsExisting === false) continue;
-
         const downloadName = existingFileNames?.get(normalizedName) ?? fileName;
-        let currentText: string;
-        try {
-          currentText = requestScope
-            ? await authFilesApi.downloadText(downloadName, requestScope)
-            : await authFilesApi.downloadText(downloadName);
-        } catch {
+
+        // The listing only reports the manager cache while the download reads the file on disk,
+        // so an unlisted name still has to be probed; only a definite 404 proves it is free.
+        const probe = await probeStoredAuthFile(downloadName, requestScope);
+        if (probe.kind === 'missing') {
+          if (listedAsExisting === false) continue;
+          changedFileNames.push(fileName);
+          continue;
+        }
+        if (probe.kind === 'failed') {
           changedFileNames.push(fileName);
           continue;
         }
 
         let currentValue: unknown;
         try {
-          currentValue = JSON.parse(currentText) as unknown;
+          currentValue = JSON.parse(probe.text) as unknown;
         } catch {
           changedFileNames.push(fileName);
           continue;
@@ -1212,6 +1234,8 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
             }))
           )
         );
+        // The guard awaits list()/downloadText(), so a connection switch must abort before writing.
+        if (!isCurrentOperation()) return;
         const result =
           prepared.files.length > 0
             ? requestScope
@@ -1307,6 +1331,8 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
           }
           throw guardError;
         }
+        // The guard awaits list()/downloadText(), so a connection switch must abort before writing.
+        if (!isCurrentOperation()) return [];
         if (payloads.length === 1) {
           try {
             if (requestScope) {
@@ -1970,7 +1996,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       // Same lock as the raw JSON import: an unrecognized version cannot merge exclusions.
       if (
         getAccountModelExclusionPriority(serverVersion) === 'unknown' &&
-        CREDENTIAL_EXCLUSION_FIELDS.some((field) => field in fields)
+        CREDENTIAL_EXCLUSION_PATCH_FIELDS.some((field) => field in fields)
       ) {
         showNotification(t('auth_files.patch_error_exclusions_locked'), 'error');
         return null;
