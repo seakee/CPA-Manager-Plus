@@ -50,9 +50,9 @@ export function ModelPricesPage() {
   const managementKey = useAuthStore((state) => state.managementKey);
   const featureAvailability = usePanelFeatureAvailability();
   const {
-    loading,
     modelPrices,
     modelPricesLoaded,
+    modelPricesLoading,
     modelPricesScopeKey,
     setModelPrices,
     syncModelPrices,
@@ -67,6 +67,9 @@ export function ModelPricesPage() {
   const [filter, setFilter] = useState<ModelPriceFilter>(() => initialUiState.current.filter);
   const [syncing, setSyncing] = useState(false);
   const syncTokenRef = useRef(0);
+  // Bumped whenever the price scope changes: a price action that was started for
+  // the previous connection must not touch this page's draft/candidates/notices.
+  const pageActionTokenRef = useRef(0);
   const [syncResult, setSyncResult] = useState<ModelPriceSyncResponse | null>(null);
   const [selectedCandidates, setSelectedCandidates] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState<PriceDraft>(() => createEmptyPriceDraft());
@@ -157,6 +160,7 @@ export function ModelPricesPage() {
   // an in-flight sync of the previous connection must not report into this one.
   useEffect(() => {
     syncTokenRef.current += 1;
+    pageActionTokenRef.current += 1;
     setSyncing(false);
     setDraft(createEmptyPriceDraft());
     setManualEditorOpen(false);
@@ -204,7 +208,9 @@ export function ModelPricesPage() {
   };
 
   const handleConfirmCandidate = async (model: string, candidate: ModelPriceSyncCandidate) => {
+    const actionToken = pageActionTokenRef.current;
     await setModelPrices(applyCandidatePrice(modelPrices, model, candidate));
+    if (pageActionTokenRef.current !== actionToken) return;
     setSyncResult((previous) =>
       previous
         ? {
@@ -224,12 +230,14 @@ export function ModelPricesPage() {
       showNotification(t('usage_stats.model_price_model_required'), 'warning');
       return;
     }
+    const actionToken = pageActionTokenRef.current;
     await setModelPrices({
       ...modelPrices,
       [model]: {
         ...price,
       },
     });
+    if (pageActionTokenRef.current !== actionToken) return;
     setDraft(createEmptyPriceDraft());
     setManualEditorOpen(false);
     showNotification(t('usage_stats.model_price_saved'), 'success');
@@ -238,7 +246,9 @@ export function ModelPricesPage() {
   const handleDelete = async (model: string) => {
     const next = { ...modelPrices };
     delete next[model];
+    const actionToken = pageActionTokenRef.current;
     await setModelPrices(next);
+    if (pageActionTokenRef.current !== actionToken) return;
     if (draft.model === model) {
       setDraft(createEmptyPriceDraft());
       setManualEditorOpen(false);
@@ -424,10 +434,8 @@ export function ModelPricesPage() {
           </div>
         ) : null}
 
-        {!modelPricesLoaded && !usageSummaryLoaded ? (
-          loading || usageSummaryLoading ? (
-            <div className={styles.emptyState}>{t('common.loading')}</div>
-          ) : null
+        {!modelPricesLoaded && !usageSummaryLoaded && (modelPricesLoading || usageSummaryLoading) ? (
+          <div className={styles.emptyState}>{t('common.loading')}</div>
         ) : visibleRows.length === 0 ? (
           <div className={styles.emptyState}>{t('model_prices.empty')}</div>
         ) : (

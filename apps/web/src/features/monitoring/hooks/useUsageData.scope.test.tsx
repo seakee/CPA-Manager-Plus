@@ -358,32 +358,136 @@ describe('useUsageData model price scope', () => {
     expect(latest.modelPrices).toEqual({});
   });
 
-  it('never publishes a stale scope save into the current scope', async () => {
-    mocks.getModelPrices.mockResolvedValue({ prices: { 'b-model': price(2) } });
+  it('ignores a stale scope save without disturbing the current scope', async () => {
+    mocks.getModelPrices.mockResolvedValueOnce({ prices: { 'a-model': price(1) } });
     await mount();
     await act(async () => {
       await Promise.resolve();
     });
-
     const staleSetter = latest.setModelPrices;
+
+    // Switch to B while B's price read is still in flight.
+    const bRead = deferred<{ prices: Record<string, ModelPrice> }>();
+    mocks.getModelPrices.mockReturnValueOnce(bRead.promise);
     mocks.auth = { apiBase: 'https://gateway-b.test', managementKey: 'key-b' };
     mocks.availability = availabilityFor('http://manager-b.local');
     await rerender();
+
+    const apiSavesBefore = mocks.saveModelPrices.mock.calls.length;
+    await act(async () => {
+      await staleSetter({ 'stale-model': price(9) });
+    });
+    // The previous connection's captured setter must not write anything, nor
+    // invalidate the read that is in flight for the current connection.
+    expect(mocks.saveModelPrices.mock.calls.length).toBe(apiSavesBefore);
+
+    await act(async () => {
+      bRead.resolve({ prices: { 'b-model': price(2) } });
+      await Promise.resolve();
+    });
+    expect(latest.modelPrices).toEqual({ 'b-model': price(2) });
+  });
+
+  it('ignores a stale scope sync without disturbing the current scope', async () => {
+    mocks.getModelPrices.mockResolvedValueOnce({ prices: { 'a-model': price(1) } });
+    await mount();
     await act(async () => {
       await Promise.resolve();
     });
-    const save = deferred<{ prices: Record<string, ModelPrice> }>();
-    mocks.saveModelPrices.mockReturnValueOnce(save.promise);
+    const staleSync = latest.syncModelPrices;
 
-    let pending!: Promise<void>;
-    act(() => {
-      pending = staleSetter({ 'a-model': price(9) });
-    });
+    const bRead = deferred<{ prices: Record<string, ModelPrice> }>();
+    mocks.getModelPrices.mockReturnValueOnce(bRead.promise);
+    mocks.auth = { apiBase: 'https://gateway-b.test', managementKey: 'key-b' };
+    mocks.availability = availabilityFor('http://manager-b.local');
+    await rerender();
+
+    const syncCallsBefore = mocks.syncModelPrices.mock.calls.length;
+    let result: ModelPriceSyncResponse | null = null;
     await act(async () => {
-      save.resolve({ prices: { 'a-model': price(9) } });
-      await pending;
+      result = await staleSync(['a-model']);
     });
+    expect(result).toBeNull();
+    expect(mocks.syncModelPrices.mock.calls.length).toBe(syncCallsBefore);
 
+    await act(async () => {
+      bRead.resolve({ prices: { 'b-model': price(2) } });
+      await Promise.resolve();
+    });
+    expect(latest.modelPrices).toEqual({ 'b-model': price(2) });
+  });
+
+  it('reports the price read in flight for the current scope only', async () => {
+    const readA = deferred<{ prices: Record<string, ModelPrice> }>();
+    mocks.getModelPrices.mockReturnValueOnce(readA.promise);
+    await mount();
+    expect(latest.modelPricesLoading).toBe(true);
+
+    const readB = deferred<{ prices: Record<string, ModelPrice> }>();
+    mocks.getModelPrices.mockReturnValueOnce(readB.promise);
+    mocks.auth = { apiBase: 'https://gateway-b.test', managementKey: 'key-b' };
+    mocks.availability = availabilityFor('http://manager-b.local');
+    await rerender();
+    expect(latest.modelPricesLoading).toBe(true);
+
+    await act(async () => {
+      readA.resolve({ prices: { 'a-model': price(1) } });
+      await Promise.resolve();
+    });
+    // The stale read must not clear the current scope's loading state.
+    expect(latest.modelPricesLoading).toBe(true);
+
+    await act(async () => {
+      readB.resolve({ prices: {} });
+      await Promise.resolve();
+    });
+    expect(latest.modelPricesLoading).toBe(false);
+  });
+
+  it('clears modelPricesLoading when a save supersedes an in-flight read', async () => {
+    const read = deferred<{ prices: Record<string, ModelPrice> }>();
+    mocks.getModelPrices.mockReturnValueOnce(read.promise);
+    await mount();
+    expect(latest.modelPricesLoading).toBe(true);
+
+    mocks.saveModelPrices.mockRejectedValueOnce(new Error('save offline'));
+    await act(async () => {
+      await latest.setModelPrices({ 'saved-model': price(4) });
+    });
+    expect(latest.modelPricesLoading).toBe(false);
+
+    await act(async () => {
+      read.reject(new Error('read offline'));
+      await Promise.resolve();
+    });
+    expect(latest.modelPricesLoading).toBe(false);
+  });
+
+  it('ignores a stale scope reloadModelPrices without sticking modelPricesLoading or dropping the current read', async () => {
+    mocks.getModelPrices.mockResolvedValueOnce({ prices: { 'a-model': price(1) } });
+    await mount();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const staleReload = latest.reloadModelPrices;
+
+    const bRead = deferred<{ prices: Record<string, ModelPrice> }>();
+    mocks.getModelPrices.mockReturnValueOnce(bRead.promise);
+    mocks.auth = { apiBase: 'https://gateway-b.test', managementKey: 'key-b' };
+    mocks.availability = availabilityFor('http://manager-b.local');
+    await rerender();
+
+    const readsBefore = mocks.getModelPrices.mock.calls.length;
+    await act(async () => {
+      await staleReload();
+    });
+    expect(mocks.getModelPrices.mock.calls.length).toBe(readsBefore);
+
+    await act(async () => {
+      bRead.resolve({ prices: { 'b-model': price(2) } });
+      await Promise.resolve();
+    });
+    expect(latest.modelPricesLoading).toBe(false);
     expect(latest.modelPrices).toEqual({ 'b-model': price(2) });
   });
 });

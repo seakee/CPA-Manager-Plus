@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
     usage: {
       loading: false,
       modelPricesLoaded: true,
+      modelPricesLoading: false,
       modelPricesScopeKey: 'scope-a',
     },
   };
@@ -64,6 +65,7 @@ vi.mock('@/features/monitoring/hooks/useUsageData', () => ({
     loading: mocks.usage.loading,
     modelPrices: mocks.prices,
     modelPricesLoaded: mocks.usage.modelPricesLoaded,
+    modelPricesLoading: mocks.usage.modelPricesLoading,
     modelPricesScopeKey: mocks.usage.modelPricesScopeKey,
     reloadModelPrices: vi.fn(),
     setModelPrices: mocks.save,
@@ -142,7 +144,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.prices = { 'tiered-model': tieredPrice() };
   mocks.availability = { modelPricesAvailable: false };
-  mocks.usage = { loading: false, modelPricesLoaded: true, modelPricesScopeKey: 'scope-a' };
+  mocks.usage = {
+    loading: false,
+    modelPricesLoaded: true,
+    modelPricesLoading: false,
+    modelPricesScopeKey: 'scope-a',
+  };
   mocks.usageSummary.mockResolvedValue({ summary: {} });
 });
 afterEach(async () => {
@@ -268,18 +275,47 @@ describe('ModelPricesPage snapshot gating', () => {
 
   it('shows the first-load state only while no price snapshot exists', async () => {
     mocks.prices = {};
-    mocks.usage = { loading: true, modelPricesLoaded: false, modelPricesScopeKey: 'scope-a' };
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: false,
+      modelPricesLoading: true,
+      modelPricesScopeKey: 'scope-a',
+    };
     await act(async () => {
       renderer = create(<ModelPricesPage />);
     });
     expect(pageText()).toContain('common.loading');
 
-    mocks.usage = { loading: false, modelPricesLoaded: true, modelPricesScopeKey: 'scope-a' };
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: true,
+      modelPricesLoading: false,
+      modelPricesScopeKey: 'scope-a',
+    };
     await act(async () => {
       renderer.update(<ModelPricesPage />);
     });
     expect(pageText()).toContain('model_prices.empty');
     expect(pageText()).not.toContain('common.loading');
+  });
+
+  it('never renders a blank page when both first requests settle without a snapshot', async () => {
+    mocks.prices = {};
+    mocks.usageSummary.mockRejectedValue(new Error('summary offline'));
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: false,
+      modelPricesLoading: false,
+      modelPricesScopeKey: 'scope-a',
+    };
+    await act(async () => {
+      renderer = create(<ModelPricesPage />);
+      await Promise.resolve();
+    });
+
+    expect(pageText()).not.toBe('null');
+    expect(pageText()).not.toContain('common.loading');
+    expect(pageText()).toContain('model_prices.empty');
   });
 
   it('keeps the known empty state while the usage summary is still loading', async () => {
@@ -326,7 +362,12 @@ describe('ModelPricesPage snapshot gating', () => {
         .some((input) => input.props.label === 'usage_stats.model_name');
     expect(hasEditor()).toBe(true);
 
-    mocks.usage = { loading: false, modelPricesLoaded: true, modelPricesScopeKey: 'scope-b' };
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: true,
+      modelPricesLoading: false,
+      modelPricesScopeKey: 'scope-b',
+    };
     mocks.prices = {};
     await act(async () => {
       renderer.update(<ModelPricesPage />);
@@ -385,7 +426,12 @@ describe('ModelPricesPage sync scope isolation', () => {
     expect(mocks.sync).toHaveBeenCalledTimes(1);
 
     // The manager connection changed while the sync was still running.
-    mocks.usage = { loading: false, modelPricesLoaded: true, modelPricesScopeKey: 'scope-b' };
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: true,
+      modelPricesLoading: false,
+      modelPricesScopeKey: 'scope-b',
+    };
     await act(async () => {
       renderer.update(<ModelPricesPage />);
     });
@@ -421,5 +467,159 @@ describe('ModelPricesPage sync scope isolation', () => {
         (call) => typeof call[0] === 'string' && call[0].startsWith('model_prices.sync_success')
       )
     ).toBe(false);
+  });
+});
+
+describe('ModelPricesPage price action scope isolation', () => {
+  const candidateResponse = {
+    prices: {},
+    imported: 0,
+    skipped: 0,
+    candidates: [
+      {
+        model: 'tiered-model',
+        candidates: [
+          {
+            sourceModelId: 'gateway-a-model',
+            score: 0.9,
+            reason: 'similar-name',
+            price: { prompt: 5, completion: 6, cache: 0 },
+          },
+        ],
+      },
+    ],
+    unmatched: [],
+    preserved: [],
+  };
+
+  const mountAndSettle = async () => {
+    await act(async () => {
+      renderer = create(<ModelPricesPage />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+
+  const clickBySpanLabel = async (label: string) => {
+    const target = renderer.root
+      .findAllByType('button')
+      .find((button) => button.findAllByType('span').some((span) => span.children.includes(label)));
+    expect(target).toBeTruthy();
+    await act(async () => {
+      target!.props.onClick();
+    });
+  };
+
+  const candidateSelects = () =>
+    renderer.root.findAllByProps({ 'aria-label': 'model_prices.candidate_select' });
+  const hasDraftEditor = () =>
+    renderer.root
+      .findAllByType(Input)
+      .some((input) => input.props.label === 'usage_stats.model_name');
+  const notifiedWith = (key: string) => mocks.notify.mock.calls.some((call) => call[0] === key);
+  const switchToScopeB = async () => {
+    mocks.usage = {
+      loading: false,
+      modelPricesLoaded: true,
+      modelPricesLoading: false,
+      modelPricesScopeKey: 'scope-b',
+    };
+    await act(async () => {
+      renderer.update(<ModelPricesPage />);
+    });
+  };
+
+  it('does not apply a candidate confirm that finishes after the connection changed', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = {};
+    mocks.usageSummary.mockResolvedValue({
+      sampled_events: 1,
+      total_events: 1,
+      truncated: false,
+      models: [{ model: 'tiered-model', calls: 1, requested_calls: 1, resolved_calls: 1 }],
+    });
+    mocks.sync.mockResolvedValue(candidateResponse);
+    await mountAndSettle();
+    await clickBySpanLabel('usage_stats.model_price_sync');
+    expect(candidateSelects()).toHaveLength(1);
+
+    const pendingSave = deferred<undefined>();
+    mocks.save.mockReturnValueOnce(pendingSave.promise);
+    await clickBySpanLabel('model_prices.confirm_candidate');
+
+    // The connection changes while the confirm is still saving, and the new
+    // connection builds its own candidate set for the same model.
+    await switchToScopeB();
+    await clickBySpanLabel('usage_stats.model_price_sync');
+    expect(candidateSelects()).toHaveLength(1);
+    mocks.notify.mockClear();
+
+    await act(async () => {
+      pendingSave.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(candidateSelects()).toHaveLength(1);
+    expect(notifiedWith('model_prices.candidate_confirmed')).toBe(false);
+  });
+
+  it('does not close the current draft when a save finishes after the connection changed', async () => {
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    await mountAndSettle();
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0].props.onClick();
+    });
+    const pendingSave = deferred<undefined>();
+    mocks.save.mockReturnValueOnce(pendingSave.promise);
+    await clickBySpanLabel('common.save');
+
+    await switchToScopeB();
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0].props.onClick();
+    });
+    expect(hasDraftEditor()).toBe(true);
+    mocks.notify.mockClear();
+
+    await act(async () => {
+      pendingSave.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(hasDraftEditor()).toBe(true);
+    expect(notifiedWith('usage_stats.model_price_saved')).toBe(false);
+  });
+
+  it('does not clear the current draft when a delete finishes after the connection changed', async () => {
+    mocks.prices = { 'tiered-model': tieredPrice() };
+    await mountAndSettle();
+    // The delete handler only clears a draft of the same model, so both
+    // connections must have that model's editor open.
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0].props.onClick();
+    });
+    expect(hasDraftEditor()).toBe(true);
+    const pendingSave = deferred<undefined>();
+    mocks.save.mockReturnValueOnce(pendingSave.promise);
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.delete' })[0].props.onClick();
+    });
+
+    await switchToScopeB();
+    await act(async () => {
+      renderer.root.findAllByProps({ 'aria-label': 'common.edit' })[0].props.onClick();
+    });
+    expect(hasDraftEditor()).toBe(true);
+
+    await act(async () => {
+      pendingSave.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(hasDraftEditor()).toBe(true);
   });
 });
