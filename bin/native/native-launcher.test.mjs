@@ -596,6 +596,60 @@ const LICENSE_COLLECTOR_STUB = [
  * intercepts only that collector entry point, plus a go recorder and a real
  * Full Web dist. Everything else (evidence generator, ledger copy) stays real.
  */
+const FULLWEB_STAGING_VERIFIER = [
+  "const fs = require('node:fs');",
+  "const path = require('node:path');",
+  "const crypto = require('node:crypto');",
+  '',
+  'const moduleDir = process.argv[2];',
+  "const embedDir = path.join(moduleDir, 'internal/httpapi/web/fullweb');",
+  "const manifestPath = path.join(moduleDir, 'internal/httpapi/release-fullweb-manifest.json');",
+  "const mutation = process.env.CPAMP_TEST_FULLWEB_MUTATION || '';",
+  '',
+  'const listFiles = (directory, prefix = \'\') => {',
+  '  const files = [];',
+  '  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {',
+  "    const relative = prefix ? prefix + '/' + entry.name : entry.name;",
+  '    const absolute = path.join(directory, entry.name);',
+  '    if (entry.isDirectory()) files.push(...listFiles(absolute, relative));',
+  '    else files.push(relative);',
+  '  }',
+  '  return files.sort();',
+  '};',
+  '',
+  "const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));",
+  'const expected = new Map(manifest.files.map((item) => [item.path, item.sha256]));',
+  '',
+  '// Test-only staging corruption: proves this verifier rejects exactly the',
+  '// conditions the real Go embed test rejects.',
+  "if (mutation === 'add-gitkeep') fs.writeFileSync(path.join(embedDir, '.gitkeep'), '');",
+  "if (mutation === 'delete-asset') fs.rmSync(path.join(embedDir, [...expected.keys()].find((name) => name !== 'index.html')));",
+  "if (mutation === 'modify-asset') fs.appendFileSync(path.join(embedDir, [...expected.keys()].find((name) => name !== 'index.html')), 'corrupted');",
+  '',
+  'const actual = listFiles(embedDir);',
+  'let failed = false;',
+  'for (const file of actual) {',
+  '  if (!expected.has(file)) {',
+  "    console.error('staged Full Web contains unexpected file: ' + file);",
+  '    failed = true;',
+  '  }',
+  '}',
+  'for (const [file, sha] of expected) {',
+  '  if (!actual.includes(file)) {',
+  "    console.error('staged Full Web is missing manifest entry: ' + file);",
+  '    failed = true;',
+  '    continue;',
+  '  }',
+  "  const digest = 'sha256:' + crypto.createHash('sha256').update(fs.readFileSync(path.join(embedDir, file))).digest('hex');",
+  '  if (digest !== sha) {',
+  "    console.error('staged Full Web digest mismatch: ' + file);",
+  '    failed = true;',
+  '  }',
+  '}',
+  'if (failed) process.exit(1);',
+  '',
+].join('\n');
+
 const createLicenseTestHarness = (baseDir) => {
   const root = path.join(baseDir, 'license-harness');
   const binDir = path.join(root, 'bin');
@@ -603,9 +657,11 @@ const createLicenseTestHarness = (baseDir) => {
   const webHtml = path.join(root, 'panel/management.html');
   const goroot = path.join(root, 'goroot');
   const goroot124 = path.join(root, 'goroot-1.24');
+  const gorootB = path.join(root, 'goroot-b');
   const staleGoroot = path.join(root, 'stale-goroot');
   const orderLog = path.join(root, 'order.log');
   const collectorStub = path.join(root, 'collector-stub.cjs');
+  const fullWebVerifier = path.join(root, 'fullweb-verifier.cjs');
   mkdirSync(binDir, { recursive: true });
   writeFixtureFile(fullWebDist, 'index.html', '<!doctype html><title>fixture</title>\n');
   writeFixtureFile(fullWebDist, 'assets/app.js', 'console.log("fixture");\n');
@@ -613,10 +669,12 @@ const createLicenseTestHarness = (baseDir) => {
   writeFixtureFile(webHtml, '', '<!doctype html><title>panel</title>\n');
   writeFixtureFile(goroot, 'VERSION', 'go1.26.1\n');
   writeFixtureFile(goroot124, 'VERSION', 'go1.24.13\n');
+  writeFixtureFile(gorootB, 'VERSION', 'go1.26.1\n');
   // A root whose VERSION disagrees with the running tool: the collector must
   // never label notices with a version the root does not contain.
   writeFixtureFile(staleGoroot, 'VERSION', 'go1.20.14\n');
   writeFileSync(collectorStub, LICENSE_COLLECTOR_STUB);
+  writeFileSync(fullWebVerifier, FULLWEB_STAGING_VERIFIER);
   writeFileSync(orderLog, '');
 
   const realPython = execFileSync('bash', ['-c', 'command -v python3'], {
@@ -654,9 +712,19 @@ const createLicenseTestHarness = (baseDir) => {
       'binary_version="${CPAMP_TEST_GOVERSION:-go1.26.1}"',
       'case "${1:-}" in',
       '  env)',
-      '    if [ "${2:-}" = "GOVERSION" ]; then printf \'%s\\n\' "${collector_version}"; fi',
-      '    if [ "${2:-}" = "GOROOT" ]; then printf \'%s\\n\' "${CPAMP_TEST_GOROOT}"; fi',
+      '    module_root="${CPAMP_TEST_GOROOT}"',
+      '    module_version="${collector_version}"',
+      '    case "$PWD" in',
+      '      */apps/manager-server) module_root="${CPAMP_TEST_GOROOT_MANAGER:-${module_root}}"; module_version="${CPAMP_TEST_GOVERSION_MANAGER:-${module_version}}" ;;',
+      '      */apps/ingress) module_root="${CPAMP_TEST_GOROOT_INGRESS:-${module_root}}"; module_version="${CPAMP_TEST_GOVERSION_INGRESS:-${module_version}}" ;;',
+      '      */apps/runtime-supervisor) module_root="${CPAMP_TEST_GOROOT_SUPERVISOR:-${module_root}}"; module_version="${CPAMP_TEST_GOVERSION_SUPERVISOR:-${module_version}}" ;;',
+      '    esac',
+      '    if [ "${2:-}" = "GOVERSION" ]; then printf \'%s\\n\' "${module_version}"; fi',
+      '    if [ "${2:-}" = "GOROOT" ]; then printf \'%s\\n\' "${module_root}"; fi',
       '    exit 0',
+      '    ;;',
+      '  test)',
+      '    exec "${CPAMP_TEST_NODE}" "${CPAMP_TEST_FULLWEB_VERIFIER}" "$PWD"',
       '    ;;',
       '  version)',
       '    if [ "${2:-}" = "-m" ]; then',
@@ -704,6 +772,7 @@ const createLicenseTestHarness = (baseDir) => {
     webHtml,
     goroot,
     goroot124,
+    gorootB,
     staleGoroot,
     orderLog,
     // Harness-only variables consumed by the stubs above; package-native.sh
@@ -714,6 +783,7 @@ const createLicenseTestHarness = (baseDir) => {
       CPAMP_TEST_REAL_PYTHON: realPython,
       CPAMP_TEST_NODE: process.execPath,
       CPAMP_TEST_COLLECTOR_STUB: collectorStub,
+      CPAMP_TEST_FULLWEB_VERIFIER: fullWebVerifier,
       CPAMP_TEST_GOROOT: goroot,
     },
   };
@@ -2040,6 +2110,108 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       /v2 Native packaging builds Manager, Ingress and Runtime Supervisor from source/
     );
 
+    // 2i. A custom CPA archive SHA with the opt-in builds a local package that
+    // must never claim the official release or VERIFIED status.
+    const cpaArchiveDir = path.join(baseDir, 'cpa-archive');
+    mkdirSync(cpaArchiveDir, { recursive: true });
+    writeFileSync(path.join(cpaArchiveDir, 'cli-proxy-api'), 'fake cpa archive binary\n');
+    writeFileSync(path.join(cpaArchiveDir, 'LICENSE'), 'CLIProxyAPI archive license\n');
+    const cpaArchivePath = path.join(baseDir, 'CLIProxyAPI_8.0.55_linux_amd64.tar.gz');
+    execFileSync('tar', ['-czf', cpaArchivePath, '-C', cpaArchiveDir, 'cli-proxy-api', 'LICENSE']);
+    const archiveOut = path.join(baseDir, 'dist-custom-archive');
+    const archiveResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: archiveOut,
+        CPA_BINARY_PATH: '',
+        CPA_ARCHIVE_PATH: cpaArchivePath,
+        CPAMP_CPA_ARCHIVE_SHA256: fixtureFileDigest(cpaArchivePath).slice('sha256:'.length),
+        CPAMP_CPA_EXECUTABLE_SHA256: fixtureFileDigest(
+          path.join(cpaArchiveDir, 'cli-proxy-api')
+        ).slice('sha256:'.length),
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(archiveResult.status, 0, archiveResult.stderr);
+    assert.match(archiveResult.stderr, /provenance will be labelled UNPINNED_LOCAL_CPA/);
+    const archiveExtract = path.join(baseDir, 'extracted-archive');
+    mkdirSync(archiveExtract, { recursive: true });
+    execFileSync('tar', [
+      '--no-same-owner',
+      '-xzf',
+      path.join(archiveOut, 'cpa-manager-plus-native-v2_v2.0.0-beta.1_linux_amd64.tar.gz'),
+      '-C',
+      archiveExtract,
+    ]);
+    const archivePkgRoot = path.join(
+      archiveExtract,
+      'cpa-manager-plus-native-v2_v2.0.0-beta.1_linux_amd64'
+    );
+    const archiveProvenance = JSON.parse(
+      readFileSync(path.join(archivePkgRoot, 'share/cpamp/provenance.json'), 'utf8')
+    );
+    assert.equal(archiveProvenance.status, 'UNPINNED_LOCAL_CPA');
+    const archiveCpa = archiveProvenance.components.find((item) => item.name === 'cpa');
+    assert.equal(archiveCpa.source, 'local-unpinned-cpa');
+    assert.equal(archiveCpa.release, undefined);
+    assert.equal(
+      JSON.parse(
+        readFileSync(path.join(archivePkgRoot, 'share/cpamp/release/third-party-inventory.txt'))
+      ).status,
+      'UNPINNED_LOCAL_CPA'
+    );
+
+    // 2j-2l. The staged embed tree is verified exactly like the Go test would:
+    // an extra placeholder, a deleted asset or a modified asset must fail
+    // before the first go build.
+    for (const [mutation, pattern] of [
+      ['add-gitkeep', /unexpected file: \.gitkeep/],
+      ['delete-asset', /missing manifest entry/],
+      ['modify-asset', /digest mismatch/],
+    ]) {
+      writeFileSync(harness.orderLog, '');
+      const stagingResult = spawnSync('bash', [packageNativeScript], {
+        env: {
+          ...pkgEnv,
+          OUT_DIR: path.join(baseDir, `dist-staging-${mutation}`),
+          CPAMP_TEST_FULLWEB_MUTATION: mutation,
+        },
+        encoding: 'utf8',
+      });
+      assert.notEqual(stagingResult.status, 0, `staging mutation ${mutation} must fail`);
+      assert.match(stagingResult.stderr, pattern);
+      assert.ok(
+        !readFileSync(harness.orderLog, 'utf8').includes('go build '),
+        `staging mutation ${mutation} must fail before go build`
+      );
+    }
+
+    // 2m. Different roots with the same toolchain are still a mismatch.
+    const differentRootResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-different-root'),
+        CPAMP_TEST_GOROOT_INGRESS: harness.gorootB,
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(differentRootResult.status, 0);
+    assert.match(differentRootResult.stderr, /Go toolchains differ across module directories/);
+
+    // 2n. A per-module GOVERSION difference is rejected even when each root is
+    // self-consistent.
+    const differentVersionResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-different-version'),
+        CPAMP_TEST_GOROOT_INGRESS: harness.goroot124,
+        CPAMP_TEST_GOVERSION_INGRESS: 'go1.24.13',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(differentVersionResult.status, 0);
+    assert.match(differentVersionResult.stderr, /Go toolchains differ across module directories/);
+
     // 3. Builds valid v2 linux/amd64 archive. Reset the recorder so the
     // ordering assertion below only sees this successful run.
     writeFileSync(harness.orderLog, '');
@@ -2191,13 +2363,14 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
         `provenance must bind ${item.path}`
       );
     }
+    // The fixture CPA is not the pinned official artifact, so the package is
+    // local evidence: it must never claim the official release or VERIFIED.
+    assert.equal(provenance.status, 'UNPINNED_LOCAL_CPA');
     const cpaProvenance = provenance.components.find((item) => item.name === 'cpa');
     assert.equal(cpaProvenance.version, '8.0.55');
     assert.equal(cpaProvenance.sha256, `sha256:${cpaSha}`);
-    assert.equal(
-      cpaProvenance.release,
-      'https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.55'
-    );
+    assert.equal(cpaProvenance.source, 'local-unpinned-cpa');
+    assert.equal(cpaProvenance.release, undefined);
     assert.equal(
       provenance.components.find((item) => item.name === 'manager').module,
       'github.com/seakee/cpa-manager-plus/apps/manager-server'
@@ -2208,7 +2381,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.equal(provenance.licenseInventorySHA256, fixtureDigest(aggregateBytes));
     const aggregate = JSON.parse(aggregateBytes);
     assert.equal(aggregate.schemaVersion, 1);
-    assert.equal(aggregate.status, 'VERIFIED_LICENSE_COLLECTION');
+    assert.equal(aggregate.status, 'UNPINNED_LOCAL_CPA');
     assert.equal(aggregate.role, 'native');
     assert.deepEqual(Object.keys(aggregate.components).sort(), [
       'ingress',

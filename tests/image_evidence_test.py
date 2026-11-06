@@ -673,6 +673,36 @@ class ImageEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "CPA provenance differs"):
             evidence.validate_provenance(provenance, "native", VERSION, SHA, files.__getitem__)
 
+    def test_native_official_cpa_binding_is_version_hash_and_source(self):
+        files, _, provenance = self.fixture("native")
+        artifact = json.loads(files["share/cpamp/runtime/cpa-artifact.json"])
+        cpa = [item for item in provenance["components"] if item["name"] == "cpa"][0]
+        self.assertEqual(provenance["status"], "VERIFIED_LICENSE_COLLECTION")
+        self.assertEqual(cpa["version"], artifact["version"])
+        self.assertEqual(cpa["sha256"], artifact["artifactId"])
+        self.assertEqual(cpa["source"], evidence.CPA_SOURCE)
+        self.assertEqual(cpa["release"], evidence.CPA_SOURCE + "/releases/tag/v" + artifact["version"])
+        evidence.validate_provenance(provenance, "native", VERSION, SHA, files.__getitem__)
+
+    def test_native_unpinned_cpa_is_never_release_evidence(self):
+        files = make_evidence("native", base_files("native"), cpa_official=False)
+        provenance = json.loads(files["share/cpamp/provenance.json"])
+        aggregate = json.loads(files["share/cpamp/release/third-party-inventory.txt"])
+        cpa = [item for item in provenance["components"] if item["name"] == "cpa"][0]
+        self.assertEqual(provenance["status"], "UNPINNED_LOCAL_CPA")
+        self.assertEqual(aggregate["status"], "UNPINNED_LOCAL_CPA")
+        self.assertEqual(cpa["source"], "local-unpinned-cpa")
+        self.assertNotIn("release", cpa)
+        # The release validators never accept the local marker.
+        with self.assertRaisesRegex(ValueError, "unverified provenance status"):
+            evidence.validate_provenance(provenance, "native", VERSION, SHA, files.__getitem__)
+        with self.assertRaisesRegex(ValueError, "unverified third-party inventory"):
+            evidence.validate_inventory(aggregate, "native", files.__getitem__)
+
+    def test_unpinned_cpa_evidence_is_native_only(self):
+        with self.assertRaisesRegex(ValueError, "only the Native package"):
+            make_evidence("manager", base_files("manager"), cpa_official=False)
+
     def test_native_license_coverage_keeps_original_text_policy(self):
         _, inventory, _ = self.fixture("native")
         for component in ("manager", "web", "ingress", "runtime-supervisor"):

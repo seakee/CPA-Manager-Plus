@@ -65,6 +65,12 @@ ROLE_TARGET = {role: ("native" if role == "native" else "image") for role in COM
 MODULES = {"manager": "apps/manager-server", "ingress": "apps/ingress",
            "runtime-supervisor": "apps/runtime-supervisor"}
 SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
+VERIFIED_STATUS = "VERIFIED_LICENSE_COLLECTION"
+# A v2 Native package built with a CPA artifact that is not the Dockerfile pin
+# may still exist for local verification, but it is never release evidence: it
+# must not claim the official release or a verified status.
+UNPINNED_STATUS = "UNPINNED_LOCAL_CPA"
+UNPINNED_CPA_SOURCE = "local-unpinned-cpa"
 # Go, Web and Debian base-image components must carry original license or
 # copyright texts, so a missing original fails the build. Alpine's installed
 # APK database only promises an SPDX expression per package; its evidence
@@ -137,11 +143,12 @@ def license_coverage(components):
     return result
 
 
-def validate_inventory(value, role, read_file, expected_source=None):
+def validate_inventory(value, role, read_file, expected_source=None, allow_unpinned=False):
     lay = layout(role)
     target = ROLE_TARGET[role]
+    allowed_status = (VERIFIED_STATUS, UNPINNED_STATUS) if allow_unpinned else (VERIFIED_STATUS,)
     require(type(value) is dict and value.get("schemaVersion") == 1 and
-            value.get("status") == "VERIFIED_LICENSE_COLLECTION", "unverified third-party inventory")
+            value.get("status") in allowed_status, "unverified third-party inventory")
     require(value.get("role") == role and type(value.get("components")) is dict and
             set(value["components"]) == set(COMPONENTS[role]), "incomplete component license inventory")
     source_bytes = read_file(lay["sourceInventory"])
@@ -217,7 +224,7 @@ def validate_inventory(value, role, read_file, expected_source=None):
         require(read_file(lay["licenseRoot"] + "cli-proxy-api/LICENSE"), "missing CPA LICENSE")
 
 
-def validate_provenance(value, role, version, commit, read_file):
+def validate_provenance(value, role, version, commit, read_file, allow_unpinned=False):
     lay = layout(role)
     identity(version, commit)
     require(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1,
@@ -225,6 +232,11 @@ def validate_provenance(value, role, version, commit, read_file):
     require(value.get("role") == role and value.get("version") == version and
             value.get("sourceCommit") == commit and value.get("source") == SOURCE,
             "provenance source/version identity mismatch")
+    if role == "native":
+        # Release evidence is verified or explicitly local; the release
+        # validator never accepts the local marker.
+        expected_status = UNPINNED_STATUS if allow_unpinned else VERIFIED_STATUS
+        require(value.get("status") == expected_status, "unverified provenance status")
     require(value.get("platform") in lay["platforms"], "invalid provenance platform")
     aggregate = read_file(lay["inventory"])
     require(value.get("licenseInventorySHA256") == digest(aggregate), "provenance inventory hash mismatch")
@@ -244,9 +256,15 @@ def validate_provenance(value, role, version, commit, read_file):
         if item["name"] == "cpa":
             artifact = json.loads(read_file(lay["artifact"]))
             require(artifact.get("schemaVersion") == 1 and artifact.get("engine") == "cpa" and
-                    artifact.get("version") == item.get("version") and artifact.get("artifactId") == item["sha256"]
-                    and item.get("source") == CPA_SOURCE and item.get("release") == CPA_SOURCE + "/releases/tag/v" + item["version"],
+                    artifact.get("version") == item.get("version") and artifact.get("artifactId") == item["sha256"],
                     "CPA provenance differs from verified artifact")
+            if allow_unpinned:
+                require(item.get("source") == UNPINNED_CPA_SOURCE and "release" not in item,
+                        "unpinned CPA provenance must not claim an official release")
+            else:
+                require(item.get("source") == CPA_SOURCE and
+                        item.get("release") == CPA_SOURCE + "/releases/tag/v" + item["version"],
+                        "CPA provenance differs from verified artifact")
         else:
             require(item.get("source") == SOURCE and item.get("sourceCommit") == commit and
                     item.get("version") == version, "component source claim mismatch")
@@ -255,10 +273,13 @@ def validate_provenance(value, role, version, commit, read_file):
                     "component Go module identity mismatch")
 
 
-def build(root, role, version, commit, platform, source_inventory):
+def build(root, role, version, commit, platform, source_inventory, cpa_official=True):
     lay = layout(role)
     target = ROLE_TARGET[role]
     identity(version, commit)
+    if not cpa_official and role != "native":
+        raise ValueError("only the Native package can carry unpinned CPA evidence")
+    status = VERIFIED_STATUS if cpa_official else UNPINNED_STATUS
     def read_file(path):
         return (root / path.lstrip("/")).read_bytes()
     components = {}
@@ -268,13 +289,13 @@ def build(root, role, version, commit, platform, source_inventory):
     source_path = root / lay["sourceInventory"].lstrip("/")
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_bytes(source_inventory.read_bytes())
-    inventory = {"schemaVersion": 1, "status": "VERIFIED_LICENSE_COLLECTION", "role": role,
+    inventory = {"schemaVersion": 1, "status": status, "role": role,
                  "scope": ("Original Go/Web notices and Debian copyright files fail closed; Alpine base "
                            "packages record APK SPDX expressions plus available packaged originals; "
                            "not legal approval"),
                  "licenseCoverage": license_coverage(components),
                  "sourceInventorySHA256": digest(source_path.read_bytes()), "components": components}
-    validate_inventory(inventory, role, read_file)
+    validate_inventory(inventory, role, read_file, allow_unpinned=not cpa_official)
     (root / lay["inventory"].lstrip("/")).write_bytes(encoded(inventory))
     items = []
     for name, binary in BINARIES[role]:
@@ -282,8 +303,12 @@ def build(root, role, version, commit, platform, source_inventory):
         item = {"name": name, "path": path, "sha256": digest(read_file(path))}
         if name == "cpa":
             artifact = json.loads(read_file(lay["artifact"]))
-            item.update(version=artifact["version"], source=CPA_SOURCE,
-                        release=CPA_SOURCE + "/releases/tag/v" + artifact["version"])
+            if cpa_official:
+                item.update(version=artifact["version"], source=CPA_SOURCE,
+                            release=CPA_SOURCE + "/releases/tag/v" + artifact["version"])
+            else:
+                # Local build: never claim the official release.
+                item.update(version=artifact["version"], source=UNPINNED_CPA_SOURCE)
         else:
             item.update(version=version, source=SOURCE, sourceCommit=commit,
                         module="github.com/seakee/cpa-manager-plus/" + MODULES[name])
@@ -296,7 +321,9 @@ def build(root, role, version, commit, platform, source_inventory):
                   "source": SOURCE, "platform": platform, "components": items,
                   "licenseCoverage": inventory["licenseCoverage"],
                   "licenseInventorySHA256": digest(read_file(lay["inventory"]))}
-    validate_provenance(provenance, role, version, commit, read_file)
+    if role == "native":
+        provenance["status"] = status
+    validate_provenance(provenance, role, version, commit, read_file, allow_unpinned=not cpa_official)
     (root / lay["provenance"].lstrip("/")).write_bytes(encoded(provenance))
     return provenance
 
@@ -309,10 +336,14 @@ def main():
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--platform", required=True)
     parser.add_argument("--source-inventory", type=Path, required=True)
+    parser.add_argument("--cpa-unpinned", action="store_true",
+                        help="Native only: label evidence as local, never as the official CPA release")
     args = parser.parse_args()
     try:
+        if args.cpa_unpinned and args.role != "native":
+            raise ValueError("--cpa-unpinned is only valid for the Native role")
         build(args.root, args.role, args.version, args.source_commit, args.platform,
-              args.source_inventory)
+              args.source_inventory, cpa_official=not args.cpa_unpinned)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         # Keep the published image diagnostic prefix stable; only the Native
         # package uses the generalized wording.

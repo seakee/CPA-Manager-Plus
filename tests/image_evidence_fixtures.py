@@ -29,7 +29,7 @@ SOURCE["inputs"].update({name: evidence.digest(b"fixture " + name.encode())
 SOURCE_BYTES = evidence.encoded(SOURCE)
 
 
-def make_evidence(role, files, source_bytes=SOURCE_BYTES):
+def make_evidence(role, files, source_bytes=SOURCE_BYTES, cpa_official=True):
     """Use the real generator on synthetic originals and caller-supplied binaries."""
     lay = evidence.LAYOUTS[evidence.ROLE_TARGET[role]]
     target = evidence.ROLE_TARGET[role]
@@ -74,7 +74,7 @@ def make_evidence(role, files, source_bytes=SOURCE_BYTES):
             destination.write_bytes(data)
         source = root / "source.json"
         source.write_bytes(source_bytes)
-        evidence.build(root, role, VERSION, SHA, "linux/amd64", source)
+        evidence.build(root, role, VERSION, SHA, "linux/amd64", source, cpa_official=cpa_official)
         prefix = "/" if target == "image" else ""
         return {prefix + path.relative_to(root).as_posix(): path.read_bytes()
                 for path in root.rglob("*") if path.is_file() and path != source}

@@ -219,13 +219,18 @@ write_native_provenance() {
     exit 1
   fi
 
+  local unpinned_flag=""
+  if [ "${native_cpa_official}" != "1" ]; then
+    unpinned_flag="--cpa-unpinned"
+  fi
   python3 "${repo_root}/bin/release/image-evidence.py" \
     --root "${package_dir}" \
     --role native \
     --version "${version}" \
     --source-commit "${source_commit}" \
     --platform linux/amd64 \
-    --source-inventory "${native_source_inventory}"
+    --source-inventory "${native_source_inventory}" \
+    ${unpinned_flag}
 }
 
 mkdir -p "${repo_root}/bin/tmp/release"
@@ -234,6 +239,7 @@ trap 'rm -rf "${work_dir}"' EXIT
 native_source_inventory=""
 native_go_root=""
 native_go_version=""
+native_cpa_official=1
 
 rm -rf "${out_dir}"
 mkdir -p "${out_dir}"
@@ -295,15 +301,22 @@ package_v2_linux_amd64() {
 
   # The sha pin parsed from Dockerfile.runtime is the architecture and
   # plugin-build guarantee. An environment override is a different artifact, so
-  # it needs an explicit, reviewable opt-in instead of silently shipping it.
+  # it needs an explicit, reviewable opt-in instead of silently shipping it. A
+  # directly supplied binary skips the pinned archive and its upstream LICENSE,
+  # so it is never official either, even when its digest matches the pin.
   if [ "${cpa_version}" != "${default_cpa_version}" ] ||
     [ "${cpa_archive_sha256}" != "${default_archive_sha}" ] ||
     [ "${cpa_executable_sha256}" != "${default_exec_sha}" ] ||
-    [ "${cpa_asset_name}" != "CLIProxyAPI_${default_cpa_version}_linux_amd64.tar.gz" ]; then
+    [ "${cpa_asset_name}" != "CLIProxyAPI_${default_cpa_version}_linux_amd64.tar.gz" ] ||
+    [ -n "${CPA_BINARY_PATH:-}" ]; then
     if [ "${CPAMP_ALLOW_UNPINNED_CPA:-0}" != "1" ]; then
-      echo "CPA input differs from the Dockerfile.runtime linux/amd64 pin; set CPAMP_ALLOW_UNPINNED_CPA=1 only for an explicitly reviewed artifact" >&2
+      echo "CPA input differs from the Dockerfile.runtime linux/amd64 pinned archive; set CPAMP_ALLOW_UNPINNED_CPA=1 only for an explicitly reviewed artifact" >&2
       exit 1
     fi
+    # Any deviation from the pin is local evidence only: it must never claim
+    # the official CPA release or a verified status.
+    native_cpa_official=0
+    echo "WARNING: packaging a non-official CPA artifact; provenance will be labelled UNPINNED_LOCAL_CPA and is not release evidence" >&2
   fi
 
   case "${cpa_asset_name}${CPA_BINARY_PATH:-}${CPA_ARCHIVE_PATH:-}" in
