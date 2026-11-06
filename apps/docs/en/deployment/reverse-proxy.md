@@ -28,11 +28,14 @@ For most deployments, use separate domains or subdomains for CPAMP and CPA. Read
 | `/usage-service/*`                           | CPAMP `:18317`      | Manager Server mode detection and config APIs.                                                                                                         |
 | `/v0/management/*`                           | CPAMP `:18317`      | CPAMP handles usage, model-prices, aliases, dashboard, monitoring, and codex-inspection first; other management APIs are then proxied by CPAMP to CPA. |
 | `/v0/resource/plugins/*`                     | CPAMP `:18317`      | Plugin page resources used by the CPAMP panel. CPAMP proxies them to CPA when needed.                                                                  |
+| `/v8/management/config/api-keys[/*]`         | CPAMP `:18317`      | Read-only CPA v8 provider key groups, including group names and `auth_index`. CPAMP forwards `GET` only, accepts the CPAMP admin key only, and uses the saved CPA Management Key; other `/v8/management/*` paths are not forwarded. |
 | `/models`                                    | CPAMP `:18317`      | Compatibility proxy to CPA after setup.                                                                                                                |
 | `/v1/*`, `/v1beta/*`, `/backend-api/codex/*` | CPA `:8317`         | Actual model API, Codex API, and provider requests.                                                                                                    |
 | OAuth callback                               | CPA `:8317`         | For example `/anthropic/callback` and `/codex/callback`.                                                                                               |
 | New paths without explicit ownership         | CPA `:8317`         | Avoid blocking future CPA endpoints.                                                                                                                   |
 | RESP Pub/Sub / RESP pop                      | Direct CPA `:8317`  | Cannot go through an HTTP reverse proxy.                                                                                                               |
+
+In v2 this `/v8/management/config/api-keys[/*]` route is served only on the Manager Server legacy management surface (the `/management.html` panel and its reverse-proxy topology): a sandboxed plugin iframe is a cross-site fetch client and the public Ingress denies the whole `/v8/management/*` namespace, so neither can reach it.
 
 Recommended architecture:
 
@@ -43,6 +46,7 @@ Browser
       -> /usage-service/*       -> CPA Manager Plus :18317
       -> /v0/management/*       -> CPA Manager Plus :18317
       -> /v0/resource/plugins/* -> CPA Manager Plus :18317
+      -> /v8/management/config/api-keys[/*] -> CPA Manager Plus :18317
       -> /v1/*, /backend-api/*  -> CPA :8317
       -> fallback               -> CPA :8317
 ```
@@ -199,6 +203,12 @@ server {
     # CPAMP plugin page resources. Without this rule, plugin pages may be blank or return 404 for assets.
     location ^~ /v0/resource/plugins/ { proxy_pass http://cpamp; }
 
+    # Read-only CPA v8 provider key groups. CPAMP forwards GET only, accepts the CPAMP
+    # admin key only, and uses the saved CPA Management Key. Other /v8/management/* paths
+    # keep using the CPA fallback: neither CPAMP nor the public Ingress forwards them.
+    location = /v8/management/config/api-keys   { proxy_pass http://cpamp; }
+    location ^~ /v8/management/config/api-keys/ { proxy_pass http://cpamp; }
+
     # /models is provided through CPAMP's compatibility proxy
     # If CPAMP has not completed setup yet, this path may return 412
     location = /models          { proxy_pass http://cpamp; }
@@ -342,6 +352,11 @@ curl -i https://your-domain.com/v0/management/config \
 # 7. Plugin resource path should hit CPAMP. A missing resource may return 404,
 # but it should not be sent to the wrong upstream by Nginx.
 curl -i https://your-domain.com/v0/resource/plugins/
+
+# 8. Read-only CPA v8 provider key groups; requires the CPAMP Admin Key, and the
+# public Ingress denies this namespace.
+curl -i https://your-domain.com/v8/management/config/api-keys \
+  -H "Authorization: Bearer your CPAMP Admin Key"
 ```
 
 ## Troubleshooting

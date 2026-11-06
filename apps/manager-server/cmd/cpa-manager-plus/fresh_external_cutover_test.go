@@ -190,3 +190,43 @@ func TestExternalLegacyBridgeBoundsConcurrentRefusals(t *testing.T) {
 		}
 	}
 }
+
+// TestExternalLegacyBridgeGatesTheV8KeyGroupView proves the External cutover
+// covers the one CPA v8 subtree Manager forwards. It is the same kind of request
+// as a v0 management read — an admin-authorized proxy with the saved management
+// key — so the bridge must serialize it while the credential works and answer the
+// typed blocker locally once the user's CPA refused that credential, instead of
+// presenting it again.
+func TestExternalLegacyBridgeGatesTheV8KeyGroupView(t *testing.T) {
+	app, fake := newExternalProbeApp(t)
+
+	before := fake.requests.Load()
+	admitted := gateRequest(t, app, http.MethodGet, "/v8/management/config/api-keys", gateAdmin)
+	if admitted.Code != http.StatusOK {
+		t.Fatalf("admitted read = %d %s", admitted.Code, admitted.Body.String())
+	}
+	if sent := fake.requests.Load() - before; sent != 1 {
+		t.Fatalf("the admitted read reached the CPA %d times, want 1", sent)
+	}
+
+	// A refusal learned through a typed read must stop this path too: CPA bans
+	// the calling address after five failed authentications.
+	fake.management.Store(strings.Repeat("f", 64))
+	first := gatewayRequest(t, app, http.MethodGet, "external/usage", "", "")
+	if first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
+		t.Fatalf("first read = %d %s", first.Code, first.Body.String())
+	}
+	before = fake.requests.Load()
+	for range 3 {
+		response := gateRequest(t, app, http.MethodGet, "/v8/management/config/api-keys/claude", gateAdmin)
+		if response.Code != http.StatusConflict {
+			t.Fatalf("read after the rejection = %d %s", response.Code, response.Body.String())
+		}
+		if code := errorCode(t, response); code != freshconfig.ReasonManagementRejected {
+			t.Fatalf("read after the rejection code = %q", code)
+		}
+	}
+	if sent := fake.requests.Load() - before; sent != 0 {
+		t.Fatalf("the bridge presented the refused key %d more times", sent)
+	}
+}

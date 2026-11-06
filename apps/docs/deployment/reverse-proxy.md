@@ -28,11 +28,14 @@
 | `/usage-service/*`                           | CPAMP `:18317`   | Manager Server 模式探测和配置接口。                                                                     |
 | `/v0/management/*`                           | CPAMP `:18317`   | CPAMP 先处理用量、模型价格、别名、仪表盘、请求监控、Codex 账号巡检；其他管理接口再由 CPAMP 代理到 CPA。 |
 | `/v0/resource/plugins/*`                     | CPAMP `:18317`   | CPAMP 面板中的插件页面资源；CPAMP 会按需代理到 CPA。                                                    |
+| `/v8/management/config/api-keys[/*]`         | CPAMP `:18317`   | 只读 CPA v8 provider Key 分组（含分组名称和 `auth_index`）。CPAMP 只转发 `GET` 且只接受 CPAMP 管理员密钥，使用服务端保存的 CPA Management Key；其他 `/v8/management/*` 不转发。 |
 | `/models`                                    | CPAMP `:18317`   | setup 后由 CPAMP 兼容代理到 CPA。                                                                       |
 | `/v1/*`、`/v1beta/*`、`/backend-api/codex/*` | CPA `:8317`      | 实际模型 API、Codex API 和提供商请求。                                                                  |
 | OAuth 回调                                   | CPA `:8317`      | 例如 `/anthropic/callback`、`/codex/callback`。                                                         |
 | 未明确归属的新路径                           | CPA `:8317`      | 避免阻断 CPA 未来新增接口。                                                                             |
 | RESP Pub/Sub / RESP pop                      | 直连 CPA `:8317` | 不能经过 HTTP 反向代理。                                                                                |
+
+在 v2 中，上述 `/v8/management/config/api-keys[/*]` 路由只在 Manager Server 旧版管理面（`/management.html` 面板及其反向代理拓扑）提供：沙箱化插件 iframe 是跨站取用者，公开 Ingress 也拒绝整个 `/v8/management/*`，两者都不可达。
 
 推荐架构：
 
@@ -43,6 +46,7 @@ Browser
       -> /usage-service/*       -> CPA Manager Plus :18317
       -> /v0/management/*       -> CPA Manager Plus :18317
       -> /v0/resource/plugins/* -> CPA Manager Plus :18317
+      -> /v8/management/config/api-keys[/*] -> CPA Manager Plus :18317
       -> /v1/*, /backend-api/*  -> CPA :8317
       -> fallback               -> CPA :8317
 ```
@@ -199,6 +203,12 @@ server {
     # CPAMP 插件页面资源。缺少此规则时，插件页面可能打开空白或资源 404。
     location ^~ /v0/resource/plugins/ { proxy_pass http://cpamp; }
 
+    # CPA v8 provider Key 分组只读接口。CPAMP 只转发 GET，只接受 CPAMP 管理员密钥，
+    # 并使用服务端保存的 CPA Management Key。其他 /v8/management/* 保持走 CPA 兜底规则，
+    # 因为公开 Ingress 与 CPAMP 都不转发它们。
+    location = /v8/management/config/api-keys   { proxy_pass http://cpamp; }
+    location ^~ /v8/management/config/api-keys/ { proxy_pass http://cpamp; }
+
     # /models 由 CPAMP 提供兼容代理
     # 如果 CPAMP 尚未完成 setup，访问此路径可能返回 412
     location = /models          { proxy_pass http://cpamp; }
@@ -341,6 +351,10 @@ curl -i https://your-domain.com/v0/management/config \
 
 # 7. 插件资源路径应该命中 CPAMP；不存在的资源可以返回 404，但不应被 Nginx 转到错误后端
 curl -i https://your-domain.com/v0/resource/plugins/
+
+# 8. CPA v8 provider Key 分组只读接口，需要 CPAMP 管理员密钥；公开 Ingress 会拒绝该命名空间
+curl -i https://your-domain.com/v8/management/config/api-keys \
+  -H "Authorization: Bearer 你的 CPAMP 管理员密钥"
 ```
 
 ## 排障

@@ -41,6 +41,19 @@ func TestSavedKeyMarkFollowsTheCredentialActuallySent(t *testing.T) {
 			want: false,
 		},
 		{
+			// The one CPA v8 subtree Manager forwards is an admin read that
+			// presents the saved management key, so the External cutover must
+			// gate it as one.
+			name: "v8 api-key groups",
+			path: "/v8/management/config/api-keys/claude",
+			call: func(w http.ResponseWriter, r *http.Request) {
+				fixture.service.ProxyV8APIKeysConfig(w, r, writeProxyError, func(w http.ResponseWriter) {
+					w.WriteHeader(http.StatusMethodNotAllowed)
+				})
+			},
+			want: true,
+		},
+		{
 			name: "model list",
 			path: "/v1/models",
 			call: func(w http.ResponseWriter, r *http.Request) {

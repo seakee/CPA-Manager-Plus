@@ -76,6 +76,13 @@ func externalLegacyReplacedWrite(path, method string) bool {
 // can still read the blocker. The model list is deliberately absent: it forwards
 // the caller's own header, so it is not a presentation of the saved key.
 func legacyBridgePresentsSavedKey(path string) bool {
+	// The one CPA v8 subtree Manager forwards is the same kind of request: an
+	// admin-authorized read proxied with the saved management key, so the
+	// External cutover serializes it and files its refusal exactly like a v0
+	// management read.
+	if proxysvc.IsCPAV8APIKeysConfigPath(path) {
+		return true
+	}
 	cleaned := strings.TrimRight(path, "/")
 	if cleaned == "/v0/resource/plugins" || strings.HasPrefix(cleaned, "/v0/resource/plugins/") {
 		return true

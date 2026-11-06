@@ -1421,6 +1421,88 @@ func TestServerCompatProxyRoutes(t *testing.T) {
 	}
 }
 
+// TestServerCompatV8APIKeysConfigProxy pins the one CPA v8 management subtree
+// Manager forwards: read-only provider-key group views for a verified CPAMP
+// admin, with the saved CPA management key. Everything else under
+// /v8/management stays unforwarded, and an escaped or dot-segment path never
+// reaches CPA because ServeMux does not clean it.
+func TestServerCompatV8APIKeysConfigProxy(t *testing.T) {
+	cpa := testutil.NewCPAMock(t)
+	setup := &store.Setup{CPAUpstreamURL: cpa.URL(), ManagementKey: "management-key", Queue: "usage", PopSide: "right"}
+	handler, _ := newCompatHandler(t, testutil.NewConfig(t), setup)
+
+	for _, tc := range []struct {
+		target string
+		path   string
+		query  string
+	}{
+		{target: "/v8/management/config/api-keys?format=json", path: "/v8/management/config/api-keys", query: "format=json"},
+		{target: "/v8/management/config/api-keys/claude", path: "/v8/management/config/api-keys/claude"},
+	} {
+		rr := testutil.Request(t, handler, http.MethodGet, tc.target, "", testutil.AdminKey)
+		testutil.RequireStatus(t, rr, http.StatusOK)
+		got, ok := cpa.LastRequest(tc.path)
+		if !ok {
+			t.Fatalf("CPA mock did not receive %s", tc.path)
+		}
+		if got.Method != http.MethodGet || got.Authorization != "Bearer management-key" || got.Query != tc.query {
+			t.Fatalf("%s proxy request = %#v", tc.target, got)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		target string
+		key    string
+		want   int
+	}{
+		{name: "missing admin key", method: http.MethodGet, target: "/v8/management/config/api-keys", want: http.StatusUnauthorized},
+		{name: "wrong admin key", method: http.MethodGet, target: "/v8/management/config/api-keys", key: "wrong-key", want: http.StatusUnauthorized},
+		{name: "CPA management key", method: http.MethodGet, target: "/v8/management/config/api-keys", key: "management-key", want: http.StatusUnauthorized},
+		{name: "put", method: http.MethodPut, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "patch", method: http.MethodPatch, target: "/v8/management/config/api-keys/claude", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "delete", method: http.MethodDelete, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "head", method: http.MethodHead, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "config root", method: http.MethodGet, target: "/v8/management/config", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "config yaml", method: http.MethodGet, target: "/v8/management/config.yaml", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "sibling config key", method: http.MethodGet, target: "/v8/management/config/api-keys-x", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "other v8 route", method: http.MethodGet, target: "/v8/management/credentials/download?name=a.json", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/../../credentials/download", key: testutil.AdminKey},
+		{name: "encoded dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/%2e%2e/%2e%2e/credentials/download", key: testutil.AdminKey},
+		{name: "encoded slash dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys%2F..%2F..%2Fcredentials/download", key: testutil.AdminKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := len(cpa.Requests())
+			rr := testutil.Request(t, handler, tc.method, tc.target, "", tc.key)
+			if tc.want != 0 {
+				testutil.RequireStatus(t, rr, tc.want)
+			} else if rr.Code == http.StatusOK {
+				t.Fatalf("%s %s status = 200, body = %s", tc.method, tc.target, rr.Body.String())
+			}
+			if requests := cpa.Requests(); len(requests) != before {
+				t.Fatalf("%s %s reached CPA: %#v", tc.method, tc.target, requests[before:])
+			}
+		})
+	}
+
+	// v2-only pin: the route stays an admin surface behind
+	// RejectCrossSiteAdmin. A sandboxed plugin document is an opaque-origin
+	// cross-site fetch client, so it cannot use this credentialed read as a
+	// confused deputy.
+	before := len(cpa.Requests())
+	crossSite := httptest.NewRequest(http.MethodGet, "/v8/management/config/api-keys", nil)
+	crossSite.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+	crossSite.Header.Set("Sec-Fetch-Dest", "empty")
+	crossSiteRR := httptest.NewRecorder()
+	handler.ServeHTTP(crossSiteRR, crossSite)
+	testutil.RequireStatus(t, crossSiteRR, http.StatusForbidden)
+	if requests := cpa.Requests(); len(requests) != before {
+		t.Fatalf("cross-site read reached CPA: %#v", requests[before:])
+	}
+}
+
 func TestServerCompatPluginProxyRoutes(t *testing.T) {
 	type observedRequest struct {
 		method            string

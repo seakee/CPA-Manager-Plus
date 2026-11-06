@@ -172,6 +172,13 @@ func rootHandler(
 			proxyHandler.CPAResource(w, r)
 			return
 		}
+		// The one CPA v8 management subtree Manager forwards. It sits inside
+		// RejectCrossSiteAdmin like every other admin surface: a sandboxed plugin
+		// document is a cross-site fetch client and must not reach it.
+		if proxysvc.IsCPAV8APIKeysConfigPath(r.URL.Path) {
+			middleware.WithCORS(appCtx.Config, proxyHandler.V8APIKeysConfig)(w, r)
+			return
+		}
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/management.html", http.StatusTemporaryRedirect)
 			return
