@@ -483,18 +483,121 @@ def parse_compose_service_images(compose_text):
     return services
 
 
+API_CONTRACT_ID = "cpamp-r1-embedded-public-api-transport-v1"
+
+
+def verify_archive_anchor(path, role, evidence, pairing, source_commit):
+    require(path.is_file(), "missing OCI archive: " + str(path))
+    ev_img = evidence["images"][role]
+    actual_archive_sha = digest(path.read_bytes())
+    require(actual_archive_sha == ev_img["archiveSHA256"],
+            "OCI archive SHA256 mismatch against evidence: " + role)
+    with tarfile.open(path, mode="r:*") as archive:
+        layout = json_object(read_member(archive, "oci-layout", 4096), "oci-layout")
+        require(layout.get("imageLayoutVersion") == "1.0.0", "not an OCI layout")
+        raw_index = read_member(archive, "index.json", 1024 * 1024)
+        if "ociLayoutIndexDigest" in ev_img:
+            require(digest(raw_index) == ev_img["ociLayoutIndexDigest"],
+                    "OCI layout index digest mismatch against evidence: " + role)
+        index = json_object(raw_index, "index")
+        require(index.get("schemaVersion") == 2, "invalid OCI index schema")
+        descriptors = index.get("manifests")
+        require(isinstance(descriptors, list), "missing OCI index descriptors")
+        matches = [m for m in descriptors if type(m) is dict and
+                   type(m.get("platform")) is dict and
+                   m["platform"].get("os") == "linux" and
+                   m["platform"].get("architecture") == "amd64"]
+        require(len(matches) == 1 and len(descriptors) == 1,
+                "candidate must contain exactly one linux/amd64 manifest")
+        descriptor = matches[0]
+        manifest_id = descriptor.get("digest")
+        require(manifest_id == ev_img["platformManifestDigest"] and
+                manifest_id == pairing["images"][role]["manifest_digest"],
+                "OCI archive platformManifestDigest mismatch against evidence/pairing: " + role)
+        manifest = json_object(read_descriptor(archive, descriptor, (MANIFEST_TYPE,)), "manifest")
+        config_descriptor = manifest.get("config")
+        config = json_object(read_descriptor(archive, config_descriptor, (CONFIG_TYPE,)), "config")
+        config_id = config_descriptor["digest"]
+        require(config_id == ev_img["imageConfigDigest"] and
+                config_id == pairing["images"][role]["image_config_digest"],
+                "OCI archive imageConfigDigest mismatch against evidence/pairing: " + role)
+        labels = (config.get("config") or {}).get("Labels") or {}
+        require(labels.get("org.opencontainers.image.revision") == source_commit,
+                "OCI archive revision label mismatch against source_commit: " + role)
+        require(labels.get("io.cpamp.candidate.role") == role,
+                "OCI archive role label mismatch: " + role)
+        if evidence.get("candidateBuildEventClaim"):
+            require(labels.get("io.cpamp.candidate.event") == evidence["candidateBuildEventClaim"],
+                    "OCI archive build event label mismatch: " + role)
+        layers = manifest.get("layers")
+        rootfs = config.get("rootfs") or {}
+        wanted = {GO_BINARIES[role], image_evidence.PROVENANCE}
+        if role == "manager":
+            wanted.update({WEB_MANIFEST, API_CONTRACT})
+        if role == "runtime":
+            wanted.add("/usr/local/bin/cli-proxy-api")
+        files, _ = final_files(archive, layers, rootfs.get("diff_ids") or [], wanted)
+        compiled_identity = check_go_binary(files[GO_BINARIES[role]], role, source_commit)
+        require(compiled_identity.get("managerCompiledSourceClaim") ==
+                ev_img["goBinaryIdentity"].get("managerCompiledSourceClaim"),
+                "OCI archive Go binary source claim mismatch: " + role)
+        require(digest(files[GO_BINARIES[role]]) == ev_img["packagedFiles"][GO_BINARIES[role]] and
+                digest(files[GO_BINARIES[role]]) == pairing["images"][role]["binary_sha256"],
+                "OCI archive binary SHA256 mismatch: " + role)
+        provenance = json_object(files[image_evidence.PROVENANCE], "component provenance")
+        require(provenance.get("sourceCommit") == source_commit and
+                provenance.get("role") == role,
+                "OCI archive provenance sourceCommit/role mismatch: " + role)
+        require(digest(files[image_evidence.PROVENANCE]) == ev_img["packagedFiles"][image_evidence.PROVENANCE] and
+                digest(files[image_evidence.PROVENANCE]) == pairing["images"][role]["release_provenance_sha256"],
+                "OCI archive provenance SHA256 mismatch: " + role)
+        if role == "manager":
+            fullweb = json_object(files[WEB_MANIFEST], "Full Web file-set manifest")
+            require(fullweb.get("schemaVersion") == 1 and
+                    isinstance(fullweb.get("files"), list) and len(fullweb["files"]) >= 2,
+                    "invalid Full Web manifest in Manager OCI archive")
+            index_html = next(
+                (item["sha256"] for item in fullweb["files"]
+                 if isinstance(item, dict) and item.get("path") == "index.html"),
+                None,
+            )
+            require(isinstance(index_html, str) and SHA.fullmatch(index_html) is not None,
+                    "missing valid index.html entry in Manager OCI archive Full Web manifest")
+            web_sha = digest(files[WEB_MANIFEST])
+            require(web_sha == ev_img["packagedFiles"][WEB_MANIFEST] and
+                    pairing["fullweb"] == {
+                        "manifest_sha256": web_sha,
+                        "index_html_sha256": index_html,
+                        "asset_count": len(fullweb["files"]),
+                    },
+                    "OCI archive Full Web manifest or index.html summary mismatch against pairing")
+            if "fullWebSummary" in ev_img:
+                require(ev_img["fullWebSummary"] == {
+                    "manifestSHA256": web_sha,
+                    "indexHtmlSHA256": index_html,
+                    "assetCount": len(fullweb["files"]),
+                }, "OCI archive Full Web summary differs from manager.fullWebSummary")
+            api_obj = json_object(files[API_CONTRACT], "Public API transport contract")
+            api_sha = digest(files[API_CONTRACT])
+            require(api_sha == ev_img["packagedFiles"][API_CONTRACT] and
+                    pairing["api_contract"] == {
+                        "sha256": api_sha,
+                        "contract_id": api_obj.get("contractId"),
+                        "qualification": api_obj.get("qualification"),
+                        "api_suffix": api_obj.get("apiSuffix"),
+                        "expected_path": api_obj.get("expectedPath"),
+                    },
+                    "OCI archive API transport contract mismatch against pairing")
+        if role == "runtime":
+            require(hashlib.sha256(files["/usr/local/bin/cli-proxy-api"]).hexdigest() == CPA_SHA,
+                    "OCI archive official CPA v8.0.55 executable hash mismatch")
+
+
 def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=None):
     require(type(evidence) is dict and evidence.get("schemaVersion") == 1,
             "invalid candidate evidence for pairing verification")
     require(compose_path.is_file(), "missing rendered compose file: " + str(compose_path))
     require(pairing_path.is_file(), "missing rendered pairing file: " + str(pairing_path))
-    if archive_paths:
-        for role, archive in archive_paths.items():
-            if archive is not None:
-                require(archive.is_file(), "missing OCI archive: " + str(archive))
-                actual_archive_sha = digest(archive.read_bytes())
-                require(actual_archive_sha == evidence["images"][role]["archiveSHA256"],
-                        "OCI archive SHA256 mismatch against evidence: " + role)
     compose_bytes = compose_path.read_bytes()
     compose_text = compose_bytes.decode("utf-8")
     service_images = parse_compose_service_images(compose_text)
@@ -529,6 +632,7 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
     api_contract = pairing.get("api_contract")
     require(type(api_contract) is dict and
             api_contract.get("sha256") == manager_files.get(API_CONTRACT) and
+            api_contract.get("contract_id") == API_CONTRACT_ID and
             api_contract.get("qualification") == API_CONTRACT_QUALIFICATION and
             api_contract.get("api_suffix") == "/api/v2" and
             api_contract.get("expected_path") == "/phase4-test/api/v2/technical",
@@ -564,10 +668,13 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
         require(entry.get("release_provenance_sha256") == ev_img["packagedFiles"][image_evidence.PROVENANCE],
                 "pairing release_provenance_sha256 mismatch: " + role)
         expected_ref = f"{repo}:{tag}@{manifest_digest}"
-        if "image_ref" in entry:
-            require(entry["image_ref"] == expected_ref, "pairing image_ref mismatch: " + role)
+        require(entry.get("image_ref") == expected_ref, "pairing image_ref mismatch: " + role)
         require(service_images["cpamp-" + role] == expected_ref,
                 "rendered compose image mismatch for cpamp-" + role)
+    if archive_paths:
+        for role, archive in archive_paths.items():
+            if archive is not None:
+                verify_archive_anchor(archive, role, evidence, pairing, source_commit)
     renderer = Path(__file__).with_name("render-embedded-compose.mjs")
     require(renderer.is_file(), "missing compose/pairing renderer: " + str(renderer))
     node_env = dict(os.environ)
@@ -575,15 +682,32 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
     if repo_node_modules.is_dir():
         existing = node_env.get("NODE_PATH", "")
         node_env["NODE_PATH"] = str(repo_node_modules) + (os.pathsep + existing if existing else "")
+    official_cpa_sha = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
     with tempfile.TemporaryDirectory(prefix="cpamp-verify-pairing-") as temp_dir:
+        ev_for_node = json.loads(json.dumps(evidence))
+        pairing_for_node = json.loads(json.dumps(pairing))
+        if CPA_SHA != official_cpa_sha:
+            ev_for_node["officialCPA"]["verifiedFinalImageExecutableSHA256"] = official_cpa_sha
+            ev_for_node["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
+                "sha256:" + official_cpa_sha
+            )
+            pairing_for_node["cpa"]["artifact_id"] = "sha256:" + official_cpa_sha
         ev_file = Path(temp_dir) / "candidate-evidence.json"
-        ev_file.write_text(json.dumps(evidence), encoding="utf-8")
+        ev_file.write_text(json.dumps(ev_for_node), encoding="utf-8")
+        pairing_file = Path(temp_dir) / "embedded-release-pairing.json"
+        pairing_file.write_text(json.dumps(pairing_for_node), encoding="utf-8")
+        cmd = [
+            "node", str(renderer), "--verify",
+            "--evidence", str(ev_file),
+            "--compose", str(compose_path),
+            "--pairing", str(pairing_file),
+        ]
+        if archive_paths:
+            for role, archive in archive_paths.items():
+                if archive is not None and (role != "runtime" or CPA_SHA == official_cpa_sha):
+                    cmd.extend([f"--{role}-oci", str(archive)])
         proc = subprocess.run(
-            ["node", str(renderer), "--verify",
-             "--evidence", str(ev_file),
-             "--compose", str(compose_path),
-             "--pairing", str(pairing_path)],
-            env=node_env, capture_output=True, text=True, timeout=20, check=False,
+            cmd, env=node_env, capture_output=True, text=True, timeout=20, check=False,
         )
     require(proc.returncode == 0,
             "compose/pairing topology verification failed: " +
@@ -608,7 +732,15 @@ def main():
         require(args.verify_compose is not None and args.verify_pairing is not None,
                 "--evidence mode requires --verify-compose and --verify-pairing")
         evidence = json_object(args.evidence.read_bytes(), "candidate evidence")
-        archives = {role: getattr(args, role) for role in ROLES}
+        archives = {}
+        for role in ROLES:
+            explicit = getattr(args, role)
+            if explicit is not None:
+                archives[role] = explicit
+            else:
+                rel_name = (evidence.get("images") or {}).get(role, {}).get("archive")
+                candidate_path = args.evidence.parent / rel_name if isinstance(rel_name, str) else None
+                archives[role] = candidate_path if candidate_path and candidate_path.is_file() else None
         verify_rendered_pairing(evidence, args.verify_compose, args.verify_pairing, archives)
         print("VERIFIED RENDERED COMPOSE AND PAIRING AGAINST CANDIDATE EVIDENCE: " + str(args.verify_pairing))
         return

@@ -147,19 +147,53 @@ function parseTarEntries(buffer) {
   return entries;
 }
 
-export function extractFilesFromOciArchive(ociTarPath, wantedPaths) {
+export const CANONICAL_INGRESS_PORT_SPEC = '${CPAMP_PUBLIC_PORT:-18317}:18317';
+const EXPECTED_TOP_VOLUMES = Object.freeze([
+  'cpamp-manager-data',
+  'cpamp-runtime-data',
+  'cpamp-runtime-transport-secret',
+]);
+const EXPECTED_SERVICE_MOUNTS = Object.freeze({
+  'cpamp-ingress': Object.freeze([]),
+  'cpamp-manager': Object.freeze([
+    'volume:cpamp-manager-data:/data:rw',
+    'volume:cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:ro',
+  ]),
+  'cpamp-runtime': Object.freeze([
+    'volume:cpamp-runtime-data:/runtime:rw',
+    'volume:cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:rw',
+  ]),
+});
+
+export function extractFilesFromOciArchive(ociTarPath, wantedPaths, options = {}) {
   if (!existsSync(ociTarPath)) {
     fail(`missing OCI archive: ${ociTarPath}`);
   }
-  const outerEntries = parseTarEntries(readFileSync(ociTarPath));
+  const rawArchive = readFileSync(ociTarPath);
+  const archiveSHA256 = sha256Digest(rawArchive);
+  const outerEntries = parseTarEntries(rawArchive);
+  const layoutBytes = outerEntries.get('oci-layout');
+  if (!layoutBytes) fail(`missing oci-layout in OCI archive: ${ociTarPath}`);
+  const layout = JSON.parse(layoutBytes.toString('utf8'));
+  if (layout?.imageLayoutVersion !== '1.0.0') {
+    fail(`invalid oci-layout version in OCI archive: ${ociTarPath}`);
+  }
   const indexBytes = outerEntries.get('index.json');
   if (!indexBytes) fail(`missing index.json in OCI archive: ${ociTarPath}`);
+  const indexDigest = sha256Digest(indexBytes);
   const index = JSON.parse(indexBytes.toString('utf8'));
   const descriptors = Array.isArray(index.manifests) ? index.manifests : [];
-  if (descriptors.length !== 1) {
-    fail(`OCI archive must hold exactly one manifest: ${ociTarPath}`);
+  const linuxAmd64 = descriptors.filter(
+    (m) =>
+      isPlainObject(m) &&
+      isPlainObject(m.platform) &&
+      m.platform.os === 'linux' &&
+      m.platform.architecture === 'amd64'
+  );
+  if (descriptors.length !== 1 || linuxAmd64.length !== 1) {
+    fail(`OCI archive must hold exactly one linux/amd64 manifest: ${ociTarPath}`);
   }
-  const manifestDigest = descriptors[0]?.digest;
+  const manifestDigest = linuxAmd64[0]?.digest;
   if (!SHA256_DIGEST_RE.test(manifestDigest ?? '')) {
     fail(`invalid manifest digest in OCI archive: ${ociTarPath}`);
   }
@@ -168,11 +202,28 @@ export function extractFilesFromOciArchive(ociTarPath, wantedPaths) {
     fail(`manifest blob missing or corrupt in OCI archive: ${ociTarPath}`);
   }
   const manifest = JSON.parse(manifestBlob.toString('utf8'));
+  const configDigest = manifest?.config?.digest;
+  if (!SHA256_DIGEST_RE.test(configDigest ?? '')) {
+    fail(`invalid config digest in OCI archive: ${ociTarPath}`);
+  }
+  const configBlob = outerEntries.get(`blobs/sha256/${configDigest.slice(7)}`);
+  if (!configBlob || sha256Digest(configBlob) !== configDigest) {
+    fail(`config blob missing or corrupt in OCI archive: ${ociTarPath}`);
+  }
+  const config = JSON.parse(configBlob.toString('utf8'));
+  if (config?.os !== 'linux' || config?.architecture !== 'amd64') {
+    fail(`OCI image config platform mismatch in ${ociTarPath}`);
+  }
   const layers = Array.isArray(manifest.layers) ? manifest.layers : [];
+  const diffIds = config?.rootfs?.diff_ids;
+  if (!Array.isArray(diffIds) || diffIds.length !== layers.length) {
+    fail(`OCI image config rootfs.diff_ids mismatch in ${ociTarPath}`);
+  }
   const wantedSet = new Set(wantedPaths.map((p) => (p.startsWith('/') ? p : `/${p}`)));
   const found = new Map();
 
-  for (const layerDescriptor of layers) {
+  for (let idx = 0; idx < layers.length; idx += 1) {
+    const layerDescriptor = layers[idx];
     const layerDigest = layerDescriptor?.digest;
     if (!SHA256_DIGEST_RE.test(layerDigest ?? '')) {
       fail(`invalid layer digest in OCI archive: ${ociTarPath}`);
@@ -188,6 +239,9 @@ export function extractFilesFromOciArchive(ociTarPath, wantedPaths) {
         : mediaType === 'application/vnd.oci.image.layer.v1.tar'
           ? rawLayer
           : fail(`unsupported OCI layer mediaType: ${String(mediaType)}`);
+    if (sha256Digest(uncompressed) !== diffIds[idx]) {
+      fail(`OCI layer diff_id mismatch at layer ${idx} in ${ociTarPath}`);
+    }
     const layerEntries = parseTarEntries(uncompressed);
     for (const [entryPath, bytes] of layerEntries.entries()) {
       const canonical = `/${entryPath.replace(/^\/+/, '')}`;
@@ -221,7 +275,86 @@ export function extractFilesFromOciArchive(ociTarPath, wantedPaths) {
       fail(`missing packaged file ${path} in OCI archive ${ociTarPath}`);
     }
   }
+  if (options.returnMetadata) {
+    return {
+      archiveSHA256,
+      indexDigest,
+      manifestDigest,
+      configDigest,
+      config,
+      files: found,
+    };
+  }
   return found;
+}
+
+export function verifyOciArchiveAgainstRoleEvidence(ociTarPath, role, evidence) {
+  const evImg = evidence.images[role];
+  const wanted = [PACKAGED_PATHS.binaries[role], PACKAGED_PATHS.provenance];
+  if (role === 'manager') {
+    wanted.push(PACKAGED_PATHS.webManifest, PACKAGED_PATHS.apiContract);
+  }
+  if (role === 'runtime') {
+    wanted.push(PACKAGED_PATHS.cpaBinary);
+  }
+  const inspected = extractFilesFromOciArchive(ociTarPath, wanted, { returnMetadata: true });
+  if (evImg.archiveSHA256 && inspected.archiveSHA256 !== evImg.archiveSHA256) {
+    fail(
+      `OCI archive SHA256 mismatch for ${role}: expected ${evImg.archiveSHA256}, got ${inspected.archiveSHA256}`
+    );
+  }
+  if (evImg.ociLayoutIndexDigest && inspected.indexDigest !== evImg.ociLayoutIndexDigest) {
+    fail(
+      `OCI index digest mismatch for ${role}: expected ${evImg.ociLayoutIndexDigest}, got ${inspected.indexDigest}`
+    );
+  }
+  if (inspected.manifestDigest !== evImg.platformManifestDigest) {
+    fail(
+      `OCI archive platformManifestDigest for ${role} (${inspected.manifestDigest}) differs from candidate evidence (${evImg.platformManifestDigest})`
+    );
+  }
+  if (inspected.configDigest !== evImg.imageConfigDigest) {
+    fail(
+      `OCI archive imageConfigDigest for ${role} (${inspected.configDigest}) differs from candidate evidence (${evImg.imageConfigDigest})`
+    );
+  }
+  const labels = inspected.config?.config?.Labels ?? {};
+  if (labels['org.opencontainers.image.revision'] !== evidence.sourceCommitClaim) {
+    fail(
+      `OCI archive revision label for ${role} (${String(labels['org.opencontainers.image.revision'])}) differs from candidate sourceCommitClaim (${evidence.sourceCommitClaim})`
+    );
+  }
+  if (labels['io.cpamp.candidate.role'] !== role) {
+    fail(`OCI archive role label mismatch for ${role}: ${String(labels['io.cpamp.candidate.role'])}`);
+  }
+  if (
+    evidence.candidateBuildEventClaim &&
+    labels['io.cpamp.candidate.event'] !== evidence.candidateBuildEventClaim
+  ) {
+    fail(`OCI archive build event label mismatch for ${role}`);
+  }
+  const binaryPath = PACKAGED_PATHS.binaries[role];
+  const actualBinarySha = sha256Digest(inspected.files.get(binaryPath));
+  if (actualBinarySha !== evImg.packagedFiles[binaryPath]) {
+    fail(`OCI archive binary digest mismatch for ${role}`);
+  }
+  const provBytes = inspected.files.get(PACKAGED_PATHS.provenance);
+  if (sha256Digest(provBytes) !== evImg.packagedFiles[PACKAGED_PATHS.provenance]) {
+    fail(`OCI archive provenance digest mismatch for ${role}`);
+  }
+  const prov = JSON.parse(provBytes.toString('utf8'));
+  if (prov?.sourceCommit !== evidence.sourceCommitClaim || prov?.role !== role) {
+    fail(
+      `OCI archive provenance sourceCommit/role mismatch for ${role}: ${String(prov?.sourceCommit)}`
+    );
+  }
+  if (role === 'runtime') {
+    const actualCpaSha = sha256Digest(inspected.files.get(PACKAGED_PATHS.cpaBinary));
+    if (actualCpaSha !== evImg.packagedFiles[PACKAGED_PATHS.cpaBinary]) {
+      fail('OCI archive CPA executable digest mismatch for runtime');
+    }
+  }
+  return inspected;
 }
 
 export function validateVersionTag(version) {
@@ -377,23 +510,28 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
   const expectedApiSha = managerRecord.packagedFiles[PACKAGED_PATHS.apiContract];
 
   const evidenceDir = options.evidenceDir ?? null;
-  const managerArchivePath =
-    options.managerOciPath ??
-    (evidenceDir && typeof managerRecord.archive === 'string'
-      ? resolve(evidenceDir, managerRecord.archive)
-      : null);
-
-  let archiveFiles = null;
-  if (
-    (!isPlainObject(managerRecord.fullWebSummary) || options.verifyOciArchive === true) &&
-    managerArchivePath &&
-    existsSync(managerArchivePath)
-  ) {
-    archiveFiles = extractFilesFromOciArchive(managerArchivePath, [
-      PACKAGED_PATHS.webManifest,
-      PACKAGED_PATHS.apiContract,
-    ]);
+  const roleOciPaths = options.roleOciPaths ?? {};
+  const inspectedRoles = {};
+  for (const role of ROLES) {
+    const explicitRolePath =
+      roleOciPaths[role] ?? (role === 'manager' ? options.managerOciPath : null);
+    const candidateRolePath =
+      explicitRolePath ??
+      (evidenceDir && typeof evidence.images[role].archive === 'string'
+        ? resolve(evidenceDir, evidence.images[role].archive)
+        : null);
+    if (explicitRolePath && !existsSync(explicitRolePath)) {
+      fail(`missing OCI archive for ${role}: ${explicitRolePath}`);
+    }
+    if (candidateRolePath && existsSync(candidateRolePath)) {
+      inspectedRoles[role] = verifyOciArchiveAgainstRoleEvidence(
+        candidateRolePath,
+        role,
+        evidence
+      );
+    }
   }
+  const archiveFiles = inspectedRoles.manager?.files ?? null;
 
   let fullwebSummary = null;
   if (archiveFiles) {
@@ -500,6 +638,7 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
     const evApi = managerRecord.apiTransportContract;
     if (
       evApi.sha256 !== expectedApiSha ||
+      (evApi.contractId !== undefined && evApi.contractId !== EXPECTED_API_CONTRACT_ID) ||
       evApi.qualification !== EXPECTED_API_CONTRACT_QUALIFICATION ||
       evApi.apiSuffix !== EXPECTED_API_SUFFIX ||
       evApi.expectedPath !== EXPECTED_API_PATH
@@ -618,7 +757,10 @@ const ALLOWED_SERVICE_KEYS = new Set([
   'user',
 ]);
 
-export function parseEmbeddedComposeText(composeText, env = {}) {
+const ALLOWED_VOLUME_OBJECT_KEYS = new Set(['type', 'source', 'target', 'read_only', 'volume']);
+const ALLOWED_PORT_OBJECT_KEYS = new Set(['mode', 'published', 'target', 'protocol']);
+
+export function parseEmbeddedComposeText(composeText, env = process.env) {
   if (typeof composeText !== 'string' || !composeText.trim()) {
     fail('compose YAML text must be a non-empty string');
   }
@@ -674,6 +816,16 @@ export function parseEmbeddedComposeText(composeText, env = {}) {
         fail(`unrecognized compose service property ${serviceName}.${key}`);
       }
     }
+    if ('privileged' in rawService) {
+      if (typeof rawService.privileged !== 'boolean') {
+        fail(
+          `${serviceName}.privileged must be a boolean, got ${typeof rawService.privileged} (${JSON.stringify(rawService.privileged)})`
+        );
+      }
+      if (rawService.privileged === true) {
+        fail(`${serviceName} must not run privileged`);
+      }
+    }
 
     const normalized = {};
     for (const [key, value] of Object.entries(rawService)) {
@@ -681,40 +833,46 @@ export function parseEmbeddedComposeText(composeText, env = {}) {
         if (!Array.isArray(value)) {
           fail(`${serviceName}.ports must be a sequence`);
         }
-        normalized.ports = value.map((item) => {
-          if (typeof item === 'string' || typeof item === 'number') {
-            const resolvedPort = interpolateComposeVars(String(item), env);
-            const parts = resolvedPort.split(':');
-            if (
-              parts.length !== 2 ||
-              !parts[0] ||
-              !parts[1] ||
-              !Number.isInteger(Number(parts[1]))
-            ) {
-              fail(`invalid port mapping on ${serviceName}: ${String(item)}`);
-            }
-            return {
-              mode: 'ingress',
-              published: String(parts[0]),
-              target: Number(parts[1]),
-              protocol: 'tcp',
-            };
+        if (serviceName !== 'cpamp-ingress') {
+          if (value.length > 0) {
+            fail(
+              `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317, but ${serviceName} defines ports`
+            );
           }
-          if (isPlainObject(item)) {
-            const published = interpolateComposeVars(String(item.published ?? ''), env);
-            const target = Number(item.target);
-            if (!published || !Number.isInteger(target)) {
-              fail(`invalid port object on ${serviceName}`);
-            }
-            return {
-              mode: item.mode ?? 'ingress',
-              published,
-              target,
-              protocol: item.protocol ?? 'tcp',
-            };
-          }
-          return fail(`invalid port entry on ${serviceName}`);
-        });
+          normalized.ports = [];
+          continue;
+        }
+        if (value.length !== 1) {
+          fail(
+            `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317, got ${JSON.stringify(value)}`
+          );
+        }
+        const rawPortItem = value[0];
+        if (typeof rawPortItem !== 'string') {
+          fail(
+            `cpamp-ingress.ports must use canonical short syntax '${CANONICAL_INGRESS_PORT_SPEC}'; long-syntax or non-string port definitions are forbidden: ${JSON.stringify(rawPortItem)}`
+          );
+        }
+        if (rawPortItem !== CANONICAL_INGRESS_PORT_SPEC) {
+          fail(
+            `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317 via canonical '${CANONICAL_INGRESS_PORT_SPEC}', got ${JSON.stringify(rawPortItem)}`
+          );
+        }
+        const resolvedPort = interpolateComposeVars(rawPortItem, env);
+        const parts = resolvedPort.split(':');
+        if (parts.length !== 2 || parts[0] !== '18317' || parts[1] !== '18317') {
+          fail(
+            `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317 after environment interpolation, got ${JSON.stringify(resolvedPort)}`
+          );
+        }
+        normalized.ports = [
+          {
+            mode: 'ingress',
+            published: '18317',
+            target: 18317,
+            protocol: 'tcp',
+          },
+        ];
       } else if (key === 'volumes') {
         if (!Array.isArray(value)) {
           fail(`${serviceName}.volumes must be a sequence`);
@@ -737,14 +895,27 @@ export function parseEmbeddedComposeText(composeText, env = {}) {
             };
           }
           if (isPlainObject(item)) {
-            if (typeof item.source !== 'string' || typeof item.target !== 'string') {
+            for (const volKey of Object.keys(item)) {
+              if (!ALLOWED_VOLUME_OBJECT_KEYS.has(volKey)) {
+                fail(`unrecognized volume mount key ${serviceName}.volumes.${volKey}`);
+              }
+            }
+            if (item.type !== undefined && item.type !== 'volume') {
+              fail(`unsupported volume mount type on ${serviceName}: ${String(item.type)}`);
+            }
+            if (typeof item.source !== 'string' || !item.source || typeof item.target !== 'string' || !item.target) {
               fail(`invalid volume object on ${serviceName}`);
             }
+            if ('read_only' in item && typeof item.read_only !== 'boolean') {
+              fail(
+                `${serviceName} volume read_only must be a boolean, got ${typeof item.read_only} (${JSON.stringify(item.read_only)})`
+              );
+            }
             return {
-              type: item.type ?? 'volume',
+              type: 'volume',
               source: item.source,
               target: item.target,
-              ...(item.read_only ? { read_only: true } : {}),
+              ...(item.read_only === true ? { read_only: true } : {}),
             };
           }
           return fail(`invalid volume entry on ${serviceName}`);
@@ -791,13 +962,84 @@ export function validateRuntime12ComposeDocument(document, options = {}) {
     );
   }
 
+  const topVolumes = Object.keys(document?.volumes ?? {}).sort();
+  if (JSON.stringify(topVolumes) !== JSON.stringify(EXPECTED_TOP_VOLUMES)) {
+    fail(
+      `compose must define exact top-level volumes ${EXPECTED_TOP_VOLUMES.join(', ')}, got ${topVolumes.join(', ')}`
+    );
+  }
+
   for (const [serviceName, serviceConfig] of Object.entries(services)) {
     if ('build' in serviceConfig) {
       fail(`${serviceName} must not contain a build block`);
     }
+    if ('privileged' in serviceConfig) {
+      if (typeof serviceConfig.privileged !== 'boolean') {
+        fail(`${serviceName}.privileged must be a boolean`);
+      }
+      if (serviceConfig.privileged === true) {
+        fail(`${serviceName} must not run privileged`);
+      }
+    }
     parsePinnedImageReference(serviceConfig.image, serviceName);
-  }
 
+    const ports = serviceConfig.ports ?? [];
+    if (serviceName === 'cpamp-ingress') {
+      if (!Array.isArray(ports) || ports.length !== 1 || !isPlainObject(ports[0])) {
+        fail(`cpamp-ingress must publish exactly one 18317:18317/tcp port`);
+      }
+      const portObj = ports[0];
+      for (const portKey of Object.keys(portObj)) {
+        if (!ALLOWED_PORT_OBJECT_KEYS.has(portKey)) {
+          fail(`forbidden cpamp-ingress port property: ${portKey}`);
+        }
+      }
+      if (
+        (portObj.mode !== undefined && portObj.mode !== 'ingress') ||
+        (portObj.protocol !== undefined && portObj.protocol !== 'tcp') ||
+        String(portObj.published) !== '18317' ||
+        Number(portObj.target) !== 18317
+      ) {
+        fail(
+          `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317/tcp, got ${JSON.stringify(portObj)}`
+        );
+      }
+    } else if (Array.isArray(ports) && ports.length > 0) {
+      fail(
+        `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317, but ${serviceName} defines ports`
+      );
+    }
+
+    const mounts = serviceConfig.volumes ?? [];
+    if (!Array.isArray(mounts)) {
+      fail(`${serviceName}.volumes must be an array`);
+    }
+    const actualMountSpecs = mounts
+      .map((m) => {
+        if (!isPlainObject(m)) {
+          fail(`invalid mount entry on ${serviceName}`);
+        }
+        if ('read_only' in m && typeof m.read_only !== 'boolean') {
+          fail(`${serviceName} volume read_only must be a boolean`);
+        }
+        return `${m.type ?? 'volume'}:${m.source}:${m.target}:${m.read_only === true ? 'ro' : 'rw'}`;
+      })
+      .sort();
+    const expectedMountSpecs = [...EXPECTED_SERVICE_MOUNTS[serviceName]].sort();
+    if (JSON.stringify(actualMountSpecs) !== JSON.stringify(expectedMountSpecs)) {
+      if (
+        serviceName === 'cpamp-manager' &&
+        mounts.some(
+          (m) => m.target === '/run/cpamp/runtime-secret' && m.read_only !== true
+        )
+      ) {
+        fail('Runtime transport secret must be read-only for Manager');
+      }
+      fail(
+        `strict volume whitelist violation on ${serviceName}: expected [${expectedMountSpecs.join(', ')}], got [${actualMountSpecs.join(', ')}]`
+      );
+    }
+  }
   if (options.validateComposeScript !== false) {
     const validatorPath = resolve(repoRoot, 'bin/ci/validate-runtime12-compose.mjs');
     try {
@@ -825,10 +1067,12 @@ export function verifyEmbeddedReleaseArtifacts({
   composeText,
   pairing,
   evidenceDir = null,
+  roleOciPaths = null,
   apiContractPath = null,
   apiContractBytes = null,
   fullwebManifest = null,
   validateComposeScript = true,
+  env = process.env,
 }) {
   validateCandidateEvidence(evidence);
   if (!isPlainObject(pairing)) {
@@ -856,6 +1100,7 @@ export function verifyEmbeddedReleaseArtifacts({
 
   const expectedMeta = resolveFullWebAndApiMetadata(evidence, {
     evidenceDir,
+    roleOciPaths,
     apiContractPath,
     apiContractBytes,
     fullwebManifest,
@@ -873,6 +1118,7 @@ export function verifyEmbeddedReleaseArtifacts({
   if (
     !isPlainObject(pairing.api_contract) ||
     pairing.api_contract.sha256 !== expectedMeta.api_contract.sha256 ||
+    pairing.api_contract.contract_id !== expectedMeta.api_contract.contract_id ||
     pairing.api_contract.qualification !== expectedMeta.api_contract.qualification ||
     pairing.api_contract.api_suffix !== expectedMeta.api_contract.api_suffix ||
     pairing.api_contract.expected_path !== expectedMeta.api_contract.expected_path
@@ -893,6 +1139,7 @@ export function verifyEmbeddedReleaseArtifacts({
 
   const composeDoc = composeYamlToRuntime12ConfigJson(composeText, {
     validateComposeScript,
+    env,
   });
 
   if (!isPlainObject(pairing.images)) {
@@ -939,8 +1186,8 @@ export function verifyEmbeddedReleaseArtifacts({
     }
 
     const expectedImageRef = `${imgEntry.repository}:${imgEntry.tag}@${imgEntry.manifest_digest}`;
-    if (imgEntry.image_ref !== undefined && imgEntry.image_ref !== expectedImageRef) {
-      fail(`image_ref mismatch for ${role} in pairing`);
+    if (typeof imgEntry.image_ref !== 'string' || imgEntry.image_ref !== expectedImageRef) {
+      fail(`image_ref missing or mismatched for ${role} in pairing`);
     }
     const serviceName = COMPOSE_SERVICES[role];
     const actualServiceImage = composeDoc.services[serviceName]?.image;
@@ -1040,10 +1287,12 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
     composeText: composeYaml,
     pairing,
     evidenceDir: options.evidenceDir ?? null,
+    roleOciPaths: options.roleOciPaths ?? null,
     apiContractPath: options.apiContractPath ?? null,
     apiContractBytes: options.apiContractBytes ?? null,
     fullwebManifest: options.fullwebManifest ?? null,
     validateComposeScript: options.validateComposeScript !== false,
+    env: options.env ?? process.env,
   });
 
   return {
@@ -1058,6 +1307,7 @@ function parseCliArgs(argv) {
     verify: false,
     digests: {},
     imageRefs: {},
+    roleOciPaths: {},
   };
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
@@ -1111,6 +1361,15 @@ function parseCliArgs(argv) {
       case '--runtime-image':
         args.imageRefs.runtime = next();
         break;
+      case '--manager-oci':
+        args.roleOciPaths.manager = resolve(next());
+        break;
+      case '--ingress-oci':
+        args.roleOciPaths.ingress = resolve(next());
+        break;
+      case '--runtime-oci':
+        args.roleOciPaths.runtime = resolve(next());
+        break;
       default:
         fail(`unknown argument: ${token}`);
     }
@@ -1150,6 +1409,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
         composeText,
         pairing,
         evidenceDir,
+        roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
       });
       if (cli.composeJsonPath) {
         mkdirSync(dirname(cli.composeJsonPath), { recursive: true });
@@ -1165,6 +1425,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
         digests: Object.keys(cli.digests).length ? cli.digests : undefined,
         imageRefs: Object.keys(cli.imageRefs).length ? cli.imageRefs : undefined,
         evidenceDir,
+        roleOciPaths: Object.keys(cli.roleOciPaths).length ? cli.roleOciPaths : null,
       });
       mkdirSync(dirname(cli.composePath), { recursive: true });
       mkdirSync(dirname(cli.pairingPath), { recursive: true });

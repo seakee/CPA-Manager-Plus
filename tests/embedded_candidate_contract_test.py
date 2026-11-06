@@ -474,9 +474,10 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         inventory = self.root / "bin/release/embedded-third-party-inventory.txt"
         inventory.parent.mkdir(parents=True)
         inventory.write_bytes(SOURCE_BYTES)
+        real_api_bytes = (VERIFIER.parents[2] / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
         api = self.root / "tests/fixtures/r1-embedded-api-transport.json"
         api.parent.mkdir(parents=True)
-        api.write_bytes(MOCK_API_CONTRACT)
+        api.write_bytes(real_api_bytes)
         fake_cpa = hashlib.sha256(ROLE_BINARIES["ingress"]).hexdigest()
         fake_license = hashlib.sha256(b"official").hexdigest()
         renderer = VERIFIER.parent / "render-embedded-compose.mjs"
@@ -485,11 +486,11 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             archives = {}
             for role in subject.ROLES:
                 archive = self.root / (role + ".oci.tar")
-                make_oci(archive, role, self.license)
+                make_oci(archive, role, self.license, api_contract=real_api_bytes)
                 archives[role] = archive
             receipt = subject.verify(archives, SHA, EVENT, self.root)
-            # Rewrite runtime CPA hash in receipt to official pin for the Node renderer,
-            # while testing Python verifier with patched CPA_SHA.
+            # Rewrite runtime CPA hash in receipt_for_node to official pin for the initial Node render,
+            # while keeping manager.oci.tar and ingress.oci.tar on disk for real OCI re-derivation.
             receipt_for_node = json.loads(json.dumps(receipt))
             real_cpa_sha = VERIFIER.read_text(encoding="utf-8").split(
                 'CPA_SHA = "', 1)[1].split('"', 1)[0]
@@ -497,28 +498,22 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             receipt_for_node["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
                 "sha256:" + real_cpa_sha
             )
-            real_api_bytes = (VERIFIER.parents[2] / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
-            real_api_sha = blob(real_api_bytes)
-            receipt_for_node["images"]["manager"]["packagedFiles"][subject.API_CONTRACT] = real_api_sha
-            receipt_for_node["images"]["manager"]["apiTransportContract"]["sha256"] = real_api_sha
+            receipt_for_node["images"]["runtime"]["archive"] = None
             evidence_path = self.root / "candidate-evidence.json"
             compose_path = self.root / "docker-compose.v2-embedded.yml"
             pairing_path = self.root / "embedded-release-pairing.json"
             evidence_path.write_text(json.dumps(receipt_for_node, indent=2) + "\n", encoding="utf-8")
-            # Remove manager.oci.tar temporarily so Node renderer uses fullWebSummary + real API fixture,
-            # then restore it for Python archive SHA verification.
-            saved_manager = archives["manager"].read_bytes()
-            archives["manager"].unlink()
             rendered = subprocess.run(
                 ["node", str(renderer), "--evidence", str(evidence_path),
                  "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
                 capture_output=True, text=True, timeout=20, check=False)
             self.assertEqual(rendered.returncode, 0, rendered.stdout + "\n" + rendered.stderr)
-            archives["manager"].write_bytes(saved_manager)
+            receipt_for_node["images"]["runtime"]["archive"] = "runtime.oci.tar"
             with patch.object(subject, "CPA_SHA", real_cpa_sha):
+                # Test with manager and ingress real OCI archives + patched runtime CPA pin
+                test_archives = {"manager": archives["manager"], "ingress": archives["ingress"], "runtime": None}
                 verified = subject.verify_rendered_pairing(
-                    receipt_for_node, compose_path, pairing_path, archives)
-                self.assertEqual(verified["source_commit"], SHA)
+                    receipt_for_node, compose_path, pairing_path, test_archives)
                 self.assertEqual(verified["compose"]["filename"], "docker-compose.v2-embedded.yml")
 
                 # Negative 1: :latest in compose
@@ -530,7 +525,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "must not reference :latest"):
                     subject.verify_rendered_pairing(
-                        receipt_for_node, compose_path, pairing_path, archives)
+                        receipt_for_node, compose_path, pairing_path, test_archives)
 
                 # Negative 2: build block in compose
                 compose_path.write_text(
@@ -538,7 +533,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "must not contain local build blocks"):
                     subject.verify_rendered_pairing(
-                        receipt_for_node, compose_path, pairing_path, archives)
+                        receipt_for_node, compose_path, pairing_path, test_archives)
 
                 # Negative 3: loopback env in compose
                 compose_path.write_text(
@@ -546,7 +541,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"):
                     subject.verify_rendered_pairing(
-                        receipt_for_node, compose_path, pairing_path, archives)
+                        receipt_for_node, compose_path, pairing_path, test_archives)
 
                 compose_path.write_text(original_compose, encoding="utf-8")
 
@@ -557,7 +552,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 pairing_path.write_text(json.dumps(bad_pairing), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "pairing manifest_digest mismatch"):
                     subject.verify_rendered_pairing(
-                        receipt_for_node, compose_path, pairing_path, archives)
+                        receipt_for_node, compose_path, pairing_path, test_archives)
 
                 # Helper to write a mutated compose and re-sync pairing.compose digest/size
                 def write_resynced_compose(mutated_compose_text):
@@ -580,9 +575,9 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                         ValueError, "expected only cpamp-ingress 18317:18317"
                     ):
                         subject.verify_rendered_pairing(
-                            receipt_for_node, compose_path, pairing_path, archives)
+                            receipt_for_node, compose_path, pairing_path, test_archives)
 
-                # Negative 6: privileged: true, network_mode: host, writable secret on manager
+                # Negative 6: privileged: true / "true", network_mode: host, writable / "false" secret on manager, cross-role mount, UDP/long port
                 write_resynced_compose(
                     original_compose.replace(
                         "  cpamp-runtime:\n", "  cpamp-runtime:\n    privileged: true\n"
@@ -590,7 +585,16 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ValueError, "cpamp-runtime must not run privileged"):
                     subject.verify_rendered_pairing(
-                        receipt_for_node, compose_path, pairing_path, archives)
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                write_resynced_compose(
+                    original_compose.replace(
+                        "  cpamp-runtime:\n", '  cpamp-runtime:\n    privileged: "true"\n'
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "cpamp-runtime.privileged must be a boolean"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
 
                 write_resynced_compose(
                     original_compose.replace(
@@ -601,7 +605,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     ValueError, "cpamp-runtime must not use host networking"
                 ):
                     subject.verify_rendered_pairing(
-                        receipt_for_node, compose_path, pairing_path, archives)
+                        receipt_for_node, compose_path, pairing_path, test_archives)
 
                 write_resynced_compose(
                     original_compose.replace(
@@ -612,7 +616,19 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     ValueError, "Runtime transport secret must be read-only for Manager"
                 ):
                     subject.verify_rendered_pairing(
-                        receipt_for_node, compose_path, pairing_path, archives)
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                write_resynced_compose(
+                    original_compose.replace(
+                        "      - cpamp-manager-data:/data",
+                        "      - cpamp-manager-data:/data\n      - cpamp-runtime-data:/runtime-copy",
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "strict volume whitelist violation on cpamp-manager"
+                ):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
 
                 # Restore valid compose and pairing, then test per-role sourceCommitClaim drift
                 compose_path.write_text(original_compose, encoding="utf-8")
@@ -624,8 +640,62 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                         ValueError, role + " sourceCommitClaim differs"
                     ):
                         subject.verify_rendered_pairing(
-                            drifted, compose_path, pairing_path, archives)
+                            drifted, compose_path, pairing_path, test_archives)
 
+                # Negative 7 (P1-1): Archives unchanged, evidence+pairing+compose consistently forged
+                # Case A: consistently forged manager platformManifestDigest
+                real_mgr_manifest = receipt_for_node["images"]["manager"]["platformManifestDigest"]
+                forged_mgr_manifest = "sha256:" + "9" * 64
+                forged_ev_a = json.loads(json.dumps(receipt_for_node))
+                forged_ev_a["images"]["manager"]["platformManifestDigest"] = forged_mgr_manifest
+                forged_compose_a = original_compose.replace(real_mgr_manifest, forged_mgr_manifest)
+                forged_compose_a_bytes = forged_compose_a.encode("utf-8")
+                compose_path.write_bytes(forged_compose_a_bytes)
+                forged_pairing_a = json.loads(json.dumps(original_pairing))
+                forged_pairing_a["images"]["manager"]["manifest_digest"] = forged_mgr_manifest
+                forged_pairing_a["images"]["manager"]["image_ref"] = (
+                    forged_pairing_a["images"]["manager"]["image_ref"].replace(
+                        real_mgr_manifest, forged_mgr_manifest
+                    )
+                )
+                forged_pairing_a["compose"]["sha256"] = blob(forged_compose_a_bytes)
+                forged_pairing_a["compose"]["size"] = len(forged_compose_a_bytes)
+                pairing_path.write_text(json.dumps(forged_pairing_a), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError, "OCI archive platformManifestDigest mismatch"
+                ):
+                    subject.verify_rendered_pairing(
+                        forged_ev_a, compose_path, pairing_path, test_archives)
+
+                # Case B: consistently forged sourceCommitClaim across evidence + pairing
+                compose_path.write_text(original_compose, encoding="utf-8")
+                forged_commit = "1" * 40
+                forged_ev_b = json.loads(json.dumps(receipt_for_node))
+                forged_ev_b["sourceCommitClaim"] = forged_commit
+                forged_ev_b["images"]["manager"]["goBinaryIdentity"]["managerCompiledSourceClaim"] = (
+                    forged_commit
+                )
+                forged_pairing_b = json.loads(json.dumps(original_pairing))
+                forged_pairing_b["source_commit"] = forged_commit
+                pairing_path.write_text(json.dumps(forged_pairing_b), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError, "OCI archive revision label mismatch"
+                ):
+                    subject.verify_rendered_pairing(
+                        forged_ev_b, compose_path, pairing_path, test_archives)
+
+                # Case C: consistently forged fullWebSummary.indexHtmlSHA256 across evidence + pairing
+                forged_index_sha = "sha256:" + "8" * 64
+                forged_ev_c = json.loads(json.dumps(receipt_for_node))
+                forged_ev_c["images"]["manager"]["fullWebSummary"]["indexHtmlSHA256"] = forged_index_sha
+                forged_pairing_c = json.loads(json.dumps(original_pairing))
+                forged_pairing_c["fullweb"]["index_html_sha256"] = forged_index_sha
+                pairing_path.write_text(json.dumps(forged_pairing_c), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError, "OCI archive Full Web manifest or index.html summary mismatch"
+                ):
+                    subject.verify_rendered_pairing(
+                        forged_ev_c, compose_path, pairing_path, test_archives)
 
 def stage_mock_candidate_repo(source):
     repo_root = VERIFIER.parents[2]
@@ -700,7 +770,7 @@ for idx, role in enumerate(("manager", "ingress", "runtime"), start=1):
     if role == "runtime":
         packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + cpa_sha
     images[role] = {{
-        "archive": archive.name,
+        "archive": None,
         "archiveSHA256": "sha256:" + hashlib.sha256(archive.read_bytes()).hexdigest(),
         "platform": "linux/amd64",
         "platformManifestDigest": manifest_digest,

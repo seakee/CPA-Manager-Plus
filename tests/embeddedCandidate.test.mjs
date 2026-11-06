@@ -512,6 +512,108 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
     expect(() => composeYamlToRuntime12ConfigJson(unrecognizedKeyCompose)).toThrow(
       /unrecognized compose service property cpamp-manager\.extra_hosts/
     );
+
+    // 7. P1-2: Non-boolean quoted strings for privileged or read_only
+    const quotedPrivilegedTrue = composeYaml.replace(
+      '  cpamp-runtime:\n',
+      '  cpamp-runtime:\n    privileged: "true"\n'
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(quotedPrivilegedTrue)).toThrow(
+      /cpamp-runtime\.privileged must be a boolean/
+    );
+    const quotedPrivilegedFalse = composeYaml.replace(
+      '  cpamp-runtime:\n',
+      '  cpamp-runtime:\n    privileged: "false"\n'
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(quotedPrivilegedFalse)).toThrow(
+      /cpamp-runtime\.privileged must be a boolean/
+    );
+    const quotedReadOnlyFalse = composeYaml.replace(
+      '      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:ro',
+      '      - type: volume\n        source: cpamp-runtime-transport-secret\n        target: /run/cpamp/runtime-secret\n        read_only: "false"'
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(quotedReadOnlyFalse)).toThrow(
+      /cpamp-manager volume read_only must be a boolean/
+    );
+    const quotedReadOnlyTrue = composeYaml.replace(
+      '      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:ro',
+      '      - type: volume\n        source: cpamp-runtime-transport-secret\n        target: /run/cpamp/runtime-secret\n        read_only: "true"'
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(quotedReadOnlyTrue)).toThrow(
+      /cpamp-manager volume read_only must be a boolean/
+    );
+
+    // 8. P1-3: Cross-role state volume mount on Manager
+    const crossRoleMountCompose = composeYaml.replace(
+      '      - cpamp-manager-data:/data',
+      '      - cpamp-manager-data:/data\n      - cpamp-runtime-data:/runtime-copy'
+    );
+    const resyncedCrossMountPairing = structuredClone(pairing);
+    resyncedCrossMountPairing.compose.sha256 =
+      'sha256:' + createHash('sha256').update(crossRoleMountCompose, 'utf8').digest('hex');
+    resyncedCrossMountPairing.compose.size = Buffer.byteLength(crossRoleMountCompose, 'utf8');
+    expect(() =>
+      verifyEmbeddedReleaseArtifacts({
+        evidence,
+        composeText: crossRoleMountCompose,
+        pairing: resyncedCrossMountPairing,
+      })
+    ).toThrow(/strict volume whitelist violation on cpamp-manager/);
+
+    // 9. P1-4: Env override, UDP protocol, long-syntax port object, literal different container port
+    expect(() =>
+      verifyEmbeddedReleaseArtifacts({
+        evidence,
+        composeText: composeYaml,
+        pairing,
+        env: { CPAMP_PUBLIC_PORT: '18318' },
+      })
+    ).toThrow(/expected only cpamp-ingress 18317:18317 after environment interpolation/);
+
+    const udpPortCompose = composeYaml.replace(
+      "      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
+      "      - '${CPAMP_PUBLIC_PORT:-18317}:18317/udp'"
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(udpPortCompose)).toThrow(
+      /expected only cpamp-ingress 18317:18317 via canonical/
+    );
+
+    const diffContainerPortCompose = composeYaml.replace(
+      "      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
+      "      - '${CPAMP_PUBLIC_PORT:-18317}:18318'"
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(diffContainerPortCompose)).toThrow(
+      /expected only cpamp-ingress 18317:18317 via canonical/
+    );
+
+    const longFormPortCompose = composeYaml.replace(
+      "      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
+      '      - target: 18317\n        published: "18317"\n        protocol: udp\n        host_ip: "0.0.0.0"\n        mode: host'
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(longFormPortCompose)).toThrow(
+      /long-syntax or non-string port definitions are forbidden/
+    );
+
+    // 10. P2-1: Required api_contract.contract_id and images.<role>.image_ref
+    const badContractIdPairing = structuredClone(pairing);
+    badContractIdPairing.api_contract.contract_id = 'forged-contract-id';
+    expect(() =>
+      verifyEmbeddedReleaseArtifacts({
+        evidence,
+        composeText: composeYaml,
+        pairing: badContractIdPairing,
+      })
+    ).toThrow(/api_contract summary mismatch/);
+
+    const missingImageRefPairing = structuredClone(pairing);
+    delete missingImageRefPairing.images.manager.image_ref;
+    expect(() =>
+      verifyEmbeddedReleaseArtifacts({
+        evidence,
+        composeText: composeYaml,
+        pairing: missingImageRefPairing,
+      })
+    ).toThrow(/image_ref missing or mismatched for manager/);
   });
 
   it('runs the CLI renderer and --verify mode end-to-end', () => {
