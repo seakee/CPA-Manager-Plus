@@ -6,6 +6,7 @@ import {
   markModelThinkingLevelsForClear,
   markModelThinkingLevelsForEdit,
 } from '@/types';
+import { updateOpenAIApiKey } from '@/utils/openAIKeyEntries';
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
@@ -294,6 +295,35 @@ describe('providersApi auth-index preservation', () => {
         'base-url': 'https://api.disabled-mixed.example/v1',
         'api-key-entries': [{ 'api-key': '' }, { 'api-key': 'sk-compat-b' }],
         models: [{ name: 'qwen-2.5-coder' }],
+      },
+    ]);
+  });
+
+  it('does not write back a cleared keyed entry as an empty api-key', async () => {
+    const keyedProvider = {
+      name: 'keyed-upstream',
+      'base-url': 'https://api.keyed.example/v1',
+      'api-key-entries': [{ 'api-key': 'sk-only-key' }],
+    };
+    mocks.get.mockImplementation(async (url: string) => {
+      if (url === '/openai-compatibility' || url === '/config') {
+        return { 'openai-compatibility': [keyedProvider] };
+      }
+      throw new Error(`unexpected url: ${url}`);
+    });
+    mocks.put.mockResolvedValue({});
+
+    const [provider] = await providersApi.getOpenAIProviders();
+    await providersApi.updateOpenAIProvider('keyed-upstream', 0, {
+      ...provider,
+      apiKeyEntries: [updateOpenAIApiKey(provider.apiKeyEntries[0], '')],
+    });
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'keyed-upstream',
+        'base-url': 'https://api.keyed.example/v1',
+        'api-key-entries': [],
       },
     ]);
   });

@@ -208,7 +208,9 @@ const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
   };
   if (weight !== undefined) result.weight = weight;
   if (authIndex) result.authIndex = authIndex;
-  return markPersistedOpenAIKeyEntry(result);
+  // Only entries that are keyless as persisted need the marker; a keyed entry the
+  // user later clears is a blank row and must not be written back as {"api-key": ""}.
+  return trimmed ? result : markPersistedOpenAIKeyEntry(result);
 };
 
 const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => {
