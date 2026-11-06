@@ -5,6 +5,9 @@ import i18n from '@/i18n';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
 import { ModelInputList } from '@/components/ui/ModelInputList';
 import { hasModelThinkingLevelsClearMarker, hasModelThinkingLevelsEditMarker } from '@/types';
+import { normalizeOpenAIProvider } from '@/services/api/transformers';
+import { isPersistedOpenAIKeyEntry } from '@/utils/openAIKeyEntries';
+import { providersApi as realProvidersApi } from '@/services/api/providers';
 
 const authState = vi.hoisted(() => ({
   serverVersion: 'v7.2.93' as string | null,
@@ -22,6 +25,9 @@ const mocks = vi.hoisted(() => ({
   showNotification: vi.fn(),
   updateOpenAIProvider: vi.fn(),
   createOpenAIProvider: vi.fn(),
+  apiCallRequest: vi.fn(),
+  clientGet: vi.fn(),
+  clientPut: vi.fn(),
 }));
 
 vi.mock('@/stores', () => ({
@@ -58,7 +64,7 @@ vi.mock('@/components/ui/Modal', () => ({
 }));
 
 vi.mock('@/services/api', () => ({
-  apiCallApi: { request: vi.fn() },
+  apiCallApi: { request: mocks.apiCallRequest },
   getApiCallErrorDetails: vi.fn(() => ''),
   modelsApi: { fetchModelsViaApiCall: mocks.fetchModelsViaApiCall },
   providersApi: {
@@ -66,6 +72,10 @@ vi.mock('@/services/api', () => ({
     getOpenAIProviders: mocks.getOpenAIProviders,
     updateOpenAIProvider: mocks.updateOpenAIProvider,
   },
+}));
+
+vi.mock('@/services/api/client', () => ({
+  apiClient: { get: mocks.clientGet, put: mocks.clientPut },
 }));
 
 import { OpenAIEditDrawer } from './OpenAIEditDrawer';
@@ -97,15 +107,20 @@ describe('OpenAIEditDrawer model discovery', () => {
     mocks.fetchModelsViaApiCall.mockResolvedValue([]);
     mocks.updateOpenAIProvider.mockResolvedValue(undefined);
     mocks.createOpenAIProvider.mockResolvedValue(undefined);
+    mocks.apiCallRequest.mockResolvedValue({ statusCode: 200, body: '{}' });
   });
 
-  it('uses the proxy from the first valid credential when an earlier row is empty', async () => {
+  it('prefers a real API key for model discovery over an earlier keyless proxy entry', async () => {
     mocks.getOpenAIProviders.mockResolvedValueOnce([
       {
         name: 'openai-example',
         baseUrl: 'https://api.example.com/v1',
         apiKeyEntries: [
-          { apiKey: '' },
+          {
+            apiKey: '',
+            authIndex: 'auth-keyless',
+            proxyUrl: 'socks5://keyless-proxy.example:1080',
+          },
           {
             apiKey: 'second-key',
             authIndex: 'auth-second',
@@ -135,9 +150,377 @@ describe('OpenAIEditDrawer model discovery', () => {
       'second-key',
       {},
       'auth-second',
-      'socks5://proxy.example:1080'
+      'socks5://proxy.example:1080',
+      false
     );
 
+    act(() => renderer!.unmount());
+  });
+
+  it('discovers models through a keyless proxy without a runtime auth-index', async () => {
+    mocks.getOpenAIProviders.mockResolvedValueOnce([
+      normalizeOpenAIProvider({
+        name: 'keyless-proxy',
+        'base-url': 'http://upstream/v1',
+        'api-key-entries': [{ 'api-key': '', 'proxy-url': 'http://proxy' }],
+      }),
+    ]);
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <OpenAIEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />
+      );
+    });
+    await act(async () => {
+      findModelsFetchButton(renderer.root)!.props.onClick();
+    });
+    expect(mocks.fetchModelsViaApiCall).toHaveBeenCalledWith(
+      'http://upstream/v1',
+      undefined,
+      {},
+      undefined,
+      'http://proxy',
+      true
+    );
+    act(() => renderer.unmount());
+  });
+
+  it.each([
+    { weight: 0, mixed: false },
+    { weight: 2, mixed: false },
+    { weight: 0, mixed: true },
+    { weight: 2, mixed: true },
+  ])(
+    'drops the cleared keyed entry from PUT with weight=$weight and mixed=$mixed',
+    async ({ weight, mixed }) => {
+      const raw = {
+        name: 'clear-key',
+        'base-url': 'http://upstream/v1',
+        'api-key-entries': [
+          { 'api-key': 'old-key', 'proxy-url': 'http://proxy', weight },
+          ...(mixed
+            ? [{ 'api-key': '', 'connection-pool': { name: 'keyless' } }, { 'api-key': 'keep-key' }]
+            : []),
+        ],
+      };
+      mocks.clientGet.mockResolvedValue({ 'openai-compatibility': [raw] });
+      mocks.clientPut.mockResolvedValue({});
+      mocks.getOpenAIProviders.mockResolvedValueOnce([normalizeOpenAIProvider(raw)]);
+      mocks.updateOpenAIProvider.mockImplementationOnce(realProvidersApi.updateOpenAIProvider);
+      let renderer!: ReactTestRenderer;
+      await act(async () => {
+        renderer = create(
+          <OpenAIEditDrawer
+            open
+            editIndex={0}
+            disabled={false}
+            onClose={vi.fn()}
+            onSaved={vi.fn()}
+          />
+        );
+      });
+      const input = renderer.root
+        .findAllByType('input')
+        .find((node) => node.props.placeholder === i18n.t('ai_providers.openai_key_placeholder'))!;
+      act(() => input.props.onChange({ target: { value: '' } }));
+      await act(async () => {
+        await findSaveButton(renderer.root)!.props.onClick();
+      });
+      const [, saved] = mocks.clientPut.mock.calls[0];
+      expect(saved[0]['api-key-entries']).toEqual(
+        mixed
+          ? [{ 'api-key': '', 'connection-pool': { name: 'keyless' } }, { 'api-key': 'keep-key' }]
+          : []
+      );
+      act(() => renderer.unmount());
+    }
+  );
+
+  it('tests and saves an OpenAI-compatible provider without an API key', async () => {
+    mocks.getOpenAIProviders.mockResolvedValueOnce([
+      {
+        name: 'local-anonymous',
+        baseUrl: 'http://localhost:11434/v1',
+        apiKeyEntries: [],
+        models: [{ name: 'local-model' }],
+      },
+    ]);
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <OpenAIEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />
+      );
+    });
+
+    const testLabel = i18n.t('ai_providers.openai_test_single_action');
+    const testButton = renderer!.root
+      .findAllByType('button')
+      .find((button) =>
+        button.findAllByType('span').some((span) => span.children.join('') === testLabel)
+      );
+    expect(testButton).toBeDefined();
+    expect(testButton?.props.disabled).not.toBe(true);
+    await act(async () => {
+      await testButton?.props.onClick();
+    });
+
+    expect(mocks.apiCallRequest).toHaveBeenCalledTimes(1);
+    const request = mocks.apiCallRequest.mock.calls[0][0] as {
+      authIndex?: string;
+      header?: Record<string, string>;
+    };
+    expect(request.header).toEqual({ 'Content-Type': 'application/json' });
+    expect(request.authIndex).toBeUndefined();
+
+    await act(async () => {
+      await findSaveButton(renderer!.root)?.props.onClick();
+    });
+    expect(mocks.updateOpenAIProvider).toHaveBeenCalledWith(
+      'local-anonymous',
+      0,
+      expect.objectContaining({ apiKeyEntries: [] })
+    );
+    act(() => renderer!.unmount());
+  });
+
+  it('keeps both entries when editing and saving a startup-disabled mixed provider without runtime auth-index', async () => {
+    const disabledMixed = normalizeOpenAIProvider({
+      name: 'disabled-mixed',
+      disabled: true,
+      'base-url': 'https://api.mixed.example/v1',
+      'api-key-entries': [{ 'api-key': '' }, { 'api-key': 'sk-compat-b' }],
+      models: [{ name: 'local-model' }],
+    })!;
+    mocks.getOpenAIProviders.mockResolvedValueOnce([disabledMixed]);
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <OpenAIEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />
+      );
+    });
+
+    await act(async () => {
+      await findSaveButton(renderer!.root)?.props.onClick();
+    });
+
+    expect(mocks.updateOpenAIProvider).toHaveBeenCalledTimes(1);
+    const [, , savedPayload] = mocks.updateOpenAIProvider.mock.calls[0] as [
+      string,
+      number,
+      { apiKeyEntries: Array<{ apiKey: string }> },
+    ];
+    expect(savedPayload.apiKeyEntries).toHaveLength(2);
+    expect(savedPayload.apiKeyEntries.map((entry) => entry.apiKey)).toEqual(['', 'sk-compat-b']);
+    expect(isPersistedOpenAIKeyEntry(savedPayload.apiKeyEntries[0])).toBe(true);
+    act(() => renderer!.unmount());
+  });
+
+  it('tests and discovers models for an indexed keyless proxy without Authorization', async () => {
+    mocks.getOpenAIProviders.mockResolvedValueOnce([
+      {
+        name: 'keyless-proxy',
+        baseUrl: 'https://model.example/v1',
+        apiKeyEntries: [
+          {
+            apiKey: '',
+            authIndex: 'cpa-keyless-index',
+            proxyUrl: 'socks5://proxy.example:1080',
+          },
+        ],
+        models: [{ name: 'local-model' }],
+      },
+    ]);
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <OpenAIEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />
+      );
+    });
+
+    const keyLabel = i18n.t('ai_providers.openai_test_single_action');
+    const singleTestButton = renderer!.root
+      .findAllByType('button')
+      .find((button) =>
+        button.findAllByType('span').some((span) => span.children.join('') === keyLabel)
+      );
+    expect(singleTestButton?.props.disabled).toBe(false);
+    await act(async () => {
+      await singleTestButton?.props.onClick();
+    });
+
+    expect(mocks.apiCallRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authIndex: 'cpa-keyless-index',
+        proxyUrl: 'socks5://proxy.example:1080',
+        header: { 'Content-Type': 'application/json' },
+      }),
+      expect.anything()
+    );
+
+    await act(async () => {
+      findModelsFetchButton(renderer!.root)?.props.onClick();
+    });
+    expect(mocks.fetchModelsViaApiCall).toHaveBeenCalledWith(
+      'https://model.example/v1',
+      undefined,
+      {},
+      'cpa-keyless-index',
+      'socks5://proxy.example:1080',
+      true
+    );
+
+    act(() => renderer!.unmount());
+  });
+
+  it('drops a stale auth-index when a keyless entry is changed to a real API key', async () => {
+    mocks.getOpenAIProviders.mockResolvedValueOnce([
+      {
+        name: 'keyless-to-keyed',
+        baseUrl: 'https://model.example/v1',
+        apiKeyEntries: [
+          {
+            apiKey: '',
+            authIndex: 'old-keyless-index',
+            proxyUrl: 'socks5://proxy.example:1080',
+          },
+        ],
+        models: [{ name: 'local-model' }],
+      },
+    ]);
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <OpenAIEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />
+      );
+    });
+
+    const keyInput = renderer!.root
+      .findAllByType('input')
+      .find((input) => input.props.placeholder === i18n.t('ai_providers.openai_key_placeholder'));
+    expect(keyInput).toBeDefined();
+    act(() => {
+      keyInput!.props.onChange({ target: { value: 'new-real-key' } });
+    });
+
+    const keyLabel = i18n.t('ai_providers.openai_test_single_action');
+    const testButton = renderer!.root
+      .findAllByType('button')
+      .find((button) =>
+        button.findAllByType('span').some((span) => span.children.join('') === keyLabel)
+      );
+    await act(async () => {
+      await testButton?.props.onClick();
+    });
+
+    expect(mocks.apiCallRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authIndex: undefined,
+        proxyUrl: 'socks5://proxy.example:1080',
+        header: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer new-real-key',
+        },
+      }),
+      expect.anything()
+    );
+
+    act(() => renderer!.unmount());
+  });
+
+  it('does not stay dirty when the API key is changed and restored after auth-index invalidation', async () => {
+    const onClose = vi.fn();
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal('window', { confirm: confirmMock });
+    mocks.getOpenAIProviders.mockResolvedValueOnce([
+      {
+        name: 'restore-key',
+        baseUrl: 'https://model.example/v1',
+        apiKeyEntries: [
+          {
+            apiKey: 'original-key',
+            authIndex: 'server-runtime-index',
+          },
+        ],
+        models: [{ name: 'local-model' }],
+      },
+    ]);
+
+    let renderer: ReactTestRenderer;
+    try {
+      await act(async () => {
+        renderer = create(
+          <OpenAIEditDrawer
+            open
+            editIndex={0}
+            disabled={false}
+            onClose={onClose}
+            onSaved={vi.fn()}
+          />
+        );
+      });
+
+      const findKeyInput = () =>
+        renderer!.root
+          .findAllByType('input')
+          .find(
+            (input) => input.props.placeholder === i18n.t('ai_providers.openai_key_placeholder')
+          );
+      act(() => {
+        findKeyInput()!.props.onChange({ target: { value: 'changed-key' } });
+      });
+      act(() => {
+        findKeyInput()!.props.onChange({ target: { value: 'original-key' } });
+      });
+
+      const cancelLabel = i18n.t('common.cancel');
+      const cancelButton = renderer!.root
+        .findAllByType('button')
+        .find((button) =>
+          button.findAllByType('span').some((span) => span.children.join('') === cancelLabel)
+        );
+      expect(cancelButton).toBeDefined();
+      act(() => {
+        cancelButton!.props.onClick();
+      });
+
+      expect(confirmMock).not.toHaveBeenCalled();
+      expect(onClose).toHaveBeenCalledTimes(1);
+      act(() => renderer!.unmount());
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('disables testing an empty placeholder when another key is configured', async () => {
+    mocks.getOpenAIProviders.mockResolvedValueOnce([
+      {
+        name: 'mixed',
+        baseUrl: 'https://model.example/v1',
+        apiKeyEntries: [{ apiKey: 'actual-key' }, { apiKey: '' }],
+        models: [{ name: 'local-model' }],
+      },
+    ]);
+
+    let renderer: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <OpenAIEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />
+      );
+    });
+
+    const keyLabel = i18n.t('ai_providers.openai_test_single_action');
+    const buttons = renderer!.root
+      .findAllByType('button')
+      .filter((button) =>
+        button.findAllByType('span').some((span) => span.children.join('') === keyLabel)
+      );
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].props.disabled).toBe(false);
+    expect(buttons[1].props.disabled).toBe(true);
     act(() => renderer!.unmount());
   });
 

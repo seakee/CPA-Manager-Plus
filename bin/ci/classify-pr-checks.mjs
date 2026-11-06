@@ -52,6 +52,16 @@ const triggersFrontend = (filePath) =>
   filePath === 'README_CN.md' ||
   filePath === 'package.json' ||
   filePath === 'package-lock.json' ||
+  // The toolchain baseline assertions live in tests/ciWorkflowIntegrity.test.mjs,
+  // which the Frontend job runs: the Node baseline, every image base and every
+  // Go module manifest that carries the Go directive.
+  filePath === '.nvmrc' ||
+  filePath === 'Dockerfile.manager-server' ||
+  filePath === 'Dockerfile.ingress' ||
+  filePath === 'Dockerfile.runtime' ||
+  filePath === 'apps/manager-server/go.mod' ||
+  filePath === 'apps/ingress/go.mod' ||
+  filePath === 'apps/runtime-supervisor/go.mod' ||
   filePath === '.github/dependabot.yml' ||
   filePath === 'eslint.config.js' ||
   filePath === 'bin/install-cpamp.sh' ||
@@ -71,6 +81,12 @@ const triggersFrontend = (filePath) =>
   // Frontend job as well.
   filePath === 'bin/ci/panel-lite-cpa-v8.mjs' ||
   filePath === 'bin/ci/panel-lite-cpa-v8.test.mjs' ||
+  // The Gate B/C readiness evidence harness and its native `node:test` suite run
+  // in the Frontend job; the report that quotes its observations is part of the
+  // same change and must keep that job scheduled.
+  filePath === 'bin/ci/readiness-gate-bc.mjs' ||
+  filePath === 'bin/ci/readiness-gate-bc.test.mjs' ||
+  startsWithPath(filePath, 'docs/architecture/evidence') ||
   startsWithPath(filePath, 'bin/release');
 
 const triggersManagerServer = (filePath) =>
@@ -152,6 +168,13 @@ const triggersRuntimeLifecycle = (filePath) =>
 const triggersNativeControl = (filePath) =>
   startsWithPath(filePath, 'bin/native') ||
   filePath === 'bin/release/package-native.sh' ||
+  // Native packaging consumes the same license collector and evidence
+  // generator as the images, so any change there must rerun its tests.
+  filePath === 'bin/release/collect-third-party-licenses.py' ||
+  filePath === 'bin/release/image-evidence.py' ||
+  filePath === 'bin/release/hash-fullweb.mjs' ||
+  filePath === 'bin/release/embedded-third-party-inventory.txt' ||
+  startsWithPath(filePath, 'bin/release/third-party-license-sources') ||
   filePath === 'tests/nativeControlScripts.test.mjs' ||
   filePath === 'package.json' ||
   filePath === 'package-lock.json';

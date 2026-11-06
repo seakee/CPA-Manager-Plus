@@ -34,7 +34,7 @@ Browser
 
 ## Requirements
 
-- Use a current CPA release; the CPAMP README currently recommends CPA `v7.1.39+`.
+- The 1.x Stable panel retains its existing CPA compatibility range. v2 Beta panel acceptance targets pinned official CPA `v8.0.55`, and External Full Mode also requires at least `v8.0.55`; older README recommendations do not prove Beta qualification.
 - Configure `remote-management.secret-key`; otherwise the Management API and panel are disabled.
 - Keep `remote-management.disable-control-panel` set to `false`.
 - CPA must be able to reach GitHub Releases, directly or through its configured proxy, to download `management.html`.
@@ -107,14 +107,23 @@ This is the CPAMP v2 Beta publication contract for the lightweight panel. Until 
 
 ### Try The v2 Beta Panel On CPA
 
-CPA cannot install a panel from a prerelease: `panel-github-repository` is only ever resolved to the repository's `releases/latest`. An `api.github.com` URL that does not end in `/releases/latest` gets that suffix appended, so `.../releases/tags/<tag>` becomes `.../releases/tags/<tag>/releases/latest` and the lookup fails; the browser form `github.com/<owner>/<repo>/releases/tag/<tag>` keeps only its first two path segments, i.e. `repos/<owner>/<repo>/releases/latest`, which still yields the 1.x panel (both checked against CPA v8.0.13). When the lookup fails and no local file exists, CPA installs the upstream fallback panel (from `cpamc.router-for.me`) instead. To try the v2 Beta panel, place the file manually:
+Automatic updates through `panel-github-repository` use `releases/latest`, not a Beta Prerelease selector. Do not put a prerelease Tag URL in that setting to change channels:
 
-1. Download `management.html` from the v2 Beta prerelease page.
+- **`api.github.com` URL**: if it does not end with `/releases/latest`, CPA appends that suffix. Thus `.../releases/tags/<tag>` becomes `.../releases/tags/<tag>/releases/latest`, rather than fetching the chosen prerelease.
+- **Browser URL**: `github.com/<owner>/<repo>/releases/tag/<tag>` uses only the first two path segments and resolves to the repository's `repos/<owner>/<repo>/releases/latest`. It still obtains the 1.x panel, not the page's Tag.
+- **Fallback after a failed download**: if fetching fails and no local cached file exists, CPA attempts to install the upstream fallback panel from `cpamc.router-for.me`. That is not the selected CPAMP Beta file; merely opening `/management.html` does not prove the intended Beta was installed.
+
+Install the v2 Beta panel manually, retaining the cache location and automatic-update settings below:
+
+1. Download `management.html` from an actually published v2 Beta prerelease and compare it with that release's `checksums.txt`. Stable URL: `https://github.com/seakee/CPA-Manager-Plus/releases/latest/download/management.html`. Beta template: `https://github.com/seakee/CPA-Manager-Plus/releases/download/v2.0.0-beta.X/management.html`; replace `X` with an actually published number.
 2. Set `disable-auto-update-panel: true` in CPA `config.yaml`. Otherwise CPA overwrites the manually placed file with the 1.x panel from `releases/latest`.
 3. Stop CPA, copy the file to `management.html` in the `static/` folder next to CPA's `config.yaml`, and start CPA.
 4. Open `http://<cpa-host>:8317/management.html` and log in with the CPA Management Key.
 
 To return to the 1.x panel, delete `static/management.html`, set `disable-auto-update-panel` back to `false`, and restart CPA.
+
+External Full Mode is not this backend-free lightweight panel: it needs Manager while the operator independently runs, upgrades, and backs up external CPA. CPAMP does not take over its host lifecycle; see [Runtime Model](../guide/runtime-model.md). v2 Embedded instead requires the matching three-image Compose/pairing record; copying only `management.html` does not upgrade Full Web. See [Releases And Licensing](../reference/releases.md) for current project MIT, official CPA MIT, and image third-party notice inspection paths.
+
 
 ## Lightweight Panel Capabilities
 

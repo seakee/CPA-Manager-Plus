@@ -234,10 +234,9 @@ const buildOpenAIProviderItems = (
         providerIndex: row.originalIndex,
         providerLabel: providerDisplay.providerLabel,
         providerSubtitle: providerDisplay.providerSubtitle,
-        targetLabel: 'Key #1',
-        targetLabelKey: 'ai_providers.health_check_key_index',
-        targetLabelValues: { index: 1 },
-        detailLabel: 'No key entries',
+        targetLabel: 'No API key configured',
+        targetLabelKey: 'ai_providers.health_check_no_key_entries',
+        detailLabel: 'No API key configured',
         detailLabelKey: 'ai_providers.health_check_no_key_entries',
         baseUrl: row.baseUrl,
         status: 'pending',
@@ -249,6 +248,7 @@ const buildOpenAIProviderItems = (
 
   return entries.map((entry, keyIndex) => {
     const credentialDetail = getCredentialDetailLabel(entry.apiKey, entry.authIndex);
+    const hasApiKey = Boolean(entry.apiKey?.trim());
     return {
       id: `${row.key}:key:${keyIndex}`,
       providerKey: row.key,
@@ -256,8 +256,10 @@ const buildOpenAIProviderItems = (
       providerIndex: row.originalIndex,
       providerLabel: providerDisplay.providerLabel,
       providerSubtitle: providerDisplay.providerSubtitle,
-      targetLabel: `Key #${keyIndex + 1}`,
-      targetLabelKey: 'ai_providers.health_check_key_index',
+      targetLabel: hasApiKey ? `Key #${keyIndex + 1}` : `Keyless #${keyIndex + 1}`,
+      targetLabelKey: hasApiKey
+        ? 'ai_providers.health_check_key_index'
+        : 'ai_providers.health_check_keyless_index',
       targetLabelValues: { index: keyIndex + 1 },
       detailLabel: credentialDetail.detailLabel,
       detailLabelKey: credentialDetail.detailLabelKey,
@@ -432,12 +434,11 @@ export const runProviderHealthCheckItem = async (
       modelCount = await testVertexByStandardModelsEndpoints(target.config);
     } else if (target.kind === 'openai') {
       const entry = target.config.apiKeyEntries?.[target.keyIndex];
-      const authIndex =
-        normalizeAuthIndex(entry?.authIndex ?? target.config.authIndex) ?? undefined;
-      requireCredential(entry?.apiKey, authIndex, {
-        ...(target.config.headers ?? {}),
-        ...(entry?.headers ?? {}),
-      });
+      // CPA may assign an auth-index to keyless providers with no key
+      // entries. Only use an auth-index when an explicit entry exists.
+      const authIndex = entry
+        ? (normalizeAuthIndex(entry.authIndex ?? target.config.authIndex) ?? undefined)
+        : undefined;
       const headers = { ...(target.config.headers ?? {}), ...(entry?.headers ?? {}) };
       const hasAuthHeader = hasHeader(headers, 'authorization');
       const models = await modelsApi.fetchModelsViaApiCall(
@@ -445,7 +446,8 @@ export const runProviderHealthCheckItem = async (
         hasAuthHeader ? undefined : entry?.apiKey?.trim() || undefined,
         headers,
         authIndex,
-        entry?.proxyUrl
+        entry?.proxyUrl,
+        !entry?.apiKey?.trim()
       );
       modelCount = ensureNonEmptyModels(models);
     }

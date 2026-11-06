@@ -34,7 +34,7 @@ CPAMP 轻量面板由 CPA 直接托管，用 CPA Manager Plus 的界面替换官
 
 ## 前置条件
 
-- 推荐使用当前版本 CPA；CPAMP README 当前推荐 CPA `v7.1.39+`。
+- 1.x Stable 面板保留原 CPA 兼容范围；v2 Beta 面板按固定官方 CPA `v8.0.55` 验收，External 完整模式最低也要求 `v8.0.55`，不能将旧 README 的 CPA 推荐版本当成 Beta 资格证明。
 - CPA 必须配置 `remote-management.secret-key`，否则 Management API 和面板无法使用。
 - `remote-management.disable-control-panel` 必须为 `false`。
 - CPA 需要能够访问 GitHub Release，或通过它已经配置的代理下载 `management.html`。
@@ -107,14 +107,23 @@ rm static/management.html
 
 ### 在 CPA 上试用 v2 Beta 面板
 
-CPA 无法从预发布自动安装面板：`panel-github-repository` 只会被解析为仓库的 `releases/latest`。`api.github.com` 形式的地址若不以 `/releases/latest` 结尾，CPA 会在其后追加该后缀，所以 `.../releases/tags/<tag>` 会变成 `.../releases/tags/<tag>/releases/latest` 而获取失败；浏览器形式的 `github.com/<owner>/<repo>/releases/tag/<tag>` 只取前两段，等同于 `repos/<owner>/<repo>/releases/latest`，得到的仍是 1.x 面板（均已对照 CPA v8.0.13 验证）。获取失败且本地没有文件时，CPA 会改为安装上游的备用面板（来自 `cpamc.router-for.me`）。要试用 v2 Beta 面板，手动放置文件：
+CPA 的 `panel-github-repository` 自动更新入口面向 `releases/latest`，不用于选择 Beta Prerelease。不要把预发布 Tag URL 填入该字段来切换通道：
 
-1. 从 v2 Beta 预发布页面下载 `management.html`。
+- **`api.github.com` 形式**：地址如果不以 `/releases/latest` 结尾，CPA 会追加该后缀；因此 `.../releases/tags/<tag>` 会变成 `.../releases/tags/<tag>/releases/latest`，而不是获取指定预发布。
+- **浏览器形式**：`github.com/<owner>/<repo>/releases/tag/<tag>` 只取前两段，解析为仓库的 `repos/<owner>/<repo>/releases/latest`，取得的仍是 1.x 面板，不会选中网页 Tag。
+- **获取失败的备用来源**：如果下载失败且本地没有缓存文件，CPA 会尝试安装来自 `cpamc.router-for.me` 的上游备用面板；它不是所选 CPAMP Beta 文件。不能把能够打开 `/management.html` 本身视为已安装目标 Beta。
+
+要试用 v2 Beta 面板，手动放置文件，并保留下述缓存位置与自动更新设置：
+
+1. 从实际已发布的 v2 Beta 预发布页面下载 `management.html`，并核对同版 `checksums.txt`。Stable 地址为 `https://github.com/seakee/CPA-Manager-Plus/releases/latest/download/management.html`；Beta 模板为 `https://github.com/seakee/CPA-Manager-Plus/releases/download/v2.0.0-beta.X/management.html`，其中 `X` 必须替换成真实已发布编号。
 2. 在 CPA `config.yaml` 中设置 `disable-auto-update-panel: true`。否则 CPA 会用 `releases/latest` 的 1.x 面板覆盖手动放置的文件。
 3. 停止 CPA，把文件复制为 CPA `config.yaml` 同级 `static/` 文件夹中的 `management.html`，再启动 CPA。
 4. 打开 `http://<cpa-host>:8317/management.html`，使用 CPA Management Key 登录。
 
 回到 1.x 面板：删除 `static/management.html`，把 `disable-auto-update-panel` 改回 `false`，重启 CPA。
+
+External 完整模式不是这个无后端的轻量面板：它需要 Manager，并由操作者独立运行、升级及备份外部 CPA；CPAMP 不接管其宿主机生命周期，见 [运行模型](../guide/runtime-model.md)。v2 Embedded 则必须使用同版三镜像 Compose/配对记录，不能只复制 `management.html` 升级 Full Web。项目当前 MIT、官方 CPA MIT 与镜像第三方声明的核验路径见 [发布与许可证](../reference/releases.md)。
+
 
 ## 轻量面板支持什么
 

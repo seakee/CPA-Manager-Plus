@@ -225,4 +225,29 @@ describe('documentation content integrity', () => {
     expect(releasesEn).not.toContain('docs/release-notes');
     expect(releasesEn).not.toContain('GitHub Actions');
   });
+
+  it('keeps the reverse-proxy Nginx example refusing non-canonical and unlisted v8 management paths', () => {
+    for (const relativePath of ['deployment/reverse-proxy.md', 'en/deployment/reverse-proxy.md']) {
+      const doc = readFileSync(path.join(docsRoot, relativePath), 'utf8');
+      const match = doc.match(/if \(\$request_uri ~\* "([^"]+)"\) \{\s*return 404;\s*\}/);
+      expect(match, `${relativePath} leading-slash $request_uri guard`).not.toBeNull();
+      const leadingSlashGuard = new RegExp(match[1], 'i');
+      expect(leadingSlashGuard.test('//v8/management/config/api-keys')).toBe(true);
+      expect(leadingSlashGuard.test('///v8/management/config/api-keys/claude')).toBe(true);
+      expect(leadingSlashGuard.test('http://example.test//v8/management/config/api-keys')).toBe(
+        true
+      );
+      expect(leadingSlashGuard.test('/v8/management/config/api-keys')).toBe(false);
+      expect(leadingSlashGuard.test('/v1/models')).toBe(false);
+
+      expect(doc).toContain(
+        'location = /v8/management/config/api-keys   { proxy_pass http://cpamp; }'
+      );
+      expect(doc).toContain(
+        'location ^~ /v8/management/config/api-keys/ { proxy_pass http://cpamp; }'
+      );
+      expect(doc).toContain('location = /v8/management  { return 404; }');
+      expect(doc).toContain('location ^~ /v8/management/ { return 404; }');
+    }
+  });
 });

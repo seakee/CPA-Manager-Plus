@@ -1,5 +1,59 @@
 # 原生包部署
 
+## v2 Beta：仅 linux/amd64
+
+首个 v2 Beta 原生发行资产是 **`cpa-manager-plus-native-v2_<ver>_linux_amd64.tar.gz`**，从对应的 GitHub Prerelease 手动下载并按同版 `checksums.txt` 核验。不要用 1.x 的 `cpa-manager-plus_<ver>_<os>_<arch>` 命名推算 v2 下载地址。v2 Beta **不发布** `darwin_amd64`、`darwin_arm64`、`linux_arm64`、`windows_amd64`、`windows_arm64` 原生包；这些平台继续使用 1.x Stable，或在满足 `linux/amd64` 平台要求的 Docker 主机上运行 [Embedded Beta](./docker.md)。External 是 CPA 的运维模式，不会使未支持平台获得 v2 原生包。
+
+### 包内容与运行边界
+
+与下方 1.x 单二进制包不同，v2 包内有：
+
+- `bin/cpa-manager-plus`、`bin/cpa-manager-plus-ingress`、`bin/cpa-manager-plus-runtime-supervisor`、`bin/cli-proxy-api`（固定官方 CPA `v8.0.55`）。
+- `cpa-manager-plus-launcher`（根目录与 `bin/` 中）、`cpa-manager-plusctl`、`cpa-manager-plus.service`。
+- `share/cpamp/runtime/cpa-artifact.json`、`share/cpamp/runtime/config.seed.yaml`、根 `LICENSE` 与 `share/licenses/cli-proxy-api/LICENSE`。
+- `data/`、`run/`、`logs/`；默认 Manager 数据位于 `data/usage.sqlite`、`data/data.key`，Runtime 数据位于 `data/runtime/`。备份还要包含 SQLite WAL/SHM、`usage-archives/`（存在时）与 Runtime 状态，见 [备份](../operations/backup.md)。
+
+Launcher 管理 Runtime Supervisor、Manager、Ingress，并由 Runtime 托管 CPA；不能仅启动 Manager 二进制替代完整栈。Launcher 以 root 运行，只有 CPA 子进程降权到专用身份；`cpa-manager-plusctl install` 创建 `cpamp-cpa` 账号及隔离目录。不要套用下方 1.x 的单进程 systemd 示例。
+
+### 安装与首次认领
+
+将包解压到固定目录（以下以 `/opt/cpa-manager-plus` 为例，目录里应直接包含 `bin/` 与控制脚本，而非再嵌套一层归档目录）。在该目录执行：
+
+```bash
+sudo ./cpa-manager-plusctl install --home /opt/cpa-manager-plus
+sudo env USAGE_DATA_DIR=/opt/cpa-manager-plus/data \
+  ./bin/cpa-manager-plus initialize
+```
+
+记录命令输出的短期 `/.well-known/cpamp-bootstrap/ui#handoff=...`；不要把它当成日志或管理员密钥。生成的 systemd 服务读取 **`<home>/cpa-manager-plus.env`**，此例为 `/opt/cpa-manager-plus/cpa-manager-plus.env`。创建/编辑时保留该文件已有配置，并限制为 root 所有、`0600`：
+
+```bash
+sudo touch /opt/cpa-manager-plus/cpa-manager-plus.env
+sudo chown root:root /opt/cpa-manager-plus/cpa-manager-plus.env
+sudo chmod 0600 /opt/cpa-manager-plus/cpa-manager-plus.env
+sudoedit /opt/cpa-manager-plus/cpa-manager-plus.env
+```
+
+在文件中设置真实公开 origin，例如已配置 TLS 反向代理的域名：
+
+```dotenv
+CPAMP_PUBLIC_ORIGIN=https://cpamp.example.com
+```
+
+优先使用 HTTPS，确保反向代理与证书已正确配置，并将示例替换成实际可达域名。明文 HTTP 仅用于可信本地/隔离测试网络，不用于经非可信网络传递 Handoff、Admin Key 或 Client Key。修改环境文件后通过重启服务生效（首次也可用 restart 启动）：
+
+```bash
+sudo systemctl restart cpa-manager-plus.service
+sudo systemctl status cpa-manager-plus.service
+```
+
+在浏览器将公开 origin 与完整 Handoff 路径拼接，设置 Admin Key、选择 New Managed / Adopt / External 并完成资格检查；New Managed 保存首次 Client Key 并验证公开入口。重新签发 `initialize`、重置管理员密钥、备份或迁移前先停止整个服务；不要并行运行 systemd 和 `cpa-manager-plusctl start`。升级已有 1.x 必须使用 [v1.14.10 离线迁移和回滚手册](../operations/update.md)，不得指向原 1.x 目录直接启动 v2。
+
+当前 Native 包的许可证查验以实际包内 `LICENSE` 与 `share/licenses/cli-proxy-api/LICENSE` 为准；镜像的第三方清单与 Provenance 路径不适用于 Native，见 [发布与许可证](../reference/releases.md)。
+
+## 1.x Stable：多平台单二进制包
+
+
 不想使用 Docker 时，可以直接运行 CPAMP 原生包。它适合已有进程管理、systemd、launchd 或 Windows 服务托管习惯的环境。
 
 原生包模式仍然是 Manager Server 模式：二进制会托管 `/management.html`，本地保存 SQLite 数据，并使用 CPAMP 管理员密钥登录。它不是旧 CPA-Manager 的“给 CPA 端口面板外接 Usage Service”工作流。

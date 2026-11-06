@@ -9,6 +9,14 @@ import { AccountConfigurationTab } from './AccountConfigurationTab';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const mockAuthState = vi.hoisted(() => ({
+  serverVersion: null as string | null,
+  serverCommit: null as string | null,
+}));
+vi.mock('@/stores/useAuthStore', () => ({
+  useAuthStore: (selector: (state: typeof mockAuthState) => unknown) => selector(mockAuthState),
+}));
+
 vi.mock('react-i18next', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-i18next')>();
   return {
@@ -342,5 +350,59 @@ describe('AccountConfigurationTab', () => {
     expect(text).toContain('accounts.detail_runtime_config_unavailable');
     expect(text).toContain('accounts.config_runtime_only_desc');
     expect(text).not.toContain('common.save');
+  });
+
+  it.each(['custom', null] as const)(
+    'keeps the exclusion list read-only for unrecognized CPA version %j while other fields stay editable',
+    (serverVersion) => {
+      mockAuthState.serverVersion = serverVersion;
+      try {
+        const renderer = renderTab(makeRow(), makeEditor('codex'));
+        const excluded = renderer.root.findByProps({
+          'aria-label': 'auth_files.excluded_models_label',
+        });
+        const headers = renderer.root.findByProps({ 'aria-label': 'auth_files.headers_label' });
+        expect(excluded.props.disabled).toBe(true);
+        expect(headers.props.disabled).toBe(false);
+      } finally {
+        mockAuthState.serverVersion = null;
+      }
+    }
+  );
+
+  it.each(['v8.0.32', 'v8.0.55', 'v8.0.32-0-gabc1234', 'v8.0.33-0-gabc1234'] as const)(
+    'keeps the exclusion list editable on CPA %s',
+    (serverVersion) => {
+      mockAuthState.serverVersion = serverVersion;
+      try {
+        const renderer = renderTab(makeRow(), makeEditor('codex'));
+        const excluded = renderer.root.findByProps({
+          'aria-label': 'auth_files.excluded_models_label',
+        });
+        expect(excluded.props.disabled).toBe(false);
+      } finally {
+        mockAuthState.serverVersion = null;
+      }
+    }
+  );
+
+  it.each([
+    ['v8.0.32', null],
+    ['v8.0.33', 'accounts.config_excluded_models_override_hint'],
+    ['custom', 'accounts.config_excluded_models_precedence_unknown_hint'],
+  ] as const)('explains credential exclusion precedence on CPA %s', (serverVersion, hint) => {
+    mockAuthState.serverVersion = serverVersion;
+    try {
+      const text = readText(renderTab(makeRow(), makeEditor('codex')).toJSON());
+      expect(text).toContain('accounts.config_excluded_models_hint');
+      expect(text.includes('accounts.config_excluded_models_override_hint')).toBe(
+        hint === 'accounts.config_excluded_models_override_hint'
+      );
+      expect(text.includes('accounts.config_excluded_models_precedence_unknown_hint')).toBe(
+        hint === 'accounts.config_excluded_models_precedence_unknown_hint'
+      );
+    } finally {
+      mockAuthState.serverVersion = null;
+    }
   });
 });

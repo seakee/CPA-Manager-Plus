@@ -578,6 +578,7 @@ export const resolveWindowDurationSeconds = (
 
 const getAntigravityMatrixGroupDisplayLabel = (label: string) => {
   const normalized = label.toLowerCase();
+  if (normalized.includes('argon')) return 'Argon';
   if (normalized.includes('claude') || normalized.includes('gpt')) return 'Claude';
   if (normalized.includes('gemini')) return 'Gemini';
   return label;

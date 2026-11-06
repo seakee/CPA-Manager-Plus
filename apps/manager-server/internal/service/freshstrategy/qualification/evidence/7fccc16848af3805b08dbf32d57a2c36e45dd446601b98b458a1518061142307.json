@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "runId": "AQ02-279937cb798eb94d3530d099c0938a1b472c97e2f888d8e4",
+  "caseRef": "AQ03-E01-real-auth",
+  "records": [
+    {
+      "expectationRef": "AQ03-E01-real-auth-HTTP",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 1891,
+      "requestBytes": 0,
+      "responseBytes": 652
+    },
+    {
+      "expectationRef": "AQ03-E01-real-auth-STATE",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 1891,
+      "requestBytes": 0,
+      "responseBytes": 652
+    },
+    {
+      "expectationRef": "AQ03-E01-real-auth-CONTROL",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 1891,
+      "requestBytes": 0,
+      "responseBytes": 652
+    }
+  ]
+}

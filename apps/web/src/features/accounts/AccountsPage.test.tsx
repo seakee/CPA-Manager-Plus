@@ -8936,6 +8936,119 @@ describe('AccountsPage replacement flows', () => {
     expect(renderer.root.findAllByProps({ 'data-quota-window-group': 'standard' })).toHaveLength(0);
   });
 
+  it('keeps all Antigravity Pro quota windows, including Gemini 4 Argon, in grid and table views', async () => {
+    const file = {
+      name: 'antigravity-pro-argon.json',
+      type: 'antigravity',
+      provider: 'antigravity',
+      authIndex: 'antigravity-pro-argon-01',
+      account: 'AG Pro Argon',
+      label: 'Antigravity Pro Argon',
+      priority: 0,
+      disabled: false,
+    } as AuthFileItem;
+    mocks.files = [file];
+    mocks.quotaState.antigravityQuota = buildCredentialScopedQuotaRecord(file, {
+      status: 'success',
+      subscription: { plan: 'pro', tierName: 'Pro', tierId: 'g1-pro' },
+      groups: [
+        {
+          id: 'gemini-models',
+          label: 'Gemini Models',
+          buckets: [
+            {
+              id: 'gemini-5h',
+              label: 'Five Hour Limit',
+              window: '5h',
+              remainingFraction: 0.96,
+              resetTime: '2027-07-09T12:00:00Z',
+            },
+            {
+              id: 'gemini-weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.04,
+              resetTime: '2027-07-15T12:00:00Z',
+            },
+          ],
+        },
+        {
+          id: 'claude-gpt-models',
+          label: 'Claude and GPT models',
+          buckets: [
+            {
+              id: '3p-5h',
+              label: 'Five Hour Limit',
+              window: '5h',
+              remainingFraction: 0.11,
+              resetTime: '2027-07-09T11:00:00Z',
+            },
+            {
+              id: '3p-weekly',
+              label: 'Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.19,
+              resetTime: '2027-07-13T12:00:00Z',
+            },
+          ],
+        },
+        {
+          id: 'gemini-4-argon',
+          label: 'Gemini 4 Argon',
+          buckets: [
+            {
+              id: 'gemini-argon-wtu-weekly',
+              label: 'Gemini 4 Argon Weekly Limit',
+              window: 'weekly',
+              remainingFraction: 0.57,
+              resetTime: '2027-07-15T12:00:00Z',
+            },
+          ],
+        },
+      ],
+    });
+    mocks.location = { pathname: '/accounts', search: '?layout=grid' };
+
+    const renderer = await renderAccountsPage();
+    const selectionKey = getAuthFileSelectionKey(file);
+    const card = findAccountCardByKey(renderer, selectionKey);
+    const gridWindows = card.findAll(
+      (node) => typeof node.props['data-account-quota-window'] === 'string'
+    );
+    expect(gridWindows.map((window) => window.props['data-account-quota-window'])).toEqual([
+      'claude-gpt-models:3p-5h',
+      'claude-gpt-models:3p-weekly',
+      'gemini-models:gemini-5h',
+      'gemini-models:gemini-weekly',
+      'gemini-4-argon:gemini-argon-wtu-weekly',
+    ]);
+    expect(card.findAll((node) => typeof node.props['data-account-quota-group'] === 'string'))
+      .toHaveLength(3);
+    expect(readText(card)).toContain('Argon Weekly');
+
+    const tableButton = renderer.root.find(
+      (node) => node.type === 'button' && node.props['aria-label'] === 'accounts.view_mode_table'
+    );
+    await act(async () => {
+      tableButton.props.onClick();
+      await Promise.resolve();
+    });
+    await flushPromises();
+
+    const tableCard = findAccountCardByKey(renderer, selectionKey);
+    const tableWindows = tableCard.findAll(
+      (node) => typeof node.props['data-account-quota-window'] === 'string'
+    );
+    expect(tableWindows.map((window) => window.props['data-account-quota-window'])).toEqual([
+      'claude-gpt-models:3p-5h',
+      'gemini-models:gemini-5h',
+      'claude-gpt-models:3p-weekly',
+      'gemini-models:gemini-weekly',
+      'gemini-4-argon:gemini-argon-wtu-weekly',
+    ]);
+    expect(readText(tableCard)).toContain('Argon Weekly');
+  });
+
   it('renders Antigravity Free model groups in the quota matrix and keeps them in quota details', async () => {
     mocks.location = { pathname: '/accounts', search: '?layout=grid' };
     mocks.files = [

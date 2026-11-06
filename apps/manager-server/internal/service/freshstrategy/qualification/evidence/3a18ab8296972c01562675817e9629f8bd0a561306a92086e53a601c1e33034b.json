@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "runId": "AQ02-ac58035dea24a0379614ff4388bf5372410f169aee51f56b",
+  "caseRef": "AQ04-S02-legacy",
+  "records": [
+    {
+      "expectationRef": "AQ04-S02-legacy-OBSERVATION",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 115610,
+      "requestBytes": 0,
+      "responseBytes": 942
+    },
+    {
+      "expectationRef": "AQ04-S02-legacy-STATE",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 115610,
+      "requestBytes": 0,
+      "responseBytes": 942
+    },
+    {
+      "expectationRef": "AQ04-S02-legacy-CONTROL",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 115610,
+      "requestBytes": 0,
+      "responseBytes": 942
+    }
+  ]
+}

@@ -128,6 +128,16 @@ func (m *CPAMock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"method": r.Method,
 			"path":   r.URL.Path,
 		})
+	case strings.HasPrefix(r.URL.Path, "/v8/management/"):
+		if !m.hasManagementAuth(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"ok":     true,
+			"method": r.Method,
+			"path":   r.URL.Path,
+		})
 	case r.URL.Path == "/v1/models" || r.URL.Path == "/models":
 		writeJSON(w, map[string]any{
 			"data": []map[string]string{{"id": "gpt-test"}},

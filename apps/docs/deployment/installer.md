@@ -1,5 +1,12 @@
 # 一键安装脚本
 
+::: warning 1.x Stable 安装器，不是 v2 Beta 安装入口
+`bin/install-cpamp.sh` 默认继续安装 **1.x Stable**。本页的安装、升级、修复、重置及原生包参数描述的是 1.x；不要通过改镜像名或版本参数把这个单容器安装流程当成 v2 迁移。
+
+试用 **v2 Beta Embedded** 请改用同一次 Prerelease 随附的 `docker-compose.v2-embedded.yml` 与 `embedded-release-pairing.json`，三镜像固定为 `<tag>@sha256:<digest>`，见 [v2 Docker 安装](./docker.md)。已有 1.x 实例先按 [升级与回滚](../operations/update.md) 升到精确的 `v1.14.10` 基线，再离线 copy-in；目标 CPA 最低 `v8.0.55`。无 Docker 的 v2 Beta 仅提供 [linux/amd64 原生包](./native.md)。
+:::
+
+
 安装脚本适合第一次部署，或已经有 CPA、只想把 CPAMP 跑起来的环境。它不会直接覆盖已有配置文件；执行前会先展示安装摘要，确认后才写入文件和启动服务。
 
 当安装器收到 CPA URL 和 CPA Management Key 时，这些值只作为一次性导入输入：安装器调用 `store-cpa-connection`，使用 `data.key` 将连接写入 CPAMP 的 SQLite 配置，然后在健康检查、管理员鉴权和 CPA 管理接口代理验证成功后删除临时密钥文件。最终运行配置不再包含 `CPA_UPSTREAM_URL`、`CPA_MANAGEMENT_KEY_FILE` 或长期 CPA Key secret mount。

@@ -3,6 +3,12 @@
  */
 
 import { apiClient } from './client';
+import {
+  getPersistedOpenAIKeyEntryIndex,
+  hasOpenAIKeyEntryConfiguration,
+  isPersistedOpenAIKeyEntry,
+  preservePersistedOpenAIKeyEntry,
+} from '@/utils/openAIKeyEntries';
 import { configApi } from './config';
 import {
   normalizeClaudeFingerprintProfile,
@@ -197,9 +203,6 @@ const openAIProviderIdentity = (record: Record<string, unknown>) =>
 const modelIdentity = (record: Record<string, unknown>) =>
   getStringField(record, ['name', 'id', 'model']);
 
-const apiKeyEntryIdentity = (record: Record<string, unknown>) =>
-  getStringField(record, AUTH_INDEX_FIELDS) || getStringField(record, ['api-key', 'apiKey', 'key']);
-
 const cloneWithoutKnownFields = (
   raw: unknown,
   knownFields: readonly string[]
@@ -269,20 +272,22 @@ const findRawRecord = (
   return undefined;
 };
 
-const mergeKnownRecordList = (
-  rawItems: unknown,
-  payloadItems: Record<string, unknown>[],
-  knownFields: readonly string[],
-  getIdentity: (record: Record<string, unknown>) => string
-) => {
+const mergeOpenAIKeyEntries = (rawItems: unknown, payloadItems: Record<string, unknown>[]) => {
   const rawRecords = Array.isArray(rawItems)
     ? rawItems.map((item) => (isRecord(item) ? item : undefined))
     : [];
   const usedIndexes = new Set<number>();
 
-  return payloadItems.map((payload, index) => {
-    const raw = findRawRecord(rawRecords, usedIndexes, payload, index, getIdentity);
-    return mergeKnownFields(raw, payload, knownFields);
+  return payloadItems.map((payload) => {
+    const persistedIndex = getPersistedOpenAIKeyEntryIndex(payload);
+    let raw: Record<string, unknown> | undefined;
+    if (persistedIndex !== undefined && !usedIndexes.has(persistedIndex)) {
+      raw = rawRecords[persistedIndex];
+      if (raw) {
+        usedIndexes.add(persistedIndex);
+      }
+    }
+    return mergeKnownFields(raw, payload, API_KEY_ENTRY_FIELDS);
   });
 };
 
@@ -428,11 +433,9 @@ const mergeOpenAIProviderPayload = (raw: unknown, payload: Record<string, unknow
     : undefined;
   const apiKeyEntries = payload['api-key-entries'];
   if (Array.isArray(apiKeyEntries)) {
-    next['api-key-entries'] = mergeKnownRecordList(
+    next['api-key-entries'] = mergeOpenAIKeyEntries(
       rawApiKeyEntries,
-      apiKeyEntries.filter(isRecord),
-      API_KEY_ENTRY_FIELDS,
-      apiKeyEntryIdentity
+      apiKeyEntries.filter(isRecord)
     );
   }
   const models = mergeModelPayloads(raw, payload.models);
@@ -753,14 +756,18 @@ const serializeAuthIndex = (value?: string) => {
 const serializeApiKeyEntry = (entry: ApiKeyEntry) => {
   const payload: Record<string, unknown> = {};
   const apiKey = entry.apiKey?.trim();
-  if (apiKey) payload['api-key'] = apiKey;
+  if (apiKey) {
+    payload['api-key'] = apiKey;
+  } else if (isPersistedOpenAIKeyEntry(entry)) {
+    payload['api-key'] = '';
+  }
   const authIndex = serializeAuthIndex(entry.authIndex);
   if (authIndex) payload['auth-index'] = authIndex;
   if (entry.weight !== undefined) payload.weight = entry.weight;
   if (entry.proxyUrl) payload['proxy-url'] = entry.proxyUrl;
   const headers = serializeHeaders(entry.headers);
   if (headers) payload.headers = headers;
-  return payload;
+  return preservePersistedOpenAIKeyEntry(entry, payload);
 };
 
 const serializeProviderKey = (config: ProviderKeyConfig) => {
@@ -883,7 +890,9 @@ const serializeOpenAIProvider = (provider: OpenAIProviderConfig) => {
     name: provider.name,
     'base-url': provider.baseUrl,
     'api-key-entries': Array.isArray(provider.apiKeyEntries)
-      ? provider.apiKeyEntries.map((entry) => serializeApiKeyEntry(entry))
+      ? provider.apiKeyEntries
+          .filter((entry) => hasOpenAIKeyEntryConfiguration(entry))
+          .map((entry) => serializeApiKeyEntry(entry))
       : [],
   };
   const authIndex = serializeAuthIndex(provider.authIndex);

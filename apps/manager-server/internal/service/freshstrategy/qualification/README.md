@@ -14,19 +14,29 @@ The single build-bound `consumer.json` controls authorization. No fixture, CI
 job, request, environment variable or Runtime observation can change it in a
 running Manager.
 
-The current [pre-Beta maintainer acceptance record](evidence/eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5.md)
-records each consumer's evidence and limits for the pinned CPA `v8.0.55`
-candidate and the NH2 loopback-hardened Supervisor destination execution chain.
-External acceptance does not guarantee connectivity for every topology; Gateway
-remains pending.
+The current [pre-Beta independent re-verification and maintainer acceptance record](evidence/025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d.md)
+records the completed read-only independent reviews (`QualReemitReviewArgon`
+`GO` at `evidence/85b7fbac90d2f4a843f2301ec0665a773630c7932011521cd817d15af8e20414.md`
+and `PreBetaReverifySolR2` `GO`, M1 closed, at
+`evidence/c01ba53261978ab3a74eab95309cada7e98e8ba2ee0d61d6d2ddd71958edc7c5.md`),
+the maintainer's formal report-bound provenance decision, the exact 23 directly
+hashed source files across both implementation pins, and each consumer's
+clean-source re-emitted evidence and limits for the pinned CPA `v8.0.55`
+candidate and the NH2 loopback-hardened Supervisor destination execution chain
+at committed `HEAD` `8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc` (tree
+`b636fae617e9fb19eea938bfe3b6e1fb54af3ac5`). External acceptance does not
+guarantee connectivity for every topology; Gateway remains pending.
 
 The pins below (`runtime_destination_implementation.sha256`,
 `implementationSha256`, the AQ profile evidence, the adoption resource chain and
-the legacy transition chain) are bound in `consumer.json` under maintainer
-acceptance `eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5`
-(2026-11-06) from the re-emitted harness and real-process container runs against
-the pinned CPA `v8.0.55` and `v7.0.12` candidates. The earlier 2026-10-18
-independent review (`evidence/65eb659a172c9075afeddc959a9ab825d208cc728487186cce2514dd8d27050a.md`)
+the legacy transition chain) are bound in `consumer.json` under acceptance
+record `025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d`
+(2026-11-06) from the clean-worktree harness and real-process container runs
+against the pinned CPA `v8.0.55` and `v7.0.12` candidates. The superseded
+2026-11-06 re-verification record (`evidence/5e2c9dcc9bf2ad453cd9c4d5312eac9a2f1e8f79d408c806e55c7b18ac9758e5.md`),
+the clean-source provenance re-emission addendum (`evidence/1eba18df2a5bb486e8f184ce4ba618f5d5a52097d7beb20c1a9b9d44df35e8d9.md`),
+the initial 2026-11-06 maintainer acceptance (`evidence/eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5.md`),
+the 2026-10-18 independent review (`evidence/65eb659a172c9075afeddc959a9ab825d208cc728487186cce2514dd8d27050a.md`)
 and the 2026-10-09 pre-4A review (`evidence/ae378022a8d32455c9a3b36f2b5ddb8e1eb18e9d1ee9072171429cdf11706da5.md`)
 remain retained in `qualification/evidence/` as historical audit records.
 
@@ -183,12 +193,18 @@ reference and never become durable upstream-controlled identities. The
 inventory and its decisions are written through the existing Fresh CAS before
 any destination mutation and are immutable afterwards.
 
-**Honest status of the widened kinds (2026-10-29 waiver carried forward under `eedd3243` on 2026-11-06).**
+**Honest status of the widened kinds (2026-10-29 waiver carried forward under `eedd3243`, `1eba18df`, `5e2c9dcc`, and `025f5175` on 2026-11-06).**
 Historical acceptance `65eb659a` covered client API keys only. The network
 consumer's migration of credentials, gateway configuration and provider sections
 was introduced under a **maintainer waiver dated 2026-10-29** and carries
 forward under the pre-Beta maintainer acceptance record
-`eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5`, backed by
+`eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5`, its
+clean-source provenance re-emission addendum
+`1eba18df2a5bb486e8f184ce4ba618f5d5a52097d7beb20c1a9b9d44df35e8d9`, the
+superseded re-verification record
+`5e2c9dcc9bf2ad453cd9c4d5312eac9a2f1e8f79d408c806e55c7b18ac9758e5`, and the
+current independent re-verification record
+`025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d`, backed by
 real-process CPA `v8.0.55` source-read, destination-replay and destination-verify
 evidence. The executor's per-item gate is what keeps the four-kind breadth of
 `network_existing` honest: an item is copied only when the record's decision for

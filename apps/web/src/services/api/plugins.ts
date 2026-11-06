@@ -46,6 +46,7 @@ const normalizeConfigField = (value: unknown): PluginConfigField | null => {
     type: asString(value.type).trim() || 'string',
     enumValues,
     description: asString(value.description).trim(),
+    defaultValue: value.default,
   };
 };
 

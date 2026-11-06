@@ -17,6 +17,8 @@ import {
 } from '@/services/api';
 import { apiClient, createScopedApiRequestConfig } from '@/services/api/client';
 import { useNotificationStore } from '@/stores';
+import { useAuthStore } from '@/stores/useAuthStore';
+import { getAccountModelExclusionPriority } from '@/features/accounts/model/accountModelRules';
 import type { AuthFileItem } from '@/types';
 import { formatFileSize } from '@/utils/format';
 import { MAX_AUTH_FILE_SIZE } from '@/utils/constants';
@@ -648,6 +650,169 @@ const appendUploadFileNameSuffix = (fileName: string, suffix: number) => {
   return `${baseName}-${suffix}.json`;
 };
 
+class CredentialExclusionLockedError extends Error {
+  readonly fileNames: string[];
+
+  constructor(fileNames: string[]) {
+    super(`Credential model exclusions are locked for: ${fileNames.join(', ')}`);
+    this.name = 'CredentialExclusionLockedError';
+    this.fileNames = fileNames;
+  }
+}
+
+// Raw JSON import can overwrite a credential without going through the configuration editor,
+// so the effective exclusion list has to be resolved exactly like CPA does it.
+const CPA_EXCLUSION_KEYS = ['excluded_models', 'excluded-models'] as const;
+// `excludedModels` is not a CPA metadata key, but the web client can still patch or delete it.
+const CREDENTIAL_EXCLUSION_PATCH_FIELDS = [...CPA_EXCLUSION_KEYS, 'excludedModels'] as const;
+
+// CPA reads `excluded_models` first and only falls back to the legacy `excluded-models` alias when
+// the canonical key is absent, so a present-but-empty canonical key really means "no exclusions".
+const readCpaExclusionList = (record: Record<string, unknown>): string[] | null => {
+  for (const key of CPA_EXCLUSION_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+    const value = record[key];
+    if (value === undefined || value === null) continue;
+    // CPA only understands a list of model names; anything else cannot be compared safely.
+    if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) return null;
+  }
+  const effectiveKey = CPA_EXCLUSION_KEYS.find((key) =>
+    Object.prototype.hasOwnProperty.call(record, key)
+  );
+  const effective = effectiveKey ? record[effectiveKey] : null;
+  if (!Array.isArray(effective)) return [];
+  return effective.filter((entry): entry is string => typeof entry === 'string').sort();
+};
+
+const buildCredentialIdentityTuple = (record: Record<string, unknown>) => {
+  const nested = record.fields;
+  const fields = nested && typeof nested === 'object' ? (nested as Record<string, unknown>) : {};
+  const pick = (...values: unknown[]) => {
+    for (const value of values) {
+      if (value === undefined || value === null) continue;
+      const text = String(value).trim();
+      if (text) return text;
+    }
+    return '';
+  };
+  return [
+    pick(record.type, record.provider),
+    pick(record.auth_index, record.authIndex, fields['auth-index']),
+    pick(record.id),
+    pick(record.account_id, record.chatgpt_account_id),
+    pick(record.email, record.account),
+  ].join('|');
+};
+
+const buildCredentialExclusionSignature = (value: unknown): string | null => {
+  if (Array.isArray(value)) {
+    const entries: string[] = [];
+    // Positional comparison: reordering records or swapping identities across them changes
+    // which account owns which exclusion, so the order must survive.
+    for (const record of value) {
+      if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+      const fields = record as Record<string, unknown>;
+      const exclusions = readCpaExclusionList(fields);
+      if (exclusions === null) return null;
+      entries.push(`${buildCredentialIdentityTuple(fields)}=${exclusions.join('\u0000')}`);
+    }
+    return `array:${entries.join('|')}`;
+  }
+  // A single credential compares only its exclusion list: renaming or re-identifying it does
+  // not move any exclusion to another account.
+  if (!value || typeof value !== 'object') return null;
+  const exclusions = readCpaExclusionList(value as Record<string, unknown>);
+  return exclusions === null ? null : `object:${exclusions.join('\u0000')}`;
+};
+
+const isWritableAuthFileName = (fileName: string) =>
+  fileName.length > 0 && !/[\\/]/.test(fileName) && !fileName.startsWith('.');
+
+const readApiErrorStatus = (error: unknown): number | undefined => {
+  if (error === null || typeof error !== 'object' || !('status' in error)) return undefined;
+  const status = error.status;
+  return typeof status === 'number' ? status : undefined;
+};
+
+type StoredAuthFileProbe =
+  | { kind: 'found'; text: string }
+  | { kind: 'missing' }
+  | { kind: 'failed' };
+
+const probeStoredAuthFile = async (
+  fileName: string,
+  scope: Parameters<typeof authFilesApi.downloadText>[1]
+): Promise<StoredAuthFileProbe> => {
+  try {
+    const text = scope
+      ? await authFilesApi.downloadText(fileName, scope)
+      : await authFilesApi.downloadText(fileName);
+    return { kind: 'found', text };
+  } catch (err: unknown) {
+    return readApiErrorStatus(err) === 404 ? { kind: 'missing' } : { kind: 'failed' };
+  }
+};
+
+const matchesStoredCredentialExclusions = (
+  text: string,
+  incomingValue: unknown,
+  incomingSignature: string | null
+): boolean => {
+  let currentValue: unknown;
+  try {
+    currentValue = JSON.parse(text) as unknown;
+  } catch {
+    return false;
+  }
+  const currentSignature = buildCredentialExclusionSignature(currentValue);
+  return (
+    Array.isArray(currentValue) === Array.isArray(incomingValue) &&
+    currentSignature !== null &&
+    incomingSignature !== null &&
+    currentSignature === incomingSignature
+  );
+};
+
+type ExistingAuthFileNames = {
+  // Every physical name exactly as reported, so two names differing only by case stay separate.
+  exactNames: Set<string>;
+  // Case-folded alias index; only used to find candidates, never to pick the probe target.
+  byLowerName: Map<string, string[]>;
+};
+
+const collectExistingAuthFileNames = async (
+  files: AuthFileItem[],
+  scope: Parameters<typeof authFilesApi.list>[0]
+): Promise<ExistingAuthFileNames | null> => {
+  const exactNames = new Set<string>();
+  const byLowerName = new Map<string, string[]>();
+  const remember = (file: { name?: unknown } | null | undefined) => {
+    if (typeof file?.name !== 'string' || !file.name.trim()) return;
+    if (exactNames.has(file.name)) return;
+    exactNames.add(file.name);
+    const variants = byLowerName.get(file.name.toLowerCase());
+    if (variants) variants.push(file.name);
+    else byLowerName.set(file.name.toLowerCase(), [file.name]);
+  };
+  files.forEach(remember);
+  try {
+    const response = scope ? await authFilesApi.list(scope) : await authFilesApi.list();
+    (response.files ?? []).forEach(remember);
+    return { exactNames, byLowerName };
+  } catch {
+    // Without a server list a new file cannot be told apart from an overwrite.
+    return null;
+  }
+};
+
+const readUploadedJsonValue = async (file: File): Promise<unknown> => {
+  try {
+    return JSON.parse(await file.text()) as unknown;
+  } catch {
+    return null;
+  }
+};
+
 const hasAuthFileUploadFailureStatus = (status: string) => {
   const normalizedStatus = status.trim().toLowerCase();
   return (
@@ -735,6 +900,7 @@ type UseAuthFilesDataOptions = {
 export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuthFilesDataResult {
   const { t } = useTranslation();
   const { showNotification, showConfirmation } = useNotificationStore();
+  const serverVersion = useAuthStore((state) => state.serverVersion);
   const connectionFingerprint = options.connectionFingerprint?.trim() ?? '';
   const requestScope = options.requestScope;
   const onCredentialMutation = options.onCredentialMutation;
@@ -987,6 +1153,112 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
     fileInputRef.current?.click();
   }, []);
 
+  // Raw JSON paste and file upload bypass the configuration editor, so an unrecognized CPA
+  // version must be blocked here before an existing credential's exclusions are overwritten.
+  const assertCredentialExclusionsWritable = useCallback(
+    async (incoming: { fileName: string; value: unknown }[]) => {
+      if (getAccountModelExclusionPriority(serverVersion) !== 'unknown' || incoming.length === 0) {
+        return;
+      }
+
+      const existingFileNames = await collectExistingAuthFileNames(files, requestScope);
+
+      const changedFileNames: string[] = [];
+      const batchSignatures = new Map<string, string | null>();
+      const foldedBatchSignatures = new Map<
+        string,
+        { signature: string | null; confirmedDistinct: boolean }
+      >();
+      const probeCache = new Map<string, StoredAuthFileProbe>();
+      const probeAuthFileOnce = async (probeTarget: string) => {
+        const cached = probeCache.get(probeTarget);
+        if (cached) return cached;
+        const probe = await probeStoredAuthFile(probeTarget, requestScope);
+        probeCache.set(probeTarget, probe);
+        return probe;
+      };
+
+      for (const item of incoming) {
+        const fileName = item.fileName.trim();
+        const normalizedName = fileName.toLowerCase();
+        const incomingSignature = buildCredentialExclusionSignature(item.value);
+
+        // Two entries of one batch writing the same name would race each other.
+        if (batchSignatures.has(fileName)) {
+          if (batchSignatures.get(fileName) !== incomingSignature) {
+            changedFileNames.push(fileName);
+          }
+          continue;
+        }
+        batchSignatures.set(fileName, incomingSignature);
+
+        if (!isWritableAuthFileName(fileName)) {
+          changedFileNames.push(fileName || item.fileName);
+          continue;
+        }
+
+        // The exact name is the physical file the upload rewrites, so its own probe decides and a
+        // sibling credential never has to match. Case variants only matter while existence is
+        // ambiguous, because the backend may resolve them to that same file.
+        const exactProbe = await probeAuthFileOnce(fileName);
+        let rejected = false;
+        let confirmedDistinct = false;
+        if (exactProbe.kind === 'failed') {
+          rejected = true;
+        } else if (exactProbe.kind === 'found') {
+          rejected = !matchesStoredCredentialExclusions(
+            exactProbe.text,
+            item.value,
+            incomingSignature
+          );
+          // A listed exact name whose download succeeded cannot be an alias of another listing.
+          confirmedDistinct = !rejected && existingFileNames?.exactNames.has(fileName) === true;
+        } else if (existingFileNames === null || existingFileNames.exactNames.has(fileName)) {
+          // The listing claims the file exists, so a 404 is an inconsistency, not a new file.
+          rejected = true;
+        } else {
+          // The exact name is free, but a listed case variant may still be the same file on a
+          // case-insensitive backend: every variant has to exist with matching exclusions.
+          for (const variant of existingFileNames.byLowerName.get(normalizedName) ?? []) {
+            if (variant === fileName) continue;
+            const variantProbe = await probeAuthFileOnce(variant);
+            if (
+              variantProbe.kind !== 'found' ||
+              !matchesStoredCredentialExclusions(variantProbe.text, item.value, incomingSignature)
+            ) {
+              rejected = true;
+              break;
+            }
+          }
+        }
+
+        // Two names that fold together may be one file, so the batch cannot leave them with
+        // different contents unless both were proven to be distinct existing physical files.
+        const foldedEntry = foldedBatchSignatures.get(normalizedName);
+        if (
+          !rejected &&
+          foldedEntry !== undefined &&
+          foldedEntry.signature !== incomingSignature &&
+          !(foldedEntry.confirmedDistinct && confirmedDistinct)
+        ) {
+          rejected = true;
+        }
+        if (!rejected) {
+          foldedBatchSignatures.set(normalizedName, {
+            signature: incomingSignature,
+            confirmedDistinct,
+          });
+        }
+        if (rejected) changedFileNames.push(fileName);
+      }
+
+      if (changedFileNames.length > 0) {
+        throw new CredentialExclusionLockedError(changedFileNames);
+      }
+    },
+    [files, requestScope, serverVersion]
+  );
+
   const handleFileChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
       const fileList = event.target.files;
@@ -1033,6 +1305,16 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       try {
         const prepared = await prepareAuthFilesForUpload(validFiles);
         if (!isCurrentOperation()) return;
+        await assertCredentialExclusionsWritable(
+          await Promise.all(
+            prepared.files.map(async (file) => ({
+              fileName: file.name,
+              value: await readUploadedJsonValue(file),
+            }))
+          )
+        );
+        // The guard awaits list()/downloadText(), so a connection switch must abort before writing.
+        if (!isCurrentOperation()) return;
         const result =
           prepared.files.length > 0
             ? requestScope
@@ -1070,7 +1352,14 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
         }
       } catch (err: unknown) {
         if (!isCurrentOperation()) return;
-        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+        const errorMessage =
+          err instanceof CredentialExclusionLockedError
+            ? t('auth_files.upload_error_exclusions_locked', {
+                names: err.fileNames.join(', '),
+              })
+            : err instanceof Error
+              ? err.message
+              : 'Unknown error';
         showNotification(`${t('notification.upload_failed')}: ${errorMessage}`, 'error');
       } finally {
         if (uploadOperationRef.current === operationToken) {
@@ -1081,6 +1370,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       }
     },
     [
+      assertCredentialExclusionsWritable,
       clearInspectionOwnershipForFile,
       loadFiles,
       notifySourceFilesChanged,
@@ -1104,8 +1394,24 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       authJsonPasteSavingRef.current = true;
       setAuthJsonPasteSaving(true);
       try {
-        const payloads = buildPastedAuthJsonPayloads(type, fileName, jsonText);
+        const payloads = buildPastedAuthJsonPayloads(type, fileName.trim(), jsonText);
         const savedFileNames = payloads.map((payload) => payload.fileName);
+        try {
+          await assertCredentialExclusionsWritable(
+            payloads.map((payload) => ({ fileName: payload.fileName, value: payload.authJson }))
+          );
+        } catch (guardError: unknown) {
+          if (guardError instanceof CredentialExclusionLockedError) {
+            throw new Error(
+              t('auth_files.paste_error_exclusions_locked', {
+                names: guardError.fileNames.join(', '),
+              })
+            );
+          }
+          throw guardError;
+        }
+        // The guard awaits list()/downloadText(), so a connection switch must abort before writing.
+        if (!isCurrentOperation()) return [];
         if (payloads.length === 1) {
           try {
             if (requestScope) {
@@ -1213,6 +1519,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       }
     },
     [
+      assertCredentialExclusionsWritable,
       clearInspectionOwnershipForFile,
       loadFiles,
       notifySourceFilesChanged,
@@ -1765,6 +2072,14 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
       const normalizedTargets = normalizeBatchPatchTargets(targets);
       if (normalizedTargets.length === 0) return null;
       if (Object.keys(fields).length === 0) return null;
+      // Same lock as the raw JSON import: an unrecognized version cannot merge exclusions.
+      if (
+        getAccountModelExclusionPriority(serverVersion) === 'unknown' &&
+        CREDENTIAL_EXCLUSION_PATCH_FIELDS.some((field) => field in fields)
+      ) {
+        showNotification(t('auth_files.patch_error_exclusions_locked'), 'error');
+        return null;
+      }
 
       batchFieldsPendingRef.current = generation;
       setBatchFieldsUpdating(true);
@@ -1892,7 +2207,7 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
         }
       }
     },
-    [commitFiles, deselectAll, loadFiles, requestScope, showNotification, t]
+    [commitFiles, deselectAll, loadFiles, requestScope, serverVersion, showNotification, t]
   );
 
   const batchDownload = useCallback(

@@ -2002,7 +2002,8 @@
 }
 
 .quotaWindowGrid > .quotaWindowCard:only-child,
-.quotaWindowGrid > .quotaWindowCard:nth-child(3):last-child {
+.quotaWindowGrid > .quotaWindowCard:nth-child(3):last-child,
+.quotaWindowGrid > .quotaWindowCard:nth-child(5):last-child {
   grid-column: 1 / -1;
 }
 

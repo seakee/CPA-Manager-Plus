@@ -41,6 +41,8 @@ func TestTransitionalClassifier(t *testing.T) {
 		{path: "/v8/management", want: RouteDeny},
 		{path: "/v8/management/config", want: RouteDeny},
 		{path: "/v8/management/config/access/api-keys", want: RouteDeny},
+		{path: "/v8/management/config/api-keys", want: RouteDeny},
+		{path: "/v8/management/config/api-keys/claude", want: RouteDeny},
 		{path: "/v8/management-other", want: RouteGateway},
 		{path: "/v8/management-lookalike/v1", want: RouteGateway},
 	}

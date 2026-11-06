@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 from unittest.mock import patch
+from embedded_renderer_fixture import stage_renderer, redirect_fixture_node
 from pathlib import Path
 
 from image_evidence_fixtures import SOURCE_BYTES, make_evidence
@@ -464,6 +465,642 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "official CPA"):
             self.inspect("runtime")
 
+    def test_verify_rendered_compose_and_pairing_against_oci_receipt(self):
+        (self.root / "LICENSE").write_bytes(self.license)
+        seed = self.root / "docker/runtime/config.v8.default.seed.yaml"
+        seed.parent.mkdir(parents=True)
+        seed.write_bytes(b"seed")
+        entrypoint = self.root / "docker/runtime/v8-entrypoint.sh"
+        entrypoint.write_bytes(MOCK_RUNTIME_ENTRYPOINT)
+        inventory = self.root / "bin/release/embedded-third-party-inventory.txt"
+        inventory.parent.mkdir(parents=True)
+        inventory.write_bytes(SOURCE_BYTES)
+        real_api_bytes = (VERIFIER.parents[2] / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
+        api = self.root / "tests/fixtures/r1-embedded-api-transport.json"
+        api.parent.mkdir(parents=True)
+        api.write_bytes(real_api_bytes)
+        fake_cpa = hashlib.sha256(ROLE_BINARIES["ingress"]).hexdigest()
+        fake_license = hashlib.sha256(b"official").hexdigest()
+        renderer = VERIFIER.parent / "render-embedded-compose.mjs"
+        with patch.object(subject, "CPA_SHA", fake_cpa), patch.object(
+                subject, "CPA_LICENSE_SHA", fake_license):
+            archives = {}
+            for role in subject.ROLES:
+                archive = self.root / (role + ".oci.tar")
+                make_oci(archive, role, self.license, api_contract=real_api_bytes)
+                archives[role] = archive
+            receipt = subject.verify(archives, SHA, EVENT, self.root)
+            real_cpa_sha = VERIFIER.read_text(encoding="utf-8").split(
+                'CPA_SHA = "', 1)[1].split('"', 1)[0]
+            evidence_path = self.root / "candidate-evidence.json"
+            compose_path = self.root / "docker-compose.v2-embedded.yml"
+            pairing_path = self.root / "embedded-release-pairing.json"
+
+            # Production surface contract: neither Python verifier nor Node renderer exposes any
+            # pin-override / test-setter attribute or export.
+            py_forbidden = [
+                name for name in dir(subject)
+                if any(tok in name.lower() for tok in ("fortest", "for_test", "setexpected", "set_expected", "activeexpected", "active_expected", "official_cpa_sha"))
+            ]
+            self.assertEqual(py_forbidden, [])
+            # Exact allowed export list for bin/release/render-embedded-compose.mjs
+            # (kept in sync with tests/embeddedCandidate.test.mjs), plus process.env Proxy probe.
+            expected_node_exports = [
+                "CANONICAL_INGRESS_PORT_SPEC",
+                "CLI_HELP_TEXT",
+                "COMPOSE_FILENAME",
+                "COMPOSE_SERVICES",
+                "DEFAULT_REGISTRY_PREFIX",
+                "DEFAULT_REPOSITORIES",
+                "EMBEDDED_VERIFIER_CONTRACT_NOTICE",
+                "EXPECTED_API_CONTRACT_ID",
+                "EXPECTED_API_CONTRACT_QUALIFICATION",
+                "EXPECTED_API_PATH",
+                "EXPECTED_API_SUFFIX",
+                "EXPECTED_CPA_ARTIFACT_ID",
+                "EXPECTED_CPA_SHA256",
+                "EXPECTED_CPA_VERSION",
+                "PACKAGED_PATHS",
+                "PAIRING_FILENAME",
+                "ROLES",
+                "assertCanonicalCpaArtifact",
+                "composeYamlToRuntime12ConfigJson",
+                "extractFilesFromOciArchive",
+                "parseEmbeddedComposeText",
+                "parsePinnedImageReference",
+                "renderEmbeddedComposeYaml",
+                "renderEmbeddedReleaseArtifacts",
+                "resolveFullWebAndApiMetadata",
+                "runCli",
+                "validateCandidateEvidence",
+                "validateRegistryPrefix",
+                "validateRuntime12ComposeDocument",
+                "validateVersionTag",
+                "verifyEmbeddedReleaseArtifacts",
+                "verifyOciArchiveAgainstRoleEvidence",
+            ]
+            node_probe_proc = subprocess.run(
+                [
+                    "node", "--input-type=module", "-e",
+                    "const allowed = new Set(['NODE_PATH']);\n"
+                    "const desc = Object.getOwnPropertyDescriptor(process, 'env');\n"
+                    f"const fake = {json.dumps(fake_cpa)};\n"
+                    "Object.defineProperty(process, 'env', {\n"
+                    "  ...desc,\n"
+                    "  value: new Proxy(process.env, {\n"
+                    "    get(t, p, r) { return typeof p === 'string' && !allowed.has(p) ? fake : Reflect.get(t, p, r); }\n"
+                    "  }),\n"
+                    "});\n"
+                    f"const m = await import({json.dumps(renderer.resolve().as_uri() + '?env-probe=1')});\n"
+                    "Object.defineProperty(process, 'env', desc);\n"
+                    f"const syntheticEv = {json.dumps(receipt)};\n"
+                    "let rejected = false;\n"
+                    "try { m.validateCandidateEvidence(syntheticEv); } catch (e) {\n"
+                    "  rejected = /officialCPA pin mismatch/.test(String(e));\n"
+                    "}\n"
+                    "console.log(JSON.stringify({ exports: Object.keys(m).sort(), rejected }));\n",
+                ],
+                capture_output=True, text=True, timeout=20, check=True,
+            )
+            node_probe = json.loads(node_probe_proc.stdout)
+            self.assertEqual(node_probe["exports"], expected_node_exports)
+            self.assertTrue(
+                node_probe["rejected"],
+                "production renderer accepted non-official CPA pin when process.env returned fixture sha",
+            )
+            self.assertEqual(
+                real_cpa_sha,
+                "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
+            )
+
+            # Round-4 P1 regression: unpatched CLI renderer must reject runtime.oci.tar whose CPA executable
+            # bytes (fake_cpa) do not match the official v8.0.55 pin even if cpa-artifact.json is self-consistent
+            mismatch_ev = json.loads(json.dumps(receipt))
+            mismatch_ev["officialCPA"]["verifiedFinalImageExecutableSHA256"] = real_cpa_sha
+            mismatch_ev["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
+                "sha256:" + real_cpa_sha
+            )
+            evidence_path.write_text(json.dumps(mismatch_ev, indent=2) + "\n", encoding="utf-8")
+            mismatch_render = subprocess.run(
+                ["node", str(renderer), "--evidence", str(evidence_path),
+                 "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
+                capture_output=True, text=True, timeout=20, check=False)
+            self.assertNotEqual(mismatch_render.returncode, 0)
+            self.assertIn(
+                "OCI archive official CPA v8.0.55 executable hash mismatch for runtime",
+                mismatch_render.stderr,
+            )
+
+            # Positive synthetic render uses an isolated test module without public runCli.
+            receipt_for_node = json.loads(json.dumps(receipt))
+            evidence_path.write_text(json.dumps(receipt_for_node, indent=2) + "\n", encoding="utf-8")
+            _, render_runner = stage_renderer(self.root / "synthetic-fixture", fake_cpa)
+            rendered = subprocess.run(
+                ["node", str(render_runner), "--evidence", str(evidence_path),
+                 "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
+                capture_output=True, text=True, timeout=20, check=False)
+            self.assertEqual(rendered.returncode, 0, rendered.stdout + "\n" + rendered.stderr)
+
+            # Round-4 P1 regression: unpatched CLI --verify and Python CLI must also reject the official-pin mismatch
+            mismatch_pairing = json.loads(pairing_path.read_text(encoding="utf-8"))
+            mismatch_pairing["cpa"]["artifact_id"] = "sha256:" + real_cpa_sha
+            mismatch_ev_path = self.root / "mismatch-evidence.json"
+            mismatch_pairing_path = self.root / "mismatch-pairing.json"
+            mismatch_ev_path.write_text(json.dumps(mismatch_ev, indent=2) + "\n", encoding="utf-8")
+            mismatch_pairing_path.write_text(json.dumps(mismatch_pairing, indent=2) + "\n", encoding="utf-8")
+            mismatch_verify_node = subprocess.run(
+                ["node", str(renderer), "--verify",
+                 "--evidence", str(mismatch_ev_path),
+                 "--compose", str(compose_path),
+                 "--pairing", str(mismatch_pairing_path),
+                 "--manager-oci", str(archives["manager"]),
+                 "--ingress-oci", str(archives["ingress"]),
+                 "--runtime-oci", str(archives["runtime"])],
+                capture_output=True, text=True, timeout=20, check=False)
+            self.assertNotEqual(mismatch_verify_node.returncode, 0)
+            self.assertIn(
+                "OCI archive official CPA v8.0.55 executable hash mismatch for runtime",
+                mismatch_verify_node.stderr,
+            )
+            mismatch_verify_py = subprocess.run(
+                [sys.executable, str(VERIFIER),
+                 "--evidence", str(mismatch_ev_path),
+                 "--verify-compose", str(compose_path),
+                 "--verify-pairing", str(mismatch_pairing_path),
+                 "--manager", str(archives["manager"]),
+                 "--ingress", str(archives["ingress"]),
+                 "--runtime", str(archives["runtime"])],
+                capture_output=True, text=True, timeout=20, check=False)
+            self.assertNotEqual(mismatch_verify_py.returncode, 0)
+            self.assertIn(
+                "OCI archive official CPA v8.0.55 executable hash mismatch",
+                mismatch_verify_py.stderr,
+            )
+
+            test_archives = dict(archives)
+            with redirect_fixture_node(subject, render_runner):
+                verified = subject.verify_rendered_pairing(
+                    receipt_for_node, compose_path, pairing_path, test_archives)
+            self.assertEqual(verified["compose"]["filename"], "docker-compose.v2-embedded.yml")
+
+            # Node's documented archive/topology checks do not certify Go metadata.
+            # Python certification must reject a role binary from a different Go module,
+            # even when its archive hashes, receipt, compose and pairing all agree.
+            valid_compose = compose_path.read_bytes()
+            valid_pairing = pairing_path.read_bytes()
+            for role in subject.ROLES:
+                archive = archives[role]
+                original_archive = archive.read_bytes()
+                try:
+                    wrong_binary = ROLE_BINARIES["runtime" if role == "ingress" else "ingress"]
+                    binary_path = subject.GO_BINARIES[role]
+                    make_oci(
+                        archive, role, self.license, api_contract=real_api_bytes,
+                        mutate_evidence=lambda files: {**files, binary_path: wrong_binary},
+                    )
+                    wrong_identity = json.loads(json.dumps(receipt_for_node))
+                    image = wrong_identity["images"][role]
+                    with tarfile.open(archive) as tf:
+                        index = json.load(tf.extractfile("index.json"))
+                        image["ociLayoutIndexDigest"] = blob(tf.extractfile("index.json").read())
+                        manifest_digest = index["manifests"][0]["digest"]
+                        manifest = json.load(tf.extractfile("blobs/" + manifest_digest.replace(":", "/")))
+                    image["archiveSHA256"] = blob(archive.read_bytes())
+                    image["platformManifestDigest"] = manifest_digest
+                    image["imageConfigDigest"] = manifest["config"]["digest"]
+                    image["packagedFiles"][binary_path] = blob(wrong_binary)
+                    evidence_path.write_text(json.dumps(wrong_identity))
+                    rendered_wrong = subprocess.run(
+                        ["node", str(render_runner), "--evidence", str(evidence_path),
+                         "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
+                        capture_output=True, text=True, timeout=20, check=False)
+                    self.assertEqual(rendered_wrong.returncode, 0, rendered_wrong.stderr)
+                    with self.assertRaisesRegex(ValueError, "Go compiled module/entrypoint mismatch: " + role):
+                        subject.verify_rendered_pairing(
+                            wrong_identity, compose_path, pairing_path, test_archives)
+                finally:
+                    archive.write_bytes(original_archive)
+                    compose_path.write_bytes(valid_compose)
+                    pairing_path.write_bytes(valid_pairing)
+                    evidence_path.write_text(json.dumps(receipt_for_node))
+
+            # Round-4 P1 regression: tampered cpa-artifact.json digest in evidence fails closed
+            bad_cpa_art_ev = json.loads(json.dumps(receipt_for_node))
+            bad_cpa_art_ev["images"]["runtime"]["packagedFiles"][
+                "/usr/local/share/cpamp/runtime/cpa-artifact.json"
+            ] = "sha256:" + "7" * 64
+            with self.assertRaisesRegex(
+                ValueError, "OCI archive CPA artifact manifest digest mismatch against evidence"
+            ):
+                subject.verify_rendered_pairing(
+                    bad_cpa_art_ev, compose_path, pairing_path, test_archives)
+            # Round-3 regression: missing any single role archive or archive=None/""/wrong fails closed
+            with self.assertRaisesRegex(ValueError, "missing required OCI archive for runtime"):
+                subject.verify_rendered_pairing(
+                    receipt_for_node, compose_path, pairing_path,
+                    {"manager": archives["manager"], "ingress": archives["ingress"], "runtime": None})
+            for bad_archive_val in (None, "", "wrong.tar"):
+                bad_ev_arch = json.loads(json.dumps(receipt_for_node))
+                bad_ev_arch["images"]["manager"]["archive"] = bad_archive_val
+                with self.assertRaisesRegex(ValueError, "invalid or missing archive filename for manager"):
+                    subject.verify_rendered_pairing(
+                        bad_ev_arch, compose_path, pairing_path, test_archives)
+
+            with redirect_fixture_node(subject, render_runner):
+                # Negative 1: :latest in compose
+                original_compose = compose_path.read_text(encoding="utf-8")
+                compose_path.write_text(
+                    original_compose.replace(
+                        "@" + receipt_for_node["images"]["ingress"]["platformManifestDigest"],
+                        ":latest"),
+                    encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "must not reference :latest"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                # Negative 2: build block in compose
+                compose_path.write_text(
+                    original_compose + "    build:\n      context: .\n",
+                    encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "must not contain local build blocks"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                # Negative 3: loopback env in compose
+                compose_path.write_text(
+                    original_compose + "      CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: '1'\n",
+                    encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                compose_path.write_text(original_compose, encoding="utf-8")
+
+                # Negative 4: tampered pairing digest
+                original_pairing = json.loads(pairing_path.read_text(encoding="utf-8"))
+                bad_pairing = json.loads(json.dumps(original_pairing))
+                bad_pairing["images"]["manager"]["manifest_digest"] = "sha256:" + "f" * 64
+                pairing_path.write_text(json.dumps(bad_pairing), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "pairing manifest_digest mismatch"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                # Helper to write a mutated compose and re-sync pairing.compose digest/size
+                def write_resynced_compose(mutated_compose_text):
+                    raw_bytes = mutated_compose_text.encode("utf-8")
+                    compose_path.write_bytes(raw_bytes)
+                    synced = json.loads(json.dumps(original_pairing))
+                    synced["compose"]["sha256"] = blob(raw_bytes)
+                    synced["compose"]["size"] = len(raw_bytes)
+                    pairing_path.write_text(json.dumps(synced), encoding="utf-8")
+
+                # Negative 5: extra port on cpamp-manager (normal and deeper-indented YAML)
+                for port_block in (
+                    "    ports:\n      - '18318:18317'\n    expose:\n      - '18317'",
+                    "    ports:\n        - '18318:18317'\n    expose:\n      - '18317'",
+                ):
+                    write_resynced_compose(
+                        original_compose.replace("    expose:\n      - '18317'", port_block)
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError, "expected only cpamp-ingress 18317:18317"
+                    ):
+                        subject.verify_rendered_pairing(
+                            receipt_for_node, compose_path, pairing_path, test_archives)
+
+                # Negative 6: privileged: true / "true", network_mode: host, writable / "false" secret on manager, cross-role mount, UDP/long port
+                write_resynced_compose(
+                    original_compose.replace(
+                        "  cpamp-runtime:\n", "  cpamp-runtime:\n    privileged: true\n"
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "cpamp-runtime must not run privileged"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                write_resynced_compose(
+                    original_compose.replace(
+                        "  cpamp-runtime:\n", '  cpamp-runtime:\n    privileged: "true"\n'
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "cpamp-runtime.privileged must be a boolean"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                write_resynced_compose(
+                    original_compose.replace(
+                        "  cpamp-runtime:\n", "  cpamp-runtime:\n    network_mode: host\n"
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "cpamp-runtime must not use host networking"
+                ):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                write_resynced_compose(
+                    original_compose.replace(
+                        "/run/cpamp/runtime-secret:ro", "/run/cpamp/runtime-secret"
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "Runtime transport secret must be read-only for Manager"
+                ):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                write_resynced_compose(
+                    original_compose.replace(
+                        "      - cpamp-manager-data:/data",
+                        "      - cpamp-manager-data:/data\n      - cpamp-runtime-data:/runtime-copy",
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "strict volume whitelist violation on cpamp-manager"
+                ):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                # Round-3 regression: top-level volume override (name/external/driver/driver_opts/labels)
+                write_resynced_compose(
+                    original_compose.replace(
+                        "  cpamp-manager-data:\n",
+                        "  cpamp-manager-data:\n    name: cpamp-shared-state\n",
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "top-level volume cpamp-manager-data must be a canonical empty definition"
+                ):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, test_archives)
+
+                # Restore valid compose and pairing, then test per-role sourceCommitClaim drift
+                compose_path.write_text(original_compose, encoding="utf-8")
+                pairing_path.write_text(json.dumps(original_pairing), encoding="utf-8")
+                for role in subject.ROLES:
+                    drifted = json.loads(json.dumps(receipt_for_node))
+                    drifted["images"][role]["sourceCommitClaim"] = "0" * 40
+                    with self.assertRaisesRegex(
+                        ValueError, role + " sourceCommitClaim differs"
+                    ):
+                        subject.verify_rendered_pairing(
+                            drifted, compose_path, pairing_path, test_archives)
+
+                # Negative 7 (P1-1): Archives unchanged, evidence+pairing+compose consistently forged
+                # Case A: consistently forged manager platformManifestDigest
+                real_mgr_manifest = receipt_for_node["images"]["manager"]["platformManifestDigest"]
+                forged_mgr_manifest = "sha256:" + "9" * 64
+                forged_ev_a = json.loads(json.dumps(receipt_for_node))
+                forged_ev_a["images"]["manager"]["platformManifestDigest"] = forged_mgr_manifest
+                forged_compose_a = original_compose.replace(real_mgr_manifest, forged_mgr_manifest)
+                forged_compose_a_bytes = forged_compose_a.encode("utf-8")
+                compose_path.write_bytes(forged_compose_a_bytes)
+                forged_pairing_a = json.loads(json.dumps(original_pairing))
+                forged_pairing_a["images"]["manager"]["manifest_digest"] = forged_mgr_manifest
+                forged_pairing_a["images"]["manager"]["image_ref"] = (
+                    forged_pairing_a["images"]["manager"]["image_ref"].replace(
+                        real_mgr_manifest, forged_mgr_manifest
+                    )
+                )
+                forged_pairing_a["compose"]["sha256"] = blob(forged_compose_a_bytes)
+                forged_pairing_a["compose"]["size"] = len(forged_compose_a_bytes)
+                pairing_path.write_text(json.dumps(forged_pairing_a), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError, "OCI archive platformManifestDigest mismatch"
+                ):
+                    subject.verify_rendered_pairing(
+                        forged_ev_a, compose_path, pairing_path, test_archives)
+
+                # Case B: consistently forged sourceCommitClaim across evidence + pairing
+                compose_path.write_text(original_compose, encoding="utf-8")
+                forged_commit = "1" * 40
+                forged_ev_b = json.loads(json.dumps(receipt_for_node))
+                forged_ev_b["sourceCommitClaim"] = forged_commit
+                forged_ev_b["images"]["manager"]["goBinaryIdentity"]["managerCompiledSourceClaim"] = (
+                    forged_commit
+                )
+                forged_pairing_b = json.loads(json.dumps(original_pairing))
+                forged_pairing_b["source_commit"] = forged_commit
+                pairing_path.write_text(json.dumps(forged_pairing_b), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError, "OCI archive revision label mismatch"
+                ):
+                    subject.verify_rendered_pairing(
+                        forged_ev_b, compose_path, pairing_path, test_archives)
+
+                # Case C: consistently forged fullWebSummary.indexHtmlSHA256 across evidence + pairing
+                forged_index_sha = "sha256:" + "8" * 64
+                forged_ev_c = json.loads(json.dumps(receipt_for_node))
+                forged_ev_c["images"]["manager"]["fullWebSummary"]["indexHtmlSHA256"] = forged_index_sha
+                forged_pairing_c = json.loads(json.dumps(original_pairing))
+                forged_pairing_c["fullweb"]["index_html_sha256"] = forged_index_sha
+                pairing_path.write_text(json.dumps(forged_pairing_c), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError, "OCI archive Full Web manifest or index.html summary mismatch"
+                ):
+                    subject.verify_rendered_pairing(
+                        forged_ev_c, compose_path, pairing_path, test_archives)
+
+def stage_mock_candidate_repo(source):
+    repo_root = VERIFIER.parents[2]
+    mock_cpa_sha = hashlib.sha256(b"mock-cpa-binary").hexdigest()
+    for rel in (
+        "bin/release/build-embedded-candidate.sh",
+        "bin/ci/validate-runtime12-compose.mjs",
+        "tests/fixtures/r1-embedded-api-transport.json",
+    ):
+        dst = source / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes((repo_root / rel).read_bytes())
+    _, runner = stage_renderer(source / "bin/release", mock_cpa_sha)
+    (source / "bin/release/render-embedded-compose.mjs").write_bytes(runner.read_bytes())
+    qual = source / "tests/fixtures/cpa-v8-qualification/.keep"
+    qual.parent.mkdir(parents=True, exist_ok=True)
+    qual.write_bytes(b"")
+
+MOCK_VERIFIER_SCRIPT = """\
+import gzip
+import hashlib
+import io
+import json
+import pathlib
+import sys
+import tarfile
+
+a = sys.argv
+if "--evidence" in a and "--out" not in a:
+    ev = json.loads(pathlib.Path(a[a.index("--evidence") + 1]).read_text(encoding="utf-8"))
+    compose = pathlib.Path(a[a.index("--verify-compose") + 1]).read_bytes()
+    pairing = json.loads(pathlib.Path(a[a.index("--verify-pairing") + 1]).read_text(encoding="utf-8"))
+    assert pairing["source_commit"] == ev["sourceCommitClaim"]
+    assert pairing["compose"]["sha256"] == "sha256:" + hashlib.sha256(compose).hexdigest()
+    sys.exit(0)
+
+commit = a[a.index("--source-commit") + 1] if "--source-commit" in a else "a" * 40
+event = a[a.index("--build-event") + 1] if "--build-event" in a else "local-test-event"
+root = pathlib.Path(a[a.index("--source-root") + 1]) if "--source-root" in a else pathlib.Path(".")
+{extra_checks}
+api_bytes = (root / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
+api_sha = "sha256:" + hashlib.sha256(api_bytes).hexdigest()
+cpa_sha = hashlib.sha256(b"mock-cpa-binary").hexdigest()
+
+def s256(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+def build_tar_bytes(entries):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for name, content in entries.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(content)
+            tf.addfile(info, io.BytesIO(content))
+    return buf.getvalue()
+
+images = {{}}
+for idx, role in enumerate(("manager", "ingress", "runtime"), start=1):
+    archive = pathlib.Path(a[a.index("--" + role) + 1])
+    bin_path = {{
+        "manager": "/usr/local/bin/cpa-manager-plus",
+        "ingress": "/usr/local/bin/cpamp-ingress",
+        "runtime": "/usr/local/bin/cpamp-runtime-supervisor",
+    }}[role]
+    bin_bytes = ("mock-bin-" + role).encode("utf-8")
+    prov_bytes = json.dumps({{"sourceCommit": commit, "role": role}}).encode("utf-8")
+    layer_entries = {{
+        bin_path.lstrip("/"): bin_bytes,
+        "usr/local/share/cpamp/provenance.json": prov_bytes,
+    }}
+    packaged = {{
+        bin_path: s256(bin_bytes),
+        "/usr/local/share/cpamp/provenance.json": s256(prov_bytes),
+    }}
+    extra = {{}}
+    if role == "manager":
+        idx_sha = "sha256:" + "c" * 64
+        web_bytes = json.dumps({{
+            "schemaVersion": 1,
+            "indexHtmlSHA256": idx_sha,
+            "assetCount": 2,
+            "files": [
+                {{"path": "index.html", "sha256": idx_sha, "size": 10}},
+                {{"path": "assets/app.js", "sha256": "sha256:" + "d" * 64, "size": 20}},
+            ],
+        }}).encode("utf-8")
+        web_sha = s256(web_bytes)
+        layer_entries["usr/local/share/cpamp/release/fullweb-manifest.json"] = web_bytes
+        layer_entries["usr/local/share/cpamp/release/public-api-transport-contract.json"] = api_bytes
+        packaged["/usr/local/share/cpamp/release/fullweb-manifest.json"] = web_sha
+        packaged["/usr/local/share/cpamp/release/public-api-transport-contract.json"] = api_sha
+        extra["fullWebSummary"] = {{
+            "manifestSHA256": web_sha,
+            "indexHtmlSHA256": idx_sha,
+            "assetCount": 2,
+        }}
+        extra["apiTransportContract"] = {{
+            "sha256": api_sha,
+            "contractId": "cpamp-r1-embedded-public-api-transport-v1",
+            "qualification": "SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY",
+            "apiSuffix": "/api/v2",
+            "expectedPath": "/phase4-test/api/v2/technical",
+        }}
+    if role == "runtime":
+        cpa_bytes = b"mock-cpa-binary"
+        cpa_art_bytes = json.dumps({{
+            "schemaVersion": 1,
+            "engine": "cpa",
+            "version": "8.0.55",
+            "artifactId": s256(cpa_bytes),
+        }}).encode("utf-8")
+        layer_entries["usr/local/bin/cli-proxy-api"] = cpa_bytes
+        layer_entries["usr/local/share/cpamp/runtime/cpa-artifact.json"] = cpa_art_bytes
+        packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + cpa_sha
+        packaged["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = s256(cpa_art_bytes)
+    layer_tar = build_tar_bytes(layer_entries)
+    diff_id = s256(layer_tar)
+    layer_gz = gzip.compress(layer_tar)
+    layer_digest = s256(layer_gz)
+    config_bytes = json.dumps({{
+        "architecture": "amd64",
+        "os": "linux",
+        "config": {{
+            "Labels": {{
+                "org.opencontainers.image.revision": commit,
+                "io.cpamp.candidate.role": role,
+                "io.cpamp.candidate.event": event,
+            }},
+        }},
+        "rootfs": {{"type": "layers", "diff_ids": [diff_id]}},
+    }}).encode("utf-8")
+    cfg = s256(config_bytes)
+    manifest_bytes = json.dumps({{
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {{
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": cfg,
+            "size": len(config_bytes),
+        }},
+        "layers": [{{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "digest": layer_digest,
+            "size": len(layer_gz),
+        }}],
+    }}).encode("utf-8")
+    manifest_digest = s256(manifest_bytes)
+    index_bytes = json.dumps({{
+        "schemaVersion": 2,
+        "manifests": [{{
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": manifest_digest,
+            "size": len(manifest_bytes),
+            "platform": {{"os": "linux", "architecture": "amd64"}},
+        }}],
+    }}).encode("utf-8")
+    oci_bytes = build_tar_bytes({{
+        "oci-layout": b'{{"imageLayoutVersion":"1.0.0"}}',
+        "index.json": index_bytes,
+        "blobs/sha256/" + manifest_digest.split(":", 1)[1]: manifest_bytes,
+        "blobs/sha256/" + cfg.split(":", 1)[1]: config_bytes,
+        "blobs/sha256/" + layer_digest.split(":", 1)[1]: layer_gz,
+    }})
+    archive.write_bytes(oci_bytes)
+    docker_tar = archive.parent / (role + ".docker.tar")
+    if docker_tar.exists():
+        transport = json.dumps([{{
+            "Config": "blobs/" + cfg.replace(":", "/", 1),
+            "RepoTags": ["cpamp-r1-" + role + ":candidate"],
+            "Layers": ["blobs/" + layer_digest.replace(":", "/", 1)],
+        }}]).encode("utf-8")
+        docker_tar.write_bytes(build_tar_bytes({{"manifest.json": transport}}))
+    images[role] = {{
+        "archive": role + ".oci.tar",
+        "archiveSHA256": s256(oci_bytes),
+        "ociLayoutIndexDigest": s256(index_bytes),
+        "platform": "linux/amd64",
+        "platformManifestDigest": manifest_digest,
+        "imageConfigDigest": cfg,
+        "goBinaryIdentity": {{
+            "managerCompiledSourceClaim": commit if role == "manager" else None,
+        }},
+        "packagedFiles": packaged,
+        **extra,
+    }}
+out = pathlib.Path(a[a.index("--out") + 1])
+out.write_text(json.dumps({{
+    "schemaVersion": 1,
+    "platform": "linux/amd64",
+    "sourceCommitClaim": commit,
+    "candidateBuildEventClaim": event,
+    "candidateVersionClaim": "2.0.0-r1candidate",
+    "officialCPA": {{
+        "version": "8.0.55",
+        "verifiedFinalImageExecutableSHA256": cpa_sha,
+    }},
+    "images": images,
+    "sourceRoot": str(root),
+    "testOnly": True,
+}}), encoding="utf-8")
+"""
 
 
 class CandidateBuilderSnapshotContracts(unittest.TestCase):
@@ -482,24 +1119,15 @@ class CandidateBuilderSnapshotContracts(unittest.TestCase):
                 "source.txt": b"original source bytes\n",
             }.items():
                 (source / name).write_bytes(content)
-            build_script = VERIFIER.parent / "build-embedded-candidate.sh"
+            stage_mock_candidate_repo(source)
             script_in_source = source / "bin/release/build-embedded-candidate.sh"
-            script_in_source.parent.mkdir(parents=True)
-            script_in_source.write_bytes(build_script.read_bytes())
             verifier = source / "bin/release/verify-embedded-candidate.py"
-            verifier.write_text("""\
-import json
-import pathlib
-import sys
-a = sys.argv
-root = pathlib.Path(a[a.index("--source-root") + 1])
+            verifier.write_text(MOCK_VERIFIER_SCRIPT.format(extra_checks="""\
 assert (root / "source.txt").read_text() == "original source bytes\\n"
 for role in ("manager", "ingress", "runtime"):
     archive = pathlib.Path(a[a.index("--" + role) + 1])
     assert archive.read_text() == "fake OCI " + role
-out = pathlib.Path(a[a.index("--out") + 1])
-out.write_text(json.dumps({"sourceRoot": str(root), "testOnly": True}))
-""", encoding="utf-8")
+"""), encoding="utf-8")
             subprocess.run(["git", "init", "-q"], cwd=source, check=True)
             subprocess.run(["git", "add", "."], cwd=source, check=True)
             subprocess.run(["git", "-c", "user.name=CI Test",
@@ -559,6 +1187,7 @@ if role == "manager":
             record = base / "docker-record.jsonl"
             env = dict(os.environ)
             env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+            env["NODE_PATH"] = str(VERIFIER.parents[2] / "node_modules")
             env["FAKE_SOURCE_DIR"] = str(source)
             env["FAKE_COMMIT"] = pinned_commit
             env["FAKE_RECORD"] = str(record)
@@ -578,7 +1207,8 @@ if role == "manager":
             snapshot = Path(events[0]["context"])
             self.assertFalse(snapshot.exists(), "disposable source snapshot was not removed")
             self.assertTrue((output / "candidate-evidence.json").exists())
-
+            self.assertTrue((output / "docker-compose.v2-embedded.yml").exists())
+            self.assertTrue((output / "embedded-release-pairing.json").exists())
 
 class CandidateLoadContracts(unittest.TestCase):
     SCRIPT = VERIFIER.parent / "build-embedded-candidate.sh"
@@ -618,23 +1248,10 @@ class CandidateLoadContracts(unittest.TestCase):
             for name in ("Dockerfile.manager-server", "Dockerfile.ingress", "Dockerfile.runtime"):
                 (source / name).write_bytes(b"FROM scratch\n")
             (source / "source.txt").write_bytes(b"original source bytes\n")
+            stage_mock_candidate_repo(source)
             script_in_source = source / "bin/release/build-embedded-candidate.sh"
-            script_in_source.parent.mkdir(parents=True)
-            script_in_source.write_bytes(self.SCRIPT.read_bytes())
-            (source / "bin/release/verify-embedded-candidate.py").write_text("""\
-import json
-import pathlib
-import sys
-a = sys.argv
-images = {}
-for role in ("manager", "ingress", "runtime"):
-    archive = pathlib.Path(a[a.index("--" + role) + 1])
-    images[role] = {
-        "imageConfigDigest": (archive.parent / (role + ".digest")).read_text().strip(),
-    }
-out = pathlib.Path(a[a.index("--out") + 1])
-out.write_text(json.dumps({"images": images}))
-""", encoding="utf-8")
+            (source / "bin/release/verify-embedded-candidate.py").write_text(
+                MOCK_VERIFIER_SCRIPT.format(extra_checks=""), encoding="utf-8")
             subprocess.run(["git", "init", "-q"], cwd=source, check=True)
             subprocess.run(["git", "add", "."], cwd=source, check=True)
             subprocess.run(["git", "-c", "user.name=CI Test", "-c", "user.email=ci@example.invalid",
@@ -701,6 +1318,7 @@ with open(os.environ["FAKE_LOAD_RECORD"], "a", encoding="utf-8") as log:
             (fakebin / "docker").chmod(0o755)
             env = dict(os.environ)
             env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+            env["NODE_PATH"] = str(VERIFIER.parents[2] / "node_modules")
             env["CPAMP_CANDIDATE_LOAD"] = "1"
             env["FAKE_LOAD_STATE"] = str(base / "state")
             env["FAKE_LOAD_RECORD"] = str(base / "loaded.txt")
@@ -742,18 +1360,13 @@ class CandidateBuilderSelectionContracts(unittest.TestCase):
         source.mkdir()
         for name in ("Dockerfile.manager-server", "Dockerfile.ingress", "Dockerfile.runtime"):
             (source / name).write_bytes(b"FROM scratch\n")
+        stage_mock_candidate_repo(source)
         script = source / "bin/release/build-embedded-candidate.sh"
-        script.parent.mkdir(parents=True)
-        script.write_bytes((VERIFIER.parent / "build-embedded-candidate.sh").read_bytes())
-        (source / "bin/release/verify-embedded-candidate.py").write_text("""\
-import json, pathlib, sys
-a = sys.argv
-images = {role: {"imageConfigDigest": "sha256:" + "0" * 64}
-          for role in ("manager", "ingress", "runtime")}
-for role in images:
+        (source / "bin/release/verify-embedded-candidate.py").write_text(
+            MOCK_VERIFIER_SCRIPT.format(extra_checks="""\
+for role in ("manager", "ingress", "runtime"):
     assert pathlib.Path(a[a.index("--" + role) + 1]).exists()
-pathlib.Path(a[a.index("--out") + 1]).write_text(json.dumps({"images": images}))
-""", encoding="utf-8")
+"""), encoding="utf-8")
         subprocess.run(["git", "init", "-q"], cwd=source, check=True)
         subprocess.run(["git", "add", "."], cwd=source, check=True)
         subprocess.run(["git", "-c", "user.name=CI Test", "-c", "user.email=ci@example.invalid",
@@ -787,6 +1400,7 @@ with open(os.environ["FAKE_BUILD_RECORD"], "a", encoding="utf-8") as log:
         (fakebin / "docker").chmod(0o755)
         env = dict(os.environ)
         env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+        env["NODE_PATH"] = str(VERIFIER.parents[2] / "node_modules")
         env["FAKE_BUILD_RECORD"] = str(base / "builds.jsonl")
         env.pop("CPAMP_CANDIDATE_LOAD", None)
         env.pop("CPAMP_CANDIDATE_BUILDER", None)

@@ -7,6 +7,8 @@ import {
 } from '@/services/api';
 import type { AuthFileItem } from '@/types';
 import { useNotificationStore } from '@/stores';
+import { useAuthStore } from '@/stores/useAuthStore';
+import { getAccountModelExclusionPriority } from '@/features/accounts/model/accountModelRules';
 import {
   AUTH_FILE_CONFIGURATION_INVALID_JSON,
   AUTH_FILE_CONFIGURATION_TARGET_NOT_FOUND,
@@ -94,6 +96,11 @@ export function useAuthFileConfigurationEditor(
   } = options;
   const { t } = useTranslation();
   const showNotification = useNotificationStore((store) => store.showNotification);
+  // Credential exclusions mean different things across CPA releases, so an
+  // unrecognized version must not be saved through this shared boundary.
+  const exclusionPriority = getAccountModelExclusionPriority(
+    useAuthStore((authState) => authState.serverVersion)
+  );
   const fileRef = useRef(file);
   fileRef.current = file;
   const normalizedConnectionKey = String(connectionKey ?? '');
@@ -234,6 +241,10 @@ export function useAuthFileConfigurationEditor(
   // navigation when they would produce no server mutation. Invalid edits do
   // remain dirty so the unsaved-changes guard cannot silently discard them.
   const dirty = Boolean(state?.record && (hasPatch || hasErrors));
+  // A pre-existing draft (another tab, a reload, a dirty form) must not smuggle
+  // an exclusion change past an unrecognized CPA version either.
+  const excludedModelsBlocked =
+    exclusionPriority === 'unknown' && patchResult.patch['excluded-models'] !== undefined;
   const canSave =
     Boolean(state?.record) &&
     dirty &&
@@ -243,6 +254,7 @@ export function useAuthFileConfigurationEditor(
     !sharedSourceReadOnly &&
     !state?.loading &&
     !state?.error &&
+    !excludedModelsBlocked &&
     state?.saving !== true;
   const rawDataText = state?.record ? buildRedactedAuthFileConfigurationText(state.record) : '';
 

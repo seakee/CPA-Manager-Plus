@@ -414,6 +414,7 @@ const CREDENTIAL_EVIDENCE_UNIQUE_FILE_NAME_BOUNDARY_PREFIX = 'unique-file-name\u
 const CREDENTIAL_EVIDENCE_SOURCE_FILE_BOUNDARY_PREFIX = 'source-file\u0000';
 const CREDENTIAL_EVIDENCE_PROVIDER_BOUNDARY_PREFIX = 'provider\u0000';
 const ANTIGRAVITY_MULTI_WINDOW_PLAN_TYPES = new Set(['pro', 'ultra', 'ultra-lite']);
+const ANTIGRAVITY_MAIN_LIST_QUOTA_WINDOW_LIMIT = 5;
 
 type AccountQuotaRefreshMode = 'summary' | 'detail';
 
@@ -424,11 +425,13 @@ const getMainListQuotaWindowLimit = (
   layoutMode: AccountsLayoutMode,
   row: AccountRow
 ): number => {
-  if (layoutMode === 'table') return 4;
-  return row.provider === ANTIGRAVITY_CONFIG.type &&
-    ANTIGRAVITY_MULTI_WINDOW_PLAN_TYPES.has(row.canonicalPlanType ?? '')
-    ? 4
-    : 2;
+  if (row.provider === ANTIGRAVITY_CONFIG.type) {
+    if (layoutMode === 'table') return ANTIGRAVITY_MAIN_LIST_QUOTA_WINDOW_LIMIT;
+    return ANTIGRAVITY_MULTI_WINDOW_PLAN_TYPES.has(row.canonicalPlanType ?? '')
+      ? ANTIGRAVITY_MAIN_LIST_QUOTA_WINDOW_LIMIT
+      : 2;
+  }
+  return layoutMode === 'table' ? 4 : 2;
 };
 
 const getCardQuotaWindowGroups = (

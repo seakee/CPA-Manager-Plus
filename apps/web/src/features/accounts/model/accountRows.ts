@@ -493,14 +493,15 @@ export const buildAccountRows = (
         updatedAtMs !== null &&
         authenticationAtMs >= updatedAtMs);
     const quota = resolveAccountQuota(effectiveFile, stores, overrides);
+    const planType = provider === 'xai' ? quota.planType : (quota.planType ?? readPlanType(file));
     return {
       key: file.name,
       selectionKey,
       fileName: file.name,
       accountLabel: resolveAccountLabel(file),
       provider,
-      planType: quota.planType ?? readPlanType(file),
-      canonicalPlanType: getCanonicalPlanType(provider, quota.planType ?? readPlanType(file)),
+      planType,
+      canonicalPlanType: getCanonicalPlanType(provider, planType),
       disabled: effectiveFile.disabled === true,
       runtimeOnly:
         file.runtimeOnly === true || file.runtimeOnly === 'true' || file.runtime_only === true,

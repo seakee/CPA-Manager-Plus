@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "version": "v2.0.0-beta.1",
+  "source_commit": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
+  "platform": "linux/amd64",
+  "cpa": {
+    "version": "8.0.55",
+    "artifact_id": "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+  },
+  "fullweb": {
+    "manifest_sha256": "sha256:e672356a4516a01619b9b0924c11ad2db9ee1be9b7bf473d5457c248a525350d",
+    "index_html_sha256": "sha256:f550a4e415ff6ac294ffedbd9c18c3448395193b9bd70eeda6cae09740ac6be3",
+    "asset_count": 70
+  },
+  "api_contract": {
+    "sha256": "sha256:3c58e25f608451675f2ab7c68f5dcfcc410680e0d4fcf355de9352d442cbd8d5",
+    "contract_id": "cpamp-r1-embedded-public-api-transport-v1",
+    "qualification": "SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY",
+    "api_suffix": "/api/v2",
+    "expected_path": "/phase4-test/api/v2/technical"
+  },
+  "compose": {
+    "filename": "docker-compose.v2-embedded.yml",
+    "sha256": "sha256:bace609b570324070429c5360cac229e82585a6396aaf76e9005d2a0bf547b44",
+    "size": 2592
+  },
+  "images": {
+    "manager": {
+      "repository": "seakee/cpa-manager-plus",
+      "tag": "v2.0.0-beta.1",
+      "image_ref": "seakee/cpa-manager-plus:v2.0.0-beta.1@sha256:be0dee922347da5e33bf9546bb86447a7afa9973e3bc77a965908a31e43a0258",
+      "manifest_digest": "sha256:be0dee922347da5e33bf9546bb86447a7afa9973e3bc77a965908a31e43a0258",
+      "image_config_digest": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86",
+      "binary_sha256": "sha256:e5cb3dc054b0243af6c56d687e9281647022f73797c718329f31660ddcbfcf90",
+      "release_provenance_sha256": "sha256:50a055f60c58fb0f6471703ffe5890c001ca82916646283fb557b04e07764837"
+    },
+    "ingress": {
+      "repository": "seakee/cpamp-ingress",
+      "tag": "v2.0.0-beta.1",
+      "image_ref": "seakee/cpamp-ingress:v2.0.0-beta.1@sha256:ec2d8db9eca2c102a13f05667f01db2bf62c0208bcade582a05a23eedb276c4d",
+      "manifest_digest": "sha256:ec2d8db9eca2c102a13f05667f01db2bf62c0208bcade582a05a23eedb276c4d",
+      "image_config_digest": "sha256:5cfa0720fb17822a3b682fe311b336aafe2ebca7c8a037b89ca1df679a7625fb",
+      "binary_sha256": "sha256:18018d8e804b85eb3bf1240206ddbf58f2d1fdf2aed79ef00940bb39b893edd6",
+      "release_provenance_sha256": "sha256:2d7899975a1e6cfa21286ede29b1823f753f95649c21b2f1b8ce5cc3ff60537b"
+    },
+    "runtime": {
+      "repository": "seakee/cpamp-runtime",
+      "tag": "v2.0.0-beta.1",
+      "image_ref": "seakee/cpamp-runtime:v2.0.0-beta.1@sha256:9e334bf2941c959cf9220f2da126086673eff10fbab4da621a3477c138c967d1",
+      "manifest_digest": "sha256:9e334bf2941c959cf9220f2da126086673eff10fbab4da621a3477c138c967d1",
+      "image_config_digest": "sha256:8c6a7ed65a2c4cd15c5a65b57e0e296bb519c5f8e3130f87c77e1a3647861797",
+      "binary_sha256": "sha256:020d8c4fa1042780c5d21807c5657f40c742184bc2f9354b5ece094da970f1d7",
+      "release_provenance_sha256": "sha256:ec39457ec9eb5709d9699da16ecc361e51bcae8e17440ee5f38b0dc94f6d548b"
+    }
+  }
+}

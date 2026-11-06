@@ -345,6 +345,8 @@ func TestHandlerAdmissionNeverForwardsManagementOrPrivatePaths(t *testing.T) {
 		{target: "/usage-service/config", want: http.StatusNoContent},
 		{target: "/v8/management/config", want: http.StatusNotFound},
 		{target: "/v8/management/config/access/api-keys", want: http.StatusNotFound},
+		{target: "/v8/management/config/api-keys", want: http.StatusNotFound},
+		{target: "/v8/management/config/api-keys/claude", want: http.StatusNotFound},
 		{target: "/v8%2fmanagement%2fconfig", want: http.StatusNotFound},
 		{target: FreshRoutingAuthorityPath, want: http.StatusNotFound},
 		{target: FreshRoutingControlPath, want: http.StatusNotFound},
