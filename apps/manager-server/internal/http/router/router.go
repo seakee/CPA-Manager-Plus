@@ -25,6 +25,7 @@ import (
 	updatecheckcontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/updatecheck"
 	usagecontroller "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/usage"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/middleware"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/response"
 	proxysvc "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/proxy"
 )
 
@@ -80,7 +81,12 @@ func New(appCtx *app.Context) http.Handler {
 	mux.HandleFunc("/management.html", panelHandler.ManagementHTML)
 	mux.HandleFunc("/", rootHandler(appCtx, usageHandler, modelPriceHandler, apiKeyAliasHandler, accountActionHandler, codexInspectionHandler, dashboardHandler, monitoringHandler, quotaSnapshotHandler, managerConfigHandler, proxyHandler))
 
-	var routes http.Handler = mux
+	// ServeMux answers a dirty path with a 301 onto the cleaned one, so the v8
+	// API-key subtree is refused before that rewrite — otherwise a client that
+	// follows the redirect, still holding its admin header, would turn a refused
+	// shape into an admitted read. It wraps the mux directly, so the cross-site
+	// rejection below still answers first.
+	var routes http.Handler = refuseNonCanonicalV8APIKeysPath(mux)
 	// Admin authorization is a request header, so a cross-site caller cannot
 	// gain authority by being cross-site. The rejection still matters: it stops
 	// a sandboxed plugin document from using this API as a confused deputy, and
@@ -92,6 +98,18 @@ func New(appCtx *app.Context) http.Handler {
 	// not skip the cross-site check either.
 	routes = middleware.RejectCrossSiteAdmin(routes, proxysvc.IsCanonicalPluginResourceRequest)
 	return middleware.Recovery(middleware.RequestLogger(routingdomain.ProtectFixedDiscovery(routes, routingdomain.DiscoveryHandler{})))
+}
+
+// refuseNonCanonicalV8APIKeysPath answers the v8 API-key subtree's dirty paths
+// with an exact 404 before ServeMux can redirect them onto a canonical one.
+func refuseNonCanonicalV8APIKeysPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if proxysvc.IsNonCanonicalV8APIKeysConfigRequest(r) {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func rootHandler(
@@ -108,6 +126,15 @@ func rootHandler(
 	proxyHandler *proxycontroller.Handler,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The v8 API-key subtree accepts GET only. Its OPTIONS is answered here
+		// rather than by the generic preflight branch below, which would advertise
+		// a 204 for a method the route does not have. This still runs inside
+		// RejectCrossSiteAdmin, so a sandboxed document cannot even ask.
+		if proxysvc.IsCPAV8APIKeysConfigPath(r.URL.Path) && r.Method == http.MethodOptions {
+			middleware.WriteCORS(appCtx.Config, w, r)
+			response.MethodNotAllowed(w)
+			return
+		}
 		if r.Method == http.MethodOptions {
 			middleware.WriteCORS(appCtx.Config, w, r)
 			w.WriteHeader(http.StatusNoContent)
@@ -170,6 +197,13 @@ func rootHandler(
 			// response outright, so the sandboxed plugin could not read its own
 			// resource.
 			proxyHandler.CPAResource(w, r)
+			return
+		}
+		// The one CPA v8 management subtree Manager forwards. It sits inside
+		// RejectCrossSiteAdmin like every other admin surface: a sandboxed plugin
+		// document is a cross-site fetch client and must not reach it.
+		if proxysvc.IsCPAV8APIKeysConfigPath(r.URL.Path) {
+			middleware.WithCORS(appCtx.Config, proxyHandler.V8APIKeysConfig)(w, r)
 			return
 		}
 		if r.URL.Path == "/" {

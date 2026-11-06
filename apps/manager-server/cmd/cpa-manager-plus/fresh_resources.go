@@ -75,7 +75,17 @@ func externalLegacyReplacedWrite(path, method string) bool {
 // store, and a page, a static asset or a redirect must stay reachable so the user
 // can still read the blocker. The model list is deliberately absent: it forwards
 // the caller's own header, so it is not a presentation of the saved key.
-func legacyBridgePresentsSavedKey(path string) bool {
+func legacyBridgePresentsSavedKey(r *http.Request) bool {
+	path := r.URL.Path
+	// The one CPA v8 subtree Manager forwards is the same kind of request: an
+	// admin-authorized GET proxied with the saved management key, so the External
+	// cutover serializes it and files its refusal exactly like a v0 management
+	// read. Only the shape the router will actually proxy counts: every other
+	// method or path shape is answered locally with 405/404, so gating it would
+	// report a credential failure for a request that never presents the key.
+	if proxysvc.IsCPAV8APIKeysConfigPath(path) {
+		return r.Method == http.MethodGet && proxysvc.IsCanonicalV8APIKeysConfigRequest(r)
+	}
 	cleaned := strings.TrimRight(path, "/")
 	if cleaned == "/v0/resource/plugins" || strings.HasPrefix(cleaned, "/v0/resource/plugins/") {
 		return true
@@ -129,7 +139,7 @@ func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLega
 	if a == nil || a.store == nil || r == nil || r.URL == nil {
 		return legacyDecisionPassthrough, freshstore.Record{}
 	}
-	presents := legacyBridgePresentsSavedKey(r.URL.Path)
+	presents := legacyBridgePresentsSavedKey(r)
 	record, err := a.store.Load(r.Context())
 	if err != nil {
 		// Fail closed: without the committed instruction this Manager cannot prove

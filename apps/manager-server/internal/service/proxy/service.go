@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -91,6 +92,15 @@ type authFileWriteMutation struct {
 
 const cpaPluginResourcePrefix = "/v0/resource/plugins"
 const cpaManagementPrefix = "/v0/management"
+
+// cpaV8APIKeysConfigPath is the only CPA v8 management subtree Manager Server
+// forwards. It is the v8 provider-key group tree (`api-keys.<family>`, the eight
+// families v8 loads at internal/config/config_v8.go:67-72 in the pinned
+// v8.0.55), whose group names a flattened v0 key list does not carry. Other v8
+// routes stay unreachable because the auth-file and config mutation guards in
+// this package only recognize their v0 paths, and the config root also carries
+// the management secret field.
+const cpaV8APIKeysConfigPath = "/v8/management/config/api-keys"
 const codexInviteOriginHeader = "X-Codex-Invite-Origin"
 const managementOriginJSONField = "management_origin"
 const authFilePhysicalNameHeader = "X-CPAMP-Auth-File-Physical-Name"
@@ -250,6 +260,27 @@ func (s *Service) proxyPluginResource(w http.ResponseWriter, r *http.Request, wr
 func (s *Service) proxyWithSavedManagementKey(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
 	if !isManagementPath(r.URL.Path) {
 		writeError(w, http.StatusNotFound, errors.New("proxy path must be under /v0/management/"))
+		return
+	}
+	s.proxyToSavedSetup(w, r, writeError, true, false)
+}
+
+// ProxyV8APIKeysConfig forwards read-only CPA v8 provider API-key group views,
+// which carry the group names that the flattened v0 key lists drop.
+//
+// The method is restricted rather than forwarded: unlike a plugin resource
+// namespace, this is a credentialed management read, and the v8 config surface
+// it lives on also carries writes for the same subtree (PUT/PATCH/DELETE
+// /v8/management/config/access/api-keys and the provider sections). Only GET
+// reaches CPA, and only after a verified CPAMP admin presented its own key; the
+// saved CPA management key is substituted upstream.
+func (s *Service) ProxyV8APIKeysConfig(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error), methodNotAllowed func(http.ResponseWriter)) {
+	if !IsCPAV8APIKeysConfigPath(r.URL.Path) || !isCanonicalRequestPath(r.URL) {
+		writeError(w, http.StatusNotFound, errors.New("proxy path must be under "+cpaV8APIKeysConfigPath))
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
 		return
 	}
 	s.proxyToSavedSetup(w, r, writeError, true, false)
@@ -1601,6 +1632,75 @@ func IsCPAPluginManagementPath(path string) bool {
 func IsCPAPluginResourcePath(path string) bool {
 	cleaned := strings.TrimRight(path, "/")
 	return cleaned == cpaPluginResourcePrefix || strings.HasPrefix(cleaned, cpaPluginResourcePrefix+"/")
+}
+
+// IsCPAV8APIKeysConfigPath matches the v8 API-key config subtree on a path
+// segment boundary, so siblings such as /config/api-keys-x are excluded.
+func IsCPAV8APIKeysConfigPath(path string) bool {
+	return path == cpaV8APIKeysConfigPath || strings.HasPrefix(path, cpaV8APIKeysConfigPath+"/")
+}
+
+// isCanonicalRequestPath rejects percent-encoded, dot-segment and duplicate-slash
+// paths. ServeMux does not clean escaped dot segments and redirects the rest, so
+// a prefix check alone would let /api-keys/%2e%2e/... resolve to another upstream
+// route.
+func isCanonicalRequestPath(u *url.URL) bool {
+	if u == nil {
+		return false
+	}
+	if u.RawPath != "" || u.EscapedPath() != u.Path {
+		return false
+	}
+	segments := strings.Split(u.Path, "/")
+	for index, segment := range segments {
+		if segment == "" {
+			// The split always yields an empty first segment for an absolute path,
+			// and a trailing slash yields an empty last one; anything in between is
+			// a duplicate slash ServeMux would collapse.
+			if index == 0 || (index == len(segments)-1 && len(segments) > 1) {
+				continue
+			}
+			return false
+		}
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// IsCanonicalV8APIKeysConfigRequest reports whether r is the one shape of the v8
+// API-key subtree this proxy forwards.
+func IsCanonicalV8APIKeysConfigRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && IsCPAV8APIKeysConfigPath(r.URL.Path) && isCanonicalRequestPath(r.URL)
+}
+
+// IsNonCanonicalV8APIKeysConfigRequest reports whether r is a request for the v8
+// API-key subtree that must be refused before ServeMux rewrites it. ServeMux
+// answers a dirty path with a 301 onto the cleaned one, so a client that follows
+// the redirect — still holding its admin header — would turn a refused shape into
+// an admitted read. Both the raw path and the path ServeMux would clean it into
+// are checked, because a duplicate slash in the leading segments no longer
+// starts with the subtree prefix.
+func IsNonCanonicalV8APIKeysConfigRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil || isCanonicalRequestPath(r.URL) {
+		return false
+	}
+	if IsCPAV8APIKeysConfigPath(r.URL.Path) {
+		return true
+	}
+	cleaned := cleanRequestPath(r.URL.Path)
+	return IsCPAV8APIKeysConfigPath(cleaned) || IsCPAV8APIKeysConfigPath(strings.TrimSuffix(cleaned, "/"))
+}
+
+// cleanRequestPath mirrors the cleaning http.ServeMux performs before dispatch:
+// duplicate slashes collapse, dot segments resolve, and a trailing slash survives.
+func cleanRequestPath(requestPath string) string {
+	cleaned := path.Clean("/" + requestPath)
+	if strings.HasSuffix(requestPath, "/") && cleaned != "/" {
+		cleaned += "/"
+	}
+	return cleaned
 }
 
 func (s *Service) resolveSetup(ctx context.Context) (store.Setup, bool, error) {
