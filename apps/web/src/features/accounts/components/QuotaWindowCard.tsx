@@ -439,6 +439,13 @@ export const QuotaWindowCard = ({
     resolvedMode === 'model' &&
     q.modelScope?.complete !== false &&
     Boolean(usage?.matched || previousUsage?.matched || q.forecast);
+  const modelCurrentUsageConfirmed =
+    resolvedMode === 'model' &&
+    q.modelScope?.complete !== false &&
+    Boolean(
+      usage?.matched ||
+        (usage?.matched === false && usage.syncStatus === 'empty' && !hasUsageScopeWarning(usage))
+    );
   const modelBoundaryIncomplete = resolvedMode === 'model' && q.windowMode === 'unknown';
   const modelWindowStatsUnavailable = resolvedMode === 'model' && !modelHasUsableUsage;
   const lifecycleUnavailable = q.availability === 'pending_absent' || q.availability === 'inactive';
@@ -470,7 +477,7 @@ export const QuotaWindowCard = ({
         ? 'scope_unknown'
         : modelBoundaryIncomplete
           ? 'boundary_incomplete'
-          : !modelHasUsableUsage
+          : !modelHasUsableUsage || !modelCurrentUsageConfirmed
             ? hasScopeWarning
               ? 'scope_incomplete'
               : q.stale && !lifecycleUnavailable
@@ -479,10 +486,12 @@ export const QuotaWindowCard = ({
             : null;
   const showStaleSourceMeta =
     Boolean(q.stale) && !lifecycleUnavailable && modelWarningReason !== 'stale';
-  const hasSourceWarnings =
-    showStaleSourceMeta ||
-    hasLifecycleNotice ||
-    (hasScopeWarning && !modelWindowStatsUnavailable);
+  const showScopeSourceMeta =
+    hasScopeWarning &&
+    !modelWindowStatsUnavailable &&
+    modelWarningReason !== 'scope_unknown' &&
+    modelWarningReason !== 'scope_incomplete';
+  const hasSourceWarnings = showStaleSourceMeta || hasLifecycleNotice || showScopeSourceMeta;
 
   if (variant === 'compact') {
     return (
@@ -535,13 +544,13 @@ export const QuotaWindowCard = ({
           {t('accounts.detail_quota_window_provider_reset')}
         </span>
       ) : null}
-      {!modelWindowStatsUnavailable && q.modelScope?.complete === false ? (
+      {showScopeSourceMeta && q.modelScope?.complete === false ? (
         <span className={styles.sourceMetaWarn}>
           <IconCircleHelp size={12} />
           {t('accounts.detail_scope_unknown')}
         </span>
       ) : null}
-      {!modelWindowStatsUnavailable &&
+      {showScopeSourceMeta &&
       (hasUsageScopeWarning(usage) || hasUsageScopeWarning(previousUsage)) ? (
         <span className={styles.sourceMetaWarn}>
           <IconCircleHelp size={12} />

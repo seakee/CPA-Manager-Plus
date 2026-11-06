@@ -633,7 +633,7 @@ describe('QuotaWindowCard', () => {
     expect(renderer.root.findAllByProps({ 'data-quota-model-warning': 'true' })).toHaveLength(0);
   });
 
-  it('distinguishes unavailable usage from an explicit empty period', () => {
+  it('distinguishes unavailable usage from an explicit empty period and keeps the alert visible when previous usage exists', () => {
     const renderer = renderCard(
       makeWindow({
         modelScope: { kind: 'family', key: 'gemini', complete: true },
@@ -648,10 +648,73 @@ describe('QuotaWindowCard', () => {
     const comparison = renderer.root.findByProps({ 'data-quota-model-comparison': 'true' });
     const current = comparison.findByProps({ 'data-quota-usage-period': 'current' });
     const currentText = readText(current);
+    const warning = renderer.root.findByProps({ 'data-quota-model-warning': 'true' });
     expect(currentText).toContain('accounts.detail_model_window_usage_unavailable');
     expect(currentText).not.toContain('accounts.detail_model_window_empty_usage');
     expect(renderer.root.findAllByProps({ 'data-quota-window-empty': 'true' })).toHaveLength(0);
-    expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+    expect(warning.props.role).toBe('alert');
+    expect(warning.props['data-quota-window-warning-reason']).toBe('usage_unavailable');
+    expect(readText(warning)).toContain('accounts.detail_model_window_usage_unavailable');
+    expect(readText(warning)).toContain('accounts.detail_model_window_usage_unavailable_desc');
+  });
+
+  it('warns when the current window sync status is unknown even if previous usage or forecast exists', () => {
+    const renderer = renderCard(
+      makeWindow({
+        modelScope: { kind: 'family', key: 'gemini', complete: true },
+        usage: usage({ matched: false, syncStatus: 'unknown' }),
+        currentUsage: usage({ matched: false, syncStatus: 'unknown' }),
+        previousUsage: usage({ fromMs: -17_999_000, toMs: 1_000, successRate: 98 }),
+        forecast: { requests: 120, tokens: 1_200_000, cost: 120, basis: 'previous' },
+      }),
+      'model'
+    );
+
+    const comparison = renderer.root.findByProps({ 'data-quota-model-comparison': 'true' });
+    const current = comparison.findByProps({ 'data-quota-usage-period': 'current' });
+    const warning = renderer.root.findByProps({ 'data-quota-model-warning': 'true' });
+    expect(readText(current)).toContain('accounts.detail_model_window_usage_unavailable');
+    expect(warning.props.role).toBe('alert');
+    expect(warning.props['data-quota-window-warning-reason']).toBe('usage_unavailable');
+    expect(renderer.root.findAllByProps({ 'data-quota-window-empty': 'true' })).toHaveLength(0);
+  });
+
+  it('does not let a quota-based forecast suppress the unavailable current-window warning', () => {
+    const renderer = renderCard(
+      makeWindow({
+        modelScope: { kind: 'family', key: 'gemini', complete: true },
+        usage: null,
+        currentUsage: null,
+        previousUsage: emptyUsage({ fromMs: -17_999_000, toMs: 1_000 }),
+        forecast: { requests: 80, tokens: 800_000, cost: 80, basis: 'quota' },
+      }),
+      'model'
+    );
+
+    const warning = renderer.root.findByProps({ 'data-quota-model-warning': 'true' });
+    expect(warning.props.role).toBe('alert');
+    expect(warning.props['data-quota-window-warning-reason']).toBe('usage_unavailable');
+    expect(renderer.root.findAllByProps({ 'data-quota-window-empty': 'true' })).toHaveLength(0);
+  });
+
+  it('keeps the scope-incomplete alert when current window is empty with partial scope even if previous usage exists', () => {
+    const renderer = renderCard(
+      makeWindow({
+        modelScope: { kind: 'models', models: ['demo-model'], complete: true },
+        usage: emptyUsage({ scopeMatchStatus: 'partial', unmatchedRequests: 3 }),
+        currentUsage: emptyUsage({ scopeMatchStatus: 'partial', unmatchedRequests: 3 }),
+        previousUsage: usage({ fromMs: -17_999_000, toMs: 1_000, successRate: 98 }),
+        forecast: null,
+      }),
+      'model'
+    );
+
+    const warning = renderer.root.findByProps({ 'data-quota-model-warning': 'true' });
+    expect(warning.props.role).toBe('alert');
+    expect(warning.props['data-quota-window-warning-reason']).toBe('scope_incomplete');
+    expect(readText(warning)).toContain('accounts.detail_scope_incomplete');
+    expect(renderer.root.findAllByProps({ 'data-quota-window-empty': 'true' })).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ 'data-quota-source-warnings': 'true' })).toHaveLength(0);
   });
 
   it('merges missing model scope into the single alert while keeping stale evidence separate', () => {
