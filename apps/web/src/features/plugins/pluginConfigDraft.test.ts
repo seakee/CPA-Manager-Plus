@@ -33,4 +33,64 @@ describe('pluginConfigDraft', () => {
     draft.touched.add('priority');
     expect(buildPluginConfigPatch(draft, [], t).patch).toEqual({ priority: 0 });
   });
+
+  it('displays typed defaults for absent config keys without persisting them', () => {
+    const fields = [
+      { name: 'quota_notes', type: 'boolean', enumValues: [], description: '', defaultValue: true },
+      { name: 'disabled', type: 'boolean', enumValues: [], description: '', defaultValue: false },
+      { name: 'count', type: 'integer', enumValues: [], description: '', defaultValue: 0 },
+      { name: 'timezone', type: 'string', enumValues: [], description: '', defaultValue: 'Asia/Shanghai' },
+      { name: 'mode', type: 'enum', enumValues: ['safe', 'fast'], description: '', defaultValue: 'safe' },
+      { name: 'items', type: 'array', enumValues: [], description: '', defaultValue: [1, true] },
+      { name: 'options', type: 'object', enumValues: [], description: '', defaultValue: { active: true } },
+      { name: 'legacy', type: 'boolean', enumValues: [], description: '' },
+    ];
+    const draft = createPluginConfigDraft(fields, { enabled: true }, true);
+
+    expect(draft.values).toEqual({
+      quota_notes: true,
+      disabled: false,
+      count: '0',
+      timezone: 'Asia/Shanghai',
+      mode: 'safe',
+      items: JSON.stringify([1, true], null, 2),
+      options: JSON.stringify({ active: true }, null, 2),
+      legacy: false,
+    });
+    expect(draft.touched.size).toBe(0);
+    expect(buildPluginConfigPatch(draft, fields, t)).toEqual({ patch: {}, errors: {} });
+  });
+
+  it('prefers explicitly configured false, zero, empty string, and null over defaults', () => {
+    const fields = [
+      { name: 'flag', type: 'boolean', enumValues: [], description: '', defaultValue: true },
+      { name: 'count', type: 'integer', enumValues: [], description: '', defaultValue: 5 },
+      { name: 'timezone', type: 'string', enumValues: [], description: '', defaultValue: 'Asia/Shanghai' },
+      { name: 'mode', type: 'enum', enumValues: ['safe'], description: '', defaultValue: 'safe' },
+    ];
+    const draft = createPluginConfigDraft(
+      fields,
+      { flag: false, count: 0, timezone: '', mode: null },
+      false
+    );
+
+    expect(draft.values).toEqual({ flag: false, count: '0', timezone: '', mode: '' });
+    expect(buildPluginConfigPatch(draft, fields, t).patch).toEqual({});
+  });
+
+  it('patches only fields explicitly edited from inherited defaults', () => {
+    const fields = [
+      { name: 'flag', type: 'boolean', enumValues: [], description: '', defaultValue: true },
+      { name: 'timezone', type: 'string', enumValues: [], description: '', defaultValue: 'Asia/Shanghai' },
+    ];
+    const draft = createPluginConfigDraft(fields, {}, true);
+    draft.values.flag = false;
+    draft.touched.add('flag');
+
+    expect(buildPluginConfigPatch(draft, fields, t)).toEqual({
+      patch: { flag: false },
+      errors: {},
+    });
+  });
+
 });

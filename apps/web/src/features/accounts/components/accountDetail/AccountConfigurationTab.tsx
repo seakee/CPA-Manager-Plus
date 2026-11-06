@@ -8,6 +8,7 @@ import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import { CoolingPolicySelect } from '@/components/providers/CoolingPolicySelect';
 import { IconCode, IconCopy, IconRefreshCw } from '@/components/ui/icons';
 import type { AccountRow } from '@/features/accounts/model/accountRows';
+import { getAccountModelExclusionPriority } from '@/features/accounts/model/accountModelRules';
 import { getProviderLabel } from '@/features/accounts/model/accountsPagePresentation';
 import type { UseAuthFileConfigurationEditorResult } from '@/features/authFiles/hooks/useAuthFileConfigurationEditor';
 import {
@@ -17,6 +18,7 @@ import {
   type AuthFileConfigurationErrorKey,
   type XaiRoutingMode,
 } from '@/features/authFiles/model/authFileConfiguration';
+import { useAuthStore } from '@/stores/useAuthStore';
 import styles from '@/features/accounts/AccountsPage.module.scss';
 
 type AccountConfigurationTabProps = {
@@ -33,6 +35,9 @@ export function AccountConfigurationTab({
   onCopyText,
 }: AccountConfigurationTabProps) {
   const { t } = useTranslation();
+  const exclusionPriority = getAccountModelExclusionPriority(
+    useAuthStore((authState) => authState.serverVersion)
+  );
   const reloadButtonId = useId();
   const {
     state,
@@ -371,6 +376,15 @@ export function AccountConfigurationTab({
                 : 'accounts.config_excluded_models_hint'
             )}
           </div>
+          {!sharedSourceReadOnly && exclusionPriority !== 'merge' ? (
+            <div className="hint" role="note">
+              {t(
+                exclusionPriority === 'override'
+                  ? 'accounts.config_excluded_models_override_hint'
+                  : 'accounts.config_excluded_models_precedence_unknown_hint'
+              )}
+            </div>
+          ) : null}
         </div>
       </section>
 

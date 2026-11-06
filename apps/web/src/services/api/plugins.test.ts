@@ -266,4 +266,38 @@ describe('plugin API normalizers', () => {
       id: 'demo/plugin',
     });
   });
+
+  it('preserves plugin field defaults without coercing their types', () => {
+    const result = normalizePluginList({
+      plugins: [
+        {
+          id: 'top-level',
+          config_fields: [
+            { name: 'on', type: 'boolean', default: true },
+            { name: 'off', type: 'boolean', default: false },
+            { name: 'count', type: 'integer', default: 0 },
+            { name: 'options', type: 'object', default: { flags: [true, 2] } },
+            { name: 'unset', type: 'string' },
+          ],
+        },
+        {
+          id: 'metadata-only',
+          metadata: {
+            config_fields: [{ name: 'timezone', type: 'string', default: 'Asia/Shanghai' }],
+          },
+        },
+      ],
+    });
+
+    expect(result.plugins[0]?.configFields.map((field) => field.defaultValue)).toEqual([
+      true,
+      false,
+      0,
+      { flags: [true, 2] },
+      undefined,
+    ]);
+    expect(result.plugins[1]?.configFields[0]?.defaultValue).toBe('Asia/Shanghai');
+    expect(result.plugins[1]?.metadata?.configFields[0]?.defaultValue).toBe('Asia/Shanghai');
+  });
+
 });
