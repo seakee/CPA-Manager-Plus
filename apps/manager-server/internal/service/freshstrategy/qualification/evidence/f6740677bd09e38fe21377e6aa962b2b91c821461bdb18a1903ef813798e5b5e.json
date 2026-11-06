@@ -1,0 +1,3164 @@
+{
+  "schemaVersion": 1,
+  "contractId": "cpamp-cpa-v8-qualification",
+  "manifestRevision": "r2",
+  "manifestSha256": "1553601be218d5eea1bf60313502b6533062d3f22ae5f852e3f273f8fe0e1aa0",
+  "run": {
+    "id": "AQ02-9455d785a2043d789e140a4eaa415a491570c90e4735a690",
+    "kind": "upstream-run",
+    "runnerCommit": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
+    "state": "completed",
+    "selectedCaseRefs": [
+      "AQ02-M01-bearer",
+      "AQ02-M02-header",
+      "AQ02-M02-bearer-precedence",
+      "AQ02-M03-missing",
+      "AQ02-M03-wrong",
+      "AQ02-M04-ban",
+      "AQ02-M05-client-as-management",
+      "AQ02-M05-upstream-as-management",
+      "AQ02-M05-management-as-client",
+      "AQ02-M05-upstream-as-client",
+      "AQ02-M06-no-secret",
+      "AQ02-M06-env-secret",
+      "AQ02-M07-client",
+      "AQ02-M08-missing",
+      "AQ02-M08-wrong",
+      "AQ02-M08-provider-error",
+      "AQ02-M09-empty",
+      "AQ02-M09-absent",
+      "AQ02-M09-null",
+      "AQ02-M10-rotate",
+      "AQ02-M10-remove",
+      "AQ02-M11-root",
+      "AQ02-M11-subtree",
+      "AQ02-M11-yaml",
+      "AQ02-M12-read-only",
+      "AQ02-M13-root-put",
+      "AQ02-M14-subtree-put",
+      "AQ02-M14-map-patch",
+      "AQ02-M14-list-patch",
+      "AQ02-M15-delete",
+      "AQ02-M15-absent",
+      "AQ02-M15-null",
+      "AQ02-M15-empty",
+      "AQ02-M15-false",
+      "AQ02-M15-zero",
+      "AQ02-M15-invalid-type",
+      "AQ02-M16-readonly",
+      "AQ02-M16-invalid-path",
+      "AQ02-M16-invalid-body",
+      "AQ02-M17-yaml-put",
+      "AQ02-M17-response-loss",
+      "AQ02-M18-populated",
+      "AQ02-M18-empty",
+      "AQ02-M19-put",
+      "AQ02-M19-patch",
+      "AQ02-M19-delete",
+      "AQ02-M20-invalid",
+      "AQ02-M20-duplicate",
+      "AQ02-M20-write-failure",
+      "AQ02-M20-response-loss",
+      "AQ02-M21-empty",
+      "AQ02-M21-populated",
+      "AQ02-M22-raw",
+      "AQ02-M22-multipart",
+      "AQ02-M22-invalid",
+      "AQ02-M22-duplicate",
+      "AQ02-M22-partial",
+      "AQ02-M23-delete",
+      "AQ02-M23-missing",
+      "AQ02-M23-unsafe",
+      "AQ02-M24-status",
+      "AQ02-M24-fields",
+      "AQ02-M24-invalid",
+      "AQ02-M24-readonly",
+      "AQ02-M24-conflict",
+      "AQ02-M25-missing",
+      "AQ02-M25-invalid",
+      "AQ02-M25-refresh-error",
+      "AQ02-M26-start",
+      "AQ02-M26-missing-provider",
+      "AQ02-M26-unknown-provider",
+      "AQ02-M27-pending",
+      "AQ02-M27-unknown",
+      "AQ02-M27-auth",
+      "AQ02-M28-get-missing",
+      "AQ02-M28-post-missing",
+      "AQ02-M28-invalid",
+      "AQ02-M28-unknown",
+      "AQ02-M28-mismatch",
+      "AQ02-M29-error-callback",
+      "AQ02-M30-cancel",
+      "AQ02-M30-auth",
+      "AQ02-M30-replay",
+      "AQ02-M30-missing",
+      "AQ02-M31-repeated",
+      "AQ02-M31-race",
+      "AQ02-M34-registered",
+      "AQ02-M34-missing",
+      "AQ02-M34-unknown",
+      "AQ02-M35-codex",
+      "AQ02-M35-unknown",
+      "AQ02-M36-model-reload"
+    ],
+    "startedAt": "2026-11-06T05:51:07.293Z",
+    "endedAt": "2026-11-06T05:52:07.904Z",
+    "setupState": "ready",
+    "cleanupState": "completed",
+    "fixtureInputRefs": [
+      {
+        "fixtureRef": "CPA8-MANAGEMENT-r2",
+        "revision": "r2",
+        "configProfileId": "management-per-case-r2",
+        "modeProfileId": "linux-amd64-network-none-r2"
+      }
+    ]
+  },
+  "artifactObservation": {
+    "candidateRef": "CPA8-8.0.55-linux-amd64-plugin",
+    "provenance": "locally-verified",
+    "observedArchiveSha256": "4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123",
+    "observedBinarySha256": "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+  },
+  "results": [
+    {
+      "caseRef": "AQ02-M01-bearer",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M01-bearer-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M01-bearer-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M01-bearer-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M01-bearer-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M02-header",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M02-header-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M02-header-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M02-header-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M02-header-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M02-bearer-precedence",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M02-bearer-precedence-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M02-bearer-precedence-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M02-bearer-precedence-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M02-bearer-precedence-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M03-missing",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M03-missing-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M03-missing-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M03-missing-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M03-missing-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M03-wrong",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M03-wrong-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M03-wrong-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M03-wrong-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M03-wrong-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M04-ban",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M04-ban-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M04-ban-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M04-ban-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M04-ban-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M05-client-as-management",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M05-client-as-management-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M05-client-as-management-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M05-client-as-management-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M05-client-as-management-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M05-upstream-as-management",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M05-upstream-as-management-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M05-upstream-as-management-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M05-upstream-as-management-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M05-upstream-as-management-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M05-management-as-client",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M05-management-as-client-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M05-management-as-client-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M05-management-as-client-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M05-management-as-client-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M05-upstream-as-client",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M05-upstream-as-client-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M05-upstream-as-client-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M05-upstream-as-client-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M05-upstream-as-client-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M06-no-secret",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M06-no-secret-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M06-no-secret-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M06-no-secret-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M06-no-secret-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M06-env-secret",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M06-env-secret-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M06-env-secret-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M06-env-secret-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M06-env-secret-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M07-client",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M07-client-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M07-client-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M07-client-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M07-client-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M08-missing",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M08-missing-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M08-missing-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M08-missing-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M08-missing-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M08-wrong",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M08-wrong-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M08-wrong-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M08-wrong-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M08-wrong-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M08-provider-error",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M08-provider-error-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M08-provider-error-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M08-provider-error-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M08-provider-error-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M09-empty",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M09-empty-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M09-empty-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M09-empty-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M09-empty-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M09-absent",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M09-absent-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M09-absent-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M09-absent-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M09-absent-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M09-null",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M09-null-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M09-null-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M09-null-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M09-null-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M10-rotate",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M10-rotate-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M10-rotate-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M10-rotate-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M10-rotate-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M10-remove",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M10-remove-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M10-remove-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M10-remove-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M10-remove-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M11-root",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M11-root-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M11-root-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M11-root-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M11-root-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M11-subtree",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M11-subtree-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M11-subtree-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M11-subtree-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M11-subtree-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M11-yaml",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M11-yaml-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M11-yaml-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M11-yaml-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M11-yaml-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M12-read-only",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M12-read-only-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M12-read-only-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M12-read-only-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M12-read-only-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M13-root-put",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M13-root-put-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M13-root-put-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M13-root-put-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M13-root-put-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M14-subtree-put",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M14-subtree-put-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M14-subtree-put-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M14-subtree-put-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M14-subtree-put-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M14-map-patch",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M14-map-patch-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M14-map-patch-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M14-map-patch-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M14-map-patch-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M14-list-patch",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M14-list-patch-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M14-list-patch-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M14-list-patch-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M14-list-patch-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M15-delete",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M15-delete-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-delete-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-delete-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M15-delete-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M15-absent",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M15-absent-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-absent-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-absent-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M15-absent-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M15-null",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M15-null-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-null-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-null-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M15-null-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M15-empty",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M15-empty-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-empty-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-empty-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M15-empty-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M15-false",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M15-false-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-false-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-false-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M15-false-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M15-zero",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M15-zero-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-zero-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-zero-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M15-zero-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M15-invalid-type",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M15-invalid-type-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-invalid-type-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M15-invalid-type-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M15-invalid-type-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M16-readonly",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M16-readonly-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M16-readonly-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M16-readonly-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M16-readonly-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M16-invalid-path",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M16-invalid-path-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M16-invalid-path-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M16-invalid-path-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M16-invalid-path-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M16-invalid-body",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M16-invalid-body-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M16-invalid-body-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M16-invalid-body-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M16-invalid-body-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M17-yaml-put",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M17-yaml-put-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M17-yaml-put-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M17-yaml-put-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M17-yaml-put-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M17-response-loss",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M17-response-loss-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M17-response-loss-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M17-response-loss-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M17-response-loss-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M18-populated",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M18-populated-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M18-populated-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M18-populated-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M18-populated-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M18-empty",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M18-empty-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M18-empty-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M18-empty-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M18-empty-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M19-put",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M19-put-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M19-put-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M19-put-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M19-put-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M19-patch",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "supported",
+      "reasonCode": "NONE",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M19-patch-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M19-patch-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M19-patch-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M19-patch-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M19-delete",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M19-delete-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M19-delete-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M19-delete-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M19-delete-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M20-invalid",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M20-invalid-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M20-invalid-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M20-invalid-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M20-invalid-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M20-duplicate",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M20-duplicate-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M20-duplicate-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M20-duplicate-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M20-duplicate-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M20-write-failure",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M20-write-failure-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M20-write-failure-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M20-write-failure-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M20-write-failure-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M20-response-loss",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M20-response-loss-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M20-response-loss-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M20-response-loss-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M20-response-loss-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M21-empty",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M21-empty-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M21-empty-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M21-empty-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M21-empty-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M21-populated",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M21-populated-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M21-populated-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M21-populated-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M21-populated-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M22-raw",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M22-raw-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-raw-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-raw-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M22-raw-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M22-multipart",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M22-multipart-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-multipart-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-multipart-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M22-multipart-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M22-invalid",
+      "executionState": "completed",
+      "assertionOutcome": "fail",
+      "capability": "unknown",
+      "reasonCode": "ASSERTION_FAILED",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M22-invalid-HTTP",
+          "outcome": "fail",
+          "observationCode": "EXPECTED_MISMATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-invalid-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-invalid-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M22-invalid-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M22-duplicate",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M22-duplicate-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-duplicate-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-duplicate-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M22-duplicate-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M22-partial",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M22-partial-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-partial-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M22-partial-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M22-partial-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M23-delete",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M23-delete-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M23-delete-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M23-delete-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M23-delete-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M23-missing",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M23-missing-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M23-missing-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M23-missing-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M23-missing-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M23-unsafe",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M23-unsafe-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M23-unsafe-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M23-unsafe-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M23-unsafe-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M24-status",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M24-status-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-status-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-status-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M24-status-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M24-fields",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M24-fields-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-fields-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-fields-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M24-fields-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M24-invalid",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M24-invalid-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-invalid-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-invalid-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M24-invalid-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M24-readonly",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M24-readonly-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-readonly-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-readonly-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M24-readonly-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M24-conflict",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M24-conflict-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-conflict-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M24-conflict-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M24-conflict-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M25-missing",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M25-missing-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M25-missing-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M25-missing-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M25-missing-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M25-invalid",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M25-invalid-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M25-invalid-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M25-invalid-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M25-invalid-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M25-refresh-error",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M25-refresh-error-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M25-refresh-error-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M25-refresh-error-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M25-refresh-error-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M26-start",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M26-start-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M26-start-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M26-start-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M26-start-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M26-missing-provider",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M26-missing-provider-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M26-missing-provider-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M26-missing-provider-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M26-missing-provider-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M26-unknown-provider",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M26-unknown-provider-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M26-unknown-provider-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M26-unknown-provider-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M26-unknown-provider-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M27-pending",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M27-pending-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M27-pending-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M27-pending-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M27-pending-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M27-unknown",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M27-unknown-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M27-unknown-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M27-unknown-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M27-unknown-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M27-auth",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M27-auth-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M27-auth-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M27-auth-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M27-auth-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M28-get-missing",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M28-get-missing-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-get-missing-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-get-missing-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M28-get-missing-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M28-post-missing",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M28-post-missing-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-post-missing-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-post-missing-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M28-post-missing-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M28-invalid",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M28-invalid-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-invalid-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-invalid-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M28-invalid-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M28-unknown",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M28-unknown-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-unknown-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-unknown-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M28-unknown-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M28-mismatch",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M28-mismatch-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-mismatch-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M28-mismatch-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M28-mismatch-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M29-error-callback",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M29-error-callback-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M29-error-callback-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M29-error-callback-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M29-error-callback-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M30-cancel",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M30-cancel-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M30-cancel-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M30-cancel-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M30-cancel-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M30-auth",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M30-auth-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M30-auth-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M30-auth-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M30-auth-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M30-replay",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M30-replay-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M30-replay-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M30-replay-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M30-replay-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M30-missing",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M30-missing-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M30-missing-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M30-missing-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M30-missing-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M31-repeated",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M31-repeated-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M31-repeated-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M31-repeated-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M31-repeated-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M31-race",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M31-race-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M31-race-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M31-race-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M31-race-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M34-registered",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M34-registered-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M34-registered-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M34-registered-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M34-registered-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M34-missing",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M34-missing-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M34-missing-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M34-missing-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M34-missing-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M34-unknown",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M34-unknown-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M34-unknown-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M34-unknown-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M34-unknown-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M35-codex",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M35-codex-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M35-codex-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M35-codex-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M35-codex-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M35-unknown",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M35-unknown-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M35-unknown-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M35-unknown-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M35-unknown-TRACE"
+      ]
+    },
+    {
+      "caseRef": "AQ02-M36-model-reload",
+      "executionState": "completed",
+      "assertionOutcome": "pass",
+      "capability": "limited",
+      "reasonCode": "COVERAGE_UNKNOWN",
+      "assertions": [
+        {
+          "expectationRef": "AQ02-M36-model-reload-HTTP",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M36-model-reload-STATE",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        },
+        {
+          "expectationRef": "AQ02-M36-model-reload-CONTROL",
+          "outcome": "pass",
+          "observationCode": "EXPECTED_MATCH"
+        }
+      ],
+      "evidenceRefs": [
+        "AQ02-M36-model-reload-TRACE"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "AQ02-M01-bearer-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M01-bearer.json",
+      "sha256": "49453e197104c1ebe4948ee70550006da38a4045be5f6e8e734161940ef69ec3"
+    },
+    {
+      "id": "AQ02-M02-header-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M02-header.json",
+      "sha256": "b38cd0919b6fd63dfc2a8ba37817b327170aba5826882e72d7cca0eaac7b9df6"
+    },
+    {
+      "id": "AQ02-M02-bearer-precedence-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M02-bearer-precedence.json",
+      "sha256": "fec96234cbb1dda096116d510970fa1246a0cf0c9a36b3a061fdf0e393b5772a"
+    },
+    {
+      "id": "AQ02-M03-missing-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M03-missing.json",
+      "sha256": "6c828b7417ac7b56fe037b39b217a5f313e8c5ab8ce73fa3e57a7a59531051a3"
+    },
+    {
+      "id": "AQ02-M03-wrong-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M03-wrong.json",
+      "sha256": "a061a13e963cfc1155473bc8b7dd2d7cb5422d3ba5002579fe0e9d4e20651b7e"
+    },
+    {
+      "id": "AQ02-M04-ban-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M04-ban.json",
+      "sha256": "c79c15bdc3071343f025ced8a1a80e86ad09604b94b0a30202889e8904b3f9cb"
+    },
+    {
+      "id": "AQ02-M05-client-as-management-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M05-client-as-management.json",
+      "sha256": "61f2800ab88b5c3ed753e97eea5b8fc8207db6adc531da5f1d0a45c90b33eb9f"
+    },
+    {
+      "id": "AQ02-M05-upstream-as-management-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M05-upstream-as-management.json",
+      "sha256": "55044ec962fc35e6cf481cdd0f57c0f0975ed136cffc5c95975f9d5557b6cb08"
+    },
+    {
+      "id": "AQ02-M05-management-as-client-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M05-management-as-client.json",
+      "sha256": "feb48a340e646d2bac00b967f7f75c3aa00d05672683df30b68e636f4597dcaf"
+    },
+    {
+      "id": "AQ02-M05-upstream-as-client-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M05-upstream-as-client.json",
+      "sha256": "18f9bfca27a3c1ab8fcaaafa195f8b6f6b6487c1ca289f650efa55dc8ebe7c27"
+    },
+    {
+      "id": "AQ02-M06-no-secret-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M06-no-secret.json",
+      "sha256": "dabb08c1771e6d928604f11b2d14ed49b809b82a8d77d4c8a80a7d349019d967"
+    },
+    {
+      "id": "AQ02-M06-env-secret-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M06-env-secret.json",
+      "sha256": "2289c107e69734eb09d7d88b664b77959b972afeef49a0720f5cc08c028b0d79"
+    },
+    {
+      "id": "AQ02-M07-client-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M07-client.json",
+      "sha256": "195c5990fc69dc19f8fa9473d95f0c002cf2e2150682c4ad934a0527b779d700"
+    },
+    {
+      "id": "AQ02-M08-missing-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M08-missing.json",
+      "sha256": "b7e0b286a011aaba364e3619fe3923b108c01ce92e222f7c0354244448fbd94b"
+    },
+    {
+      "id": "AQ02-M08-wrong-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M08-wrong.json",
+      "sha256": "48d9fb846b1cf8deb4e994c8163ac18cde86a3d3a6c46fdbc7c74e52a6699c7b"
+    },
+    {
+      "id": "AQ02-M08-provider-error-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M08-provider-error.json",
+      "sha256": "c63c585d83327b5fa70a7889462156f32a7d0c220938764b25067165d377651d"
+    },
+    {
+      "id": "AQ02-M09-empty-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M09-empty.json",
+      "sha256": "b90d5d68666996e94dff10004a7c4362deaabadb008496c8fedb0cde55529cb3"
+    },
+    {
+      "id": "AQ02-M09-absent-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M09-absent.json",
+      "sha256": "1f291bc9cb136c6c4831495a8d6e2512092b478d17d2e00d0ec6be75800639d1"
+    },
+    {
+      "id": "AQ02-M09-null-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M09-null.json",
+      "sha256": "e68ab78fb630ffeaea1ff2c660f4bd3dc1f84c91ab4247f7d4277006fd48157d"
+    },
+    {
+      "id": "AQ02-M10-rotate-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M10-rotate.json",
+      "sha256": "d2a7010704076933cef166fe876d6742456c863afb2329722353529be5346eaa"
+    },
+    {
+      "id": "AQ02-M10-remove-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M10-remove.json",
+      "sha256": "5c9e5cbe9787097b7d6d808f0b670003a6e1eedc66f3425545735b9cbcafd46c"
+    },
+    {
+      "id": "AQ02-M11-root-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M11-root.json",
+      "sha256": "6803337cb58abc482e31ec18afbdd628a8fe63a0f2f4628650fb40b331a87366"
+    },
+    {
+      "id": "AQ02-M11-subtree-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M11-subtree.json",
+      "sha256": "10e55079c26c1e4bb06cffb5c0720296f03734bc0a72c4328f0d197d0d3f85da"
+    },
+    {
+      "id": "AQ02-M11-yaml-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M11-yaml.json",
+      "sha256": "40a459640d3e2338a22e9c2f0f3d2276183e712f9407c7a4e6517cf78ddc9231"
+    },
+    {
+      "id": "AQ02-M12-read-only-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M12-read-only.json",
+      "sha256": "c4eef8edd667da695c0ca345ca8c162715dfbd92495f4b9428a08abf08f46f97"
+    },
+    {
+      "id": "AQ02-M13-root-put-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M13-root-put.json",
+      "sha256": "95743d957a4eb67516453d8a6a09c0fbe55b7086d97da36c9dd1e4c99e9cdadd"
+    },
+    {
+      "id": "AQ02-M14-subtree-put-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M14-subtree-put.json",
+      "sha256": "51501510efda96adcbec128e3d0789f40a040f724a5cd87d1fdab4e13c8b8d64"
+    },
+    {
+      "id": "AQ02-M14-map-patch-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M14-map-patch.json",
+      "sha256": "d77278dea139decde3a91b0e715288e3f6eac48b8bbc6e4aa4e36c66e2088ea9"
+    },
+    {
+      "id": "AQ02-M14-list-patch-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M14-list-patch.json",
+      "sha256": "b9b11f736681c49551d54fcb984245c06d3d696bb95af66fe1e45026f4dcb66e"
+    },
+    {
+      "id": "AQ02-M15-delete-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M15-delete.json",
+      "sha256": "a2656b805eb76179e396c8cbeb43e4328f0ba2f87068cff1946400036cedb225"
+    },
+    {
+      "id": "AQ02-M15-absent-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M15-absent.json",
+      "sha256": "010c57bf35e79591245358876b81e7dd2f74b09db99031c3ceba4fe0a4a7acb5"
+    },
+    {
+      "id": "AQ02-M15-null-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M15-null.json",
+      "sha256": "43670d6d829a353fb3bee0700158231fdad35eeac2858412b64131cb50aac3e3"
+    },
+    {
+      "id": "AQ02-M15-empty-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M15-empty.json",
+      "sha256": "8ce20933e3bf574c4b3402262c76fdfa388890bcd3bca1b66eac6adbeac40cc9"
+    },
+    {
+      "id": "AQ02-M15-false-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M15-false.json",
+      "sha256": "4a9efc488b0f411ff33b58a876f8618d41db4f64214b60c0fb2324c7c1ddf380"
+    },
+    {
+      "id": "AQ02-M15-zero-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M15-zero.json",
+      "sha256": "c6c07e53bf35d31e31ef33e0485a8f800d52604eff30cd7fdb5705fbc99cad89"
+    },
+    {
+      "id": "AQ02-M15-invalid-type-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M15-invalid-type.json",
+      "sha256": "67282d4b8243dc16e81e4a5bb0829d0432f09403b8b3a312ee3647d3ed680d72"
+    },
+    {
+      "id": "AQ02-M16-readonly-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M16-readonly.json",
+      "sha256": "24055568b93e1625044eea08c64722b98b5a1cf020f94ae9712b815dadeebf07"
+    },
+    {
+      "id": "AQ02-M16-invalid-path-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M16-invalid-path.json",
+      "sha256": "883b18f8d1b807544651fbff597f1f50569b0126f90f4efa2680de304ab91d40"
+    },
+    {
+      "id": "AQ02-M16-invalid-body-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M16-invalid-body.json",
+      "sha256": "ec04904e1fcb5eea6d3f6be7490589761693f3864ec637fc55d3cd9ee438be6f"
+    },
+    {
+      "id": "AQ02-M17-yaml-put-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M17-yaml-put.json",
+      "sha256": "98ecb8ab6d8120a1ede7b8fff3a3211e589b590ff415021d74981562c4dca78e"
+    },
+    {
+      "id": "AQ02-M17-response-loss-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M17-response-loss.json",
+      "sha256": "6f7fe5361a6f8da98894cf7aa3553f7baa25fba8e8ebd4eda1e65d55e39dd203"
+    },
+    {
+      "id": "AQ02-M18-populated-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M18-populated.json",
+      "sha256": "d303660a6a44827ea274d32f46e942d3e1d68575cee27268998fad1549bcc40f"
+    },
+    {
+      "id": "AQ02-M18-empty-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M18-empty.json",
+      "sha256": "ec38dc5b593f50eefa18cc8a6984d63f434810971510ae6d9afccacdc454df03"
+    },
+    {
+      "id": "AQ02-M19-put-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M19-put.json",
+      "sha256": "62b623fc9dd8c7c2a2ec9e26a0353351a5620edd9389684d88701c31b02a04e3"
+    },
+    {
+      "id": "AQ02-M19-patch-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M19-patch.json",
+      "sha256": "289bbb789b43dd212c52762837b25ff882d6c11ee6ece01251e8afe77468b962"
+    },
+    {
+      "id": "AQ02-M19-delete-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M19-delete.json",
+      "sha256": "d3e9bc0ab6d95f31cf680e65330896636e3fbc0ead8a50ae9c6253fe10153b08"
+    },
+    {
+      "id": "AQ02-M20-invalid-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M20-invalid.json",
+      "sha256": "1fc6cb850372ef670f9784e82f4dae953fce180a429bd7d068cd0f1b3ace63ef"
+    },
+    {
+      "id": "AQ02-M20-duplicate-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M20-duplicate.json",
+      "sha256": "9a41f17e3908fb8a2cecf3512696b135a8c2208b91dc6d791c493ee5471e729e"
+    },
+    {
+      "id": "AQ02-M20-write-failure-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M20-write-failure.json",
+      "sha256": "e0056ef41b18d774173995b683380f086457628ee6099e3904c9899ec3909317"
+    },
+    {
+      "id": "AQ02-M20-response-loss-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M20-response-loss.json",
+      "sha256": "e5e4dbfd3c3026e38dc05a9e73eb898113426c28c3c8bb2227630e780d119d05"
+    },
+    {
+      "id": "AQ02-M21-empty-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M21-empty.json",
+      "sha256": "ec5dc5693913d1624a553e4bef8dc4caf077f94f303c28f44ce094cab6af809b"
+    },
+    {
+      "id": "AQ02-M21-populated-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M21-populated.json",
+      "sha256": "4a0ac3d528004cac77ca456f884c479d717ae25b7b885515e85694bc5f0611f8"
+    },
+    {
+      "id": "AQ02-M22-raw-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M22-raw.json",
+      "sha256": "a28a196b810b040ac96f7af0ba01123e052ca62adc026e3845e910dc5329c9a9"
+    },
+    {
+      "id": "AQ02-M22-multipart-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M22-multipart.json",
+      "sha256": "76952021cf43ba79eae00bde666839343e536c2efaf0792ce0fa5673879471ab"
+    },
+    {
+      "id": "AQ02-M22-invalid-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M22-invalid.json",
+      "sha256": "e329aed1aea5b4c1db0aecd30a7b0677b17d06fcd8916da7eb05cda3b9285195"
+    },
+    {
+      "id": "AQ02-M22-duplicate-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M22-duplicate.json",
+      "sha256": "349085814a7b0b94009c02ecb7e550ead8e6d990175c3ca38a243e2a6f3bf430"
+    },
+    {
+      "id": "AQ02-M22-partial-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M22-partial.json",
+      "sha256": "64cceea8778f51194a3869dfcdaf2e591e903a5e918bd06dcdce9c19163e69f1"
+    },
+    {
+      "id": "AQ02-M23-delete-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M23-delete.json",
+      "sha256": "20b13a7b8c9e3df5788342a7b9ce91022f23c5884089e371f79a5893d0f7e2d9"
+    },
+    {
+      "id": "AQ02-M23-missing-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M23-missing.json",
+      "sha256": "b838288a701a0dae3ab1f95213a0e1a85e8df3773ed50dad810c3d4719729a9f"
+    },
+    {
+      "id": "AQ02-M23-unsafe-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M23-unsafe.json",
+      "sha256": "5872b22321be6c1b45dc3dca5f99b2d13f219e35214403d6d8a16d2cfcc34c64"
+    },
+    {
+      "id": "AQ02-M24-status-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M24-status.json",
+      "sha256": "6b9465132462535d68bb759478497929165feee8836e5de9865890b42809cfa0"
+    },
+    {
+      "id": "AQ02-M24-fields-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M24-fields.json",
+      "sha256": "3924e52f2aefce30b10a6e6e3d5bb9105add68fa26fb427570618c906a5c3a45"
+    },
+    {
+      "id": "AQ02-M24-invalid-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M24-invalid.json",
+      "sha256": "05f7d986719c85e61e578cbc4fceac3577ee61105e0fcff0f77af3f9084f725d"
+    },
+    {
+      "id": "AQ02-M24-readonly-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M24-readonly.json",
+      "sha256": "00d3358d8b9387b05399cc815948d4ca1931402d4e96a31cf6d7a9894cb0192e"
+    },
+    {
+      "id": "AQ02-M24-conflict-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M24-conflict.json",
+      "sha256": "0ee68615ee64b760e4e0f623a5dfa8d0bb8356c7ada2a9e1361016656808de7c"
+    },
+    {
+      "id": "AQ02-M25-missing-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M25-missing.json",
+      "sha256": "40770c703e1bdf93d5e907adcbf3a58a84702a2b591048564c44b905520ff3ec"
+    },
+    {
+      "id": "AQ02-M25-invalid-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M25-invalid.json",
+      "sha256": "8f5d5c38bccc34a0a444038a86c2a7a93db3272f02209653e62a6e8a5f40f643"
+    },
+    {
+      "id": "AQ02-M25-refresh-error-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M25-refresh-error.json",
+      "sha256": "4cb81a70901c6ad3ab28a65081e4107a29f2b76d8220145176b0b8d8253d7894"
+    },
+    {
+      "id": "AQ02-M26-start-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M26-start.json",
+      "sha256": "6ac69cc49fc5bf70b26cd4c186cf6c06496c66e6e80ee74d149846f7865e7cc3"
+    },
+    {
+      "id": "AQ02-M26-missing-provider-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M26-missing-provider.json",
+      "sha256": "cad2d7e038c88424690e26b683b169f1e2e1c67f389310ab6d7ec6302715b0a7"
+    },
+    {
+      "id": "AQ02-M26-unknown-provider-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M26-unknown-provider.json",
+      "sha256": "a7710b9a40d66518e951f2bbcc9a5275ed40db74de579bea2c1edb4282dcddb1"
+    },
+    {
+      "id": "AQ02-M27-pending-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M27-pending.json",
+      "sha256": "3a3a3964fd6b05ee447afa2ecc45e9076ebe444f3a45d75092f5a673b96b890e"
+    },
+    {
+      "id": "AQ02-M27-unknown-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M27-unknown.json",
+      "sha256": "f9097ce20e66bfd2e30ba7f2fe1c23448d754a8417dd5e78bb22075771d67708"
+    },
+    {
+      "id": "AQ02-M27-auth-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M27-auth.json",
+      "sha256": "fe1327d2e9941ca50f305e5f0e7f48ac08b3936c13a862449f79309f77d9d099"
+    },
+    {
+      "id": "AQ02-M28-get-missing-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M28-get-missing.json",
+      "sha256": "0fa532fa4dc9ea2a92bba0aaf7400a24816f3ad6bf95f7c6e7fdaf07a7c708e1"
+    },
+    {
+      "id": "AQ02-M28-post-missing-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M28-post-missing.json",
+      "sha256": "8838469571ae3295843c8cba53018fdeb8aa0a8dc61dafb1ec03564f737b56cd"
+    },
+    {
+      "id": "AQ02-M28-invalid-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M28-invalid.json",
+      "sha256": "930ded6b9f9b2ee8fda65a0a21408a05af03496a10b9f7de4abf5cd261ed9031"
+    },
+    {
+      "id": "AQ02-M28-unknown-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M28-unknown.json",
+      "sha256": "b42881062317e73142e5e34fbd40032e0dae6288bdad9c09f2a973843a0c8a07"
+    },
+    {
+      "id": "AQ02-M28-mismatch-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M28-mismatch.json",
+      "sha256": "c2f82043b6a40052a79dd40bc3252343d4f2f3102f668942aaf6d746906afe15"
+    },
+    {
+      "id": "AQ02-M29-error-callback-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M29-error-callback.json",
+      "sha256": "36f5305c8d1df8623825bcf19718fb630be3f63094bb59f575625fdb61fc546d"
+    },
+    {
+      "id": "AQ02-M30-cancel-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M30-cancel.json",
+      "sha256": "d247c8c9ed5ac3863e76e7955faf5cabd6a4b014f9e441be64eaf434ad572f56"
+    },
+    {
+      "id": "AQ02-M30-auth-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M30-auth.json",
+      "sha256": "c17846b984d5c097f1c65664e49d5b157dd3e5fe8e6c117adac4cc1428f8a970"
+    },
+    {
+      "id": "AQ02-M30-replay-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M30-replay.json",
+      "sha256": "dee50bb1936489f5a01792c48d490b86ede077c39868f81ce5a738af8fc1f5fb"
+    },
+    {
+      "id": "AQ02-M30-missing-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M30-missing.json",
+      "sha256": "a0836c7db43f44a3eecccc0568c0751480e0af271a80e0ce3b899903492a8eee"
+    },
+    {
+      "id": "AQ02-M31-repeated-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M31-repeated.json",
+      "sha256": "fff3fb0da04f48e85626890a01fdf558d511d6d1cf2a71bc8f9e1e187abaee4f"
+    },
+    {
+      "id": "AQ02-M31-race-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M31-race.json",
+      "sha256": "8d8207b194612671731cd9c095095bf201340859c9cfc585f4888015771422b8"
+    },
+    {
+      "id": "AQ02-M34-registered-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M34-registered.json",
+      "sha256": "0d2bbb81fed1c00d42aff86217e85258bbcc0edd845233d8ba3c6fbb68ef21b3"
+    },
+    {
+      "id": "AQ02-M34-missing-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M34-missing.json",
+      "sha256": "21c6704ee78617e1b3660657b09acfea10fb12d3331f7000dc0099ce1e49d789"
+    },
+    {
+      "id": "AQ02-M34-unknown-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M34-unknown.json",
+      "sha256": "8393e389cf0276c22b8ab161a590f6be6f19c168f262c77bbaeadfbd06c8cccb"
+    },
+    {
+      "id": "AQ02-M35-codex-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M35-codex.json",
+      "sha256": "eeb18d8eb18d7afe1bf3946aa547bcdc0ac055079405da2e18f3e681a14f4d39"
+    },
+    {
+      "id": "AQ02-M35-unknown-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M35-unknown.json",
+      "sha256": "9bf329c825bd2700c751c77f0893c338e52630c5ce55b3f2b79127fe3ba2dcff"
+    },
+    {
+      "id": "AQ02-M36-model-reload-TRACE",
+      "kind": "sanitized-trace",
+      "relativePath": "AQ02-M36-model-reload.json",
+      "sha256": "de55e4ac3a4c2f38a545ed28d06b2629fff42ec860bd3cdaa354129044b66276"
+    }
+  ]
+}

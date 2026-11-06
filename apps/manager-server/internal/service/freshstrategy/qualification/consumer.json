@@ -14,15 +14,15 @@
         {
           "profile": "CPA8-MGMT-MIN-r1",
           "manifestSha256": "1553601be218d5eea1bf60313502b6533062d3f22ae5f852e3f273f8fe0e1aa0",
-          "reportSha256": "b71f090d49b481b99729e51bef8a622e2d3e4028943502ff4acef0dd68066c8d",
-          "implementationHead": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
+          "reportSha256": "f6740677bd09e38fe21377e6aa962b2b91c821461bdb18a1903ef813798e5b5e",
+          "implementationHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
           "caseRefs": [
             "AQ02-M01-bearer",
             "AQ02-M11-root"
           ]
         }
       ],
-      "acceptanceSha256": "eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5",
+      "acceptanceSha256": "025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d",
       "limitations": [
         "management_generation_v8",
         "exact_cpa_v8_artifact_identity",
@@ -53,15 +53,15 @@
         {
           "profile": "CPA8-EXTERNAL-SAFETY-r1",
           "manifestSha256": "526cdc0a6481c22e0010e9717a1dc75c07adc20d9805741262a7ae0076bd3115",
-          "reportSha256": "773429080399c3def6523a8a92ebfd25080a01eee4e1c175afc7b72897f24f78",
-          "implementationHead": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
+          "reportSha256": "5362106f521a17fd2bcacd8eb40205769c38f2e1b3864d0b54ed19171e59b978",
+          "implementationHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
           "caseRefs": [
             "AQ03-E01-real-auth",
             "AQ03-E01-real-config"
           ]
         }
       ],
-      "acceptanceSha256": "eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5",
+      "acceptanceSha256": "025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d",
       "limitations": [
         "management_generation_v8",
         "read_only_bounded_safe_read",
@@ -93,8 +93,8 @@
         {
           "profile": "CPA8-EXTERNAL-SAFETY-r1",
           "manifestSha256": "526cdc0a6481c22e0010e9717a1dc75c07adc20d9805741262a7ae0076bd3115",
-          "reportSha256": "773429080399c3def6523a8a92ebfd25080a01eee4e1c175afc7b72897f24f78",
-          "implementationHead": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
+          "reportSha256": "5362106f521a17fd2bcacd8eb40205769c38f2e1b3864d0b54ed19171e59b978",
+          "implementationHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
           "caseRefs": [
             "AQ03-E01-real-auth",
             "AQ03-E01-real-config"
@@ -103,14 +103,14 @@
         {
           "profile": "CPA8-STAGE-r1",
           "manifestSha256": "a5ee818e5c23b71b58a0eb680fb64c3a67e5f7b9104300fa38b82015b2245c3c",
-          "reportSha256": "28490eb332d1697e470636c51aa0ab2d63b36bf71f872f6819b043a46f1b56b7",
-          "implementationHead": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
+          "reportSha256": "97f359d1530a7428d6525448f7c3b0bde6f0a51be5f85351711328d96f9888b6",
+          "implementationHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
           "caseRefs": [
             "AQ04-S05-v8"
           ]
         }
       ],
-      "acceptanceSha256": "eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5",
+      "acceptanceSha256": "025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d",
       "limitations": [
         "management_generation_v8",
         "read_only_bounded_safe_read",
@@ -130,8 +130,8 @@
       "adoptionEvidence": {
         "profile": "CPA8-ADOPT-RESOURCE-r1",
         "manifestSha256": "41725ced527fa1221e32d4f0aabd9b3a7709dd454cc2761165e8e375bd9db6a2",
-        "reportSha256": "9797df697443fb1d9e48b12e408b6c9b88984c7c37c3645a8990517238641522",
-        "implementationHead": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
+        "reportSha256": "806513e004913951327482e3b6fc91d6118e5f60ee6d345542bf37278497e5bf",
+        "implementationHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
         "readCaseRef": "fresh-network-client-api-keys-read",
         "replayCaseRef": "fresh-network-client-api-keys-replay",
         "verifyCaseRef": "fresh-network-client-api-keys-verify"
@@ -152,8 +152,8 @@
         {
           "profile": "CPA8-EXTERNAL-SAFETY-r1",
           "manifestSha256": "526cdc0a6481c22e0010e9717a1dc75c07adc20d9805741262a7ae0076bd3115",
-          "reportSha256": "773429080399c3def6523a8a92ebfd25080a01eee4e1c175afc7b72897f24f78",
-          "implementationHead": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
+          "reportSha256": "5362106f521a17fd2bcacd8eb40205769c38f2e1b3864d0b54ed19171e59b978",
+          "implementationHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
           "caseRefs": [
             "AQ03-E01-real-auth",
             "AQ03-E01-real-config"
@@ -162,15 +162,15 @@
         {
           "profile": "CPA8-STAGE-r1",
           "manifestSha256": "a5ee818e5c23b71b58a0eb680fb64c3a67e5f7b9104300fa38b82015b2245c3c",
-          "reportSha256": "28490eb332d1697e470636c51aa0ab2d63b36bf71f872f6819b043a46f1b56b7",
-          "implementationHead": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
+          "reportSha256": "97f359d1530a7428d6525448f7c3b0bde6f0a51be5f85351711328d96f9888b6",
+          "implementationHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
           "caseRefs": [
             "AQ04-S02-legacy",
             "AQ04-S05-v8"
           ]
         }
       ],
-      "acceptanceSha256": "eedd32432a0165e10d8993323500bd885a8a0d86272318e4e933874ccb6fdee5",
+      "acceptanceSha256": "025f517544f71ba83eac62b104c3ae381b454b5d07c29b7b46c86962fb562e3d",
       "limitations": [
         "management_generation_v8",
         "read_only_bounded_safe_read",
@@ -192,8 +192,8 @@
       "adoptionEvidence": {
         "profile": "CPA8-ADOPT-RESOURCE-r1",
         "manifestSha256": "08d8c0163c77f235365b4d5f9149a6d3855062c642071eb99e5d12bfa69b49fe",
-        "reportSha256": "9fe9f696876d1db3809e3d4ebd968a03f6d10f0a53b60c2f116202af4042775c",
-        "implementationHead": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
+        "reportSha256": "13658e32e5413205c586526d29e30cf182c9f064d067f86e3124d957d60e3ade",
+        "implementationHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
         "readCaseRef": "fresh-legacy-client-api-keys-read",
         "replayCaseRef": "fresh-legacy-client-api-keys-replay",
         "verifyCaseRef": "fresh-legacy-client-api-keys-verify"
@@ -202,9 +202,9 @@
         "profile": "CPA8-STAGE-r1",
         "caseRef": "fresh-legacy-managed-stage-v8-r1",
         "manifestSha256": "80fc3fea2d865edf50e3f2a87ae5109fb15e7c97bc3863a8589c39b50e974a5e",
-        "reportSha256": "6fe1b4a5860ae7c6240048fa9bd2f37162ed4fa96800e87782fbbdcba4450f71",
-        "implementationHead": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
-        "evidenceSha256": "893ac307693a27399f90dc99fd7bc4bb23ecda93e15c4c082a480878b4ed7e0a",
+        "reportSha256": "8ee774428cb22850119ecfb34a0ce77c917236e8213d495f6f749f2c4af81064",
+        "implementationHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
+        "evidenceSha256": "1e75dc651b612722551f4e3d0a28dafc4ec20ee1f005e80b63b5217667481030",
         "legacyVersion": "v7.0.12",
         "legacyArchiveSha256": "8afc9ed4c89a50a5ffce5d122a9bb93442c5b8ff3d8c6f07b7a274c719109b74",
         "legacyBinarySha256": "1eb108b85ad554b92bab9f5a85af433d7c2e1b951bb192b639d73605d4593d1a"
