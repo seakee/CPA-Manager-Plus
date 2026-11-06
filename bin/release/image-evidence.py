@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Build and validate deterministic, byte-bound image provenance and notices.
+"""Build and validate deterministic, byte-bound provenance and notices.
 
-These are unsigned source claims, not protected-producer attestations or legal approval.
+The same contract covers OCI images and the Native package; only the layout
+roots differ. These are unsigned source claims, not protected-producer
+attestations or legal approval.
 """
 import argparse
 import hashlib
@@ -11,16 +13,55 @@ from pathlib import Path, PurePosixPath
 
 SOURCE = "https://github.com/seakee/CPA-Manager-Plus"
 CPA_SOURCE = "https://github.com/router-for-me/CLIProxyAPI"
-LICENSE_ROOT = "/usr/local/share/licenses/"
-INVENTORY = "/usr/local/share/cpamp/release/third-party-inventory.txt"
-PROVENANCE = "/usr/local/share/cpamp/provenance.json"
-SOURCE_INVENTORY = "/usr/local/share/cpamp/release/source-dependency-inventory.json"
+# An image carries these paths inside the container root; the Native tarball
+# carries the same relative layout under its package root.
+LAYOUTS = {
+    "image": {
+        "licenseRoot": "/usr/local/share/licenses/",
+        "inventory": "/usr/local/share/cpamp/release/third-party-inventory.txt",
+        "provenance": "/usr/local/share/cpamp/provenance.json",
+        "sourceInventory": "/usr/local/share/cpamp/release/source-dependency-inventory.json",
+        "binRoot": "/usr/local/bin/",
+        "artifact": "/usr/local/share/cpamp/runtime/cpa-artifact.json",
+        "webManifest": "/usr/local/share/cpamp/release/fullweb-manifest.json",
+        "platforms": ("linux/amd64", "linux/arm64"),
+    },
+    "native": {
+        "licenseRoot": "share/licenses/",
+        "inventory": "share/cpamp/release/third-party-inventory.txt",
+        "provenance": "share/cpamp/provenance.json",
+        "sourceInventory": "share/cpamp/release/source-dependency-inventory.json",
+        "binRoot": "bin/",
+        "artifact": "share/cpamp/runtime/cpa-artifact.json",
+        "webManifest": "share/cpamp/release/fullweb-manifest.json",
+        # The Native package ships linux/amd64 only; other platforms fall back
+        # to 1.x Stable and must never be relabelled with this evidence.
+        "platforms": ("linux/amd64",),
+    },
+}
+LICENSE_ROOT = LAYOUTS["image"]["licenseRoot"]
+INVENTORY = LAYOUTS["image"]["inventory"]
+PROVENANCE = LAYOUTS["image"]["provenance"]
+SOURCE_INVENTORY = LAYOUTS["image"]["sourceInventory"]
 COMPONENTS = {"manager": ("manager", "web", "base-image"),
               "ingress": ("ingress", "base-image"),
-              "runtime": ("runtime-supervisor", "base-image")}
+              "runtime": ("runtime-supervisor", "base-image"),
+              # A tarball cannot own the host OS, so it has no base-image
+              # component: it ships only the licenses of the Go modules and
+              # the embedded Web closure it actually links.
+              "native": ("manager", "web", "ingress", "runtime-supervisor")}
 BINARIES = {"manager": (("manager", "cpa-manager-plus"),),
             "ingress": (("ingress", "cpamp-ingress"),),
-            "runtime": (("runtime-supervisor", "cpamp-runtime-supervisor"), ("cpa", "cli-proxy-api"))}
+            "runtime": (("runtime-supervisor", "cpamp-runtime-supervisor"), ("cpa", "cli-proxy-api")),
+            "native": (("manager", "cpa-manager-plus"),
+                       ("ingress", "cpa-manager-plus-ingress"),
+                       ("runtime-supervisor", "cpa-manager-plus-runtime-supervisor"),
+                       ("cpa", "cli-proxy-api"))}
+PROVENANCE_COMPONENTS = {"manager": ("manager", "web"),
+                         "ingress": ("ingress",),
+                         "runtime": ("runtime-supervisor", "cpa"),
+                         "native": ("manager", "ingress", "runtime-supervisor", "cpa", "web")}
+ROLE_TARGET = {role: ("native" if role == "native" else "image") for role in COMPONENTS}
 MODULES = {"manager": "apps/manager-server", "ingress": "apps/ingress",
            "runtime-supervisor": "apps/runtime-supervisor"}
 SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -57,11 +98,16 @@ def identity(version, commit):
             "SOURCE_COMMIT must be an exact non-unknown 40-hex commit")
 
 
-def notice_path(component, relative):
+def layout(role):
+    return LAYOUTS[ROLE_TARGET[role]]
+
+
+def notice_path(component, relative, target="image"):
+    require(target in LAYOUTS, "unknown evidence layout: " + str(target))
     require(isinstance(relative, str) and relative and not relative.startswith("/") and
             ".." not in PurePosixPath(relative).parts and "\\" not in relative,
             "unsafe license inventory path")
-    return LICENSE_ROOT + component + "/" + relative
+    return LAYOUTS[target]["licenseRoot"] + component + "/" + relative
 
 
 def alpine_coverage(dependencies):
@@ -92,11 +138,13 @@ def license_coverage(components):
 
 
 def validate_inventory(value, role, read_file, expected_source=None):
+    lay = layout(role)
+    target = ROLE_TARGET[role]
     require(type(value) is dict and value.get("schemaVersion") == 1 and
             value.get("status") == "VERIFIED_LICENSE_COLLECTION", "unverified third-party inventory")
     require(value.get("role") == role and type(value.get("components")) is dict and
             set(value["components"]) == set(COMPONENTS[role]), "incomplete component license inventory")
-    source_bytes = read_file(SOURCE_INVENTORY)
+    source_bytes = read_file(lay["sourceInventory"])
     require(value.get("sourceInventorySHA256") == digest(source_bytes), "source dependency inventory hash mismatch")
     source = json.loads(source_bytes)
     require(source.get("schemaVersion") == 1 and source.get("status") == "SOURCE_MANIFESTS_VERIFIED" and
@@ -104,7 +152,7 @@ def validate_inventory(value, role, read_file, expected_source=None):
     if expected_source is not None:
         require(source_bytes == expected_source, "source dependency inventory differs from checked source")
     for component, entry in value["components"].items():
-        raw = read_file(notice_path(component, "inventory.json"))
+        raw = read_file(notice_path(component, "inventory.json", target))
         require(digest(raw) == entry.get("inventorySHA256"), "component inventory hash mismatch: " + component)
         inventory = json.loads(raw)
         require(inventory == entry.get("inventory") and inventory.get("schemaVersion") == 1 and
@@ -145,7 +193,7 @@ def validate_inventory(value, role, read_file, expected_source=None):
             else:
                 require(dep["notices"], "missing original dependency license/NOTICE")
             for notice in dep["notices"]:
-                path = notice_path(component, notice.get("path"))
+                path = notice_path(component, notice.get("path"), target)
                 require(path not in notice_paths, "notice file claimed by multiple dependencies: " + path)
                 notice_paths.add(path)
                 require(SHA.fullmatch(notice.get("sha256", "")) and
@@ -164,36 +212,37 @@ def validate_inventory(value, role, read_file, expected_source=None):
                     "Alpine license coverage summary mismatch: " + component)
     require(value.get("licenseCoverage") == license_coverage(value["components"]),
             "license coverage summary differs from component inventories")
-    require(read_file(LICENSE_ROOT + "cpamp/LICENSE"), "missing CPAMP LICENSE")
-    if role == "runtime":
-        require(read_file(LICENSE_ROOT + "cli-proxy-api/LICENSE"), "missing CPA LICENSE")
+    require(read_file(lay["licenseRoot"] + "cpamp/LICENSE"), "missing CPAMP LICENSE")
+    if any(name == "cpa" for name, _ in BINARIES[role]):
+        require(read_file(lay["licenseRoot"] + "cli-proxy-api/LICENSE"), "missing CPA LICENSE")
 
 
 def validate_provenance(value, role, version, commit, read_file):
+    lay = layout(role)
     identity(version, commit)
     require(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1,
             "invalid provenance schemaVersion")
     require(value.get("role") == role and value.get("version") == version and
             value.get("sourceCommit") == commit and value.get("source") == SOURCE,
             "provenance source/version identity mismatch")
-    require(value.get("platform") in ("linux/amd64", "linux/arm64"), "invalid provenance platform")
-    aggregate = read_file(INVENTORY)
+    require(value.get("platform") in lay["platforms"], "invalid provenance platform")
+    aggregate = read_file(lay["inventory"])
     require(value.get("licenseInventorySHA256") == digest(aggregate), "provenance inventory hash mismatch")
     coverage = json.loads(aggregate).get("licenseCoverage")
     require(isinstance(coverage, dict) and coverage and value.get("licenseCoverage") == coverage,
             "provenance license coverage differs from aggregate inventory")
     components = value.get("components")
-    expected = [name for name, _ in BINARIES[role]] + (["web"] if role == "manager" else [])
+    expected = list(PROVENANCE_COMPONENTS[role])
     require(isinstance(components, list) and [item.get("name") for item in components] == expected,
             "incomplete provenance components")
-    paths = {name: "/usr/local/bin/" + binary for name, binary in BINARIES[role]}
-    paths["web"] = "/usr/local/share/cpamp/release/fullweb-manifest.json"
+    paths = {name: lay["binRoot"] + binary for name, binary in BINARIES[role]}
+    paths["web"] = lay["webManifest"]
     for item in components:
         require(item.get("path") == paths[item["name"]], "provenance component path mismatch")
         require(isinstance(item.get("path"), str) and SHA.fullmatch(item.get("sha256", "")) and
                 digest(read_file(item["path"])) == item["sha256"], "provenance component hash mismatch")
         if item["name"] == "cpa":
-            artifact = json.loads(read_file("/usr/local/share/cpamp/runtime/cpa-artifact.json"))
+            artifact = json.loads(read_file(lay["artifact"]))
             require(artifact.get("schemaVersion") == 1 and artifact.get("engine") == "cpa" and
                     artifact.get("version") == item.get("version") and artifact.get("artifactId") == item["sha256"]
                     and item.get("source") == CPA_SOURCE and item.get("release") == CPA_SOURCE + "/releases/tag/v" + item["version"],
@@ -207,14 +256,16 @@ def validate_provenance(value, role, version, commit, read_file):
 
 
 def build(root, role, version, commit, platform, source_inventory):
+    lay = layout(role)
+    target = ROLE_TARGET[role]
     identity(version, commit)
     def read_file(path):
         return (root / path.lstrip("/")).read_bytes()
     components = {}
     for name in COMPONENTS[role]:
-        raw = read_file(notice_path(name, "inventory.json"))
+        raw = read_file(notice_path(name, "inventory.json", target))
         components[name] = {"inventorySHA256": digest(raw), "inventory": json.loads(raw)}
-    source_path = root / SOURCE_INVENTORY.lstrip("/")
+    source_path = root / lay["sourceInventory"].lstrip("/")
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_bytes(source_inventory.read_bytes())
     inventory = {"schemaVersion": 1, "status": "VERIFIED_LICENSE_COLLECTION", "role": role,
@@ -224,29 +275,29 @@ def build(root, role, version, commit, platform, source_inventory):
                  "licenseCoverage": license_coverage(components),
                  "sourceInventorySHA256": digest(source_path.read_bytes()), "components": components}
     validate_inventory(inventory, role, read_file)
-    (root / INVENTORY.lstrip("/")).write_bytes(encoded(inventory))
+    (root / lay["inventory"].lstrip("/")).write_bytes(encoded(inventory))
     items = []
     for name, binary in BINARIES[role]:
-        path = "/usr/local/bin/" + binary
+        path = lay["binRoot"] + binary
         item = {"name": name, "path": path, "sha256": digest(read_file(path))}
         if name == "cpa":
-            artifact = json.loads(read_file("/usr/local/share/cpamp/runtime/cpa-artifact.json"))
+            artifact = json.loads(read_file(lay["artifact"]))
             item.update(version=artifact["version"], source=CPA_SOURCE,
                         release=CPA_SOURCE + "/releases/tag/v" + artifact["version"])
         else:
             item.update(version=version, source=SOURCE, sourceCommit=commit,
                         module="github.com/seakee/cpa-manager-plus/" + MODULES[name])
         items.append(item)
-    if role == "manager":
-        path = "/usr/local/share/cpamp/release/fullweb-manifest.json"
+    if "web" in PROVENANCE_COMPONENTS[role]:
+        path = lay["webManifest"]
         items.append({"name": "web", "path": path, "sha256": digest(read_file(path)),
                       "version": version, "source": SOURCE, "sourceCommit": commit})
     provenance = {"schemaVersion": 1, "role": role, "version": version, "sourceCommit": commit,
                   "source": SOURCE, "platform": platform, "components": items,
                   "licenseCoverage": inventory["licenseCoverage"],
-                  "licenseInventorySHA256": digest(read_file(INVENTORY))}
+                  "licenseInventorySHA256": digest(read_file(lay["inventory"]))}
     validate_provenance(provenance, role, version, commit, read_file)
-    (root / PROVENANCE.lstrip("/")).write_bytes(encoded(provenance))
+    (root / lay["provenance"].lstrip("/")).write_bytes(encoded(provenance))
     return provenance
 
 
@@ -259,11 +310,16 @@ def main():
     parser.add_argument("--platform", required=True)
     parser.add_argument("--source-inventory", type=Path, required=True)
     args = parser.parse_args()
-    build(args.root, args.role, args.version, args.source_commit, args.platform, args.source_inventory)
+    try:
+        build(args.root, args.role, args.version, args.source_commit, args.platform,
+              args.source_inventory)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        # Keep the published image diagnostic prefix stable; only the Native
+        # package uses the generalized wording.
+        label = ("invalid image evidence" if ROLE_TARGET[args.role] == "image"
+                 else "invalid provenance evidence")
+        raise SystemExit("STOP: " + label + ": " + str(exc)) from exc
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except (ValueError, OSError, KeyError, TypeError) as exc:
-        raise SystemExit("STOP: invalid image evidence: " + str(exc)) from exc
+    main()

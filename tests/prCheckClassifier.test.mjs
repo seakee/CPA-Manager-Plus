@@ -344,6 +344,27 @@ describe('PR check classifier', () => {
     });
   });
 
+  it('reruns native packaging tests when its license evidence inputs change', () => {
+    for (const filePath of [
+      'bin/release/collect-third-party-licenses.py',
+      'bin/release/image-evidence.py',
+      'bin/release/embedded-third-party-inventory.txt',
+      'bin/release/third-party-license-sources/manifest.json',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({
+        ...noChecks,
+        frontend: true,
+        native_control: true,
+      });
+    }
+    // The Full Web manifest generator is also the embedded-dist verifier.
+    expect(classifyChangedFiles(['bin/release/hash-fullweb.mjs'])).toEqual({
+      ...noChecks,
+      frontend: true,
+      native_control: true,
+    });
+  });
+
   it('runs Runtime lifecycle and Docker validation for Compose and Runtime E2E changes', () => {
     for (const filePath of [
       'docker-compose.yml',

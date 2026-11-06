@@ -12,6 +12,7 @@ ingress_src="${repo_root}/apps/ingress"
 supervisor_src="${repo_root}/apps/runtime-supervisor"
 native_script_src="${repo_root}/bin/native"
 runtime_dockerfile="${repo_root}/Dockerfile.runtime"
+license_source_inventory="${repo_root}/bin/release/embedded-third-party-inventory.txt"
 
 if [ -n "${PACKAGE_MODE:-}" ]; then
   package_mode="${PACKAGE_MODE}"
@@ -107,9 +108,132 @@ parse_dockerfile_cpa_v8_pin() {
   ' "${runtime_dockerfile}"
 }
 
+# The v2 Native package must carry the same evidence as the images: original
+# license texts per linked component, an aggregate inventory, and provenance
+# binding the packaged bytes. A missing original notice fails the build.
+collect_native_licenses() {
+  local package_dir="$1"
+  local module_dir
+
+  if ! command -v go >/dev/null 2>&1; then
+    echo "go is required to download every declared Go module before license collection" >&2
+    exit 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to collect Native third-party licenses" >&2
+    exit 1
+  fi
+
+  # A Linux-amd64 build does not necessarily fetch every module declared in
+  # go.mod, while the collector requires all of them. Mirror the image build
+  # order and download the declared set first, against the resolved root.
+  for module_dir in "${server_src}" "${ingress_src}" "${supervisor_src}"; do
+    (
+      cd "${module_dir}"
+      GOROOT="${native_go_root}" go mod download
+    )
+  done
+
+  GOROOT="${native_go_root}" python3 "${repo_root}/bin/release/collect-third-party-licenses.py" go \
+    --module "${server_src}" --component manager \
+    --output "${package_dir}/share/licenses/manager"
+  GOROOT="${native_go_root}" python3 "${repo_root}/bin/release/collect-third-party-licenses.py" go \
+    --module "${ingress_src}" --component ingress \
+    --output "${package_dir}/share/licenses/ingress"
+  GOROOT="${native_go_root}" python3 "${repo_root}/bin/release/collect-third-party-licenses.py" go \
+    --module "${supervisor_src}" --component runtime-supervisor \
+    --output "${package_dir}/share/licenses/runtime-supervisor"
+  python3 "${repo_root}/bin/release/collect-third-party-licenses.py" web \
+    --root "${repo_root}" --output "${package_dir}/share/licenses/web"
+
+  native_source_inventory="${license_source_inventory}"
+}
+
+# Resolve the toolchain the collector actually reads. `go env GOROOT` is
+# evaluated inside each module directory so a go.mod toolchain/GOTOOLCHAIN
+# switch is honoured; <GOROOT>/VERSION is the authoritative statement of what
+# that root contains, because GOVERSION reports the running tool, not the root.
+resolve_native_go_root() {
+  local module_dir goroot gover root_version expected_goroot="" expected_version=""
+
+  for module_dir in "${server_src}" "${ingress_src}" "${supervisor_src}"; do
+    if ! goroot="$(cd "${module_dir}" && go env GOROOT)"; then
+      echo "Cannot resolve the Go toolchain in ${module_dir}" >&2
+      exit 1
+    fi
+    if ! gover="$(cd "${module_dir}" && go env GOVERSION)"; then
+      echo "Cannot resolve the Go version in ${module_dir}" >&2
+      exit 1
+    fi
+    if [ -z "${goroot}" ] || [ -z "${gover}" ] || [ ! -f "${goroot}/VERSION" ]; then
+      echo "Go toolchain in ${module_dir} has no readable GOROOT/VERSION (GOROOT=${goroot})" >&2
+      exit 1
+    fi
+    root_version="$(sed -n '1p' "${goroot}/VERSION")"
+    if [ "${root_version}" != "${gover}" ]; then
+      echo "GOROOT ${goroot} contains ${root_version} but go env GOVERSION reports ${gover} in ${module_dir}" >&2
+      exit 1
+    fi
+    if [ -n "${expected_goroot}" ] &&
+      { [ "${goroot}" != "${expected_goroot}" ] || [ "${gover}" != "${expected_version}" ]; }; then
+      echo "Go toolchains differ across module directories: ${expected_goroot} (${expected_version}) and ${goroot} (${gover})" >&2
+      exit 1
+    fi
+    expected_goroot="${goroot}"
+    expected_version="${gover}"
+  done
+
+  native_go_root="${expected_goroot}"
+  native_go_version="${expected_version}"
+}
+
+# Every packaged binary must have been produced by the same resolved toolchain,
+# otherwise the collector's standard-library notices describe code it does not
+# contain.
+verify_native_binary_toolchain() {
+  local package_dir="$1"
+  local binary version
+
+  for binary in \
+    cpa-manager-plus \
+    cpa-manager-plus-ingress \
+    cpa-manager-plus-runtime-supervisor; do
+    if ! version="$(go version -m "${package_dir}/bin/${binary}" 2>/dev/null | awk 'NR == 1 {print $NF}')" ||
+      [ -z "${version}" ]; then
+      echo "Cannot read the Go toolchain embedded in bin/${binary}" >&2
+      exit 1
+    fi
+    if [ "${version}" != "${native_go_version}" ]; then
+      echo "bin/${binary} was built with ${version} but the collector toolchain is ${native_go_version}" >&2
+      exit 1
+    fi
+  done
+}
+
+write_native_provenance() {
+  local package_dir="$1"
+  local source_commit="$2"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "python3 is required to write Native provenance" >&2
+    exit 1
+  fi
+
+  python3 "${repo_root}/bin/release/image-evidence.py" \
+    --root "${package_dir}" \
+    --role native \
+    --version "${version}" \
+    --source-commit "${source_commit}" \
+    --platform linux/amd64 \
+    --source-inventory "${native_source_inventory}"
+}
+
 mkdir -p "${repo_root}/bin/tmp/release"
 work_dir="$(mktemp -d "${repo_root}/bin/tmp/release/native.XXXXXX")"
 trap 'rm -rf "${work_dir}"' EXIT
+native_source_inventory=""
+native_go_root=""
+native_go_version=""
 
 rm -rf "${out_dir}"
 mkdir -p "${out_dir}"
@@ -136,11 +260,38 @@ package_v2_linux_amd64() {
   local cpa_archive_sha256="${CPAMP_CPA_ARCHIVE_SHA256:-${default_archive_sha}}"
   local cpa_executable_sha256="${CPAMP_CPA_EXECUTABLE_SHA256:-${default_exec_sha}}"
   local cpa_asset_name="${CPAMP_CPA_ASSET_NAME:-CLIProxyAPI_${cpa_version}_linux_amd64.tar.gz}"
+  local source_commit="${SOURCE_COMMIT:-$(git -C "${repo_root}" rev-parse HEAD)}"
 
   if [ -z "${cpa_version}" ] || [ -z "${cpa_executable_sha256}" ]; then
     echo "Failed to resolve pinned CPA v8 version/hash for linux/amd64" >&2
     exit 1
   fi
+
+  # Provenance binds this exact commit; a moving or abbreviated ref would make
+  # the packaged evidence unverifiable.
+  if [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "SOURCE_COMMIT must be an exact 40-hex commit, got: ${source_commit}" >&2
+    exit 1
+  fi
+
+  # The v2 package must be built from source: the script places the Full Web
+  # dist into the embed tree itself, so the binary/manifest binding holds by
+  # construction. A prebuilt binary's embedded file set cannot be proven from
+  # its bytes, so any prebuilt input fails closed. The 1.x path is unaffected.
+  if [ -n "${CPAMP_PREBUILT_MANAGER_BIN:-}" ] ||
+    [ -n "${CPAMP_PREBUILT_INGRESS_BIN:-}" ] ||
+    [ -n "${CPAMP_PREBUILT_RUNTIME_SUPERVISOR_BIN:-}" ]; then
+    echo "v2 Native packaging builds Manager, Ingress and Runtime Supervisor from source; prebuilt binaries cannot be bound to the embedded Full Web file set" >&2
+    exit 1
+  fi
+
+  # Resolve the toolchain before any build so a GOROOT that disagrees with the
+  # running go command fails here, not as a confusing compile error.
+  if ! command -v go >/dev/null 2>&1; then
+    echo "go is required to build the v2 Native package" >&2
+    exit 1
+  fi
+  resolve_native_go_root
 
   # The sha pin parsed from Dockerfile.runtime is the architecture and
   # plugin-build guarantee. An environment override is a different artifact, so
@@ -168,7 +319,9 @@ package_v2_linux_amd64() {
     "${package_dir}/run" \
     "${package_dir}/logs" \
     "${package_dir}/share/cpamp/runtime" \
-    "${package_dir}/share/licenses/cli-proxy-api"
+    "${package_dir}/share/cpamp/release" \
+    "${package_dir}/share/licenses/cli-proxy-api" \
+    "${package_dir}/share/licenses/cpamp"
   chmod 0700 "${package_dir}/data" "${package_dir}/run" "${package_dir}/logs"
 
   # Stage and verify pinned CPA v8 linux/amd64 binary
@@ -236,67 +389,79 @@ package_v2_linux_amd64() {
     chmod 0644 "${package_dir}/share/cpamp/runtime/config.seed.yaml"
   fi
 
-  # Build or copy the 3 Go binaries (Manager, Ingress, Runtime Supervisor)
-  if [ -n "${CPAMP_PREBUILT_MANAGER_BIN:-}" ] &&
-    [ -n "${CPAMP_PREBUILT_INGRESS_BIN:-}" ] &&
-    [ -n "${CPAMP_PREBUILT_RUNTIME_SUPERVISOR_BIN:-}" ]; then
-    for prebuilt in \
-      "${CPAMP_PREBUILT_MANAGER_BIN}" \
-      "${CPAMP_PREBUILT_INGRESS_BIN}" \
-      "${CPAMP_PREBUILT_RUNTIME_SUPERVISOR_BIN}"; do
-      if [ ! -s "${prebuilt}" ]; then
-        echo "Missing or empty prebuilt binary: ${prebuilt}" >&2
-        exit 1
-      fi
-    done
-    cp "${CPAMP_PREBUILT_MANAGER_BIN}" "${package_dir}/bin/cpa-manager-plus"
-    cp "${CPAMP_PREBUILT_INGRESS_BIN}" "${package_dir}/bin/cpa-manager-plus-ingress"
-    cp "${CPAMP_PREBUILT_RUNTIME_SUPERVISOR_BIN}" "${package_dir}/bin/cpa-manager-plus-runtime-supervisor"
-  else
-    if [ ! -f "${web_html}" ]; then
-      echo "missing ${web_html}; run npm run build first" >&2
-      exit 1
-    fi
-    local source_commit
-    source_commit="${SOURCE_COMMIT:-$(git -C "${repo_root}" rev-parse HEAD)}"
-
-    cp -R "${server_src}" "${work_dir}/manager-server"
-    cp "${web_html}" "${work_dir}/manager-server/internal/httpapi/web/management.html"
-    if [ -f "${repo_root}/tests/fixtures/r1-embedded-api-transport.json" ]; then
-      cp "${repo_root}/tests/fixtures/r1-embedded-api-transport.json" \
-        "${work_dir}/manager-server/internal/domain/routing/release-embedded-api-transport.json"
-    fi
-    if [ -d "${full_web_dist}" ]; then
-      cp -R "${full_web_dist}/." "${work_dir}/manager-server/internal/httpapi/web/fullweb/"
-      if [ -f "${repo_root}/bin/release/hash-fullweb.mjs" ] && command -v node >/dev/null 2>&1; then
-        node "${repo_root}/bin/release/hash-fullweb.mjs" \
-          "${full_web_dist}" \
-          "${work_dir}/manager-server/internal/httpapi/release-fullweb-manifest.json"
-      fi
-    fi
-
-    (
-      cd "${work_dir}/manager-server"
-      CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-        -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=${source_commit}" \
-        -o "${package_dir}/bin/cpa-manager-plus" ./cmd/cpa-manager-plus
-    )
-    (
-      cd "${ingress_src}"
-      CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
-        -o "${package_dir}/bin/cpa-manager-plus-ingress" ./cmd/cpamp-ingress
-    )
-    (
-      cd "${supervisor_src}"
-      CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
-        -o "${package_dir}/bin/cpa-manager-plus-runtime-supervisor" ./cmd/cpamp-runtime-supervisor
-    )
+  # Build the 3 Go binaries (Manager, Ingress, Runtime Supervisor) from source.
+  if [ ! -f "${web_html}" ]; then
+    echo "missing ${web_html}; run npm run build first" >&2
+    exit 1
   fi
+  # The v2 Native package embeds Full Web; its license inventory must cover
+  # the exact production dependency closure those bytes came from.
+  if [ ! -d "${full_web_dist}" ]; then
+    echo "missing ${full_web_dist}; the v2 Native package embeds Full Web, run npm run build first" >&2
+    exit 1
+  fi
+  if [ ! -f "${repo_root}/bin/release/hash-fullweb.mjs" ] || ! command -v node >/dev/null 2>&1; then
+    echo "node and bin/release/hash-fullweb.mjs are required to bind the embedded Full Web build" >&2
+    exit 1
+  fi
+
+  cp -R "${server_src}" "${work_dir}/manager-server"
+  cp "${web_html}" "${work_dir}/manager-server/internal/httpapi/web/management.html"
+  if [ -f "${repo_root}/tests/fixtures/r1-embedded-api-transport.json" ]; then
+    cp "${repo_root}/tests/fixtures/r1-embedded-api-transport.json" \
+      "${work_dir}/manager-server/internal/domain/routing/release-embedded-api-transport.json"
+  fi
+  # The embed tree must contain exactly the Full Web dist. The repository keeps
+  # a .gitkeep placeholder there, which would otherwise ship as an extra file
+  # that the manifest does not list (Docker avoids it via .dockerignore).
+  rm -rf "${work_dir}/manager-server/internal/httpapi/web/fullweb"
+  mkdir -p "${work_dir}/manager-server/internal/httpapi/web/fullweb"
+  cp -R "${full_web_dist}/." "${work_dir}/manager-server/internal/httpapi/web/fullweb/"
+  node "${repo_root}/bin/release/hash-fullweb.mjs" \
+    "${full_web_dist}" \
+    "${work_dir}/manager-server/internal/httpapi/release-fullweb-manifest.json"
+  cp "${work_dir}/manager-server/internal/httpapi/release-fullweb-manifest.json" \
+    "${package_dir}/share/cpamp/release/fullweb-manifest.json"
+
+  # Same guarantee the image build enforces: the staged embed must match the
+  # manifest exactly before the binary is compiled.
+  (
+    cd "${work_dir}/manager-server"
+    CPAMP_FULLWEB_PACKAGED_TEST=1 go test -run '^TestPackagedFullWeb(Dist|Manifest)$' ./internal/httpapi
+  )
+
+  (
+    cd "${work_dir}/manager-server"
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+      -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=${version} -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=${source_commit}" \
+      -o "${package_dir}/bin/cpa-manager-plus" ./cmd/cpa-manager-plus
+  )
+  (
+    cd "${ingress_src}"
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
+      -o "${package_dir}/bin/cpa-manager-plus-ingress" ./cmd/cpamp-ingress
+  )
+  (
+    cd "${supervisor_src}"
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" \
+      -o "${package_dir}/bin/cpa-manager-plus-runtime-supervisor" ./cmd/cpamp-runtime-supervisor
+  )
 
   chmod 0755 \
     "${package_dir}/bin/cpa-manager-plus" \
     "${package_dir}/bin/cpa-manager-plus-ingress" \
     "${package_dir}/bin/cpa-manager-plus-runtime-supervisor"
+
+  # Native license and provenance evidence, mirroring the image contract.
+  cp "${repo_root}/LICENSE" "${package_dir}/share/licenses/cpamp/LICENSE"
+  chmod 0444 "${package_dir}/share/licenses/cpamp/LICENSE"
+  if [ ! -s "${package_dir}/share/cpamp/release/fullweb-manifest.json" ]; then
+    echo "Missing share/cpamp/release/fullweb-manifest.json: the v2 Native package must be built from source with the embedded Full Web dist" >&2
+    exit 1
+  fi
+  verify_native_binary_toolchain "${package_dir}"
+  collect_native_licenses "${package_dir}"
+  write_native_provenance "${package_dir}" "${source_commit}"
 
   # Install launcher, control script, systemd unit, and docs
   cp "${native_script_src}/cpa-manager-plus-launcher" "${package_dir}/bin/cpa-manager-plus-launcher"

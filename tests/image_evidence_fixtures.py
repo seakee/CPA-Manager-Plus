@@ -31,8 +31,10 @@ SOURCE_BYTES = evidence.encoded(SOURCE)
 
 def make_evidence(role, files, source_bytes=SOURCE_BYTES):
     """Use the real generator on synthetic originals and caller-supplied binaries."""
+    lay = evidence.LAYOUTS[evidence.ROLE_TARGET[role]]
+    target = evidence.ROLE_TARGET[role]
     files = dict(files)
-    files.setdefault(evidence.LICENSE_ROOT + "cpamp/LICENSE", b"MIT fixture CPAMP license\n")
+    files.setdefault(lay["licenseRoot"] + "cpamp/LICENSE", b"MIT fixture CPAMP license\n")
     for component in evidence.COMPONENTS[role]:
         data = b"original fixture dependency notice\n"
         notices = [{"path": "fixture/LICENSE", "sha256": evidence.digest(data)}]
@@ -40,7 +42,7 @@ def make_evidence(role, files, source_bytes=SOURCE_BYTES):
         inputs, ecosystem, extra = {}, "go", {}
         if component in evidence.MODULES:
             stdlib = b"original fixture Go standard library notice\n"
-            files[evidence.notice_path(component, "fixture/GO-LICENSE")] = stdlib
+            files[evidence.notice_path(component, "fixture/GO-LICENSE", target)] = stdlib
             dependencies.append({"name": "Go standard library and bundled sources", "version": "go1.24.0",
                                  "notices": [{"path": "fixture/GO-LICENSE",
                                               "sha256": evidence.digest(stdlib)}]})
@@ -62,8 +64,8 @@ def make_evidence(role, files, source_bytes=SOURCE_BYTES):
                 dependencies = [{"name": "libc6", "version": "2.36-r1", "notices": notices}]
         value = {"schemaVersion": 1, "component": component, "ecosystem": ecosystem,
                  "inputs": inputs, "dependencies": dependencies, **extra}
-        files[evidence.notice_path(component, "inventory.json")] = evidence.encoded(value)
-        files[evidence.notice_path(component, "fixture/LICENSE")] = data
+        files[evidence.notice_path(component, "inventory.json", target)] = evidence.encoded(value)
+        files[evidence.notice_path(component, "fixture/LICENSE", target)] = data
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         for path, data in files.items():
@@ -73,18 +75,20 @@ def make_evidence(role, files, source_bytes=SOURCE_BYTES):
         source = root / "source.json"
         source.write_bytes(source_bytes)
         evidence.build(root, role, VERSION, SHA, "linux/amd64", source)
-        return {"/" + path.relative_to(root).as_posix(): path.read_bytes()
+        prefix = "/" if target == "image" else ""
+        return {prefix + path.relative_to(root).as_posix(): path.read_bytes()
                 for path in root.rglob("*") if path.is_file() and path != source}
 
 
 def base_files(role):
-    files = {"/usr/local/bin/" + binary: ("fixture " + name).encode()
+    lay = evidence.LAYOUTS[evidence.ROLE_TARGET[role]]
+    files = {lay["binRoot"] + binary: ("fixture " + name).encode()
              for name, binary in evidence.BINARIES[role]}
-    if role == "runtime":
-        files["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = evidence.encoded({
+    if any(name == "cpa" for name, _ in evidence.BINARIES[role]):
+        files[lay["artifact"]] = evidence.encoded({
             "schemaVersion": 1, "engine": "cpa", "version": "8.0.13",
-            "artifactId": evidence.digest(files["/usr/local/bin/cli-proxy-api"])})
-        files[evidence.LICENSE_ROOT + "cli-proxy-api/LICENSE"] = b"MIT fixture CPA license\n"
-    elif role == "manager":
-        files["/usr/local/share/cpamp/release/fullweb-manifest.json"] = b'{"schemaVersion":1,"files":[]}'
+            "artifactId": evidence.digest(files[lay["binRoot"] + "cli-proxy-api"])})
+        files[lay["licenseRoot"] + "cli-proxy-api/LICENSE"] = b"MIT fixture CPA license\n"
+    if "web" in evidence.PROVENANCE_COMPONENTS[role]:
+        files[lay["webManifest"]] = b'{"schemaVersion":1,"files":[]}'
     return files

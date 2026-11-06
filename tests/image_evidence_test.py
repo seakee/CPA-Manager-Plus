@@ -372,20 +372,24 @@ class CollectorTests(unittest.TestCase):
 
 class ImageEvidenceTests(unittest.TestCase):
     def fixture(self, role="manager"):
+        lay = evidence.LAYOUTS[evidence.ROLE_TARGET[role]]
         files = make_evidence(role, base_files(role))
-        return files, json.loads(files[evidence.INVENTORY]), json.loads(files[evidence.PROVENANCE])
+        return files, json.loads(files[lay["inventory"]]), json.loads(files[lay["provenance"]])
 
-    def test_all_three_roles_generate_complete_deterministic_evidence(self):
+    def test_every_role_generates_complete_deterministic_evidence(self):
         for role in evidence.COMPONENTS:
+            lay = evidence.LAYOUTS[evidence.ROLE_TARGET[role]]
             with self.subTest(role=role):
                 files, inventory, provenance = self.fixture(role)
                 evidence.validate_inventory(inventory, role, files.__getitem__, SOURCE_BYTES)
                 evidence.validate_provenance(provenance, role, VERSION, SHA, files.__getitem__)
                 self.assertEqual(files, make_evidence(role, base_files(role)))
                 self.assertEqual(set(inventory["components"]), set(evidence.COMPONENTS[role]))
-                self.assertIn(evidence.LICENSE_ROOT + "cpamp/LICENSE", files)
-                if role == "runtime":
-                    self.assertIn(evidence.LICENSE_ROOT + "cli-proxy-api/LICENSE", files)
+                self.assertIn(lay["licenseRoot"] + "cpamp/LICENSE", files)
+                if any(name == "cpa" for name, _ in evidence.BINARIES[role]):
+                    self.assertIn(lay["licenseRoot"] + "cli-proxy-api/LICENSE", files)
+                    self.assertEqual([item["name"] for item in provenance["components"]],
+                                     list(evidence.PROVENANCE_COMPONENTS[role]))
 
     def test_invalid_version_and_source_claims_fail(self):
         for version, commit in (("", SHA), ("unknown", SHA), ("UNKNOWN", SHA), ("bad version", SHA),
@@ -405,11 +409,12 @@ class ImageEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incomplete component"):
             evidence.validate_inventory(inventory, "manager", files.__getitem__)
 
-    def change_component(self, inventory, files, component, change):
+    def change_component(self, inventory, files, component, change, role="manager"):
+        target = evidence.ROLE_TARGET[role]
         value = inventory["components"][component]["inventory"]
         change(value)
         raw = evidence.encoded(value)
-        files[evidence.notice_path(component, "inventory.json")] = raw
+        files[evidence.notice_path(component, "inventory.json", target)] = raw
         inventory["components"][component]["inventorySHA256"] = evidence.digest(raw)
 
     def rewrite_base_image(self, inventory, files, change):
@@ -557,6 +562,124 @@ class ImageEvidenceTests(unittest.TestCase):
         files["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = evidence.encoded(artifact)
         with self.assertRaisesRegex(ValueError, "CPA provenance differs"):
             evidence.validate_provenance(provenance, "runtime", VERSION, SHA, files.__getitem__)
+
+    def test_native_evidence_binds_three_modules_web_and_cpa(self):
+        files, inventory, provenance = self.fixture("native")
+        evidence.validate_inventory(inventory, "native", files.__getitem__, SOURCE_BYTES)
+        evidence.validate_provenance(provenance, "native", VERSION, SHA, files.__getitem__)
+        self.assertEqual(provenance["platform"], "linux/amd64")
+        self.assertEqual([item["name"] for item in provenance["components"]],
+                         ["manager", "ingress", "runtime-supervisor", "cpa", "web"])
+        self.assertEqual([item["path"] for item in provenance["components"]],
+                         ["bin/cpa-manager-plus", "bin/cpa-manager-plus-ingress",
+                          "bin/cpa-manager-plus-runtime-supervisor", "bin/cli-proxy-api",
+                          "share/cpamp/release/fullweb-manifest.json"])
+        self.assertNotIn("base-image", inventory["components"])
+        self.assertEqual(set(inventory["licenseCoverage"]),
+                         {"manager", "web", "ingress", "runtime-supervisor"})
+        self.assertEqual(provenance["licenseInventorySHA256"],
+                         evidence.digest(files["share/cpamp/release/third-party-inventory.txt"]))
+        self.assertEqual(inventory["sourceInventorySHA256"],
+                         evidence.digest(files["share/cpamp/release/source-dependency-inventory.json"]))
+        for component in evidence.COMPONENTS["native"]:
+            raw = files[evidence.notice_path(component, "inventory.json", "native")]
+            self.assertEqual(inventory["components"][component]["inventorySHA256"],
+                             evidence.digest(raw))
+
+    def test_native_rejects_unsupported_platforms(self):
+        files, _, provenance = self.fixture("native")
+        for platform in ("linux/arm64", "darwin/arm64", "windows/amd64"):
+            with self.subTest(platform=platform), self.assertRaisesRegex(ValueError, "invalid provenance platform"):
+                evidence.validate_provenance(dict(provenance, platform=platform), "native", VERSION, SHA,
+                                             files.__getitem__)
+
+    def test_native_missing_license_text_fails(self):
+        for component in evidence.COMPONENTS["native"]:
+            files, inventory, _ = self.fixture("native")
+            del files[evidence.notice_path(component, "fixture/LICENSE", "native")]
+            with self.subTest(component=component), self.assertRaises(KeyError):
+                evidence.validate_inventory(inventory, "native", files.__getitem__)
+
+    def test_native_missing_component_inventory_fails(self):
+        files, inventory, _ = self.fixture("native")
+        del inventory["components"]["web"]
+        with self.assertRaisesRegex(ValueError, "incomplete component"):
+            evidence.validate_inventory(inventory, "native", files.__getitem__)
+
+    def test_native_inventory_missing_real_ledger_module_fails(self):
+        # Uses the checked-in ledger as both the shipped source inventory and
+        # the expected module set: a Native inventory that omits a declared
+        # module must fail even when every text it ships is intact.
+        ledger_bytes = (ROOT / "bin/release/embedded-third-party-inventory.txt").read_bytes()
+        ledger = json.loads(ledger_bytes)
+        files = base_files("native")
+        files["share/licenses/cpamp/LICENSE"] = b"MIT fixture CPAMP license\n"
+        components = {}
+        for component in evidence.COMPONENTS["native"]:
+            dependencies = []
+            inputs = {}
+            ecosystem = "go"
+            identities = []
+            if component in evidence.MODULES:
+                identities = [(item["name"], item["version"])
+                              for item in ledger["goModules"][component]]
+                if component == "manager":
+                    identities = [item for item in identities if item[0] != "modernc.org/sqlite"]
+                identities.append(("Go standard library and bundled sources", "go1.26.1"))
+                directory = evidence.MODULES[component]
+                for name in ("go.mod", "go.sum"):
+                    if directory + "/" + name in ledger["inputs"]:
+                        inputs[name] = ledger["inputs"][directory + "/" + name]
+            else:
+                ecosystem = "npm"
+                identities = [(name, version) for name, version in ledger["webDependencies"].items()]
+                inputs = {name: ledger["inputs"][name]
+                          for name in ("apps/web/package.json", "package-lock.json")}
+            for index, (name, version) in enumerate(identities):
+                relative = "fixture/%d/LICENSE" % index
+                data = ("original notice %s@%s\n" % (name, version)).encode()
+                files[evidence.notice_path(component, relative, "native")] = data
+                dependencies.append({"name": name, "version": version,
+                                     "notices": [{"path": relative, "sha256": evidence.digest(data)}]})
+            value = {"schemaVersion": 1, "component": component, "ecosystem": ecosystem,
+                     "inputs": inputs, "dependencies": dependencies}
+            files[evidence.notice_path(component, "inventory.json", "native")] = evidence.encoded(value)
+            components[component] = {"inventory": value,
+                                     "inventorySHA256": evidence.digest(evidence.encoded(value))}
+        inventory = {"schemaVersion": 1, "status": "VERIFIED_LICENSE_COLLECTION", "role": "native",
+                     "sourceInventorySHA256": evidence.digest(ledger_bytes),
+                     "components": components,
+                     "licenseCoverage": evidence.license_coverage(components)}
+        files["share/cpamp/release/source-dependency-inventory.json"] = ledger_bytes
+        with self.assertRaisesRegex(ValueError, "incomplete declared Go module coverage: manager"):
+            evidence.validate_inventory(inventory, "native", files.__getitem__, ledger_bytes)
+
+    def test_native_base_image_claim_is_rejected(self):
+        files, inventory, _ = self.fixture("native")
+        inventory["components"]["base-image"] = dict(inventory["components"]["manager"])
+        with self.assertRaisesRegex(ValueError, "incomplete component"):
+            evidence.validate_inventory(inventory, "native", files.__getitem__)
+
+    def test_native_provenance_binds_web_manifest_and_cpa_artifact(self):
+        for path in ("share/cpamp/release/fullweb-manifest.json", "bin/cli-proxy-api"):
+            files, _, provenance = self.fixture("native")
+            files[path] += b"changed"
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "component hash mismatch"):
+                evidence.validate_provenance(provenance, "native", VERSION, SHA, files.__getitem__)
+        files, _, provenance = self.fixture("native")
+        artifact = json.loads(files["share/cpamp/runtime/cpa-artifact.json"])
+        artifact["version"] = "0.0.0"
+        files["share/cpamp/runtime/cpa-artifact.json"] = evidence.encoded(artifact)
+        with self.assertRaisesRegex(ValueError, "CPA provenance differs"):
+            evidence.validate_provenance(provenance, "native", VERSION, SHA, files.__getitem__)
+
+    def test_native_license_coverage_keeps_original_text_policy(self):
+        _, inventory, _ = self.fixture("native")
+        for component in ("manager", "web", "ingress", "runtime-supervisor"):
+            self.assertEqual(inventory["licenseCoverage"][component]["policy"],
+                             evidence.ORIGINAL_TEXT_POLICY)
+            self.assertEqual(inventory["licenseCoverage"][component]["originalTexts"],
+                             "complete-for-installed-dependencies")
 
 
 class DockerContracts(unittest.TestCase):

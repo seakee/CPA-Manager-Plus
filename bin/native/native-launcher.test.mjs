@@ -499,6 +499,227 @@ const waitForFile = async (filePath, timeoutMs = 8000) => {
   return false;
 };
 
+const writeFixtureFile = (root, relative, data) => {
+  const target = path.join(root, relative);
+  mkdirSync(path.dirname(target), { recursive: true });
+  writeFileSync(target, data);
+  return data;
+};
+
+const fixtureDigest = (data) => `sha256:${createHash('sha256').update(data).digest('hex')}`;
+const fixtureFileDigest = (filePath) => fixtureDigest(readFileSync(filePath));
+
+const LICENSE_COLLECTOR_STUB = [
+  "const fs = require('node:fs');",
+  "const path = require('node:path');",
+  "const crypto = require('node:crypto');",
+  '// argv[2] is the intercepted collector script path; argv[3] is the mode.',
+  'const args = process.argv.slice(2).slice(1);',
+  'const value = (flag) => {',
+  '  const index = args.indexOf(flag);',
+  '  return index >= 0 ? args[index + 1] : undefined;',
+  '};',
+  'const mode = args[0];',
+  "const output = value('--output');",
+  "const ledger = JSON.parse(fs.readFileSync(process.env.CPAMP_TEST_LEDGER, 'utf8'));",
+  "const sha256 = (data) => 'sha256:' + crypto.createHash('sha256').update(data).digest('hex');",
+  "const slug = (name, version) => (name + '-' + version).replace(/[^A-Za-z0-9._-]/g, '_');",
+  'const moduleDirectories = {',
+  "  manager: 'apps/manager-server',",
+  "  ingress: 'apps/ingress',",
+  "  'runtime-supervisor': 'apps/runtime-supervisor',",
+  '};',
+  "const component = value('--component');",
+  'fs.appendFileSync(process.env.CPAMP_TEST_ORDER_LOG, `collect ${component || mode} goroot=${process.env.GOROOT || \'\'}\\n`);',
+  'if (process.env.CPAMP_TEST_OMIT_COMPONENT === (component || mode)) process.exit(0);',
+  'fs.mkdirSync(output, { recursive: true });',
+  'const writeNotice = (name, version) => {',
+  "  const relative = 'fixture/' + slug(name, version) + '/LICENSE';",
+  "  const text = 'Original license text fixture for ' + name + '@' + version + '\\n';",
+  '  if (process.env.CPAMP_TEST_MISSING_NOTICE !== name) {',
+  '    fs.mkdirSync(path.join(output, path.dirname(relative)), { recursive: true });',
+  '    fs.writeFileSync(path.join(output, relative), text);',
+  '  }',
+  '  return [{ path: relative, sha256: sha256(Buffer.from(text)) }];',
+  '};',
+  'let inventory;',
+  "if (mode === 'go') {",
+  '  const directory = moduleDirectories[component];',
+  '  const inputs = {};',
+  '  for (const key of Object.keys(ledger.inputs)) {',
+  "    if (key === directory + '/go.mod' || key === directory + '/go.sum') {",
+  '      inputs[path.basename(key)] = ledger.inputs[key];',
+  '    }',
+  '  }',
+  "  const dropComponent = process.env.CPAMP_TEST_DROP_COMPONENT || 'manager';",
+  '  const declared = (ledger.goModules[component] || []).filter((item) =>',
+  '    !(component === dropComponent && process.env.CPAMP_TEST_DROP_MODULE === item.name));',
+  '  const dependencies = declared.map((item) => ({',
+  '    name: item.name,',
+  '    version: item.version,',
+  "    integrity: 'h1:fixture',",
+  '    notices: writeNotice(item.name, item.version),',
+  '  }));',
+  '  dependencies.push({',
+  "    name: 'Go standard library and bundled sources',",
+  "    version: 'go1.26.1',",
+  "    notices: writeNotice('Go standard library and bundled sources', 'go1.26.1'),",
+  '  });',
+  '  inventory = { schemaVersion: 1, component, ecosystem: \'go\', inputs, dependencies };',
+  '} else {',
+  '  const dependencies = Object.keys(ledger.webDependencies).sort().map((name) => ({',
+  '    name,',
+  '    version: ledger.webDependencies[name],',
+  "    integrity: 'sha512-fixture',",
+  "    licenseExpression: 'MIT',",
+  '    notices: writeNotice(name, ledger.webDependencies[name]),',
+  '  }));',
+  '  inventory = {',
+  '    schemaVersion: 1,',
+  "    component: 'web',",
+  "    ecosystem: 'npm',",
+  '    inputs: {',
+  "      'apps/web/package.json': ledger.inputs['apps/web/package.json'],",
+  "      'package-lock.json': ledger.inputs['package-lock.json'],",
+  '    },',
+  '    dependencies,',
+  '  };',
+  '}',
+  "fs.writeFileSync(path.join(output, 'inventory.json'), JSON.stringify(inventory, null, 2) + '\\n');",
+  '',
+].join('\n');
+
+/**
+ * Test-only harness. The release packaging path has no license fixture
+ * switch: it always runs bin/release/collect-third-party-licenses.py against
+ * the checked-in source ledger. Tests substitute a PATH-stubbed python3 that
+ * intercepts only that collector entry point, plus a go recorder and a real
+ * Full Web dist. Everything else (evidence generator, ledger copy) stays real.
+ */
+const createLicenseTestHarness = (baseDir) => {
+  const root = path.join(baseDir, 'license-harness');
+  const binDir = path.join(root, 'bin');
+  const fullWebDist = path.join(root, 'fullweb');
+  const webHtml = path.join(root, 'panel/management.html');
+  const goroot = path.join(root, 'goroot');
+  const goroot124 = path.join(root, 'goroot-1.24');
+  const staleGoroot = path.join(root, 'stale-goroot');
+  const orderLog = path.join(root, 'order.log');
+  const collectorStub = path.join(root, 'collector-stub.cjs');
+  mkdirSync(binDir, { recursive: true });
+  writeFixtureFile(fullWebDist, 'index.html', '<!doctype html><title>fixture</title>\n');
+  writeFixtureFile(fullWebDist, 'assets/app.js', 'console.log("fixture");\n');
+  writeFixtureFile(fullWebDist, 'assets/app.css', 'body{color:#111}\n');
+  writeFixtureFile(webHtml, '', '<!doctype html><title>panel</title>\n');
+  writeFixtureFile(goroot, 'VERSION', 'go1.26.1\n');
+  writeFixtureFile(goroot124, 'VERSION', 'go1.24.13\n');
+  // A root whose VERSION disagrees with the running tool: the collector must
+  // never label notices with a version the root does not contain.
+  writeFixtureFile(staleGoroot, 'VERSION', 'go1.20.14\n');
+  writeFileSync(collectorStub, LICENSE_COLLECTOR_STUB);
+  writeFileSync(orderLog, '');
+
+  const realPython = execFileSync('bash', ['-c', 'command -v python3'], {
+    encoding: 'utf8',
+  }).trim();
+  assert.ok(realPython, 'python3 is required by the Native packaging path');
+
+  const pythonWrapper = path.join(binDir, 'python3');
+  writeFileSync(
+    pythonWrapper,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'for arg in "$@"; do',
+      '  case "$arg" in',
+      '    */collect-third-party-licenses.py)',
+      '      exec "${CPAMP_TEST_NODE}" "${CPAMP_TEST_COLLECTOR_STUB}" "$@"',
+      '      ;;',
+      '  esac',
+      'done',
+      'exec "${CPAMP_TEST_REAL_PYTHON}" "$@"',
+      '',
+    ].join('\n'),
+    { mode: 0o755 }
+  );
+
+  const goWrapper = path.join(binDir, 'go');
+  writeFileSync(
+    goWrapper,
+    [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'printf \'go %s @ %s\\n\' "$*" "$PWD" >> "${CPAMP_TEST_ORDER_LOG}"',
+      'collector_version="${CPAMP_TEST_COLLECTOR_GOVERSION:-${CPAMP_TEST_GOVERSION:-go1.26.1}}"',
+      'binary_version="${CPAMP_TEST_GOVERSION:-go1.26.1}"',
+      'case "${1:-}" in',
+      '  env)',
+      '    if [ "${2:-}" = "GOVERSION" ]; then printf \'%s\\n\' "${collector_version}"; fi',
+      '    if [ "${2:-}" = "GOROOT" ]; then printf \'%s\\n\' "${CPAMP_TEST_GOROOT}"; fi',
+      '    exit 0',
+      '    ;;',
+      '  version)',
+      '    if [ "${2:-}" = "-m" ]; then',
+      '      case "$(basename "${3:-}")" in',
+      '        cpa-manager-plus) printf \'%s: %s\\n\' "${3}" "${CPAMP_TEST_MANAGER_GO_VERSION:-${binary_version}}" ;;',
+      '        cpa-manager-plus-ingress) printf \'%s: %s\\n\' "${3}" "${CPAMP_TEST_INGRESS_GO_VERSION:-${binary_version}}" ;;',
+      '        cpa-manager-plus-runtime-supervisor) printf \'%s: %s\\n\' "${3}" "${CPAMP_TEST_SUPERVISOR_GO_VERSION:-${binary_version}}" ;;',
+      '        *) printf \'%s: %s\\n\' "${3}" "${binary_version}" ;;',
+      '      esac',
+      '      exit 0',
+      '    fi',
+      '    printf \'go version %s\\n\' "${binary_version}"',
+      '    exit 0',
+      '    ;;',
+      '  build)',
+      '    out=""',
+      '    previous=""',
+      '    for arg in "$@"; do',
+      '      if [ "${previous}" = "-o" ]; then out="${arg}"; fi',
+      '      previous="${arg}"',
+      '    done',
+      '    if [ -z "${out}" ]; then',
+      '      echo "stub go build requires -o" >&2',
+      '      exit 1',
+      '    fi',
+      '    case "$(basename "${out}")" in',
+      '      cpa-manager-plus) cp "${CPAMP_TEST_BUILD_MANAGER_BIN}" "${out}" ;;',
+      '      cpa-manager-plus-ingress) cp "${CPAMP_TEST_BUILD_INGRESS_BIN}" "${out}" ;;',
+      '      cpa-manager-plus-runtime-supervisor) cp "${CPAMP_TEST_BUILD_RUNTIME_SUPERVISOR_BIN}" "${out}" ;;',
+      '      *) echo "stub go build: unknown output ${out}" >&2; exit 1 ;;',
+      '    esac',
+      '    chmod 0755 "${out}"',
+      '    exit 0',
+      '    ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'),
+    { mode: 0o755 }
+  );
+
+  return {
+    binDir,
+    fullWebDist,
+    webHtml,
+    goroot,
+    goroot124,
+    staleGoroot,
+    orderLog,
+    // Harness-only variables consumed by the stubs above; package-native.sh
+    // never reads any of them.
+    env: {
+      CPAMP_TEST_LEDGER: path.join(repoRoot, 'bin/release/embedded-third-party-inventory.txt'),
+      CPAMP_TEST_ORDER_LOG: orderLog,
+      CPAMP_TEST_REAL_PYTHON: realPython,
+      CPAMP_TEST_NODE: process.execPath,
+      CPAMP_TEST_COLLECTOR_STUB: collectorStub,
+      CPAMP_TEST_GOROOT: goroot,
+    },
+  };
+};
+
+
 const waitFor = async (predicate, timeoutMs = 8000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -1617,6 +1838,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     const outDir = path.join(baseDir, 'dist-native');
     const cpaLicensePath = path.join(baseDir, 'cli-proxy-api-LICENSE');
     writeFileSync(cpaLicensePath, 'CLIProxyAPI license fixture\n');
+    const harness = createLicenseTestHarness(baseDir);
 
     const pkgEnv = {
       ...process.env,
@@ -1627,15 +1849,22 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       CPA_LICENSE_PATH: cpaLicensePath,
       CPAMP_CPA_VERSION: '8.0.55',
       CPAMP_CPA_EXECUTABLE_SHA256: cpaSha,
-      // This fixture binary is not the released artifact, so the packaging
-      // guard requires an explicit opt-in for the override.
-      CPAMP_ALLOW_UNPINNED_CPA: '1',
-      CPAMP_PREBUILT_MANAGER_BIN: path.join(binDir, 'cpa-manager-plus'),
-      CPAMP_PREBUILT_INGRESS_BIN: path.join(binDir, 'cpa-manager-plus-ingress'),
-      CPAMP_PREBUILT_RUNTIME_SUPERVISOR_BIN: path.join(
+      // The v2 path always builds from source; the harness go stub writes the
+      // fixture service wrappers and reports their toolchain, while the real
+      // collector entry point and evidence generator run unchanged.
+      ...harness.env,
+      PATH: `${harness.binDir}:${process.env.PATH}`,
+      WEB_HTML: harness.webHtml,
+      FULL_WEB_DIST: harness.fullWebDist,
+      CPAMP_TEST_BUILD_MANAGER_BIN: path.join(binDir, 'cpa-manager-plus'),
+      CPAMP_TEST_BUILD_INGRESS_BIN: path.join(binDir, 'cpa-manager-plus-ingress'),
+      CPAMP_TEST_BUILD_RUNTIME_SUPERVISOR_BIN: path.join(
         binDir,
         'cpa-manager-plus-runtime-supervisor'
       ),
+      // This fixture binary is not the released artifact, so the packaging
+      // guard requires an explicit opt-in for the override.
+      CPAMP_ALLOW_UNPINNED_CPA: '1',
       CPAMP_SKIP_PACKAGE_DOCS: '1',
     };
 
@@ -1682,8 +1911,178 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.notEqual(noPluginResult.status, 0);
     assert.match(noPluginResult.stderr, /Refusing _no-plugin CPA artifact/);
 
-    // 3. Builds valid v2 linux/amd64 archive
+    // 2b. A component inventory the build never collected fails closed
+    // instead of shipping a package that silently drops a linked closure.
+    const missingComponentResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-missing-component'),
+        CPAMP_TEST_OMIT_COMPONENT: 'ingress',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(missingComponentResult.status, 0);
+    assert.match(missingComponentResult.stderr, /STOP: invalid provenance evidence/);
+    assert.match(missingComponentResult.stderr, /share\/licenses\/ingress\/inventory\.json/);
+
+    // 2c. An inventory that references a license text the build does not carry
+    // must fail closed: hashes alone never stand in for the original text.
+    const missingTextResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-missing-text'),
+        CPAMP_TEST_MISSING_NOTICE: 'modernc.org/sqlite',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(missingTextResult.status, 0);
+    assert.match(missingTextResult.stderr, /STOP: invalid provenance evidence/);
+    assert.match(missingTextResult.stderr, /share\/licenses\/manager\/fixture\//);
+
+    // 2c-bis. The checked-in source ledger declares every linked Go module; a
+    // collected inventory that omits one of them is incomplete even when every
+    // text it does ship is intact.
+    const incompleteCoverageResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-incomplete-coverage'),
+        CPAMP_TEST_DROP_COMPONENT: 'runtime-supervisor',
+        CPAMP_TEST_DROP_MODULE: 'modernc.org/sqlite',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(incompleteCoverageResult.status, 0);
+    assert.match(incompleteCoverageResult.stderr, /STOP: invalid provenance evidence/);
+    assert.match(
+      incompleteCoverageResult.stderr,
+      /incomplete declared Go module coverage: runtime-supervisor/
+    );
+
+    // 2d. Provenance cannot claim a moving ref as the source commit.
+    const badCommitResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-bad-commit'),
+        SOURCE_COMMIT: 'HEAD',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(badCommitResult.status, 0);
+    assert.match(badCommitResult.stderr, /SOURCE_COMMIT must be an exact 40-hex commit/);
+
+    // 2e. Binaries built by different Go toolchains cannot share one
+    // standard-library notice set, so mixed inputs fail closed.
+    const mixedToolchainResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-mixed-toolchain'),
+        CPAMP_TEST_GOVERSION: 'go1.24.13',
+        CPAMP_TEST_GOROOT: harness.goroot124,
+        CPAMP_TEST_INGRESS_GO_VERSION: 'go1.26.1',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(mixedToolchainResult.status, 0);
+    assert.match(
+      mixedToolchainResult.stderr,
+      /bin\/cpa-manager-plus-ingress was built with go1\.26\.1 but the collector toolchain is go1\.24\.13/
+    );
+
+    // 2f. GOROOT is authoritative for the standard-library notices: a root
+    // whose VERSION differs from the running tool must never be collected.
+    const staleGorootResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-stale-goroot'),
+        CPAMP_TEST_GOROOT: harness.staleGoroot,
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(staleGorootResult.status, 0);
+    assert.match(
+      staleGorootResult.stderr,
+      /GOROOT .*stale-goroot contains go1\.20\.14 but go env GOVERSION reports go1\.26\.1/
+    );
+
+    // 2g. A binary from another toolchain than the collector fails closed.
+    const collectorMismatchResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-collector-toolchain'),
+        CPAMP_TEST_MANAGER_GO_VERSION: 'go1.24.13',
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(collectorMismatchResult.status, 0);
+    assert.match(
+      collectorMismatchResult.stderr,
+      /bin\/cpa-manager-plus was built with go1\.24\.13 but the collector toolchain is go1\.26\.1/
+    );
+
+    // 2h. v2 packaging builds from source; prebuilt binaries cannot be bound to
+    // the embedded Full Web file set and must be refused.
+    const prebuiltResult = spawnSync('bash', [packageNativeScript], {
+      env: {
+        ...pkgEnv,
+        OUT_DIR: path.join(baseDir, 'dist-prebuilt'),
+        CPAMP_PREBUILT_MANAGER_BIN: path.join(binDir, 'cpa-manager-plus'),
+        CPAMP_PREBUILT_INGRESS_BIN: path.join(binDir, 'cpa-manager-plus-ingress'),
+        CPAMP_PREBUILT_RUNTIME_SUPERVISOR_BIN: path.join(
+          binDir,
+          'cpa-manager-plus-runtime-supervisor'
+        ),
+      },
+      encoding: 'utf8',
+    });
+    assert.notEqual(prebuiltResult.status, 0);
+    assert.match(
+      prebuiltResult.stderr,
+      /v2 Native packaging builds Manager, Ingress and Runtime Supervisor from source/
+    );
+
+    // 3. Builds valid v2 linux/amd64 archive. Reset the recorder so the
+    // ordering assertion below only sees this successful run.
+    writeFileSync(harness.orderLog, '');
     execFileSync('bash', [packageNativeScript], { env: pkgEnv, encoding: 'utf8' });
+
+    // 3a. Declared modules are downloaded before the collector runs, matching
+    // the image build order: a linux/amd64 build need not fetch every module.
+    const order = readFileSync(harness.orderLog, 'utf8').split('\n');
+    const downloadIndexes = [];
+    for (const directory of ['apps/manager-server', 'apps/ingress', 'apps/runtime-supervisor']) {
+      const index = order.findIndex(
+        (line) => line.startsWith('go mod download') && line.endsWith(`@ ${path.join(repoRoot, directory)}`)
+      );
+      assert.notEqual(index, -1, `go mod download must run in ${directory}`);
+      downloadIndexes.push(index);
+    }
+    const firstCollect = order.findIndex((line) => line.startsWith('collect '));
+    assert.ok(firstCollect >= 0, 'the license collector must run');
+    assert.ok(
+      Math.max(...downloadIndexes) < firstCollect,
+      'every go mod download must precede license collection'
+    );
+
+    // 3b. The staged embed tree is verified against its manifest before any
+    // binary is compiled, exactly like the image build.
+    const goTestIndex = order.findIndex(
+      (line) => line.startsWith('go test ') && line.includes('TestPackagedFullWeb(Dist|Manifest)')
+    );
+    assert.notEqual(goTestIndex, -1, 'the staged Full Web embed must be tested');
+    const goBuildIndex = order.findIndex((line) => line.startsWith('go build '));
+    assert.ok(goBuildIndex >= 0, 'the binaries must be built');
+    assert.ok(goTestIndex < goBuildIndex, 'the embed test must precede go build');
+
+    // 3c. The collector receives the resolved GOROOT explicitly instead of
+    // re-deriving one from a possibly different environment.
+    for (const line of order.filter(
+      (item) => item.startsWith('collect ') && !item.startsWith('collect web ')
+    )) {
+      assert.ok(
+        line.endsWith(`goroot=${harness.goroot}`),
+        `collector must use the resolved GOROOT: ${line}`
+      );
+    }
 
     const archiveName = 'cpa-manager-plus-native-v2_v2.0.0-beta.1_linux_amd64.tar.gz';
     assert.equal(
@@ -1723,6 +2122,15 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       'share/cpamp/runtime/cpa-artifact.json',
       'share/cpamp/runtime/config.seed.yaml',
       'share/licenses/cli-proxy-api/LICENSE',
+      'share/licenses/cpamp/LICENSE',
+      'share/licenses/manager/inventory.json',
+      'share/licenses/web/inventory.json',
+      'share/licenses/ingress/inventory.json',
+      'share/licenses/runtime-supervisor/inventory.json',
+      'share/cpamp/release/third-party-inventory.txt',
+      'share/cpamp/release/source-dependency-inventory.json',
+      'share/cpamp/release/fullweb-manifest.json',
+      'share/cpamp/provenance.json',
       'LICENSE',
       'README.md',
       'README_CN.md',
@@ -1746,6 +2154,129 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       version: '8.0.55',
       artifactId: `sha256:${cpaSha}`,
     });
+
+    // 4b. The archive carries the same license/provenance contract as images:
+    // per-component original texts, an aggregate inventory, and a record that
+    // binds the packaged bytes and the CPA upstream artifact.
+    assert.deepEqual(
+      readFileSync(path.join(pkgRoot, 'share/licenses/cpamp/LICENSE')),
+      readFileSync(path.join(repoRoot, 'LICENSE'))
+    );
+    assert.deepEqual(
+      readFileSync(path.join(pkgRoot, 'share/licenses/cli-proxy-api/LICENSE')),
+      readFileSync(cpaLicensePath)
+    );
+
+    const provenance = JSON.parse(
+      readFileSync(path.join(pkgRoot, 'share/cpamp/provenance.json'), 'utf8')
+    );
+    const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim();
+    assert.equal(provenance.schemaVersion, 1);
+    assert.equal(provenance.role, 'native');
+    assert.equal(provenance.version, 'v2.0.0-beta.1');
+    assert.equal(provenance.sourceCommit, sourceCommit);
+    assert.equal(provenance.platform, 'linux/amd64');
+    assert.equal(provenance.source, 'https://github.com/seakee/CPA-Manager-Plus');
+    assert.deepEqual(
+      provenance.components.map((item) => item.name),
+      ['manager', 'ingress', 'runtime-supervisor', 'cpa', 'web']
+    );
+    for (const item of provenance.components) {
+      assert.equal(
+        item.sha256,
+        fixtureFileDigest(path.join(pkgRoot, item.path)),
+        `provenance must bind ${item.path}`
+      );
+    }
+    const cpaProvenance = provenance.components.find((item) => item.name === 'cpa');
+    assert.equal(cpaProvenance.version, '8.0.55');
+    assert.equal(cpaProvenance.sha256, `sha256:${cpaSha}`);
+    assert.equal(
+      cpaProvenance.release,
+      'https://github.com/router-for-me/CLIProxyAPI/releases/tag/v8.0.55'
+    );
+    assert.equal(
+      provenance.components.find((item) => item.name === 'manager').module,
+      'github.com/seakee/cpa-manager-plus/apps/manager-server'
+    );
+
+    const aggregatePath = path.join(pkgRoot, 'share/cpamp/release/third-party-inventory.txt');
+    const aggregateBytes = readFileSync(aggregatePath);
+    assert.equal(provenance.licenseInventorySHA256, fixtureDigest(aggregateBytes));
+    const aggregate = JSON.parse(aggregateBytes);
+    assert.equal(aggregate.schemaVersion, 1);
+    assert.equal(aggregate.status, 'VERIFIED_LICENSE_COLLECTION');
+    assert.equal(aggregate.role, 'native');
+    assert.deepEqual(Object.keys(aggregate.components).sort(), [
+      'ingress',
+      'manager',
+      'runtime-supervisor',
+      'web',
+    ]);
+    for (const [component, entry] of Object.entries(aggregate.components)) {
+      const inventoryPath = path.join(pkgRoot, 'share/licenses', component, 'inventory.json');
+      assert.equal(entry.inventorySHA256, fixtureFileDigest(inventoryPath));
+      const inventory = JSON.parse(readFileSync(inventoryPath, 'utf8'));
+      assert.equal(inventory.component, component);
+      for (const dependency of inventory.dependencies) {
+        assert.ok(
+          dependency.notices.length > 0,
+          `${component}/${dependency.name} needs an original notice`
+        );
+        for (const notice of dependency.notices) {
+          assert.equal(
+            notice.sha256,
+            fixtureFileDigest(path.join(pkgRoot, 'share/licenses', component, notice.path)),
+            `notice text must match its inventory digest: ${component}/${notice.path}`
+          );
+        }
+      }
+    }
+    assert.equal(
+      JSON.parse(
+        readFileSync(
+          path.join(pkgRoot, 'share/cpamp/release/source-dependency-inventory.json'),
+          'utf8'
+        )
+      ).status,
+      'SOURCE_MANIFESTS_VERIFIED'
+    );
+
+    // 4c. The packaged inventories must cover the checked-in source ledger,
+    // not merely hash whatever the build happened to collect.
+    const sourceLedger = JSON.parse(
+      readFileSync(path.join(repoRoot, 'bin/release/embedded-third-party-inventory.txt'), 'utf8')
+    );
+    for (const component of ['manager', 'ingress', 'runtime-supervisor']) {
+      const inventory = JSON.parse(
+        readFileSync(path.join(pkgRoot, 'share/licenses', component, 'inventory.json'), 'utf8')
+      );
+      const identities = new Set(
+        inventory.dependencies.map((dependency) => `${dependency.name}@${dependency.version}`)
+      );
+      for (const module of sourceLedger.goModules[component]) {
+        assert.equal(
+          identities.has(`${module.name}@${module.version}`),
+          true,
+          `${component} must license declared module ${module.name}@${module.version}`
+        );
+      }
+      assert.equal(
+        identities.has('Go standard library and bundled sources@go1.26.1'),
+        true,
+        `${component} must license the Go standard library`
+      );
+    }
+    const webInventory = JSON.parse(
+      readFileSync(path.join(pkgRoot, 'share/licenses/web/inventory.json'), 'utf8')
+    );
+    const webNames = new Set(webInventory.dependencies.map((dependency) => dependency.name));
+    for (const name of Object.keys(sourceLedger.webDependencies)) {
+      assert.equal(webNames.has(name), true, `web must license direct dependency ${name}`);
+    }
 
     // 5. Run cpa-manager-plusctl start/status/stop directly inside the extracted package
     const extractedEnvRaw = await buildPortEnv(pkgRoot);
@@ -2211,6 +2742,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       const cpaLicensePath = path.join(baseDir, 'cli-proxy-api-LICENSE');
       writeFileSync(cpaLicensePath, 'CLIProxyAPI license fixture\n');
       const cpaSha = createHash('sha256').update(readFileSync(cpaBin)).digest('hex');
+      const harness = createLicenseTestHarness(baseDir);
 
       const pkgEnv = {
         ...process.env,
@@ -2221,15 +2753,19 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
         CPAMP_CPA_VERSION: '8.0.55',
         CPAMP_CPA_EXECUTABLE_SHA256: cpaSha,
         CPAMP_ALLOW_UNPINNED_CPA: '1',
-        CPAMP_PREBUILT_MANAGER_BIN: path.join(binDir, 'cpa-manager-plus'),
-        CPAMP_PREBUILT_INGRESS_BIN: path.join(binDir, 'cpa-manager-plus-ingress'),
-        CPAMP_PREBUILT_RUNTIME_SUPERVISOR_BIN: path.join(
+        ...harness.env,
+        WEB_HTML: harness.webHtml,
+        FULL_WEB_DIST: harness.fullWebDist,
+        CPAMP_TEST_BUILD_MANAGER_BIN: path.join(binDir, 'cpa-manager-plus'),
+        CPAMP_TEST_BUILD_INGRESS_BIN: path.join(binDir, 'cpa-manager-plus-ingress'),
+        CPAMP_TEST_BUILD_RUNTIME_SUPERVISOR_BIN: path.join(
           binDir,
           'cpa-manager-plus-runtime-supervisor'
         ),
         CPAMP_SKIP_PACKAGE_DOCS: '1',
-        // Force this exact tar implementation for both builds.
-        PATH: `${path.dirname(tarPath)}:${process.env.PATH}`,
+        // Force this exact tar implementation for both builds; the harness
+        // stubs stay first so license collection remains deterministic.
+        PATH: `${harness.binDir}:${path.dirname(tarPath)}:${process.env.PATH}`,
       };
 
       const digests = [];
