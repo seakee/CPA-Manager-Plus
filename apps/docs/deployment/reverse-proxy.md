@@ -207,6 +207,11 @@ server {
 
     # CPA v8 provider Key 分组只读接口。CPAMP 只转发 GET，只接受 CPAMP 管理员密钥，
     # 并使用服务端保存的 CPA Management Key。
+    # Nginx 默认会把请求行开头的 // 合并成单个 / 再转发给上游，原始的前导重复斜杠
+    # 到不了 CPAMP 的路径守卫；因此在进入 location 匹配前先按原始 $request_uri 拒绝。
+    if ($request_uri ~* "^(?:https?://[^/]+)?//+v8/management(?:/|\?|$)") {
+        return 404;
+    }
     location = /v8/management/config/api-keys   { proxy_pass http://cpamp; }
     location ^~ /v8/management/config/api-keys/ { proxy_pass http://cpamp; }
 

@@ -1478,7 +1478,12 @@ func TestServerCompatV8APIKeysConfigProxy(t *testing.T) {
 		{name: "duplicate slash", method: http.MethodGet, target: "/v8/management/config/api-keys//claude", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
 		{name: "duplicate slash in prefix", method: http.MethodGet, target: "/v8//management/config/api-keys", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
 		{name: "leading duplicate slash", method: http.MethodGet, target: "//v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "leading triple slash", method: http.MethodGet, target: "///v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "absolute-form leading duplicate slash", method: http.MethodGet, target: "http://example.test//v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
 		{name: "encoded dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/%2e%2e/%2e%2e/credentials/download", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "uppercase encoded dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/%2E%2e/claude", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "double-encoded dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/%252e%252e/claude", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "double-encoded slash", method: http.MethodGet, target: "/v8/management/config/api-keys/claude%252Fsub", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
 		{name: "encoded slash dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys%2F..%2F..%2Fcredentials/download", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

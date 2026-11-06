@@ -207,6 +207,12 @@ server {
 
     # Read-only CPA v8 provider key groups. CPAMP forwards GET only, accepts the CPAMP
     # admin key only, and uses the saved CPA Management Key.
+    # Nginx collapses leading // in the request target to a single / before forwarding,
+    # so CPAMP's own path guard would never see a leading duplicate slash; refuse that
+    # raw shape from $request_uri before location matching.
+    if ($request_uri ~* "^(?:https?://[^/]+)?//+v8/management(?:/|\?|$)") {
+        return 404;
+    }
     location = /v8/management/config/api-keys   { proxy_pass http://cpamp; }
     location ^~ /v8/management/config/api-keys/ { proxy_pass http://cpamp; }
 
