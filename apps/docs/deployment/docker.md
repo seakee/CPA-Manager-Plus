@@ -31,10 +31,10 @@ curl -fLO "https://github.com/seakee/CPA-Manager-Plus/releases/download/$TAG/che
 
 ### 首次初始化与认领
 
-先为外部入口配置可从部署环境访问的真实 origin；例如使用 TLS 反向代理时设为它的 `https://` origin，非默认宿主机端口则同时设置 `CPAMP_PUBLIC_PORT`。这不是 CPA 内网地址。
+先为外部入口配置可从部署环境访问的真实 origin。**优先使用已配置 TLS 反向代理的 HTTPS origin**，例如 `https://cpamp.example.com`；替换为实际域名并确认代理/证书已配置。明文 HTTP 只用于可信本地/隔离测试网络，不能通过非可信网络传递 Handoff、Admin Key 或 Client Key。非默认宿主机端口还需设置 `CPAMP_PUBLIC_PORT`。origin 不是 CPA 内网地址。
 
 ```bash
-export CPAMP_PUBLIC_ORIGIN='http://your-host:18317'
+export CPAMP_PUBLIC_ORIGIN='https://cpamp.example.com'
 docker compose -f docker-compose.v2-embedded.yml config
 docker compose -f docker-compose.v2-embedded.yml pull
 docker compose -f docker-compose.v2-embedded.yml up -d

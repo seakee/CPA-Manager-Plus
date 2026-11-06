@@ -31,40 +31,113 @@ v2 Beta 从 **`v1.14.10`** 离线升级，目标 CPA 最低 **`v8.0.55`**；备�
 
 Embedded 还必须备份整个 Runtime 卷：实际路径为 `/runtime/gateway/config.yaml`、`/runtime/gateway/auth/`（单数 `auth`）、`/runtime/gateway/plugins/`（存在时）和 `/runtime/supervisor/`（含 `operations.sqlite`、WAL/SHM、artifacts/active 状态）。不要只复制 CPA 配置。保存 transport secret 卷 `/run/cpamp/runtime-secret`、同版 Compose/配对记录、公开 origin 与环境配置；备份应加密并限制访问。
 
-在发布 Compose 所在目录、同一项目下执行。以下宿主机备份目录只是示例；每次用新空目录，不覆盖上一份备份：
+在发布 Compose 所在目录、同一项目下，将以下完整子 shell 块作为一次操作执行。`mktemp -d` 创建私有唯一目录，容器内 `set -C` 拒绝覆盖已有归档；`set -eu` 在任一步失败时立即停止，不自动重启服务。记录打印的备份路径：
 
 ```bash
-umask 077
-mkdir backup
-docker compose -f docker-compose.v2-embedded.yml stop
-docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
-  -v "$PWD/backup":/backup --entrypoint tar cpamp-manager \
-  -czpf /backup/manager.tgz -C /data .
-docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
-  -v "$PWD/backup":/backup --entrypoint tar cpamp-runtime \
-  -czpf /backup/runtime.tgz -C /runtime .
-docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
-  -v "$PWD/backup":/backup --entrypoint tar cpamp-runtime \
-  -czpf /backup/runtime-secret.tgz -C /run/cpamp/runtime-secret .
+(
+  set -eu
+  umask 077
+  BACKUP_DIR="$(mktemp -d "$PWD/cpampd-backup.XXXXXX")"
+  printf 'Backup directory: %s\n' "$BACKUP_DIR"
+  docker compose -f docker-compose.v2-embedded.yml stop
+  docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+    -v "$BACKUP_DIR":/backup --entrypoint sh cpamp-manager -ec '
+      set -C
+      tar -czpf - -C /data . > /backup/manager.tgz
+      gzip -t /backup/manager.tgz
+      tar -tzf /backup/manager.tgz > /dev/null
+    '
+  docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+    -v "$BACKUP_DIR":/backup --entrypoint sh cpamp-runtime -ec '
+      set -C
+      tar -czpf - -C /runtime . > /backup/runtime.tgz
+      gzip -t /backup/runtime.tgz
+      tar -tzf /backup/runtime.tgz > /dev/null
+    '
+  docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+    -v "$BACKUP_DIR":/backup --entrypoint sh cpamp-runtime -ec '
+      set -C
+      tar -czpf - -C /run/cpamp/runtime-secret . > /backup/runtime-secret.tgz
+      gzip -t /backup/runtime-secret.tgz
+      tar -tzf /backup/runtime-secret.tgz > /dev/null
+    '
+  docker compose -f docker-compose.v2-embedded.yml up -d
+)
 ```
 
-三次归档命令全部成功后，才执行 `docker compose -f docker-compose.v2-embedded.yml up -d`；失败则保持停止并处理错误。命令复用已固定 Digest 的服务镜像，不需要额外的浮动工具镜像。离线期间不能有其他 Manager/CPA 进程写入这些卷。
+只有三份归档各自写入、gzip 完整性检查及 tar 目录读取全部成功，才会运行最后的 `up -d`。任一步失败时保留目录及错误信息，服务保持停止，排除原因后重新创建新的备份目录；不在半成品目录重写归档。命令复用已固定 Digest 的镜像，离线期间不能有其他 Manager/CPA 写入原卷。
 
-恢复时先停止服务，使用备份对应的 Compose/配对记录及项目配置，准备**独立的空卷/空目录**；不要把 tar 叠加到有旧 WAL、归档或 Runtime 状态的目录：
+### 恢复到三个全新、已核对为空的卷
+
+先停止原项目的整个栈，保留原卷不动；准备备份对应的 Compose/配对记录，并恢复原公开 origin/环境配置。以下 `BACKUP_DIR` 必须替换为上一节成功备份的真实绝对目录。其余 `RESTORE_*` 仅是本段 shell/Compose override 的变量，不是新的 CPAMP 配置项。脚本创建独立恢复项目和三个新卷，拒绝任何已存在的同名卷；通过 override 显式绑定三个新卷，确认空目录后才解压。不要删除原项目的卷来制造“空卷”。
 
 ```bash
-docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
-  -v "$PWD/backup":/backup:ro --entrypoint tar cpamp-manager \
-  -xzpf /backup/manager.tgz -C /data
-docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
-  -v "$PWD/backup":/backup:ro --entrypoint tar cpamp-runtime \
-  -xzpf /backup/runtime.tgz -C /runtime
-docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
-  -v "$PWD/backup":/backup:ro --entrypoint tar cpamp-runtime \
-  -xzpf /backup/runtime-secret.tgz -C /run/cpamp/runtime-secret
+(
+  set -eu
+  umask 077
+  BACKUP_DIR='/absolute/path/to/successful/cpampd-backup.XXXXXX'
+  test -d "$BACKUP_DIR"
+  docker compose -f docker-compose.v2-embedded.yml stop
+  RESTORE_DIR="$(mktemp -d "$PWD/cpampd-restore.XXXXXX")"
+  RESTORE_PROJECT="$(basename "$RESTORE_DIR" | tr '[:upper:]' '[:lower:]')"
+  RESTORE_MANAGER_VOLUME="$RESTORE_PROJECT-manager"
+  RESTORE_RUNTIME_VOLUME="$RESTORE_PROJECT-runtime"
+  RESTORE_SECRET_VOLUME="$RESTORE_PROJECT-secret"
+  printf 'Restore project: %s\nRestore directory: %s\n' "$RESTORE_PROJECT" "$RESTORE_DIR"
+  for volume in "$RESTORE_MANAGER_VOLUME" "$RESTORE_RUNTIME_VOLUME" "$RESTORE_SECRET_VOLUME"; do
+    if docker volume inspect "$volume" > /dev/null 2>&1; then
+      printf 'Refusing existing volume: %s\n' "$volume" >&2
+      exit 1
+    fi
+    docker volume create "$volume"
+  done
+  cat > "$RESTORE_DIR/volumes.yml" <<YAML
+volumes:
+  cpamp-manager-data:
+    external: true
+    name: "$RESTORE_MANAGER_VOLUME"
+  cpamp-runtime-data:
+    external: true
+    name: "$RESTORE_RUNTIME_VOLUME"
+  cpamp-runtime-transport-secret:
+    external: true
+    name: "$RESTORE_SECRET_VOLUME"
+YAML
+  restore_compose() {
+    docker compose -p "$RESTORE_PROJECT" -f docker-compose.v2-embedded.yml \
+      -f "$RESTORE_DIR/volumes.yml" "$@"
+  }
+  restore_compose config
+  restore_compose run --rm --no-deps --entrypoint sh cpamp-manager -ec '
+    entries="$(find /data -mindepth 1 -maxdepth 1 -print -quit)"
+    test -z "$entries"
+  '
+  restore_compose run --rm --no-deps --entrypoint sh cpamp-runtime -ec '
+    for root in /runtime /run/cpamp/runtime-secret; do
+      entries="$(find "$root" -mindepth 1 -maxdepth 1 -print -quit)"
+      test -z "$entries"
+    done
+  '
+  restore_compose run --rm --no-deps -v "$BACKUP_DIR":/backup:ro \
+    --entrypoint sh cpamp-manager -ec '
+      for archive in manager runtime runtime-secret; do
+        gzip -t "/backup/$archive.tgz"
+        tar -tzf "/backup/$archive.tgz" > /dev/null
+      done
+    '
+  restore_compose run --rm --no-deps -v "$BACKUP_DIR":/backup:ro \
+    --entrypoint tar cpamp-manager -xzpf /backup/manager.tgz -C /data
+  restore_compose run --rm --no-deps -v "$BACKUP_DIR":/backup:ro \
+    --entrypoint tar cpamp-runtime -xzpf /backup/runtime.tgz -C /runtime
+  restore_compose run --rm --no-deps -v "$BACKUP_DIR":/backup:ro \
+    --entrypoint tar cpamp-runtime -xzpf /backup/runtime-secret.tgz -C /run/cpamp/runtime-secret
+  restore_compose up -d
+)
 ```
 
-全部成功后再 `up -d`。保留归档属主、权限及隔离；不要把整个数据目录递归改为 CPA 身份。核对 Admin 登录、CPA 连接、Client Key、历史/coverage 与 Gateway；`/health` 单独成功不代表全部恢复。回退 1.x 必须使用迁移前的原 1.x 卷，不能使用 v2 数据归档。
+脚本只在三个空卷检查、三份归档校验和三次解压全部成功后启动恢复项目；失败则不启动，保留原卷及恢复目录以便诊断，再从另一组新空卷重试。后续必须保留打印的恢复项目名及 `volumes.yml`，始终使用同一 `-p` 和两份 `-f` 参数管理恢复实例；直接运行原项目命令会使用原卷，不是恢复卷。两个项目不能同时占用同一公开端口。
+
+保留归档属主、权限及隔离，不把整个数据目录递归改为 CPA 身份。核对 Admin 登录、CPA 连接、Client Key、历史/coverage 与 Gateway；`/health` 单独成功不代表全部恢复。回退 1.x 必须使用迁移前的原 1.x 卷，不能使用 v2 归档或恢复卷。
 
 ### Manager 离线快照的边界
 

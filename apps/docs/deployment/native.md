@@ -25,10 +25,25 @@ sudo env USAGE_DATA_DIR=/opt/cpa-manager-plus/data \
   ./bin/cpa-manager-plus initialize
 ```
 
-记录命令输出的短期 `/.well-known/cpamp-bootstrap/ui#handoff=...`；不要把它当成日志或管理员密钥。启动前用 systemd 的服务环境配置 `CPAMP_PUBLIC_ORIGIN` 为真实公开 origin（例如 `http://your-host:18317`），再启动：
+记录命令输出的短期 `/.well-known/cpamp-bootstrap/ui#handoff=...`；不要把它当成日志或管理员密钥。生成的 systemd 服务读取 **`<home>/cpa-manager-plus.env`**，此例为 `/opt/cpa-manager-plus/cpa-manager-plus.env`。创建/编辑时保留该文件已有配置，并限制为 root 所有、`0600`：
 
 ```bash
-sudo systemctl start cpa-manager-plus.service
+sudo touch /opt/cpa-manager-plus/cpa-manager-plus.env
+sudo chown root:root /opt/cpa-manager-plus/cpa-manager-plus.env
+sudo chmod 0600 /opt/cpa-manager-plus/cpa-manager-plus.env
+sudoedit /opt/cpa-manager-plus/cpa-manager-plus.env
+```
+
+在文件中设置真实公开 origin，例如已配置 TLS 反向代理的域名：
+
+```dotenv
+CPAMP_PUBLIC_ORIGIN=https://cpamp.example.com
+```
+
+优先使用 HTTPS，确保反向代理与证书已正确配置，并将示例替换成实际可达域名。明文 HTTP 仅用于可信本地/隔离测试网络，不用于经非可信网络传递 Handoff、Admin Key 或 Client Key。修改环境文件后通过重启服务生效（首次也可用 restart 启动）：
+
+```bash
+sudo systemctl restart cpa-manager-plus.service
 sudo systemctl status cpa-manager-plus.service
 ```
 

@@ -69,7 +69,9 @@ docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
   --cpa-version <actual-source-CPA-version> --plugins false --json
 ```
 
-Replace every angle-bracket parameter before running. `--plugins false` explicitly disables plugins in this example; choose according to your intent. Stop on qualification/destination-proof refusals, retain the report, and do not manually copy credentials into Runtime. After success, stop Runtime/Ingress, then run the `upgrade_cli verify` and `status` commands above. Run `docker compose -f docker-compose.v2-embedded.yml up -d` only at `complete`. Retain original 1.x data and upgrade backups until full acceptance. Verify public origin, browser login, Client Key, history/coverage, and real model requests; `/health` cannot replace these checks.
+Replace every angle-bracket parameter before running. `--plugins false` explicitly disables plugins in this example; choose according to your intent. Stop on qualification/destination-proof refusals, retain the report, and do not manually copy credentials into Runtime. After success, **keep Runtime Supervisor and the destination CPA running and Ready; keep only the long-running Manager Server stopped**. The one-shot Manager CLI's `upgrade verify` must read live Runtime identity and active-artifact evidence, so do not stop Runtime first. Ingress, already started in the example, may remain running, but isolate public traffic at the host firewall or reverse proxy. Ingress liveness neither replaces live Runtime proof nor establishes product readiness.
+
+In that state, run the `upgrade_cli verify` and `upgrade_cli status` commands above separately. Only after the persisted stage is confirmed as `complete`, run `docker compose -f docker-compose.v2-embedded.yml up -d` to start the full stack and restore public traffic. Retain original 1.x data and upgrade backups until full acceptance. Verify public origin, browser login, Client Key, history/coverage, and real model requests; `/health` cannot replace these checks.
 
 ### Exact Rollback To Original 1.x Data
 
@@ -83,7 +85,18 @@ upgrade_cli rollback --prepare --legacy "$LEGACY_ROOT" --target /data \
 
 `--prepare` prints/saves a plan; it never controls Docker. Check every emitted precondition on the **Docker host**: the old volume/path is the copy-in source, v2 is stopped, and the rollback port is free. Default 1.x rollback port is **18318**, distinct from v2 public port 18317; checks inside a container cannot prove host port availability. Apply the printed Compose and invocation on the host, or restore the original 1.x Compose against the **original unchanged 1.x volume**, using the plan's exact image and port, and restore the original CPA configuration. Never use a floating tag or the v2 data copy.
 
-After 1.x starts, run `--verify` with the plan's backup and port. Inside the one-shot CLI container above, the Docker host is not `127.0.0.1`; for the default port:
+After 1.x starts, **complete the Docker-host container-identity and mount inspection gate before running `rollback --verify`**. The CLI has no Docker socket and cannot prove that the container answering health checks uses the original volume. Locate the unique container on the plan's actual rollback port, then set `ROLLBACK_CONTAINER_ID` to its real full ID:
+
+```bash
+docker ps --no-trunc --filter publish=18318 --format '{{.ID}} {{.Image}} {{.Names}}'
+export ROLLBACK_CONTAINER_ID='actual-full-container-id'
+docker inspect --format '{{.Id}} {{.Config.Image}} {{.Image}}' "$ROLLBACK_CONTAINER_ID"
+docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Type}} {{.Name}} {{.Source}} -> {{.Destination}}{{println}}{{end}}{{end}}' "$ROLLBACK_CONTAINER_ID"
+```
+
+Confirm the container ID belongs to the old Manager just restarted. `.Config.Image` must equal the plan's exact image reference; `.Image` is its actual image ID. For a named volume, `/data`'s `.Name` must equal the original `LEGACY_MOUNT`; run `docker volume inspect "$LEGACY_MOUNT"` and compare its returned `Mountpoint` with that container's `/data` `.Source`. For a bind mount, `.Source` must equal the original absolute host path. Where container-side paths differ, manually establish that this is the same source mounted read-only during copy-in. Stop on any mismatch or unproven correspondence; retain the inspection record with the plan.
+
+Only after that gate, run `--verify` with the plan's backup and port. Inside the one-shot CLI container above, the Docker host is not `127.0.0.1`; for the default port:
 
 ```bash
 upgrade_cli rollback --verify --legacy "$LEGACY_ROOT" --target /data \
@@ -92,7 +105,7 @@ upgrade_cli rollback --verify --legacy "$LEGACY_ROOT" --target /data \
 upgrade_cli status --db-path /data/usage.sqlite --json
 ```
 
-For custom backup/port settings, retain the emitted `--backup` and use the actual port. Only proven health identity, source volume, backup integrity, and retained data record `rolled_back`; an ordinary HTTP request exiting `0` is not rollback proof. If refused, do not recreate the source volume or delete upgrade records to proceed.
+For custom backup/port settings, retain the emitted `--backup` and use the actual port. `rolled_back` records only the CLI's successful health-identity, source-directory, backup-integrity, and retained-data checks; **it contains neither automatic Docker container/mount proof nor a manual-confirmation field**. Consider rollback complete only together with the operator's saved container/mount inspection record above. An ordinary HTTP request exiting `0` is insufficient too. If refused, do not recreate the source volume or delete upgrade records to proceed.
 
 ### Native And Common Diagnostics
 

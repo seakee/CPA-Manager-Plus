@@ -31,10 +31,10 @@ Compare both downloaded files with `checksums.txt` and retain them for upgrades/
 
 ### Initialize And Claim The Installation
 
-Configure the real public origin reachable from the deployment environment. For a TLS reverse proxy, use its `https://` origin; set `CPAMP_PUBLIC_PORT` as well if the host port differs. This is not CPA's internal URL.
+Configure the real public origin reachable from the deployment environment. **Prefer an HTTPS origin behind a configured TLS reverse proxy**, for example `https://cpamp.example.com`; replace it with your actual domain and configure the proxy/certificate first. Plain HTTP is only for trusted local/isolated test networks, never for sending Handoff, Admin Key, or Client Key over untrusted networks. Set `CPAMP_PUBLIC_PORT` as well if the host port differs. The origin is not CPA's internal URL.
 
 ```bash
-export CPAMP_PUBLIC_ORIGIN='http://your-host:18317'
+export CPAMP_PUBLIC_ORIGIN='https://cpamp.example.com'
 docker compose -f docker-compose.v2-embedded.yml config
 docker compose -f docker-compose.v2-embedded.yml pull
 docker compose -f docker-compose.v2-embedded.yml up -d

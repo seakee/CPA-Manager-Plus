@@ -25,10 +25,25 @@ sudo env USAGE_DATA_DIR=/opt/cpa-manager-plus/data \
   ./bin/cpa-manager-plus initialize
 ```
 
-Keep the short-lived `/.well-known/cpamp-bootstrap/ui#handoff=...` output private; it is neither a log entry nor an Admin Key. Before startup, configure `CPAMP_PUBLIC_ORIGIN` in the systemd service environment with the real public origin, for example `http://your-host:18317`, then start:
+Keep the short-lived `/.well-known/cpamp-bootstrap/ui#handoff=...` output private; it is neither a log entry nor an Admin Key. The generated systemd unit reads **`<home>/cpa-manager-plus.env`**, `/opt/cpa-manager-plus/cpa-manager-plus.env` in this example. Create/edit it without discarding existing settings, and restrict it to root ownership and mode `0600`:
 
 ```bash
-sudo systemctl start cpa-manager-plus.service
+sudo touch /opt/cpa-manager-plus/cpa-manager-plus.env
+sudo chown root:root /opt/cpa-manager-plus/cpa-manager-plus.env
+sudo chmod 0600 /opt/cpa-manager-plus/cpa-manager-plus.env
+sudoedit /opt/cpa-manager-plus/cpa-manager-plus.env
+```
+
+Set the real public origin in that file, for example a domain with a configured TLS reverse proxy:
+
+```dotenv
+CPAMP_PUBLIC_ORIGIN=https://cpamp.example.com
+```
+
+Prefer HTTPS, with a correctly configured proxy/certificate and the example replaced by your reachable domain. Plain HTTP is only for trusted local/isolated test networks, not for sending Handoff, Admin Key, or Client Key across untrusted networks. Restart the service to apply environment-file changes (`restart` also starts it initially):
+
+```bash
+sudo systemctl restart cpa-manager-plus.service
 sudo systemctl status cpa-manager-plus.service
 ```
 

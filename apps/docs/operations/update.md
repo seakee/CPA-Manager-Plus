@@ -69,7 +69,9 @@ docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
   --cpa-version <实际源CPA版本> --plugins false --json
 ```
 
-这段是参数模板，替换所有尖括号后运行；`--plugins false` 是显式关闭插件的示例，按实际意图选择。`cpa-import` 的资格或目标证明拒绝时停止，保留报告，不手工复制凭证到 Runtime。成功后停止 Runtime/Ingress，再运行上面的 `upgrade_cli verify`、`status`。只有 `complete` 才执行 `docker compose -f docker-compose.v2-embedded.yml up -d`；保留原 1.x 数据与升级备份直到完整验收。公开 origin、浏览器登录、Client Key、历史/coverage 和实际模型请求都需核对，`/health` 不能代替它们。
+这段是参数模板，替换所有尖括号后运行；`--plugins false` 是显式关闭插件的示例，按实际意图选择。`cpa-import` 的资格或目标证明拒绝时停止，保留报告，不手工复制凭证到 Runtime。成功后**保持 Runtime Supervisor 和目标 CPA 运行且为 Ready，仅保持长驻 Manager Server 停止**；一次性 Manager CLI 的 `upgrade verify` 需要实时读取 Runtime 的身份和 active artifact，不能先停止 Runtime。示例中已启动的 Ingress 可以保留，但应在宿主机防火墙或反向代理隔离公开流量；Ingress 存活不能替代 Runtime 的实时证明，也不能当成产品就绪。
+
+在此状态分别运行上面的 `upgrade_cli verify`、`upgrade_cli status`；只有持久化阶段确认为 `complete`，才执行 `docker compose -f docker-compose.v2-embedded.yml up -d` 启动完整栈并恢复公开流量。保留原 1.x 数据与升级备份直到完整验收。公开 origin、浏览器登录、Client Key、历史/coverage 和实际模型请求都需核对，`/health` 不能代替它们。
 
 ### 精确回滚到原 1.x 数据
 
@@ -83,7 +85,18 @@ upgrade_cli rollback --prepare --legacy "$LEGACY_ROOT" --target /data \
 
 `--prepare` 只输出/保存计划，不控制 Docker。逐条在 **Docker 宿主机**检查输出的 preconditions：旧卷/绝对目录确实是 copy-in 的源，v2 已停，回滚端口空闲。默认旧 Manager 回滚端口是 **18318**，不同于 v2 公开端口 18317；容器内端口检查不能证明宿主机空闲。把输出的 Compose 内容和 invocation 应用于宿主机，或恢复原 1.x Compose 指向**原未修改的 1.x 卷**，使用计划的精确镜像与端口，恢复原 CPA 配置。不要使用浮动标签或 v2 数据副本。
 
-旧 1.x 启动后，按计划输出的 `--backup` 与端口执行 `--verify`。在上述一次性 CLI 容器中，宿主机不是 `127.0.0.1`；默认端口示例为：
+旧 1.x 启动后，**必须先在 Docker 宿主机完成容器身份与挂载人工门禁，才能运行 `rollback --verify`**。CLI 没有 Docker socket，不能证明回答健康检查的容器确实使用了原数据卷。先以计划的实际回滚端口定位唯一容器，再把真实完整容器 ID 设为 `ROLLBACK_CONTAINER_ID`：
+
+```bash
+docker ps --no-trunc --filter publish=18318 --format '{{.ID}} {{.Image}} {{.Names}}'
+export ROLLBACK_CONTAINER_ID='actual-full-container-id'
+docker inspect --format '{{.Id}} {{.Config.Image}} {{.Image}}' "$ROLLBACK_CONTAINER_ID"
+docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Type}} {{.Name}} {{.Source}} -> {{.Destination}}{{println}}{{end}}{{end}}' "$ROLLBACK_CONTAINER_ID"
+```
+
+确认容器 ID 就是本次重启的旧 Manager；`.Config.Image` 必须是计划中的精确镜像引用，`.Image` 是对应的实际镜像 ID。对于 named volume，核对 `/data` 的 `.Name` 等于原 `LEGACY_MOUNT`，并执行 `docker volume inspect "$LEGACY_MOUNT"`，确认输出的 `Mountpoint` 与该容器 `/data` 的 `.Source` 相同；对于 bind mount，`.Source` 必须等于原始宿主机绝对路径。另在容器间路径不同的环境中人工核对它确实是 copy-in 只读挂载的同一源。任何不一致或无法确认就停止，不执行核验。将此检查记录与计划一起保留。
+
+门禁通过后，按计划输出的 `--backup` 与端口执行 `--verify`。在上述一次性 CLI 容器中，宿主机不是 `127.0.0.1`；默认端口示例为：
 
 ```bash
 upgrade_cli rollback --verify --legacy "$LEGACY_ROOT" --target /data \
@@ -92,7 +105,7 @@ upgrade_cli rollback --verify --legacy "$LEGACY_ROOT" --target /data \
 upgrade_cli status --db-path /data/usage.sqlite --json
 ```
 
-如果使用自定义备份或端口，保留计划打印的 `--backup` 并改为实际端口。只有健康身份、源卷、备份完整性与保留数据证明通过后才会记录 `rolled_back`；退出 `0` 的普通 HTTP 请求不足以证明回滚。若计划拒绝，不重建源卷或删除升级记录来强行继续。
+如果使用自定义备份或端口，保留计划打印的 `--backup` 并改为实际端口。`rolled_back` 仅记录 CLI 的健康身份、源目录、备份完整性与保留数据检查通过，**不包含 Docker 容器/实际挂载的自动证明或人工确认字段**。只有结合上述操作者保存的容器与挂载检查记录，才能把回滚视为完成；普通 HTTP 请求退出 `0` 也不足以证明回滚。若计划拒绝，不重建源卷或删除升级记录来强行继续。
 
 ### Native 与常见诊断
 

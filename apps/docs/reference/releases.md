@@ -11,7 +11,9 @@ v2 Beta 是 **Prerelease**，不是 Stable；`releases/latest`、1.x 自动面�
 - linux/amd64 Native：`cpa-manager-plus-native-v2_<ver>_linux_amd64.tar.gz`。不提供 v2 的 macOS、Windows、linux/arm64 原生包，见 [原生部署](../deployment/native.md)。
 - 独立 CPA 轻量面板 `management.html`；Stable 与 Beta 的双轨取得方式见 [轻量面板](../deployment/cpa-panel.md)。
 
-v2 更新元数据契约使用 `schema_version: 2`、`migration_required: true`、`minimum_direct_upgrade_version: v1.14.10`、`minimum_cpa_version: v8.0.55`。更新索引外层 `versions.json` 仍为 `schema_version: 1`，`channels.beta` 使用 `schema_version: 2`。这些字段不表示 1.x 可自动原地升级：先读 [离线 copy-in、对账与回滚](../operations/update.md)，备份 `data.key`、SQLite WAL/SHM 和 `usage-archives/`。
+**随 Beta 交付的发布契约，不是已有构建的现行更新能力：** v2 Beta 的 `release-info.json` 契约使用 `schema_version: 2`、`migration_required: true`、`minimum_direct_upgrade_version: v1.14.10`、`minimum_cpa_version: v8.0.55`；更新索引文件名是 **`update-index.json`**，外层保持 `schema_version: 1`，v2 的 `channels.beta` 条目使用 `schema_version: 2`，且只允许 Beta Prerelease。基线 `8935bce5` 尚未实现 v2 发布及该 schema-2 Beta 条目；发布端契约由 PR #1137 引入，当前仅允许显式 opt-in 的 `DRY_RUN=true` 演练，真实发布/索引写入仍须维护者解除门禁。不能据此声称 Beta 已发布或线上索引已改变。
+
+**应用内更新不会提供 v2：** `v1.14.10` 的 Stable 检查不会选择 v2 Beta；手工切到 beta 后也会拒绝 schema-2 的 ReleaseInfo，不会显示可用的 v2 更新。当前 v2 构建同样不会通过应用内更新提供 v2 目标，发布端契约不等于已新增 v2 消费端支持。安装或后续更新必须阅读对应发布说明并显式选择同版资产，不能依赖自动换镜像；从 1.x 迁移按 [离线 copy-in、对账与回滚](../operations/update.md)，备份 `data.key`、SQLite WAL/SHM 和 `usage-archives/`。
 
 ## 当前许可证与可核验文件
 
