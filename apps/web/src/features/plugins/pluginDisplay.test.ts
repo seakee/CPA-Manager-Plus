@@ -10,6 +10,7 @@ const basePlugin: PluginListEntry = {
   enabled: true,
   effectiveEnabled: true,
   supportsOAuth: false,
+  supportsQuota: false,
   logo: '',
   configFields: [],
   menus: [

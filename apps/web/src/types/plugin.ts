@@ -41,10 +41,50 @@ export interface PluginListEntry {
   enabled: boolean;
   effectiveEnabled: boolean;
   supportsOAuth: boolean;
+  supportsQuota: boolean;
+  quotaProvider?: string;
   logo: string;
   configFields: PluginConfigField[];
   menus: PluginMenu[];
   metadata: PluginMetadata | null;
+}
+
+export interface PluginQuotaSubscription {
+  plan: string | null;
+  tierName: string | null;
+  tierId: string | null;
+}
+
+export interface PluginQuotaSummaryItem {
+  key: string;
+  label: string;
+  value: string | number | null;
+  unit: string | null;
+  format: string | null;
+  currency: string | null;
+}
+
+export interface PluginQuotaBucket {
+  id: string;
+  label: string;
+  window?: string;
+  remainingFraction: number;
+  resetTime?: string;
+  description?: string;
+}
+
+export interface PluginQuotaGroup {
+  id: string;
+  label: string;
+  description?: string;
+  buckets: PluginQuotaBucket[];
+}
+
+export interface PluginQuotaResponse {
+  subscription: PluginQuotaSubscription | null;
+  summary: PluginQuotaSummaryItem[];
+  groups: PluginQuotaGroup[];
+  serverTimeOffsetMs: number | null;
 }
 
 export interface PluginListResponse {

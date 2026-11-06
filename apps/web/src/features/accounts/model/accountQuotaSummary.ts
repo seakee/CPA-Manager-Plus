@@ -7,6 +7,7 @@ import type {
   DevinQuotaState,
   KimiQuotaState,
   MetaQuotaState,
+  PluginQuotaState,
   QuotaResetAccuracy,
   XaiBillingSummary,
   XaiQuotaState,
@@ -80,6 +81,7 @@ export interface AccountQuotaStores {
   devinQuota: Record<string, DevinQuotaState>;
   kimiQuota: Record<string, KimiQuotaState>;
   metaQuota: Record<string, MetaQuotaState>;
+  pluginQuota?: Record<string, PluginQuotaState>;
   xaiQuota: Record<string, XaiQuotaState>;
 }
 
@@ -1160,6 +1162,41 @@ export const resolveAccountQuota = (
           quota.windows.find((w) => w.quotaProgressObservedAtMs !== null)
             ?.quotaProgressObservedAtMs ?? undefined,
       }
+    );
+  }
+
+  // Plugin-served credentials fall back to the generic plugin quota store.
+  const pluginQuotaState = stores.pluginQuota
+    ? getCredentialScopedQuotaState(stores.pluginQuota, file)
+    : undefined;
+  if (pluginQuotaState) {
+    const planType = pluginQuotaState.subscription?.plan ?? filePlanType;
+    if (pluginQuotaState.status === 'loading') return loadingQuota(planType);
+    if (pluginQuotaState.status === 'error')
+      return quotaFromError(
+        pluginQuotaState.error,
+        planType,
+        pluginQuotaState.errorStatus,
+        pluginQuotaState.failedAtMs
+      );
+    return quotaFromRemainingWindows(
+      pluginQuotaState.groups.flatMap((group) =>
+        group.buckets.map((bucket) => {
+          const reset = resolveAbsoluteQuotaReset(bucket.resetTime);
+          return {
+            // Normalize to 0.1% precision to keep fraction scaling stable.
+            remainingPercent:
+              typeof bucket.remainingFraction === 'number' && Number.isFinite(bucket.remainingFraction)
+                ? Math.round(bucket.remainingFraction * 1000) / 10
+                : null,
+            resetLabel: bucket.resetTime ?? '-',
+            resetAtMs: reset.resetAtMs,
+            resetAccuracy: reset.resetAccuracy,
+          };
+        })
+      ),
+      planType,
+      { fetchedAtMs: pluginQuotaState.fetchedAtMs }
     );
   }
 

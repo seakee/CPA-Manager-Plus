@@ -66,7 +66,12 @@ xAI OAuth 配额刷新成功后，会在后台通过 CPA 查询 `/user?include=s
 | Claude         | 基础额度、周额度、模型级 scoped limits                 | scoped limits 可能重复、缺失或停用，CPAMP 按身份和新鲜度归并。 |
 | xAI/Grok OAuth | CLI billing 周/月数据、官方 API 身份、请求事件耗尽信号 | 官方 API 身份不等于可查询费用或剩余百分比。                    |
 | Muse / Meta    | `meta:window`、`meta:weekly`、reset/周期元数据           | 缺少用量比例时保持 unknown，不把缺失字段解释成 `0%`；DCA 仅用于账号/配额流程。 |
+| 插件 Provider  | 凭证条目的 `supports_quota` 标记加上所属插件的额度探测 | 需要 CPA 插件声明 `quota_provider` 能力（例如 ClinePassBridge）。 |
 | 其他 Provider  | CPA 凭证元数据或最近响应 Header                        | 不假设存在统一主动额度接口。                                   |
+
+### 插件凭证
+
+CPA 插件可以声明 `quota_provider` 能力。当凭证条目带有 `supports_quota` 标记时，凭证管理会为它显示常规的额度刷新入口。刷新时 CPAMP 从凭证条目（`quota_plugin_id`）或插件注册表（`quota_provider`）解析所属插件，然后调用 CPA 的通用插件额度接口，由插件现查上游数据。插件额度窗口遵循与内置 Provider 相同的刷新、缓存和证据规则。
 
 ## 配额冷却与账号处理
 
