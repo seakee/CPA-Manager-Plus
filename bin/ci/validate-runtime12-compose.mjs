@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { isatty } from 'node:tty';
 import { fileURLToPath } from 'node:url';
 
 const fail = (message) => {
@@ -8,7 +9,13 @@ const fail = (message) => {
 };
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const stdinText = process.stdin.isTTY ? '' : readFileSync(0, 'utf8').trim();
+const stdinChunks = [];
+if (!isatty(0)) {
+  for await (const chunk of process.stdin) {
+    stdinChunks.push(Buffer.from(chunk));
+  }
+}
+const stdinText = Buffer.concat(stdinChunks).toString('utf8').trim();
 const document = JSON.parse(
   stdinText ||
     execFileSync(
