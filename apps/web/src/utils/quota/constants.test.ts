@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  ANTIGRAVITY_HUB_PLATFORM,
+  ANTIGRAVITY_HUB_VERSION,
+  ANTIGRAVITY_REQUEST_HEADERS,
+  ANTIGRAVITY_USER_AGENT,
+  buildAntigravityUserAgent,
   XAI_GROK_CLIENT_VERSION,
   XAI_GROK_USER_AGENT,
   XAI_INFERENCE_USER_AGENT,
@@ -19,6 +24,22 @@ const versionAtLeast = (version: string, floor: string): boolean => {
 
   return true;
 };
+
+describe('Antigravity client identity', () => {
+  it('meets the CPA Antigravity Hub compatibility floor', () => {
+    expect(versionAtLeast(ANTIGRAVITY_HUB_VERSION, '2.23.0')).toBe(true);
+  });
+
+  it('keeps the Hub user agent and request header synchronized', () => {
+    expect(ANTIGRAVITY_USER_AGENT).toBe(
+      `antigravity/hub/${ANTIGRAVITY_HUB_VERSION} ${ANTIGRAVITY_HUB_PLATFORM}`
+    );
+    expect(buildAntigravityUserAgent({ version: '2.24.1', platform: 'darwin/arm64' })).toBe(
+      'antigravity/hub/2.24.1 darwin/arm64'
+    );
+    expect(ANTIGRAVITY_REQUEST_HEADERS['User-Agent']).toBe(ANTIGRAVITY_USER_AGENT);
+  });
+});
 
 describe('xAI Grok client identity', () => {
   it('meets the known xAI chat-proxy minimum Grok CLI version', () => {

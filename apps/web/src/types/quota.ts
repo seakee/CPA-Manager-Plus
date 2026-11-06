@@ -620,6 +620,12 @@ export interface XaiOfficialApiHealth {
   teamBlocked: boolean | null;
 }
 
+export interface XaiSubscriptionInfo {
+  planType: string | null;
+  source: 'user' | 'settings';
+  observedAtMs: number;
+}
+
 export interface XaiBillingSummary {
   periodType: XaiBillingPeriodType;
   usagePercent: number | null;
@@ -639,6 +645,9 @@ export interface XaiBillingSummary {
   partial?: boolean;
   diagnostics?: XaiBillingDiagnostic[];
   rateLimited?: boolean;
+  subscription?: XaiSubscriptionInfo;
+  /** A prior subscription observation was discarded; file metadata cannot replace it. */
+  subscriptionSuperseded?: boolean;
 }
 
 export interface XaiQuotaState extends CredentialScopedQuotaState {

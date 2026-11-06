@@ -208,6 +208,9 @@ export const useQuotaStore = create<QuotaStoreState>()(
 
 export const captureQuotaCacheGeneration = (): number => useQuotaStore.getState().cacheGeneration;
 
+export const isQuotaCacheGenerationCurrent = (generation: number): boolean =>
+  useQuotaStore.getState().cacheGeneration === generation;
+
 export const commitIfQuotaCacheCurrent = (generation: number, commit: () => void): boolean => {
   if (useQuotaStore.getState().cacheGeneration !== generation) return false;
   commit();
