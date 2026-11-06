@@ -192,41 +192,100 @@ func TestExternalLegacyBridgeBoundsConcurrentRefusals(t *testing.T) {
 }
 
 // TestExternalLegacyBridgeGatesTheV8KeyGroupView proves the External cutover
-// covers the one CPA v8 subtree Manager forwards. It is the same kind of request
-// as a v0 management read — an admin-authorized proxy with the saved management
-// key — so the bridge must serialize it while the credential works and answer the
-// typed blocker locally once the user's CPA refused that credential, instead of
-// presenting it again.
+// covers the one CPA v8 subtree Manager forwards — and only the shape that
+// actually proxies. The gate must serialize a canonical GET while the credential
+// works and answer the typed blocker locally once the user's CPA refused it, but
+// it must not turn a write or a dirty path into a credential failure: those keep
+// the router's own 405/404 answers.
 func TestExternalLegacyBridgeGatesTheV8KeyGroupView(t *testing.T) {
-	app, fake := newExternalProbeApp(t)
+	t.Run("admitted", func(t *testing.T) {
+		app, fake := newExternalProbeApp(t)
 
-	before := fake.requests.Load()
-	admitted := gateRequest(t, app, http.MethodGet, "/v8/management/config/api-keys", gateAdmin)
-	if admitted.Code != http.StatusOK {
-		t.Fatalf("admitted read = %d %s", admitted.Code, admitted.Body.String())
-	}
-	if sent := fake.requests.Load() - before; sent != 1 {
-		t.Fatalf("the admitted read reached the CPA %d times, want 1", sent)
-	}
+		before := fake.requests.Load()
+		admitted := gateRequest(t, app, http.MethodGet, "/v8/management/config/api-keys", gateAdmin)
+		if admitted.Code != http.StatusOK {
+			t.Fatalf("admitted read = %d %s", admitted.Code, admitted.Body.String())
+		}
+		if sent := fake.requests.Load() - before; sent != 1 {
+			t.Fatalf("the admitted read reached the CPA %d times, want 1", sent)
+		}
 
-	// A refusal learned through a typed read must stop this path too: CPA bans
-	// the calling address after five failed authentications.
-	fake.management.Store(strings.Repeat("f", 64))
-	first := gatewayRequest(t, app, http.MethodGet, "external/usage", "", "")
-	if first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
-		t.Fatalf("first read = %d %s", first.Code, first.Body.String())
-	}
-	before = fake.requests.Load()
-	for range 3 {
-		response := gateRequest(t, app, http.MethodGet, "/v8/management/config/api-keys/claude", gateAdmin)
-		if response.Code != http.StatusConflict {
-			t.Fatalf("read after the rejection = %d %s", response.Code, response.Body.String())
+		for _, test := range []struct {
+			name   string
+			method string
+			path   string
+			auth   string
+			want   int
+		}{
+			{name: "put", method: http.MethodPut, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "options", method: http.MethodOptions, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "encoded dot segments", method: http.MethodGet, path: "/v8/management/config/api-keys/%2e%2e/config", auth: gateAdmin, want: http.StatusNotFound},
+			{name: "duplicate slash", method: http.MethodGet, path: "/v8/management/config/api-keys//claude", auth: gateAdmin, want: http.StatusNotFound},
+			{name: "leading duplicate slash", method: http.MethodGet, path: "//v8/management/config/api-keys", auth: gateAdmin, want: http.StatusNotFound},
+			{name: "sibling", method: http.MethodGet, path: "/v8/management/config/api-keys-x", auth: gateAdmin, want: http.StatusNotFound},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				before := fake.requests.Load()
+				response := gateRequest(t, app, test.method, test.path, test.auth)
+				if response.Code != test.want {
+					t.Fatalf("%s %s = %d %s", test.method, test.path, response.Code, response.Body.String())
+				}
+				if response.Header().Get("Location") != "" {
+					t.Fatalf("%s %s redirected instead of refusing", test.method, test.path)
+				}
+				if sent := fake.requests.Load() - before; sent != 0 {
+					t.Fatalf("%s %s reached the CPA %d times", test.method, test.path, sent)
+				}
+			})
 		}
-		if code := errorCode(t, response); code != freshconfig.ReasonManagementRejected {
-			t.Fatalf("read after the rejection code = %q", code)
+	})
+
+	t.Run("rejected", func(t *testing.T) {
+		app, fake := newExternalProbeApp(t)
+		// A refusal learned through a typed read must stop this path too: CPA bans
+		// the calling address after five failed authentications.
+		fake.management.Store(strings.Repeat("f", 64))
+		first := gatewayRequest(t, app, http.MethodGet, "external/usage", "", "")
+		if first.Code != http.StatusConflict || errorCode(t, first) != freshconfig.ReasonManagementRejected {
+			t.Fatalf("first read = %d %s", first.Code, first.Body.String())
 		}
-	}
-	if sent := fake.requests.Load() - before; sent != 0 {
-		t.Fatalf("the bridge presented the refused key %d more times", sent)
-	}
+
+		for _, test := range []struct {
+			name   string
+			method string
+			path   string
+			auth   string
+			want   int
+			code   string
+		}{
+			{name: "canonical read", method: http.MethodGet, path: "/v8/management/config/api-keys/claude", auth: gateAdmin, want: http.StatusConflict, code: freshconfig.ReasonManagementRejected},
+			{name: "bad admin key", method: http.MethodGet, path: "/v8/management/config/api-keys", auth: "Bearer wrong-key", want: http.StatusUnauthorized},
+			{name: "put", method: http.MethodPut, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "options", method: http.MethodOptions, path: "/v8/management/config/api-keys", auth: gateAdmin, want: http.StatusMethodNotAllowed},
+			{name: "encoded dot segments", method: http.MethodGet, path: "/v8/management/config/api-keys/%2e%2e/config", auth: gateAdmin, want: http.StatusNotFound},
+			{name: "duplicate slash", method: http.MethodGet, path: "/v8/management/config/api-keys//claude", auth: gateAdmin, want: http.StatusNotFound},
+			{name: "leading duplicate slash", method: http.MethodGet, path: "//v8/management/config/api-keys", auth: gateAdmin, want: http.StatusNotFound},
+			{name: "sibling", method: http.MethodGet, path: "/v8/management/config/api-keys-x", auth: gateAdmin, want: http.StatusNotFound},
+			{name: "client keys", method: http.MethodGet, path: "/v8/management/config/access/api-keys", auth: gateAdmin, want: http.StatusNotFound},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				before := fake.requests.Load()
+				response := gateRequest(t, app, test.method, test.path, test.auth)
+				if response.Code != test.want {
+					t.Fatalf("%s %s = %d %s", test.method, test.path, response.Code, response.Body.String())
+				}
+				if test.code != "" {
+					if code := errorCode(t, response); code != test.code {
+						t.Fatalf("%s %s code = %q, want %q", test.method, test.path, code, test.code)
+					}
+				}
+				if response.Header().Get("Location") != "" {
+					t.Fatalf("%s %s redirected instead of refusing", test.method, test.path)
+				}
+				if sent := fake.requests.Load() - before; sent != 0 {
+					t.Fatalf("%s %s reached the CPA %d times", test.method, test.path, sent)
+				}
+			})
+		}
+	})
 }

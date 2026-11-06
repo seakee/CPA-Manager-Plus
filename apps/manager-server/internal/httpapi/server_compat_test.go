@@ -1451,34 +1451,44 @@ func TestServerCompatV8APIKeysConfigProxy(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name   string
-		method string
-		target string
-		key    string
-		want   int
+		name       string
+		method     string
+		target     string
+		key        string
+		want       int
+		noRedirect bool
 	}{
 		{name: "missing admin key", method: http.MethodGet, target: "/v8/management/config/api-keys", want: http.StatusUnauthorized},
 		{name: "wrong admin key", method: http.MethodGet, target: "/v8/management/config/api-keys", key: "wrong-key", want: http.StatusUnauthorized},
 		{name: "CPA management key", method: http.MethodGet, target: "/v8/management/config/api-keys", key: "management-key", want: http.StatusUnauthorized},
+		{name: "options with admin key", method: http.MethodOptions, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "options without admin key", method: http.MethodOptions, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
 		{name: "put", method: http.MethodPut, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
+		{name: "post", method: http.MethodPost, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
 		{name: "patch", method: http.MethodPatch, target: "/v8/management/config/api-keys/claude", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
 		{name: "delete", method: http.MethodDelete, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
 		{name: "head", method: http.MethodHead, target: "/v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusMethodNotAllowed},
 		{name: "config root", method: http.MethodGet, target: "/v8/management/config", key: testutil.AdminKey, want: http.StatusNotFound},
 		{name: "config yaml", method: http.MethodGet, target: "/v8/management/config.yaml", key: testutil.AdminKey, want: http.StatusNotFound},
+		{name: "client keys", method: http.MethodGet, target: "/v8/management/config/access/api-keys", key: testutil.AdminKey, want: http.StatusNotFound},
 		{name: "sibling config key", method: http.MethodGet, target: "/v8/management/config/api-keys-x", key: testutil.AdminKey, want: http.StatusNotFound},
 		{name: "other v8 route", method: http.MethodGet, target: "/v8/management/credentials/download?name=a.json", key: testutil.AdminKey, want: http.StatusNotFound},
-		{name: "dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/../../credentials/download", key: testutil.AdminKey},
-		{name: "encoded dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/%2e%2e/%2e%2e/credentials/download", key: testutil.AdminKey},
-		{name: "encoded slash dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys%2F..%2F..%2Fcredentials/download", key: testutil.AdminKey},
+		{name: "dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/../../credentials/download", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "single dot segment", method: http.MethodGet, target: "/v8/management/config/api-keys/./claude", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "duplicate slash", method: http.MethodGet, target: "/v8/management/config/api-keys//claude", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "duplicate slash in prefix", method: http.MethodGet, target: "/v8//management/config/api-keys", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "leading duplicate slash", method: http.MethodGet, target: "//v8/management/config/api-keys", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/%2e%2e/%2e%2e/credentials/download", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
+		{name: "encoded slash dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys%2F..%2F..%2Fcredentials/download", key: testutil.AdminKey, want: http.StatusNotFound, noRedirect: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			before := len(cpa.Requests())
 			rr := testutil.Request(t, handler, tc.method, tc.target, "", tc.key)
-			if tc.want != 0 {
-				testutil.RequireStatus(t, rr, tc.want)
-			} else if rr.Code == http.StatusOK {
-				t.Fatalf("%s %s status = 200, body = %s", tc.method, tc.target, rr.Body.String())
+			testutil.RequireStatus(t, rr, tc.want)
+			if tc.noRedirect {
+				if location := rr.Header().Get("Location"); location != "" {
+					t.Fatalf("%s %s redirected to %q instead of refusing", tc.method, tc.target, location)
+				}
 			}
 			if requests := cpa.Requests(); len(requests) != before {
 				t.Fatalf("%s %s reached CPA: %#v", tc.method, tc.target, requests[before:])
@@ -1490,16 +1500,27 @@ func TestServerCompatV8APIKeysConfigProxy(t *testing.T) {
 	// RejectCrossSiteAdmin. A sandboxed plugin document is an opaque-origin
 	// cross-site fetch client, so it cannot use this credentialed read as a
 	// confused deputy.
-	before := len(cpa.Requests())
-	crossSite := httptest.NewRequest(http.MethodGet, "/v8/management/config/api-keys", nil)
-	crossSite.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
-	crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
-	crossSite.Header.Set("Sec-Fetch-Dest", "empty")
-	crossSiteRR := httptest.NewRecorder()
-	handler.ServeHTTP(crossSiteRR, crossSite)
-	testutil.RequireStatus(t, crossSiteRR, http.StatusForbidden)
-	if requests := cpa.Requests(); len(requests) != before {
-		t.Fatalf("cross-site read reached CPA: %#v", requests[before:])
+	// A dirty shape gets the same cross-site answer: the rejection runs before
+	// the subtree's own path refusal.
+	for _, target := range []string{"/v8/management/config/api-keys", "/v8/management/config/api-keys//claude"} {
+		before := len(cpa.Requests())
+		crossSite := httptest.NewRequest(http.MethodGet, target, nil)
+		crossSite.Header.Set("Authorization", "Bearer "+testutil.AdminKey)
+		crossSite.Header.Set("Sec-Fetch-Site", "cross-site")
+		crossSite.Header.Set("Sec-Fetch-Dest", "empty")
+		crossSiteRR := httptest.NewRecorder()
+		handler.ServeHTTP(crossSiteRR, crossSite)
+		testutil.RequireStatus(t, crossSiteRR, http.StatusForbidden)
+		if requests := cpa.Requests(); len(requests) != before {
+			t.Fatalf("cross-site read of %s reached CPA: %#v", target, requests[before:])
+		}
+	}
+
+	// The subtree's 405 for OPTIONS must not change the CORS preflight answer
+	// of any other route.
+	for _, target := range []string{"/v0/management/config", "/v8/management/config/access/api-keys"} {
+		rr := testutil.Request(t, handler, http.MethodOptions, target, "", "")
+		testutil.RequireStatus(t, rr, http.StatusNoContent)
 	}
 }
 

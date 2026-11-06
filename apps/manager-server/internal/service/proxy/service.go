@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -1639,9 +1640,10 @@ func IsCPAV8APIKeysConfigPath(path string) bool {
 	return path == cpaV8APIKeysConfigPath || strings.HasPrefix(path, cpaV8APIKeysConfigPath+"/")
 }
 
-// isCanonicalRequestPath rejects percent-encoded or dot-segment paths. ServeMux
-// does not clean escaped dot segments, so a prefix check alone would let
-// /api-keys/%2e%2e/... resolve to another route upstream.
+// isCanonicalRequestPath rejects percent-encoded, dot-segment and duplicate-slash
+// paths. ServeMux does not clean escaped dot segments and redirects the rest, so
+// a prefix check alone would let /api-keys/%2e%2e/... resolve to another upstream
+// route.
 func isCanonicalRequestPath(u *url.URL) bool {
 	if u == nil {
 		return false
@@ -1649,12 +1651,56 @@ func isCanonicalRequestPath(u *url.URL) bool {
 	if u.RawPath != "" || u.EscapedPath() != u.Path {
 		return false
 	}
-	for _, segment := range strings.Split(u.Path, "/") {
+	segments := strings.Split(u.Path, "/")
+	for index, segment := range segments {
+		if segment == "" {
+			// The split always yields an empty first segment for an absolute path,
+			// and a trailing slash yields an empty last one; anything in between is
+			// a duplicate slash ServeMux would collapse.
+			if index == 0 || (index == len(segments)-1 && len(segments) > 1) {
+				continue
+			}
+			return false
+		}
 		if segment == "." || segment == ".." {
 			return false
 		}
 	}
 	return true
+}
+
+// IsCanonicalV8APIKeysConfigRequest reports whether r is the one shape of the v8
+// API-key subtree this proxy forwards.
+func IsCanonicalV8APIKeysConfigRequest(r *http.Request) bool {
+	return r != nil && r.URL != nil && IsCPAV8APIKeysConfigPath(r.URL.Path) && isCanonicalRequestPath(r.URL)
+}
+
+// IsNonCanonicalV8APIKeysConfigRequest reports whether r is a request for the v8
+// API-key subtree that must be refused before ServeMux rewrites it. ServeMux
+// answers a dirty path with a 301 onto the cleaned one, so a client that follows
+// the redirect — still holding its admin header — would turn a refused shape into
+// an admitted read. Both the raw path and the path ServeMux would clean it into
+// are checked, because a duplicate slash in the leading segments no longer
+// starts with the subtree prefix.
+func IsNonCanonicalV8APIKeysConfigRequest(r *http.Request) bool {
+	if r == nil || r.URL == nil || isCanonicalRequestPath(r.URL) {
+		return false
+	}
+	if IsCPAV8APIKeysConfigPath(r.URL.Path) {
+		return true
+	}
+	cleaned := cleanRequestPath(r.URL.Path)
+	return IsCPAV8APIKeysConfigPath(cleaned) || IsCPAV8APIKeysConfigPath(strings.TrimSuffix(cleaned, "/"))
+}
+
+// cleanRequestPath mirrors the cleaning http.ServeMux performs before dispatch:
+// duplicate slashes collapse, dot segments resolve, and a trailing slash survives.
+func cleanRequestPath(requestPath string) string {
+	cleaned := path.Clean("/" + requestPath)
+	if strings.HasSuffix(requestPath, "/") && cleaned != "/" {
+		cleaned += "/"
+	}
+	return cleaned
 }
 
 func (s *Service) resolveSetup(ctx context.Context) (store.Setup, bool, error) {

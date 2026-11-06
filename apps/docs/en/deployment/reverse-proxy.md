@@ -29,10 +29,11 @@ For most deployments, use separate domains or subdomains for CPAMP and CPA. Read
 | `/v0/management/*`                           | CPAMP `:18317`      | CPAMP handles usage, model-prices, aliases, dashboard, monitoring, and codex-inspection first; other management APIs are then proxied by CPAMP to CPA. |
 | `/v0/resource/plugins/*`                     | CPAMP `:18317`      | Plugin page resources used by the CPAMP panel. CPAMP proxies them to CPA when needed.                                                                  |
 | `/v8/management/config/api-keys[/*]`         | CPAMP `:18317`      | Read-only CPA v8 provider key groups, including group names and `auth_index`. CPAMP forwards `GET` only, accepts the CPAMP admin key only, and uses the saved CPA Management Key; other `/v8/management/*` paths are not forwarded. |
+| `/v8/management/*` (everything else)         | Refused (404)       | Both CPAMP and the public Ingress refuse these; a reverse proxy must answer 404 explicitly instead of falling through to CPA, which would bypass CPAMP admin authorization. |
 | `/models`                                    | CPAMP `:18317`      | Compatibility proxy to CPA after setup.                                                                                                                |
 | `/v1/*`, `/v1beta/*`, `/backend-api/codex/*` | CPA `:8317`         | Actual model API, Codex API, and provider requests.                                                                                                    |
 | OAuth callback                               | CPA `:8317`         | For example `/anthropic/callback` and `/codex/callback`.                                                                                               |
-| New paths without explicit ownership         | CPA `:8317`         | Avoid blocking future CPA endpoints.                                                                                                                   |
+| New paths without explicit ownership         | CPA `:8317`         | Avoid blocking future CPA endpoints, except `/v8/management/*` (see above).                                                                             |
 | RESP Pub/Sub / RESP pop                      | Direct CPA `:8317`  | Cannot go through an HTTP reverse proxy.                                                                                                               |
 
 In v2 this `/v8/management/config/api-keys[/*]` route is served only on the Manager Server legacy management surface (the `/management.html` panel and its reverse-proxy topology): a sandboxed plugin iframe is a cross-site fetch client and the public Ingress denies the whole `/v8/management/*` namespace, so neither can reach it.
@@ -47,6 +48,7 @@ Browser
       -> /v0/management/*       -> CPA Manager Plus :18317
       -> /v0/resource/plugins/* -> CPA Manager Plus :18317
       -> /v8/management/config/api-keys[/*] -> CPA Manager Plus :18317
+      -> /v8/management/* (rest)  -> 404 (not forwarded)
       -> /v1/*, /backend-api/*  -> CPA :8317
       -> fallback               -> CPA :8317
 ```
@@ -204,10 +206,19 @@ server {
     location ^~ /v0/resource/plugins/ { proxy_pass http://cpamp; }
 
     # Read-only CPA v8 provider key groups. CPAMP forwards GET only, accepts the CPAMP
-    # admin key only, and uses the saved CPA Management Key. Other /v8/management/* paths
-    # keep using the CPA fallback: neither CPAMP nor the public Ingress forwards them.
+    # admin key only, and uses the saved CPA Management Key.
     location = /v8/management/config/api-keys   { proxy_pass http://cpamp; }
     location ^~ /v8/management/config/api-keys/ { proxy_pass http://cpamp; }
+
+    # Every other /v8/management/* path is refused with 404:
+    # - it must not reach CPA: /v8/management/config/* accepts GET/PUT/PATCH/DELETE
+    #   there, so a direct hit would bypass CPAMP admin authorization and the public
+    #   Ingress refusal;
+    # - it must not reach CPAMP either, because CPAMP does not forward it.
+    # Nginx prefers the exact match first and then the longest ^~ prefix, so the two
+    # allowed locations above still win.
+    location = /v8/management  { return 404; }
+    location ^~ /v8/management/ { return 404; }
 
     # /models is provided through CPAMP's compatibility proxy
     # If CPAMP has not completed setup yet, this path may return 412
@@ -445,6 +456,8 @@ location / {
 ```
 
 This ensures future CPA endpoints are not blocked just because they do not have explicit Nginx location rules yet.
+
+`/v8/management/*` is the one exception: it must stay outside the fallback (everything there is a 404 except `/v8/management/config/api-keys[/*]`, which goes to CPAMP), or CPA's v8 management writes would be exposed directly.
 
 ### Plugin pages are blank or plugin resources return 404
 

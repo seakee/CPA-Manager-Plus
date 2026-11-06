@@ -51,9 +51,12 @@ func TestIsCanonicalRequestPath(t *testing.T) {
 		want   bool
 	}{
 		{target: "/v8/management/config/api-keys", want: true},
+		{target: "/v8/management/config/api-keys/", want: true},
 		{target: "/v8/management/config/api-keys/claude?format=json", want: true},
 		{target: "/v8/management/config/api-keys/../credentials", want: false},
 		{target: "/v8/management/config/api-keys/./claude", want: false},
+		{target: "/v8/management/config/api-keys//claude", want: false},
+		{target: "/v8//management/config/api-keys", want: false},
 		{target: "/v8/management/config/api-keys/%2e%2e/credentials", want: false},
 		{target: "/v8/management/config/api-keys%2F..%2Fcredentials", want: false},
 	}
@@ -66,6 +69,45 @@ func TestIsCanonicalRequestPath(t *testing.T) {
 	var nilURL *url.URL
 	if isCanonicalRequestPath(nilURL) {
 		t.Fatal("a nil URL must not be treated as canonical")
+	}
+}
+
+// TestV8APIKeysConfigRequestPredicates pins the pair the router and the External
+// cutover share: which requests are the one forwarded shape, and which dirty
+// shapes must be refused before ServeMux can redirect them onto it.
+func TestV8APIKeysConfigRequestPredicates(t *testing.T) {
+	tests := []struct {
+		target    string
+		canonical bool
+		refused   bool
+	}{
+		{target: "/v8/management/config/api-keys", canonical: true},
+		{target: "/v8/management/config/api-keys/", canonical: true},
+		{target: "/v8/management/config/api-keys/claude?format=json", canonical: true},
+		// Canonical paths outside the subtree are not dirty: the router's ordinary
+		// 404 answers them, not the pre-mux guard.
+		{target: "/v8/management/config/api-keys-x"},
+		{target: "/v8/management/config/access/api-keys"},
+		{target: "/v8/management/config/api-keys//claude", refused: true},
+		{target: "/v8/management/config/api-keys/./claude", refused: true},
+		{target: "/v8/management/config/api-keys/../credentials", refused: true},
+		{target: "/v8//management/config/api-keys", refused: true},
+		{target: "//v8/management/config/api-keys", refused: true},
+		{target: "/v8/management/config/api-keys/%2e%2e/credentials", refused: true},
+		{target: "/v8/management/config/api-keys%2F..%2Fcredentials", refused: true},
+		// Outside the subtree: the guard stays silent and the router's ordinary
+		// ServeMux behaviour is untouched.
+		{target: "/v1/chat/completions"},
+		{target: "/v8/management//credentials"},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(http.MethodGet, test.target, nil)
+		if got := IsCanonicalV8APIKeysConfigRequest(request); got != test.canonical {
+			t.Fatalf("IsCanonicalV8APIKeysConfigRequest(%q) = %v, want %v", test.target, got, test.canonical)
+		}
+		if got := IsNonCanonicalV8APIKeysConfigRequest(request); got != test.refused {
+			t.Fatalf("IsNonCanonicalV8APIKeysConfigRequest(%q) = %v, want %v", test.target, got, test.refused)
+		}
 	}
 }
 
@@ -113,9 +155,11 @@ func TestProxyV8APIKeysConfigForwardsOnlyAdminReads(t *testing.T) {
 		{name: "patch", method: http.MethodPatch, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
 		{name: "delete", method: http.MethodDelete, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
 		{name: "head", method: http.MethodHead, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
+		{name: "options", method: http.MethodOptions, target: "/v8/management/config/api-keys", want: http.StatusMethodNotAllowed},
 		{name: "config root", method: http.MethodGet, target: "/v8/management/config", want: http.StatusNotFound},
 		{name: "client keys", method: http.MethodGet, target: "/v8/management/config/access/api-keys", want: http.StatusNotFound},
 		{name: "sibling", method: http.MethodGet, target: "/v8/management/config/api-keys-x", want: http.StatusNotFound},
+		{name: "duplicate slash", method: http.MethodGet, target: "/v8/management/config/api-keys//claude", want: http.StatusNotFound},
 		{name: "dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/../config", want: http.StatusNotFound},
 		{name: "encoded dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys/%2e%2e/config", want: http.StatusNotFound},
 		{name: "encoded slash dot segments", method: http.MethodGet, target: "/v8/management/config/api-keys%2F..%2Fconfig", want: http.StatusNotFound},
