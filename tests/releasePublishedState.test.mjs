@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -384,11 +384,12 @@ const makeV2ReleaseFixture = () => {
   const nativeDirectory = path.join(directory, 'native');
   mkdirSync(nativeDirectory);
   const info = generateReleaseInfo(v2Tag, v2SourceCommit, v2Notes(), {
+    dryRun: true,
     allowV2Beta: true,
     pairing: v2PairingRecord(),
   });
   writeFileSync(path.join(directory, 'release-info.json'), JSON.stringify(info, null, 2));
-  for (const name of expectedReleaseAssetNames(v2Tag, { allowV2Beta: true })) {
+  for (const name of expectedReleaseAssetNames(v2Tag, { dryRun: true, allowV2Beta: true })) {
     if (name === 'release-info.json') continue;
     const assetPath = [
       'management.html',
@@ -423,10 +424,11 @@ const v2Release = ({ assets, overrides = {} }) => ({
 describe('v2 beta published release verification', () => {
   it('accepts the exact v2 asset set published as a GitHub Prerelease', () => {
     const assets = buildExpectedReleaseAssets(makeV2ReleaseFixture(), v2Tag, {
+      dryRun: true,
       allowV2Beta: true,
     });
     expect(assets.map(({ name }) => name)).toEqual(
-      expectedReleaseAssetNames(v2Tag, { allowV2Beta: true })
+      expectedReleaseAssetNames(v2Tag, { dryRun: true, allowV2Beta: true })
     );
     expect(assets).toHaveLength(6);
     expect(assets.map(({ name }) => name)).toContain('docker-compose.v2-embedded.yml');
@@ -449,6 +451,7 @@ describe('v2 beta published release verification', () => {
         prerelease: true,
         body: '# v2 Beta\n',
         assets,
+        dryRun: true,
         allowV2Beta: true,
       })
     ).toEqual({
@@ -462,6 +465,7 @@ describe('v2 beta published release verification', () => {
 
   it('requires a Prerelease that never becomes GitHub Latest', () => {
     const assets = buildExpectedReleaseAssets(makeV2ReleaseFixture(), v2Tag, {
+      dryRun: true,
       allowV2Beta: true,
     });
     const verify = (release, prerelease) =>
@@ -471,6 +475,7 @@ describe('v2 beta published release verification', () => {
         prerelease,
         body: '# v2 Beta\n',
         assets,
+        dryRun: true,
         allowV2Beta: true,
       });
     expect(() => verify(v2Release({ assets, overrides: { prerelease: false } }), false)).toThrow(
@@ -484,27 +489,27 @@ describe('v2 beta published release verification', () => {
   it('rejects stable-version.txt and 1.x or cross-platform native packages', () => {
     const directory = makeV2ReleaseFixture();
     writeFileSync(path.join(directory, 'stable-version.txt'), 'v1.14.10\n');
-    expect(() => buildExpectedReleaseAssets(directory, v2Tag, { allowV2Beta: true })).toThrow(
-      /unexpected assets: stable-version.txt/
-    );
+    expect(() =>
+      buildExpectedReleaseAssets(directory, v2Tag, { dryRun: true, allowV2Beta: true })
+    ).toThrow(/unexpected assets: stable-version.txt/);
 
     const legacy = makeV2ReleaseFixture();
     writeFileSync(
       path.join(legacy, 'native', `cpa-manager-plus_${v2Tag}_darwin_arm64.tar.gz`),
       'x\n'
     );
-    expect(() => buildExpectedReleaseAssets(legacy, v2Tag, { allowV2Beta: true })).toThrow(
-      /unexpected assets/
-    );
+    expect(() =>
+      buildExpectedReleaseAssets(legacy, v2Tag, { dryRun: true, allowV2Beta: true })
+    ).toThrow(/unexpected assets/);
 
     const crossPlatform = makeV2ReleaseFixture();
     writeFileSync(
       path.join(crossPlatform, 'native', `cpa-manager-plus-native-v2_${v2Tag}_linux_arm64.tar.gz`),
       'x\n'
     );
-    expect(() => buildExpectedReleaseAssets(crossPlatform, v2Tag, { allowV2Beta: true })).toThrow(
-      /unexpected assets/
-    );
+    expect(() =>
+      buildExpectedReleaseAssets(crossPlatform, v2Tag, { dryRun: true, allowV2Beta: true })
+    ).toThrow(/unexpected assets/);
   });
 
   it('rejects a schema_version 1 release-info.json inside the v2 asset set', () => {
@@ -531,9 +536,9 @@ describe('v2 beta published release verification', () => {
         )
       )
     );
-    expect(() => buildExpectedReleaseAssets(directory, v2Tag, { allowV2Beta: true })).toThrow(
-      /schema_version 2/
-    );
+    expect(() =>
+      buildExpectedReleaseAssets(directory, v2Tag, { dryRun: true, allowV2Beta: true })
+    ).toThrow(/schema_version 2/);
   });
 
   it('requires management.html and the embedded compose asset', () => {
@@ -544,18 +549,18 @@ describe('v2 beta published release verification', () => {
     ]) {
       const directory = makeV2ReleaseFixture();
       rmSync(path.join(directory, missing));
-      expect(() => buildExpectedReleaseAssets(directory, v2Tag, { allowV2Beta: true })).toThrow(
-        new RegExp(`Missing expected v2 release asset: ${missing.replaceAll('.', '\\.')}`)
-      );
+      expect(() =>
+        buildExpectedReleaseAssets(directory, v2Tag, { dryRun: true, allowV2Beta: true })
+      ).toThrow(new RegExp(`Missing expected v2 release asset: ${missing.replaceAll('.', '\\.')}`));
     }
   });
 
   it('rejects a tampered compose file or pairing record', () => {
     const composeDir = makeV2ReleaseFixture();
     writeFileSync(path.join(composeDir, 'docker-compose.v2-embedded.yml'), 'services: {}\n');
-    expect(() => buildExpectedReleaseAssets(composeDir, v2Tag, { allowV2Beta: true })).toThrow(
-      /compose asset digest does not match release info/
-    );
+    expect(() =>
+      buildExpectedReleaseAssets(composeDir, v2Tag, { dryRun: true, allowV2Beta: true })
+    ).toThrow(/compose asset digest does not match release info/);
 
     const pairingDir = makeV2ReleaseFixture();
     const tamperedPairing = v2PairingRecord();
@@ -564,9 +569,9 @@ describe('v2 beta published release verification', () => {
       path.join(pairingDir, 'embedded-release-pairing.json'),
       JSON.stringify(tamperedPairing)
     );
-    expect(() => buildExpectedReleaseAssets(pairingDir, v2Tag, { allowV2Beta: true })).toThrow(
-      /Full Web digest does not match release info/
-    );
+    expect(() =>
+      buildExpectedReleaseAssets(pairingDir, v2Tag, { dryRun: true, allowV2Beta: true })
+    ).toThrow(/Full Web digest does not match release info/);
 
     const imageDir = makeV2ReleaseFixture();
     const renamedImage = v2PairingRecord();
@@ -575,28 +580,33 @@ describe('v2 beta published release verification', () => {
       path.join(imageDir, 'embedded-release-pairing.json'),
       JSON.stringify(renamedImage)
     );
-    expect(() => buildExpectedReleaseAssets(imageDir, v2Tag, { allowV2Beta: true })).toThrow(
-      /manager digest does not match release info/
-    );
+    expect(() =>
+      buildExpectedReleaseAssets(imageDir, v2Tag, { dryRun: true, allowV2Beta: true })
+    ).toThrow(/manager digest does not match release info/);
   });
 
   it('ignores release-notes.md like 1.x but rejects unexpected subdirectories', () => {
     const directory = makeV2ReleaseFixture();
     writeFileSync(path.join(directory, 'release-notes.md'), '# reviewed notes\n');
     expect(
-      buildExpectedReleaseAssets(directory, v2Tag, { allowV2Beta: true }).map(({ name }) => name)
-    ).toEqual(expectedReleaseAssetNames(v2Tag, { allowV2Beta: true }));
+      buildExpectedReleaseAssets(directory, v2Tag, { dryRun: true, allowV2Beta: true }).map(
+        ({ name }) => name
+      )
+    ).toEqual(expectedReleaseAssetNames(v2Tag, { dryRun: true, allowV2Beta: true }));
 
     const nested = makeV2ReleaseFixture();
     mkdirSync(path.join(nested, 'extra'));
-    expect(() => buildExpectedReleaseAssets(nested, v2Tag, { allowV2Beta: true })).toThrow(
-      /Unexpected v2 release asset directory: extra/
-    );
+    expect(() =>
+      buildExpectedReleaseAssets(nested, v2Tag, { dryRun: true, allowV2Beta: true })
+    ).toThrow(/Unexpected v2 release asset directory: extra/);
   });
 
   it('requires DRY_RUN and --allow-v2-beta together on the verification CLI', () => {
     const directory = makeV2ReleaseFixture();
-    const assets = buildExpectedReleaseAssets(directory, v2Tag, { allowV2Beta: true });
+    const assets = buildExpectedReleaseAssets(directory, v2Tag, {
+      dryRun: true,
+      allowV2Beta: true,
+    });
     const releaseJson = path.join(directory, 'github-release.json');
     writeFileSync(releaseJson, JSON.stringify(v2Release({ assets })));
     const bodyPath = path.join(directory, 'body.md');
@@ -633,5 +643,143 @@ describe('v2 beta published release verification', () => {
       { env, stdio: 'pipe' }
     ).toString();
     expect(stdout).toContain('6/6');
+  });
+
+  it('never reports an incomplete or mutated v2 asset set as complete', () => {
+    const assets = buildExpectedReleaseAssets(makeV2ReleaseFixture(), v2Tag, {
+      dryRun: true,
+      allowV2Beta: true,
+    });
+    const base = {
+      tag: v2Tag,
+      prerelease: true,
+      body: '# v2 Beta\n',
+      dryRun: true,
+      allowV2Beta: true,
+    };
+    expect(verifyPublishedRelease({ ...base, release: v2Release({ assets }), assets })).toEqual({
+      expectedAssets: 6,
+      publishedAssets: 6,
+      missingAssets: [],
+      complete: true,
+      immutable: true,
+    });
+    const native = assets.find(({ name }) => name.includes('_linux_amd64'));
+    const extra = { name: 'stable-version.txt', size: 3, digest: `sha256:${'a'.repeat(64)}` };
+    const cases = [
+      { expected: [], published: [], error: /asset set mismatch/ },
+      {
+        expected: assets.filter(({ name }) => name !== 'docker-compose.v2-embedded.yml'),
+        published: assets.filter(({ name }) => name !== 'docker-compose.v2-embedded.yml'),
+        error: /asset set mismatch/,
+      },
+      {
+        expected: assets,
+        published: assets.filter(({ name }) => name !== 'management.html'),
+        error: /asset set mismatch/,
+      },
+      { expected: [...assets, native], published: [...assets, native], error: /duplicate/i },
+      { expected: [...assets, extra], published: [...assets, extra], error: /stable-version\.txt/ },
+    ];
+    for (const { expected, published, error } of cases)
+      expect(() =>
+        verifyPublishedRelease({
+          ...base,
+          release: v2Release({ assets: published }),
+          assets: expected,
+        })
+      ).toThrow(error);
+  });
+
+  it('rejects the missing-asset relaxation for v2 releases and drafts', () => {
+    const assets = buildExpectedReleaseAssets(makeV2ReleaseFixture(), v2Tag, {
+      dryRun: true,
+      allowV2Beta: true,
+    });
+    const partial = assets.filter(({ name }) => name !== 'management.html');
+    const common = {
+      tag: v2Tag,
+      prerelease: true,
+      body: '# v2 Beta\n',
+      assets,
+      allowMissingAssets: true,
+      allowV2Beta: true,
+      dryRun: true,
+    };
+    expect(() =>
+      verifyPublishedRelease({
+        ...common,
+        release: v2Release({ assets: partial, overrides: { immutable: false } }),
+      })
+    ).toThrow(/does not allow missing assets/);
+    expect(() =>
+      verifyDraftRelease({
+        ...common,
+        release: v2Release({
+          assets: partial,
+          overrides: { draft: true, published_at: null, immutable: false },
+        }),
+      })
+    ).toThrow(/does not allow missing assets/);
+  });
+
+  it('limits the v2 dry-run side effect to the local --result-path report', () => {
+    const assetsDir = makeV2ReleaseFixture();
+    const metadataDir = mkdtempSync(path.join(tmpdir(), 'cpamp-v2-cli-'));
+    temporaryDirectories.push(metadataDir);
+    const assets = buildExpectedReleaseAssets(assetsDir, v2Tag, {
+      dryRun: true,
+      allowV2Beta: true,
+    });
+    const releaseJson = path.join(metadataDir, 'github-release.json');
+    writeFileSync(releaseJson, JSON.stringify(v2Release({ assets })));
+    const bodyPath = path.join(metadataDir, 'body.md');
+    writeFileSync(bodyPath, '# v2 Beta\n');
+    const resultPath = path.join(metadataDir, 'result.json');
+    const script = fileURLToPath(
+      new URL('../bin/release/verify-published-release.mjs', import.meta.url)
+    );
+    const env = { ...process.env };
+    delete env.DRY_RUN;
+    const args = [
+      script,
+      '--tag',
+      v2Tag,
+      '--release-json',
+      releaseJson,
+      '--body-path',
+      bodyPath,
+      '--prerelease',
+      'true',
+      '--mode',
+      'artifact',
+      '--assets-dir',
+      assetsDir,
+      '--allow-v2-beta',
+      'true',
+      '--dry-run',
+      'true',
+    ];
+
+    // The only write is the local diagnostic report; no remote call exists in
+    // this verifier, and the report is explicitly part of the dry-run contract.
+    const stdout = execFileSync(process.execPath, [...args, '--result-path', resultPath], {
+      env,
+      stdio: 'pipe',
+    }).toString();
+    expect(stdout).toContain('6/6');
+    expect(JSON.parse(readFileSync(resultPath, 'utf8'))).toMatchObject({
+      expectedAssets: 6,
+      publishedAssets: 6,
+      complete: true,
+    });
+
+    // The 1.x resume relaxation is never a v2 authorization.
+    expect(() =>
+      execFileSync(process.execPath, [...args, '--allow-missing-assets', 'true'], {
+        env,
+        stdio: 'pipe',
+      })
+    ).toThrow(/does not allow missing assets/);
   });
 });

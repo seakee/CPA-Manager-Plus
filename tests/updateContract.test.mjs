@@ -17,8 +17,15 @@ import {
   validateInfo,
   v2ImageRepositories,
   v2NativeArchiveName,
+  validateV2Pairing,
 } from '../bin/release/update-contract.mjs';
 import { generateReleaseInfo } from '../bin/release/generate-release-info.mjs';
+import {
+  buildExpectedReleaseAssets,
+  verifyDraftRelease,
+  verifyPublishedRelease,
+  verifyPublishedReleaseMetadata,
+} from '../bin/release/verify-published-release.mjs';
 import { resolveAliases, verifyCandidate } from '../bin/release/publish-update-index.mjs';
 const corpus = JSON.parse(
   readFileSync(new URL('./fixtures/update-versions.json', import.meta.url), 'utf8')
@@ -207,6 +214,7 @@ const v2Notes = () =>
   '\n-->';
 const makeV2Info = () =>
   generateReleaseInfo(v2Tag, v2SourceCommit, v2Notes(), {
+    dryRun: true,
     allowV2Beta: true,
     pairing: v2Pairing(),
   });
@@ -223,6 +231,75 @@ describe('v2 beta release contract', () => {
     ).toThrow(/v2 Embedded/);
     expect(assertSupportedVersion(v2Tag, { allowV2Beta: true }).stage).toBe('beta');
     expect(assertSupportedVersion('v1.14.10').core[0]).toBe('1');
+  });
+
+  it('requires dryRun and the beta opt-in at every exported v2 entry, before IO', () => {
+    // Producer: neither flag alone may produce a v2 record, and notes are not
+    // parsed until both are present.
+    for (const options of [{}, { allowV2Beta: true }, { dryRun: true }])
+      expect(() => generateReleaseInfo(v2Tag, v2SourceCommit, 'not notes', options)).toThrow(
+        /DRY_RUN opt-in/
+      );
+    expect(() =>
+      generateReleaseInfo(v2Tag, v2SourceCommit, v2Notes(), {
+        allowV2Beta: 'true',
+        dryRun: true,
+      })
+    ).toThrow(/allowV2Beta must be a boolean/);
+    expect(() =>
+      generateReleaseInfo('v2.0.0', v2SourceCommit, v2Notes(), {
+        allowV2Beta: true,
+        dryRun: true,
+      })
+    ).toThrow(/only v2.x.y-beta.N is enabled/);
+
+    // Asset builder: the gate rejects before the first readFileSync. A directory
+    // containing invalid JSON proves the file was never parsed.
+    const directory = mkdtempSync(path.join(tmpdir(), 'cpamp-v2-gate-'));
+    try {
+      writeFileSync(path.join(directory, 'release-info.json'), '{not json');
+      for (const options of [{}, { allowV2Beta: true }, { dryRun: true }])
+        expect(() => buildExpectedReleaseAssets(directory, v2Tag, options)).toThrow(
+          /DRY_RUN opt-in/
+        );
+      expect(() =>
+        buildExpectedReleaseAssets(directory, v2Tag, {
+          allowV2Beta: true,
+          dryRun: 'true',
+        })
+      ).toThrow(/dryRun must be a boolean/);
+      expect(() =>
+        buildExpectedReleaseAssets('/nonexistent-v2-assets', v2Tag, { allowV2Beta: true })
+      ).toThrow(/DRY_RUN opt-in/);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+
+    // Published/draft/metadata verifiers: same boundary, same fail-closed path
+    // even with a well-formed release object.
+    const release = {
+      tag_name: v2Tag,
+      draft: false,
+      prerelease: true,
+      immutable: true,
+      published_at: '2026-11-06T00:00:00Z',
+      body: '# v2 Beta\n',
+      assets: [],
+    };
+    const base = { release, tag: v2Tag, prerelease: true, body: '# v2 Beta\n' };
+    expect(() => verifyPublishedRelease({ ...base, assets: [] })).toThrow(/DRY_RUN opt-in/);
+    expect(() => verifyDraftRelease({ ...base, assets: [] })).toThrow(/DRY_RUN opt-in/);
+    expect(() => verifyPublishedReleaseMetadata(base)).toThrow(/DRY_RUN opt-in/);
+    expect(() => verifyPublishedRelease({ ...base, assets: [], allowV2Beta: true })).toThrow(
+      /DRY_RUN opt-in/
+    );
+    expect(() => verifyPublishedRelease({ ...base, assets: [], dryRun: true })).toThrow(
+      /DRY_RUN opt-in/
+    );
+    // With both flags the exact six-asset invariant still rejects empty input.
+    expect(() =>
+      verifyPublishedRelease({ ...base, assets: [], allowV2Beta: true, dryRun: true })
+    ).toThrow(/asset set mismatch/);
   });
 
   it('builds a schema 2 beta record bound to the pairing manifest', () => {
@@ -372,6 +449,7 @@ describe('v2 beta release contract', () => {
     pairing.images.runtime.manifest_digest = pairing.images.manager.manifest_digest;
     expect(() =>
       generateReleaseInfo(v2Tag, v2SourceCommit, v2Notes(), {
+        dryRun: true,
         allowV2Beta: true,
         pairing,
       })
@@ -389,7 +467,7 @@ describe('v2 beta release contract', () => {
         v2Tag,
         v2SourceCommit,
         withoutField((metadata) => delete metadata.update.minimum_direct_upgrade_version),
-        { allowV2Beta: true, pairing: v2Pairing() }
+        { dryRun: true, allowV2Beta: true, pairing: v2Pairing() }
       )
     ).toThrow(/must declare minimum_direct_upgrade_version/);
     expect(() =>
@@ -397,64 +475,91 @@ describe('v2 beta release contract', () => {
         v2Tag,
         v2SourceCommit,
         withoutField((metadata) => delete metadata.compatibility.minimum_cpa_version),
-        { allowV2Beta: true, pairing: v2Pairing() }
+        { dryRun: true, allowV2Beta: true, pairing: v2Pairing() }
       )
     ).toThrow(/must declare minimum_cpa_version/);
   });
 
-  it('keeps the shared consumer fixture identical to the producer output', () => {
+  it('regenerates the shared consumer fixture from independent golden inputs', () => {
+    // Independent inputs: the pairing and compose bytes were produced by the
+    // real Embedded renderer from the candidate evidence (PR-1), and the notes
+    // file is a fixed reviewed input. None of them is derived from the fixture.
+    const fixtureRoot = new URL('./fixtures/', import.meta.url);
     const fixtureInfo = JSON.parse(
-      readFileSync(new URL('./fixtures/release-v2.0.0-beta.1-info.json', import.meta.url), 'utf8')
+      readFileSync(new URL('release-v2.0.0-beta.1-info.json', fixtureRoot), 'utf8')
     );
-    const canonical = v2Pairing();
-    const pairing = {
-      schema_version: 1,
-      version: fixtureInfo.release.version,
-      source_commit: fixtureInfo.release.source_commit,
-      platform: 'linux/amd64',
-      cpa: canonical.cpa,
-      fullweb: { manifest_sha256: fixtureInfo.pairing.fullweb_manifest_sha256 },
-      api_contract: { sha256: fixtureInfo.pairing.api_contract_sha256 },
-      compose: {
-        filename: fixtureInfo.distribution.compose.filename,
-        sha256: fixtureInfo.distribution.compose.sha256,
-      },
-      images: Object.fromEntries(
-        Object.entries(v2ImageRepositories).map(([role, name]) => [
-          role,
-          {
-            repository: `seakee/${name}`,
-            tag: fixtureInfo.release.version,
-            manifest_digest: fixtureInfo.distribution.docker.images.find(
-              (image) => image.role === role
-            ).digest,
-            image_config_digest: canonical.images[role].image_config_digest,
-            release_provenance_sha256: canonical.images[role].release_provenance_sha256,
-          },
-        ])
-      ),
-    };
-    const fixtureNotes =
-      '<!-- cpamp-update\n' +
-      JSON.stringify({
-        summary: fixtureInfo.content.summary,
-        update: {
-          breaking: fixtureInfo.update.breaking,
-          migration_required: fixtureInfo.update.migration_required,
-          minimum_direct_upgrade_version: fixtureInfo.update.minimum_direct_upgrade_version,
-          upgrade_guide_url: fixtureInfo.update.upgrade_guide_url,
-        },
-        compatibility: { minimum_cpa_version: fixtureInfo.compatibility.minimum_cpa_version },
-      }) +
-      '\n-->';
-    expect(
-      generateReleaseInfo(
-        fixtureInfo.release.version,
-        fixtureInfo.release.source_commit,
-        fixtureNotes,
-        { allowV2Beta: true, pairing }
-      )
-    ).toEqual(fixtureInfo);
+    const pairingPath = fileURLToPath(new URL('v2-beta-pairing.json', fixtureRoot));
+    const pairing = JSON.parse(readFileSync(pairingPath, 'utf8'));
+    const composeBytes = readFileSync(new URL('v2-beta-compose.yml', fixtureRoot));
+    expect(`sha256:${createHash('sha256').update(composeBytes).digest('hex')}`).toBe(
+      pairing.compose.sha256
+    );
+
+    const notes = readFileSync(new URL('v2-beta-notes-zh.md', fixtureRoot), 'utf8');
+    const producer = fileURLToPath(
+      new URL('../bin/release/generate-release-info.mjs', import.meta.url)
+    );
+    const workdir = mkdtempSync(path.join(tmpdir(), 'cpamp-v2-fixture-'));
+    try {
+      mkdirSync(path.join(workdir, 'docs', 'release-notes'), { recursive: true });
+      writeFileSync(
+        path.join(workdir, 'docs', 'release-notes', `${fixtureInfo.release.version}-zh.md`),
+        notes
+      );
+      const generate = (output, pairingFile = pairingPath) => {
+        execFileSync(
+          process.execPath,
+          [
+            producer,
+            fixtureInfo.release.version,
+            output,
+            fixtureInfo.release.source_commit,
+            '--dry-run',
+            '--allow-v2-beta',
+            '--pairing',
+            pairingFile,
+          ],
+          { cwd: workdir, stdio: 'pipe' }
+        );
+        return JSON.parse(readFileSync(output, 'utf8'));
+      };
+
+      // The real producer CLI, driven only by the golden inputs, must reproduce
+      // the shared consumer fixture exactly.
+      expect(generate(path.join(workdir, 'release-info.json'))).toEqual(fixtureInfo);
+
+      // Single-field tampering must surface as drift, not silently pass.
+      const tamperedCompose = structuredClone(pairing);
+      tamperedCompose.compose.sha256 = sha256Of('tampered-compose');
+      const composePath = path.join(workdir, 'tampered-compose-pairing.json');
+      writeFileSync(composePath, JSON.stringify(tamperedCompose));
+      const driftedCompose = generate(path.join(workdir, 'drifted-compose.json'), composePath);
+      expect(driftedCompose.distribution.compose.sha256).toBe(sha256Of('tampered-compose'));
+      expect(driftedCompose).not.toEqual(fixtureInfo);
+
+      const tamperedImage = structuredClone(pairing);
+      tamperedImage.images.runtime.manifest_digest = sha256Of('tampered-runtime');
+      const imagePath = path.join(workdir, 'tampered-image-pairing.json');
+      writeFileSync(imagePath, JSON.stringify(tamperedImage));
+      const driftedImage = generate(path.join(workdir, 'drifted-image.json'), imagePath);
+      expect(
+        driftedImage.distribution.docker.images
+          .filter((image) => image.role === 'runtime')
+          .map((image) => image.digest)
+      ).toEqual([sha256Of('tampered-runtime'), sha256Of('tampered-runtime')]);
+      expect(driftedImage).not.toEqual(fixtureInfo);
+
+      // The CLI is itself fail-closed on a pairing that does not bind the commit.
+      const wrongCommit = structuredClone(pairing);
+      wrongCommit.source_commit = 'b'.repeat(40);
+      const commitPath = path.join(workdir, 'wrong-commit-pairing.json');
+      writeFileSync(commitPath, JSON.stringify(wrongCommit));
+      expect(() => generate(path.join(workdir, 'wrong-commit.json'), commitPath)).toThrow(
+        /source commit mismatch/
+      );
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+    }
   });
 
   it('shares the consumer fixture and keeps v2 Beta out of stable, rc and aliases', () => {
@@ -502,5 +607,53 @@ describe('v2 beta release contract', () => {
     expect(() => validateIndex({ ...index, schema_version: 2 }, { allowV2Beta: true })).toThrow(
       /Invalid update index/
     );
+  });
+
+  it('only accepts v2.x.y-beta.N as the beta channel target', () => {
+    const channels = {
+      stable: { version: 'v1.14.11' },
+      rc: { version: 'v1.14.11' },
+      beta: { version: v2Tag, schema_version: 2 },
+    };
+    const index = { schema_version: 1, revision: 3, channels };
+    expect(validateIndex(index, { allowV2Beta: true })).toBe(index);
+    for (const version of ['v2.0.0', 'v2.0.0-rc.1', 'v2.0.0-BETA.1', 'v2.0.0-beta.1+build']) {
+      expect(() =>
+        validateIndex(
+          { ...index, channels: { ...channels, beta: { version, schema_version: 2 } } },
+          { allowV2Beta: true }
+        )
+      ).toThrow(
+        /v2 beta channel target must be a beta prerelease|Invalid update index target|only v2.x.y-beta.N is enabled/
+      );
+    }
+    // A truthy string is not an opt-in.
+    expect(() => validateIndex(index, { allowV2Beta: 'true' })).toThrow(/must be a boolean/);
+  });
+
+  it('pins every pairing image to the approved registries', () => {
+    const valid = v2Pairing();
+    const expectValid = (pairing) =>
+      expect(validateV2Pairing(pairing, { tag: v2Tag, sourceCommit: v2SourceCommit })).toBe(
+        pairing
+      );
+    expectValid(valid);
+    const ghcr = structuredClone(valid);
+    ghcr.images.manager.repository = 'ghcr.io/seakee/cpa-manager-plus';
+    expectValid(ghcr);
+    for (const repository of [
+      'untrusted.example/cpa-manager-plus',
+      'seakee/extra/cpa-manager-plus',
+      'docker.io/seakee/cpa-manager-plus',
+      'cpa-manager-plus',
+      'ghcr.io/other/cpa-manager-plus',
+      'seakee/cpamp-ingress',
+    ]) {
+      const tampered = structuredClone(valid);
+      tampered.images.manager.repository = repository;
+      expect(() =>
+        validateV2Pairing(tampered, { tag: v2Tag, sourceCommit: v2SourceCommit })
+      ).toThrow(/unexpected manager repository/);
+    }
   });
 });

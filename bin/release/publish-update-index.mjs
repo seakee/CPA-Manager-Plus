@@ -13,6 +13,8 @@ import {
   validateIndex,
   assertV2AssetSet,
   assertV2AssetBindings,
+  assertBooleanOption,
+  isV2Version,
   v2EmbeddedComposeFilename,
   v2PairingFilename,
   repository,
@@ -203,13 +205,22 @@ export async function publishUpdateIndex({
   candidateAssetsDir,
   candidateInfoPath,
 } = {}) {
-  const v2BetaOptIn = Boolean(allowV2Beta && dryRun);
-  // Gate M3: v2 channel work is a rehearsal only; the real path stays fail-closed.
+  // Explicit booleans only: a truthy string such as 'false' never authorizes.
+  const dryRunValue = assertBooleanOption({ dryRun }, 'dryRun');
+  const allowV2BetaValue = assertBooleanOption({ allowV2Beta }, 'allowV2Beta');
+  const v2BetaOptIn = allowV2BetaValue === true && dryRunValue === true;
+  const v2Intent =
+    allowV2BetaValue === true ||
+    candidateAssetsDir !== undefined ||
+    candidateInfoPath !== undefined;
+  // Gate M3: fail closed before any file read or network request. A plain 1.x
+  // enumeration carries no v2 intent, so a remote v2 Beta is skipped in the
+  // release loop instead of breaking the 1.x maintenance job.
+  if (v2Intent && !v2BetaOptIn)
+    throw new Error(
+      'Unqualified v2 Embedded release: v2 rehearsal is fail-closed (Gate M3); the v2 beta DRY_RUN opt-in requires dryRun === true and allowV2Beta === true'
+    );
   if (candidateAssetsDir || candidateInfoPath) {
-    if (!v2BetaOptIn)
-      throw new Error(
-        'Unqualified v2 Embedded release: candidate assets require the v2 beta DRY_RUN opt-in'
-      );
     if (!candidateAssetsDir)
       throw new Error('Candidate release info requires a candidate assets directory');
     if (
@@ -217,6 +228,16 @@ export async function publishUpdateIndex({
       path.resolve(candidateInfoPath) !== path.resolve(candidateAssetsDir, 'release-info.json')
     )
       throw new Error('--candidate must match --candidate-assets-dir/release-info.json');
+  }
+  const withdraw = env.WITHDRAW_RELEASE || '',
+    restore = env.RESTORE_RELEASE || '';
+  if (withdraw && restore) throw new Error('Choose withdraw or restore');
+  for (const tag of [withdraw, restore].filter(Boolean)) {
+    parseVersion(tag);
+    if (isV2Version(tag) && !v2BetaOptIn)
+      throw new Error(
+        'Unqualified v2 Embedded release: withdrawing a v2 release requires the v2 beta DRY_RUN opt-in'
+      );
   }
   // Local files first: a tampered candidate must fail before any GitHub request.
   const candidateInfo = candidateAssetsDir ? readCandidateInfo(candidateAssetsDir) : null;
@@ -257,10 +278,6 @@ export async function publishUpdateIndex({
   const catalog = await read('release-catalog.json', {});
   const withdrawn = await read('withdrawn.json', []);
   const previousCatalog = JSON.parse(JSON.stringify(catalog));
-  const withdraw = env.WITHDRAW_RELEASE || '',
-    restore = env.RESTORE_RELEASE || '';
-  if (withdraw && restore) throw new Error('Choose withdraw or restore');
-  for (const tag of [withdraw, restore].filter(Boolean)) parseVersion(tag);
   const releases = [];
   for (let page = 1; ; page++) {
     const batch = await api('/releases?per_page=100&page=' + page);
@@ -289,10 +306,9 @@ export async function publishUpdateIndex({
     // Historical releases lacking this asset are deliberately excluded.
     const asset = release.assets.find((a) => a.name === 'release-info.json');
     if (release.draft || !asset || withdrawn.includes(tag)) continue;
-    if (parseVersion(tag).core[0] === '2' && !v2BetaOptIn)
-      throw new Error(
-        'Unqualified v2 Embedded release: v2 channel publication is fail-closed (Gate M3) outside DRY_RUN'
-      );
+    // A 1.x maintenance run must keep working while a v2 Beta exists remotely:
+    // skip it before downloading release-info or resolving its commit.
+    if (isV2Version(tag) && !v2BetaOptIn) continue;
     let info = catalog[tag]?.info;
     if (!info || catalog[tag].digest !== asset.digest) {
       if (!Number.isSafeInteger(asset.size) || asset.size < 1 || asset.size > 256 * 1024)
@@ -373,7 +389,7 @@ export async function publishUpdateIndex({
         throw new Error('Registry digest mismatch: ' + tag);
       digests.set(tag, digest);
     }
-  if (!dryRun)
+  if (!dryRunValue)
     for (const image of images)
       for (const [alias, tag] of Object.entries(aliases)) {
         exec(
@@ -391,14 +407,16 @@ export async function publishUpdateIndex({
         const actual = verifyImage(inspect(image + ':' + alias), candidates.get(tag));
         if (actual !== digests.get(tag)) throw new Error('Alias digest mismatch: ' + alias);
       }
-  if (channels.stable && !dryRun) {
+  if (channels.stable && !dryRunValue) {
     const stable = releases.find((r) => r.tag_name === channels.stable.version);
     await api('/releases/' + stable.id, 'PATCH', { make_latest: 'true' });
     const latest = await api('/releases/latest');
     if (latest.id !== stable.id || latest.tag_name !== channels.stable.version)
       throw new Error('GitHub Latest did not advance to the stable target');
   }
-  if (dryRun) return index;
+  // Dry-run scope: zero GitHub writes (release, tree, commit, refs, Latest) and
+  // zero registry writes (alias creates); only GETs and local Docker inspects ran.
+  if (dryRunValue) return index;
   const files = {
     'update-index.json': JSON.stringify(index, null, 2) + '\n',
     'release-catalog.json': JSON.stringify(catalog, null, 2) + '\n',
@@ -450,7 +468,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const dryRun = options.dryRun === true || process.env.DRY_RUN === 'true';
     publishUpdateIndex({
       dryRun,
-      allowV2Beta: options.allowV2BetaDryRun === true && dryRun,
+      // Raw intent: the function itself combines it with dryRun and fails
+      // closed before IO when only one of the two is present.
+      allowV2Beta: options.allowV2BetaDryRun === true,
       candidateAssetsDir: options.candidateAssetsDir,
       candidateInfoPath: options.candidateInfoPath,
     })

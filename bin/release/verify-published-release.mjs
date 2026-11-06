@@ -2,8 +2,12 @@ import { createHash } from 'node:crypto';
 import {
   validateInfo,
   assertSupportedVersion,
+  assertV2Rehearsal,
   assertV2AssetBindings,
+  assertV2AssetSet,
+  assertBooleanOption,
   expectedV2AssetNames,
+  isV2Version,
   parseVersion,
   v2EmbeddedComposeFilename,
   v2PairingFilename,
@@ -94,6 +98,8 @@ const buildExpectedV2ReleaseAssets = (assetsDir, tag) => {
 };
 
 export const buildExpectedReleaseAssets = (assetsDir, tag, options = {}) => {
+  // Gate M3 at the exported boundary, before the first readFileSync.
+  assertV2Rehearsal(tag, options);
   if (assertSupportedVersion(tag, options).core[0] === '2') {
     const info = JSON.parse(readFileSync(path.join(assetsDir, 'release-info.json'), 'utf8'));
     validateInfo(info, tag, options);
@@ -196,6 +202,19 @@ const verifyUploadedAssetMetadata = (asset) => {
 
 const verifyReleaseAssets = ({ release, tag, assets, allowMissingAssets }) => {
   const actualAssets = sortedPublishedAssets(release);
+  if (isV2Version(tag)) {
+    // A v2 Release has exactly six files: an incomplete or extra set can never
+    // be reported as complete, and the 1.x resume relaxation does not apply.
+    if (allowMissingAssets === true) fail('v2 release verification does not allow missing assets');
+    assertV2AssetSet(
+      assets.map((asset) => asset.name),
+      tag
+    );
+    assertV2AssetSet(
+      actualAssets.map((asset) => asset.name),
+      tag
+    );
+  }
   const expectedByName = new Map(assets.map((asset) => [asset.name, asset]));
 
   for (const actual of actualAssets) {
@@ -244,7 +263,11 @@ export const verifyPublishedRelease = ({
   assets,
   allowMissingAssets = false,
   allowV2Beta = false,
+  dryRun = false,
 }) => {
+  // Gate M3 at the exported boundary: v2 verification is a rehearsal only.
+  assertV2Rehearsal(tag, { allowV2Beta, dryRun });
+  allowMissingAssets = assertBooleanOption({ allowMissingAssets }, 'allowMissingAssets');
   verifyReleaseIdentity({ release, tag, prerelease, body, draft: false, allowV2Beta });
   return verifyReleaseAssets({ release, tag, assets, allowMissingAssets });
 };
@@ -257,7 +280,10 @@ export const verifyDraftRelease = ({
   assets,
   allowMissingAssets = false,
   allowV2Beta = false,
+  dryRun = false,
 }) => {
+  assertV2Rehearsal(tag, { allowV2Beta, dryRun });
+  allowMissingAssets = assertBooleanOption({ allowMissingAssets }, 'allowMissingAssets');
   verifyReleaseIdentity({ release, tag, prerelease, body, draft: true, allowV2Beta });
   return verifyReleaseAssets({
     release,
@@ -273,9 +299,16 @@ export const verifyPublishedReleaseMetadata = ({
   prerelease,
   body,
   allowV2Beta = false,
+  dryRun = false,
 }) => {
+  assertV2Rehearsal(tag, { allowV2Beta, dryRun });
   verifyReleaseIdentity({ release, tag, prerelease, body, draft: false, allowV2Beta });
   const actualAssets = sortedPublishedAssets(release);
+  if (isV2Version(tag))
+    assertV2AssetSet(
+      actualAssets.map((asset) => asset.name),
+      tag
+    );
   const expectedNames = expectedReleaseAssetNames(tag, { allowV2Beta });
   if (actualAssets.length !== expectedNames.length) {
     fail(
@@ -348,6 +381,9 @@ const runCli = () => {
   const allowV2Beta = booleanOption(options, 'allow-v2-beta');
   const dryRun = booleanOption(options, 'dry-run', process.env.DRY_RUN === 'true');
   // Gate M3: v2 verification is a rehearsal only, exactly like the producers.
+  // Dry-run scope for v2: zero GitHub Release, update-index, image-tag and
+  // registry writes. The only permitted side effect is the local `--result-path`
+  // diagnostic report (stdout remains the authoritative result).
   if (parseVersion(tag).core[0] === '2' && !(allowV2Beta && dryRun))
     fail(
       'v2 release verification is fail-closed (Gate M3); DRY_RUN and --allow-v2-beta are both required'
@@ -364,7 +400,7 @@ const runCli = () => {
   const body = readFileSync(bodyPath, 'utf8');
   const result =
     mode === 'metadata'
-      ? verifyPublishedReleaseMetadata({ release, tag, prerelease, body, allowV2Beta })
+      ? verifyPublishedReleaseMetadata({ release, tag, prerelease, body, allowV2Beta, dryRun })
       : mode === 'draft'
         ? verifyDraftRelease({
             release,
@@ -373,9 +409,11 @@ const runCli = () => {
             body,
             assets: buildExpectedReleaseAssets(requiredOption(options, 'assets-dir'), tag, {
               allowV2Beta,
+              dryRun,
             }),
             allowMissingAssets: booleanOption(options, 'allow-missing-assets'),
             allowV2Beta,
+            dryRun,
           })
         : verifyPublishedRelease({
             release,
@@ -384,9 +422,11 @@ const runCli = () => {
             body,
             assets: buildExpectedReleaseAssets(requiredOption(options, 'assets-dir'), tag, {
               allowV2Beta,
+              dryRun,
             }),
             allowMissingAssets: booleanOption(options, 'allow-missing-assets'),
             allowV2Beta,
+            dryRun,
           });
 
   if (options['result-path']) {

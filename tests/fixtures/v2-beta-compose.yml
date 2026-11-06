@@ -1,0 +1,70 @@
+# Immutable v2 Embedded three-image deployment compose.
+# Rendered from verified candidate evidence; every service image is digest-pinned.
+services:
+  cpamp-ingress:
+    image: 'seakee/cpamp-ingress:v2.0.0-beta.1@sha256:ec2d8db9eca2c102a13f05667f01db2bf62c0208bcade582a05a23eedb276c4d'
+    restart: unless-stopped
+    ports:
+      - '${CPAMP_PUBLIC_PORT:-18317}:18317'
+    environment:
+      CPAMP_INGRESS_ADDR: '0.0.0.0:18317'
+      CPAMP_MANAGER_URL: 'http://cpamp-manager:18317'
+      CPAMP_GATEWAY_URL: 'http://cpamp-runtime:8317'
+      CPAMP_INGRESS_CONTROL_ADDR: '0.0.0.0:9082'
+    depends_on:
+      - cpamp-manager
+      - cpamp-runtime
+
+  cpamp-manager:
+    image: 'seakee/cpa-manager-plus:v2.0.0-beta.1@sha256:be0dee922347da5e33bf9546bb86447a7afa9973e3bc77a965908a31e43a0258'
+    restart: unless-stopped
+    expose:
+      - '18317'
+    environment:
+      HTTP_ADDR: '0.0.0.0:18317'
+      USAGE_DB_PATH: '/data/usage.sqlite'
+      CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'
+      CPA_UPSTREAM_URL: 'http://cpamp-runtime:8317'
+      CPAMP_RUNTIME_URL: 'http://cpamp-runtime:9081'
+      CPAMP_RUNTIME_TOKEN_FILE: '/run/cpamp/runtime-secret/token'
+      CPAMP_INGRESS_CONTROL_URL: 'http://cpamp-ingress:9082'
+      CPAMP_PUBLIC_ORIGIN: '${CPAMP_PUBLIC_ORIGIN:-}'
+      USAGE_COLLECTOR_MODE: 'auto'
+      USAGE_RESP_QUEUE: 'usage'
+      USAGE_RESP_POP_SIDE: 'right'
+      USAGE_BATCH_SIZE: '100'
+      USAGE_POLL_INTERVAL_MS: '500'
+      USAGE_QUERY_LIMIT: '50000'
+      USAGE_CORS_ORIGINS: '*'
+    volumes:
+      - cpamp-manager-data:/data
+      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:ro
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:18317/health']
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  cpamp-runtime:
+    image: 'seakee/cpamp-runtime:v2.0.0-beta.1@sha256:9e334bf2941c959cf9220f2da126086673eff10fbab4da621a3477c138c967d1'
+    restart: unless-stopped
+    expose:
+      - '8317'
+      - '9081'
+    environment:
+      CPAMP_RUNTIME_ADDR: '0.0.0.0:9081'
+      CPAMP_RUNTIME_IDENTITY: 'embedded-default'
+      CPAMP_RUNTIME_JOURNAL_PATH: '/runtime/supervisor/operations.sqlite'
+      CPAMP_RUNTIME_CPA_ADDR: '127.0.0.1:8317'
+      CPAMP_RUNTIME_CPA_UID: '10001'
+      CPAMP_RUNTIME_CPA_GID: '10001'
+      CPAMP_CPA_EXECUTABLE: '/usr/local/bin/cli-proxy-api'
+      CPAMP_RUNTIME_TOKEN_FILE: '/run/cpamp/runtime-secret/token'
+    volumes:
+      - cpamp-runtime-data:/runtime
+      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret
+
+volumes:
+  cpamp-manager-data:
+  cpamp-runtime-data:
+  cpamp-runtime-transport-secret:

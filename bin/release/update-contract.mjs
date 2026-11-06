@@ -81,13 +81,41 @@ const assertSha256 = (value, label) => {
 export const isV2Version = (tag) => parseVersion(tag).core[0] === '2';
 
 /**
+ * Exported entry points receive caller/API input, so a truthy string such as
+ * `'false'` must never authorize anything. `undefined` means "not provided".
+ */
+export const assertBooleanOption = (options, name, fallback = false) => {
+  const value = options?.[name];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') throw new TypeError(`${name} must be a boolean`);
+  return value;
+};
+
+/**
+ * Gate M3 at the exported boundary, not only in the CLI wrappers: any v2 entry
+ * point with an effect (disk reads included) must see BOTH a real dry-run and an
+ * explicit beta opt-in, and must reject before doing anything observable.
+ * 1.x behaviour is untouched.
+ */
+export function assertV2Rehearsal(raw, options = {}) {
+  const allowV2Beta = assertBooleanOption(options, 'allowV2Beta');
+  const dryRun = assertBooleanOption(options, 'dryRun');
+  if (!isV2Version(raw)) return;
+  if (!(allowV2Beta === true && dryRun === true))
+    throw new Error(
+      'Unqualified v2 Embedded release: v2 rehearsal is fail-closed (Gate M3); the v2 beta DRY_RUN opt-in requires dryRun === true and allowV2Beta === true'
+    );
+}
+
+/**
  * Version gate shared by every producer/verifier.
  *
  * 1.x is unchanged. Any v2 tag stays fail-closed (Gate M3) unless the caller
  * explicitly opts in AND the tag is a beta prerelease: `v2.x.y` stable can never
  * pass, with or without the opt-in, so GitHub `releases/latest` stays 1.x.
  */
-export function assertSupportedVersion(raw, { allowV2Beta = false } = {}) {
+export function assertSupportedVersion(raw, options = {}) {
+  const allowV2Beta = assertBooleanOption(options, 'allowV2Beta');
   const v = parseVersion(raw);
   if (v.core[0] === '1') return v;
   if (v.core[0] === '2' && v.stage === 'beta' && allowV2Beta) return v;
@@ -174,7 +202,10 @@ export function validateV2Pairing(pairing, { tag, sourceCommit }) {
     if (!image || typeof image !== 'object')
       throw new Error(`v2 pairing is missing the ${role} image`);
     const repositoryValue = String(image.repository ?? '');
-    if (repositoryValue !== repositoryName && !repositoryValue.endsWith(`/${repositoryName}`))
+    const allowedRepositories = v2ImageRegistries.map(
+      (registry) => `${registry}/${repositoryName}`
+    );
+    if (!allowedRepositories.includes(repositoryValue))
       throw new Error(`v2 pairing has an unexpected ${role} repository`);
     if (image.tag !== tag) throw new Error(`v2 pairing ${role} tag mismatch`);
     assertSha256(image.manifest_digest, `v2 pairing ${role} manifest digest`);
@@ -371,7 +402,8 @@ export function validateInfo(info, tag, options = {}) {
  * so 1.x consumers keep parsing it; a v2 Beta target is only legal on the beta
  * channel, must carry `schema_version: 2`, and needs the explicit opt-in.
  */
-export function validateIndex(index, { allowV2Beta = false } = {}) {
+export function validateIndex(index, options = {}) {
+  const allowV2Beta = assertBooleanOption(options, 'allowV2Beta');
   if (
     !index ||
     typeof index !== 'object' ||
@@ -395,6 +427,10 @@ export function validateIndex(index, { allowV2Beta = false } = {}) {
       throw new Error('Invalid update index target');
     if (v.core[0] === '2') {
       if (channel !== 'beta') throw new Error('v2 release may only target the beta channel');
+      // Reject `v2.0.0` and `v2.0.0-rc.1` on the beta channel: the v2 Beta
+      // channel target is exactly `v2.x.y-beta.N`.
+      assertSupportedVersion(target.version, { allowV2Beta: true });
+      if (v.stage !== 'beta') throw new Error('v2 beta channel target must be a beta prerelease');
       if (target.schema_version !== 2)
         throw new Error('v2 beta index target requires schema_version 2');
       if (!allowV2Beta)

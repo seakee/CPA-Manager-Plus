@@ -356,7 +356,11 @@ const v2Notes = (tag) =>
   }) +
   '\n-->';
 const makeV2Info = (tag = v2Tag) =>
-  generateReleaseInfo(tag, v2Sha, v2Notes(tag), { allowV2Beta: true, pairing: v2Pairing(tag) });
+  generateReleaseInfo(tag, v2Sha, v2Notes(tag), {
+    dryRun: true,
+    allowV2Beta: true,
+    pairing: v2Pairing(tag),
+  });
 const v2StablePayload = (tag) =>
   JSON.stringify({
     schema_version: 2,
@@ -469,16 +473,19 @@ function v2Scenario({
       const tag = decodeURIComponent(new URL(url).pathname.split('/commits/')[1] || '');
       return response({ sha: extraRelease && tag === extraRelease.tag_name ? v2Sha : sha });
     }
+    // A plain 1.x maintenance run still advances Latest and commits the index.
+    if (url.endsWith('/releases/latest')) return response(stableRelease);
+    if (/\/releases\/\d+$/.test(url)) return response(stableRelease);
+    if (url.endsWith('/git/trees')) return response({ sha: 'tree' });
+    if (url.endsWith('/git/commits')) return response({ sha: 'commit' });
+    if (url.includes('/git/refs')) return response({}, 201);
     throw new Error('Unexpected request: ' + url);
   };
-  const exec = (_cmd, args) => {
-    calls.push({ docker: args });
-    if (args[2] === 'create') throw new Error('v2 dry run must not create image aliases');
-    const reference = args[3];
-    if (!reference.endsWith(':' + stableTag)) throw new Error('Unexpected image: ' + reference);
-    return JSON.stringify({
+  const aliases = new Map();
+  const inspectPayload = (digest) =>
+    JSON.stringify({
       manifest: {
-        digest: sha256Of('stable-image'),
+        digest,
         manifests: ['amd64', 'arm64'].map((architecture) => ({
           platform: { os: 'linux', architecture },
         })),
@@ -498,6 +505,17 @@ function v2Scenario({
         ])
       ),
     });
+  const exec = (_cmd, args) => {
+    calls.push({ docker: args });
+    if (args[2] === 'create') {
+      if (dryRun) throw new Error('v2 dry run must not create image aliases');
+      aliases.set(args[4], args[5].split('@')[1]);
+      return '';
+    }
+    const reference = args[3];
+    if (aliases.has(reference)) return inspectPayload(aliases.get(reference));
+    if (!reference.endsWith(':' + stableTag)) throw new Error('Unexpected image: ' + reference);
+    return inspectPayload(sha256Of('stable-image'));
   };
   return {
     calls,
@@ -639,5 +657,94 @@ describe('v2 beta update index rehearsal', () => {
     await expect(
       v2Scenario({ candidate: false, extraRelease: stableV2Release }).run()
     ).rejects.toThrow(/v2 Embedded/);
+  });
+
+  it('fails closed before any IO when only one gate is present', async () => {
+    const noDryRun = v2Scenario({ dryRun: false, candidate: false });
+    await expect(noDryRun.run()).rejects.toThrow(/DRY_RUN opt-in/);
+    expect(noDryRun.calls).toEqual([]);
+
+    const noOptIn = v2Scenario({ allowV2Beta: false });
+    await expect(noOptIn.run()).rejects.toThrow(/DRY_RUN opt-in/);
+    expect(noOptIn.calls).toEqual([]);
+
+    // A candidate path is v2 intent by itself: reject before reading it, which
+    // is why a non-existent directory reports the gate error, not ENOENT.
+    await expect(
+      publishUpdateIndex({
+        env: { GITHUB_REPOSITORY: 'seakee/CPA-Manager-Plus', GITHUB_TOKEN: 'fixture' },
+        fetchImpl: async () => {
+          throw new Error('no request expected');
+        },
+        candidateAssetsDir: '/nonexistent-v2-candidate',
+        candidateInfoPath: '/nonexistent-v2-candidate/release-info.json',
+      })
+    ).rejects.toThrow(/DRY_RUN opt-in/);
+  });
+
+  it('keeps a plain 1.x run working while a remote v2 Beta exists', async () => {
+    const payload = JSON.stringify(makeV2Info());
+    const v2BetaRelease = {
+      id: 780,
+      tag_name: v2Tag,
+      draft: false,
+      immutable: true,
+      prerelease: true,
+      published_at: '2026-11-06T00:00:00Z',
+      assets: publishedV2Assets(v2Tag, payload),
+    };
+    const s = v2Scenario({
+      dryRun: false,
+      allowV2Beta: false,
+      candidate: false,
+      extraRelease: v2BetaRelease,
+      extraPayload: payload,
+    });
+    const index = await s.run();
+    expect(index.channels).toEqual({
+      stable: { version: 'v1.14.10' },
+      rc: { version: 'v1.14.10' },
+      beta: { version: 'v1.14.10' },
+    });
+    // No v2 download, commit lookup, or catalog entry: the release is skipped
+    // before its release-info is fetched.
+    expect(s.calls.some((call) => call.url?.includes('/releases/download/'))).toBe(false);
+    expect(s.calls.some((call) => call.url?.includes('/commits/v2'))).toBe(false);
+    const tree = s.calls.find((call) => call.url?.endsWith('/git/trees'));
+    const files = Object.fromEntries(tree.body.tree.map((file) => [file.path, file.content]));
+    expect(files['release-catalog.json']).not.toContain(v2Tag);
+    expect(files['withdrawn.json']).toBe('[]\n');
+    expect(files['update-index.json']).not.toContain(v2Tag);
+    // The 1.x maintenance path still commits its index and alias.
+    expect(
+      s.calls.some((call) => call.url?.endsWith('/git/commits') && call.method === 'POST')
+    ).toBe(true);
+    expect(s.calls.some((call) => call.docker?.includes('create'))).toBe(true);
+  });
+
+  it('rejects truthy non-boolean gate values', async () => {
+    const env = { GITHUB_REPOSITORY: 'seakee/CPA-Manager-Plus', GITHUB_TOKEN: 'fixture' };
+    const fetchImpl = async () => {
+      throw new Error('no request expected');
+    };
+    for (const value of ['false', 'true', '0', '', 0, 1, null])
+      await expect(
+        publishUpdateIndex({ env, fetchImpl, dryRun: value, allowV2Beta: true })
+      ).rejects.toThrow(/dryRun must be a boolean/);
+    for (const value of ['false', 'true', '0', '', 0, 1, null])
+      await expect(
+        publishUpdateIndex({ env, fetchImpl, dryRun: true, allowV2Beta: value })
+      ).rejects.toThrow(/allowV2Beta must be a boolean/);
+    // Real booleans open the gate; the sentinel proves the request was attempted.
+    await expect(
+      publishUpdateIndex({ env, fetchImpl, dryRun: true, allowV2Beta: true })
+    ).rejects.toThrow(/no request expected/);
+    await expect(
+      publishUpdateIndex({ env, fetchImpl, dryRun: false, allowV2Beta: false })
+    ).rejects.toThrow(/no request expected/);
+    // Explicit undefined means "not provided" and takes the documented default.
+    await expect(
+      publishUpdateIndex({ env, fetchImpl, dryRun: undefined, allowV2Beta: undefined })
+    ).rejects.toThrow(/no request expected/);
   });
 });

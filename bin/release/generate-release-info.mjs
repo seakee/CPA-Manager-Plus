@@ -7,6 +7,7 @@ import {
   nativeAssets,
   validateInfo,
   assertSupportedVersion,
+  assertV2Rehearsal,
   validateV2Pairing,
   v2EmbeddedComposeFilename,
   v2PairingFilename,
@@ -93,6 +94,9 @@ const buildV2ReleaseInfo = (tag, sha, metadata, pairingInput) => {
 };
 
 export function generateReleaseInfo(tag, sha, chineseNotes, options = {}) {
+  // Gate M3 at the exported boundary: no v2 record may be produced without a
+  // real dry-run and an explicit beta opt-in, before notes are even parsed.
+  assertV2Rehearsal(tag, options);
   const v = assertSupportedVersion(tag, options);
   const metadata = parseUpdateMetadata(chineseNotes);
   if (v.core[0] === '2') return buildV2ReleaseInfo(tag, sha, metadata, options.pairing);
@@ -141,7 +145,7 @@ const runCli = () => {
     );
   // A stable v2 tag never passes, even with the opt-in, before any file is read.
   assertSupportedVersion(tag, { allowV2Beta: dryRunV2OptIn });
-  const infoOptions = isV2 ? { allowV2Beta: true } : {};
+  const infoOptions = isV2 ? { dryRun: true, allowV2Beta: true } : {};
   if (isV2) {
     if (!options.pairingPath)
       throw new Error('v2 beta release info requires --pairing embedded-release-pairing.json');
