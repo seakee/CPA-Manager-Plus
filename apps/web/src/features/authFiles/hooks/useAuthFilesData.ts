@@ -1154,8 +1154,19 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
 
       const changedFileNames: string[] = [];
       const batchSignatures = new Map<string, string | null>();
-      const foldedBatchSignatures = new Map<string, string | null>();
+      const foldedBatchSignatures = new Map<
+        string,
+        { signature: string | null; confirmedDistinct: boolean }
+      >();
       const probeCache = new Map<string, StoredAuthFileProbe>();
+      const probeAuthFileOnce = async (probeTarget: string) => {
+        const cached = probeCache.get(probeTarget);
+        if (cached) return cached;
+        const probe = await probeStoredAuthFile(probeTarget, requestScope);
+        probeCache.set(probeTarget, probe);
+        return probe;
+      };
+
       for (const item of incoming) {
         const fileName = item.fileName.trim();
         const normalizedName = fileName.toLowerCase();
@@ -1169,46 +1180,65 @@ export function useAuthFilesData(options: UseAuthFilesDataOptions = {}): UseAuth
           continue;
         }
         batchSignatures.set(fileName, incomingSignature);
-        // Names differing only by case may reach one file on a case-insensitive backend, so a
-        // batch must not leave them with different contents. Both are still probed below.
-        const foldedConflict =
-          foldedBatchSignatures.has(normalizedName) &&
-          foldedBatchSignatures.get(normalizedName) !== incomingSignature;
-        if (!foldedBatchSignatures.has(normalizedName)) {
-          foldedBatchSignatures.set(normalizedName, incomingSignature);
-        }
 
         if (!isWritableAuthFileName(fileName)) {
           changedFileNames.push(fileName || item.fileName);
           continue;
         }
 
-        // Probe the physical name the upload will write first, then every listed name that only
-        // differs by case: a sibling credential must never vouch for the file being overwritten.
-        const probeTargets = [fileName];
-        for (const variant of existingFileNames?.byLowerName.get(normalizedName) ?? []) {
-          if (variant !== fileName) probeTargets.push(variant);
-        }
-
+        // The exact name is the physical file the upload rewrites, so its own probe decides and a
+        // sibling credential never has to match. Case variants only matter while existence is
+        // ambiguous, because the backend may resolve them to that same file.
+        const exactProbe = await probeAuthFileOnce(fileName);
         let rejected = false;
-        for (const probeTarget of probeTargets) {
-          const listedAsExisting =
-            existingFileNames === null ? null : existingFileNames.exactNames.has(probeTarget);
-
-          // The listing only reports the manager cache while the download reads the file on disk,
-          // so an unlisted name still has to be probed; only a definite 404 proves it is free.
-          // One batch can reach the same physical name through several case variants.
-          const probe =
-            probeCache.get(probeTarget) ?? (await probeStoredAuthFile(probeTarget, requestScope));
-          probeCache.set(probeTarget, probe);
-          rejected =
-            probe.kind === 'failed' ||
-            (probe.kind === 'missing'
-              ? listedAsExisting !== false
-              : !matchesStoredCredentialExclusions(probe.text, item.value, incomingSignature));
-          if (rejected) break;
+        let confirmedDistinct = false;
+        if (exactProbe.kind === 'failed') {
+          rejected = true;
+        } else if (exactProbe.kind === 'found') {
+          rejected = !matchesStoredCredentialExclusions(
+            exactProbe.text,
+            item.value,
+            incomingSignature
+          );
+          // A listed exact name whose download succeeded cannot be an alias of another listing.
+          confirmedDistinct = !rejected && existingFileNames?.exactNames.has(fileName) === true;
+        } else if (existingFileNames === null || existingFileNames.exactNames.has(fileName)) {
+          // The listing claims the file exists, so a 404 is an inconsistency, not a new file.
+          rejected = true;
+        } else {
+          // The exact name is free, but a listed case variant may still be the same file on a
+          // case-insensitive backend: every variant has to exist with matching exclusions.
+          for (const variant of existingFileNames.byLowerName.get(normalizedName) ?? []) {
+            if (variant === fileName) continue;
+            const variantProbe = await probeAuthFileOnce(variant);
+            if (
+              variantProbe.kind !== 'found' ||
+              !matchesStoredCredentialExclusions(variantProbe.text, item.value, incomingSignature)
+            ) {
+              rejected = true;
+              break;
+            }
+          }
         }
-        if (rejected || foldedConflict) changedFileNames.push(fileName);
+
+        // Two names that fold together may be one file, so the batch cannot leave them with
+        // different contents unless both were proven to be distinct existing physical files.
+        const foldedEntry = foldedBatchSignatures.get(normalizedName);
+        if (
+          !rejected &&
+          foldedEntry !== undefined &&
+          foldedEntry.signature !== incomingSignature &&
+          !(foldedEntry.confirmedDistinct && confirmedDistinct)
+        ) {
+          rejected = true;
+        }
+        if (!rejected) {
+          foldedBatchSignatures.set(normalizedName, {
+            signature: incomingSignature,
+            confirmedDistinct,
+          });
+        }
+        if (rejected) changedFileNames.push(fileName);
       }
 
       if (changedFileNames.length > 0) {

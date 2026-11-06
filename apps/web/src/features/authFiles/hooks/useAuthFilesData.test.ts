@@ -4100,12 +4100,15 @@ describe('useAuthFilesData raw credential import exclusions', () => {
   };
 
   // Two physical credentials that differ only by case, each with its own exclusions.
+  const caseCollidingExclusions = (name: string) =>
+    name === 'Alpha.json' ? ['gpt-4o'] : ['gpt-5'];
+
   const caseCollidingStoredCredential = (name: string) =>
     JSON.stringify({
       type: 'codex',
       email: 'user@example.com',
       access_token: `access-token-${name}`,
-      'excluded-models': name === 'Alpha.json' ? ['gpt-4o'] : ['gpt-5'],
+      'excluded-models': caseCollidingExclusions(name),
     });
 
   const mountWithCaseCollidingCredentials = (
@@ -4507,8 +4510,15 @@ describe('useAuthFilesData raw credential import exclusions', () => {
     hook.unmount();
   });
 
-  it('downloads the stored name when only the letter case differs', async () => {
-    const hook = mountWithExistingCredential(null, ['Custom-Auth.json']);
+  it('consults a listed case variant when the exact name is absent', async () => {
+    // A case-sensitive auth directory holds only `Custom-Auth.json`, so the exact probe 404s.
+    mockAuthState.serverVersion = null;
+    mocks.list.mockResolvedValue({ files: [{ name: 'Custom-Auth.json', type: 'codex' }] });
+    mocks.downloadText.mockImplementation(async (name: string) => {
+      if (name === 'Custom-Auth.json') return JSON.stringify(existingCredential);
+      throw Object.assign(new Error('Not Found'), { status: 404 });
+    });
+    const hook = mountUseAuthFilesData();
 
     await act(async () => {
       await hook
@@ -4588,6 +4598,98 @@ describe('useAuthFilesData raw credential import exclusions', () => {
       hook.unmount();
     }
   );
+
+  // Editing a field other than the model exclusions must stay possible for both physical files.
+  const caseCollisionTargets = [
+    { listed: ['Alpha.json', 'alpha.json'], target: 'Alpha.json' },
+    { listed: ['alpha.json', 'Alpha.json'], target: 'alpha.json' },
+  ];
+  const caseCollisionTargetCases = caseCollisionTargets.flatMap((scenario) =>
+    ([null, 'custom'] as const).map((serverVersion) => ({ ...scenario, serverVersion }))
+  );
+
+  it.each(caseCollisionTargetCases)(
+    'allows a note-only paste on CPA version $serverVersion for $target',
+    async ({ listed, target, serverVersion }) => {
+      const hook = mountWithCaseCollidingCredentials(serverVersion, listed);
+      const incoming = {
+        type: 'codex',
+        email: 'user@example.com',
+        access_token: 'next-access-token',
+        'excluded-models': caseCollidingExclusions(target),
+        note: 'updated',
+      };
+
+      await act(async () => {
+        await hook.getCurrent().savePastedAuthJson('cpa', target, JSON.stringify(incoming));
+      });
+
+      expect(mocks.saveJsonObject).toHaveBeenCalledTimes(1);
+      expect(mocks.saveJsonObject).toHaveBeenCalledWith(target, incoming);
+      // The exact target settles the decision; its case sibling is not a gate.
+      expect(mocks.downloadText.mock.calls.map(([name]) => name)).toEqual([target]);
+      hook.unmount();
+    }
+  );
+
+  it.each(caseCollisionTargetCases)(
+    'allows a note-only upload on CPA version $serverVersion for $target',
+    async ({ listed, target, serverVersion }) => {
+      const hook = mountWithCaseCollidingCredentials(serverVersion, listed);
+
+      await uploadCredentialFile(
+        hook,
+        {
+          type: 'codex',
+          email: 'user@example.com',
+          access_token: 'next-access-token',
+          'excluded-models': caseCollidingExclusions(target),
+          note: 'updated',
+        },
+        target
+      );
+
+      expect(mocks.uploadFiles).toHaveBeenCalledTimes(1);
+      expect(mocks.downloadText.mock.calls.map(([name]) => name)).toEqual([target]);
+      hook.unmount();
+    }
+  );
+
+  it('allows a two-file note-only batch of case-colliding credentials', async () => {
+    const hook = mountWithCaseCollidingCredentials(null, ['Alpha.json', 'alpha.json']);
+
+    const batch = ['Alpha.json', 'alpha.json'].map(
+      (name) =>
+        new File(
+          [
+            JSON.stringify({
+              type: 'codex',
+              email: 'user@example.com',
+              access_token: `next-${name}`,
+              'excluded-models': caseCollidingExclusions(name),
+              note: 'updated',
+            }),
+          ],
+          name,
+          { type: 'application/json' }
+        )
+    );
+    const target = { files: batch as unknown as FileList, value: '' };
+    await act(async () => {
+      await hook
+        .getCurrent()
+        .handleFileChange({ target } as unknown as Parameters<
+          ReturnType<typeof useAuthFilesData>['handleFileChange']
+        >[0]);
+    });
+
+    expect(mocks.downloadText.mock.calls.map(([name]) => name)).toEqual([
+      'Alpha.json',
+      'alpha.json',
+    ]);
+    expect(mocks.uploadFiles).toHaveBeenCalledTimes(1);
+    hook.unmount();
+  });
 
   it('probes both case-colliding credentials in one batch instead of collapsing them', async () => {
     const identical = JSON.stringify({
