@@ -260,9 +260,15 @@ describe('GitHub Actions workflow integrity', () => {
     const goDirective = (module) =>
       readRepoFile(`apps/${module}/go.mod`).match(/^go (\d+\.\d+\.\d+)$/m)?.[1];
 
+    const goVersions = {};
     for (const module of ['manager-server', 'ingress', 'runtime-supervisor']) {
-      expectAtLeast(goDirective(module), '1.26.10', `apps/${module}/go.mod go directive`);
+      goVersions[module] = goDirective(module);
+      expectAtLeast(goVersions[module], '1.26.10', `apps/${module}/go.mod go directive`);
     }
+    // The toolchain must not fork: setup-go reads the manifest, the images bake
+    // the Dockerfile version, so all three manifests and all three build stages
+    // have to agree exactly (the floors above only stop downgrades).
+    expect(new Set(Object.values(goVersions)).size, JSON.stringify(goVersions)).toBe(1);
     for (const module of ['manager-server', 'runtime-supervisor']) {
       const requirement = readRepoFile(`apps/${module}/go.mod`).match(
         /golang\.org\/x\/sys v(\d+\.\d+\.\d+)/
@@ -278,20 +284,26 @@ describe('GitHub Actions workflow integrity', () => {
       'Dockerfile.manager-server node base'
     );
 
+    const imageGoVersions = {};
     for (const dockerfile of [
       'Dockerfile.manager-server',
       'Dockerfile.ingress',
       'Dockerfile.runtime',
     ]) {
       const text = readRepoFile(dockerfile);
-      expectAtLeast(
-        text.match(/golang:(\d+\.\d+\.\d+)-alpine/)?.[1],
-        '1.26.10',
-        `${dockerfile} golang base`
-      );
+      imageGoVersions[dockerfile] = text.match(/golang:(\d+\.\d+\.\d+)-alpine/)?.[1];
+      expectAtLeast(imageGoVersions[dockerfile], '1.26.10', `${dockerfile} golang base`);
       expect(text, dockerfile).not.toContain('golang:1.24');
       expect(text, dockerfile).not.toMatch(/node:\d+-alpine/);
     }
+    expect(
+      new Set(Object.values(imageGoVersions)).size,
+      JSON.stringify(imageGoVersions)
+    ).toBe(1);
+    expect(
+      Object.values(imageGoVersions)[0],
+      'build images must match the module Go directive'
+    ).toBe(Object.values(goVersions)[0]);
 
     for (const file of workflows) {
       const text = readWorkflow(file);
@@ -307,6 +319,33 @@ describe('GitHub Actions workflow integrity', () => {
         expectAtLeast(match[1], '22.23.4', `${file} NODE_VERSION`);
       }
     }
+  });
+
+  it('installs the Go toolchain before any job runs the Go-dependent repo tests', () => {
+    const workflow = parseYaml(readWorkflow('pr-check.yml'));
+    const repoTestStep = /^npm run test(?::repo)?$/m;
+    let checkedJobs = 0;
+
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      if (!Array.isArray(job.steps)) continue;
+      const testIndex = job.steps.findIndex((step) => repoTestStep.test(step.run ?? ''));
+      if (testIndex < 0) continue;
+      checkedJobs += 1;
+      const setupIndex = job.steps.findIndex((step) => /^actions\/setup-go@/.test(step.uses ?? ''));
+      expect(setupIndex, `${name} must install Go`).toBeGreaterThanOrEqual(0);
+      expect(setupIndex, `${name} must install Go before ${job.steps[testIndex].name}`).toBeLessThan(
+        testIndex
+      );
+      // The repo tests read the module manifests through `go mod edit -json`, so
+      // the setup has to be driven by a manifest rather than a floating major.
+      expect(job.steps[setupIndex].with['go-version-file']).toMatch(/^apps\/.*\/go\.mod$/);
+      for (const [index, step] of job.steps.entries()) {
+        if (!/^go\s/.test((step.run ?? '').trim())) continue;
+        expect(index, `${name} ${step.name} runs go`).toBeGreaterThan(setupIndex);
+      }
+    }
+
+    expect(checkedJobs).toBeGreaterThan(0);
   });
 
   it('locks the dependency versions that close the known advisories', () => {

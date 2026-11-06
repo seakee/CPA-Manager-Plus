@@ -109,6 +109,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # `npm run test` runs `test:repo`, and tests/imageEvidence.test.mjs shells out
+      # to the license collector, which reads every module's go.mod with
+      # `go mod edit -json` under GOPROXY=off. The toolchain therefore has to be
+      # installed before the repo tests, not only before the packaged preflight.
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/manager-server/go.mod
+          cache-dependency-path: |
+            apps/manager-server/go.sum
+            apps/ingress/go.mod
+            apps/runtime-supervisor/go.sum
+
       - name: Type check
         run: npm run type-check
 
@@ -137,13 +150,6 @@ jobs:
 
       - name: Check demo isolation
         run: npm run check:demo-isolation
-
-      # The packaged preflight entry depends on the real staged Full Web asset graph.
-      - name: Setup Go for packaged preflight check
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: apps/manager-server/go.mod
-          cache-dependency-path: apps/manager-server/go.sum
 
       - name: Verify packaged read-only preflight HTTP transport
         env:
