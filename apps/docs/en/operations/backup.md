@@ -69,7 +69,7 @@ The final `up -d` runs only after all three writes, gzip integrity checks, and t
 
 ### Restore Into Three New Volumes Proven Empty
 
-Stop the original project's whole stack without changing its volumes. Prepare the backup's Compose/pairing record and restore the saved public origin/environment. Replace `BACKUP_DIR` below with the actual absolute directory of a successful backup. Other `RESTORE_*` variables are local shell/Compose override values, not new CPAMP settings. The script creates a separate restore project and three new volumes, refuses any existing volume name, explicitly binds the new volumes through an override, and verifies empty directories before extraction. Do not delete original project volumes to make them empty.
+Prepare the backup's Compose/pairing record and restore the saved public origin/environment without changing the original volumes. Replace `BACKUP_DIR` below with the actual absolute directory of a successful backup. Other `RESTORE_*` variables are local shell/Compose override values, not new CPAMP settings. The script first generates and validates a legal restore project name, the merged Compose configuration, and new volume names. Only after those checks pass does it stop the original project and create three new volumes. It explicitly binds them through the override and verifies empty directories before extraction. Do not delete original project volumes to make them empty.
 
 ```bash
 (
@@ -77,20 +77,17 @@ Stop the original project's whole stack without changing its volumes. Prepare th
   umask 077
   BACKUP_DIR='/absolute/path/to/successful/cpampd-backup.XXXXXX'
   test -d "$BACKUP_DIR"
-  docker compose -f docker-compose.v2-embedded.yml stop
   RESTORE_DIR="$(mktemp -d "$PWD/cpampd-restore.XXXXXX")"
-  RESTORE_PROJECT="$(basename "$RESTORE_DIR" | tr '[:upper:]' '[:lower:]')"
+  RESTORE_PROJECT="$(basename "$RESTORE_DIR" | tr '[:upper:].' '[:lower:]-')"
+  case "$RESTORE_PROJECT" in
+    ''|[!a-z0-9]*|*[!a-z0-9_-]*)
+      printf 'Invalid restore project name: %s\n' "$RESTORE_PROJECT" >&2
+      exit 1 ;;
+  esac
   RESTORE_MANAGER_VOLUME="$RESTORE_PROJECT-manager"
   RESTORE_RUNTIME_VOLUME="$RESTORE_PROJECT-runtime"
   RESTORE_SECRET_VOLUME="$RESTORE_PROJECT-secret"
   printf 'Restore project: %s\nRestore directory: %s\n' "$RESTORE_PROJECT" "$RESTORE_DIR"
-  for volume in "$RESTORE_MANAGER_VOLUME" "$RESTORE_RUNTIME_VOLUME" "$RESTORE_SECRET_VOLUME"; do
-    if docker volume inspect "$volume" > /dev/null 2>&1; then
-      printf 'Refusing existing volume: %s\n' "$volume" >&2
-      exit 1
-    fi
-    docker volume create "$volume"
-  done
   cat > "$RESTORE_DIR/volumes.yml" <<YAML
 volumes:
   cpamp-manager-data:
@@ -108,6 +105,16 @@ YAML
       -f "$RESTORE_DIR/volumes.yml" "$@"
   }
   restore_compose config
+  for volume in "$RESTORE_MANAGER_VOLUME" "$RESTORE_RUNTIME_VOLUME" "$RESTORE_SECRET_VOLUME"; do
+    if docker volume inspect "$volume" > /dev/null 2>&1; then
+      printf 'Refusing existing volume: %s\n' "$volume" >&2
+      exit 1
+    fi
+  done
+  docker compose -f docker-compose.v2-embedded.yml stop
+  for volume in "$RESTORE_MANAGER_VOLUME" "$RESTORE_RUNTIME_VOLUME" "$RESTORE_SECRET_VOLUME"; do
+    docker volume create "$volume"
+  done
   restore_compose run --rm --no-deps --entrypoint sh cpamp-manager -ec '
     entries="$(find /data -mindepth 1 -maxdepth 1 -print -quit)"
     test -z "$entries"

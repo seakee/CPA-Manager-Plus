@@ -69,7 +69,7 @@ Embedded 还必须备份整个 Runtime 卷：实际路径为 `/runtime/gateway/c
 
 ### 恢复到三个全新、已核对为空的卷
 
-先停止原项目的整个栈，保留原卷不动；准备备份对应的 Compose/配对记录，并恢复原公开 origin/环境配置。以下 `BACKUP_DIR` 必须替换为上一节成功备份的真实绝对目录。其余 `RESTORE_*` 仅是本段 shell/Compose override 的变量，不是新的 CPAMP 配置项。脚本创建独立恢复项目和三个新卷，拒绝任何已存在的同名卷；通过 override 显式绑定三个新卷，确认空目录后才解压。不要删除原项目的卷来制造“空卷”。
+先准备备份对应的 Compose/配对记录，并恢复原公开 origin/环境配置，保留原卷不动。以下 `BACKUP_DIR` 必须替换为上一节成功备份的真实绝对目录。其余 `RESTORE_*` 仅是本段 shell/Compose override 的变量，不是新的 CPAMP 配置项。脚本先生成并校验合法的恢复项目名、验证合并后的 Compose 配置和新卷名；这些检查全部通过后，才停止原项目、创建三个新卷。通过 override 显式绑定新卷，确认空目录后才解压。不要删除原项目的卷来制造“空卷”。
 
 ```bash
 (
@@ -77,20 +77,17 @@ Embedded 还必须备份整个 Runtime 卷：实际路径为 `/runtime/gateway/c
   umask 077
   BACKUP_DIR='/absolute/path/to/successful/cpampd-backup.XXXXXX'
   test -d "$BACKUP_DIR"
-  docker compose -f docker-compose.v2-embedded.yml stop
   RESTORE_DIR="$(mktemp -d "$PWD/cpampd-restore.XXXXXX")"
-  RESTORE_PROJECT="$(basename "$RESTORE_DIR" | tr '[:upper:]' '[:lower:]')"
+  RESTORE_PROJECT="$(basename "$RESTORE_DIR" | tr '[:upper:].' '[:lower:]-')"
+  case "$RESTORE_PROJECT" in
+    ''|[!a-z0-9]*|*[!a-z0-9_-]*)
+      printf 'Invalid restore project name: %s\n' "$RESTORE_PROJECT" >&2
+      exit 1 ;;
+  esac
   RESTORE_MANAGER_VOLUME="$RESTORE_PROJECT-manager"
   RESTORE_RUNTIME_VOLUME="$RESTORE_PROJECT-runtime"
   RESTORE_SECRET_VOLUME="$RESTORE_PROJECT-secret"
   printf 'Restore project: %s\nRestore directory: %s\n' "$RESTORE_PROJECT" "$RESTORE_DIR"
-  for volume in "$RESTORE_MANAGER_VOLUME" "$RESTORE_RUNTIME_VOLUME" "$RESTORE_SECRET_VOLUME"; do
-    if docker volume inspect "$volume" > /dev/null 2>&1; then
-      printf 'Refusing existing volume: %s\n' "$volume" >&2
-      exit 1
-    fi
-    docker volume create "$volume"
-  done
   cat > "$RESTORE_DIR/volumes.yml" <<YAML
 volumes:
   cpamp-manager-data:
@@ -108,6 +105,16 @@ YAML
       -f "$RESTORE_DIR/volumes.yml" "$@"
   }
   restore_compose config
+  for volume in "$RESTORE_MANAGER_VOLUME" "$RESTORE_RUNTIME_VOLUME" "$RESTORE_SECRET_VOLUME"; do
+    if docker volume inspect "$volume" > /dev/null 2>&1; then
+      printf 'Refusing existing volume: %s\n' "$volume" >&2
+      exit 1
+    fi
+  done
+  docker compose -f docker-compose.v2-embedded.yml stop
+  for volume in "$RESTORE_MANAGER_VOLUME" "$RESTORE_RUNTIME_VOLUME" "$RESTORE_SECRET_VOLUME"; do
+    docker volume create "$volume"
+  done
   restore_compose run --rm --no-deps --entrypoint sh cpamp-manager -ec '
     entries="$(find /data -mindepth 1 -maxdepth 1 -print -quit)"
     test -z "$entries"
