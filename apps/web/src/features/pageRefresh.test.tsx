@@ -294,6 +294,7 @@ const pluginData: PluginListResponse = {
       enabled: true,
       effectiveEnabled: true,
       supportsOAuth: false,
+      supportsQuota: false,
       logo: '',
       configFields: [],
       metadata: { name: 'Retained Plugin', version: '1.0', author: 'test', configFields: [], githubRepository: 'test/plugin', logo: '' },

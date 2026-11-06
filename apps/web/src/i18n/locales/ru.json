@@ -5376,5 +5376,16 @@
       "ultra": "Ultra",
       "ultra_lite": "Ultra Lite"
     }
+  },
+  "plugin_quota": {
+    "plan_label": "План",
+    "missing_auth_index": "В файле аутентификации отсутствует auth_index",
+    "probe_unsupported": "Текущая версия CPA не поддерживает декларативный опрос квоты плагинов (quota_probe)",
+    "plugin_not_found": "Не найден активный плагин, предоставляющий квоту для {{provider}}",
+    "empty_data": "Данные квоты пока недоступны",
+    "window_five_hour": "Лимит 5 часов",
+    "window_daily": "Дневной лимит",
+    "window_weekly": "Недельный лимит",
+    "window_monthly": "Месячный лимит"
   }
 }

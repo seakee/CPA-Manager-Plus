@@ -23,8 +23,10 @@ vi.mock('./client', () => ({
 import {
   normalizePluginDeleteResult,
   normalizePluginList,
+  normalizePluginQuotaResponse,
   normalizePluginStoreList,
   normalizePluginStoreInstallResult,
+  pluginsApi,
   pluginStoreApi,
 } from './plugins';
 
@@ -300,4 +302,72 @@ describe('plugin API normalizers', () => {
     expect(result.plugins[1]?.metadata?.configFields[0]?.defaultValue).toBe('Asia/Shanghai');
   });
 
+});
+
+describe('plugin quota API', () => {
+  it('normalizes plugin list quota capability fields', () => {
+    const result = normalizePluginList({
+      plugins: [
+        {
+          id: 'clinepassbridge',
+          supports_quota: true,
+          quota_provider: 'cline-pass',
+        },
+        {
+          id: 'legacy',
+          supportsQuota: false,
+        },
+      ],
+    });
+    expect(result.plugins[0]?.supportsQuota).toBe(true);
+    expect(result.plugins[0]?.quotaProvider).toBe('cline-pass');
+    expect(result.plugins[1]?.supportsQuota).toBe(false);
+    expect(result.plugins[1]?.quotaProvider).toBeUndefined();
+  });
+
+  it('normalizes plugin quota responses into subscription and grouped buckets', () => {
+    const result = normalizePluginQuotaResponse({
+      subscription: { plan: 'Cline Pass (Monthly)' },
+      groups: [
+        {
+          displayName: 'Cline Pass',
+          buckets: [
+            { window: '5h', remainingFraction: 1 },
+            { window: '7d', remainingFraction: 0.13, resetTime: '2026-11-09T06:36:53Z' },
+            { remainingFraction: 2 },
+            { remainingFraction: 'not-a-number' },
+          ],
+        },
+        { label: 'empty', buckets: [] },
+      ],
+    });
+    expect(result.subscription?.plan).toBe('Cline Pass (Monthly)');
+    expect(result.groups).toHaveLength(1);
+    const group = result.groups[0];
+    expect(group?.label).toBe('Cline Pass');
+    // Out-of-range fractions are clamped into [0, 1]; non-numeric ones drop out
+    expect(group?.buckets).toHaveLength(3);
+    expect(group?.buckets[0]).toMatchObject({ id: '5h', label: '5h', remainingFraction: 1 });
+    expect(group?.buckets[1]?.remainingFraction).toBe(0.13);
+    expect(group?.buckets[2]).toMatchObject({ id: 'cline-pass-2', remainingFraction: 1 });
+    expect(result.summary).toEqual([]);
+    expect(result.serverTimeOffsetMs).toBeNull();
+  });
+
+  it('posts auth_index to the plugin quota endpoint', async () => {
+    mocks.post.mockResolvedValueOnce({
+      subscription: { plan: 'Pro' },
+      groups: [
+        {
+          displayName: 'Cline Pass',
+          buckets: [{ window: 'monthly', remainingFraction: 0.5 }],
+        },
+      ],
+    });
+    const result = await pluginsApi.fetchQuota('clinepassbridge', 'auth-1');
+    expect(mocks.post).toHaveBeenCalledWith('/plugins/clinepassbridge/quota', {
+      auth_index: 'auth-1',
+    });
+    expect(result.groups[0]?.buckets[0]?.remainingFraction).toBe(0.5);
+  });
 });

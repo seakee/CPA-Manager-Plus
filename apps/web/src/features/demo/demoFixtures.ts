@@ -1377,6 +1377,7 @@ const demoPlugins: PluginListResponse = {
       enabled: true,
       effectiveEnabled: true,
       supportsOAuth: false,
+      supportsQuota: false,
       logo: '',
       configFields: [
         { name: 'sampleWindow', type: 'integer', enumValues: [], description: 'Sample window' },
@@ -1409,6 +1410,7 @@ const demoPlugins: PluginListResponse = {
       effectiveEnabled: true,
       supportsOAuth: true,
       oauthProvider: 'codex',
+      supportsQuota: false,
       logo: '',
       configFields: [],
       menus: [
