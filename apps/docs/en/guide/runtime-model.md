@@ -1,5 +1,26 @@
 # How CPAMP Works With CPA
 
+## v2 Beta: Embedded And External
+
+Full Mode in v2 Beta is not the single-Manager 1.x deployment below. Embedded official CPA is pinned to **`v8.0.55`**; External requires at least **`v8.0.55`** and actual qualification. The exact 1.x direct upgrade baseline is **`v1.14.10`**; see [Upgrade And Rollback](../operations/update.md).
+
+| Mode | Who runs CPA | CPAMP boundary |
+| --- | --- | --- |
+| Embedded / New Managed or qualified Adopt | Docker `cpamp-runtime` or Native Runtime Supervisor manages official CPA | Ingress + Manager + Runtime; Docker publishes only Ingress `18317`, with one Digest-paired image group; Native launcher manages three processes and the CPA child |
+| External | The operator's own CPA host/container/service | CPAMP proves/saves the connection, manages supported configuration and Client Keys, and reads status/observations; it does not start, stop, restart, or upgrade external CPA or take over its traffic entry automatically |
+| Lightweight Panel | CPA directly hosts `management.html` | No Manager, SQLite, or Runtime; signs in with CPA Management Key and cannot provide Manager request history |
+
+**Embedded** browser/model traffic uses the configured public origin. Ingress owns public routing; do not separately publish internal/control `8317`/`9081`. New installation requires a host `initialize` Handoff, browser Admin Key setup, and strategy/qualification completion before normal product access. The first Client Key is for model requests; Admin Key is for administration. Process liveness, installation completion, and Gateway readiness are different states.
+
+**External** first proves the connection and Management Key. Supported configuration does not imply host filesystem/lifecycle authority. Rule writes stay read-only without an exclusive write window; writable scalar fields follow actual capabilities. Usage statistics require explicit administrator confirmation rather than automatic changes to external CPA. Its operator remains responsible for CPA upgrades, TLS/networking, configuration/OAuth backups, and availability. Clients retain the external CPA's real entry; Manager completion does not reroute them automatically.
+
+After external Management Key rotation, rebind and prove the current connection in the panel; do not repeatedly retry credentials CPA already rejected. Retain Manager `data.key` with its encrypted database. A refused or incomplete Adopt migration does not authorize automatic External fallback: follow the wizard report, not environment changes or manually edited records.
+
+Install: [v2 Docker](../deployment/docker.md) / [linux/amd64 Native](../deployment/native.md). Operate: [Backup](../operations/backup.md) / [Licensing And Release Assets](../reference/releases.md).
+
+## 1.x Stable And Lightweight Panel Reference
+
+
 CPA receives and forwards real model requests. CPAMP manages CPA and, in Full Mode, stores request history, analyzes cost, and helps maintain account state.
 
 Most users only need to remember three things:
