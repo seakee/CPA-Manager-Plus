@@ -65,6 +65,18 @@ describe('PR check classifier', () => {
     expect(classifyChangedFiles(['bin/ci/fresh-adopt-network-other.mjs'])).toEqual(noChecks);
   });
 
+  // The Panel Lite acceptance and its native `node:test` suite run in the same
+  // Frontend job. A PR that changes only one of them must still run that job.
+  it('runs the Panel Lite harness suite when only a Panel Lite script changes', () => {
+    for (const filePath of [
+      'bin/ci/panel-lite-cpa-v8.mjs',
+      'bin/ci/panel-lite-cpa-v8.test.mjs',
+    ]) {
+      expect(classifyChangedFiles([filePath])).toEqual({ ...noChecks, frontend: true });
+    }
+    expect(classifyChangedFiles(['bin/ci/panel-lite-cpa-v8-other.mjs'])).toEqual(noChecks);
+  });
+
   it('fails closed when no changed files are available', () => {
     expect(classifyChangedFiles([])).toEqual({
       frontend: true,

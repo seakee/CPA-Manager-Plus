@@ -67,6 +67,10 @@ const triggersFrontend = (filePath) =>
   filePath === 'bin/ci/fresh-adopt-network.mjs' ||
   filePath === 'bin/ci/fresh-adopt-lifecycle.test.mjs' ||
   filePath === 'bin/ci/fresh-adopt-redaction.mjs' ||
+  // The Panel Lite acceptance and its native `node:test` suite run in the
+  // Frontend job as well.
+  filePath === 'bin/ci/panel-lite-cpa-v8.mjs' ||
+  filePath === 'bin/ci/panel-lite-cpa-v8.test.mjs' ||
   startsWithPath(filePath, 'bin/release');
 
 const triggersManagerServer = (filePath) =>

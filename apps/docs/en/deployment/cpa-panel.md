@@ -38,6 +38,7 @@ Browser
 - Configure `remote-management.secret-key`; otherwise the Management API and panel are disabled.
 - Keep `remote-management.disable-control-panel` set to `false`.
 - CPA must be able to reach GitHub Releases, directly or through its configured proxy, to download `management.html`.
+- CPA v8 works: the v2 Beta lightweight panel runs on the `/v0/management` API that CPA v8 still serves; see "v2 Beta And The Lightweight Panel" below.
 
 ## Configure CPA
 
@@ -63,6 +64,8 @@ remote-management:
 
 `allow-remote: true` exposes the remote Management API. Use it only on a trusted network, through a VPN, or behind a protected reverse proxy. Do not expose the management port and key to an untrusted network.
 
+CPA v8 also reads its new configuration layout: `config-version: 8` with a top-level `management:` section holding the same fields as `remote-management` above. Both spellings have been verified on CPA v8.
+
 ## Start And Log In
 
 1. Save the configuration and restart or reload CPA.
@@ -75,7 +78,7 @@ http://<cpa-host>:8317/management.html
 3. Log in with the CPA Management Key.
 4. Confirm that Dashboard, Configuration, Providers, Accounts, OAuth, and Logs load correctly.
 
-On first access, CPA checks the latest Release in the configured GitHub repository for an asset named `management.html` and caches it in the CPA working directory.
+CPA looks for an asset named `management.html` in `releases/latest` of the configured GitHub repository (the newest non-prerelease Release) and caches it as `static/management.html`, in the `static/` folder next to CPA's `config.yaml` (`MANAGEMENT_STATIC_PATH` or `WRITABLE_PATH`, when set, take precedence).
 
 ## Updates And Cache
 
@@ -83,7 +86,7 @@ With `disable-auto-update-panel: false`, CPA periodically checks for a newer pan
 
 1. Confirm that `panel-github-repository` still points to CPA Manager Plus.
 2. Stop CPA.
-3. Remove the cached panel from the CPA working directory:
+3. Remove the cached panel from the `static/` folder next to CPA's `config.yaml`:
 
 ```bash
 rm static/management.html
@@ -92,6 +95,26 @@ rm static/management.html
 4. Restart CPA and open `/management.html` again.
 
 With `disable-auto-update-panel: true`, CPA downloads the panel only when the cached file is missing and does not perform periodic updates.
+
+## v2 Beta And The Lightweight Panel
+
+This is the CPAMP v2 Beta publication contract for the lightweight panel. Until the first v2 Beta prerelease is published, the Releases page has no matching file.
+
+- **`releases/latest` stays on 1.x.** The v2 Beta is published as a GitHub prerelease, and GitHub's `releases/latest` excludes prereleases. CPA reads only `releases/latest`, so a CPA configured with `panel-github-repository` as on this page keeps downloading and updating the 1.x lightweight panel during the Beta and is never switched to v2 automatically.
+- **The prerelease carries `management.html`.** Each v2 Beta prerelease also ships the single-file `management.html` (the `npm run build:panel` output, with no reference to any `assets/` resource). CPA does not download it automatically.
+- **The Management API stays `/v0/management`.** The v2 Beta lightweight panel reads and writes CPA configuration through `/v0/management`, which CPA v8 still serves, and signs in with the CPA v8 Management Key. Moving to `/v8/management` is post-Stable work and is outside the first Beta.
+- **Pre-release acceptance.** `bin/ci/panel-lite-cpa-v8.mjs` verifies on the pinned CPA v8 that the `static/management.html` CPA obtains is byte-identical to the build, `/management.html` answers 200, the Management Key authenticates `/v0/management/config` and a changed configuration field is written to `config.yaml`, and `/management.html` answers 404 when `disable-control-panel: true`.
+
+### Try The v2 Beta Panel On CPA
+
+CPA cannot install a panel from a prerelease: `panel-github-repository` is only ever resolved to the repository's `releases/latest`. An `api.github.com` URL that does not end in `/releases/latest` gets that suffix appended, so `.../releases/tags/<tag>` becomes `.../releases/tags/<tag>/releases/latest` and the lookup fails; the browser form `github.com/<owner>/<repo>/releases/tag/<tag>` keeps only its first two path segments, i.e. `repos/<owner>/<repo>/releases/latest`, which still yields the 1.x panel (both checked against CPA v8.0.13). When the lookup fails and no local file exists, CPA installs the upstream fallback panel (from `cpamc.router-for.me`) instead. To try the v2 Beta panel, place the file manually:
+
+1. Download `management.html` from the v2 Beta prerelease page.
+2. Set `disable-auto-update-panel: true` in CPA `config.yaml`. Otherwise CPA overwrites the manually placed file with the 1.x panel from `releases/latest`.
+3. Stop CPA, copy the file to `management.html` in the `static/` folder next to CPA's `config.yaml`, and start CPA.
+4. Open `http://<cpa-host>:8317/management.html` and log in with the CPA Management Key.
+
+To return to the 1.x panel, delete `static/management.html`, set `disable-auto-update-panel` back to `false`, and restart CPA.
 
 ## Lightweight Panel Capabilities
 
@@ -128,4 +151,5 @@ The lightweight panel may remain on the CPA port, but full capabilities are avai
 - Panel does not open: confirm that `secret-key` is non-empty and `disable-control-panel` is `false`.
 - Official panel still appears: check `panel-github-repository` spelling and clear the cache.
 - Remote access is rejected: check `allow-remote`, firewall, and reverse proxy settings.
+- The old 1.x interface returns after installing the v2 Beta panel: confirm `disable-auto-update-panel: true`; otherwise CPA overwrites the manually placed file with the 1.x panel from `releases/latest`.
 - Monitoring is missing: this is expected in Lightweight Mode; use the Manager Server panel.
