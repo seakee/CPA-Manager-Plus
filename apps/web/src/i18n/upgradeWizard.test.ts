@@ -38,7 +38,6 @@ const CODES = [
   'upgrade_verify_binding_missing',
   'upgrade_verify_binding_drifted',
   'upgrade_verify_connection_unproven',
-  'upgrade_verify_waiting_for_repin',
   'upgrade_verify_conflict',
   'upgrade_verify_failed',
   'upgrade_request_invalid',
@@ -186,7 +185,6 @@ describe('upgrade wizard verification copy', () => {
     'verifyRunning',
     'verifyDoneTitle',
     'verifyComplete',
-    'verifyWaiting',
     'verifyAlready',
     'verifyFailedTitle',
     'verifyTargetExternal',
@@ -206,14 +204,4 @@ describe('upgrade wizard verification copy', () => {
     }
   });
 
-  it('keeps a completion apart from the Managed position that waits', () => {
-    // The two outcomes are different operator situations: one closes the upgrade
-    // surface on the next start, the other leaves the installation waiting for
-    // the trusted re-pin. They must never share a sentence.
-    for (const language of LOCALES) {
-      expect(upgradeWizardText('verifyComplete', language)).not.toBe(
-        upgradeWizardText('verifyWaiting', language)
-      );
-    }
-  });
 });

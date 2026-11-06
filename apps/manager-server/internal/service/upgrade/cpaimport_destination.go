@@ -21,13 +21,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 )
 
 // cpaImportDestinationRecord is the settings row that carries the destination
@@ -46,15 +47,45 @@ import (
 // are the Supervisor's replay identity. TerminalFailure records that the attempt
 // reached a terminal failure, which is the only condition under which the next
 // run may submit a new attempt ID.
+//
+// ServerFingerprint is the digest of the destination's build version and v8
+// configuration body a run proved with the authenticated proof. It is written
+// only after that proof and is what the completion gate re-derives from the live
+// CPA, so a destination that changed underneath the handoff is refused instead of
+// completed.
+//
+// SourceVersion, SourceLayout and ManualItems are what the completed step
+// reported about the source it read. They are the replay's only record of them:
+// the operation row keeps the manual items as bounded one-line text, which cannot
+// be turned back into an item, a reason and an instruction without guessing, so a
+// replay that reported zero manual items would tell the operator the opposite of
+// what the import found. They are written by the same statement that records the
+// completion, so a row that carries `cpa_config` carries them too.
+// ManualItemsRecorded distinguishes an attempt that reported no manual items from
+// a row written before the items were kept: both leave the list empty, and only
+// the first may answer a replay with zero. It is the flag that lets the legacy
+// fallback refuse to echo another step's manual items back as this step's.
+// SourceCredentialsDigest is the digest of the credential set this run read, and
+// it is what a retry reproduces. The Supervisor's request carries the source
+// identity — the config.yaml digest — and the client keys, so a retry that found
+// the same configuration but a different credential file would pass every request
+// comparison while handing the destination credentials the recorded attempt never
+// described.
 type cpaImportDestinationRecord struct {
-	BaseURL         string                     `json:"baseUrl"`
-	URLProved       bool                       `json:"urlProved"`
-	ManagementKey   string                     `json:"managementKey"`
-	Intent          cpaImportDestinationIntent `json:"intent"`
-	OperationID     string                     `json:"operationId"`
-	Attempt         int                        `json:"attempt"`
-	TerminalFailure bool                       `json:"terminalFailure"`
-	UpdatedAtMS     int64                      `json:"updatedAtMs"`
+	BaseURL                 string                     `json:"baseUrl"`
+	URLProved               bool                       `json:"urlProved"`
+	ServerFingerprint       string                     `json:"serverFingerprint"`
+	ManagementKey           string                     `json:"managementKey"`
+	Intent                  cpaImportDestinationIntent `json:"intent"`
+	OperationID             string                     `json:"operationId"`
+	Attempt                 int                        `json:"attempt"`
+	TerminalFailure         bool                       `json:"terminalFailure"`
+	SourceVersion           string                     `json:"sourceVersion,omitempty"`
+	SourceLayout            string                     `json:"sourceLayout,omitempty"`
+	ManualItems             []CPAImportManualItem      `json:"manualItems,omitempty"`
+	ManualItemsRecorded     bool                       `json:"manualItemsRecorded,omitempty"`
+	SourceCredentialsDigest string                     `json:"sourceCredentialsDigest,omitempty"`
+	UpdatedAtMS             int64                      `json:"updatedAtMs"`
 }
 
 // urlProved reports whether an earlier run proved BaseURL to be the destination
@@ -90,7 +121,20 @@ type cpaImportDestinationIntent struct {
 	SourceIdentity            string                  `json:"sourceIdentity"`
 	SourceClass               string                  `json:"sourceClass"`
 	APIKeys                   []string                `json:"apiKeys"`
-	PluginsEnabled            bool                    `json:"pluginsEnabled"`
+	// PluginsEnabled is v2's explicit plugin-runtime choice as it was submitted.
+	// It is a pointer so a row that carries no choice is distinguishable from a
+	// row that chose false: the step never defaults the choice, and a record that
+	// does not hold the one the destination was staged with cannot be replayed.
+	PluginsEnabled *bool `json:"pluginsEnabled,omitempty"`
+}
+
+// pluginsChoiceEqual compares two recorded plugin choices by value. A nil choice
+// equals nothing, because a record that holds none never submitted one.
+func pluginsChoiceEqual(left, right *bool) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 // complete reports whether this record holds the request it submitted. A record
@@ -197,6 +241,67 @@ func saveCPAImportDestinationRecord(ctx context.Context, databasePath, dataKeyPa
 	return nil
 }
 
+// recordCPAImportDestinationEvidenceTx merges the proved destination URL, the
+// server fingerprint this run observed and the source facts it reported into the
+// attempt row, inside the caller's transaction.
+//
+// The row is the same one the stage recorded, so the management secret, the
+// request and the replay identity are preserved byte for byte; only the evidence
+// a run actually observed is added. A missing row is a refusal: the completion
+// gate reads this row, and writing a null entry would report a handoff the store
+// never held.
+//
+// The source facts are written by this statement rather than by a second one so a
+// row carrying `cpa_config` always carries the manual items the step reported:
+// the replay answers from this row, and a completed import whose manual items were
+// dropped here would be reported back to the operator as "manual items: 0".
+func recordCPAImportDestinationEvidenceTx(ctx context.Context, tx *sql.Tx, result CPAImportResult) error {
+	destinationURL, err := cpa.NormalizeV8BaseURL(strings.TrimSpace(result.DestinationURL))
+	if err != nil {
+		return newUpgradeError(UpgradeErrorCPAImportUnproven,
+			"the import proved no usable destination URL, so it cannot claim the destination holds the copied state", err)
+	}
+	fingerprint := strings.TrimSpace(result.ServerFingerprint)
+	if fingerprint == "" {
+		return newUpgradeError(UpgradeErrorCPAImportUnproven,
+			"the import proved no destination server fingerprint, so the completion gate could not re-prove the target it copied into", nil)
+	}
+	var storedValue string
+	var storedColumnMS int64
+	switch err := tx.QueryRowContext(ctx,
+		`select value, updated_at_ms from settings where key = ?`, cpaImportDestinationKeySetting).Scan(&storedValue, &storedColumnMS); {
+	case err == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		return newUpgradeError(UpgradeErrorCPAImportUnproven,
+			"the destination attempt this run proved is no longer recorded, so the import cannot hand a destination the store does not describe", nil)
+	default:
+		return fmt.Errorf("read the recorded destination attempt: %w", err)
+	}
+	var record cpaImportDestinationRecord
+	if err := json.Unmarshal([]byte(storedValue), &record); err != nil {
+		return fmt.Errorf("decode the recorded destination attempt: %w", err)
+	}
+	record.BaseURL = destinationURL
+	record.URLProved = true
+	record.ServerFingerprint = fingerprint
+	record.SourceVersion = strings.TrimSpace(result.SourceVersion)
+	record.SourceLayout = strings.TrimSpace(result.SourceLayout)
+	record.ManualItems = slices.Clone(result.ManualItems)
+	record.ManualItemsRecorded = true
+	record.UpdatedAtMS = nextDestinationUpdatedAtMS(time.Now().UnixMilli(), storedColumnMS, record.UpdatedAtMS)
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("encode the destination evidence: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`insert into settings (key, value, updated_at_ms) values (?, ?, ?)
+		 on conflict (key) do update set value = excluded.value, updated_at_ms = excluded.updated_at_ms`,
+		cpaImportDestinationKeySetting, string(payload), record.UpdatedAtMS); err != nil {
+		return fmt.Errorf("record the destination evidence: %w", err)
+	}
+	return nil
+}
+
 // nextDestinationUpdatedAtMS returns the timestamp the attempt's next write must
 // store. It is the operation row's rule without a creation time, because the
 // settings row has none: never lower than the wall clock, the stored column or
@@ -249,12 +354,18 @@ func loadCPAImportDestinationRecordFrom(ctx context.Context, db *sql.DB, dataKey
 	}
 	// The key is never created here: a read that minted a data key could not
 	// decrypt the envelope it is looking at, and would leave a second key behind.
-	if _, err := os.Stat(dataKeyPath); err != nil {
-		return cpaImportDestinationRecord{}, "", false, fmt.Errorf("read the Manager data key: %w", err)
-	}
-	key, _, err := security.LoadOrCreateDataKey("", dataKeyPath)
+	// LoadExistingDataKey is that read in one step, so the absence check and the
+	// load cannot disagree with a key another writer created between them.
+	key, err := security.LoadExistingDataKey("", dataKeyPath)
 	if err != nil {
 		return cpaImportDestinationRecord{}, "", false, fmt.Errorf("load the Manager data key: %w", err)
+	}
+	// The recorded secret is only a secret while it is sealed. UnprotectString
+	// hands back a value that is not an envelope unchanged, so an unsealed key
+	// written by an older build would read as a decrypted credential; the shape is
+	// checked before anything decrypts it, exactly as the admission does.
+	if !security.IsValidProtectedEnvelope(strings.TrimSpace(record.ManagementKey)) {
+		return cpaImportDestinationRecord{}, "", false, errors.New("the recorded destination attempt carries no sealed management secret")
 	}
 	protector, err := security.NewProtector(key)
 	if err != nil {
@@ -264,8 +375,12 @@ func loadCPAImportDestinationRecordFrom(ctx context.Context, db *sql.DB, dataKey
 	if err != nil {
 		return cpaImportDestinationRecord{}, "", false, fmt.Errorf("decrypt the destination management secret: %w", err)
 	}
-	if strings.TrimSpace(secret) == "" {
-		return cpaImportDestinationRecord{}, "", false, nil
+	// A secret that decrypted but is not a management key is not an attempt this
+	// build can replay or hand over. Reporting it as "no record" would let the
+	// next run mint a second secret for a destination that already holds the
+	// first, so the row is a refusal instead.
+	if !cpa.ValidV8ManagementKey(strings.TrimSpace(secret)) {
+		return cpaImportDestinationRecord{}, "", false, errors.New("the recorded destination attempt carries no usable management secret")
 	}
 	return record, secret, true, nil
 }

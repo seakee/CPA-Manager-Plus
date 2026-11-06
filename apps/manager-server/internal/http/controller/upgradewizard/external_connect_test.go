@@ -96,7 +96,7 @@ func TestNextActionForAnExternalConnectRefusal(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if got := nextActionForRecordedStage(testCase.stage, testCase.errorCode, nil, nil); got != testCase.want {
+			if got := nextActionForRecordedStage(testCase.stage, testCase.errorCode, nil); got != testCase.want {
 				t.Fatalf("nextActionForRecordedStage(%q, %q) = %q, want %q",
 					testCase.stage, testCase.errorCode, got, testCase.want)
 			}

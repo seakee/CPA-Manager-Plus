@@ -969,33 +969,6 @@ func lockOperationRow(ctx context.Context, tx Tx, nowMS int64) error {
 // row, and a second write would only move the timestamp of a verdict that did
 // not change.
 func RecordCompletionTx(ctx context.Context, tx Tx, verification model.UpgradeVerification) (model.UpgradeOperation, error) {
-	return recordVerificationTx(ctx, tx, model.UpgradeStageComplete, verification, "", "", nil)
-}
-
-// RecordWaitingVerificationTx records the verify position a Managed operation
-// reaches: the evidence this run proved, the typed reason this build may not
-// promote its authority, and the operator instructions that say what remains.
-// Nothing is cleared — the manual items and the refusals earlier steps recorded
-// stay exactly as they were — because a position that is waiting is not a
-// position that succeeded.
-//
-// It is not a completion: the stage is verify, which the operation can leave
-// only towards complete, and only RecordCompletionTx may write that.
-func RecordWaitingVerificationTx(ctx context.Context, tx Tx, verification model.UpgradeVerification, code, detail string, manualItems []string) (model.UpgradeOperation, error) {
-	if strings.TrimSpace(code) == "" {
-		return model.UpgradeOperation{}, fmt.Errorf("%w: the verify reason code is empty", ErrInvalidRow)
-	}
-	return recordVerificationTx(ctx, tx, model.UpgradeStageVerify, verification, code, detail, manualItems)
-}
-
-// recordVerificationTx is the shared body of the two gate writers: one
-// statement, one revision, one timestamp, and an idempotent repeat that writes
-// nothing at all.
-func recordVerificationTx(ctx context.Context, tx Tx, stage model.UpgradeStage, verification model.UpgradeVerification,
-	code, detail string, manualItems []string) (model.UpgradeOperation, error) {
-	if stage != model.UpgradeStageComplete && stage != model.UpgradeStageVerify {
-		return model.UpgradeOperation{}, fmt.Errorf("%w: the gate records only verify and complete", ErrUnknownStage)
-	}
 	if err := verification.Validate(); err != nil {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: %v", ErrInvalidRow, err)
 	}
@@ -1014,23 +987,13 @@ func recordVerificationTx(ctx context.Context, tx Tx, stage model.UpgradeStage, 
 	if !found {
 		return model.UpgradeOperation{}, fmt.Errorf("%w: no recorded operation to verify", ErrInvalidRow)
 	}
-	next := current
-	added := []string{}
-	for _, item := range manualItems {
-		line := strings.TrimSpace(item)
-		if line == "" || slices.Contains(next.ManualItems, line) || slices.Contains(added, line) {
-			continue
-		}
-		added = append(added, line)
-	}
 	// The repeat of the verdict already on the row stores nothing: not the
 	// evidence, not a revision, not a timestamp. A run only observes again, so
 	// the observation time is the one field a repeat may change; every other
 	// field says what was proven and a difference there is a new record. It is
 	// asked before the frozen check below, because re-proving the recorded
 	// verdict is not a write to a completed row.
-	if current.Stage == stage && current.ErrorCode == code &&
-		current.ErrorDetail == strings.TrimSpace(detail) && len(added) == 0 {
+	if current.Stage == model.UpgradeStageComplete && current.ErrorCode == "" && current.ErrorDetail == "" {
 		if stored, decodeErr := current.VerificationEvidence(); decodeErr == nil && stored.SameVerdict(verification) {
 			return current, nil
 		}
@@ -1041,15 +1004,15 @@ func recordVerificationTx(ctx context.Context, tx Tx, stage model.UpgradeStage, 
 	if current.Stage == model.UpgradeStageComplete {
 		return current, fmt.Errorf("%w: completed operation is frozen at %q", ErrStageRegression, current.Stage)
 	}
-	if err := requireTransition(current, stage); err != nil {
+	if err := requireTransition(current, model.UpgradeStageComplete); err != nil {
 		return current, err
 	}
-	next.Stage = stage
-	next.LastForwardStage = stage
+	next := current
+	next.Stage = model.UpgradeStageComplete
+	next.LastForwardStage = model.UpgradeStageComplete
 	next.Verification = payload
-	next.ErrorCode = code
-	next.ErrorDetail = strings.TrimSpace(detail)
-	next.ManualItems = append(next.ManualItems, added...)
+	next.ErrorCode = ""
+	next.ErrorDetail = ""
 	next.UpdatedAtMS = nextUpdatedAtMS(now, next)
 	expectedRevision := next.Revision
 	next.Revision = expectedRevision + 1

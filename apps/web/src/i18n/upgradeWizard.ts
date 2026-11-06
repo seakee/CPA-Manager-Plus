@@ -104,8 +104,6 @@ const en = {
     'The CPA this Manager connects to is not the target the connection step recorded. Reconnect the CPA, then verify again.',
   codeUpgradeVerifyConnectionUnproven:
     'The connection the CPA import handed over did not survive: the Manager no longer names that destination with the secret the import used.',
-  codeUpgradeVerifyWaitingForRepin:
-    'Waiting for the trusted re-pin to complete the Managed authority promotion and the CPA copy qualification. Nothing was promoted or copied, and the recorded manual items stay open.',
   codeUpgradeVerifyConflict:
     'The recorded operation changed while it was being verified, so nothing was written. Run the verification again.',
   codeUpgradeVerifyFailed: 'The verification could not finish and recorded nothing.',
@@ -195,8 +193,6 @@ const en = {
   verifyDoneTitle: 'The verification recorded a verdict',
   verifyComplete:
     'The operation is complete. Restart the Manager: the normal product starts and the Upgrade surface closes.',
-  verifyWaiting:
-    'The verification recorded this position but did not complete the operation. The Managed authority promotion and the CPA copy qualification wait for the trusted re-pin; nothing was promoted, copied or waived, and the recorded manual items stay open.',
   verifyAlready: 'This position was already recorded; nothing was written this time.',
   verifyFailedTitle: 'The verification recorded nothing',
   verifyTargetExternal: 'Target: an External CPA, administered by its owner',
@@ -318,8 +314,6 @@ const zh: typeof en = {
     '本 Manager 当前连接的 CPA 不是连接步骤记录的目标。请重新连接 CPA 后再验证。',
   codeUpgradeVerifyConnectionUnproven:
     'CPA 导入移交的连接未能保持：Manager 不再以导入使用的管理密钥指向该目标。',
-  codeUpgradeVerifyWaitingForRepin:
-    '等待受信任的 re-pin 完成托管式权限提升与 CPA 复制资格。未提升、未复制任何事项，已记录的手工项仍然待办。',
   codeUpgradeVerifyConflict: '验证过程中已记录的操作发生变更，因此没有写入任何内容。请重新执行验证。',
   codeUpgradeVerifyFailed: '验证未能完成，也没有记录任何内容。',
   codeUpgradeRequestInvalid: '验证不接受任何输入，该请求已被拒绝。',
@@ -393,8 +387,6 @@ const zh: typeof en = {
   verifyRunning: '正在验证已记录的操作…',
   verifyDoneTitle: '验证已记录结论',
   verifyComplete: '操作已完成。请重启 Manager：常规产品将启动，升级界面关闭。',
-  verifyWaiting:
-    '验证已记录当前位置，但未完成该操作。托管式权限提升与 CPA 复制资格需等待受信任的 re-pin；未提升、未复制、也未豁免任何事项，已记录的手工项仍然待办。',
   verifyAlready: '该位置此前已记录，本次没有写入任何内容。',
   verifyFailedTitle: '验证未记录任何结论',
   verifyTargetExternal: '目标：由所有者管理的 External CPA',
@@ -515,8 +507,6 @@ const tw: typeof en = {
     '本 Manager 目前連線的 CPA 不是連線步驟記錄的目標。請重新連線 CPA 後再驗證。',
   codeUpgradeVerifyConnectionUnproven:
     'CPA 匯入移交的連線未能保持：Manager 不再以匯入使用的管理金鑰指向該目標。',
-  codeUpgradeVerifyWaitingForRepin:
-    '等待受信任的 re-pin 完成受管權限提升與 CPA 複製資格。未提升、未複製任何項目，已記錄的手動項目仍然待辦。',
   codeUpgradeVerifyConflict: '驗證過程中已記錄的操作發生變更，因此沒有寫入任何內容。請重新執行驗證。',
   codeUpgradeVerifyFailed: '驗證未能完成，也沒有記錄任何內容。',
   codeUpgradeRequestInvalid: '驗證不接受任何輸入，該請求已被拒絕。',
@@ -589,8 +579,6 @@ const tw: typeof en = {
   verifyRunning: '正在驗證已記錄的操作…',
   verifyDoneTitle: '驗證已記錄結論',
   verifyComplete: '操作已完成。請重新啟動 Manager：一般產品將啟動，升級介面關閉。',
-  verifyWaiting:
-    '驗證已記錄目前位置，但未完成該操作。受管權限提升與 CPA 複製資格需等待受信任的 re-pin；未提升、未複製、也未豁免任何項目，已記錄的手動項目仍然待辦。',
   verifyAlready: '該位置先前已記錄，本次沒有寫入任何內容。',
   verifyFailedTitle: '驗證未記錄任何結論',
   verifyTargetExternal: '目標：由擁有者管理的 External CPA',
@@ -715,8 +703,6 @@ const ru: typeof en = {
     'CPA, к которому подключается этот Manager, — не та цель, которую записал шаг подключения. Подключите CPA заново и повторите проверку.',
   codeUpgradeVerifyConnectionUnproven:
     'Соединение, переданное импортом CPA, не сохранилось: Manager больше не указывает на это назначение с тем секретом, который использовал импорт.',
-  codeUpgradeVerifyWaitingForRepin:
-    'Ожидание доверенного re-pin, который выполнит повышение полномочий управляемой установки и подтверждение права копирования CPA. Ничего не повышено и не скопировано, записанные ручные пункты остаются открытыми.',
   codeUpgradeVerifyConflict:
     'Записанная операция изменилась во время проверки, поэтому ничего не записано. Запустите проверку снова.',
   codeUpgradeVerifyFailed: 'Проверка не завершилась и ничего не записала.',
@@ -804,8 +790,6 @@ const ru: typeof en = {
   verifyDoneTitle: 'Проверка записала вывод',
   verifyComplete:
     'Операция завершена. Перезапустите Manager: запустится обычный продукт, а интерфейс обновления закроется.',
-  verifyWaiting:
-    'Проверка записала эту позицию, но не завершила операцию. Повышение полномочий управляемой установки и подтверждение права копирования CPA ждут доверенного re-pin; ничего не повышено и не скопировано, записанные ручные пункты остаются открытыми.',
   verifyAlready: 'Эта позиция уже была записана; на этот раз ничего не записано.',
   verifyFailedTitle: 'Проверка ничего не записала',
   verifyTargetExternal: 'Цель: внешний CPA, которым управляет его владелец',
@@ -937,8 +921,6 @@ export function blockedCodeText(code: string, language = fullWebLanguage()): str
       return upgradeWizardText('codeUpgradeVerifyBindingDrifted', language);
     case 'upgrade_verify_connection_unproven':
       return upgradeWizardText('codeUpgradeVerifyConnectionUnproven', language);
-    case 'upgrade_verify_waiting_for_repin':
-      return upgradeWizardText('codeUpgradeVerifyWaitingForRepin', language);
     case 'upgrade_verify_conflict':
       return upgradeWizardText('codeUpgradeVerifyConflict', language);
     case 'upgrade_verify_failed':

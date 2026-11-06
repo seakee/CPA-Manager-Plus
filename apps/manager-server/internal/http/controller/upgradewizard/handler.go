@@ -181,19 +181,11 @@ var externalConnectStages = map[string]bool{
 // by an External CPA it could not connect to must offer that step:
 // reconciliation is not what resolves a v7 CPA or a rejected key, and offering it
 // would send the operator past a stop that is still standing.
-//
-// A verified row carries the gate's own reason. The Managed position — waiting
-// for the trusted re-pin — is not a completion and not a failure: the operator
-// waits, then runs the same verification again, because only the gate may record
-// what follows it.
-func nextActionForRecordedStage(stage, errorCode string, domains, manualItems []string) string {
+func nextActionForRecordedStage(stage, errorCode string, domains []string) string {
 	if externalConnectStages[stage] && externalConnectRefusals[errorCode] {
 		return ActionExternalConnect
 	}
-	if stage == StageVerify && errorCode == string(upgradeservice.UpgradeErrorVerifyWaitingForRepin) {
-		return ActionVerify
-	}
-	return nextAction(stage, domains, manualItems)
+	return nextAction(stage, domains)
 }
 
 // SourceRoot states whether the 1.x source the later steps need is still
@@ -267,6 +259,11 @@ type Handler struct {
 	// MountTimeout bounds the per-request wait on the mount lookup. Zero uses
 	// MountLookupTimeout.
 	MountTimeout time.Duration
+	// Runtime is the Manager-owned Supervisor the verification observes for a
+	// Managed target. Optional: when nil, the gate resolves the client from the
+	// Manager's own configuration, exactly as the import does, so a handler built
+	// without it cannot observe a different authority than the CLI would.
+	Runtime upgradeservice.VerifyRuntime
 
 	// lookupMount is the test seam for the mount lookup: a test substitutes a
 	// lookup that never answers to prove the bound and the one-in-flight rule.
@@ -992,6 +989,7 @@ func (h *Handler) serveVerify(w http.ResponseWriter, r *http.Request, mount moun
 	result, err := upgradeservice.Verify(ctx, upgradeservice.VerifyOptions{
 		LegacyRoot: mount.root,
 		TargetRoot: filepath.Dir(target),
+		Runtime:    h.Runtime,
 	})
 	if err != nil {
 		writeError(w, actionFailureStatus(err), actionFailureCode(err))
@@ -1014,7 +1012,7 @@ func (h *Handler) serveVerify(w http.ResponseWriter, r *http.Request, mount moun
 		AlreadyVerified: result.AlreadyVerified,
 		UpdatedAtMS:     result.UpdatedAtMS,
 	}
-	document.NextAction = nextActionForRecordedStage(document.Stage, document.ReasonCode, document.DomainsDone, document.ManualItems)
+	document.NextAction = nextActionForRecordedStage(document.Stage, document.ReasonCode, document.DomainsDone)
 	writeJSON(w, http.StatusOK, document)
 }
 
@@ -1197,11 +1195,10 @@ func readRecordedStatus(ctx context.Context, databasePath string, document statu
 	// pass the same content scrubber as the error detail: a copy-pasted command
 	// can carry a credential, and a path in an instruction is still a path.
 	document.ManualItems = scrubList(manualItems)
-	// The next decision reads the recorded domains and the scrubbed items: this
-	// build's import records no cpa_config domain, so the items it wrote are the
-	// record that the step ran and deferred its work, and the action is computed
-	// from the scrubbed value the document carries, never from the raw text.
-	document.NextAction = nextActionForRecordedStage(row.Stage, row.ErrorCode.String, document.DomainsDone, document.ManualItems)
+	// The next decision reads the recorded domains only: `cpa_config` is the
+	// import's own claim that the destination holds the copied state, and it is
+	// recorded in the same statement as the manual items the operator still owns.
+	document.NextAction = nextActionForRecordedStage(row.Stage, row.ErrorCode.String, document.DomainsDone)
 	document.SourceKind = row.SourceKind.String
 	document.SourceVersion = row.SourceVersion.String
 	document.ErrorCode = row.ErrorCode.String
@@ -1245,7 +1242,7 @@ func withCopyInMarker(document statusDocument, marker copyinmarker.Marker) statu
 	// The marker is written after the target was materialized, which is exactly
 	// the domain the recorded copy_in row names.
 	document.DomainsDone = []string{domainSourceCopy}
-	document.NextAction = nextAction(StageCopyIn, document.DomainsDone, document.ManualItems)
+	document.NextAction = nextAction(StageCopyIn, document.DomainsDone)
 	document.SourceKind = marker.SourceKind
 	document.SourceVersion = marker.SourceVersion
 	document.UpdatedAtMS = marker.WrittenAtMS
@@ -1266,28 +1263,21 @@ func knownStage(stage string) bool {
 	}
 }
 
-// nextAction maps the recorded stage, domains and manual items onto the wizard's
-// next decision.
+// nextAction maps the recorded stage and domains onto the wizard's next
+// decision.
 //
 // A stage is a checkpoint, not a pending step: recording `reconcile` means the
 // comparison finished, so the next decision is the import that follows it.
-// Recording `cpa_import` with the `cpa_config` domain means the destination was
-// copied and proved, so the next decision is verification — repeating the
-// import would ask the operator to redo work the row already proves. Recording
-// `cpa_import` without that domain is the deferred import this build records: it
-// copied nothing, so it owns no `cpa_config`, and its manual items carry the
-// typed reason. The verification is still the next step, because the gate is what
-// names the position such an operation stands at ("waiting for the trusted re-pin
-// ") and refuses to pretend it finished; offering the import again would write
-// nothing and strand the operation on a step that cannot advance.
+// Recording `cpa_import` with the `cpa_config` domain means the destination holds
+// the copied state, so the next decision is verification — repeating the import
+// would ask the operator to redo work the row already proves. Without that domain
+// the import has not settled its copy and is offered again.
 //
-// Recording `verify` means the gate ran: an External target is one statement from
-// completion, and a Managed one carries the reason it may not be promoted, so
-// the next decision is the same verification once the re-pin has happened. A
-// failed operation resumes at reconciliation, and a stage this build does not
-// know keeps the empty string: the caller must show the recorded stage verbatim
-// rather than claim a step that may not be the real position.
-func nextAction(stage string, domains, manualItems []string) string {
+// Recording `verify` means the gate ran and completed the operation. A failed
+// operation resumes at reconciliation, and a stage this build does not know keeps
+// the empty string: the caller must show the recorded stage verbatim rather than
+// claim a step that may not be the real position.
+func nextAction(stage string, domains []string) string {
 	switch stage {
 	case "":
 		return ActionPreflight
@@ -1298,10 +1288,9 @@ func nextAction(stage string, domains, manualItems []string) string {
 	case StageReconcile:
 		return ActionCPAImport
 	case StageCPAImport:
+		// A completed import records `cpa_config`; without it the step has not
+		// settled its copy and the import is offered again.
 		if slices.Contains(domains, domainCPAConfig) {
-			return ActionVerify
-		}
-		if cpaImportDeferred(manualItems) {
 			return ActionVerify
 		}
 		return ActionCPAImport
@@ -1321,25 +1310,6 @@ func nextAction(stage string, domains, manualItems []string) string {
 	default:
 		return ""
 	}
-}
-
-// cpaImportDeferred reports whether the recorded manual items carry the reason
-// the Managed CPA import writes for every item it did not copy.
-//
-// This build records no `cpa_config` domain, because it copies nothing, so the
-// domain cannot say whether the step has run. The items it appended are the
-// record of the run itself, and their typed reason is the part the projection
-// reads: an item line is bounded, and the reason is written so it survives that
-// bound. A row with any other manual item — a reconciliation instruction, say —
-// is not a deferred import and still offers the step.
-func cpaImportDeferred(manualItems []string) bool {
-	marker := "(" + upgradeservice.CPAImportRequiresQualification + ")"
-	for _, item := range manualItems {
-		if strings.Contains(item, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // reconciliationSummary projects the operation's reconciliation output through

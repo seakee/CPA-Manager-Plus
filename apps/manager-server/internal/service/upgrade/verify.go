@@ -26,17 +26,25 @@ package upgrade
 //   - the target is what the Manager itself stores: an External operation's
 //     upgrade_external_connect binding is read in the same transaction and
 //     compared with the Manager's own CPA connection, and a Managed operation's
-//     imported destination connection is still the one the import recorded.
+//     imported destination connection is still the one the import recorded;
+//   - a Managed destination is the one the live Runtime Supervisor runs: the
+//     active gateway artifact it reports is the artifact this build's adoption
+//     record accepted and the one the stage request named, and its identity is
+//     the identity the attempt was staged under. The CPA at the recorded address
+//     answers the same reads whichever artifact it is, so this observation is the
+//     only thing that distinguishes the staged destination from a later one.
 //
 // # The two outcomes
 //
-// An External target that passes is completed: the verification evidence and the
-// complete stage commit in one statement. A Managed target that passes is
-// recorded at verify with its evidence and the typed reason it may not be
-// promoted — the Manager authority promotion and the CPA copy qualification are
-// deferred to the trusted re-pin — and every manual item and refusal earlier
-// steps recorded stays exactly as it was. Neither outcome is invented: a failure
-// of any check writes nothing and returns a typed error.
+// A target that passes is completed: the verification evidence and the complete
+// stage commit in one statement. Both target modes are completed by this gate.
+// An External target proves the binding the connect step recorded; a Managed
+// target proves the destination the CPA import recorded — its address, the
+// Manager's sealed credential for it, and the live v8 server fingerprint — so the
+// Manager that starts after the upgrade administers the CPA this run verified.
+// Every manual item and refusal earlier steps recorded stays exactly as it was.
+// Neither outcome is invented: a failure of any check writes nothing and returns
+// a typed error.
 //
 // # What it refuses
 //
@@ -59,6 +67,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/config"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
@@ -68,21 +77,11 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
-
-// VerifyWaitingInstruction is the one-line instruction recorded with the Managed
-// verify position and printed by the CLI. It names the step an operator waits
-// for, never a step they may perform by hand: the authority promotion and the CPA
-// copy qualification belong to the trusted re-pin, and nothing in this build can
-// substitute for them.
-const VerifyWaitingInstruction = "wait for the trusted U1-1b re-pin to complete the Managed authority promotion and the CPA copy qualification, then run the verification again"
-
-// verifyWaitingItemPrefix is the manual item an unclean Managed verification
-// appends. It uses the same bounded one-line shape the other steps write, so the
-// row's own record carries the reason even after the error columns are cleared.
-const verifyWaitingItemPrefix = "verification"
 
 // VerifyOptions is one invocation of the completion gate.
 type VerifyOptions struct {
@@ -100,12 +99,29 @@ type VerifyOptions struct {
 	// The four seams below are the ones ExternalConnectOptions exposes. Production
 	// leaves them nil and the cpa package's probes run on the External transport,
 	// so the gate proves the recorded target with the same reads the connect step
-	// made. A test supplies them so it can prove the refused cases without a
-	// network.
+	// made. Both target modes use them: a Managed destination is the same v8
+	// management surface, and the gate proves it live rather than trusting the
+	// import's own observation. A test supplies them so it can prove the refused
+	// cases without a network.
 	observeExternalVersion func(ctx context.Context, baseURL, managementKey string) (cpa.ExternalVersionReport, error)
 	readExternalKeys       func(ctx context.Context, baseURL, managementKey string) (cpa.ExternalKeySnapshot, error)
 	proveModelSurface      func(ctx context.Context, baseURL, clientKey string) error
 	readV8Config           func(ctx context.Context, baseURL, managementKey string) (cpa.V8ConfigObservation, error)
+	// Runtime is the Manager-owned Supervisor the Managed destination was staged
+	// on. Production leaves it nil and the client is resolved from the Manager's
+	// own configuration; a caller that already holds the client — a test, or a
+	// handler built with one — supplies it, so the gate asks the Supervisor the
+	// Manager is running rather than a second client built from the same
+	// environment.
+	Runtime VerifyRuntime
+}
+
+// VerifyRuntime is the Supervisor observation the Managed gate needs: the
+// artifact it is running, the identity it runs under and the state of the CPA it
+// started. It is the read half of the import's own Runtime seam, so the gate and
+// the import observe the same authority.
+type VerifyRuntime interface {
+	Status(ctx context.Context) (model.RuntimeObservedStatus, error)
 }
 
 // VerifyResult is the observable outcome of the gate. It reports what the row
@@ -256,12 +272,17 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 		return VerifyResult{}, err
 	}
 	// The stored-key equality above proves the Manager holds the credential the
-	// connect step proved. This proves that credential still administers the CPA
+	// target step proved. This proves that credential still administers the CPA
 	// right now: the same reads the connect step made, made with the secret the
 	// Manager itself will present after a restart. It runs before the write
 	// transaction, so a refused live proof leaves the operation row unadvanced.
-	if mode == model.UpgradeTargetExternal {
+	switch mode {
+	case model.UpgradeTargetExternal:
 		if err := proveVerifyExternalTarget(ctx, options, target, binding); err != nil {
+			return VerifyResult{}, err
+		}
+	case model.UpgradeTargetManaged:
+		if err := proveVerifyManagedTarget(ctx, options, db, target); err != nil {
 			return VerifyResult{}, err
 		}
 	}
@@ -350,12 +371,10 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	// stores nothing when it re-proves the verdict already on the row, so an
 	// unchanged revision means this run observed and recorded nothing new.
 	previousRevision := current.Revision
-	if mode == model.UpgradeTargetExternal {
-		operation, err = upgradeoperation.RecordCompletionTx(ctx, tx, verification)
-	} else {
-		operation, err = upgradeoperation.RecordWaitingVerificationTx(ctx, tx, verification,
-			string(UpgradeErrorVerifyWaitingForRepin), VerifyWaitingInstruction, []string{verifyWaitingManualItem()})
-	}
+	// Both target modes complete here. The target each one proves is named by the
+	// evidence this statement writes; there is no waiting position any more,
+	// because both proofs now exist.
+	operation, err = upgradeoperation.RecordCompletionTx(ctx, tx, verification)
 	if err != nil {
 		return VerifyResult{}, mapVerifyRecordError(err)
 	}
@@ -381,15 +400,6 @@ func Verify(ctx context.Context, options VerifyOptions) (VerifyResult, error) {
 	return verifyResult(operation, mode, already), nil
 }
 
-// verifyWaitingManualItem is the instruction line a Managed verification appends.
-func verifyWaitingManualItem() string {
-	return boundedManualItem(CPAImportManualItem{
-		Item:        verifyWaitingItemPrefix,
-		Reason:      string(UpgradeErrorVerifyWaitingForRepin),
-		Instruction: VerifyWaitingInstruction,
-	})
-}
-
 // completedVerifyResult reports a row that already carries the verdict. Nothing
 // is written and the source is not read: the operation is over, the product is
 // admitted normally, and a repeated call must not re-observe a volume those
@@ -397,11 +407,29 @@ func verifyWaitingManualItem() string {
 //
 // The stage is not the verdict on its own. This reader re-checks the record the
 // gate wrote against the row it was written to: an External target, the source
-// volume the copy-in observed, every domain the verdict names, the External
-// binding the verdict bound, and the sealed credential that binding proved. A row
-// that fails any of them is a store whose `complete` label no gate ever proved,
-// and it is reported as unusable instead of as a finished install.
+// volume the copy-in observed, every domain the verdict names, and the target
+// binding that verdict proved: the External connect row for an External target,
+// the sealed credential and the destination the import handed over for a Managed
+// one. A row that fails any of them is a store whose `complete` label no gate ever
+// proved, and it is reported as unusable instead of as a finished install.
 func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeoperation.ExternalBinding, hasBinding bool) (VerifyResult, error) {
+	// The stage alone is not a verdict. The row must still describe the copy-in the
+	// gate observed — the upgraded-legacy label, both source fingerprints and the
+	// backup manifest digest — because without them this store cannot be told apart
+	// from any other database that happens to carry a `complete` row. This is the
+	// same set the startup admission requires before it unlocks the normal surfaces.
+	if recorded.SourceKind != SourceKindUpgradedLegacy {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but does not name the upgraded-legacy source kind, so its verdict cannot be reported; restore the v2 store from its backup", nil)
+	}
+	if strings.TrimSpace(recorded.SourceFingerprintBefore) == "" || strings.TrimSpace(recorded.SourceFingerprintAfter) == "" {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but does not carry both source fingerprints, so the volume its verdict describes cannot be identified; restore the v2 store from its backup", nil)
+	}
+	if strings.TrimSpace(recorded.BackupManifestSHA256) == "" {
+		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+			"the recorded operation is complete but does not carry the backup manifest digest, so the copy it claims cannot be identified; restore the v2 store from its backup", nil)
+	}
 	evidence, err := recorded.VerificationEvidence()
 	if err != nil {
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
@@ -411,21 +439,16 @@ func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeopera
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
 			"the recorded operation is complete but its verification evidence is incomplete, so its verdict cannot be reported; restore the v2 store from its backup", nil)
 	}
-	// A Managed operation stops at verify until the trusted U1-1b re-pin promotes
-	// its authority, so this build can never have recorded one as complete. A
-	// completed row that says otherwise was not written by this gate.
-	if evidence.TargetMode != model.UpgradeTargetExternal {
-		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
-			"the recorded operation is complete but its verification names a target this build cannot complete, so its verdict cannot be reported; restore the v2 store from its backup", nil)
-	}
 	if strings.TrimSpace(evidence.SourceFingerprint) != strings.TrimSpace(recorded.SourceFingerprintAfter) {
 		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
 			"the recorded operation is complete but its verification names a different source volume than the recorded copy-in, so its verdict cannot be reported; restore the v2 store from its backup", nil)
 	}
 	required := append([]string{}, evidence.Domains...)
-	for _, domain := range []string{
-		model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig, model.UpgradeDomainIdentity,
-	} {
+	requiredDomains := []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig}
+	if evidence.TargetMode == model.UpgradeTargetExternal {
+		requiredDomains = append(requiredDomains, model.UpgradeDomainIdentity)
+	}
+	for _, domain := range requiredDomains {
 		if !containsVerifyDomain(required, domain) {
 			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable, fmt.Sprintf(
 				"the recorded operation is complete but its verification does not name the %q domain this target needs, so its verdict cannot be reported; restore the v2 store from its backup", domain), nil)
@@ -442,23 +465,33 @@ func completedVerifyResult(recorded model.UpgradeOperation, binding upgradeopera
 			"the recorded operation is complete but does not hold the %s its verification proves, so its verdict cannot be reported; restore the v2 store from its backup: %s",
 			plural(len(missing), "domain", "domains"), strings.Join(missing, ", ")), nil)
 	}
-	if !hasBinding {
-		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
-			"the recorded operation is complete but carries no External connect binding, so the target its verdict names cannot be checked; restore the v2 store from its backup", nil)
-	}
-	if !security.IsValidProtectedEnvelope(strings.TrimSpace(binding.ManagementKey)) {
-		// The verdict proves the binding, never the credential the connect step
-		// proved against it. A row completed before that secret was sealed carries
-		// none, and UnprotectString would hand an unsealed value back as if it
-		// were readable, so the shape is checked before anything decrypts it.
-		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
-			"the recorded operation is complete but its External binding carries no sealed management secret, so the credential the Manager would present was never proved; restore the v2 store from its backup", nil)
-	}
-	if evidence.BindingIdentity != binding.Identity ||
-		evidence.BindingGeneration != binding.Generation ||
-		evidence.BindingObservedAtMS != binding.ObservedAtMS {
-		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
-			"the recorded operation is complete but its verification names a different External binding than the recorded one, so its verdict cannot be reported; restore the v2 store from its backup", nil)
+	switch evidence.TargetMode {
+	case model.UpgradeTargetExternal:
+		if !hasBinding {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+				"the recorded operation is complete but carries no External connect binding, so the target its verdict names cannot be checked; restore the v2 store from its backup", nil)
+		}
+		if !security.IsValidProtectedEnvelope(strings.TrimSpace(binding.ManagementKey)) {
+			// The verdict proves the binding, never the credential the connect step
+			// proved against it. A row completed before that secret was sealed carries
+			// none, and UnprotectString would hand an unsealed value back as if it
+			// were readable, so the shape is checked before anything decrypts it.
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+				"the recorded operation is complete but its External binding carries no sealed management secret, so the credential the Manager would present was never proved; restore the v2 store from its backup", nil)
+		}
+		if evidence.BindingIdentity != binding.Identity ||
+			evidence.BindingGeneration != binding.Generation ||
+			evidence.BindingObservedAtMS != binding.ObservedAtMS {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+				"the recorded operation is complete but its verification names a different External binding than the recorded one, so its verdict cannot be reported; restore the v2 store from its backup", nil)
+		}
+	case model.UpgradeTargetManaged:
+		// A Managed target has no External binding. A stored one means the row's
+		// mode is a claim the store contradicts, so the verdict is unusable.
+		if hasBinding {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+				"the recorded operation is complete as a Managed target but carries an External connect binding, so the target its verdict names cannot be checked; restore the v2 store from its backup", nil)
+		}
 	}
 	return verifyResult(recorded, evidence.TargetMode, true), nil
 }
@@ -498,14 +531,31 @@ func completedVerifyResultForStore(ctx context.Context, db *sql.DB, paths target
 	if err != nil {
 		return VerifyResult{}, err
 	}
-	target, err := verifyTargetConfiguration(ctx, db, paths, model.UpgradeTargetExternal)
-	if err != nil {
-		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
-			"the recorded operation is complete but the CPA connection its verdict rests on cannot be read, so its verdict cannot be reported; restore the v2 store from its backup", err)
-	}
-	if err := requireVerifyTarget(model.UpgradeTargetExternal, binding, target); err != nil {
-		return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
-			"the recorded operation is complete but the credential its verdict proved is not the one the Manager stores, so its verdict cannot be reported; restore the v2 store from its backup", err)
+	switch result.TargetMode {
+	case model.UpgradeTargetExternal:
+		target, err := verifyTargetConfiguration(ctx, db, paths, model.UpgradeTargetExternal)
+		if err != nil {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+				"the recorded operation is complete but the CPA connection its verdict rests on cannot be read, so its verdict cannot be reported; restore the v2 store from its backup", err)
+		}
+		if err := requireVerifyTarget(model.UpgradeTargetExternal, binding, target); err != nil {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+				"the recorded operation is complete but the credential its verdict proved is not the one the Manager stores, so its verdict cannot be reported; restore the v2 store from its backup", err)
+		}
+	case model.UpgradeTargetManaged:
+		target, err := verifyTargetConfiguration(ctx, db, paths, model.UpgradeTargetManaged)
+		if err != nil {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+				"the recorded operation is complete but the imported destination its verdict rests on cannot be read, so its verdict cannot be reported; restore the v2 store from its backup", err)
+		}
+		if err := requireVerifyTarget(model.UpgradeTargetManaged, binding, target); err != nil {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+				"the recorded operation is complete but the destination credential its verdict proved is not the one the Manager stores, so its verdict cannot be reported; restore the v2 store from its backup", err)
+		}
+		if err := verifyStoredManagedConnection(ctx, db, target); err != nil {
+			return VerifyResult{}, newUpgradeError(UpgradeErrorVerifyNotApplicable,
+				"the recorded operation is complete but the Manager's sealed CPA connection cannot administer the destination its verdict proved, so its verdict cannot be reported; restore the v2 store from its backup", err)
+		}
 	}
 	return result, nil
 }
@@ -743,11 +793,25 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the CPA import recorded no destination attempt, so the connection it handed over cannot be confirmed; nothing was written", nil)
 	}
-	if !target.attempt.urlProved() {
+	if err := requireManagedDestinationEvidence(target.attempt); err != nil {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
-			"the recorded destination attempt names no proved address, so the connection it handed over cannot be confirmed; nothing was written", nil)
+			"the CPA import's recorded destination does not describe a proved server, so the connection it handed over cannot be confirmed; nothing was written", err)
 	}
-	if cpa.NormalizeBaseURL(target.attempt.BaseURL) != target.connection.BaseURL {
+	// The address comparison is canonical, by the same two functions the External
+	// arm and the startup admission apply: "127.0.0.1:8317" and
+	// "http://127.0.0.1:8317/" name one endpoint, and comparing spellings would
+	// refuse a handoff that is intact.
+	destinationAddress, err := canonicalVerifyAddress(target.attempt.BaseURL)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the destination the CPA import recorded is not a usable endpoint, so the connection it handed over cannot be confirmed; nothing was written", err)
+	}
+	connectionAddress, err := canonicalVerifyAddress(target.connection.BaseURL)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the CPA address the Manager stores is not a usable endpoint, so the connection the CPA import handed over cannot be confirmed; nothing was written", err)
+	}
+	if destinationAddress != connectionAddress {
 		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
 			"the Manager connection no longer names the destination the CPA import recorded, so the handoff did not survive; nothing was written", nil)
 	}
@@ -756,6 +820,91 @@ func requireVerifyTarget(mode string, binding upgradeoperation.ExternalBinding, 
 			"the Manager connection no longer carries the management secret the CPA import handed over; nothing was written", nil)
 	}
 	return nil
+}
+
+// requireManagedDestinationEvidence proves the recorded destination row is the
+// whole evidence a Managed handoff rests on: a proved address, the source
+// identity and class the destination was staged for, the Supervisor authority and
+// artifact the stage request named, the client keys it published, the plugin
+// choice the operator made, and the server fingerprint a run observed with the
+// authenticated proof. A row missing any of them describes a destination no run
+// of this operation proved, so the live re-proof has nothing to compare against.
+//
+// The provenance is checked field by field rather than by presence, because the
+// handoff is the claim that this operation staged this destination: the attempt
+// identity is derived from the source it was staged for, and the request is
+// replayed by the Supervisor against the authority and artifact recorded here. A
+// row whose operation ID does not resolve to its own source and attempt, or whose
+// recorded artifact is not the one this build's adoption record was qualified
+// against, describes a stage this operation never submitted.
+//
+// The fingerprint is checked by shape, exactly as the admission checks it: a value
+// that is not the digest freshkeyapply.ExternalServerFingerprint produces can
+// never equal the one the gate derives from the live CPA, so reporting it as
+// evidence would be a comparison that always fails for the wrong reason.
+func requireManagedDestinationEvidence(destination cpaImportDestinationRecord) error {
+	if strings.TrimSpace(destination.BaseURL) == "" {
+		return errors.New("the recorded destination names no address")
+	}
+	if !destination.urlProved() {
+		return errors.New("the recorded destination names no address a run proved")
+	}
+	if !validManagedServerFingerprint(destination.ServerFingerprint) {
+		return errors.New("the recorded destination names no proved server fingerprint")
+	}
+	intent := destination.Intent
+	if !validManagedSourceIdentity(intent.SourceIdentity) {
+		return errors.New("the recorded destination names no source identity this import stamps")
+	}
+	if intent.SourceClass != managedDestinationSourceClass {
+		return errors.New("the recorded destination does not name the legacy managed source class the import stages")
+	}
+	if destination.Attempt < 1 {
+		return errors.New("the recorded destination names no attempt identity")
+	}
+	if destination.OperationID != cpaImportDestinationOperationID(intent.SourceIdentity, destination.Attempt) {
+		return errors.New("the recorded destination's operation ID does not resolve to its own source and attempt")
+	}
+	if strings.TrimSpace(string(intent.ExpectedRuntimeIdentity)) == "" || intent.ExpectedRuntimeGeneration == 0 {
+		return errors.New("the recorded destination names no Supervisor authority the stage request addressed")
+	}
+	if len(intent.APIKeys) == 0 {
+		return errors.New("the recorded destination names no client key list the stage request published")
+	}
+	if intent.PluginsEnabled == nil {
+		return errors.New("the recorded destination names no plugin choice the stage request published")
+	}
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		return fmt.Errorf("this build carries no accepted CPA adoption artifact to compare the recorded destination against: %w", err)
+	}
+	if intent.ExpectedActiveArtifactID != qualifiedArtifact {
+		return errors.New("the recorded destination was staged on an artifact this build's adoption record is not qualified against")
+	}
+	return nil
+}
+
+// managedDestinationSourceClass is the source class every Managed destination
+// stage publishes. The import copies a 1.x stack's own CPA state, and the class is
+// what makes the Supervisor apply that arm; a row naming another one was written
+// by a request this step never submitted.
+const managedDestinationSourceClass = "legacy_managed"
+
+// validManagedSourceIdentity accepts the identity the managed source stamps and
+// the Runtime Supervisor validates for `legacy_managed`: the `external:sha256:`
+// prefix and a lowercase SHA-256 digest. A destination staged for anything else
+// was staged for another source.
+func validManagedSourceIdentity(value string) bool {
+	digest, ok := strings.CutPrefix(strings.TrimSpace(value), "external:sha256:")
+	return ok && identity.IsValidSHA256Hex(digest)
+}
+
+// validManagedServerFingerprint accepts exactly the shape
+// freshkeyapply.ExternalServerFingerprint produces: the shared identity prefix and
+// a lowercase SHA-256 digest.
+func validManagedServerFingerprint(value string) bool {
+	digest, ok := strings.CutPrefix(strings.TrimSpace(value), "external:sha256:")
+	return ok && identity.IsValidSHA256Hex(digest)
 }
 
 // proveVerifyExternalTarget proves the live External target with the Manager's
@@ -811,6 +960,281 @@ func proveVerifyExternalTarget(ctx context.Context, options VerifyOptions, targe
 			"the CPA answering the recorded address no longer matches the server and configuration fingerprint the External connect step proved; run upgrade external-connect --reprove if its key or configuration changed intentionally, and nothing was written", nil)
 	}
 	return nil
+}
+
+// resolveManagedVerifyRuntime returns the Supervisor client the Managed gate
+// observes.
+//
+// A caller that already holds the Manager's Runtime client supplies it. Everything
+// else, including the command line and a handler built without one, falls back to
+// the Manager's own configuration, which is the same client the import stages
+// through: a Manager not configured for the Manager-owned Runtime has no
+// Supervisor to report the destination, and the gate refuses instead of guessing
+// which CPA the operation ran.
+func resolveManagedVerifyRuntime(runtime VerifyRuntime) (VerifyRuntime, error) {
+	if runtime != nil {
+		return runtime, nil
+	}
+	cfg, err := config.LoadWithoutCreatingDefault()
+	if err != nil {
+		return nil, fmt.Errorf("load the Manager configuration: %w", err)
+	}
+	if !cfg.EmbeddedRuntimeConfigured() {
+		return nil, errors.New("this Manager is not configured for the Manager-owned Runtime (CPAMP_RUNTIME_URL and CPAMP_RUNTIME_TOKEN_FILE), so it cannot report the destination CPA the CPA import staged")
+	}
+	return runtimeservice.NewEmbeddedClientWithTokenSource(
+		cfg.RuntimeURL,
+		runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile),
+	), nil
+}
+
+// proveManagedVerifyRuntimeAuthority proves, against the live Supervisor, that
+// the destination this gate would complete is the one the record describes.
+//
+// The recorded attempt names the Runtime identity and the artifact its stage
+// request carried; the Supervisor names the identity it runs under and the
+// artifact it is executing now. A Supervisor that restarted under an artifact
+// this build's adoption record never accepted, or that is running another
+// identity, answers the destination's four management reads exactly as the
+// recorded one did — the URL, the management secret and the client key list are
+// unchanged — so the reads below cannot tell them apart. This comparison is
+// therefore the only proof that the CPA the Manager will administer after the
+// upgrade is the one the import staged, and it runs before any of those reads.
+// The artifact this build accepts is supplied by the caller, which derives it from
+// the compiled adoption authority the import proved.
+func proveManagedVerifyRuntimeAuthority(ctx context.Context, runtimeClient VerifyRuntime, qualifiedArtifact model.RuntimeArtifactID, destination cpaImportDestinationRecord) error {
+	unproven := func(reason string, cause error) error {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven, reason, cause)
+	}
+	if runtimeClient == nil {
+		return unproven("the Manager-owned Runtime is not configured, so the active gateway artifact of the Managed destination cannot be confirmed; nothing was written", nil)
+	}
+	status, err := runtimeClient.Status(ctx)
+	if err != nil {
+		return unproven("the Manager-owned Runtime did not answer, so the active gateway artifact of the Managed destination cannot be confirmed; nothing was written", err)
+	}
+	if err := status.Validate(); err != nil {
+		return unproven("the Manager-owned Runtime reported a status this build cannot read, so the active gateway artifact of the Managed destination cannot be confirmed; nothing was written", err)
+	}
+	if status.ProtocolVersion != "v1" || status.ActiveGatewayArtifact == nil {
+		return unproven("the Manager-owned Runtime did not report an active gateway artifact, so the destination CPA this operation imported into cannot be confirmed; nothing was written", nil)
+	}
+	// The Supervisor reports its observed artifact in every state, including
+	// offline and starting, so an artifact match alone does not prove it is
+	// running the destination CPA now. Only a Ready Supervisor is administering
+	// the CPA that answers the probes below.
+	if reason := managedRuntimeReadyFailure(status); reason != "" {
+		return unproven(reason+"; nothing was written", nil)
+	}
+	// The running artifact has to be the one this build's authority accepted and
+	// the one the stage request was published against. Either difference means the
+	// destination the Supervisor runs is not the destination this operation
+	// staged, even when the CPA at the recorded address answers.
+	if running := status.ActiveGatewayArtifact.ArtifactID; running != qualifiedArtifact {
+		return unproven(fmt.Sprintf(
+			"the Manager-owned Runtime is running gateway artifact %q, and this build's accepted CPA adoption record is for %q, so the Managed destination cannot be confirmed; nothing was written",
+			running, qualifiedArtifact), nil)
+	}
+	if staged := destination.Intent.ExpectedActiveArtifactID; staged != status.ActiveGatewayArtifact.ArtifactID {
+		return unproven(fmt.Sprintf(
+			"the CPA import staged this destination on gateway artifact %q, and the Manager-owned Runtime is running %q, so the destination this operation wrote is not the one now serving; nothing was written",
+			staged, status.ActiveGatewayArtifact.ArtifactID), nil)
+	}
+	// The identity is the Supervisor's authority over its own destination: a
+	// different one never staged this request, and the secret the Manager stores
+	// was minted under the recorded one. The recorded identity is never empty — the
+	// attempt evidence refuses a row without one — so the comparison is exact.
+	if staged, running := destination.Intent.ExpectedRuntimeIdentity, status.Identity; staged != running {
+		return unproven(fmt.Sprintf(
+			"the CPA import staged this destination on Runtime %q, and the Supervisor running now reports %q, so the recorded destination belongs to an authority this Manager cannot administer; nothing was written",
+			staged, running), nil)
+	}
+	return nil
+}
+
+// managedRuntimeReadyFailure names why a Supervisor status does not prove that a
+// ready destination CPA is running, and reports "" when it does.
+//
+// The Supervisor reports its observed artifact in every state — offline and
+// starting included — so an artifact, identity and URL that all match still say
+// nothing about whether the destination CPA answers now. Both steps that address
+// the destination on the strength of that status, the completion gate and a replay
+// of a recorded import, refuse the same states with this one reason; they differ
+// only in the error code they type it with and in what they say about writes.
+func managedRuntimeReadyFailure(status model.RuntimeObservedStatus) string {
+	if status.State == model.RuntimeStateReady {
+		return ""
+	}
+	return fmt.Sprintf(
+		"the Manager-owned Runtime reported state %q rather than %q, so the Supervisor is not running a ready Managed destination CPA",
+		status.State, model.RuntimeStateReady)
+}
+
+// proveVerifyManagedTarget proves the live Managed destination with the Manager's
+// own stored credential.
+//
+// The import handed the destination a secret only this Manager holds, and recorded
+// the server facts it observed. Three things can still be wrong at completion time:
+// the stored connection may not be the sealed credential the Manager would
+// actually present after a restart, the Supervisor may be running an artifact or
+// identity the stage request was never published under, and the CPA answering the
+// recorded address may no longer be the server the import proved. So this gate
+// asks the live Supervisor for its artifact and identity and compares them with
+// the recorded attempt, re-reads the sealed connection with the Manager data key,
+// requires the URL both records name to be the same endpoint, and repeats the four
+// v8 management reads — version, configuration document, authenticated client-key
+// list, gateway model surface — with that credential. The fingerprint those reads
+// produce must equal the one the import recorded.
+func proveVerifyManagedTarget(ctx context.Context, options VerifyOptions, db *sql.DB, target verifyTarget) error {
+	destination := target.attempt
+	managementKey := strings.TrimSpace(target.connection.ManagementKey)
+	if !cpa.ValidV8ManagementKey(managementKey) {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the Manager's stored CPA connection carries no usable management secret, so the destination the CPA import handed over could not be administered by a restarted Manager; nothing was written", nil)
+	}
+	// The two stored secrets must be the same one: the Manager presents the
+	// connection it resolved, and the destination accepts the secret the import
+	// staged. Comparing them here is what makes the four reads below a proof about
+	// this Manager rather than about any credential that happens to answer.
+	if !security.EqualHMAC(managementKey, strings.TrimSpace(target.attemptSecret)) {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the Manager's stored CPA connection does not carry the management secret the CPA import recorded for this destination, so a restarted Manager could not administer the CPA this run would verify; nothing was written", nil)
+	}
+	if err := verifyStoredManagedConnection(ctx, db, target); err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the Manager's stored CPA connection is not the sealed credential the CPA import handed the destination, so a restarted Manager could not administer the CPA this run would verify; nothing was written", err)
+	}
+	// What the Manager administers after the upgrade is the CPA the Supervisor
+	// started, not merely whatever answers the recorded address. The Supervisor's
+	// own report is the only statement about that, so it is read before the four
+	// management reads below: an artifact or identity that is not the recorded one
+	// would answer every one of them exactly as the staged destination did.
+	//
+	// The artifact this build accepts is derived first: a build whose compiled
+	// record authorizes no staging transition has nothing to compare the
+	// Supervisor's report with.
+	if _, err := qualifiedUpgradeAdoption(); err != nil {
+		return err
+	}
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		return err
+	}
+	runtimeClient, err := resolveManagedVerifyRuntime(options.Runtime)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the Manager-owned Runtime is not configured or reachable, so the active gateway artifact of the Managed destination cannot be confirmed; nothing was written", err)
+	}
+	if err := proveManagedVerifyRuntimeAuthority(ctx, runtimeClient, qualifiedArtifact, destination); err != nil {
+		return err
+	}
+	probes := ExternalConnectOptions{
+		BaseURL:                destination.BaseURL,
+		ManagementKey:          managementKey,
+		observeExternalVersion: options.observeExternalVersion,
+		readExternalKeys:       options.readExternalKeys,
+		proveModelSurface:      options.proveModelSurface,
+		readV8Config:           options.readV8Config,
+	}
+	report, err := externalConnectVersion(ctx, probes, destination.BaseURL, managementKey)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the management secret the Manager stores did not authenticate against the destination the CPA import recorded, so a restarted Manager could not administer it; nothing was written", err)
+	}
+	if report.WriteBlocked {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the destination the CPA import recorded no longer serves the v8 management contract this Manager writes, so a restarted Manager could not administer it; nothing was written", nil)
+	}
+	if err := externalConnectConfig(ctx, probes, destination.BaseURL, managementKey); err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the destination the CPA import recorded did not answer the authenticated configuration read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", err)
+	}
+	snapshot, err := externalConnectKeys(ctx, probes, destination.BaseURL, managementKey)
+	if err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the destination the CPA import recorded did not answer the authenticated client-key read with the management secret the Manager stores, so a restarted Manager could not administer it; nothing was written", err)
+	}
+	clientKey := ""
+	if len(snapshot.Keys) > 0 {
+		clientKey = snapshot.Keys[0]
+	}
+	if err := externalConnectModelSurface(ctx, probes, destination.BaseURL, clientKey); err != nil {
+		return newUpgradeError(UpgradeErrorVerifyConnectionUnproven,
+			"the gateway behind the destination the CPA import recorded did not answer its model surface, so the target a restarted Manager would administer is not serving; nothing was written", err)
+	}
+	if freshkeyapply.ExternalServerFingerprint(report.Version, snapshot.SourceSHA256) != destination.ServerFingerprint {
+		return newUpgradeError(UpgradeErrorVerifyBindingDrifted,
+			"the CPA answering the recorded destination address no longer matches the server fingerprint the CPA import proved; re-run the import against the destination this Manager staged if its build or configuration changed intentionally, and nothing was written", nil)
+	}
+	return nil
+}
+
+// verifyStoredManagedConnection proves the Manager's own CPA connection is the
+// sealed credential the Managed destination was handed.
+//
+// A stored connection that happens to hold the same plaintext proves nothing on
+// its own: the value the next start reads is the envelope on disk, and a
+// plaintext secret left there by an older build is not a sealed credential this
+// Manager can re-read with its data key. So the raw settings row is checked for a
+// valid envelope, decrypted with the existing data key, and required to equal the
+// connection the store resolved — and to name the same endpoint as the recorded
+// destination.
+func verifyStoredManagedConnection(ctx context.Context, db *sql.DB, target verifyTarget) error {
+	if !target.attemptFound {
+		return errors.New("the CPA import recorded no destination")
+	}
+	if target.protector == nil {
+		return errors.New("the Manager data key is unavailable")
+	}
+	sealed, err := readSealedManagerConnectionSecret(ctx, db)
+	if err != nil {
+		return err
+	}
+	if !security.IsValidProtectedEnvelope(sealed) {
+		return errors.New("the Manager's stored CPA connection carries no sealed management secret")
+	}
+	secret, err := target.protector.UnprotectString(sealed)
+	if err != nil {
+		return fmt.Errorf("decrypt the Manager's sealed management secret: %w", err)
+	}
+	secret = strings.TrimSpace(secret)
+	if !cpa.ValidV8ManagementKey(secret) {
+		return errors.New("the Manager's sealed management secret is not a usable v8 key")
+	}
+	if !security.EqualHMAC(strings.TrimSpace(target.connection.ManagementKey), secret) {
+		return errors.New("the sealed management secret is not the connection the Manager resolved")
+	}
+	connectionAddress, err := canonicalVerifyAddress(target.connection.BaseURL)
+	if err != nil || connectionAddress == "" {
+		return errors.New("the Manager's stored CPA connection names no usable address")
+	}
+	destinationAddress, err := canonicalVerifyAddress(target.attempt.BaseURL)
+	if err != nil {
+		return fmt.Errorf("the recorded destination names an address that is not a usable endpoint: %w", err)
+	}
+	if connectionAddress != destinationAddress {
+		return errors.New("the Manager's stored CPA connection names a different address than the recorded destination")
+	}
+	return nil
+}
+
+// readSealedManagerConnectionSecret reads the sealed management key exactly as it
+// is stored on disk, without decrypting it. The caller decides whether the
+// envelope is one this Manager can read.
+func readSealedManagerConnectionSecret(ctx context.Context, db *sql.DB) (string, error) {
+	var raw string
+	err := db.QueryRowContext(ctx, `select value from settings where key = 'manager_config_v1'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errors.New("the Manager stores no CPA connection")
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the Manager's stored CPA connection: %w", err)
+	}
+	var stored model.ManagerConfig
+	if err := json.Unmarshal([]byte(raw), &stored); err != nil {
+		return "", fmt.Errorf("decode the Manager's stored CPA connection: %w", err)
+	}
+	return strings.TrimSpace(stored.CPAConnection.ManagementKey), nil
 }
 
 // canonicalVerifyAddress applies exactly the two functions the External connect
@@ -941,10 +1365,13 @@ func markedReason(reason string) bool {
 }
 
 // verifyRequiredDomains is the applicable domain set of this operation: the
-// copy-in's own domain, every domain the reconciliation established, and — for an
-// External target — the two domains the connect step records. It is derived and
-// never the whole model vocabulary: `usage_events` is a domain no step of this
-// build records, and requiring it would make every real operation unverifiable.
+// copy-in's own domain, every domain the reconciliation established, and the
+// target step's domains. `cpa_config` is required for both modes — the External
+// connect step and the Managed CPA import each record it — while `identity` is
+// the External connect step's own observation and has no Managed producer. It is
+// derived and never the whole model vocabulary: `usage_events` is a domain no
+// step of this build records, and requiring it would make every real operation
+// unverifiable.
 func verifyRequiredDomains(mode string, established []string) []string {
 	required := make([]string, 0, len(established)+3)
 	required = append(required, model.UpgradeDomainSourceCopy)
@@ -953,12 +1380,11 @@ func verifyRequiredDomains(mode string, established []string) []string {
 			required = append(required, domain)
 		}
 	}
-	if mode == model.UpgradeTargetExternal {
-		for _, domain := range []string{model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig} {
-			if !containsVerifyDomain(required, domain) {
-				required = append(required, domain)
-			}
-		}
+	if mode == model.UpgradeTargetExternal && !containsVerifyDomain(required, model.UpgradeDomainIdentity) {
+		required = append(required, model.UpgradeDomainIdentity)
+	}
+	if !containsVerifyDomain(required, model.UpgradeDomainCPAConfig) {
+		required = append(required, model.UpgradeDomainCPAConfig)
 	}
 	return required
 }

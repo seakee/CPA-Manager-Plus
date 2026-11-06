@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,16 +23,22 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/upgradeoperation"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/managerconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/store"
 )
 
 const (
-	verifyExternalAddress   = "https://cpa.example"
-	verifyManagedAddress    = "http://127.0.0.1:28317"
-	verifyManagedSecret     = "managed-destination-secret"
-	verifyDestinationSource = "1x-managed-source-identity"
+	verifyExternalAddress = "https://cpa.example"
+	verifyManagedAddress  = "http://127.0.0.1:28317"
+	verifyManagedSecret   = "managed-destination-secret"
 )
+
+// verifyDestinationSource is the identity the managed source stamps: the
+// `external:sha256:` prefix and the digest of the configuration bytes the
+// destination was staged for.
+var verifyDestinationSource = "external:sha256:" + strings.Repeat("c", 64)
 
 // verifyFixture is a recorded operation driven through the real steps. Every
 // step runs its production entry point — CopyIn, Reconcile, ExternalConnect or
@@ -42,29 +49,132 @@ type verifyFixture struct {
 	volume legacyVolume
 	target string
 	paths  targetPaths
+	// runtime is the Supervisor the Managed gate observes. It reports the
+	// identity and artifact the recorded attempt names, so a test can change one
+	// of them and prove which comparison refused.
+	runtime *fakeVerifyRuntime
 }
 
 // newVerifyFixture copies a real 1.x fixture into a fresh v2 data root. The
 // copy-in takes the source fence; it is released as soon as the step returns, so
 // the fixture never presents the source as a live writer.
+var (
+	verifyTemplateOnce       sync.Once
+	verifyTemplateLegacyDB   []byte
+	verifyTemplateDataKey    []byte
+	verifyTemplateCopyInDB   []byte
+	verifyTemplateReconciled []byte
+	verifyTemplateReport     ReconcileReport
+	verifyTemplateErr        error
+)
+
+func ensureVerifyTemplates(t *testing.T) {
+	t.Helper()
+	verifyTemplateOnce.Do(func() {
+		volume := newLegacyVolume(t)
+		targetRoot := canonicalTempDir(t)
+		options := copyInOptions(volume, targetRoot)
+		lock, err := processlock.AcquireExisting(volume.databasePath())
+		if err != nil {
+			verifyTemplateErr = err
+			return
+		}
+		options.Lock = lock
+		_, copyErr := CopyIn(context.Background(), options)
+		if closeErr := lock.Close(); closeErr != nil && copyErr == nil {
+			copyErr = closeErr
+		}
+		if copyErr != nil {
+			verifyTemplateErr = copyErr
+			return
+		}
+		paths := newTargetPaths(targetRoot)
+		checkpointSQLite(volume.databasePath())
+		checkpointSQLite(paths.Database)
+		if verifyTemplateLegacyDB, verifyTemplateErr = os.ReadFile(volume.databasePath()); verifyTemplateErr != nil {
+			return
+		}
+		if verifyTemplateDataKey, verifyTemplateErr = os.ReadFile(filepath.Join(volume.root, dataKeyFileName)); verifyTemplateErr != nil {
+			return
+		}
+		if verifyTemplateCopyInDB, verifyTemplateErr = os.ReadFile(paths.Database); verifyTemplateErr != nil {
+			return
+		}
+		sourceLock, err := processlock.AcquireExisting(volume.databasePath())
+		if err != nil {
+			verifyTemplateErr = err
+			return
+		}
+		targetLock, err := processlock.Acquire(paths.Database)
+		if err != nil {
+			_ = sourceLock.Close()
+			verifyTemplateErr = err
+			return
+		}
+		report, recErr := Reconcile(context.Background(), Options{
+			LegacyRoot: volume.root,
+			TargetRoot: targetRoot,
+			BundleDir:  DefaultBundleDirectory(targetRoot),
+			Lock:       sourceLock,
+			TargetLock: targetLock,
+		})
+		if closeErr := errors.Join(sourceLock.Close(), targetLock.Close()); closeErr != nil && recErr == nil {
+			recErr = closeErr
+		}
+		if recErr != nil {
+			verifyTemplateErr = recErr
+			return
+		}
+		checkpointSQLite(paths.Database)
+		verifyTemplateReport = report
+		verifyTemplateReconciled, verifyTemplateErr = os.ReadFile(paths.Database)
+	})
+	if verifyTemplateErr != nil {
+		t.Fatalf("initialize verify fixture templates: %v", verifyTemplateErr)
+	}
+}
+
+func checkpointSQLite(databasePath string) {
+	if db, err := sql.Open("sqlite", databasePath); err == nil {
+		_, _ = db.Exec(`pragma wal_checkpoint(TRUNCATE)`)
+		_ = db.Close()
+	}
+}
+
+func materializeCachedLegacyVolume(t *testing.T) legacyVolume {
+	t.Helper()
+	ensureVerifyTemplates(t)
+	root := canonicalTempDir(t)
+	volume := legacyVolume{root: root}
+	databasePath := volume.databasePath()
+	if err := os.WriteFile(databasePath, verifyTemplateLegacyDB, 0o600); err != nil {
+		t.Fatalf("write 1.x fixture database: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, dataKeyFileName), verifyTemplateDataKey, 0o600); err != nil {
+		t.Fatalf("write 1.x fixture data key: %v", err)
+	}
+	for index, path := range volume.archives() {
+		writeFixtureTree(t, path, fmt.Sprintf("{\"segment\":%d}\n", index+1))
+	}
+	if err := os.WriteFile(databasePath+".manager.lock", nil, 0o600); err != nil {
+		t.Fatalf("create 1.x fixture ownership marker: %v", err)
+	}
+	return volume
+}
+
 func newVerifyFixture(t *testing.T) *verifyFixture {
 	t.Helper()
-	volume := newLegacyVolume(t)
+	volume := materializeCachedLegacyVolume(t)
 	targetRoot := canonicalTempDir(t)
-	options := copyInOptions(volume, targetRoot)
-	lock, err := processlock.AcquireExisting(volume.databasePath())
-	if err != nil {
-		t.Fatalf("acquire the copy-in source fence: %v", err)
+	paths := newTargetPaths(targetRoot)
+	if err := os.WriteFile(paths.Database, verifyTemplateCopyInDB, 0o600); err != nil {
+		t.Fatalf("write v2 fixture database: %v", err)
 	}
-	options.Lock = lock
-	_, copyErr := CopyIn(context.Background(), options)
-	if err := lock.Close(); err != nil {
-		t.Fatalf("release the copy-in source fence: %v", err)
+	if err := os.WriteFile(paths.DataKey, verifyTemplateDataKey, 0o600); err != nil {
+		t.Fatalf("write v2 fixture data key: %v", err)
 	}
-	if copyErr != nil {
-		t.Fatalf("copy in: %v", copyErr)
-	}
-	return &verifyFixture{volume: volume, target: targetRoot, paths: newTargetPaths(targetRoot)}
+	execTarget(t, paths.Database, fmt.Sprintf("update upgrade_operations set source_root = '%s' where id = 1", canonicalPath(volume.root)))
+	return &verifyFixture{volume: volume, target: targetRoot, paths: paths, runtime: newFakeVerifyRuntime(t)}
 }
 
 func (f *verifyFixture) databasePath() string { return f.paths.Database }
@@ -93,25 +203,12 @@ func (f *verifyFixture) targetLock(t *testing.T) *processlock.Lock {
 // releases them, so the verification finds both free.
 func (f *verifyFixture) reconcile(t *testing.T) ReconcileReport {
 	t.Helper()
-	sourceLock := f.sourceLock(t)
-	targetLock := f.targetLock(t)
-	report, err := Reconcile(context.Background(), Options{
-		LegacyRoot: f.volume.root,
-		TargetRoot: f.target,
-		BundleDir:  DefaultBundleDirectory(f.target),
-		Lock:       sourceLock,
-		TargetLock: targetLock,
-	})
-	if closeErr := errors.Join(sourceLock.Close(), targetLock.Close()); closeErr != nil {
-		t.Fatalf("release the reconciliation fences: %v", closeErr)
+	ensureVerifyTemplates(t)
+	if err := os.WriteFile(f.paths.Database, verifyTemplateReconciled, 0o600); err != nil {
+		t.Fatalf("write reconciled v2 fixture database: %v", err)
 	}
-	if err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if !report.Recorded {
-		t.Fatalf("reconcile did not record its evidence: %+v", report)
-	}
-	return report
+	execTarget(t, f.paths.Database, fmt.Sprintf("update upgrade_operations set source_root = '%s' where id = 1", canonicalPath(f.volume.root)))
+	return verifyTemplateReport
 }
 
 // connectExternal runs the real External connect step against a synthetic v8
@@ -166,11 +263,51 @@ func (f *verifyFixture) handManagerConnection(t *testing.T, address, secret stri
 	}
 }
 
+// verifyManagedFingerprint is the server fingerprint the synthetic probe seams
+// below report, so the evidence the fixture records is the one the live re-proof
+// derives.
+func verifyManagedFingerprint() string {
+	return freshkeyapply.ExternalServerFingerprint("v8.0.13", strings.Repeat("a", 64))
+}
+
+// managedDestinationRecord is the destination attempt a completed Managed import
+// leaves behind: the whole request the Supervisor published, the attempt identity
+// derived from the source it was staged for, and the evidence a run observed.
+func managedDestinationRecord(t *testing.T) cpaImportDestinationRecord {
+	t.Helper()
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		t.Fatalf("read the compiled adoption artifact: %v", err)
+	}
+	return cpaImportDestinationRecord{
+		BaseURL:           cpa.NormalizeBaseURL(verifyManagedAddress),
+		URLProved:         true,
+		ServerFingerprint: verifyManagedFingerprint(),
+		Intent: cpaImportDestinationIntent{
+			ExpectedRuntimeIdentity:   "runtime-identity-1",
+			ExpectedRuntimeGeneration: 4,
+			ExpectedActiveArtifactID:  qualifiedArtifact,
+			SourceIdentity:            verifyDestinationSource,
+			SourceClass:               managedDestinationSourceClass,
+			APIKeys:                   []string{"legacy-client-key-1"},
+			PluginsEnabled:            boolPointer(true),
+		},
+		OperationID:   cpaImportDestinationOperationID(verifyDestinationSource, 1),
+		Attempt:       1,
+		SourceVersion: "7.3.4",
+		SourceLayout:  "v7",
+		ManualItems: []CPAImportManualItem{{
+			Item:        "section:ampcode",
+			Reason:      "reconfigure_after_adoption",
+			Instruction: "re-create it in the destination CPA",
+		}},
+	}
+}
+
 // recordManagedImport records what the CPA import leaves behind for a Managed
-// target: the handoff connection, the proved destination attempt, the
-// cpa_import stage and the manual items it defers. It records no cpa_config
-// domain, because this build copies nothing — that omission is the fact the
-// verification has to survive.
+// target: the handoff connection, the proved destination attempt with the server
+// facts the run observed, the cpa_import stage with its cpa_config domain, and the
+// manual items the adoption rules keep manual.
 func (f *verifyFixture) recordManagedImport(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -180,24 +317,19 @@ func (f *verifyFixture) recordManagedImport(t *testing.T) {
 	if err := handDestinationConnection(ctx, f.databasePath(), f.paths.DataKey, verifyManagedAddress, verifyManagedSecret); err != nil {
 		t.Fatalf("hand the destination connection over: %v", err)
 	}
-	if err := saveCPAImportDestinationRecord(ctx, f.databasePath(), f.paths.DataKey, cpaImportDestinationRecord{
-		BaseURL:     cpa.NormalizeBaseURL(verifyManagedAddress),
-		URLProved:   true,
-		Intent:      cpaImportDestinationIntent{SourceIdentity: verifyDestinationSource},
-		OperationID: cpaImportDestinationOperationID(verifyDestinationSource, 1),
-		Attempt:     1,
-	}, verifyManagedSecret); err != nil {
+	destination := managedDestinationRecord(t)
+	if err := saveCPAImportDestinationRecord(ctx, f.databasePath(), f.paths.DataKey, destination, verifyManagedSecret); err != nil {
 		t.Fatalf("record the destination attempt: %v", err)
 	}
-	if _, err := recordCPAImportDeferral(ctx, f.databasePath(), CPAImportResult{
-		Stage: model.UpgradeStageCPAImport,
-		ManualItems: []CPAImportManualItem{{
-			Item:        "section:ampcode",
-			Reason:      CPAImportRequiresQualification,
-			Instruction: "re-create it in the destination CPA",
-		}},
+	if _, err := recordCPAImportCompletion(ctx, f.databasePath(), CPAImportResult{
+		Stage:             model.UpgradeStageCPAImport,
+		SourceVersion:     destination.SourceVersion,
+		SourceLayout:      destination.SourceLayout,
+		DestinationURL:    verifyManagedAddress,
+		ServerFingerprint: verifyManagedFingerprint(),
+		ManualItems:       destination.ManualItems,
 	}); err != nil {
-		t.Fatalf("record the CPA import deferral: %v", err)
+		t.Fatalf("record the CPA import completion: %v", err)
 	}
 }
 
@@ -227,6 +359,7 @@ func (f *verifyFixture) verifyOptions() VerifyOptions {
 	return VerifyOptions{
 		LegacyRoot: f.volume.root,
 		TargetRoot: f.target,
+		Runtime:    f.runtime,
 		observeExternalVersion: func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
 			return cpa.ClassifyExternalVersion("v8.0.13"), nil
 		},
@@ -238,6 +371,49 @@ func (f *verifyFixture) verifyOptions() VerifyOptions {
 		},
 		proveModelSurface: func(context.Context, string, string) error { return nil },
 	}
+}
+
+// fakeVerifyRuntime is the Supervisor the Managed gate observes. Its default
+// report is the one the recorded attempt names — the qualified artifact, the
+// fixture's Runtime identity and the version the destination proves — so a test
+// changes exactly one fact and the refusal it proves is about that fact.
+type fakeVerifyRuntime struct {
+	status model.RuntimeObservedStatus
+	err    error
+}
+
+// newFakeVerifyRuntime builds the truthful report. The artifact is the one this
+// build's adoption record was accepted for, which is what the fixture's stage
+// request carried.
+func newFakeVerifyRuntime(t *testing.T) *fakeVerifyRuntime {
+	t.Helper()
+	qualifiedArtifact, err := freshstrategy.QualifiedUpgradeAdoptionArtifactID()
+	if err != nil {
+		t.Fatalf("read the compiled adoption artifact: %v", err)
+	}
+	return &fakeVerifyRuntime{status: model.RuntimeObservedStatus{
+		Identity:              "runtime-identity-1",
+		Generation:            4,
+		ProtocolVersion:       "v1",
+		State:                 model.RuntimeStateReady,
+		CPAObservedVersion:    "v8.0.13",
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: qualifiedArtifact, Version: "v8.0.13"},
+		Capabilities:          model.RuntimeCapabilities{model.RuntimeCapabilityStart},
+	}}
+}
+
+func (f *fakeVerifyRuntime) Status(context.Context) (model.RuntimeObservedStatus, error) {
+	if f.err != nil {
+		return model.RuntimeObservedStatus{}, f.err
+	}
+	status := f.status
+	// The caller gets its own copy of the observation, so a gate that held the
+	// value could not be mistaken for the Supervisor changing its mind later.
+	if status.ActiveGatewayArtifact != nil {
+		artifact := *status.ActiveGatewayArtifact
+		status.ActiveGatewayArtifact = &artifact
+	}
+	return status, nil
 }
 
 func (f *verifyFixture) verify(t *testing.T) (VerifyResult, error) {
@@ -337,50 +513,50 @@ func TestVerifyCompletesTheExternalOperation(t *testing.T) {
 	}
 }
 
-// TestVerifyRecordsTheManagedWaitingPosition is the decision-4 contract: a
-// Managed operation whose comparison and connection hold is recorded at verify
-// with the typed reason, and never completes.
-func TestVerifyRecordsTheManagedWaitingPosition(t *testing.T) {
+// TestVerifyCompletesTheManagedOperation is the Managed contract end to end: the
+// recorded copy-in, reconciliation, imported destination and Manager connection
+// are re-proved against the live CPA, and the verdict and its evidence are
+// recorded as `complete` in one statement.
+func TestVerifyCompletesTheManagedOperation(t *testing.T) {
 	fixture := newManagedVerifyFixture(t)
 	before := fixture.operation(t)
 	if before.Stage != model.UpgradeStageCPAImport {
 		t.Fatalf("fixture stage = %q, want cpa_import", before.Stage)
 	}
-	if before.HasDomain(model.UpgradeDomainCPAConfig) {
-		t.Fatal("fixture recorded cpa_config, which this build must not claim")
+	if !before.HasDomain(model.UpgradeDomainCPAConfig) {
+		t.Fatal("fixture recorded no cpa_config, so the import never settled its copy")
 	}
 
 	result, err := fixture.verify(t)
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if result.Complete {
-		t.Fatalf("a Managed operation completed before the re-pin: %+v", result)
-	}
-	if result.Stage != model.UpgradeStageVerify {
-		t.Fatalf("stage = %q, want verify", result.Stage)
+	if !result.Complete || result.Stage != model.UpgradeStageComplete {
+		t.Fatalf("result = %+v, want a completed operation", result)
 	}
 	if result.TargetMode != model.UpgradeTargetManaged {
 		t.Fatalf("target mode = %q, want managed", result.TargetMode)
 	}
-	if result.ReasonCode != string(UpgradeErrorVerifyWaitingForRepin) {
-		t.Fatalf("reason code = %q, want the re-pin reason", result.ReasonCode)
+	if result.ReasonCode != "" || result.Reason != "" {
+		t.Fatalf("a completed operation reported a reason: %+v", result)
 	}
-	if !strings.Contains(result.Reason, "U1-1b") {
-		t.Fatalf("reason = %q, want it to name the trusted re-pin", result.Reason)
+	wantDomains := []string{
+		model.UpgradeDomainSourceCopy,
+		model.UpgradeDomainRetainedProjection,
+		model.UpgradeDomainPricing,
+		model.UpgradeDomainCoverage,
+		model.UpgradeDomainCPAConfig,
+	}
+	if !hasDomains(result.DomainsDone, wantDomains...) {
+		t.Fatalf("domains = %v, want %v", result.DomainsDone, wantDomains)
+	}
+	if slicesContain(result.DomainsDone, model.UpgradeDomainIdentity) {
+		t.Fatalf("a Managed completion claimed the External identity domain: %v", result.DomainsDone)
 	}
 
 	recorded := fixture.operation(t)
-	if recorded.Stage != model.UpgradeStageVerify {
-		t.Fatalf("recorded stage = %q, want verify", recorded.Stage)
-	}
-	if recorded.ErrorCode != string(UpgradeErrorVerifyWaitingForRepin) {
-		t.Fatalf("recorded reason code = %q", recorded.ErrorCode)
-	}
-	// The deferred cpa_config domain stays missing, honestly: the waiting record
-	// is not a claim that the destination holds the copied state.
-	if recorded.HasDomain(model.UpgradeDomainCPAConfig) {
-		t.Fatal("the waiting record claimed cpa_config")
+	if recorded.Stage != model.UpgradeStageComplete {
+		t.Fatalf("recorded stage = %q, want complete", recorded.Stage)
 	}
 	evidence, err := recorded.VerificationEvidence()
 	if err != nil {
@@ -392,34 +568,132 @@ func TestVerifyRecordsTheManagedWaitingPosition(t *testing.T) {
 	if evidence.BindingIdentity != "" || evidence.BindingGeneration != "" {
 		t.Fatalf("a Managed verification named a binding: %+v", evidence)
 	}
-	// Every manual item the import recorded survives, and the waiting
-	// instruction is added beside them rather than replacing them.
-	if len(recorded.ManualItems) != len(before.ManualItems)+1 {
-		t.Fatalf("manual items = %v, want the import's %v plus the waiting line", recorded.ManualItems, before.ManualItems)
-	}
-	for _, item := range before.ManualItems {
-		if !slicesContain(recorded.ManualItems, item) {
-			t.Fatalf("manual item %q was lost: %v", item, recorded.ManualItems)
-		}
+	// Every manual item the import recorded survives: completion is not a
+	// statement that the operator's remaining work disappeared.
+	if len(recorded.ManualItems) != len(before.ManualItems) {
+		t.Fatalf("manual items = %v, want the import's %v", recorded.ManualItems, before.ManualItems)
 	}
 
-	// A repeat records nothing: the position and its evidence are already there.
+	// A repeat is the same verdict, not a new record: nothing is written.
 	repeat, err := fixture.verify(t)
 	if err != nil {
 		t.Fatalf("repeat verify: %v", err)
 	}
-	if repeat.Complete || !repeat.AlreadyVerified {
-		t.Fatalf("repeat = %+v, want the recorded waiting position", repeat)
+	if !repeat.Complete || !repeat.AlreadyVerified {
+		t.Fatalf("repeat = %+v, want the recorded verdict reported", repeat)
 	}
 	after := fixture.operation(t)
 	if after.Revision != recorded.Revision || after.UpdatedAtMS != recorded.UpdatedAtMS {
 		t.Fatalf("repeat wrote the row: %d/%d -> %d/%d", recorded.Revision, recorded.UpdatedAtMS, after.Revision, after.UpdatedAtMS)
 	}
-	if len(after.ManualItems) != len(recorded.ManualItems) {
-		t.Fatalf("repeat duplicated manual items: %v -> %v", recorded.ManualItems, after.ManualItems)
+}
+
+// TestVerifyManagedRefusesLiveSupervisorArtifactDriftWithIdenticalVersionAndConfig
+// is the High finding: the gate trusted the recorded attempt alone, so a Supervisor
+// that switched the active gateway artifact after the import — while keeping the
+// same URL, management secret, client keys, destination build and configuration —
+// still completed, and the Manager that started afterwards administered a CPA no
+// accepted record describes. The live Supervisor is now read before the four
+// management reads, and its artifact, identity and reachability are compared with
+// the recorded attempt.
+func TestVerifyManagedRefusesLiveSupervisorArtifactDriftWithIdenticalVersionAndConfig(t *testing.T) {
+	drifted := model.RuntimeArtifactID("sha256:" + strings.Repeat("b", 64))
+	testCases := []struct {
+		name   string
+		mutate func(*fakeVerifyRuntime)
+		want   string
+	}{
+		{
+			name: "an active artifact this build's record never accepted",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.ActiveGatewayArtifact.ArtifactID = drifted
+			},
+			want: string(drifted),
+		},
+		{
+			name: "another Runtime identity",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.Identity = "runtime-identity-2"
+			},
+			want: "runtime-identity-2",
+		},
+		{
+			name: "a Supervisor that does not answer",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.err = errors.New("the Runtime Supervisor is unreachable")
+			},
+			want: "unreachable",
+		},
+		{
+			name: "a Supervisor in state offline with the qualified artifact",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.State = model.RuntimeStateOffline
+			},
+			want: string(model.RuntimeStateOffline),
+		},
+		{
+			name: "a Supervisor in state unknown with the qualified artifact",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.State = model.RuntimeStateUnknown
+			},
+			want: string(model.RuntimeStateUnknown),
+		},
+		{
+			name: "a Supervisor in state starting with the qualified artifact",
+			mutate: func(runtime *fakeVerifyRuntime) {
+				runtime.status.State = model.RuntimeStateStarting
+			},
+			want: string(model.RuntimeStateStarting),
+		},
 	}
-	if after.Stage == model.UpgradeStageComplete {
-		t.Fatal("a Managed operation reached complete")
+	fixture := newManagedVerifyFixture(t)
+	before := fixture.operation(t)
+	if before.Stage != model.UpgradeStageCPAImport {
+		t.Fatalf("fixture stage = %q, want cpa_import", before.Stage)
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture.runtime = newFakeVerifyRuntime(t)
+			options := fixture.verifyOptions()
+			if options.Runtime == nil {
+				t.Fatal("the fixture supplied no Supervisor, so this test would prove the configuration fallback instead")
+			}
+			// The four management reads are the gate's contact with the
+			// destination. Counting them proves the refusal happened before it.
+			contacted := 0
+			options.observeExternalVersion = func(context.Context, string, string) (cpa.ExternalVersionReport, error) {
+				contacted++
+				return cpa.ClassifyExternalVersion("v8.0.13"), nil
+			}
+			options.readExternalKeys = func(context.Context, string, string) (cpa.ExternalKeySnapshot, error) {
+				contacted++
+				return cpa.ExternalKeySnapshot{Keys: []string{"client-key-1"}, SourceSHA256: strings.Repeat("a", 64)}, nil
+			}
+			options.readV8Config = func(context.Context, string, string) (cpa.V8ConfigObservation, error) {
+				contacted++
+				return cpa.V8ConfigObservation{BaseURL: verifyManagedAddress, ClientKeyCount: 1}, nil
+			}
+			options.proveModelSurface = func(context.Context, string, string) error {
+				contacted++
+				return nil
+			}
+			testCase.mutate(fixture.runtime)
+
+			_, err := Verify(context.Background(), options)
+			if !errors.Is(err, ErrVerifyConnectionUnproven) {
+				t.Fatalf("verify against %s error = %v, want ErrVerifyConnectionUnproven", testCase.name, err)
+			}
+			if !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("the refusal %q does not name %q", err, testCase.want)
+			}
+			if contacted != 0 {
+				t.Fatalf("the refusal contacted the destination %d time(s), want the Supervisor comparison first", contacted)
+			}
+			assertVerifyRefusalWroteNothing(t, fixture, before)
+			if after := fixture.operation(t); after.Stage != model.UpgradeStageCPAImport {
+				t.Fatalf("stage after the refusal = %q, want the untouched %q", after.Stage, model.UpgradeStageCPAImport)
+			}
+		})
 	}
 }
 
@@ -592,6 +866,70 @@ func TestVerifyRefusesAManagedConnectionThatDidNotSurvive(t *testing.T) {
 		t.Fatalf("verify with a lost handoff error = %v, want ErrVerifyConnectionUnproven", err)
 	}
 	assertVerifyRefusalWroteNothing(t, fixture, before)
+}
+
+// TestVerifyRefusesAnIncompleteManagedDestinationProvenance pins the Medium
+// finding: the gate used to check only the address, the source identity's presence
+// and the fingerprint's shape, so a row whose attempt identity, source class,
+// Supervisor authority, artifact, client key list or plugin choice was missing or
+// tampered with still completed. Each field is the import's own statement about
+// the destination it staged, and a row that cannot produce it describes a stage
+// this operation never submitted.
+func TestVerifyRefusesAnIncompleteManagedDestinationProvenance(t *testing.T) {
+	testCases := []struct {
+		name   string
+		mutate func(*cpaImportDestinationRecord)
+	}{
+		{name: "no source identity", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.SourceIdentity = ""
+		}},
+		{name: "a source identity this import does not stamp", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.SourceIdentity = "managed:sha256:" + strings.Repeat("d", 64)
+		}},
+		{name: "no source class", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.SourceClass = ""
+		}},
+		{name: "another source class", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.SourceClass = "network_existing"
+		}},
+		{name: "no attempt identity", mutate: func(record *cpaImportDestinationRecord) {
+			record.Attempt = 0
+		}},
+		{name: "an operation ID for another attempt", mutate: func(record *cpaImportDestinationRecord) {
+			record.OperationID = cpaImportDestinationOperationID(record.Intent.SourceIdentity, 2)
+		}},
+		{name: "no expected runtime identity", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.ExpectedRuntimeIdentity = ""
+		}},
+		{name: "no expected runtime generation", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.ExpectedRuntimeGeneration = 0
+		}},
+		{name: "an unqualified artifact", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.ExpectedActiveArtifactID = model.RuntimeArtifactID("sha256:" + strings.Repeat("b", 64))
+		}},
+		{name: "no client keys", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.APIKeys = nil
+		}},
+		{name: "no plugin choice", mutate: func(record *cpaImportDestinationRecord) {
+			record.Intent.PluginsEnabled = nil
+		}},
+	}
+	fixture := newManagedVerifyFixture(t)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			record := managedDestinationRecord(t)
+			testCase.mutate(&record)
+			if err := saveCPAImportDestinationRecord(context.Background(), fixture.databasePath(), fixture.paths.DataKey, record, verifyManagedSecret); err != nil {
+				t.Fatalf("rewrite the recorded destination: %v", err)
+			}
+			before := fixture.operation(t)
+			_, err := fixture.verify(t)
+			if !errors.Is(err, ErrVerifyConnectionUnproven) {
+				t.Fatalf("a Managed destination with %s verified as %v, want ErrVerifyConnectionUnproven", testCase.name, err)
+			}
+			assertVerifyRefusalWroteNothing(t, fixture, before)
+		})
+	}
 }
 
 // TestVerifyRefusesASourceThatWasWritten proves the mounted volume is the one
@@ -928,11 +1266,11 @@ func TestVerifyTargetModeDerivesFromTheDurableRecord(t *testing.T) {
 // model vocabulary, never a caller's list.
 func TestVerifyRequiredDomainsAreDerived(t *testing.T) {
 	managed := verifyRequiredDomains(model.UpgradeTargetManaged, []string{model.UpgradeDomainPricing})
-	if !slices.Equal(managed, []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainPricing}) {
+	if !slices.Equal(managed, []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainPricing, model.UpgradeDomainCPAConfig}) {
 		t.Fatalf("managed required domains = %v", managed)
 	}
-	if slicesContain(managed, model.UpgradeDomainUsageEvents) || slicesContain(managed, model.UpgradeDomainCPAConfig) {
-		t.Fatalf("managed required domains = %v, want no unperformed domain", managed)
+	if slicesContain(managed, model.UpgradeDomainUsageEvents) || slicesContain(managed, model.UpgradeDomainIdentity) {
+		t.Fatalf("managed required domains = %v, want no domain no Managed step records", managed)
 	}
 	external := verifyRequiredDomains(model.UpgradeTargetExternal, nil)
 	want := []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainIdentity, model.UpgradeDomainCPAConfig}

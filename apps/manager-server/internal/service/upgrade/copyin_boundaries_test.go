@@ -162,8 +162,8 @@ func TestUpgradeEntriesRequireCopyInRecovery(t *testing.T) {
 				{"cpa-stage", func() error {
 					return enterCPAImportStage(context.Background(), filepath.Join(target, databaseFileName))
 				}},
-				{"cpa-deferral", func() error {
-					_, err := recordCPAImportDeferral(context.Background(), filepath.Join(target, databaseFileName), CPAImportResult{})
+				{"cpa-completion", func() error {
+					_, err := recordCPAImportCompletion(context.Background(), filepath.Join(target, databaseFileName), CPAImportResult{})
 					return err
 				}},
 				{"cpa-destination-save", func() error {

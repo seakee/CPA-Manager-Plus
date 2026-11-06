@@ -5,10 +5,10 @@ package upgrade
 // It is the Upgrade step that stages, binds and connects the destination, so it
 // shares the refusals contract of the other steps instead of inventing one: a
 // typed refusal the operator has to act on exits 1, a usage or environment
-// failure exits 2, and success exits 0. This build copies no provider
-// configuration or OAuth credential; the source is inventoried and every item is
-// reported as deferred manual work. Nothing here reaches a CPA before the service
-// layer's version gate has passed.
+// failure exits 2, and success exits 0. It copies the qualified routing,
+// API-key provider sections and OAuth credential files under the compiled
+// adoption authority, and records any unsupported item as manual work. Nothing
+// here reaches a CPA before the service layer's version gate has passed.
 
 import (
 	"context"
@@ -46,7 +46,7 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 	cpaVersion := flags.String("cpa-version", "", "release of the source CPA; a v7 configuration carries no version of its own")
 	target := flags.String("target", "", "v2 data directory holding the recorded operation; defaults to the Manager data directory")
 	destination := flags.String("destination-url", "", "destination CPA base URL; defaults to CPA_UPSTREAM_URL")
-	destinationKeyFile := flags.String("destination-management-key-file", "", "file holding the management secret of an already-running destination CPA; only needed when no earlier run of this step recorded one")
+	destinationKeyFile := flags.String("destination-management-key-file", "", "file holding the management secret of a recorded destination attempt when resuming")
 	plugins := flags.String("plugins", "", "v2's plugin-runtime choice for the destination: true or false; required")
 	asJSON := flags.Bool("json", false, "print the import result as JSON")
 	if err := flags.Parse(args); err != nil {
@@ -132,13 +132,13 @@ func runCPAImport(ctx context.Context, args []string, stdout, stderr io.Writer) 
 		writeCPAImportOutput(stdout, *asJSON, output)
 		return refuseTyped(stderr, err)
 	}
-	// The import stops at cpa_import by contract. This build copies no
-	// configuration or credential: every item is recorded as manual work with a
-	// typed reason, and the automatic copy belongs to the trusted re-pin step. The
-	// External connection is a separate, authorized step, so the exact command that
-	// continues is printed rather than run.
+	// The import records `cpa_config` once the copy settles. Credential files,
+	// gateway routing configuration and provider runtime state are copied and
+	// read back; anything the adoption rules keep manual is listed in manualItems
+	// with its own action. The External connection is a separate, authorized
+	// step, so the exact command that continues is printed rather than run.
 	if string(result.Stage) == cpaImportStage() {
-		output.Next = "the destination is staged, bound and stored in the Manager connection; provider configuration and OAuth credentials are not copied by this build — every item is recorded in manualItems with reason " + upgradeservice.CPAImportRequiresQualification + ", and the automatic copy is deferred to the trusted re-pin step. Apply those items by hand for now; the operation stays at cpa_import until that step can copy and prove them"
+		output.Next = "the destination is staged, bound and stored in the Manager connection, and the copied CPA state is recorded under cpa_config; any item this source cannot copy is listed in manualItems and must be applied by hand. Run `upgrade verify` to prove the destination and complete the operation"
 	}
 	writeCPAImportOutput(stdout, *asJSON, output)
 	return nil
@@ -208,6 +208,9 @@ func writeCPAImportOutput(w io.Writer, asJSON bool, output cpaImportOutput) {
 		// proved nothing, and printing a count beside it is the claim that it did.
 		if output.Error == "" {
 			_, _ = fmt.Fprintf(w, "  client keys proved: %d\n", result.ClientKeys)
+			if !result.AlreadyComplete {
+				_, _ = fmt.Fprintf(w, "  items copied: %d\n", result.MigratedCount)
+			}
 		}
 		_, _ = fmt.Fprintf(w, "  manual items: %d\n", len(result.ManualItems))
 		for _, item := range result.ManualItems {

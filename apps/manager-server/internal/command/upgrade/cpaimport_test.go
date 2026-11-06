@@ -185,12 +185,13 @@ func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
 		DomainsDone:    []string{"source_copy"},
 		SourceVersion:  "7.3.4",
 		SourceLayout:   "v7",
-		SourceIdentity: "legacy-managed:sha256:fixture",
+		SourceIdentity: "external:sha256:fixture",
 		DestinationURL: "http://127.0.0.1:8317",
 		PluginsEnabled: true,
 		ClientKeys:     1,
+		MigratedCount:  5,
 		ManualItems: []upgradeservice.CPAImportManualItem{
-			{Item: "section:ampcode", Reason: upgradeservice.CPAImportRequiresQualification, Instruction: "re-create it"},
+			{Item: "section:ampcode", Reason: "reconfigure_after_adoption", Instruction: "re-create it"},
 		},
 		UpdatedAtMS: 1700000000000,
 	}
@@ -214,7 +215,8 @@ func TestCPAImportOutputCarriesOnlyTheContract(t *testing.T) {
 	allowedResult := map[string]bool{
 		"stage": true, "domainsDone": true, "sourceVersion": true, "sourceLayout": true,
 		"sourceIdentity": true, "destinationUrl": true, "pluginsEnabled": true,
-		"clientKeys": true, "manualItems": true, "alreadyComplete": true, "updatedAtMs": true,
+		"clientKeys": true, "migratedCount": true, "serverFingerprint": true,
+		"manualItems": true, "alreadyComplete": true, "updatedAtMs": true,
 	}
 	for key := range encodedResult {
 		if !allowedResult[key] {
@@ -263,5 +265,65 @@ func TestCPAImportRefusalDoesNotClaimProvedClientKeys(t *testing.T) {
 	writeCPAImportOutput(buffer, false, cpaImportOutput{Result: &result})
 	if !strings.Contains(buffer.String(), "client keys proved: 3") {
 		t.Fatalf("a successful run did not report the proved count:\n%s", buffer.String())
+	}
+}
+
+// TestCPAImportReplayReportsTheRecordedItems is the CLI half of the Medium
+// finding: a completed import used to be replayed with no source version, no source
+// layout and an empty manual-item list, so the operator was told `manual items: 0`
+// for a store whose operation row lists them. The replay now answers with what the
+// attempt recorded, and both output shapes carry it.
+func TestCPAImportReplayReportsTheRecordedItems(t *testing.T) {
+	result := upgradeservice.CPAImportResult{
+		Stage:          "cpa_import",
+		DomainsDone:    []string{"source_copy", "cpa_config"},
+		SourceVersion:  "7.3.4",
+		SourceLayout:   "v7",
+		SourceIdentity: "external:sha256:fixture",
+		DestinationURL: "http://127.0.0.1:8317",
+		PluginsEnabled: true,
+		ClientKeys:     2,
+		ManualItems: []upgradeservice.CPAImportManualItem{
+			{Item: "section:ampcode", Reason: "reconfigure_after_adoption", Instruction: "re-create it"},
+			{Item: "section:something-new", Reason: "not_in_import_scope", Instruction: "re-create it by hand"},
+		},
+		AlreadyComplete: true,
+	}
+	buffer := &bytes.Buffer{}
+	writeCPAImportOutput(buffer, false, cpaImportOutput{Result: &result})
+	written := buffer.String()
+	for _, want := range []string{
+		"source version: 7.3.4", "source layout: v7", "manual items: 2",
+		"section:ampcode reconfigure_after_adoption", "section:something-new not_in_import_scope",
+		"already complete: true",
+	} {
+		if !strings.Contains(written, want) {
+			t.Fatalf("the replay output does not report %q:\n%s", want, written)
+		}
+	}
+
+	buffer.Reset()
+	writeCPAImportOutput(buffer, true, cpaImportOutput{Result: &result})
+	var decoded struct {
+		Result struct {
+			SourceVersion   string                               `json:"sourceVersion"`
+			SourceLayout    string                               `json:"sourceLayout"`
+			PluginsEnabled  bool                                 `json:"pluginsEnabled"`
+			ManualItems     []upgradeservice.CPAImportManualItem `json:"manualItems"`
+			AlreadyComplete bool                                 `json:"alreadyComplete"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(buffer.Bytes(), &decoded); err != nil {
+		t.Fatalf("the JSON replay output is not valid JSON: %v", err)
+	}
+	if decoded.Result.SourceVersion != "7.3.4" || decoded.Result.SourceLayout != "v7" ||
+		!decoded.Result.PluginsEnabled || !decoded.Result.AlreadyComplete {
+		t.Fatalf("the JSON replay output = %+v, want the recorded source facts", decoded.Result)
+	}
+	if len(decoded.Result.ManualItems) != len(result.ManualItems) {
+		t.Fatalf("the JSON replay output carries %d manual item(s), want %d", len(decoded.Result.ManualItems), len(result.ManualItems))
+	}
+	if decoded.Result.ManualItems[0] != result.ManualItems[0] {
+		t.Fatalf("the JSON replay output manual item = %+v, want %+v", decoded.Result.ManualItems[0], result.ManualItems[0])
 	}
 }

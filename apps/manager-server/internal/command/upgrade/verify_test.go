@@ -133,38 +133,33 @@ func TestVerifyCLICompletesTheExternalOperation(t *testing.T) {
 	}
 }
 
-// TestVerifyCLIExitsZeroAtTheManagedWaitingPosition: a Managed operation whose
-// comparison and connection hold is a recorded position, not a failure. The
-// operator reads the instruction, and the shell keeps exit 0.
-func TestVerifyCLIExitsZeroAtTheManagedWaitingPosition(t *testing.T) {
-	// The print half of the Managed outcome: the CLI reports what the gate
-	// recorded, so a waiting position is rendered from the same result value the
-	// service returns.
+// TestVerifyCLIRendersTheManagedCompletion: the print half of a Managed
+// completion. The gate records `complete` for both target modes now, so the
+// shell reports the verdict and the remaining manual items and exits 0.
+func TestVerifyCLIRendersTheManagedCompletion(t *testing.T) {
 	stdout := &strings.Builder{}
 	writeVerifyOutput(stdout, false, verifyOutput{Result: &upgradeservice.VerifyResult{
-		Stage:       model.UpgradeStageVerify,
-		DomainsDone: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainPricing},
-		Complete:    false,
+		Stage:       model.UpgradeStageComplete,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig},
+		Complete:    true,
 		TargetMode:  model.UpgradeTargetManaged,
-		ReasonCode:  string(upgradeservice.UpgradeErrorVerifyWaitingForRepin),
-		Reason:      upgradeservice.VerifyWaitingInstruction,
-		ManualItems: []string{"section:ampcode: re-create it (upgrade_cpa_import_requires_qualification)"},
+		ManualItems: []string{"section:ampcode: re-create it (reconfigure_after_adoption)"},
 		UpdatedAtMS: 1,
 	}})
 	report := stdout.String()
 	for _, expected := range []string{
-		"stage: verify",
+		"stage: complete",
 		"target: managed",
-		"waiting: upgrade_verify_waiting_for_repin",
-		upgradeservice.VerifyWaitingInstruction,
+		"the operation is complete",
 		"manual items: 1 recorded",
+		"reconfigure_after_adoption",
 	} {
 		if !strings.Contains(report, expected) {
 			t.Fatalf("the report does not carry %q: %s", expected, report)
 		}
 	}
-	if strings.Contains(report, "the operation is complete") {
-		t.Fatalf("a waiting position was reported as complete: %s", report)
+	if strings.Contains(report, "waiting:") {
+		t.Fatalf("a completed operation reported a waiting position: %s", report)
 	}
 }
 
@@ -287,7 +282,7 @@ func TestVerifyCLIUsageNamesTheCommand(t *testing.T) {
 	for _, expected := range []string{
 		"verify --legacy <dir>",
 		"the one verdict the",
-		"waits for the trusted re-pin",
+		"complete for both a Managed destination and",
 		"a verification the recorded operation does not support",
 	} {
 		if !strings.Contains(usage, expected) {

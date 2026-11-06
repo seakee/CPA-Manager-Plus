@@ -1136,7 +1136,7 @@ test('expectedNextAction mirrors the product ladder instead of expecting a stage
   // The cases are the product's own tables:
   // internal/http/controller/upgradewizard/external_connect_test.go
   // (TestNextActionForAnExternalConnectRefusal) and verify_action_test.go
-  // (TestVerifiedRowOffersTheGateAgain), plus the stage table they run against.
+  // (TestVerifiedRowOffersCompletion), plus the stage table they run against.
   const cases = [
     // the stage table
     ['', {}, 'preflight'],
@@ -1166,11 +1166,8 @@ test('expectedNextAction mirrors the product ladder instead of expecting a stage
     ['cpa_import', { errorCode: 'upgrade_reconcile_blocked' }, 'cpa_import'],
     // the import has run when it recorded the domain…
     ['cpa_import', { domains: ['source_copy', 'cpa_config'] }, 'verify'],
-    // …and it stands deferred when the row carries its typed item
-    ['cpa_import', { manualItems: ['Managed CPA import deferred (upgrade_cpa_import_requires_qualification)'] }, 'verify'],
-    ['cpa_import', { manualItems: ['reconcile the retained projection'] }, 'cpa_import'],
-    // a verify row that stopped waiting for a re-pin offers the gate again
-    ['verify', { errorCode: 'upgrade_verify_waiting_for_repin' }, 'verify'],
+    // …and a row without it is still the import's own position
+    ['cpa_import', { domains: ['source_copy'] }, 'cpa_import'],
     // an unknown stage projects nothing rather than a guessed action
     ['never-recorded', {}, ''],
   ];

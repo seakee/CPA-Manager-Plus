@@ -1913,7 +1913,7 @@ async function assertWizard(binary, sourceRoot) {
 // own tables are the authority for the mirror —
 // `TestNextActionForAnExternalConnectRefusal` (a refusal on
 // `copy_in`/`reconcile`/`cpa_import` offers the connect step again) and
-// `TestVerifiedRowOffersTheGateAgain` (a waiting verify row offers the gate) — and
+// `TestVerifiedRowOffersCompletion` (a verify row offers completion) — and
 // the harness test repeats their cases, so a change to the ladder fails the run as
 // staleness instead of passing a guess.
 const WIZARD_STAGE_ACTIONS = Object.freeze({
@@ -1934,19 +1934,16 @@ const WIZARD_EXTERNAL_CONNECT_REFUSALS = Object.freeze([
   'external_management_key_rejected',
   'external_target_moved',
 ]);
-const WIZARD_VERIFY_WAITING_FOR_REPIN = 'upgrade_verify_waiting_for_repin';
-const WIZARD_CPA_IMPORT_DEFERRED_MARKER = '(upgrade_cpa_import_requires_qualification)';
 
-export function expectedNextAction(stage, { errorCode = '', domains = [], manualItems = [] } = {}) {
+export function expectedNextAction(stage, { errorCode = '', domains = [] } = {}) {
   if (WIZARD_EXTERNAL_CONNECT_STAGES.includes(stage) && WIZARD_EXTERNAL_CONNECT_REFUSALS.includes(errorCode)) {
     return 'external_connect';
   }
-  if (stage === 'verify' && errorCode === WIZARD_VERIFY_WAITING_FOR_REPIN) return 'verify';
   if (stage === 'cpa_import') {
-    // The import has run when it recorded the domain, and it stands deferred when
-    // the row carries its typed item; both leave only the verification.
-    const deferred = manualItems.some((item) => String(item).includes(WIZARD_CPA_IMPORT_DEFERRED_MARKER));
-    return domains.includes('cpa_config') || deferred ? 'verify' : 'cpa_import';
+    // The import has run when it recorded the domain; a row that has not is the
+    // import's own position again. There is no deferred position: every target
+    // mode finishes through the verification.
+    return domains.includes('cpa_config') ? 'verify' : 'cpa_import';
   }
   return WIZARD_STAGE_ACTIONS[stage] ?? '';
 }

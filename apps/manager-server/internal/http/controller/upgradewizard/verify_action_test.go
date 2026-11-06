@@ -413,34 +413,29 @@ func TestReadsStayPureReads(t *testing.T) {
 	}
 }
 
-// TestVerifiedRowOffersTheGateAgain pins the wizard's mapping of a recorded
-// verify position: the Managed waiting row is a step the operator may run again,
-// never a completed operation.
-func TestVerifiedRowOffersTheGateAgain(t *testing.T) {
-	waiting := string(upgradeservice.UpgradeErrorVerifyWaitingForRepin)
-	if got := nextActionForRecordedStage(StageVerify, waiting, nil, nil); got != ActionVerify {
-		t.Fatalf("next action for a waiting row = %q, want %q", got, ActionVerify)
-	}
-	if got := nextActionForRecordedStage(StageVerify, "", nil, nil); got != ActionComplete {
-		t.Fatalf("next action for a verified row without a reason = %q, want %q", got, ActionComplete)
+// TestVerifiedRowOffersCompletion pins the wizard's mapping of a recorded verify
+// position: the gate writes `verify` only as the row it is about to complete, so
+// the next decision is that completion, not a repeated gate run.
+func TestVerifiedRowOffersCompletion(t *testing.T) {
+	if got := nextActionForRecordedStage(StageVerify, "", nil); got != ActionComplete {
+		t.Fatalf("next action for a verified row = %q, want %q", got, ActionComplete)
 	}
 	// The result projection carries the same decision through the route.
 	database := filepath.Join(t.TempDir(), "usage.sqlite")
 	recordOperation(t, database, model.UpgradeOperation{
 		Stage:       model.UpgradeStageVerify,
-		DomainsDone: []string{model.UpgradeDomainSourceCopy},
-		ErrorCode:   waiting,
+		DomainsDone: []string{model.UpgradeDomainSourceCopy, model.UpgradeDomainCPAConfig},
 	})
 	_, body := request(t, handlerFor(t, database), http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), http.StatusOK)
 	var status statusDocument
 	if err := json.Unmarshal([]byte(body), &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.NextAction != ActionVerify {
-		t.Fatalf("status next action = %q, want %q", status.NextAction, ActionVerify)
+	if status.NextAction != ActionComplete {
+		t.Fatalf("status next action = %q, want %q", status.NextAction, ActionComplete)
 	}
-	if status.ErrorCode != waiting {
-		t.Fatalf("status reason = %q, want %q", status.ErrorCode, waiting)
+	if status.ErrorCode != "" {
+		t.Fatalf("status reason = %q, want none", status.ErrorCode)
 	}
 }
 

@@ -259,9 +259,8 @@ export interface UpgradeVerifyOutcome {
 // Only a document this build can read is presented. The action wrote something
 // when it answered 200, so a reply that does not describe a position is a read
 // failure: the page then re-reads the row rather than guessing what happened.
-// The gate records exactly two positions, and the reply must be one of them: a
-// completed stage can only mean an External target, and the Managed waiting
-// position can only mean an unfinished one that names its reason.
+// The gate completes both target modes, so the only position a reply may carry is
+// `complete`; there is no waiting position to present.
 export function parseUpgradeVerify(value: unknown): UpgradeVerifyOutcome | null {
   if (!value || typeof value !== 'object') return null;
   const document = value as Record<string, unknown>;
@@ -278,11 +277,9 @@ export function parseUpgradeVerify(value: unknown): UpgradeVerifyOutcome | null 
   const targetMode = text(document.targetMode);
   if (targetMode !== 'external' && targetMode !== 'managed') return null;
   const reasonCode = text(document.reasonCode);
-  if (document.complete) {
-    if (targetMode !== 'external') return null;
-  } else if (targetMode !== 'managed' || reasonCode === '') {
-    return null;
-  }
+  // Both target modes complete through the gate, and this build has no waiting
+  // position: a reply that is not a completion is a position it never records.
+  if (!document.complete) return null;
   return {
     stage: document.stage,
     stageKnown: document.stageKnown,
@@ -967,11 +964,7 @@ export function FreshUpgradeFlow({
               <FullWebIcon name="check" size={24} />
               <div>
                 <h3>{t('verifyDoneTitle', language)}</h3>
-                <p data-testid="upgrade-verify-outcome">
-                  {verification.value.complete
-                    ? t('verifyComplete', language)
-                    : t('verifyWaiting', language)}
-                </p>
+                <p data-testid="upgrade-verify-outcome">{t('verifyComplete', language)}</p>
                 {verification.value.alreadyVerified && (
                   <p data-testid="upgrade-verify-already">{t('verifyAlready', language)}</p>
                 )}
@@ -981,9 +974,6 @@ export function FreshUpgradeFlow({
                       ? t('verifyTargetExternal', language)
                       : t('verifyTargetManaged', language)}
                   </p>
-                )}
-                {!verification.value.complete && verification.value.reason && (
-                  <p data-testid="upgrade-verify-reason">{verification.value.reason}</p>
                 )}
               </div>
             </div>
