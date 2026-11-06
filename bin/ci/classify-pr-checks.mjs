@@ -52,6 +52,16 @@ const triggersFrontend = (filePath) =>
   filePath === 'README_CN.md' ||
   filePath === 'package.json' ||
   filePath === 'package-lock.json' ||
+  // The toolchain baseline assertions live in tests/ciWorkflowIntegrity.test.mjs,
+  // which the Frontend job runs: the Node baseline, every image base and every
+  // Go module manifest that carries the Go directive.
+  filePath === '.nvmrc' ||
+  filePath === 'Dockerfile.manager-server' ||
+  filePath === 'Dockerfile.ingress' ||
+  filePath === 'Dockerfile.runtime' ||
+  filePath === 'apps/manager-server/go.mod' ||
+  filePath === 'apps/ingress/go.mod' ||
+  filePath === 'apps/runtime-supervisor/go.mod' ||
   filePath === '.github/dependabot.yml' ||
   filePath === 'eslint.config.js' ||
   filePath === 'bin/install-cpamp.sh' ||

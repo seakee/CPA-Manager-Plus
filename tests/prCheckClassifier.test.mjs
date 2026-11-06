@@ -51,6 +51,24 @@ describe('PR check classifier', () => {
     expect(classifyChangedFiles(['bin/ci/validate-cpa-v8-evidence-other.mjs'])).toEqual(noChecks);
   });
 
+  // The toolchain baseline assertions live in tests/ciWorkflowIntegrity.test.mjs,
+  // which the Frontend job runs, so a PR that only moves a baseline must still
+  // run it (otherwise the Go/Node/image pins could regress unchecked).
+  it('runs the Frontend job when only a toolchain baseline file changes', () => {
+    for (const filePath of [
+      '.nvmrc',
+      'Dockerfile.manager-server',
+      'Dockerfile.ingress',
+      'Dockerfile.runtime',
+      'apps/manager-server/go.mod',
+      'apps/ingress/go.mod',
+      'apps/runtime-supervisor/go.mod',
+    ]) {
+      expect(classifyChangedFiles([filePath]).frontend, filePath).toBe(true);
+    }
+    expect(classifyChangedFiles(['docs/release.md']).frontend).toBe(false);
+  });
+
   // The D acceptance and its native `node:test` lifecycle suite run in the
   // Frontend job. A PR that changes only one of these files must still run it,
   // and a neighbouring script that no job executes must not.
@@ -246,7 +264,6 @@ describe('PR check classifier', () => {
 
   it('runs Supervisor, Runtime lifecycle, and Docker checks for Supervisor module changes', () => {
     for (const filePath of [
-      'apps/runtime-supervisor/go.mod',
       'apps/runtime-supervisor/internal/protocol/handler.go',
       './apps\\runtime-supervisor\\cmd\\cpamp-runtime-supervisor\\main_test.go',
     ]) {
@@ -258,6 +275,16 @@ describe('PR check classifier', () => {
         docker: true,
       });
     }
+    // The module manifest also declares the Go toolchain baseline, whose
+    // integrity assertions run in the Frontend job.
+    expect(classifyChangedFiles(['apps/runtime-supervisor/go.mod'])).toEqual({
+      ...noChecks,
+      frontend: true,
+      runtime_supervisor: true,
+      runtime_lifecycle: true,
+      docker_all_images: true,
+      docker: true,
+    });
   });
 
   it('runs both necessary check sets for mixed Manager and Supervisor changes', () => {
@@ -278,15 +305,23 @@ describe('PR check classifier', () => {
   });
 
   it('runs Ingress, Runtime lifecycle, and Docker checks for Ingress changes', () => {
-    for (const filePath of ['apps/ingress/internal/ingress/proxy.go', 'Dockerfile.ingress']) {
-      expect(classifyChangedFiles([filePath])).toEqual({
-        ...noChecks,
-        ingress: true,
-        runtime_lifecycle: true,
-        docker_all_images: true,
-        docker: true,
-      });
-    }
+    expect(classifyChangedFiles(['apps/ingress/internal/ingress/proxy.go'])).toEqual({
+      ...noChecks,
+      ingress: true,
+      runtime_lifecycle: true,
+      docker_all_images: true,
+      docker: true,
+    });
+    // Dockerfile.ingress carries both the Ingress build and the image base that
+    // tests/ciWorkflowIntegrity.test.mjs asserts, so both jobs run.
+    expect(classifyChangedFiles(['Dockerfile.ingress'])).toEqual({
+      ...noChecks,
+      frontend: true,
+      ingress: true,
+      runtime_lifecycle: true,
+      docker_all_images: true,
+      docker: true,
+    });
   });
 
   it('keeps mixed ordinary Manager and external Runtime changes off Manager Runtime gates', () => {
@@ -306,11 +341,7 @@ describe('PR check classifier', () => {
   });
 
   it('runs Supervisor, Runtime lifecycle, and Docker checks for Runtime packaging changes', () => {
-    for (const filePath of [
-      'Dockerfile.runtime',
-      'docker/runtime/entrypoint.sh',
-      'docker/runtime/config.seed.yaml',
-    ]) {
+    for (const filePath of ['docker/runtime/entrypoint.sh', 'docker/runtime/config.seed.yaml']) {
       expect(classifyChangedFiles([filePath])).toEqual({
         ...noChecks,
         runtime_supervisor: true,
@@ -319,6 +350,16 @@ describe('PR check classifier', () => {
         docker: true,
       });
     }
+    // Dockerfile.runtime also carries the Go/Node image bases asserted by
+    // tests/ciWorkflowIntegrity.test.mjs in the Frontend job.
+    expect(classifyChangedFiles(['Dockerfile.runtime'])).toEqual({
+      ...noChecks,
+      frontend: true,
+      runtime_supervisor: true,
+      runtime_lifecycle: true,
+      docker_all_images: true,
+      docker: true,
+    });
   });
 
   it('runs Supervisor checks when its architecture gate or fixtures change', () => {

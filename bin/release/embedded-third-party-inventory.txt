@@ -33,7 +33,7 @@
       },
       {
         "name": "golang.org/x/sys",
-        "version": "v0.37.0"
+        "version": "v0.44.0"
       },
       {
         "name": "gopkg.in/yaml.v3",
@@ -83,7 +83,7 @@
       },
       {
         "name": "golang.org/x/sys",
-        "version": "v0.37.0"
+        "version": "v0.44.0"
       },
       {
         "name": "gopkg.in/yaml.v3",
@@ -108,13 +108,13 @@
     ]
   },
   "inputs": {
-    "apps/ingress/go.mod": "sha256:ac2a831f52d8d4136c0687fa16897bc4b38351e40f837293b6ec950d67235420",
-    "apps/manager-server/go.mod": "sha256:76fe445a5185b3b488c2b0b12e09f8c57318c67a2916b84fd0605fd25b113e66",
-    "apps/manager-server/go.sum": "sha256:507af468b63af7db15a420f0d2f5af2486da82dd51c26ee78a726df2dd67e36f",
-    "apps/runtime-supervisor/go.mod": "sha256:cecc2dc7bddbd151ae11f70902c8a8ab4101d01663f7a0b0cf988954df79b95e",
-    "apps/runtime-supervisor/go.sum": "sha256:507af468b63af7db15a420f0d2f5af2486da82dd51c26ee78a726df2dd67e36f",
-    "apps/web/package.json": "sha256:b5af8265b6a9fade0f3a88001d33636eb0a379230345226c06018cd274bc8c03",
-    "package-lock.json": "sha256:3a6bf6ea7c31b4630f1f4e2c24085b4687a601a8546c442e91d43e21a83f6050"
+    "apps/ingress/go.mod": "sha256:1dfdf18d9a54552348b8f455b0218b7f959e30324303c59275437ca6c6acaf86",
+    "apps/manager-server/go.mod": "sha256:5a6b6784239e5622c5ad3472f5cb0774443d71de0334a4895d2922035aa8c1f0",
+    "apps/manager-server/go.sum": "sha256:5e4167f8c1008dfa3925975b218562277120fe05cebbdad6c06f91271c206f03",
+    "apps/runtime-supervisor/go.mod": "sha256:7422cfe442b3b35c49333e7f5ed0ea22ccf465b5bb6099d3c5e5a079b9f26774",
+    "apps/runtime-supervisor/go.sum": "sha256:5e4167f8c1008dfa3925975b218562277120fe05cebbdad6c06f91271c206f03",
+    "apps/web/package.json": "sha256:26dfc107d28c4eec5faa03265f00522431de05afb6a249f6cd98045e27447b22",
+    "package-lock.json": "sha256:63f73af65af6160425fa19af0fd0636482ab1c75da79799c7d8b7fb3f2356832"
   },
   "schemaVersion": 1,
   "status": "SOURCE_MANIFESTS_VERIFIED",
@@ -122,14 +122,14 @@
     "@codemirror/lang-yaml": "^6.1.2",
     "@codemirror/merge": "^6.12.0",
     "@uiw/react-codemirror": "^4.25.3",
-    "axios": "^1.13.2",
+    "axios": "^1.20.0",
     "echarts": "^6.1.0",
     "i18next": "^26.2.0",
     "motion": "^12.34.3",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "react-i18next": "^17.0.8",
-    "react-router-dom": "^7.10.1",
+    "react-router-dom": "^7.18.2",
     "yaml": "^2.8.2",
     "zustand": "^5.0.9"
   }

@@ -25,6 +25,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  security:
+    name: Dependency Security
+    uses: ./.github/workflows/security.yml
+
   changes:
     name: Scope
     runs-on: ubuntu-latest
@@ -99,7 +103,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version: '24.22.1'
           cache: npm
 
       - name: Install dependencies
@@ -138,7 +142,7 @@ jobs:
       - name: Setup Go for packaged preflight check
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.24.x'
+          go-version-file: apps/manager-server/go.mod
           cache-dependency-path: apps/manager-server/go.sum
 
       - name: Verify packaged read-only preflight HTTP transport
@@ -159,7 +163,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.24.x'
+          go-version-file: apps/manager-server/go.mod
           cache-dependency-path: apps/manager-server/go.sum
 
       - name: Test
@@ -498,7 +502,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.24.x'
+          go-version-file: apps/runtime-supervisor/go.mod
           cache-dependency-path: apps/runtime-supervisor/go.mod
 
       - name: Test
@@ -552,7 +556,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.24.x'
+          go-version-file: apps/runtime-supervisor/go.mod
           cache-dependency-path: apps/runtime-supervisor/go.mod
 
       - name: Test selection filesystem portability
@@ -575,7 +579,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.24.x'
+          go-version-file: apps/ingress/go.mod
           cache-dependency-path: apps/ingress/go.mod
 
       - name: Test
@@ -631,7 +635,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.24.x'
+          go-version-file: apps/manager-server/go.mod
           cache-dependency-path: apps/manager-server/go.sum
 
       - name: Record Windows test environment
@@ -724,7 +728,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version: '24.22.1'
           cache: npm
 
       - name: Install dependencies
@@ -895,7 +899,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version: '24.22.1'
           cache: npm
 
       - name: Install dependencies
@@ -924,7 +928,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version: '24.22.1'
           cache: npm
 
       - name: Validate changed release content
@@ -952,6 +956,7 @@ jobs:
   required:
     name: Required checks
     needs:
+      - security
       - changes
       - frontend
       - manager-server
@@ -969,6 +974,7 @@ jobs:
     steps:
       - name: Verify applicable checks
         env:
+          SECURITY_RESULT: ${{ needs.security.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           MANAGER_SERVER_RESULT: ${{ needs['manager-server'].result }}
@@ -983,6 +989,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          if [ "${SECURITY_RESULT}" != "success" ]; then
+            echo "Dependency Security did not complete successfully: ${SECURITY_RESULT:-missing}" >&2
+            exit 1
+          fi
+          echo "Dependency Security: ${SECURITY_RESULT}"
 
           results=(
             "Scope:${CHANGES_RESULT}"

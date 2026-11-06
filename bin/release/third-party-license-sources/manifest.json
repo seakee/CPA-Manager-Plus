@@ -34,6 +34,30 @@
       "reason": "The lock records version but no integrity. The registry gitHead has only an MIT declaration; its immediate child adds the original LICENSE (upstream issue #61), with no code changes. Preserve this upstream-added notice and its distinct revision, not a fabricated release-era text.",
       "path": "html-parse-stringify-3.0.1/LICENSE",
       "sha256": "sha256:f51aa7a410f3d3ff9352a5422b76c072588ac76b63861f59447502caeacacc16"
+    },
+    {
+      "name": "https-proxy-agent",
+      "version": "5.0.1",
+      "integrity": "sha512-dFcAjpTQFgoLMzC2VwU+C/CbS7uRL0lWmxDITmqm7C+7F0Odmj6s9l6alZc6AELXhrnggM2CeWSXHGOdX2YtwA==",
+      "registry": "https://registry.npmjs.org/https-proxy-agent/5.0.1",
+      "sourceCommit": "5923589c2e5206504772c250ac4f20fc31122d3b",
+      "source": "https://raw.githubusercontent.com/TooTallNate/node-https-proxy-agent/5923589c2e5206504772c250ac4f20fc31122d3b/packages/https-proxy-agent/LICENSE",
+      "path": "https-proxy-agent-5.0.1/LICENSE",
+      "sha256": "sha256:8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a",
+      "reason": "The published npm archive omits any license file: the registry gitHead tree of this exact release has no LICENSE, and the MIT grant lives only in the shipped README. The vendored original is the first LICENSE file upstream committed for this package (license-only change 5923589, #251 \"Moved licenses to separate files\") in the upstream monorepo; its copyright holder and MIT text are unchanged from the release-era README grant. The pin is recorded by immutable revision and SHA256 rather than synthesizing text from the SPDX expression.",
+      "packageSourceCommit": "d0d80cc0482f20495aa8595f802e1a9f3b1b3409"
+    },
+    {
+      "name": "agent-base",
+      "version": "6.0.2",
+      "integrity": "sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==",
+      "registry": "https://registry.npmjs.org/agent-base/6.0.2",
+      "sourceCommit": "5923589c2e5206504772c250ac4f20fc31122d3b",
+      "source": "https://raw.githubusercontent.com/TooTallNate/node-https-proxy-agent/5923589c2e5206504772c250ac4f20fc31122d3b/packages/agent-base/LICENSE",
+      "path": "agent-base-6.0.2/LICENSE",
+      "sha256": "sha256:8d8c55319c7729d57be811c747452636688d54f19701ee0752b6b15ad3771d9a",
+      "reason": "The published npm archive omits any license file: the registry gitHead tree of this exact release has no LICENSE, and the MIT grant lives only in the shipped README. The vendored original is the first LICENSE file upstream committed for this package (license-only change 5923589, #251 \"Moved licenses to separate files\") in the upstream monorepo; its copyright holder and MIT text are unchanged from the release-era README grant. The pin is recorded by immutable revision and SHA256 rather than synthesizing text from the SPDX expression.",
+      "packageSourceCommit": "c4b8ea2e1a11bae023bb09b708050a50418204e9"
     }
   ]
 }
