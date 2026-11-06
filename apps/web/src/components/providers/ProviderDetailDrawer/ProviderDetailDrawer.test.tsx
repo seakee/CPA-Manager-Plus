@@ -95,6 +95,39 @@ describe('ProviderDetailDrawer', () => {
     expect(text.match(/\(default\)/g)).toHaveLength(1);
   });
 
+  it('shows an explicit zero-key section for a provider with no API key entries', () => {
+    const row = buildOpenAIRow({
+      name: 'Anonymous OpenAI',
+      baseUrl: 'https://anonymous.example/v1',
+      apiKeyEntries: [],
+    });
+    const text = renderDetailText(row);
+    expect(text).toContain('ai_providers.openai_keys_count: 0');
+    expect(text).toContain('ai_providers.health_check_no_key_entries');
+  });
+
+  it('shows keyless statistics as unavailable and mixed statistics as partial', () => {
+    const keylessRow = buildOpenAIRow({
+      name: 'Keyless OpenAI',
+      baseUrl: 'https://keyless.example/v1',
+      apiKeyEntries: [{ apiKey: '', proxyUrl: 'socks5://proxy:1080' }],
+    });
+    const keylessText = renderDetailText(keylessRow);
+    expect(keylessRow.keyCount).toBe(0);
+    expect(keylessText).toContain('ai_providers.openai_keys_count: 0');
+    expect(keylessText).toContain('ai_providers.usage_stats_unavailable');
+
+    const mixedRow = buildOpenAIRow({
+      name: 'Mixed OpenAI',
+      baseUrl: 'https://mixed.example/v1',
+      apiKeyEntries: [{ apiKey: 'tracked-key' }, { apiKey: '', proxyUrl: 'socks5://proxy:1080' }],
+    });
+    const mixedText = renderDetailText(mixedRow);
+    expect(mixedRow.keyCount).toBe(1);
+    expect(mixedText).toContain('ai_providers.openai_keys_count: 1');
+    expect(mixedText).toContain('ai_providers.usage_stats_partial');
+  });
+
   it('shows effective weights for every single-key provider kind', () => {
     const rows = buildProviderRows({
       gemini: [{ apiKey: 'gemini-default' }],

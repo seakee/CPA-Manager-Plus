@@ -182,7 +182,8 @@ export const modelsApi = {
     apiKey?: string,
     headers: Record<string, string> = {},
     authIndex?: string,
-    proxyUrl?: string
+    proxyUrl?: string,
+    keyless = false
   ) {
     const endpoint = buildModelsEndpoint(baseUrl);
     if (!endpoint) {
@@ -194,7 +195,7 @@ export const modelsApi = {
     const resolvedHeaders = { ...headers };
     if (apiKey && !hasHeader(resolvedHeaders, 'authorization')) {
       resolvedHeaders.Authorization = `Bearer ${apiKey}`;
-    } else if (trimmedAuthIndex && !hasHeader(resolvedHeaders, 'authorization')) {
+    } else if (trimmedAuthIndex && !keyless && !hasHeader(resolvedHeaders, 'authorization')) {
       resolvedHeaders.Authorization = 'Bearer $TOKEN$';
     }
 

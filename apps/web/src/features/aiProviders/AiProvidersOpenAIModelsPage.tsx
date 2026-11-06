@@ -10,6 +10,7 @@ import { useEdgeSwipeBack } from '@/hooks/useEdgeSwipeBack';
 import { modelsApi } from '@/services/api';
 import type { ModelInfo } from '@/utils/models';
 import { normalizeAuthIndex } from '@/utils/authIndex';
+import { getOpenAIModelDiscoveryEntry } from '@/utils/openAIKeyEntries';
 import { buildHeaderObject, hasHeader } from '@/utils/headers';
 import { buildOpenAIModelsEndpoint } from '@/components/providers/utils';
 import type { OpenAIEditOutletContext } from './AiProvidersOpenAIEditLayout';
@@ -82,9 +83,7 @@ export function AiProvidersOpenAIModelsPage() {
       setError('');
       try {
         const headerObject = buildHeaderObject(form.headers);
-        const firstEntry = form.apiKeyEntries.find(
-          (entry) => entry.apiKey?.trim() || normalizeAuthIndex(entry.authIndex)
-        );
+        const firstEntry = getOpenAIModelDiscoveryEntry(form.apiKeyEntries);
         const firstKey = firstEntry?.apiKey?.trim();
         const authIndex = normalizeAuthIndex(firstEntry?.authIndex) ?? undefined;
         const hasAuthHeader = hasHeader(headerObject, 'authorization');
@@ -93,7 +92,8 @@ export function AiProvidersOpenAIModelsPage() {
           hasAuthHeader ? undefined : firstKey,
           headerObject,
           authIndex,
-          firstEntry?.proxyUrl
+          firstEntry?.proxyUrl,
+          !firstKey
         );
         setModels(list);
       } catch (err: unknown) {

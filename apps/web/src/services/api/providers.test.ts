@@ -29,6 +29,232 @@ beforeEach(() => {
 });
 
 describe('providersApi auth-index preservation', () => {
+  it('saves anonymous OpenAI providers with no placeholder credential while retaining real keys', async () => {
+    mocks.get.mockResolvedValueOnce({ 'openai-compatibility': [] });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'local-anonymous',
+        baseUrl: 'http://localhost:11434/v1',
+        apiKeyEntries: [{ apiKey: '' }],
+      },
+      {
+        name: 'with-key',
+        baseUrl: 'https://remote.example/v1',
+        apiKeyEntries: [{ apiKey: 'real-key' }, { apiKey: '' }],
+      },
+      {
+        name: 'anonymous-with-proxy',
+        baseUrl: 'https://another.example/v1',
+        apiKeyEntries: [{ apiKey: '', proxyUrl: 'http://proxy.example:8080' }],
+      },
+      {
+        name: 'header-only-placeholder',
+        baseUrl: 'https://headers.example/v1',
+        apiKeyEntries: [{ apiKey: '', headers: { 'X-Unsupported-Per-Key': 'value' } }],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'local-anonymous',
+        'base-url': 'http://localhost:11434/v1',
+        'api-key-entries': [],
+      },
+      {
+        name: 'with-key',
+        'base-url': 'https://remote.example/v1',
+        'api-key-entries': [{ 'api-key': 'real-key' }],
+      },
+      {
+        name: 'anonymous-with-proxy',
+        'base-url': 'https://another.example/v1',
+        'api-key-entries': [{ 'proxy-url': 'http://proxy.example:8080' }],
+      },
+      {
+        name: 'header-only-placeholder',
+        'base-url': 'https://headers.example/v1',
+        'api-key-entries': [],
+      },
+    ]);
+  });
+
+  it('reads CPA keyless providers back with an empty credential list', async () => {
+    mocks.get.mockResolvedValueOnce({
+      'openai-compatibility': [
+        {
+          name: 'local-anonymous',
+          'base-url': 'http://localhost:11434/v1',
+          'api-key-entries': [],
+          'auth-index': 'cpa-assigned-index',
+        },
+        {
+          name: 'header-only-placeholder',
+          'base-url': 'https://headers.example/v1',
+          'api-key-entries': [{ headers: { 'X-Unsupported-Per-Key': 'value' } }],
+        },
+      ],
+    });
+
+    await expect(providersApi.getOpenAIProviders()).resolves.toEqual([
+      expect.objectContaining({
+        name: 'local-anonymous',
+        baseUrl: 'http://localhost:11434/v1',
+        apiKeyEntries: [],
+        authIndex: 'cpa-assigned-index',
+      }),
+      expect.objectContaining({
+        name: 'header-only-placeholder',
+        baseUrl: 'https://headers.example/v1',
+        apiKeyEntries: [],
+      }),
+    ]);
+  });
+
+  it('round-trips a keyless provider without inventing an empty credential', async () => {
+    const cpaManagementKeylessProvider = {
+      name: 'ollama-local',
+      'base-url': 'http://127.0.0.1:11434/v1',
+      'auth-index': 'cpa-keyless-index',
+      models: [{ name: 'llama3' }],
+      'disable-cooling': true,
+    };
+    const cpaRawConfigKeylessProvider = {
+      name: 'ollama-local',
+      'base-url': 'http://127.0.0.1:11434/v1',
+      models: [{ name: 'llama3' }],
+      'disable-cooling': true,
+      'connection-pool': { enabled: true },
+    };
+    mocks.get.mockImplementation(async (url: string) => {
+      if (url === '/openai-compatibility') {
+        return { 'openai-compatibility': [cpaManagementKeylessProvider] };
+      }
+      if (url === '/config') {
+        return { 'openai-compatibility': [cpaRawConfigKeylessProvider] };
+      }
+      throw new Error(`unexpected url: ${url}`);
+    });
+    mocks.put.mockResolvedValue({});
+
+    const [provider] = await providersApi.getOpenAIProviders();
+    expect(provider.apiKeyEntries).toEqual([]);
+    expect(provider.authIndex).toBe('cpa-keyless-index');
+
+    await providersApi.updateOpenAIProvider('ollama-local', 0, {
+      ...provider,
+      apiKeyEntries: [{ apiKey: '' }],
+    });
+
+    const [, payload] = mocks.put.mock.calls[0] as [string, Array<Record<string, unknown>>];
+    expect(payload[0]).toMatchObject({
+      name: 'ollama-local',
+      'base-url': 'http://127.0.0.1:11434/v1',
+      'api-key-entries': [],
+      'auth-index': 'cpa-keyless-index',
+      'disable-cooling': true,
+      'connection-pool': { enabled: true },
+    });
+    expect(payload[0]['api-key-entries']).toEqual([]);
+  });
+
+  it('round-trips mixed keyed and keyless entries while dropping blank placeholder rows', async () => {
+    const cpaManagementMixedProvider = {
+      name: 'mixed-upstream',
+      'base-url': 'https://api.mixed.example/v1',
+      'api-key-entries': [
+        {
+          'api-key': '',
+          'proxy-url': 'http://proxy1.internal:8080',
+          weight: 2,
+          'auth-index': 'cpa-keyless-proxy-index',
+        },
+        {
+          'api-key': 'sk-real-key',
+          weight: 5,
+          'auth-index': 'cpa-keyed-index',
+        },
+      ],
+      models: [{ name: 'qwen-2.5-coder' }],
+    };
+    const cpaRawConfigMixedProvider = {
+      name: 'mixed-upstream',
+      'base-url': 'https://api.mixed.example/v1',
+      'api-key-entries': [
+        {
+          'api-key': '',
+          'proxy-url': 'http://proxy1.internal:8080',
+          weight: 2,
+          'connection-pool': { enabled: true },
+        },
+        {
+          'api-key': 'sk-real-key',
+          weight: 5,
+          'connection-pool': { 'idle-conn-timeout': '60s' },
+        },
+      ],
+      models: [{ name: 'qwen-2.5-coder' }],
+    };
+    mocks.get.mockImplementation(async (url: string) => {
+      if (url === '/openai-compatibility') {
+        return { 'openai-compatibility': [cpaManagementMixedProvider] };
+      }
+      if (url === '/config') {
+        return { 'openai-compatibility': [cpaRawConfigMixedProvider] };
+      }
+      throw new Error(`unexpected url: ${url}`);
+    });
+    mocks.put.mockResolvedValue({});
+
+    const [provider] = await providersApi.getOpenAIProviders();
+    expect(provider.apiKeyEntries).toEqual([
+      {
+        apiKey: '',
+        proxyUrl: 'http://proxy1.internal:8080',
+        weight: 2,
+        authIndex: 'cpa-keyless-proxy-index',
+        headers: undefined,
+      },
+      {
+        apiKey: 'sk-real-key',
+        proxyUrl: undefined,
+        weight: 5,
+        authIndex: 'cpa-keyed-index',
+        headers: undefined,
+      },
+    ]);
+
+    await providersApi.saveOpenAIProviders([
+      {
+        ...provider,
+        apiKeyEntries: [...provider.apiKeyEntries, { apiKey: '   ' }],
+      },
+    ]);
+
+    expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+      {
+        name: 'mixed-upstream',
+        'base-url': 'https://api.mixed.example/v1',
+        'api-key-entries': [
+          {
+            'auth-index': 'cpa-keyless-proxy-index',
+            'proxy-url': 'http://proxy1.internal:8080',
+            weight: 2,
+            'connection-pool': { enabled: true },
+          },
+          {
+            'api-key': 'sk-real-key',
+            'auth-index': 'cpa-keyed-index',
+            weight: 5,
+            'connection-pool': { 'idle-conn-timeout': '60s' },
+          },
+        ],
+        models: [{ name: 'qwen-2.5-coder' }],
+      },
+    ]);
+  });
+
   it('normalizes credential weights without collapsing explicit zero into omission', async () => {
     mocks.get.mockResolvedValueOnce({
       'codex-api-key': [

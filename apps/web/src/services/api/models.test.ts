@@ -52,6 +52,60 @@ describe('gateway availability errors', () => {
 });
 
 describe('modelsApi request-level proxy', () => {
+  it('keeps the auth-index for keyless proxy routing without resolving a missing token', async () => {
+    mocks.request.mockResolvedValueOnce(successfulResult({ data: [{ id: 'local-model' }] }));
+
+    await modelsApi.fetchModelsViaApiCall(
+      'https://keyless.example.com/v1',
+      undefined,
+      {},
+      'auth-keyless',
+      'socks5://keyless-proxy.example:1080',
+      true
+    );
+
+    expect(mocks.request).toHaveBeenCalledWith({
+      authIndex: 'auth-keyless',
+      proxyUrl: 'socks5://keyless-proxy.example:1080',
+      method: 'GET',
+      url: 'https://keyless.example.com/v1/models',
+      header: undefined,
+    });
+  });
+
+  it('preserves indexed credential token substitution for other callers', async () => {
+    mocks.request.mockResolvedValueOnce(successfulResult({ data: [{ id: 'indexed-model' }] }));
+
+    await modelsApi.fetchModelsViaApiCall(
+      'https://indexed.example.com/v1',
+      undefined,
+      {},
+      'auth-with-key'
+    );
+
+    expect(mocks.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authIndex: 'auth-with-key',
+        header: { Authorization: 'Bearer $TOKEN$' },
+      })
+    );
+  });
+
+  it('does not overwrite custom Authorization on keyless requests', async () => {
+    mocks.request.mockResolvedValueOnce(successfulResult({ data: [{ id: 'custom-model' }] }));
+    await modelsApi.fetchModelsViaApiCall(
+      'https://keyless.example.com/v1',
+      undefined,
+      { Authorization: 'Basic custom-auth' },
+      'auth-keyless',
+      undefined,
+      true
+    );
+    expect(mocks.request).toHaveBeenCalledWith(
+      expect.objectContaining({ header: { Authorization: 'Basic custom-auth' } })
+    );
+  });
+
   it.each([
     ['v1', modelsApi.fetchV1ModelsViaApiCall, 'https://api.example.com/v1/models'],
     ['openai', modelsApi.fetchModelsViaApiCall, 'https://api.example.com/models'],
