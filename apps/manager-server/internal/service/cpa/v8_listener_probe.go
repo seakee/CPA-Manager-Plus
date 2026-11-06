@@ -26,18 +26,18 @@ package cpa
 // a CPA", and the authenticated read is what names a destination.
 //
 // The CPA v8 rejection body was checked before deciding whether the probe could
-// narrow that, and it cannot. In v8.0.13 (tag d7914af, the release
+// narrow that, and it cannot. In v8.0.55 (tag e6e5708e, the release
 // internal/service/cpa/config_schema.go pins) the standard `v1` group — which
-// carries GET /v1/models (internal/api/server_routes.go:64-66) — is guarded by
+// carries GET /v1/models (internal/api/server_routes.go:66-69) — is guarded by
 // AuthMiddleware, i.e. accessAuthMiddleware with realtimeError=false
-// (internal/api/server_middleware.go:151-159), and that branch writes the message
+// (internal/api/server_middleware.go:484-485,502), and that branch writes the message
 // as a plain string: `c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})`
-// (internal/api/server_middleware.go:198). The typed codes
+// (internal/api/server_middleware.go:557). The typed codes
 // AuthErrorCodeNoCredentials ("no_credentials") and AuthErrorCodeInvalidCredential
-// ("invalid_credential") exist in sdk/access/errors.go:13-14,65-71 but never reach
+// ("invalid_credential") exist in sdk/access/errors.go:13-14,71-75 but never reach
 // that body; the only typed `error.type` the authentication middleware emits is on
 // the realtime route, and it is "authentication_error" / "server_error"
-// (internal/api/server_middleware.go:183-197). A body-type check would therefore
+// (internal/api/server_middleware.go:540-554). A body-type check would therefore
 // refuse every real CPA, so the probe stays a status check.
 
 import (

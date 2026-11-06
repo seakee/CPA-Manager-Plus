@@ -124,41 +124,11 @@ func TestDestinationNewManagedStagesProductizedTemplateOnlyOverEmptyGatewayAuth(
 	if err != nil {
 		t.Fatal(err)
 	}
-	var config struct {
-		Server struct {
-			Host string `json:"host"`
-			Port int    `json:"port"`
-		} `json:"server"`
-		Management struct {
-			AllowRemote         bool   `json:"allow-remote"`
-			SecretKey           string `json:"secret-key"`
-			DisableControlPanel bool   `json:"disable-control-panel"`
-		} `json:"management"`
-		Access struct {
-			Keys []string `json:"api-keys"`
-		} `json:"access"`
-		OAuth struct {
-			AuthDir string `json:"auth-dir"`
-		} `json:"oauth"`
-		Observability struct {
-			Usage struct {
-				Enabled bool `json:"usage-statistics-enabled"`
-			} `json:"usage"`
-		} `json:"observability"`
-		Plugins struct {
-			Enabled bool   `json:"enabled"`
-			Dir     string `json:"dir"`
-		} `json:"plugins"`
-	}
 	// The plugin root is the Supervisor's, beside the destination the publish
 	// swaps: the destination directory is replaced whole, so a root inside it
 	// would lose every installed plugin on the first re-stage.
 	pluginRoot := filepath.Join(filepath.Dir(root), "plugins")
-	if json.Unmarshal(data, &config) != nil || config.Server.Port != 8317 || !config.Management.AllowRemote || config.Management.SecretKey != r.ManagementKey ||
-		!config.Management.DisableControlPanel || !reflect.DeepEqual(config.Access.Keys, r.APIKeys) || config.OAuth.AuthDir != filepath.Join(root, "auth") ||
-		!config.Observability.Usage.Enabled || config.Plugins.Enabled || config.Plugins.Dir != pluginRoot {
-		t.Fatalf("New Managed template: %s", data)
-	}
+	config := assertDestinationTemplate(t, data, root, r, "127.0.0.1", true)
 	// The immutable stage snapshot is Supervisor-private and holds exactly the
 	// one Client Key the Manager persisted before staging.
 	stage, err := os.ReadFile(filepath.Join(root, "stage.json"))
@@ -423,4 +393,129 @@ func TestDestinationPartialPersistenceNeverResumesUncertainStage(t *testing.T) {
 			}
 		})
 	}
+}
+
+type destinationTemplateConfig struct {
+	ConfigVersion int `json:"config-version"`
+	Server        struct {
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	} `json:"server"`
+	Management struct {
+		AllowRemote            bool   `json:"allow-remote"`
+		SecretKey              string `json:"secret-key"`
+		DisableControlPanel    bool   `json:"disable-control-panel"`
+		DisableAutoUpdatePanel bool   `json:"disable-auto-update-panel"`
+	} `json:"management"`
+	Access struct {
+		Keys []string `json:"api-keys"`
+	} `json:"access"`
+	OAuth struct {
+		AuthDir string `json:"auth-dir"`
+	} `json:"oauth"`
+	Observability struct {
+		Logs struct {
+			LoggingToFile bool `json:"logging-to-file"`
+		} `json:"logs"`
+		Usage struct {
+			Enabled bool `json:"usage-statistics-enabled"`
+		} `json:"usage"`
+	} `json:"observability"`
+	Plugins struct {
+		Enabled bool   `json:"enabled"`
+		Dir     string `json:"dir"`
+	} `json:"plugins"`
+}
+
+func assertDestinationTemplate(t *testing.T, data []byte, root string, r DestinationRequest, wantHost string, wantAllowRemote bool) destinationTemplateConfig {
+	t.Helper()
+	var config destinationTemplateConfig
+	pluginRoot := filepath.Join(filepath.Dir(root), "plugins")
+	if json.Unmarshal(data, &config) != nil || config.ConfigVersion != 8 || config.Server.Host != wantHost || config.Server.Port != 8317 ||
+		config.Management.AllowRemote != wantAllowRemote || config.Management.SecretKey != r.ManagementKey ||
+		!config.Management.DisableControlPanel || !config.Management.DisableAutoUpdatePanel ||
+		!reflect.DeepEqual(config.Access.Keys, r.APIKeys) || config.OAuth.AuthDir != filepath.Join(root, "auth") ||
+		config.Observability.Logs.LoggingToFile || !config.Observability.Usage.Enabled ||
+		config.Plugins.Enabled != r.PluginsEnabled || config.Plugins.Dir != pluginRoot {
+		t.Fatalf("destination template (wantHost=%q wantAllowRemote=%v): %s", wantHost, wantAllowRemote, data)
+	}
+	return config
+}
+
+func testChildIdentity() *cpaprocess.ChildIdentity {
+	if os.Geteuid() == 0 {
+		return &cpaprocess.ChildIdentity{UID: 10001, GID: 10001}
+	}
+	return &cpaprocess.ChildIdentity{UID: uint32(os.Getuid()), GID: uint32(os.Getgid())}
+}
+
+func stageTemplateShape(t *testing.T, address string, child *cpaprocess.ChildIdentity, listenLoopback bool) ([]byte, string, DestinationRequest) {
+	t.Helper()
+	f, r, root := destinationFixture(t)
+	r = newManagedRequest(r)
+	if err := f.starter.EnableDestination(root, gatewayAuthFixture(f), address, child, listenLoopback); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := f.starter.StageDestination(t.Context(), r)
+	if err != nil || staged.State != journal.StateSucceeded {
+		t.Fatalf("stage destination: %+v %v", staged, err)
+	}
+	configPath := filepath.Join(root, "config.yaml")
+	info, err := os.Lstat(configPath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("config.yaml stat: %v %v", info, err)
+	}
+	if child != nil {
+		rootInfo, err := os.Lstat(root)
+		if err != nil || !rootInfo.IsDir() || rootInfo.Mode().Perm() != 0o710 {
+			t.Fatalf("destination root stat: %v %v", rootInfo, err)
+		}
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data, root, r
+}
+
+func TestDestinationTemplateKeepsDockerShape(t *testing.T) {
+	data, root, r := stageTemplateShape(t, "127.0.0.1:8317", testChildIdentity(), false)
+	assertDestinationTemplate(t, data, root, r, "0.0.0.0", true)
+}
+
+func TestDestinationTemplateKeepsInProcessShape(t *testing.T) {
+	data, root, r := stageTemplateShape(t, "127.0.0.1:8317", nil, false)
+	assertDestinationTemplate(t, data, root, r, "127.0.0.1", true)
+}
+
+func TestDestinationTemplateNativeLoopback(t *testing.T) {
+	dockerData, dockerRoot, dockerReq := stageTemplateShape(t, "127.0.0.1:8317", testChildIdentity(), false)
+	assertDestinationTemplate(t, dockerData, dockerRoot, dockerReq, "0.0.0.0", true)
+
+	for _, address := range []string{"127.0.0.1:8317", "localhost:8317"} {
+		t.Run(address, func(t *testing.T) {
+			nativeData, nativeRoot, nativeReq := stageTemplateShape(t, address, testChildIdentity(), true)
+			assertDestinationTemplate(t, nativeData, nativeRoot, nativeReq, "127.0.0.1", false)
+
+			var dockerMap, nativeMap map[string]any
+			if err := json.Unmarshal(dockerData, &dockerMap); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(nativeData, &nativeMap); err != nil {
+				t.Fatal(err)
+			}
+			nativeMap["server"].(map[string]any)["host"] = "0.0.0.0"
+			nativeMap["management"].(map[string]any)["allow-remote"] = true
+			nativeMap["oauth"].(map[string]any)["auth-dir"] = filepath.Join(dockerRoot, "auth")
+			nativeMap["plugins"].(map[string]any)["dir"] = filepath.Join(filepath.Dir(dockerRoot), "plugins")
+			if !reflect.DeepEqual(dockerMap, nativeMap) {
+				t.Fatalf("native template drifted beyond server.host and management.allow-remote:\ndocker=%v\nnative=%v", dockerMap, nativeMap)
+			}
+		})
+	}
+}
+
+func TestDestinationTemplateNativeLoopbackIPv6(t *testing.T) {
+	data, root, r := stageTemplateShape(t, "[::1]:8317", testChildIdentity(), true)
+	assertDestinationTemplate(t, data, root, r, "::1", false)
 }

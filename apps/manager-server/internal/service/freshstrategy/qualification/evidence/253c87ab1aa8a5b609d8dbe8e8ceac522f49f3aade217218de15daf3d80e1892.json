@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "runId": "AQ02-625f57f0be96c59896e3bc551aa0e333ad7add06d93b056a",
+  "caseRef": "AQ04-S05-v8",
+  "records": [
+    {
+      "expectationRef": "AQ04-S05-v8-OBSERVATION",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 119360,
+      "requestBytes": 0,
+      "responseBytes": 1075
+    },
+    {
+      "expectationRef": "AQ04-S05-v8-STATE",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 119360,
+      "requestBytes": 0,
+      "responseBytes": 1075
+    },
+    {
+      "expectationRef": "AQ04-S05-v8-CONTROL",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 119360,
+      "requestBytes": 0,
+      "responseBytes": 1075
+    }
+  ]
+}

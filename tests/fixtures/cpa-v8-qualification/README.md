@@ -322,12 +322,12 @@ docker create --name "$AQ02_CONTAINER" --platform linux/amd64 \
   --user "$(id -u)" --init --read-only --network none \
   --cap-drop ALL --security-opt no-new-privileges \
   --pids-limit 128 --memory 1g --cpus 2 \
-  --mount "type=bind,src=$AQ02_ARCHIVE,dst=/input/CLIProxyAPI_8.0.13_linux_amd64.tar.gz,readonly" \
+  --mount "type=bind,src=$AQ02_ARCHIVE,dst=/input/CLIProxyAPI_8.0.55_linux_amd64.tar.gz,readonly" \
   --mount "type=bind,src=$AQ02_RUN_DIR/manifest.json,dst=/run/aq02-manifest.json,readonly" \
   --mount "type=bind,src=$AQ02_RUN_DIR/inspect.json,dst=/run/aq02-isolation.json,readonly" \
   --mount "type=bind,src=$AQ02_RUN_DIR/output,dst=/work" \
   "$AQ02_IMAGE_DIGEST" --run --manifest /run/aq02-manifest.json \
-  --archive /input/CLIProxyAPI_8.0.13_linux_amd64.tar.gz \
+  --archive /input/CLIProxyAPI_8.0.55_linux_amd64.tar.gz \
   --output-parent /work --case-set management-r2
 docker inspect "$AQ02_CONTAINER" --format '{{json .}}' > "$AQ02_RUN_DIR/inspect.json"
 docker start --attach "$AQ02_CONTAINER"
@@ -423,9 +423,9 @@ mandatory selections and two disabled optional selections.
 | Planning repository commit                       | 85d4f9942049fb3fdbf8358a5d8a9d7624f110bd                          |
 | CPA v8 Gate blob                                 | 779860b2126a95b1878af6645497e95419ce1775                          |
 | Explicitly selected local v2 implementation base | f5d12c6ca4af1f36f087e8acd28e565c5a0ae655                          |
-| Source-observed CPA candidate                    | v8.0.13 at d7914afdedca7af95ee974a42453dc49fc1388ce               |
-| Candidate artifact                               | Linux amd64 plugin variant, CLIProxyAPI_8.0.13_linux_amd64.tar.gz |
-| Declared archive SHA256                          | 50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3  |
+| Source-observed CPA candidate                    | v8.0.55 at e6e5708e677adb2463d45accdd24bc9fd028ddd8               |
+| Candidate artifact                               | Linux amd64 plugin variant, CLIProxyAPI_8.0.55_linux_amd64.tar.gz |
+| Declared archive SHA256                          | 4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123  |
 
 The draft was shaped against v2 at 58076c6e26c372f179695d6754e3dc306190191f.
 The selected local base predates PR #888; those five identity-consumer files do

@@ -147,7 +147,7 @@ func NewExecutor(source Source, destination Destination, auth Authorization) *Ex
 // classification discovery also uses, so an item is gated under exactly the
 // reference the record decided for it. A writable gateway leaf or a whole payload
 // rule family is routing configuration: that table is the exact scope the gateway
-// configuration page reads and writes against CPA v8.0.13. Anything outside the
+// configuration page reads and writes against CPA v8.0.55. Anything outside the
 // table keeps the reference that already describes it and stays manual: the
 // executor never widens a scope by classifying an item into a migrate verdict it
 // was not given.

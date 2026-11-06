@@ -7,8 +7,8 @@ configuration endpoint, Key replacement/revocation, or production qualification.
 
 The profile is **off by default**. The Host selects
 `CPAMP_PRIVATE_CONFIG_AUTHORITY=1` on both Runtime and Manager, using only the
-Linux/amd64 `v8-amd64-loopback-proof` image and official CPA **v8.0.13**
-(`sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41`).
+Linux/amd64 `v8-amd64-loopback-proof` image and official CPA **v8.0.55**
+(`sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7`).
 The separate private composition has no updater, artifact selection or adoption
 writer. Ordinary Runtime composition and its existing qualification bytes,
 `v8-entrypoint.sh` seed equality, Ingress and pre-install seed validators remain

@@ -52,6 +52,84 @@ func TestLoadConfigCPAAddressDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestDestinationListenLoopbackRejectsInvalidValue(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want bool
+	}{
+		{"", false},
+		{"1", true},
+		{" 1 ", true},
+		{"true", true},
+		{"TRUE", true},
+		{" True ", true},
+	} {
+		values := validConfigValues()
+		values["CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"] = test.raw
+		cfg, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(41))
+		if err != nil || cfg.cpaListenLoopback != test.want {
+			t.Fatalf("loadConfig(CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=%q) = %v, %v", test.raw, cfg.cpaListenLoopback, err)
+		}
+	}
+	for _, raw := range []string{"yes", "0", "on", "false", "2"} {
+		t.Run(raw, func(t *testing.T) {
+			values := validConfigValues()
+			values["CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"] = raw
+			_, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(41))
+			if err == nil || !strings.Contains(err.Error(), "CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: must be 1 or true") {
+				t.Fatalf("loadConfig(CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=%q) error = %v", raw, err)
+			}
+		})
+	}
+}
+
+func TestDestinationListenLoopbackRequiresExactLoopbackHost(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:8317", "[::1]:8317", "localhost:8317"} {
+		t.Run("accept_"+address, func(t *testing.T) {
+			directory := t.TempDir()
+			values := validConfigValues()
+			values["CPAMP_RUNTIME_CPA_ADDR"] = address
+			values["CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"] = "1"
+			values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
+			values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
+			cfg, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(41))
+			if err != nil || !cfg.cpaListenLoopback {
+				t.Fatalf("loadConfig(%q) = %+v, %v", address, cfg, err)
+			}
+			handler, err := newRuntimeHandler(t.Context(), cfg)
+			if err != nil {
+				t.Fatalf("newRuntimeHandler(%q) error = %v", address, err)
+			}
+			if err := handler.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for _, address := range []string{"127.0.0.2:8317", "127.0.1.1:8317", "0.0.0.0:8317", "192.0.2.10:8317"} {
+		t.Run("reject_"+address, func(t *testing.T) {
+			directory := t.TempDir()
+			cfg := loadTestConfig(t, fixedGeneration(41))
+			cfg.cpaAddr = address
+			cfg.cpaListenLoopback = true
+			cfg.journalPath = filepath.Join(directory, "private", "operations.sqlite")
+			cfg.cpaExecutable = copyStartHelper(t, directory)
+			handler, err := newRuntimeHandler(t.Context(), cfg)
+			if handler != nil || err == nil || !strings.Contains(err.Error(), "CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK") {
+				t.Fatalf("newRuntimeHandler(%q) = %v, %v; want CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK error", address, handler, err)
+			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(cfg.journalPath), "destination")); !os.IsNotExist(err) {
+				t.Fatalf("rejected loopback address %q created destination directory: %v", address, err)
+			}
+			if _, err := os.Stat(filepath.Dir(cfg.journalPath)); !os.IsNotExist(err) {
+				t.Fatalf("rejected loopback address %q opened supervisor runtime root before failing: %v", address, err)
+			}
+			if _, err := os.Stat(filepath.Join(directory, "spawns")); !os.IsNotExist(err) {
+				t.Fatalf("rejected loopback address %q started a child process: %v", address, err)
+			}
+		})
+	}
+}
+
 func TestReadOnlyRuntimeRemainsUnknownWithoutCPAProbe(t *testing.T) {
 	var probes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

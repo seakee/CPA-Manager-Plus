@@ -718,7 +718,7 @@ node bin/ci/fresh-adopt-network.mjs \
   cpamp-d-runtime:local cpamp-d-manager:local cpamp-d-ingress:local bin/tmp/d-adopt
 ```
 
-It is the browser journey, not an API reconstruction. A real CPA v8.0.13 runs as
+It is the browser journey, not an API reconstruction. A real CPA v8.0.55 runs as
 its own container holding 40 credential files, one gateway config with the seeded
 routing, provider and client-key sections, one credential whose item name is past
 the record's limit (recorded `manual` with an instruction, never uploaded) and one
@@ -819,7 +819,7 @@ node bin/ci/fresh-external-management.mjs \
   cpamp-d-runtime:local cpamp-d-manager:local cpamp-d-ingress:local OUT
 ```
 
-It runs the External journey against a real CPA v8.0.13 container built from the
+It runs the External journey against a real CPA v8.0.55 container built from the
 runtime candidate's pinned binary, on a private network, with the manager-only
 image and Ingress beside it. Ingress is not scaffolding: it is the public
 listener and the routing control plane, so a Manager without it cannot activate
@@ -847,7 +847,7 @@ It is the acceptance for everything above:
    drains the CPA's queue, one model request with an installed Client Key and an
    out-of-band `usage-queue` read that is empty both before and after it — the
    check is named "usage queue empty at probe time", because that observation is
-   all it makes. The Manager is restarted after the probe. CPA v8.0.13 credits
+   all it makes. The Manager is restarted after the probe. CPA v8.0.55 credits
    usage only to an inference call that reached a Provider, so a Client-Key figure
    for a real call is an explicit `NOT RUN` ("Key usage attribution of a real call
    (no Provider fixture)") in a disposable CPA with no Provider fixture;
@@ -1179,12 +1179,15 @@ item. The executor is `internal/service/freshadopt`, reached only from
 | rule family | the same single document | `PUT /config/<family path>`, for the 5 `cpa.ConfigRuleFamilyIDs()` families | `GET` that path |
 | provider section | the same single document | `PUT /config/<section>`, for the 12 `api-keys.*`/`oauth.*` groups | `GET` that path |
 
-The approved scope names 13 provider ownership groups, but CPA v8.0.13 has no
-root `models` section: `internal/config/config_types.go:454-455,537-538,658-659`
-declares `models` only inside a `payload` rule list or a provider config, and
-`v8AllowedRoots` (`config_v8.go:572`) does not list it. It is absent from the
-table rather than guessed; its effective content arrives with the `api-keys.*`
-groups, which carry each group's own `models` list.
+The approved scope names 13 provider ownership groups, but the pinned v8 document
+projection has no root `models` section: v8.0.55 accepts the root key
+(`v8AllowedRoots`, `config_v8.go:636-637`, added since v8.0.13), but it is a
+catalog-source selector (`internal/config/model_catalogs.go`) that
+`GET /v8/management/config` never renders, and
+`internal/config/config_types.go:650-651,738-739,869-870`
+declares `models` only inside a `payload` rule list or a provider config. It is
+absent from the table rather than guessed; its effective content arrives with the
+`api-keys.*` groups, which carry each group's own `models` list.
 
 Three properties are structural rather than conventional:
 
@@ -1579,7 +1582,7 @@ review is unchanged.
 The adoption subset of that re-acceptance is narrower and already pinned by a
 real run: `TestDestinationRealCPAV8` and
 `TestAdoptionExactCPAV8WithSupervisor` were re-run in a
-`linux/amd64` container against the exact CPA v8.0.13 candidate and the pinned
+`linux/amd64` container against the exact CPA v8.0.55 candidate and the pinned
 CPA v7.0.12 historical source, and the emitted
 `network_existing`/`legacy_managed` resource chains plus the legacy transition
 observation are what `consumer.json` now binds. Re-running those two harnesses

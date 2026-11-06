@@ -23,23 +23,31 @@ func embeddedLegacyTransitionManifest(t *testing.T) (string, []byte, legacyTrans
 	if err != nil {
 		t.Fatal(err)
 	}
+	var foundName string
+	var foundData []byte
+	var found legacyTransitionManifest
 	for _, name := range names {
 		data, err := fs.ReadFile(productionEvidence, name)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var manifest legacyTransitionManifest
-		if json.Unmarshal(data, &manifest) != nil {
+		if json.Unmarshal(data, &manifest) != nil || manifest.Candidate.DeclaredSHA256 != realCPA8ArchiveSHA256 {
 			continue
 		}
 		for _, transitionCase := range manifest.Cases {
 			if transitionCase.ID == acceptedLegacyTransitionCaseRef {
-				return name, data, manifest
+				if foundName != "" {
+					t.Fatal("multiple legacy transition manifests")
+				}
+				foundName, foundData, found = name, data, manifest
 			}
 		}
 	}
-	t.Fatal("checked-in legacy transition manifest is missing")
-	return "", nil, legacyTransitionManifest{}
+	if foundName == "" {
+		t.Fatal("checked-in legacy transition manifest is missing")
+	}
+	return foundName, foundData, found
 }
 
 func TestCheckedInLegacyTransitionManifestBindsAcceptedSourceProfile(t *testing.T) {

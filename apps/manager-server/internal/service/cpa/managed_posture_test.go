@@ -21,7 +21,15 @@ func TestManagedPostureAcceptsOnlyTheDestinationTemplate(t *testing.T) {
 	// template's, and only the Supervisor-owned directory plus the closed key set
 	// are pinned. Every other plugin shape is a posture this Manager never wrote.
 	for name, body := range map[string]string{
-		"plugins enabled":  strings.Replace(managedDestinationConfig, `"enabled":false`, `"enabled":true`, 1),
+		"plugins enabled": strings.Replace(managedDestinationConfig, `"enabled":false`, `"enabled":true`, 1),
+		"native loopback ipv4": strings.NewReplacer(
+			`"host":"0.0.0.0"`, `"host":"127.0.0.1"`,
+			`"allow-remote":true`, `"allow-remote":false`,
+		).Replace(managedDestinationConfig),
+		"native loopback ipv6": strings.NewReplacer(
+			`"host":"0.0.0.0"`, `"host":"::1"`,
+			`"allow-remote":true`, `"allow-remote":false`,
+		).Replace(managedDestinationConfig),
 	} {
 		if !managedProofPosture.matches([]byte(body)) {
 			t.Fatalf("%s refused", name)
@@ -38,6 +46,10 @@ func TestManagedPostureAcceptsOnlyTheDestinationTemplate(t *testing.T) {
 		"plugin non-boolean switch":               strings.Replace(managedDestinationConfig, `"enabled":false`, `"enabled":"false"`, 1),
 		"loopback host":    strings.Replace(managedDestinationConfig, `"host":"0.0.0.0"`, `"host":"127.0.0.1"`, 1),
 		"remote disabled":  strings.Replace(managedDestinationConfig, `"allow-remote":true`, `"allow-remote":false`, 1),
+		"non-canonical loopback 127.0.0.2": strings.NewReplacer(
+			`"host":"0.0.0.0"`, `"host":"127.0.0.2"`,
+			`"allow-remote":true`, `"allow-remote":false`,
+		).Replace(managedDestinationConfig),
 		"usage disabled":   strings.Replace(managedDestinationConfig, `"usage-statistics-enabled":true`, `"usage-statistics-enabled":false`, 1),
 		"plaintext secret": strings.Replace(managedDestinationConfig, `"$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY12"`, `"plaintext-management-key"`, 1),
 		"installed key":    strings.Replace(managedDestinationConfig, `"api-keys":[]`, `"api-keys":["cpamp_sk_`+strings.Repeat("a", 64)+`"]`, 1),

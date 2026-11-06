@@ -2,17 +2,17 @@
   "schemaVersion": 1,
   "contractId": "cpamp-cpa-v8-adoption-resource",
   "manifestRevision": "fresh-network-client-api-keys-r1",
-  "manifestSha256": "563ef299810ce576636df6bd5ebf39a0554d54e5b8bde31b8606405c4d2ac3be",
+  "manifestSha256": "41725ced527fa1221e32d4f0aabd9b3a7709dd454cc2761165e8e375bd9db6a2",
   "run": {
-    "id": "cpamp-fresh-adoption-resource-network-3a4addb702c8",
-    "runnerCommit": "3a4addb702c879b863b96444182e39a729ad3f0a",
-    "testedTree": "f2f66c80bdf450ce2ba7452996ec5b771e1a3df5"
+    "id": "cpamp-fresh-adoption-resource-network-69ea7e9609f2",
+    "runnerCommit": "69ea7e9609f28dc50d955851abd36e9059f42dd1",
+    "testedTree": "04197ab6e8a44a4d0378f1c27f9195fa68258557"
   },
   "artifactObservation": {
-    "candidateRef": "CPA8-8.0.13-linux-amd64-plugin",
+    "candidateRef": "CPA8-8.0.55-linux-amd64-plugin",
     "provenance": "locally-verified",
-    "observedArchiveSha256": "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3",
-    "observedBinarySha256": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+    "observedArchiveSha256": "4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123",
+    "observedBinarySha256": "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
   },
   "results": [
     {
@@ -47,17 +47,17 @@
     {
       "id": "fresh-network-client-api-keys-read",
       "kind": "sanitized-trace",
-      "sha256": "9929b9daf6bb96cdcf21ef937c5e76f5aac472d8830672967d8f56adfb6bafe7"
+      "sha256": "81b98481527dd45aeba866f38dac029b28e6e43a8f8df39b6dada5318e458c10"
     },
     {
       "id": "fresh-network-client-api-keys-replay",
       "kind": "sanitized-trace",
-      "sha256": "431ef2dd495034bed7173df669ad2cc19a996019402196dde4945d78456590e6"
+      "sha256": "416cfeb651e9ffbb434a61a0b0f0421bb23c34815851e0775bb461aad0408e04"
     },
     {
       "id": "fresh-network-client-api-keys-verify",
       "kind": "sanitized-trace",
-      "sha256": "6c192dc8eb13f9ba5bad9c0bacb54651ce670e3be8b78b9ee1c0523c5ef68da9"
+      "sha256": "3584f5978a416881611c0c49a2dc19ef873f9438cf41b7758aebd697775d0fee"
     }
   ]
 }

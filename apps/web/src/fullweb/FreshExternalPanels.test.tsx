@@ -57,7 +57,7 @@ const usageState = {
   statisticsEnabled: false,
   collector: 'stopped',
   collectionStarted: false,
-  cpaVersion: { version: 'v8.0.13', support: 'supported', writeBlocked: false },
+  cpaVersion: { version: 'v8.0.55', support: 'supported', writeBlocked: false },
 };
 
 describe('External rebind dialog', () => {

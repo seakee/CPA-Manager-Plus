@@ -13,7 +13,7 @@ import (
 // table: unknown paths, wrong value shapes and rule families that are not part
 // of the accepted scope. Value bounds are never copied here: CPA validates its
 // own schema and answers 400/422 for a value it will not persist
-// (internal/api/handlers/management/config_v8.go:118-186, v8.0.13).
+// (internal/api/handlers/management/config_v8.go:150-197, v8.0.55).
 var ErrInvalidConfigPath = errors.New("invalid config path")
 
 // ConfigLeafType is the JSON shape CPA accepts for one leaf. It is a shape, not
@@ -43,7 +43,7 @@ const (
 
 // ConfigLeaf is one writable CPA YAML leaf of the gateway page.
 //
-// Every path below exists in CPA v8.0.13 (tag d7914af) and is addressed through
+// Every path below exists in CPA v8.0.55 (tag e6e5708e) and is addressed through
 // its canonical v8 name: internal/config/config_v8.go builds the same alias
 // projection the management GET/PATCH endpoints apply before serving a path.
 type ConfigLeaf struct {
@@ -87,7 +87,7 @@ type ConfigGroup struct {
 
 // gatewayLeaves is the single writable scope of the gateway configuration page.
 // It is generated from the accepted r3 field inventory and verified leaf by leaf
-// against the CPA v8.0.13 schema; the page never edits a path outside it.
+// against the CPA v8.0.55 schema; the page never edits a path outside it.
 //
 //	internal/config/config_types.go:352-374   routing strategy/affinity/force-model-prefix
 //	internal/config/config.go:86-103          routing retry and cooldown
@@ -150,7 +150,7 @@ var gatewayLeaves = []ConfigLeaf{
 	{Path: "upstream.xai.inject-x-search", Type: ConfigLeafBool, Kind: ConfigKindBool, Group: "xai"},
 }
 
-// imageModeValues is the v8.0.13 accepted spelling of disable-image-generation
+// imageModeValues is the v8.0.55 accepted spelling of disable-image-generation
 // (internal/config/disable_image_generation_mode.go). "passthrough" postdates the
 // r3 inventory snapshot: it is accepted as an existing value and never offered as
 // a new draft, so the page cannot coerce a value CPA already persists.

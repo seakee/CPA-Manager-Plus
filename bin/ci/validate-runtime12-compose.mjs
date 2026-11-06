@@ -1,10 +1,22 @@
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const fail = (message) => {
   throw new Error(`Runtime 13 Compose validation failed: ${message}`);
 };
 
-const document = JSON.parse(readFileSync(0, 'utf8'));
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const stdinText = process.stdin.isTTY ? '' : readFileSync(0, 'utf8').trim();
+const document = JSON.parse(
+  stdinText ||
+    execFileSync(
+      'docker',
+      ['compose', '-f', resolve(repoRoot, 'docker-compose.yml'), 'config', '--format', 'json'],
+      { cwd: repoRoot, encoding: 'utf8' }
+    )
+);
 const services = document.services ?? {};
 for (const name of ['cpamp-ingress', 'cpamp-manager', 'cpamp-runtime']) {
   if (!services[name]) fail(`missing service ${name}`);
@@ -52,6 +64,24 @@ if (
   fail('Runtime must configure the fixed image-owned CPA UID/GID 10001:10001');
 }
 if (runtime.user) fail('Runtime Supervisor must remain the privileged container user');
+for (const [name, service] of Object.entries(services)) {
+  if ('CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK' in (service.environment ?? {})) {
+    fail(`${name} must not define CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK`);
+  }
+}
+const dockerSurfaceFiles = [
+  ...readdirSync(repoRoot)
+    .filter((entry) => /^Dockerfile($|\.)|^docker-compose.*\.ya?ml$/.test(entry))
+    .map((entry) => resolve(repoRoot, entry)),
+  ...readdirSync(resolve(repoRoot, 'bin', 'ci'))
+    .filter((entry) => /compose.*\.ya?ml$/.test(entry))
+    .map((entry) => resolve(repoRoot, 'bin', 'ci', entry)),
+];
+for (const filePath of dockerSurfaceFiles) {
+  if (readFileSync(filePath, 'utf8').includes('CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK')) {
+    fail(`${filePath} must not define CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK`);
+  }
+}
 
 const volumeTargets = (service) =>
   new Map((service.volumes ?? []).map((volume) => [volume.target, volume]));

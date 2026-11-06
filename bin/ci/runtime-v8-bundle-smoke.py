@@ -21,7 +21,7 @@ import sys
 import time
 
 
-PIN = "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+PIN = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
@@ -170,7 +170,7 @@ exit 1
         request(runtime_url, "/v1/runtime/status", expected=401)
         manifest = json.loads(command("docker", "exec", name, "cat",
                                      "/usr/local/share/cpamp/runtime/cpa-artifact.json"))
-        assert manifest == {"schemaVersion": 1, "engine": "cpa", "version": "8.0.13",
+        assert manifest == {"schemaVersion": 1, "engine": "cpa", "version": "8.0.55",
                             "artifactId": "sha256:" + PIN}
         result["manifest"] = manifest
         hashes = command("docker", "exec", name, "sha256sum", "/usr/local/bin/cli-proxy-api",
@@ -210,7 +210,7 @@ test "$(stat -c '%u:%g:%a' /runtime/supervisor)" = 0:10001:710
         wait_status("ready")
         assert "-config /runtime/supervisor/destination/config.yaml" in snapshot("destination")
         config, version = request(cpa_url, "/v8/management/config", key=management_key)
-        assert version == "8.0.13", version
+        assert version == "8.0.55", version
         assert config["config-version"] == 8, config.keys()
         assert config["access"]["api-keys"] == [client_key]
         assert config["server"]["host"] == "0.0.0.0" and config["server"]["port"] == 8317

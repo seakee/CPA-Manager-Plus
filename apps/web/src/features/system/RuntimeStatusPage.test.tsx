@@ -31,7 +31,7 @@ const externalStatus: RuntimeStatusResponse = {
   status: 'ready',
   observedAt: '2026-10-27T00:00:00.000Z',
   manager: { state: 'ready' },
-  gateway: { state: 'ready', ready: true, version: '8.0.13' },
+  gateway: { state: 'ready', ready: true, version: '8.0.55' },
 };
 
 let renderer: ReactTestRenderer | undefined;
@@ -78,7 +78,7 @@ describe('Runtime status page', () => {
     await renderPage(client);
     const content = text(renderer!.root);
     expect(content).toContain('外部 CPA 连接');
-    expect(content).toContain('8.0.13');
+    expect(content).toContain('8.0.55');
     expect(buttons().map(text)).not.toContain('启动');
     expect(buttons().map(text)).not.toContain('停止');
     expect(buttons().map(text)).not.toContain('重启');

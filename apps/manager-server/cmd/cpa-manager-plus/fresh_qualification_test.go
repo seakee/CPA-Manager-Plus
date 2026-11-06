@@ -77,7 +77,7 @@ func TestFreshProductionQualificationCannotBeExtendedByHTTPOrRestart(t *testing.
 				"attemptId": strings.Repeat("a", 32),
 				"baseUrl":   "http://127.0.0.1:1", "managementKey": "private-source-secret",
 				"expectedRuntimeIdentity": "claimed-runtime", "expectedRuntimeGeneration": 7,
-				"expectedArtifactId": "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
+				"expectedArtifactId": "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
 			}
 			for _, injected := range []string{"", "qualification", "qualifiedArtifactId", "adoptionCiphertext", "adoptionResources"} {
 				if injected != "" {

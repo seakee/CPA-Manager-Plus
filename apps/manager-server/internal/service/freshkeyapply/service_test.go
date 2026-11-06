@@ -60,7 +60,7 @@ func fixture(t *testing.T) (*Service, *fakeWire, *observedRuntime, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rt := &observedRuntime{status: model.RuntimeObservedStatus{Identity: cpa.PrivateKeyRuntime, Generation: 7, State: model.RuntimeStateReady, ActiveGatewayArtifact: &model.ActiveGatewayArtifact{ArtifactID: cpa.PrivateKeyArtifact, Version: "8.0.13"}}}
+	rt := &observedRuntime{status: model.RuntimeObservedStatus{Identity: cpa.PrivateKeyRuntime, Generation: 7, State: model.RuntimeStateReady, ActiveGatewayArtifact: &model.ActiveGatewayArtifact{ArtifactID: cpa.PrivateKeyArtifact, Version: "8.0.55"}}}
 	w := &fakeWire{configured: true, auth: true}
 	s := New(r, keys, rt)
 	s.wire = w

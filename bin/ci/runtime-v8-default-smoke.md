@@ -7,16 +7,16 @@ It changes the normal final Docker target, not a release channel or Gateway admi
 ## Build and isolation contract
 
 A build without --target (or with --target runtime) selects the official
-router-for-me/CLIProxyAPI v8.0.13 pin, tag commit
-d7914afdedca7af95ee974a42453dc49fc1388ce. Both archive and extracted executable
+router-for-me/CLIProxyAPI v8.0.55 pin, tag commit
+e6e5708e677adb2463d45accdd24bc9fd028ddd8. Both archive and extracted executable
 SHA256 are mandatory. There are no version/hash override arguments or v7 fallback.
 
 | Platform | Official archive SHA256 | Executable / manifest artifactId suffix |
 | --- | --- | --- |
-| linux/amd64 | 50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3 | b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41 |
-| linux/arm64 | f7ff98a128075ea8437dadd58a88f429a401e452a42ef7119304139185f5344f | 9dfe80b79f8466b4e56d51d71869ce759021942a9279e43dbea92eda21b994d7 |
+| linux/amd64 | 4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123 | e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7 |
+| linux/arm64 | 62c136d7c6ee03cedebaad4be3e7fb9bcf14d095c96597fd92e68554c2a785c5 | 4a5b43cc3700d36c72b7c1953e9b11eca0888c13b789ea2f99471117504a7d5d |
 
-The official Release API asset digests were checked live on 2026-10-20.
+The official Release API asset digests were checked live on 2026-11-05.
 The arm64 archive was independently downloaded and hashed before pinning its
 extracted executable. The existing v8 download stage is reused for both platforms.
 Other architectures fail with an explicit no-v7-fallback error.
@@ -99,7 +99,9 @@ explicit historical suites. Scope selection includes the new test files.
 
 ## Observed results — 2026-10-20
 
-Local Docker Desktop Engine 27.3.1 on Linux/amd64 6.10.14-linuxkit.
+These observations were recorded against the previous v8.0.13 pin; the rerun on
+the v8.0.55 pin has not been performed. Local Docker Desktop Engine 27.3.1 on
+Linux/amd64 6.10.14-linuxkit.
 
 | Check | Result |
 | --- | --- |

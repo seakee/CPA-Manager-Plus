@@ -89,24 +89,26 @@ func ManagerOwned(path string) bool {
 // treats as one whole provider group, four are the `oauth.*` model-facing maps
 // and one is the model catalogue.
 //
-// Verified against CPA v8.0.13 (tag d7914af):
+// Verified against CPA v8.0.55 (tag e6e5708e):
 //
-//	internal/config/config_v8.go:64-69   api-keys.gemini, api-keys.interactions,
+//	internal/config/config_v8.go:67-72   api-keys.gemini, api-keys.interactions,
 //	                                     api-keys.vertex, api-keys.codex,
 //	                                     api-keys.claude, api-keys.xai,
 //	                                     api-keys.meta, api-keys.openai-compatibility
-//	internal/config/config_v8.go:85-86   oauth.model-alias, oauth.excluded-models,
+//	internal/config/config_v8.go:90-91   oauth.model-alias, oauth.excluded-models,
 //	                                     oauth.settings, oauth.request-scoped-errors
 //
-// The scope also names a `models` section. CPA v8.0.13 has no root `models`
-// key: `internal/config/config_types.go:454-455` (payload rule lists),
-// `:537-538` (claude provider) and `:658-659` (codex provider) declare `models`
-// only as a member of those structures, and no other root declares it, while
-// `v8AllowedRoots` (internal/config/config_v8.go:572) does not list it. So
-// `models` is NOT a whole section that can be copied, and
-// it is absent from the table below rather than guessed. Its effective content
-// arrives with the `api-keys.*` groups, which carry each group's own `models`
-// list.
+// The scope also names a `models` section. v8.0.55 accepts a root `models` key
+// (`v8AllowedRoots`, internal/config/config_v8.go:636-637, added since
+// v8.0.13), but it is a catalog-source selector
+// (internal/config/model_catalogs.go), not provider data, and the v8 document
+// projection this package reads (GET /v8/management/config) never renders it.
+// `internal/config/config_types.go:650-651` (payload rule lists), `:738-739`
+// (claude provider) and `:869-870` (codex provider) declare `models` only as a
+// member of those structures. So `models` is NOT a whole section that can be
+// copied, and it is absent from the table below rather than guessed. Its
+// effective content arrives with the `api-keys.*` groups, which carry each
+// group's own `models` list.
 // The list itself lives in the pinned resolver (`cpa.ProviderAdoptionSections`),
 // next to the reference each section is gated under, so a section cannot be
 // copyable without a classification.

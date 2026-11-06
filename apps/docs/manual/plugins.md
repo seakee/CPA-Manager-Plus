@@ -139,7 +139,7 @@ CPAMP 只支持 CPA v8 及以后版本。升级到新的固定 CPA 版本时，�
 1. **插件 v0 接口**：`/v0/management/plugins`、`/v0/management/plugins/<id>/enabled`、`/v0/management/plugins/<id>/config`、`/v0/management/plugin-store` 仍存在且语义不变。插件启停与配置只在 `v0` 提供，`/v8/management` 不替代它们。
 2. **管理路径归属**：`cpaBuiltinManagementPathHeads` 必须与 CPA 当前内置路由一致。"非内置即插件"的判断一旦错位，插件接口会被误判为内置或反之。
 3. **`pluginabi` 版本**：`pluginabi.SchemaVersion`（v8.0.44 为 7）与插件商店中插件的兼容性；版本不一致会导致安装成功但无法加载。
-4. **资源前缀**：`/v0/resource/plugins/<id>/` 前缀自 v8.0.13 至 v8.0.44 未变，升级后重新验证一次插件页面打开与主题同步。
+4. **资源前缀**：`/v0/resource/plugins/<id>/` 前缀自 v8.0.13 至 v8.0.55 未变，升级后重新验证一次插件页面打开与主题同步。
 
 ## 安全边界
 

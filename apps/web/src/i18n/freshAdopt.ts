@@ -11,7 +11,7 @@ const en = {
   help: 'Copy the configuration of another CPA into the CPA this Manager runs. The source CPA is only read, never written.',
   sourceTitle: 'Source CPA',
   sourceHelp:
-    'Enter the address and management key of the CPA you are adopting from. It must be CPA v8.0.13 with remote management enabled.',
+    'Enter the address and management key of the CPA you are adopting from. It must be CPA v8.0.55 with remote management enabled.',
   baseURL: 'Source address',
   baseURLHelp: 'For example http://cpa.internal:8317. The destination is always this Manager.',
   managementKey: 'Source management key',
@@ -130,7 +130,7 @@ const zh: typeof en = {
   help: '把另一个 CPA 的配置复制到本管理程序运行的 CPA。源 CPA 只会被读取，绝不会被写入。',
   sourceTitle: '源 CPA',
   sourceHelp:
-    '填写要接管来源 CPA 的地址与管理密钥。该 CPA 必须是已开启远程管理、版本为 v8.0.13 的 CPA。',
+    '填写要接管来源 CPA 的地址与管理密钥。该 CPA 必须是已开启远程管理、版本为 v8.0.55 的 CPA。',
   baseURL: '源地址',
   baseURLHelp: '例如 http://cpa.internal:8317。目标始终是本管理程序运行的 CPA。',
   managementKey: '源管理密钥',
@@ -219,7 +219,7 @@ const tw: typeof en = {
   help: '把另一個 CPA 的設定複製到本管理程式執行的 CPA。來源 CPA 只會被讀取，絕不會被寫入。',
   sourceTitle: '來源 CPA',
   sourceHelp:
-    '填寫要接管來源 CPA 的位址與管理金鑰。該 CPA 必須是已開啟遠端管理、版本為 v8.0.13 的 CPA。',
+    '填寫要接管來源 CPA 的位址與管理金鑰。該 CPA 必須是已開啟遠端管理、版本為 v8.0.55 的 CPA。',
   baseURL: '來源位址',
   baseURLHelp: '例如 http://cpa.internal:8317。目標一律是本管理程式執行的 CPA。',
   managementKey: '來源管理金鑰',
@@ -308,7 +308,7 @@ const ru: typeof en = {
   help: 'Скопировать конфигурацию другого CPA в CPA, которым управляет этот Manager. Исходный CPA только читается и никогда не изменяется.',
   sourceTitle: 'Исходный CPA',
   sourceHelp:
-    'Укажите адрес и ключ управления CPA, который вы подключаете. Это должен быть CPA v8.0.13 с включённым удалённым управлением.',
+    'Укажите адрес и ключ управления CPA, который вы подключаете. Это должен быть CPA v8.0.55 с включённым удалённым управлением.',
   baseURL: 'Адрес источника',
   baseURLHelp: 'Например http://cpa.internal:8317. Целевым всегда является CPA этого Manager.',
   managementKey: 'Ключ управления источника',
@@ -572,11 +572,11 @@ const enBlockers: Record<string, string> = {
   adoption_source_class_refused:
     'That source type is not supported here. Only a CPA v8 reachable over the network can be adopted.',
   adoption_source_qualification_required:
-    'This build has not qualified the network source class. Use a qualified CPA v8.0.13 build.',
+    'This build has not qualified the network source class. Use a qualified CPA v8.0.55 build.',
   adoption_resource_qualification_required:
-    'This build has not qualified the resources Adopt copies. Use a qualified CPA v8.0.13 build.',
+    'This build has not qualified the resources Adopt copies. Use a qualified CPA v8.0.55 build.',
   exact_v8_artifact_qualification_required:
-    'This build has no qualified CPA v8.0.13 artifact. Use a qualified runtime.',
+    'This build has no qualified CPA v8.0.55 artifact. Use a qualified runtime.',
   adoption_destination_staging_required:
     'This CPA cannot stage an adoption destination yet. Update the runtime and retry.',
   adoption_destination_stage_unresolved:
@@ -612,11 +612,11 @@ const zhBlockers: Record<string, string> = {
     '源地址就是本管理程序自己的 CPA。请填写你要迁移的源 CPA。',
   adoption_source_class_refused: '不支持该来源类型。这里只能接管可通过网络访问的 CPA v8。',
   adoption_source_qualification_required:
-    '当前构建尚未取得网络来源类别的资格。请使用已取得资格的 CPA v8.0.13 构建。',
+    '当前构建尚未取得网络来源类别的资格。请使用已取得资格的 CPA v8.0.55 构建。',
   adoption_resource_qualification_required:
-    '当前构建尚未取得接管所需资源的资格。请使用已取得资格的 CPA v8.0.13 构建。',
+    '当前构建尚未取得接管所需资源的资格。请使用已取得资格的 CPA v8.0.55 构建。',
   exact_v8_artifact_qualification_required:
-    '当前构建没有已取得资格的 CPA v8.0.13 制品。请使用已取得资格的运行时。',
+    '当前构建没有已取得资格的 CPA v8.0.55 制品。请使用已取得资格的运行时。',
   adoption_destination_staging_required: '该 CPA 目前无法准备接管目标。请更新运行时后重试。',
   adoption_destination_stage_unresolved: '目标 CPA 未返回准备结果。请等 CPA 可用后重试。',
   adoption_destination_stage_failed: '目标 CPA 无法从源快照启动。请重试本次操作。',
@@ -640,11 +640,11 @@ const twBlockers: Record<string, string> = {
     '來源位址就是本管理程式自己的 CPA。請填寫你要遷移的來源 CPA。',
   adoption_source_class_refused: '不支援該來源類型。此處只能接管可透過網路存取的 CPA v8。',
   adoption_source_qualification_required:
-    '目前建置尚未取得網路來源類別的資格。請使用已取得資格的 CPA v8.0.13 建置。',
+    '目前建置尚未取得網路來源類別的資格。請使用已取得資格的 CPA v8.0.55 建置。',
   adoption_resource_qualification_required:
-    '目前建置尚未取得接管所需資源的資格。請使用已取得資格的 CPA v8.0.13 建置。',
+    '目前建置尚未取得接管所需資源的資格。請使用已取得資格的 CPA v8.0.55 建置。',
   exact_v8_artifact_qualification_required:
-    '目前建置沒有已取得資格的 CPA v8.0.13 產物。請使用已取得資格的執行環境。',
+    '目前建置沒有已取得資格的 CPA v8.0.55 產物。請使用已取得資格的執行環境。',
   adoption_destination_staging_required: '該 CPA 目前無法準備接管目標。請更新執行環境後重試。',
   adoption_destination_stage_unresolved: '目標 CPA 未回傳準備結果。請等 CPA 可用後重試。',
   adoption_destination_stage_failed: '目標 CPA 無法從來源快照啟動。請重試本次操作。',
@@ -672,11 +672,11 @@ const ruBlockers: Record<string, string> = {
   adoption_source_class_refused:
     'Этот тип источника здесь не поддерживается. Перенести можно только CPA v8, доступный по сети.',
   adoption_source_qualification_required:
-    'Эта сборка не квалифицировала сетевой класс источника. Используйте квалифицированную сборку CPA v8.0.13.',
+    'Эта сборка не квалифицировала сетевой класс источника. Используйте квалифицированную сборку CPA v8.0.55.',
   adoption_resource_qualification_required:
-    'Эта сборка не квалифицировала ресурсы, которые переносит Adopt. Используйте квалифицированную сборку CPA v8.0.13.',
+    'Эта сборка не квалифицировала ресурсы, которые переносит Adopt. Используйте квалифицированную сборку CPA v8.0.55.',
   exact_v8_artifact_qualification_required:
-    'В этой сборке нет квалифицированного артефакта CPA v8.0.13. Используйте квалифицированную среду выполнения.',
+    'В этой сборке нет квалифицированного артефакта CPA v8.0.55. Используйте квалифицированную среду выполнения.',
   adoption_destination_staging_required:
     'Этот CPA пока не может подготовить целевой CPA. Обновите среду выполнения и повторите.',
   adoption_destination_stage_unresolved:

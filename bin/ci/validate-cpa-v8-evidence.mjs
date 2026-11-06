@@ -244,14 +244,14 @@ const PLAN_INPUT = {
 };
 const BASE = 'f5d12c6ca4af1f36f087e8acd28e565c5a0ae655';
 const CANDIDATE = {
-  id: 'CPA8-8.0.13-linux-amd64-plugin',
-  version: 'v8.0.13',
-  sourceCommit: 'd7914afdedca7af95ee974a42453dc49fc1388ce',
+  id: 'CPA8-8.0.55-linux-amd64-plugin',
+  version: 'v8.0.55',
+  sourceCommit: 'e6e5708e677adb2463d45accdd24bc9fd028ddd8',
   os: 'linux',
   arch: 'amd64',
   variant: 'plugin',
-  assetName: 'CLIProxyAPI_8.0.13_linux_amd64.tar.gz',
-  declaredSha256: '50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3',
+  assetName: 'CLIProxyAPI_8.0.55_linux_amd64.tar.gz',
+  declaredSha256: '4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123',
   provenance: 'declared',
 };
 

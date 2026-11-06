@@ -33,9 +33,9 @@ import (
 )
 
 const (
-	realCPA8BinarySHA256      = "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
-	realCPA8ArchiveSHA256     = "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3"
-	realCPA8Version           = "v8.0.13"
+	realCPA8BinarySHA256      = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
+	realCPA8ArchiveSHA256     = "4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123"
+	realCPA8Version           = "v8.0.55"
 	legacyTransitionOutputKey = "CPAMP_TEST_FRESH_TRANSITION_OUT"
 	legacyTransitionHeadKey   = "CPAMP_TEST_FRESH_TRANSITION_HEAD"
 	legacyTransitionTreeKey   = "CPAMP_TEST_FRESH_TRANSITION_TREE"

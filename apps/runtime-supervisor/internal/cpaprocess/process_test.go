@@ -287,6 +287,7 @@ func TestStartFiltersOnlySupervisorPrivateEnvironment(t *testing.T) {
 		"CPAMP_RUNTIME_TOKEN", "CPAMP_RUNTIME_JOURNAL_PATH", "CPAMP_RUNTIME_IDENTITY",
 		"CPAMP_RUNTIME_ADDR", "CPAMP_RUNTIME_GENERATION", "CPAMP_CPA_EXECUTABLE",
 		"CPAMP_CPA_ARTIFACT_MANIFEST", "CPAMP_RUNTIME_FUTURE_SECRET", "CPAMP_RUNTIME_CPA_ADDR",
+		"CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK", "MANAGEMENT_PASSWORD",
 	}
 	for _, key := range private {
 		t.Setenv(key, "test-only-private-value")
@@ -367,6 +368,7 @@ func TestChildEnvironmentFiltersSupervisorPrivateVariables(t *testing.T) {
 				"CPAMP_RUNTIME_TOKEN=secret", "CPAMP_RUNTIME_FUTURE_SECRET=secret", "CPAMP_CPA_EXECUTABLE=/cpa",
 				"CPAMP_CPA_ARTIFACT_MANIFEST=/trusted/artifact.json",
 				"CPAMP_RUNTIME_CPA_ADDR=127.0.0.1:8317",
+				"CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1", "MANAGEMENT_PASSWORD=secret",
 				"cpamp_runtime_token=ordinary", "cpamp_cpa_executable=ordinary", "CPAMP_RUNTIME=ordinary",
 				"CPAMP_DEPLOYMENT_SENTINEL=ordinary", "CPAMP_CPA_EXECUTABLE_SUFFIX=ordinary",
 				"NORMAL_SENTINEL=first", "CPAMP_RUNTIME_TOKEN=duplicate-secret", "NORMAL_SENTINEL=",
@@ -387,6 +389,7 @@ func TestChildEnvironmentFiltersSupervisorPrivateVariables(t *testing.T) {
 				`HomeDrive=C:`, `HomePath=\Users\cpa`, `tMp=C:\tmp`, `TeMp=C:\temp`,
 				"CpAmP_RuNtImE_ToKeN=secret", "cpamp_runtime_future_secret=secret", "cpamp_cpa_executable=cpa.exe",
 				"CpAmP_RuNtImE_CpA_AdDr=127.0.0.1:8317",
+				"CpAmP_RuNtImE_CpA_LiStEn_LoOpBaCk=1", "MaNaGeMeNt_PaSsWoRd=secret",
 				"Cpamp_Deployment_Sentinel=ordinary", "Cpamp_Cpa_Executable_Suffix=ordinary", "CPAMP_RUNTIME=ordinary",
 				"Http_Proxy=http://proxy.invalid:3128", `=C:=C:\work`,
 			},
@@ -416,6 +419,27 @@ func TestChildEnvironmentFiltersSupervisorPrivateVariables(t *testing.T) {
 				t.Fatal("filter changed the parent environment slice")
 			}
 		})
+	}
+}
+
+func TestChildEnvironmentStripsManagementPassword(t *testing.T) {
+	parent := []string{
+		"FIRST_SENTINEL=alpha",
+		"MANAGEMENT_PASSWORD=operator-exported-password",
+		"CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1",
+		"MIDDLE_SENTINEL=beta=gamma",
+		"MANAGEMENT_PASSWORD=",
+		"LAST_SENTINEL=omega",
+	}
+	want := []string{
+		"FIRST_SENTINEL=alpha",
+		"MIDDLE_SENTINEL=beta=gamma",
+		"LAST_SENTINEL=omega",
+	}
+	for _, windows := range []bool{false, true} {
+		if got := childEnvironment(parent, windows); !reflect.DeepEqual(got, want) {
+			t.Fatalf("childEnvironment(windows=%v) = %q, want %q", windows, got, want)
+		}
 	}
 }
 

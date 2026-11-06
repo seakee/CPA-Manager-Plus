@@ -138,6 +138,26 @@ func TestDestinationRealCPAV8NewManaged(t *testing.T) {
 	r, address, body := startRealDestination(t, func(r *DestinationRequest) {
 		r.OperationID, r.SourceClass, r.SourceIdentity, r.APIKeys = "real-native:managed-destination", SourceClassNewManaged, "managed:sha256:"+strings.Repeat("c", 64), []string{initial}
 	})
+	assertRealManagedDestinationPosture(t, body, r, initial, true)
+	base := "http://" + address
+	if status := realStatus(t, http.MethodGet, base+"/v8/management/config", strings.Repeat("d", 64), nil); status != http.StatusUnauthorized {
+		t.Fatalf("foreign management key status=%d", status)
+	}
+	// Real CPA access middleware: the install key authenticates, every other
+	// credential (none, a foreign Client Key, the management key) is refused.
+	for _, sample := range []struct {
+		key  string
+		want int
+	}{{"", http.StatusUnauthorized}, {"cpamp_sk_" + strings.Repeat("e", 64), http.StatusUnauthorized},
+		{r.ManagementKey, http.StatusUnauthorized}, {initial, http.StatusOK}} {
+		if status := realStatus(t, http.MethodGet, base+"/v1/models", sample.key, nil); status != sample.want {
+			t.Fatalf("real New Managed client auth key=%q status=%d want=%d", sample.key, status, sample.want)
+		}
+	}
+}
+
+func assertRealManagedDestinationPosture(t *testing.T, body []byte, r DestinationRequest, initial string, wantAllowRemote bool) {
+	t.Helper()
 	var config struct {
 		Access struct {
 			Keys []string `json:"api-keys"`
@@ -153,23 +173,8 @@ func TestDestinationRealCPAV8NewManaged(t *testing.T) {
 			} `json:"usage"`
 		} `json:"observability"`
 	}
-	if json.Unmarshal(body, &config) != nil || len(config.Access.Keys) != 1 || config.Access.Keys[0] != initial || !config.Management.AllowRemote ||
+	if json.Unmarshal(body, &config) != nil || len(config.Access.Keys) != 1 || config.Access.Keys[0] != initial || config.Management.AllowRemote != wantAllowRemote ||
 		!config.Management.DisableControlPanel || !config.Observability.Usage.Enabled || !strings.HasPrefix(config.Management.SecretKey, "$2") || strings.Contains(string(body), r.ManagementKey) {
 		t.Fatalf("real New Managed destination posture: %s", body)
-	}
-	base := "http://" + address
-	if status := realStatus(t, http.MethodGet, base+"/v8/management/config", strings.Repeat("d", 64), nil); status != http.StatusUnauthorized {
-		t.Fatalf("foreign management key status=%d", status)
-	}
-	// Real CPA access middleware: the install key authenticates, every other
-	// credential (none, a foreign Client Key, the management key) is refused.
-	for _, sample := range []struct {
-		key  string
-		want int
-	}{{"", http.StatusUnauthorized}, {"cpamp_sk_" + strings.Repeat("e", 64), http.StatusUnauthorized},
-		{r.ManagementKey, http.StatusUnauthorized}, {initial, http.StatusOK}} {
-		if status := realStatus(t, http.MethodGet, base+"/v1/models", sample.key, nil); status != sample.want {
-			t.Fatalf("real New Managed client auth key=%q status=%d want=%d", sample.key, status, sample.want)
-		}
 	}
 }

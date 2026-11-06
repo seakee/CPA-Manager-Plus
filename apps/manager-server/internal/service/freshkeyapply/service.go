@@ -131,7 +131,7 @@ func (s *Service) target(ctx context.Context, p Permit) (model.RuntimeObservedSt
 	if string(v.Identity) != cpa.PrivateKeyRuntime || strconv.FormatUint(uint64(v.Generation), 10) != p.Generation {
 		return v, ErrGeneration
 	}
-	if v.State != model.RuntimeStateReady || v.ActiveGatewayArtifact == nil || string(v.ActiveGatewayArtifact.ArtifactID) != cpa.PrivateKeyArtifact || v.ActiveGatewayArtifact.Version != "8.0.13" {
+	if v.State != model.RuntimeStateReady || v.ActiveGatewayArtifact == nil || string(v.ActiveGatewayArtifact.ArtifactID) != cpa.PrivateKeyArtifact || v.ActiveGatewayArtifact.Version != "8.0.55" {
 		return v, ErrUnavailable
 	}
 	return v, nil

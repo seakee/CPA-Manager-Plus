@@ -41,12 +41,12 @@ No real Provider, real model, approved public HTTPS target, real credential, ext
 
 ## Offline reproduction
 
-Use unique task image tags; build `Dockerfile.runtime` with `--platform linux/amd64 --target v8-amd64-loopback-proof`, plus the unchanged Manager/Ingress Dockerfiles. Every image needs the fail-closed identity arguments `--build-arg VERSION=dev --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)"`, which also populate the OCI revision label the proof checks. This embeds the unmodified official CPA v8.0.13 binary from:
+Use unique task image tags; build `Dockerfile.runtime` with `--platform linux/amd64 --target v8-amd64-loopback-proof`, plus the unchanged Manager/Ingress Dockerfiles. Every image needs the fail-closed identity arguments `--build-arg VERSION=dev --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)"`, which also populate the OCI revision label the proof checks. This embeds the unmodified official CPA v8.0.55 binary from:
 
 ```text
-https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.13/CLIProxyAPI_8.0.13_linux_amd64.tar.gz
-archive SHA256: 50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3
-binary SHA256:  b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41
+https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.55/CLIProxyAPI_8.0.55_linux_amd64.tar.gz
+archive SHA256: 4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123
+binary SHA256:  e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7
 ```
 
 The proof uses locally built CPAMP images around that official binary; it is not an upstream-published CPA image or release provenance.

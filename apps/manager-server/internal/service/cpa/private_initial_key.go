@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	privateCPAArtifact     = "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+	privateCPAArtifact     = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
 	privateRuntimeIdentity = "embedded-auth-proof"
 	privateCPAAddress      = "127.0.0.1:8317"
 	maxResponseBytes       = 1 << 20
@@ -226,10 +226,24 @@ type proofPosture struct {
 var privateProofPosture = proofPosture{}
 
 // managedProofPosture is the default new_managed destination: the Supervisor
-// template binds 0.0.0.0 with a child identity, enables remote management and
-// usage statistics, publishes the Supervisor-owned plugin root, and keeps its
-// own Gateway auth directory.
+// template binds either 0.0.0.0 with remote management enabled (Docker) or
+// 127.0.0.1/::1 with remote management disabled (Native
+// CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=1), enables usage statistics, publishes the
+// Supervisor-owned plugin root, and keeps its own Gateway auth directory.
 var managedProofPosture = proofPosture{managed: true, host: "0.0.0.0", allowRemote: true, usageStatistics: true}
+
+// validDestinationBind reports whether (boundHost, allowRemote) matches a
+// bind posture the Runtime Supervisor writes for this proofPosture.
+func (p proofPosture) validDestinationBind(boundHost string, allowRemote bool) bool {
+	host := p.host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if boundHost == host && allowRemote == p.allowRemote {
+		return true
+	}
+	return p.managed && (boundHost == "127.0.0.1" || boundHost == "::1") && !allowRemote
+}
 
 // looksLikeBcrypt reports whether CPA persisted a bcrypt digest. CPA hashes a
 // plaintext secret-key at load and rewrites the file; a plaintext value here
@@ -302,7 +316,7 @@ func (p proofPosture) matches(data []byte) bool {
 	}
 	var boundHost string
 	var port int
-	if json.Unmarshal(server["host"], &boundHost) != nil || boundHost != host ||
+	if json.Unmarshal(server["host"], &boundHost) != nil ||
 		json.Unmarshal(server["port"], &port) != nil || port != 8317 {
 		return false
 	}
@@ -322,9 +336,15 @@ func (p proofPosture) matches(data []byte) bool {
 	if json.Unmarshal(root["management"], &management) != nil || len(management) != 4 {
 		return false
 	}
-	for name, expected := range map[string]bool{"allow-remote": p.allowRemote, "disable-control-panel": true, "disable-auto-update-panel": true} {
+	var allowRemote bool
+	if (!bytes.Equal(management["allow-remote"], []byte("true")) && !bytes.Equal(management["allow-remote"], []byte("false"))) ||
+		json.Unmarshal(management["allow-remote"], &allowRemote) != nil ||
+		!p.validDestinationBind(boundHost, allowRemote) {
+		return false
+	}
+	for _, name := range []string{"disable-control-panel", "disable-auto-update-panel"} {
 		var value bool
-		if (!bytes.Equal(management[name], []byte("true")) && !bytes.Equal(management[name], []byte("false"))) || json.Unmarshal(management[name], &value) != nil || value != expected {
+		if (!bytes.Equal(management[name], []byte("true")) && !bytes.Equal(management[name], []byte("false"))) || json.Unmarshal(management[name], &value) != nil || !value {
 			return false
 		}
 	}

@@ -48,7 +48,15 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 		return nil, err
 	}
 	if err := readiness.ValidateAddress(cfg.cpaAddr); err != nil {
+		if cfg.cpaListenLoopback {
+			return nil, fmt.Errorf("CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: CPAMP_RUNTIME_CPA_ADDR: %w", err)
+		}
 		return nil, fmt.Errorf("CPAMP_RUNTIME_CPA_ADDR: %w", err)
+	}
+	if cfg.cpaListenLoopback {
+		if _, err := lifecycle.LoopbackListenHost(cfg.cpaAddr); err != nil {
+			return nil, errors.New("CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: CPAMP_RUNTIME_CPA_ADDR host must be 127.0.0.1, ::1, or localhost")
+		}
 	}
 	settings := protocol.Config{
 		RuntimeIdentity:   cfg.runtimeIdentity,
@@ -142,7 +150,7 @@ func newRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler, error)
 		// The bootstrap Gateway shares the Supervisor's parent Runtime root.
 		if goruntime.GOOS == "linux" {
 			gatewayAuth := filepath.Join(filepath.Dir(supervisorRoot), "gateway", "auth")
-			if err := runtime.executor.EnableDestination(filepath.Join(supervisorRoot, "destination"), gatewayAuth, cfg.cpaAddr, cfg.cpaIdentity); err != nil {
+			if err := runtime.executor.EnableDestination(filepath.Join(supervisorRoot, "destination"), gatewayAuth, cfg.cpaAddr, cfg.cpaIdentity, cfg.cpaListenLoopback); err != nil {
 				return nil, errors.Join(err, runtime.executor.Close())
 			}
 			settings.Destination = runtime.executor

@@ -43,6 +43,7 @@ type config struct {
 	cpaExecutable        string
 	cpaArtifactManifest  string
 	cpaAddr              string
+	cpaListenLoopback    bool
 	cpaIdentity          *cpaprocess.ChildIdentity
 }
 
@@ -92,6 +93,14 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 	if err := readiness.ValidateAddress(cpaAddr); err != nil {
 		return config{}, fmt.Errorf("CPAMP_RUNTIME_CPA_ADDR: %w", err)
 	}
+	var cpaListenLoopback bool
+	switch strings.ToLower(strings.TrimSpace(getenv("CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"))) {
+	case "":
+	case "1", "true":
+		cpaListenLoopback = true
+	default:
+		return config{}, errors.New("CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: must be 1 or true")
+	}
 	cpaIdentity, err := loadCPAChildIdentity(getenv)
 	if err != nil {
 		return config{}, err
@@ -114,6 +123,7 @@ func loadConfig(getenv func(string) string, nextGeneration generationSource) (co
 		cpaExecutable:        executable,
 		cpaArtifactManifest:  artifactManifest,
 		cpaAddr:              cpaAddr,
+		cpaListenLoopback:    cpaListenLoopback,
 		cpaIdentity:          cpaIdentity,
 	}, nil
 }

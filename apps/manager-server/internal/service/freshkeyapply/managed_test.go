@@ -145,7 +145,7 @@ func managedFixture(t *testing.T) (*Service, *managedCPA, *ModelSource, string) 
 	server := cpa.serve(t)
 	rt := &observedRuntime{status: model.RuntimeObservedStatus{Identity: managedRuntimeIdentity, Generation: 9,
 		State:                 model.RuntimeStateReady,
-		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{ArtifactID: model.RuntimeArtifactID(managedArtifact()), Version: "v8.0.13"}}}
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{ArtifactID: model.RuntimeArtifactID(managedArtifact()), Version: "v8.0.55"}}}
 	source := &ModelSource{install: ManagedInstall{
 		RunID: "managed:operation-default-install", Generation: "9", Identity: managedRuntimeIdentity,
 		ArtifactID: managedArtifact(), BaseURL: server.URL, ManagementKey: cpa.management,

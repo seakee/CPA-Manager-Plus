@@ -33,6 +33,15 @@ func TestAdoptPostureAcceptsTheAdoptedDestination(t *testing.T) {
 			t.Fatalf("adopted destination rejected the plugin switch %s", enabled)
 		}
 	}
+	for name, host := range map[string]string{"ipv4": "127.0.0.1", "ipv6": "::1"} {
+		native := strings.NewReplacer(
+			`"host":"0.0.0.0"`, `"host":"`+host+`"`,
+			`"allow-remote":true`, `"allow-remote":false`,
+		).Replace(adoptDestinationConfig)
+		if !adoptProofPosture().matches([]byte(native)) {
+			t.Fatalf("adopted destination rejected native loopback (%s)", name)
+		}
+	}
 }
 
 // TestAdoptPostureAcceptsThePluginGroupTheOperatorSaves is the P1 regression: the
@@ -85,6 +94,10 @@ func TestAdoptPostureRefusesWhatTheManagerNeverStaged(t *testing.T) {
 		"plaintext secret":    strings.Replace(adoptDestinationConfig, `"$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY12"`, `"plaintext-management-key"`, 1),
 		"remote disabled":     strings.Replace(adoptDestinationConfig, `"allow-remote":true`, `"allow-remote":false`, 1),
 		"loopback host":       strings.Replace(adoptDestinationConfig, `"host":"0.0.0.0"`, `"host":"127.0.0.1"`, 1),
+		"non-canonical loopback 127.0.0.2": strings.NewReplacer(
+			`"host":"0.0.0.0"`, `"host":"127.0.0.2"`,
+			`"allow-remote":true`, `"allow-remote":false`,
+		).Replace(adoptDestinationConfig),
 		"foreign plugin dir":  strings.Replace(adoptDestinationConfig, `"/runtime/supervisor/plugins"`, `"/tmp/plugins"`, 1),
 		"foreign auth dir":    strings.Replace(adoptDestinationConfig, `"/runtime/gateway/destination/auth"`, `"/tmp/auth"`, 1),
 		"non-boolean switch":  strings.Replace(adoptDestinationConfig, `"enabled":false`, `"enabled":"false"`, 1),

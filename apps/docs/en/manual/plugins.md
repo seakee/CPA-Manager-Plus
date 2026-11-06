@@ -139,7 +139,7 @@ CPAMP supports CPA v8 and later only. When the pinned CPA version is upgraded, r
 1. **Plugin v0 endpoints** — `/v0/management/plugins`, `/v0/management/plugins/<id>/enabled`, `/v0/management/plugins/<id>/config`, and `/v0/management/plugin-store` still exist with the same semantics. Plugin enable/disable and configuration exist only in `v0`; `/v8/management` does not replace them.
 2. **Management path ownership** — `cpaBuiltinManagementPathHeads` must match CPA's current built-in routes. If the "not built-in means plugin" test drifts, plugin endpoints are classified wrongly in either direction.
 3. **`pluginabi` version** — `pluginabi.SchemaVersion` (7 in v8.0.44) and the store plugins' compatibility. A mismatch installs successfully but never loads.
-4. **Resource prefix** — `/v0/resource/plugins/<id>/` has not changed from v8.0.13 through v8.0.44; re-verify that plugin pages open and that theme synchronization still works.
+4. **Resource prefix** — `/v0/resource/plugins/<id>/` has not changed from v8.0.13 through v8.0.55; re-verify that plugin pages open and that theme synchronization still works.
 
 ## Security Boundaries
 
