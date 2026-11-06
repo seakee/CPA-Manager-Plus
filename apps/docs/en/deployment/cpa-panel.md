@@ -107,7 +107,13 @@ This is the CPAMP v2 Beta publication contract for the lightweight panel. Until 
 
 ### Try The v2 Beta Panel On CPA
 
-Automatic updates through `panel-github-repository` use `releases/latest`, not a Beta Prerelease selector. Do not put a prerelease Tag URL in that setting to change channels. Install the v2 Beta panel manually:
+Automatic updates through `panel-github-repository` use `releases/latest`, not a Beta Prerelease selector. Do not put a prerelease Tag URL in that setting to change channels:
+
+- **`api.github.com` URL**: if it does not end with `/releases/latest`, CPA appends that suffix. Thus `.../releases/tags/<tag>` becomes `.../releases/tags/<tag>/releases/latest`, rather than fetching the chosen prerelease.
+- **Browser URL**: `github.com/<owner>/<repo>/releases/tag/<tag>` uses only the first two path segments and resolves to the repository's `repos/<owner>/<repo>/releases/latest`. It still obtains the 1.x panel, not the page's Tag.
+- **Fallback after a failed download**: if fetching fails and no local cached file exists, CPA attempts to install the upstream fallback panel from `cpamc.router-for.me`. That is not the selected CPAMP Beta file; merely opening `/management.html` does not prove the intended Beta was installed.
+
+Install the v2 Beta panel manually, retaining the cache location and automatic-update settings below:
 
 1. Download `management.html` from an actually published v2 Beta prerelease and compare it with that release's `checksums.txt`. Stable URL: `https://github.com/seakee/CPA-Manager-Plus/releases/latest/download/management.html`. Beta template: `https://github.com/seakee/CPA-Manager-Plus/releases/download/v2.0.0-beta.X/management.html`; replace `X` with an actually published number.
 2. Set `disable-auto-update-panel: true` in CPA `config.yaml`. Otherwise CPA overwrites the manually placed file with the 1.x panel from `releases/latest`.

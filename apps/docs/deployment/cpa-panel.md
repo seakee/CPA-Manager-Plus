@@ -107,7 +107,13 @@ rm static/management.html
 
 ### 在 CPA 上试用 v2 Beta 面板
 
-CPA 的 `panel-github-repository` 自动更新入口面向 `releases/latest`，不用于选择 Beta Prerelease。不要把预发布 Tag URL 填入该字段来切换通道；要试用 v2 Beta 面板，手动放置文件：
+CPA 的 `panel-github-repository` 自动更新入口面向 `releases/latest`，不用于选择 Beta Prerelease。不要把预发布 Tag URL 填入该字段来切换通道：
+
+- **`api.github.com` 形式**：地址如果不以 `/releases/latest` 结尾，CPA 会追加该后缀；因此 `.../releases/tags/<tag>` 会变成 `.../releases/tags/<tag>/releases/latest`，而不是获取指定预发布。
+- **浏览器形式**：`github.com/<owner>/<repo>/releases/tag/<tag>` 只取前两段，解析为仓库的 `repos/<owner>/<repo>/releases/latest`，取得的仍是 1.x 面板，不会选中网页 Tag。
+- **获取失败的备用来源**：如果下载失败且本地没有缓存文件，CPA 会尝试安装来自 `cpamc.router-for.me` 的上游备用面板；它不是所选 CPAMP Beta 文件。不能把能够打开 `/management.html` 本身视为已安装目标 Beta。
+
+要试用 v2 Beta 面板，手动放置文件，并保留下述缓存位置与自动更新设置：
 
 1. 从实际已发布的 v2 Beta 预发布页面下载 `management.html`，并核对同版 `checksums.txt`。Stable 地址为 `https://github.com/seakee/CPA-Manager-Plus/releases/latest/download/management.html`；Beta 模板为 `https://github.com/seakee/CPA-Manager-Plus/releases/download/v2.0.0-beta.X/management.html`，其中 `X` 必须替换成真实已发布编号。
 2. 在 CPA `config.yaml` 中设置 `disable-auto-update-panel: true`。否则 CPA 会用 `releases/latest` 的 1.x 面板覆盖手动放置的文件。
