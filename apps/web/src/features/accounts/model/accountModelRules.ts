@@ -11,7 +11,7 @@ export type AccountModelExclusionPriority = 'merge' | 'override' | 'unknown';
 // through v8.0.32; v8.0.33+ gives nonempty credential exclusions priority over global
 // exclusions, and an empty credential list inherits them. Custom builds stay unknown.
 const CPA_RELEASE_VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)$/i;
-const CPA_GIT_DESCRIBE_VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)-(\d+)-g([0-9a-f]+)(?:-dirty)?$/i;
+const CPA_GIT_DESCRIBE_VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)-(\d+)-g([0-9a-f]+)(-dirty)?$/i;
 // The CPAMP demo reports `<release>-demo` and emulates that release.
 const CPAMP_DEMO_VERSION_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)-demo$/i;
 const FIRST_VERIFIED_MERGE_VERSION = [6, 10, 8] as const;
@@ -41,9 +41,12 @@ export const getAccountModelExclusionPriority = (
   if (comparison > 0) return 'override';
   if (comparison < 0) return 'merge';
   // A describe at distance 0 is exactly the v8.0.32 tag; later commits may or may
-  // not include the precedence change.
+  // not include the precedence change, and a dirty worktree cannot prove the build
+  // matches the tag bytes at all.
   if (!describeMatch) return 'merge';
-  return Number.parseInt(describeMatch[4], 10) === 0 ? 'merge' : 'unknown';
+  if (Number.parseInt(describeMatch[4], 10) !== 0) return 'unknown';
+  // A dirty worktree cannot prove the build matches the v8.0.32 tag bytes.
+  return normalizedVersion.toLowerCase().endsWith('-dirty') ? 'unknown' : 'merge';
 };
 
 export type AccountModelRuleScope =
@@ -366,9 +369,7 @@ export const buildAccountModelRuleProjection = ({
   });
 
   const knownRuleModelIds = new Set(
-    rows
-      .filter((row) => row.ruleModelIdResolved)
-      .map((row) => normalizeModelId(row.ruleModelId))
+    rows.filter((row) => row.ruleModelIdResolved).map((row) => normalizeModelId(row.ruleModelId))
   );
   const isAdvancedRule = (rule: string) =>
     rule.includes('*') || !knownRuleModelIds.has(normalizeModelId(rule));

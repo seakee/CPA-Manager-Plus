@@ -291,6 +291,8 @@ describe('useAuthFileConfigurationEditor', () => {
   it.each([
     [null, false],
     ['custom', false],
+    ['v8.0.32-0-gabc1234-dirty', false],
+    ['v8.0.32-0-gabc1234', true],
     ['v8.0.32', true],
     ['v8.0.55', true],
   ] as const)(

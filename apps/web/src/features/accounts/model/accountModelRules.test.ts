@@ -28,6 +28,7 @@ describe('accountModelRules', () => {
     ['v8.1.0', 'override'],
     ['v8.0.31-12-gabc1234', 'merge'],
     ['v8.0.32-0-gabc1234', 'merge'],
+    ['v8.0.32-0-gabc1234-dirty', 'unknown'],
     ['v8.0.32-3-gabc1234', 'unknown'],
     ['v8.0.33-0-gabc1234', 'override'],
     ['v8.0.33-1-gabc1234-dirty', 'override'],
@@ -495,12 +496,10 @@ describe('accountModelRules', () => {
   });
 
   it('cleans up legacy prefixed exact rule when disabling model (Case 10)', () => {
-    const result = setAccountModelExactRule(
-      ['haochi/gpt-5.5'],
+    const result = setAccountModelExactRule(['haochi/gpt-5.5'], 'gpt-5.5', true, [
       'gpt-5.5',
-      true,
-      ['gpt-5.5', 'haochi/gpt-5.5']
-    );
+      'haochi/gpt-5.5',
+    ]);
 
     expect(result).toEqual(['gpt-5.5']);
   });

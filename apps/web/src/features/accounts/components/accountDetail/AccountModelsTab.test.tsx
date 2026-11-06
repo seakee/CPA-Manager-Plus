@@ -197,6 +197,7 @@ const unknownVersionGlobalRules: [string | null, Record<string, string[]>][] = [
   ['custom', { codex: [] }],
   ['custom', { codex: ['gpt-global'] }],
   ['v8.0.32-1-gabc1234', { codex: [] }],
+  ['v8.0.32-0-gabc1234-dirty', { codex: [] }],
 ];
 
 describe('AccountModelsTab', () => {
