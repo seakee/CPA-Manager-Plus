@@ -1,9 +1,23 @@
 FROM --platform=$BUILDPLATFORM node:22-alpine AS web-build
-ARG VERSION=dev
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before any Web or Go build runs. The format
+# is the same one bin/release/image-evidence.py enforces for the final evidence.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 WORKDIR /app
 COPY package*.json ./
 COPY apps/web/package.json ./apps/web/package.json
 RUN npm ci
+RUN apk add --no-cache python3
+COPY bin/release/collect-third-party-licenses.py /collect-third-party-licenses.py
+COPY bin/release/third-party-license-sources/ /third-party-license-sources/
+RUN python3 /collect-third-party-licenses.py web --root /app --output /out/licenses/web
 COPY apps/web ./apps/web
 # Full Web TypeScript tests import this source-shared R1 fixture.
 # Keep the in-image module path identical to the repository layout.
@@ -11,12 +25,23 @@ COPY tests/fixtures/r1-embedded-api-transport.json ./tests/fixtures/r1-embedded-
 COPY bin/build ./bin/build
 COPY bin/release/hash-fullweb.mjs ./bin/release/hash-fullweb.mjs
 WORKDIR /app/apps/web
-RUN VERSION=$VERSION npm run build
+RUN VERSION="$VERSION" npm run build
 RUN mkdir -p /out && node /app/bin/release/hash-fullweb.mjs /app/apps/web/dist/fullweb /out/fullweb-manifest.json
 
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS service-build
-ARG VERSION=dev
-ARG SOURCE_COMMIT=unknown
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before the Go build and license collection.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
+RUN apk add --no-cache python3
+COPY bin/release/collect-third-party-licenses.py /collect-third-party-licenses.py
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -27,6 +52,7 @@ COPY --from=web-build /app/apps/web/dist/fullweb/ ./apps/manager-server/internal
 COPY --from=web-build /out/fullweb-manifest.json ./apps/manager-server/internal/httpapi/release-fullweb-manifest.json
 WORKDIR /src/apps/manager-server
 RUN go mod download
+RUN python3 /collect-third-party-licenses.py go --module /src/apps/manager-server --component manager --output /out/licenses/manager
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags "-X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=$VERSION -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=$SOURCE_COMMIT" -o /out/cpa-manager-plus ./cmd/cpa-manager-plus
 # Verify the real output binary carries this source stamp, not just image labels.
 RUN go version -m /out/cpa-manager-plus | grep -F "SourceCommit=$SOURCE_COMMIT"
@@ -37,14 +63,60 @@ FROM service-build AS web-package-test
 RUN CPAMP_FULLWEB_PACKAGED_TEST=1 go test -run '^TestPackagedFullWeb(Dist|Manifest)$' ./internal/httpapi
 RUN go test -run '^TestR1EmbeddedPublicAPITransportFixture$' ./internal/domain/routing
 
-FROM alpine:3.21
+FROM alpine:3.21 AS manager-base
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before any package or network operation.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 RUN apk add --no-cache ca-certificates wget tzdata
+
+# Snapshot the final package database before adding the audit-only interpreter.
+FROM manager-base AS manager-evidence
+ARG VERSION
+ARG SOURCE_COMMIT
+ARG TARGETOS
+ARG TARGETARCH
+# Fail closed on malformed identity before the snapshot and audit install.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
+RUN mkdir -p /base/lib/apk/db && cp /lib/apk/db/installed /base/lib/apk/db/installed \
+    && if test -d /usr/share/licenses; then mkdir -p /base/usr/share; cp -a /usr/share/licenses /base/usr/share/; fi
+RUN apk add --no-cache python3
+COPY bin/release/collect-third-party-licenses.py bin/release/image-evidence.py /tools/
+COPY bin/release/embedded-third-party-inventory.txt /source-inventory.json
+COPY LICENSE /image/usr/local/share/licenses/cpamp/LICENSE
+COPY --from=web-package-test /out/cpa-manager-plus /image/usr/local/bin/cpa-manager-plus
+COPY --from=service-build /out/licenses/manager/ /image/usr/local/share/licenses/manager/
+COPY --from=web-build /out/licenses/web/ /image/usr/local/share/licenses/web/
+COPY --from=web-build /out/fullweb-manifest.json /image/usr/local/share/cpamp/release/fullweb-manifest.json
+RUN python3 /tools/collect-third-party-licenses.py base --kind alpine --root /base --output /image/usr/local/share/licenses/base-image \
+    && python3 /tools/image-evidence.py --root /image --role manager --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
+      --platform "$TARGETOS/$TARGETARCH" --source-inventory /source-inventory.json
+
+FROM manager-base
+ARG VERSION
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.version=$VERSION \
+      org.opencontainers.image.revision=$SOURCE_COMMIT \
+      org.opencontainers.image.source="https://github.com/seakee/CPA-Manager-Plus"
 WORKDIR /app
 COPY --from=web-package-test /out/cpa-manager-plus /usr/local/bin/cpa-manager-plus
-COPY --from=web-build /out/fullweb-manifest.json /usr/local/share/cpamp/release/fullweb-manifest.json
 COPY tests/fixtures/r1-embedded-api-transport.json /usr/local/share/cpamp/release/public-api-transport-contract.json
-COPY LICENSE /usr/local/share/licenses/cpamp/LICENSE
-COPY bin/release/embedded-third-party-inventory.txt /usr/local/share/cpamp/release/third-party-inventory.txt
+COPY --from=manager-evidence /image/usr/local/share/licenses/ /usr/local/share/licenses/
+COPY --from=manager-evidence /image/usr/local/share/cpamp/ /usr/local/share/cpamp/
 ENV HTTP_ADDR=0.0.0.0:18317
 ENV USAGE_DATA_DIR=/data
 ENV USAGE_DB_PATH=/data/usage.sqlite

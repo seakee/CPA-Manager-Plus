@@ -23,10 +23,13 @@ The [read-only inventory helper](../../../bin/ci/check-v2-private-candidate.py) 
 set -euo pipefail
 source_sha="$(git rev-parse HEAD)"
 docker buildx build --platform linux/amd64 --target v8-amd64-loopback-proof \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$source_sha" \
   -f Dockerfile.runtime --load -t cpamp-audit-v8-runtime:local .
-docker buildx build --platform linux/amd64 --build-arg SOURCE_COMMIT="$source_sha" \
+docker buildx build --platform linux/amd64 \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$source_sha" \
   -f Dockerfile.manager-server --load -t cpamp-audit-v8-manager:local .
 docker buildx build --platform linux/amd64 \
+  --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$source_sha" \
   -f Dockerfile.ingress --load -t cpamp-audit-v8-ingress:local .
 python3 bin/ci/test-check-v2-private-candidate.py
 python3 bin/ci/check-v2-private-candidate.py --source-commit "$source_sha" \

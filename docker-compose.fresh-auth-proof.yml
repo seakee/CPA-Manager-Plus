@@ -11,6 +11,11 @@ services:
       context: .
       dockerfile: Dockerfile.runtime
       target: v8-amd64-loopback-proof
+      # Fail-closed identity: export SOURCE_COMMIT="$(git rev-parse HEAD)"
+      # before building this proof profile.
+      args:
+        VERSION: '${VERSION:-dev}'
+        SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
     image: cpamp-runtime:fresh-auth-proof
     restart: 'no'
     ports:
@@ -33,6 +38,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.manager-server
+      args:
+        VERSION: '${VERSION:-dev}'
+        SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
     image: cpamp-manager:fresh-auth-proof
     restart: 'no'
     network_mode: 'service:cpamp-runtime'
@@ -59,6 +67,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ingress
+      args:
+        VERSION: '${VERSION:-dev}'
+        SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
     image: cpamp-ingress:fresh-auth-proof
     restart: 'no'
     network_mode: 'service:cpamp-runtime'

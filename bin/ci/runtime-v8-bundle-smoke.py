@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Disposable linux/amd64 bundle smoke; no production mounts or image push.
 
-Build first:
+Build first (the Dockerfiles fail closed without both identity arguments):
   docker buildx build --platform linux/amd64 --target v8-amd64-candidate \
+    --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" \
     -f Dockerfile.runtime --load -t cpamp-d1-runtime:local .
-Also build Dockerfile.ingress with --platform linux/amd64 --load.
+Also build Dockerfile.ingress with --platform linux/amd64 --load and the same
+two --build-arg values.
 Then: python3 bin/ci/runtime-v8-bundle-smoke.py RUNTIME_IMAGE INGRESS_IMAGE NEW_EVIDENCE_DIRECTORY
 Uses a Python probe on a unique internal Docker network; no ports are published.
 This is bundle evidence, not Fresh/Upgrade or Beta acceptance.

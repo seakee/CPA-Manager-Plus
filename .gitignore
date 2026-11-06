@@ -51,5 +51,9 @@ TODO.md
 /apps/manager-server/internal/httpapi/web/fullweb/*
 !/apps/manager-server/internal/httpapi/web/fullweb/.gitkeep
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 # Local temp scratch files
 .tmp-*

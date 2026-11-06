@@ -3,6 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.manager-server
+      # Fail-closed identity: local builds must export
+      # SOURCE_COMMIT="$(git rev-parse HEAD)" (VERSION defaults to dev).
+      args:
+        VERSION: '${VERSION:-dev}'
+        SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
     image: seakee/cpa-manager-plus:latest
     restart: unless-stopped
     ports:

@@ -225,6 +225,7 @@ go run ./cmd/cpa-manager-plus
 本地构建 Docker stack：
 
 ```bash
+export SOURCE_COMMIT="$(git rev-parse HEAD)"   # 必需；缺少时构建会 fail closed
 docker compose -f docker-compose.manager.yml up --build
 ```
 

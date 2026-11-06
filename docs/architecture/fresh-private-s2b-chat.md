@@ -41,7 +41,7 @@ No real Provider, real model, approved public HTTPS target, real credential, ext
 
 ## Offline reproduction
 
-Use unique task image tags; build `Dockerfile.runtime` with `--platform linux/amd64 --target v8-amd64-loopback-proof`, plus the unchanged Manager/Ingress Dockerfiles. This embeds the unmodified official CPA v8.0.13 binary from:
+Use unique task image tags; build `Dockerfile.runtime` with `--platform linux/amd64 --target v8-amd64-loopback-proof`, plus the unchanged Manager/Ingress Dockerfiles. Every image needs the fail-closed identity arguments `--build-arg VERSION=dev --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)"`, which also populate the OCI revision label the proof checks. This embeds the unmodified official CPA v8.0.13 binary from:
 
 ```text
 https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.13/CLIProxyAPI_8.0.13_linux_amd64.tar.gz

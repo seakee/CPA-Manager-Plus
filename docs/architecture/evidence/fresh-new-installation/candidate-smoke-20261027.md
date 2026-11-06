@@ -176,8 +176,10 @@ control.
 
 ## NOT VERIFIED
 
-- **NOTICE NOT VERIFIED** — the candidate third-party inventory is still
-  `NOT_VERIFIED`; LICENSE/NOTICE legal sufficiency is out of scope.
+- **NOTICE NOT VERIFIED** — at the time of this run the candidate third-party
+  inventory was still `NOT_VERIFIED`. Current images record
+  `VERIFIED_LICENSE_COLLECTION`; independent legal acceptance of those
+  LICENSE/NOTICE terms remains out of scope for this smoke.
 - **Real Provider model success** — no Provider fixture or credential exists in
   this disposable installation. The model-request check proves that CPA
   authenticates the installed Client Key (non-401); it does not prove a completed

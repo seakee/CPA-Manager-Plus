@@ -15,13 +15,13 @@ import sys
 from unittest.mock import patch
 from pathlib import Path
 
+from image_evidence_fixtures import SOURCE_BYTES, make_evidence
 VERIFIER = Path(__file__).resolve().parents[1] / "bin/release/verify-embedded-candidate.py"
 spec = importlib.util.spec_from_file_location("embedded_candidate", VERIFIER)
 subject = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(subject)
 SHA = "a" * 40
 EVENT = "local-test-event"
-MOCK_NOTICE = b"NOT_VERIFIED: license inventory only"
 MOCK_RUNTIME_ENTRYPOINT = b"#!/bin/sh\n"
 MOCK_API_CONTRACT = json.dumps({
     "schemaVersion": 1, "qualification": subject.API_CONTRACT_QUALIFICATION,
@@ -63,13 +63,12 @@ ROLE_BINARIES = {}
 def make_oci(destination, role, license_bytes, *,
              source=SHA, event=EVENT, arch="amd64", corrupt=False, missing=None,
              bad_descriptor_size=False, bad_descriptor_type=False, bad_diff_id=False,
-             notice_bytes=MOCK_NOTICE, api_contract=MOCK_API_CONTRACT,
+             source_inventory=SOURCE_BYTES, api_contract=MOCK_API_CONTRACT,
              bad_mode=None, invalid_elf=False, wrong_module=False, wrong_source_stamp=False,
              wrong_sha_suffix=False, wrong_version_suffix=False, wrong_entrypoint=False,
-             wrong_cmd=False, runtime_script=MOCK_RUNTIME_ENTRYPOINT):
+             wrong_cmd=False, runtime_script=MOCK_RUNTIME_ENTRYPOINT, mutate_evidence=None):
     files = {
         "/usr/local/share/licenses/cpamp/LICENSE": license_bytes,
-        subject.NOTICE: notice_bytes,
     }
     if role == "manager":
         files["/usr/local/bin/cpa-manager-plus"] = (
@@ -98,11 +97,14 @@ def make_oci(destination, role, license_bytes, *,
         files["/usr/local/bin/cli-proxy-api"] = ROLE_BINARIES["ingress"]
         files["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = json.dumps({
             "schemaVersion": 1, "engine": "cpa", "version": "8.0.13",
-            "artifactId": "sha256:" + subject.CPA_SHA,
+            "artifactId": blob(ROLE_BINARIES["ingress"]),
         }).encode()
         files["/usr/local/share/cpamp/runtime/config.seed.yaml"] = b"seed"
         files["/usr/local/bin/cpamp-runtime-v8-entrypoint"] = runtime_script
         files["/usr/local/share/licenses/cli-proxy-api/LICENSE"] = b"official"
+    files = make_evidence(role, files, source_inventory)
+    if mutate_evidence is not None:
+        files = mutate_evidence(files)
     if missing:
         files.pop(missing)
     uncompressed = tar_content(files, bad_mode=bad_mode)
@@ -224,7 +226,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         entrypoint.write_bytes(MOCK_RUNTIME_ENTRYPOINT)
         inventory = self.root / "bin/release/embedded-third-party-inventory.txt"
         inventory.parent.mkdir(parents=True)
-        inventory.write_bytes(MOCK_NOTICE)
+        inventory.write_bytes(SOURCE_BYTES)
         api = self.root / "tests/fixtures/r1-embedded-api-transport.json"
         api.parent.mkdir(parents=True)
         api.write_bytes(MOCK_API_CONTRACT)
@@ -242,11 +244,22 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                              "STRUCTURAL_CANDIDATE_EVIDENCE_ONLY_NOT_RELEASE_QUALIFIED")
             self.assertEqual(set(receipt["images"]), set(subject.ROLES))
             self.assertEqual(len({x["platformManifestDigest"] for x in receipt["images"].values()}), 3)
+            self.assertEqual(set(receipt["licenseCoverage"]), set(subject.ROLES))
+            self.assertEqual(receipt["licenseCoveragePolicy"]["alpineBasePackages"],
+                             subject.image_evidence.ALPINE_POLICY)
+            for role, record in receipt["images"].items():
+                base = record["licenseCoverage"]["base-image"]
+                if role == "runtime":
+                    self.assertEqual(base["policy"], "debian-copyright-files-fail-closed")
+                    self.assertEqual(base["packages"], 1)
+                else:
+                    self.assertEqual((base["metadataOnlyPackages"], base["packagedNoticePackages"]),
+                                     (1, 0), role)
             make_oci(archives["ingress"], "ingress", self.license, event="wrong-event")
             with self.assertRaisesRegex(ValueError, "build event"):
                 subject.verify(archives, SHA, EVENT, self.root)
-            make_oci(archives["ingress"], "ingress", self.license, notice_bytes=MOCK_NOTICE + b" tampered")
-            with self.assertRaisesRegex(ValueError, "third-party inventory differs"):
+            make_oci(archives["ingress"], "ingress", self.license, source_inventory=SOURCE_BYTES + b" ")
+            with self.assertRaisesRegex(ValueError, "source dependency inventory differs"):
                 subject.verify(archives, SHA, EVENT, self.root)
             make_oci(archives["ingress"], "ingress", self.license)
             make_oci(archives["manager"], "manager", self.license, api_contract=MOCK_API_CONTRACT + b" ")
@@ -264,6 +277,99 @@ class EmbeddedCandidateContracts(unittest.TestCase):
     def test_ingress_positive(self):
         evidence = self.inspect("ingress")
         self.assertIn("/usr/local/bin/cpamp-ingress", evidence["packagedFiles"])
+
+    def test_receipt_records_explicit_alpine_metadata_coverage(self):
+        receipt = self.inspect("ingress")
+        base = receipt["licenseCoverage"]["base-image"]
+        self.assertEqual(base["policy"], subject.image_evidence.ALPINE_POLICY)
+        self.assertEqual(base["originalTexts"], "available-packaged-notices-only")
+        self.assertEqual(base["metadataOnlyPackages"], 1)
+        self.assertEqual(base["packagedNoticePackages"], 0)
+        self.assertEqual(receipt["licenseCoverage"]["ingress"]["policy"],
+                         subject.image_evidence.ORIGINAL_TEXT_POLICY)
+
+    def test_receipt_rejects_false_alpine_packaged_notice_claim(self):
+        def falsify(files):
+            path = subject.image_evidence.notice_path("base-image", "inventory.json")
+            inventory = json.loads(files[path])
+            inventory["dependencies"][0]["evidence"] = subject.image_evidence.ALPINE_PACKAGED
+            files[path] = subject.image_evidence.encoded(inventory)
+            aggregate = json.loads(files[subject.NOTICE])
+            aggregate["components"]["base-image"] = {
+                "inventory": inventory, "inventorySHA256": subject.image_evidence.digest(files[path])}
+            files[subject.NOTICE] = subject.image_evidence.encoded(aggregate)
+            # Rebind provenance to the rewritten aggregate inventory so only the
+            # false packaged-notice claim can be responsible for the rejection.
+            provenance = json.loads(files[subject.image_evidence.PROVENANCE])
+            provenance["licenseInventorySHA256"] = subject.image_evidence.digest(files[subject.NOTICE])
+            files[subject.image_evidence.PROVENANCE] = subject.image_evidence.encoded(provenance)
+            return files
+
+        with self.assertRaisesRegex(ValueError, "invalid installed Alpine license evidence"):
+            self.inspect("ingress", mutate_evidence=falsify)
+
+    @staticmethod
+    def rewrite_base_inventory(files, role, change):
+        """Rewrite the base component and recompute every dependent digest.
+
+        Provenance is re-validated here, so only a semantic rule may reject the
+        resulting image: no hash, summary, or identity check can be responsible.
+        """
+        image_evidence = subject.image_evidence
+        path = image_evidence.notice_path("base-image", "inventory.json")
+        inventory = json.loads(files[path])
+        change(inventory)
+        files[path] = image_evidence.encoded(inventory)
+        aggregate = json.loads(files[subject.NOTICE])
+        component = aggregate["components"]["base-image"]
+        component["inventory"] = inventory
+        component["inventorySHA256"] = image_evidence.digest(files[path])
+        aggregate["licenseCoverage"] = image_evidence.license_coverage(aggregate["components"])
+        files[subject.NOTICE] = image_evidence.encoded(aggregate)
+        provenance = json.loads(files[image_evidence.PROVENANCE])
+        provenance["licenseInventorySHA256"] = image_evidence.digest(files[subject.NOTICE])
+        provenance["licenseCoverage"] = aggregate["licenseCoverage"]
+        files[image_evidence.PROVENANCE] = image_evidence.encoded(provenance)
+        image_evidence.validate_provenance(provenance, role, subject.CANDIDATE_VERSION, SHA,
+                                           files.__getitem__)
+        return files
+
+    def test_receipt_rejects_runtime_base_image_downgraded_to_alpine(self):
+        def reclassify(files):
+            def change(value):
+                package = {"name": "musl", "version": "1.2.5-r1", "licenseExpression": "MIT",
+                           "evidence": subject.image_evidence.ALPINE_METADATA_ONLY, "notices": []}
+                value.update(ecosystem="alpine", dependencies=[package],
+                             coveragePolicy=subject.image_evidence.ALPINE_POLICY,
+                             coverage=subject.image_evidence.alpine_coverage([package]))
+            return self.rewrite_base_inventory(files, "runtime", change)
+
+        with self.assertRaisesRegex(ValueError, "base-image ecosystem differs from the image role"):
+            self.inspect("runtime", mutate_evidence=reclassify)
+
+    def test_receipt_rejects_alpine_package_reusing_another_package_notice(self):
+        data = b"original busybox license\n"
+        shared = "packaged-notices/busybox/COPYING"
+
+        def cross_reference(files):
+            files[subject.image_evidence.notice_path("base-image", shared)] = data
+
+            def change(value):
+                packages = [
+                    {"name": "musl", "version": "1.2.5-r9", "licenseExpression": "MIT",
+                     "evidence": subject.image_evidence.ALPINE_PACKAGED,
+                     "notices": [{"path": shared, "sha256": subject.image_evidence.digest(data)}]},
+                    {"name": "busybox", "version": "1.37-r1", "licenseExpression": "GPL-2.0-only",
+                     "evidence": subject.image_evidence.ALPINE_PACKAGED,
+                     "notices": [{"path": shared, "sha256": subject.image_evidence.digest(data)}]},
+                ]
+                value.update(dependencies=packages,
+                             coveragePolicy=subject.image_evidence.ALPINE_POLICY,
+                             coverage=subject.image_evidence.alpine_coverage(packages))
+            return self.rewrite_base_inventory(files, "manager", change)
+
+        with self.assertRaisesRegex(ValueError, "does not belong to its package"):
+            self.inspect("manager", mutate_evidence=cross_reference)
 
     def test_reject_invalid_descriptor_size(self):
         with self.assertRaisesRegex(ValueError, "descriptor size"):

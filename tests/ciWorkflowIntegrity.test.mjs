@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const workflowDir = path.join(repoRoot, '.github', 'workflows');
@@ -179,6 +180,10 @@ describe('GitHub Actions workflow integrity', () => {
     expect(lifecycleSteps[0]).toContain('run: docker compose build');
     expect(lifecycleSteps[1]).toContain('python3 bin/ci/runtime-v8-default-smoke.py');
     expect(lifecycleSteps[2]).toContain('--platform linux/riscv64 --target cpa-v8-download');
+    // The refusal must still exercise the architecture check, so the build
+    // carries valid identity instead of failing the early identity guard.
+    expect(lifecycleSteps[2]).toContain('--build-arg VERSION=ci');
+    expect(lifecycleSteps[2]).toContain('--build-arg SOURCE_COMMIT=${{ github.sha }}');
     expect(lifecycleSteps[2]).toContain(
       'unsupported official CPA v8 target: linux/riscv64 (no v7 fallback)'
     );
@@ -208,6 +213,140 @@ describe('GitHub Actions workflow integrity', () => {
     expect(
       existsSync(path.join(repoRoot, 'bin', 'ci', 'runtime19-phase1-exit-e2e.sh'))
     ).toBe(true);
+  });
+
+  it('passes fail-closed image identity to every Docker build caller', () => {
+    const imageDockerfiles = [
+      'Dockerfile.ingress',
+      'Dockerfile.manager-server',
+      'Dockerfile.runtime',
+    ];
+    const mergeCommit = '${{ github.sha }}';
+    const readYaml = (relative) => parseYaml(readFileSync(path.join(repoRoot, relative), 'utf8'));
+    const stepsOf = (parsed) => Object.values(parsed.jobs).flatMap((job) => job.steps ?? []);
+    const imageBuilds = (parsed) =>
+      stepsOf(parsed).filter((step) => step.with && imageDockerfiles.includes(step.with.file));
+
+    // PR images compile the checked-out merge commit, so the stamp must be
+    // github.sha: the PR head SHA names different bytes when the base moved.
+    const pullRequest = readYaml('.github/workflows/pr-check.yml');
+    const dockerBuilds = imageBuilds(pullRequest);
+    expect(dockerBuilds.map((step) => step.with.file).sort()).toEqual(imageDockerfiles);
+    for (const step of dockerBuilds) {
+      expect(step.with['build-args'], step.name).toContain('VERSION=ci');
+      expect(step.with['build-args'], step.name).toContain(`SOURCE_COMMIT=${mergeCommit}`);
+    }
+
+    const composeSteps = stepsOf(pullRequest).filter(
+      (step) =>
+        typeof step.run === 'string' &&
+        step.run.includes('docker compose') &&
+        /\bbuild\b/.test(step.run)
+    );
+    expect(composeSteps).toHaveLength(2);
+    for (const step of composeSteps) {
+      expect(step.env?.VERSION, step.name).toBe('ci');
+      expect(step.env?.SOURCE_COMMIT, step.name).toBe(mergeCommit);
+    }
+
+    // Release images are built from the tagged commit and must carry the exact
+    // expected expressions; a truncated or emptied value must not pass.
+    const expectedIdentity = {
+      '.github/workflows/release.yml': {
+        VERSION: '${{ env.RELEASE_TAG }}',
+        SOURCE_COMMIT: '${{ github.sha }}',
+      },
+      '.github/workflows/release-publish-recovery.yml': {
+        VERSION: '${{ env.RELEASE_TAG }}',
+        SOURCE_COMMIT: '${{ env.RELEASE_SHA }}',
+      },
+    };
+    const identityLines = (args) =>
+      String(args ?? '')
+        .trim()
+        .split('\n')
+        .map((line) => line.trim());
+    const hasExactIdentity = (args, expected) => {
+      const lines = identityLines(args);
+      return (
+        lines.length === 2 &&
+        lines[0] === `VERSION=${expected.VERSION}` &&
+        lines[1] === `SOURCE_COMMIT=${expected.SOURCE_COMMIT}`
+      );
+    };
+    for (const [file, expected] of Object.entries(expectedIdentity)) {
+      const releaseBuilds = imageBuilds(readYaml(file));
+      expect(releaseBuilds.length, file).toBeGreaterThan(0);
+      for (const step of releaseBuilds) {
+        expect(identityLines(step.with['build-args']), `${file}: ${step.name}`).toEqual([
+          `VERSION=${expected.VERSION}`,
+          `SOURCE_COMMIT=${expected.SOURCE_COMMIT}`,
+        ]);
+        expect(hasExactIdentity(step.with['build-args'], expected), `${file}: ${step.name}`).toBe(
+          true
+        );
+      }
+      const exact = `VERSION=${expected.VERSION}\nSOURCE_COMMIT=${expected.SOURCE_COMMIT}`;
+      expect(hasExactIdentity(exact, expected), file).toBe(true);
+      // Mutating or emptying either expression must fail the exact check.
+      expect(hasExactIdentity(`VERSION=\nSOURCE_COMMIT=${expected.SOURCE_COMMIT}`, expected), file).toBe(
+        false
+      );
+      expect(hasExactIdentity(`VERSION=${expected.VERSION}\nSOURCE_COMMIT=`, expected), file).toBe(
+        false
+      );
+      expect(hasExactIdentity(`SOURCE_COMMIT=${expected.SOURCE_COMMIT}`, expected), file).toBe(false);
+      expect(hasExactIdentity(`VERSION=${expected.VERSION}`, expected), file).toBe(false);
+    }
+
+    // Every buildable Compose service forwards both args. The empty
+    // SOURCE_COMMIT default keeps local builds fail-closed.
+    for (const file of [
+      'docker-compose.yml',
+      'docker-compose.manager.yml',
+      'docker-compose.fresh-auth-proof.yml',
+    ]) {
+      const services = readYaml(file).services;
+      const buildable = Object.entries(services).filter(([, service]) => service.build);
+      expect(buildable.length, file).toBeGreaterThan(0);
+      for (const [name, service] of buildable) {
+        expect(imageDockerfiles, `${file}: ${name}`).toContain(service.build.dockerfile);
+        expect(service.build.args?.VERSION, `${file}: ${name}`).toBe('${VERSION:-dev}');
+        expect(service.build.args?.SOURCE_COMMIT, `${file}: ${name}`).toBe('${SOURCE_COMMIT:-}');
+      }
+    }
+
+    // The local CI scripts derive the same identity from the checkout itself.
+    const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' })
+      .stdout.trim();
+    expect(head).toMatch(/^[0-9a-f]{40}$/);
+    const quotedRoot = JSON.stringify(repoRoot);
+    for (const script of [
+      'runtime12-docker-smoke.sh',
+      'runtime14-failure-e2e.sh',
+      'runtime17-activation-e2e.sh',
+      'runtime18-secret-state-e2e.sh',
+      'runtime19-phase1-exit-e2e.sh',
+    ]) {
+      const lines = readFileSync(path.join(repoRoot, 'bin', 'ci', script), 'utf8').split('\n');
+      const lastExport = lines.map((line) => line.startsWith('export SOURCE_COMMIT=')).lastIndexOf(true);
+      expect(lastExport, script).toBeGreaterThan(0);
+      const header = lines
+        .slice(0, lastExport + 1)
+        // `bash -c` leaves BASH_SOURCE empty, so pin the worktree root instead.
+        .map((line) => (line.startsWith('repo_root=') ? `repo_root=${quotedRoot}` : line))
+        .join('\n');
+      const result = spawnSync(
+        'bash',
+        ['-c', `${header}\nprintf '%s\\n%s' "$VERSION" "$SOURCE_COMMIT"`],
+        { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, VERSION: '', SOURCE_COMMIT: '' } }
+      );
+      expect(result.status, `${script}: ${result.stderr}`).toBe(0);
+      const [version, commit] = result.stdout.split('\n');
+      expect(version, script).toMatch(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/);
+      expect(version.toLowerCase(), script).not.toBe('unknown');
+      expect(commit, script).toBe(head);
+    }
   });
 
   it('keeps Manager Runtime race, vet, and Windows portability gates', () => {

@@ -1,5 +1,16 @@
 FROM --platform=$BUILDPLATFORM alpine:3.21 AS cpa-download
 
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before any package or network operation.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 ARG TARGETOS
 ARG TARGETARCH
 RUN set -eu; \
@@ -16,6 +27,9 @@ RUN set -eu; \
     printf '%s  %s\n' "$asset_sha256" "/tmp/${asset_name}" | sha256sum -c -; \
     mkdir -p /out; \
     tar -xOzf "/tmp/${asset_name}" cli-proxy-api > /out/cli-proxy-api; \
+    tar -xOzf "/tmp/${asset_name}" LICENSE > /out/CPA-LICENSE; \
+    test -s /out/CPA-LICENSE; \
+    chmod 0444 /out/CPA-LICENSE; \
     chmod 0755 /out/cli-proxy-api; \
     binary_sha256="$(sha256sum /out/cli-proxy-api | awk '{print $1}')"; \
     printf '{"schemaVersion":1,"engine":"cpa","version":"%s","artifactId":"sha256:%s"}\n' \
@@ -26,6 +40,17 @@ RUN set -eu; \
 # No version/hash override is accepted for this pin.
 FROM --platform=$BUILDPLATFORM alpine:3.21 AS cpa-v8-download
 
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before any package or network operation.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 ARG TARGETOS
 ARG TARGETARCH
 RUN set -eu; \
@@ -55,27 +80,102 @@ RUN set -eu; \
 
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS supervisor-build
 
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before the Go build and license collection.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
+RUN apk add --no-cache python3
+COPY bin/release/collect-third-party-licenses.py /collect-third-party-licenses.py
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src/apps/runtime-supervisor
 COPY apps/runtime-supervisor/go.mod apps/runtime-supervisor/go.sum ./
 RUN go mod download
+RUN python3 /collect-third-party-licenses.py go --module /src/apps/runtime-supervisor --component runtime-supervisor --output /out/licenses/runtime-supervisor
 COPY apps/runtime-supervisor ./
 RUN test "$TARGETOS" = "linux"
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/cpamp-runtime-supervisor ./cmd/cpamp-runtime-supervisor
 
-FROM debian:bookworm-slim AS runtime-base
-
+FROM debian:bookworm-slim AS runtime-os
+ARG VERSION
+ARG SOURCE_COMMIT
+# Fail closed on malformed identity before any package or network operation.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 --system cpamp-cpa \
     && useradd --uid 10001 --gid 10001 --system --no-create-home \
       --home-dir /runtime/gateway --shell /usr/sbin/nologin cpamp-cpa
+
+# Capture only packages from runtime-os, not the audit interpreter or its deps.
+FROM runtime-os AS runtime-evidence
+ARG VERSION
+ARG SOURCE_COMMIT
+ARG TARGETOS
+ARG TARGETARCH
+# Fail closed on malformed identity before the snapshot and audit install.
+# The format is the same one bin/release/image-evidence.py enforces.
+RUN set -eu; \
+    test -n "$VERSION"; \
+    test "${#VERSION}" -le 128; \
+    case "$VERSION" in [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) exit 1 ;; esac; \
+    case "$(printf '%s' "$VERSION" | tr 'A-Z' 'a-z')" in unknown) exit 1 ;; esac; \
+    test "${#SOURCE_COMMIT}" -eq 40; \
+    case "$SOURCE_COMMIT" in *[!0-9a-f]*) exit 1 ;; esac
+RUN mkdir -p /base/usr/share \
+    && dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\n' > /base/base-packages.tsv \
+    && cp -a /usr/share/doc /base/usr/share/doc
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+COPY bin/release/collect-third-party-licenses.py bin/release/image-evidence.py /tools/
+COPY bin/release/embedded-third-party-inventory.txt /source-inventory.json
+COPY LICENSE /image/usr/local/share/licenses/cpamp/LICENSE
+COPY --from=supervisor-build /out/cpamp-runtime-supervisor /image/usr/local/bin/cpamp-runtime-supervisor
+COPY --from=supervisor-build /out/licenses/runtime-supervisor/ /image/usr/local/share/licenses/runtime-supervisor/
+COPY --from=cpa-v8-download /out/cli-proxy-api /image/usr/local/bin/cli-proxy-api
+COPY --from=cpa-v8-download /out/cpa-artifact.json /image/usr/local/share/cpamp/runtime/cpa-artifact.json
+COPY --from=cpa-v8-download /out/CPA-LICENSE /image/usr/local/share/licenses/cli-proxy-api/LICENSE
+RUN python3 /tools/collect-third-party-licenses.py base --kind debian --root /base --output /image/usr/local/share/licenses/base-image \
+    && python3 /tools/image-evidence.py --root /image --role runtime --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
+      --platform "$TARGETOS/$TARGETARCH" --source-inventory /source-inventory.json
+
+FROM runtime-evidence AS v7-evidence
+# ARG is stage-scoped: the evidence call below reads these four names, so they
+# must be declared again in this stage rather than inherited from runtime-evidence.
+ARG VERSION
+ARG SOURCE_COMMIT
+ARG TARGETOS
+ARG TARGETARCH
+COPY --from=cpa-download /out/cli-proxy-api /image/usr/local/bin/cli-proxy-api
+COPY --from=cpa-download /out/cpa-artifact.json /image/usr/local/share/cpamp/runtime/cpa-artifact.json
+COPY --from=cpa-download /out/CPA-LICENSE /image/usr/local/share/licenses/cli-proxy-api/LICENSE
+RUN python3 /tools/image-evidence.py --root /image --role runtime --version "$VERSION" --source-commit "$SOURCE_COMMIT" \
+      --platform "$TARGETOS/$TARGETARCH" --source-inventory /source-inventory.json
+
+FROM runtime-os AS runtime-base
+ARG VERSION
+ARG SOURCE_COMMIT
+LABEL org.opencontainers.image.version=$VERSION \
+      org.opencontainers.image.revision=$SOURCE_COMMIT \
+      org.opencontainers.image.source="https://github.com/seakee/CPA-Manager-Plus"
 COPY --from=supervisor-build /out/cpamp-runtime-supervisor /usr/local/bin/cpamp-runtime-supervisor
-COPY LICENSE /usr/local/share/licenses/cpamp/LICENSE
-COPY bin/release/embedded-third-party-inventory.txt /usr/local/share/cpamp/release/third-party-inventory.txt
+COPY --from=runtime-evidence /image/usr/local/share/licenses/ /usr/local/share/licenses/
+COPY --from=runtime-evidence /image/usr/local/share/cpamp/ /usr/local/share/cpamp/
 COPY docker/runtime/entrypoint.sh /usr/local/bin/cpamp-runtime-entrypoint
 
 ENV CPAMP_RUNTIME_ADDR=0.0.0.0:9081 \
@@ -115,6 +215,8 @@ COPY docker/runtime/config.v8.loopback-proof.yaml /usr/local/share/cpamp/runtime
 FROM runtime-base AS v7-compatibility
 COPY --from=cpa-download /out/cli-proxy-api /usr/local/bin/cli-proxy-api
 COPY --from=cpa-download /out/cpa-artifact.json /usr/local/share/cpamp/runtime/cpa-artifact.json
+COPY --from=v7-evidence /image/usr/local/share/licenses/cli-proxy-api/LICENSE /usr/local/share/licenses/cli-proxy-api/LICENSE
+COPY --from=v7-evidence /image/usr/local/share/cpamp/ /usr/local/share/cpamp/
 COPY docker/runtime/config.seed.yaml /usr/local/share/cpamp/runtime/config.seed.yaml
 
 # Normal v2 build: official CPA v8, isolated bootstrap, no data migration.
