@@ -213,16 +213,33 @@ function InstalledPluginsView({
     [operationEpoch]
   );
 
+  // Only the newest mutation may clear the shared busy state in its finally.
+  const mutationTokenRef = useRef(0);
+  const beginMutation = (id: string) => {
+    const token = mutationTokenRef.current + 1;
+    mutationTokenRef.current = token;
+    setMutatingID(id);
+    return token;
+  };
+  const endMutation = (token: number) => {
+    if (mutationTokenRef.current === token) setMutatingID('');
+  };
+
   const listRequestIdRef = useRef(0);
   const clearPluginData = useCallback(() => {
     canOperateRef.current = false;
     operationEpochRef.current += 1;
     listRequestIdRef.current += 1;
     configRequestSeq.current += 1;
+    // Abandoned mutations must not keep the restored connection busy: drop the
+    // busy marker now and bump the token so their late `finally` cannot clear a
+    // newer operation's busy state.
+    mutationTokenRef.current += 1;
     setData(null);
     setEditingPlugin(null);
     setDraft(null);
     setOpeningConfigID('');
+    setMutatingID('');
     setLoading(false);
   }, []);
   useLayoutEffect(() => {
@@ -396,14 +413,17 @@ function InstalledPluginsView({
 
   const handleTogglePlugin = async (plugin: PluginListEntry, enabled: boolean) => {
     if (!canContinueOperation()) return;
-    setMutatingID(plugin.id);
+    const mutationToken = beginMutation(plugin.id);
     try {
       await pluginsApi.updateEnabled(plugin.id, enabled);
+      if (!canContinueOperation()) return;
       clearConfigCache();
       await loadPluginsAfterMutation(true, plugin.id, (item) => item.enabled === enabled);
+      if (!canContinueOperation()) return;
       notifyPluginResourcesChanged();
       showNotification(t('plugin_management.toggle_success'), 'success');
     } catch (err: unknown) {
+      if (!canContinueOperation()) return;
       showNotification(
         `${t('plugin_management.toggle_failed')}: ${getErrorMessage(
           err,
@@ -412,7 +432,7 @@ function InstalledPluginsView({
         'error'
       );
     } finally {
-      setMutatingID('');
+      endMutation(mutationToken);
     }
   };
 
@@ -429,15 +449,17 @@ function InstalledPluginsView({
       variant: 'danger',
       onConfirm: async () => {
         if (!canContinueOperation()) return;
-        setMutatingID(plugin.id);
+        const mutationToken = beginMutation(plugin.id);
         try {
           const result = await pluginsApi.deletePlugin(plugin.id);
+          if (!canContinueOperation()) return;
           clearConfigCache();
           if (editingPlugin?.id === plugin.id) {
             setEditingPlugin(null);
             setDraft(null);
           }
           await loadPluginsAfterMutation(false);
+          if (!canContinueOperation()) return;
           notifyPluginResourcesChanged();
           showNotification(
             result.restartRequired
@@ -446,6 +468,7 @@ function InstalledPluginsView({
             result.restartRequired ? 'warning' : 'success'
           );
         } catch (err: unknown) {
+          if (!canContinueOperation()) return;
           showNotification(
             hasStatus(err, 409) && hasRestartRequired(err)
               ? t('plugin_management.delete_restart_required')
@@ -456,7 +479,7 @@ function InstalledPluginsView({
             hasStatus(err, 409) && hasRestartRequired(err) ? 'warning' : 'error'
           );
         } finally {
-          setMutatingID('');
+          endMutation(mutationToken);
         }
       },
     });
@@ -476,7 +499,7 @@ function InstalledPluginsView({
       onConfirm: async () => {
         if (!canContinueOperation()) return;
         const mutationKey = `${plugin.id}:reinstall`;
-        setMutatingID(mutationKey);
+        const mutationToken = beginMutation(mutationKey);
         try {
           const store = await pluginStoreApi.list();
           if (!canContinueOperation()) return;
@@ -491,6 +514,7 @@ function InstalledPluginsView({
           }
 
           const deleteResult = await pluginsApi.deletePlugin(plugin.id);
+          if (!canContinueOperation()) return;
           clearConfigCache();
           if (editingPlugin?.id === plugin.id) {
             setEditingPlugin(null);
@@ -498,6 +522,7 @@ function InstalledPluginsView({
           }
           if (deleteResult.restartRequired) {
             await loadPluginsAfterMutation(false);
+            if (!canContinueOperation()) return;
             notifyPluginResourcesChanged();
             showNotification(t('plugin_management.reinstall_delete_restart_required'), 'warning');
             return;
@@ -506,18 +531,21 @@ function InstalledPluginsView({
           const sourceId = storeEntry.sourceId || undefined;
           if (!canContinueOperation()) return;
           const installResult = await pluginStoreApi.install(storeEntry.id, { sourceId });
+          if (!canContinueOperation()) return;
           clearConfigCache();
           await loadPluginsAfterMutation(
             !installResult.restartRequired,
             plugin.id,
             (item) => item.registered || item.configured || item.enabled
           );
+          if (!canContinueOperation()) return;
           notifyPluginResourcesChanged();
           if (installResult.restartRequired) {
             showNotification(t('plugin_management.reinstall_restart_required'), 'warning');
           }
           showNotification(t('plugin_management.reinstall_success'), 'success');
         } catch (err: unknown) {
+          if (!canContinueOperation()) return;
           const sourceRequired = getErrorDetailCode(err) === 'plugin_store_source_required';
           showNotification(
             sourceRequired
@@ -532,7 +560,7 @@ function InstalledPluginsView({
           );
           throw err;
         } finally {
-          setMutatingID('');
+          endMutation(mutationToken);
         }
       },
     });
@@ -549,20 +577,23 @@ function InstalledPluginsView({
       return;
     }
 
-    setMutatingID(editingPlugin.id);
+    const mutationToken = beginMutation(editingPlugin.id);
     try {
       await pluginsApi.patchConfig(editingPlugin.id, patch);
+      if (!canContinueOperation()) return;
       clearConfigCache();
       await loadPluginsAfterMutation(
         patch.enabled === true && editingPlugin.enabled !== true,
         editingPlugin.id,
         (item) => item.enabled === true
       );
+      if (!canContinueOperation()) return;
       notifyPluginResourcesChanged();
       setEditingPlugin(null);
       setDraft(null);
       showNotification(t('plugin_management.save_success'), 'success');
     } catch (err: unknown) {
+      if (!canContinueOperation()) return;
       showNotification(
         `${t('plugin_management.save_failed')}: ${getErrorMessage(
           err,
@@ -571,7 +602,7 @@ function InstalledPluginsView({
         'error'
       );
     } finally {
-      setMutatingID('');
+      endMutation(mutationToken);
     }
   };
 

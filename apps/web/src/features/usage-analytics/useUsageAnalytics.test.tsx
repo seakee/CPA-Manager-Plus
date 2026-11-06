@@ -26,8 +26,12 @@ vi.mock('@/features/monitoring/services/monitoringMetaService', () => ({
   loadMonitoringMetaPayload: monitoringMetaMocks.load,
 }));
 
+const authMocks = vi.hoisted(() => ({ apiBase: 'https://a.test', managementKey: 'key-a' }));
+
 vi.mock('@/stores', () => ({
   useConfigStore: (selector: (state: { config: null }) => unknown) => selector({ config: null }),
+  useAuthStore: (selector: (state: { apiBase: string; managementKey: string }) => unknown) =>
+    selector(authMocks),
 }));
 
 const useMonitoringAnalyticsMock = vi.mocked(useMonitoringAnalytics);
@@ -70,6 +74,15 @@ const localHourStartMs = (timestampMs: number) => {
 describe('useUsageAnalytics request orchestration', () => {
   let renderer: ReactTestRenderer | null = null;
   let latestResult: ReturnType<typeof useUsageAnalytics> | null = null;
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    return { promise, resolve, reject };
+  };
   let selectorError = '';
   let credentialTimelineError = '';
   let credentialTimelineLoading = false;
@@ -217,6 +230,8 @@ describe('useUsageAnalytics request orchestration', () => {
   }
 
   beforeEach(() => {
+    authMocks.apiBase = 'https://a.test';
+    authMocks.managementKey = 'key-a';
     selectorError = '';
     credentialTimelineError = '';
     credentialTimelineLoading = false;
@@ -615,6 +630,131 @@ describe('useUsageAnalytics request orchestration', () => {
       authIndex: 'auth-a',
     });
     expect(latestResult?.error).toBe('meta offline');
+  });
+
+  it('keeps loaded credential labels when a same-connection metadata refresh throws', async () => {
+    monitoringMetaMocks.load.mockResolvedValueOnce({
+      authFiles: [
+        {
+          name: 'kept-credential.json',
+          auth_index: 'auth-a',
+          account: 'kept@example.com',
+          provider: 'codex',
+        },
+      ],
+      authFilesLoaded: true,
+      channels: [],
+      channelsLoaded: true,
+      error: '',
+    });
+    monitoringMetaMocks.load.mockResolvedValue({
+      authFiles: [],
+      authFilesLoaded: true,
+      channels: [],
+      channelsLoaded: true,
+      error: '',
+    });
+
+    await renderHook();
+    await act(async () => {
+      latestResult?.setActiveTab('credentials');
+      await Promise.resolve();
+    });
+    expect(latestResult?.credentialRows[0]).toMatchObject({ label: 'kept-credential.json' });
+
+    monitoringMetaMocks.load.mockRejectedValueOnce(new Error('metadata offline'));
+    await act(async () => {
+      latestResult?.refresh();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(latestResult?.credentialRows[0]).toMatchObject({ label: 'kept-credential.json' });
+  });
+
+  it('ignores a monitoring-meta response that belongs to the previous connection', async () => {
+    type MetaPayload = {
+      authFiles: Array<Record<string, unknown>>;
+      authFilesLoaded: boolean;
+      channels: Array<Record<string, unknown>>;
+      channelsLoaded: boolean;
+      error: string;
+    };
+    const first = deferred<MetaPayload>();
+    const second = deferred<MetaPayload>();
+    monitoringMetaMocks.load
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockResolvedValue({
+        authFiles: [],
+        authFilesLoaded: true,
+        channels: [],
+        channelsLoaded: true,
+        error: '',
+      });
+
+    await renderHook();
+    await act(async () => {
+      latestResult?.setActiveTab('credentials');
+      await Promise.resolve();
+    });
+
+    // Connection A's metadata request is still pending when the scope switches.
+    authMocks.apiBase = 'https://b.test';
+    await act(async () => {
+      renderer?.update(
+        <MemoryRouter initialEntries={['/usage-analytics']}>
+          <Harness />
+        </MemoryRouter>
+      );
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      second.resolve({
+        authFiles: [
+          {
+            name: 'b-credential.json',
+            auth_index: 'auth-a',
+            account: 'b@example.com',
+            provider: 'codex',
+          },
+        ],
+        authFilesLoaded: true,
+        channels: [],
+        channelsLoaded: true,
+        error: '',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(latestResult?.credentialRows[0]).toMatchObject({
+      label: 'b-credential.json',
+      account: 'b@example.com',
+    });
+
+    await act(async () => {
+      first.resolve({
+        authFiles: [
+          {
+            name: 'a-credential.json',
+            auth_index: 'auth-a',
+            account: 'a@example.com',
+            provider: 'codex',
+          },
+        ],
+        authFilesLoaded: true,
+        channels: [],
+        channelsLoaded: true,
+        error: '',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(latestResult?.credentialRows[0]).toMatchObject({
+      label: 'b-credential.json',
+      account: 'b@example.com',
+    });
   });
 
   it('recognizes successful empty auxiliary snapshots but rejects them after scope invalidation', async () => {

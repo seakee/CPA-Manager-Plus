@@ -5772,7 +5772,10 @@ export function AccountsPage() {
     accountWindowUsageAbortRef.current?.abort();
     accountWindowUsageAbortRef.current = null;
 
-    if (featureAvailability.checking || !managerStorageAvailable || !selectedRow) {
+    // A capability re-check only invalidates in-flight requests; it must not
+    // discard the last verified windows or the snapshot write they carry.
+    if (featureAvailability.checking) return;
+    if (!managerStorageAvailable || !selectedRow) {
       setAccountWindowUsageByKey(new Map());
       setAccountWindowUsageQueryContext(null);
       setAccountWindowUsageError('');
@@ -6795,8 +6798,10 @@ export function AccountsPage() {
     listWindowUsageReqIdRef.current = requestId;
     listWindowUsageAbortRef.current?.abort();
 
+    // Same as the detail loader: checking is a re-check, not a scope change,
+    // and `managerStorageAvailable` is false during it.
+    if (featureAvailability.checking) return;
     if (
-      featureAvailability.checking ||
       !managerStorageAvailable ||
       !featureAvailability.requestMonitoringAvailable ||
       pageRows.length === 0

@@ -42,6 +42,9 @@ vi.mock('@/utils/usage', () => ({
   loadModelPrices: () => ({}),
   saveModelPrices: vi.fn(),
   clearModelPrices: vi.fn(),
+  loadModelPriceFallback: () => ({}),
+  saveModelPriceFallback: vi.fn(),
+  clearModelPriceFallback: vi.fn(),
 }));
 vi.mock('@/features/monitoring/services/usageImportSession', () => ({
   cancelUsageImportFile: vi.fn(),

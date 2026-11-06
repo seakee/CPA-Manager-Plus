@@ -11962,6 +11962,140 @@ describe('AccountsPage replacement flows', () => {
     ).toBe(25);
   });
 
+  const makeCheckingWindowFile = (name: string, authIndex: string) => {
+    const file = makeCodexFile(name, authIndex, `${authIndex}@example.com`);
+    const sibling = makeCodexFile(
+      `${authIndex}-sibling.json`,
+      `${authIndex}-sib`,
+      `${authIndex}-sib@example.com`
+    );
+    mocks.files = [file, sibling];
+    mocks.panelFeatureAvailability = {
+      checking: false,
+      managerServiceBase: 'http://manager.local:18317',
+      requestMonitoringAvailable: true,
+      serverCodexInspectionAvailable: false,
+    };
+    const now = Date.now();
+    const windows = [
+      {
+        id: 'five-hour',
+        label: 'Five hours',
+        usedPercent: 40,
+        resetLabel: new Date(now + 3 * 3600 * 1000).toISOString(),
+        resetAtMs: now + 3 * 3600 * 1000,
+        resetAccuracy: 'exact' as const,
+        limitWindowSeconds: 5 * 3600,
+        modelScope: CODEX_MAIN_SCOPE,
+      },
+    ];
+    mocks.quotaState.codexQuota = {
+      ...buildCredentialScopedQuotaRecord(file, { status: 'success', windows }),
+      ...buildCredentialScopedQuotaRecord(sibling, { status: 'success', windows }),
+    };
+    mocks.getAccountWindowUsage.mockImplementation((_base, _key, request) =>
+      Promise.resolve({
+        generated_at_ms: Date.now(),
+        items: request.windows.map((w) => ({
+          request_key: w.request_key,
+          row_key: w.row_key,
+          window_key: w.window_key,
+          provider_window_id: w.provider_window_id,
+          period: w.period,
+          from_ms: w.from_ms,
+          to_ms: w.to_ms,
+          matched: true,
+          total_requests: 10,
+          success_calls: 10,
+          failure_calls: 0,
+          total_tokens: 50_000,
+          total_cost: 0.5,
+          success_rate: 1,
+          last_seen_ms: Date.now() - 1000,
+          scope_match_status: 'complete',
+          unmatched_requests: 0,
+          sync_status: 'ready',
+        })),
+      })
+    );
+    return { file, rowKey: getAuthFileSelectionKey(file) };
+  };
+
+  it('keeps list window usage through a checking-only transition and a failed retry', async () => {
+    vi.useFakeTimers();
+    const { rowKey } = makeCheckingWindowFile('checking-list.json', 'auth-checking-list');
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+    });
+    expect(readText(findAccountCardByKey(renderer, rowKey))).toContain('$0.50');
+
+    mocks.panelFeatureAvailability = { ...mocks.panelFeatureAvailability, checking: true };
+    await act(async () => {
+      renderer.update(<AccountsPage />);
+      await Promise.resolve();
+    });
+    await flushPromises();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+    });
+    expect(readText(findAccountCardByKey(renderer, rowKey))).toContain('$0.50');
+
+    mocks.getAccountWindowUsage.mockRejectedValueOnce(new Error('still offline'));
+    mocks.panelFeatureAvailability = { ...mocks.panelFeatureAvailability, checking: false };
+    await act(async () => {
+      renderer.update(<AccountsPage />);
+      await Promise.resolve();
+    });
+    await flushPromises();
+    expect(readText(findAccountCardByKey(renderer, rowKey))).toContain('$0.50');
+    vi.useRealTimers();
+  });
+
+  it('keeps detail window usage through a checking-only transition and a failed retry', async () => {
+    vi.useFakeTimers();
+    const { rowKey, file } = makeCheckingWindowFile('checking-detail.json', 'auth-checking-detail');
+    mocks.location = {
+      pathname: '/accounts',
+      search: `?account=${encodeURIComponent(rowKey)}&tab=quota`,
+    };
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+    });
+    expect(readText(renderer.root.findByType(AccountQuotaTab))).toContain('$0.50');
+
+    mocks.panelFeatureAvailability = { ...mocks.panelFeatureAvailability, checking: true };
+    await act(async () => {
+      renderer.update(<AccountsPage />);
+      await Promise.resolve();
+    });
+    await flushPromises();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.resolve();
+    });
+    expect(readText(renderer.root.findByType(AccountQuotaTab))).toContain('$0.50');
+
+    mocks.getAccountWindowUsage.mockRejectedValueOnce(new Error('still offline'));
+    mocks.panelFeatureAvailability = { ...mocks.panelFeatureAvailability, checking: false };
+    await act(async () => {
+      renderer.update(<AccountsPage />);
+      await Promise.resolve();
+    });
+    await flushPromises();
+    expect(readText(renderer.root.findByType(AccountQuotaTab))).toContain('$0.50');
+    expect(readText(findAccountCardByKey(renderer, getAuthFileSelectionKey(file)))).toContain(
+      '$0.50'
+    );
+    vi.useRealTimers();
+  });
+
   it('keeps the last successful Codex quota visible while a reset verification fails', async () => {
     const file = makeCodexFile('codex-reset.json', 'auth-reset', 'reset@example.com');
     mocks.files = [file];

@@ -49,14 +49,24 @@ export function ModelPricesPage() {
   const { showNotification } = useNotificationStore();
   const managementKey = useAuthStore((state) => state.managementKey);
   const featureAvailability = usePanelFeatureAvailability();
-  const { loading, modelPrices, setModelPrices, syncModelPrices, usageServiceAvailable } =
-    useUsageData({ loadUsageEvents: false });
+  const {
+    loading,
+    modelPrices,
+    modelPricesLoaded,
+    modelPricesScopeKey,
+    setModelPrices,
+    syncModelPrices,
+    usageServiceAvailable,
+  } = useUsageData({ loadUsageEvents: false });
   const [usageSummary, setUsageSummary] = useState<ModelPriceUsageSummaryResponse | null>(null);
   const [usageSummaryLoading, setUsageSummaryLoading] = useState(false);
+  const [usageSummaryLoaded, setUsageSummaryLoaded] = useState(false);
+  const usageSummaryLoadedRef = useRef(false);
   const initialUiState = useRef(readModelPricesPageUiState());
   const [search, setSearch] = useState(() => initialUiState.current.search);
   const [filter, setFilter] = useState<ModelPriceFilter>(() => initialUiState.current.filter);
   const [syncing, setSyncing] = useState(false);
+  const syncTokenRef = useRef(0);
   const [syncResult, setSyncResult] = useState<ModelPriceSyncResponse | null>(null);
   const [selectedCandidates, setSelectedCandidates] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState<PriceDraft>(() => createEmptyPriceDraft());
@@ -64,6 +74,12 @@ export function ModelPricesPage() {
   const modelPriceServiceBase = featureAvailability.modelPricesAvailable
     ? featureAvailability.managerServiceBase
     : '';
+  const summaryScopeKey = `${managementKey}\u0000${modelPriceServiceBase}`;
+  const summaryScopeRef = useRef(summaryScopeKey);
+  const markUsageSummaryUnloaded = () => {
+    usageSummaryLoadedRef.current = false;
+    setUsageSummaryLoaded(false);
+  };
 
   const syncModels = useMemo(
     () => buildSyncPriceModelsFromSummary(usageSummary, modelPrices),
@@ -97,8 +113,16 @@ export function ModelPricesPage() {
 
   useEffect(() => {
     const controller = new AbortController();
+    const scopeChanged = summaryScopeRef.current !== summaryScopeKey;
+    summaryScopeRef.current = summaryScopeKey;
+    if (scopeChanged) {
+      // Another connection must not show this scope's usage summary.
+      setUsageSummary(null);
+      markUsageSummaryUnloaded();
+    }
     if (!modelPriceServiceBase) {
       setUsageSummary(null);
+      markUsageSummaryUnloaded();
       setUsageSummaryLoading(false);
       return () => controller.abort();
     }
@@ -109,13 +133,15 @@ export function ModelPricesPage() {
       .then((response) => {
         if (!controller.signal.aborted) {
           setUsageSummary(response);
+          usageSummaryLoadedRef.current = true;
+          setUsageSummaryLoaded(true);
         }
       })
       .catch(() => {
         if (!controller.signal.aborted) {
           // Older Manager Server versions do not expose this lightweight endpoint.
           // Keep saved prices visible without falling back to the large /usage payload.
-          setUsageSummary(null);
+          if (!usageSummaryLoadedRef.current) setUsageSummary(null);
         }
       })
       .finally(() => {
@@ -125,16 +151,32 @@ export function ModelPricesPage() {
       });
 
     return () => controller.abort();
-  }, [managementKey, modelPriceServiceBase]);
+  }, [managementKey, modelPriceServiceBase, summaryScopeKey]);
+
+  // A price save built from another connection's draft must never be posted, and
+  // an in-flight sync of the previous connection must not report into this one.
+  useEffect(() => {
+    syncTokenRef.current += 1;
+    setSyncing(false);
+    setDraft(createEmptyPriceDraft());
+    setManualEditorOpen(false);
+    setSelectedCandidates({});
+    setSyncResult(null);
+  }, [modelPricesScopeKey]);
 
   const handleSync = async () => {
     if (syncModels.length === 0) {
       showNotification(t('usage_stats.model_price_sync_no_models'), 'warning');
       return;
     }
+    const token = syncTokenRef.current + 1;
+    syncTokenRef.current = token;
     setSyncing(true);
     try {
       const result = await syncModelPrices(syncModels);
+      // A superseded sync (another connection or a newer price operation) must
+      // not refill this page's candidates.
+      if (!result || syncTokenRef.current !== token) return;
       setSyncResult(result);
       showNotification(
         t('model_prices.sync_success_detail', {
@@ -146,6 +188,7 @@ export function ModelPricesPage() {
         result.preserved?.length ? 'warning' : 'success'
       );
     } catch (error: unknown) {
+      if (syncTokenRef.current !== token) return;
       const message = resolveErrorMessage(error, t('common.unknown_error'));
       showNotification(
         `${t('usage_stats.model_price_sync_failed')}: ${
@@ -156,7 +199,7 @@ export function ModelPricesPage() {
         'error'
       );
     } finally {
-      setSyncing(false);
+      if (syncTokenRef.current === token) setSyncing(false);
     }
   };
 
@@ -381,8 +424,10 @@ export function ModelPricesPage() {
           </div>
         ) : null}
 
-        {(loading || usageSummaryLoading) && visibleRows.length === 0 ? (
-          <div className={styles.emptyState}>{t('common.loading')}</div>
+        {!modelPricesLoaded && !usageSummaryLoaded ? (
+          loading || usageSummaryLoading ? (
+            <div className={styles.emptyState}>{t('common.loading')}</div>
+          ) : null
         ) : visibleRows.length === 0 ? (
           <div className={styles.emptyState}>{t('model_prices.empty')}</div>
         ) : (

@@ -1,6 +1,7 @@
 import { useState, type ReactNode, type ReactElement } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as PluginStoreModule from './plugins/PluginStorePage';
 import { LogsPage } from './logs/LogsPage';
 import { PluginsPage } from './plugins/PluginsPage';
 import { PluginResourcePage } from './plugins/PluginResourcePage';
@@ -242,6 +243,9 @@ beforeEach(() => {
   mocks.params = new URLSearchParams();
   mocks.models.loading = false;
   mocks.models.error = null;
+  // Notification and navigation sinks are shared: reset them per test so a
+  // notification from an earlier case cannot be read as this one's feedback.
+  mocks.noop.mockClear();
   mocks.requestScroll.mockClear();
   mocks.fetchModels.mockResolvedValue(mocks.models.models);
   mocks.fetchConfig.mockResolvedValue({});
@@ -598,6 +602,231 @@ describe('page refresh interactions', () => {
     }
   );
 
+  const notifiedWith = (key: string) => mocks.noop.mock.calls.some((call) => call[0] === key);
+  const pluginResourceEvents = () =>
+    mocks.noop.mock.calls.filter(
+      (call) => call[0] instanceof Event && (call[0] as Event).type === 'plugin-resources-refresh'
+    ).length;
+
+  it('stops a toggle that resolves after plugin access is revoked', async () => {
+    mocks.plugins.mockResolvedValue(pluginData);
+    await mount(<PluginsPage />);
+
+    const next = deferred<unknown>();
+    mocks.updatePlugin.mockReturnValueOnce(next.promise);
+    const toggle = renderer.root.findByType(ToggleSwitch);
+    act(() => {
+      toggle.props.onChange(true);
+    });
+    expect(mocks.updatePlugin).toHaveBeenCalledOnce();
+
+    mocks.auth.supportsPlugin = false;
+    await act(async () => {
+      renderer.update(<PluginsPage />);
+    });
+    const eventsBefore = pluginResourceEvents();
+
+    await act(async () => {
+      next.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(notifiedWith('plugin_management.toggle_success')).toBe(false);
+    expect(pluginResourceEvents()).toBe(eventsBefore);
+    expect(renderer.root.findAllByType(ToggleSwitch).every((node) => node.props.disabled)).toBe(
+      true
+    );
+  });
+
+  it('stops a delete that resolves after plugin access is revoked', async () => {
+    mocks.plugins.mockResolvedValue(pluginData);
+    await mount(<PluginsPage />);
+
+    const next = deferred<unknown>();
+    mocks.deletePlugin.mockReturnValueOnce(next.promise);
+    act(() => {
+      renderer.root
+        .findByType(DropdownMenu)
+        .props.items.find((item: { key: string }) => item.key === 'delete')
+        .onClick();
+    });
+    const staleConfirm = mocks.confirmation.mock.lastCall![0].onConfirm;
+    let pending!: Promise<unknown>;
+    await act(async () => {
+      pending = staleConfirm();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.deletePlugin).toHaveBeenCalledOnce();
+
+    mocks.auth.supportsPlugin = false;
+    await act(async () => {
+      renderer.update(<PluginsPage />);
+    });
+    const eventsBefore = pluginResourceEvents();
+
+    await act(async () => {
+      next.resolve({ restartRequired: false });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await pending;
+
+    // Neither the old success path nor its failure fallback may speak for the
+    // revoked session.
+    expect(
+      mocks.noop.mock.calls.some(
+        (call) => typeof call[0] === 'string' && call[0].startsWith('plugin_management.delete_')
+      )
+    ).toBe(false);
+    expect(pluginResourceEvents()).toBe(eventsBefore);
+  });
+
+  it.each(['delete', 'reinstall'] as const)(
+    'keeps a new install busy after an abandoned store %s completes',
+    async (kind) => {
+      const { PluginStorePage } = await vi.importActual<typeof import('./plugins/PluginStorePage')>(
+        './plugins/PluginStorePage'
+      );
+      const installed = { ...storeData, plugins: [{ ...storeData.plugins[0], installed: true }] };
+      mocks.pluginStore.mockResolvedValue(installed);
+      await mount(<PluginStorePage />);
+
+      const abandoned = deferred<{ restartRequired: boolean }>();
+      mocks.deletePlugin.mockReturnValueOnce(abandoned.promise);
+      act(() => {
+        if (kind === 'delete') {
+          renderer.root
+            .findAllByType('button')
+            .find((node) => node.props.title === 'plugin_store.delete_plugin')!
+            .props.onClick();
+        } else {
+          clickButton('plugin_store.reinstall_plugin');
+        }
+      });
+      let abandonedPending!: Promise<unknown>;
+      act(() => {
+        abandonedPending = mocks.confirmation.mock.lastCall![0].onConfirm();
+      });
+
+      mocks.auth.supportsPlugin = false;
+      await act(async () => {
+        renderer.update(<PluginStorePage />);
+      });
+      mocks.pluginStore.mockResolvedValue(storeData);
+      mocks.auth.supportsPlugin = true;
+      await act(async () => {
+        renderer.update(<PluginStorePage />);
+        await Promise.resolve();
+      });
+
+      const current = deferred<{ restartRequired: boolean }>();
+      mocks.installPlugin.mockReturnValueOnce(current.promise);
+      act(() => {
+        clickButton('plugin_store.install');
+      });
+      let currentPending!: Promise<unknown>;
+      act(() => {
+        currentPending = installOptions().props.onConfirm();
+      });
+      expect(installOptions().props.installing).toBe(true);
+
+      try {
+        await act(async () => {
+          abandoned.resolve({ restartRequired: false });
+          await abandonedPending;
+        });
+        // The abandoned delete/reinstall must not clear the newer install's busy state.
+        expect(installOptions().props.installing).toBe(true);
+      } finally {
+        await act(async () => {
+          current.resolve({ restartRequired: true });
+          await currentPending;
+        });
+      }
+    }
+  );
+
+  it.each(['delete', 'reinstall'] as const)(
+    'does not publish store %s feedback after reconciliation loses access',
+    async (kind) => {
+      const { PluginStorePage } = await vi.importActual<typeof import('./plugins/PluginStorePage')>(
+        './plugins/PluginStorePage'
+      );
+      const installed = { ...storeData, plugins: [{ ...storeData.plugins[0], installed: true }] };
+      mocks.pluginStore.mockResolvedValue(installed);
+      await mount(<PluginStorePage />);
+
+      const poll = deferred<PluginStoreResponse>();
+      mocks.pluginStore.mockReturnValueOnce(poll.promise);
+      mocks.deletePlugin.mockResolvedValueOnce({ restartRequired: true });
+      act(() => {
+        if (kind === 'delete') {
+          renderer.root
+            .findAllByType('button')
+            .find((node) => node.props.title === 'plugin_store.delete_plugin')!
+            .props.onClick();
+        } else {
+          clickButton('plugin_store.reinstall_plugin');
+        }
+      });
+      let pending!: Promise<unknown>;
+      await act(async () => {
+        pending = mocks.confirmation.mock.lastCall![0].onConfirm();
+        await Promise.resolve();
+      });
+
+      mocks.auth.supportsPlugin = false;
+      await act(async () => {
+        renderer.update(<PluginStorePage />);
+      });
+      const countBefore = pluginResourceEvents();
+      await act(async () => {
+        poll.resolve(installed);
+        await pending;
+      });
+
+      expect(pluginResourceEvents()).toBe(countBefore);
+    }
+  );
+
+  it('stops a store install that resolves after plugin access is revoked', async () => {
+    const { PluginStorePage } = await vi.importActual<typeof import('./plugins/PluginStorePage')>(
+      './plugins/PluginStorePage'
+    );
+    mocks.pluginStore.mockResolvedValue(storeData);
+    await mount(<PluginStorePage />);
+
+    const next = deferred<unknown>();
+    mocks.installPlugin.mockReturnValueOnce(next.promise);
+    act(() => {
+      clickButton('plugin_store.install');
+    });
+    let installPending!: Promise<unknown>;
+    act(() => {
+      installPending = installOptions().props.onConfirm();
+    });
+    expect(mocks.installPlugin).toHaveBeenCalledOnce();
+
+    mocks.auth.supportsPlugin = false;
+    await act(async () => {
+      renderer.update(<PluginStorePage />);
+    });
+    const eventsBefore = pluginResourceEvents();
+
+    await act(async () => {
+      next.resolve({ restartRequired: false });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(notifiedWith('plugin_store.install_success')).toBe(false);
+    expect(pluginResourceEvents()).toBe(eventsBefore);
+    await act(async () => {
+      await installPending;
+    });
+  });
+
   it.each([false, true])(
     'does not roll back a successful store mutation when an earlier read arrives (update=%s)',
     async (isUpdate) => {
@@ -817,6 +1046,103 @@ describe('page refresh interactions', () => {
       await mutation;
     });
     expect(text(renderer.root)).not.toContain('Retained Store Plugin');
+  });
+
+  it('does not let an abandoned toggle release the busy state of a newer one', async () => {
+    mocks.plugins.mockResolvedValue(pluginData);
+    await mount(<PluginsPage />);
+
+    const abandoned = deferred<unknown>();
+    mocks.updatePlugin.mockReturnValueOnce(abandoned.promise);
+    act(() => {
+      renderer.root.findByType(ToggleSwitch).props.onChange(false);
+    });
+    expect(renderer.root.findByType(ToggleSwitch).props.disabled).toBe(true);
+
+    mocks.auth.supportsPlugin = false;
+    await act(async () => {
+      renderer.update(<PluginsPage />);
+    });
+    // Revoking access must not leave the restored connection blocked on the
+    // abandoned request.
+    mocks.auth.supportsPlugin = true;
+    await act(async () => {
+      renderer.update(<PluginsPage />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(renderer.root.findByType(ToggleSwitch).props.disabled).toBe(false);
+
+    const current = deferred<unknown>();
+    mocks.updatePlugin.mockReturnValueOnce(current.promise);
+    act(() => {
+      renderer.root.findByType(ToggleSwitch).props.onChange(true);
+    });
+    expect(renderer.root.findByType(ToggleSwitch).props.disabled).toBe(true);
+
+    await act(async () => {
+      abandoned.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The abandoned operation's `finally` must not unlock the newer mutation.
+    expect(renderer.root.findByType(ToggleSwitch).props.disabled).toBe(true);
+
+    await act(async () => {
+      current.resolve(undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(renderer.root.findByType(ToggleSwitch).props.disabled).toBe(false);
+  });
+
+  it('keeps a restored connection install dialog when an older install completes', async () => {
+    const { PluginStorePage } =
+      await vi.importActual<typeof PluginStoreModule>('./plugins/PluginStorePage');
+    mocks.pluginStore.mockResolvedValue(storeData);
+    await mount(<PluginStorePage />);
+    const old = deferred<{ restartRequired: boolean }>();
+    mocks.installPlugin.mockReturnValueOnce(old.promise);
+    act(() => {
+      clickButton('plugin_store.install');
+    });
+    let oldPending!: Promise<unknown>;
+    act(() => {
+      oldPending = installOptions().props.onConfirm();
+    });
+    mocks.auth.supportsPlugin = false;
+    await act(async () => {
+      renderer.update(<PluginStorePage />);
+    });
+    mocks.auth.supportsPlugin = true;
+    await act(async () => {
+      renderer.update(<PluginStorePage />);
+      await Promise.resolve();
+    });
+    const current = deferred<{ restartRequired: boolean }>();
+    mocks.installPlugin.mockReturnValueOnce(current.promise);
+    act(() => {
+      clickButton('plugin_store.install');
+    });
+    let currentPending!: Promise<unknown>;
+    act(() => {
+      currentPending = installOptions().props.onConfirm();
+    });
+    expect(installOptions().props.entry).not.toBeNull();
+    expect(installOptions().props.installing).toBe(true);
+    try {
+      await act(async () => {
+        old.resolve({ restartRequired: false });
+        await oldPending;
+      });
+      expect(installOptions().props.entry).not.toBeNull();
+      expect(installOptions().props.installing).toBe(true);
+    } finally {
+      await act(async () => {
+        current.resolve({ restartRequired: true });
+        await currentPending;
+      });
+    }
   });
 
   it('attributes an error-log-only failure to logs while keeping collector health and last-known count', async () => {

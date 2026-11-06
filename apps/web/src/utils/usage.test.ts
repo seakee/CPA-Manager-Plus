@@ -15,7 +15,11 @@ import {
   getServiceTierMultiplier,
   inferCacheInputMode,
   isOpaqueUsageSourceId,
+  clearModelPriceFallback,
+  loadModelPriceFallback,
   loadModelPrices,
+  resetModelPriceFallbacks,
+  saveModelPriceFallback,
   normalizeAnalyticsModel,
   normalizeCacheAccounting,
   normalizeUsageSourceId,
@@ -1717,5 +1721,55 @@ describe('model price storage', () => {
       expect.objectContaining({ mode: 'fast', serviceTier: 'priority', prompt: 12.5 }),
     ]);
     expect(prices['gpt-ambiguous'].serviceTiers).toBeUndefined();
+  });
+});
+
+describe('model price failed-save fallback', () => {
+  const scopeKey = JSON.stringify([
+    'https://gateway.test',
+    'sk-management-secret',
+    'https://manager.test',
+  ]);
+  const prices = { 'a-model': { prompt: 1, completion: 2, cache: 0 } };
+
+  afterEach(() => {
+    resetModelPriceFallbacks();
+  });
+
+  it('keeps a failed save in memory without persisting the management key', () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value);
+      },
+      removeItem: (key: string) => {
+        store.delete(key);
+      },
+      clear: () => store.clear(),
+      key: (index: number) => Array.from(store.keys())[index] ?? null,
+      get length() {
+        return store.size;
+      },
+    });
+
+    saveModelPriceFallback(scopeKey, prices);
+
+    expect(loadModelPriceFallback(scopeKey)).toEqual(prices);
+    expect(store.size).toBe(0);
+    expect(Array.from(store.entries()).flat().join('\u0000')).not.toContain('sk-management-secret');
+
+    clearModelPriceFallback(scopeKey);
+    expect(loadModelPriceFallback(scopeKey)).toEqual({});
+
+    saveModelPriceFallback(scopeKey, prices);
+    resetModelPriceFallbacks();
+    expect(loadModelPriceFallback(scopeKey)).toEqual({});
+  });
+
+  it('never returns another scope fallback', () => {
+    saveModelPriceFallback(scopeKey, prices);
+    expect(loadModelPriceFallback(JSON.stringify(['https://other.test', 'b', 'c']))).toEqual({});
+    expect(loadModelPriceFallback('')).toEqual({});
   });
 });

@@ -17,6 +17,12 @@ const mocks = vi.hoisted(() => {
       managerServiceBase?: string;
     },
     usageSummary: vi.fn(),
+    sync: vi.fn(),
+    usage: {
+      loading: false,
+      modelPricesLoaded: true,
+      modelPricesScopeKey: 'scope-a',
+    },
   };
 });
 
@@ -33,6 +39,16 @@ vi.mock('@/stores', () => ({
 vi.mock('@/hooks/usePanelFeatureAvailability', () => ({
   usePanelFeatureAvailability: () => mocks.availability,
 }));
+vi.mock('@/services/api/usageService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/api/usageService')>();
+  return {
+    ...actual,
+    usageServiceApi: {
+      ...actual.usageServiceApi,
+      getModelPriceUsageSummary: mocks.usageSummary,
+    },
+  };
+});
 vi.mock('@/services/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/api')>();
   return {
@@ -45,10 +61,13 @@ vi.mock('@/services/api', async (importOriginal) => {
 });
 vi.mock('@/features/monitoring/hooks/useUsageData', () => ({
   useUsageData: () => ({
-    loading: false,
+    loading: mocks.usage.loading,
     modelPrices: mocks.prices,
+    modelPricesLoaded: mocks.usage.modelPricesLoaded,
+    modelPricesScopeKey: mocks.usage.modelPricesScopeKey,
+    reloadModelPrices: vi.fn(),
     setModelPrices: mocks.save,
-    syncModelPrices: vi.fn(),
+    syncModelPrices: mocks.sync,
     usageServiceAvailable: true,
   }),
 }));
@@ -123,6 +142,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.prices = { 'tiered-model': tieredPrice() };
   mocks.availability = { modelPricesAvailable: false };
+  mocks.usage = { loading: false, modelPricesLoaded: true, modelPricesScopeKey: 'scope-a' };
   mocks.usageSummary.mockResolvedValue({ summary: {} });
 });
 afterEach(async () => {
@@ -130,6 +150,14 @@ afterEach(async () => {
     renderer?.unmount();
   });
 });
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((yes) => {
+    resolve = yes;
+  });
+  return { promise, resolve };
+};
 
 describe('ModelPricesPage base price edits', () => {
   it('saves existing rules, inherited rates and explicit zero through the real Save action', async () => {
@@ -231,6 +259,167 @@ describe('ModelPricesPage usage summary revalidation', () => {
       renderer.root
         .findAllByType('div')
         .some((node) => node.children.includes('common.loading'))
+    ).toBe(false);
+  });
+});
+
+describe('ModelPricesPage snapshot gating', () => {
+  const pageText = () => JSON.stringify(renderer.toJSON());
+
+  it('shows the first-load state only while no price snapshot exists', async () => {
+    mocks.prices = {};
+    mocks.usage = { loading: true, modelPricesLoaded: false, modelPricesScopeKey: 'scope-a' };
+    await act(async () => {
+      renderer = create(<ModelPricesPage />);
+    });
+    expect(pageText()).toContain('common.loading');
+
+    mocks.usage = { loading: false, modelPricesLoaded: true, modelPricesScopeKey: 'scope-a' };
+    await act(async () => {
+      renderer.update(<ModelPricesPage />);
+    });
+    expect(pageText()).toContain('model_prices.empty');
+    expect(pageText()).not.toContain('common.loading');
+  });
+
+  it('keeps the known empty state while the usage summary is still loading', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = {};
+    mocks.usageSummary.mockReturnValue(new Promise(() => {}));
+    await act(async () => {
+      renderer = create(<ModelPricesPage />);
+    });
+
+    expect(pageText()).toContain('model_prices.empty');
+    expect(pageText()).not.toContain('common.loading');
+  });
+
+  it('keeps the known empty state when a search filters every row out during a refresh', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.usageSummary.mockReturnValue(new Promise(() => {}));
+    await act(async () => {
+      renderer = create(<ModelPricesPage />);
+    });
+
+    const searchInput = renderer.root
+      .findAllByType(Input)
+      .find((input) => input.props.placeholder === 'model_prices.search_placeholder');
+    await act(async () => {
+      searchInput!.props.onChange({ target: { value: 'no-such-model' } });
+    });
+
+    expect(pageText()).toContain('model_prices.empty');
+    expect(pageText()).not.toContain('common.loading');
+  });
+
+  it('discards a draft that belonged to the previous connection', async () => {
+    await editFirstModel();
+    const hasEditor = () =>
+      renderer.root
+        .findAllByType(Input)
+        .some((input) => input.props.label === 'usage_stats.model_name');
+    expect(hasEditor()).toBe(true);
+
+    mocks.usage = { loading: false, modelPricesLoaded: true, modelPricesScopeKey: 'scope-b' };
+    mocks.prices = {};
+    await act(async () => {
+      renderer.update(<ModelPricesPage />);
+    });
+
+    expect(hasEditor()).toBe(false);
+    expect(pageText()).not.toContain('tiered-model');
+  });
+});
+
+describe('ModelPricesPage sync scope isolation', () => {
+  const clickByLabel = async (label: string) => {
+    const target = renderer.root
+      .findAllByType('button')
+      .find((button) => button.findAllByType('span').some((span) => span.children.includes(label)));
+    expect(target).toBeTruthy();
+    await act(async () => {
+      target!.props.onClick();
+    });
+  };
+
+  it('does not surface candidates from a sync that belonged to the previous connection', async () => {
+    mocks.availability = {
+      modelPricesAvailable: true,
+      managerServiceBase: 'http://manager.local',
+    };
+    mocks.prices = {};
+    mocks.usageSummary.mockResolvedValue({
+      sampled_events: 1,
+      total_events: 1,
+      truncated: false,
+      models: [{ model: 'tiered-model', calls: 1, requested_calls: 1, resolved_calls: 1 }],
+    });
+    const pending = deferred<{
+      prices: Record<string, ModelPrice>;
+      imported: string[];
+      candidates: {
+        model: string;
+        candidates: {
+          sourceModelId: string;
+          score: number;
+          reason: string;
+          price: ModelPrice;
+        }[];
+      }[];
+      unmatched: string[];
+      preserved: string[];
+    }>();
+    mocks.sync.mockReturnValueOnce(pending.promise);
+    await act(async () => {
+      renderer = create(<ModelPricesPage />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await clickByLabel('usage_stats.model_price_sync');
+    expect(mocks.sync).toHaveBeenCalledTimes(1);
+
+    // The manager connection changed while the sync was still running.
+    mocks.usage = { loading: false, modelPricesLoaded: true, modelPricesScopeKey: 'scope-b' };
+    await act(async () => {
+      renderer.update(<ModelPricesPage />);
+    });
+
+    await act(async () => {
+      pending.resolve({
+        prices: {},
+        imported: [],
+        candidates: [
+          {
+            model: 'tiered-model',
+            candidates: [
+              {
+                sourceModelId: 'gateway-a-model',
+                score: 0.9,
+                reason: 'similar-name',
+                price: { prompt: 5, completion: 6, cache: 0 },
+              },
+            ],
+          },
+        ],
+        unmatched: [],
+        preserved: [],
+      });
+      await Promise.resolve();
+    });
+
+    expect(
+      renderer.root.findAllByProps({ 'aria-label': 'model_prices.candidate_select' })
+    ).toHaveLength(0);
+    expect(
+      mocks.notify.mock.calls.some(
+        (call) => typeof call[0] === 'string' && call[0].startsWith('model_prices.sync_success')
+      )
     ).toBe(false);
   });
 });

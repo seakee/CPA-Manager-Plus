@@ -530,14 +530,30 @@ export function PluginStorePage({
     navigate('/plugins');
   }, [navigate, onManageInstalled]);
 
+  // Only the newest install may clear the shared busy state in its finally.
+  const mutationTokenRef = useRef(0);
+  const beginMutation = (id: string) => {
+    const token = mutationTokenRef.current + 1;
+    mutationTokenRef.current = token;
+    setInstallingID(id);
+    return token;
+  };
+  const endMutation = (token: number) => {
+    if (mutationTokenRef.current === token) setInstallingID('');
+  };
+
   const listRequestIdRef = useRef(0);
   const clearPluginData = useCallback(() => {
     canOperateRef.current = false;
     operationEpochRef.current += 1;
     listRequestIdRef.current += 1;
+    // Same as the installed-plugins page: an abandoned install must release the
+    // restored connection without letting its late `finally` clear a newer one.
+    mutationTokenRef.current += 1;
     setData(null);
     setGateEntry(null);
     setInstallOptionsEntry(null);
+    setInstallingID('');
     setLoading(false);
   }, []);
   useLayoutEffect(() => {
@@ -707,7 +723,7 @@ export function PluginStorePage({
       const sourceId = entry.sourceId || undefined;
       const version = requestedVersion.trim();
 
-      setInstallingID(entryKey);
+      const mutationToken = beginMutation(entryKey);
       try {
         const result = await pluginStoreApi.install(entry.id, {
           sourceId,
@@ -755,6 +771,7 @@ export function PluginStorePage({
             if (requestId === listRequestIdRef.current) setLoading(false);
           }
         }
+        if (!canContinueOperation()) return;
         notifyPluginResourcesChanged();
         if (!result.restartRequired) {
           notifyPluginResourcesChanged({
@@ -762,6 +779,7 @@ export function PluginStorePage({
           });
         }
       } catch (err: unknown) {
+        if (!canContinueOperation()) throw err;
         const sourceRequired = getErrorDetailCode(err) === 'plugin_store_source_required';
         showNotification(
           sourceRequired
@@ -771,7 +789,7 @@ export function PluginStorePage({
         );
         throw err;
       } finally {
-        setInstallingID('');
+        endMutation(mutationToken);
       }
     },
     [clearConfigCache, clearPluginData, canContinueOperation, loadStore, showNotification, t]
@@ -805,6 +823,7 @@ export function PluginStorePage({
     }
     try {
       await runInstall(installOptionsEntry, installOptionsIsUpdate, requestedVersion);
+      if (!canContinueOperation()) return;
       setInstallOptionsEntry(null);
       setInstallVersion('');
     } catch {
@@ -826,7 +845,7 @@ export function PluginStorePage({
       variant: 'danger',
       onConfirm: async () => {
         if (!canContinueOperation()) return;
-        setInstallingID(`${entryKey}:delete`);
+        const mutationToken = beginMutation(`${entryKey}:delete`);
         try {
           const result = await pluginsApi.deletePlugin(entry.id);
           if (!canContinueOperation()) return;
@@ -837,6 +856,9 @@ export function PluginStorePage({
             );
           }
           await loadStore();
+          // A reconnect during reconciliation invalidates this session: neither
+          // its resource events nor its notifications may speak for the new one.
+          if (!canContinueOperation()) return;
           notifyPluginResourcesChanged();
           showNotification(
             result.restartRequired
@@ -845,18 +867,20 @@ export function PluginStorePage({
             result.restartRequired ? 'warning' : 'success'
           );
         } catch (err: unknown) {
-          showNotification(
-            hasRestartRequired(err)
-              ? t('plugin_store.delete_restart_required')
-              : `${t('plugin_store.delete_failed')}: ${getErrorMessage(
-                  err,
-                  t('plugin_store.delete_failed')
-                )}`,
-            hasRestartRequired(err) ? 'warning' : 'error'
-          );
+          if (canContinueOperation()) {
+            showNotification(
+              hasRestartRequired(err)
+                ? t('plugin_store.delete_restart_required')
+                : `${t('plugin_store.delete_failed')}: ${getErrorMessage(
+                    err,
+                    t('plugin_store.delete_failed')
+                  )}`,
+              hasRestartRequired(err) ? 'warning' : 'error'
+            );
+          }
           throw err;
         } finally {
-          setInstallingID('');
+          endMutation(mutationToken);
         }
       },
     });
@@ -868,7 +892,7 @@ export function PluginStorePage({
       const entryKey = getStoreEntryKey(entry);
       const sourceId = entry.sourceId || undefined;
 
-      setInstallingID(`${entryKey}:reinstall`);
+      const mutationToken = beginMutation(`${entryKey}:reinstall`);
       try {
         const deleteResult = await pluginsApi.deletePlugin(entry.id);
         if (!canContinueOperation()) return;
@@ -878,6 +902,7 @@ export function PluginStorePage({
             current.includes(entryKey) ? current : [...current, entryKey]
           );
           await loadStore();
+          if (!canContinueOperation()) return;
           notifyPluginResourcesChanged();
           showNotification(t('plugin_store.reinstall_delete_restart_required'), 'warning');
           return;
@@ -893,6 +918,7 @@ export function PluginStorePage({
           showNotification(t('plugin_store.restart_required_notice'), 'warning');
         }
         await loadStore();
+        if (!canContinueOperation()) return;
         notifyPluginResourcesChanged();
         if (!installResult.restartRequired) {
           notifyPluginResourcesChanged({
@@ -901,21 +927,23 @@ export function PluginStorePage({
         }
         showNotification(t('plugin_store.reinstall_success'), 'success');
       } catch (err: unknown) {
-        const sourceRequired = getErrorDetailCode(err) === 'plugin_store_source_required';
-        showNotification(
-          sourceRequired
-            ? t('plugin_store.source_required')
-            : hasRestartRequired(err)
-              ? t('plugin_store.reinstall_delete_restart_required')
-              : `${t('plugin_store.reinstall_failed')}: ${getErrorMessage(
-                  err,
-                  t('plugin_store.reinstall_failed')
-                )}`,
-          sourceRequired || hasRestartRequired(err) ? 'warning' : 'error'
-        );
+        if (canContinueOperation()) {
+          const sourceRequired = getErrorDetailCode(err) === 'plugin_store_source_required';
+          showNotification(
+            sourceRequired
+              ? t('plugin_store.source_required')
+              : hasRestartRequired(err)
+                ? t('plugin_store.reinstall_delete_restart_required')
+                : `${t('plugin_store.reinstall_failed')}: ${getErrorMessage(
+                    err,
+                    t('plugin_store.reinstall_failed')
+                  )}`,
+            sourceRequired || hasRestartRequired(err) ? 'warning' : 'error'
+          );
+        }
         throw err;
       } finally {
-        setInstallingID('');
+        endMutation(mutationToken);
       }
     },
     [clearConfigCache, canContinueOperation, loadStore, showNotification, t]
@@ -956,6 +984,7 @@ export function PluginStorePage({
     } else {
       await runInstall(gateEntry, gateIsUpdate, gateRequestedVersion);
     }
+    if (!canContinueOperation()) return;
     setGateEntry(null);
     setGateRequestedVersion('');
   }, [

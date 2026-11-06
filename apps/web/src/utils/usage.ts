@@ -1492,51 +1492,53 @@ function normalizeServiceTiers(value: unknown): ModelPriceServiceTier[] | undefi
   );
 }
 
+function normalizeStoredModelPrices(parsed: unknown): Record<string, ModelPrice> {
+  if (!isRecord(parsed)) return {};
+
+  const normalized: Record<string, ModelPrice> = {};
+  Object.entries(parsed).forEach(([model, price]) => {
+    if (!model || !isRecord(price)) return;
+
+    const prompt = toFiniteNumber(price.prompt);
+    const completion = toFiniteNumber(price.completion);
+    const cacheRaw = Number(price.cache);
+    const cache = Number.isFinite(cacheRaw) && cacheRaw >= 0 ? cacheRaw : prompt;
+    const cacheReadRaw = Number(price.cacheRead);
+    const cacheRead = Number.isFinite(cacheReadRaw) && cacheReadRaw >= 0 ? cacheReadRaw : 0;
+    const cacheCreationRaw = Number(price.cacheCreation);
+    const cacheCreation =
+      Number.isFinite(cacheCreationRaw) && cacheCreationRaw >= 0 ? cacheCreationRaw : 0;
+
+    if (prompt < 0 || completion < 0 || cache < 0 || cacheRead < 0 || cacheCreation < 0) return;
+    normalized[model] = {
+      prompt,
+      completion,
+      cache,
+      cacheRead,
+      cacheCreation,
+      promptConfigured: price.promptConfigured === true,
+      completionConfigured: price.completionConfigured === true,
+      cacheReadConfigured: price.cacheReadConfigured === true,
+      cacheCreationConfigured: price.cacheCreationConfigured === true,
+      source: readDetailString(price.source),
+      sourceModelId: readDetailString(price.sourceModelId),
+      rawJson: readDetailString(price.rawJson),
+      contextTiers: normalizeContextTiers(price.contextTiers),
+      serviceTiers: normalizeServiceTiers(price.serviceTiers),
+      updatedAtMs: toPositiveNumber(price.updatedAtMs),
+      syncedAtMs: toPositiveNumber(price.syncedAtMs),
+    };
+  });
+
+  return normalized;
+}
+
 export function loadModelPrices(): Record<string, ModelPrice> {
   try {
     if (typeof localStorage === 'undefined') return {};
     const raw = localStorage.getItem(MODEL_PRICE_STORAGE_KEY);
     if (!raw) return {};
-
-    const parsed: unknown = JSON.parse(raw);
-    if (!isRecord(parsed)) return {};
-
-    const normalized: Record<string, ModelPrice> = {};
-    Object.entries(parsed).forEach(([model, price]) => {
-      if (!model || !isRecord(price)) return;
-
-      const prompt = toFiniteNumber(price.prompt);
-      const completion = toFiniteNumber(price.completion);
-      const cacheRaw = Number(price.cache);
-      const cache = Number.isFinite(cacheRaw) && cacheRaw >= 0 ? cacheRaw : prompt;
-      const cacheReadRaw = Number(price.cacheRead);
-      const cacheRead = Number.isFinite(cacheReadRaw) && cacheReadRaw >= 0 ? cacheReadRaw : 0;
-      const cacheCreationRaw = Number(price.cacheCreation);
-      const cacheCreation =
-        Number.isFinite(cacheCreationRaw) && cacheCreationRaw >= 0 ? cacheCreationRaw : 0;
-
-      if (prompt < 0 || completion < 0 || cache < 0 || cacheRead < 0 || cacheCreation < 0) return;
-      normalized[model] = {
-        prompt,
-        completion,
-        cache,
-        cacheRead,
-        cacheCreation,
-        promptConfigured: price.promptConfigured === true,
-        completionConfigured: price.completionConfigured === true,
-        cacheReadConfigured: price.cacheReadConfigured === true,
-        cacheCreationConfigured: price.cacheCreationConfigured === true,
-        source: readDetailString(price.source),
-        sourceModelId: readDetailString(price.sourceModelId),
-        rawJson: readDetailString(price.rawJson),
-        contextTiers: normalizeContextTiers(price.contextTiers),
-        serviceTiers: normalizeServiceTiers(price.serviceTiers),
-        updatedAtMs: toPositiveNumber(price.updatedAtMs),
-        syncedAtMs: toPositiveNumber(price.syncedAtMs),
-      };
-    });
-
-    return normalized;
+    return normalizeStoredModelPrices(JSON.parse(raw));
   } catch {
     return {};
   }
@@ -1558,6 +1560,33 @@ export function clearModelPrices(): void {
   } catch {
     // Ignore storage failures; pricing is optional fallback data.
   }
+}
+
+// Legacy (unscoped) prices are migration input only. A failed save must not land
+// there, otherwise another connection would read it as legacy data and backfill
+// it with that connection's gateway. Failed saves are held in memory for this
+// session only: the scope key contains the management key, so persisting it would
+// store a secret in localStorage.
+const modelPriceFallbackByScope = new Map<string, Record<string, ModelPrice>>();
+
+export function loadModelPriceFallback(scopeKey: string): Record<string, ModelPrice> {
+  if (!scopeKey) return {};
+  return modelPriceFallbackByScope.get(scopeKey) ?? {};
+}
+
+export function saveModelPriceFallback(scopeKey: string, prices: Record<string, ModelPrice>): void {
+  if (!scopeKey) return;
+  modelPriceFallbackByScope.set(scopeKey, prices);
+}
+
+export function clearModelPriceFallback(scopeKey: string): void {
+  if (!scopeKey) return;
+  modelPriceFallbackByScope.delete(scopeKey);
+}
+
+/** Drops every in-memory failed-save fallback (tests and connection teardown). */
+export function resetModelPriceFallbacks(): void {
+  modelPriceFallbackByScope.clear();
 }
 
 const COMPACT_NUMBER_UNITS = [
