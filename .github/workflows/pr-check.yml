@@ -143,6 +143,12 @@ jobs:
       - name: Test Panel Lite acceptance harness
         run: node --test bin/ci/panel-lite-cpa-v8.test.mjs
 
+      # Same reason again: the Gate B/C readiness harness under bin/ci is native
+      # node:test, so `npm run test` never collects it. Its cases need neither
+      # Docker nor a candidate image.
+      - name: Test Gate B/C readiness harness
+        run: node --test bin/ci/readiness-gate-bc.test.mjs
+
       - name: Build
         run: npm --workspace apps/web run build:bundle
         env:

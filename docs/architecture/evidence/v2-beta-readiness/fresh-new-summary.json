@@ -1,0 +1,81 @@
+{
+  "source": "fresh new installation / external management / adopt network acceptance at 8935bce5",
+  "harness": "bin/ci/fresh-new-installation.mjs",
+  "result": "PASS",
+  "gitHead": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
+  "imageSourceCommit": null,
+  "images": {
+    "cpamp-runtime": "sha256:8c6a7ed65a2c4cd15c5a65b57e0e296bb519c5f8e3130f87c77e1a3647861797",
+    "cpamp-manager": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86",
+    "cpamp-ingress": "sha256:5cfa0720fb17822a3b682fe311b336aafe2ebca7c8a037b89ca1df679a7625fb"
+  },
+  "project": "cpamp-fresh-new-764c041e73c7",
+  "origin": "http://127.0.0.1:64192",
+  "checks": 33,
+  "checkResults": {
+    "PASS": 30,
+    "FAIL": 0,
+    "NOT RUN": 0
+  },
+  "failedChecks": [],
+  "notRun": [
+    "Real Provider model success (no Provider fixture or credential exists in this disposable installation; the model-request check proves Client Key authentication only)",
+    "Real Provider/model traffic, other four journeys, arm64, power-loss and production rollback",
+    "Natural ten-minute claim expiry (expired server timestamp is injected offline only in this disposable fixture)",
+    "Non-Chinese locale layouts, other browser engines"
+  ],
+  "dataLayer": [
+    {
+      "name": "cpamp resource bridge reads CPA /auth-files",
+      "result": "PASS",
+      "observed": {
+        "files": 0
+      }
+    },
+    {
+      "name": "committing strategy reply carries the installer Client Key once",
+      "result": "PASS",
+      "observed": {
+        "committingReplies": 2,
+        "cacheControl": "no-store",
+        "replayRepeated": false
+      }
+    },
+    {
+      "name": "installation Client Key installed in CPA",
+      "result": "PASS",
+      "observed": {
+        "runtimeState": "effective_observed"
+      }
+    },
+    {
+      "name": "CPA model API accepts the installed Client Key",
+      "result": "PASS",
+      "observed": {
+        "status": 200
+      }
+    },
+    {
+      "name": "CPA rejects an unknown Client Key",
+      "result": "PASS",
+      "observed": {
+        "status": 401
+      }
+    },
+    {
+      "name": "CPA authenticates the installed Client Key on a model request (non-401)",
+      "result": "PASS",
+      "observed": {
+        "status": 400
+      }
+    },
+    {
+      "name": "Ingress Gateway admits the installed Client Key",
+      "result": "PASS",
+      "observed": {
+        "status": 400
+      }
+    }
+  ],
+  "cleanup": "PASS"
+}

@@ -1,0 +1,853 @@
+{
+  "contract": "cpamp.readiness-gate-bc.v1",
+  "generatedAt": "2026-11-06T16:21:28.193Z",
+  "harness": {
+    "path": "bin/ci/readiness-gate-bc.mjs",
+    "sha256": "sha256:4aa9fa492c6020d2a1ac37d77fd5273d2c680e6b9e58537c23c210e98634a16d"
+  },
+  "runId": "b3010e4c",
+  "prefix": "cpampdb3010e4c",
+  "candidateTag": "8935bce5",
+  "candidateCommit": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
+  "platform": "linux/amd64",
+  "limits": {
+    "cpus": 2,
+    "memory": "4g",
+    "memorySwap": "4g"
+  },
+  "budgets": {
+    "diagnosticMs": 10000,
+    "coldStartMs": 5000,
+    "peakMemoryBytes": 1610612736
+  },
+  "imageReferences": {
+    "manager": "cpampd-beta-manager:8935bce5",
+    "runtime": "cpampd-beta-runtime:8935bce5",
+    "ingress": "cpampd-beta-ingress:8935bce5"
+  },
+  "images": {
+    "manager": {
+      "reference": "cpampd-beta-manager:8935bce5",
+      "id": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86"
+    },
+    "runtime": {
+      "reference": "cpampd-beta-runtime:8935bce5",
+      "id": "sha256:8c6a7ed65a2c4cd15c5a65b57e0e296bb519c5f8e3130f87c77e1a3647861797"
+    },
+    "ingress": {
+      "reference": "cpampd-beta-ingress:8935bce5",
+      "id": "sha256:5cfa0720fb17822a3b682fe311b336aafe2ebca7c8a037b89ca1df679a7625fb"
+    }
+  },
+  "host": {
+    "os": "darwin",
+    "arch": "x64",
+    "release": "22.6.0",
+    "cpus": 8,
+    "totalMemoryBytes": 34359738368,
+    "dockerServer": "linux/amd64 27.3.1"
+  },
+  "representativeness": {
+    "observed": "Docker Desktop VM on macOS x64; container limits --cpus=2 --memory=4g --memory-swap=4g",
+    "productionHostClaim": "cannot be extrapolated: this is not a dedicated SSD Linux host, and production performance must be re-measured there"
+  },
+  "fixtureConstruction": "candidate `initialize` creates the schema and data key; the harness removes the Fresh checkpoint rows, writes the bootstrap-state row and retires the Fresh marker so the benchmark serves the post-install Manager graph",
+  "scenarios": {
+    "disk": {
+      "mount": "/",
+      "totalBytes": 62671097856,
+      "availableBytes": 6350786560,
+      "floorBytes": 3221225472
+    },
+    "provenance": {
+      "sourceCommit": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
+      "releaseProvenancePath": "/usr/local/share/cpamp/release-provenance.json",
+      "roles": {
+        "manager": {
+          "reference": "cpampd-beta-manager:8935bce5",
+          "inventoryPath": "/usr/local/share/cpamp/release/third-party-inventory.txt",
+          "provenancePath": "/usr/local/share/cpamp/provenance.json",
+          "releaseProvenancePathPresent": false,
+          "inventoryBytes": 57730,
+          "verification": {
+            "ok": true,
+            "failures": [],
+            "thirdPartyInventoryStatus": "VERIFIED_LICENSE_COLLECTION",
+            "role": "manager",
+            "licenseInventorySHA256": "sha256:8ef65e44d0b1be27750b4936ed51c88e539cf637ea7ca2fd678c399676bd7c12",
+            "licenseCoverage": {
+              "base-image": {
+                "metadataOnlyPackages": 21,
+                "originalTexts": "available-packaged-notices-only",
+                "packagedNoticePackages": 0,
+                "packages": 21,
+                "policy": "apk-license-metadata-and-available-packaged-notices"
+              },
+              "manager": {
+                "originalTexts": "complete-for-installed-dependencies",
+                "packages": 13,
+                "policy": "original-license-texts-fail-closed"
+              },
+              "web": {
+                "originalTexts": "complete-for-installed-dependencies",
+                "packages": 70,
+                "policy": "original-license-texts-fail-closed"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "reference": "cpampd-beta-runtime:8935bce5",
+          "inventoryPath": "/usr/local/share/cpamp/release/third-party-inventory.txt",
+          "provenancePath": "/usr/local/share/cpamp/provenance.json",
+          "releaseProvenancePathPresent": false,
+          "inventoryBytes": 52168,
+          "verification": {
+            "ok": true,
+            "failures": [],
+            "thirdPartyInventoryStatus": "VERIFIED_LICENSE_COLLECTION",
+            "role": "runtime",
+            "licenseInventorySHA256": "sha256:303169d52a5a93fd53a7af29db42f73e459c5c4c2784e3c252eb571ad0a1fe3f",
+            "licenseCoverage": {
+              "base-image": {
+                "originalTexts": "complete-for-installed-packages",
+                "packages": 91,
+                "policy": "debian-copyright-files-fail-closed"
+              },
+              "runtime-supervisor": {
+                "originalTexts": "complete-for-installed-dependencies",
+                "packages": 13,
+                "policy": "original-license-texts-fail-closed"
+              }
+            }
+          }
+        },
+        "ingress": {
+          "reference": "cpampd-beta-ingress:8935bce5",
+          "inventoryPath": "/usr/local/share/cpamp/release/third-party-inventory.txt",
+          "provenancePath": "/usr/local/share/cpamp/provenance.json",
+          "releaseProvenancePathPresent": false,
+          "inventoryBytes": 9944,
+          "verification": {
+            "ok": true,
+            "failures": [],
+            "thirdPartyInventoryStatus": "VERIFIED_LICENSE_COLLECTION",
+            "role": "ingress",
+            "licenseInventorySHA256": "sha256:54347dd5276e9cce48932fdf93e1cad1615c3060865cd759ed25b55a44a54443",
+            "licenseCoverage": {
+              "base-image": {
+                "metadataOnlyPackages": 17,
+                "originalTexts": "available-packaged-notices-only",
+                "packagedNoticePackages": 0,
+                "packages": 17,
+                "policy": "apk-license-metadata-and-available-packaged-notices"
+              },
+              "ingress": {
+                "originalTexts": "complete-for-installed-dependencies",
+                "packages": 1,
+                "policy": "original-license-texts-fail-closed"
+              }
+            }
+          }
+        }
+      },
+      "ok": true
+    },
+    "storeOpenFailure": {
+      "kind": "unsupported_derived_format",
+      "container": {
+        "name": "cpampdb3010e4c-storeopenfailure",
+        "id": "882fa8d2a6fdf912c0e5b8ced25494945493496e1d4dcb2080a63676c8119b77",
+        "image": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86"
+      },
+      "elapsedMs": 16,
+      "health": {
+        "status": 503,
+        "body": "{\"ok\":false}\n"
+      },
+      "discovery": {
+        "status": 503,
+        "body": "{\"contract_version\":\"cpamp.phase4-01.discovery.v1\",\"status\":\"unavailable\",\"authentication_required\":false,\"auth_entry\":\"unavailable\",\"reason\":\"observation_unavailable\"}\n"
+      },
+      "businessStatus": 404,
+      "logTail": "2026/11/06 16:19:40 cpa-manager-plus listening on [::]:18317\n2026/11/06 16:19:41 Manager store could not be opened; keeping safe not-ready diagnostics available\n",
+      "lockProbe": {
+        "exitCode": 0,
+        "released": true,
+        "failures": [],
+        "output": "16:19:42 [derived-migration] creating index idx_usage_monitoring_event_projection_account_window\n2026/11/06 16:19:42 [derived-migration] creating index idx_usage_monitoring_event_projection_model_timestamp\n2026/11/06 16:19:42 [derived-migration] creating index idx_usage_monitoring_header_latest_timestamp\n2026/11/06 16:19:42 [derived-migration] creating index idx_usage_event_identity_ledger_raw_event_id\n2026/11/06 16:19:42 [derived-migration] creating index idx_usage_event_identity_ledger_bucket\n"
+      },
+      "oomKilled": false,
+      "judgement": {
+        "ok": true,
+        "failures": [],
+        "observed": {
+          "label": "store-open-failure",
+          "elapsedMs": 16,
+          "budgetMs": 10000,
+          "healthStatus": 503,
+          "discoveryStatus": 503,
+          "businessStatus": 404,
+          "logMarkerPresent": true,
+          "leakedSecretCount": 0
+        },
+        "offline": {
+          "ok": true,
+          "failures": [],
+          "released": true,
+          "exitCode": 0,
+          "lockRefused": false
+        }
+      }
+    },
+    "corruptedDatabase": {
+      "kind": "corrupted_database_bytes",
+      "container": {
+        "name": "cpampdb3010e4c-corrupteddatabase",
+        "id": "625529cb2afda889ad13fef2cefad678ee03c60d1393e7bdd587e8c9a35e1d5a",
+        "image": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86"
+      },
+      "elapsedMs": 12,
+      "health": {
+        "status": 503,
+        "body": "{\"ok\":false}\n"
+      },
+      "discovery": {
+        "status": 503,
+        "body": "{\"contract_version\":\"cpamp.phase4-01.discovery.v1\",\"status\":\"unavailable\",\"authentication_required\":false,\"auth_entry\":\"unavailable\",\"reason\":\"observation_unavailable\"}\n"
+      },
+      "businessStatus": 404,
+      "logTail": "2026/11/06 16:19:43 cpa-manager-plus listening on [::]:18317\n2026/11/06 16:19:43 Manager writable startup is not authorized; keeping read-only discovery available: read the Upgrade operation: file is not a database (26)\n",
+      "lockProbe": {
+        "exitCode": 1,
+        "released": true,
+        "failures": [],
+        "output": "2026/11/06 16:19:44 cleanup derived data: validate sqlite /data/usage.sqlite: file is not a database (26)\n"
+      },
+      "oomKilled": false,
+      "judgement": {
+        "ok": true,
+        "failures": [],
+        "observed": {
+          "label": "corrupted-database",
+          "elapsedMs": 12,
+          "budgetMs": 10000,
+          "healthStatus": 503,
+          "discoveryStatus": 503,
+          "businessStatus": 404,
+          "logMarkerPresent": true,
+          "leakedSecretCount": 0
+        },
+        "offline": {
+          "ok": true,
+          "failures": [],
+          "released": true,
+          "exitCode": 1,
+          "lockRefused": false
+        }
+      }
+    },
+    "mismatchedDataKey": {
+      "secretFree": {
+        "healthStatus": 200,
+        "settledAtMs": 114,
+        "leakedSecretCount": 0,
+        "logTail": "ger Plus administrator authority loaded\n2026/11/06 16:19:45 [derived-migration] post-listen index preparation started\n2026/11/06 16:19:45 [derived-migration] creating index idx_gateway_api_key_binding_history_hash\n2026/11/06 16:19:45 [derived-migration] creating index idx_gateway_credential_binding_history_auth_id\n2026/11/06 16:19:45 [derived-migration] creating index idx_usage_events_timestamp\n2026/11/06 16:19:45 [derived-migration] creating index idx_usage_events_ts_latency_ttft_cover\n2026/11/06 16:19:45 [derived-migration] creating index idx_usage_events_request_id\n2026/11/06 16:19:45 [derived-migration] creating index idx_usage_events_model\n2026/11/06 16:19:45 [derived-migration] creating index idx_usage_events_auth_index\n2026/11/06 16:19:45 http GET /health status=200 duration=25.801µs remote=172.17.0.1:62952\n2026/11/06 16:19:45 [derived-migration] creating index idx_usage_events_endpoint\n2026/11/06 16:19:45 [derived-migration] creating index idx_usage_events_header_quota_recover\n",
+        "note": "the secret-free fixture has no encrypted connection secret, so a mismatched data key does not reach RequireDataKeyForInspectedConnection or decryption; the candidate settles at /health 200"
+      },
+      "encrypted": {
+        "exitCode": 1,
+        "running": false,
+        "elapsedMs": 337,
+        "healthStatus": 503,
+        "failures": [],
+        "leakedSecretCount": 0,
+        "logTail": "2026/11/06 16:19:47 cpa-manager-plus listening on [::]:18317\n2026/11/06 16:19:47 bootstrap manager server: decrypt secret: invalid data key or corrupted ciphertext\n",
+        "note": "RequireDataKeyForInspectedConnection only checks that data.key exists; the mismatched key is rejected when bootstrap.Run decrypts manager_config_v1/setup, and main.go fails closed with log.Fatalf"
+      }
+    },
+    "benchmark": {
+      "storage": {
+        "kind": "docker-volume",
+        "volume": "cpampdb3010e4c-bench"
+      },
+      "fixture": {
+        "count": 100000,
+        "uniqueHashes": 100000,
+        "models": 12,
+        "providers": 3,
+        "accounts": 100,
+        "apiKeys": 10,
+        "minTimestampMs": 1783613988481,
+        "maxTimestampMs": 1793981884801,
+        "windowDays": 120,
+        "rawBytes": 850
+      },
+      "seedMs": 2355,
+      "dbBytes": 145870848,
+      "limits": {
+        "cpus": 2,
+        "memory": "4g",
+        "memorySwap": "4g"
+      },
+      "checks": {
+        "fixture_distribution": {
+          "ok": true,
+          "detail": {
+            "count": 100000,
+            "uniqueHashes": 100000,
+            "models": 12,
+            "providers": 3,
+            "accounts": 100,
+            "apiKeys": 10,
+            "minTimestampMs": 1783613988481,
+            "maxTimestampMs": 1793981884801,
+            "windowDays": 120,
+            "rawBytes": 850
+          }
+        },
+        "cold_start_within_budget": {
+          "ok": true,
+          "detail": {
+            "rollupOnMs": 365,
+            "rollupOffMs": 278,
+            "budgetMs": 5000
+          }
+        },
+        "derived_maintenance_finished": {
+          "ok": true,
+          "detail": {
+            "ms": 53566,
+            "coverageEventId": 100000,
+            "status": {
+              "databaseMaintenance": {
+                "required": true,
+                "performanceDegraded": true,
+                "deferredIndexes": 11,
+                "offlineJobs": 0,
+                "reasons": [
+                  "deferred_indexes"
+                ],
+                "command": "cleanup-derived"
+              }
+            }
+          }
+        },
+        "offline_maintenance_cleared_deferred_indexes": {
+          "ok": true,
+          "detail": {
+            "offline": {
+              "exitCode": 0,
+              "durationMs": 2194,
+              "preparedIndexes": 11,
+              "output": "2026/11/06 16:21:07 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 16:21:07 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 16:21:07 [derived-migration] creating index idx_usage_events_latest_request_source"
+            },
+            "afterRestart": {
+              "databaseMaintenance": {
+                "required": false,
+                "performanceDegraded": false,
+                "deferredIndexes": 0,
+                "offlineJobs": 0,
+                "reasons": []
+              }
+            }
+          }
+        },
+        "fixture_exercised_by_queries": {
+          "ok": true,
+          "detail": {
+            "failures": [],
+            "rollupOn": {
+              "dashboard_summary": {
+                "ok": true,
+                "failures": []
+              },
+              "monitoring_header_snapshots": {
+                "ok": true,
+                "failures": []
+              },
+              "monitoring_events_page": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_overview_30d": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_overview_90d": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_hourly_24h": {
+                "ok": true,
+                "failures": []
+              }
+            },
+            "rollupOff": {
+              "dashboard_summary": {
+                "ok": true,
+                "failures": []
+              },
+              "monitoring_header_snapshots": {
+                "ok": true,
+                "failures": []
+              },
+              "monitoring_events_page": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_overview_30d": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_overview_90d": {
+                "ok": true,
+                "failures": []
+              },
+              "usage_analytics_hourly_24h": {
+                "ok": true,
+                "failures": []
+              }
+            }
+          }
+        },
+        "index_states_recorded": {
+          "ok": true,
+          "detail": {
+            "rollupOn": {
+              "required": true,
+              "deferredIndexes": 11,
+              "performanceDegraded": true
+            },
+            "rollupOff": {
+              "required": false,
+              "deferredIndexes": 0,
+              "performanceDegraded": false
+            },
+            "comparable": false,
+            "note": "sequential observations: the rollup-on phase ran with 11 deferred indexes pending, the rollup-off phase after cleanup-derived prepared them; the difference is not attributable to the rollup flag alone"
+          }
+        },
+        "peak_memory_within_budget": {
+          "ok": true,
+          "detail": {
+            "rollupOnRssBytes": 136073216,
+            "rollupOffRssBytes": 87478272,
+            "rollupOnCgroupBytes": 1432059904,
+            "rollupOffCgroupBytes": 74252288,
+            "budgetBytes": 1610612736,
+            "metric": "process VmHWM (RSS)"
+          }
+        },
+        "no_oom_and_no_restart": {
+          "ok": true,
+          "detail": {
+            "rollupOn": {
+              "Status": "running",
+              "Running": true,
+              "Paused": false,
+              "Restarting": false,
+              "OOMKilled": false,
+              "Dead": false,
+              "Pid": 13331,
+              "ExitCode": 0,
+              "Error": "",
+              "StartedAt": "2026-11-06T16:19:51.721128119Z",
+              "FinishedAt": "0001-01-01T00:00:00Z",
+              "RestartCount": 0
+            },
+            "rollupOff": {
+              "Status": "running",
+              "Running": true,
+              "Paused": false,
+              "Restarting": false,
+              "OOMKilled": false,
+              "Dead": false,
+              "Pid": 13671,
+              "ExitCode": 0,
+              "Error": "",
+              "StartedAt": "2026-11-06T16:21:08.39282209Z",
+              "FinishedAt": "0001-01-01T00:00:00Z",
+              "RestartCount": 0
+            }
+          }
+        }
+      },
+      "runs": {
+        "rollupOn": {
+          "container": {
+            "name": "cpampdb3010e4c-benchon",
+            "id": "ddd99f912c5e9e0a232a1899bf8c4500d01c58e156a145356d325239cae1de1d"
+          },
+          "env": {
+            "HTTP_ADDR": "0.0.0.0:18317",
+            "USAGE_DB_PATH": "/data/usage.sqlite",
+            "CPA_MANAGER_DATA_KEY_PATH": "/data/data.key",
+            "CPA_MANAGER_ADMIN_KEY": "[redacted]",
+            "CPAMP_UPDATE_CHECK_ENABLED": "false"
+          },
+          "coldStartMs": 365,
+          "derivedMaintenanceMs": 53566,
+          "derivedCoverageEventId": 100000,
+          "maintenanceStatus": {
+            "databaseMaintenance": {
+              "required": true,
+              "performanceDegraded": true,
+              "deferredIndexes": 11,
+              "offlineJobs": 0,
+              "reasons": [
+                "deferred_indexes"
+              ],
+              "command": "cleanup-derived"
+            }
+          },
+          "samples": {
+            "dashboard_summary": {
+              "count": 5,
+              "p50": 475.2702449999924,
+              "p95": 522.2284969999891,
+              "min": 450.36750599999505,
+              "max": 522.2284969999891
+            },
+            "monitoring_header_snapshots": {
+              "count": 5,
+              "p50": 2.278940000003786,
+              "p95": 2.815176000003703,
+              "min": 1.9565070000098785,
+              "max": 2.815176000003703
+            },
+            "monitoring_events_page": {
+              "count": 5,
+              "p50": 111.49948500000755,
+              "p95": 115.2510159999947,
+              "min": 111.3003880000033,
+              "max": 115.2510159999947
+            },
+            "usage_analytics_overview_30d": {
+              "count": 5,
+              "p50": 1035.7849129999959,
+              "p95": 1116.7453740000055,
+              "min": 1025.7697139999946,
+              "max": 1116.7453740000055
+            },
+            "usage_analytics_overview_90d": {
+              "count": 5,
+              "p50": 2181.092457999999,
+              "p95": 2448.5299490000034,
+              "min": 1848.6086150000046,
+              "max": 2448.5299490000034
+            },
+            "usage_analytics_hourly_24h": {
+              "count": 5,
+              "p50": 262.21910899999784,
+              "p95": 270.4064919999946,
+              "min": 254.20795300000464,
+              "max": 270.4064919999946
+            }
+          },
+          "validations": {
+            "dashboard_summary": {
+              "ok": true,
+              "failures": []
+            },
+            "monitoring_header_snapshots": {
+              "ok": true,
+              "failures": []
+            },
+            "monitoring_events_page": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_overview_30d": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_overview_90d": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_hourly_24h": {
+              "ok": true,
+              "failures": []
+            }
+          },
+          "validationFailures": [],
+          "peakMemoryBytes": 136073216,
+          "cgroupPeakMemoryBytes": 1432059904,
+          "memoryMetric": "process VmHWM (RSS); cgroup memory.peak (includes page cache) recorded separately",
+          "state": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 13331,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-11-06T16:19:51.721128119Z",
+            "FinishedAt": "0001-01-01T00:00:00Z",
+            "RestartCount": 0
+          }
+        },
+        "rollupOff": {
+          "container": {
+            "name": "cpampdb3010e4c-benchoff",
+            "id": "73bd16aa45e7632d8cac06c233bf08105f7a00bf522b09d255117b4e9a928a81"
+          },
+          "env": {
+            "HTTP_ADDR": "0.0.0.0:18317",
+            "USAGE_DB_PATH": "/data/usage.sqlite",
+            "CPA_MANAGER_DATA_KEY_PATH": "/data/data.key",
+            "CPA_MANAGER_ADMIN_KEY": "[redacted]",
+            "CPAMP_UPDATE_CHECK_ENABLED": "false",
+            "USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED": "false"
+          },
+          "coldStartMs": 278,
+          "derivedMaintenanceMs": null,
+          "derivedCoverageEventId": null,
+          "maintenanceStatus": {
+            "databaseMaintenance": {
+              "required": false,
+              "performanceDegraded": false,
+              "deferredIndexes": 0,
+              "offlineJobs": 0,
+              "reasons": []
+            }
+          },
+          "samples": {
+            "dashboard_summary": {
+              "count": 5,
+              "p50": 13.230483999999706,
+              "p95": 27.650711999987834,
+              "min": 11.522133000005851,
+              "max": 27.650711999987834
+            },
+            "monitoring_header_snapshots": {
+              "count": 5,
+              "p50": 2.5208549999952083,
+              "p95": 3.3220390000060434,
+              "min": 2.37217299999611,
+              "max": 3.3220390000060434
+            },
+            "monitoring_events_page": {
+              "count": 5,
+              "p50": 8.676521999994293,
+              "p95": 18.774156999992556,
+              "min": 7.207204999998794,
+              "max": 18.774156999992556
+            },
+            "usage_analytics_overview_30d": {
+              "count": 5,
+              "p50": 1023.4846970000071,
+              "p95": 1097.6054719999956,
+              "min": 977.0205520000018,
+              "max": 1097.6054719999956
+            },
+            "usage_analytics_overview_90d": {
+              "count": 5,
+              "p50": 2619.7825100000045,
+              "p95": 2750.0263479999994,
+              "min": 2539.192214999988,
+              "max": 2750.0263479999994
+            },
+            "usage_analytics_hourly_24h": {
+              "count": 5,
+              "p50": 8.70817199999874,
+              "p95": 11.669420999998692,
+              "min": 7.751533000002382,
+              "max": 11.669420999998692
+            }
+          },
+          "validations": {
+            "dashboard_summary": {
+              "ok": true,
+              "failures": []
+            },
+            "monitoring_header_snapshots": {
+              "ok": true,
+              "failures": []
+            },
+            "monitoring_events_page": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_overview_30d": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_overview_90d": {
+              "ok": true,
+              "failures": []
+            },
+            "usage_analytics_hourly_24h": {
+              "ok": true,
+              "failures": []
+            }
+          },
+          "validationFailures": [],
+          "peakMemoryBytes": 87478272,
+          "cgroupPeakMemoryBytes": 74252288,
+          "memoryMetric": "process VmHWM (RSS); cgroup memory.peak (includes page cache) recorded separately",
+          "state": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 13671,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-11-06T16:21:08.39282209Z",
+            "FinishedAt": "0001-01-01T00:00:00Z",
+            "RestartCount": 0
+          }
+        }
+      },
+      "offlineCleanup": {
+        "exitCode": 0,
+        "durationMs": 2194,
+        "preparedIndexes": 11,
+        "output": "2026/11/06 16:21:07 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 16:21:07 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 16:21:07 [derived-migration] creating index idx_usage_events_latest_request_source"
+      },
+      "indexState": {
+        "rollupOn": {
+          "required": true,
+          "deferredIndexes": 11,
+          "performanceDegraded": true
+        },
+        "rollupOff": {
+          "required": false,
+          "deferredIndexes": 0,
+          "performanceDegraded": false
+        },
+        "comparable": false,
+        "note": "sequential observations: the rollup-on phase ran with 11 deferred indexes pending, the rollup-off phase after cleanup-derived prepared them; the difference is not attributable to the rollup flag alone"
+      }
+    }
+  },
+  "checks": [
+    {
+      "name": "image:manager",
+      "result": "PASS",
+      "detail": "{\"reference\":\"cpampd-beta-manager:8935bce5\",\"id\":\"sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86\"}"
+    },
+    {
+      "name": "image:runtime",
+      "result": "PASS",
+      "detail": "{\"reference\":\"cpampd-beta-runtime:8935bce5\",\"id\":\"sha256:8c6a7ed65a2c4cd15c5a65b57e0e296bb519c5f8e3130f87c77e1a3647861797\"}"
+    },
+    {
+      "name": "image:ingress",
+      "result": "PASS",
+      "detail": "{\"reference\":\"cpampd-beta-ingress:8935bce5\",\"id\":\"sha256:5cfa0720fb17822a3b682fe311b336aafe2ebca7c8a037b89ca1df679a7625fb\"}"
+    },
+    {
+      "name": "disk_guard",
+      "result": "PASS",
+      "detail": "{\"mount\":\"/\",\"totalBytes\":62671097856,\"availableBytes\":6350786560,\"floorBytes\":3221225472}"
+    },
+    {
+      "name": "provenance:manager",
+      "result": "PASS",
+      "detail": "{\"status\":\"VERIFIED_LICENSE_COLLECTION\",\"failures\":[],\"inventoryPath\":\"/usr/local/share/cpamp/release/third-party-inventory.txt\"}"
+    },
+    {
+      "name": "provenance:runtime",
+      "result": "PASS",
+      "detail": "{\"status\":\"VERIFIED_LICENSE_COLLECTION\",\"failures\":[],\"inventoryPath\":\"/usr/local/share/cpamp/release/third-party-inventory.txt\"}"
+    },
+    {
+      "name": "provenance:ingress",
+      "result": "PASS",
+      "detail": "{\"status\":\"VERIFIED_LICENSE_COLLECTION\",\"failures\":[],\"inventoryPath\":\"/usr/local/share/cpamp/release/third-party-inventory.txt\"}"
+    },
+    {
+      "name": "store_open_failure:safe_diagnostics",
+      "result": "PASS",
+      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"store-open-failure\",\"elapsedMs\":16,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0},\"offline\":{\"ok\":true,\"failures\":[],\"released\":true,\"exitCode\":0,\"lockRefused\":false}}"
+    },
+    {
+      "name": "corrupted_database:safe_diagnostics",
+      "result": "PASS",
+      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"corrupted-database\",\"elapsedMs\":12,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0},\"offline\":{\"ok\":true,\"failures\":[],\"released\":true,\"exitCode\":1,\"lockRefused\":false}}"
+    },
+    {
+      "name": "mismatched_data_key:secret_free_store",
+      "result": "PASS",
+      "detail": "{\"healthStatus\":200,\"settledAtMs\":114,\"leakedSecretCount\":0,\"failures\":[],\"note\":\"the secret-free fixture has no encrypted connection secret, so a mismatched data key does not reach RequireDataKeyForInspectedConnection or decryption; the candidate settles at /health 200\"}"
+    },
+    {
+      "name": "mismatched_data_key:encrypted_settings_fail_closed",
+      "result": "PASS",
+      "detail": "{\"exitCode\":1,\"elapsedMs\":337,\"failures\":[],\"note\":\"RequireDataKeyForInspectedConnection only checks that data.key exists; the mismatched key is rejected when bootstrap.Run decrypts manager_config_v1/setup, and main.go fails closed with log.Fatalf\"}"
+    },
+    {
+      "name": "benchmark:fixture_distribution",
+      "result": "PASS",
+      "detail": "{\"count\":100000,\"uniqueHashes\":100000,\"models\":12,\"providers\":3,\"accounts\":100,\"apiKeys\":10,\"minTimestampMs\":1783613988481,\"maxTimestampMs\":1793981884801,\"windowDays\":120,\"rawBytes\":850}"
+    },
+    {
+      "name": "benchmark:cold_start_within_budget",
+      "result": "PASS",
+      "detail": "{\"rollupOnMs\":365,\"rollupOffMs\":278,\"budgetMs\":5000}"
+    },
+    {
+      "name": "benchmark:derived_maintenance_finished",
+      "result": "PASS",
+      "detail": "{\"ms\":53566,\"coverageEventId\":100000,\"status\":{\"databaseMaintenance\":{\"required\":true,\"performanceDegraded\":true,\"deferredIndexes\":11,\"offlineJobs\":0,\"reasons\":[\"deferred_indexes\"],\"command\":\"cleanup-derived\"}}}"
+    },
+    {
+      "name": "benchmark:offline_maintenance_cleared_deferred_indexes",
+      "result": "PASS",
+      "detail": "{\"offline\":{\"exitCode\":0,\"durationMs\":2194,\"preparedIndexes\":11,\"output\":\"2026/11/06 16:21:07 [derived-migration] creating index idx_usage_events_header_trace_id\\n2026/11/06 16:21:07 [derived-migration] creating index idx_usage_events_latest_request_auth_file\\n2026/11/06 16:21:07 [derived-migration] creating index idx_usage_events_latest_request_source\"},\"afterRestart\":{\"databaseMaintenance\":{\"required\":false,\"performanceDegraded\":false,\"deferredIndexes\":0,\"offlineJobs\":0,\"reasons\":[]}}}"
+    },
+    {
+      "name": "benchmark:fixture_exercised_by_queries",
+      "result": "PASS",
+      "detail": "{\"failures\":[],\"rollupOn\":{\"dashboard_summary\":{\"ok\":true,\"failures\":[]},\"monitoring_header_snapshots\":{\"ok\":true,\"failures\":[]},\"monitoring_events_page\":{\"ok\":true,\"failures\":[]},\"usage_analytics_overview_30d\":{\"ok\":true,\"failures\":[]},\"usage_analytics_overview_90d\":{\"ok\":true,\"failures\":[]},\"usage_analytics_hourly_24h\":{\"ok\":true,\"failures\":[]}},\"rollupOff\":{\"dashboard_summary\":{\"ok\":true,\"failures\":[]},\"monitoring_header_snapshots\":{\"ok\":true,\"failures\":[]},\"monitoring_events_page\":{\"ok\":true,\"failures\":[]},\"usage_analytics_overview_30d\":{\"ok\":true,\"failures\":[]},\"usage_analytics_overview_90d\":{\"ok\":true,\"failures\":[]},\"usage_analytics_hourly_24h\":{\"ok\":true,\"failures\":[]}}}"
+    },
+    {
+      "name": "benchmark:index_states_recorded",
+      "result": "PASS",
+      "detail": "{\"rollupOn\":{\"required\":true,\"deferredIndexes\":11,\"performanceDegraded\":true},\"rollupOff\":{\"required\":false,\"deferredIndexes\":0,\"performanceDegraded\":false},\"comparable\":false,\"note\":\"sequential observations: the rollup-on phase ran with 11 deferred indexes pending, the rollup-off phase after cleanup-derived prepared them; the difference is not attributable to the rollup flag alone\"}"
+    },
+    {
+      "name": "benchmark:peak_memory_within_budget",
+      "result": "PASS",
+      "detail": "{\"rollupOnRssBytes\":136073216,\"rollupOffRssBytes\":87478272,\"rollupOnCgroupBytes\":1432059904,\"rollupOffCgroupBytes\":74252288,\"budgetBytes\":1610612736,\"metric\":\"process VmHWM (RSS)\"}"
+    },
+    {
+      "name": "benchmark:no_oom_and_no_restart",
+      "result": "PASS",
+      "detail": "{\"rollupOn\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":13331,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T16:19:51.721128119Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0},\"rollupOff\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":13671,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T16:21:08.39282209Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0}}"
+    }
+  ],
+  "cleanup": {
+    "ok": true,
+    "released": [
+      "container:cpampdb3010e4c-storeopenfailure",
+      "container:cpampdb3010e4c-corrupteddatabase",
+      "container:cpampdb3010e4c-mismatchedkeyempty",
+      "container:cpampdb3010e4c-mismatchedkeyencrypted",
+      "container:cpampdb3010e4c-benchon",
+      "container:cpampdb3010e4c-benchoff",
+      "volume:cpampdb3010e4c-bench"
+    ],
+    "errors": [],
+    "workspace": {
+      "ok": true,
+      "method": "fs",
+      "parentRemoved": true
+    }
+  },
+  "abortedSignal": null,
+  "verdict": "pass",
+  "exitCode": 0,
+  "redactions": 19,
+  "evidenceFiles": {
+    "runCopy": "readiness-gate-bc-b3010e4c.json",
+    "repoCopy": "docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-b3010e4c.json"
+  }
+}
