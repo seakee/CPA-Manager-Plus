@@ -1,7 +1,14 @@
-const PERSISTED_OPENAI_KEY_ENTRY_MARKER = Symbol('persisted-openai-key-entry');
+const OPENAI_KEY_ENTRY_METADATA_MARKER = Symbol('openai-key-entry-metadata');
 
-type PersistedOpenAIKeyEntryCarrier = {
-  [PERSISTED_OPENAI_KEY_ENTRY_MARKER]?: true;
+export type OpenAIKeyEntrySourceState = 'persisted-keyless' | 'persisted-keyed' | 'keyed-cleared';
+
+type OpenAIKeyEntryMetadata = {
+  sourceState?: OpenAIKeyEntrySourceState;
+  persistedIndex?: number;
+};
+
+type OpenAIKeyEntryMetadataCarrier = {
+  [OPENAI_KEY_ENTRY_METADATA_MARKER]?: OpenAIKeyEntryMetadata;
 };
 
 type OpenAIKeyEntryLike = {
@@ -12,38 +19,77 @@ type OpenAIKeyEntryLike = {
   headers?: Record<string, string>;
 };
 
-export const markPersistedOpenAIKeyEntry = <T extends object>(entry: T): T => {
-  Object.defineProperty(entry, PERSISTED_OPENAI_KEY_ENTRY_MARKER, {
+const getOpenAIKeyEntryMetadata = (entry: unknown): OpenAIKeyEntryMetadata | undefined =>
+  typeof entry === 'object' && entry !== null
+    ? (entry as OpenAIKeyEntryMetadataCarrier)[OPENAI_KEY_ENTRY_METADATA_MARKER]
+    : undefined;
+
+const setOpenAIKeyEntryMetadata = <T extends object>(
+  entry: T,
+  metadata: OpenAIKeyEntryMetadata
+): T => {
+  Object.defineProperty(entry, OPENAI_KEY_ENTRY_METADATA_MARKER, {
     configurable: true,
     enumerable: false,
-    value: true,
+    value: metadata,
   });
   return entry;
 };
 
-export const isPersistedOpenAIKeyEntry = (entry: unknown): boolean =>
-  typeof entry === 'object' &&
-  entry !== null &&
-  (entry as PersistedOpenAIKeyEntryCarrier)[PERSISTED_OPENAI_KEY_ENTRY_MARKER] === true;
+export const markPersistedOpenAIKeyEntry = <T extends OpenAIKeyEntryLike>(
+  entry: T,
+  persistedIndex?: number,
+  hasExplicitApiKey = true
+): T =>
+  setOpenAIKeyEntryMetadata(entry, {
+    sourceState: entry.apiKey?.trim()
+      ? 'persisted-keyed'
+      : hasExplicitApiKey
+        ? 'persisted-keyless'
+        : undefined,
+    persistedIndex,
+  });
+
+export const getPersistedOpenAIKeyEntryIndex = (entry: unknown): number | undefined =>
+  getOpenAIKeyEntryMetadata(entry)?.persistedIndex;
+
+export const isPersistedOpenAIKeyEntry = (entry: unknown): boolean => {
+  if (typeof entry !== 'object' || entry === null) return false;
+  const apiKey = (entry as OpenAIKeyEntryLike).apiKey?.trim();
+  return !apiKey && getOpenAIKeyEntryMetadata(entry)?.sourceState === 'persisted-keyless';
+};
+
+export const isClearedOpenAIKeyEntry = (entry: unknown): boolean => {
+  if (typeof entry !== 'object' || entry === null) return false;
+  const apiKey = (entry as OpenAIKeyEntryLike).apiKey?.trim();
+  if (apiKey) return false;
+  const state = getOpenAIKeyEntryMetadata(entry)?.sourceState;
+  return state === 'keyed-cleared' || state === 'persisted-keyed';
+};
 
 export const preservePersistedOpenAIKeyEntry = <T extends object>(
   source: unknown,
   target: T
-): T => (isPersistedOpenAIKeyEntry(source) ? markPersistedOpenAIKeyEntry(target) : target);
+): T => {
+  const metadata = getOpenAIKeyEntryMetadata(source);
+  return metadata ? setOpenAIKeyEntryMetadata(target, { ...metadata }) : target;
+};
 
 // CPA uses [] for OpenAI-compatible upstreams that require no API key, while
 // mixed or startup-disabled providers may persist explicit {"api-key": ""}
-// entries without a runtime auth-index. Treat CPA-persisted entries and
-// CPA-supported per-entry fields as configured, while dropping blank UI rows.
+// entries without a runtime auth-index. A previously keyed entry whose key the
+// user clears is dropped even if it still carries proxy-url or weight.
 // Entry-level headers are not part of CPA's OpenAI compatibility key schema.
-export const hasOpenAIKeyEntryConfiguration = (entry: OpenAIKeyEntryLike): boolean =>
-  Boolean(
-    entry.apiKey?.trim() ||
-      entry.authIndex?.trim() ||
-      entry.proxyUrl?.trim() ||
-      (entry.weight !== undefined && String(entry.weight).trim() !== '') ||
-      isPersistedOpenAIKeyEntry(entry)
+export const hasOpenAIKeyEntryConfiguration = (entry: OpenAIKeyEntryLike): boolean => {
+  if (entry.apiKey?.trim()) return true;
+  if (isClearedOpenAIKeyEntry(entry)) return false;
+  return Boolean(
+    entry.authIndex?.trim() ||
+    entry.proxyUrl?.trim() ||
+    (entry.weight !== undefined && String(entry.weight).trim() !== '') ||
+    isPersistedOpenAIKeyEntry(entry)
   );
+};
 
 export const getOpenAIModelDiscoveryEntry = <T extends OpenAIKeyEntryLike>(
   entries: T[]
@@ -51,14 +97,35 @@ export const getOpenAIModelDiscoveryEntry = <T extends OpenAIKeyEntryLike>(
   entries.find((entry) => entry.apiKey?.trim()) ??
   entries.find((entry) => hasOpenAIKeyEntryConfiguration(entry));
 
-export const updateOpenAIApiKey = <T extends OpenAIKeyEntryLike>(entry: T, apiKey: string): T =>
-  preservePersistedOpenAIKeyEntry(entry, {
+export const updateOpenAIApiKey = <T extends OpenAIKeyEntryLike>(entry: T, apiKey: string): T => {
+  const previousMetadata = getOpenAIKeyEntryMetadata(entry);
+  const previousState = previousMetadata?.sourceState;
+  const wasKeyed =
+    Boolean(entry.apiKey?.trim()) ||
+    previousState === 'persisted-keyed' ||
+    previousState === 'keyed-cleared';
+  const nextTrimmed = apiKey.trim();
+  const nextState: OpenAIKeyEntrySourceState | undefined = nextTrimmed
+    ? 'persisted-keyed'
+    : wasKeyed
+      ? 'keyed-cleared'
+      : previousState;
+  const nextEntry: T = {
     ...entry,
     apiKey,
     // auth-index identifies the server-side credential generated from the old key.
     // Any user edit to the key invalidates that identity until CPA returns a fresh one.
     authIndex: '',
+  };
+  if (nextState === undefined && previousMetadata?.persistedIndex === undefined) {
+    return nextEntry;
+  }
+  return setOpenAIKeyEntryMetadata(nextEntry, {
+    sourceState: nextState,
+    persistedIndex: previousMetadata?.persistedIndex,
   });
+};
+
 export const getOpenAIKeyCount = (entries: OpenAIKeyEntryLike[]): number =>
   entries.filter((entry) => entry.apiKey?.trim()).length;
 

@@ -166,7 +166,7 @@ const normalizeAuthIndex = (value: unknown): string | undefined => {
   return trimmed ? trimmed : undefined;
 };
 
-const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
+const normalizeApiKeyEntry = (entry: unknown, persistedIndex?: number): ApiKeyEntry | null => {
   if (entry === undefined || entry === null) return null;
   const record = isRecord(entry) ? entry : null;
   const apiKey =
@@ -208,9 +208,7 @@ const normalizeApiKeyEntry = (entry: unknown): ApiKeyEntry | null => {
   };
   if (weight !== undefined) result.weight = weight;
   if (authIndex) result.authIndex = authIndex;
-  // Only entries that are keyless as persisted need the marker; a keyed entry the
-  // user later clears is a blank row and must not be written back as {"api-key": ""}.
-  return trimmed ? result : markPersistedOpenAIKeyEntry(result);
+  return markPersistedOpenAIKeyEntry(result, persistedIndex, hasExplicitApiKey);
 };
 
 const normalizeProviderKeyConfig = (item: unknown): ProviderKeyConfig | null => {
@@ -361,11 +359,11 @@ const normalizeOpenAIProvider = (provider: unknown): OpenAIProviderConfig | null
   let apiKeyEntries: ApiKeyEntry[] = [];
   if (Array.isArray(provider['api-key-entries'])) {
     apiKeyEntries = provider['api-key-entries']
-      .map((entry) => normalizeApiKeyEntry(entry))
+      .map((entry, index) => normalizeApiKeyEntry(entry, index))
       .filter(Boolean) as ApiKeyEntry[];
   } else if (Array.isArray(provider['api-keys'])) {
     apiKeyEntries = provider['api-keys']
-      .map((key) => normalizeApiKeyEntry(key))
+      .map((key, index) => normalizeApiKeyEntry(key, index))
       .filter(Boolean) as ApiKeyEntry[];
   }
 

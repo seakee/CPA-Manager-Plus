@@ -7,6 +7,7 @@ import {
   markModelThinkingLevelsForEdit,
 } from '@/types';
 import { updateOpenAIApiKey } from '@/utils/openAIKeyEntries';
+import { normalizeOpenAIProvider } from './transformers';
 
 const { mocks } = vi.hoisted(() => ({
   mocks: {
@@ -239,6 +240,7 @@ describe('providersApi auth-index preservation', () => {
         'base-url': 'https://api.mixed.example/v1',
         'api-key-entries': [
           {
+            'api-key': '',
             'auth-index': 'cpa-keyless-proxy-index',
             'proxy-url': 'http://proxy1.internal:8080',
             weight: 2,
@@ -325,6 +327,247 @@ describe('providersApi auth-index preservation', () => {
         'base-url': 'https://api.keyed.example/v1',
         'api-key-entries': [],
       },
+    ]);
+  });
+
+  it.each([
+    { reversed: false, action: 'delete' },
+    { reversed: false, action: 'clear' },
+    { reversed: true, action: 'delete' },
+    { reversed: true, action: 'clear' },
+  ])(
+    'retains the original keyless connection-pool after $action with reversed=$reversed',
+    async ({ reversed, action }) => {
+      const rawEntries = [
+        {
+          'api-key': 'key-A',
+          'proxy-url': 'http://proxy-A',
+          weight: 0,
+          'connection-pool': { name: 'A' },
+        },
+        {
+          'api-key': '',
+          'proxy-url': 'http://proxy-B',
+          weight: 2,
+          'connection-pool': { name: 'B' },
+        },
+      ];
+      if (reversed) rawEntries.reverse();
+      const raw = {
+        name: 'mixed',
+        disabled: true,
+        'base-url': 'http://upstream/v1',
+        'api-key-entries': rawEntries,
+      };
+      mocks.get.mockResolvedValue({ 'openai-compatibility': [raw] });
+      mocks.put.mockResolvedValue({});
+      const [provider] = await providersApi.getOpenAIProviders();
+      const entries =
+        action === 'delete'
+          ? provider.apiKeyEntries.filter((entry) => !entry.apiKey)
+          : provider.apiKeyEntries.map((entry) =>
+              entry.apiKey ? updateOpenAIApiKey(entry, '') : entry
+            );
+
+      await providersApi.saveOpenAIProviders([
+        { ...provider, disabled: false, apiKeyEntries: entries },
+      ]);
+
+      expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [
+        expect.objectContaining({
+          disabled: false,
+          'api-key-entries': [
+            {
+              'api-key': '',
+              'proxy-url': 'http://proxy-B',
+              weight: 2,
+              'connection-pool': { name: 'B' },
+            },
+          ],
+        }),
+      ]);
+    }
+  );
+
+  it.each(['delete', 'reverse'])(
+    'preserves original identity for two indistinguishable keyless entries after %s',
+    async (action) => {
+      const raw = {
+        name: 'two-keyless',
+        disabled: true,
+        'base-url': 'http://upstream/v1',
+        'api-key-entries': [
+          { 'api-key': '', 'connection-pool': { name: 'first' } },
+          { 'api-key': '', 'connection-pool': { name: 'second' } },
+        ],
+      };
+      mocks.get.mockResolvedValue({ 'openai-compatibility': [raw] });
+      mocks.put.mockResolvedValue({});
+      const [provider] = await providersApi.getOpenAIProviders();
+      const entries =
+        action === 'delete'
+          ? provider.apiKeyEntries.slice(1)
+          : [...provider.apiKeyEntries].reverse();
+
+      await providersApi.saveOpenAIProviders([{ ...provider, apiKeyEntries: entries }]);
+
+      const [, saved] = mocks.put.mock.calls[0];
+      expect(saved[0]['api-key-entries']).toEqual(
+        (action === 'delete' ? ['second'] : ['second', 'first']).map((name) => ({
+          'api-key': '',
+          'connection-pool': { name },
+        }))
+      );
+    }
+  );
+
+  it('does not inherit unknown fields when an unindexed keyless entry has an ambiguous match', async () => {
+    mocks.get.mockResolvedValue({
+      'openai-compatibility': [
+        {
+          name: 'ambiguous',
+          'base-url': 'http://upstream/v1',
+          'api-key-entries': [
+            { 'api-key': '', 'connection-pool': { name: 'first' } },
+            { 'api-key': '', 'connection-pool': { name: 'second' } },
+          ],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue({});
+
+    await providersApi.saveOpenAIProviders([
+      {
+        name: 'ambiguous',
+        baseUrl: 'http://upstream/v1',
+        apiKeyEntries: [{ apiKey: '', weight: 0 }],
+      },
+    ]);
+
+    const [, saved] = mocks.put.mock.calls[0];
+    expect(saved[0]['api-key-entries']).toEqual([{ weight: 0 }]);
+  });
+
+  it('keeps a newly added keyless row independent of a removed keyless row', async () => {
+    const raw = {
+      name: 'local',
+      'base-url': 'http://localhost/v1',
+      'api-key-entries': [
+        { 'api-key': '', 'connection-pool': { enabled: true, 'max-idle-conns': 3 } },
+        { 'api-key': '', 'connection-pool': { enabled: true, 'max-idle-conns': 7 } },
+      ],
+    };
+    mocks.get.mockResolvedValue({ 'openai-compatibility': [raw] });
+    mocks.put.mockResolvedValue({});
+    const provider = normalizeOpenAIProvider(raw)!;
+
+    await providersApi.updateOpenAIProvider('local', 0, {
+      ...provider,
+      apiKeyEntries: [provider.apiKeyEntries[1], { apiKey: '', weight: 0 }],
+    });
+
+    const entries = mocks.put.mock.calls[0][1][0]['api-key-entries'];
+    expect(entries[0]['connection-pool']).toEqual(raw['api-key-entries'][1]['connection-pool']);
+    expect(entries[1]).not.toHaveProperty('connection-pool');
+  });
+
+  it('does not give a new keyed row the unknown fields of a removed row with the same key', async () => {
+    const raw = {
+      name: 'local',
+      'base-url': 'http://localhost/v1',
+      'api-key-entries': [
+        { 'api-key': 'key-a', 'connection-pool': { enabled: true, 'max-idle-conns': 3 } },
+        { 'api-key': 'key-b', 'connection-pool': { enabled: true, 'max-idle-conns': 7 } },
+      ],
+    };
+    mocks.get.mockResolvedValue({ 'openai-compatibility': [raw] });
+    mocks.put.mockResolvedValue({});
+    const provider = normalizeOpenAIProvider(raw)!;
+
+    await providersApi.updateOpenAIProvider('local', 0, {
+      ...provider,
+      apiKeyEntries: [provider.apiKeyEntries[1], { apiKey: 'key-a' }],
+    });
+
+    const entries = mocks.put.mock.calls[0][1][0]['api-key-entries'];
+    expect(entries[0]['connection-pool']).toEqual(raw['api-key-entries'][1]['connection-pool']);
+    expect(entries[1]).toEqual({ 'api-key': 'key-a' });
+  });
+
+  it('preserves original unknown fields when a keyed entry receives a replacement key', async () => {
+    const pool = { enabled: true, 'max-idle-conns': 3 };
+    const raw = {
+      name: 'local',
+      'base-url': 'http://localhost/v1',
+      'api-key-entries': [{ 'api-key': 'old-key', 'connection-pool': pool }],
+    };
+    mocks.get.mockResolvedValue({ 'openai-compatibility': [raw] });
+    mocks.put.mockResolvedValue({});
+    const provider = normalizeOpenAIProvider(raw)!;
+
+    await providersApi.updateOpenAIProvider('local', 0, {
+      ...provider,
+      apiKeyEntries: [updateOpenAIApiKey(provider.apiKeyEntries[0], 'new-key')],
+    });
+
+    expect(mocks.put.mock.calls[0][1][0]['api-key-entries'][0]).toEqual({
+      'api-key': 'new-key',
+      'connection-pool': pool,
+    });
+  });
+
+  it('retains the original entry identity when its replacement key matches a removed entry', async () => {
+    const ownPool = { enabled: true, 'max-idle-conns': 3 };
+    const raw = {
+      name: 'local',
+      'base-url': 'http://localhost/v1',
+      'api-key-entries': [
+        { 'api-key': 'old-key', 'connection-pool': ownPool },
+        { 'api-key': 'existing-key', 'connection-pool': { enabled: true, 'max-idle-conns': 7 } },
+      ],
+    };
+    mocks.get.mockResolvedValue({ 'openai-compatibility': [raw] });
+    mocks.put.mockResolvedValue({});
+    const provider = normalizeOpenAIProvider(raw)!;
+
+    await providersApi.updateOpenAIProvider('local', 0, {
+      ...provider,
+      apiKeyEntries: [updateOpenAIApiKey(provider.apiKeyEntries[0], 'existing-key')],
+    });
+
+    expect(mocks.put.mock.calls[0][1][0]['api-key-entries'][0]['connection-pool']).toEqual(ownPool);
+  });
+
+  it('keeps each entry connection-pool when one of several entries changes its key and entries are reordered', async () => {
+    const poolA = { enabled: true, 'max-idle-conns': 3 };
+    const poolB = { enabled: true, 'max-idle-conns': 7 };
+    const poolC = { enabled: true, 'max-idle-conns': 11 };
+    const raw = {
+      name: 'multi-entry',
+      'base-url': 'http://localhost/v1',
+      'api-key-entries': [
+        { 'api-key': 'key-a', 'connection-pool': poolA },
+        { 'api-key': '', 'proxy-url': 'http://proxy-b', 'connection-pool': poolB },
+        { 'api-key': 'key-c', 'connection-pool': poolC },
+      ],
+    };
+    mocks.get.mockResolvedValue({ 'openai-compatibility': [raw] });
+    mocks.put.mockResolvedValue({});
+    const provider = normalizeOpenAIProvider(raw)!;
+
+    await providersApi.updateOpenAIProvider('multi-entry', 0, {
+      ...provider,
+      apiKeyEntries: [
+        provider.apiKeyEntries[2],
+        updateOpenAIApiKey(provider.apiKeyEntries[0], 'key-a-rotated'),
+        provider.apiKeyEntries[1],
+      ],
+    });
+
+    expect(mocks.put.mock.calls[0][1][0]['api-key-entries']).toEqual([
+      { 'api-key': 'key-c', 'connection-pool': poolC },
+      { 'api-key': 'key-a-rotated', 'connection-pool': poolA },
+      { 'api-key': '', 'proxy-url': 'http://proxy-b', 'connection-pool': poolB },
     ]);
   });
 
@@ -603,11 +846,11 @@ describe('providersApi auth-index preservation', () => {
     mocks.put.mockResolvedValue({});
 
     await providersApi.saveOpenAIProviders([
-      {
+      normalizeOpenAIProvider({
         name: 'openai-compatible',
-        baseUrl: 'https://api.example.com/v1',
-        apiKeyEntries: [{ apiKey: '', authIndex: 'auth-2' }],
-      },
+        'base-url': 'https://api.example.com/v1',
+        'api-key-entries': [{ 'auth-index': 'auth-2' }],
+      })!,
     ]);
 
     expect(mocks.put).toHaveBeenCalledWith('/openai-compatibility', [

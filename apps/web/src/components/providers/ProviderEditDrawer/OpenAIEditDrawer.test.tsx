@@ -7,6 +7,7 @@ import { ModelInputList } from '@/components/ui/ModelInputList';
 import { hasModelThinkingLevelsClearMarker, hasModelThinkingLevelsEditMarker } from '@/types';
 import { normalizeOpenAIProvider } from '@/services/api/transformers';
 import { isPersistedOpenAIKeyEntry } from '@/utils/openAIKeyEntries';
+import { providersApi as realProvidersApi } from '@/services/api/providers';
 
 const authState = vi.hoisted(() => ({
   serverVersion: 'v7.2.93' as string | null,
@@ -25,6 +26,8 @@ const mocks = vi.hoisted(() => ({
   updateOpenAIProvider: vi.fn(),
   createOpenAIProvider: vi.fn(),
   apiCallRequest: vi.fn(),
+  clientGet: vi.fn(),
+  clientPut: vi.fn(),
 }));
 
 vi.mock('@/stores', () => ({
@@ -69,6 +72,10 @@ vi.mock('@/services/api', () => ({
     getOpenAIProviders: mocks.getOpenAIProviders,
     updateOpenAIProvider: mocks.updateOpenAIProvider,
   },
+}));
+
+vi.mock('@/services/api/client', () => ({
+  apiClient: { get: mocks.clientGet, put: mocks.clientPut },
 }));
 
 import { OpenAIEditDrawer } from './OpenAIEditDrawer';
@@ -149,6 +156,85 @@ describe('OpenAIEditDrawer model discovery', () => {
 
     act(() => renderer!.unmount());
   });
+
+  it('discovers models through a keyless proxy without a runtime auth-index', async () => {
+    mocks.getOpenAIProviders.mockResolvedValueOnce([
+      normalizeOpenAIProvider({
+        name: 'keyless-proxy',
+        'base-url': 'http://upstream/v1',
+        'api-key-entries': [{ 'api-key': '', 'proxy-url': 'http://proxy' }],
+      }),
+    ]);
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <OpenAIEditDrawer open editIndex={0} disabled={false} onClose={vi.fn()} onSaved={vi.fn()} />
+      );
+    });
+    await act(async () => {
+      findModelsFetchButton(renderer.root)!.props.onClick();
+    });
+    expect(mocks.fetchModelsViaApiCall).toHaveBeenCalledWith(
+      'http://upstream/v1',
+      undefined,
+      {},
+      undefined,
+      'http://proxy',
+      true
+    );
+    act(() => renderer.unmount());
+  });
+
+  it.each([
+    { weight: 0, mixed: false },
+    { weight: 2, mixed: false },
+    { weight: 0, mixed: true },
+    { weight: 2, mixed: true },
+  ])(
+    'drops the cleared keyed entry from PUT with weight=$weight and mixed=$mixed',
+    async ({ weight, mixed }) => {
+      const raw = {
+        name: 'clear-key',
+        'base-url': 'http://upstream/v1',
+        'api-key-entries': [
+          { 'api-key': 'old-key', 'proxy-url': 'http://proxy', weight },
+          ...(mixed
+            ? [{ 'api-key': '', 'connection-pool': { name: 'keyless' } }, { 'api-key': 'keep-key' }]
+            : []),
+        ],
+      };
+      mocks.clientGet.mockResolvedValue({ 'openai-compatibility': [raw] });
+      mocks.clientPut.mockResolvedValue({});
+      mocks.getOpenAIProviders.mockResolvedValueOnce([normalizeOpenAIProvider(raw)]);
+      mocks.updateOpenAIProvider.mockImplementationOnce(realProvidersApi.updateOpenAIProvider);
+      let renderer!: ReactTestRenderer;
+      await act(async () => {
+        renderer = create(
+          <OpenAIEditDrawer
+            open
+            editIndex={0}
+            disabled={false}
+            onClose={vi.fn()}
+            onSaved={vi.fn()}
+          />
+        );
+      });
+      const input = renderer.root
+        .findAllByType('input')
+        .find((node) => node.props.placeholder === i18n.t('ai_providers.openai_key_placeholder'))!;
+      act(() => input.props.onChange({ target: { value: '' } }));
+      await act(async () => {
+        await findSaveButton(renderer.root)!.props.onClick();
+      });
+      const [, saved] = mocks.clientPut.mock.calls[0];
+      expect(saved[0]['api-key-entries']).toEqual(
+        mixed
+          ? [{ 'api-key': '', 'connection-pool': { name: 'keyless' } }, { 'api-key': 'keep-key' }]
+          : []
+      );
+      act(() => renderer.unmount());
+    }
+  );
 
   it('tests and saves an OpenAI-compatible provider without an API key', async () => {
     mocks.getOpenAIProviders.mockResolvedValueOnce([

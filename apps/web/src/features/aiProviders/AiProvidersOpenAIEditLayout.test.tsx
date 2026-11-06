@@ -1,13 +1,19 @@
 import { createElement, type ReactElement } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { OpenAIProviderConfig } from '@/types';
 import type { OpenAIFormState } from '@/components/providers/types';
+import { normalizeOpenAIProvider } from '@/services/api/transformers';
+import { providersApi as realProvidersApi } from '@/services/api/providers';
 
 const mocks = vi.hoisted(() => ({
   params: { index: '0' } as Record<string, string | undefined>,
   config: { openaiCompatibility: [] as OpenAIProviderConfig[] },
   getOpenAIProviders: vi.fn(),
+  updateOpenAIProvider: vi.fn(),
+  clientGet: vi.fn(),
+  clientPut: vi.fn(),
+  renderPage: false,
   fetchConfig: vi.fn(),
   updateConfigValue: vi.fn(),
   showNotification: vi.fn(),
@@ -26,11 +32,12 @@ vi.mock('react-i18next', () => ({
 vi.mock('react-router-dom', () => ({
   Outlet: (props: { context?: unknown }) => {
     mocks.outletContext.current = (props.context ?? null) as Record<string, unknown> | null;
-    return null;
+    return mocks.renderPage ? createElement(AiProvidersOpenAIEditPage) : null;
   },
   useNavigate: () => mocks.navigate,
   useLocation: () => ({ state: null }),
   useParams: () => mocks.params,
+  useOutletContext: () => mocks.outletContext.current,
 }));
 
 vi.mock('@/hooks/useUnsavedChangesGuard', () => ({
@@ -62,12 +69,30 @@ vi.mock('@/stores', async () => {
 vi.mock('@/services/api', () => ({
   providersApi: {
     getOpenAIProviders: mocks.getOpenAIProviders,
-    updateOpenAIProvider: vi.fn(),
+    updateOpenAIProvider: mocks.updateOpenAIProvider,
     createOpenAIProvider: vi.fn(),
   },
 }));
 
+vi.mock('@/services/api/client', () => ({
+  apiClient: { get: mocks.clientGet, put: mocks.clientPut },
+}));
+
+vi.mock('@/hooks/useEdgeSwipeBack', () => ({
+  useEdgeSwipeBack: () => ({ current: null }),
+}));
+
+vi.mock('@/components/common/SecondaryScreenShell', () => ({
+  SecondaryScreenShell: ({
+    children,
+    floatingAction,
+  }: {
+    children: ReactElement;
+    floatingAction: ReactElement;
+  }) => createElement('div', null, children, floatingAction),
+}));
 import { AiProvidersOpenAIEditLayout } from './AiProvidersOpenAIEditLayout';
+import { AiProvidersOpenAIEditPage } from './AiProvidersOpenAIEditPage';
 import { useOpenAIEditDraftStore } from '@/stores/useOpenAIEditDraftStore';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -117,6 +142,8 @@ const isBlockedLeavingEditor = () => {
 describe('AiProvidersOpenAIEditLayout dirty tracking', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.renderPage = false;
+    vi.stubGlobal('window', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
     useOpenAIEditDraftStore.setState({ drafts: {}, refCounts: {} });
     mocks.params = { index: '0' };
     const provider: OpenAIProviderConfig = {
@@ -132,6 +159,58 @@ describe('AiProvidersOpenAIEditLayout dirty tracking', () => {
     mocks.guardShouldBlock.current = null;
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    { weight: 0, mixed: false },
+    { weight: 2, mixed: false },
+    { weight: 0, mixed: true },
+    { weight: 2, mixed: true },
+  ])(
+    'drops the cleared keyed entry from standalone page PUT with weight=$weight and mixed=$mixed',
+    async ({ weight, mixed }) => {
+      const raw = {
+        name: 'clear-key',
+        'base-url': 'http://upstream/v1',
+        'api-key-entries': [
+          { 'api-key': 'old-key', 'proxy-url': 'http://proxy', weight },
+          ...(mixed
+            ? [{ 'api-key': '', 'connection-pool': { name: 'keyless' } }, { 'api-key': 'keep-key' }]
+            : []),
+        ],
+      };
+      const provider = normalizeOpenAIProvider(raw)!;
+      mocks.config = { openaiCompatibility: [provider] };
+      mocks.getOpenAIProviders.mockResolvedValue([provider]);
+      mocks.clientGet.mockResolvedValue({ 'openai-compatibility': [raw] });
+      mocks.clientPut.mockResolvedValue({});
+      mocks.updateOpenAIProvider.mockImplementationOnce(realProvidersApi.updateOpenAIProvider);
+      mocks.renderPage = true;
+      const renderer = await renderEditor();
+      const input = renderer.root
+        .findAllByType('input')
+        .find((node) => node.props.placeholder === 'ai_providers.openai_key_placeholder')!;
+      act(() => input.props.onChange({ target: { value: '' } }));
+      const save = renderer.root
+        .findAllByType('button')
+        .find((node) =>
+          node.findAllByType('span').some((span) => span.children.join('') === 'common.save')
+        )!;
+      expect(save.props.disabled).toBe(false);
+      await act(async () => {
+        await save.props.onClick();
+      });
+      const [, saved] = mocks.clientPut.mock.calls[0];
+      expect(saved[0]['api-key-entries']).toEqual(
+        mixed
+          ? [{ 'api-key': '', 'connection-pool': { name: 'keyless' } }, { 'api-key': 'keep-key' }]
+          : []
+      );
+      act(() => renderer.unmount());
+    }
+  );
   it('does not stay dirty when a key is changed and restored after its runtime auth-index is cleared', async () => {
     const renderer = await renderEditor();
 

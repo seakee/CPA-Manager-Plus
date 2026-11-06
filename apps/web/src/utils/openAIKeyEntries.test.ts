@@ -57,6 +57,35 @@ describe('OpenAI-compatible keyless editor rows', () => {
     ).toEqual({ apiKey: 'new-key', authIndex: '' });
   });
 
+  it.each([0, 2])(
+    'drops a keyed entry cleared by the user despite proxy and weight %s',
+    (weight) => {
+      const loaded = markPersistedOpenAIKeyEntry(
+        { apiKey: 'real-key', proxyUrl: 'http://proxy', weight },
+        0
+      );
+      const cleared = updateOpenAIApiKey(loaded, '');
+      expect(hasOpenAIKeyEntryConfiguration(cleared)).toBe(false);
+      expect(getOpenAIModelDiscoveryEntry([cleared])).toBeUndefined();
+      expect(
+        hasOpenAIKeyEntryConfiguration(
+          preservePersistedOpenAIKeyEntry(cleared, { ...cleared, weight: 3 })
+        )
+      ).toBe(false);
+      expect(hasOpenAIKeyEntryConfiguration(updateOpenAIApiKey(cleared, 'new-key'))).toBe(true);
+      expect(hasOpenAIKeyEntryConfiguration({ apiKey: '', proxyUrl: 'http://proxy', weight })).toBe(
+        true
+      );
+    }
+  );
+
+  it('keeps untouched persisted keyless entries but drops them after a real key is entered and cleared', () => {
+    const loaded = markPersistedOpenAIKeyEntry({ apiKey: '' });
+    expect(hasOpenAIKeyEntryConfiguration(updateOpenAIApiKey(loaded, ''))).toBe(true);
+    const keyed = updateOpenAIApiKey(loaded, 'real-key');
+    expect(hasOpenAIKeyEntryConfiguration(updateOpenAIApiKey(keyed, ''))).toBe(false);
+  });
+
   it('counts only real API keys and reports keyless accounting coverage explicitly', () => {
     expect(getOpenAIKeyCount([])).toBe(0);
     expect(getOpenAIKeyCount([{ apiKey: '', proxyUrl: 'socks5://proxy:1080' }])).toBe(0);
