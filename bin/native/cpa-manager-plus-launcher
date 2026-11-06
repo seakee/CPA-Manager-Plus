@@ -119,10 +119,12 @@ CPA process provenance:
   Only a process that proves it belongs to this installation is signalled: it
   must run under the CPA identity, be this installation's cli-proxy-api, and
   carry this instance's runtime config (-config under data/runtime, or the
-  Gateway directory as its working directory), pinned by the pid/start record
-  in run/cpa-instance.provenance and re-checked before any escalation. A
-  same-UID process that merely occupies the CPA port is never signalled or
-  waited on; start fails closed until an operator clears it.
+  Gateway directory as its working directory). Attribution is decided from live
+  process state; the pid/start record in run/cpa-instance.provenance is written
+  by the launcher as a pin for its own drain, is advisory, and is re-checked
+  immediately before any escalation. A same-UID process that merely occupies the
+  CPA port, shares a session, or copies this installation's command line is
+  never signalled or waited on; start fails closed until an operator clears it.
 EOF
 }
 
@@ -597,18 +599,6 @@ process_parent_pid() {
   ps -o ppid= -p "${pid}" 2>/dev/null | tr -d ' ' || true
 }
 
-process_session_id() {
-  local pid="$1"
-  local session=""
-
-  session="$(process_stat_field "${pid}" 4 || true)"
-  if [ -n "${session}" ]; then
-    printf '%s\n' "${session}"
-    return 0
-  fi
-  ps -o sess= -p "${pid}" 2>/dev/null | tr -d ' ' || true
-}
-
 process_is_descendant_of() {
   local pid="$1"
   local ancestor="$2"
@@ -824,11 +814,13 @@ refresh_cpa_instance_provenance() {
 
 # A candidate is attributable only when the instance tuple holds and the process
 # is bound to a concrete identity: either a pin this launcher recorded earlier
-# (re-checked against the live start time) or a live place in the launcher's own
-# process tree or session. Everything else fails closed and is left untouched.
+# (re-checked against the live start time) or a live descendant of this
+# incarnation's Supervisor. A shared session or process group is deliberately not
+# provenance: every process a host starts from the same shell shares it, so it
+# would re-admit the same-UID lookalike this check exists to reject.
 cpa_process_is_instance_owned() {
   local pid="$1"
-  local recorded sid self_sid
+  local recorded
 
   cpa_process_matches_instance "${pid}" || return 1
 
@@ -839,12 +831,6 @@ cpa_process_is_instance_owned() {
   fi
 
   if [ -n "${runtime_pid}" ] && process_is_descendant_of "${pid}" "${runtime_pid}"; then
-    return 0
-  fi
-
-  sid="$(process_session_id "${pid}" || true)"
-  self_sid="$(process_session_id "$$" || true)"
-  if [ -n "${sid}" ] && [ -n "${self_sid}" ] && [ "${sid}" = "${self_sid}" ]; then
     return 0
   fi
   return 1
@@ -1619,6 +1605,7 @@ stop_child_process() {
   local pid="$2"
   local child_pid_file="$3"
   local deadline="$4"
+  local waited=0
 
   if [ -n "${pid}" ] && is_pid_running "${pid}"; then
     log_msg "Stopping ${name} (PID ${pid})"
@@ -1633,7 +1620,19 @@ stop_child_process() {
       log_err "${name} (PID ${pid}) did not exit within the ${stop_timeout_sec}s shutdown budget; sending SIGKILL"
       kill -KILL "${pid}" >/dev/null 2>&1 || true
     fi
-    wait "${pid}" 2>/dev/null || true
+    # `wait` blocks for as long as the child is still alive (an unkillable
+    # D-state process would otherwise hang shutdown forever), so it is only
+    # called once the process is gone, and the reap is additionally bounded.
+    waited=0
+    while is_pid_running "${pid}" && [ "${waited}" -lt 50 ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if ! is_pid_running "${pid}"; then
+      wait "${pid}" 2>/dev/null || true
+    else
+      log_err "${name} (PID ${pid}) is still alive after SIGKILL; leaving it for the operator"
+    fi
   fi
   rm -f "${child_pid_file}"
 }
@@ -1665,9 +1664,24 @@ handle_shutdown_signal() {
     return 0
   fi
   shutting_down=1
+  # A signalled shutdown is not a failure: nothing below may abort on an error
+  # (a child already gone, a port that just closed, an interrupted `wait`) and
+  # leak its status as the launcher's exit code.
+  set +e
   log_msg "Received SIG${sig}; shutting down 3-process stack in reverse dependency order"
   shutdown_all_children
   exit 0
+}
+
+# Startup aborts degrade to a success status when the abort was requested by a
+# shutdown signal, so `systemctl stop` during startup still exits 0.
+abort_startup() {
+  shutdown_all_children
+  if [ "${shutting_down}" -eq 1 ]; then
+    log_msg "Startup interrupted by a shutdown signal; exiting 0"
+    exit 0
+  fi
+  exit 1
 }
 
 handle_reload_signal() {
@@ -1844,18 +1858,15 @@ rm -f "${cpa_provenance_file}"
 assert_listener_port_available "cpa-gateway" "${cpa_addr}"
 
 if ! spawn_runtime_supervisor; then
-  shutdown_all_children
-  exit 1
+  abort_startup
 fi
 
 if ! spawn_manager_server; then
-  shutdown_all_children
-  exit 1
+  abort_startup
 fi
 
 if ! spawn_ingress; then
-  shutdown_all_children
-  exit 1
+  abort_startup
 fi
 
 write_ready_state
@@ -1889,6 +1900,19 @@ while [ "${shutting_down}" -eq 0 ]; do
   if [ -n "${crashed_name}" ] && [ "${shutting_down}" -eq 0 ]; then
     exit_code=0
     wait "${crashed_pid}" 2>/dev/null || exit_code="$?"
+
+    # A shutdown signal that arrived while we were collecting the child status
+    # wins: the exit code of an interrupted `wait` (or of a child that was
+    # already going away) is not this launcher's status.
+    if [ "${shutting_down}" -eq 1 ]; then
+      set +e
+      shutdown_all_children
+      exit 0
+    fi
+
+    case "${exit_code}" in
+      '' | *[!0-9]*) exit_code=1 ;;
+    esac
     if [ "${exit_code}" -eq 0 ]; then
       exit_code=1
     fi

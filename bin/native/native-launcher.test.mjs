@@ -548,6 +548,30 @@ const readProvenancePids = (homeDir) => {
     .filter((pid) => Number.isInteger(pid) && pid > 0);
 };
 
+/**
+ * Resolves `[code, signal]` when the process exits, and fails instead of hanging
+ * forever when it does not. A launcher that never returns from shutdown must
+ * surface as a diagnosable failure, not as a stuck test run.
+ */
+const waitForExit = (proc, timeoutMs = 30000) =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(
+          `launcher (PID ${proc.pid}) did not exit within ${timeoutMs}ms; alive=${isPidAlive(proc.pid)}`
+        )
+      );
+    }, timeoutMs);
+    proc.once('exit', (code, signal) => {
+      clearTimeout(timer);
+      resolve([code, signal]);
+    });
+    proc.once('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+
 /** Waits until the mock Supervisor has spawned its CPA child and it is listening. */
 const waitForSpawnedCpa = async (pidFile, port, timeoutMs = 10000) => {
   const ok = await waitFor(() => {
@@ -693,9 +717,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.match(readFileSync(bootstrapKeyFile, 'utf8'), /^[0-9a-f]{64}$/);
 
     proc.kill('SIGTERM');
-    const [exitCode] = await new Promise((resolve) =>
-      proc.once('exit', (code, sig) => resolve([code, sig]))
-    );
+    const [exitCode] = await waitForExit(proc);
     assert.equal(exitCode, 0);
 
     // Token file is preserved across shutdown
@@ -824,7 +846,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       );
 
       proc.kill('SIGTERM');
-      await new Promise((resolve) => proc.once('exit', resolve));
+      await waitForExit(proc);
     }
   });
 
@@ -859,7 +881,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.equal(existsSync(readyFile), true);
 
     proc.kill('SIGTERM');
-    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
+    const [exitCode] = await waitForExit(proc);
     assert.equal(exitCode, 0);
   });
 
@@ -898,7 +920,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.equal(pinned, true, 'the launcher must pin the observed CPA child');
 
     proc.kill('SIGTERM');
-    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
+    const [exitCode] = await waitForExit(proc);
     assert.equal(exitCode, 0);
     assert.equal(isPidAlive(cpaPid), false, 'orphaned instance CPA child must be reaped');
     assert.match(
@@ -937,9 +959,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
 
       const startedAt = Date.now();
       proc.kill('SIGTERM');
-      const [exitCode] = await new Promise((resolve) =>
-        proc.once('exit', (code) => resolve([code]))
-      );
+      const [exitCode] = await waitForExit(proc);
       const elapsedMs = Date.now() - startedAt;
 
       assert.equal(exitCode, 0);
@@ -1037,7 +1057,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     );
 
     proc.kill('SIGTERM');
-    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
+    const [exitCode] = await waitForExit(proc);
     assert.equal(exitCode, 0);
     assert.doesNotMatch(stderr, /is already bound by a process that cannot be attributed/);
   });
@@ -1076,9 +1096,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       assert.equal(await waitForPortAccepting(ports.cpaPort), true);
 
       process.kill(Number(ready.runtime_pid), 'SIGKILL');
-      const [exitCode] = await new Promise((resolve) =>
-        proc.once('exit', (code) => resolve([code]))
-      );
+      const [exitCode] = await waitForExit(proc);
 
       assert.notEqual(exitCode, 0, 'the launcher must fail closed instead of restarting');
       assert.match(stderr, /is already bound by a process that cannot be attributed/);
@@ -1117,7 +1135,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.equal(await waitForFile(readyFile), true, 'launcher should reach ready state');
 
     proc.kill('SIGTERM');
-    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
+    const [exitCode] = await waitForExit(proc);
     assert.equal(exitCode, 0);
 
     const events = readFileSync(eventLog, 'utf8')
@@ -1207,7 +1225,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
 
     // 2. Second crash exceeds CPAMP_MAX_RESTARTS=1 -> launcher tears down remaining children and exits non-zero
     process.kill(restartedManagerPid, 'SIGKILL');
-    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
+    const [exitCode] = await waitForExit(proc);
     assert.notEqual(exitCode, 0, 'launcher must exit non-zero when child exceeds max restarts');
     assert.equal(isPidAlive(Number(initialReady.runtime_pid)), false);
     assert.equal(isPidAlive(Number(initialReady.ingress_pid)), false);
@@ -1387,17 +1405,199 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
 
     const proc = spawn('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
       env: env2,
-      stdio: 'ignore',
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
     activeProcesses.push(proc);
+    let sigintOutput = '';
+    proc.stdout.on('data', (chunk) => {
+      sigintOutput += chunk.toString();
+    });
+    proc.stderr.on('data', (chunk) => {
+      sigintOutput += chunk.toString();
+    });
 
     const readyFile = path.join(runDir, 'launcher.ready');
     assert.equal(await waitForFile(readyFile), true);
 
     proc.kill('SIGINT');
-    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
-    assert.equal(exitCode, 0);
+    const [exitCode, exitSignal] = await waitForExit(proc);
+    assert.equal(
+      exitSignal,
+      null,
+      `SIGINT must be handled by the launcher, not terminate it\n${sigintOutput}`
+    );
+    assert.equal(exitCode, 0, `SIGINT shutdown must exit 0, got ${exitCode}\n${sigintOutput}`);
     assert.equal(existsSync(readyFile), false);
+  });
+
+  it('exits 0 on SIGINT and SIGTERM with an active CPA child and reaps it', async () => {
+    for (const signal of ['SIGINT', 'SIGTERM']) {
+      const baseDir = makeTempDir(`cpamp-native-signal-${signal.toLowerCase()}-`);
+      const { homeDir, binDir, runDir } = createMockNativeHome(baseDir);
+      const cpaPidFile = path.join(baseDir, 'cpa.pid');
+      const rawEnv = await buildPortEnv(homeDir, {
+        CPAMP_STOP_TIMEOUT_SEC: '5',
+        MOCK_SUPERVISOR_SPAWN_CPA: '1',
+        MOCK_CPA_PID_FILE: cpaPidFile,
+      });
+      const { _ports: ports, ...env } = rawEnv;
+
+      const proc = spawn('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      activeProcesses.push(proc);
+      let output = '';
+      proc.stdout.on('data', (chunk) => {
+        output += chunk.toString();
+      });
+      proc.stderr.on('data', (chunk) => {
+        output += chunk.toString();
+      });
+
+      const readyFile = path.join(runDir, 'launcher.ready');
+      assert.equal(await waitForFile(readyFile), true);
+      const cpaPid = await waitForSpawnedCpa(cpaPidFile, ports.cpaPort);
+      assert.equal(
+        await waitFor(() => readProvenancePids(homeDir).includes(cpaPid), 5000),
+        true,
+        'the active CPA child must be pinned before the signal'
+      );
+
+      const startedAt = Date.now();
+      proc.kill(signal);
+      const [exitCode, exitSignal] = await waitForExit(proc);
+      const elapsedMs = Date.now() - startedAt;
+
+      assert.equal(
+        exitSignal,
+        null,
+        `${signal} must be handled by the launcher, not terminate it\n${output}`
+      );
+      assert.equal(exitCode, 0, `${signal} shutdown must exit 0, got ${exitCode}\n${output}`);
+      assert.equal(existsSync(readyFile), false);
+      assert.equal(
+        await waitFor(() => !isPidAlive(cpaPid), 5000),
+        true,
+        `${signal}: the CPA child must be reaped\n${output}`
+      );
+      assert.ok(elapsedMs < 8000, `${signal} shutdown took ${elapsedMs}ms\n${output}`);
+      assert.match(output, new RegExp(`Received SIG${signal.slice(3)}`));
+    }
+  });
+
+  it('never signals a same-session lookalike that copies the instance CPA command line', async () => {
+    const baseDir = makeTempDir('cpamp-native-lookalike-');
+    const { homeDir, binDir, dataDir, runDir, cpaBin } = createMockNativeHome(baseDir);
+    const rawEnv = await buildPortEnv(homeDir, { CPAMP_STOP_TIMEOUT_SEC: '5' });
+    const { _ports: ports, ...env } = rawEnv;
+
+    const proc = spawn('bash', [path.join(binDir, 'cpa-manager-plus-launcher')], {
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    activeProcesses.push(proc);
+    let output = '';
+    proc.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    proc.stderr.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    assert.equal(await waitForFile(path.join(runDir, 'launcher.ready')), true);
+
+    // Same UID, same session and process group, the installation's own CPA
+    // entry point, and a -config path under this installation's runtime root.
+    // Only the missing Supervisor parent and the missing pin distinguish it
+    // from the child the launcher owns, so it must never be signalled.
+    const lookalike = spawn(
+      cpaBin,
+      ['-config', path.join(dataDir, 'runtime/gateway/config.yaml')],
+      { stdio: 'ignore' }
+    );
+    try {
+      assert.equal(await waitForPortAccepting(ports.cpaPort), true, 'lookalike should be listening');
+
+      const startedAt = Date.now();
+      proc.kill('SIGINT');
+      const [exitCode] = await waitForExit(proc);
+      const elapsedMs = Date.now() - startedAt;
+
+      assert.equal(exitCode, 0, `launcher must exit 0\n${output}`);
+      assert.equal(
+        isPidAlive(lookalike.pid),
+        true,
+        'a same-session lookalike must not be signalled'
+      );
+      assert.match(
+        output,
+        new RegExp(`Refusing to signal PID ${lookalike.pid} on 127\\.0\\.0\\.1:${ports.cpaPort}`)
+      );
+      assert.ok(
+        elapsedMs < 4000,
+        `shutdown must not wait on an unattributable process (took ${elapsedMs}ms)\n${output}`
+      );
+    } finally {
+      try {
+        lookalike.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  it('resolves the install unit CPA address from the target instance, not the caller', async () => {
+    const sourceBase = makeTempDir('cpamp-native-install-source-');
+    const source = createMockNativeHome(sourceBase);
+    const targetBase = makeTempDir('cpamp-native-install-target-');
+    const target = createMockNativeHome(targetBase);
+    const ctl = path.join(source.homeDir, 'cpa-manager-plusctl');
+    const unitDir = path.join(targetBase, 'systemd');
+    const unitPath = path.join(unitDir, 'cpa-manager-plus.service');
+
+    // The caller's instance and the install target record different ports.
+    writeFileSync(path.join(source.runDir, 'cpa.address'), '127.0.0.1:19111\n');
+    writeFileSync(path.join(target.runDir, 'cpa.address'), '127.0.0.1:19222\n');
+
+    const baseEnv = { ...process.env, CPA_MANAGER_PLUS_HOME: source.homeDir };
+    delete baseEnv.CPAMP_RUNTIME_CPA_ADDR;
+    delete baseEnv.CPAMP_CPA_PORT;
+    delete baseEnv.CPAMP_GATEWAY_URL;
+    delete baseEnv.CPA_UPSTREAM_URL;
+
+    const install = (extraEnv) =>
+      spawnSync(
+        'bash',
+        [ctl, 'install', '--home', target.homeDir, '--unit-dir', unitDir, '--no-systemctl'],
+        { env: { ...baseEnv, ...extraEnv }, encoding: 'utf8' }
+      );
+
+    const baseRes = install({});
+    assert.equal(baseRes.status, 0, baseRes.stderr);
+    const baseUnit = readFileSync(unitPath, 'utf8');
+    assert.match(baseUnit, /Environment="CPAMP_RUNTIME_CPA_ADDR=127\.0\.0\.1:19222"/);
+    assert.doesNotMatch(
+      baseUnit,
+      /127\.0\.0\.1:19111/,
+      "the caller instance's recorded address must never leak into the target unit"
+    );
+
+    // An explicit override still wins over either recorded address.
+    const overrideRes = install({ CPAMP_CPA_PORT: '19111' });
+    assert.equal(overrideRes.status, 0, overrideRes.stderr);
+    assert.match(
+      readFileSync(unitPath, 'utf8'),
+      /Environment="CPAMP_RUNTIME_CPA_ADDR=127\.0\.0\.1:19111"/
+    );
+
+    // No override and no record for the target: the documented default applies.
+    rmSync(path.join(target.runDir, 'cpa.address'), { force: true });
+    const defaultRes = install({});
+    assert.equal(defaultRes.status, 0, defaultRes.stderr);
+    assert.match(
+      readFileSync(unitPath, 'utf8'),
+      /Environment="CPAMP_RUNTIME_CPA_ADDR=127\.0\.0\.1:8317"/
+    );
   });
 
   it('packages the v2 linux/amd64 Native archive with distinct naming, pinned CPA sha256 verification, root-owned members, and runnable layout', async () => {
@@ -1779,9 +1979,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
       foreign.listen(ports.runtimePort, '::1', resolve);
     });
     try {
-      const [exitCode] = await new Promise((resolve) =>
-        proc.once('exit', (code, signal) => resolve([code, signal]))
-      );
+      const [exitCode] = await waitForExit(proc);
       assert.notEqual(exitCode, 0, 'the launcher must not report ready while a foreign listener shares the port');
       assert.match(stderr, /Timed out after 3s waiting for runtime-supervisor/);
       assert.equal(existsSync(path.join(runDir, 'launcher.ready')), false);
@@ -1975,7 +2173,7 @@ describe('v2 Native linux/amd64 3-process launcher, ctl, and packaging', () => {
     assert.equal(readReadyState(path.join(homeDir, 'run')).cpa_addr, `127.0.0.1:${decimalPort}`);
 
     proc.kill('SIGTERM');
-    const [exitCode] = await new Promise((resolve) => proc.once('exit', (code) => resolve([code])));
+    const [exitCode] = await waitForExit(proc);
     assert.equal(exitCode, 0);
   });
 

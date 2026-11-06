@@ -622,6 +622,11 @@ listening_pids_on_port() {
 # inside this installation. A process that only listens on the CPA port, or only
 # carries a matching argv substring under the same UID, is untrusted and is left
 # untouched for the operator.
+#
+# The launcher-written record pins a pid and start time; it is advisory. `ctl`
+# decides attribution from live process state (identity, entry point, runtime
+# configuration) and only accepts a record whose pinned start time still matches
+# the live process, so a stale or forged file can never widen what is signalled.
 cpa_runtime_root() {
   local runtime_data_dir="${CPAMP_RUNTIME_DATA_DIR:-"${data_dir}/runtime"}"
   local journal_path="${CPAMP_RUNTIME_JOURNAL_PATH:-"${runtime_data_dir}/supervisor/operations.sqlite"}"
@@ -927,7 +932,7 @@ start_v2_app() {
     # `stop` always agree and neither falls back to a hardcoded 8317.
     launcher_cpa_address="${CPAMP_RUNTIME_CPA_ADDR:-}"
     if [ -z "${launcher_cpa_address}" ]; then
-      launcher_cpa_address="$(resolve_cpa_address_for_start)"
+      launcher_cpa_address="$(resolve_cpa_address_for_instance "${run_dir}")"
     fi
     export CPAMP_RUNTIME_CPA_ADDR="${launcher_cpa_address}"
     exec nohup "${launcher_bin}" "$@"
@@ -1193,7 +1198,8 @@ split_host_port() {
 }
 
 read_persisted_cpa_address() {
-  local persisted="${run_dir}/cpa.address"
+  local source_run_dir="${1:-${run_dir}}"
+  local persisted="${source_run_dir}/cpa.address"
   local candidate=""
 
   if [ -f "${persisted}" ] && [ ! -L "${persisted}" ]; then
@@ -1231,16 +1237,20 @@ resolve_cpa_address() {
   read_persisted_cpa_address || cpa_address_from_environment
 }
 
-# `start` honours an explicit override first, then the address this installation
-# last ran with, then the default. The resolved value is exported to the
-# launcher, so a restart can never drift back to the hardcoded 8317.
-resolve_cpa_address_for_start() {
+# `start` and `install` are acting on a specific instance, so they resolve in
+# this order: explicit override, that instance's own recorded address, then the
+# documented default. `start` passes this installation's run directory and
+# `install` passes the target's, so installing instance B never inherits
+# instance A's port and a restart can never drift back to the hardcoded 8317.
+resolve_cpa_address_for_instance() {
+  local instance_run_dir="$1"
+
   if [ -n "${CPAMP_RUNTIME_CPA_ADDR:-}" ] || [ -n "${CPAMP_CPA_PORT:-}" ] ||
     [ -n "${CPAMP_GATEWAY_URL:-}" ] || [ -n "${CPA_UPSTREAM_URL:-}" ]; then
     cpa_address_from_environment
     return 0
   fi
-  read_persisted_cpa_address || printf '%s\n' "127.0.0.1:8317"
+  read_persisted_cpa_address "${instance_run_dir}" || printf '%s\n' "127.0.0.1:8317"
 }
 
 extract_host_port_from_url() {
@@ -1643,7 +1653,7 @@ install_service() {
   local manager_addr="${CPAMP_MANAGER_ADDR:-127.0.0.1:18319}"
   local ingress_control_addr="${CPAMP_INGRESS_CONTROL_ADDR:-127.0.0.1:18320}"
   local cpa_addr
-  cpa_addr="$(resolve_cpa_address)"
+  cpa_addr="$(resolve_cpa_address_for_instance "${target_run_dir}")"
 
   require_unit_address "public ingress" "${public_http_addr}" "false"
   require_unit_address "runtime" "${runtime_addr}" "true"
