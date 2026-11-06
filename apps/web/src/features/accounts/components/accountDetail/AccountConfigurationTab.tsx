@@ -52,6 +52,9 @@ export function AccountConfigurationTab({
   const capabilities = getAuthFileConfigurationCapabilities(state?.providerKey || row.provider);
   const providerLabel = getProviderLabel(state?.providerKey || row.provider, t);
   const disabled = disableControls || sharedSourceReadOnly || state?.saving === true;
+  // Unknown CPA precedence only blocks the credential exclusion list; every other
+  // configuration field stays editable.
+  const excludedModelsDisabled = disabled || exclusionPriority === 'unknown';
   const reloadAndRestoreFocus = () => {
     void editor.reload().then(() => {
       if (typeof window === 'undefined') return;
@@ -366,7 +369,7 @@ export function AccountConfigurationTab({
             value={draft.excludedModelsText}
             placeholder={t('auth_files.excluded_models_placeholder')}
             aria-label={t('auth_files.excluded_models_label')}
-            disabled={disabled}
+            disabled={excludedModelsDisabled}
             onChange={(event) => editor.updateField('excludedModelsText', event.target.value)}
           />
           <div className="hint">

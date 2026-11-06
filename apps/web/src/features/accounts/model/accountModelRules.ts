@@ -40,8 +40,10 @@ export const getAccountModelExclusionPriority = (
   const comparison = compareVersion(version, LAST_MERGE_VERSION);
   if (comparison > 0) return 'override';
   if (comparison < 0) return 'merge';
-  // Commits after the v8.0.32 tag may or may not include the precedence change.
-  return describeMatch ? 'unknown' : 'merge';
+  // A describe at distance 0 is exactly the v8.0.32 tag; later commits may or may
+  // not include the precedence change.
+  if (!describeMatch) return 'merge';
+  return Number.parseInt(describeMatch[4], 10) === 0 ? 'merge' : 'unknown';
 };
 
 export type AccountModelRuleScope =

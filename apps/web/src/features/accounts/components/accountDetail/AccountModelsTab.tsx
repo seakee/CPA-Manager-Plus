@@ -190,6 +190,8 @@ export function AccountModelsTab({
       : null;
   const precedenceUnknown =
     globalRulesKnown && exclusionPriority === 'unknown' && projection.globalRules.length > 0;
+  const precedenceUnknownWithoutGlobalRules =
+    globalRulesKnown && exclusionPriority === 'unknown' && projection.globalRules.length === 0;
   const hasUnresolvedRows = useMemo(
     () => projection.rows.some((row) => !row.ruleModelIdResolved),
     [projection.rows]
@@ -230,7 +232,9 @@ export function AccountModelsTab({
     row.runtimeOnly ||
     sharedSourceReadOnly ||
     !globalRulesKnown ||
-    precedenceUnknown ||
+    // Credential exclusions cannot be interpreted without a known CPA version, so
+    // the gate never depends on whether global rules happen to exist.
+    exclusionPriority === 'unknown' ||
     state?.saving === true ||
     !editorReady;
   const disabledCount = projection.rows.filter((model) => isKnownDisabledScope(model.scope)).length;
@@ -448,6 +452,12 @@ export function AccountModelsTab({
       {precedenceUnknown ? (
         <div className={styles.accountModelsWarning} role="note">
           {t('accounts.model_precedence_unknown', { count: projection.globalRules.length })}
+        </div>
+      ) : null}
+
+      {precedenceUnknownWithoutGlobalRules ? (
+        <div className={styles.accountModelsWarning} role="note">
+          {t('accounts.model_precedence_unknown_no_global')}
         </div>
       ) : null}
 

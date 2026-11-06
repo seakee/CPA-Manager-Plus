@@ -78,6 +78,16 @@ describe('pluginConfigDraft', () => {
     expect(buildPluginConfigPatch(draft, fields, t).patch).toEqual({});
   });
 
+  it('keeps an explicitly empty array instead of inheriting its schema default', () => {
+    const fields = [
+      { name: 'items', type: 'array', enumValues: [], description: '', defaultValue: [1, 2] },
+    ];
+    const draft = createPluginConfigDraft(fields, { items: [] }, false);
+
+    expect(draft.values.items).toBe(JSON.stringify([], null, 2));
+    expect(buildPluginConfigPatch(draft, fields, t).patch).toEqual({});
+  });
+
   it('patches only fields explicitly edited from inherited defaults', () => {
     const fields = [
       { name: 'flag', type: 'boolean', enumValues: [], description: '', defaultValue: true },

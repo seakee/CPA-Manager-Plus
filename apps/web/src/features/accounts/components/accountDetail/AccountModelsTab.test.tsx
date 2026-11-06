@@ -9,9 +9,9 @@ import { AccountModelsTab } from './AccountModelsTab';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const mockAuthState = vi.hoisted(() => ({ serverVersion: 'v8.0.13' }));
+const mockAuthState = vi.hoisted(() => ({ serverVersion: 'v8.0.13' as string | null }));
 vi.mock('@/stores/useAuthStore', () => ({
-  useAuthStore: (selector: (state: { serverVersion: string }) => unknown) =>
+  useAuthStore: (selector: (state: { serverVersion: string | null }) => unknown) =>
     selector(mockAuthState),
 }));
 beforeEach(() => {
@@ -189,6 +189,16 @@ const findLoadingSpinners = (renderer: ReactTestRenderer) =>
       node.props.className.split(/\s+/).includes('loading-spinner')
   );
 
+const unknownVersionGlobalRules: [string | null, Record<string, string[]>][] = [
+  [null, {}],
+  [null, { codex: [] }],
+  [null, { codex: ['gpt-global'] }],
+  ['custom', {}],
+  ['custom', { codex: [] }],
+  ['custom', { codex: ['gpt-global'] }],
+  ['v8.0.32-1-gabc1234', { codex: [] }],
+];
+
 describe('AccountModelsTab', () => {
   it('does not render animated icons for automatic model loading', () => {
     const editor = makeEditor();
@@ -295,6 +305,62 @@ describe('AccountModelsTab', () => {
     );
     expect(action.props.disabled).toBe(true);
   });
+
+  it.each(unknownVersionGlobalRules)(
+    'blocks credential model actions on unrecognized CPA version %j with global rules %j',
+    (serverVersion, globalExcluded) => {
+      mockAuthState.serverVersion = serverVersion;
+      const editor = makeEditor();
+      const { renderer } = renderTab({
+        editor,
+        models: [{ id: 'gpt-5.6-terra' }, { id: 'gpt-6-luna' }],
+        globalExcluded,
+        globalExcludedState: 'ready',
+      });
+      const action = findButtonByText(
+        findModelRow(renderer, 'gpt-6-luna'),
+        'accounts.model_disable_for_credential'
+      );
+      expect(action.props.disabled).toBe(true);
+      act(() => {
+        action.props.onClick();
+      });
+      expect(editor.updateField).not.toHaveBeenCalled();
+    }
+  );
+
+  it('explains the blocked actions when an unrecognized version has no global rules', () => {
+    mockAuthState.serverVersion = null;
+    const { renderer } = renderTab({
+      models: [{ id: 'gpt-6-luna' }],
+      globalExcluded: { codex: [] },
+      globalExcludedState: 'ready',
+    });
+    expect(readText(renderer.toJSON())).toContain('accounts.model_precedence_unknown_no_global');
+  });
+
+  it.each(['v8.0.32', 'v8.0.55', 'v8.0.32-0-gabc1234', 'v8.0.33-0-gabc1234'] as const)(
+    'keeps credential model actions editable on CPA %s',
+    (serverVersion) => {
+      mockAuthState.serverVersion = serverVersion;
+      const editor = makeEditor();
+      const { renderer } = renderTab({
+        editor,
+        models: [{ id: 'gpt-6-luna' }],
+        globalExcluded: { codex: [] },
+        globalExcludedState: 'ready',
+      });
+      const action = findButtonByText(
+        findModelRow(renderer, 'gpt-6-luna'),
+        'accounts.model_disable_for_credential'
+      );
+      expect(action.props.disabled).toBe(false);
+      act(() => {
+        action.props.onClick();
+      });
+      expect(editor.updateField).toHaveBeenCalledWith('excludedModelsText', 'gpt-6-luna');
+    }
+  );
 
   it('routes a restore that would empty the credential list to global rules', () => {
     mockAuthState.serverVersion = 'v8.0.40';

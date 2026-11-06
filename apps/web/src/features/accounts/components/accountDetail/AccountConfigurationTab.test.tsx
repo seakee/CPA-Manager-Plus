@@ -324,6 +324,40 @@ describe('AccountConfigurationTab', () => {
     expect(text).not.toContain('common.save');
   });
 
+  it.each(['custom', null] as const)(
+    'keeps the exclusion list read-only for unrecognized CPA version %j while other fields stay editable',
+    (serverVersion) => {
+      mockAuthState.serverVersion = serverVersion;
+      try {
+        const renderer = renderTab(makeRow(), makeEditor('codex'));
+        const excluded = renderer.root.findByProps({
+          'aria-label': 'auth_files.excluded_models_label',
+        });
+        const headers = renderer.root.findByProps({ 'aria-label': 'auth_files.headers_label' });
+        expect(excluded.props.disabled).toBe(true);
+        expect(headers.props.disabled).toBe(false);
+      } finally {
+        mockAuthState.serverVersion = null;
+      }
+    }
+  );
+
+  it.each(['v8.0.32', 'v8.0.55', 'v8.0.32-0-gabc1234', 'v8.0.33-0-gabc1234'] as const)(
+    'keeps the exclusion list editable on CPA %s',
+    (serverVersion) => {
+      mockAuthState.serverVersion = serverVersion;
+      try {
+        const renderer = renderTab(makeRow(), makeEditor('codex'));
+        const excluded = renderer.root.findByProps({
+          'aria-label': 'auth_files.excluded_models_label',
+        });
+        expect(excluded.props.disabled).toBe(false);
+      } finally {
+        mockAuthState.serverVersion = null;
+      }
+    }
+  );
+
   it.each([
     ['v8.0.32', null],
     ['v8.0.33', 'accounts.config_excluded_models_override_hint'],

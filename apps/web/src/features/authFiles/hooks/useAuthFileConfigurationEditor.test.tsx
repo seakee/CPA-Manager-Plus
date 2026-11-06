@@ -47,6 +47,12 @@ vi.mock('@/stores', () => ({
   ) => selector({ showNotification: mocks.showNotification }),
 }));
 
+const mockAuthState = vi.hoisted(() => ({ serverVersion: 'v8.0.55' as string | null }));
+vi.mock('@/stores/useAuthStore', () => ({
+  useAuthStore: (selector: (state: { serverVersion: string | null }) => unknown) =>
+    selector(mockAuthState),
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const file = {
@@ -280,6 +286,63 @@ describe('useAuthFileConfigurationEditor', () => {
       'excluded-models': ['canonical-model'],
     });
     expect(latest?.state?.record).not.toHaveProperty('excluded_models');
+  });
+
+  it.each([
+    [null, false],
+    ['custom', false],
+    ['v8.0.32', true],
+    ['v8.0.55', true],
+  ] as const)(
+    'blocks a pre-existing exclusion change when CPA version is %j (savable: %s)',
+    async (serverVersion, savable) => {
+      mockAuthState.serverVersion = serverVersion;
+      try {
+        await act(async () => {
+          renderer = create(<Harness />);
+          await Promise.resolve();
+        });
+        await flush();
+
+        act(() => latest?.updateField('excludedModelsText', 'gpt-4o'));
+        expect(latest?.dirty).toBe(true);
+        expect(latest?.canSave).toBe(savable);
+
+        await act(async () => {
+          await latest?.save();
+        });
+
+        if (savable) {
+          expect(mocks.patchFieldsWithPluginSourceFallback).toHaveBeenCalledWith(
+            expect.anything(),
+            { 'excluded-models': ['gpt-4o'] },
+            expect.anything()
+          );
+        } else {
+          expect(mocks.patchFieldsWithPluginSourceFallback).not.toHaveBeenCalled();
+          expect(mocks.patchFieldsForAuthIndexes).not.toHaveBeenCalled();
+          expect(latest?.dirty).toBe(true);
+        }
+      } finally {
+        mockAuthState.serverVersion = 'v8.0.55';
+      }
+    }
+  );
+
+  it('keeps an unrecognized CPA version from blocking unrelated configuration saves', async () => {
+    mockAuthState.serverVersion = 'custom';
+    try {
+      await act(async () => {
+        renderer = create(<Harness />);
+        await Promise.resolve();
+      });
+      await flush();
+
+      act(() => latest?.updateField('note', 'updated'));
+      expect(latest?.canSave).toBe(true);
+    } finally {
+      mockAuthState.serverVersion = 'v8.0.55';
+    }
   });
 
   it('does not mark formatting-only edits as unsaved but keeps invalid edits guarded', async () => {
