@@ -1,5 +1,55 @@
 # Docker Deployment
 
+## v2 Beta: Embedded Three-Image Installation
+
+::: warning Choose the correct channel
+This section is for v2 Beta only. The existing single-container, `latest`, and separate CPA examples below are **1.x Stable** instructions; `bin/install-cpamp.sh` also still installs 1.x by default. Do not substitute them for the v2 image group or mount an existing 1.x volume directly into v2: read [Upgrade And Rollback](../operations/update.md) first.
+:::
+
+### Download Assets From One Prerelease
+
+Select an actually published v2 Beta **Prerelease** from [GitHub Releases](https://github.com/seakee/CPA-Manager-Plus/releases). Download its `docker-compose.v2-embedded.yml`, `embedded-release-pairing.json`, and `checksums.txt`. These downloads do not exist before publication; the version below is an example and must be replaced with the chosen release.
+
+```bash
+export TAG=v2.0.0-beta.1
+curl -fLO "https://github.com/seakee/CPA-Manager-Plus/releases/download/$TAG/docker-compose.v2-embedded.yml"
+curl -fLO "https://github.com/seakee/CPA-Manager-Plus/releases/download/$TAG/embedded-release-pairing.json"
+curl -fLO "https://github.com/seakee/CPA-Manager-Plus/releases/download/$TAG/checksums.txt"
+```
+
+Compare both downloaded files with `checksums.txt` and retain them for upgrades/rollback. The pairing record binds the version, source commit, three image Manifest Digests, Full Web manifest, and API contract; never mix releases. Image references are `seakee/cpa-manager-plus:<tag>@sha256:<digest>`, `seakee/cpamp-ingress:<tag>@sha256:<digest>`, and `seakee/cpamp-runtime:<tag>@sha256:<digest>`. Do not remove Digests, use floating tags, or add local `build:` entries. The first Beta pairing targets `linux/amd64`; never upgrade Runtime independently.
+
+### Topology, Data, And Public Entry
+
+| Service | Responsibility | Storage and port boundary |
+| --- | --- | --- |
+| `cpamp-ingress` | Unified Full Web, Manager API, and model traffic entry | Only published port: `${CPAMP_PUBLIC_PORT:-18317}:18317`; no mounted volumes |
+| `cpamp-manager` | Management, SQLite, Full Web/API pairing | `cpamp-manager-data` → `/data`; read-only Runtime transport secret; no host port |
+| `cpamp-runtime` | Runtime Supervisor manages the pinned official CPA `v8.0.55` | `cpamp-runtime-data` → `/runtime`; writable transport secret; internal `8317`/`9081` only |
+
+`cpamp-runtime-transport-secret` is mounted at `/run/cpamp/runtime-secret` in Manager and Runtime, never Ingress. Preserve the release topology: no Docker socket, privileged mode, host networking, or published Runtime control port. Actual named volumes include a Compose project prefix; keep using the same directory/project. Back up the complete Manager and Runtime data sets; see [Backup And Restore](../operations/backup.md).
+
+### Initialize And Claim The Installation
+
+Configure the real public origin reachable from the deployment environment. For a TLS reverse proxy, use its `https://` origin; set `CPAMP_PUBLIC_PORT` as well if the host port differs. This is not CPA's internal URL.
+
+```bash
+export CPAMP_PUBLIC_ORIGIN='http://your-host:18317'
+docker compose -f docker-compose.v2-embedded.yml config
+docker compose -f docker-compose.v2-embedded.yml pull
+docker compose -f docker-compose.v2-embedded.yml up -d
+docker compose -f docker-compose.v2-embedded.yml exec -T cpamp-manager cpa-manager-plus initialize
+```
+
+`initialize` is a one-shot host-authorized operation. It prints `/.well-known/cpamp-bootstrap/ui#handoff=...`. Append the **entire output, including the fragment**, to your public origin and open it in a browser. This short-lived claim credential must not enter screenshots or service logs. The initial read-only listener may remain running. To reissue/resume, stop the writable Manager first, run `docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps cpamp-manager initialize`, then `up -d` again; do not delete the database to reset installation.
+
+In the browser, set and save the CPAMP Admin Key, then choose **New Managed** (new managed CPA), **Adopt** (qualify and migrate an existing CPA), or **External** (connect to an independently operated CPA). Adopt/External are not unconditional success paths: resolve the wizard's source, version, credential, or evidence refusals and stop if admission fails; do not edit installation records manually. External requires at least CPA `v8.0.55`; see [Runtime Model](../guide/runtime-model.md).
+
+For New Managed, save the one-time first Client Key and verify model requests through the public entry before sending production traffic. Admin Key, CPA Management Key, and Client Key are different credentials. A successful process `/health` is not installation completion or Gateway readiness: require the wizard's completion, routing verification, and client connectivity.
+
+## 1.x Stable: Manual Deployment Reference
+
+
 Docker is the simplest path for a new deployment. The CPAMP image contains Manager Server and the embedded `management.html` panel. CPA / CLI Proxy API is still a separate service, and can run in the same Compose stack.
 
 If you want the script to check the environment and generate Compose files for you, start with [One-Click Installer](./installer.md). The rest of this page is for manual Compose maintenance or merging CPAMP into an existing deployment.

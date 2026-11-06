@@ -1,5 +1,44 @@
 # Native Packages
 
+## v2 Beta: linux/amd64 Only
+
+The first v2 Beta native asset is **`cpa-manager-plus-native-v2_<ver>_linux_amd64.tar.gz`**. Download it manually from the matching GitHub Prerelease and verify it against that release's `checksums.txt`. Do not derive a v2 download URL from the 1.x `cpa-manager-plus_<ver>_<os>_<arch>` names. v2 Beta ships **no** `darwin_amd64`, `darwin_arm64`, `linux_arm64`, `windows_amd64`, or `windows_arm64` native packages. Those platforms can stay on 1.x Stable or use [Embedded Beta](./docker.md) on a Docker host meeting the `linux/amd64` requirement. External is a CPA operating mode, not a native package for unsupported platforms.
+
+### Package Contents And Process Boundary
+
+Unlike the 1.x single-binary package below, v2 includes:
+
+- `bin/cpa-manager-plus`, `bin/cpa-manager-plus-ingress`, `bin/cpa-manager-plus-runtime-supervisor`, and `bin/cli-proxy-api` (pinned official CPA `v8.0.55`).
+- `cpa-manager-plus-launcher` (at the root and in `bin/`), `cpa-manager-plusctl`, and `cpa-manager-plus.service`.
+- `share/cpamp/runtime/cpa-artifact.json`, `share/cpamp/runtime/config.seed.yaml`, root `LICENSE`, and `share/licenses/cli-proxy-api/LICENSE`.
+- `data/`, `run/`, and `logs/`; Manager defaults to `data/usage.sqlite` and `data/data.key`, Runtime to `data/runtime/`. Backups must also include SQLite WAL/SHM, `usage-archives/` when present, and Runtime state; see [Backup And Restore](../operations/backup.md).
+
+The launcher manages Runtime Supervisor, Manager, and Ingress, with CPA managed by Runtime. Starting only the Manager binary does not start this stack. The launcher runs as root and only the CPA child drops to a dedicated identity; `cpa-manager-plusctl install` creates `cpamp-cpa` and the isolated directory layout. Do not use the 1.x single-process systemd example below for v2.
+
+### Install And Claim
+
+Extract into a fixed directory (the example uses `/opt/cpa-manager-plus`, directly containing `bin/` and the control script, not another nested archive directory). From that directory:
+
+```bash
+sudo ./cpa-manager-plusctl install --home /opt/cpa-manager-plus
+sudo env USAGE_DATA_DIR=/opt/cpa-manager-plus/data \
+  ./bin/cpa-manager-plus initialize
+```
+
+Keep the short-lived `/.well-known/cpamp-bootstrap/ui#handoff=...` output private; it is neither a log entry nor an Admin Key. Before startup, configure `CPAMP_PUBLIC_ORIGIN` in the systemd service environment with the real public origin, for example `http://your-host:18317`, then start:
+
+```bash
+sudo systemctl start cpa-manager-plus.service
+sudo systemctl status cpa-manager-plus.service
+```
+
+Append the entire Handoff path to the public origin in a browser, set an Admin Key, select New Managed / Adopt / External, and complete qualification. For New Managed, save the first Client Key and verify the public entry. Stop the entire service before reissuing `initialize`, resetting Admin, backing up, or migrating; do not run systemd and `cpa-manager-plusctl start` concurrently. Existing 1.x users must follow the [v1.14.10 offline migration and rollback procedure](../operations/update.md), never start v2 directly against the old data directory.
+
+Check Native licensing using the actual package's `LICENSE` and `share/licenses/cli-proxy-api/LICENSE`. Container third-party inventory and Provenance paths do not apply to Native; see [Releases And Licensing](../reference/releases.md).
+
+## 1.x Stable: Multi-Platform Single-Binary Packages
+
+
 Use native packages when Docker is not part of your environment. They fit deployments already managed by systemd, launchd, Windows services, or another process supervisor.
 
 Native mode is still Manager Server mode: the binary serves `/management.html`, stores SQLite data locally, and uses the CPAMP Admin Key for login. It is not the old "external Usage Service for the CPA-port panel" workflow.

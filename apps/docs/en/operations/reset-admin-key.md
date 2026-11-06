@@ -1,5 +1,30 @@
 # Reset Admin Key
 
+## v2 Beta: Preserve Data And Installation State
+
+Stop and follow [Backup And Restore](./backup.md) for Manager (`usage.sqlite`, WAL/SHM, `data.key`, and `usage-archives/` when present), plus Embedded Runtime/secrets. Reset replaces only Manager's administrator credential. It cannot recover `data.key`, rotate CPA Management Key/Client Keys, reclaim installation, or complete an upgrade. First installation uses [Host Initialize And Handoff](../deployment/docker.md), not Admin reset instead of the wizard.
+
+From the same release Compose directory/project, preserving the three-image Digest pairing:
+
+```bash
+docker compose -f docker-compose.v2-embedded.yml stop
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  cpamp-manager reset-admin-key --db-path /data/usage.sqlite
+```
+
+Save the new Admin Key shown once in the terminal. Only after success run `docker compose -f docker-compose.v2-embedded.yml up -d` and sign in through the original public entry. Do not delete volumes, lock files, or installation records. On failure, leave services stopped and check the actual data path. Keep output out of public logs.
+
+For linux/amd64 Native, stop the complete launcher/systemd service and back up first, then run from the package root:
+
+```bash
+sudo ./bin/cpa-manager-plus reset-admin-key --db-path "$PWD/data/usage.sqlite"
+```
+
+For an explicit new key, prefer `--admin-key-file` with a private file; Docker also needs that file mounted read-only and the container-side path. After success restart the original service and verify administrator login/CPA connection, rather than rerunning the installer. Upgrade refusals still follow [Upgrade](./update.md) (source baseline `v1.14.10`, minimum CPA `v8.0.55`).
+
+## 1.x Stable: Original Deployment Recovery
+
+
 Use this page when you have lost the CPAMP Admin Key for Full Docker or native Manager Server mode. It does not reset the CPA Management Key and cannot recover a lost `data.key`.
 
 The reset command modifies the local SQLite database directly. Stop Manager Server before running it so the service does not keep writing to SQLite.

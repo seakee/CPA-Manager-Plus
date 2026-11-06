@@ -1,5 +1,30 @@
 # 重置管理员密钥
 
+## v2 Beta：保持原数据与安装状态
+
+先按 [备份与恢复](./backup.md) 停机备份 Manager（`usage.sqlite`、WAL/SHM、`data.key`、`usage-archives/`，存在时）及 Embedded Runtime/secret。重置仅替换 Manager 的管理员凭证，不会恢复 `data.key`、轮换 CPA Management Key/Client Key、重新认领安装或完成升级。首次安装应使用 [Host initialize 与 Handoff](../deployment/docker.md)，不要用重置命令代替向导。
+
+在同一发布 Compose 目录/项目下（保留三镜像 Digest 配对）：
+
+```bash
+docker compose -f docker-compose.v2-embedded.yml stop
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  cpamp-manager reset-admin-key --db-path /data/usage.sqlite
+```
+
+保存终端仅显示一次的新 Admin Key；命令成功后才执行 `docker compose -f docker-compose.v2-embedded.yml up -d`，通过原公开入口登录。不要删除数据卷、锁文件或安装记录；失败时保持停止，核对真实数据路径。不要让输出进入公开日志。
+
+linux/amd64 Native 在停止完整 launcher/systemd 服务、完成备份后，从包根目录执行：
+
+```bash
+sudo ./bin/cpa-manager-plus reset-admin-key --db-path "$PWD/data/usage.sqlite"
+```
+
+如果显式指定新密钥，使用 `--admin-key-file` 及私有文件；Docker 还需把该文件只读挂到一次性容器并使用容器内路径。成功后恢复原服务，验证管理员登录和 CPA 连接，不要重复运行安装器。升级中的拒绝仍按 [升级手册](./update.md) 处理（源基线 `v1.14.10`、CPA 最低 `v8.0.55`）。
+
+## 1.x Stable：原部署恢复步骤
+
+
 忘记 CPAMP 管理员密钥时，用这页重置完整 Docker / 原生 Manager Server 模式的登录密钥。它不会重置 CPA Management Key，也不能恢复丢失的 `data.key`。
 
 重置命令会直接修改本地 SQLite 数据库。执行前请先停止 Manager Server，避免服务运行中继续写入 SQLite。

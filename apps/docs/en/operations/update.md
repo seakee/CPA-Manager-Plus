@@ -1,5 +1,118 @@
 # Upgrade CPA Manager Plus
 
+## v2 Beta: Upgrade From 1.x, Not An In-Place Image Change
+
+::: warning Exact baseline and stop conditions
+The minimum direct upgrade version is **`v1.14.10`**; the current CLI accepts only that exact declaration, not every later 1.x release automatically. For `<= v1.14.9`, first upgrade using the original deployment method to `v1.14.10`, verify it, then stop it. Merely changing `--source-version` is not an upgrade. Target CPA requires at least **`v8.0.55`** (Embedded pins that version). Version differences, unknown/newer schemas, a busy source, evidence mismatches, or history differences require operator action; never edit SQLite markers to proceed.
+:::
+
+1. Download one v2 Prerelease's `docker-compose.v2-embedded.yml`, `embedded-release-pairing.json`, and checksum file. Retain all three `<tag>@sha256:<digest>` image references as a group; see [Beta Installation](../deployment/docker.md). `releases/latest` and the installer remain 1.x Stable.
+2. Save the exact 1.x image/binary, Compose, environment, and volume mapping. Stop the old Manager; also stop the old CPA when migrating a managed CPA. Back up `usage.sqlite`, WAL/SHM, `data.key`, `usage-archives/` when present, configuration, and secrets; see [Backup](./backup.md). Prevent all other source writers.
+3. Give v2 **separate new data volumes**. Keep the original 1.x volume unchanged and read-only. Source roots must not overlap target/backup roots; scratch snapshots must be outside source and target. Follow the preflight disk-space report.
+
+### Docker: Offline Preflight, Copy-In, And Four-Domain Reconciliation
+
+Run from the v2 release Compose directory. `LEGACY_MOUNT` is the **actual old volume name** (check `docker inspect`), not a new empty volume. For a bind-mounted source, set both `LEGACY_MOUNT` and `LEGACY_ROOT` to the same actual absolute host path so the container and rollback plan agree. Replace the example volume name.
+
+```bash
+export LEGACY_MOUNT='actual-1x-manager-volume'
+export LEGACY_ROOT='/legacy'
+umask 077
+mkdir -p upgrade-secrets
+docker compose -f docker-compose.v2-embedded.yml stop
+upgrade_cli() {
+  docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+    --add-host host.docker.internal:host-gateway \
+    -v "$LEGACY_MOUNT:$LEGACY_ROOT:ro" \
+    -v "$PWD/upgrade-secrets":/upgrade-secrets:ro \
+    cpamp-manager upgrade "$@"
+}
+upgrade_cli preflight --legacy "$LEGACY_ROOT" \
+  --source-version v1.14.10 --target-dir /data --json
+```
+
+Require exit `0` and `ready: true`, then execute these separately:
+
+```bash
+upgrade_cli run --legacy "$LEGACY_ROOT" \
+  --source-version v1.14.10 --target /data --json
+upgrade_cli reconcile --legacy "$LEGACY_ROOT" \
+  --source-version v1.14.10 --target /data --json
+```
+
+Continue only after each step succeeds. `run` performs backup/copy-in, not the complete upgrade; its default backup is the target's `upgrade-backup/`. `reconcile` compares **`retained`, `pricing`, `coverage`, and `history`**; inapplicable domains must state why. Review permanently incomplete UTC days individually before repeating the same `reconcile` command with `--acknowledge YYYY-MM-DD` for each day. `--acknowledge-parity-gaps` accepts only reported parity days already lost by old versions, not other measured mismatches. Do not add acknowledgements blindly or interpret them as restoring lost history.
+
+### Finish CPA Connection And Final Verification
+
+**External path**: the CPA operator independently upgrades/configures CPA to at least `v8.0.55` and makes it reachable from the CLI container. Put the real Management Key in a private host file `upgrade-secrets/cpa-management-key`, not a command argument. Replace the example URL:
+
+```bash
+upgrade_cli external-connect --target /data \
+  --cpa-base-url 'http://your-cpa-host:8317' \
+  --management-key-file /upgrade-secrets/cpa-management-key --json
+upgrade_cli verify --legacy "$LEGACY_ROOT" --target /data --json
+upgrade_cli status --db-path /data/usage.sqlite --json
+```
+
+Normal startup requires proven connection, identity, model surface, reconciliation, and the persisted stage `complete`. If the version header is absent, `external-connect --cpa-version` only declares the actual CPA version; it does not turn v7 into v8. After rotating the key, use `--reprove` at the same URL to prove it again rather than repeatedly presenting rejected credentials.
+
+**Managed path**: import the old CPA configuration/credentials and prove the Runtime destination; do not use `external-connect` against an internal address instead. Start only target Runtime and Ingress, keeping Manager stopped. Add read-only mounts for the old CPA directory and its real auth directory to the one-shot Manager container. The command template is (paths/source version must come from the old deployment, and plugin choice must be explicit):
+
+```text
+docker compose -f docker-compose.v2-embedded.yml up -d --no-deps cpamp-runtime cpamp-ingress
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v <old-Manager-mount-source>:<original-LEGACY_ROOT>:ro \
+  -v <old-CPA-absolute-directory>:/legacy-cpa:ro \
+  -v <old-CPA-auth-absolute-directory>:/legacy-cpa-auth:ro \
+  cpamp-manager upgrade cpa-import --legacy <original-LEGACY_ROOT> --target /data \
+  --cpa-dir /legacy-cpa --cpa-auth-dir /legacy-cpa-auth \
+  --cpa-version <actual-source-CPA-version> --plugins false --json
+```
+
+Replace every angle-bracket parameter before running. `--plugins false` explicitly disables plugins in this example; choose according to your intent. Stop on qualification/destination-proof refusals, retain the report, and do not manually copy credentials into Runtime. After success, stop Runtime/Ingress, then run the `upgrade_cli verify` and `status` commands above. Run `docker compose -f docker-compose.v2-embedded.yml up -d` only at `complete`. Retain original 1.x data and upgrade backups until full acceptance. Verify public origin, browser login, Client Key, history/coverage, and real model requests; `/health` cannot replace these checks.
+
+### Exact Rollback To Original 1.x Data
+
+Rollback never mounts v2 SQLite into the old image. Stop the **whole v2 stack**, retain v2 data for diagnosis, and prepare under the same Compose project and identical read-only source mount:
+
+```bash
+docker compose -f docker-compose.v2-embedded.yml stop
+upgrade_cli rollback --prepare --legacy "$LEGACY_ROOT" --target /data \
+  --volume "$LEGACY_MOUNT" --legacy-image seakee/cpa-manager-plus:v1.14.10
+```
+
+`--prepare` prints/saves a plan; it never controls Docker. Check every emitted precondition on the **Docker host**: the old volume/path is the copy-in source, v2 is stopped, and the rollback port is free. Default 1.x rollback port is **18318**, distinct from v2 public port 18317; checks inside a container cannot prove host port availability. Apply the printed Compose and invocation on the host, or restore the original 1.x Compose against the **original unchanged 1.x volume**, using the plan's exact image and port, and restore the original CPA configuration. Never use a floating tag or the v2 data copy.
+
+After 1.x starts, run `--verify` with the plan's backup and port. Inside the one-shot CLI container above, the Docker host is not `127.0.0.1`; for the default port:
+
+```bash
+upgrade_cli rollback --verify --legacy "$LEGACY_ROOT" --target /data \
+  --legacy-image seakee/cpa-manager-plus:v1.14.10 \
+  --status-url http://host.docker.internal:18318/health
+upgrade_cli status --db-path /data/usage.sqlite --json
+```
+
+For custom backup/port settings, retain the emitted `--backup` and use the actual port. Only proven health identity, source volume, backup integrity, and retained data record `rolled_back`; an ordinary HTTP request exiting `0` is not rollback proof. If refused, do not recreate the source volume or delete upgrade records to proceed.
+
+### Native And Common Diagnostics
+
+linux/amd64 Native uses the matching package's `bin/cpa-manager-plus upgrade ...`. Stop the complete launcher/systemd stack, replace `upgrade_cli` above with that binary, use the original absolute 1.x data directory for `--legacy`, and the actual new `data/` for `--target` / `--target-dir`. Use a private host credential file for External. Native Manager defaults to internal `127.0.0.1:18319`; pass `--manager-addr 127.0.0.1:18319` to rollback (or the actual overridden address), and confirm the public Ingress is stopped too. Restore the old 1.x binary/service and original data directory, start on the plan's separate port, then run host-side `rollback --verify --legacy ... --target ... --status-url http://127.0.0.1:18318/health`; do not use container-only `host.docker.internal`.
+
+| Report/exit code | Action |
+| --- | --- |
+| `0` | Current step succeeded; inspect its stage, not every step is complete |
+| `1` | Blocked/refused/acknowledgement required: read the report and stop automation |
+| `2` | Usage, environment, or retryable error: resolve the cause before retry |
+| `upgrade_source_version_unsupported` / `upgrade_source_version_undeclared` | Check the actual release and exact `v1.14.10` declaration |
+| `upgrade_source_busy` / `upgrade_store_locked` | Stop the actual source/target Manager; do not remove lock files to proceed |
+| `upgrade_source_changed` | Source is changing: stop all writers and reassess source/backup |
+| `upgrade_rollback_image_unpinned` / `upgrade_rollback_volume_unbound` | Provide the exact old image and original volume mapping, not a new empty volume |
+
+## 1.x Stable: Update Within The Original Deployment
+
+The in-place pull/binary-replacement instructions below are for 1.x updates, not the v2 copy-in procedure.
+
+
 This guide explains how to upgrade CPAMP without losing SQLite data, `data.key`, or locally managed secrets. Follow the section for the way CPAMP is currently deployed; do not overwrite an existing deployment with first-install commands.
 
 ## Before You Upgrade

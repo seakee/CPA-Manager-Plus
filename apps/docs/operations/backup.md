@@ -10,6 +10,8 @@ CPAMP 的请求历史、配置和加密凭证都在本机。备份时最容易�
 - `usage.sqlite-wal`
 - `usage.sqlite-shm`
 - `data.key`
+- `usage-archives/`（若存在；包括原始请求归档及清单，不可只备份 SQLite）
+- `usage.sqlite-journal`（若存在）
 
 如果部署目录还有自定义配置文件，也应一起备份。使用一键安装脚本时，至少额外备份安装目录中的 `secrets/` 和 `data/`；成功导入后通常不会再有 `secrets/cpa-management-key`，但升级失败或 `CPAMP_SKIP_EXECUTE=1` 时该临时文件可能仍需保留以便重试。手动 env/secret 部署仍应备份对应 secret 文件。
 
@@ -22,6 +24,72 @@ CPAMP 的请求历史、配置和加密凭证都在本机。备份时最容易�
 - 丢失 `data.key` 时，已经保存的 CPA Management Key 无法恢复，只能重新保存 CPA 连接配置。
 
 如果 CPA 连接由手动环境变量或 secret 文件管理，CPA Management Key 可能不写入 SQLite；请把对应的 secret 文件和数据目录作为一组备份。一键安装器的 env 输入会在成功后迁移到 SQLite，不应只备份一次性输入文件。
+
+## v2 Beta：Embedded 全栈备份与恢复
+
+v2 Beta 从 **`v1.14.10`** 离线升级，目标 CPA 最低 **`v8.0.55`**；备份不是迁移授权，仍须通过 [升级预检与对账](./update.md)。Manager 的完整备份集合是 `usage.sqlite`、WAL/SHM（存在时）、`data.key`、`usage-archives/`（存在时）及自定义配置/secret。丢失 `data.key` 无法通过重置 Admin Key 修复。
+
+Embedded 还必须备份整个 Runtime 卷：实际路径为 `/runtime/gateway/config.yaml`、`/runtime/gateway/auth/`（单数 `auth`）、`/runtime/gateway/plugins/`（存在时）和 `/runtime/supervisor/`（含 `operations.sqlite`、WAL/SHM、artifacts/active 状态）。不要只复制 CPA 配置。保存 transport secret 卷 `/run/cpamp/runtime-secret`、同版 Compose/配对记录、公开 origin 与环境配置；备份应加密并限制访问。
+
+在发布 Compose 所在目录、同一项目下执行。以下宿主机备份目录只是示例；每次用新空目录，不覆盖上一份备份：
+
+```bash
+umask 077
+mkdir backup
+docker compose -f docker-compose.v2-embedded.yml stop
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup --entrypoint tar cpamp-manager \
+  -czpf /backup/manager.tgz -C /data .
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup --entrypoint tar cpamp-runtime \
+  -czpf /backup/runtime.tgz -C /runtime .
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup --entrypoint tar cpamp-runtime \
+  -czpf /backup/runtime-secret.tgz -C /run/cpamp/runtime-secret .
+```
+
+三次归档命令全部成功后，才执行 `docker compose -f docker-compose.v2-embedded.yml up -d`；失败则保持停止并处理错误。命令复用已固定 Digest 的服务镜像，不需要额外的浮动工具镜像。离线期间不能有其他 Manager/CPA 进程写入这些卷。
+
+恢复时先停止服务，使用备份对应的 Compose/配对记录及项目配置，准备**独立的空卷/空目录**；不要把 tar 叠加到有旧 WAL、归档或 Runtime 状态的目录：
+
+```bash
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup:ro --entrypoint tar cpamp-manager \
+  -xzpf /backup/manager.tgz -C /data
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup:ro --entrypoint tar cpamp-runtime \
+  -xzpf /backup/runtime.tgz -C /runtime
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup:ro --entrypoint tar cpamp-runtime \
+  -xzpf /backup/runtime-secret.tgz -C /run/cpamp/runtime-secret
+```
+
+全部成功后再 `up -d`。保留归档属主、权限及隔离；不要把整个数据目录递归改为 CPA 身份。核对 Admin 登录、CPA 连接、Client Key、历史/coverage 与 Gateway；`/health` 单独成功不代表全部恢复。回退 1.x 必须使用迁移前的原 1.x 卷，不能使用 v2 数据归档。
+
+### Manager 离线快照的边界
+
+`manager-data-snapshot` 在停止 Manager 后为数据库、WAL/SHM、rollback journal 和 `data.key` 创建带完整性清单的快照；**不包含 `usage-archives/`、自定义配置、Runtime 或外部 CPA**，不能替代全量备份。在原生 v2 包根目录执行以下备份命令（快照目录必须尚不存在）：
+
+```bash
+sudo ./bin/cpa-manager-plus manager-data-snapshot create \
+  --db-path "$PWD/data/usage.sqlite" --data-key-path "$PWD/data/data.key" \
+  --snapshot-dir "$PWD/backup/manager-snapshot"
+```
+
+只有需要恢复时才运行：
+
+```bash
+sudo ./bin/cpa-manager-plus manager-data-snapshot restore \
+  --db-path "$PWD/data/usage.sqlite" --data-key-path "$PWD/data/data.key" \
+  --snapshot-dir "$PWD/backup/manager-snapshot"
+```
+
+锁被占用时命令拒绝，先停止实际 Manager。Docker 可用同一 Compose 的 `run --rm --no-deps cpamp-manager manager-data-snapshot ...`，指定 `/data/usage.sqlite`、`/data/data.key` 和已挂载的持久化快照目录。Native 完整备份/恢复还要包括同次的 `data/runtime/` 及 `run/` 中的 secret，保留属主/权限。
+
+External 的 CPA 配置、OAuth 凭证及进程由操作者独立备份/恢复；Manager 快照不会备份远端主机。只保留配置的导出也不是 v2 完整升级路径。
+
+## 1.x Stable：备份示例
+
 
 ## Docker 备份示例
 

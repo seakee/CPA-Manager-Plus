@@ -1,5 +1,12 @@
 # One-Click Installer
 
+::: warning 1.x Stable installer, not the v2 Beta installation entry
+`bin/install-cpamp.sh` continues to install **1.x Stable** by default. The installation, upgrade, repair, reset, and native options on this page describe 1.x. Changing an image or version parameter does not turn this single-container flow into a v2 migration.
+
+For **v2 Beta Embedded**, use `docker-compose.v2-embedded.yml` and `embedded-release-pairing.json` from the same Prerelease, with all three images pinned to `<tag>@sha256:<digest>`; see [v2 Docker Installation](./docker.md). Existing 1.x installations must first reach the exact `v1.14.10` baseline, then use offline copy-in as described in [Upgrade And Rollback](../operations/update.md); target CPA requires at least `v8.0.55`. Without Docker, v2 Beta provides only the [linux/amd64 native package](./native.md).
+:::
+
+
 Use the installer for a first deployment, or when CPA is already running and you only want to bring up CPAMP. It does not overwrite existing config files by default. Before it writes files or starts services, it shows a summary and asks for confirmation.
 
 When the installer receives a CPA URL and CPA Management Key, they are one-time import inputs. The installer runs `store-cpa-connection`, encrypts the connection into CPAMP's SQLite configuration with `data.key`, and removes the temporary key file only after health, admin-auth, and proxied CPA Management API checks succeed. The final runtime configuration no longer contains `CPA_UPSTREAM_URL`, `CPA_MANAGEMENT_KEY_FILE`, or a long-lived CPA-key secret mount.

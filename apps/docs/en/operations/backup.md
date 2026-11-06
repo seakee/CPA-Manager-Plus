@@ -10,6 +10,8 @@ Back up these files as a set:
 - `usage.sqlite-wal`
 - `usage.sqlite-shm`
 - `data.key`
+- `usage-archives/` when present, including raw request archives and manifests; SQLite alone is insufficient
+- `usage.sqlite-journal` when present
 
 If your deployment directory contains custom configuration files, back them up too. With the one-click installer, also back up `secrets/` and `data/` under the install directory; after a successful import, `secrets/cpa-management-key` is normally gone, but it may remain after a failed upgrade or with `CPAMP_SKIP_EXECUTE=1` for retry. Manual env/secret deployments should back up their matching secret files.
 
@@ -22,6 +24,72 @@ CPA connections saved through setup or the panel encrypt the CPA Management Key 
 - If `data.key` is lost, the saved CPA Management Key cannot be recovered. You must save the CPA connection configuration again.
 
 If a CPA connection is managed by manual environment variables or secret files, the CPA Management Key may not be written to SQLite. Back up the related secret files together with the data directory. The installer's env input is migrated into SQLite after success, so do not rely on the one-time input file alone.
+
+## v2 Beta: Embedded Stack Backup And Restore
+
+v2 Beta's offline upgrade source is **`v1.14.10`** and target CPA requires at least **`v8.0.55`**. A backup does not authorize migration: follow [Upgrade Preflight And Reconciliation](./update.md). The complete Manager set includes `usage.sqlite`, WAL/SHM when present, `data.key`, `usage-archives/` when present, and custom configuration/secrets. Resetting Admin cannot repair a missing `data.key`.
+
+Embedded also requires the entire Runtime volume: actual paths are `/runtime/gateway/config.yaml`, `/runtime/gateway/auth/` (singular `auth`), `/runtime/gateway/plugins/` when present, and `/runtime/supervisor/` (including `operations.sqlite`, WAL/SHM, and artifacts/active state). CPA configuration alone is insufficient. Retain the transport secret volume at `/run/cpamp/runtime-secret`, matching Compose/pairing record, public origin, and environment configuration. Encrypt backups and restrict access.
+
+Run in the release Compose directory with the same project. The host backup directory is an example; use a new empty directory each time:
+
+```bash
+umask 077
+mkdir backup
+docker compose -f docker-compose.v2-embedded.yml stop
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup --entrypoint tar cpamp-manager \
+  -czpf /backup/manager.tgz -C /data .
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup --entrypoint tar cpamp-runtime \
+  -czpf /backup/runtime.tgz -C /runtime .
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup --entrypoint tar cpamp-runtime \
+  -czpf /backup/runtime-secret.tgz -C /run/cpamp/runtime-secret .
+```
+
+Only after all three archive commands succeed, run `docker compose -f docker-compose.v2-embedded.yml up -d`; on failure, leave services stopped and resolve the error. The commands reuse Digest-pinned service images rather than a floating utility image. No other Manager/CPA process may write these volumes while offline.
+
+For restore, stop services, use the backup's Compose/pairing record and project configuration, and prepare **separate empty volumes/directories**. Never overlay an archive onto old WAL, archives, or Runtime state:
+
+```bash
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup:ro --entrypoint tar cpamp-manager \
+  -xzpf /backup/manager.tgz -C /data
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup:ro --entrypoint tar cpamp-runtime \
+  -xzpf /backup/runtime.tgz -C /runtime
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v "$PWD/backup":/backup:ro --entrypoint tar cpamp-runtime \
+  -xzpf /backup/runtime-secret.tgz -C /run/cpamp/runtime-secret
+```
+
+Run `up -d` only after all succeed. Preserve archived owners, permissions, and isolation; do not recursively change all data to the CPA identity. Verify Admin login, CPA connection, Client Key, history/coverage, and Gateway; `/health` alone is insufficient. A 1.x rollback uses the original pre-migration 1.x volume, never these v2 archives.
+
+### Scope Of Offline Manager Snapshots
+
+With Manager stopped, `manager-data-snapshot` snapshots the database, WAL/SHM, rollback journal, and `data.key`, with an integrity manifest. It **does not include `usage-archives/`, custom configuration, Runtime, or external CPA**, so it does not replace a full backup. From the v2 native package root (the snapshot directory must not already exist):
+
+```bash
+sudo ./bin/cpa-manager-plus manager-data-snapshot create \
+  --db-path "$PWD/data/usage.sqlite" --data-key-path "$PWD/data/data.key" \
+  --snapshot-dir "$PWD/backup/manager-snapshot"
+```
+
+Only when restoring:
+
+```bash
+sudo ./bin/cpa-manager-plus manager-data-snapshot restore \
+  --db-path "$PWD/data/usage.sqlite" --data-key-path "$PWD/data/data.key" \
+  --snapshot-dir "$PWD/backup/manager-snapshot"
+```
+
+A held lock refuses the command: stop the actual Manager. Docker can use the same Compose's `run --rm --no-deps cpamp-manager manager-data-snapshot ...`, naming `/data/usage.sqlite`, `/data/data.key`, and a mounted persistent snapshot directory. A full Native backup/restore also includes the same backup's `data/runtime/` and secrets in `run/`, preserving ownership/permissions.
+
+For External, the operator separately backs up/restores CPA configuration, OAuth credentials, and process state. Manager snapshots do not back up the remote host. Configuration-only export is not a complete v2 upgrade path.
+
+## 1.x Stable: Backup Examples
+
 
 ## Docker Backup Example
 

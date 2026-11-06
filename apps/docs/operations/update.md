@@ -1,5 +1,118 @@
 # 更新 CPA Manager Plus
 
+## v2 Beta：从 1.x 升级，不是原地换镜像
+
+::: warning 精确基线与停止条件
+最低直接升级版本为 **`v1.14.10`**，当前 CLI 只接受这个精确声明，不代表所有更高 1.x 都自动合格。`<= v1.14.9` 必须先按原部署方式升级到 `v1.14.10`，验证正常后再停机；不要仅把 `--source-version` 改为该值。目标 CPA 最低 **`v8.0.55`**（Embedded 固定为该版本）。版本不符、未知/更新的 schema、源忙碌、证据失配或历史差异都必须按报告处理，不能修改 SQLite 标记来继续。
+:::
+
+1. 下载同一次 v2 Prerelease 的 `docker-compose.v2-embedded.yml`、`embedded-release-pairing.json` 与校验文件，三镜像必须保留 `<tag>@sha256:<digest>` 配对，见 [Beta 安装](../deployment/docker.md)。`releases/latest` 与安装脚本仍属于 1.x Stable。
+2. 保存精确的 1.x 镜像/二进制、Compose、环境和数据卷映射。停止旧 Manager；若迁移托管 CPA，同时停止旧 CPA。备份 `usage.sqlite`、WAL/SHM、`data.key`、`usage-archives/`（若存在）、配置与 secrets，见 [备份](./backup.md)。阻止其他进程写入源目录。
+3. 为 v2 使用**独立新数据卷**，保留原 1.x 卷不变且只读。复制、目标与备份目录不可包含彼此的源目录；临时快照目录也不能位于源或目标内。磁盘需求以预检报告为准。
+
+### Docker：离线预检、copy-in、四域对账
+
+下面在 v2 发布 Compose 所在目录运行。`LEGACY_MOUNT` 是**实际旧卷名**（先用 `docker inspect` 核对），不是新的空卷名。若旧部署使用 bind mount，把 `LEGACY_MOUNT` 和 `LEGACY_ROOT` 都设置为同一个实际宿主机绝对路径，使容器与回滚计划中的路径一致。示例卷名必须替换。
+
+```bash
+export LEGACY_MOUNT='actual-1x-manager-volume'
+export LEGACY_ROOT='/legacy'
+umask 077
+mkdir -p upgrade-secrets
+docker compose -f docker-compose.v2-embedded.yml stop
+upgrade_cli() {
+  docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+    --add-host host.docker.internal:host-gateway \
+    -v "$LEGACY_MOUNT:$LEGACY_ROOT:ro" \
+    -v "$PWD/upgrade-secrets":/upgrade-secrets:ro \
+    cpamp-manager upgrade "$@"
+}
+upgrade_cli preflight --legacy "$LEGACY_ROOT" \
+  --source-version v1.14.10 --target-dir /data --json
+```
+
+先确认预检退出 `0` 且 `ready: true`，再分别执行：
+
+```bash
+upgrade_cli run --legacy "$LEGACY_ROOT" \
+  --source-version v1.14.10 --target /data --json
+upgrade_cli reconcile --legacy "$LEGACY_ROOT" \
+  --source-version v1.14.10 --target /data --json
+```
+
+每步成功后才执行下一步。`run` 只备份及 copy-in，不会完成整个升级；默认备份位于目标的 `upgrade-backup/`。`reconcile` 比较 **`retained`、`pricing`、`coverage`、`history`** 四域，不适用项必须有原因。被报告为永久不完整的 UTC 日需要逐日审阅后，用同一 `reconcile` 命令增加重复的 `--acknowledge YYYY-MM-DD`；`--acknowledge-parity-gaps` 仅确认报告中旧版已丢失的 parity 日，不会接受其他实测失配。不要盲目加确认参数，也不要把确认解读为恢复了丢失历史。
+
+### 完成 CPA 连接与最终核验
+
+**External 路径**：由 CPA 操作者独立升级/配置 CPA 至至少 `v8.0.55`，使其可从 CLI 容器访问。把真实 Management Key 写入宿主机私有文件 `upgrade-secrets/cpa-management-key`（不要放入命令行）。以下 URL 为示例，必须替换：
+
+```bash
+upgrade_cli external-connect --target /data \
+  --cpa-base-url 'http://your-cpa-host:8317' \
+  --management-key-file /upgrade-secrets/cpa-management-key --json
+upgrade_cli verify --legacy "$LEGACY_ROOT" --target /data --json
+upgrade_cli status --db-path /data/usage.sqlite --json
+```
+
+只有真实连接、身份、模型面及对账证据通过且持久化阶段为 `complete` 才可启动正常产品。缺版本 header 时，`external-connect --cpa-version` 仅用于如实声明实际 CPA 版本，不会把 v7 变成 v8；密钥轮换后使用同一 URL 的 `--reprove` 重新证明，不要反复提交已拒绝凭证。
+
+**Managed 路径**：还需导入旧 CPA 的配置/凭证并证明 Runtime 目标，不是用 `external-connect` 连接内部地址。先只启动目标 Runtime 和 Ingress，保持 Manager 停止；把旧 CPA 目录及其真实 auth 目录额外只读挂载到一次性 Manager 容器。命令格式如下（路径/源 CPA 版本来自实际旧部署，插件选择必须显式给出）：
+
+```text
+docker compose -f docker-compose.v2-embedded.yml up -d --no-deps cpamp-runtime cpamp-ingress
+docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps \
+  -v <旧Manager挂载源>:<原LEGACY_ROOT>:ro \
+  -v <旧CPA绝对目录>:/legacy-cpa:ro \
+  -v <旧CPA凭证绝对目录>:/legacy-cpa-auth:ro \
+  cpamp-manager upgrade cpa-import --legacy <原LEGACY_ROOT> --target /data \
+  --cpa-dir /legacy-cpa --cpa-auth-dir /legacy-cpa-auth \
+  --cpa-version <实际源CPA版本> --plugins false --json
+```
+
+这段是参数模板，替换所有尖括号后运行；`--plugins false` 是显式关闭插件的示例，按实际意图选择。`cpa-import` 的资格或目标证明拒绝时停止，保留报告，不手工复制凭证到 Runtime。成功后停止 Runtime/Ingress，再运行上面的 `upgrade_cli verify`、`status`。只有 `complete` 才执行 `docker compose -f docker-compose.v2-embedded.yml up -d`；保留原 1.x 数据与升级备份直到完整验收。公开 origin、浏览器登录、Client Key、历史/coverage 和实际模型请求都需核对，`/health` 不能代替它们。
+
+### 精确回滚到原 1.x 数据
+
+回滚不是把 v2 SQLite 挂回旧镜像。停止**整个 v2 栈**，保留 v2 目录供诊断，仍在同一 Compose 项目与相同只读源挂载下生成计划：
+
+```bash
+docker compose -f docker-compose.v2-embedded.yml stop
+upgrade_cli rollback --prepare --legacy "$LEGACY_ROOT" --target /data \
+  --volume "$LEGACY_MOUNT" --legacy-image seakee/cpa-manager-plus:v1.14.10
+```
+
+`--prepare` 只输出/保存计划，不控制 Docker。逐条在 **Docker 宿主机**检查输出的 preconditions：旧卷/绝对目录确实是 copy-in 的源，v2 已停，回滚端口空闲。默认旧 Manager 回滚端口是 **18318**，不同于 v2 公开端口 18317；容器内端口检查不能证明宿主机空闲。把输出的 Compose 内容和 invocation 应用于宿主机，或恢复原 1.x Compose 指向**原未修改的 1.x 卷**，使用计划的精确镜像与端口，恢复原 CPA 配置。不要使用浮动标签或 v2 数据副本。
+
+旧 1.x 启动后，按计划输出的 `--backup` 与端口执行 `--verify`。在上述一次性 CLI 容器中，宿主机不是 `127.0.0.1`；默认端口示例为：
+
+```bash
+upgrade_cli rollback --verify --legacy "$LEGACY_ROOT" --target /data \
+  --legacy-image seakee/cpa-manager-plus:v1.14.10 \
+  --status-url http://host.docker.internal:18318/health
+upgrade_cli status --db-path /data/usage.sqlite --json
+```
+
+如果使用自定义备份或端口，保留计划打印的 `--backup` 并改为实际端口。只有健康身份、源卷、备份完整性与保留数据证明通过后才会记录 `rolled_back`；退出 `0` 的普通 HTTP 请求不足以证明回滚。若计划拒绝，不重建源卷或删除升级记录来强行继续。
+
+### Native 与常见诊断
+
+linux/amd64 Native 使用同版包的 `bin/cpa-manager-plus upgrade ...`；停止整个 launcher/systemd 栈后，把上面 `upgrade_cli` 换为该二进制，`--legacy` 改为原 1.x 绝对数据目录，`--target` / `--target-dir` 改为实际新 `data/`。External 凭证路径改为宿主机私有文件。默认 Native Manager 内部地址是 `127.0.0.1:18319`，运行回滚计划时用 `--manager-addr 127.0.0.1:18319`（有覆盖则用真实地址），并确认公开 Ingress 也已停止。恢复原 1.x 二进制/服务及原数据目录，按计划的独立端口启动，再从宿主机执行 `rollback --verify --legacy ... --target ... --status-url http://127.0.0.1:18318/health`；不要使用容器专用的 `host.docker.internal`。
+
+| 报告/退出码 | 操作 |
+| --- | --- |
+| `0` | 当前步骤成功；仍须核对阶段，不等于所有步骤完成 |
+| `1` | 阻塞/拒绝/待确认：读报告，停止自动推进 |
+| `2` | 用法、环境或可重试错误：排除原因后再重试 |
+| `upgrade_source_version_unsupported` / `upgrade_source_version_undeclared` | 核对实际源版本和精确 `v1.14.10` 声明 |
+| `upgrade_source_busy` / `upgrade_store_locked` | 停止真实源/目标 Manager，不能移除锁文件规避 |
+| `upgrade_source_changed` | 源仍在变化；停止所有写入，重新评估源和备份 |
+| `upgrade_rollback_image_unpinned` / `upgrade_rollback_volume_unbound` | 提供精确旧镜像和原卷映射，不能改用新空卷 |
+
+## 1.x Stable：原部署方式内更新
+
+以下原地拉取/替换二进制只用于 1.x 内更新，不是上述 v2 copy-in 流程。
+
+
 本页说明如何在不丢失 SQLite 数据、`data.key` 和本机 secret 的前提下更新 CPAMP。请选择与你当前部署方式对应的章节，不要用首次安装命令覆盖已有配置。
 
 ## 更新前检查
