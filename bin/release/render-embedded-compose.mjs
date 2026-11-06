@@ -1,9 +1,30 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { createRequire } from 'node:module';
+import { delimiter, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
+
+function loadYamlModule() {
+  const candidates = [
+    import.meta.url,
+    pathToFileURL(resolve(process.cwd(), 'package.json')).href,
+  ];
+  for (const dir of (process.env.NODE_PATH ?? '').split(delimiter).filter(Boolean)) {
+    candidates.push(pathToFileURL(resolve(dir, 'package.json')).href);
+  }
+  for (const base of candidates) {
+    try {
+      return createRequire(base)('yaml');
+    } catch {
+      // continue searching
+    }
+  }
+  throw new Error('Required dependency "yaml" could not be resolved');
+}
+
+const yaml = loadYamlModule();
 
 export const ROLES = Object.freeze(['manager', 'ingress', 'runtime']);
 export const COMPOSE_SERVICES = Object.freeze({
@@ -578,21 +599,24 @@ export function renderEmbeddedComposeYaml(imageRefs) {
   return lines.join('\n');
 }
 
-const unquoteYamlScalar = (raw) => {
-  const trimmed = raw.trim();
-  if (
-    (trimmed.startsWith("'") && trimmed.endsWith("'")) ||
-    (trimmed.startsWith('"') && trimmed.endsWith('"'))
-  ) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-};
-
 const interpolateComposeVars = (value, env = {}) =>
   String(value).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}/g, (_, name, fallback) =>
     env[name] !== undefined && env[name] !== '' ? String(env[name]) : fallback
   );
+
+const ALLOWED_SERVICE_KEYS = new Set([
+  'image',
+  'restart',
+  'ports',
+  'expose',
+  'environment',
+  'depends_on',
+  'volumes',
+  'healthcheck',
+  'privileged',
+  'network_mode',
+  'user',
+]);
 
 export function parseEmbeddedComposeText(composeText, env = {}) {
   if (typeof composeText !== 'string' || !composeText.trim()) {
@@ -608,124 +632,150 @@ export function parseEmbeddedComposeText(composeText, env = {}) {
     fail('compose YAML must not contain local build blocks');
   }
 
-  const services = {};
+  let rawDoc;
+  try {
+    rawDoc = yaml.parse(composeText, { uniqueKeys: true });
+  } catch (error) {
+    fail(`invalid compose YAML syntax: ${error.message}`);
+  }
+  if (!isPlainObject(rawDoc)) {
+    fail('compose YAML root must be a mapping');
+  }
+  for (const topKey of Object.keys(rawDoc)) {
+    if (topKey !== 'services' && topKey !== 'volumes') {
+      fail(`unexpected top-level compose section: ${topKey}`);
+    }
+  }
+  if (!isPlainObject(rawDoc.services)) {
+    fail('compose YAML must define a services mapping');
+  }
+  if (!isPlainObject(rawDoc.volumes)) {
+    fail('compose YAML must define a volumes mapping');
+  }
+
   const volumes = {};
-  let topSection = null;
-  let currentService = null;
-  let currentField = null;
+  for (const [volName, volConfig] of Object.entries(rawDoc.volumes)) {
+    if (volConfig !== null && !isPlainObject(volConfig)) {
+      fail(`invalid volume definition for ${volName}`);
+    }
+    volumes[volName] = volConfig ?? {};
+  }
 
-  for (const rawLine of composeText.split(/\r?\n/)) {
-    const trimmed = rawLine.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const indent = rawLine.match(/^ */)?.[0].length ?? 0;
+  const services = {};
+  for (const [serviceName, rawService] of Object.entries(rawDoc.services)) {
+    if (!isPlainObject(rawService)) {
+      fail(`service ${serviceName} must be a mapping`);
+    }
+    if ('build' in rawService) {
+      fail(`${serviceName} must not define a build block`);
+    }
+    for (const key of Object.keys(rawService)) {
+      if (!ALLOWED_SERVICE_KEYS.has(key)) {
+        fail(`unrecognized compose service property ${serviceName}.${key}`);
+      }
+    }
 
-    if (indent === 0) {
-      currentService = null;
-      currentField = null;
-      if (trimmed === 'services:') {
-        topSection = 'services';
-      } else if (trimmed === 'volumes:') {
-        topSection = 'volumes';
+    const normalized = {};
+    for (const [key, value] of Object.entries(rawService)) {
+      if (key === 'ports') {
+        if (!Array.isArray(value)) {
+          fail(`${serviceName}.ports must be a sequence`);
+        }
+        normalized.ports = value.map((item) => {
+          if (typeof item === 'string' || typeof item === 'number') {
+            const resolvedPort = interpolateComposeVars(String(item), env);
+            const parts = resolvedPort.split(':');
+            if (
+              parts.length !== 2 ||
+              !parts[0] ||
+              !parts[1] ||
+              !Number.isInteger(Number(parts[1]))
+            ) {
+              fail(`invalid port mapping on ${serviceName}: ${String(item)}`);
+            }
+            return {
+              mode: 'ingress',
+              published: String(parts[0]),
+              target: Number(parts[1]),
+              protocol: 'tcp',
+            };
+          }
+          if (isPlainObject(item)) {
+            const published = interpolateComposeVars(String(item.published ?? ''), env);
+            const target = Number(item.target);
+            if (!published || !Number.isInteger(target)) {
+              fail(`invalid port object on ${serviceName}`);
+            }
+            return {
+              mode: item.mode ?? 'ingress',
+              published,
+              target,
+              protocol: item.protocol ?? 'tcp',
+            };
+          }
+          return fail(`invalid port entry on ${serviceName}`);
+        });
+      } else if (key === 'volumes') {
+        if (!Array.isArray(value)) {
+          fail(`${serviceName}.volumes must be a sequence`);
+        }
+        normalized.volumes = value.map((item) => {
+          if (typeof item === 'string') {
+            const parts = item.split(':');
+            if (parts.length < 2 || parts.length > 3 || !parts[0] || !parts[1]) {
+              fail(`invalid volume mount on ${serviceName}: ${item}`);
+            }
+            const mode = parts[2] ?? '';
+            if (mode && mode !== 'ro' && mode !== 'rw') {
+              fail(`unsupported volume mode on ${serviceName}: ${item}`);
+            }
+            return {
+              type: 'volume',
+              source: parts[0],
+              target: parts[1],
+              ...(mode === 'ro' ? { read_only: true } : {}),
+            };
+          }
+          if (isPlainObject(item)) {
+            if (typeof item.source !== 'string' || typeof item.target !== 'string') {
+              fail(`invalid volume object on ${serviceName}`);
+            }
+            return {
+              type: item.type ?? 'volume',
+              source: item.source,
+              target: item.target,
+              ...(item.read_only ? { read_only: true } : {}),
+            };
+          }
+          return fail(`invalid volume entry on ${serviceName}`);
+        });
+      } else if (key === 'environment') {
+        if (isPlainObject(value)) {
+          const envMap = {};
+          for (const [envKey, envVal] of Object.entries(value)) {
+            envMap[envKey] = interpolateComposeVars(String(envVal ?? ''), env);
+          }
+          normalized.environment = envMap;
+        } else if (Array.isArray(value)) {
+          const envMap = {};
+          for (const entry of value) {
+            if (typeof entry !== 'string' || !entry.includes('=')) {
+              fail(`invalid environment entry on ${serviceName}: ${String(entry)}`);
+            }
+            const eqIdx = entry.indexOf('=');
+            const envKey = entry.slice(0, eqIdx);
+            const envVal = entry.slice(eqIdx + 1);
+            envMap[envKey] = interpolateComposeVars(envVal, env);
+          }
+          normalized.environment = envMap;
+        } else {
+          fail(`${serviceName}.environment must be a mapping or sequence`);
+        }
       } else {
-        fail(`unexpected top-level compose section: ${trimmed}`);
+        normalized[key] = value;
       }
-      continue;
     }
-
-    if (topSection === 'volumes' && indent === 2 && trimmed.endsWith(':')) {
-      volumes[trimmed.slice(0, -1)] = {};
-      continue;
-    }
-
-    if (topSection === 'services' && indent === 2 && trimmed.endsWith(':')) {
-      currentService = trimmed.slice(0, -1);
-      currentField = null;
-      if (services[currentService]) {
-        fail(`duplicate service definition in compose YAML: ${currentService}`);
-      }
-      services[currentService] = {};
-      continue;
-    }
-
-    if (topSection === 'services' && currentService && indent === 4) {
-      const colonIdx = trimmed.indexOf(':');
-      if (colonIdx <= 0) {
-        fail(`invalid service property line in ${currentService}: ${trimmed}`);
-      }
-      const key = trimmed.slice(0, colonIdx).trim();
-      const rest = trimmed.slice(colonIdx + 1).trim();
-      if (key === 'build') {
-        fail(`${currentService} must not define a build block`);
-      }
-      if (!rest) {
-        currentField = key;
-        if (key === 'environment' || key === 'healthcheck') {
-          services[currentService][key] = {};
-        } else {
-          services[currentService][key] = [];
-        }
-      } else {
-        currentField = null;
-        const scalar = unquoteYamlScalar(rest);
-        if (scalar === 'true') services[currentService][key] = true;
-        else if (scalar === 'false') services[currentService][key] = false;
-        else services[currentService][key] = scalar;
-      }
-      continue;
-    }
-
-    if (topSection === 'services' && currentService && currentField && indent === 6) {
-      const target = services[currentService][currentField];
-      if (Array.isArray(target)) {
-        if (!trimmed.startsWith('- ')) {
-          fail(`expected list item under ${currentService}.${currentField}: ${trimmed}`);
-        }
-        const itemText = unquoteYamlScalar(trimmed.slice(2));
-        if (currentField === 'ports') {
-          const resolvedPort = interpolateComposeVars(itemText, env);
-          const parts = resolvedPort.split(':');
-          if (parts.length !== 2) {
-            fail(`invalid port mapping on ${currentService}: ${itemText}`);
-          }
-          target.push({
-            mode: 'ingress',
-            published: String(parts[0]),
-            target: Number(parts[1]),
-            protocol: 'tcp',
-          });
-        } else if (currentField === 'volumes') {
-          const parts = itemText.split(':');
-          if (parts.length < 2 || parts.length > 3) {
-            fail(`invalid volume mount on ${currentService}: ${itemText}`);
-          }
-          const mode = parts[2] ?? '';
-          if (mode && mode !== 'ro' && mode !== 'rw') {
-            fail(`unsupported volume mode on ${currentService}: ${itemText}`);
-          }
-          target.push({
-            type: 'volume',
-            source: parts[0],
-            target: parts[1],
-            ...(mode === 'ro' ? { read_only: true } : {}),
-          });
-        } else {
-          target.push(itemText);
-        }
-      } else if (isPlainObject(target)) {
-        const colonIdx = trimmed.indexOf(':');
-        if (colonIdx <= 0) {
-          fail(`expected key/value under ${currentService}.${currentField}: ${trimmed}`);
-        }
-        const k = trimmed.slice(0, colonIdx).trim();
-        const vRaw = trimmed.slice(colonIdx + 1).trim();
-        if (currentField === 'environment') {
-          target[k] = interpolateComposeVars(unquoteYamlScalar(vRaw), env);
-        } else {
-          target[k] = vRaw;
-        }
-      }
-      continue;
-    }
+    services[serviceName] = normalized;
   }
 
   return { services, volumes };
@@ -778,7 +828,6 @@ export function verifyEmbeddedReleaseArtifacts({
   apiContractPath = null,
   apiContractBytes = null,
   fullwebManifest = null,
-  allowRegistryIndexDigest = false,
   validateComposeScript = true,
 }) {
   validateCandidateEvidence(evidence);
@@ -870,10 +919,7 @@ export function verifyEmbeddedReleaseArtifacts({
     if (!SHA256_DIGEST_RE.test(imgEntry.manifest_digest ?? '')) {
       fail(`invalid manifest_digest for ${role} in pairing`);
     }
-    if (
-      !allowRegistryIndexDigest &&
-      imgEntry.manifest_digest !== evImg.platformManifestDigest
-    ) {
+    if (imgEntry.manifest_digest !== evImg.platformManifestDigest) {
       fail(
         `manifest_digest for ${role} (${imgEntry.manifest_digest}) differs from candidate platformManifestDigest (${evImg.platformManifestDigest})`
       );
@@ -918,8 +964,6 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
   const registryPrefix = validateRegistryPrefix(
     options.registryPrefix ?? DEFAULT_REGISTRY_PREFIX
   );
-  const allowRegistryIndexDigest = Boolean(options.allowRegistryIndexDigest);
-
   const resolvedImages = {};
   const imageRefs = {};
 
@@ -949,7 +993,7 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
       manifestDigest = explicitDigest;
     }
 
-    if (!allowRegistryIndexDigest && manifestDigest !== evImg.platformManifestDigest) {
+    if (manifestDigest !== evImg.platformManifestDigest) {
       fail(
         `manifest digest mismatch for ${role}: expected ${evImg.platformManifestDigest}, got ${manifestDigest}`
       );
@@ -999,7 +1043,6 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
     apiContractPath: options.apiContractPath ?? null,
     apiContractBytes: options.apiContractBytes ?? null,
     fullwebManifest: options.fullwebManifest ?? null,
-    allowRegistryIndexDigest,
     validateComposeScript: options.validateComposeScript !== false,
   });
 
@@ -1013,7 +1056,6 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
 function parseCliArgs(argv) {
   const args = {
     verify: false,
-    allowRegistryIndexDigest: false,
     digests: {},
     imageRefs: {},
   };
@@ -1027,9 +1069,6 @@ function parseCliArgs(argv) {
     switch (token) {
       case '--verify':
         args.verify = true;
-        break;
-      case '--allow-registry-index-digest':
-        args.allowRegistryIndexDigest = true;
         break;
       case '--evidence':
         args.evidencePath = next();
@@ -1111,7 +1150,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
         composeText,
         pairing,
         evidenceDir,
-        allowRegistryIndexDigest: cli.allowRegistryIndexDigest,
       });
       if (cli.composeJsonPath) {
         mkdirSync(dirname(cli.composeJsonPath), { recursive: true });
@@ -1127,7 +1165,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
         digests: Object.keys(cli.digests).length ? cli.digests : undefined,
         imageRefs: Object.keys(cli.imageRefs).length ? cli.imageRefs : undefined,
         evidenceDir,
-        allowRegistryIndexDigest: cli.allowRegistryIndexDigest,
       });
       mkdirSync(dirname(cli.composePath), { recursive: true });
       mkdirSync(dirname(cli.pairingPath), { recursive: true });

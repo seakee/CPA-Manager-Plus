@@ -10,6 +10,7 @@ import io
 import importlib.util
 import gzip
 import json
+import os
 import re
 import shlex
 import struct
@@ -545,6 +546,9 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
         entry = images[role]
         require(type(entry) is dict, "invalid pairing image entry: " + role)
         ev_img = evidence["images"][role]
+        if "sourceCommitClaim" in ev_img and ev_img["sourceCommitClaim"] is not None:
+            require(ev_img["sourceCommitClaim"] == source_commit,
+                    f"{role} sourceCommitClaim differs from candidate sourceCommitClaim")
         repo = entry.get("repository")
         tag = entry.get("tag")
         manifest_digest = entry.get("manifest_digest")
@@ -564,6 +568,26 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
             require(entry["image_ref"] == expected_ref, "pairing image_ref mismatch: " + role)
         require(service_images["cpamp-" + role] == expected_ref,
                 "rendered compose image mismatch for cpamp-" + role)
+    renderer = Path(__file__).with_name("render-embedded-compose.mjs")
+    require(renderer.is_file(), "missing compose/pairing renderer: " + str(renderer))
+    node_env = dict(os.environ)
+    repo_node_modules = Path(__file__).resolve().parents[2] / "node_modules"
+    if repo_node_modules.is_dir():
+        existing = node_env.get("NODE_PATH", "")
+        node_env["NODE_PATH"] = str(repo_node_modules) + (os.pathsep + existing if existing else "")
+    with tempfile.TemporaryDirectory(prefix="cpamp-verify-pairing-") as temp_dir:
+        ev_file = Path(temp_dir) / "candidate-evidence.json"
+        ev_file.write_text(json.dumps(evidence), encoding="utf-8")
+        proc = subprocess.run(
+            ["node", str(renderer), "--verify",
+             "--evidence", str(ev_file),
+             "--compose", str(compose_path),
+             "--pairing", str(pairing_path)],
+            env=node_env, capture_output=True, text=True, timeout=20, check=False,
+        )
+    require(proc.returncode == 0,
+            "compose/pairing topology verification failed: " +
+            (proc.stderr.strip() or proc.stdout.strip()))
     return pairing
 
 

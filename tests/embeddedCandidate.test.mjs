@@ -443,11 +443,13 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       /Manager compiled source commit/
     );
 
-    const driftedRoleEvidence = structuredClone(evidence);
-    driftedRoleEvidence.images.ingress.sourceCommitClaim = '0'.repeat(40);
-    expect(() => renderEmbeddedReleaseArtifacts(driftedRoleEvidence)).toThrow(
-      /ingress sourceCommitClaim differs/
-    );
+    for (const role of ['manager', 'ingress', 'runtime']) {
+      const driftedRoleEvidence = structuredClone(evidence);
+      driftedRoleEvidence.images[role].sourceCommitClaim = '0'.repeat(40);
+      expect(() => renderEmbeddedReleaseArtifacts(driftedRoleEvidence)).toThrow(
+        new RegExp(`${role} sourceCommitClaim differs`)
+      );
+    }
 
     // 5. Tampered Full Web manifest or API contract digest in pairing
     const badWebPairing = structuredClone(pairing);
@@ -470,7 +472,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       })
     ).toThrow(/api_contract summary mismatch/);
 
-    // 6. Compose injected with CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK or extra port
+    // 6. Compose injected with CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK, extra port, deeper-indented extra port, or unrecognized property
     const loopbackCompose = composeYaml.replace(
       "      CPAMP_RUNTIME_CPA_GID: '10001'",
       "      CPAMP_RUNTIME_CPA_GID: '10001'\n      CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: '1'"
@@ -485,6 +487,30 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
     );
     expect(() => composeYamlToRuntime12ConfigJson(extraPortCompose)).toThrow(
       /expected only cpamp-ingress 18317:18317/
+    );
+
+    const deepIndentExtraPortCompose = composeYaml.replace(
+      "    expose:\n      - '18317'",
+      "    ports:\n        - '18318:18317'\n    expose:\n      - '18317'"
+    );
+    const resyncedDeepIndentPairing = structuredClone(pairing);
+    resyncedDeepIndentPairing.compose.sha256 =
+      'sha256:' + createHash('sha256').update(deepIndentExtraPortCompose, 'utf8').digest('hex');
+    resyncedDeepIndentPairing.compose.size = Buffer.byteLength(deepIndentExtraPortCompose, 'utf8');
+    expect(() =>
+      verifyEmbeddedReleaseArtifacts({
+        evidence,
+        composeText: deepIndentExtraPortCompose,
+        pairing: resyncedDeepIndentPairing,
+      })
+    ).toThrow(/expected only cpamp-ingress 18317:18317/);
+
+    const unrecognizedKeyCompose = composeYaml.replace(
+      '    restart: unless-stopped\n    expose:\n      - \'18317\'',
+      '    restart: unless-stopped\n    extra_hosts:\n      - "host.docker.internal:host-gateway"\n    expose:\n      - \'18317\''
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(unrecognizedKeyCompose)).toThrow(
+      /unrecognized compose service property cpamp-manager\.extra_hosts/
     );
   });
 
@@ -541,6 +567,18 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
         }
       );
       expect(validatorOut).toContain('Runtime 18 Compose validation passed');
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            'bin/release/render-embedded-compose.mjs',
+            '--evidence',
+            evidencePath,
+            '--allow-registry-index-digest',
+          ],
+          { cwd: new URL('..', import.meta.url), stdio: 'pipe' }
+        )
+      ).toThrow(/unknown argument: --allow-registry-index-digest/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -117,6 +117,9 @@ python3 "$snapshot/bin/release/verify-embedded-candidate.py" \
   --runtime "$output/runtime.oci.tar" \
   --out "$output/candidate-evidence.json"
 
+if [[ -d "$PWD/node_modules" ]]; then
+  export NODE_PATH="$PWD/node_modules${NODE_PATH:+:$NODE_PATH}"
+fi
 node "$snapshot/bin/release/render-embedded-compose.mjs" \
   --evidence "$output/candidate-evidence.json" \
   --compose-out "$output/docker-compose.v2-embedded.yml" \

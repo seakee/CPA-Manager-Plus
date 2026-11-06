@@ -551,13 +551,80 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 compose_path.write_text(original_compose, encoding="utf-8")
 
                 # Negative 4: tampered pairing digest
-                bad_pairing = json.loads(pairing_path.read_text(encoding="utf-8"))
+                original_pairing = json.loads(pairing_path.read_text(encoding="utf-8"))
+                bad_pairing = json.loads(json.dumps(original_pairing))
                 bad_pairing["images"]["manager"]["manifest_digest"] = "sha256:" + "f" * 64
                 pairing_path.write_text(json.dumps(bad_pairing), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "pairing manifest_digest mismatch"):
                     subject.verify_rendered_pairing(
                         receipt_for_node, compose_path, pairing_path, archives)
 
+                # Helper to write a mutated compose and re-sync pairing.compose digest/size
+                def write_resynced_compose(mutated_compose_text):
+                    raw_bytes = mutated_compose_text.encode("utf-8")
+                    compose_path.write_bytes(raw_bytes)
+                    synced = json.loads(json.dumps(original_pairing))
+                    synced["compose"]["sha256"] = blob(raw_bytes)
+                    synced["compose"]["size"] = len(raw_bytes)
+                    pairing_path.write_text(json.dumps(synced), encoding="utf-8")
+
+                # Negative 5: extra port on cpamp-manager (normal and deeper-indented YAML)
+                for port_block in (
+                    "    ports:\n      - '18318:18317'\n    expose:\n      - '18317'",
+                    "    ports:\n        - '18318:18317'\n    expose:\n      - '18317'",
+                ):
+                    write_resynced_compose(
+                        original_compose.replace("    expose:\n      - '18317'", port_block)
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError, "expected only cpamp-ingress 18317:18317"
+                    ):
+                        subject.verify_rendered_pairing(
+                            receipt_for_node, compose_path, pairing_path, archives)
+
+                # Negative 6: privileged: true, network_mode: host, writable secret on manager
+                write_resynced_compose(
+                    original_compose.replace(
+                        "  cpamp-runtime:\n", "  cpamp-runtime:\n    privileged: true\n"
+                    )
+                )
+                with self.assertRaisesRegex(ValueError, "cpamp-runtime must not run privileged"):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, archives)
+
+                write_resynced_compose(
+                    original_compose.replace(
+                        "  cpamp-runtime:\n", "  cpamp-runtime:\n    network_mode: host\n"
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "cpamp-runtime must not use host networking"
+                ):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, archives)
+
+                write_resynced_compose(
+                    original_compose.replace(
+                        "/run/cpamp/runtime-secret:ro", "/run/cpamp/runtime-secret"
+                    )
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "Runtime transport secret must be read-only for Manager"
+                ):
+                    subject.verify_rendered_pairing(
+                        receipt_for_node, compose_path, pairing_path, archives)
+
+                # Restore valid compose and pairing, then test per-role sourceCommitClaim drift
+                compose_path.write_text(original_compose, encoding="utf-8")
+                pairing_path.write_text(json.dumps(original_pairing), encoding="utf-8")
+                for role in subject.ROLES:
+                    drifted = json.loads(json.dumps(receipt_for_node))
+                    drifted["images"][role]["sourceCommitClaim"] = "0" * 40
+                    with self.assertRaisesRegex(
+                        ValueError, role + " sourceCommitClaim differs"
+                    ):
+                        subject.verify_rendered_pairing(
+                            drifted, compose_path, pairing_path, archives)
 
 
 def stage_mock_candidate_repo(source):
@@ -746,6 +813,7 @@ if role == "manager":
             record = base / "docker-record.jsonl"
             env = dict(os.environ)
             env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+            env["NODE_PATH"] = str(VERIFIER.parents[2] / "node_modules")
             env["FAKE_SOURCE_DIR"] = str(source)
             env["FAKE_COMMIT"] = pinned_commit
             env["FAKE_RECORD"] = str(record)
@@ -876,6 +944,7 @@ with open(os.environ["FAKE_LOAD_RECORD"], "a", encoding="utf-8") as log:
             (fakebin / "docker").chmod(0o755)
             env = dict(os.environ)
             env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+            env["NODE_PATH"] = str(VERIFIER.parents[2] / "node_modules")
             env["CPAMP_CANDIDATE_LOAD"] = "1"
             env["FAKE_LOAD_STATE"] = str(base / "state")
             env["FAKE_LOAD_RECORD"] = str(base / "loaded.txt")
@@ -957,6 +1026,7 @@ with open(os.environ["FAKE_BUILD_RECORD"], "a", encoding="utf-8") as log:
         (fakebin / "docker").chmod(0o755)
         env = dict(os.environ)
         env["PATH"] = str(fakebin) + os.pathsep + env.get("PATH", "")
+        env["NODE_PATH"] = str(VERIFIER.parents[2] / "node_modules")
         env["FAKE_BUILD_RECORD"] = str(base / "builds.jsonl")
         env.pop("CPAMP_CANDIDATE_LOAD", None)
         env.pop("CPAMP_CANDIDATE_BUILDER", None)
