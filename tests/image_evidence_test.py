@@ -124,10 +124,11 @@ class CollectorTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing pinned original"):
                 collector.supplemental_notice(item["name"], item["version"], "wrong-integrity", self.output)
 
-    def test_supplemental_allowlist_is_exactly_three_and_hash_mismatch_fails(self):
+    def test_supplemental_allowlist_is_exactly_five_and_hash_mismatch_fails(self):
         manifest = collector.read_json(ROOT / "bin/release/third-party-license-sources/manifest.json")
         self.assertEqual({item["name"] for item in manifest["packages"]}, {
-            "@uiw/react-codemirror", "@uiw/codemirror-extensions-basic-setup", "html-parse-stringify"})
+            "@uiw/react-codemirror", "@uiw/codemirror-extensions-basic-setup", "html-parse-stringify",
+            "https-proxy-agent", "agent-base"})
         item = manifest["packages"][0]
         item["sha256"] = "sha256:" + "0" * 64
         with patch.object(collector, "read_json", return_value=manifest), self.assertRaisesRegex(ValueError, "hash mismatch"):

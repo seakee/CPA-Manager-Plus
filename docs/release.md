@@ -441,13 +441,19 @@ locked-version mismatches, and missing originals fail the build. Registry
 integrity is recorded when present in the lock; absent integrity is recorded as
 absent, never invented or described as independently verified artifact integrity.
 
-Three npm distributions omit original license files. Their exact upstream texts
+Five npm distributions omit original license files. Their exact upstream texts
 are vendored under `bin/release/third-party-license-sources/`, with immutable
 source URLs, SHA256, package version and available integrity in `manifest.json`.
 The two UIW notices match the registry's exact gitHead. For
 `html-parse-stringify@3.0.1`, upstream added the original LICENSE in the immediate
 child of its registry gitHead (license-only change, upstream issue #61). Both
 revisions and this distinction are recorded; no release-era notice is fabricated.
+`https-proxy-agent@5.0.1` and `agent-base@6.0.2` (the proxy support `axios@1.20.0`
+adds to the Web dependency closure) publish no license file at all: their
+registry gitHead trees carry only an MIT declaration and the grant text inside
+the shipped README. Their pins are the first LICENSE files upstream committed for
+those packages (license-only commit `5923589`, upstream #251) in the upstream
+monorepo, recorded together with the release-era `packageSourceCommit`.
 Changing these package versions requires collecting and reviewing new originals,
 not copying a generic MIT template.
 

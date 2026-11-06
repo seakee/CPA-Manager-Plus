@@ -1,11 +1,28 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+const compareVersions = (left, right) => {
+  const parts = (value) => value.split('-')[0].split('.').map((part) => Number(part));
+  const [major, minor, patch] = parts(left);
+  const [otherMajor, otherMinor, otherPatch] = parts(right);
+  return major - otherMajor || minor - otherMinor || patch - otherPatch;
+};
+
+const expectAtLeast = (version, floor, label) => {
+  expect(version, `${label} must declare a pinned version`).toMatch(/^\d+\.\d+(?:\.\d+)?$/);
+  expect(
+    compareVersions(version, floor),
+    `${label}: ${version} must be at least ${floor}`
+  ).toBeGreaterThanOrEqual(0);
+};
+
 const workflowDir = path.join(repoRoot, '.github', 'workflows');
 const readWorkflow = (name) => readFileSync(path.join(workflowDir, name), 'utf8');
 const dependabotConfig = readFileSync(path.join(repoRoot, '.github', 'dependabot.yml'), 'utf8');
@@ -100,6 +117,287 @@ describe('GitHub Actions workflow integrity', () => {
     expect(requiredJob).toContain('- demo-docs');
     expect(requiredJob).toContain("DEMO_DOCS_RESULT: ${{ needs['demo-docs'].result }}");
     expect(requiredJob).toContain('"Demo and Docs:${DEMO_DOCS_RESULT}"');
+  });
+
+  it('always calls the security workflow and waits for it in Required checks', () => {
+    const workflow = parseYaml(readWorkflow('pr-check.yml'));
+    const security = parseYaml(readWorkflow('security.yml'));
+
+    expect(workflow.jobs.security.uses).toBe('./.github/workflows/security.yml');
+    expect(workflow.jobs.security.if).toBeUndefined();
+    expect(workflow.jobs.security['continue-on-error']).toBeUndefined();
+    expect(workflow.jobs.required.needs).toContain('security');
+    expect(workflow.jobs.required.if).toBe('always()');
+    expect(security.on).toHaveProperty('workflow_call');
+    expect(security.on).toHaveProperty('schedule');
+    expect(security.on).toHaveProperty('workflow_dispatch');
+  });
+
+  it.each(['success', 'failure', 'cancelled', 'skipped', '', undefined])(
+    'only passes Required checks when Dependency Security succeeds (%s)',
+    (securityResult) => {
+      const workflow = parseYaml(readWorkflow('pr-check.yml'));
+      const step = workflow.jobs.required.steps.find(
+        (candidate) => candidate.name === 'Verify applicable checks'
+      );
+      expect(step.env.SECURITY_RESULT).toBe('${{ needs.security.result }}');
+      const env = {
+        ...process.env,
+        ...Object.fromEntries(Object.keys(step.env).map((key) => [key, 'skipped'])),
+      };
+      if (securityResult === undefined) delete env.SECURITY_RESULT;
+      else env.SECURITY_RESULT = securityResult;
+
+      const result = spawnSync('bash', ['-c', step.run], { env, encoding: 'utf8' });
+      expect(result.error).toBeUndefined();
+      if (securityResult === 'success') expect(result.status, result.stderr).toBe(0);
+      else expect(result.status).not.toBe(0);
+    }
+  );
+
+  it('scans every Go module for the six shipped target platforms', () => {
+    const security = parseYaml(readWorkflow('security.yml'));
+    const goJob = security.jobs.go;
+    const npmJob = security.jobs.npm;
+
+    // v2 ships linux/amd64 + linux/arm64 images, darwin/amd64 + darwin/arm64
+    // native archives and windows/amd64 native and portability builds, so the
+    // standard-library audit keeps the complete six-target matrix.
+    expect(goJob.strategy.matrix.goos).toEqual(['linux', 'darwin', 'windows']);
+    expect(goJob.strategy.matrix.goarch).toEqual(['amd64', 'arm64']);
+    expect(goJob.steps.find((step) => step.name === 'Setup Go').with).toEqual({
+      'go-version-file': 'apps/manager-server/go.mod',
+      'cache-dependency-path':
+        'apps/manager-server/go.sum\napps/ingress/go.mod\napps/runtime-supervisor/go.sum\n',
+    });
+    const scan = goJob.steps.find((step) => step.name === 'Scan application dependencies');
+    expect(scan.env.GOOS).toBe('${{ matrix.goos }}');
+    expect(scan.env.GOARCH).toBe('${{ matrix.goarch }}');
+    expect(scan.env.CGO_ENABLED).toBe('0');
+
+    const npmAudit = npmJob.steps.find(
+      (step) => step.name === 'Audit all workspace dependencies'
+    );
+    expect(npmAudit.run).toBe('npm audit --package-lock-only --ignore-scripts');
+    expectAtLeast(
+      npmJob.steps.find((step) => step.name === 'Setup Node.js').with['node-version'],
+      '22.23.4',
+      'security.yml npm node-version'
+    );
+  });
+
+  it('scans every Go module and fails the Go audit when any module reports a finding', () => {
+    const security = parseYaml(readWorkflow('security.yml'));
+    const scan = security.jobs.go.steps.find(
+      (step) => step.name === 'Scan application dependencies'
+    );
+    const stubDir = mkdtempSync(path.join(tmpdir(), 'govulncheck-stub-'));
+    const logFile = path.join(stubDir, 'invocations.log');
+    writeFileSync(
+      path.join(stubDir, 'govulncheck'),
+      [
+        '#!/bin/sh',
+        'set -eu',
+        'echo "$PWD" >> "$GOVULNCHECK_LOG"',
+        'if [ -n "$GOVULNCHECK_FAIL_SUFFIX" ]; then',
+        '  case "$PWD" in',
+        '    *"$GOVULNCHECK_FAIL_SUFFIX") echo "Vulnerability found" >&2; exit 3;;',
+        '  esac',
+        'fi',
+        'exit 0',
+        '',
+      ].join('\n'),
+      { mode: 0o755 }
+    );
+
+    const runScan = (failSuffix) => {
+      rmSync(logFile, { force: true });
+      const result = spawnSync('bash', ['-c', scan.run], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${stubDir}:${process.env.PATH}`,
+          GOVULNCHECK_LOG: logFile,
+          GOVULNCHECK_FAIL_SUFFIX: failSuffix,
+          GOOS: 'linux',
+          GOARCH: 'amd64',
+          CGO_ENABLED: '0',
+        },
+      });
+      return {
+        ...result,
+        scanned: existsSync(logFile)
+          ? readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean)
+          : [],
+      };
+    };
+
+    try {
+      const passing = runScan('');
+      expect(passing.error).toBeUndefined();
+      expect(passing.status, passing.stderr).toBe(0);
+      expect(passing.scanned.map((dir) => path.relative(repoRoot, dir))).toEqual([
+        'apps/manager-server',
+        'apps/ingress',
+        'apps/runtime-supervisor',
+      ]);
+
+      const failing = runScan('apps/ingress');
+      expect(failing.status).not.toBe(0);
+      expect(failing.scanned.map((dir) => path.relative(repoRoot, dir))).toEqual([
+        'apps/manager-server',
+        'apps/ingress',
+      ]);
+    } finally {
+      rmSync(stubDir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the Go and Node security baselines in manifests, images and CI', () => {
+    const workflows = readdirSync(workflowDir).filter((file) => /\.ya?ml$/.test(file));
+    const readRepoFile = (relative) => readFileSync(path.join(repoRoot, relative), 'utf8');
+    const goDirective = (module) =>
+      readRepoFile(`apps/${module}/go.mod`).match(/^go (\d+\.\d+\.\d+)$/m)?.[1];
+
+    const goVersions = {};
+    for (const module of ['manager-server', 'ingress', 'runtime-supervisor']) {
+      goVersions[module] = goDirective(module);
+      expectAtLeast(goVersions[module], '1.26.10', `apps/${module}/go.mod go directive`);
+    }
+    // The toolchain must not fork: setup-go reads the manifest, the images bake
+    // the Dockerfile version, so all three manifests and all three build stages
+    // have to agree exactly (the floors above only stop downgrades).
+    expect(new Set(Object.values(goVersions)).size, JSON.stringify(goVersions)).toBe(1);
+    for (const module of ['manager-server', 'runtime-supervisor']) {
+      const requirement = readRepoFile(`apps/${module}/go.mod`).match(
+        /golang\.org\/x\/sys v(\d+\.\d+\.\d+)/
+      );
+      expect(requirement, `${module} must require golang.org/x/sys`).toBeTruthy();
+      expectAtLeast(requirement[1], '0.44.0', `${module} golang.org/x/sys`);
+    }
+
+    expectAtLeast(readRepoFile('.nvmrc').trim(), '24.22.1', '.nvmrc');
+    expectAtLeast(
+      readRepoFile('Dockerfile.manager-server').match(/node:(\d+\.\d+\.\d+)-alpine/)?.[1],
+      '22.23.4',
+      'Dockerfile.manager-server node base'
+    );
+
+    const imageGoVersions = {};
+    for (const dockerfile of [
+      'Dockerfile.manager-server',
+      'Dockerfile.ingress',
+      'Dockerfile.runtime',
+    ]) {
+      const text = readRepoFile(dockerfile);
+      imageGoVersions[dockerfile] = text.match(/golang:(\d+\.\d+\.\d+)-alpine/)?.[1];
+      expectAtLeast(imageGoVersions[dockerfile], '1.26.10', `${dockerfile} golang base`);
+      expect(text, dockerfile).not.toContain('golang:1.24');
+      expect(text, dockerfile).not.toMatch(/node:\d+-alpine/);
+    }
+    expect(
+      new Set(Object.values(imageGoVersions)).size,
+      JSON.stringify(imageGoVersions)
+    ).toBe(1);
+    expect(
+      Object.values(imageGoVersions)[0],
+      'build images must match the module Go directive'
+    ).toBe(Object.values(goVersions)[0]);
+
+    for (const file of workflows) {
+      const text = readWorkflow(file);
+      for (const match of text.matchAll(/(?:node|go)-version:\s*'([^']+)'/g)) {
+        // An unpinned major such as '24' or '22' would silently float the
+        // toolchain, so every pin has to carry a patch version.
+        expect(match[1], `${file} ${match[0]}`).toMatch(/^\d+\.\d+\.\d+$/);
+      }
+      for (const match of text.matchAll(/^\s*GO_VERSION:\s*'([^']+)'/gm)) {
+        expectAtLeast(match[1], '1.26.10', `${file} GO_VERSION`);
+      }
+      for (const match of text.matchAll(/^\s*NODE_VERSION:\s*'([^']+)'/gm)) {
+        expectAtLeast(match[1], '22.23.4', `${file} NODE_VERSION`);
+      }
+    }
+  });
+
+  it('installs the Go toolchain before any job runs the Go-dependent repo tests', () => {
+    const workflow = parseYaml(readWorkflow('pr-check.yml'));
+    const repoTestStep = /^npm run test(?::repo)?$/m;
+    let checkedJobs = 0;
+
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      if (!Array.isArray(job.steps)) continue;
+      const testIndex = job.steps.findIndex((step) => repoTestStep.test(step.run ?? ''));
+      if (testIndex < 0) continue;
+      checkedJobs += 1;
+      const setupIndex = job.steps.findIndex((step) => /^actions\/setup-go@/.test(step.uses ?? ''));
+      expect(setupIndex, `${name} must install Go`).toBeGreaterThanOrEqual(0);
+      expect(setupIndex, `${name} must install Go before ${job.steps[testIndex].name}`).toBeLessThan(
+        testIndex
+      );
+      // The repo tests read the module manifests through `go mod edit -json`, so
+      // the setup has to be driven by a manifest rather than a floating major.
+      expect(job.steps[setupIndex].with['go-version-file']).toMatch(/^apps\/.*\/go\.mod$/);
+      for (const [index, step] of job.steps.entries()) {
+        if (!/^go\s/.test((step.run ?? '').trim())) continue;
+        expect(index, `${name} ${step.name} runs go`).toBeGreaterThan(setupIndex);
+      }
+    }
+
+    expect(checkedJobs).toBeGreaterThan(0);
+  });
+
+  it('locks the dependency versions that close the known advisories', () => {
+    const lock = JSON.parse(readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'));
+    const locked = (name) => lock.packages[`node_modules/${name}`]?.version;
+    const atLeast = (name, minimum) => {
+      const version = locked(name);
+      expect(version, name).toBeTruthy();
+      const [major, minor, patch] = version.split('.').map(Number);
+      const [minMajor, minMinor, minPatch] = minimum.split('.').map(Number);
+      expect(
+        major - minMajor || minor - minMinor || patch - minPatch,
+        `${name}@${version} must be at least ${minimum}`
+      ).toBeGreaterThanOrEqual(0);
+    };
+
+    // zod < 4.6.6 exhausts memory while validating oversized arrays
+    // (GHSA-mrhx-c7xc-m3w5). It is a dev-only peer of eslint-plugin-react-hooks,
+    // but the workspace audit gates every PR, so the lock must stay above it.
+    atLeast('zod', '4.6.6');
+    // The runtime and build stack the workspace audit covers.
+    atLeast('axios', '1.20.0');
+    atLeast('react-router-dom', '7.18.2');
+    atLeast('vite', '8.1.6');
+    atLeast('vite-plugin-singlefile', '2.3.4');
+    atLeast('vitest', '4.1.12');
+
+    // Advisories published after v1.14.10: follow-redirects inbound-header leak
+    // (GHSA-mrwp-f3q8-3g9p, patched 1.16.2) and the VitePress build Vite copy
+    // (GHSA-8g5g-mxqh-grgj, patched 6.4.5).
+    atLeast('follow-redirects', '1.16.2');
+    expectAtLeast(
+      lock.packages['node_modules/vitepress/node_modules/vite']?.version,
+      '6.4.5',
+      'VitePress build vite'
+    );
+
+    // GHSA-g3hv-75wg-m249 (minimatch < 11.0.1) is closed only inside the
+    // typescript-eslint path; eslint's own minimatch 3 line, which filelist,
+    // jake and ejs still need, must stay untouched.
+    expectAtLeast(
+      lock.packages['node_modules/@typescript-eslint/typescript-estree/node_modules/minimatch']
+        ?.version,
+      '11.0.1',
+      'typescript-estree minimatch'
+    );
+    expect(locked('minimatch')).toMatch(/^3\./);
+
+    // The scoped VitePress overrides keep the docs build on React 19 compatible
+    // DocSearch packages instead of the advisories in its default resolution.
+    expect(locked('@docsearch/css')).toBe('3.9.0');
+    expect(locked('@docsearch/js')).toBe('3.9.0');
   });
 
   it('runs Supervisor verification through classification and the required-check aggregate', () => {

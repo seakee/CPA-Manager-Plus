@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM node:22-alpine AS web-build
+FROM --platform=$BUILDPLATFORM node:22.23.4-alpine AS web-build
 ARG VERSION
 ARG SOURCE_COMMIT
 # Fail closed on malformed identity before any Web or Go build runs. The format
@@ -28,7 +28,7 @@ WORKDIR /app/apps/web
 RUN VERSION="$VERSION" npm run build
 RUN mkdir -p /out && node /app/bin/release/hash-fullweb.mjs /app/apps/web/dist/fullweb /out/fullweb-manifest.json
 
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS service-build
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS service-build
 ARG VERSION
 ARG SOURCE_COMMIT
 # Fail closed on malformed identity before the Go build and license collection.

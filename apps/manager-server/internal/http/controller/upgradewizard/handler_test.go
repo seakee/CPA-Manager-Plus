@@ -1477,7 +1477,7 @@ func TestScrubbersKeepHostPathsOut(t *testing.T) {
 		// included; the wrap is still resolved, which is what this asserts.
 		t.Fatalf("split bearer is not joined and redacted: %q", got)
 	} else if got := strings.Count(got, "\n"); got != 2 {
-		t.Fatalf("split bearer changed the detail shape: %q", got)
+		t.Fatalf("split bearer changed the detail shape: %d", got)
 	}
 	// A product key broken mid-token is one credential too: the head is redacted
 	// by the key pattern, and the continuation carries no prefix of its own, so it

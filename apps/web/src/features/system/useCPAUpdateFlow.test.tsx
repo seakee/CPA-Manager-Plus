@@ -132,7 +132,7 @@ beforeEach(() => {
   mutate = async (phase, body) => mutationResult(phase, body);
   observe = async (phase, body) => observationResult(updateIntent({ ...body, phase }), 'running');
   request.mockReset();
-  request.mockImplementation(async (config) => {
+  request.mockImplementation(async (config: AxiosRequestConfig) => {
     const suffix = config.url!.split('/usage-service/runtime/updates')[1];
     let data: unknown;
     if (suffix === '' || suffix === '/check') data = await readStatus();

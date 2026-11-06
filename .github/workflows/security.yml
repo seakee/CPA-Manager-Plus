@@ -1,0 +1,69 @@
+name: Dependency Security
+
+on:
+  workflow_call:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  npm:
+    name: npm dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.22.1'
+
+      - name: Audit all workspace dependencies
+        run: npm audit --package-lock-only --ignore-scripts
+
+  go:
+    # govulncheck resolves the standard library and module graph for the
+    # GOOS/GOARCH it is asked about, so every platform that ships a first-party
+    # binary is audited: linux/amd64 + linux/arm64 container images,
+    # darwin/amd64 + darwin/arm64 native archives and windows/amd64 native and
+    # portability builds. The six-target matrix is retained from v1 as the
+    # complete coverage set, and all three Go modules are scanned because the
+    # vulnerability surface differs per module graph.
+    name: Go vulnerability scan (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/manager-server/go.mod
+          cache-dependency-path: |
+            apps/manager-server/go.sum
+            apps/ingress/go.mod
+            apps/runtime-supervisor/go.sum
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+
+      - name: Scan application dependencies
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          for module in apps/manager-server apps/ingress apps/runtime-supervisor; do
+            echo "Scanning ${module} for ${GOOS}/${GOARCH}"
+            (cd "${module}" && govulncheck ./...)
+          done

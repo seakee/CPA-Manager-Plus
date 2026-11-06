@@ -34,8 +34,8 @@ jobs:
 
     env:
       SKIP_UPGRADE_DOCKER: ${{ vars.SKIP_UPGRADE_DOCKER }}
-      GO_VERSION: '1.24.13'
-      NODE_VERSION: '22'
+      GO_VERSION: '1.26.10'
+      NODE_VERSION: '24.22.1'
 
     steps:
       - name: Checkout code
