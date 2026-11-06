@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,6 +50,199 @@ func TestLoadConfigCPAAddressDefaultsAndValidation(t *testing.T) {
 				t.Fatal("invalid probe configuration opened the journal before failing")
 			}
 		})
+	}
+}
+
+func TestDestinationListenLoopbackRejectsInvalidValue(t *testing.T) {
+	for _, test := range []struct {
+		raw  string
+		want bool
+	}{
+		{"", false},
+		{"1", true},
+		{" 1 ", true},
+		{"true", true},
+		{"TRUE", true},
+		{" True ", true},
+	} {
+		values := validConfigValues()
+		values["CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"] = test.raw
+		cfg, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(41))
+		if err != nil || cfg.cpaListenLoopback != test.want {
+			t.Fatalf("loadConfig(CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=%q) = %v, %v", test.raw, cfg.cpaListenLoopback, err)
+		}
+	}
+	for _, raw := range []string{"yes", "0", "on", "false", "2"} {
+		t.Run(raw, func(t *testing.T) {
+			values := validConfigValues()
+			values["CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"] = raw
+			_, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(41))
+			if err == nil || !strings.Contains(err.Error(), "CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: must be 1 or true") {
+				t.Fatalf("loadConfig(CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK=%q) error = %v", raw, err)
+			}
+		})
+	}
+}
+
+func TestDestinationListenLoopbackRequiresExactLoopbackHost(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:8317", "[::1]:8317", "localhost:8317"} {
+		t.Run("accept_"+address, func(t *testing.T) {
+			directory := t.TempDir()
+			values := validConfigValues()
+			values["CPAMP_RUNTIME_CPA_ADDR"] = address
+			values["CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"] = "1"
+			values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
+			values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
+			cfg, err := loadConfig(func(key string) string { return values[key] }, fixedGeneration(41))
+			if err != nil || !cfg.cpaListenLoopback {
+				t.Fatalf("loadConfig(%q) = %+v, %v", address, cfg, err)
+			}
+			handler, err := newRuntimeHandler(t.Context(), cfg)
+			if err != nil {
+				t.Fatalf("newRuntimeHandler(%q) error = %v", address, err)
+			}
+			if err := handler.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for _, address := range []string{"127.0.0.2:8317", "127.0.1.1:8317", "0.0.0.0:8317", "192.0.2.10:8317"} {
+		t.Run("reject_"+address, func(t *testing.T) {
+			directory := t.TempDir()
+			cfg := loadTestConfig(t, fixedGeneration(41))
+			cfg.cpaAddr = address
+			cfg.cpaListenLoopback = true
+			cfg.journalPath = filepath.Join(directory, "private", "operations.sqlite")
+			cfg.cpaExecutable = copyStartHelper(t, directory)
+			handler, err := newRuntimeHandler(t.Context(), cfg)
+			if handler != nil || err == nil || !strings.Contains(err.Error(), "CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK") {
+				t.Fatalf("newRuntimeHandler(%q) = %v, %v; want CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK error", address, handler, err)
+			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(cfg.journalPath), "destination")); !os.IsNotExist(err) {
+				t.Fatalf("rejected loopback address %q created destination directory: %v", address, err)
+			}
+			if _, err := os.Stat(filepath.Dir(cfg.journalPath)); !os.IsNotExist(err) {
+				t.Fatalf("rejected loopback address %q opened supervisor runtime root before failing: %v", address, err)
+			}
+			if _, err := os.Stat(filepath.Join(directory, "spawns")); !os.IsNotExist(err) {
+				t.Fatalf("rejected loopback address %q started a child process: %v", address, err)
+			}
+		})
+	}
+}
+
+func TestDestinationListenLoopbackNormalizesLocalhostReadinessToIPv4(t *testing.T) {
+	var v6Listener net.Listener
+	var port string
+	for range 8 {
+		candidate, err := net.Listen("tcp6", "[::1]:0")
+		if err != nil {
+			t.Skipf("IPv6 loopback unavailable: %v", err)
+		}
+		_, candidatePort, err := net.SplitHostPort(candidate.Addr().String())
+		if err != nil {
+			_ = candidate.Close()
+			t.Fatal(err)
+		}
+		v4Check, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", candidatePort))
+		if err != nil {
+			_ = candidate.Close()
+			continue
+		}
+		_ = v4Check.Close()
+		v6Listener = candidate
+		port = candidatePort
+		break
+	}
+	if v6Listener == nil {
+		t.Fatal("failed to allocate shared port for [::1] and 127.0.0.1")
+	}
+
+	var v6Probes atomic.Int32
+	v6Server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			v6Probes.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	t.Cleanup(func() {
+		_ = v6Server.Close()
+		_ = v6Listener.Close()
+	})
+	go func() {
+		_ = v6Server.Serve(v6Listener)
+	}()
+
+	directory := t.TempDir()
+	values := validConfigValues()
+	values["CPAMP_RUNTIME_CPA_ADDR"] = net.JoinHostPort("localhost", port)
+	values["CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"] = "1"
+	values["CPAMP_RUNTIME_JOURNAL_PATH"] = filepath.Join(directory, "runtime", "operations.sqlite")
+	values["CPAMP_CPA_EXECUTABLE"] = copyStartHelper(t, directory)
+	for _, key := range []string{"NORMAL_SENTINEL", "CPAMP_DEPLOYMENT_SENTINEL", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"} {
+		values[key] = "test-only-ordinary-value"
+	}
+	for key, value := range values {
+		t.Setenv(key, value)
+	}
+	cfg, err := loadConfig(os.Getenv, fixedGeneration(41))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newRuntimeHandler(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		runtimeStop(handler, context.Background(), "fixture-cleanup-stop", 41)
+		if err := handler.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	if started := runtimeStart(handler, t.Context(), "start-nh2-localhost", 41); started.Code != http.StatusOK {
+		t.Fatalf("Start = %d %s", started.Code, started.Body)
+	}
+	awaitSpawnCount(t, directory, 1)
+
+	// (a) A foreign IPv6 [::1]:<port> listener returning 200 OK on /healthz
+	// while nothing listens on 127.0.0.1:<port> must not satisfy readiness
+	// and must receive zero probes from the Supervisor.
+	assertReadiness(t, handler, "starting")
+	if got := v6Probes.Load(); got != 0 {
+		t.Fatalf("IPv6 [::1]:%s listener received %d readiness probes, want 0", port, got)
+	}
+
+	// (b) Once an IPv4 127.0.0.1:<port> listener serves /healthz on the same
+	// port, the Supervisor's normalized readiness probe connects to 127.0.0.1:<port>.
+	v4Listener, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		t.Fatalf("listen 127.0.0.1:%s: %v", port, err)
+	}
+	var v4Probes atomic.Int32
+	v4Server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			v4Probes.Add(1)
+			if r.Method != http.MethodHead || r.URL.String() != "/healthz" {
+				t.Errorf("unexpected CPA probe %s %s", r.Method, r.URL)
+			}
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	t.Cleanup(func() {
+		_ = v4Server.Close()
+		_ = v4Listener.Close()
+	})
+	go func() {
+		_ = v4Server.Serve(v4Listener)
+	}()
+
+	assertReadiness(t, handler, "ready")
+	if got := v4Probes.Load(); got != 1 {
+		t.Fatalf("IPv4 127.0.0.1:%s listener received %d readiness probes, want 1", port, got)
+	}
+	if got := v6Probes.Load(); got != 0 {
+		t.Fatalf("IPv6 [::1]:%s listener received %d readiness probes after IPv4 ready, want 0", port, got)
 	}
 }
 

@@ -17,12 +17,12 @@ import uuid
 from pathlib import Path
 
 CPA_EXECUTABLE_SHA256 = {
-    "amd64": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
-    "arm64": "9dfe80b79f8466b4e56d51d71869ce759021942a9279e43dbea92eda21b994d7",
+    "amd64": "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
+    "arm64": "4a5b43cc3700d36c72b7c1953e9b11eca0888c13b789ea2f99471117504a7d5d",
 }
-CPA_VERSION = "8.0.13"
+CPA_VERSION = "8.0.55"
 CPA_LICENSE_PATH = "/usr/local/share/licenses/cli-proxy-api/LICENSE"
-# Original LICENSE bytes from the checksum-verified official v8.0.13 archive.
+# Original LICENSE bytes from the checksum-verified official v8.0.55 archive.
 CPA_LICENSE_SHA256 = "879792e89cf1bdd6a8d446033ec87e30496f97dcafc4656dc53f641509b346a6"
 EXTRACT = {
     "manager": ("/usr/local/bin/cpa-manager-plus",),
@@ -71,7 +71,7 @@ def check_artifact(content, architecture):
             value.get("schemaVersion") != 1 or
             value.get("engine") != "cpa" or value.get("version") != CPA_VERSION or
             value.get("artifactId") != "sha256:" + CPA_EXECUTABLE_SHA256[architecture]):
-        raise ValueError("CPA artifact manifest does not identify pinned official v8.0.13")
+        raise ValueError("CPA artifact manifest does not identify pinned official v8.0.55")
     return value
 
 
@@ -81,7 +81,7 @@ def check_cpa_license(path):
     if path.stat().st_mode & 0o222:
         raise ValueError("packaged CPA LICENSE must be read-only")
     if hashlib.sha256(path.read_bytes()).hexdigest() != CPA_LICENSE_SHA256:
-        raise ValueError("packaged CPA LICENSE differs from official v8.0.13")
+        raise ValueError("packaged CPA LICENSE differs from official v8.0.55")
 
 
 def audit_one(role, image, tmpdir):
@@ -104,7 +104,7 @@ def audit_one(role, image, tmpdir):
                 check_cpa_license(destination)
         record["files"] = files
         if role == "runtime" and files["/usr/local/bin/cli-proxy-api"] != CPA_EXECUTABLE_SHA256[record["architecture"]]:
-            raise ValueError("actual bundled CPA executable differs from pinned v8.0.13")
+            raise ValueError("actual bundled CPA executable differs from pinned v8.0.55")
         return record
     finally:
         if created:

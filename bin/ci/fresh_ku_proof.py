@@ -40,7 +40,7 @@ def exercise(command,http,record,evidence,name,probe,runtime,old,old_id,admin,ap
         assert json.loads(command("docker","network","inspect",name))[0]["Internal"]
         code,status=http(9081,"/v1/runtime/status",key=runtime_token[0])
         assert code==200 and str(status["runtimeGeneration"])==permit["generation"] and status["state"]=="ready"
-        assert command("docker","exec",runtime,"sha256sum","/usr/local/bin/cli-proxy-api").split()[0]=="b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+        assert command("docker","exec",runtime,"sha256sum","/usr/local/bin/cli-proxy-api").split()[0]=="e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
         # No other HTTP/file/reload writer is launched. The original S1 writer
         # is spent; the journal prevents reinstallation. Manager is sole writer.
         source=command("docker","exec","--user","10001:10001",runtime,"sha256sum","/runtime/gateway/config.yaml").split()[0]

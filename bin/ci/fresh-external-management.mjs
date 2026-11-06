@@ -2,7 +2,7 @@
 // Disposable D acceptance for Fresh External management. No shared state, no
 // pinned evidence: every container, network and volume this creates is removed.
 //
-// The scenario is the one a user actually hits. A real CPA v8.0.13 runs as its
+// The scenario is the one a user actually hits. A real CPA v8.0.55 runs as its
 // own container from the runtime candidate's pinned binary, and the Manager
 // reaches it over a private network. The Manager owns no part of that CPA, so
 // every write it makes is a write onto somebody else's process, which is what the
@@ -323,7 +323,7 @@ function cpaLogTail(lines = 40) {
   return ((logs.stdout || '') + (logs.stderr || '')).slice(-6000);
 }
 
-// The CPA is the pinned v8.0.13 binary from the runtime candidate, started
+// The CPA is the pinned v8.0.55 binary from the runtime candidate, started
 // directly rather than through the Runtime entrypoint: this Manager must reach a
 // CPA it does not own, so the container must not be the Manager's own runtime.
 let cpaConfig = [
@@ -386,12 +386,12 @@ try {
     `${cpaConfigPath}:/cpa/config.yaml`,
     images['cpamp-runtime'],
     '/usr/local/bin/cli-proxy-api',
-    // The pinned v8.0.13 binary takes a single-dash flag; `--config` is not a
+    // The pinned v8.0.55 binary takes a single-dash flag; `--config` is not a
     // synonym and would start the CPA on its defaults instead.
     '-config',
     '/cpa/config.yaml'
   );
-  await check('user CPA v8.0.13 starts as its own container on a private network', async () =>
+  await check('user CPA v8.0.55 starts as its own container on a private network', async () =>
     wait(async () => {
       const probe = run(
         [
@@ -906,7 +906,7 @@ try {
 
   // ---- Usage attribution. A CPA publishes a usage record only for an inference
   // call that reached a Provider: a Client-Key model list publishes nothing, and
-  // so does an inference that fails before any Provider (both observed on v8.0.13,
+  // so does an inference that fails before any Provider (both observed on v8.0.55,
   // and this run has no Provider fixture). What is provable here is the honest
   // half of attribution — the CPA queues nothing for this run's traffic while
   // nothing drains the queue, and the projection attributes nothing it was never

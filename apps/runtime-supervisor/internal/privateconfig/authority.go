@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const Artifact = "sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+const Artifact = "sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
 const Path = "/v1/runtime/private-configuration"
 const GrantPath = "/run/cpamp-config/source.json"
 

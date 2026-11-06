@@ -1,7 +1,7 @@
 # Private Fresh S1 initial Key installation
 
 This is a maintainer-authorized, disposable **Linux/amd64** experiment for official
-CPA **v8.0.13**, scoped by [Plan #57](https://github.com/seakee/cpamp-plan/pull/57)
+CPA **v8.0.55**, scoped by [Plan #57](https://github.com/seakee/cpamp-plan/pull/57)
 and product [Draft #1017](https://github.com/seakee/CPA-Manager-Plus/pull/1017).
 It grants no public Gateway, release, default Compose, External, Upgrade or S2
 capability. All Ingress model requests remain **503**.
@@ -41,7 +41,7 @@ Runtime/CPA URLs are the private loopback literals. This environment setting alo
 grants nothing. Manager must also load a root-owned, regular, non-symlink **0600**
 host permit, mounted read-only by the disposable launcher. Its short lease is
 checked against real time, authenticated Runtime generation, ready state and the
-fixed v8.0.13 artifact. The transport rechecks lease expiry before PUT.
+fixed v8.0.55 artifact. The transport rechecks lease expiry before PUT.
 
 The host launcher is the authority for the facts Manager cannot infer over HTTP.
 It creates unpredictable new volumes and an internal Docker network; verifies
@@ -139,9 +139,9 @@ python3 bin/ci/fresh-s1-docker-proof.py bin/tmp/s1/new-proof-directory
 `python:3.13-alpine` must already be available locally. The script never selects
 an existing container or volume. It destroys only resources it created. The
 official pinned archive SHA256 is
-`50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3`;
+`4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123`;
 the executable SHA256 is
-`b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41`.
+`e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7`.
 The official executable is never modified or rebuilt from CPA source.
 
 The script exercises canonical initialize/claim/Admin/routing/Strategy before

@@ -2,7 +2,7 @@
 // Disposable D acceptance for network Adopt. No shared state, no pinned evidence:
 // every container, network and volume this creates is removed.
 //
-// The journey is the operator's own. A real CPA v8.0.13 runs as its own container
+// The journey is the operator's own. A real CPA v8.0.55 runs as its own container
 // carrying credentials, provider sections and gateway settings; a second CPA is
 // the Supervisor-owned destination this Manager stages; and the browser adopts
 // the first into the second through the wizard, from the source form to the
@@ -191,8 +191,8 @@ const providerKeys = {
 //
 // The bytes are the form CPA itself writes an auth file in: the metadata map it
 // holds, marshalled (sorted keys, `disabled` present). CPA's upload path re-marshals
-// a credential whose bytes differ from that form (`sdk/auth/filestore.go:135-146` in
-// v8.0.13), so bytes in any other key order come back changed and the executor's
+// a credential whose bytes differ from that form (`sdk/auth/filestore.go:140-150` in
+// v8.0.55), so bytes in any other key order come back changed and the executor's
 // byte-equality read-back would report every one of them as unverified. A real
 // source CPA holds canonical files; a fixture that does not is not the state the
 // migration is specified against.
@@ -222,11 +222,11 @@ const overlongFile = {
     type: 'claude',
   }),
 };
-// A `.json` file the source cannot classify. CPA v8.0.13 only lists a credential it
+// A `.json` file the source cannot classify. CPA v8.0.55 only lists a credential it
 // synthesized: a body that is not a JSON object, or one without a `type`, returns
 // no auth and never reaches `/v8/management/credentials`
-// (`internal/watcher/synthesizer/file.go:75-83,158-160`), and the route lists the
-// auth manager's own set (`internal/api/handlers/management/auth_files.go:143-147`).
+// (`internal/watcher/synthesizer/file.go:87-98,180-182`), and the route lists the
+// auth manager's own set (`internal/api/handlers/management/auth_files.go:146-152`).
 // The file therefore exists on the source host but is not an item of the migration
 // inventory: it must stay off the destination and must not be invented as a manual
 // item. It stays in the fixture because that distinction is what this run proves.
@@ -795,7 +795,7 @@ function destinationManagementKey() {
   return destinationKey;
 }
 // CPA rewrites its own config document as YAML the first time it saves a change
-// (`internal/config/config_load.go:223` in v8.0.13), so the file on disk is not a
+// (`internal/config/config_load.go:350` in v8.0.55), so the file on disk is not a
 // JSON document after the migration. The CPA's own management read is the exact
 // configuration the child serves, and it is JSON.
 function destinationConfig() {
@@ -863,7 +863,7 @@ async function adminGet(path) {
 // ends the script, so the ones behind it never run; naming them here is what lets
 // the report say they were not observed instead of ending early.
 const plannedChecks = [
-  'an independent CPA v8.0.13 source answers its v8 management API',
+  'an independent CPA v8.0.55 source answers its v8 management API',
   'the source lists only the credentials its v8 API can classify',
   'Adopt is selectable and the wizard opens its source form',
   'a wrong management key is refused with adoption_source_read_unavailable',
@@ -942,7 +942,7 @@ try {
         `http://${alias}:8317/v8/management/config`],
       undefined, false
     ).status === 0;
-  await check('an independent CPA v8.0.13 source answers its v8 management API', async () => {
+  await check('an independent CPA v8.0.55 source answers its v8 management API', async () => {
     await wait(async () => managementProbe('cpampd-adopt-cpa', managementKey), 'source CPA', 120000);
     const version = run(
       ['docker', 'run', '--rm', '--network', network, '--entrypoint', 'wget',
@@ -953,7 +953,7 @@ try {
     report.sourceVersion =
       /X-Cpa-Version:\s*(v?[0-9][0-9.]*)/i.exec((version.stderr || '') + (version.stdout || ''))?.[1] ||
       'unknown';
-    assert.match(report.sourceVersion, /8\.0\.13/, 'the source must be CPA v8.0.13');
+    assert.match(report.sourceVersion, /8\.0\.55/, 'the source must be CPA v8.0.55');
     return { version: report.sourceVersion };
   });
   await wait(async () => managementProbe('cpampd-adopt-source', managementKey), 'forwarder', 60000);

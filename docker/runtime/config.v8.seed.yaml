@@ -1,4 +1,4 @@
-# CPA v8.0.13 bootstrap only: no product, client or provider credentials.
+# CPA v8.0.55 bootstrap only: no product, client or provider credentials.
 # Empty access.api-keys permits unauthenticated data-plane requests. Keep this
 # candidate private; Gateway remains pending and Beta ingress needs C1/security.
 config-version: 8

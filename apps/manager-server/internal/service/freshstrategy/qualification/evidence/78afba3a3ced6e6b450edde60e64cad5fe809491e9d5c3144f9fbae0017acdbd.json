@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "runId": "AQ02-0677dda10b95ff784f2e9ddc4948ece19e0b7b05436d461c",
+  "caseRef": "AQ03-E01-real-config",
+  "records": [
+    {
+      "expectationRef": "AQ03-E01-real-config-HTTP",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 31331,
+      "requestBytes": 0,
+      "responseBytes": 652
+    },
+    {
+      "expectationRef": "AQ03-E01-real-config-STATE",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 31331,
+      "requestBytes": 0,
+      "responseBytes": 652
+    },
+    {
+      "expectationRef": "AQ03-E01-real-config-CONTROL",
+      "outcome": "pass",
+      "observationCode": "EXPECTED_MATCH",
+      "httpStatus": 200,
+      "elapsedMs": 31331,
+      "requestBytes": 0,
+      "responseBytes": 652
+    }
+  ]
+}

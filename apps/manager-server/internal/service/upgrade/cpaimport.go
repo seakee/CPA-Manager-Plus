@@ -1038,7 +1038,7 @@ func (r *cpaImportRun) requireStagedDestinationIdentity(ctx context.Context, bas
 // no credential, and the same read with a fresh random value. A CPA answers 401 to
 // both, because gateway admission rejects an absent or unknown key — but so does
 // any other endpoint that gates credentials, and cpa.ProbeV8Listener cannot tell
-// them apart (its file header records the v8.0.13 rejection body that was checked
+// them apart (its file header records the v8.0.55 rejection body that was checked
 // and cannot narrow it). An endpoint that accepts either one is not the destination
 // this import stages — it cannot even be shown to enforce the authentication the
 // staged destination was built with — and one that answers nothing cannot be

@@ -6,6 +6,13 @@ Only packaging, a separate bootstrap seed and this focused smoke changed.
 The default Docker target/Compose still use v7.3.3; v8 requires the explicit
 `v8-amd64-candidate` target. No image was pushed, nor tag/release created.
 
+> **Recorded run, not the current pin.** Everything below — the pinned source
+> commit, the archive/executable identity table, the emitted manifest and the
+> observed headers — is the recorded v8.0.13 bundle run and is kept as evidence
+> of that run. The current pin is v8.0.55 with
+> archive `4cd59325…` / executable `e48c85c7…`, documented in
+> `bin/ci/runtime-v8-default-smoke.md`; the bundle rerun on that pin is NOT RUN.
+
 ## Pairing and historical applicability
 
 Inputs: merged Plan #40/#41/#42, First Beta and Release Transition Epics,

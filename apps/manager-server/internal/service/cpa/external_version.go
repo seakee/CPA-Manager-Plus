@@ -128,7 +128,7 @@ func (t *Transport) observeVersion(ctx context.Context, managementKey string) (s
 }
 
 // majorVersion reads the leading major number of a CPA version tag. CPA versions
-// are tags such as v8.0.13; a bare 8.0.13 is accepted as well.
+// are tags such as v8.0.55; a bare 8.0.55 is accepted as well.
 func majorVersion(version string) (int, bool) {
 	trimmed := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if trimmed == "" {

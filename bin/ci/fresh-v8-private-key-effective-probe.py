@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Destructive, private-only CPA v8.0.13 Client Key effect experiment.
+"""Destructive, private-only CPA v8.0.55 Client Key effect experiment.
 
 Run ONLY inside the trusted namespace of a fresh, disposable #1008 proof
 profile, after verifying the official CPA binary and empty synthetic volumes.

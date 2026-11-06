@@ -34,7 +34,7 @@ func embeddedAdoptionResourceManifest(t *testing.T, class bootstrap.AdoptSourceC
 			t.Fatal(err)
 		}
 		var manifest adoptionResourceManifest
-		if json.Unmarshal(data, &manifest) != nil || manifest.ContractID != adoptionResourceContract || manifest.SourceClass != class {
+		if json.Unmarshal(data, &manifest) != nil || manifest.ContractID != adoptionResourceContract || manifest.SourceClass != class || manifest.Candidate.DeclaredSHA256 != realCPA8ArchiveSHA256 {
 			continue
 		}
 		if foundName != "" {

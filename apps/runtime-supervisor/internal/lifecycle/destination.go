@@ -127,20 +127,54 @@ func (r DestinationRequest) Validate() error {
 }
 
 type destination struct {
-	root        string
-	port        string
-	child       *cpaprocess.ChildIdentity
-	gatewayAuth string
+	root           string
+	port           string
+	child          *cpaprocess.ChildIdentity
+	gatewayAuth    string
+	listenLoopback bool
+	listenHost     string
+}
+
+// LoopbackListenHost validates that address has an exact CPA loopback host
+// ("127.0.0.1", "::1", or case-insensitive "localhost") and returns the
+// normalized bind literal ("127.0.0.1" or "::1").
+func LoopbackListenHost(address string) (string, error) {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", ErrInvalidRequest
+	}
+	switch {
+	case host == "127.0.0.1" || strings.EqualFold(host, "localhost"):
+		return "127.0.0.1", nil
+	case host == "::1":
+		return "::1", nil
+	default:
+		return "", ErrInvalidRequest
+	}
 }
 
 // EnableDestination uses the existing Supervisor-private root and incarnation.
 // The stage snapshot is immutable resource input, not a second operation ledger.
 // gatewayAuth is the bootstrap Gateway auth directory a new_managed destination
 // replaces; staging refuses to orphan provider logins stored there.
-func (e *Executor) EnableDestination(root, gatewayAuth, address string, child *cpaprocess.ChildIdentity) error {
+func (e *Executor) EnableDestination(root, gatewayAuth, address string, child *cpaprocess.ChildIdentity, listenLoopback ...bool) error {
+	if len(listenLoopback) > 1 {
+		return ErrInvalidRequest
+	}
+	return e.EnableDestinationWithLoopback(root, gatewayAuth, address, child, len(listenLoopback) == 1 && listenLoopback[0])
+}
+
+func (e *Executor) EnableDestinationWithLoopback(root, gatewayAuth, address string, child *cpaprocess.ChildIdentity, listenLoopback bool) error {
 	_, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return ErrInvalidRequest
+	}
+	var listenHost string
+	if listenLoopback {
+		listenHost, err = LoopbackListenHost(address)
+		if err != nil {
+			return err
+		}
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -152,7 +186,7 @@ func (e *Executor) EnableDestination(root, gatewayAuth, address string, child *c
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.destination = &destination{root: abs, port: port, child: child, gatewayAuth: auth}
+	e.destination = &destination{root: abs, port: port, child: child, gatewayAuth: auth, listenLoopback: listenLoopback, listenHost: listenHost}
 	_, err = e.destination.load()
 	return err
 }
@@ -433,13 +467,17 @@ func (d *destination) publish(r DestinationRequest, supersedes string) error {
 		return err
 	}
 	usage := managedSourceClass(r.SourceClass)
-	config := map[string]any{"config-version": 8, "server": map[string]any{"host": "0.0.0.0", "port": json.Number(d.port)},
-		"management": map[string]any{"allow-remote": true, "secret-key": r.ManagementKey, "disable-control-panel": true, "disable-auto-update-panel": true},
+	host, allowRemote := "0.0.0.0", true
+	switch {
+	case d.listenLoopback:
+		host, allowRemote = d.listenHost, false
+	case d.child == nil:
+		host = "127.0.0.1"
+	}
+	config := map[string]any{"config-version": 8, "server": map[string]any{"host": host, "port": json.Number(d.port)},
+		"management": map[string]any{"allow-remote": allowRemote, "secret-key": r.ManagementKey, "disable-control-panel": true, "disable-auto-update-panel": true},
 		"access":     map[string]any{"api-keys": r.APIKeys}, "oauth": map[string]any{"auth-dir": filepath.Join(d.root, "auth")},
 		"plugins": map[string]any{"enabled": r.PluginsEnabled, "dir": pluginDir}, "observability": map[string]any{"logs": map[string]any{"logging-to-file": false}, "usage": map[string]any{"usage-statistics-enabled": usage}}}
-	if d.child == nil {
-		config["server"].(map[string]any)["host"] = "127.0.0.1"
-	}
 	data, err := json.Marshal(config)
 	if err != nil {
 		return err

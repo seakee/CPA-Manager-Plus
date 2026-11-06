@@ -25,8 +25,8 @@ source before committing; all matched.
   resulting Git HEAD is recorded in the Draft PR.
 - Docker Desktop daemon: real `linux/amd64`; Chrome controlled by Playwright on
   macOS accessed the real published Ingress port. No mocked application server.
-- Default official CPA **8.0.13** executable:
-  `sha256:b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41`.
+- Default official CPA **8.0.55** executable:
+  `sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7`.
   The packaged and running executable hashes matched; Runtime reached `ready`.
   The CPA config remained byte-identical to the normal v8 bootstrap seed.
 - Random task Compose project, fresh named volumes, fixed random loopback port,

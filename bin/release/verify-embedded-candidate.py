@@ -26,9 +26,9 @@ CANDIDATE_VERSION = "2.0.0-r1candidate"
 evidence_spec = importlib.util.spec_from_file_location("image_evidence", Path(__file__).with_name("image-evidence.py"))
 image_evidence = importlib.util.module_from_spec(evidence_spec)
 evidence_spec.loader.exec_module(image_evidence)
-CPA_SHA = "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41"
+CPA_SHA = "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"
 CPA_LICENSE_SHA = "879792e89cf1bdd6a8d446033ec87e30496f97dcafc4656dc53f641509b346a6"
-CPA_ARCHIVE_SHA = "50ecffb47fdd81c8c5a9825a73a7a905ab66342337e274f39c4276b92d3533f3"
+CPA_ARCHIVE_SHA = "4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123"
 LICENSE = "/usr/local/share/licenses/cpamp/LICENSE"
 NOTICE = "/usr/local/share/cpamp/release/third-party-inventory.txt"
 WEB_MANIFEST = "/usr/local/share/cpamp/release/fullweb-manifest.json"
@@ -343,11 +343,11 @@ def inspect(path, role, source_sha, event, root_license, seed, runtime_entrypoin
             require(files[RUNTIME_ENTRYPOINT] == runtime_entrypoint,
                     "Runtime entrypoint differs from locked source")
             require(hashlib.sha256(files["/usr/local/bin/cli-proxy-api"]).hexdigest() == CPA_SHA,
-                    "official CPA v8.0.13 executable hash mismatch")
+                    "official CPA v8.0.55 executable hash mismatch")
             manifest_file = json_object(files["/usr/local/share/cpamp/runtime/cpa-artifact.json"],
                                         "CPA artifact")
             require(manifest_file == {"schemaVersion": 1, "engine": "cpa",
-                                     "version": "8.0.13", "artifactId": "sha256:" + CPA_SHA},
+                                     "version": "8.0.55", "artifactId": "sha256:" + CPA_SHA},
                     "CPA artifact identity mismatch")
             require(hashlib.sha256(files["/usr/local/share/licenses/cli-proxy-api/LICENSE"]).hexdigest()
                     == CPA_LICENSE_SHA, "official CPA license mismatch")
@@ -415,7 +415,7 @@ def verify(paths, source_sha, event, root):
             "alpineBasePackages": image_evidence.ALPINE_POLICY,
         },
         "officialCPA": {
-            "version": "8.0.13", "dockerBuildPinArchiveSHA256": CPA_ARCHIVE_SHA,
+            "version": "8.0.55", "dockerBuildPinArchiveSHA256": CPA_ARCHIVE_SHA,
             "verifiedFinalImageExecutableSHA256": CPA_SHA,
         },
         "notVerified": [

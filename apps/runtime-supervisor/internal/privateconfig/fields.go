@@ -9,7 +9,7 @@ import (
 // configFields mirrors the Manager write allowlist for the Runtime journal. The
 // Host validates independently: a Manager bug must never widen the file writer,
 // and a path outside this table is rejected even if a grant names it.
-// Types and non-positive semantics are frozen from CPA v8.0.13 (tag d7914af):
+// Types and non-positive semantics are frozen from CPA v8.0.55 (tag e6e5708e):
 // routing.retry.request-retry (config.go:86-88), routing.retry.max-retry-interval
 // (config.go:93-97), requests.passthrough-headers (sdk_config.go:66-67),
 // requests.nonstream-keepalive-interval (sdk_config.go:71-74),

@@ -1,0 +1,4029 @@
+{
+  "schemaVersion": 1,
+  "contractId": "cpamp-cpa-v8-qualification",
+  "revision": "r2",
+  "planInput": {
+    "planCommit": "b654d625902c0e810f9bfc581aa17c35f4b0cff0",
+    "gateBlobSha": "d5367e63d4feda5854d0639746c18d6a78e0b274",
+    "scopeRevision": "r2"
+  },
+  "cpampBaselineCommit": "32ba418c2a5f09aaaba0f887a8d429da91df2fbe",
+  "candidate": {
+    "id": "CPA8-8.0.55-linux-amd64-plugin",
+    "version": "v8.0.55",
+    "sourceCommit": "e6e5708e677adb2463d45accdd24bc9fd028ddd8",
+    "os": "linux",
+    "arch": "amd64",
+    "variant": "plugin",
+    "assetName": "CLIProxyAPI_8.0.55_linux_amd64.tar.gz",
+    "declaredSha256": "4cd593251db85e50c820f42e6ea5cecdd05f902201d3dbdb025671d4f306a123",
+    "provenance": "declared"
+  },
+  "operations": [
+    {
+      "id": "AUTH-01",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "AUTH-01-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": true
+        }
+      ]
+    },
+    {
+      "id": "AUTH-02",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "AUTH-02-S1",
+          "transport": "http",
+          "ownerClass": "cpa-data-plane",
+          "method": "POST",
+          "pathTemplate": "/v1/chat/completions",
+          "effect": "model-request",
+          "authClass": "client-key",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "CFG-01",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "CFG-01-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": true
+        },
+        {
+          "id": "CFG-01-S2",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config/:path",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CFG-01-S3",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config.yaml",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "CFG-02",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "CFG-02-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PUT",
+          "pathTemplate": "/v8/management/config",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CFG-02-S2",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PATCH",
+          "pathTemplate": "/v8/management/config",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CFG-02-S3",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": true
+        },
+        {
+          "id": "CFG-02-S4",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config/:path",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CFG-02-S5",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config.yaml",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CFG-02-S6",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PUT",
+          "pathTemplate": "/v8/management/config/:path",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CFG-02-S7",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PATCH",
+          "pathTemplate": "/v8/management/config/:path",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CFG-02-S8",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "DELETE",
+          "pathTemplate": "/v8/management/config/:path",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CFG-02-S9",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PUT",
+          "pathTemplate": "/v8/management/config.yaml",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "KEY-01",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "KEY-01-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config/access/api-keys",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "KEY-02",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "KEY-02-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PUT",
+          "pathTemplate": "/v8/management/config/access/api-keys",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "KEY-02-S2",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PATCH",
+          "pathTemplate": "/v8/management/config/access/api-keys",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "KEY-02-S3",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "DELETE",
+          "pathTemplate": "/v8/management/config/access/api-keys",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "KEY-02-S4",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config/access/api-keys",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "CRED-01",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "CRED-01-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/credentials",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "CRED-02",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "CRED-02-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "POST",
+          "pathTemplate": "/v8/management/credentials",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CRED-02-S2",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "DELETE",
+          "pathTemplate": "/v8/management/credentials",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CRED-02-S3",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PATCH",
+          "pathTemplate": "/v8/management/credentials/status",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CRED-02-S4",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PATCH",
+          "pathTemplate": "/v8/management/credentials/fields",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CRED-02-S5",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "POST",
+          "pathTemplate": "/v8/management/credentials/refresh",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "CRED-02-S6",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/credentials",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "OAUTH-01",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "OAUTH-01-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/oauth/auth-url",
+          "effect": "flow-start",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "OAUTH-01-S2",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/oauth/status",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "OAUTH-01-S3",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/oauth/callback",
+          "effect": "mutating",
+          "authClass": "oauth-state",
+          "probeEligible": false
+        },
+        {
+          "id": "OAUTH-01-S4",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "POST",
+          "pathTemplate": "/v8/management/oauth/callback",
+          "effect": "mutating",
+          "authClass": "oauth-state",
+          "probeEligible": false
+        },
+        {
+          "id": "OAUTH-01-S5",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "DELETE",
+          "pathTemplate": "/v8/management/oauth/session",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "MODEL-01",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "MODEL-01-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/credentials/models",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "MODEL-01-S2",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/routing/model-definitions/:channel",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "USAGE-01",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "USAGE-01-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/config",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": true
+        },
+        {
+          "id": "USAGE-01-S2",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "PATCH",
+          "pathTemplate": "/v8/management/config",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "USAGE-02",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "USAGE-02-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/observability/usage/queue",
+          "effect": "consuming",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "STAGE-01",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "STAGE-01-S1",
+          "transport": "fixture",
+          "ownerClass": "contract-fixture",
+          "method": null,
+          "pathTemplate": null,
+          "effect": "staging",
+          "authClass": "fixture-only",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "EXT-GUARD-01",
+      "kind": "guard",
+      "surfaces": [
+        {
+          "id": "EXT-GUARD-01-S1",
+          "transport": "fixture",
+          "ownerClass": "contract-fixture",
+          "method": null,
+          "pathTemplate": null,
+          "effect": "guard-only",
+          "authClass": "fixture-only",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "PLUGIN-CORE-01",
+      "kind": "function",
+      "surfaces": [
+        {
+          "id": "PLUGIN-CORE-01-S1",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/plugins",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "PLUGIN-CORE-01-S2",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "DELETE",
+          "pathTemplate": "/v8/management/plugins/:id",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "PLUGIN-CORE-01-S3",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/plugins/store",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "PLUGIN-CORE-01-S4",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "POST",
+          "pathTemplate": "/v8/management/plugins/store/:id/install",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "PLUGIN-CORE-01-S5",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "GET",
+          "pathTemplate": "/v8/management/plugins/:id/quota",
+          "effect": "read-only",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "PLUGIN-CORE-01-S6",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "POST",
+          "pathTemplate": "/v8/management/plugins/:id/quota",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        },
+        {
+          "id": "PLUGIN-CORE-01-S7",
+          "transport": "http",
+          "ownerClass": "cpa-core-management",
+          "method": "DELETE",
+          "pathTemplate": "/v8/management/plugins/:id/quota",
+          "effect": "mutating",
+          "authClass": "management",
+          "probeEligible": false
+        }
+      ]
+    },
+    {
+      "id": "EXT-ENABLE-01",
+      "kind": "function",
+      "surfaces": []
+    }
+  ],
+  "profiles": [
+    {
+      "id": "CPA8-MGMT-MIN-r1",
+      "revision": "r1",
+      "selected": true,
+      "requiredOperationRefs": [
+        "AUTH-01",
+        "AUTH-02",
+        "CFG-01",
+        "CFG-02",
+        "KEY-01",
+        "KEY-02",
+        "CRED-01",
+        "CRED-02",
+        "OAUTH-01",
+        "MODEL-01"
+      ],
+      "optionalOperationRefs": []
+    },
+    {
+      "id": "CPA8-USAGE-MIN-r1",
+      "revision": "r1",
+      "selected": true,
+      "requiredOperationRefs": [
+        "USAGE-01",
+        "USAGE-02"
+      ],
+      "optionalOperationRefs": []
+    },
+    {
+      "id": "CPA8-STAGE-r1",
+      "revision": "r1",
+      "selected": true,
+      "requiredOperationRefs": [
+        "STAGE-01"
+      ],
+      "optionalOperationRefs": []
+    },
+    {
+      "id": "CPA8-EXTERNAL-SAFETY-r1",
+      "revision": "r1",
+      "selected": true,
+      "requiredOperationRefs": [
+        "AUTH-01",
+        "CFG-01"
+      ],
+      "optionalOperationRefs": []
+    },
+    {
+      "id": "CPA8-EXTENSION-GUARD-r1",
+      "revision": "r1",
+      "selected": true,
+      "requiredOperationRefs": [
+        "EXT-GUARD-01"
+      ],
+      "optionalOperationRefs": []
+    },
+    {
+      "id": "CPA8-PLUGIN-CORE-r1",
+      "revision": "r1",
+      "selected": false,
+      "requiredOperationRefs": [
+        "PLUGIN-CORE-01"
+      ],
+      "optionalOperationRefs": []
+    },
+    {
+      "id": "CPA8-EXTENSION-ENABLE-r1",
+      "revision": "r1",
+      "selected": false,
+      "requiredOperationRefs": [
+        "EXT-ENABLE-01",
+        "EXT-GUARD-01"
+      ],
+      "optionalOperationRefs": []
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "CPA8-UPSTREAM-r1",
+      "revision": "r1",
+      "kind": "upstream-real",
+      "proofScope": "upstream-function",
+      "lifecycle": "declared",
+      "configProfileId": "isolated-management-r1",
+      "modeProfileId": "isolated-loopback-r1"
+    },
+    {
+      "id": "CPA8-STAGE-r1",
+      "revision": "r1",
+      "kind": "upstream-real",
+      "proofScope": "upstream-function",
+      "lifecycle": "declared",
+      "configProfileId": "synthetic-source-r1",
+      "modeProfileId": "isolated-staging-r1"
+    },
+    {
+      "id": "CPA8-HARNESS-r1",
+      "revision": "r1",
+      "kind": "local-stub",
+      "proofScope": "harness-behavior",
+      "lifecycle": "declared",
+      "configProfileId": "synthetic-http-r1",
+      "modeProfileId": "isolated-loopback-r1"
+    },
+    {
+      "id": "CPA8-GUARD-r1",
+      "revision": "r1",
+      "kind": "boundary-deny",
+      "proofScope": "boundary-guard",
+      "lifecycle": "declared",
+      "configProfileId": "synthetic-guard-r1",
+      "modeProfileId": "offline-r1"
+    },
+    {
+      "id": "CPA8-MANAGEMENT-r2",
+      "revision": "r2",
+      "kind": "upstream-real",
+      "proofScope": "upstream-function",
+      "lifecycle": "declared",
+      "configProfileId": "management-per-case-r2",
+      "modeProfileId": "linux-amd64-network-none-r2"
+    },
+    {
+      "id": "CPA8-OAUTH-EXPIRY-r2",
+      "revision": "r2",
+      "kind": "upstream-real",
+      "proofScope": "upstream-function",
+      "lifecycle": "declared",
+      "configProfileId": "codex-natural-expiry-r2",
+      "modeProfileId": "linux-amd64-network-none-r2"
+    }
+  ],
+  "cases": [
+    {
+      "id": "AQ01-USAGE-01",
+      "operationRef": "USAGE-01",
+      "profileRefs": [
+        "CPA8-USAGE-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "USAGE-01-S1",
+        "USAGE-01-S2"
+      ],
+      "fixtureRef": "CPA8-UPSTREAM-r1",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "USAGE-01-DECLARED",
+          "mandatory": true,
+          "checkCode": "COVERAGE"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ01-USAGE-02",
+      "operationRef": "USAGE-02",
+      "profileRefs": [
+        "CPA8-USAGE-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "USAGE-02-S1"
+      ],
+      "fixtureRef": "CPA8-UPSTREAM-r1",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "USAGE-02-DECLARED",
+          "mandatory": true,
+          "checkCode": "COVERAGE"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ01-STAGE-01",
+      "operationRef": "STAGE-01",
+      "profileRefs": [
+        "CPA8-STAGE-r1"
+      ],
+      "surfaceRefs": [
+        "STAGE-01-S1"
+      ],
+      "fixtureRef": "CPA8-STAGE-r1",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "STAGE-01-DECLARED",
+          "mandatory": true,
+          "checkCode": "COVERAGE"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ01-EXT-GUARD-01",
+      "operationRef": "EXT-GUARD-01",
+      "profileRefs": [
+        "CPA8-EXTENSION-GUARD-r1",
+        "CPA8-EXTENSION-ENABLE-r1"
+      ],
+      "surfaceRefs": [
+        "EXT-GUARD-01-S1"
+      ],
+      "fixtureRef": "CPA8-GUARD-r1",
+      "proofScope": "boundary-guard",
+      "expectations": [
+        {
+          "id": "EXT-GUARD-01-DECLARED",
+          "mandatory": true,
+          "checkCode": "COVERAGE"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ01-PLUGIN-CORE-01",
+      "operationRef": "PLUGIN-CORE-01",
+      "profileRefs": [
+        "CPA8-PLUGIN-CORE-r1"
+      ],
+      "surfaceRefs": [
+        "PLUGIN-CORE-01-S1",
+        "PLUGIN-CORE-01-S2",
+        "PLUGIN-CORE-01-S3",
+        "PLUGIN-CORE-01-S4",
+        "PLUGIN-CORE-01-S5",
+        "PLUGIN-CORE-01-S6",
+        "PLUGIN-CORE-01-S7"
+      ],
+      "fixtureRef": "CPA8-UPSTREAM-r1",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "PLUGIN-CORE-01-DECLARED",
+          "mandatory": true,
+          "checkCode": "COVERAGE"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ01-EXT-ENABLE-01",
+      "operationRef": "EXT-ENABLE-01",
+      "profileRefs": [
+        "CPA8-EXTENSION-ENABLE-r1"
+      ],
+      "surfaceRefs": [],
+      "fixtureRef": "CPA8-UPSTREAM-r1",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "EXT-ENABLE-01-DECLARED",
+          "mandatory": true,
+          "checkCode": "COVERAGE"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M01-bearer",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M01-bearer-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M01-bearer-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M01-bearer-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M02-header",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M02-header-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M02-header-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M02-header-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M02-bearer-precedence",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M02-bearer-precedence-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M02-bearer-precedence-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M02-bearer-precedence-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M03-missing",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M03-missing-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M03-missing-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M03-missing-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M03-wrong",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M03-wrong-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M03-wrong-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M03-wrong-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M04-ban",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M04-ban-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M04-ban-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M04-ban-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M05-client-as-management",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M05-client-as-management-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M05-client-as-management-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M05-client-as-management-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M05-upstream-as-management",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M05-upstream-as-management-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M05-upstream-as-management-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M05-upstream-as-management-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M05-management-as-client",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M05-management-as-client-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M05-management-as-client-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M05-management-as-client-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M05-upstream-as-client",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M05-upstream-as-client-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M05-upstream-as-client-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M05-upstream-as-client-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M06-no-secret",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M06-no-secret-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M06-no-secret-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M06-no-secret-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M06-env-secret",
+      "operationRef": "AUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M06-env-secret-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M06-env-secret-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M06-env-secret-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M07-client",
+      "operationRef": "AUTH-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-02-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M07-client-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M07-client-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M07-client-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M08-missing",
+      "operationRef": "AUTH-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-02-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M08-missing-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M08-missing-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M08-missing-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M08-wrong",
+      "operationRef": "AUTH-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-02-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M08-wrong-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M08-wrong-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M08-wrong-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M08-provider-error",
+      "operationRef": "AUTH-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-02-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M08-provider-error-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M08-provider-error-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M08-provider-error-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M09-empty",
+      "operationRef": "AUTH-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-02-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M09-empty-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M09-empty-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M09-empty-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M09-absent",
+      "operationRef": "AUTH-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-02-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M09-absent-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M09-absent-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M09-absent-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M09-null",
+      "operationRef": "AUTH-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-02-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M09-null-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M09-null-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M09-null-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M10-rotate",
+      "operationRef": "AUTH-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-02-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M10-rotate-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M10-rotate-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M10-rotate-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M10-remove",
+      "operationRef": "AUTH-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "AUTH-02-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M10-remove-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M10-remove-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M10-remove-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M11-root",
+      "operationRef": "CFG-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-01-S1",
+        "CFG-01-S2",
+        "CFG-01-S3"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M11-root-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M11-root-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M11-root-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M11-subtree",
+      "operationRef": "CFG-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-01-S1",
+        "CFG-01-S2",
+        "CFG-01-S3"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M11-subtree-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M11-subtree-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M11-subtree-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M11-yaml",
+      "operationRef": "CFG-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-01-S1",
+        "CFG-01-S2",
+        "CFG-01-S3"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M11-yaml-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M11-yaml-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M11-yaml-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M12-read-only",
+      "operationRef": "CFG-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1",
+        "CPA8-EXTERNAL-SAFETY-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-01-S1",
+        "CFG-01-S2",
+        "CFG-01-S3"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M12-read-only-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M12-read-only-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M12-read-only-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M13-root-put",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M13-root-put-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M13-root-put-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M13-root-put-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M14-subtree-put",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M14-subtree-put-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M14-subtree-put-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M14-subtree-put-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M14-map-patch",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M14-map-patch-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M14-map-patch-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M14-map-patch-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M14-list-patch",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M14-list-patch-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M14-list-patch-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M14-list-patch-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M15-delete",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M15-delete-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M15-delete-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M15-delete-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M15-absent",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M15-absent-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M15-absent-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M15-absent-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M15-null",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M15-null-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M15-null-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M15-null-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M15-empty",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M15-empty-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M15-empty-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M15-empty-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M15-false",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M15-false-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M15-false-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M15-false-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M15-zero",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M15-zero-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M15-zero-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M15-zero-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M15-invalid-type",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M15-invalid-type-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M15-invalid-type-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M15-invalid-type-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M16-readonly",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M16-readonly-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M16-readonly-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M16-readonly-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M16-invalid-path",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M16-invalid-path-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M16-invalid-path-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M16-invalid-path-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M16-invalid-body",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M16-invalid-body-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M16-invalid-body-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M16-invalid-body-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M17-yaml-put",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M17-yaml-put-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M17-yaml-put-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M17-yaml-put-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M17-response-loss",
+      "operationRef": "CFG-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CFG-02-S1",
+        "CFG-02-S2",
+        "CFG-02-S3",
+        "CFG-02-S4",
+        "CFG-02-S5",
+        "CFG-02-S6",
+        "CFG-02-S7",
+        "CFG-02-S8",
+        "CFG-02-S9"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M17-response-loss-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M17-response-loss-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M17-response-loss-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M18-populated",
+      "operationRef": "KEY-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "KEY-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M18-populated-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M18-populated-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M18-populated-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M18-empty",
+      "operationRef": "KEY-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "KEY-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M18-empty-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M18-empty-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M18-empty-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M19-put",
+      "operationRef": "KEY-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "KEY-02-S1",
+        "KEY-02-S2",
+        "KEY-02-S3",
+        "KEY-02-S4"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M19-put-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M19-put-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M19-put-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M19-patch",
+      "operationRef": "KEY-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "KEY-02-S1",
+        "KEY-02-S2",
+        "KEY-02-S3",
+        "KEY-02-S4"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M19-patch-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M19-patch-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M19-patch-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M19-delete",
+      "operationRef": "KEY-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "KEY-02-S1",
+        "KEY-02-S2",
+        "KEY-02-S3",
+        "KEY-02-S4"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M19-delete-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M19-delete-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M19-delete-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M20-invalid",
+      "operationRef": "KEY-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "KEY-02-S1",
+        "KEY-02-S2",
+        "KEY-02-S3",
+        "KEY-02-S4"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M20-invalid-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M20-invalid-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M20-invalid-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M20-duplicate",
+      "operationRef": "KEY-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "KEY-02-S1",
+        "KEY-02-S2",
+        "KEY-02-S3",
+        "KEY-02-S4"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M20-duplicate-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M20-duplicate-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M20-duplicate-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M20-write-failure",
+      "operationRef": "KEY-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "KEY-02-S1",
+        "KEY-02-S2",
+        "KEY-02-S3",
+        "KEY-02-S4"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M20-write-failure-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M20-write-failure-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M20-write-failure-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M20-response-loss",
+      "operationRef": "KEY-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "KEY-02-S1",
+        "KEY-02-S2",
+        "KEY-02-S3",
+        "KEY-02-S4"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M20-response-loss-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M20-response-loss-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M20-response-loss-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M21-empty",
+      "operationRef": "CRED-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M21-empty-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M21-empty-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M21-empty-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M21-populated",
+      "operationRef": "CRED-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-01-S1"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M21-populated-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M21-populated-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M21-populated-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M22-raw",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M22-raw-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M22-raw-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M22-raw-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M22-multipart",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M22-multipart-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M22-multipart-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M22-multipart-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M22-invalid",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M22-invalid-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M22-invalid-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M22-invalid-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M22-duplicate",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M22-duplicate-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M22-duplicate-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M22-duplicate-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M22-partial",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M22-partial-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M22-partial-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M22-partial-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M23-delete",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M23-delete-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M23-delete-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M23-delete-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M23-missing",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M23-missing-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M23-missing-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M23-missing-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M23-unsafe",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M23-unsafe-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M23-unsafe-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M23-unsafe-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M24-status",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M24-status-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M24-status-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M24-status-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M24-fields",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M24-fields-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M24-fields-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M24-fields-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M24-invalid",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M24-invalid-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M24-invalid-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M24-invalid-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M24-readonly",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M24-readonly-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M24-readonly-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M24-readonly-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M24-conflict",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M24-conflict-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M24-conflict-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M24-conflict-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M25-missing",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M25-missing-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M25-missing-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M25-missing-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M25-invalid",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M25-invalid-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M25-invalid-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M25-invalid-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M25-refresh-error",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M25-refresh-error-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M25-refresh-error-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M25-refresh-error-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M25-real-refresh",
+      "operationRef": "CRED-02",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "CRED-02-S1",
+        "CRED-02-S2",
+        "CRED-02-S3",
+        "CRED-02-S4",
+        "CRED-02-S5",
+        "CRED-02-S6"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M25-real-refresh-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M25-real-refresh-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M25-real-refresh-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M26-start",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M26-start-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M26-start-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M26-start-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M26-missing-provider",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M26-missing-provider-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M26-missing-provider-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M26-missing-provider-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M26-unknown-provider",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M26-unknown-provider-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M26-unknown-provider-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M26-unknown-provider-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M27-pending",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M27-pending-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M27-pending-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M27-pending-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M27-unknown",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M27-unknown-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M27-unknown-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M27-unknown-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M27-auth",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M27-auth-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M27-auth-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M27-auth-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M28-get-missing",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M28-get-missing-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M28-get-missing-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M28-get-missing-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M28-post-missing",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M28-post-missing-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M28-post-missing-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M28-post-missing-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M28-invalid",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M28-invalid-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M28-invalid-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M28-invalid-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M28-unknown",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M28-unknown-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M28-unknown-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M28-unknown-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M28-mismatch",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M28-mismatch-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M28-mismatch-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M28-mismatch-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M29-error-callback",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M29-error-callback-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M29-error-callback-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M29-error-callback-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M30-cancel",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M30-cancel-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M30-cancel-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M30-cancel-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M30-auth",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M30-auth-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M30-auth-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M30-auth-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M30-replay",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M30-replay-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M30-replay-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M30-replay-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M30-missing",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M30-missing-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M30-missing-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M30-missing-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M31-repeated",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M31-repeated-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M31-repeated-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M31-repeated-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M31-race",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M31-race-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M31-race-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M31-race-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M32-natural-expiry",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-OAUTH-EXPIRY-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M32-natural-expiry-PENDING",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M32-natural-expiry-ERROR",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M32-natural-expiry-EXPIRY",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M32-natural-expiry-NO-CREDENTIAL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "oauth-expiry-r2"
+    },
+    {
+      "id": "AQ02-M33-real-exchange",
+      "operationRef": "OAUTH-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "OAUTH-01-S1",
+        "OAUTH-01-S2",
+        "OAUTH-01-S3",
+        "OAUTH-01-S4",
+        "OAUTH-01-S5"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M33-real-exchange-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M33-real-exchange-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M33-real-exchange-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M34-registered",
+      "operationRef": "MODEL-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "MODEL-01-S1",
+        "MODEL-01-S2"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M34-registered-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M34-registered-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M34-registered-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M34-missing",
+      "operationRef": "MODEL-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "MODEL-01-S1",
+        "MODEL-01-S2"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M34-missing-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M34-missing-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M34-missing-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M34-unknown",
+      "operationRef": "MODEL-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "MODEL-01-S1",
+        "MODEL-01-S2"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M34-unknown-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M34-unknown-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M34-unknown-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M35-codex",
+      "operationRef": "MODEL-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "MODEL-01-S1",
+        "MODEL-01-S2"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M35-codex-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M35-codex-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M35-codex-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M35-unknown",
+      "operationRef": "MODEL-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "MODEL-01-S1",
+        "MODEL-01-S2"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M35-unknown-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M35-unknown-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M35-unknown-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    },
+    {
+      "id": "AQ02-M36-model-reload",
+      "operationRef": "MODEL-01",
+      "profileRefs": [
+        "CPA8-MGMT-MIN-r1"
+      ],
+      "surfaceRefs": [
+        "MODEL-01-S1",
+        "MODEL-01-S2"
+      ],
+      "fixtureRef": "CPA8-MANAGEMENT-r2",
+      "proofScope": "upstream-function",
+      "expectations": [
+        {
+          "id": "AQ02-M36-model-reload-HTTP",
+          "mandatory": true,
+          "checkCode": "BODY_SHAPE"
+        },
+        {
+          "id": "AQ02-M36-model-reload-STATE",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        },
+        {
+          "id": "AQ02-M36-model-reload-CONTROL",
+          "mandatory": true,
+          "checkCode": "POSTCONDITION"
+        }
+      ],
+      "budgetRef": "standard-r1"
+    }
+  ]
+}

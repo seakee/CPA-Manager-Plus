@@ -3,7 +3,7 @@
 This is an opt-in **implementation candidate**, not a deployment qualification.
 Baseline: product `c5c5d852983b5354b4798ed457b522c978dc37c0`, Plan
 `a7ec29fed446a4d76fd27e03c2c62a4ee2969eba` (#64/#65/#67/#73), official
-CPA v8.0.13 (`d7914afdedca7af95ee974a42453dc49fc1388ce`). CPA is unchanged.
+CPA v8.0.55 (`e6e5708e677adb2463d45accdd24bc9fd028ddd8`). CPA is unchanged.
 An integrated Draft PR does not authorize a live write or a Beta release.
 
 ## Owners and deployment fence

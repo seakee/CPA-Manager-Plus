@@ -41,7 +41,7 @@ class AuditTest(unittest.TestCase):
 
     def test_runtime_audit_rejects_missing_or_replaced_license_and_removes_container(self):
         from tempfile import TemporaryDirectory
-        manifest = json.dumps({'schemaVersion': 1, 'engine': 'cpa', 'version': '8.0.13',
+        manifest = json.dumps({'schemaVersion': 1, 'engine': 'cpa', 'version': '8.0.55',
                                'artifactId': 'sha256:' + audit.CPA_EXECUTABLE_SHA256['amd64']})
         for missing in (True, False):
             def fake_extract(container, source, dest):
@@ -64,7 +64,7 @@ class AuditTest(unittest.TestCase):
 
     def test_artifact_requires_exact_pinned_v8(self):
         for architecture, pinned_sha in audit.CPA_EXECUTABLE_SHA256.items():
-            v = {'schemaVersion': 1, 'engine': 'cpa', 'version': '8.0.13',
+            v = {'schemaVersion': 1, 'engine': 'cpa', 'version': '8.0.55',
                  'artifactId': 'sha256:' + pinned_sha}
             with self.subTest(architecture=architecture):
                 self.assertEqual(audit.check_artifact(json.dumps(v), architecture), v)

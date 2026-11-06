@@ -14,8 +14,8 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 PINS = {
-    "amd64": "b682e9e42586263f476888361514f68f89ff4ebf89a5dadba394b850b797ce41",
-    "arm64": "9dfe80b79f8466b4e56d51d71869ce759021942a9279e43dbea92eda21b994d7",
+    "amd64": "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
+    "arm64": "4a5b43cc3700d36c72b7c1953e9b11eca0888c13b789ea2f99471117504a7d5d",
 }
 PROBE = r"""
 import json,sys,urllib.request,urllib.error
@@ -129,12 +129,12 @@ def main():
         cmd("docker", "run", "-d", "--name", probe, "--network", network,
             probe_image, "sleep", "1800")
         initial = wait_state("offline")
-        assert initial["activeGatewayArtifact"]["version"] == "8.0.13"
+        assert initial["activeGatewayArtifact"]["version"] == "8.0.55"
         assert initial["activeGatewayArtifact"]["artifactId"] == "sha256:"+pin
         assert http("http://cpamp-runtime:9081/v1/runtime/status")["code"] == 401
         manifest = json.loads(dc("exec", "-T", "cpamp-runtime", "cat",
                                  "/usr/local/share/cpamp/runtime/cpa-artifact.json").stdout)
-        assert manifest == {"schemaVersion": 1, "engine": "cpa", "version": "8.0.13", "artifactId": "sha256:"+pin}
+        assert manifest == {"schemaVersion": 1, "engine": "cpa", "version": "8.0.55", "artifactId": "sha256:"+pin}
         hashes = dc("exec", "-T", "cpamp-runtime", "sha256sum", "/usr/local/bin/cli-proxy-api",
                     "/usr/local/share/cpamp/runtime/config.seed.yaml", "/runtime/gateway/config.yaml").stdout
         assert hashes.splitlines()[0].split()[0] == pin

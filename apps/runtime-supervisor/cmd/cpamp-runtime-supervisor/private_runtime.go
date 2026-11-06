@@ -40,7 +40,7 @@ func newPrivateRuntimeHandler(ctx context.Context, cfg config) (*runtimeHandler,
 			return e
 		}
 		o := observed.Observation()
-		if o == nil || string(o.ArtifactID) != privateconfig.Artifact || o.Version != "8.0.13" {
+		if o == nil || string(o.ArtifactID) != privateconfig.Artifact || o.Version != "8.0.55" {
 			return privateconfig.ErrStop
 		}
 		return nil

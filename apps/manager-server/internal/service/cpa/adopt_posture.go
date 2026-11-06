@@ -23,13 +23,16 @@ import (
 // with the install-derived credential, and CPA rewrote that credential into its
 // own bcrypt digest.
 
-// adoptRoots is the closed set of root sections a CPA v8 document may carry. It
-// is CPA's own accepted vocabulary, not this Manager's page: v8.0.13 derives
-// `v8AllowedRoots()` from `buildV8Paths()` (internal/config/config_v8.go), which
-// accepts five literal roots — config-version, api-keys, plugins, quota-exceeded,
-// client — plus the first segment of every migrated path (server, management,
-// access, credentials, routing, requests, oauth, upstream, multimedia,
-// observability).
+// adoptRoots is the closed set of root sections the pinned v8 document
+// projection may carry. It is CPA's own accepted vocabulary, not this Manager's
+// page: v8.0.55 derives `v8AllowedRoots()` from `buildV8Paths()`
+// (internal/config/config_v8.go:636), which accepts six literal roots —
+// config-version, api-keys, plugins, quota-exceeded, client, models — plus the
+// first segment of every migrated path (server, management, access, credentials,
+// routing, requests, oauth, upstream, multimedia, observability). `models` is
+// the one literal root the v8 projection never renders (it is not a migrated
+// path, internal/config/model_catalogs.go), so it stays out of this map: the
+// document this test reads cannot carry it.
 //
 // An adopted destination carries whatever its source carried, so this is a subset
 // membership test with no exact count: a root CPA itself would not read is a
@@ -153,7 +156,7 @@ func (p proofPosture) matchesAdopt(data []byte) bool {
 		Host string `json:"host"`
 		Port int    `json:"port"`
 	}
-	if json.Unmarshal(root["server"], &server) != nil || server.Host != p.host || server.Port != 8317 {
+	if json.Unmarshal(root["server"], &server) != nil || server.Port != 8317 {
 		return false
 	}
 	var management struct {
@@ -163,7 +166,7 @@ func (p proofPosture) matchesAdopt(data []byte) bool {
 		DisableAutoUpdatePanel bool   `json:"disable-auto-update-panel"`
 	}
 	if json.Unmarshal(root["management"], &management) != nil ||
-		management.AllowRemote != p.allowRemote ||
+		!p.validDestinationBind(server.Host, management.AllowRemote) ||
 		!management.DisableControlPanel || !management.DisableAutoUpdatePanel ||
 		// CPA hashed the install-derived key at first startup. A plaintext value
 		// means this document is not the one the destination wrote back.

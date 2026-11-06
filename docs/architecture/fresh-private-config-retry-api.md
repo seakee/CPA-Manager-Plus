@@ -9,7 +9,7 @@ A2 Full Web and I0 combined Key/Config writing remain separate tasks.
 ## Qualification and ownership
 
 Default is **off**. Only a trusted Host-created, continuously exclusive private
-Linux/amd64 Embedded Fresh source with official CPA v8.0.13 qualifies. Consume
+Linux/amd64 Embedded Fresh source with official CPA v8.0.55 qualifies. Consume
 the existing #1032 root-owned read-only source grant, exact Runtime raw-file
 SHA256/revision/generation, S1 permit/installed Key and target identity checks.
 No ordinary Docker, External, Upgrade, adoption, public Gateway or release

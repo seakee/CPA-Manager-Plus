@@ -56,7 +56,7 @@ deadline is not an in-flight cancellation lease. Later requests always recheck.
 Use unique task-owned image tags; no existing CPA, production volume, real Key,
 public port or default Compose is selected. Build the three existing Dockerfiles
 for Linux/amd64, using the Runtime target `v8-amd64-loopback-proof` and the fixed
-official CPA v8.0.13 executable. Do not rebuild or modify CPA from source.
+official CPA v8.0.55 executable. Do not rebuild or modify CPA from source.
 
 ```sh
 revision=$(git rev-parse HEAD)

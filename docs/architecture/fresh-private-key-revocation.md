@@ -1,7 +1,7 @@
 # Private Canonical Key revocation and necessary replacement
 
 Implements the maintainer-approved [Plan #64](https://github.com/seakee/cpamp-plan/pull/64)
-slice on official CPA **v8.0.13**, Linux/amd64, disposable Fresh Embedded only.
+slice on official CPA **v8.0.55**, Linux/amd64, disposable Fresh Embedded only.
 The existing Full Web Key page prepares and continues a canonical-ID operation.
 This is default-off private functionality. Real Provider, target deployment network
 and manual acceptance remain **LIVE NOT RUN / BETA HOLD** under Plan #63.
@@ -61,8 +61,10 @@ Example timestamps are placeholders, not a valid permit. Grants last at most
 S1's provisioning permit is still required but cannot authorize either KU step.
 Each step revalidates source, actual effective Keys, generation and grant before
 claiming intent, then authority again immediately before its single PUT.
-Official v8.0.13 has no ETag/If-Match contract on this endpoint; the source hash
-is a Host ownership binding, **not** upstream compare-and-swap.
+Official v8.0.55 serves an `ETag` on this endpoint and honours `If-Match` when it
+is supplied (a stale precondition answers 412 `precondition_failed`); this
+Manager sends no `If-Match`, so the source hash remains a Host ownership binding,
+**not** upstream compare-and-swap.
 
 ## Journal and failure recovery
 

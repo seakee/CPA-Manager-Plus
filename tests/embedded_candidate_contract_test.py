@@ -96,7 +96,7 @@ def make_oci(destination, role, license_bytes, *,
         )
         files["/usr/local/bin/cli-proxy-api"] = ROLE_BINARIES["ingress"]
         files["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = json.dumps({
-            "schemaVersion": 1, "engine": "cpa", "version": "8.0.13",
+            "schemaVersion": 1, "engine": "cpa", "version": "8.0.55",
             "artifactId": blob(ROLE_BINARIES["ingress"]),
         }).encode()
         files["/usr/local/share/cpamp/runtime/config.seed.yaml"] = b"seed"
