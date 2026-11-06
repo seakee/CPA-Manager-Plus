@@ -18,15 +18,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   READINESS_GATE_BC_CONTRACT,
   checkCleanupHelper,
   classifyDockerInspect,
+  classifyRemoveResult,
   completeFixtureStore,
+  createCleanupCoordinator,
   createDockerReleaser,
   createRedactor,
   createResourceRegistry,
+  describeFatal,
   dockerRunArgs,
   finalExitCode,
   fixtureRow,
@@ -34,6 +38,7 @@ import {
   injectUnsupportedDerivedFormat,
   installSignalGuard,
   judgeDiagnostic,
+  judgeCleanupHelper,
   judgeFixtureExercised,
   judgeOfflineLock,
   judgeSecretFreeMismatchedKey,
@@ -47,6 +52,7 @@ import {
   summarizeQuerySamples,
   verifyReleaseProvenance,
   verifyStartedImage,
+  writeEvidence,
 } from './readiness-gate-bc.mjs';
 
 const DAY_MS = 86_400_000;
@@ -849,4 +855,269 @@ test('evidence redaction turns the run workspace into a placeholder', () => {
   assert.equal(redacted.includes(workDir), false);
   assert.equal(redacted.includes(os.tmpdir()), false);
   assert.match(redacted, /\[redacted\]/);
+});
+
+test('a removal counts only on exit zero or a definite not-found, and never over a denial', () => {
+  assert.deepEqual(classifyRemoveResult({ status: 0 }), { ok: true, absent: false, error: null });
+  const gone = classifyRemoveResult({
+    status: 1,
+    stderr: `Error response from daemon: No such container: ${PREFIX}-cleanup`,
+  });
+  assert.equal(gone.ok, true);
+  assert.equal(gone.absent, true);
+  assert.equal(classifyRemoveResult({ status: 1, stderr: `No such volume: ${PREFIX}-bench` }).absent, true);
+
+  for (const stderr of [
+    'permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock',
+    'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?',
+    'Error response from daemon: operation not permitted',
+  ]) {
+    const removal = classifyRemoveResult({ status: 1, stderr });
+    assert.equal(removal.ok, false, stderr);
+    assert.equal(removal.absent, false, stderr);
+    assert.equal(removal.error.length > 0, true, stderr);
+  }
+  // A denial is not excused by a not-found phrase in the same message.
+  assert.equal(
+    classifyRemoveResult({ status: 1, stderr: 'permission denied; No such container: x' }).ok,
+    false
+  );
+  const unparseable = classifyRemoveResult({ status: null });
+  assert.equal(unparseable.ok, false);
+  assert.match(unparseable.error, /exited null/);
+});
+
+test('a cleanup helper whose own removal failed fails the run even when the container is gone', () => {
+  const name = `${PREFIX}-cleanup`;
+  const denied = judgeCleanupHelper({
+    name,
+    runResult: { status: 0 },
+    removeResult: { status: 1, stderr: 'permission denied while trying to connect to the Docker daemon' },
+    inspected: { state: 'absent' },
+  });
+  assert.equal(denied.ok, false);
+  assert.match(denied.error, /cleanup helper remove failed/);
+  assert.equal(finalExitCode({ runOk: true, cleanupOk: denied.ok }), 1);
+
+  const unreachable = judgeCleanupHelper({
+    name,
+    runResult: { status: 0 },
+    removeResult: { status: 1, stderr: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock' },
+    inspected: { state: 'absent' },
+  });
+  assert.equal(unreachable.ok, false);
+  assert.equal(finalExitCode({ runOk: true, cleanupOk: unreachable.ok }), 1);
+
+  const alreadyGone = judgeCleanupHelper({
+    name,
+    runResult: { status: 0 },
+    removeResult: { status: 1, stderr: `Error response from daemon: No such container: ${name}` },
+    inspected: { state: 'absent' },
+  });
+  assert.deepEqual(alreadyGone, { ok: true, failures: [], error: '' });
+
+  const removed = judgeCleanupHelper({
+    name,
+    runResult: { status: 0 },
+    removeResult: { status: 0 },
+    inspected: { state: 'absent' },
+  });
+  assert.equal(removed.ok, true);
+
+  const stillThere = judgeCleanupHelper({
+    name,
+    runResult: { status: 0 },
+    removeResult: { status: 0 },
+    inspected: { state: 'present' },
+  });
+  assert.equal(stillThere.ok, false);
+  assert.match(stillThere.error, /still present/);
+
+  const helperFailed = judgeCleanupHelper({
+    name,
+    runResult: { status: 137, stderr: 'Killed' },
+    removeResult: { status: 0 },
+    inspected: { state: 'absent' },
+  });
+  assert.equal(helperFailed.ok, false);
+  assert.match(helperFailed.error, /helper run exited 137/);
+});
+
+test('concurrent cleanup callers share one release and a failed cleanup is never a pass', async () => {
+  let calls = 0;
+  const coordinator = createCleanupCoordinator({
+    cleanupResources: async () => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { ok: true, released: ['container', 'volume'], errors: [] };
+    },
+  });
+  assert.equal(coordinator.pending, false);
+  const [first, second] = await Promise.all([coordinator.run(), coordinator.run()]);
+  const third = await coordinator.abort({ signal: 'SIGTERM' });
+  assert.equal(calls, 1);
+  assert.equal(coordinator.pending, true);
+  assert.equal(first, second);
+  assert.deepEqual(third.outcome.released, ['container', 'volume']);
+  assert.equal(third.exitCode, 143);
+
+  const failing = createCleanupCoordinator({
+    cleanupResources: async () => {
+      throw new Error(`could not remove /Users/operator/scratch/${PREFIX}`);
+    },
+    redact: (value) => String(value).replace('/Users/operator/scratch/', '[redacted]/'),
+  });
+  const outcome = await failing.run();
+  assert.equal(outcome.ok, false);
+  assert.deepEqual(outcome.released, []);
+  assert.equal(outcome.errors.length, 1);
+  assert.match(outcome.errors[0], /cleanup threw/);
+  assert.equal(outcome.errors[0].includes('/Users/operator'), false);
+  assert.equal(finalExitCode({ runOk: true, cleanupOk: outcome.ok }), 1);
+  assert.equal((await failing.abort({ runOk: true })).exitCode, 1);
+});
+
+test('a signal that lands during finalisation waits for the cleanup already in flight', async () => {
+  const target = new EventEmitter();
+  const exits = [];
+  const released = [];
+  let calls = 0;
+  const coordinator = createCleanupCoordinator({
+    cleanupResources: async () => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      released.push(`${PREFIX}-manager`, `${PREFIX}-bench`);
+      return { ok: true, released: [...released], errors: [] };
+    },
+  });
+  const guard = installSignalGuard({
+    target,
+    exit: (code) => exits.push({ code, released: released.length }),
+    onSignal: (signal) => coordinator.abort({ signal }),
+  });
+
+  const normal = coordinator.run();
+  target.emit('SIGTERM');
+  target.emit('SIGTERM');
+  await normal;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls, 1);
+  assert.deepEqual(exits, [{ code: 143, released: 2 }]);
+  assert.equal(guard.signal, 'SIGTERM');
+  guard.detach();
+  assert.equal(target.listenerCount('SIGTERM'), 0);
+  assert.equal(target.listenerCount('SIGINT'), 0);
+});
+
+test('a fatal line carries the message and no stack or absolute path', () => {
+  const redactor = createRedactor([]);
+  const output = '/Users/operator/scratch/evidence';
+  redactor.add(output);
+  const error = new Error(`EACCES: permission denied, mkdir '${output}/run-1'`);
+  const line = describeFatal(error, redactor);
+  assert.match(line, /^readiness-gate-bc: EACCES: permission denied/);
+  assert.equal(line.includes('/Users'), false);
+  assert.equal(line.includes(output), false);
+  assert.match(line, /\[redacted(-path)?\]/);
+  assert.equal(line.includes('\n'), false);
+
+  // Without a redactor the absolute path still must not be printed.
+  const bare = describeFatal(new Error('spawn docker ENOENT at /Users/operator/bin/docker'));
+  assert.equal(bare.includes('/Users/operator'), false);
+  assert.match(bare, /\[redacted-path\]/);
+
+  const named = describeFatal(new TypeError('bad argument'), redactor);
+  assert.match(named, /^readiness-gate-bc: TypeError: bad argument$/);
+});
+
+test('evidence is written as one unit and a failed write leaves no partial document', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-evidence-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const output = path.join(root, 'run');
+  const repoEvidenceDir = path.join(root, 'docs', 'evidence');
+  const redactor = createRedactor([]);
+  for (const hostPath of [root, output, repoEvidenceDir]) redactor.add(hostPath);
+
+  const document = { schema_version: 1, verdict: 'pass', images: { manager: { id: 'sha256:abc' } } };
+  const written = writeEvidence({ document, redactor, output, repoEvidenceDir, runId: 'deadbeef', root });
+  assert.equal(written.ok, true, written.error);
+  const runCopy = fs.readFileSync(written.runFile, 'utf8');
+  const repoCopy = fs.readFileSync(written.repoFile, 'utf8');
+  assert.equal(repoCopy, runCopy);
+  assert.equal(runCopy.includes(root), false);
+  const archived = JSON.parse(repoCopy);
+  assert.equal(archived.verdict, 'pass');
+  assert.equal(archived.evidenceFiles.runCopy, 'readiness-gate-bc-deadbeef.json');
+
+  const deniedOutput = path.join(root, 'denied');
+  const denied = writeEvidence({
+    document: { verdict: 'pass' },
+    redactor,
+    output: deniedOutput,
+    repoEvidenceDir,
+    runId: 'deadbeef',
+    root,
+    mkdirSync: () => {
+      throw new Error(`EACCES: permission denied, mkdir '${deniedOutput}'`);
+    },
+  });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.error.includes(root), false);
+  assert.equal(fs.existsSync(path.join(deniedOutput, 'readiness-gate-bc-deadbeef.json')), false);
+
+  // The repo copy failing after the run copy was written must remove the run copy
+  // too: a half-written pair is not evidence.
+  const failedRoot = path.join(root, 'failed');
+  const runFile = path.join(failedRoot, 'run', 'readiness-gate-bc-cafebabe.json');
+  const writes = [];
+  const removed = [];
+  const secondWrite = writeEvidence({
+    document: { verdict: 'pass' },
+    redactor,
+    output: path.dirname(runFile),
+    repoEvidenceDir: path.join(failedRoot, 'repo'),
+    runId: 'cafebabe',
+    root: failedRoot,
+    mkdirSync: () => {},
+    writeFileSync: (file) => {
+      writes.push(file);
+      if (writes.length === 2) throw new Error('ENOSPC: no space left on device');
+    },
+    unlinkSync: (file) => removed.push(file),
+  });
+  assert.equal(secondWrite.ok, false);
+  assert.match(secondWrite.error, /ENOSPC/);
+  assert.equal(removed.includes(runFile), true);
+});
+
+test('the archived report cites evidence this harness build actually produced', () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const evidenceDir = path.join(root, 'docs', 'architecture', 'evidence', 'v2-beta-readiness');
+  const report = fs.readFileSync(path.join(evidenceDir, 'gate-bc-readiness-report.md'), 'utf8');
+  const digest = `sha256:${createHash('sha256')
+    .update(fs.readFileSync(path.join(root, 'bin', 'ci', 'readiness-gate-bc.mjs')))
+    .digest('hex')}`;
+
+  const cited = new Set(
+    [...report.matchAll(/readiness-gate-bc-([0-9a-f]{8})\.json/g)].map((match) => match[1])
+  );
+  assert.equal(cited.size > 0, true, 'the report must cite an archived evidence file');
+
+  const archived = new Set(
+    fs
+      .readdirSync(evidenceDir)
+      .filter((entry) => /^readiness-gate-bc-[0-9a-f]{8}\.json$/.test(entry))
+  );
+  for (const runId of cited) {
+    const file = `readiness-gate-bc-${runId}.json`;
+    assert.equal(archived.has(file), true, `the report cites ${file}, which is not archived`);
+    const document = JSON.parse(fs.readFileSync(path.join(evidenceDir, file), 'utf8'));
+    assert.equal(document.verdict, 'pass', `${file} is cited but not a pass`);
+    assert.equal(
+      document.harness.sha256,
+      digest,
+      `${file} was produced by a different build of the harness; re-run it and resync the report`
+    );
+  }
 });

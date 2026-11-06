@@ -405,6 +405,31 @@ export function settleEphemeralTracking({ registry, kind = 'container', name, in
   return { tracked: true, untracked: false, unverified: inspected?.error ?? 'inspect did not answer' };
 }
 
+// classifyRemoveResult classifies a `docker rm -f` result the same way
+// classifyDockerInspect classifies an inspect: exit 0 removed the object, an
+// explicit "No such container/volume" means someone else already did, and every
+// other failure — permission denied, an unreachable daemon, an unparseable exit —
+// is a failed removal. The helper's own `docker rm` goes through this, so a
+// removal error cannot hide behind a later "the container is gone anyway".
+const DENIED_REMOVAL =
+  /permission denied|cannot connect to the docker daemon|is the docker daemon running|access denied|operation not permitted/i;
+
+export function classifyRemoveResult({ status, stdout = '', stderr = '' } = {}) {
+  if (status === 0) return { ok: true, absent: false, error: null };
+  const text = `${stderr || ''}${stdout || ''}`.trim();
+  // A denial wins over a not-found phrase in the same message: "permission
+  // denied" means the removal was not attempted, whatever else the daemon said.
+  if (DENIED_REMOVAL.test(text)) {
+    return { ok: false, absent: false, error: text.slice(0, 300) || `remove exited ${status} with no output` };
+  }
+  if (/\bNo such (?:container|volume|object)\b/i.test(text)) return { ok: true, absent: true, error: null };
+  return {
+    ok: false,
+    absent: false,
+    error: text.slice(0, 300) || `remove exited ${status === null || status === undefined ? 'null' : status} with no output`,
+  };
+}
+
 // checkCleanupHelper is the one fact the fallback helper must satisfy: it is
 // gone. The helper starts after the registry is fenced, so nothing else will
 // ever remove it, and a helper that outlives the run is a leak like any other.
@@ -498,6 +523,132 @@ export function verifyStartedImage({ name, expected, actual }) {
     throw new Error(`${name} runs image ${actual}, not the pre-checked ${expected}`);
   }
   return { name, image: actual };
+}
+
+// judgeCleanupHelper is the fallback helper's whole contract in one decision:
+// the helper's `docker run` must not have failed, its own `docker rm` must have
+// succeeded or found nothing to remove, and the container must be gone. A later
+// "absent" inspect cannot excuse a permission error from the removal — the run
+// has to say it could not verify its own cleanup.
+export function judgeCleanupHelper({ name, runResult = {}, removeResult = {}, inspected } = {}) {
+  const failures = [];
+  const runStatus = runResult?.status;
+  if (runStatus !== 0) {
+    const detail = String(`${runResult?.stderr ?? ''}${runResult?.stdout ?? ''}`).trim().slice(0, 200);
+    failures.push(`cleanup helper run exited ${runStatus === undefined ? 'null' : runStatus}${detail ? `: ${detail}` : ''}`);
+  }
+  const removal = classifyRemoveResult(removeResult ?? {});
+  if (!removal.ok) failures.push(`cleanup helper remove failed: ${removal.error}`);
+  const helper = checkCleanupHelper({ name, inspected });
+  if (!helper.ok) failures.push(helper.error);
+  return { ok: failures.length === 0, failures, error: failures.join('; ') };
+}
+
+// createCleanupCoordinator makes the cleanup exactly-once and awaitable by both
+// exits: the normal one and a handled signal. The signal guard calls `abort`
+// while the normal path calls `run`; both get the same promise, so a SIGTERM that
+// lands in the middle of a release waits for the releases instead of terminating
+// the process with containers still on the host. A cleanup that throws is a
+// failed cleanup, never a clean exit.
+export function createCleanupCoordinator({
+  cleanupResources,
+  exitCode = finalExitCode,
+  redact = (value) => String(value),
+} = {}) {
+  if (typeof cleanupResources !== 'function') throw new TypeError('a cleanup coordinator needs cleanupResources');
+  let promise = null;
+  const run = () => {
+    if (!promise) {
+      promise = Promise.resolve()
+        .then(() => cleanupResources())
+        .catch((error) => ({
+          ok: false,
+          released: [],
+          errors: [`cleanup threw: ${redact(error?.message || String(error))}`],
+        }));
+    }
+    return promise;
+  };
+  return {
+    run,
+    get pending() {
+      return promise !== null;
+    },
+    // The signal path: await the in-flight (or not yet started) cleanup, then
+    // say which code the process must exit with. The signal still decides the
+    // code, and it is never 0.
+    async abort({ signal, runOk = false } = {}) {
+      const outcome = await run();
+      return { outcome, exitCode: exitCode({ runOk, cleanupOk: outcome.ok, signal }) };
+    },
+  };
+}
+
+// describeFatal formats an uncaught top-level failure without a stack: a stack
+// carries the operator's absolute paths, and this line is what a failed run
+// prints. Registered paths are replaced by the redactor's placeholder.
+// A POSIX absolute path in a stray message: two or more segments after the root,
+// which is what an fs error carries. Over-redacting a snippet of an error string
+// is the safe direction for a fatal line.
+const ABSOLUTE_PATH = /(?:\/(?:[\w.@+-]|%[0-9A-F]{2})+){2,}/g;
+
+export function describeFatal(error, redactor = null) {
+  const name = error?.name && error.name !== 'Error' ? `${error.name}: ` : '';
+  const raw = error?.message || String(error ?? 'unknown failure');
+  const message = redactor ? redactor.redact(raw) : raw;
+  return `readiness-gate-bc: ${name}${message.replace(ABSOLUTE_PATH, '[redacted-path]')}`;
+}
+
+// writeEvidence writes the archived copy twice (the run copy and the versioned
+// repo copy) and treats them as one unit: if either write fails, neither file is
+// left behind, so a failed run cannot leave a half-written document that reads as
+// a PASS.
+export function writeEvidence({
+  document,
+  redactor,
+  output,
+  repoEvidenceDir,
+  runId,
+  root = ROOT,
+  mkdirSync = fs.mkdirSync,
+  writeFileSync = fs.writeFileSync,
+  unlinkSync = fs.unlinkSync,
+} = {}) {
+  const serialize = () => `${redactor.redact(JSON.stringify(document, null, 2))}\n`;
+  const written = [];
+  const removeAll = () => {
+    for (const file of written.reverse()) {
+      try {
+        unlinkSync(file);
+      } catch {}
+    }
+    written.length = 0;
+  };
+  try {
+    mkdirSync(output, { recursive: true });
+    const runFile = path.join(output, `readiness-gate-bc-${runId}.json`);
+    writeFileSync(runFile, serialize());
+    written.push(runFile);
+    mkdirSync(repoEvidenceDir, { recursive: true });
+    const repoFile = path.join(repoEvidenceDir, `readiness-gate-bc-${runId}.json`);
+    writeFileSync(repoFile, serialize());
+    written.push(repoFile);
+    document.evidenceFiles = {
+      // The archived copy stays self-describing without carrying the operator's
+      // absolute scratch path into the repository.
+      runCopy: path.basename(runFile),
+      repoCopy: path.relative(root, repoFile),
+    };
+    // Rewrite both copies with the evidence-paths field so the archived copy is
+    // self-describing.
+    const finalSerialized = serialize();
+    writeFileSync(runFile, finalSerialized);
+    writeFileSync(repoFile, finalSerialized);
+    return { ok: true, runFile, repoFile };
+  } catch (error) {
+    removeAll();
+    return { ok: false, error: redactor.redact(error?.message || String(error)) };
+  }
 }
 
 // verifyReleaseProvenance asserts the licence collection status the plan
@@ -862,17 +1013,25 @@ async function runMain(argv = process.argv.slice(2)) {
   const scenarios = {};
   const imageEvidence = {};
   const ports = new Set();
+  // The run's own host paths become placeholders everywhere, including on the
+  // failure paths that archive an error message verbatim. The longest prefix is
+  // registered first by the redactor's own ordering, so a child path collapses
+  // with its parent. This happens before anything is created, so the first fs
+  // error already has its path registered.
+  for (const hostPath of [options.workDir, options.output, options.repoEvidenceDir]) {
+    redactor.add(hostPath);
+  }
+  // Fail fast, before any Docker work or scratch directory: a run that cannot
+  // write its evidence is not worth two minutes of containers. The error reaches
+  // the top-level catch, which prints a path-free summary.
+  fs.mkdirSync(options.output, { recursive: true });
+  fs.mkdirSync(options.repoEvidenceDir, { recursive: true });
   // One run owns one host directory under its own prefix, so a second run can
   // never inherit a half-initialised or corrupt store from the first.
   const runWorkDir = path.join(options.workDir, prefix);
   fs.mkdirSync(runWorkDir, { recursive: true });
-  // The run's own host paths become placeholders everywhere, including on the
-  // failure paths that archive an error message verbatim. The longest prefix is
-  // registered first by the redactor's own ordering, so a child path collapses
-  // with its parent.
-  for (const hostPath of [runWorkDir, options.workDir, options.output]) redactor.add(hostPath);
+  redactor.add(runWorkDir);
   let abortedSignal = null;
-  let finalizing = false;
   let cleanup = { ok: true, released: [], errors: [] };
 
   const redact = (value) => redactor.redact(value);
@@ -972,7 +1131,7 @@ async function runMain(argv = process.argv.slice(2)) {
         // itself inside the same prefix, uses `--rm`, carries the same resource
         // budget, and is verified gone afterwards: a helper that outlives the
         // cleanup is a leak like any other.
-        docker(
+        const helperRun = docker(
           [
             ...dockerRunArgs({
               name: cleanupContainer,
@@ -986,13 +1145,18 @@ async function runMain(argv = process.argv.slice(2)) {
           ],
           { check: false }
         );
-        docker(['rm', '-f', cleanupContainer], { check: false });
-        const helper = checkCleanupHelper({
+        // The helper's own removal is classified like every other removal: exit 0
+        // or a definite "No such container" may continue, anything else
+        // (permissions, an unreachable daemon) fails the cleanup even when the
+        // final inspect happens to report the container absent.
+        const helper = judgeCleanupHelper({
           name: cleanupContainer,
+          runResult: helperRun,
+          removeResult: docker(['rm', '-f', cleanupContainer], { check: false }),
           inspected: inspectObject('container', cleanupContainer),
         });
         if (!helper.ok) {
-          helperFailure = helper.error;
+          helperFailure = redact(helper.error);
           throw new Error(helperFailure);
         }
       },
@@ -1018,13 +1182,18 @@ async function runMain(argv = process.argv.slice(2)) {
     return outcome;
   };
 
+  // One awaitable cleanup for both exits. The signal guard stays attached until
+  // it settles, so a SIGTERM during finalisation waits for the releases instead
+  // of terminating the process with resources still on the host.
+  const cleanupCoordinator = createCleanupCoordinator({
+    cleanupResources,
+    exitCode: finalExitCode,
+    redact,
+  });
   const shutdown = async (signal) => {
-    if (finalizing) return { exitCode: finalExitCode({ runOk: false, signal }) };
-    finalizing = true;
-    abortedSignal = signal;
+    abortedSignal = abortedSignal || signal;
     registry.fence(`aborted by ${signal}`);
-    const outcome = await cleanupResources();
-    return { exitCode: finalExitCode({ runOk: false, cleanupOk: outcome.ok, signal }) };
+    return cleanupCoordinator.abort({ signal });
   };
   const signalGuard = installSignalGuard({ onSignal: shutdown });
 
@@ -1978,11 +2147,17 @@ async function runMain(argv = process.argv.slice(2)) {
     record('harness', 'FAIL', { error: redact(error?.message || String(error)) });
     runOk = false;
   } finally {
+    // Await the same promise the signal path awaits — cleanup runs once — and
+    // keep the guard attached until it has settled.
+    cleanup = await cleanupCoordinator.run();
     signalGuard.detach();
-    if (!finalizing) {
-      finalizing = true;
-      cleanup = await cleanupResources();
-    }
+  }
+
+  // A handled signal owns the exit code and is already exiting this process once
+  // the cleanup settles; archiving a verdict here would race that exit and could
+  // leave a half-written document behind.
+  if (signalGuard.signal) {
+    return finalExitCode({ runOk: false, cleanupOk: cleanup.ok, signal: signalGuard.signal });
   }
 
   const document = baseEvidence();
@@ -2002,27 +2177,18 @@ async function runMain(argv = process.argv.slice(2)) {
   document.redactions = redactor.size();
 
   // The last redaction pass covers the whole document, so a captured field that
-  // was not individually scrubbed still cannot carry a registered secret.
-  const serialized = `${redactor.redact(JSON.stringify(document, null, 2))}\n`;
-  fs.mkdirSync(options.output, { recursive: true });
-  const file = path.join(options.output, `readiness-gate-bc-${runId}.json`);
-  fs.writeFileSync(file, serialized);
-  fs.mkdirSync(options.repoEvidenceDir, { recursive: true });
-  const repoFile = path.join(options.repoEvidenceDir, `readiness-gate-bc-${runId}.json`);
-  fs.writeFileSync(repoFile, serialized);
-  document.evidenceFiles = {
-    // The archived copy stays self-describing without carrying the operator's
-    // absolute scratch path into the repository.
-    runCopy: path.basename(file),
-    repoCopy: path.relative(ROOT, repoFile),
-  };
-  // Rewrite both copies with the evidence-paths field so the archived copy is
-  // self-describing.
-  const finalSerialized = `${redactor.redact(JSON.stringify(document, null, 2))}\n`;
-  fs.writeFileSync(file, finalSerialized);
-  fs.writeFileSync(repoFile, finalSerialized);
-  process.stdout.write(`evidence: ${file}\n`);
-  process.stdout.write(`repo evidence: ${path.relative(ROOT, repoFile)}\n`);
+  // was not individually scrubbed still cannot carry a registered secret. Both
+  // copies are written as one unit: a failure removes whatever was written.
+  const written = writeEvidence({
+    document,
+    redactor,
+    output: options.output,
+    repoEvidenceDir: options.repoEvidenceDir,
+    runId,
+  });
+  if (!written.ok) throw new Error(`could not write the evidence: ${written.error}`);
+  process.stdout.write(`evidence: ${path.basename(written.runFile)}\n`);
+  process.stdout.write(`repo evidence: ${path.relative(ROOT, written.repoFile)}\n`);
   process.stdout.write(`verdict: ${document.verdict}\n`);
   return document.exitCode;
 }
@@ -2036,7 +2202,9 @@ if (isEntryPoint) {
       process.exitCode = code;
     })
     .catch((error) => {
-      process.stderr.write(`readiness-gate-bc: ${error?.stack || error}\n`);
+      // No stack: it carries the operator's absolute paths, and a failed run
+      // must not print them.
+      process.stderr.write(`${describeFatal(error)}\n`);
       process.exitCode = 1;
     });
 }

@@ -1,12 +1,12 @@
 {
   "contract": "cpamp.readiness-gate-bc.v1",
-  "generatedAt": "2026-11-06T14:31:43.615Z",
+  "generatedAt": "2026-11-06T15:10:41.860Z",
   "harness": {
     "path": "bin/ci/readiness-gate-bc.mjs",
-    "sha256": "sha256:30f78e3609ae82eb37e33c8c8150eac33a19e7db61df0f9e516f2934a48410bb"
+    "sha256": "sha256:70102c3e280c536d05051efe4c3cc0202d93c2677d2f186d03006473898d770b"
   },
-  "runId": "fd6b966d",
-  "prefix": "cpampdfd6b966d",
+  "runId": "acb982b6",
+  "prefix": "cpampdacb982b6",
   "candidateTag": "8935bce5",
   "candidateCommit": "8935bce5ea7ce994185ee97acb8a4fdbd9cdd6cc",
   "platform": "linux/amd64",
@@ -56,7 +56,7 @@
     "disk": {
       "mount": "/",
       "totalBytes": 62671097856,
-      "availableBytes": 6350884864,
+      "availableBytes": 6350856192,
       "floorBytes": 3221225472
     },
     "provenance": {
@@ -156,11 +156,11 @@
     "storeOpenFailure": {
       "kind": "unsupported_derived_format",
       "container": {
-        "name": "cpampdfd6b966d-storeopenfailure",
-        "id": "0a5cca0fa276076a3dd76b676fcc77be289dfab51893e3c3145755749b87082c",
+        "name": "cpampdacb982b6-storeopenfailure",
+        "id": "39d4fbf4cfb5cccd0e990d536253a8f5facfbd09aa67a7ae75072defdf3aa4d3",
         "image": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86"
       },
-      "elapsedMs": 21,
+      "elapsedMs": 94,
       "health": {
         "status": 503,
         "body": "{\"ok\":false}\n"
@@ -170,12 +170,12 @@
         "body": "{\"contract_version\":\"cpamp.phase4-01.discovery.v1\",\"status\":\"unavailable\",\"authentication_required\":false,\"auth_entry\":\"unavailable\",\"reason\":\"observation_unavailable\"}\n"
       },
       "businessStatus": 404,
-      "logTail": "2026/11/06 14:29:52 cpa-manager-plus listening on [::]:18317\n2026/11/06 14:29:52 Manager store could not be opened; keeping safe not-ready diagnostics available\n",
+      "logTail": "2026/11/06 15:08:53 cpa-manager-plus listening on [::]:18317\n2026/11/06 15:08:54 Manager store could not be opened; keeping safe not-ready diagnostics available\n",
       "lockProbe": {
         "exitCode": 0,
         "released": true,
         "failures": [],
-        "output": "14:29:53 [derived-migration] creating index idx_usage_monitoring_event_projection_account_window\n2026/11/06 14:29:53 [derived-migration] creating index idx_usage_monitoring_event_projection_model_timestamp\n2026/11/06 14:29:53 [derived-migration] creating index idx_usage_monitoring_header_latest_timestamp\n2026/11/06 14:29:53 [derived-migration] creating index idx_usage_event_identity_ledger_raw_event_id\n2026/11/06 14:29:53 [derived-migration] creating index idx_usage_event_identity_ledger_bucket\n"
+        "output": "15:08:55 [derived-migration] creating index idx_usage_monitoring_event_projection_account_window\n2026/11/06 15:08:55 [derived-migration] creating index idx_usage_monitoring_event_projection_model_timestamp\n2026/11/06 15:08:55 [derived-migration] creating index idx_usage_monitoring_header_latest_timestamp\n2026/11/06 15:08:55 [derived-migration] creating index idx_usage_event_identity_ledger_raw_event_id\n2026/11/06 15:08:55 [derived-migration] creating index idx_usage_event_identity_ledger_bucket\n"
       },
       "oomKilled": false,
       "judgement": {
@@ -183,7 +183,7 @@
         "failures": [],
         "observed": {
           "label": "store-open-failure",
-          "elapsedMs": 21,
+          "elapsedMs": 94,
           "budgetMs": 10000,
           "healthStatus": 503,
           "discoveryStatus": 503,
@@ -203,11 +203,11 @@
     "corruptedDatabase": {
       "kind": "corrupted_database_bytes",
       "container": {
-        "name": "cpampdfd6b966d-corrupteddatabase",
-        "id": "1b8fa28f2957bcc8c7201576904503a25d7f464b1e99ce80e9bbbe31a8868c91",
+        "name": "cpampdacb982b6-corrupteddatabase",
+        "id": "5fdf52e666cd98ba243a305f3d8b6b2e6ab8506fda4d596945bfe2f94aada61b",
         "image": "sha256:38ade7eae6d09e7c05501eae543992cdbea99e0090e6d656651ed12744706f86"
       },
-      "elapsedMs": 4,
+      "elapsedMs": 20,
       "health": {
         "status": 503,
         "body": "{\"ok\":false}\n"
@@ -217,12 +217,12 @@
         "body": "{\"contract_version\":\"cpamp.phase4-01.discovery.v1\",\"status\":\"unavailable\",\"authentication_required\":false,\"auth_entry\":\"unavailable\",\"reason\":\"observation_unavailable\"}\n"
       },
       "businessStatus": 404,
-      "logTail": "2026/11/06 14:29:55 cpa-manager-plus listening on [::]:18317\n2026/11/06 14:29:55 Manager writable startup is not authorized; keeping read-only discovery available: read the Upgrade operation: file is not a database (26)\n",
+      "logTail": "2026/11/06 15:08:56 cpa-manager-plus listening on [::]:18317\n2026/11/06 15:08:56 Manager writable startup is not authorized; keeping read-only discovery available: read the Upgrade operation: file is not a database (26)\n",
       "lockProbe": {
         "exitCode": 1,
         "released": true,
         "failures": [],
-        "output": "2026/11/06 14:29:55 cleanup derived data: validate sqlite /data/usage.sqlite: file is not a database (26)\n"
+        "output": "2026/11/06 15:08:56 cleanup derived data: validate sqlite /data/usage.sqlite: file is not a database (26)\n"
       },
       "oomKilled": false,
       "judgement": {
@@ -230,7 +230,7 @@
         "failures": [],
         "observed": {
           "label": "corrupted-database",
-          "elapsedMs": 4,
+          "elapsedMs": 20,
           "budgetMs": 10000,
           "healthStatus": 503,
           "discoveryStatus": 503,
@@ -250,26 +250,26 @@
     "mismatchedDataKey": {
       "secretFree": {
         "healthStatus": 200,
-        "settledAtMs": 146,
+        "settledAtMs": 211,
         "leakedSecretCount": 0,
-        "logTail": "2026/11/06 14:29:57 cpa-manager-plus listening on [::]:18317\n2026/11/06 14:29:57 CPA Manager Plus administrator authority loaded\n2026/11/06 14:29:57 [derived-migration] post-listen index preparation started\n2026/11/06 14:29:57 [derived-migration] creating index idx_gateway_api_key_binding_history_hash\n2026/11/06 14:29:57 http GET /health status=200 duration=25.627µs remote=172.17.0.1:58482\n2026/11/06 14:29:57 [derived-migration] creating index idx_gateway_credential_binding_history_auth_id\n",
+        "logTail": "cy_ttft_cover\n2026/11/06 15:08:59 [derived-migration] creating index idx_usage_events_request_id\n2026/11/06 15:08:59 [derived-migration] creating index idx_usage_events_model\n2026/11/06 15:08:59 [derived-migration] creating index idx_usage_events_auth_index\n2026/11/06 15:08:59 [derived-migration] creating index idx_usage_events_endpoint\n2026/11/06 15:08:59 [derived-migration] creating index idx_usage_events_header_quota_recover\n2026/11/06 15:08:59 [derived-migration] creating index idx_usage_events_header_error_kind\n2026/11/06 15:08:59 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 15:08:59 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 15:08:59 [derived-migration] creating index idx_usage_events_latest_request_source\n2026/11/06 15:08:59 http GET /health status=200 duration=24.094µs remote=172.17.0.1:56356\n2026/11/06 15:08:59 [derived-migration] creating index idx_account_action_candidates_pending_identity_action\n",
         "note": "the secret-free fixture has no encrypted connection secret, so a mismatched data key does not reach RequireDataKeyForInspectedConnection or decryption; the candidate settles at /health 200"
       },
       "encrypted": {
         "exitCode": 1,
         "running": false,
-        "elapsedMs": 664,
+        "elapsedMs": 297,
         "healthStatus": 503,
         "failures": [],
         "leakedSecretCount": 0,
-        "logTail": "2026/11/06 14:29:58 cpa-manager-plus listening on [::]:18317\n2026/11/06 14:29:59 bootstrap manager server: decrypt secret: invalid data key or corrupted ciphertext\n",
+        "logTail": "2026/11/06 15:09:00 cpa-manager-plus listening on [::]:18317\n2026/11/06 15:09:00 bootstrap manager server: decrypt secret: invalid data key or corrupted ciphertext\n",
         "note": "RequireDataKeyForInspectedConnection only checks that data.key exists; the mismatched key is rejected when bootstrap.Run decrypts manager_config_v1/setup, and main.go fails closed with log.Fatalf"
       }
     },
     "benchmark": {
       "storage": {
         "kind": "docker-volume",
-        "volume": "cpampdfd6b966d-bench"
+        "volume": "cpampdacb982b6-bench"
       },
       "fixture": {
         "count": 100000,
@@ -278,12 +278,12 @@
         "providers": 3,
         "accounts": 100,
         "apiKeys": 10,
-        "minTimestampMs": 1783607400592,
-        "maxTimestampMs": 1793975296912,
+        "minTimestampMs": 1783609741644,
+        "maxTimestampMs": 1793977637964,
         "windowDays": 120,
         "rawBytes": 850
       },
-      "seedMs": 2169,
+      "seedMs": 2104,
       "dbBytes": 145870848,
       "limits": {
         "cpus": 2,
@@ -300,8 +300,8 @@
             "providers": 3,
             "accounts": 100,
             "apiKeys": 10,
-            "minTimestampMs": 1783607400592,
-            "maxTimestampMs": 1793975296912,
+            "minTimestampMs": 1783609741644,
+            "maxTimestampMs": 1793977637964,
             "windowDays": 120,
             "rawBytes": 850
           }
@@ -309,15 +309,15 @@
         "cold_start_within_budget": {
           "ok": true,
           "detail": {
-            "rollupOnMs": 294,
-            "rollupOffMs": 338,
+            "rollupOnMs": 299,
+            "rollupOffMs": 278,
             "budgetMs": 5000
           }
         },
         "derived_maintenance_finished": {
           "ok": true,
           "detail": {
-            "ms": 55898,
+            "ms": 54829,
             "coverageEventId": 100000,
             "status": {
               "databaseMaintenance": {
@@ -338,9 +338,9 @@
           "detail": {
             "offline": {
               "exitCode": 0,
-              "durationMs": 2339,
+              "durationMs": 2086,
               "preparedIndexes": 11,
-              "output": "2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 14:31:22 [derived-migration] creating index idx_usage_events_latest_request_source"
+              "output": "2026/11/06 15:10:21 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 15:10:21 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 15:10:21 [derived-migration] creating index idx_usage_events_latest_request_source"
             },
             "afterRestart": {
               "databaseMaintenance": {
@@ -431,10 +431,10 @@
         "peak_memory_within_budget": {
           "ok": true,
           "detail": {
-            "rollupOnRssBytes": 139919360,
-            "rollupOffRssBytes": 87519232,
-            "rollupOnCgroupBytes": 1108193280,
-            "rollupOffCgroupBytes": 73715712,
+            "rollupOnRssBytes": 140828672,
+            "rollupOffRssBytes": 88223744,
+            "rollupOnCgroupBytes": 1393569792,
+            "rollupOffCgroupBytes": 76148736,
             "budgetBytes": 1610612736,
             "metric": "process VmHWM (RSS)"
           }
@@ -449,10 +449,10 @@
               "Restarting": false,
               "OOMKilled": false,
               "Dead": false,
-              "Pid": 93773,
+              "Pid": 99680,
               "ExitCode": 0,
               "Error": "",
-              "StartedAt": "2026-11-06T14:30:03.512067935Z",
+              "StartedAt": "2026-11-06T15:09:04.462573065Z",
               "FinishedAt": "0001-01-01T00:00:00Z",
               "RestartCount": 0
             },
@@ -463,10 +463,10 @@
               "Restarting": false,
               "OOMKilled": false,
               "Dead": false,
-              "Pid": 94110,
+              "Pid": 324,
               "ExitCode": 0,
               "Error": "",
-              "StartedAt": "2026-11-06T14:31:22.756985972Z",
+              "StartedAt": "2026-11-06T15:10:22.234567667Z",
               "FinishedAt": "0001-01-01T00:00:00Z",
               "RestartCount": 0
             }
@@ -476,8 +476,8 @@
       "runs": {
         "rollupOn": {
           "container": {
-            "name": "cpampdfd6b966d-benchon",
-            "id": "67100bd8e0670893c7b79d931a129eef92232f8197bc4fc907f323b6b3f3a5c8"
+            "name": "cpampdacb982b6-benchon",
+            "id": "d9c856e96244fd6c2e836a9a43020e83352663281c2e2d2a392c55174a2a246a"
           },
           "env": {
             "HTTP_ADDR": "0.0.0.0:18317",
@@ -486,8 +486,8 @@
             "CPA_MANAGER_ADMIN_KEY": "[redacted]",
             "CPAMP_UPDATE_CHECK_ENABLED": "false"
           },
-          "coldStartMs": 294,
-          "derivedMaintenanceMs": 55898,
+          "coldStartMs": 299,
+          "derivedMaintenanceMs": 54829,
           "derivedCoverageEventId": 100000,
           "maintenanceStatus": {
             "databaseMaintenance": {
@@ -504,45 +504,45 @@
           "samples": {
             "dashboard_summary": {
               "count": 5,
-              "p50": 395.078388000009,
-              "p95": 430.6552559999982,
-              "min": 352.3334380000015,
-              "max": 430.6552559999982
+              "p50": 354.46897300001,
+              "p95": 377.8290090000082,
+              "min": 334.6602439999988,
+              "max": 377.8290090000082
             },
             "monitoring_header_snapshots": {
               "count": 5,
-              "p50": 3.4645480000035604,
-              "p95": 3.885498000003281,
-              "min": 2.793778999999631,
-              "max": 3.885498000003281
+              "p50": 2.6884419999987585,
+              "p95": 6.6755969999940135,
+              "min": 2.2711850000050617,
+              "max": 6.6755969999940135
             },
             "monitoring_events_page": {
               "count": 5,
-              "p50": 149.4587889999966,
-              "p95": 157.92979399999604,
-              "min": 146.9849910000048,
-              "max": 157.92979399999604
+              "p50": 139.27702700000373,
+              "p95": 139.90734200000588,
+              "min": 130.18225499999244,
+              "max": 139.90734200000588
             },
             "usage_analytics_overview_30d": {
               "count": 5,
-              "p50": 1164.745465999993,
-              "p95": 1335.6663079999998,
-              "min": 1089.4163049999916,
-              "max": 1335.6663079999998
+              "p50": 1240.8332200000004,
+              "p95": 1280.9921669999894,
+              "min": 1209.9004409999907,
+              "max": 1280.9921669999894
             },
             "usage_analytics_overview_90d": {
               "count": 5,
-              "p50": 2051.2191329999914,
-              "p95": 2086.760043999995,
-              "min": 1995.4045650000044,
-              "max": 2086.760043999995
+              "p50": 2031.6630980000045,
+              "p95": 2072.638678000003,
+              "min": 1994.1612109999987,
+              "max": 2072.638678000003
             },
             "usage_analytics_hourly_24h": {
               "count": 5,
-              "p50": 281.6372440000123,
-              "p95": 301.01147800000035,
-              "min": 267.5847919999942,
-              "max": 301.01147800000035
+              "p50": 262.5450270000001,
+              "p95": 278.61406399999396,
+              "min": 249.89751300000353,
+              "max": 278.61406399999396
             }
           },
           "validations": {
@@ -572,8 +572,8 @@
             }
           },
           "validationFailures": [],
-          "peakMemoryBytes": 139919360,
-          "cgroupPeakMemoryBytes": 1108193280,
+          "peakMemoryBytes": 140828672,
+          "cgroupPeakMemoryBytes": 1393569792,
           "memoryMetric": "process VmHWM (RSS); cgroup memory.peak (includes page cache) recorded separately",
           "state": {
             "Status": "running",
@@ -582,18 +582,18 @@
             "Restarting": false,
             "OOMKilled": false,
             "Dead": false,
-            "Pid": 93773,
+            "Pid": 99680,
             "ExitCode": 0,
             "Error": "",
-            "StartedAt": "2026-11-06T14:30:03.512067935Z",
+            "StartedAt": "2026-11-06T15:09:04.462573065Z",
             "FinishedAt": "0001-01-01T00:00:00Z",
             "RestartCount": 0
           }
         },
         "rollupOff": {
           "container": {
-            "name": "cpampdfd6b966d-benchoff",
-            "id": "37b57d2b1d3f2afdb561903439974fdc2555c52515cc0cd45d04abe0d5cbea5a"
+            "name": "cpampdacb982b6-benchoff",
+            "id": "40bf89e18206ff41f4da782a95ba53d3b0714f97d5d725b90e7364ebdc305ea9"
           },
           "env": {
             "HTTP_ADDR": "0.0.0.0:18317",
@@ -603,7 +603,7 @@
             "CPAMP_UPDATE_CHECK_ENABLED": "false",
             "USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED": "false"
           },
-          "coldStartMs": 338,
+          "coldStartMs": 278,
           "derivedMaintenanceMs": null,
           "derivedCoverageEventId": null,
           "maintenanceStatus": {
@@ -618,45 +618,45 @@
           "samples": {
             "dashboard_summary": {
               "count": 5,
-              "p50": 63.595117999997456,
-              "p95": 87.61987700000464,
-              "min": 42.35069300000032,
-              "max": 87.61987700000464
+              "p50": 53.57156899999245,
+              "p95": 91.46878799999831,
+              "min": 46.5153139999893,
+              "max": 91.46878799999831
             },
             "monitoring_header_snapshots": {
               "count": 5,
-              "p50": 2.6502139999938663,
-              "p95": 3.9254389999987325,
-              "min": 2.3451289999939036,
-              "max": 3.9254389999987325
+              "p50": 2.482397999992827,
+              "p95": 2.9195509999990463,
+              "min": 2.228075999999419,
+              "max": 2.9195509999990463
             },
             "monitoring_events_page": {
               "count": 5,
-              "p50": 4.928862000000663,
-              "p95": 6.38224099999934,
-              "min": 4.831785000002128,
-              "max": 6.38224099999934
+              "p50": 4.820099999997183,
+              "p95": 12.280236999999033,
+              "min": 4.534280000007129,
+              "max": 12.280236999999033
             },
             "usage_analytics_overview_30d": {
               "count": 5,
-              "p50": 1078.4931610000058,
-              "p95": 1189.4583989999956,
-              "min": 987.0691789999983,
-              "max": 1189.4583989999956
+              "p50": 978.7403989999875,
+              "p95": 1066.0776500000065,
+              "min": 958.1379610000004,
+              "max": 1066.0776500000065
             },
             "usage_analytics_overview_90d": {
               "count": 5,
-              "p50": 2722.7507630000036,
-              "p95": 2883.206878000012,
-              "min": 2558.6311720000085,
-              "max": 2883.206878000012
+              "p50": 2547.6651960000017,
+              "p95": 2654.9184559999994,
+              "min": 2493.014909000005,
+              "max": 2654.9184559999994
             },
             "usage_analytics_hourly_24h": {
               "count": 5,
-              "p50": 8.4834780000092,
-              "p95": 10.361147000003257,
-              "min": 8.049173000006704,
-              "max": 10.361147000003257
+              "p50": 8.726965000008931,
+              "p95": 10.384384000004502,
+              "min": 7.647492000003695,
+              "max": 10.384384000004502
             }
           },
           "validations": {
@@ -686,8 +686,8 @@
             }
           },
           "validationFailures": [],
-          "peakMemoryBytes": 87519232,
-          "cgroupPeakMemoryBytes": 73715712,
+          "peakMemoryBytes": 88223744,
+          "cgroupPeakMemoryBytes": 76148736,
           "memoryMetric": "process VmHWM (RSS); cgroup memory.peak (includes page cache) recorded separately",
           "state": {
             "Status": "running",
@@ -696,10 +696,10 @@
             "Restarting": false,
             "OOMKilled": false,
             "Dead": false,
-            "Pid": 94110,
+            "Pid": 324,
             "ExitCode": 0,
             "Error": "",
-            "StartedAt": "2026-11-06T14:31:22.756985972Z",
+            "StartedAt": "2026-11-06T15:10:22.234567667Z",
             "FinishedAt": "0001-01-01T00:00:00Z",
             "RestartCount": 0
           }
@@ -707,9 +707,9 @@
       },
       "offlineCleanup": {
         "exitCode": 0,
-        "durationMs": 2339,
+        "durationMs": 2086,
         "preparedIndexes": 11,
-        "output": "2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 14:31:22 [derived-migration] creating index idx_usage_events_latest_request_source"
+        "output": "2026/11/06 15:10:21 [derived-migration] creating index idx_usage_events_header_trace_id\n2026/11/06 15:10:21 [derived-migration] creating index idx_usage_events_latest_request_auth_file\n2026/11/06 15:10:21 [derived-migration] creating index idx_usage_events_latest_request_source"
       },
       "indexState": {
         "rollupOn": {
@@ -746,7 +746,7 @@
     {
       "name": "disk_guard",
       "result": "PASS",
-      "detail": "{\"mount\":\"/\",\"totalBytes\":62671097856,\"availableBytes\":6350884864,\"floorBytes\":3221225472}"
+      "detail": "{\"mount\":\"/\",\"totalBytes\":62671097856,\"availableBytes\":6350856192,\"floorBytes\":3221225472}"
     },
     {
       "name": "provenance:manager",
@@ -766,42 +766,42 @@
     {
       "name": "store_open_failure:safe_diagnostics",
       "result": "PASS",
-      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"store-open-failure\",\"elapsedMs\":21,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0},\"offline\":{\"ok\":true,\"failures\":[],\"released\":true,\"exitCode\":0,\"lockRefused\":false}}"
+      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"store-open-failure\",\"elapsedMs\":94,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0},\"offline\":{\"ok\":true,\"failures\":[],\"released\":true,\"exitCode\":0,\"lockRefused\":false}}"
     },
     {
       "name": "corrupted_database:safe_diagnostics",
       "result": "PASS",
-      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"corrupted-database\",\"elapsedMs\":4,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0},\"offline\":{\"ok\":true,\"failures\":[],\"released\":true,\"exitCode\":1,\"lockRefused\":false}}"
+      "detail": "{\"ok\":true,\"failures\":[],\"observed\":{\"label\":\"corrupted-database\",\"elapsedMs\":20,\"budgetMs\":10000,\"healthStatus\":503,\"discoveryStatus\":503,\"businessStatus\":404,\"logMarkerPresent\":true,\"leakedSecretCount\":0},\"offline\":{\"ok\":true,\"failures\":[],\"released\":true,\"exitCode\":1,\"lockRefused\":false}}"
     },
     {
       "name": "mismatched_data_key:secret_free_store",
       "result": "PASS",
-      "detail": "{\"healthStatus\":200,\"settledAtMs\":146,\"leakedSecretCount\":0,\"failures\":[],\"note\":\"the secret-free fixture has no encrypted connection secret, so a mismatched data key does not reach RequireDataKeyForInspectedConnection or decryption; the candidate settles at /health 200\"}"
+      "detail": "{\"healthStatus\":200,\"settledAtMs\":211,\"leakedSecretCount\":0,\"failures\":[],\"note\":\"the secret-free fixture has no encrypted connection secret, so a mismatched data key does not reach RequireDataKeyForInspectedConnection or decryption; the candidate settles at /health 200\"}"
     },
     {
       "name": "mismatched_data_key:encrypted_settings_fail_closed",
       "result": "PASS",
-      "detail": "{\"exitCode\":1,\"elapsedMs\":664,\"failures\":[],\"note\":\"RequireDataKeyForInspectedConnection only checks that data.key exists; the mismatched key is rejected when bootstrap.Run decrypts manager_config_v1/setup, and main.go fails closed with log.Fatalf\"}"
+      "detail": "{\"exitCode\":1,\"elapsedMs\":297,\"failures\":[],\"note\":\"RequireDataKeyForInspectedConnection only checks that data.key exists; the mismatched key is rejected when bootstrap.Run decrypts manager_config_v1/setup, and main.go fails closed with log.Fatalf\"}"
     },
     {
       "name": "benchmark:fixture_distribution",
       "result": "PASS",
-      "detail": "{\"count\":100000,\"uniqueHashes\":100000,\"models\":12,\"providers\":3,\"accounts\":100,\"apiKeys\":10,\"minTimestampMs\":1783607400592,\"maxTimestampMs\":1793975296912,\"windowDays\":120,\"rawBytes\":850}"
+      "detail": "{\"count\":100000,\"uniqueHashes\":100000,\"models\":12,\"providers\":3,\"accounts\":100,\"apiKeys\":10,\"minTimestampMs\":1783609741644,\"maxTimestampMs\":1793977637964,\"windowDays\":120,\"rawBytes\":850}"
     },
     {
       "name": "benchmark:cold_start_within_budget",
       "result": "PASS",
-      "detail": "{\"rollupOnMs\":294,\"rollupOffMs\":338,\"budgetMs\":5000}"
+      "detail": "{\"rollupOnMs\":299,\"rollupOffMs\":278,\"budgetMs\":5000}"
     },
     {
       "name": "benchmark:derived_maintenance_finished",
       "result": "PASS",
-      "detail": "{\"ms\":55898,\"coverageEventId\":100000,\"status\":{\"databaseMaintenance\":{\"required\":true,\"performanceDegraded\":true,\"deferredIndexes\":11,\"offlineJobs\":0,\"reasons\":[\"deferred_indexes\"],\"command\":\"cleanup-derived\"}}}"
+      "detail": "{\"ms\":54829,\"coverageEventId\":100000,\"status\":{\"databaseMaintenance\":{\"required\":true,\"performanceDegraded\":true,\"deferredIndexes\":11,\"offlineJobs\":0,\"reasons\":[\"deferred_indexes\"],\"command\":\"cleanup-derived\"}}}"
     },
     {
       "name": "benchmark:offline_maintenance_cleared_deferred_indexes",
       "result": "PASS",
-      "detail": "{\"offline\":{\"exitCode\":0,\"durationMs\":2339,\"preparedIndexes\":11,\"output\":\"2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_header_trace_id\\n2026/11/06 14:31:21 [derived-migration] creating index idx_usage_events_latest_request_auth_file\\n2026/11/06 14:31:22 [derived-migration] creating index idx_usage_events_latest_request_source\"},\"afterRestart\":{\"databaseMaintenance\":{\"required\":false,\"performanceDegraded\":false,\"deferredIndexes\":0,\"offlineJobs\":0,\"reasons\":[]}}}"
+      "detail": "{\"offline\":{\"exitCode\":0,\"durationMs\":2086,\"preparedIndexes\":11,\"output\":\"2026/11/06 15:10:21 [derived-migration] creating index idx_usage_events_header_trace_id\\n2026/11/06 15:10:21 [derived-migration] creating index idx_usage_events_latest_request_auth_file\\n2026/11/06 15:10:21 [derived-migration] creating index idx_usage_events_latest_request_source\"},\"afterRestart\":{\"databaseMaintenance\":{\"required\":false,\"performanceDegraded\":false,\"deferredIndexes\":0,\"offlineJobs\":0,\"reasons\":[]}}}"
     },
     {
       "name": "benchmark:fixture_exercised_by_queries",
@@ -816,24 +816,24 @@
     {
       "name": "benchmark:peak_memory_within_budget",
       "result": "PASS",
-      "detail": "{\"rollupOnRssBytes\":139919360,\"rollupOffRssBytes\":87519232,\"rollupOnCgroupBytes\":1108193280,\"rollupOffCgroupBytes\":73715712,\"budgetBytes\":1610612736,\"metric\":\"process VmHWM (RSS)\"}"
+      "detail": "{\"rollupOnRssBytes\":140828672,\"rollupOffRssBytes\":88223744,\"rollupOnCgroupBytes\":1393569792,\"rollupOffCgroupBytes\":76148736,\"budgetBytes\":1610612736,\"metric\":\"process VmHWM (RSS)\"}"
     },
     {
       "name": "benchmark:no_oom_and_no_restart",
       "result": "PASS",
-      "detail": "{\"rollupOn\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":93773,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T14:30:03.512067935Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0},\"rollupOff\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":94110,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T14:31:22.756985972Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0}}"
+      "detail": "{\"rollupOn\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":99680,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T15:09:04.462573065Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0},\"rollupOff\":{\"Status\":\"running\",\"Running\":true,\"Paused\":false,\"Restarting\":false,\"OOMKilled\":false,\"Dead\":false,\"Pid\":324,\"ExitCode\":0,\"Error\":\"\",\"StartedAt\":\"2026-11-06T15:10:22.234567667Z\",\"FinishedAt\":\"0001-01-01T00:00:00Z\",\"RestartCount\":0}}"
     }
   ],
   "cleanup": {
     "ok": true,
     "released": [
-      "container:cpampdfd6b966d-storeopenfailure",
-      "container:cpampdfd6b966d-corrupteddatabase",
-      "container:cpampdfd6b966d-mismatchedkeyempty",
-      "container:cpampdfd6b966d-mismatchedkeyencrypted",
-      "container:cpampdfd6b966d-benchon",
-      "container:cpampdfd6b966d-benchoff",
-      "volume:cpampdfd6b966d-bench"
+      "container:cpampdacb982b6-storeopenfailure",
+      "container:cpampdacb982b6-corrupteddatabase",
+      "container:cpampdacb982b6-mismatchedkeyempty",
+      "container:cpampdacb982b6-mismatchedkeyencrypted",
+      "container:cpampdacb982b6-benchon",
+      "container:cpampdacb982b6-benchoff",
+      "volume:cpampdacb982b6-bench"
     ],
     "errors": [],
     "workspace": {
@@ -845,9 +845,9 @@
   "abortedSignal": null,
   "verdict": "pass",
   "exitCode": 0,
-  "redactions": 18,
+  "redactions": 19,
   "evidenceFiles": {
-    "runCopy": "readiness-gate-bc-fd6b966d.json",
-    "repoCopy": "docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-fd6b966d.json"
+    "runCopy": "readiness-gate-bc-acb982b6.json",
+    "repoCopy": "docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-acb982b6.json"
   }
 }
