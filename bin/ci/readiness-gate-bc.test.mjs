@@ -12,13 +12,14 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   READINESS_GATE_BC_CONTRACT,
@@ -59,6 +60,7 @@ import {
 
 const DAY_MS = 86_400_000;
 const PREFIX = 'cpampd1a2b3c4d';
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function workspace(t, prefix) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), `pr3-${prefix}-`));
@@ -1049,7 +1051,7 @@ test('a fatal line carries the message and no stack or absolute path', () => {
   assert.match(named, /^readiness-gate-bc: TypeError: bad argument$/);
 });
 
-test('evidence is published as one unit: both copies or neither', (t) => {
+test('evidence is published as one unit: both copies or neither', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-evidence-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const redactor = createRedactor([]);
@@ -1058,7 +1060,7 @@ test('evidence is published as one unit: both copies or neither', (t) => {
   const repoEvidenceDir = path.join(root, 'docs', 'evidence');
 
   const document = { schema_version: 1, verdict: 'pass', images: { manager: { id: 'sha256:abc' } } };
-  const written = writeEvidence({ document, redactor, output, repoEvidenceDir, runId: 'deadbeef', root, pid: 1 });
+  const written = await writeEvidence({ document, redactor, output, repoEvidenceDir, runId: 'deadbeef', root, pid: 1 });
   assert.equal(written.ok, true, written.error);
   assert.equal(written.aborted, false);
   const runCopy = fs.readFileSync(written.runFile, 'utf8');
@@ -1073,14 +1075,14 @@ test('evidence is published as one unit: both copies or neither', (t) => {
   }
 });
 
-test('a write that fails after creating bytes leaves neither copy and no temp file', (t) => {
+test('a write that fails after creating bytes leaves neither copy and no temp file', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-evidence-fail-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const redactor = createRedactor([]);
   redactor.add(root);
 
-  // Each stage fails after it has really written bytes to disk, which is the case
-  // the earlier "throw before touching the file" test could not reach.
+  // Each stage fails after it has really put bytes on disk, which is the case the
+  // earlier "throw before touching the file" test could not reach.
   const stages = ['runTemp', 'repoTemp', 'runRename', 'repoRename'];
   for (const stage of stages) {
     const caseRoot = path.join(root, stage);
@@ -1091,9 +1093,7 @@ test('a write that fails after creating bytes leaves neither copy and no temp fi
     const repoFile = path.join(repoEvidenceDir, `readiness-gate-bc-${runId}.json`);
     let writes = 0;
     let renames = 0;
-    const realWrite = fs.writeFileSync;
-    const realRename = fs.renameSync;
-    const result = writeEvidence({
+    const result = await writeEvidence({
       document: { verdict: 'pass' },
       redactor,
       output,
@@ -1101,14 +1101,14 @@ test('a write that fails after creating bytes leaves neither copy and no temp fi
       runId,
       root: caseRoot,
       pid: 1,
-      writeFileSync: (file, data) => {
-        realWrite(file, data);
+      writeFile: async (file, data) => {
+        await fs.promises.writeFile(file, data);
         writes += 1;
         const failing = stage === 'runTemp' ? 1 : stage === 'repoTemp' ? 2 : 0;
         if (writes === failing) throw new Error(`ENOSPC: no space left on device, write '${file}'`);
       },
-      renameSync: (from, to) => {
-        realRename(from, to);
+      rename: async (from, to) => {
+        await fs.promises.rename(from, to);
         renames += 1;
         const failing = stage === 'runRename' ? 1 : stage === 'repoRename' ? 2 : 0;
         if (renames === failing) throw new Error(`EIO: i/o error, rename '${from}'`);
@@ -1118,12 +1118,9 @@ test('a write that fails after creating bytes leaves neither copy and no temp fi
     assert.equal(result.aborted, false, stage);
     assert.match(result.error, /ENOSPC|EIO/, stage);
     assert.equal(result.error.includes(caseRoot), false, stage);
-    const left = [
-      runFile,
-      repoFile,
-      `${runFile}.tmp-1`,
-      `${repoFile}.tmp-1`,
-    ].filter((file) => fs.existsSync(file));
+    const left = [runFile, repoFile, `${runFile}.tmp-1`, `${repoFile}.tmp-1`].filter((file) =>
+      fs.existsSync(file)
+    );
     assert.deepEqual(left, [], `${stage} left ${left.join(', ')}`);
     const listed = [
       ...(fs.existsSync(output) ? fs.readdirSync(output) : []),
@@ -1133,7 +1130,43 @@ test('a write that fails after creating bytes leaves neither copy and no temp fi
   }
 });
 
-test('a signal during the archive removes every file it had created', (t) => {
+test('the archive yields to the event loop before its first write', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-evidence-yield-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const redactor = createRedactor([]);
+  redactor.add(root);
+  const output = path.join(root, 'run');
+  const repoEvidenceDir = path.join(root, 'repo');
+
+  // A signal listener is a macrotask. If the archive only yielded microtasks, this
+  // callback would not run before the first write and the archive would publish a
+  // PASS document after the process had already been asked to stop.
+  let signal = null;
+  setImmediate(() => {
+    signal = 'SIGTERM';
+  });
+  // No real I/O: those calls would yield to the loop by themselves and hide the
+  // question this test asks. With instantly-resolving writes, only the archive's
+  // own yields can let the queued macrotask run.
+  const result = await writeEvidence({
+    document: { verdict: 'pass' },
+    redactor,
+    output,
+    repoEvidenceDir,
+    runId: '0ddba11',
+    root,
+    pid: 1,
+    writeFile: async () => {},
+    rename: async () => {},
+    interrupted: () => signal,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.aborted, true);
+  assert.deepEqual(fs.readdirSync(output), []);
+  assert.deepEqual(fs.readdirSync(repoEvidenceDir), []);
+});
+
+test('a signal during the archive removes every file it had created', async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-evidence-signal-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const redactor = createRedactor([]);
@@ -1144,7 +1177,7 @@ test('a signal during the archive removes every file it had created', (t) => {
   const repoFile = path.join(repoEvidenceDir, 'readiness-gate-bc-feedface.json');
 
   let checks = 0;
-  const result = writeEvidence({
+  const result = await writeEvidence({
     document: { verdict: 'pass' },
     redactor,
     output,
@@ -1165,6 +1198,155 @@ test('a signal during the archive removes every file it had created', (t) => {
   assert.equal(fs.existsSync(repoFile), false);
   assert.deepEqual(fs.readdirSync(output), []);
   assert.deepEqual(fs.readdirSync(repoEvidenceDir), []);
+});
+
+// A real signal, in a real process: the in-process test above can only prove the
+// decision, not that the event loop gets a turn to deliver the signal before the
+// guard is detached. The child wires the same way the harness does — coordinator,
+// signal guard, awaitable archive — and the parent signals it while the archive
+// is provably in flight (after the run temp file is on disk).
+function runSignalledArchive(t, signalName) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), `gate-bc-signal-${signalName}-`));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const output = path.join(root, 'run');
+  const repoEvidenceDir = path.join(root, 'repo');
+  const runId = 'feebdaed';
+  const childPath = path.join(root, 'child.mjs');
+  fs.writeFileSync(
+    childPath,
+    `import fs from 'node:fs';
+import path from 'node:path';
+
+const [harnessUrl, output, repoDir, runId, signalName] = process.argv.slice(2);
+const { createCleanupCoordinator, createRedactor, finalExitCode, installSignalGuard, writeEvidence } =
+  await import(harnessUrl);
+
+let signal = null;
+const seen = { value: false };
+process.on(signalName, () => {
+  signal = signalName;
+  seen.value = true;
+});
+
+const redactor = createRedactor([]);
+redactor.add(output);
+redactor.add(repoDir);
+const coordinator = createCleanupCoordinator({
+  cleanupResources: async () => ({ ok: true, released: [], errors: [] }),
+});
+const guard = installSignalGuard({ onSignal: (pending) => coordinator.abort({ signal: pending }) });
+
+const written = await coordinator.trackArchive(
+  writeEvidence({
+    document: { schema_version: 1, verdict: 'pass' },
+    redactor,
+    output,
+    repoEvidenceDir: repoDir,
+    runId,
+    interrupted: () => signal,
+    // Hold the archive in flight after the run copy exists, so the signal lands
+    // in the middle of publishing rather than before it starts. The poll keeps
+    // the event loop alive: a bare pending promise lets Node exit before the
+    // signal is delivered.
+    writeFile: async (file, data) => {
+      await fs.promises.writeFile(file, data);
+      process.stdout.write('WROTE ' + path.basename(file) + '\\n');
+      await new Promise((resolve) => {
+        const timer = setInterval(() => {
+          if (seen.value) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 5);
+      });
+    },
+  })
+);
+guard.detach();
+process.exitCode = written.aborted ? finalExitCode({ runOk: false, signal: guard.signal }) : written.ok ? 0 : 1;
+`
+  );
+
+  const child = spawn(
+    process.execPath,
+    [childPath, pathToFileURL(path.join(ROOT, 'bin/ci/readiness-gate-bc.mjs')).href, output, repoEvidenceDir, runId, signalName],
+    { stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  t.after(() => child.kill('SIGKILL'));
+
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let signalled = false;
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`child did not finish; stdout=${stdout} stderr=${stderr}`));
+    }, 15_000);
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+      if (!signalled && stdout.includes('WROTE')) {
+        signalled = true;
+        process.kill(child.pid, signalName);
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on('error', reject);
+    child.on('exit', (code, bySignal) => {
+      clearTimeout(timer);
+      resolve({ code, bySignal, stdout, stderr });
+    });
+  }).then((result) => {
+    const expected = signalName === 'SIGTERM' ? 143 : 130;
+    assert.equal(result.code, expected, `${signalName}: ${JSON.stringify(result)}`);
+    for (const file of [
+      path.join(output, `readiness-gate-bc-${runId}.json`),
+      path.join(repoEvidenceDir, `readiness-gate-bc-${runId}.json`),
+      path.join(output, `readiness-gate-bc-${runId}.json.tmp-${child.pid}`),
+      path.join(repoEvidenceDir, `readiness-gate-bc-${runId}.json.tmp-${child.pid}`),
+    ]) {
+      assert.equal(fs.existsSync(file), false, `${signalName} left ${file}`);
+    }
+    assert.deepEqual(fs.readdirSync(output), [], signalName);
+    assert.deepEqual(fs.readdirSync(repoEvidenceDir), [], signalName);
+  });
+}
+
+test('a real SIGTERM during the archive exits 143 with no file left behind', (t) => runSignalledArchive(t, 'SIGTERM'));
+
+test('a real SIGINT during the archive exits 130 with no file left behind', (t) => runSignalledArchive(t, 'SIGINT'));
+
+test('the write probe never removes a file it did not create', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-bc-probe-owner-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const occupied = path.join(root, '.readiness-gate-bc-11-abcd.probe');
+  fs.writeFileSync(occupied, 'not ours');
+  assert.throws(
+    () => probeWritableDirectory(root, { pid: 11, token: 'abcd' }),
+    (error) => error.code === 'EEXIST'
+  );
+  // The file that occupied the probe path is somebody else's: it survives intact.
+  assert.equal(fs.readFileSync(occupied, 'utf8'), 'not ours');
+
+  // A probe this call created is removed even when writing it fails, and a
+  // neighbouring file is untouched.
+  const neighbour = path.join(root, 'neighbour.json');
+  fs.writeFileSync(neighbour, '{"keep":true}');
+  assert.throws(
+    () =>
+      probeWritableDirectory(root, {
+        pid: 12,
+        token: 'ef01',
+        writeSync: () => {
+          throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+        },
+      }),
+    (error) => error.code === 'ENOSPC'
+  );
+  assert.equal(fs.existsSync(path.join(root, '.readiness-gate-bc-12-ef01.probe')), false);
+  assert.equal(fs.existsSync(occupied), true);
+  assert.equal(fs.readFileSync(neighbour, 'utf8'), '{"keep":true}');
 });
 
 test('the run workspace is only created after both archive directories are proven writable', () => {

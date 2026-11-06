@@ -557,6 +557,7 @@ export function createCleanupCoordinator({
 } = {}) {
   if (typeof cleanupResources !== 'function') throw new TypeError('a cleanup coordinator needs cleanupResources');
   let promise = null;
+  let archive = null;
   const run = () => {
     if (!promise) {
       promise = Promise.resolve()
@@ -574,11 +575,29 @@ export function createCleanupCoordinator({
     get pending() {
       return promise !== null;
     },
-    // The signal path: await the in-flight (or not yet started) cleanup, then
-    // say which code the process must exit with. The signal still decides the
-    // code, and it is never 0.
+    // The archive is the last thing a run publishes. While it is in flight, a
+    // signal must wait for it: the archive is what rolls its own files back when
+    // it sees the signal, so exiting first would leave a PASS document behind.
+    trackArchive(pending) {
+      archive = Promise.resolve(pending);
+      return archive;
+    },
+    get archivePending() {
+      return archive !== null;
+    },
+    // The signal path: await the in-flight (or not yet started) cleanup and any
+    // in-flight archive, then say which code the process must exit with. The
+    // signal still decides the code, and it is never 0.
     async abort({ signal, runOk = false } = {}) {
       const outcome = await run();
+      if (archive) {
+        try {
+          await archive;
+        } catch {
+          // The archive reports its own failures; an aborted or failed archive
+          // still must not keep the signal from exiting.
+        }
+      }
       return { outcome, exitCode: exitCode({ runOk, cleanupOk: outcome.ok, signal }) };
     },
   };
@@ -626,18 +645,20 @@ export function probeWritableDirectory(
 ) {
   mkdirSync(directory, { recursive: true });
   const probe = path.join(directory, `.readiness-gate-bc-${pid}-${token}.probe`);
+  // `wx` refuses to reuse a file, so a path that is already occupied is somebody
+  // else's: only a probe this call actually created may be removed, and a probe
+  // that cannot be removed is a failure, not a pass.
+  let created = false;
   try {
-    // `wx` refuses to reuse a file: the probe only ever touches what it created.
     const fd = openSync(probe, 'wx');
+    created = true;
     try {
       writeSync(fd, 'readiness-gate-bc write probe\n');
     } finally {
       closeSync(fd);
     }
   } finally {
-    try {
-      unlinkSync(probe);
-    } catch {}
+    if (created) unlinkSync(probe);
   }
   return { ok: true, directory };
 }
@@ -669,7 +690,13 @@ export function prepareRunDirectories({
 // any failure — a short write, a failed rename, a signal mid-archive — leaves
 // neither a final file nor a temp file behind. A failed run therefore cannot
 // leave a document that reads as a PASS.
-export function writeEvidence({
+//
+// It is asynchronous on purpose. A synchronous write would block the event loop
+// for its whole duration, so a real SIGTERM/SIGINT delivered during it could not
+// reach its listener before the caller detached the guard: the process would exit
+// 0 with both PASS files on disk. Every step yields to the loop and re-checks the
+// signal, and a signal seen at any point rolls back and reports `aborted`.
+export async function writeEvidence({
   document,
   redactor,
   output,
@@ -678,9 +705,10 @@ export function writeEvidence({
   root = ROOT,
   interrupted = () => null,
   mkdirSync = fs.mkdirSync,
-  writeFileSync = fs.writeFileSync,
-  renameSync = fs.renameSync,
+  writeFile = fs.promises.writeFile,
+  rename = fs.promises.rename,
   unlinkSync = fs.unlinkSync,
+  yieldToLoop = () => new Promise((resolve) => setImmediate(resolve)),
   pid = process.pid,
 } = {}) {
   const runFile = path.join(output, `readiness-gate-bc-${runId}.json`);
@@ -716,6 +744,9 @@ export function writeEvidence({
   try {
     mkdirSync(output, { recursive: true });
     mkdirSync(repoEvidenceDir, { recursive: true });
+    // The first turn belongs to the loop: a signal that arrived before the
+    // archive started must be seen before the first byte is written.
+    await yieldToLoop();
     checkInterrupt();
     // Both target paths are known up front, so the document is serialised once
     // and both copies carry the same bytes — there is no second rewrite window.
@@ -726,13 +757,19 @@ export function writeEvidence({
       repoCopy: path.relative(root, repoFile),
     };
     const serialized = `${redactor.redact(JSON.stringify(document, null, 2))}\n`;
-    writeFileSync(runTemp, serialized);
+    await writeFile(runTemp, serialized);
+    await yieldToLoop();
     checkInterrupt();
-    writeFileSync(repoTemp, serialized);
+    await writeFile(repoTemp, serialized);
+    await yieldToLoop();
     checkInterrupt();
-    renameSync(runTemp, runFile);
+    await rename(runTemp, runFile);
+    await yieldToLoop();
     checkInterrupt();
-    renameSync(repoTemp, repoFile);
+    await rename(repoTemp, repoFile);
+    // One more turn after the last rename: a signal delivered while it ran must
+    // be seen before this call reports the pair as published.
+    await yieldToLoop();
     checkInterrupt();
     return { ok: true, aborted: false, runFile, repoFile };
   } catch (error) {
@@ -2276,15 +2313,20 @@ async function runMain(argv = process.argv.slice(2)) {
   // The last redaction pass covers the whole document, so a captured field that
   // was not individually scrubbed still cannot carry a registered secret. Both
   // copies are written as one unit: a failure removes whatever was written.
-  const written = writeEvidence({
-    document,
-    redactor,
-    output: options.output,
-    repoEvidenceDir: options.repoEvidenceDir,
-    runId,
-    interrupted: () => signalGuard.signal,
-  });
-  // The archive is done: from here the signal guard has nothing left to protect.
+  // The coordinator owns the archive while it is in flight: a signal arriving
+  // now makes `shutdown` await this promise, which rolls its own files back
+  // before the process exits with the signal's code.
+  const written = await cleanupCoordinator.trackArchive(
+    writeEvidence({
+      document,
+      redactor,
+      output: options.output,
+      repoEvidenceDir: options.repoEvidenceDir,
+      runId,
+      interrupted: () => signalGuard.signal,
+    })
+  );
+  // The archive is settled: from here the signal guard has nothing left to protect.
   signalGuard.detach();
   if (!written.ok) {
     // An interrupted archive is not a failed one: the signal owns the exit code,

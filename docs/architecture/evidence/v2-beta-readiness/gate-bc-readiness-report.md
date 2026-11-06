@@ -24,7 +24,7 @@ already loaded on the Docker host.
 Each evidence document carries `harness.sha256`, the digest of
 `bin/ci/readiness-gate-bc.mjs` read when the document was written, so a reader can
 tell which revision produced it. The archived run below was produced by
-`sha256:130ab04ec94272f88fe340c53565d69c17d874a2e0f4e01768b2553751d16559`.
+`sha256:4aa9fa492c6020d2a1ac37d77fd5273d2c680e6b9e58537c23c210e98634a16d`.
 
 ## Candidate images (inspected, never built)
 
@@ -46,7 +46,7 @@ started), so every document below describes one candidate build.
 | Host OS | macOS `darwin 22.6.0`, x64, 8 logical CPUs, 32 GiB RAM |
 | Docker server | `linux/amd64 27.3.1` (Docker Desktop VM) |
 | Container limits | `--cpus=2 --memory=4g --memory-swap=4g` |
-| Docker VM free space at start | `6,350,807,040` bytes (5.91 GiB); the harness floor is 3 GiB |
+| Docker VM free space at start | `6,350,786,560` bytes (5.91 GiB); the harness floor is 3 GiB |
 | Benchmark storage | Docker volume inside the VM (the fixture is prepared on the host and copied into the volume, so measured I/O runs on the VM filesystem, not the macOS shared-folder layer) |
 
 The benchmark host is **Docker Desktop on macOS x64**, not a dedicated SSD Linux
@@ -100,7 +100,7 @@ and never an operator's local paths or a temp root.
 5. **2 vCPU / 4 GB benchmark** — 100,000 synthetic `usage_events` over 120 days
    (12 models, 3 providers, 100 accounts, 10 API keys, 850-byte synthetic
    `raw_json`, `timestamp_ms == created_at_ms` so the day rollups carry the same
-   spread). One transaction seeds the store (`1,975 ms`, 145,870,848 bytes), then
+   spread). One transaction seeds the store (`2,355 ms`, 145,870,848 bytes), then
    two limited runs are measured: hourly rollup enabled (default) and disabled
    (`USAGE_DASHBOARD_HOURLY_ROLLUP_ENABLED=false`), with `cleanup-derived`
    executed offline between them.
@@ -128,8 +128,8 @@ numbers do not transfer to a production host.
 
 | Scenario | Time to first `/health` response | `/health` | `/.well-known/cpamp-bootstrap` | Business route | Log marker | Offline lock |
 | --- | --- | --- | --- | --- | --- | --- |
-| `unsupported_derived_format` (real `Store.Open` failure) | **32 ms** | `503 {"ok":false}` | `503 status=unavailable` | `404` | `Manager store could not be opened; keeping safe not-ready diagnostics available` | released: `cleanup-derived` exited `0` |
-| `corrupted_database_bytes` | **4 ms** | `503 {"ok":false}` | `503 status=unavailable` | `404` | `keeping read-only discovery available` | released: `cleanup-derived` reached the file (`exit 1`, `file is not a database (26)`) without a lock refusal |
+| `unsupported_derived_format` (real `Store.Open` failure) | **16 ms** | `503 {"ok":false}` | `503 status=unavailable` | `404` | `Manager store could not be opened; keeping safe not-ready diagnostics available` | released: `cleanup-derived` exited `0` |
+| `corrupted_database_bytes` | **12 ms** | `503 {"ok":false}` | `503 status=unavailable` | `404` | `keeping read-only discovery available` | released: `cleanup-derived` reached the file (`exit 1`, `file is not a database (26)`) without a lock refusal |
 
 Both scenarios are far inside the 10,000 ms budget. No registered secret (admin
 key, injected untrusted text, host scratch path, data key) appeared in a response
@@ -150,8 +150,8 @@ the scenario record.
 
 | Variant | Observed | Secret leaks |
 | --- | --- | --- |
-| secret-free store | `/health` **200** after **212 ms** | 0 |
-| encrypted `manager_config_v1` + `setup` | **exit code 1** after **287 ms**, `running=false`; log: `bootstrap manager server: decrypt secret: invalid data key or corrupted ciphertext` | 0 |
+| secret-free store | `/health` **200** after **114 ms** | 0 |
+| encrypted `manager_config_v1` + `setup` | **exit code 1** after **337 ms**, `running=false`; log: `bootstrap manager server: decrypt secret: invalid data key or corrupted ciphertext` | 0 |
 
 Mechanism, as the code actually reads: `RequireDataKeyForInspectedConnection`
 only checks that `data.key` **exists** — it does not compare contents. With a
@@ -165,12 +165,12 @@ the log; it is not a 503 diagnostic.
 
 | Metric | Rollup on (default) | Rollup off |
 | --- | --- | --- |
-| Container start → `/health` 200 | **307 ms** | **220 ms** |
-| Derived rollups finished (pricing/monitoring/Codex, coverage `100000`) | **49,027 ms** | already covered (no rebuild) |
+| Container start → `/health` 200 | **365 ms** | **278 ms** |
+| Derived rollups finished (pricing/monitoring/Codex, coverage `100000`) | **53,566 ms** | already covered (no rebuild) |
 | `databaseMaintenance.required` **at measurement time** | `true` (`deferredIndexes=11`, `performanceDegraded=true`, `command=cleanup-derived`) | `false` (`deferredIndexes=0`, `performanceDegraded=false`) |
-| Offline `cleanup-derived` (Manager stopped) | — | **1,928 ms**, `preparedIndexes=11` |
-| Peak process RSS (`VmHWM`) | **127.79 MiB** | **83.52 MiB** |
-| cgroup `memory.peak` (includes page cache) | 1,481.12 MiB | 70.16 MiB |
+| Offline `cleanup-derived` (Manager stopped) | — | **2,194 ms**, `preparedIndexes=11` |
+| Peak process RSS (`VmHWM`) | **129.77 MiB** | **83.43 MiB** |
+| cgroup `memory.peak` (includes page cache) | 1,365.72 MiB | 70.81 MiB |
 | OOM killed / restarts | `false` / `0` | `false` / `0` |
 
 Both cold starts are inside the 5,000 ms target, and peak RSS is far below the
@@ -181,12 +181,12 @@ Both cold starts are inside the 5,000 ms target, and peak RSS is far below the
 
 | Query | Rollup on P50 / P95 | Rollup off P50 / P95 |
 | --- | --- | --- |
-| Dashboard summary (`/v0/management/dashboard/summary`, today window) | **303.26 / 306.91** | **64.12 / 96.00** |
-| Monitoring header snapshots (`?days=30&limit=100`) | **2.04 / 2.76** | **2.52 / 3.47** |
-| Monitoring events page (50 rows, 30d) | **110.10 / 113.89** | **4.62 / 7.71** |
-| Usage Analytics Overview, 30d / day | **1,014.27 / 1,046.38** | **985.85 / 1,006.84** |
-| Usage Analytics Overview, 90d / day | **1,861.00 / 1,891.45** | **2,530.83 / 2,534.78** |
-| Usage Analytics hourly, 24h | **212.57 / 214.82** | **7.74 / 9.40** |
+| Dashboard summary (`/v0/management/dashboard/summary`, today window) | **475.27 / 522.23** | **13.23 / 27.65** |
+| Monitoring header snapshots (`?days=30&limit=100`) | **2.28 / 2.82** | **2.52 / 3.32** |
+| Monitoring events page (50 rows, 30d) | **111.50 / 115.25** | **8.68 / 18.77** |
+| Usage Analytics Overview, 30d / day | **1,035.78 / 1,116.75** | **1,023.48 / 1,097.61** |
+| Usage Analytics Overview, 90d / day | **2,181.09 / 2,448.53** | **2,619.78 / 2,750.03** |
+| Usage Analytics hourly, 24h | **262.22 / 270.41** | **8.71 / 11.67** |
 
 The fixture is proven to be exercised by the queries themselves, not only by row
 counts, and **every one of the five samples is validated in both runs**: the 30d
@@ -229,7 +229,7 @@ Observed notes, recorded rather than smoothed:
   between the phases, none of these differences can be attributed to the rollup
   flag; they are what an operator sees in those two states, in that order.
 - The Monitoring events page is the one query whose two phases differ by more
-  than an order of magnitude (110.10 ms → 4.62 ms P50). The same caveat applies:
+  than an order of magnitude (111.50 ms → 8.68 ms P50). The same caveat applies:
   the second phase ran after the offline index build.
 
 ## Results — candidate licence inventory
@@ -255,7 +255,7 @@ names would have produced a check that always fails or, worse, a vacuous pass.
 
 | Item | Result | Evidence |
 | --- | --- | --- |
-| `node bin/ci/readiness-gate-bc.mjs` | **PASS**, `verdict: "pass"`, 19/19 checks, exit `0` | `readiness-gate-bc-518ee586.json` |
+| `node bin/ci/readiness-gate-bc.mjs` | **PASS**, `verdict: "pass"`, 19/19 checks, exit `0` | `readiness-gate-bc-b3010e4c.json` |
 | `node bin/ci/fresh-new-installation.mjs` (same three images) | **PASS**, 30 PASS / 0 FAIL / 0 NOT RUN (3 further entries are harness request records, not checks) | `fresh-new-summary.json` |
 | `node bin/ci/fresh-external-management.mjs` (same three images) | **PASS**, 38 PASS / 0 FAIL / 2 NOT RUN (v7 CPA refusal needs `CPAMP_D_CPA_LEGACY`; no real Provider) | `fresh-external-summary.json` |
 | `node bin/ci/fresh-adopt-network.mjs` (same three images) | **PASS**, 22 PASS / 0 FAIL / 1 NOT RUN (the v7 source refusal needs `CPAMP_D_CPA_LEGACY`; no pinned v7 binary was supplied) | `fresh-adopt-summary.json` |
@@ -334,10 +334,10 @@ result rather than a gap this document hides.
 
 - `bin/ci/readiness-gate-bc.mjs` (new; Gate B1/C harness, licence inventory,
   provenance/scenario evidence, self-cleaning workspace)
-- `bin/ci/readiness-gate-bc.test.mjs` (new; 36 offline `node:test` cases)
+- `bin/ci/readiness-gate-bc.test.mjs` (new; 40 offline `node:test` cases)
 - `docs/architecture/evidence/v2-beta-readiness/gate-bc-readiness-report.md`
   (this report)
-- `docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-518ee586.json`
+- `docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-b3010e4c.json`
   (redacted harness evidence)
 - `docs/architecture/evidence/v2-beta-readiness/fresh-new-summary.json`,
   `fresh-external-summary.json`, `fresh-adopt-summary.json`,
@@ -353,7 +353,7 @@ part of PR-3.
 
 ```bash
 node --test bin/ci/readiness-gate-bc.test.mjs
-# 36 tests, 36 pass, 0 fail
+# 40 tests, 40 pass, 0 fail
 
 node bin/ci/readiness-gate-bc.mjs \
   --output $SCRATCH/evidence \
@@ -428,7 +428,7 @@ go test -v ./cmd/cpa-manager-plus -run TestStoreOpenFailureKeepsSafeStartupListe
 
 ## Evidence paths (repo-relative)
 
-- `docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-518ee586.json`
+- `docs/architecture/evidence/v2-beta-readiness/readiness-gate-bc-b3010e4c.json`
 - `docs/architecture/evidence/v2-beta-readiness/fresh-new-summary.json`
 - `docs/architecture/evidence/v2-beta-readiness/fresh-external-summary.json`
 - `docs/architecture/evidence/v2-beta-readiness/fresh-adopt-summary.json`
