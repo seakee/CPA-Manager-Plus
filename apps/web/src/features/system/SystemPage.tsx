@@ -226,6 +226,14 @@ function SystemPageContent({
     } catch (err: unknown) {
       if (requestId !== modelRequestId.current) return;
       const code = getUsageServiceErrorCode(err);
+      if (
+        auth.sessionMode === 'manager_embedded' &&
+        !modelsCache &&
+        (code === 'invalid_admin_key' || code === 'unauthorized')
+      ) {
+        setModelStatus({ type: 'muted', message: t('system_info.models_empty') });
+        return;
+      }
       const detail = isGatewayPendingError(err)
         ? t('system_info.models_gateway_pending')
         : code
@@ -435,7 +443,9 @@ function SystemPageContent({
             {modelStatus && (
               <div className={`status-badge ${modelStatus.type}`}>{modelStatus.message}</div>
             )}
-            {modelsError && <div className="error-box">{modelsError}</div>}
+            {modelsCache && modelsError && modelStatus?.type !== 'error' && (
+              <div className="error-box">{modelsError}</div>
+            )}
             {modelsLoading && !modelsCache ? (
               <div className="hint">{t('common.loading')}</div>
             ) : !modelsCache ? null : models.length === 0 ? (

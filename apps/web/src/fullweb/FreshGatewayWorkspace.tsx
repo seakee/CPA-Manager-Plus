@@ -752,7 +752,10 @@ export function FreshGatewayWorkspace({
                 checked={draft.action === 'set' && draft.value === true}
                 onChange={(event) => setDraft(field.path, { action: 'set', value: event.target.checked })}
               />
-              <span>
+              <span className="track" aria-hidden="true">
+                <span className="thumb" />
+              </span>
+              <span className="label">
                 {draft.action === 'set' && draft.value === true ? c('valueOn') : c('valueOff')}
               </span>
             </label>

@@ -27,12 +27,15 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
   const checkpointError = checkpoint?.error;
   const statusError = !database ? error : '';
   const databaseUnavailable = !loading && !database;
-  const checkpointUnavailable = Boolean(database && !checkpoint);
+  const checkpointModeRaw = checkpoint?.mode?.trim().toLowerCase();
+  const checkpointUnobserved = checkpointModeRaw === 'unobserved';
+  const checkpointUnavailable = Boolean(database && (!checkpoint || !checkpointModeRaw));
   const checkpointBehind =
+    !checkpointUnobserved &&
     Number.isFinite(checkpoint?.logFrames) &&
     Number.isFinite(checkpoint?.checkpointedFrames) &&
     Number(checkpoint?.checkpointedFrames) < Number(checkpoint?.logFrames);
-  const checkpointPending = checkpoint?.mode?.trim().toLowerCase() === 'pending';
+  const checkpointPending = checkpointModeRaw === 'pending';
   const walOverLimit =
     Number.isFinite(database?.walBytes) &&
     Number.isFinite(database?.journalSizeLimitBytes) &&
@@ -42,7 +45,7 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
     databaseUnavailable ||
     checkpointUnavailable ||
     checkpointError ||
-    Number(checkpoint?.busy) > 0 ||
+    (!checkpointUnobserved && Number(checkpoint?.busy) > 0) ||
     checkpointBehind ||
     checkpointPending ||
     walOverLimit
@@ -62,13 +65,17 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
   });
 
   const checkpointMode = (() => {
-    switch (checkpoint?.mode?.trim().toLowerCase()) {
+    switch (checkpointModeRaw) {
       case 'passive':
         return t('system_info.database_checkpoint_passive');
       case 'truncate':
         return t('system_info.database_checkpoint_truncate');
       case 'pending':
         return t('system_info.database_checkpoint_pending');
+      case 'unobserved':
+        return t('system_info.database_checkpoint_unobserved', {
+          defaultValue: t('system_info.database_checkpoint_unavailable'),
+        });
       case undefined:
       case '':
         return t('system_info.database_checkpoint_unavailable');
@@ -78,7 +85,9 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
   })();
 
   const checkpointProgress =
-    Number.isFinite(checkpoint?.logFrames) && Number.isFinite(checkpoint?.checkpointedFrames)
+    !checkpointUnobserved &&
+    Number.isFinite(checkpoint?.logFrames) &&
+    Number.isFinite(checkpoint?.checkpointedFrames)
       ? t('system_info.database_checkpoint_frames', {
           checkpointed: formatCount(checkpoint?.checkpointedFrames, i18n.language),
           log: formatCount(checkpoint?.logFrames, i18n.language),
@@ -87,12 +96,14 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
 
   const checkpointTime = !checkpoint
     ? t('system_info.database_checkpoint_unavailable')
-    : checkpoint.executedAtMs && Number.isFinite(checkpoint.executedAtMs)
-      ? t('system_info.database_checkpoint_time', {
-          time: new Date(checkpoint.executedAtMs).toLocaleString(i18n.language),
-          duration: formatCount(checkpoint.durationMs, i18n.language),
-        })
-      : t('system_info.database_checkpoint_pending');
+    : checkpointUnobserved
+      ? '-'
+      : checkpoint.executedAtMs && Number.isFinite(checkpoint.executedAtMs)
+        ? t('system_info.database_checkpoint_time', {
+            time: new Date(checkpoint.executedAtMs).toLocaleString(i18n.language),
+            duration: formatCount(checkpoint.durationMs, i18n.language),
+          })
+        : t('system_info.database_checkpoint_pending');
 
   const summaryItems = [
     {
@@ -118,7 +129,7 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
     { label: t('system_info.database_checkpoint_progress'), value: checkpointProgress },
     {
       label: t('system_info.database_checkpoint_busy'),
-      value: formatCount(checkpoint?.busy, i18n.language),
+      value: checkpointUnobserved ? '-' : formatCount(checkpoint?.busy, i18n.language),
     },
     { label: t('system_info.database_checkpoint_last_run'), value: checkpointTime },
   ];
@@ -127,8 +138,9 @@ export function DatabaseStatusCard({ status, loading, error }: DatabaseStatusCar
     ? styles.statusPending
     : checkpointWarning
       ? styles.statusWarn
-      : styles.statusOk;
-
+      : checkpointUnobserved
+        ? styles.statusPending
+        : styles.statusOk;
   return (
     <Card
       title={t('system_info.database_status_title')}

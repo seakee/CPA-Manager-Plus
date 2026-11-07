@@ -122,10 +122,11 @@ func (s *Service) mutate(ctx context.Context, phase MutationPhase, request Mutat
 	}
 	result := newMutationResult(phase, request)
 
-	if !s.mode.IsValid() {
+	mode := s.currentMode()
+	if !mode.IsValid() {
 		return MutationResult{}, newMutationError(MutationErrorUnavailable, "runtime_mode_invalid")
 	}
-	if s.mode != model.RuntimeModeEmbedded {
+	if mode != model.RuntimeModeEmbedded {
 		return MutationResult{}, newMutationError(MutationErrorConflict, "managed_externally")
 	}
 	state, now, err := s.discoverySnapshot(ctx)

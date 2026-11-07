@@ -1016,7 +1016,7 @@ func (r *repository) ApplyPassiveSnapshot(ctx context.Context, params ports.Reco
 			continue
 		}
 		if _, present := uniqueAPIKeys[hash]; !present {
-			if existing.entity.Lifecycle == identity.LifecycleActive {
+			if existing.entity.Lifecycle == identity.LifecycleActive && existing.binding.ObservedRuntimeGeneration != 0 {
 				if existing.entity.Revision >= math.MaxInt64 {
 					return ports.ReconcileSnapshotResult{}, ports.ErrRevisionOverflow
 				}

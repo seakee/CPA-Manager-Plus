@@ -9,6 +9,7 @@ import (
 
 	identityrepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/adapters/sqlite/identitystore"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
+	ports "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/ports/identitystore"
 	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
@@ -191,5 +192,80 @@ func TestMatchStagedSecretDoesNotGrantRuntimeAuthorization(t *testing.T) {
 	}
 	if ok, err := svc.MatchStagedSecret(ctx, first.CreatedSecret); err == nil || ok {
 		t.Fatal("tampered hash was not fail-closed")
+	}
+}
+
+func TestPreboundAndObservedKeyPassiveSnapshotLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fresh-keys-missing.sqlite")
+	db, err := sqlite.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	p, err := security.NewProtector([]byte("fresh-private-key-proof"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := New(repo.New(db), p, WithSourceRuntime(func(context.Context) (string, error) {
+		return "runtime-managed-1", nil
+	}))
+	created, _, err := service.Create(ctx, strings.Repeat("d", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyHash := digest(created.CreatedSecret)
+	otherHash := digest("other-installed-runtime-secret")
+	identities := identityrepo.New(db)
+
+	// 1. Prebound unobserved key stays active when absent from snapshot.
+	if _, err := identities.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           "runtime-managed-1",
+		ObservedRuntimeGeneration: 1,
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: otherHash}},
+		NowMS:                     created.Key.CreatedAtMS + 100,
+	}); err != nil {
+		t.Fatalf("ApplyPassiveSnapshot(prebound absent): %v", err)
+	}
+	detail, err := service.Detail(ctx, string(created.Key.ID))
+	if err != nil || detail.Lifecycle != identity.LifecycleActive {
+		t.Fatalf("Detail(prebound absent) = %+v, %v; want active", detail, err)
+	}
+	var gotSecret string
+	if err := service.WithStagedSecret(ctx, string(created.Key.ID), func(secret string) error {
+		gotSecret = secret
+		return nil
+	}); err != nil || gotSecret != created.CreatedSecret {
+		t.Fatalf("WithStagedSecret(prebound absent) err = %v", err)
+	}
+
+	// 2. Once observed on the runtime and subsequently absent, the key transitions to missing,
+	// List/Detail preserve LifecycleMissing, and WithStagedSecret refuses it.
+	if _, err := identities.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           "runtime-managed-1",
+		ObservedRuntimeGeneration: 2,
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: keyHash}},
+		NowMS:                     created.Key.CreatedAtMS + 200,
+	}); err != nil {
+		t.Fatalf("ApplyPassiveSnapshot(present): %v", err)
+	}
+	if _, err := identities.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           "runtime-managed-1",
+		ObservedRuntimeGeneration: 3,
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: otherHash}},
+		NowMS:                     created.Key.CreatedAtMS + 300,
+	}); err != nil {
+		t.Fatalf("ApplyPassiveSnapshot(absent after observed): %v", err)
+	}
+	keys, err := service.List(ctx)
+	if err != nil || len(keys) != 1 || keys[0].Lifecycle != identity.LifecycleMissing {
+		t.Fatalf("List(after observed absent) = %+v, %v; want missing", keys, err)
+	}
+	detail, err = service.Detail(ctx, string(created.Key.ID))
+	if err != nil || detail.Lifecycle != identity.LifecycleMissing {
+		t.Fatalf("Detail(after observed absent) = %+v, %v; want missing", detail, err)
+	}
+	if err := service.WithStagedSecret(ctx, string(created.Key.ID), func(string) error { return nil }); err == nil {
+		t.Fatal("WithStagedSecret(missing) succeeded; want error")
 	}
 }

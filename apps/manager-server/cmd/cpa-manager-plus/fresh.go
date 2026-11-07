@@ -29,6 +29,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	collectorservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/collector"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
+	cpaupdateservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpaupdate"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
@@ -198,6 +199,9 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	legacyCollectorService := collectorservice.New(legacyCollector)
 	legacyContext := app.FromExistingWithModelsDev(cfg, legacyStore, legacyCollector, time.Now().UnixMilli(), nil, nil, nil, nil, "cpa-manager-plus")
 	a.legacyCollector = legacyCollectorService
+	if dbPath := strings.TrimSpace(opened.Record.Operation.Identity.DatabasePath); dbPath != "" {
+		legacyContext.DatabaseMaintenance = freshDatabaseStatusProvider{dbPath: dbPath}
+	}
 	a.collectorWorker = worker.NewCollectorWorker(cfg, legacyStore, legacyCollectorService)
 	// A CPA that refuses the management credential this Collector runs with is
 	// terminal, not a retry: the Collector stops itself and reports, and this
@@ -246,6 +250,16 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		// lifecycle/strategy Runtime of this application. The Runtime status page
 		// observes it through runtimeStatusClient and offers no lifecycle actions.
 	}
+	runtimeMode := model.RuntimeModeExternal
+	if cfg.EmbeddedRuntimeConfigured() {
+		runtimeMode = model.RuntimeModeEmbedded
+	}
+	legacyContext.CPAUpdateService = cpaupdateservice.New(legacyStore, freshRuntimeClientAdapter{app: a}, runtimeMode).WithModeResolver(func() model.RuntimeMode {
+		if a.runtime != nil {
+			return model.RuntimeModeEmbedded
+		}
+		return model.RuntimeModeExternal
+	})
 	// Attach the same durable mutation services as the normal Embedded app
 	// before publishing its routes. An incomplete graph must never fall back to
 	// unjournaled API-key rotation or credential deletion.

@@ -34,6 +34,20 @@ type managementStatusError struct {
 
 func (e *managementStatusError) Error() string { return e.what + ": " + e.status }
 
+func (e *managementStatusError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	switch e.code {
+	case http.StatusUnauthorized:
+		return ErrManagementRejected
+	case http.StatusForbidden:
+		return ErrManagementClientForbidden
+	default:
+		return nil
+	}
+}
+
 func ValidateManagementAPI(ctx context.Context, baseURL string, key string) error {
 	_, err := ObserveManagementAPI(ctx, baseURL, key)
 	return err
