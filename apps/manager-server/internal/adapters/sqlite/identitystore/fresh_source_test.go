@@ -188,3 +188,41 @@ func TestApplyPassiveSnapshotBindsMissingStagedKey(t *testing.T) {
 		t.Fatalf("identities = %d, want exactly the staged one", identities)
 	}
 }
+
+// A staged workspace key pre-bound at creation time (observed_runtime_generation
+// IS NULL) has not been applied to CPA yet; passive snapshots must not flip its
+// identity lifecycle to missing before it is first observed on the runtime.
+func TestApplyPassiveSnapshotKeepsPreboundUnobservedStagedKeyActive(t *testing.T) {
+	ctx := t.Context()
+	db, repo := setupTestDB(t)
+	stagedID := "e1b2c3d4e5f60718293a4b5c6d7e8f94"
+	stagedHash := sha256Hex("prebound-unapplied-workspace-secret")
+	liveHash := sha256Hex("currently-installed-secret")
+	seedStagedFreshKey(t, db, stagedID, stagedHash, "active")
+	if _, err := db.Exec(`insert into gateway_api_key_source_bindings
+		(api_key_id, runtime_identity, api_key_hash, observed_runtime_generation,
+		 first_seen_at_ms, last_seen_at_ms, retired_at_ms)
+		values (?, 'runtime-managed-1', ?, null, 100, 100, null)`, stagedID, stagedHash); err != nil {
+		t.Fatalf("seed prebound source binding: %v", err)
+	}
+
+	result, err := repo.ApplyPassiveSnapshot(ctx, ports.ReconcileSnapshotParams{
+		RuntimeIdentity:           "runtime-managed-1",
+		ObservedRuntimeGeneration: 3,
+		APIKeys:                   []ports.APIKeySnapshotItem{{APIKeyHash: liveHash}},
+		NowMS:                     5000,
+	})
+	if err != nil {
+		t.Fatalf("apply snapshot: %v", err)
+	}
+	if result.APIKeysMissing != 0 {
+		t.Fatalf("APIKeysMissing = %d, want 0 for prebound unobserved staged key", result.APIKeysMissing)
+	}
+	entity, err := repo.LoadAPIKeyByID(ctx, identity.APIKeyID(stagedID))
+	if err != nil {
+		t.Fatalf("LoadAPIKeyByID: %v", err)
+	}
+	if entity.Lifecycle != identity.LifecycleActive {
+		t.Fatalf("staged key lifecycle = %q, want %q", entity.Lifecycle, identity.LifecycleActive)
+	}
+}

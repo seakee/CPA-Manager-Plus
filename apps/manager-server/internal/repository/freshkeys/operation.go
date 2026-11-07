@@ -206,7 +206,7 @@ func (r *Repository) SaveOperation(ctx context.Context, o Operation) error {
 		return ErrConflict
 	}
 	if o.Outcome == "committed" {
-		result, err = tx.ExecContext(ctx, "update gateway_api_key_identities set lifecycle='superseded',revision=revision+1,updated_at_ms=? where id=? and lifecycle='active'", o.CompletedAtMS, o.TargetID)
+		result, err = tx.ExecContext(ctx, "update gateway_api_key_identities set lifecycle='superseded',revision=revision+1,updated_at_ms=? where id=? and lifecycle in ('active','missing')", o.CompletedAtMS, o.TargetID)
 		if err != nil {
 			return err
 		}

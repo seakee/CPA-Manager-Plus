@@ -193,3 +193,39 @@ func TestMatchStagedSecretDoesNotGrantRuntimeAuthorization(t *testing.T) {
 		t.Fatal("tampered hash was not fail-closed")
 	}
 }
+
+func TestListAndStagedSecretNormalizeMissingIdentityToActiveWorkspaceLifecycle(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fresh-keys-missing.sqlite")
+	db, err := sqlite.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	p, err := security.NewProtector([]byte("fresh-private-key-proof"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := New(repo.New(db), p)
+	created, _, err := service.Create(ctx, strings.Repeat("d", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`update gateway_api_key_identities set lifecycle = ? where id = ?`, identity.LifecycleMissing, created.Key.ID); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := service.List(ctx)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("List() = %+v, %v", keys, err)
+	}
+	if keys[0].Lifecycle != identity.LifecycleActive {
+		t.Fatalf("List()[0].Lifecycle = %q, want %q", keys[0].Lifecycle, identity.LifecycleActive)
+	}
+	var gotSecret string
+	if err := service.WithStagedSecret(ctx, string(created.Key.ID), func(secret string) error {
+		gotSecret = secret
+		return nil
+	}); err != nil || gotSecret != created.CreatedSecret {
+		t.Fatalf("WithStagedSecret() err = %v, secret match = %v", err, gotSecret == created.CreatedSecret)
+	}
+}
