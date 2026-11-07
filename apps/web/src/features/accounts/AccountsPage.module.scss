@@ -261,12 +261,12 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 9px 12px;
   border: 1px dashed var(--border-color);
   border-radius: $radius-md;
-  color: var(--color-text-tertiary, var(--gray-500));
-  font-size: 12px;
-  line-height: 18px;
+  color: var(--color-text-secondary, var(--gray-600));
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .loadingPanel,

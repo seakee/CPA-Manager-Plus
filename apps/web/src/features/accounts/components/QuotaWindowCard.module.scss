@@ -215,9 +215,9 @@
   gap: 5px;
   min-width: 0;
   color: var(--color-text, var(--gray-900));
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 750;
-  line-height: 18px;
+  line-height: 19px;
 
   svg {
     flex: 0 0 auto;
@@ -226,12 +226,12 @@
 }
 
 .compareColumnSubtitle {
-  min-height: 17px;
+  min-height: 18px;
   margin-top: 2px;
   overflow: hidden;
-  color: var(--color-text-tertiary, var(--gray-500));
-  font-size: 9px;
-  line-height: 14px;
+  color: var(--color-text-secondary, var(--gray-600));
+  font-size: 11px;
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -244,20 +244,20 @@
 
 .compareItem {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) auto;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: center;
-  column-gap: 6px;
+  column-gap: 7px;
   min-width: 0;
-  min-height: 32px;
-  font-size: 11px;
+  min-height: 34px;
+  font-size: 13px;
 }
 
 .rowIcon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border: 1px solid transparent;
   border-radius: 50%;
 }
@@ -311,9 +311,9 @@
   flex: 1 1 auto;
   min-width: 0;
   padding: 10px 2px;
-  color: var(--color-text-tertiary, var(--gray-500));
-  font-size: 10px;
-  line-height: 1.45;
+  color: var(--color-text-secondary, var(--gray-600));
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .forecastNotice {
@@ -322,18 +322,18 @@
   padding-top: $spacing-sm;
   border-top: 1px dashed
     color-mix(in srgb, var(--color-primary) 24%, var(--color-border, var(--gray-200)));
-  color: var(--color-text-tertiary, var(--gray-500));
-  font-size: 10px;
-  line-height: 15px;
+  color: var(--color-text-secondary, var(--gray-600));
+  font-size: 12px;
+  line-height: 18px;
   text-align: center;
 }
 
 .modelEmptyUsage {
   margin-top: $spacing-xs;
   padding: 7px 2px;
-  color: var(--color-text-tertiary, var(--gray-500));
-  font-size: 10px;
-  line-height: 15px;
+  color: var(--color-text-secondary, var(--gray-600));
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .modelWarning {
@@ -375,15 +375,16 @@
 
 .paceNotice {
   display: flex;
-  align-items: center;
-  gap: $spacing-xs;
+  align-items: flex-start;
+  gap: $spacing-sm;
   margin-top: $spacing-sm;
-  padding: 6px $spacing-sm;
-  border-radius: $radius-sm;
+  padding: 8px 10px;
+  border-radius: $radius-md;
   background: var(--color-surface-muted);
-  color: var(--color-text-tertiary, var(--gray-500));
-  font-size: 10px;
-  line-height: 15px;
+  color: var(--color-text-secondary, var(--gray-600));
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -391,10 +392,16 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 16px;
-  width: 16px;
-  height: 16px;
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
   color: currentColor;
+
+  svg {
+    width: 15px;
+    height: 15px;
+  }
 }
 
 .paceNoticeWarning {
@@ -531,26 +538,26 @@
   }
 
   .compareColumnTitle {
-    font-size: 12px;
-    line-height: 18px;
+    font-size: 13px;
+    line-height: 19px;
   }
 
   .compareColumnSubtitle {
     min-height: 28px;
     overflow: visible;
-    font-size: 10px;
-    line-height: 14px;
+    font-size: 11px;
+    line-height: 16px;
     text-overflow: clip;
     white-space: normal;
   }
 
   .compareItem {
-    font-size: 11px;
+    font-size: 13px;
   }
 
   .rowIcon {
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
   }
 
   .sourceMetaMain {
