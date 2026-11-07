@@ -15,6 +15,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/fresh"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 )
@@ -233,5 +234,18 @@ func TestFreshConfiguredButUnverifiableHostAuthorityCannotOpenClaim(t *testing.T
 				t.Fatal("unverifiable host authority created DB")
 			}
 		})
+	}
+}
+
+func TestFreshNewInstallationPreparesEmptyTableDerivedIndexesBeforeInitialKeyBinding(t *testing.T) {
+	harness := newFreshUsageHarness(t)
+	defer harness.cleanup()
+
+	status, err := sqliterepo.ReadDerivedMaintenanceStatus(t.Context(), harness.db)
+	if err != nil {
+		t.Fatalf("read derived maintenance status: %v", err)
+	}
+	if status.Required || status.DeferredIndexes != 0 {
+		t.Fatalf("fresh installation reported pending database maintenance after initial key binding: %+v", status)
 	}
 }

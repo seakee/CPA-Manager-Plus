@@ -1187,6 +1187,30 @@ describe('page refresh interactions', () => {
     expect(text(renderer.root)).not.toContain('models offline');
   });
 
+  it('degrades available models card to dash without rendering a duplicate alert when initial model discovery has no cache', async () => {
+    const retainedModels = mocks.models.models;
+    const retainedCache = mocks.models.cache;
+    mocks.models.models = [];
+    mocks.models.cache = null as unknown as typeof retainedCache;
+    mocks.models.error = 'Request failed with status code 401';
+    try {
+      await mount(<DashboardPage />);
+      const modelCard = renderer.root
+        .findAllByType('a')
+        .find((n) => text(n).includes('dashboard.available_models'))!;
+      expect(text(modelCard)).toContain('-');
+      expect(
+        renderer.root
+          .findAllByProps({ role: 'alert' })
+          .some((n) => text(n).includes('Request failed with status code 401'))
+      ).toBe(false);
+    } finally {
+      mocks.models.models = retainedModels;
+      mocks.models.cache = retainedCache;
+      mocks.models.error = null;
+    }
+  });
+
   it('keeps store results on failure and only accepts the latest overlapping refresh', async () => {
     const { PluginStorePage } = await vi.importActual<typeof import('./plugins/PluginStorePage')>('./plugins/PluginStorePage');
     const data = { plugins: [], sources: [], sourceErrors: [], pluginsEnabled: true, pluginsDir: 'plugins' };

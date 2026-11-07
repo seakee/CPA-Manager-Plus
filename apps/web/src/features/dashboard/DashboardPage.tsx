@@ -674,7 +674,7 @@ function DashboardPageContent({ useApiBaseAsCpaBase }: { useApiBaseAsCpaBase: bo
 
       {/* 6. Quick Stats + Config Summary */}
       {statsError ? <div role="alert">{statsError}</div> : null}
-      {modelsError ? <div role="alert">{modelsError}</div> : null}
+      {modelsCache && modelsError ? <div role="alert">{modelsError}</div> : null}
       <section className={styles.bottomSummaryRow}>
         <div className={styles.quickStatsPanel}>
           <div className={styles.bentoGrid}>

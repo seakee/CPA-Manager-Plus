@@ -191,6 +191,9 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	// ProductComplete, when the committed install-derived CPA authority exists;
 	// pending installs cannot start collection through an old host route.
 	legacyStore := store.New(opened.DB, opened.Protector)
+	if err := legacyStore.RunDerivedStartupMaintenance(context.Background()); err != nil {
+		log.Printf("[startup] fresh post-open index preparation failed; continuing without blocking background workers: %v", err)
+	}
 	legacyCollector := collector.NewManager(cfg, legacyStore)
 	legacyCollectorService := collectorservice.New(legacyCollector)
 	legacyContext := app.FromExistingWithModelsDev(cfg, legacyStore, legacyCollector, time.Now().UnixMilli(), nil, nil, nil, nil, "cpa-manager-plus")
