@@ -138,6 +138,22 @@ export const buildExpectedReleaseAssets = (assetsDir, tag, options = {}) => {
   return assets;
 };
 
+export const verifyLocalReleaseAssets = ({ tag, assetsDir, dryRun = false, allowV2Beta = false }) => {
+  const assets = buildExpectedReleaseAssets(assetsDir, tag, { dryRun, allowV2Beta });
+  const checksums = assets.find((asset) => asset.name === 'checksums.txt');
+  const expected = new Map(assets.filter((asset) => asset !== checksums).map((asset) => [asset.name, asset]));
+  const seen = new Set();
+  for (const line of readFileSync(checksums.filePath, 'utf8').trimEnd().split(/\r?\n/)) {
+    const match = /^([0-9a-f]{64}) [ *]((?:native\/)?([^/\\]+))$/.exec(line);
+    const asset = match && expected.get(match[3]);
+    if (!asset || seen.has(asset.name) || asset.digest !== `sha256:${match[1]}`)
+      fail('Release checksums must list every other asset exactly once with its actual SHA-256');
+    seen.add(asset.name);
+  }
+  if (seen.size !== expected.size) fail('Release checksums are missing expected assets');
+  return { tag, mode: 'assets', complete: true, expectedAssets: assets.length, assets };
+};
+
 const verifyReleaseIdentity = ({ release, tag, prerelease, body, draft, allowV2Beta = false }) => {
   parseReleaseTag(tag);
   const version = assertSupportedVersion(tag, { allowV2Beta });
@@ -337,13 +353,19 @@ export const verifyPublishedReleaseMetadata = ({
 
 const parseArguments = (argumentsList) => {
   const options = {};
-  for (let index = 0; index < argumentsList.length; index += 2) {
+  for (let index = 0; index < argumentsList.length; index += 1) {
     const name = argumentsList[index];
-    const value = argumentsList[index + 1];
-    if (!name?.startsWith('--') || value === undefined) fail('Expected --name value arguments');
+    if (!name?.startsWith('--')) fail('Expected --name value arguments');
     const key = name.slice(2);
     if (options[key] !== undefined) fail(`Duplicate argument: ${name}`);
-    options[key] = value;
+    const next = argumentsList[index + 1];
+    if (['dry-run', 'allow-v2-beta'].includes(key) && (next === undefined || next.startsWith('--')))
+      options[key] = 'true';
+    else {
+      if (next === undefined || next.startsWith('--')) fail(`Missing value for ${name}`);
+      options[key] = next;
+      index += 1;
+    }
   }
   return options;
 };
@@ -388,12 +410,20 @@ const runCli = () => {
     fail(
       'v2 release verification is fail-closed (Gate M3); DRY_RUN and --allow-v2-beta are both required'
     );
+  if (options.mode === 'assets') {
+    const result = verifyLocalReleaseAssets({
+      tag, assetsDir: requiredOption(options, 'assets-dir'), dryRun, allowV2Beta,
+    });
+    if (options['result-path']) writeFileSync(options['result-path'], `${JSON.stringify(result, null, 2)}\n`);
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
   const bodyPath = requiredOption(options, 'body-path');
   const releaseJsonPath = requiredOption(options, 'release-json');
   const prerelease = booleanOption(options, 'prerelease');
   const mode = options.mode || 'artifact';
   if (mode !== 'artifact' && mode !== 'draft' && mode !== 'metadata') {
-    fail('--mode must be artifact, draft, or metadata');
+    fail('--mode must be assets, artifact, draft, or metadata');
   }
 
   const release = JSON.parse(readFileSync(releaseJsonPath, 'utf8'));

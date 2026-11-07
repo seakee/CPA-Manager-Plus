@@ -19,6 +19,7 @@ function scenario({
   wrongRevision = false,
   registryMismatch = false,
   latestMismatch = false,
+  existingBeta,
 } = {}) {
   const sha = 'a'.repeat(40),
     calls = [];
@@ -67,6 +68,7 @@ function scenario({
       withdrawn
     ),
   };
+  if (existingBeta) oldIndex.channels.beta = existingBeta;
   const files = {
     'update-index.json': oldIndex,
     'release-catalog.json': Object.fromEntries(
@@ -156,6 +158,17 @@ function scenario({
 }
 
 describe('update index publication', () => {
+  it.each([
+    { version: 'v2.0.0-beta.1', schema_version: 2 },
+    { version: 'v1.14.7', schema_version: 2 },
+    { version: 'v2.0.0-beta.1' },
+  ])('preserves an existing v2 beta target during plain 1.x maintenance: %j', async (existingBeta) => {
+    const s = scenario({ existing: true, existingBeta });
+    await expect(s.run()).rejects.toThrow('refusing a 1.x overwrite');
+    expect(s.calls.every((call) => call.method === 'GET')).toBe(true);
+    expect(s.calls.some((call) => call.docker)).toBe(false);
+  });
+
   it('rejects a v2 Manager-only schema1 record before release candidate construction', () => {
     // The shared validator now rejects in generateReleaseInfo, before
     // the channel producer can make any Docker or GitHub write.

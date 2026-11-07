@@ -38,8 +38,16 @@ const contentFor = (tag, metadata) => ({
   ),
 });
 
-const buildV2ReleaseInfo = (tag, sha, metadata, pairingInput) => {
-  const pairing = validateV2Pairing(pairingInput, { tag, sourceCommit: sha });
+const validateV2NotesMetadata = (metadata) => {
+  for (const language of ['zh', 'en']) {
+    const summary = metadata.summary?.[language];
+    if (typeof summary !== 'string' || !summary.trim() || Buffer.byteLength(summary, 'utf8') > 4096)
+      throw new Error('Invalid v2 release content');
+  }
+  const guide = new URL(metadata.update?.upgrade_guide_url);
+  if (guide.origin !== 'https://github.com' || guide.username || guide.password ||
+      !guide.pathname.startsWith('/seakee/CPA-Manager-Plus/'))
+    throw new Error('Invalid v2 upgrade guide');
   if (typeof metadata.update?.breaking !== 'boolean')
     throw new Error('Explicit update flags required');
   if (metadata.update.migration_required !== true)
@@ -52,6 +60,20 @@ const buildV2ReleaseInfo = (tag, sha, metadata, pairingInput) => {
     throw new Error(
       `v2 beta release notes must declare minimum_cpa_version ${v2MinimumCPAVersion}`
     );
+};
+
+// Validate reviewed note metadata before OCI evidence/pairing exists. This is
+// deliberately a notes check, not a generated release-info or publication.
+export function validateReleaseMetadata(tag, chineseNotes, options = {}) {
+  assertV2Rehearsal(tag, options);
+  const version = assertSupportedVersion(tag, options);
+  const metadata = parseUpdateMetadata(chineseNotes);
+  if (version.core[0] === '2') validateV2NotesMetadata(metadata);
+  return metadata;
+}
+
+const buildV2ReleaseInfo = (tag, sha, metadata, pairingInput) => {
+  const pairing = validateV2Pairing(pairingInput, { tag, sourceCommit: sha });
   const images = v2ImageRegistries.flatMap((registry) =>
     Object.entries(v2ImageRepositories).map(([role, repositoryName]) => ({
       role,
@@ -98,7 +120,7 @@ export function generateReleaseInfo(tag, sha, chineseNotes, options = {}) {
   // real dry-run and an explicit beta opt-in, before notes are even parsed.
   assertV2Rehearsal(tag, options);
   const v = assertSupportedVersion(tag, options);
-  const metadata = parseUpdateMetadata(chineseNotes);
+  const metadata = validateReleaseMetadata(tag, chineseNotes, options);
   if (v.core[0] === '2') return buildV2ReleaseInfo(tag, sha, metadata, options.pairing);
   return validateInfo(
     {

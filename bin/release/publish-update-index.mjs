@@ -275,6 +275,12 @@ export async function publishUpdateIndex({
       old.revision >= Number.MAX_SAFE_INTEGER)
   )
     throw new Error('Invalid existing update index');
+  if (
+    !v2BetaOptIn &&
+    (old?.channels?.beta?.schema_version === 2 ||
+      /^v2\./.test(old?.channels?.beta?.version || ''))
+  )
+    throw new Error('Existing v2 beta channel requires the v2 beta DRY_RUN opt-in; refusing a 1.x overwrite');
   const catalog = await read('release-catalog.json', {});
   const withdrawn = await read('withdrawn.json', []);
   const previousCatalog = JSON.parse(JSON.stringify(catalog));

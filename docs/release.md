@@ -270,11 +270,82 @@ locally with:
 npm run release:validate -- --tag v1.2.3 --content-only
 ```
 
-For a complete topology check, provide the candidate SHA and fetched protected
-refs. The workflow's `workflow_dispatch` path performs this same validation in
-dry-run mode and may only be dispatched from `main`; it builds the HTML,
-native packages, and Docker image with publishing disabled, while skipping
-GitHub Release and Telegram delivery.
+For a complete 1.x topology check, provide the candidate SHA and fetched protected
+refs. The workflow's `workflow_dispatch` path defaults `dry_run` to `true` and
+retains the same 1.x validation and six-platform packaging on `main`. Real
+releases remain main-only. The sole branch exception is a v2 Beta dry-run on
+`main` or `v2`, described below; GitHub Release and Telegram delivery are skipped
+for every dry-run.
+
+### v2 Beta rehearsal (Gate M3 remains closed)
+
+Dispatch `release.yml` with `version: v2.0.0-beta.1` and `dry_run: true` from
+`main` or `v2`. `refs/heads/v2` is accepted only for major 2 Beta rehearsal;
+v2 stable/RC and all major-2 non-dry runs stop before building with
+`v2 real release publishing requires explicit maintainer gate unlock` for the
+non-dry case. No tag, protected-branch promotion, Registry push, GitHub Release
+mutation, remote index write or Telegram notification is authorized by rehearsal.
+
+The content-only command is explicitly gated:
+
+```bash
+node bin/release/validate-release.mjs --tag v2.0.0-beta.1 --mode notes --dry-run --allow-v2-beta
+```
+
+`--mode full` additionally requires the candidate SHA to equal `--v2-ref` (or
+`--main-ref` if no v2 ref is supplied) and requires all three versioned content
+files in that commit. It does not require a dev/main promotion merge, an existing
+tag, origin/main ancestry, or a package.json version bump: the rehearsal version
+is the explicit Beta tag. The 1.x topology and metadata rules are unchanged.
+The Telegram source remains `<tag>-telegram.html`, using the existing validated
+HTML subset, not a separate Markdown post. The read-only Release Content PR gate
+also supplies both rehearsal flags; those flags do not authorize publication.
+
+The acyclic job flow is `preflight -> build_release_assets ->
+inspect_github_release -> build_and_push_docker -> package_release_assets`.
+The existing 1.x producer stays in place. The v2-only packaging job consumes
+the separately uploaded Native/Lite files and verified three-image OCI evidence.
+`PACKAGE_MODE=v2` produces only linux/amd64. Candidate builds remain stamped
+`2.0.0-r1candidate`; rendering with `--version v2.0.0-beta.1` rehearses the
+eventual immutable references without claiming those tags exist or that the
+candidate has production release identity. The Python verifier still certifies
+the actual candidate binary/module and provenance evidence.
+
+The final exact six-file bundle contains:
+
+- `cpa-manager-plus-native-v2_v2.0.0-beta.1_linux_amd64.tar.gz`;
+- `management.html`;
+- `docker-compose.v2-embedded.yml`;
+- `embedded-release-pairing.json`;
+- schema-version-2 `release-info.json`;
+- `checksums.txt` (the other five assets, no self-checksum).
+
+Native intermediate `.sha256` files, `stable-version.txt` and the five other
+1.x platform packages do not enter this bundle. `verify-published-release.mjs
+--mode assets --dry-run --allow-v2-beta` checks local assets and checksums without
+a remote Release object. The workflow then runs:
+
+```bash
+node bin/release/publish-update-index.mjs --dry-run --allow-v2-beta-dry-run \
+  --candidate dist/release/release-info.json --candidate-assets-dir dist/release
+```
+
+This rehearses against the existing verified 1.x index using read-only GitHub
+requests and existing 1.x registry inspections; it never publishes aliases.
+Only `channels.beta` may change, with `schema_version: 2`; stable and rc must
+remain byte-equivalent. The top-level index stays schema-version 1.
+The actual remote contract is branch `update-channel`, file `update-index.json`;
+`versions.json` is the uploaded rehearsal result, not a new remote contract.
+A plain 1.x index run refuses an existing schema-2 or `v2.*` beta target before
+any remote mutation, rather than replacing it with a 1.x recommendation.
+
+Actions artifacts retain the OCI evidence, six-file bundle, asset verification
+report and generated `versions.json` for review. Candidate outputs are rehearsal
+evidence only, not a production receipt. `releases/latest` and the default
+`install-cpamp.sh` remain on 1.x, including latest/download/management.html.
+The standalone `update-index-publish.yml` manual dispatch also defaults
+`dry_run: true`; its reusable `workflow_call` keeps the existing real 1.x
+publication default, used only behind the non-dry main release gate.
 
 Release jobs share a non-canceling `release-publish` concurrency group, so two
 tags cannot publish concurrently. Assets are uploaded as an Actions artifact

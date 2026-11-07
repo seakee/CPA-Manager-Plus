@@ -1,7 +1,17 @@
 name: Publish verified update channels
 on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Validate channels without remote writes'
+        type: boolean
+        default: true
+        required: true
   workflow_call:
     inputs:
+      dry_run:
+        type: boolean
+        default: false
       withdraw_release:
         type: string
         default: ''
@@ -21,17 +31,24 @@ jobs:
           node-version: '24.22.1'
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        if: inputs.dry_run != true
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        if: inputs.dry_run != true
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Reconcile aliases and publish index last
-        run: node bin/release/publish-update-index.mjs
+        run: |
+          set -euo pipefail
+          args=()
+          if [ "${DRY_RUN}" = "true" ]; then args+=(--dry-run); fi
+          node bin/release/publish-update-index.mjs "${args[@]}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
           WITHDRAW_RELEASE: ${{ inputs.withdraw_release }}
           RESTORE_RELEASE: ${{ inputs.restore_release }}
