@@ -27,6 +27,7 @@ Keep `auth_index` stable in multi-account deployments. File-name-only identity i
 - Refresh the credential list or explicitly refresh Provider quota for one credential.
 - Paste JSON, upload, download, edit, disable, restore, or delete credentials.
 - Filter by search, provider, state, plan, quota window, or operational state.
+- Pin credentials you watch from the inline button next to each credential name. Pinned credentials stay at the top in pin order across providers and plans, but filters still apply. Pins are stored only in the current browser and are hidden in selection mode.
 - Batch change priority or enabled state, and toggle WebSockets for selected Codex credentials.
 - Inspect overview, configuration, supported models, quota history, and diagnostic evidence.
 - Run local or Manager Server Codex/xAI inspection from the health workspace.

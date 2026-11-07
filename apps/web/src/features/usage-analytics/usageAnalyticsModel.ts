@@ -709,6 +709,24 @@ export const getUsageRangeBounds = (
   }
 };
 
+// Rolling ranges change their exact timestamps on refresh, but the visible query
+// scope remains the same until the user changes filters. Calendar-day ranges
+// intentionally change scope at midnight.
+export const getUsagePresentationRangeScopeKey = (
+  filters: Pick<UsageAnalyticsFiltersState, 'timeRange'>,
+  bounds: UsageAnalyticsRangeBounds | null
+): string => {
+  switch (filters.timeRange) {
+    case 'today':
+    case 'yesterday':
+      return `${filters.timeRange}:${bounds?.fromMs ?? 'unavailable'}`;
+    case 'custom':
+      return `custom:${bounds?.fromMs ?? 'unavailable'}:${bounds?.toMs ?? 'unavailable'}`;
+    default:
+      return filters.timeRange;
+  }
+};
+
 export const resolveUsageGranularity = (
   filters: Pick<UsageAnalyticsFiltersState, 'timeRange' | 'customRange' | 'granularity'>,
   nowMs: number

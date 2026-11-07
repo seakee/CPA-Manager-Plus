@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useMonitoringAnalytics } from '@/features/monitoring/hooks/useMonitoringAnalytics';
 import { useUsageData } from '@/features/monitoring/hooks/useUsageData';
@@ -7,7 +7,7 @@ import { buildMonitoringAuthMetaMap } from '@/features/monitoring/model/authMeta
 import { readString } from '@/features/monitoring/model/base';
 import type { MonitoringChannelMeta } from '@/features/monitoring/model/types';
 import { loadMonitoringMetaPayload } from '@/features/monitoring/services/monitoringMetaService';
-import { useConfigStore } from '@/stores';
+import { useAuthStore, useConfigStore } from '@/stores';
 import type { AuthFileItem } from '@/types/authFile';
 import type { CredentialInfo } from '@/types/sourceInfo';
 import { buildSourceInfoMap } from '@/utils/sourceResolver';
@@ -36,6 +36,7 @@ import {
   buildUsageAnalyticsInclude,
   buildUsageTimeline,
   getSelectableApiKeyHash,
+  getUsagePresentationRangeScopeKey,
   getUsageRangeBounds,
   resolveUsageGranularity,
   USAGE_ANALYTICS_DEFAULT_FILTERS,
@@ -93,10 +94,41 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 
 export function useUsageAnalytics() {
   const config = useConfigStore((state) => state.config);
+  const apiBase = useAuthStore((state) => state.apiBase);
+  const managementKey = useAuthStore((state) => state.managementKey);
   const { apiKeyAliases, loadApiKeyAliases } = useUsageData({ loadUsageEvents: false });
-  const [monitoringMeta, setMonitoringMeta] = useState<UsageAnalyticsMonitoringMeta>(
-    EMPTY_USAGE_ANALYTICS_MONITORING_META
+  // Credential metadata belongs to one connection scope. Mount loads and manual
+  // refreshes share a generation so a late response for another scope is dropped,
+  // and the snapshot is tagged with its scope so a switch reads as empty without
+  // an effect-driven state reset.
+  const monitoringMetaScopeKey = useMemo(
+    () => JSON.stringify([apiBase, managementKey, config]),
+    [apiBase, config, managementKey]
   );
+  const [monitoringMetaState, setMonitoringMetaState] = useState<{
+    scope: string;
+    meta: UsageAnalyticsMonitoringMeta;
+    error: string;
+  }>(() => ({
+    scope: monitoringMetaScopeKey,
+    meta: EMPTY_USAGE_ANALYTICS_MONITORING_META,
+    error: '',
+  }));
+  const monitoringMeta =
+    monitoringMetaState.scope === monitoringMetaScopeKey
+      ? monitoringMetaState.meta
+      : EMPTY_USAGE_ANALYTICS_MONITORING_META;
+  const monitoringMetaError =
+    monitoringMetaState.scope === monitoringMetaScopeKey ? monitoringMetaState.error : '';
+  const monitoringMetaScopeRef = useRef(monitoringMetaScopeKey);
+  const monitoringMetaRequestIdRef = useRef(0);
+  useLayoutEffect(() => {
+    monitoringMetaScopeRef.current = monitoringMetaScopeKey;
+    monitoringMetaRequestIdRef.current += 1;
+    return () => {
+      monitoringMetaRequestIdRef.current += 1;
+    };
+  }, [monitoringMetaScopeKey]);
   const [searchParams, setSearchParams] = useSearchParams();
   const [initialUiState] = useState<UsageAnalyticsUiState>(() =>
     buildUsageAnalyticsUiStateFromSearchParams(searchParams, readUsageAnalyticsUiState())
@@ -127,32 +159,46 @@ export function useUsageAnalytics() {
     () => buildApiKeyDisplayMap(config?.apiKeys || [], apiKeyAliases || []),
     [apiKeyAliases, config?.apiKeys]
   );
-  const loadMonitoringMeta = useCallback(async () => {
-    const payload = await loadMonitoringMetaPayload(config);
-    setMonitoringMeta({
-      authFiles: payload.authFiles,
-      channels: payload.channels,
-    });
-  }, [config]);
-  useEffect(() => {
-    let cancelled = false;
-    loadMonitoringMetaPayload(config)
-      .then((payload) => {
-        if (cancelled) return;
-        setMonitoringMeta({
-          authFiles: payload.authFiles,
-          channels: payload.channels,
-        });
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setMonitoringMeta(EMPTY_USAGE_ANALYTICS_MONITORING_META);
-        }
+  const runMonitoringMetaLoad = useCallback(async () => {
+    const requestId = monitoringMetaRequestIdRef.current + 1;
+    monitoringMetaRequestIdRef.current = requestId;
+    const requestScope = monitoringMetaScopeKey;
+    const isCurrentRequest = () =>
+      monitoringMetaRequestIdRef.current === requestId &&
+      monitoringMetaScopeRef.current === requestScope;
+    try {
+      const payload = await loadMonitoringMetaPayload(config);
+      if (!isCurrentRequest()) return;
+      setMonitoringMetaState((current) => {
+        const base =
+          current.scope === requestScope ? current.meta : EMPTY_USAGE_ANALYTICS_MONITORING_META;
+        return {
+          scope: requestScope,
+          meta: {
+            authFiles: payload.authFilesLoaded ? payload.authFiles : base.authFiles,
+            channels: payload.channelsLoaded ? payload.channels : base.channels,
+          },
+          error: payload.error,
+        };
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [config]);
+    } catch (error) {
+      if (!isCurrentRequest()) return;
+      // A same-scope refresh failure keeps the last good credential metadata.
+      setMonitoringMetaState((current) => ({
+        scope: requestScope,
+        meta: current.scope === requestScope ? current.meta : EMPTY_USAGE_ANALYTICS_MONITORING_META,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
+  }, [config, monitoringMetaScopeKey]);
+  const loadMonitoringMeta = useCallback(async () => {
+    await runMonitoringMetaLoad();
+  }, [runMonitoringMetaLoad]);
+  useEffect(() => {
+    void (async () => {
+      await runMonitoringMetaLoad();
+    })();
+  }, [runMonitoringMetaLoad]);
   const authMetaMap = useMemo(
     () => buildMonitoringAuthMetaMap(monitoringMeta.authFiles),
     [monitoringMeta.authFiles]
@@ -214,6 +260,7 @@ export function useUsageAnalytics() {
   );
 
   const bounds = useMemo(() => getUsageRangeBounds(filters, nowMs), [filters, nowMs]);
+  const presentationRangeScopeKey = getUsagePresentationRangeScopeKey(filters, bounds);
   const heatmapRangeContext = useMemo(
     () => buildUsageHeatmapRangeContext(bounds, 'en-US', browserTimeZone),
     [bounds, browserTimeZone]
@@ -270,7 +317,7 @@ export function useUsageAnalytics() {
     () =>
       JSON.stringify({
         activeTab: activeTabState,
-        bounds,
+        presentationRangeScopeKey,
         drilldownPreview,
         filters: analyticsFilters,
         granularity: resolvedGranularity,
@@ -279,7 +326,7 @@ export function useUsageAnalytics() {
     [
       activeTabState,
       analyticsFilters,
-      bounds,
+      presentationRangeScopeKey,
       debouncedSearchQuery,
       drilldownPreview,
       resolvedGranularity,
@@ -301,10 +348,10 @@ export function useUsageAnalytics() {
   const filterSelectorsDataScopeKey = useMemo(
     () =>
       JSON.stringify({
-        bounds,
+        presentationRangeScopeKey,
         searchQuery: debouncedSearchQuery,
       }),
-    [bounds, debouncedSearchQuery]
+    [presentationRangeScopeKey, debouncedSearchQuery]
   );
   const filterSelectorsAnalytics = useMonitoringAnalytics({
     fromMs: bounds?.fromMs,
@@ -402,7 +449,7 @@ export function useUsageAnalytics() {
       JSON.stringify({
         activeTab: activeTabState,
         apiKeyHashes: apiKeyTrendHashes,
-        bounds,
+        presentationRangeScopeKey,
         filters: apiKeyTrendFilters,
         granularity: resolvedGranularity,
         searchQuery: debouncedSearchQuery,
@@ -411,7 +458,7 @@ export function useUsageAnalytics() {
       activeTabState,
       apiKeyTrendFilters,
       apiKeyTrendHashes,
-      bounds,
+      presentationRangeScopeKey,
       debouncedSearchQuery,
       resolvedGranularity,
     ]
@@ -533,7 +580,7 @@ export function useUsageAnalytics() {
     () =>
       JSON.stringify({
         activeTab: activeTabState,
-        bounds,
+        presentationRangeScopeKey,
         filters: selectedApiKeyTimelineFilters,
         granularity: resolvedGranularity,
         searchQuery: debouncedSearchQuery,
@@ -541,7 +588,7 @@ export function useUsageAnalytics() {
       }),
     [
       activeTabState,
-      bounds,
+      presentationRangeScopeKey,
       debouncedSearchQuery,
       resolvedGranularity,
       selectedApiKeyFilterHash,
@@ -588,7 +635,7 @@ export function useUsageAnalytics() {
     () =>
       JSON.stringify({
         activeTab: activeTabState,
-        bounds,
+        presentationRangeScopeKey,
         filters: selectedCredentialTimelineFilters,
         granularity: resolvedGranularity,
         searchQuery: debouncedSearchQuery,
@@ -596,7 +643,7 @@ export function useUsageAnalytics() {
       }),
     [
       activeTabState,
-      bounds,
+      presentationRangeScopeKey,
       debouncedSearchQuery,
       resolvedGranularity,
       selectedCredentialFilterID,
@@ -786,7 +833,7 @@ export function useUsageAnalytics() {
     bounds,
     resolvedGranularity,
     loading: analytics.loading,
-    error: analytics.error,
+    error: analytics.error || monitoringMetaError,
     enabled: analytics.enabled,
     apiKeyDisplayMap,
     unavailableReason: analytics.unavailableReason,
@@ -809,6 +856,7 @@ export function useUsageAnalytics() {
     selectedHeatmapDateKey: activeHeatmapDateKey,
     selectHeatmapDate,
     heatmapDateLoading: heatmapDateRefreshing,
+    heatmapDateLoaded: Boolean(heatmapDateData),
     heatmapDateError: selectedHeatmapDate ? heatmapDateAnalytics.error : '',
     selectedHeatmapCell,
     selectHeatmapCell,
@@ -827,6 +875,7 @@ export function useUsageAnalytics() {
     selectedApiKeyTrendSeries,
     credentialTrendSeries,
     credentialTrendLoading,
+    credentialTrendLoaded: Boolean(selectedCredentialTimelineData),
     credentialTrendError,
     keyAnomalies,
     credentialAnomalies,

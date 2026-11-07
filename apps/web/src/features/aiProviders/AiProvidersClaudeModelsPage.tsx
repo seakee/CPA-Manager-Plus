@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAuthStore as useDiscoveryAuthStore } from '@/stores/useAuthStore';
+import { useLayoutEffect, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useOutletContext } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
@@ -35,6 +36,7 @@ export function AiProvidersClaudeModelsPage() {
 
   const [endpoint, setEndpoint] = useState('');
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
@@ -68,7 +70,37 @@ export function AiProvidersClaudeModelsPage() {
     [selected, visibleModelNames]
   );
 
+  const discoveryConnection = useDiscoveryAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  const discoveryScope = JSON.stringify([
+    discoveryConnection,
+    form.baseUrl,
+    form.apiKey,
+    form.authIndex,
+    form.proxyUrl,
+    buildHeaderObject(form.headers),
+  ]);
+  const activeDiscoveryScopeRef = useRef(discoveryScope);
+  activeDiscoveryScopeRef.current = discoveryScope;
+  const modelDiscoveryRequestIdRef = useRef(0);
+  useLayoutEffect(() => {
+    modelDiscoveryRequestIdRef.current += 1;
+    setModels([]);
+    setModelsLoaded(false);
+    setError('');
+    setFetching(false);
+    return () => {
+      modelDiscoveryRequestIdRef.current += 1;
+    };
+  }, [discoveryScope]);
+
   const fetchClaudeModelDiscovery = useCallback(async () => {
+    const requestId = ++modelDiscoveryRequestIdRef.current;
+    const requestScope = discoveryScope;
+    const isCurrentDiscovery = () =>
+      modelDiscoveryRequestIdRef.current === requestId &&
+      activeDiscoveryScopeRef.current === requestScope;
     setFetching(true);
     setError('');
     const headerObject = buildHeaderObject(form.headers);
@@ -81,9 +113,12 @@ export function AiProvidersClaudeModelsPage() {
         authIndex,
         form.proxyUrl
       );
+      if (!isCurrentDiscovery()) return;
       setModels(list);
+      setModelsLoaded(true);
     } catch (err: unknown) {
-      setModels([]);
+      if (!isCurrentDiscovery()) return;
+
       const message = getErrorMessage(err);
       const authResolution = buildClaudeRequestHeaders({
         url: modelsApi.buildClaudeModelsEndpoint(form.baseUrl ?? ''),
@@ -98,16 +133,15 @@ export function AiProvidersClaudeModelsPage() {
         : '';
       setError(`${t('ai_providers.claude_models_fetch_error')}: ${message}${diag}`);
     } finally {
-      setFetching(false);
+      if (isCurrentDiscovery()) setFetching(false);
     }
-  }, [form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
+  }, [discoveryScope, form.apiKey, form.authIndex, form.baseUrl, form.headers, form.proxyUrl, t]);
 
   useEffect(() => {
     if (initialLoading) return;
 
     const nextEndpoint = modelsApi.buildClaudeModelsEndpoint(form.baseUrl ?? '');
     setEndpoint(nextEndpoint);
-    setModels([]);
     setSearch('');
     setSelected(new Set());
     setError('');
@@ -308,11 +342,11 @@ export function AiProvidersClaudeModelsPage() {
             </div>
           )}
           {error && <div className="error-box">{error}</div>}
-          {fetching ? (
+          {fetching && !modelsLoaded ? (
             <div className={styles.sectionHint}>
               {t('ai_providers.claude_models_fetch_loading')}
             </div>
-          ) : models.length === 0 ? (
+          ) : !modelsLoaded ? null : models.length === 0 ? (
             <div className={styles.sectionHint}>{t('ai_providers.claude_models_fetch_empty')}</div>
           ) : filteredModels.length === 0 ? (
             <div className={styles.sectionHint}>{t('ai_providers.claude_models_search_empty')}</div>

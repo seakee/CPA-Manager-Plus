@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -81,6 +81,13 @@ const buildLogsQuery = (incremental: boolean, position: LogPosition): LogsQuery 
 };
 
 export function LogsPage() {
+  const connectionScope = useAuthStore((state) =>
+    JSON.stringify([state.apiBase, state.managementKey])
+  );
+  return <LogsPageContent key={connectionScope} />;
+}
+
+function LogsPageContent() {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { showNotification, showConfirmation } = useNotificationStore();
@@ -94,6 +101,7 @@ export function LogsPage() {
   const requestLogEnabled = config?.requestLog ?? false;
   const [logState, setLogState] = useState<LogState>({ buffer: [], visibleFrom: 0 });
   const [loading, setLoading] = useState(true);
+  const [logsLoaded, setLogsLoaded] = useState(false);
   const [error, setError] = useState('');
   const [autoRefresh, setAutoRefresh] = useLocalStorage('logsPage.autoRefresh', false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -109,6 +117,7 @@ export function LogsPage() {
   );
   const [errorLogs, setErrorLogs] = useState<ErrorLogItem[]>([]);
   const [loadingErrors, setLoadingErrors] = useState(false);
+  const [errorLogsLoaded, setErrorLogsLoaded] = useState(false);
   const [errorLogsError, setErrorLogsError] = useState('');
   const [requestLogId, setRequestLogId] = useState<string | null>(null);
   const [requestLogDownloading, setRequestLogDownloading] = useState(false);
@@ -122,6 +131,24 @@ export function LogsPage() {
   } | null>(null);
   const logRequestInFlightRef = useRef(false);
   const pendingFullReloadRef = useRef(false);
+  const logGenerationRef = useRef(0);
+  const errorLogRequestRef = useRef(0);
+  const scopeActiveRef = useRef(false);
+  useLayoutEffect(() => {
+    scopeActiveRef.current = true;
+    return () => {
+      scopeActiveRef.current = false;
+    };
+  }, []);
+  useEffect(
+    () => () => {
+      logGenerationRef.current += 1;
+      logRequestInFlightRef.current = false;
+      errorLogRequestRef.current += 1;
+      pendingFullReloadRef.current = false;
+    },
+    []
+  );
 
   // 新版 CPA 优先使用 cursor，旧版接口继续使用 after 时间戳。
   const logPositionRef = useRef<LogPosition>({});
@@ -177,6 +204,7 @@ export function LogsPage() {
     }
 
     logRequestInFlightRef.current = true;
+    const generation = logGenerationRef.current;
 
     if (!incremental) {
       setLoading(true);
@@ -186,21 +214,28 @@ export function LogsPage() {
     try {
       const scrollerInstance = logScrollerRef.current;
       const stickToBottom =
-        !incremental || isNearBottom(scrollerInstance?.logViewerRef.current ?? null);
+        !logsLoaded || isNearBottom(scrollerInstance?.logViewerRef.current ?? null);
       if (stickToBottom) {
         scrollerInstance?.requestScrollToBottom();
       }
 
       const params = buildLogsQuery(incremental, logPositionRef.current);
       const data = await logsApi.fetchLogs(params);
+      if (generation !== logGenerationRef.current) return;
       updateLogPosition(data, incremental);
+      setLogsLoaded(true);
 
       const newLines = Array.isArray(data.lines) ? data.lines : [];
 
       if (incremental && data.cursorReset) {
         const buffer = newLines.slice(-MAX_BUFFER_LINES);
         const visibleFrom = Math.max(buffer.length - INITIAL_DISPLAY_LINES, 0);
-        setLogState({ buffer, visibleFrom });
+        setLogState((previous) => ({
+          buffer,
+          visibleFrom: stickToBottom
+            ? visibleFrom
+            : Math.max(buffer.length - (previous.buffer.length - previous.visibleFrom), 0),
+        }));
       } else if (incremental && newLines.length > 0) {
         // 增量更新：追加新日志并限制缓冲区大小（避免内存与渲染膨胀）
         setLogState((prev) => {
@@ -221,21 +256,23 @@ export function LogsPage() {
         // 全量加载：默认只渲染最后 100 行，向上滚动再展开更多
         const buffer = newLines.slice(-MAX_BUFFER_LINES);
         const visibleFrom = Math.max(buffer.length - INITIAL_DISPLAY_LINES, 0);
-        setLogState({ buffer, visibleFrom });
+        setLogState((previous) => ({
+          buffer,
+          visibleFrom: stickToBottom ? visibleFrom : Math.min(previous.visibleFrom, buffer.length),
+        }));
       }
     } catch (err: unknown) {
+      if (generation !== logGenerationRef.current) return;
       console.error('Failed to load logs:', err);
-      if (!incremental) {
-        setError(getErrorMessage(err) || t('logs.load_error'));
-      }
+      setError(getErrorMessage(err) || t('logs.load_error'));
     } finally {
-      if (!incremental) {
-        setLoading(false);
-      }
-      logRequestInFlightRef.current = false;
-      if (pendingFullReloadRef.current) {
-        pendingFullReloadRef.current = false;
-        void loadLogs(false);
+      if (generation === logGenerationRef.current) {
+        if (!incremental) setLoading(false);
+        logRequestInFlightRef.current = false;
+        if (pendingFullReloadRef.current) {
+          pendingFullReloadRef.current = false;
+          void loadLogs(false);
+        }
       }
     }
   };
@@ -247,12 +284,20 @@ export function LogsPage() {
       variant: 'danger',
       confirmText: t('common.confirm'),
       onConfirm: async () => {
+        if (!scopeActiveRef.current) return;
         try {
           await logsApi.clearLogs();
+          if (!scopeActiveRef.current) return;
+          logGenerationRef.current += 1;
+          logRequestInFlightRef.current = false;
+          pendingFullReloadRef.current = false;
+          setLoading(false);
+          setLogsLoaded(true);
           setLogState({ buffer: [], visibleFrom: 0 });
           resetLogPosition();
           showNotification(t('logs.clear_success'), 'success');
         } catch (err: unknown) {
+          if (!scopeActiveRef.current) return;
           const message = getErrorMessage(err);
           showNotification(
             `${t('notification.delete_failed')}${message ? `: ${message}` : ''}`,
@@ -270,6 +315,7 @@ export function LogsPage() {
   };
 
   const loadErrorLogs = async () => {
+    const requestId = ++errorLogRequestRef.current;
     if (connectionStatus !== 'connected') {
       setLoadingErrors(false);
       return;
@@ -279,17 +325,19 @@ export function LogsPage() {
     setErrorLogsError('');
     try {
       const res = await logsApi.fetchErrorLogs();
+      if (requestId !== errorLogRequestRef.current) return;
       // API 返回 { files: [...] }
       setErrorLogs(Array.isArray(res.files) ? res.files : []);
+      setErrorLogsLoaded(true);
     } catch (err: unknown) {
       console.error('Failed to load error logs:', err);
-      setErrorLogs([]);
+      if (requestId !== errorLogRequestRef.current) return;
       const message = getErrorMessage(err);
       setErrorLogsError(
         message ? `${t('logs.error_logs_load_error')}: ${message}` : t('logs.error_logs_load_error')
       );
     } finally {
-      setLoadingErrors(false);
+      if (requestId === errorLogRequestRef.current) setLoadingErrors(false);
     }
   };
 
@@ -409,14 +457,14 @@ export function LogsPage() {
     return {
       filteredParsedLines: filteredParsed,
       filteredLines: filteredParsed.map((line) => line.raw),
-      removedCount: Math.max(baseLines.length - filteredParsed.length, 0)
+      removedCount: Math.max(baseLines.length - filteredParsed.length, 0),
     };
   }, [
     baseLines,
     filters.methodFilterSet,
     filters.pathFilterSet,
     filters.statusFilterSet,
-    parsedSearchLines
+    parsedSearchLines,
   ]);
 
   const parsedVisibleLines = useMemo(
@@ -433,7 +481,7 @@ export function LogsPage() {
     isSearching,
     filteredLineCount: filteredLines.length,
     hasStructuredFilters: filters.hasStructuredFilters,
-    showRawLogs
+    showRawLogs,
   });
 
   logScrollerRef.current = scroller;
@@ -499,7 +547,7 @@ export function LogsPage() {
       const response = await logsApi.downloadRequestLogById(id);
       downloadBlob({
         filename: `request-${id}.log`,
-        blob: new Blob([response.data], { type: 'text/plain' })
+        blob: new Blob([response.data], { type: 'text/plain' }),
       });
       showNotification(t('logs.request_log_download_success'), 'success');
       setRequestLogId(null);
@@ -764,9 +812,9 @@ export function LogsPage() {
               </div>
             </div>
 
-            {loading ? (
+            {loading && !logsLoaded ? (
               <div className="hint">{t('logs.loading')}</div>
-            ) : logState.buffer.length > 0 && filteredLines.length > 0 ? (
+            ) : error && !logsLoaded ? null : logState.buffer.length > 0 && filteredLines.length > 0 ? (
               <div
                 ref={scroller.logViewerRef}
                 className={styles.logPanel}
@@ -931,9 +979,9 @@ export function LogsPage() {
               {errorLogsError && <div className="error-box">{errorLogsError}</div>}
 
               <div className={styles.errorPanel}>
-                {loadingErrors ? (
+                {loadingErrors && !errorLogsLoaded ? (
                   <div className="hint">{t('common.loading')}</div>
-                ) : errorLogs.length === 0 ? (
+                ) : errorLogsError && !errorLogsLoaded ? null : errorLogs.length === 0 ? (
                   <div className="hint">{t('logs.error_logs_empty')}</div>
                 ) : (
                   <div className="item-list">
