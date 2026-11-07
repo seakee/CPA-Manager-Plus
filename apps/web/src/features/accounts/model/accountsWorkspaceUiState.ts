@@ -20,6 +20,8 @@ export interface AccountsWorkspaceUiState {
   pageSize: number;
   accountDisplayMode: QuotaAccountDisplayMode;
   layoutMode: AccountsLayoutMode;
+  /** Show the per-window quota pace projection in the credential detail. */
+  quotaPaceEnabled: boolean;
 }
 
 const STORAGE_KEY = 'cpa_manager_accounts_workspace_ui_v1';
@@ -52,6 +54,7 @@ export const DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE: AccountsWorkspaceUiState = {
   pageSize: 10,
   accountDisplayMode: 'full',
   layoutMode: 'table',
+  quotaPaceEnabled: true,
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -89,6 +92,10 @@ export const normalizeAccountsWorkspaceUiState = (value: unknown): AccountsWorks
     pageSize: PAGE_SIZES.has(pageSize) ? pageSize : 10,
     accountDisplayMode: value.accountDisplayMode === 'masked' ? 'masked' : 'full',
     layoutMode: value.layoutMode === 'grid' ? 'grid' : 'table',
+    quotaPaceEnabled:
+      typeof value.quotaPaceEnabled === 'boolean'
+        ? value.quotaPaceEnabled
+        : DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE.quotaPaceEnabled,
   };
 };
 

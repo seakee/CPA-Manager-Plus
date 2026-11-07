@@ -19,6 +19,7 @@ Open the unified [Accounts Demo](https://seakee.github.io/CPA-Manager-Plus/#/dem
 - **Note, priority, and project ID**: use them to separate account purpose and routing preference.
 - **Account health**: combines credential state, the latest inspection, Provider queries, response Headers, cooldowns, and pending actions.
 - **Quota windows**: shows confirmed usage, reset, source, and observation time. Unknown does not mean unlimited.
+- **Quota pace**: projects when the window would run out at the current burn rate and compares it with the reset, independently per credential and per window. It can be toggled off from the quota tab or the accounts toolbar.
 
 Keep `auth_index` stable in multi-account deployments. File-name-only identity is not sufficient for reliably joining history and operational state to one account.
 

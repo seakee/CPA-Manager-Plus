@@ -235,4 +235,36 @@ describe('accountsWorkspaceUrlState', () => {
       readAccountsWorkspaceUrlState(search, DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE).layoutMode
     ).toBe('grid');
   });
+
+  it('round-trips the quota pace preference through URL search', () => {
+    const search = writeAccountsWorkspaceUrlSearch(
+      '',
+      {
+        ...DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE,
+        view: 'accounts',
+        healthMode: 'local',
+        account: null,
+        detailTab: 'overview',
+        editor: null,
+        editorProvider: '',
+        quotaPaceEnabled: false,
+      },
+      DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE
+    );
+
+    expect(search).toBe('?pace=off');
+    expect(
+      readAccountsWorkspaceUrlState(search, DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE).quotaPaceEnabled
+    ).toBe(false);
+    expect(
+      readAccountsWorkspaceUrlState('?pace=on', DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE)
+        .quotaPaceEnabled
+    ).toBe(true);
+  });
+
+  it('falls back to the stored quota pace preference when the URL omits it', () => {
+    const stored = { ...DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE, quotaPaceEnabled: false };
+
+    expect(readAccountsWorkspaceUrlState('', stored).quotaPaceEnabled).toBe(false);
+  });
 });
