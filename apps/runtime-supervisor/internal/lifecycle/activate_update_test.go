@@ -432,11 +432,32 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 	if err := os.WriteFile(pathA, bytesA, 0o700); err != nil {
 		t.Fatal(err)
 	}
+
+	stageRoot := filepath.Join(dir, "artifacts")
+	stages, err := runtimeupdate.NewStore(stageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageDirB := filepath.Join(stageRoot, "8.0.59")
+	if err := os.MkdirAll(stageDirB, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	bytesB := []byte("staged-cpa-binary-b")
 	sumB := sha256.Sum256(bytesB)
 	idB := artifact.ID("sha256:" + hex.EncodeToString(sumB[:]))
-	pathB := filepath.Join(dir, "cpa-b")
-	if err := os.WriteFile(pathB, bytesB, 0o700); err != nil {
+	pathB := filepath.Join(stageDirB, "cli-proxy-api")
+	metaB := filepath.Join(stageDirB, "artifact.json")
+	if err := os.WriteFile(pathB, bytesB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metaContent := `{"schemaVersion":1,"engine":"cpa","version":"8.0.59","artifactId":"` + string(idB) + `","sourceArchiveDigest":"sha256:` + strings.Repeat("b", 64) + `"}`
+	if err := os.WriteFile(metaB, []byte(metaContent), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	selectionRoot := filepath.Join(dir, "active")
+	selectionStore, err := selection.NewStore(selectionRoot, stages)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -447,11 +468,10 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 		Version:        "8.0.59",
 		ArtifactID:     idB,
 		ExecutablePath: pathB,
-		MetadataPath:   filepath.Join(dir, "artifact.json"),
+		MetadataPath:   metaB,
 	}
 	f.observer.byPath = map[string]artifact.ID{pathA: idA, pathB: idB}
-	f.selections.candidate = f.candidate
-	if err := f.starter.EnableActivateUpdate(f.prior, f.observer, f.selections, f.ready); err != nil {
+	if err := f.starter.EnableActivateUpdate(f.prior, f.observer, selectionStore, f.ready); err != nil {
 		t.Fatal(err)
 	}
 	destRoot := filepath.Join(dir, "destination")
@@ -483,7 +503,46 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 
 	wantArgs := []string{"-config", filepath.Join(destRoot, "config.yaml")}
 
-	// 1. Candidate B start failure rolls back to A and restores stage.json to idA.
+	// 1. Uncommitted crash window: stage.json became idB, but selections.Commit(B) did not run.
+	// Reconstructing via real selectionStore.Load(f.prior) must load A, heal stage.json to idA, and start A.
+	if err := f.starter.syncDestinationExpectedArtifactLocked(idB); err != nil {
+		t.Fatalf("syncDestinationExpectedArtifactLocked(idB) error = %v", err)
+	}
+	if staged, loadErr := f.starter.destination.load(); loadErr != nil || staged == nil || staged.ExpectedActiveArtifactID != idB {
+		t.Fatalf("pre-crash stage.json = %+v, %v; want idB", staged, loadErr)
+	}
+	uncommittedSelected, err := selectionStore.Load(f.prior)
+	if err != nil || uncommittedSelected.ExecutablePath != pathA || uncommittedSelected.IsFinalizedStage() {
+		t.Fatalf("selectionStore.Load(uncommitted) = %+v, %v; want bundled A", uncommittedSelected, err)
+	}
+	uncommittedExec, err := NewExecutor(f.starter.authority, f.journal, f.child, pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { uncommittedExec.CloseAdmission() })
+	if err := uncommittedExec.EnableActivateUpdate(uncommittedSelected, f.observer, selectionStore, f.ready); err != nil {
+		t.Fatal(err)
+	}
+	if err := uncommittedExec.EnableDestination(destRoot, filepath.Join(dir, "gateway", "auth"), "127.0.0.1:8317", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.child.observation = cpaprocess.Observation{State: cpaprocess.StateNotStarted}
+	if _, err := uncommittedExec.Start(t.Context(), StartRequest{
+		OperationID:               "start-after-uncommitted-crash",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+	}); err != nil {
+		t.Fatalf("Start() after uncommitted crash error = %v", err)
+	}
+	if f.child.lastSpec.Executable != pathA || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
+		t.Fatalf("uncommitted recovery child spec = %+v; want executable %q args %v", f.child.lastSpec, pathA, wantArgs)
+	}
+	if staged, loadErr := uncommittedExec.destination.load(); loadErr != nil || staged == nil || staged.ExpectedActiveArtifactID != idA {
+		t.Fatalf("stage.json after uncommitted recovery = %+v, %v; want idA", staged, loadErr)
+	}
+
+	// 2. Candidate B start failure rolls back to A and preserves stage.json as idA.
 	f.child.onStart = func(_ context.Context, spec cpaprocess.StartSpec) error {
 		if spec.Executable == pathB {
 			return errors.New("candidate start failed")
@@ -507,7 +566,7 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 		t.Fatalf("stage.json after rollback = %+v, %v; want ExpectedActiveArtifactID %q", staged, loadErr, idA)
 	}
 
-	// 2. Retry ActivateUpdate succeeds, spawns B with -config, and persists idB in stage.json.
+	// 3. Retry ActivateUpdate succeeds, spawns B with -config, commits selection.json, and keeps stage.json at idA.
 	f.child.onStart = func(_ context.Context, spec cpaprocess.StartSpec) error {
 		return f.observer.RefreshFrom(spec.Executable, "")
 	}
@@ -524,11 +583,17 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
 		t.Fatalf("activated child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
 	}
-	if staged, loadErr := f.starter.destination.load(); loadErr != nil || staged == nil || staged.ExpectedActiveArtifactID != idB {
-		t.Fatalf("stage.json after activation = %+v, %v; want ExpectedActiveArtifactID %q", staged, loadErr, idB)
+	if staged, loadErr := f.starter.destination.load(); loadErr != nil || staged == nil || staged.ExpectedActiveArtifactID != idA {
+		t.Fatalf("stage.json after activation = %+v, %v; want immutable origin ExpectedActiveArtifactID %q", staged, loadErr, idA)
 	}
 
-	// 3. Restart after activation preserves B and -config.
+	// 4. Exact idempotent replay of StageDestination(A) after ActivateUpdate(B) returns succeeded without modifying B.
+	replayedStage, err := f.starter.StageDestination(t.Context(), destReq)
+	if err != nil || replayedStage.OperationID != destReq.OperationID || replayedStage.State != journal.StateSucceeded {
+		t.Fatalf("replayed StageDestination() = %+v, %v; want succeeded idempotent replay", replayedStage, err)
+	}
+
+	// 5. Restart after activation preserves B and -config.
 	if _, err := f.starter.Restart(t.Context(), RestartRequest{
 		OperationID:               "restart-after-activate",
 		ExpectedRuntimeIdentity:   "runtime-01",
@@ -540,7 +605,7 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 		t.Fatalf("restarted child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
 	}
 
-	// 4. Automatic recovery after unexpected exit preserves B and -config.
+	// 6. Automatic recovery after unexpected exit preserves B and -config.
 	crashedInstance := f.child.observation.InstanceID
 	f.child.observation = cpaprocess.Observation{
 		State:      cpaprocess.StateExited,
@@ -555,13 +620,21 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 		t.Fatalf("recovered child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
 	}
 
-	// 5. Supervisor reconstruction preserves B and -config on Start.
+	// 7. Supervisor reconstruction via real selectionStore.Load(f.prior) loads B and preserves B and -config on Start.
+	reopenedStore, err := selection.NewStore(selectionRoot, stages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedSelected, err := reopenedStore.Load(f.prior)
+	if err != nil || committedSelected != f.candidate {
+		t.Fatalf("reopenedStore.Load() = %+v, %v; want %+v", committedSelected, err, f.candidate)
+	}
 	reconstructed, err := NewExecutor(f.starter.authority, f.journal, f.child, pathA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { reconstructed.CloseAdmission() })
-	if err := reconstructed.EnableActivateUpdate(f.candidate, f.observer, f.selections, f.ready); err != nil {
+	if err := reconstructed.EnableActivateUpdate(committedSelected, f.observer, reopenedStore, f.ready); err != nil {
 		t.Fatal(err)
 	}
 	if err := reconstructed.EnableDestination(destRoot, filepath.Join(dir, "gateway", "auth"), "127.0.0.1:8317", nil); err != nil {
@@ -579,12 +652,18 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
 		t.Fatalf("reconstructed child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
 	}
-	// 6. Tampering with activated binary on disk is rejected with ErrActiveArtifactMismatch.
-	if err := os.WriteFile(pathB, []byte("tampered-staged-cpa-binary"), 0o700); err != nil {
+
+	// 8. Tampering with activated binary on disk is rejected during Restart with process_restart_start_failed.
+	if err := os.WriteFile(pathB, []byte("tampered-staged-cpa-binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := reconstructed.startProcess(t.Context(), pathB); !errors.Is(err, ErrActiveArtifactMismatch) {
-		t.Fatalf("startProcess() with tampered activated binary = %v; want %v", err, ErrActiveArtifactMismatch)
+	tamperedRestart, err := reconstructed.Restart(t.Context(), RestartRequest{
+		OperationID:               "restart-with-tampered-binary",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+	})
+	if !errors.Is(err, ErrActiveArtifactMismatch) || tamperedRestart.State != journal.StateFailed || tamperedRestart.FailureCode != "process_restart_start_failed" {
+		t.Fatalf("Restart() with tampered activated binary = %+v, %v; want failed process_restart_start_failed", tamperedRestart, err)
 	}
 }
 

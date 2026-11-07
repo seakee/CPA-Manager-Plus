@@ -1,16 +1,19 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/filetrust"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/readiness"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
@@ -100,6 +103,12 @@ func (e *Executor) EnableActivateUpdate(
 	e.artifact = observer
 	e.selections = selections
 	e.readiness = ready
+	if _, ok := e.journal.(*activationDestinationJournal); !ok {
+		e.journal = &activationDestinationJournal{inner: e.journal, executor: e}
+	}
+	if err := e.restoreOriginStageRequestLocked(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -234,9 +243,14 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 			"activation_start_failed", err, operationDeadline)
 	}
 	started, err := e.startProcess(executionCtx, candidate.ExecutablePath)
+	restoreErr := e.restoreOriginStageRequestLocked()
 	if err != nil {
 		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, 0,
 			"activation_start_failed", err, operationDeadline)
+	}
+	if restoreErr != nil {
+		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, started.InstanceID,
+			"activation_start_failed", restoreErr, operationDeadline)
 	}
 	if err := e.waitExactReady(executionCtx, started.InstanceID, candidateReadinessBudget(operationDeadline)); err != nil {
 		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, started.InstanceID,
@@ -381,21 +395,28 @@ func (e *Executor) rollbackActivation(
 		return e.failRollback(operation, operationID, err)
 	}
 
-	if err := e.syncDestinationExpectedArtifactLocked(prior.ArtifactID); err != nil {
-		return e.failRollback(operation, operationID, err)
-	}
 	observed = e.process.Observe()
 	var restored cpaprocess.Observation
 	if observed.State == cpaprocess.StateRunning && observed.InstanceID == priorInstance && candidateInstance == 0 {
+		if err := e.restoreOriginStageRequestLocked(); err != nil {
+			return e.failRollback(operation, operationID, err)
+		}
 		restored = observed
 	} else {
 		if observed.State == cpaprocess.StateUnknown || observed.State == cpaprocess.StateRunning {
 			return e.failRollback(operation, operationID, errors.New("cannot safely spawn rollback child"))
 		}
+		if err := e.syncDestinationExpectedArtifactLocked(prior.ArtifactID); err != nil {
+			return e.failRollback(operation, operationID, err)
+		}
 		var err error
 		restored, err = e.startProcess(rollbackCtx, prior.ExecutablePath)
+		restoreErr := e.restoreOriginStageRequestLocked()
 		if err != nil {
 			return e.failRollback(operation, operationID, err)
+		}
+		if restoreErr != nil {
+			return e.failRollback(operation, operationID, restoreErr)
 		}
 	}
 	if err := e.waitExactReady(rollbackCtx, restored.InstanceID, activationRollbackReadinessTimeout); err != nil {
@@ -449,33 +470,173 @@ func (e *Executor) completeActivation(
 	}
 	return result, nil
 }
+const originStageRequestFile = ".stage-request.json"
+
+type activationDestinationJournal struct {
+	inner           operationJournal
+	executor        *Executor
+	activeSpawnOpID string
+}
+
+func (j *activationDestinationJournal) Resolve(ctx context.Context, authority journal.Authority, intent journal.Intent) (journal.Operation, bool, error) {
+	if intent.OperationType == "stage_destination" {
+		if err := j.executor.restoreOriginStageRequestLocked(); err != nil {
+			return journal.Operation{}, false, err
+		}
+	}
+	return j.inner.Resolve(ctx, authority, intent)
+}
+
+func (j *activationDestinationJournal) Get(ctx context.Context, runtimeIdentity, operationID string) (journal.Operation, error) {
+	return j.inner.Get(ctx, runtimeIdentity, operationID)
+}
+
+func (j *activationDestinationJournal) Begin(ctx context.Context, authority journal.Authority, intent journal.Intent) (journal.Operation, bool, error) {
+	op, created, err := j.inner.Begin(ctx, authority, intent)
+	if err == nil && created {
+		switch intent.OperationType {
+		case "start", "restart", "auto_recovery":
+			j.activeSpawnOpID = intent.OperationID
+		}
+	}
+	return op, created, err
+}
+
+func (j *activationDestinationJournal) MarkRunning(ctx context.Context, runtimeIdentity, operationID string) (journal.Operation, error) {
+	op, err := j.inner.MarkRunning(ctx, runtimeIdentity, operationID)
+	if err != nil {
+		if operationID == j.activeSpawnOpID {
+			j.activeSpawnOpID = ""
+		}
+		return op, err
+	}
+	if operationID == j.activeSpawnOpID {
+		if syncErr := j.executor.reconcileDestinationStageForCurrentSelectionLocked(); syncErr != nil {
+			j.activeSpawnOpID = ""
+			return journal.Operation{}, syncErr
+		}
+	}
+	return op, nil
+}
+
+func (j *activationDestinationJournal) Complete(ctx context.Context, runtimeIdentity, operationID string, state journal.State, failureCode string) (journal.Operation, error) {
+	var restoreErr error
+	if operationID == j.activeSpawnOpID {
+		j.activeSpawnOpID = ""
+		restoreErr = j.executor.restoreOriginStageRequestLocked()
+	}
+	op, err := j.inner.Complete(ctx, runtimeIdentity, operationID, state, failureCode)
+	if err != nil {
+		return op, err
+	}
+	if restoreErr != nil {
+		return op, restoreErr
+	}
+	return op, nil
+}
+
+func (j *activationDestinationJournal) Close() error {
+	return j.inner.Close()
+}
+
+func (e *Executor) loadOriginStageRequestLocked() (*DestinationRequest, error) {
+	if e.destination == nil {
+		return nil, nil
+	}
+	name := filepath.Join(e.destination.root, originStageRequestFile)
+	info, err := os.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 || filetrust.RequireCurrentProcessOwner(info) != nil || (os.Geteuid() >= 0 && info.Mode().Perm()&0o077 != 0) {
+		return nil, ErrPersistenceUnavailable
+	}
+	data, err := os.ReadFile(name)
+	var r DestinationRequest
+	if err != nil || json.Unmarshal(data, &r) != nil || r.Validate() != nil {
+		return nil, ErrPersistenceUnavailable
+	}
+	canonical, _ := json.Marshal(r)
+	if !bytes.Equal(data, canonical) {
+		return nil, ErrPersistenceUnavailable
+	}
+	return &r, nil
+}
+
+func (e *Executor) writeAtomicDestinationJSONLocked(targetName string, r DestinationRequest) error {
+	data, err := json.Marshal(r)
+	if err != nil || r.Validate() != nil {
+		return ErrPersistenceUnavailable
+	}
+	tmp := filepath.Join(e.destination.root, "."+targetName+".tmp")
+	_ = os.Remove(tmp)
+	if err := writeDestinationFile(tmp, data, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(e.destination.root, targetName)); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return syncDestinationDirectory(e.destination.root)
+}
 
 func (e *Executor) syncDestinationExpectedArtifactLocked(artifactID artifact.ID) error {
 	if e.destination == nil {
 		return nil
 	}
 	staged, err := e.destination.load()
-	if err != nil || staged == nil || staged.ExpectedActiveArtifactID == artifactID {
+	if err != nil || staged == nil {
 		return err
 	}
 	if !artifactID.IsValid() {
 		return ErrActiveArtifactMismatch
 	}
+	origin, err := e.loadOriginStageRequestLocked()
+	if err != nil {
+		return err
+	}
+	if origin == nil && staged.ExpectedActiveArtifactID != artifactID {
+		if err := e.writeAtomicDestinationJSONLocked(originStageRequestFile, *staged); err != nil {
+			return err
+		}
+	}
+	if staged.ExpectedActiveArtifactID == artifactID {
+		return nil
+	}
 	updated := *staged
 	updated.ExpectedActiveArtifactID = artifactID
-	data, err := json.Marshal(updated)
-	if err != nil || updated.Validate() != nil {
-		return ErrPersistenceUnavailable
+	return e.writeAtomicDestinationJSONLocked("stage.json", updated)
+}
+
+func (e *Executor) restoreOriginStageRequestLocked() error {
+	if e.destination == nil {
+		return nil
 	}
-	tmp := filepath.Join(e.destination.root, ".stage.json.tmp")
-	_ = os.Remove(tmp)
-	if err := writeDestinationFile(tmp, data, 0o600); err != nil {
-		_ = os.Remove(tmp)
+	origin, err := e.loadOriginStageRequestLocked()
+	if err != nil || origin == nil {
 		return err
 	}
-	if err := os.Rename(tmp, filepath.Join(e.destination.root, "stage.json")); err != nil {
-		_ = os.Remove(tmp)
+	staged, err := e.destination.load()
+	if err != nil || staged == nil {
 		return err
 	}
-	return syncDestinationDirectory(e.destination.root)
+	if staged.OperationID != origin.OperationID || reflect.DeepEqual(*staged, *origin) {
+		return nil
+	}
+	return e.writeAtomicDestinationJSONLocked("stage.json", *origin)
+}
+
+func (e *Executor) reconcileDestinationStageForCurrentSelectionLocked() error {
+	if e.destination == nil {
+		return nil
+	}
+	descriptor := e.currentDescriptorLocked()
+	if descriptor.IsFinalizedStage() {
+		if !descriptor.ArtifactID.IsValid() {
+			return ErrActiveArtifactMismatch
+		}
+		return e.syncDestinationExpectedArtifactLocked(descriptor.ArtifactID)
+	}
+	return e.restoreOriginStageRequestLocked()
 }

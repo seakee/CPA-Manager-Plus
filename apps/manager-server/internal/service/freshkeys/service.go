@@ -126,13 +126,9 @@ func (s *Service) runtimeIdentity(ctx context.Context) string {
 	return value
 }
 func public(v repo.Record) Key {
-	lifecycle := identity.LifecycleActive
-	if v.Identity.Lifecycle == identity.LifecycleSuperseded {
-		lifecycle = identity.LifecycleSuperseded
-	}
 	return Key{ID: v.Identity.ID, RequestID: v.RequestID, MaskedPreview: v.Preview, CreatedAtMS: v.Identity.CreatedAtMS,
 		ManagerState: "persisted", RuntimeState: "not_applied", Name: v.Name, NameRevision: v.NameRevision,
-		Lifecycle: lifecycle, Origin: v.Origin}
+		Lifecycle: v.Identity.Lifecycle, Origin: v.Origin}
 }
 
 // IdentityIDs lists the Canonical Keys of this workspace without touching any
@@ -439,7 +435,7 @@ func (s *Service) withSecret(ctx context.Context, rawID string, active bool, con
 			continue
 		}
 		secret, err := s.protector.UnprotectString(record.Ciphertext)
-		if err != nil || digest(secret) != record.Hash || active && record.Identity.Lifecycle == identity.LifecycleSuperseded {
+		if err != nil || digest(secret) != record.Hash || active && record.Identity.Lifecycle != identity.LifecycleActive {
 			return errors.New("staged client secret unavailable")
 		}
 		return consume(secret)
