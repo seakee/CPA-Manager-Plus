@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -389,21 +389,32 @@ const makeCandidateDirectory = (info) => {
   temporaryCandidateDirectories.push(directory);
   const tag = info.release.version;
   writeFileSync(path.join(directory, 'release-info.json'), JSON.stringify(info, null, 2));
+  const checksumLines = [];
   for (const name of expectedReleaseAssetNames(tag, { allowV2Beta: true })) {
-    if (name === 'release-info.json') continue;
-    const target = name.includes('_linux_amd64')
-      ? path.join(directory, 'native', name)
-      : path.join(directory, name);
-    mkdirSync(path.dirname(target), { recursive: true });
-    writeFileSync(
-      target,
+    if (name === 'checksums.txt') continue;
+    const relativePath = name.includes('_linux_amd64') ? `native/${name}` : name;
+    const target = path.join(directory, relativePath);
+    if (name !== 'release-info.json') {
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(
+        target,
+        name === 'embedded-release-pairing.json'
+          ? JSON.stringify(v2Pairing(tag))
+          : name === 'docker-compose.v2-embedded.yml'
+            ? v2ComposeContent
+            : `${name}\n`
+      );
+    }
+    const content = name === 'release-info.json' ? JSON.stringify(info, null, 2) : (
       name === 'embedded-release-pairing.json'
         ? JSON.stringify(v2Pairing(tag))
         : name === 'docker-compose.v2-embedded.yml'
           ? v2ComposeContent
           : `${name}\n`
     );
+    checksumLines.push(`${sha256Of(content).slice(7)}  ${relativePath}\n`);
   }
+  writeFileSync(path.join(directory, 'checksums.txt'), checksumLines.join(''));
   return directory;
 };
 
@@ -597,6 +608,83 @@ describe('v2 beta update index rehearsal', () => {
         candidateAssetsDir: tampered,
       })
     ).rejects.toThrow(/compose asset digest does not match release info/);
+  });
+
+  it('rejects a candidate whose checksums.txt digest or relative path is tampered', async () => {
+    const env = { GITHUB_REPOSITORY: 'seakee/CPA-Manager-Plus', GITHUB_TOKEN: 'fixture' };
+    const fetchImpl = async () => {
+      throw new Error('no request expected');
+    };
+    const tamperedDigestDir = makeCandidateDirectory(makeV2Info());
+    writeFileSync(
+      path.join(tamperedDigestDir, 'checksums.txt'),
+      `${'0'.repeat(64)}  management.html\n`
+    );
+    await expect(
+      publishUpdateIndex({
+        env,
+        fetchImpl,
+        dryRun: true,
+        allowV2Beta: true,
+        candidateAssetsDir: tamperedDigestDir,
+      })
+    ).rejects.toThrow(/checksums/);
+
+    const tamperedPathDir = makeCandidateDirectory(makeV2Info());
+    const nativeName = `cpa-manager-plus-native-v2_${v2Tag}_linux_amd64.tar.gz`;
+    const validChecksums = readFileSync(path.join(tamperedPathDir, 'checksums.txt'), 'utf8');
+    writeFileSync(
+      path.join(tamperedPathDir, 'checksums.txt'),
+      validChecksums.replace(`  native/${nativeName}\n`, `  ${nativeName}\n`)
+    );
+    await expect(
+      publishUpdateIndex({
+        env,
+        fetchImpl,
+        dryRun: true,
+        allowV2Beta: true,
+        candidateAssetsDir: tamperedPathDir,
+      })
+    ).rejects.toThrow(/checksums/);
+  });
+
+  it('rejects a candidate whose native archive bytes disagree with checksums.txt', async () => {
+    const tamperedNative = makeCandidateDirectory(makeV2Info());
+    writeFileSync(
+      path.join(
+        tamperedNative,
+        'native',
+        `cpa-manager-plus-native-v2_${v2Tag}_linux_amd64.tar.gz`
+      ),
+      'tampered-native-archive\n'
+    );
+    await expect(
+      publishUpdateIndex({
+        env: { GITHUB_REPOSITORY: 'seakee/CPA-Manager-Plus', GITHUB_TOKEN: 'fixture' },
+        fetchImpl: async () => {
+          throw new Error('no request expected');
+        },
+        dryRun: true,
+        allowV2Beta: true,
+        candidateAssetsDir: tamperedNative,
+      })
+    ).rejects.toThrow(/checksums/);
+  });
+
+  it('rejects a candidate whose management.html bytes disagree with checksums.txt', async () => {
+    const tamperedHtml = makeCandidateDirectory(makeV2Info());
+    writeFileSync(path.join(tamperedHtml, 'management.html'), 'tampered-management-panel\n');
+    await expect(
+      publishUpdateIndex({
+        env: { GITHUB_REPOSITORY: 'seakee/CPA-Manager-Plus', GITHUB_TOKEN: 'fixture' },
+        fetchImpl: async () => {
+          throw new Error('no request expected');
+        },
+        dryRun: true,
+        allowV2Beta: true,
+        candidateAssetsDir: tamperedHtml,
+      })
+    ).rejects.toThrow(/checksums/);
   });
 
   it('rejects a --candidate path that is not the candidate release-info.json', async () => {

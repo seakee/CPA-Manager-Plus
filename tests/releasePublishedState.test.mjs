@@ -426,8 +426,16 @@ describe('v2 beta published release verification', () => {
   const checksummedFixture = () => {
     const assetsDir = makeV2ReleaseFixture();
     const assets = buildExpectedReleaseAssets(assetsDir, v2Tag, { dryRun: true, allowV2Beta: true });
-    writeFileSync(path.join(assetsDir, 'checksums.txt'), assets.filter(({ name }) => name !== 'checksums.txt')
-      .map(({ name, digest }) => `${digest.slice(7)}  ${name}\n`).join(''));
+    writeFileSync(
+      path.join(assetsDir, 'checksums.txt'),
+      assets
+        .filter(({ name }) => name !== 'checksums.txt')
+        .map(
+          ({ filePath, digest }) =>
+            `${digest.slice(7)}  ${path.relative(assetsDir, filePath).replaceAll('\\', '/')}\n`
+        )
+        .join('')
+    );
     return assetsDir;
   };
 
@@ -450,6 +458,61 @@ describe('v2 beta published release verification', () => {
     if (change === 'invalid') lines[0] = `${'a'.repeat(64)}  ../management.html`;
     writeFileSync(checksumPath, lines.join('\n') + '\n');
     expect(() => verifyLocalReleaseAssets({ tag: v2Tag, assetsDir, dryRun: true, allowV2Beta: true })).toThrow(/checksums/);
+  });
+
+  it('rejects checksum entries whose relative path disagrees with the discovered asset path', () => {
+    // (a) Root asset management.html erroneously given a native/ prefix.
+    const rootWithNativePrefix = checksummedFixture();
+    const checksumPathA = path.join(rootWithNativePrefix, 'checksums.txt');
+    writeFileSync(
+      checksumPathA,
+      readFileSync(checksumPathA, 'utf8').replace('  management.html\n', '  native/management.html\n')
+    );
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag: v2Tag,
+        assetsDir: rootWithNativePrefix,
+        dryRun: true,
+        allowV2Beta: true,
+      })
+    ).toThrow(/checksums/);
+
+    // (b1) Native asset in native/ subdirectory missing the native/ prefix in checksums.txt.
+    const nativeMissingPrefix = checksummedFixture();
+    const nativeFilename = `cpa-manager-plus-native-v2_${v2Tag}_linux_amd64.tar.gz`;
+    const checksumPathB1 = path.join(nativeMissingPrefix, 'checksums.txt');
+    writeFileSync(
+      checksumPathB1,
+      readFileSync(checksumPathB1, 'utf8').replace(
+        `  native/${nativeFilename}\n`,
+        `  ${nativeFilename}\n`
+      )
+    );
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag: v2Tag,
+        assetsDir: nativeMissingPrefix,
+        dryRun: true,
+        allowV2Beta: true,
+      })
+    ).toThrow(/checksums/);
+
+    // (b2) Native asset placed at root directory but listed with native/ prefix in checksums.txt.
+    const nativeAtRootWithPrefix = checksummedFixture();
+    const stagedNativePath = path.join(nativeAtRootWithPrefix, 'native', nativeFilename);
+    writeFileSync(
+      path.join(nativeAtRootWithPrefix, nativeFilename),
+      readFileSync(stagedNativePath)
+    );
+    rmSync(stagedNativePath);
+    expect(() =>
+      verifyLocalReleaseAssets({
+        tag: v2Tag,
+        assetsDir: nativeAtRootWithPrefix,
+        dryRun: true,
+        allowV2Beta: true,
+      })
+    ).toThrow(/checksums/);
   });
 
   it.each([['--dry-run', '--allow-v2-beta'], ['--dry-run', 'true', '--allow-v2-beta', 'true']])(

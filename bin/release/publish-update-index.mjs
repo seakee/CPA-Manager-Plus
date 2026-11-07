@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { expectedReleaseAssetNames } from './verify-published-release.mjs';
+import { existsSync, readFileSync } from 'node:fs';
+import { expectedReleaseAssetNames, verifyLocalReleaseAssets } from './verify-published-release.mjs';
 import {
   validateInfo,
   resolveChannels,
@@ -12,11 +12,9 @@ import {
   assertSupportedVersion,
   validateIndex,
   assertV2AssetSet,
-  assertV2AssetBindings,
   assertBooleanOption,
   isV2Version,
   v2EmbeddedComposeFilename,
-  v2PairingFilename,
   repository,
 } from './update-contract.mjs';
 
@@ -157,41 +155,12 @@ const readCandidateInfo = (assetsDir) => {
   const info = JSON.parse(readFileSync(infoPath, 'utf8'));
   if (info?.schema_version !== 2)
     throw new Error('Candidate assets are only supported for the v2 beta dry run');
-  const tag = info.release.version;
-  const names = [];
-  const collect = (directory, root) => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        if (root && entry.name === 'native') collect(path.join(directory, entry.name), false);
-        else throw new Error('Unexpected candidate asset directory: ' + entry.name);
-        continue;
-      }
-      if (!entry.isFile()) throw new Error('Unexpected candidate asset entry: ' + entry.name);
-      // release.yml stages the reviewed notes beside the assets; like 1.x it is
-      // not part of the published set.
-      if (root && entry.name === 'release-notes.md') continue;
-      names.push(entry.name);
-    }
-  };
-  collect(assetsDir, true);
-  assertV2AssetSet(names, tag);
-  const digests = new Map();
-  const locate = (name) => {
-    const candidates = [path.join(assetsDir, name), path.join(assetsDir, 'native', name)].filter(
-      existsSync
-    );
-    if (candidates.length !== 1) throw new Error('Missing candidate release asset: ' + name);
-    return candidates[0];
-  };
-  for (const name of names) {
-    const bytes = readFileSync(locate(name));
-    if (bytes.length === 0) throw new Error('Empty candidate release asset: ' + name);
-    if (name === v2EmbeddedComposeFilename)
-      digests.set(name, 'sha256:' + createHash('sha256').update(bytes).digest('hex'));
-  }
-  assertV2AssetBindings(info, {
-    composeSha256: digests.get(v2EmbeddedComposeFilename),
-    pairing: JSON.parse(readFileSync(locate(v2PairingFilename), 'utf8')),
+  const tag = info.release?.version;
+  verifyLocalReleaseAssets({
+    tag,
+    assetsDir,
+    dryRun: true,
+    allowV2Beta: true,
   });
   return info;
 };

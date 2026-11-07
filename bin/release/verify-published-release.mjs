@@ -141,14 +141,28 @@ export const buildExpectedReleaseAssets = (assetsDir, tag, options = {}) => {
 export const verifyLocalReleaseAssets = ({ tag, assetsDir, dryRun = false, allowV2Beta = false }) => {
   const assets = buildExpectedReleaseAssets(assetsDir, tag, { dryRun, allowV2Beta });
   const checksums = assets.find((asset) => asset.name === 'checksums.txt');
-  const expected = new Map(assets.filter((asset) => asset !== checksums).map((asset) => [asset.name, asset]));
+  const relativeAssetPath = (asset) =>
+    path.relative(assetsDir, asset.filePath).replaceAll('\\', '/');
+  const expected = new Map(
+    assets
+      .filter((asset) => asset !== checksums)
+      .map((asset) => [relativeAssetPath(asset), asset])
+  );
   const seen = new Set();
   for (const line of readFileSync(checksums.filePath, 'utf8').trimEnd().split(/\r?\n/)) {
     const match = /^([0-9a-f]{64}) [ *]((?:native\/)?([^/\\]+))$/.exec(line);
-    const asset = match && expected.get(match[3]);
-    if (!asset || seen.has(asset.name) || asset.digest !== `sha256:${match[1]}`)
-      fail('Release checksums must list every other asset exactly once with its actual SHA-256');
-    seen.add(asset.name);
+    const relativePath = match?.[2];
+    const asset = relativePath ? expected.get(relativePath) : undefined;
+    if (
+      !asset ||
+      relativeAssetPath(asset) !== relativePath ||
+      seen.has(relativePath) ||
+      asset.digest !== `sha256:${match[1]}`
+    )
+      fail(
+        'Release checksums must list every other asset at its exact relative path once with its actual SHA-256'
+      );
+    seen.add(relativePath);
   }
   if (seen.size !== expected.size) fail('Release checksums are missing expected assets');
   return { tag, mode: 'assets', complete: true, expectedAssets: assets.length, assets };
