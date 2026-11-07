@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -313,6 +313,69 @@ describe('release topology validation', () => {
 
 describe('v2 beta release content continuity', () => {
   const v2Tag = 'v2.0.0-beta.1';
+  it('validates the actual Beta draft only with both strict boolean gates', () => {
+    expect(validateReleaseContent({ tag: v2Tag, dryRun: true, allowV2Beta: true })).toMatchObject({
+      paths: { telegram: `docs/release-posts/${v2Tag}-telegram.html` },
+    });
+    for (const options of [{}, { dryRun: true }, { allowV2Beta: true }]) {
+      expect(() => validateReleaseContent({ tag: v2Tag, ...options })).toThrow(/fail-closed/);
+    }
+    for (const value of ['true', 'false', 1, 0, null]) {
+      expect(() => validateReleaseContent({ tag: v2Tag, dryRun: value, allowV2Beta: true })).toThrow(/boolean/);
+      expect(() => validateReleaseTopology({ tag: v2Tag, dryRun: true, allowV2Beta: value })).toThrow(/boolean/);
+    }
+  });
+
+  it.each(['v2.0.0', 'v2.0.0-rc.1', 'v2.0.0-beta.01', 'v2.0.0-beta3'])(
+    'rejects unsupported v2 version %s even during rehearsal', (tag) => {
+      expect(() => validateReleaseContent({ tag, dryRun: true, allowV2Beta: true })).toThrow();
+    }
+  );
+
+  it('binds the Beta rehearsal to the exact selected commit and committed release files', () => {
+    const sha = 'a'.repeat(40);
+    const calls = [];
+    const git = (args) => {
+      calls.push(args);
+      if (args[0] === 'rev-parse' && args[2] === 'origin/v2^{commit}') return sha;
+      if (args[0] === 'show') return readFileSync(new URL(`../${args[1].split(':')[1]}`, import.meta.url), 'utf8');
+      throw new Error(`Unexpected git call: ${args.join(' ')}`);
+    };
+    expect(validateReleaseTopology({ tag: v2Tag, sha, v2Ref: 'origin/v2', dryRun: true, allowV2Beta: true, git }))
+      .toMatchObject({ candidateSha: sha, sourceRef: 'origin/v2', sourceSha: sha });
+    expect(calls.filter((args) => args[0] === 'show')).toHaveLength(3);
+    expect(() => validateReleaseTopology({ tag: v2Tag, sha: 'b'.repeat(40), v2Ref: 'origin/v2', dryRun: true, allowV2Beta: true, git }))
+      .toThrow('is not the current origin/v2');
+    expect(() => validateReleaseTopology({ tag: v2Tag, sha, v2Ref: 'origin/v2', dryRun: true, allowV2Beta: true,
+      git: (args) => args[0] === 'show' ? (() => { throw new Error('missing committed notes'); })() : git(args),
+    })).toThrow('missing committed notes');
+  });
+
+  it('fails before IO without both Beta gates', () => {
+    const readFile = () => { throw new Error('unexpected file read'); };
+    const git = () => { throw new Error('unexpected git call'); };
+    expect(() => validateReleaseContent({ tag: v2Tag, readFile })).toThrow(/fail-closed/);
+    expect(() => validateReleaseTopology({ tag: v2Tag, dryRun: true, git })).toThrow(/fail-closed/);
+  });
+
+  it('validates newly added Beta content through the same changed-content PR gate', () => {
+    const changedFiles = [`docs/release-notes/${v2Tag}-zh.md`, `docs/release-notes/${v2Tag}-en.md`, `docs/release-posts/${v2Tag}-telegram.html`];
+    expect(() => validateChangedReleaseContent({ changedFiles })).toThrow(/fail-closed/);
+    expect(validateChangedReleaseContent({ changedFiles, dryRun: true, allowV2Beta: true }).tags).toEqual([v2Tag]);
+    for (const [field, value] of [
+      ['summary', { zh: '', en: 'Beta' }],
+      ['update', { breaking: true, migration_required: false, minimum_direct_upgrade_version: 'v1.14.10', upgrade_guide_url: 'https://github.com/seakee/CPA-Manager-Plus/releases/tag/' + v2Tag }],
+      ['compatibility', { minimum_cpa_version: 'v7.0.0' }],
+    ]) {
+      const original = readFileSync(new URL(`../docs/release-notes/${v2Tag}-zh.md`, import.meta.url), 'utf8');
+      const metadata = JSON.parse(/<!-- cpamp-update\s*([\s\S]*?)-->/.exec(original)[1]);
+      metadata[field] = value;
+      expect(() => validateReleaseContent({ tag: v2Tag, dryRun: true, allowV2Beta: true,
+        readFile: (filePath) => filePath.endsWith('-zh.md') ? original.replace(/<!-- cpamp-update[\s\S]*?-->/, `<!-- cpamp-update\n${JSON.stringify(metadata)}\n-->`) : readFileSync(filePath, 'utf8'),
+      })).toThrow();
+    }
+  });
+
   it('accepts v2 Beta note pairs and keeps the prerelease flag', () => {
     expect(parseReleaseTag(v2Tag)).toEqual({ tag: v2Tag, prerelease: true });
     const chinese = `# CPA Manager Plus ${v2Tag}

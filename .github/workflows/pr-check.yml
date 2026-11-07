@@ -963,7 +963,7 @@ jobs:
             git diff --name-only --no-renames --diff-filter=A -z "${PUSH_BEFORE_SHA}..${CURRENT_SHA}" > "${changed_files}"
           fi
 
-          npm run --silent release:validate -- --changed-content --null < "${changed_files}"
+          npm run --silent release:validate -- --changed-content --null --dry-run --allow-v2-beta < "${changed_files}"
 
   required:
     name: Required checks

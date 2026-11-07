@@ -732,6 +732,7 @@ describe('GitHub Actions workflow integrity', () => {
 
     expect(releaseJob).toContain('name: Release Content');
     expect(releaseJob).toContain('--changed-content --null');
+    expect(releaseJob).toContain('--dry-run --allow-v2-beta');
     expect(releaseJob).toContain('--diff-filter=A -z');
     expect(requiredJob).toContain('- release-content');
     expect(requiredJob).toContain("RELEASE_CONTENT_RESULT: ${{ needs['release-content'].result }}");
@@ -823,6 +824,79 @@ describe('GitHub Actions workflow integrity', () => {
     expect(workflow).not.toContain('Generate release notes');
     expect(workflow).not.toContain('git log --pretty');
     expect(workflow).not.toContain('previous_tag');
+  });
+
+  it.each([
+    ['workflow_dispatch', 'refs/heads/main', 'v2.0.0-beta.1', 'true', true],
+    ['workflow_dispatch', 'refs/heads/v2', 'v2.0.0-beta.1', 'true', true],
+    ['workflow_dispatch', 'refs/heads/dev', 'v2.0.0-beta.1', 'true', false],
+    ['workflow_dispatch', 'refs/heads/v2', 'v1.14.11', 'true', false],
+    ['workflow_dispatch', 'refs/heads/main', 'v1.14.11', 'true', true],
+    ['workflow_dispatch', 'refs/heads/main', 'v2.0.0-beta.1', 'false', false],
+    ['workflow_dispatch', 'refs/heads/v2', 'v2.0.0-beta.1', 'false', false],
+    ['push', 'refs/tags/v2.0.0-beta.1', 'v2.0.0-beta.1', '', false],
+    ['workflow_dispatch', 'refs/heads/v2', 'v2.0.0', 'true', false],
+    ['workflow_dispatch', 'refs/heads/v2', 'v2.0.0-rc.1', 'true', false],
+  ])('enforces release context gates: %s %s %s dry=%s', (event, ref, tag, dryRun, accepted) => {
+    const workflow = parseYaml(readWorkflow('release.yml'));
+    const script = workflow.jobs.preflight.steps.find((step) => step.id === 'context').run;
+    const scratch = mkdtempSync(path.join(tmpdir(), 'cpamp-release-context-'));
+    try {
+      const result = spawnSync('bash', ['-c', script], {
+        cwd: repoRoot, encoding: 'utf8', env: { ...process.env,
+          EVENT_NAME: event, EVENT_REF: ref, EVENT_REF_NAME: tag,
+          INPUT_VERSION: tag, INPUT_DRY_RUN: dryRun, GITHUB_OUTPUT: path.join(scratch, 'output'),
+        },
+      });
+      expect(result.status === 0, result.stderr).toBe(accepted);
+      if (tag.startsWith('v2.') && (event === 'push' || dryRun === 'false'))
+        expect(result.stderr).toContain('v2 real release publishing requires explicit maintainer gate unlock');
+      if (accepted && tag.startsWith('v2.'))
+        expect(readFileSync(path.join(scratch, 'output'), 'utf8')).toContain('release_major=2');
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  });
+
+  it('keeps the v2 candidate and six-asset rehearsal separate from the 1.x producers', () => {
+    const workflow = parseYaml(readWorkflow('release.yml'));
+    const jobs = workflow.jobs;
+    const build = jobBlock(readWorkflow('release.yml'), 'build_release_assets');
+    expect(build).toContain("PACKAGE_MODE: ${{ needs.preflight.outputs.release_major == '2' && 'v2' || 'v1' }}");
+    expect(build).toContain('cpa-manager-plus-native-v2_${RELEASE_TAG}_linux_amd64.tar.gz');
+    const docker = jobs.build_and_push_docker.steps;
+    expect(docker.find((step) => step.name === 'Build and publish Manager Server image').if).toBe("env.RELEASE_MAJOR == '1'");
+    const candidate = docker.find((step) => step.name === 'Build and verify Embedded OCI candidate without publication');
+    expect(candidate.if).toBe("env.RELEASE_MAJOR == '2' && env.DRY_RUN == 'true'");
+    for (const script of ['build-embedded-candidate.sh', 'verify-embedded-candidate.py', 'render-embedded-compose.mjs'])
+      expect(candidate.run).toContain(script);
+    expect(candidate.env.CPAMP_CANDIDATE_LOAD).toBe('0');
+    expect(candidate.run).not.toMatch(/--push|docker push/);
+    expect(jobs.package_release_assets.if).toBe("needs.preflight.outputs.release_major == '2' && needs.preflight.outputs.dry_run == 'true'");
+    const pack = jobBlock(readWorkflow('release.yml'), 'package_release_assets');
+    expect(pack).toContain('--mode assets');
+    expect(pack).toContain('--dry-run --allow-v2-beta');
+    expect(pack).toContain('--dry-run --allow-v2-beta-dry-run');
+    expect(pack).toContain('versions.json');
+    expect(jobs.publish_github_release.if).toBe("needs.preflight.outputs.dry_run != 'true'");
+    expect(jobs.notify_telegram.if).toContain("needs.preflight.outputs.dry_run != 'true'");
+    for (const step of jobs.inspect_github_release.steps.filter((step) => step.uses?.startsWith('softprops/')))
+      expect(step.if).toContain("env.DRY_RUN != 'true'");
+    // Walk every dependency, rejecting a cycle before it can strand artifacts.
+    const visit = (name, ancestors = []) => {
+      expect(ancestors, name).not.toContain(name);
+      const needs = jobs[name].needs ?? [];
+      for (const dependency of typeof needs === 'string' ? [needs] : needs) visit(dependency, [...ancestors, name]);
+    };
+    for (const name of Object.keys(jobs)) visit(name);
+  });
+
+  it('defaults manual update channel publication to a write-free dry-run', () => {
+    const workflow = parseYaml(readWorkflow('update-index-publish.yml'));
+    expect(workflow.on.workflow_dispatch.inputs.dry_run).toMatchObject({ type: 'boolean', default: true });
+    expect(workflow.on.workflow_call.inputs.dry_run.default).toBe(false);
+    const step = workflow.jobs.publish.steps.find((step) => step.name === 'Reconcile aliases and publish index last');
+    expect(step.env.DRY_RUN).toBe('${{ inputs.dry_run }}');
+    expect(step.run).toContain('if [ "${DRY_RUN}" = "true" ]; then args+=(--dry-run); fi');
+    expect(step.run).toContain('publish-update-index.mjs "${args[@]}"');
   });
 
   it('scopes Telegram secrets to the delivery step', () => {

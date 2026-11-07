@@ -1,0 +1,13 @@
+<b>CPA Manager Plus v2.0.0-beta.1 · 首个 v2 Beta 预发布草案</b>
+
+<b>更新内容</b>
+• Embedded 使用 Manager、Ingress、Runtime 三容器部署，以 <code>docker-compose.v2-embedded.yml</code> 固定镜像 Digest，并通过 <code>embedded-release-pairing.json</code> 记录配对。
+• Native 提供 linux/amd64 包 <code>cpa-manager-plus-native-v2_v2.0.0-beta.1_linux_amd64.tar.gz</code>，包含三项 CPAMP 服务与 CPA v8.0.55。
+• 保留 <code>management.html</code> Lite 面板，供明确选择 Beta 版本的用户尝鲜。
+
+<b>注意事项</b>
+• 当前仅为 DRY_RUN 演练草案，不代表已发布；真实发布及通知仍需维护者授权。
+• <code>releases/latest</code> 与 <code>install-cpamp.sh</code> 默认继续服务 1.x Stable，不会自动切换至 v2。
+• 1.x 到 v2 需要备份、迁移与恢复式回滚，不支持直接覆盖旧版单二进制；Beta 仅支持 linux/amd64。
+
+<a href="https://github.com/seakee/CPA-Manager-Plus/blob/v2.0.0-beta.1/docs/release-notes/v2.0.0-beta.1-zh.md">阅读完整说明与升级注意事项</a>

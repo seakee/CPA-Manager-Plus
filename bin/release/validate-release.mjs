@@ -2,7 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { generateReleaseInfo } from './generate-release-info.mjs';
+import { generateReleaseInfo, validateReleaseMetadata } from './generate-release-info.mjs';
+import { assertSupportedVersion, assertV2Rehearsal } from './update-contract.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const repositoryUrl = 'https://github.com/seakee/CPA-Manager-Plus';
@@ -136,10 +137,15 @@ export const validateReleaseNotes = ({ tag, chinese, english }) => {
 
 export const validateReleaseContent = ({
   tag,
+  dryRun = false,
+  allowV2Beta = false,
   readFile = (filePath) => readFileSync(filePath, 'utf8'),
   fileExists = (filePath) => existsSync(filePath),
 }) => {
   parseReleaseTag(tag);
+  const options = { dryRun, allowV2Beta };
+  assertV2Rehearsal(tag, options);
+  const version = assertSupportedVersion(tag, options);
   const paths = releasePaths(tag);
   const missing = Object.values(paths).filter(
     (relativePath) => !fileExists(path.resolve(repoRoot, relativePath))
@@ -149,7 +155,8 @@ export const validateReleaseContent = ({
   const chinese = readFile(path.resolve(repoRoot, paths.chinese));
   const english = readFile(path.resolve(repoRoot, paths.english));
   const telegram = readFile(path.resolve(repoRoot, paths.telegram));
-  generateReleaseInfo(tag, '0'.repeat(40), chinese);
+  if (version.core[0] === '2') validateReleaseMetadata(tag, chinese, options);
+  else generateReleaseInfo(tag, '0'.repeat(40), chinese);
   return {
     paths,
     notes: validateReleaseNotes({ tag, chinese, english }),
@@ -175,7 +182,7 @@ const releaseTagFromPath = (filePath) => {
   return null;
 };
 
-export const validateChangedReleaseContent = ({ changedFiles, readFile, fileExists }) => {
+export const validateChangedReleaseContent = ({ changedFiles, readFile, fileExists, dryRun = false, allowV2Beta = false }) => {
   const tags = [
     ...new Set(
       changedFiles
@@ -190,6 +197,8 @@ export const validateChangedReleaseContent = ({ changedFiles, readFile, fileExis
     releases: tags.map((tag) =>
       validateReleaseContent({
         tag,
+        dryRun,
+        allowV2Beta,
         ...(readFile ? { readFile } : {}),
         ...(fileExists ? { fileExists } : {}),
       })
@@ -220,11 +229,31 @@ export const validateReleaseTopology = ({
   sha,
   mainRef = 'origin/main',
   devRef = 'origin/dev',
+  v2Ref,
+  dryRun = false,
+  allowV2Beta = false,
   requireTagRef = true,
   git = runGit,
 }) => {
   parseReleaseTag(tag);
+  const options = { dryRun, allowV2Beta };
+  assertV2Rehearsal(tag, options);
+  const version = assertSupportedVersion(tag, options);
   const candidateSha = sha || resolveCommit(git, 'HEAD');
+  if (version.core[0] === '2') {
+    const sourceRef = v2Ref || mainRef;
+    const sourceSha = resolveCommit(git, sourceRef);
+    if (candidateSha !== sourceSha)
+      fail(`Candidate ${candidateSha} is not the current ${sourceRef} ${sourceSha}`);
+    // Rehearsal binds the selected ref's committed content, not a 1.x
+    // dev/main promotion topology or package.json's still-1.x version.
+    const content = validateReleaseContent({
+      tag, ...options,
+      fileExists: () => true,
+      readFile: (filePath) => git(['show', `${candidateSha}:${path.relative(repoRoot, filePath)}`]),
+    });
+    return { tag, candidateSha, sourceRef, sourceSha, dryRun: true, content };
+  }
   const mainSha = resolveCommit(git, mainRef);
   const devSha = resolveCommit(git, devRef);
 
@@ -283,6 +312,7 @@ const parseArguments = (argv) => {
     const argument = argv[index];
     if (argument === '--content-only') options.contentOnly = true;
     else if (argument === '--dry-run') options.dryRun = true;
+    else if (argument === '--allow-v2-beta') options.allowV2Beta = true;
     else if (argument === '--changed-content') options.changedContent = true;
     else if (argument === '--null') options.null = true;
     else if (argument.startsWith('--')) {
@@ -299,20 +329,24 @@ const runCli = () => {
     if (options.changedContent) {
       const input = readFileSync(0, 'utf8');
       const changedFiles = input.split(options.null ? '\0' : /\r?\n/).filter(Boolean);
-      const content = validateChangedReleaseContent({ changedFiles });
+      const content = validateChangedReleaseContent({ changedFiles, dryRun: options.dryRun, allowV2Beta: options.allowV2Beta });
       console.log(JSON.stringify({ ok: true, mode: 'changed-content', ...content }, null, 2));
       return;
     }
     if (options.null) fail('--null requires --changed-content');
     if (!options.tag) fail('--tag is required');
-    const content = validateReleaseContent({ tag: options.tag });
-    const topology = options.contentOnly
+    if (options.mode && !['notes', 'full'].includes(options.mode)) fail('--mode must be notes or full');
+    const content = validateReleaseContent({ tag: options.tag, dryRun: options.dryRun, allowV2Beta: options.allowV2Beta });
+    const topology = options.contentOnly || options.mode === 'notes'
       ? null
       : validateReleaseTopology({
           tag: options.tag,
           sha: options.sha,
           mainRef: options.mainRef || 'origin/main',
           devRef: options.devRef || 'origin/dev',
+          v2Ref: options.v2Ref,
+          dryRun: options.dryRun,
+          allowV2Beta: options.allowV2Beta,
           requireTagRef: !options.dryRun,
         });
     console.log(
