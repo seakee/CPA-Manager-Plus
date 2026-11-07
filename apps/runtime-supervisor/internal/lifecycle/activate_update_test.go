@@ -481,6 +481,36 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 		t.Fatalf("Start() error = %v", err)
 	}
 
+	wantArgs := []string{"-config", filepath.Join(destRoot, "config.yaml")}
+
+	// 1. Candidate B start failure rolls back to A and restores stage.json to idA.
+	f.child.onStart = func(_ context.Context, spec cpaprocess.StartSpec) error {
+		if spec.Executable == pathB {
+			return errors.New("candidate start failed")
+		}
+		return f.observer.RefreshFrom(spec.Executable, "")
+	}
+	failedResult, err := f.starter.ActivateUpdate(t.Context(), ActivateUpdateRequest{
+		OperationID:               "activate-8.0.59-rollback",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+		TargetVersion:             "8.0.59",
+	})
+	if err != nil || failedResult.State != journal.StateFailed || failedResult.FailureCode != "activation_start_failed" {
+		t.Fatalf("rollback ActivateUpdate() = %+v, %v; want failed activation_start_failed", failedResult, err)
+	}
+	if f.child.lastSpec.Executable != pathA || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
+		t.Fatalf("rolled-back child spec = %+v; want executable %q args %v", f.child.lastSpec, pathA, wantArgs)
+	}
+	if staged, loadErr := f.starter.destination.load(); loadErr != nil || staged == nil || staged.ExpectedActiveArtifactID != idA {
+		t.Fatalf("stage.json after rollback = %+v, %v; want ExpectedActiveArtifactID %q", staged, loadErr, idA)
+	}
+
+	// 2. Retry ActivateUpdate succeeds, spawns B with -config, and persists idB in stage.json.
+	f.child.onStart = func(_ context.Context, spec cpaprocess.StartSpec) error {
+		return f.observer.RefreshFrom(spec.Executable, "")
+	}
 	result, err := f.starter.ActivateUpdate(t.Context(), ActivateUpdateRequest{
 		OperationID:               "activate-8.0.59",
 		ExpectedRuntimeIdentity:   "runtime-01",
@@ -491,10 +521,14 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 	if err != nil || result.State != journal.StateSucceeded {
 		t.Fatalf("ActivateUpdate() = %+v, %v; want succeeded", result, err)
 	}
-	wantArgs := []string{"-config", filepath.Join(destRoot, "config.yaml")}
 	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
 		t.Fatalf("activated child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
 	}
+	if staged, loadErr := f.starter.destination.load(); loadErr != nil || staged == nil || staged.ExpectedActiveArtifactID != idB {
+		t.Fatalf("stage.json after activation = %+v, %v; want ExpectedActiveArtifactID %q", staged, loadErr, idB)
+	}
+
+	// 3. Restart after activation preserves B and -config.
 	if _, err := f.starter.Restart(t.Context(), RestartRequest{
 		OperationID:               "restart-after-activate",
 		ExpectedRuntimeIdentity:   "runtime-01",
@@ -505,10 +539,51 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
 		t.Fatalf("restarted child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
 	}
+
+	// 4. Automatic recovery after unexpected exit preserves B and -config.
+	crashedInstance := f.child.observation.InstanceID
+	f.child.observation = cpaprocess.Observation{
+		State:      cpaprocess.StateExited,
+		InstanceID: crashedInstance,
+	}
+	f.starter.recoveryMu.Lock()
+	epoch := f.starter.recoveryEpoch
+	f.starter.recoveryState = RecoveryStateRecovering
+	f.starter.recoveryMu.Unlock()
+	f.starter.executeAutomaticRecovery(epoch, crashedInstance)
+	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
+		t.Fatalf("recovered child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
+	}
+
+	// 5. Supervisor reconstruction preserves B and -config on Start.
+	reconstructed, err := NewExecutor(f.starter.authority, f.journal, f.child, pathA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reconstructed.CloseAdmission() })
+	if err := reconstructed.EnableActivateUpdate(f.candidate, f.observer, f.selections, f.ready); err != nil {
+		t.Fatal(err)
+	}
+	if err := reconstructed.EnableDestination(destRoot, filepath.Join(dir, "gateway", "auth"), "127.0.0.1:8317", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.child.observation = cpaprocess.Observation{State: cpaprocess.StateNotStarted}
+	if _, err := reconstructed.Start(t.Context(), StartRequest{
+		OperationID:               "start-after-reconstruct",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idB,
+	}); err != nil {
+		t.Fatalf("reconstructed Start() error = %v", err)
+	}
+	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
+		t.Fatalf("reconstructed child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
+	}
+	// 6. Tampering with activated binary on disk is rejected with ErrActiveArtifactMismatch.
 	if err := os.WriteFile(pathB, []byte("tampered-staged-cpa-binary"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.starter.startProcess(t.Context(), pathB); !errors.Is(err, ErrActiveArtifactMismatch) {
+	if _, err := reconstructed.startProcess(t.Context(), pathB); !errors.Is(err, ErrActiveArtifactMismatch) {
 		t.Fatalf("startProcess() with tampered activated binary = %v; want %v", err, ErrActiveArtifactMismatch)
 	}
 }

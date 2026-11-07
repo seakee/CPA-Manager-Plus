@@ -4792,6 +4792,7 @@
     "database_checkpoint_passive": "PASSIVE",
     "database_checkpoint_truncate": "TRUNCATE",
     "database_checkpoint_unavailable": "Недоступно",
+    "database_checkpoint_unobserved": "Не отслеживается",
     "database_checkpoint_frames": "{{checkpointed}} / {{log}}",
     "database_checkpoint_time": "{{time}} · {{duration}} мс",
     "database_checkpoint_error": "Ошибка контрольной точки",

@@ -4796,6 +4796,7 @@
     "database_checkpoint_passive": "PASSIVE",
     "database_checkpoint_truncate": "TRUNCATE",
     "database_checkpoint_unavailable": "Unavailable",
+    "database_checkpoint_unobserved": "Not observed",
     "database_checkpoint_frames": "{{checkpointed}} / {{log}}",
     "database_checkpoint_time": "{{time}} · {{duration}} ms",
     "database_checkpoint_error": "Checkpoint error",

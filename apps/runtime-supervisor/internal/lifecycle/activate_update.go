@@ -2,8 +2,11 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
@@ -226,7 +229,11 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, 0,
 			"activation_target_changed", err, operationDeadline)
 	}
-	started, err := e.startDescriptorProcess(executionCtx, candidate)
+	if err := e.syncDestinationExpectedArtifactLocked(candidate.ArtifactID); err != nil {
+		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, 0,
+			"activation_start_failed", err, operationDeadline)
+	}
+	started, err := e.startProcess(executionCtx, candidate.ExecutablePath)
 	if err != nil {
 		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, 0,
 			"activation_start_failed", err, operationDeadline)
@@ -374,6 +381,9 @@ func (e *Executor) rollbackActivation(
 		return e.failRollback(operation, operationID, err)
 	}
 
+	if err := e.syncDestinationExpectedArtifactLocked(prior.ArtifactID); err != nil {
+		return e.failRollback(operation, operationID, err)
+	}
 	observed = e.process.Observe()
 	var restored cpaprocess.Observation
 	if observed.State == cpaprocess.StateRunning && observed.InstanceID == priorInstance && candidateInstance == 0 {
@@ -383,7 +393,7 @@ func (e *Executor) rollbackActivation(
 			return e.failRollback(operation, operationID, errors.New("cannot safely spawn rollback child"))
 		}
 		var err error
-		restored, err = e.startDescriptorProcess(rollbackCtx, prior)
+		restored, err = e.startProcess(rollbackCtx, prior.ExecutablePath)
 		if err != nil {
 			return e.failRollback(operation, operationID, err)
 		}
@@ -438,4 +448,34 @@ func (e *Executor) completeActivation(
 		return operation, err
 	}
 	return result, nil
+}
+
+func (e *Executor) syncDestinationExpectedArtifactLocked(artifactID artifact.ID) error {
+	if e.destination == nil {
+		return nil
+	}
+	staged, err := e.destination.load()
+	if err != nil || staged == nil || staged.ExpectedActiveArtifactID == artifactID {
+		return err
+	}
+	if !artifactID.IsValid() {
+		return ErrActiveArtifactMismatch
+	}
+	updated := *staged
+	updated.ExpectedActiveArtifactID = artifactID
+	data, err := json.Marshal(updated)
+	if err != nil || updated.Validate() != nil {
+		return ErrPersistenceUnavailable
+	}
+	tmp := filepath.Join(e.destination.root, ".stage.json.tmp")
+	_ = os.Remove(tmp)
+	if err := writeDestinationFile(tmp, data, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, filepath.Join(e.destination.root, "stage.json")); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return syncDestinationDirectory(e.destination.root)
 }

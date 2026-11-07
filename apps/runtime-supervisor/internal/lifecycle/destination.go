@@ -18,7 +18,6 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/filetrust"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/journal"
-	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
 )
 
 // DestinationRequest deliberately permits only one native resource: client
@@ -586,15 +585,6 @@ func syncDestinationDirectory(name string) error {
 }
 
 func (e *Executor) startProcess(ctx context.Context, executable string) (cpaprocess.Observation, error) {
-	descriptor := e.currentDescriptorLocked()
-	if descriptor.ExecutablePath != executable {
-		descriptor = selection.Bundled(executable, "")
-	}
-	return e.startDescriptorProcess(ctx, descriptor)
-}
-
-func (e *Executor) startDescriptorProcess(ctx context.Context, descriptor selection.Descriptor) (cpaprocess.Observation, error) {
-	executable := descriptor.ExecutablePath
 	spec := cpaprocess.StartSpec{Executable: executable}
 	if e.destination != nil {
 		staged, err := e.destination.load()
@@ -602,13 +592,8 @@ func (e *Executor) startDescriptorProcess(ctx context.Context, descriptor select
 			return cpaprocess.Observation{}, err
 		}
 		if staged != nil {
-			expectedArtifactID := staged.ExpectedActiveArtifactID
-			if descriptor.IsFinalizedStage() && descriptor.ArtifactID.IsValid() {
-				expectedArtifactID = descriptor.ArtifactID
-			}
-			// Every Start, Restart, recovery and update activation spawn
-			// preserves this destination and exact selected artifact,
-			// including after Supervisor reconstruction.
+			// Every Start, Restart and recovery spawn preserves this destination
+			// and exact artifact, including after Supervisor reconstruction.
 			f, err := os.Open(executable)
 			if err != nil {
 				return cpaprocess.Observation{}, err
@@ -616,7 +601,7 @@ func (e *Executor) startDescriptorProcess(ctx context.Context, descriptor select
 			h := sha256.New()
 			_, hashErr := io.Copy(h, f)
 			closeErr := f.Close()
-			if hashErr != nil || closeErr != nil || "sha256:"+hex.EncodeToString(h.Sum(nil)) != string(expectedArtifactID) {
+			if hashErr != nil || closeErr != nil || "sha256:"+hex.EncodeToString(h.Sum(nil)) != string(staged.ExpectedActiveArtifactID) {
 				return cpaprocess.Observation{}, ErrActiveArtifactMismatch
 			}
 			spec.Args = []string{"-config", filepath.Join(e.destination.root, "config.yaml")}

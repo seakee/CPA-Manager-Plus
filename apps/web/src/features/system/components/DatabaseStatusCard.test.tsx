@@ -2,6 +2,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import type { UsageServiceStatus } from '@/services/api/usageService';
 import { DatabaseStatusCard } from './DatabaseStatusCard';
+import enLocale from '@/i18n/locales/en.json';
+import ruLocale from '@/i18n/locales/ru.json';
+import zhCNLocale from '@/i18n/locales/zh-CN.json';
+import zhTWLocale from '@/i18n/locales/zh-TW.json';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -170,5 +174,14 @@ describe('DatabaseStatusCard', () => {
     expect(markup).not.toContain('statusWarn');
     expect(markup).not.toContain('system_info.database_checkpoint_frames');
     expect(markup).not.toContain('system_info.database_checkpoint_pending');
+  });
+
+  it('defines distinct database_checkpoint_unobserved translations in built-in locales', () => {
+    for (const locale of [enLocale, ruLocale, zhCNLocale, zhTWLocale]) {
+      expect(locale.system_info.database_checkpoint_unobserved).toBeTruthy();
+      expect(locale.system_info.database_checkpoint_unobserved).not.toBe(
+        locale.system_info.database_checkpoint_unavailable
+      );
+    }
   });
 });
