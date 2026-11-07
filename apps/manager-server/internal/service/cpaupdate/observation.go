@@ -102,10 +102,11 @@ func (s *Service) observe(ctx context.Context, phase MutationPhase, request Obse
 		TargetVersion:      request.TargetVersion,
 		RuntimeOperationID: runtimeOperationID(phase, request.RequestID),
 	}
-	if !s.mode.IsValid() {
+	mode := s.currentMode()
+	if !mode.IsValid() {
 		return ObservationResult{}, newObservationError(ObservationErrorUnavailable, "runtime_mode_invalid")
 	}
-	if s.mode != model.RuntimeModeEmbedded {
+	if mode != model.RuntimeModeEmbedded {
 		return ObservationResult{}, newObservationError(ObservationErrorConflict, "managed_externally")
 	}
 	if s.runtime == nil {

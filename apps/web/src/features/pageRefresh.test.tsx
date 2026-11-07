@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
     managementKey: 'a',
     connectionStatus: 'connected',
     supportsPlugin: true,
+    sessionMode: undefined as string | undefined,
   },
   managerBase: 'https://manager.test',
   params: new URLSearchParams(),
@@ -137,6 +138,7 @@ vi.mock('@/services/api/usageService', () => ({
     getApiKeyAliases: mocks.aliases,
     getAccountProcessingPolicy: mocks.policy, updateAccountProcessingPolicy: mocks.updatePolicy,
   },
+  getUsageServiceErrorCode: (err: { status?: number }) => (err?.status === 401 ? 'invalid_admin_key' : undefined),
 }));
 vi.mock('./monitoring/services/monitoringMetaService', () => ({
   loadMonitoringMetaPayload: mocks.meta,
@@ -1510,6 +1512,28 @@ describe('page refresh interactions', () => {
       .find((n) => text(n).includes('nav.ai_providers'));
     expect(providerLink).toBeDefined();
     expect(text(providerLink!)).toContain('5');
+  });
+
+  it('degrades SystemPage model probe 401 on manager_embedded without false admin-key error when uncached', async () => {
+    const retainedModels = mocks.models.models;
+    const retainedCache = mocks.models.cache;
+    const retainedSessionMode = mocks.auth.sessionMode;
+    mocks.auth.sessionMode = 'manager_embedded';
+    mocks.models.models = [];
+    mocks.models.cache = null as unknown as typeof retainedCache;
+    mocks.models.error = 'Request failed with status code 401';
+    mocks.fetchModels.mockRejectedValueOnce({ status: 401, message: 'Request failed with status code 401' });
+    try {
+      await mount(<SystemPage />);
+      expect(text(renderer.root)).toContain('system_info.models_empty');
+      expect(text(renderer.root)).not.toContain('usage_service_errors.invalid_admin_key');
+      expect(text(renderer.root)).not.toContain('Request failed with status code 401');
+    } finally {
+      mocks.auth.sessionMode = retainedSessionMode;
+      mocks.models.models = retainedModels;
+      mocks.models.cache = retainedCache;
+      mocks.models.error = null;
+    }
   });
 
   it('retains candidates after failure and clears them on filter or manager changes', async () => {

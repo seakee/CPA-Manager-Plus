@@ -249,3 +249,30 @@ func TestFreshNewInstallationPreparesEmptyTableDerivedIndexesBeforeInitialKeyBin
 		t.Fatalf("fresh installation reported pending database maintenance after initial key binding: %+v", status)
 	}
 }
+
+func TestFreshNewInstallationWiresDatabaseStatusAndCPAUpdateEndpoints(t *testing.T) {
+	harness := newFreshUsageHarness(t)
+	defer harness.cleanup()
+	harness.app.runtime = &freshRuntimeTestClient{status: freshRuntimeReadyStatus()}
+
+	statusRec := harness.call("GET", "cpamp/status", "")
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("GET /control/api/v2/cpamp/status status=%d body=%s", statusRec.Code, statusRec.Body.String())
+	}
+	var statusPayload map[string]any
+	if err := json.Unmarshal(statusRec.Body.Bytes(), &statusPayload); err != nil {
+		t.Fatalf("decode status payload: %v", err)
+	}
+	dbSnapshot, ok := statusPayload["database"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected database snapshot in /cpamp/status payload, got %+v", statusPayload)
+	}
+	if dbBytes, _ := dbSnapshot["databaseBytes"].(float64); dbBytes <= 0 {
+		t.Fatalf("expected positive databaseBytes in /cpamp/status payload, got %+v", dbSnapshot)
+	}
+
+	updatesRec := harness.call("GET", "cpamp/usage-service/runtime/updates", "")
+	if updatesRec.Code != http.StatusOK {
+		t.Fatalf("GET /control/api/v2/cpamp/usage-service/runtime/updates status=%d body=%s", updatesRec.Code, updatesRec.Body.String())
+	}
+}

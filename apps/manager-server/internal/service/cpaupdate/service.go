@@ -67,6 +67,7 @@ type Service struct {
 	store             Store
 	runtime           runtimeservice.RuntimeClient
 	mode              model.RuntimeMode
+	modeResolver      func() model.RuntimeMode
 	source            stableReleaseSource
 	now               func() time.Time
 	loaded            bool
@@ -82,6 +83,18 @@ func New(store Store, runtimeClient runtimeservice.RuntimeClient, mode model.Run
 		source:  newOfficialReleaseSource(),
 		now:     time.Now,
 	}
+}
+
+func (s *Service) WithModeResolver(resolve func() model.RuntimeMode) *Service {
+	s.modeResolver = resolve
+	return s
+}
+
+func (s *Service) currentMode() model.RuntimeMode {
+	if s.modeResolver != nil {
+		return s.modeResolver()
+	}
+	return s.mode
 }
 
 func (s *Service) Status(ctx context.Context) (Status, error) {
@@ -235,7 +248,8 @@ func boundedError(err error) string {
 }
 
 func (s *Service) project(ctx context.Context) (Status, error) {
-	if !s.mode.IsValid() {
+	mode := s.currentMode()
+	if !mode.IsValid() {
 		return Status{}, errors.New("CPA update Runtime mode is invalid")
 	}
 	if s.runtime == nil {
@@ -246,14 +260,14 @@ func (s *Service) project(ctx context.Context) (Status, error) {
 		return Status{}, fmt.Errorf("observe CPA Runtime for update status: %w", err)
 	}
 	status := Status{
-		Mode:          s.mode,
+		Mode:          mode,
 		State:         StateNeverChecked,
 		TargetVersion: s.state.TargetVersion,
 		LastSuccessAt: s.state.LastSuccessAt,
 		LastError:     s.state.LastError,
 		Stale:         discoveryIsStale(s.state, s.now()),
 	}
-	if s.mode == model.RuntimeModeExternal {
+	if mode == model.RuntimeModeExternal {
 		if err := observed.Validate(); err != nil {
 			return Status{}, fmt.Errorf("validate CPA Runtime update observation: %w", err)
 		}

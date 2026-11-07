@@ -15,6 +15,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
@@ -271,6 +272,95 @@ func (a *freshApplication) runtimeStatusClient() runtimeservice.RuntimeClient {
 		return a.runtimeExternal
 	}
 	return nil
+}
+
+type freshDatabaseStatusProvider struct {
+	dbPath string
+}
+
+func (p freshDatabaseStatusProvider) Snapshot() sqliterepo.WALMaintenanceSnapshot {
+	return sqliterepo.InspectDatabaseFiles(p.dbPath)
+}
+
+type freshRuntimeClientAdapter struct {
+	app *freshApplication
+}
+
+func (c freshRuntimeClientAdapter) client() (runtimeservice.RuntimeClient, error) {
+	if c.app != nil {
+		if client := c.app.runtimeStatusClient(); client != nil {
+			return client, nil
+		}
+	}
+	return nil, errors.New("CPA runtime client is not configured")
+}
+
+func (c freshRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
+	client, err := c.client()
+	if err != nil {
+		return model.RuntimeObservedStatus{}, err
+	}
+	if c.app != nil && c.app.runtime == nil {
+		grant := c.app.externalReadGrant(ctx)
+		if grant.Refused {
+			return model.RuntimeObservedStatus{}, errors.New("external CPA rejected saved management credential")
+		}
+		observed, err := client.Status(ctx)
+		if err != nil {
+			c.app.noteExternalRejection(ctx, grant, err)
+			return model.RuntimeObservedStatus{}, err
+		}
+		return observed, nil
+	}
+	return client.Status(ctx)
+}
+
+func (c freshRuntimeClientAdapter) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	client, err := c.client()
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	return client.Start(ctx, request)
+}
+
+func (c freshRuntimeClientAdapter) Stop(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	client, err := c.client()
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	return client.Stop(ctx, request)
+}
+
+func (c freshRuntimeClientAdapter) Restart(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	client, err := c.client()
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	return client.Restart(ctx, request)
+}
+
+func (c freshRuntimeClientAdapter) PrepareUpdate(ctx context.Context, request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+	client, err := c.client()
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	return client.PrepareUpdate(ctx, request)
+}
+
+func (c freshRuntimeClientAdapter) ActivateUpdate(ctx context.Context, request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
+	client, err := c.client()
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	return client.ActivateUpdate(ctx, request)
+}
+
+func (c freshRuntimeClientAdapter) ObserveUpdateOperation(ctx context.Context, request model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	client, err := c.client()
+	if err != nil {
+		return model.RuntimeUpdateOperationObservation{}, err
+	}
+	return client.ObserveUpdateOperation(ctx, request)
 }
 
 // refreshRuntimeOperations resolves abandoned journal entries from one

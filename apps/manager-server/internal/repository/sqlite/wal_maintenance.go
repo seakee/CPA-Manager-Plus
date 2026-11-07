@@ -91,6 +91,24 @@ func NewWALMaintenance(path string) (*WALMaintenance, error) {
 	return newWALMaintenance(path, walMaintenanceOptions{})
 }
 
+// InspectDatabaseFiles returns a point-in-time file-size snapshot for path
+// without opening an additional SQLite connection.
+func InspectDatabaseFiles(path string) WALMaintenanceSnapshot {
+	files, fileErr := readDatabaseFileStats(path)
+	checkpoint := WALCheckpointSnapshot{Mode: WALCheckpointModePending}
+	if fileErr != nil {
+		checkpoint.Error = fileErr.Error()
+	}
+	return WALMaintenanceSnapshot{
+		DatabaseBytes:         files.DatabaseBytes,
+		WALBytes:              files.WALBytes,
+		SHMBytes:              files.SHMBytes,
+		TotalBytes:            files.TotalBytes,
+		JournalSizeLimitBytes: WALJournalSizeLimitBytes,
+		Checkpoint:            checkpoint,
+	}
+}
+
 func newWALMaintenance(path string, options walMaintenanceOptions) (*WALMaintenance, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("SQLite maintenance path is empty")

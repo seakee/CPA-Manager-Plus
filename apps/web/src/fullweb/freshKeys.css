@@ -85,17 +85,19 @@
 }
 .key-summary-card {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px 12px;
   padding: 16px;
   min-width: 0;
 }
 .key-summary-card > div {
-  min-width: 0;
-  flex: 1;
+  min-width: 140px;
+  flex: 1 1 140px;
 }
 .key-summary-label {
   font-size: 12px;
+  font-weight: 600;
   color: var(--text-secondary);
 }
 .key-summary-card small {
@@ -106,11 +108,13 @@
   line-height: 1.5;
 }
 .key-summary-value {
+  margin-left: auto;
   font-size: 23px;
   font-weight: 600;
+  line-height: 1.2;
 }
 .key-summary-value.is-unavailable {
-  max-width: 42%;
+  max-width: 100%;
   font-size: 12px;
 }
 .key-resource-icon {
@@ -154,15 +158,15 @@
 }
 .key-table {
   width: 100%;
-  border-collapse: separate;
-  border-spacing: 0 8px;
+  border-collapse: collapse;
   table-layout: fixed;
   font-size: 12px;
 }
 .key-table th {
-  padding: 12px 8px;
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--app-border);
   color: var(--text-tertiary);
-  font-weight: 500;
+  font-weight: 600;
   text-align: left;
 }
 .key-table th:first-child {
@@ -178,19 +182,13 @@
   width: 18%;
 }
 .key-table td {
-  padding: 18px 8px;
-  border-top: 1px solid var(--app-border);
+  padding: 16px 10px;
   border-bottom: 1px solid var(--app-border);
   vertical-align: middle;
   overflow-wrap: anywhere;
 }
-.key-table td:first-child {
-  border-left: 1px solid var(--app-border);
-  border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
-}
-.key-table td:last-child {
-  border-right: 1px solid var(--app-border);
-  border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
+.key-table tbody tr:last-child td {
+  border-bottom: 0;
 }
 .key-name-cell {
   display: flex;
@@ -447,6 +445,11 @@
   gap: 10px;
   margin-bottom: 12px;
 }
+.key-usage-coverage > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 .key-usage-coverage p {
   margin: 0;
   color: var(--text-tertiary);
@@ -476,12 +479,15 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
+  padding: 6px 0;
   font-size: 12px;
 }
 .key-readonly-field > span {
+  min-width: 48px;
   color: var(--text-tertiary);
 }
-.key-readonly-field > strong {
+.key-readonly-field > strong,
+.key-readonly-field > code {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
