@@ -835,7 +835,14 @@ func NormalizeRaw(raw []byte) (Event, error) {
 	clientIP := readString(record, "client_ip", "clientIp")
 	xForwardedFor := readString(record, "x_forwarded_for", "xForwardedFor")
 	userAgent := readString(record, "user_agent", "userAgent")
-	requestServiceTier := readString(record, "request_service_tier", "requestServiceTier", "service_tier", "serviceTier")
+	// CPA v8.0.39+ reports effective_service_tier: the tier actually sent
+	// upstream after protocol translation and payload rules. service_tier keeps
+	// the client's original value, which stays "auto" when a payload override
+	// injects priority, so the effective tier wins whenever CPA provides it.
+	requestServiceTier := readString(record, "effective_service_tier", "effectiveServiceTier")
+	if requestServiceTier == "" {
+		requestServiceTier = readString(record, "request_service_tier", "requestServiceTier", "service_tier", "serviceTier")
+	}
 	responseServiceTier := readString(record, "response_service_tier", "responseServiceTier")
 	authProviderSnapshot := readString(record, "auth_provider_snapshot", "authProviderSnapshot")
 	usageContext := CacheInputContext{
