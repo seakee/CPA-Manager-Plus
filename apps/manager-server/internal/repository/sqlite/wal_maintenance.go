@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	WALCheckpointModePending  = "pending"
-	WALCheckpointModePassive  = "passive"
-	WALCheckpointModeTruncate = "truncate"
-
+	WALCheckpointModePending    = "pending"
+	WALCheckpointModePassive    = "passive"
+	WALCheckpointModeTruncate   = "truncate"
+	WALCheckpointModeUnobserved = "unobserved"
 	WALJournalSizeLimitBytes = int64(256 << 20)
 
 	defaultWALMaintenanceInterval = 30 * time.Second
@@ -95,7 +95,7 @@ func NewWALMaintenance(path string) (*WALMaintenance, error) {
 // without opening an additional SQLite connection.
 func InspectDatabaseFiles(path string) WALMaintenanceSnapshot {
 	files, fileErr := readDatabaseFileStats(path)
-	checkpoint := WALCheckpointSnapshot{Mode: WALCheckpointModePending}
+	checkpoint := WALCheckpointSnapshot{Mode: WALCheckpointModeUnobserved}
 	if fileErr != nil {
 		checkpoint.Error = fileErr.Error()
 	}

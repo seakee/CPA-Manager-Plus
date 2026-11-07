@@ -301,13 +301,23 @@ func (c freshRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObs
 		return model.RuntimeObservedStatus{}, err
 	}
 	if c.app != nil && c.app.runtime == nil {
-		grant := c.app.externalReadGrant(ctx)
-		if grant.Refused {
-			return model.RuntimeObservedStatus{}, errors.New("external CPA rejected saved management credential")
+		gate := &c.app.legacyCredentialGate
+		requestCtx := ctx
+		if !hasExternalCredentialHold(ctx, gate) {
+			if !gate.acquire(ctx) {
+				return model.RuntimeObservedStatus{}, ctx.Err()
+			}
+			var hold *externalCredentialHold
+			hold, requestCtx = beginExternalCredentialHold(ctx, gate, c.app.externalCredentialHeaderBudget())
+			defer hold.finish()
 		}
-		observed, err := client.Status(ctx)
+		grant := c.app.externalReadGrant(requestCtx)
+		if grant.Refused {
+			return model.RuntimeObservedStatus{}, externalReadRefusedError()
+		}
+		observed, err := client.Status(requestCtx)
 		if err != nil {
-			c.app.noteExternalRejection(ctx, grant, err)
+			c.app.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
 			return model.RuntimeObservedStatus{}, err
 		}
 		return observed, nil

@@ -755,3 +755,54 @@ func TestExternalProviderWaitSet(t *testing.T) {
 		}
 	}
 }
+
+func TestExternalRuntimeUpdatesSerializesAndRecordsRejection(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			upstream := newGateUpstream(t, externalAuthorityManagement)
+			upstream.handle.Store(func(w http.ResponseWriter, r *http.Request) {
+				once.Do(func() { close(entered) })
+				<-release
+				w.WriteHeader(status)
+			})
+			app := newExternalApp(t, upstream.server.URL, externalAuthorityManagement)
+			before := upstream.requests.Load()
+
+			firstDone := make(chan *httptest.ResponseRecorder, 1)
+			secondDone := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				firstDone <- gateRequest(t, app, http.MethodGet, "/usage-service/runtime/updates", gateAdmin)
+			}()
+			<-entered
+			go func() {
+				secondDone <- gateRequest(t, app, http.MethodGet, "/usage-service/runtime/updates", gateAdmin)
+			}()
+			time.Sleep(25 * time.Millisecond)
+			if got := upstream.requests.Load() - before; got != 1 {
+				t.Fatalf("concurrent runtime/updates probes reached upstream %d times while first was in flight, want 1", got)
+			}
+			close(release)
+			first := <-firstDone
+			second := <-secondDone
+			if first.Code != http.StatusServiceUnavailable && first.Code != http.StatusConflict {
+				t.Fatalf("first runtime/updates status = %d body=%s", first.Code, first.Body.String())
+			}
+			if second.Code != http.StatusServiceUnavailable {
+				t.Fatalf("second runtime/updates status = %d body=%s", second.Code, second.Body.String())
+			}
+			if !app.externalReadGrant(t.Context()).Refused {
+				t.Fatal("runtime/updates rejection did not record externalReadGrant.Refused")
+			}
+			management := gateRequest(t, app, http.MethodGet, "/v0/management/api-keys", gateAdmin)
+			if management.Code != http.StatusConflict || errorCode(t, management) != freshconfig.ReasonManagementRejected {
+				t.Fatalf("subsequent management read after runtime/updates refusal = %d body=%s", management.Code, management.Body.String())
+			}
+			if got := upstream.requests.Load() - before; got != 1 {
+				t.Fatalf("total upstream requests = %d, want 1", got)
+			}
+		})
+	}
+}

@@ -376,6 +376,16 @@ type externalCredentialHold struct {
 	once   sync.Once
 }
 
+type externalCredentialHoldContextKey struct{}
+
+func hasExternalCredentialHold(ctx context.Context, gate *externalCredentialGate) bool {
+	if ctx == nil || gate == nil {
+		return false
+	}
+	held, _ := ctx.Value(externalCredentialHoldContextKey{}).(*externalCredentialGate)
+	return held == gate
+}
+
 // beginExternalCredentialHold takes the tenure of an already-acquired gate and
 // returns the context the proxied request must use: cancelling it is what ends a
 // request whose CPA never answered. A non-positive budget means the request carries
@@ -385,7 +395,7 @@ func beginExternalCredentialHold(
 	gate *externalCredentialGate,
 	budget time.Duration,
 ) (*externalCredentialHold, context.Context) {
-	requestCtx, cancel := context.WithCancel(ctx)
+	requestCtx, cancel := context.WithCancel(context.WithValue(ctx, externalCredentialHoldContextKey{}, gate))
 	hold := &externalCredentialHold{gate: gate, cancel: cancel}
 	if budget > 0 {
 		hold.timer.Store(time.AfterFunc(budget, func() {

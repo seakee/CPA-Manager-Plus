@@ -270,6 +270,10 @@ func TestFreshNewInstallationWiresDatabaseStatusAndCPAUpdateEndpoints(t *testing
 	if dbBytes, _ := dbSnapshot["databaseBytes"].(float64); dbBytes <= 0 {
 		t.Fatalf("expected positive databaseBytes in /cpamp/status payload, got %+v", dbSnapshot)
 	}
+	checkpoint, ok := dbSnapshot["checkpoint"].(map[string]any)
+	if !ok || checkpoint["mode"] != sqliterepo.WALCheckpointModeUnobserved {
+		t.Fatalf("expected unobserved checkpoint mode in Fresh /cpamp/status payload, got %+v", dbSnapshot["checkpoint"])
+	}
 
 	updatesRec := harness.call("GET", "cpamp/usage-service/runtime/updates", "")
 	if updatesRec.Code != http.StatusOK {
