@@ -239,6 +239,7 @@ func (e *Executor) ActivateUpdate(ctx context.Context, request ActivateUpdateReq
 			"activation_target_changed", err, operationDeadline)
 	}
 	if err := e.syncDestinationExpectedArtifactLocked(candidate.ArtifactID); err != nil {
+		_ = e.restoreOriginStageRequestLocked()
 		return e.rollbackActivation(operation, intent.OperationID, prior, oldInstance, 0,
 			"activation_start_failed", err, operationDeadline)
 	}
@@ -407,6 +408,7 @@ func (e *Executor) rollbackActivation(
 			return e.failRollback(operation, operationID, errors.New("cannot safely spawn rollback child"))
 		}
 		if err := e.syncDestinationExpectedArtifactLocked(prior.ArtifactID); err != nil {
+			_ = e.restoreOriginStageRequestLocked()
 			return e.failRollback(operation, operationID, err)
 		}
 		var err error
@@ -473,9 +475,24 @@ func (e *Executor) completeActivation(
 const originStageRequestFile = ".stage-request.json"
 
 type activationDestinationJournal struct {
-	inner           operationJournal
-	executor        *Executor
-	activeSpawnOpID string
+	inner                  operationJournal
+	executor               *Executor
+	activeSpawnOpID        string
+	activeSpawnFailureCode string
+	stageWriteHook         func(targetName, step string) error
+}
+
+func spawnFailureCodeForOperationType(opType string) string {
+	switch opType {
+	case "start":
+		return "process_start_failed"
+	case "restart":
+		return "process_restart_start_failed"
+	case "auto_recovery":
+		return "process_recovery_start_failed"
+	default:
+		return ""
+	}
 }
 
 func (j *activationDestinationJournal) Resolve(ctx context.Context, authority journal.Authority, intent journal.Intent) (journal.Operation, bool, error) {
@@ -494,9 +511,9 @@ func (j *activationDestinationJournal) Get(ctx context.Context, runtimeIdentity,
 func (j *activationDestinationJournal) Begin(ctx context.Context, authority journal.Authority, intent journal.Intent) (journal.Operation, bool, error) {
 	op, created, err := j.inner.Begin(ctx, authority, intent)
 	if err == nil && created {
-		switch intent.OperationType {
-		case "start", "restart", "auto_recovery":
+		if failureCode := spawnFailureCodeForOperationType(intent.OperationType); failureCode != "" {
 			j.activeSpawnOpID = intent.OperationID
+			j.activeSpawnFailureCode = failureCode
 		}
 	}
 	return op, created, err
@@ -507,12 +524,19 @@ func (j *activationDestinationJournal) MarkRunning(ctx context.Context, runtimeI
 	if err != nil {
 		if operationID == j.activeSpawnOpID {
 			j.activeSpawnOpID = ""
+			j.activeSpawnFailureCode = ""
 		}
 		return op, err
 	}
 	if operationID == j.activeSpawnOpID {
 		if syncErr := j.executor.reconcileDestinationStageForCurrentSelectionLocked(); syncErr != nil {
+			failureCode := j.activeSpawnFailureCode
 			j.activeSpawnOpID = ""
+			j.activeSpawnFailureCode = ""
+			_ = j.executor.restoreOriginStageRequestLocked()
+			completeCtx, cancel := context.WithTimeout(context.Background(), ActivationTerminalPersistenceTimeout)
+			_, _ = j.inner.Complete(completeCtx, runtimeIdentity, operationID, journal.StateFailed, failureCode)
+			cancel()
 			return journal.Operation{}, syncErr
 		}
 	}
@@ -523,6 +547,7 @@ func (j *activationDestinationJournal) Complete(ctx context.Context, runtimeIden
 	var restoreErr error
 	if operationID == j.activeSpawnOpID {
 		j.activeSpawnOpID = ""
+		j.activeSpawnFailureCode = ""
 		restoreErr = j.executor.restoreOriginStageRequestLocked()
 	}
 	op, err := j.inner.Complete(ctx, runtimeIdentity, operationID, state, failureCode)
@@ -563,6 +588,13 @@ func (e *Executor) loadOriginStageRequestLocked() (*DestinationRequest, error) {
 	return &r, nil
 }
 
+func (e *Executor) callStageWriteHookLocked(targetName, step string) error {
+	if aj, ok := e.journal.(*activationDestinationJournal); ok && aj.stageWriteHook != nil {
+		return aj.stageWriteHook(targetName, step)
+	}
+	return nil
+}
+
 func (e *Executor) writeAtomicDestinationJSONLocked(targetName string, r DestinationRequest) error {
 	data, err := json.Marshal(r)
 	if err != nil || r.Validate() != nil {
@@ -570,7 +602,14 @@ func (e *Executor) writeAtomicDestinationJSONLocked(targetName string, r Destina
 	}
 	tmp := filepath.Join(e.destination.root, "."+targetName+".tmp")
 	_ = os.Remove(tmp)
+	if err := e.callStageWriteHookLocked(targetName, "write"); err != nil {
+		return err
+	}
 	if err := writeDestinationFile(tmp, data, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := e.callStageWriteHookLocked(targetName, "rename"); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}
@@ -578,9 +617,11 @@ func (e *Executor) writeAtomicDestinationJSONLocked(targetName string, r Destina
 		_ = os.Remove(tmp)
 		return err
 	}
+	if err := e.callStageWriteHookLocked(targetName, "dirsync"); err != nil {
+		return err
+	}
 	return syncDestinationDirectory(e.destination.root)
 }
-
 func (e *Executor) syncDestinationExpectedArtifactLocked(artifactID artifact.ID) error {
 	if e.destination == nil {
 		return nil

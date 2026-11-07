@@ -611,13 +611,16 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 		State:      cpaprocess.StateExited,
 		InstanceID: crashedInstance,
 	}
+	beforeRecoveryStarts := f.child.starts
 	f.starter.recoveryMu.Lock()
 	epoch := f.starter.recoveryEpoch
 	f.starter.recoveryState = RecoveryStateRecovering
+	f.starter.recoveryAttempts = 3
+	f.starter.recoveryInstanceID = crashedInstance
 	f.starter.recoveryMu.Unlock()
 	f.starter.executeAutomaticRecovery(epoch, crashedInstance)
-	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
-		t.Fatalf("recovered child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
+	if f.child.starts != beforeRecoveryStarts+1 || f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
+		t.Fatalf("recovered child starts=%d (want %d) spec = %+v; want executable %q args %v", f.child.starts, beforeRecoveryStarts+1, f.child.lastSpec, pathB, wantArgs)
 	}
 
 	// 7. Supervisor reconstruction via real selectionStore.Load(f.prior) loads B and preserves B and -config on Start.
@@ -664,6 +667,203 @@ func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *t
 	})
 	if !errors.Is(err, ErrActiveArtifactMismatch) || tamperedRestart.State != journal.StateFailed || tamperedRestart.FailureCode != "process_restart_start_failed" {
 		t.Fatalf("Restart() with tampered activated binary = %+v, %v; want failed process_restart_start_failed", tamperedRestart, err)
+	}
+}
+
+func TestActivateUpdateStageSyncFaultInjectionCompletesTerminalFailedWithoutStuckRunning(t *testing.T) {
+	f := newActivationFixture(t)
+	dir := t.TempDir()
+	bytesA := []byte("bundled-cpa-binary-a")
+	sumA := sha256.Sum256(bytesA)
+	idA := artifact.ID("sha256:" + hex.EncodeToString(sumA[:]))
+	pathA := filepath.Join(dir, "cpa-a")
+	if err := os.WriteFile(pathA, bytesA, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	stageRoot := filepath.Join(dir, "artifacts")
+	stages, err := runtimeupdate.NewStore(stageRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageDirB := filepath.Join(stageRoot, "8.0.59")
+	if err := os.MkdirAll(stageDirB, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bytesB := []byte("staged-cpa-binary-b")
+	sumB := sha256.Sum256(bytesB)
+	idB := artifact.ID("sha256:" + hex.EncodeToString(sumB[:]))
+	pathB := filepath.Join(stageDirB, "cli-proxy-api")
+	metaB := filepath.Join(stageDirB, "artifact.json")
+	if err := os.WriteFile(pathB, bytesB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metaContent := `{"schemaVersion":1,"engine":"cpa","version":"8.0.59","artifactId":"` + string(idB) + `","sourceArchiveDigest":"sha256:` + strings.Repeat("b", 64) + `"}`
+	if err := os.WriteFile(metaB, []byte(metaContent), 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	selectionRoot := filepath.Join(dir, "active")
+	selectionStore, err := selection.NewStore(selectionRoot, stages)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.prior = selection.Bundled(pathA, "")
+	f.prior.ArtifactID = idA
+	f.candidate = selection.Descriptor{
+		Source:         selection.SourceFinalized,
+		Version:        "8.0.59",
+		ArtifactID:     idB,
+		ExecutablePath: pathB,
+		MetadataPath:   metaB,
+	}
+	f.observer.byPath = map[string]artifact.ID{pathA: idA, pathB: idB}
+	if err := f.starter.EnableActivateUpdate(f.prior, f.observer, selectionStore, f.ready); err != nil {
+		t.Fatal(err)
+	}
+	destRoot := filepath.Join(dir, "destination")
+	if err := f.starter.EnableDestination(destRoot, filepath.Join(dir, "gateway", "auth"), "127.0.0.1:8317", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.child.observation = cpaprocess.Observation{State: cpaprocess.StateNotStarted}
+	destReq := DestinationRequest{
+		OperationID:               "fresh-op:managed-destination",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+		SourceIdentity:            "managed:sha256:" + strings.Repeat("a", 64),
+		SourceClass:               SourceClassNewManaged,
+		APIKeys:                   []string{initialClientKeyFixture()},
+		ManagementKey:             strings.Repeat("c", 64),
+	}
+	if _, err := f.starter.StageDestination(t.Context(), destReq); err != nil {
+		t.Fatalf("StageDestination() error = %v", err)
+	}
+	if _, err := f.starter.Start(t.Context(), StartRequest{
+		OperationID:               "fresh-op:managed-destination:start",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+	}); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	aj := f.starter.journal.(*activationDestinationJournal)
+
+	// 1. Fault on initial .stage-request.json persistence during ActivateUpdate(B) rolls back to A and completes failed.
+	aj.stageWriteHook = func(targetName, step string) error {
+		if targetName == originStageRequestFile && step == "write" {
+			return errors.New("origin write failed")
+		}
+		return nil
+	}
+	originFailOp, err := f.starter.ActivateUpdate(t.Context(), ActivateUpdateRequest{
+		OperationID:               "activate-origin-write-fail",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+		TargetVersion:             "8.0.59",
+	})
+	if err != nil || originFailOp.State != journal.StateFailed || originFailOp.FailureCode != "activation_start_failed" {
+		t.Fatalf("origin write fail ActivateUpdate() = %+v, %v; want failed activation_start_failed", originFailOp, err)
+	}
+	if f.child.lastSpec.Executable != pathA {
+		t.Fatalf("child after origin write fail = %q; want %q", f.child.lastSpec.Executable, pathA)
+	}
+
+	// Succeed ActivateUpdate(B) so B is committed.
+	aj.stageWriteHook = nil
+	activatedOp, err := f.starter.ActivateUpdate(t.Context(), ActivateUpdateRequest{
+		OperationID:               "activate-8.0.59-ok",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+		TargetVersion:             "8.0.59",
+	})
+	if err != nil || activatedOp.State != journal.StateSucceeded {
+		t.Fatalf("ActivateUpdate() = %+v, %v; want succeeded", activatedOp, err)
+	}
+
+	// 2. Fault on stage.json rename and dirsync during Restart of committed B completes terminal StateFailed (never stuck running).
+	for _, stepName := range []string{"rename", "dirsync"} {
+		if f.child.observation.State != cpaprocess.StateRunning {
+			f.child.observation = cpaprocess.Observation{
+				State:      cpaprocess.StateRunning,
+				InstanceID: 42,
+				PID:        4242,
+			}
+		}
+		beforeStarts := f.child.starts
+		aj.stageWriteHook = func(targetName, step string) error {
+			if targetName == "stage.json" && step == stepName {
+				return errors.New("injected stage.json " + stepName + " failure")
+			}
+			return nil
+		}
+		opID := "restart-stage-" + stepName + "-fail"
+		_, err := f.starter.Restart(t.Context(), RestartRequest{
+			OperationID:               opID,
+			ExpectedRuntimeIdentity:   "runtime-01",
+			ExpectedRuntimeGeneration: 41,
+		})
+		aj.stageWriteHook = nil
+		if !errors.Is(err, ErrPersistenceUnavailable) {
+			t.Fatalf("Restart(%s) err = %v; want ErrPersistenceUnavailable", stepName, err)
+		}
+		if f.child.starts != beforeStarts {
+			t.Fatalf("Restart(%s) spawned child despite stage sync failure", stepName)
+		}
+		storedOp, getErr := f.journal.Get(t.Context(), "runtime-01", opID)
+		if getErr != nil || storedOp.State != journal.StateFailed || storedOp.FailureCode != "process_restart_start_failed" {
+			t.Fatalf("journal operation after Restart(%s) = %+v, %v; want failed process_restart_start_failed", stepName, storedOp, getErr)
+		}
+		replayedRestart, replayErr := f.starter.Restart(t.Context(), RestartRequest{
+			OperationID:               opID,
+			ExpectedRuntimeIdentity:   "runtime-01",
+			ExpectedRuntimeGeneration: 41,
+		})
+		if replayErr != nil || replayedRestart.State != journal.StateFailed || replayedRestart.FailureCode != "process_restart_start_failed" {
+			t.Fatalf("replayed Restart(%s) = %+v, %v; want terminal failed replay", stepName, replayedRestart, replayErr)
+		}
+		if staged, loadErr := f.starter.destination.load(); loadErr != nil || staged == nil || staged.ExpectedActiveArtifactID != idA {
+			t.Fatalf("stage.json after Restart(%s) failure = %+v, %v; want restored idA", stepName, staged, loadErr)
+		}
+	}
+
+	// 3. Fault on stage.json sync during auto_recovery of committed B completes terminal StateFailed (never stuck running).
+	crashedInstance := f.child.observation.InstanceID
+	f.child.observation = cpaprocess.Observation{
+		State:      cpaprocess.StateExited,
+		InstanceID: crashedInstance,
+	}
+	beforeStarts := f.child.starts
+	aj.stageWriteHook = func(targetName, step string) error {
+		if targetName == "stage.json" && step == "rename" {
+			return errors.New("injected auto_recovery stage rename failure")
+		}
+		return nil
+	}
+	recoveryOpID := "auto-recovery-stage-rename-fail"
+	f.starter.recoveryMu.Lock()
+	epoch := f.starter.recoveryEpoch
+	f.starter.recoveryState = RecoveryStateRecovering
+	f.starter.recoveryAttempts = 3
+	f.starter.recoveryInstanceID = crashedInstance
+	f.starter.newRecoveryOperationID = func() (string, error) {
+		return recoveryOpID, nil
+	}
+	f.starter.recoveryMu.Unlock()
+	f.starter.executeAutomaticRecovery(epoch, crashedInstance)
+	aj.stageWriteHook = nil
+	if f.child.starts != beforeStarts {
+		t.Fatal("auto_recovery spawned child despite stage sync failure")
+	}
+	recoveryOp, getErr := f.journal.Get(t.Context(), "runtime-01", recoveryOpID)
+	if getErr != nil || recoveryOp.State != journal.StateFailed || recoveryOp.FailureCode != "process_recovery_start_failed" {
+		t.Fatalf("auto_recovery journal op = %+v, %v; want failed process_recovery_start_failed", recoveryOp, getErr)
+	}
+	if staged, loadErr := f.starter.destination.load(); loadErr != nil || staged == nil || staged.ExpectedActiveArtifactID != idA {
+		t.Fatalf("stage.json after auto_recovery failure = %+v, %v; want restored idA", staged, loadErr)
 	}
 }
 
