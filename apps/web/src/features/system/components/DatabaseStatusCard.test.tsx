@@ -139,4 +139,36 @@ describe('DatabaseStatusCard', () => {
     expect(markup).not.toContain('system_info.database_checkpoint_pending');
     expect(markup).toContain('statusWarn');
   });
+
+  it('renders unobserved file-only snapshots with neutral pending tone instead of warning', () => {
+    const markup = renderToStaticMarkup(
+      <DatabaseStatusCard
+        status={{
+          database: {
+            databaseBytes: 848 * 1024,
+            walBytes: 12 * 1024,
+            shmBytes: 32 * 1024,
+            totalBytes: 892 * 1024,
+            journalSizeLimitBytes: 256 * 1024 ** 2,
+            checkpoint: {
+              mode: 'unobserved',
+              busy: 0,
+              logFrames: 0,
+              checkpointedFrames: 0,
+              executedAtMs: 0,
+              durationMs: 0,
+            },
+          },
+        }}
+        loading={false}
+        error=""
+      />
+    );
+
+    expect(markup).toContain('system_info.database_checkpoint_unobserved');
+    expect(markup).toContain('statusPending');
+    expect(markup).not.toContain('statusWarn');
+    expect(markup).not.toContain('system_info.database_checkpoint_frames');
+    expect(markup).not.toContain('system_info.database_checkpoint_pending');
+  });
 });

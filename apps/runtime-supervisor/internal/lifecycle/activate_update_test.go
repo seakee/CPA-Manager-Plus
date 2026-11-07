@@ -2,8 +2,13 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -414,6 +419,97 @@ func TestActivateUpdateQueueWaitConsumesTotalBudget(t *testing.T) {
 	f.starter.mu.Unlock()
 	if err := <-result; !errors.Is(err, context.DeadlineExceeded) || containsEvent(f.events, "resolve") {
 		t.Fatalf("queued activation error=%v events=%v", err, f.events)
+	}
+}
+
+func TestActivateUpdatePreservesStagedDestinationAcrossActivationAndRestart(t *testing.T) {
+	f := newActivationFixture(t)
+	dir := t.TempDir()
+	bytesA := []byte("bundled-cpa-binary-a")
+	sumA := sha256.Sum256(bytesA)
+	idA := artifact.ID("sha256:" + hex.EncodeToString(sumA[:]))
+	pathA := filepath.Join(dir, "cpa-a")
+	if err := os.WriteFile(pathA, bytesA, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bytesB := []byte("staged-cpa-binary-b")
+	sumB := sha256.Sum256(bytesB)
+	idB := artifact.ID("sha256:" + hex.EncodeToString(sumB[:]))
+	pathB := filepath.Join(dir, "cpa-b")
+	if err := os.WriteFile(pathB, bytesB, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	f.prior = selection.Bundled(pathA, "")
+	f.prior.ArtifactID = idA
+	f.candidate = selection.Descriptor{
+		Source:         selection.SourceFinalized,
+		Version:        "8.0.59",
+		ArtifactID:     idB,
+		ExecutablePath: pathB,
+		MetadataPath:   filepath.Join(dir, "artifact.json"),
+	}
+	f.observer.byPath = map[string]artifact.ID{pathA: idA, pathB: idB}
+	f.selections.candidate = f.candidate
+	if err := f.starter.EnableActivateUpdate(f.prior, f.observer, f.selections, f.ready); err != nil {
+		t.Fatal(err)
+	}
+	destRoot := filepath.Join(dir, "destination")
+	if err := f.starter.EnableDestination(destRoot, filepath.Join(dir, "gateway", "auth"), "127.0.0.1:8317", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.child.observation = cpaprocess.Observation{State: cpaprocess.StateNotStarted}
+	destReq := DestinationRequest{
+		OperationID:               "fresh-op:managed-destination",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+		SourceIdentity:            "managed:sha256:" + strings.Repeat("a", 64),
+		SourceClass:               SourceClassNewManaged,
+		APIKeys:                   []string{initialClientKeyFixture()},
+		ManagementKey:             strings.Repeat("c", 64),
+	}
+	if _, err := f.starter.StageDestination(t.Context(), destReq); err != nil {
+		t.Fatalf("StageDestination() error = %v", err)
+	}
+	if _, err := f.starter.Start(t.Context(), StartRequest{
+		OperationID:               "fresh-op:managed-destination:start",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+	}); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	result, err := f.starter.ActivateUpdate(t.Context(), ActivateUpdateRequest{
+		OperationID:               "activate-8.0.59",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+		ExpectedActiveArtifactID:  idA,
+		TargetVersion:             "8.0.59",
+	})
+	if err != nil || result.State != journal.StateSucceeded {
+		t.Fatalf("ActivateUpdate() = %+v, %v; want succeeded", result, err)
+	}
+	wantArgs := []string{"-config", filepath.Join(destRoot, "config.yaml")}
+	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
+		t.Fatalf("activated child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
+	}
+	if _, err := f.starter.Restart(t.Context(), RestartRequest{
+		OperationID:               "restart-after-activate",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+	}); err != nil {
+		t.Fatalf("Restart() after activation error = %v", err)
+	}
+	if f.child.lastSpec.Executable != pathB || !reflect.DeepEqual(f.child.lastSpec.Args, wantArgs) {
+		t.Fatalf("restarted child spec = %+v; want executable %q args %v", f.child.lastSpec, pathB, wantArgs)
+	}
+	if err := os.WriteFile(pathB, []byte("tampered-staged-cpa-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.starter.startProcess(t.Context(), pathB); !errors.Is(err, ErrActiveArtifactMismatch) {
+		t.Fatalf("startProcess() with tampered activated binary = %v; want %v", err, ErrActiveArtifactMismatch)
 	}
 }
 

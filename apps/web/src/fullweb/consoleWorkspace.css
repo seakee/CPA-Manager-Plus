@@ -221,9 +221,12 @@
   color: var(--text-primary);
 }
 
-.gateway-tabs .tab-btn.active {
-  background: var(--accent-soft);
-  color: var(--accent);
+.gateway-tabs .tab-btn.active,
+.gateway-tabs .btn.active,
+.gateway-tabs [aria-selected='true'] {
+  border-color: var(--accent, var(--primary-color));
+  background: var(--accent-soft, var(--app-accent-soft));
+  color: var(--accent, var(--primary-color));
   font-weight: 600;
 }
 
@@ -542,7 +545,9 @@
   text-align: right;
 }
 
-.field-control input {
+.field-control input[type='text'],
+.field-control input[type='number'],
+.field-control select {
   width: 100%;
   padding: 8px 10px;
   font-size: 13px;
@@ -597,12 +602,176 @@
 .recovery-steps {
   margin: 14px 0 18px 20px;
   padding: 0;
+  list-style: decimal;
   line-height: 1.8;
   font-size: 13px;
 }
 
 .recovery-steps li {
   margin-bottom: 8px;
+}
+
+.fresh-system-workspace .page-head,
+.config-workspace .card-head,
+.fresh-system-workspace .card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.fresh-system-workspace .page-head h1,
+.workspace-head h1 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.35;
+  letter-spacing: -0.3px;
+}
+
+.fresh-system-workspace .muted,
+.config-workspace .detail,
+.fresh-system-workspace .detail {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.fresh-system-workspace .grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.fresh-system-workspace .stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.fresh-system-workspace .card,
+.config-workspace .card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fresh-system-workspace .card-head h2,
+.config-workspace .card-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.fresh-system-workspace .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-sm, 8px);
+  background: var(--bg-subtle);
+}
+
+.fresh-system-workspace .row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fresh-system-workspace .row label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.fresh-system-workspace .row .path code {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-sm, 6px);
+  background: var(--bg-card, var(--surface-bg));
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.fresh-system-workspace .row small {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.fresh-system-workspace .row p {
+  margin: 0;
+  flex: 1 1 220px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.fresh-system-workspace .badge,
+.config-workspace .badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.fresh-system-workspace .badge-emerald {
+  border-color: var(--data-badge-info-border, var(--border-subtle));
+  background: var(--data-badge-info-bg, var(--accent-soft));
+  color: var(--data-badge-info-text, var(--accent));
+}
+
+.config-workspace .badge.warn {
+  border-color: var(--data-badge-warning-border, var(--warning-border, var(--border-subtle)));
+  background: var(--data-badge-warning-bg, var(--warning-bg, var(--bg-subtle)));
+  color: var(--data-badge-warning-text, var(--warning-color, var(--text-secondary)));
+}
+
+.fresh-system-workspace .notice,
+.config-workspace .notice,
+[data-testid='recovery-modal'] .notice {
+  margin: 4px 0 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-sm, 8px);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.config-workspace .notice.warn,
+[data-testid='recovery-modal'] .notice.warn {
+  border-color: var(--data-badge-warning-border, var(--warning-border, var(--border-subtle)));
+  background: var(--data-badge-warning-bg, var(--warning-bg, var(--bg-subtle)));
+  color: var(--data-badge-warning-text, var(--warning-color, var(--text-secondary)));
+}
+
+.fresh-system-workspace .actions,
+.config-workspace .actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .fresh-system-workspace .grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Gateway configuration page: one group per card, one write per group. */
@@ -618,11 +787,22 @@
   gap: 16px;
 }
 
+.workspace-head .head-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
 .workspace-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md, 12px);
+  background: var(--bg-card, var(--surface-bg));
 }
 
 .workspace-toolbar .search {

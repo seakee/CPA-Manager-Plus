@@ -131,3 +131,34 @@ func TestObserveExternalVersionTypesAnUnreachableCPA(t *testing.T) {
 		t.Fatalf("report = %+v, want the zero report", report)
 	}
 }
+
+func TestObserveManagementAPIUnwrapsTypedRejectionOn401And403(t *testing.T) {
+	tests := []struct {
+		name          string
+		status        int
+		wantRejected  bool
+		wantForbidden bool
+	}{
+		{name: "401 unauthorized unwraps ErrManagementRejected", status: http.StatusUnauthorized, wantRejected: true, wantForbidden: false},
+		{name: "403 forbidden unwraps ErrManagementClientForbidden and ErrManagementRejected", status: http.StatusForbidden, wantRejected: true, wantForbidden: true},
+		{name: "502 bad gateway does not unwrap rejection", status: http.StatusBadGateway, wantRejected: false, wantForbidden: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+			_, err := ObserveManagementAPI(t.Context(), srv.URL, "management-key")
+			if err == nil {
+				t.Fatalf("expected error for status %d", tc.status)
+			}
+			if got := errors.Is(err, ErrManagementRejected); got != tc.wantRejected {
+				t.Fatalf("errors.Is(err, ErrManagementRejected) = %v, want %v (err=%v)", got, tc.wantRejected, err)
+			}
+			if got := errors.Is(err, ErrManagementClientForbidden); got != tc.wantForbidden {
+				t.Fatalf("errors.Is(err, ErrManagementClientForbidden) = %v, want %v (err=%v)", got, tc.wantForbidden, err)
+			}
+		})
+	}
+}
