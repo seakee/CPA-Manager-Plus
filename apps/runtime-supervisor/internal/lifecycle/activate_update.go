@@ -533,11 +533,11 @@ func (j *activationDestinationJournal) MarkRunning(ctx context.Context, runtimeI
 			failureCode := j.activeSpawnFailureCode
 			j.activeSpawnOpID = ""
 			j.activeSpawnFailureCode = ""
-			_ = j.executor.restoreOriginStageRequestLocked()
+			restoreErr := j.executor.restoreOriginStageRequestLocked()
 			completeCtx, cancel := context.WithTimeout(context.Background(), ActivationTerminalPersistenceTimeout)
-			_, _ = j.inner.Complete(completeCtx, runtimeIdentity, operationID, journal.StateFailed, failureCode)
+			_, completeErr := j.inner.Complete(completeCtx, runtimeIdentity, operationID, journal.StateFailed, failureCode)
 			cancel()
-			return journal.Operation{}, syncErr
+			return journal.Operation{}, errors.Join(syncErr, restoreErr, completeErr)
 		}
 	}
 	return op, nil

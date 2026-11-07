@@ -865,6 +865,37 @@ func TestActivateUpdateStageSyncFaultInjectionCompletesTerminalFailedWithoutStuc
 	if staged, loadErr := f.starter.destination.load(); loadErr != nil || staged == nil || staged.ExpectedActiveArtifactID != idA {
 		t.Fatalf("stage.json after auto_recovery failure = %+v, %v; want restored idA", staged, loadErr)
 	}
+
+	// 4. Dual fault: stage.json sync failure + compensatory j.inner.Complete failure surfaces both errors without spawning.
+	f.child.observation = cpaprocess.Observation{
+		State:      cpaprocess.StateRunning,
+		InstanceID: 99,
+		PID:        9999,
+	}
+	beforeDualStarts := f.child.starts
+	f.journal.failAt = "complete"
+	aj.stageWriteHook = func(targetName, step string) error {
+		if targetName == "stage.json" && step == "rename" {
+			return errors.New("injected dual-fault stage rename failure")
+		}
+		return nil
+	}
+	_, dualErr := f.starter.Restart(t.Context(), RestartRequest{
+		OperationID:               "restart-dual-fault-complete-fail",
+		ExpectedRuntimeIdentity:   "runtime-01",
+		ExpectedRuntimeGeneration: 41,
+	})
+	aj.stageWriteHook = nil
+	f.journal.failAt = ""
+	if !errors.Is(dualErr, ErrPersistenceUnavailable) || !errors.Is(dualErr, injectedFailure) {
+		t.Fatalf("Restart dual fault err = %v; want joined ErrPersistenceUnavailable and injectedFailure", dualErr)
+	}
+	if f.child.starts != beforeDualStarts {
+		t.Fatal("Restart dual fault spawned child despite stage sync failure")
+	}
+	if f.starter.RecoveryStatus().State != RecoveryStateManualIntervention {
+		t.Fatalf("RecoveryStatus after dual fault = %+v; want manual_intervention", f.starter.RecoveryStatus())
+	}
 }
 
 func assertOrdered(t *testing.T, events []string, expected ...string) {
