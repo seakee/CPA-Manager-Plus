@@ -198,7 +198,7 @@ input {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
@@ -231,8 +231,8 @@ input {
 }
 
 .btn-icon {
-  width: 34px;
-  height: 34px;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
   border-radius: var(--app-radius-sm);
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
@@ -358,7 +358,7 @@ input {
 .alert-icon {
   width: 22px;
   height: 22px;
-  border-radius: 999px;
+  border-radius: 50%;
   font-size: 12px;
   font-weight: 700;
   display: inline-flex;
@@ -409,7 +409,7 @@ input {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   padding: 1px 6px;
-  border-radius: var(--app-radius-sm);
+  border-radius: var(--app-radius-xs);
   background: var(--app-surface-muted);
   color: var(--text-primary);
 }
@@ -552,7 +552,7 @@ input {
 
 .strength-bar {
   height: 4px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--border-subtle);
   transition: background-color 0.2s ease;
 }
@@ -677,13 +677,14 @@ input {
   background: var(--accent-soft);
   border-radius: var(--app-radius-sm);
   font-size: 14px;
+  white-space: nowrap;
 }
 
 .bootstrap-header .btn-icon {
   background: transparent;
   border-color: transparent;
-  width: 40px;
-  height: 40px;
+  width: var(--control-height-md);
+  height: var(--control-height-md);
   color: var(--text-secondary);
 }
 
@@ -868,7 +869,7 @@ input {
 .journey-choice h2 {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   display: flex;
   gap: 15px;
   align-items: center;
@@ -1271,9 +1272,9 @@ input {
 /* Match the existing CPAMP Setup screen's primary action scale while the
    shared button component continues to own colors, states and focus rings. */
 .bootstrap-main .btn:not(.btn-sm):not(.btn-xs) {
-  height: 48px;
-  min-height: 48px;
-  font-size: 16px;
+  height: var(--control-height-md);
+  min-height: var(--control-height-md);
+  font-size: 14px;
 }
 
 button:focus-visible,

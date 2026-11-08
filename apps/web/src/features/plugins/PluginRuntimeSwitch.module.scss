@@ -5,9 +5,9 @@
   align-items: center;
   padding: 14px 16px;
   border: 1px solid var(--border-color);
-  border-radius: 16px;
+  border-radius: var(--app-radius-lg);
   background: var(--bg-primary);
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
 }
 
 .switchCopy {
@@ -27,7 +27,7 @@
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 .switchReadout {
@@ -46,7 +46,7 @@
 }
 
 .readoutLabel {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-weight: 700;
 }
 
@@ -54,7 +54,7 @@
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--warning-text);
+  color: color-mix(in srgb, var(--warning-text) 62%, var(--text-primary));
 }
 
 .switchControls {

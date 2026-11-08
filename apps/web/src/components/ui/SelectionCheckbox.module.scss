@@ -31,10 +31,10 @@
   width: 22px;
   height: 22px;
   flex-shrink: 0;
-  border-radius: 7px;
+  border-radius: var(--app-radius-xs);
   border: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--surface-subtle) 92%, transparent);
-  color: var(--primary-contrast, #fff);
+  color: var(--primary-contrast);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -70,11 +70,9 @@
 }
 
 .boxChecked {
-  border-color: var(--primary-color);
-  background: var(--primary-color);
-  box-shadow:
-    0 0 0 3px var(--color-primary-light-8),
-    0 8px 18px -14px color-mix(in srgb, var(--primary-color) 70%, transparent);
+  border-color: var(--primary-solid);
+  background: var(--primary-solid);
+  box-shadow: 0 0 0 3px var(--color-primary-light-8);
 }
 
 .boxChecked svg {

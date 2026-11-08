@@ -20,7 +20,7 @@
   height: 52px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--surface-subtle) 70%, transparent);
   color: var(--text-secondary);
 
@@ -35,7 +35,7 @@
   margin: 0;
   color: var(--text-primary);
   font-size: 20px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.25;
   overflow-wrap: anywhere;
 }
@@ -48,9 +48,7 @@
 
 .slug,
 .repoLink {
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text-secondary);
 }
@@ -69,7 +67,7 @@
 
   svg {
     flex-shrink: 0;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
   }
 
   &:hover {
@@ -84,7 +82,7 @@
 }
 
 .source {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -96,11 +94,11 @@
   margin-top: 16px;
   padding: 12px 14px;
   border: 1px solid var(--warning-border);
-  border-radius: 10px;
+  border-radius: var(--app-radius-md);
   background: var(--warning-bg);
-  color: var(--warning-text);
+  color: color-mix(in srgb, var(--warning-text) 62%, var(--text-primary));
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.45;
 
   svg {
@@ -122,16 +120,16 @@
 .untrustedAlert {
   margin-top: 16px;
   padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--danger-color) 32%, var(--border-color));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--danger-color) 8%, var(--bg-primary));
+  border: 1px solid var(--data-badge-danger-border);
+  border-radius: var(--app-radius-md);
+  background: var(--data-badge-danger-bg);
 }
 
 .untrustedText {
   margin: 0;
-  color: var(--danger-color);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.5;
 }
 
@@ -144,7 +142,7 @@
   dt {
     color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
   }
 
   dd {
@@ -165,7 +163,7 @@
 
 .confirmHint {
   margin: 8px 0 0;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
 }

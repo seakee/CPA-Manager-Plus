@@ -36,7 +36,7 @@
 
 .upgrade-language {
   position: relative;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
 }
 
 .upgrade-language select {
@@ -57,10 +57,10 @@
 .upgrade-theme {
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: var(--control-height-md);
+  height: var(--control-height-md);
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -85,7 +85,7 @@
   width: min(100%, 1016px);
   background: var(--glass-bg);
   border: 1px solid var(--border-subtle);
-  border-radius: 22px;
+  border-radius: var(--app-radius-lg);
   overflow: hidden;
 }
 
@@ -113,11 +113,12 @@
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  border-radius: 18px;
+  border-radius: var(--app-radius-pill);
   background: var(--bg-subtle);
   color: var(--text-secondary);
   font-size: 14px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .upgrade-heading .badge-emerald {
@@ -138,7 +139,7 @@
   gap: 12px;
   padding: 19px;
   border: 1px solid var(--amber-border);
-  border-radius: 11px;
+  border-radius: var(--app-radius-md);
   background: var(--amber-soft);
   color: var(--text-primary);
   line-height: 1.65;
@@ -202,7 +203,7 @@
   width: min(100%, 1016px);
   background: var(--glass-bg);
   border: 1px solid var(--border-subtle);
-  border-radius: 22px;
+  border-radius: var(--app-radius-lg);
   padding: 32px 46px 34px;
   display: flex;
   flex-direction: column;
@@ -225,7 +226,7 @@
   gap: 8px;
   padding: 7px 15px;
   border: 1px solid var(--border-subtle);
-  border-radius: 18px;
+  border-radius: var(--app-radius-pill);
   color: var(--text-tertiary);
   font-size: 14px;
   font-weight: 600;
@@ -333,7 +334,7 @@
   gap: 8px 12px;
   padding: 11px 15px;
   border: 1px solid var(--border-subtle);
-  border-radius: 11px;
+  border-radius: var(--app-radius-md);
   background: var(--bg-subtle);
 }
 
@@ -346,9 +347,10 @@
   font-size: 13px;
   font-weight: 600;
   padding: 2px 10px;
-  border-radius: 12px;
+  border-radius: var(--app-radius-pill);
   background: var(--bg-surface);
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .upgrade-check-outcome.is-pass {
@@ -377,7 +379,7 @@
   margin: 4px 0 18px;
   padding: 14px 16px;
   border: 1px solid var(--amber);
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   background: var(--amber-soft);
 }
 
@@ -398,7 +400,7 @@
 
 .upgrade-pending code {
   padding: 1px 6px;
-  border-radius: 6px;
+  border-radius: var(--app-radius-xs);
   background: var(--bg-surface);
   font-size: 13px;
 }
@@ -415,7 +417,7 @@
 .upgrade-days code,
 .upgrade-stage code {
   padding: 1px 7px;
-  border-radius: 7px;
+  border-radius: var(--app-radius-xs);
   background: var(--bg-code, var(--bg-subtle));
   color: var(--text-secondary);
   font-size: 13px;
@@ -483,7 +485,7 @@
   gap: 8px 14px;
   padding: 15px 19px;
   border: 1px solid var(--border-subtle);
-  border-radius: 11px;
+  border-radius: var(--app-radius-md);
   background: var(--bg-subtle);
 }
 
@@ -528,7 +530,7 @@
   gap: 10px;
   padding: 18px 19px;
   border: 1px solid var(--border-subtle);
-  border-radius: 11px;
+  border-radius: var(--app-radius-md);
 }
 
 .upgrade-gaps h3,
@@ -573,7 +575,7 @@
   }
   .upgrade-language {
     width: 32px;
-    height: 40px;
+    height: var(--control-height-md);
     justify-content: center;
   }
   .upgrade-language select {

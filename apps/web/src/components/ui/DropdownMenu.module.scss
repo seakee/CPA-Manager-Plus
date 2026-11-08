@@ -3,13 +3,13 @@
   align-items: center;
   justify-content: center;
   gap: 4px;
-  min-width: 28px;
-  min-height: 28px;
+  min-width: var(--control-height-xs);
+  min-height: var(--control-height-xs);
   padding: 0 8px;
-  border: 1px solid var(--border-color, #e5e7eb);
-  border-radius: 999px;
-  background: var(--bg-primary, #fff);
-  color: var(--text-primary, #111827);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-pill);
+  background: var(--bg-primary);
+  color: var(--text-primary);
   font: inherit;
   font-size: 12px;
   font-weight: 700;
@@ -25,8 +25,8 @@
 .trigger:hover,
 .triggerOpen {
   transform: translateY(-1px);
-  border-color: var(--border-subtle, #d8e5f2);
-  background: var(--surface-subtle-hover, #f1f7fe);
+  border-color: var(--border-subtle);
+  background: var(--surface-subtle-hover);
 }
 
 .trigger:focus {
@@ -35,10 +35,10 @@
 
 .trigger:focus-visible {
   outline: none;
-  border-color: var(--focus-border, color-mix(in srgb, var(--primary-color, #409eff) 28%, transparent));
-  background: var(--focus-bg, var(--surface-subtle-hover, #f1f7fe));
-  color: var(--focus-text, var(--primary-color, #409eff));
-  box-shadow: inset 0 0 0 1px var(--focus-inset, color-mix(in srgb, var(--primary-color, #409eff) 22%, transparent));
+  border-color: var(--focus-border);
+  background: var(--focus-bg);
+  color: var(--focus-text);
+  box-shadow: inset 0 0 0 1px var(--focus-inset);
 }
 
 .trigger:disabled {
@@ -53,27 +53,24 @@
   min-width: 168px;
   max-width: 280px;
   padding: 4px;
-  border: 1px solid
-    color-mix(in srgb, var(--primary-color, #409eff) 22%, var(--border-primary, #d1d5db));
-  border-radius: 12px;
-  background: var(--bg-primary, #fff);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-primary));
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
+  /* floating layer: elevation allowed */
   box-shadow:
     0 16px 32px rgba(15, 23, 42, 0.14),
-    0 0 0 1px color-mix(in srgb, var(--primary-color, #409eff) 8%, transparent);
-  color: var(--text-primary, #111827);
+    0 0 0 1px color-mix(in srgb, var(--primary-color) 8%, transparent);
+  color: var(--text-primary);
   font-size: 13px;
   line-height: 1.4;
 }
 
 :global([data-theme='dark']) .menu {
-  border-color: color-mix(
-    in srgb,
-    var(--primary-color, #409eff) 30%,
-    var(--border-primary, rgba(255, 255, 255, 0.12))
-  );
+  border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-primary));
+  /* floating layer: elevation allowed */
   box-shadow:
     0 16px 32px rgba(0, 0, 0, 0.42),
-    0 0 0 1px color-mix(in srgb, var(--primary-color, #409eff) 14%, transparent);
+    0 0 0 1px color-mix(in srgb, var(--primary-color) 14%, transparent);
 }
 
 .item {
@@ -83,7 +80,7 @@
   width: 100%;
   padding: 8px 10px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -98,7 +95,7 @@
 .item:hover,
 .item:focus,
 .itemActive {
-  background: var(--surface-subtle-hover, #f1f7fe);
+  background: var(--surface-subtle-hover);
 }
 
 .item:focus,
@@ -107,13 +104,13 @@
 }
 
 .itemDanger {
-  color: var(--error-color, #dc2626);
+  color: var(--error-color);
 }
 
 .itemDanger:hover,
 .itemDanger:focus,
 .itemDanger.itemActive {
-  background: color-mix(in srgb, var(--error-color, #dc2626) 10%, var(--bg-primary, #fff));
+  background: color-mix(in srgb, var(--error-color) 10%, var(--bg-primary));
 }
 
 .itemIcon {
@@ -137,5 +134,5 @@
 .divider {
   height: 1px;
   margin: 4px 4px;
-  background: var(--border-subtle, #d8e5f2);
+  background: var(--border-subtle);
 }

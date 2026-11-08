@@ -30,6 +30,7 @@
   max-width: 100%;
   background: var(--app-surface-strong, var(--bg-primary));
   border-left: 1px solid var(--border-color);
+  /* floating layer: elevation allowed */
   box-shadow: -24px 0 48px rgba(15, 23, 42, 0.18);
   outline: none;
 
@@ -37,7 +38,7 @@
     width: 100% !important;
     height: auto;
     max-height: calc(100dvh - 48px);
-    border-radius: $radius-lg $radius-lg 0 0;
+    border-radius: var(--app-radius-md) var(--app-radius-md) 0 0;
   }
 }
 
@@ -81,8 +82,8 @@
   @include button-reset;
   @include flex-center;
   width: 32px;
-  height: 32px;
-  border-radius: $radius-md;
+  height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
   color: var(--text-secondary);
   flex-shrink: 0;
 

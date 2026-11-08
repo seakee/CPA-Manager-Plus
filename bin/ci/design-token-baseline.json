@@ -1,24 +1,7 @@
 {
   "version": 2,
   "rules": {
-    "undefined-var": {
-      "apps/web/src/features/dashboard/components/HealthAlertsCard.module.scss": {
-        "--app-shadow-md": 1
-      },
-      "apps/web/src/features/oauth/CodexReauthDialog.module.scss": {
-        "--font-family-mono": 1,
-        "--surface-primary": 2
-      },
-      "apps/web/src/features/plugins/PluginRuntimeSwitch.module.scss": {
-        "--shadow-sm": 1
-      },
-      "apps/web/src/features/plugins/PluginsPage.module.scss": {
-        "--shadow-sm": 2
-      },
-      "apps/web/src/features/plugins/PluginStorePage.module.scss": {
-        "--shadow-sm": 2
-      }
-    },
+    "undefined-var": {},
     "radius": {
       "apps/web/src/components/common/DatabaseMaintenanceBanner.module.scss": 2,
       "apps/web/src/components/common/SecondaryScreenShell.module.scss": 1,
@@ -28,10 +11,6 @@
       "apps/web/src/components/modelAlias/ModelMappingDiagram.module.scss": 3,
       "apps/web/src/components/providers/ProviderDetailDrawer/ProviderDetailDrawer.module.scss": 1,
       "apps/web/src/components/providers/ProviderToolbar/ProviderToolbar.module.scss": 4,
-      "apps/web/src/components/ui/DropdownMenu.module.scss": 1,
-      "apps/web/src/components/ui/ModelInputList.module.scss": 1,
-      "apps/web/src/components/ui/SegmentedTabs.module.scss": 2,
-      "apps/web/src/components/ui/SelectionCheckbox.module.scss": 1,
       "apps/web/src/features/aiProviders/AiProvidersPage.module.scss": 4,
       "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 3,
       "apps/web/src/features/config/ConfigPage.module.scss": 6,
@@ -40,18 +19,9 @@
       "apps/web/src/features/dashboard/components/VersionCard.module.scss": 3,
       "apps/web/src/features/dashboard/DashboardPage.module.scss": 3,
       "apps/web/src/features/login/LoginPage.module.scss": 4,
-      "apps/web/src/features/logs/LogsPage.module.scss": 1,
-      "apps/web/src/features/plugins/components/PluginInstallGateModal.module.scss": 2,
-      "apps/web/src/features/plugins/PluginResourcePage.module.scss": 1,
-      "apps/web/src/features/plugins/PluginsPage.module.scss": 7,
-      "apps/web/src/features/plugins/PluginStorePage.module.scss": 12,
       "apps/web/src/features/system/components/DatabaseStatusCard.module.scss": 1,
       "apps/web/src/features/system/ManagerUpdatePage.module.scss": 2,
       "apps/web/src/features/system/RuntimeStatusPage.scss": 1,
-      "apps/web/src/fullweb/carrier.css": 3,
-      "apps/web/src/fullweb/consoleWorkspace.css": 1,
-      "apps/web/src/fullweb/upgradeEntry.css": 9,
-      "apps/web/src/styles/components.scss": 2,
       "apps/web/src/styles/layout.scss": 1
     },
     "font-weight": {
@@ -60,19 +30,12 @@
       "apps/web/src/components/config/VisualConfigEditor.module.scss": 1,
       "apps/web/src/components/providers/ProviderHealthCheckDrawer/ProviderHealthCheckDrawer.module.scss": 3,
       "apps/web/src/components/providers/ProviderToolbar/ProviderToolbar.module.scss": 1,
-      "apps/web/src/components/ui/SegmentedTabs.module.scss": 1,
       "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 1,
       "apps/web/src/features/dashboard/components/TrafficOverviewCard.module.scss": 6,
       "apps/web/src/features/login/LoginPage.module.scss": 4,
-      "apps/web/src/features/logs/LogsPage.module.scss": 1,
-      "apps/web/src/features/plugins/components/PluginInstallGateModal.module.scss": 4,
-      "apps/web/src/features/plugins/PluginsPage.module.scss": 1,
-      "apps/web/src/features/plugins/PluginStorePage.module.scss": 5,
       "apps/web/src/features/system/components/DatabaseStatusCard.module.scss": 3,
       "apps/web/src/features/system/ManagerUpdatePage.module.scss": 2,
-      "apps/web/src/features/system/RuntimeStatusPage.scss": 1,
-      "apps/web/src/fullweb/carrier.css": 1,
-      "apps/web/src/styles/components.scss": 1
+      "apps/web/src/features/system/RuntimeStatusPage.scss": 1
     },
     "scss-radius-var": {
       "apps/web/src/components/common/SplashScreen.scss": 2,
@@ -82,23 +45,16 @@
       "apps/web/src/components/providers/ProviderHealthCheckDrawer/ProviderHealthCheckDrawer.module.scss": 7,
       "apps/web/src/components/providers/ProviderTable/ProviderTable.module.scss": 1,
       "apps/web/src/components/providers/ProviderToolbar/ProviderToolbar.module.scss": 5,
-      "apps/web/src/components/ui/Drawer.module.scss": 3,
-      "apps/web/src/components/ui/ToggleSwitch.module.scss": 2,
       "apps/web/src/features/aiProviders/AiProvidersPage.module.scss": 8,
       "apps/web/src/features/authFiles/components/AuthJsonPasteModal.module.scss": 2,
       "apps/web/src/features/authFiles/components/OAuthEditorModals.module.scss": 3,
       "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 2,
       "apps/web/src/features/login/LoginPage.module.scss": 3,
-      "apps/web/src/features/logs/LogsPage.module.scss": 4,
-      "apps/web/src/features/oauth/CodexReauthDialog.module.scss": 5,
-      "apps/web/src/features/oauth/OAuthPage.module.scss": 5,
       "apps/web/src/features/system/SystemPage.module.scss": 6,
-      "apps/web/src/styles/components.scss": 15,
       "apps/web/src/styles/global.scss": 1,
       "apps/web/src/styles/variables.scss": 4
     },
     "color-literal": {
-      "apps/web/src/App.css": 3,
       "apps/web/src/components/common/DatabaseMaintenanceBanner.module.scss": 12,
       "apps/web/src/components/common/SecondaryScreenShell.module.scss": 1,
       "apps/web/src/components/config/DiffModal.module.scss": 3,
@@ -108,11 +64,8 @@
       "apps/web/src/components/providers/ProviderHealthCheckDrawer/ProviderHealthCheckDrawer.module.scss": 2,
       "apps/web/src/components/providers/ProviderToolbar/ProviderToolbar.module.scss": 6,
       "apps/web/src/components/ui/Drawer.module.scss": 2,
-      "apps/web/src/components/ui/DropdownMenu.module.scss": 24,
-      "apps/web/src/components/ui/SegmentedTabs.module.scss": 2,
+      "apps/web/src/components/ui/DropdownMenu.module.scss": 2,
       "apps/web/src/components/ui/Select.module.scss": 2,
-      "apps/web/src/components/ui/SelectionCheckbox.module.scss": 1,
-      "apps/web/src/components/ui/ToggleSwitch.module.scss": 4,
       "apps/web/src/features/accounts/AccountsPage.module.scss": 1,
       "apps/web/src/features/accounts/components/AccountRequestTimeTooltip.module.scss": 1,
       "apps/web/src/features/aiProviders/AiProvidersPage.module.scss": 28,
@@ -128,21 +81,15 @@
       "apps/web/src/features/dashboard/components/VersionCard.module.scss": 17,
       "apps/web/src/features/dashboard/DashboardPage.module.scss": 13,
       "apps/web/src/features/login/LoginPage.module.scss": 4,
-      "apps/web/src/features/logs/LogsPage.module.scss": 17,
       "apps/web/src/features/monitoring/CodexInspectionPage.module.scss": 4,
       "apps/web/src/features/monitoring/MonitoringCenterPage.module.scss": 2,
       "apps/web/src/features/monitoring/styles/_monitoring-account-overview.scss": 2,
       "apps/web/src/features/monitoring/styles/_monitoring-summary-table.scss": 5,
-      "apps/web/src/features/oauth/CodexReauthDialog.module.scss": 5,
-      "apps/web/src/features/oauth/OAuthPage.module.scss": 4,
-      "apps/web/src/features/plugins/PluginStorePage.module.scss": 1,
       "apps/web/src/features/system/components/DatabaseStatusCard.module.scss": 7,
       "apps/web/src/features/system/ManagerUpdates.module.scss": 1,
       "apps/web/src/features/system/SystemPage.module.scss": 2,
       "apps/web/src/features/usage-analytics/UsageAnalyticsPage.module.scss": 4,
-      "apps/web/src/fullweb/consoleWorkspace.css": 1,
-      "apps/web/src/index.css": 10,
-      "apps/web/src/styles/components.scss": 8,
+      "apps/web/src/styles/components.scss": 1,
       "apps/web/src/styles/layout.scss": 11,
       "apps/web/src/styles/mixins.scss": 2,
       "apps/web/src/styles/variables.scss": 18
@@ -153,7 +100,6 @@
       "apps/web/src/features/config/ConfigPage.module.scss": 12,
       "apps/web/src/features/dashboard/components/TrafficOverviewCard.module.scss": 2,
       "apps/web/src/features/login/LoginPage.module.scss": 2,
-      "apps/web/src/features/logs/LogsPage.module.scss": 4,
       "apps/web/src/features/monitoring/CodexInspectionPage.module.scss": 3,
       "apps/web/src/features/monitoring/MonitoringCenterPage.module.scss": 14,
       "apps/web/src/features/monitoring/styles/_monitoring-summary-table.scss": 9,

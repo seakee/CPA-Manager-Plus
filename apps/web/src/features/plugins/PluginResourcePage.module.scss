@@ -24,7 +24,7 @@
 .statusPanel {
   padding: 14px 16px;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--app-radius-md);
   background: var(--bg-primary);
   color: var(--text-secondary);
   font-size: 14px;
