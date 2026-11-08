@@ -201,7 +201,7 @@ doc_handoff="$("${compose[@]}" exec -T -u 10002:10002 cpa-manager-plus cpa-manag
 case "${doc_handoff}" in
   "/.well-known/cpamp-bootstrap/ui#handoff="*) ;;
   *)
-    echo "Documented initializer command did not emit the expected handoff: ${doc_handoff}" >&2
+    echo "Documented initializer command did not emit the expected fixed Bootstrap fragment handoff" >&2
     exit 1
     ;;
 esac

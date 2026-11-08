@@ -39,7 +39,7 @@ def main():
     events = []
     probe = name + "-probe"
     def command(*args, check=True):
-        completed = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        completed = subprocess.run(args, capture_output=True, text=True, timeout=180)
         events.append({"command": list(args), "exitCode": completed.returncode,
                        "stdout": completed.stdout, "stderr": completed.stderr})
         if check and completed.returncode:
@@ -83,10 +83,11 @@ with response:
         response = json.loads(completed.stdout)
         data = response["body"].encode()
         code, version = response["code"], response["version"]
+        body_sha256 = hashlib.sha256(data).hexdigest()
         events.append({"http": method + " " + path, "status": code,
                        "expected": expected, "cpaVersion": version,
-                       "responseSha256": hashlib.sha256(data).hexdigest()})
-        assert code == expected, (method, path, code, expected, response["body"])
+                       "responseSha256": body_sha256})
+        assert code == expected, (method, path, code, expected, len(data), body_sha256)
         try:
             value = json.loads(data) if data else None
         except json.JSONDecodeError:
@@ -115,7 +116,7 @@ with response:
         value, _ = request(runtime_url, "/v1/runtime/operations/" + action,
                            "POST", body, token, expected, local=True)
         if expected == 200:
-            assert value["state"] == "succeeded", value
+            assert value["state"] == "succeeded", (action, value.get("state"))
         return value
 
     def snapshot(label):

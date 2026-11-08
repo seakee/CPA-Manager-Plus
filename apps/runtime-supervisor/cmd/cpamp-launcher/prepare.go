@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -191,10 +193,26 @@ func Prepare(cfg PrepareConfig, sys System) (*PreparedRuntime, error) {
 }
 
 func prepare(cfg PrepareConfig, sys System) (*PreparedRuntime, error) {
+	return prepareContext(context.Background(), cfg, sys)
+}
+
+// prepareContext performs startup preparation, stopping between steps and during
+// the recursive ownership walk when ctx is canceled. Cancellation leaves no
+// partially written file behind: every multi-step write is atomic.
+func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*PreparedRuntime, error) {
 	if sys == nil {
 		sys = DefaultSystem()
 	}
 	cfg = applyPrepareDefaults(cfg)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := validateLoopbackAddr("CPAMP_RUNTIME_ADDR", cfg.RuntimeAddr); err != nil {
+		return nil, err
+	}
+	if err := validateLoopbackAddr("CPAMP_RUNTIME_CPA_ADDR", cfg.RuntimeCPAAddr); err != nil {
+		return nil, err
+	}
 
 	cpaUID, cpaGID, err := validateCPAIdentity(cfg, sys)
 	if err != nil {
@@ -212,7 +230,7 @@ func prepare(cfg PrepareConfig, sys System) (*PreparedRuntime, error) {
 
 	layout := ResolveRuntimeLayout(cfg.DataDir, runtimeRoot, cfg.TokenFile)
 
-	if err := ensureDataDir(layout.DataDir, sys); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
@@ -220,16 +238,26 @@ func prepare(cfg PrepareConfig, sys System) (*PreparedRuntime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read seed configuration %s: %w", cfg.SeedConfigPath, err)
 	}
-	enforceV8, err := shouldEnforceV8Bootstrap(cfg.CPAArtifactManifestPath, sys)
+	enforceV8, err := shouldEnforceV8Bootstrap(DefaultCPAArtifactManifestPath, sys)
 	if err != nil {
 		return nil, err
 	}
 	var bootstrapIdentity string
+	bootstrapState := v8BootstrapReady
 	if enforceV8 {
 		bootstrapIdentity = computeBootstrapIdentity(seedBytes)
-		if err := verifyOrInitV8Bootstrap(layout, seedBytes, bootstrapIdentity, sys); err != nil {
+		bootstrapState, err = checkV8Bootstrap(layout, seedBytes, bootstrapIdentity, sys)
+		if err != nil {
 			return nil, err
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if err := ensureDataDir(layout.DataDir, sys); err != nil {
+		return nil, err
 	}
 
 	for _, trustedDir := range []string{
@@ -294,7 +322,13 @@ func prepare(cfg PrepareConfig, sys System) (*PreparedRuntime, error) {
 		return nil, err
 	}
 
-	if err := lchownRecursiveNoDereference(layout.GatewayDir, cpaUID, cpaGID, sys); err != nil {
+	if bootstrapState == v8BootstrapInitialize {
+		if err := initV8Bootstrap(layout, bootstrapIdentity, sys); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := lchownRecursiveNoDereference(ctx, layout.GatewayDir, cpaUID, cpaGID, sys); err != nil {
 		return nil, err
 	}
 
@@ -422,6 +456,20 @@ func validateCPAIdentity(cfg PrepareConfig, sys System) (int, int, error) {
 	}
 
 	return uid, gid, nil
+}
+
+// validateLoopbackAddr enforces that a service address stays on container
+// loopback, so no environment override can publish an internal listener.
+func validateLoopbackAddr(name, addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%s must be a loopback host:port address: %w", name, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("%s must be a loopback address, got %q", name, addr)
+	}
+	return nil
 }
 
 func isDecimalDigits(s string) bool {
@@ -571,83 +619,105 @@ func v8Refuse(reason string) error {
 	)
 }
 
-func verifyOrInitV8Bootstrap(layout RuntimeLayout, seedBytes []byte, identity string, sys System) error {
+// v8BootstrapState reports whether the volume already carries a trusted v8
+// bootstrap identity or must be initialized.
+type v8BootstrapState int
+
+const (
+	v8BootstrapReady v8BootstrapState = iota
+	v8BootstrapInitialize
+)
+
+// checkV8Bootstrap performs every v8 refusal check without mutating the volume,
+// so an untrusted volume is refused before any chown or write happens.
+func checkV8Bootstrap(layout RuntimeLayout, seedBytes []byte, identity string, sys System) (v8BootstrapState, error) {
 	rootStat, rootErr := sys.Lstat(layout.RuntimeRoot)
 	rootExists := rootErr == nil
 	if rootErr != nil && !errors.Is(rootErr, fs.ErrNotExist) {
-		return fmt.Errorf("failed to stat runtime root %s: %w", layout.RuntimeRoot, rootErr)
+		return v8BootstrapReady, fmt.Errorf("failed to stat runtime root %s: %w", layout.RuntimeRoot, rootErr)
 	}
 	if rootExists {
 		if rootStat.Mode&fs.ModeSymlink != 0 || !rootStat.Mode.IsDir() {
-			return v8Refuse("invalid Runtime root")
+			return v8BootstrapReady, v8Refuse("invalid Runtime root")
 		}
 		if rootStat.UID != RootUID {
-			return v8Refuse("untrusted Runtime root owner")
+			return v8BootstrapReady, v8Refuse("untrusted Runtime root owner")
 		}
 	}
 
 	markerStat, markerErr := sys.Lstat(layout.BootstrapMarkerPath)
 	markerExists := markerErr == nil
 	if markerErr != nil && !errors.Is(markerErr, fs.ErrNotExist) {
-		return fmt.Errorf("failed to stat bootstrap marker %s: %w", layout.BootstrapMarkerPath, markerErr)
+		return v8BootstrapReady, fmt.Errorf("failed to stat bootstrap marker %s: %w", layout.BootstrapMarkerPath, markerErr)
 	}
 
 	if markerExists {
 		if markerStat.Mode&fs.ModeSymlink != 0 || !markerStat.Mode.IsRegular() {
-			return v8Refuse("invalid bootstrap identity")
+			return v8BootstrapReady, v8Refuse("invalid bootstrap identity")
 		}
 		if markerStat.UID != RootUID || markerStat.GID != RootGID || markerStat.UnixPerm() != BootstrapFileMode {
-			return v8Refuse("untrusted bootstrap identity")
+			return v8BootstrapReady, v8Refuse("untrusted bootstrap identity")
 		}
 		markerBytes, err := sys.ReadFile(layout.BootstrapMarkerPath)
 		if err != nil {
-			return v8Refuse("invalid bootstrap identity")
+			return v8BootstrapReady, v8Refuse("invalid bootstrap identity")
 		}
 		markerContent := strings.TrimRight(string(markerBytes), "\n")
 		if markerContent != identity {
-			return v8Refuse("different bootstrap identity")
+			return v8BootstrapReady, v8Refuse("different bootstrap identity")
 		}
 
 		gwStat, gwErr := sys.Lstat(layout.GatewayDir)
 		if gwErr != nil || gwStat.Mode&fs.ModeSymlink != 0 || !gwStat.Mode.IsDir() {
-			return v8Refuse("invalid Gateway directory")
+			return v8BootstrapReady, v8Refuse("invalid Gateway directory")
 		}
 
 		cfgStat, cfgErr := sys.Lstat(layout.GatewayConfigPath)
 		if cfgErr != nil || cfgStat.Mode&fs.ModeSymlink != 0 || !cfgStat.Mode.IsRegular() {
-			return v8Refuse("missing or invalid bootstrap config")
+			return v8BootstrapReady, v8Refuse("missing or invalid bootstrap config")
 		}
 
 		cfgBytes, err := sys.ReadFile(layout.GatewayConfigPath)
 		if err != nil || !bytes.Equal(seedBytes, cfgBytes) {
-			return v8Refuse("modified or incompatible bootstrap config")
+			return v8BootstrapReady, v8Refuse("modified or incompatible bootstrap config")
 		}
-		return nil
+		return v8BootstrapReady, nil
 	}
 
 	if rootExists {
 		entries, err := sys.ReadDir(layout.RuntimeRoot)
 		if err != nil {
-			return fmt.Errorf("failed to read runtime root %s: %w", layout.RuntimeRoot, err)
+			return v8BootstrapReady, fmt.Errorf("failed to read runtime root %s: %w", layout.RuntimeRoot, err)
 		}
 		if len(entries) > 0 {
-			return v8Refuse("nonempty volume without v8 bootstrap identity")
-		}
-	} else {
-		if err := sys.Mkdir(layout.RuntimeRoot, RuntimeRootMode); err != nil {
-			return fmt.Errorf("failed to create runtime root %s: %w", layout.RuntimeRoot, err)
+			return v8BootstrapReady, v8Refuse("nonempty volume without v8 bootstrap identity")
 		}
 	}
+	return v8BootstrapInitialize, nil
+}
 
-	if err := sys.WriteFile(layout.BootstrapMarkerPath, []byte(identity+"\n"), BootstrapFileMode); err != nil {
+// initV8Bootstrap atomically installs the trusted bootstrap identity marker
+// after the runtime root, gateway directory, and initial gateway config exist.
+func initV8Bootstrap(layout RuntimeLayout, identity string, sys System) error {
+	tmpFile := fmt.Sprintf("%s.tmp.%d", layout.BootstrapMarkerPath, os.Getpid())
+	_ = sys.Remove(tmpFile)
+	if err := sys.WriteFile(tmpFile, []byte(identity+"\n"), BootstrapFileMode); err != nil {
+		_ = sys.Remove(tmpFile)
 		return fmt.Errorf("failed to write bootstrap marker %s: %w", layout.BootstrapMarkerPath, err)
 	}
-	if err := sys.Chown(layout.BootstrapMarkerPath, RootUID, RootGID); err != nil {
+	if err := sys.Chown(tmpFile, RootUID, RootGID); err != nil {
+		_ = sys.Remove(tmpFile)
 		return fmt.Errorf("failed to chown bootstrap marker %s: %w", layout.BootstrapMarkerPath, err)
 	}
-	if err := sys.Chmod(layout.BootstrapMarkerPath, BootstrapFileMode); err != nil {
+	if err := sys.Chmod(tmpFile, BootstrapFileMode); err != nil {
+		_ = sys.Remove(tmpFile)
 		return fmt.Errorf("failed to chmod bootstrap marker %s: %w", layout.BootstrapMarkerPath, err)
 	}
+	if err := sys.Link(tmpFile, layout.BootstrapMarkerPath); err != nil {
+		_ = sys.Remove(tmpFile)
+		return fmt.Errorf("failed to install bootstrap marker %s: %w", layout.BootstrapMarkerPath, err)
+	}
+	_ = sys.Remove(tmpFile)
 	return nil
 }
 
@@ -806,7 +876,10 @@ func ensureGatewayConfig(configPath string, seedBytes []byte, sys System) error 
 	return nil
 }
 
-func lchownRecursiveNoDereference(path string, uid, gid int, sys System) error {
+func lchownRecursiveNoDereference(ctx context.Context, path string, uid, gid int, sys System) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	stat, err := sys.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("failed to lstat %s: %w", path, err)
@@ -823,7 +896,7 @@ func lchownRecursiveNoDereference(path string, uid, gid int, sys System) error {
 	}
 	for _, entry := range entries {
 		childPath := filepath.Join(path, entry.Name())
-		if err := lchownRecursiveNoDereference(childPath, uid, gid, sys); err != nil {
+		if err := lchownRecursiveNoDereference(ctx, childPath, uid, gid, sys); err != nil {
 			return err
 		}
 	}

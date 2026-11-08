@@ -1,9 +1,11 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { describe, expect, it } from 'vitest';
-
+import { parseGoDurationSeconds } from '../bin/ci/validate-runtime12-compose.mjs';
+import { validateRuntime12ComposeDocument } from '../bin/release/render-embedded-compose.mjs';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const composePath = path.join(repoRoot, 'docker-compose.yml');
 
@@ -195,5 +197,127 @@ describe('Fresh adoption compose topology negative fixtures', () => {
       `${MANAGER_SERVICE}:./manager-data:${MANAGER_DATA_TARGET}`,
     ]);
     expect(audit.managerDataMounts).toEqual([]);
+  });
+
+  it('validates stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s and CPAMP_RUNTIME_ADDR loopback in validate-runtime12-compose.mjs', () => {
+    const validatorPath = path.join(repoRoot, 'bin', 'ci', 'validate-runtime12-compose.mjs');
+    const validDoc = {
+      services: {
+        'cpa-manager-plus': {
+          image: 'seakee/cpa-manager-plus:latest',
+          stop_grace_period: '2m30s',
+          ports: [{ mode: 'ingress', published: '18317', target: 18317, protocol: 'tcp' }],
+          environment: {
+            CPAMP_PUBLIC_ORIGIN: '',
+            CPAMP_DRAIN_TIMEOUT: '90s',
+          },
+          volumes: [{ type: 'volume', source: 'cpamp-data', target: '/data' }],
+        },
+      },
+      volumes: { 'cpamp-data': {} },
+    };
+    const runValidator = (doc) =>
+      execFileSync(process.execPath, [validatorPath], {
+        cwd: repoRoot,
+        input: JSON.stringify(doc),
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+    const validDurationTable = [
+      ['1.5m', 90],
+      ['90000ms', 90],
+      ['1m30s', 90],
+      ['2h', 7200],
+      ['.5m', 30],
+      ['1.m', 60],
+      ['500us', 0.0005],
+      ['500µs', 0.0005],
+      ['500μs', 0.0005],
+      ['1000ns', 1e-6],
+      ['0', 0],
+      ['+150s', 150],
+    ];
+    const pinnedDocForRender = {
+      ...validDoc,
+      services: {
+        'cpa-manager-plus': {
+          ...validDoc.services['cpa-manager-plus'],
+          image: `seakee/cpa-manager-plus:v2.0.0-beta.1@sha256:${'a'.repeat(64)}`,
+        },
+      },
+    };
+    for (const [input, expected] of validDurationTable) {
+      expect(parseGoDurationSeconds(input)).toBeCloseTo(expected, 9);
+      if (expected > 0) {
+        const graceStr = `${Math.ceil(Math.max(150, expected + 60))}s`;
+        const docA = structuredClone(validDoc);
+        docA.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = input;
+        docA.services['cpa-manager-plus'].stop_grace_period = graceStr;
+        expect(() => runValidator(docA)).not.toThrow();
+
+        const docB = structuredClone(pinnedDocForRender);
+        docB.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = input;
+        docB.services['cpa-manager-plus'].stop_grace_period = graceStr;
+        expect(() => validateRuntime12ComposeDocument(docB, { validateComposeScript: false })).not.toThrow();
+      }
+    }
+    for (const invalid of ['90', 'abc', '-1s', '', '.s', '1d']) {
+      expect(Number.isNaN(parseGoDurationSeconds(invalid))).toBe(true);
+      if (invalid !== '') {
+        const docA = structuredClone(validDoc);
+        docA.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = invalid;
+        expect(() => runValidator(docA)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+
+        const docB = structuredClone(pinnedDocForRender);
+        docB.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = invalid;
+        expect(() => validateRuntime12ComposeDocument(docB, { validateComposeScript: false })).toThrow(
+          /stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/
+        );
+      }
+    }
+    expect(() => runValidator(validDoc)).not.toThrow();
+
+    for (const validDrain of ['1.5m', '90000ms', '1m30s']) {
+      const fractionalDrainDoc = structuredClone(validDoc);
+      fractionalDrainDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = validDrain;
+      expect(() => runValidator(fractionalDrainDoc)).not.toThrow();
+    }
+
+    const fractionalOverBudgetDoc = structuredClone(validDoc);
+    fractionalOverBudgetDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = '1.75m';
+    fractionalOverBudgetDoc.services['cpa-manager-plus'].stop_grace_period = '150s';
+    expect(() => runValidator(fractionalOverBudgetDoc)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+
+    const fractionalWithinCustomGraceDoc = structuredClone(validDoc);
+    fractionalWithinCustomGraceDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = '1.75m';
+    fractionalWithinCustomGraceDoc.services['cpa-manager-plus'].stop_grace_period = '2m45s';
+    expect(() => runValidator(fractionalWithinCustomGraceDoc)).not.toThrow();
+
+    for (const invalidDrain of ['90', 'abc', '-1s']) {
+      const badDrainDoc = structuredClone(validDoc);
+      badDrainDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = invalidDrain;
+      expect(() => runValidator(badDrainDoc)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+    }
+
+    const shortGraceDoc = structuredClone(validDoc);
+    shortGraceDoc.services['cpa-manager-plus'].stop_grace_period = '2m0s';
+    expect(() => runValidator(shortGraceDoc)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+
+    const longDrainShortGraceDoc = structuredClone(validDoc);
+    longDrainShortGraceDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = '120s';
+    longDrainShortGraceDoc.services['cpa-manager-plus'].stop_grace_period = '150s';
+    expect(() => runValidator(longDrainShortGraceDoc)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+    const badRuntimeAddrDoc = structuredClone(validDoc);
+    badRuntimeAddrDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_ADDR = '0.0.0.0:9081';
+    expect(() => runValidator(badRuntimeAddrDoc)).toThrow(
+      /CPAMP_RUNTIME_ADDR override must stay on in-container loopback 127\.0\.0\.1:9081/
+    );
+
+    const badCpaAddrDoc = structuredClone(validDoc);
+    badCpaAddrDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_CPA_ADDR = '0.0.0.0:8317';
+    expect(() => runValidator(badCpaAddrDoc)).toThrow(
+      /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
+    );
   });
 });

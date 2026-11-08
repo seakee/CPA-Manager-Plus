@@ -4,10 +4,68 @@ import { dirname, resolve } from 'node:path';
 import { isatty } from 'node:tty';
 import { fileURLToPath } from 'node:url';
 
+const GO_DURATION_UNIT_SECONDS = Object.freeze({
+  ns: 1e-9,
+  us: 1e-6,
+  '\u00b5s': 1e-6,
+  '\u03bcs': 1e-6,
+  ms: 1e-3,
+  s: 1,
+  m: 60,
+  h: 3600,
+});
+
+// Matches Go time.ParseDuration grammar: optional leading '+', then one or more
+// (decimal with optional fraction)(unit) segments where unit is ns|us|µs|μs|ms|s|m|h,
+// or the special bare "0" / "+0". Negative durations and bare non-zero numbers are
+// rejected. Docker Compose stop_grace_period uses the same Go duration format
+// (normalized by `docker compose config --format json` to e.g. "2m30s").
+export function parseGoDurationSeconds(raw) {
+  if (typeof raw !== 'string' && typeof raw !== 'number') {
+    return NaN;
+  }
+  const text = String(raw).trim();
+  if (!text || text.startsWith('-')) {
+    return NaN;
+  }
+  const unsigned = text.startsWith('+') ? text.slice(1) : text;
+  if (!unsigned) {
+    return NaN;
+  }
+  if (unsigned === '0') {
+    return 0;
+  }
+  const tokenRe = /(\d+(?:\.\d*)?|\.\d+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h)/gy;
+  let pos = 0;
+  let totalSeconds = 0;
+  let matchedAny = false;
+  while (pos < unsigned.length) {
+    tokenRe.lastIndex = pos;
+    const match = tokenRe.exec(unsigned);
+    if (!match) {
+      return NaN;
+    }
+    matchedAny = true;
+    const value = Number(match[1]);
+    const factor = GO_DURATION_UNIT_SECONDS[match[2]];
+    if (!Number.isFinite(value) || !Number.isFinite(factor)) {
+      return NaN;
+    }
+    totalSeconds += value * factor;
+    pos = tokenRe.lastIndex;
+  }
+  return matchedAny && Number.isFinite(totalSeconds) ? totalSeconds : NaN;
+}
+
 const fail = (message) => {
   throw new Error(`Runtime 13 Compose validation failed: ${message}`);
 };
 
+const isMainModule =
+  Boolean(process.argv[1]) &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isMainModule) {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const stdinChunks = [];
 if (!isatty(0)) {
@@ -46,12 +104,19 @@ if (
 if (cpamp.user) {
   fail('cpa-manager-plus must start as root so cpamp-launcher can provision /data and drop privileges per child');
 }
-const stopGrace = String(cpamp.stop_grace_period ?? '');
-if (stopGrace !== '2m0s' && stopGrace !== '120s') {
-  fail(`cpa-manager-plus must set stop_grace_period >= 120s, got ${JSON.stringify(cpamp.stop_grace_period)}`);
-}
-
 const env = cpamp.environment ?? {};
+const drainTimeoutRaw =
+  env.CPAMP_DRAIN_TIMEOUT && String(env.CPAMP_DRAIN_TIMEOUT).trim() !== ''
+    ? String(env.CPAMP_DRAIN_TIMEOUT).trim()
+    : '90s';
+const drainSeconds = parseGoDurationSeconds(drainTimeoutRaw);
+const graceSeconds = parseGoDurationSeconds(cpamp.stop_grace_period);
+const minGraceSeconds = Math.max(150, (Number.isFinite(drainSeconds) ? drainSeconds : 90) + 60);
+if (!Number.isFinite(drainSeconds) || drainSeconds <= 0 || !Number.isFinite(graceSeconds) || graceSeconds < minGraceSeconds) {
+  fail(
+    `cpa-manager-plus must set stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s (at least ${minGraceSeconds}s for CPAMP_DRAIN_TIMEOUT=${drainTimeoutRaw}), got ${JSON.stringify(cpamp.stop_grace_period)}`
+  );
+}
 const loopbackUrlRules = {
   CPAMP_MANAGER_URL: 'http://127.0.0.1:18319',
   CPAMP_GATEWAY_URL: 'http://127.0.0.1:8317',
@@ -67,7 +132,9 @@ for (const [key, expected] of Object.entries(loopbackUrlRules)) {
 const loopbackAddrRules = {
   CPAMP_INGRESS_CONTROL_ADDR: '127.0.0.1:9082',
   HTTP_ADDR: '127.0.0.1:18319',
+  CPAMP_RUNTIME_ADDR: '127.0.0.1:9081',
   CPAMP_RUNTIME_LISTEN_ADDR: '127.0.0.1:9081',
+  CPAMP_RUNTIME_CPA_ADDR: '127.0.0.1:8317',
 };
 for (const [key, expected] of Object.entries(loopbackAddrRules)) {
   if (key in env && env[key] !== '' && env[key] !== expected) {
@@ -138,3 +205,4 @@ if (JSON.stringify(topVolumes) !== JSON.stringify(['cpamp-data'])) {
 console.log(
   'Single-image Compose validation passed: cpa-manager-plus service, one public 18317 mapping, single /data volume, and loopback/socket/privilege invariants'
 );
+}

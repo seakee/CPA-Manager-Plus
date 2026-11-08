@@ -161,6 +161,10 @@ COPY --from=web-build /out/fullweb-manifest.json ./apps/manager-server/internal/
 WORKDIR /src/apps/manager-server
 RUN go mod download
 RUN python3 /collect-third-party-licenses.py go --module /src/apps/manager-server --component manager --output /out/licenses/manager
+# Note: -trimpath is intentionally omitted on cpa-manager-plus because Go's cmd/go
+# redacts -ldflags from runtime/debug.BuildInfo when -trimpath is set, which would
+# strip the SourceCommit/Version buildinfo stamps verified by `go version -m` below
+# and by bin/release/verify-embedded-candidate.py.
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags "-s -w -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.Version=$VERSION -X github.com/seakee/cpa-manager-plus/apps/manager-server/internal/buildinfo.SourceCommit=$SOURCE_COMMIT" -o /out/cpa-manager-plus ./cmd/cpa-manager-plus
 # Verify the real output binary carries this source stamp, not just image labels.
 RUN go version -m /out/cpa-manager-plus | grep -F "SourceCommit=$SOURCE_COMMIT"

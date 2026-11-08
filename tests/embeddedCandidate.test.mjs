@@ -424,6 +424,62 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       /CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK/
     );
 
+    const shortStopGraceCompose = composeYaml.replace(
+      '    stop_grace_period: 150s',
+      '    stop_grace_period: 120s'
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(shortStopGraceCompose)).toThrow(
+      /stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/
+    );
+
+    const drainExceedsGraceCompose = composeYaml.replace(
+      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+      "      CPAMP_DRAIN_TIMEOUT: '120s'"
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(drainExceedsGraceCompose)).toThrow(
+      /stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/
+    );
+
+    for (const validDrain of ['1.5m', '90000ms', '1m30s']) {
+      const fractionalDrainCompose = composeYaml.replace(
+        "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+        `      CPAMP_DRAIN_TIMEOUT: '${validDrain}'`
+      );
+      expect(() => composeYamlToRuntime12ConfigJson(fractionalDrainCompose)).not.toThrow();
+    }
+
+    const fractionalOverBudgetCompose = composeYaml.replace(
+      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+      "      CPAMP_DRAIN_TIMEOUT: '1.75m'"
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(fractionalOverBudgetCompose)).toThrow(
+      /stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/
+    );
+
+    for (const invalidDrain of ['90', 'abc', '-1s']) {
+      const badDrainCompose = composeYaml.replace(
+        "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+        `      CPAMP_DRAIN_TIMEOUT: '${invalidDrain}'`
+      );
+      expect(() => composeYamlToRuntime12ConfigJson(badDrainCompose)).toThrow(
+        /stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/
+      );
+    }
+    const nonLoopbackRuntimeAddrCompose = composeYaml.replace(
+      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'\n      CPAMP_RUNTIME_ADDR: '0.0.0.0:9081'"
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(nonLoopbackRuntimeAddrCompose)).toThrow(
+      /CPAMP_RUNTIME_ADDR override must stay on in-container loopback 127\.0\.0\.1:9081/
+    );
+
+    const nonLoopbackCpaAddrCompose = composeYaml.replace(
+      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'\n      CPAMP_RUNTIME_CPA_ADDR: '0.0.0.0:8317'"
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(nonLoopbackCpaAddrCompose)).toThrow(
+      /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
+    );
     const extraPortCompose = composeYaml.replace(
       "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
       "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'\n      - '18318:18317'"

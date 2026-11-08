@@ -760,7 +760,7 @@ export function renderEmbeddedComposeYaml(imageRefs) {
     '  cpa-manager-plus:',
     `    image: '${fullRef}'`,
     '    restart: unless-stopped',
-    '    stop_grace_period: 120s',
+    '    stop_grace_period: 150s',
     '    ports:',
     "      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
     '    environment:',
@@ -1001,6 +1001,59 @@ export function parseEmbeddedComposeText(composeText) {
   return { name: rawDoc.name ?? 'cpa-manager-plus', services, volumes };
 }
 
+const GO_DURATION_UNIT_SECONDS = Object.freeze({
+  ns: 1e-9,
+  us: 1e-6,
+  '\u00b5s': 1e-6,
+  '\u03bcs': 1e-6,
+  ms: 1e-3,
+  s: 1,
+  m: 60,
+  h: 3600,
+});
+
+// Matches Go time.ParseDuration grammar: optional leading '+', then one or more
+// (decimal with optional fraction)(unit) segments where unit is ns|us|µs|μs|ms|s|m|h,
+// or the special bare "0" / "+0". Negative durations and bare non-zero numbers are
+// rejected. Docker Compose stop_grace_period uses the same Go duration format
+// (normalized by `docker compose config --format json` to e.g. "2m30s").
+function parseGoDurationSeconds(raw) {
+  if (typeof raw !== 'string' && typeof raw !== 'number') {
+    return NaN;
+  }
+  const text = String(raw).trim();
+  if (!text || text.startsWith('-')) {
+    return NaN;
+  }
+  const unsigned = text.startsWith('+') ? text.slice(1) : text;
+  if (!unsigned) {
+    return NaN;
+  }
+  if (unsigned === '0') {
+    return 0;
+  }
+  const tokenRe = /(\d+(?:\.\d*)?|\.\d+)(ns|us|\u00b5s|\u03bcs|ms|s|m|h)/gy;
+  let pos = 0;
+  let totalSeconds = 0;
+  let matchedAny = false;
+  while (pos < unsigned.length) {
+    tokenRe.lastIndex = pos;
+    const match = tokenRe.exec(unsigned);
+    if (!match) {
+      return NaN;
+    }
+    matchedAny = true;
+    const value = Number(match[1]);
+    const factor = GO_DURATION_UNIT_SECONDS[match[2]];
+    if (!Number.isFinite(value) || !Number.isFinite(factor)) {
+      return NaN;
+    }
+    totalSeconds += value * factor;
+    pos = tokenRe.lastIndex;
+  }
+  return matchedAny && Number.isFinite(totalSeconds) ? totalSeconds : NaN;
+}
+
 export function validateRuntime12ComposeDocument(document, options = {}) {
   const services = document?.services ?? {};
   const serviceNames = Object.keys(services).sort();
@@ -1050,8 +1103,39 @@ export function validateRuntime12ComposeDocument(document, options = {}) {
     if (serviceName === 'cpa-manager-plus' && 'user' in serviceConfig && String(serviceConfig.user ?? '') !== '') {
       fail('cpa-manager-plus must start as root so cpamp-launcher can provision /data and drop privileges per child');
     }
+    if (serviceName === 'cpa-manager-plus') {
+      const env = serviceConfig.environment ?? {};
+      const drainTimeoutRaw =
+        env.CPAMP_DRAIN_TIMEOUT && String(env.CPAMP_DRAIN_TIMEOUT).trim() !== ''
+          ? String(env.CPAMP_DRAIN_TIMEOUT).trim()
+          : '90s';
+      const drainSeconds = parseGoDurationSeconds(drainTimeoutRaw);
+      const graceSeconds = parseGoDurationSeconds(serviceConfig.stop_grace_period);
+      const minGraceSeconds = Math.max(150, (Number.isFinite(drainSeconds) ? drainSeconds : 90) + 60);
+      if (
+        !Number.isFinite(drainSeconds) ||
+        drainSeconds <= 0 ||
+        !Number.isFinite(graceSeconds) ||
+        graceSeconds < minGraceSeconds
+      ) {
+        fail(
+          `cpa-manager-plus must set stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s (at least ${minGraceSeconds}s for CPAMP_DRAIN_TIMEOUT=${drainTimeoutRaw}), got ${JSON.stringify(serviceConfig.stop_grace_period)}`
+        );
+      }
+      const loopbackAddrRules = {
+        CPAMP_INGRESS_CONTROL_ADDR: '127.0.0.1:9082',
+        HTTP_ADDR: '127.0.0.1:18319',
+        CPAMP_RUNTIME_ADDR: '127.0.0.1:9081',
+        CPAMP_RUNTIME_LISTEN_ADDR: '127.0.0.1:9081',
+        CPAMP_RUNTIME_CPA_ADDR: '127.0.0.1:8317',
+      };
+      for (const [key, expected] of Object.entries(loopbackAddrRules)) {
+        if (key in env && env[key] !== '' && env[key] !== expected) {
+          fail(`${key} override must stay on in-container loopback ${expected}, got ${JSON.stringify(env[key])}`);
+        }
+      }
+    }
     parsePinnedImageReference(serviceConfig.image, serviceName);
-
     const ports = serviceConfig.ports ?? [];
     if (serviceName === 'cpa-manager-plus') {
       if (!Array.isArray(ports) || ports.length !== 1 || !isPlainObject(ports[0])) {

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -323,7 +324,7 @@ func TestLoadOrCreateDataKeyCreatesStableRestrictedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat data key: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("data key permissions = %o, want 600", info.Mode().Perm())
 	}
 
@@ -352,8 +353,11 @@ func TestLoadOrCreateDataKeyTightensExistingPermissiveFile(t *testing.T) {
 		t.Fatalf("LoadExistingDataKey: %v", err)
 	}
 	infoBefore, err := os.Stat(keyPath)
-	if err != nil || infoBefore.Mode().Perm() != 0o644 {
-		t.Fatalf("mode after LoadExistingDataKey = %#04o, want 0644 (err=%v)", infoBefore.Mode().Perm(), err)
+	if err != nil {
+		t.Fatalf("stat data key after LoadExistingDataKey: %v", err)
+	}
+	if runtime.GOOS != "windows" && infoBefore.Mode().Perm() != 0o644 {
+		t.Fatalf("mode after LoadExistingDataKey = %#04o, want 0644", infoBefore.Mode().Perm())
 	}
 
 	loaded, created, err := LoadOrCreateDataKey("", keyPath)
@@ -367,8 +371,10 @@ func TestLoadOrCreateDataKeyTightensExistingPermissiveFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat tightened data.key: %v", err)
 	}
-	if got := infoAfter.Mode().Perm(); got != 0o600 {
-		t.Fatalf("tightened data.key mode = %#04o, want 0600", got)
+	if runtime.GOOS != "windows" {
+		if got := infoAfter.Mode().Perm(); got != 0o600 {
+			t.Fatalf("tightened data.key mode = %#04o, want 0600", got)
+		}
 	}
 }
 

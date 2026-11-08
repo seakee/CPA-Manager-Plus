@@ -30,7 +30,7 @@ docker run -d \
   --name cpa-manager-plus \
   -p 18317:18317 \
   -v cpamp-data:/data \
-  --stop-timeout 120 \
+  --stop-timeout 150 \
   -e CPAMP_PUBLIC_ORIGIN='https://cpamp.example.com' \
   cpa-manager-plus:full-local
 ```
@@ -45,7 +45,7 @@ docker compose config
 docker compose up -d --build
 ```
 
-Preserve the single-container security boundary: no Docker socket mount, privileged mode, host networking, or published internal loopback ports. Back up the `/data` volume as a complete unit; see [Backup And Restore](../operations/backup.md). Configure graceful drain duration via `CPAMP_DRAIN_TIMEOUT` (default `90s`) and keep `--stop-timeout` / `stop_grace_period` above it (for example `120s`).
+Preserve the single-container security boundary: no Docker socket mount, privileged mode, host networking, or published internal loopback ports. Back up the `/data` volume as a complete unit; see [Backup And Restore](../operations/backup.md). Configure graceful drain duration via `CPAMP_DRAIN_TIMEOUT` (default `90s`) and ensure `--stop-timeout` / `stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s` (default `150s`).
 
 ### Initialize And Claim The Installation
 

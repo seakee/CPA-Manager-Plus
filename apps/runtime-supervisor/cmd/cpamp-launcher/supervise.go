@@ -48,7 +48,6 @@ type TimingConfig struct {
 	ManagerShutdownTimeout                time.Duration
 	SupervisorShutdownTimeout             time.Duration
 	ProcessGroupKillGrace                 time.Duration
-	ReadinessWaitTimeout                  time.Duration
 	ReadinessPollInterval                 time.Duration
 }
 
@@ -82,9 +81,6 @@ func (t TimingConfig) withDefaults(getenv func(string) string) TimingConfig {
 	}
 	if t.ProcessGroupKillGrace <= 0 {
 		t.ProcessGroupKillGrace = ProcessGroupKillGrace
-	}
-	if t.ReadinessWaitTimeout <= 0 {
-		t.ReadinessWaitTimeout = DefaultReadinessWaitTimeout
 	}
 	if t.ReadinessPollInterval <= 0 {
 		t.ReadinessPollInterval = DefaultReadinessPollInterval
@@ -480,6 +476,15 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 
 	stdoutW := &syncLineWriter{dst: cfg.Stdout}
 	stderrW := &syncLineWriter{dst: cfg.Stderr}
+	fixedBudget := ShutdownFixedBudget()
+	stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf(
+		"shutdown budget: drain=%s fixed=%s worst-case=%s; container stop grace must be >= drain+%s (>= %s)",
+		cfg.Timings.DrainTimeout,
+		fixedBudget,
+		cfg.Timings.DrainTimeout+fixedBudget,
+		ShutdownFixedBudgetLimit,
+		cfg.Timings.DrainTimeout+ShutdownFixedBudgetLimit,
+	))
 
 	reaper := newCentralReaper()
 	defer reaper.stop()
@@ -512,20 +517,31 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		},
 	)
 
+	shutdownAndReturn := func() error {
+		beginShutdown()
+		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
+		select {
+		case err := <-fatalErrCh:
+			return err
+		default:
+			return nil
+		}
+	}
+
 	select {
 	case <-supFirstStart:
 	case err := <-fatalErrCh:
 		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
 		return err
 	case <-ctx.Done():
-		beginShutdown()
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
-		return nil
+		return shutdownAndReturn()
 	}
 
 	if cfg.SupervisorTCPAddr != "" {
-		if err := waitTCPReady(ctx, shutdownCtx, cfg.SupervisorTCPAddr, cfg.Timings.ReadinessWaitTimeout, cfg.Timings.ReadinessPollInterval); err != nil {
-			stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf("supervisor readiness wait timed out or canceled: %v", err))
+		if err := waitForReadiness(ctx, shutdownCtx, "runtime supervisor", stderrW, func(checkCtx context.Context) bool {
+			return tcpProbeReady(checkCtx, cfg.SupervisorTCPAddr, cfg.Timings.ReadinessPollInterval)
+		}, cfg.Timings.ReadinessPollInterval); err != nil {
+			return shutdownAndReturn()
 		}
 	}
 
@@ -534,9 +550,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
 		return err
 	case <-ctx.Done():
-		beginShutdown()
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
-		return nil
+		return shutdownAndReturn()
 	default:
 	}
 
@@ -559,14 +573,15 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
 		return err
 	case <-ctx.Done():
-		beginShutdown()
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
-		return nil
+		return shutdownAndReturn()
 	}
 
 	if cfg.ManagerHealthURL != "" {
-		if err := waitHTTPReady(ctx, shutdownCtx, cfg.ManagerHealthURL, cfg.Timings.ReadinessWaitTimeout, cfg.Timings.ReadinessPollInterval); err != nil {
-			stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf("manager readiness wait timed out or canceled: %v", err))
+		bootstrapURL := managerBootstrapURL(cfg.ManagerHealthURL)
+		if err := waitForReadiness(ctx, shutdownCtx, "manager", stderrW, func(checkCtx context.Context) bool {
+			return httpEndpointStatusOK(checkCtx, readinessHTTPClient(cfg.Timings.ReadinessPollInterval), cfg.ManagerHealthURL, bootstrapURL)
+		}, cfg.Timings.ReadinessPollInterval); err != nil {
+			return shutdownAndReturn()
 		}
 	}
 
@@ -575,9 +590,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
 		return err
 	case <-ctx.Done():
-		beginShutdown()
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
-		return nil
+		return shutdownAndReturn()
 	default:
 	}
 
@@ -600,9 +613,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
 		return err
 	case <-ctx.Done():
-		beginShutdown()
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
-		return nil
+		return shutdownAndReturn()
 	}
 }
 
@@ -789,7 +800,7 @@ func terminateAndReapProcessGroup(pgid int, reaper *centralReaper, grace time.Du
 		time.Sleep(10 * time.Millisecond)
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	killDeadline := time.Now().Add(500 * time.Millisecond)
+	killDeadline := time.Now().Add(SIGKILLReapWait)
 	for time.Now().Before(killDeadline) {
 		reaper.reapAvailable()
 		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
@@ -799,42 +810,50 @@ func terminateAndReapProcessGroup(pgid int, reaper *centralReaper, grace time.Du
 	}
 }
 
-func waitTCPReady(ctx, shutdownCtx context.Context, addr string, timeout, interval time.Duration) error {
-	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+// waitForReadiness blocks until check succeeds, logging periodically. It returns
+// only when the launcher is shutting down, so a downstream service never starts
+// before its upstream is ready.
+func waitForReadiness(ctx, shutdownCtx context.Context, label string, stderrW *syncLineWriter, check func(context.Context) bool, interval time.Duration) error {
+	if interval <= 0 {
+		interval = DefaultReadinessPollInterval
+	}
+	start := time.Now()
+	nextLog := start.Add(ReadinessLogInterval)
 	for {
-		conn, err := net.DialTimeout("tcp", addr, interval)
-		if err == nil {
-			_ = conn.Close()
+		if check(ctx) {
 			return nil
 		}
 		select {
-		case <-deadlineCtx.Done():
-			return deadlineCtx.Err()
 		case <-shutdownCtx.Done():
 			return shutdownCtx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-time.After(interval):
+		}
+		if !time.Now().Before(nextLog) {
+			stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf("%s is not ready after %s; still waiting", label, time.Since(start).Round(time.Second)))
+			nextLog = time.Now().Add(ReadinessLogInterval)
 		}
 	}
 }
 
-func waitHTTPReady(ctx, shutdownCtx context.Context, urlStr string, timeout, interval time.Duration) error {
-	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	client := &http.Client{Timeout: interval * 2}
-	bootstrapURL := managerBootstrapURL(urlStr)
-	for {
-		if httpEndpointStatusOK(deadlineCtx, client, urlStr, bootstrapURL) {
-			return nil
-		}
-		select {
-		case <-deadlineCtx.Done():
-			return deadlineCtx.Err()
-		case <-shutdownCtx.Done():
-			return shutdownCtx.Err()
-		case <-time.After(interval):
-		}
+func tcpProbeReady(_ context.Context, addr string, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = DefaultReadinessPollInterval
 	}
+	conn, err := net.DialTimeout("tcp", addr, timeout*2)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func readinessHTTPClient(interval time.Duration) *http.Client {
+	if interval <= 0 {
+		interval = DefaultReadinessPollInterval
+	}
+	return &http.Client{Timeout: interval * 2}
 }
 
 func managerBootstrapURL(healthURL string) string {

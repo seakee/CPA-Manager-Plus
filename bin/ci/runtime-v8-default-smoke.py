@@ -104,9 +104,11 @@ def main():
         if action == "start":
             b["expectedActiveArtifactId"] = "sha256:"+pin
         v = http("http://127.0.0.1:9081/v1/runtime/operations/"+action, token, b, "POST", local=True)
-        assert v["code"] == expected, v
+        body_bytes = v["body"].encode()
+        body_sha256 = hashlib.sha256(body_bytes).hexdigest()
+        assert v["code"] == expected, ("POST", "/v1/runtime/operations/" + action, v["code"], expected, len(body_bytes), body_sha256)
         if expected == 200:
-            assert json.loads(v["body"])["state"] == "succeeded", v
+            assert json.loads(v["body"])["state"] == "succeeded", (action, json.loads(v["body"]).get("state"))
 
     def closed(label):
         for path, method in [("/v1/models", "GET"), ("/v1/chat/completions", "POST"),
@@ -115,8 +117,10 @@ def main():
             for key in (None, "incorrect-client-key"):
                 v = http("http://cpa-manager-plus:18317"+path, key,
                          {"model": "no-provider", "messages": []} if method == "POST" else None, method)
-                assert v["code"] == 503 and v["body"].strip() == "gateway pending configuration", v
-        for key in (None, "incorrect-client-key"):
+                body_bytes = v["body"].encode()
+                assert v["code"] == 503 and v["body"].strip() == "gateway pending configuration", (
+                    method, path, v["code"], len(body_bytes), hashlib.sha256(body_bytes).hexdigest()
+                )
             assert http("http://cpa-manager-plus:8317/v1/models", key)["code"] == 0
             assert http("http://cpa-manager-plus:9081/v1/runtime/status", key)["code"] == 0
         events.append({"boundary": label, "result": "PASS"})

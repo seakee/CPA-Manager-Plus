@@ -25,13 +25,13 @@ const (
 	IngressGID      = 10003
 	IngressUserName = "cpamp-ingress"
 
-	DefaultDataDir                 = "/data"
-	DefaultRuntimeRoot             = "/data/runtime"
-	DedicatedRuntimeMountPoint     = "/runtime"
-	DefaultMountInfoPath           = "/proc/self/mountinfo"
-	DefaultRuntimeSecretDir        = "/data/runtime-secret"
-	DefaultRuntimeTokenFile        = "/data/runtime-secret/token"
-	DefaultSeedConfigPath          = "/usr/local/share/cpamp/runtime/config.seed.yaml"
+	DefaultDataDir                  = "/data"
+	DefaultRuntimeRoot              = "/data/runtime"
+	DedicatedRuntimeMountPoint      = "/runtime"
+	DefaultMountInfoPath            = "/proc/self/mountinfo"
+	DefaultRuntimeSecretDir         = "/data/runtime-secret"
+	DefaultRuntimeTokenFile         = "/data/runtime-secret/token"
+	DefaultSeedConfigPath           = "/usr/local/share/cpamp/runtime/config.seed.yaml"
 	DefaultSupervisorExecutablePath = "/usr/local/bin/cpamp-runtime-supervisor"
 	DefaultManagerExecutablePath    = "/usr/local/bin/cpa-manager-plus"
 	DefaultIngressExecutablePath    = "/usr/local/bin/cpamp-ingress"
@@ -40,12 +40,12 @@ const (
 	DefaultPasswdPath               = "/etc/passwd"
 	DefaultGroupPath                = "/etc/group"
 
-	DefaultRuntimeIdentity     = "embedded-default"
-	DefaultRuntimeAddr         = "127.0.0.1:9081"
-	DefaultManagerAddr         = "127.0.0.1:18319"
-	DefaultIngressPublicAddr   = "0.0.0.0:18317"
-	DefaultIngressAdminAddr    = "127.0.0.1:9082"
-	DefaultRuntimeCPAAddr      = "127.0.0.1:8317"
+	DefaultRuntimeIdentity   = "embedded-default"
+	DefaultRuntimeAddr       = "127.0.0.1:9081"
+	DefaultManagerAddr       = "127.0.0.1:18319"
+	DefaultIngressPublicAddr = "0.0.0.0:18317"
+	DefaultIngressAdminAddr  = "127.0.0.1:9082"
+	DefaultRuntimeCPAAddr    = "127.0.0.1:8317"
 
 	BootstrapMarkerName     = ".cpamp-v8-bootstrap"
 	BootstrapIdentityPrefix = "official-cpa-v8-bootstrap:"
@@ -56,14 +56,26 @@ const (
 	SupervisorShortRunWindow              = 10 * time.Second
 	SupervisorMaxConsecutiveShortFailures = 5
 
-	DefaultDrainTimeout         = 90 * time.Second
-	IngressDrainGraceExtra      = 5 * time.Second
-	ManagerShutdownTimeout      = 15 * time.Second
-	SupervisorShutdownTimeout   = 15 * time.Second
-	ProcessGroupKillGrace       = 5 * time.Second
-	DefaultReadinessWaitTimeout = 30 * time.Second
+	DefaultDrainTimeout          = 90 * time.Second
+	IngressDrainGraceExtra       = 5 * time.Second
+	ManagerShutdownTimeout       = 15 * time.Second
+	SupervisorShutdownTimeout    = 15 * time.Second
+	ProcessGroupKillGrace        = 5 * time.Second
+	SIGKILLReapWait              = 500 * time.Millisecond
 	DefaultReadinessPollInterval = 100 * time.Millisecond
+	ReadinessLogInterval         = 15 * time.Second
+
+	// ShutdownFixedBudgetLimit bounds every stop-stage budget that is not the
+	// configurable drain window. The container stop grace must be at least
+	// CPAMP_DRAIN_TIMEOUT + this limit (default grace 150s = 90s + 60s).
+	ShutdownFixedBudgetLimit = 60 * time.Second
 )
+
+// ShutdownFixedBudget returns the worst-case time the launcher can spend on
+// shutdown stages other than the configurable drain window.
+func ShutdownFixedBudget() time.Duration {
+	return IngressDrainGraceExtra + ManagerShutdownTimeout + SupervisorShutdownTimeout + ProcessGroupKillGrace + SIGKILLReapWait
+}
 
 // RuntimeLayout holds the resolved filesystem paths produced for a runtime root.
 type RuntimeLayout struct {

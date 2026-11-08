@@ -11,7 +11,7 @@ services:
         SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
     image: seakee/cpa-manager-plus:slim
     restart: unless-stopped
-    stop_grace_period: 120s
+    stop_grace_period: 150s
     ports:
       - "18317:18317"
     environment:

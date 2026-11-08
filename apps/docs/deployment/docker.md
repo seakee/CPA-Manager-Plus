@@ -30,7 +30,7 @@ docker run -d \
   --name cpa-manager-plus \
   -p 18317:18317 \
   -v cpamp-data:/data \
-  --stop-timeout 120 \
+  --stop-timeout 150 \
   -e CPAMP_PUBLIC_ORIGIN='https://cpamp.example.com' \
   cpa-manager-plus:full-local
 ```
@@ -45,7 +45,7 @@ docker compose config
 docker compose up -d --build
 ```
 
-请保持单容器拓扑边界：不要挂载 Docker socket、启用 `privileged`、使用 `network_mode: host` 或将内部回环端口发布到宿主机。备份与恢复只需完整保留 `/data` 命名卷，详见[备份与恢复](../operations/backup.md)。可通过 `CPAMP_DRAIN_TIMEOUT`（默认 `90s`）调整停机排空超时，并保持容器 `--stop-timeout` / `stop_grace_period` 留有余量（如 `120s`）。
+请保持单容器拓扑边界：不要挂载 Docker socket、启用 `privileged`、使用 `network_mode: host` 或将内部回环端口发布到宿主机。备份与恢复只需完整保留 `/data` 命名卷，详见[备份与恢复](../operations/backup.md)。可通过 `CPAMP_DRAIN_TIMEOUT`（默认 `90s`）调整停机排空超时，并必须满足 `--stop-timeout` / `stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s`（默认 `150s`）。
 
 ### 初始化与认领
 

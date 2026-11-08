@@ -183,7 +183,7 @@ artifact_b="$(seed_stage 7.3.4 /usr/local/bin/cli-proxy-api runtime17-candidate-
 [ "${artifact_b}" != "${artifact_a}" ] || fail "candidate B must differ from bundled A"
 activate_b_payload="$(printf '{"operationId":"runtime17-activate-b","expectedRuntimeIdentity":"embedded-default","expectedRuntimeGeneration":%s,"expectedActiveArtifactId":"%s","targetVersion":"7.3.4"}' "${generation_a}" "${artifact_a}")"
 activate_b="$(runtime_activate "${activate_b_payload}")"
-[ "$(printf '%s' "${activate_b}" | json_field state)" = "succeeded" ] || fail "A to B activation did not succeed: ${activate_b}"
+[ "$(printf '%s' "${activate_b}" | json_field state)" = "succeeded" ] || fail "A to B activation did not succeed (state=$(printf '%s' "${activate_b}" | json_field state))"
 
 status_b="$(wait_ready "${artifact_b}" 120)"
 [ "$(printf '%s' "${status_b}" | json_uint_field runtimeGeneration)" = "${generation_a}" ] || fail "activation changed RuntimeGeneration"
@@ -203,7 +203,7 @@ assert_selection 7.3.4 "${artifact_b}"
 artifact_c="$(seed_stage 7.3.5 /bin/true '')"
 activate_c_payload="$(printf '{"operationId":"runtime17-activate-c","expectedRuntimeIdentity":"embedded-default","expectedRuntimeGeneration":%s,"expectedActiveArtifactId":"%s","targetVersion":"7.3.5"}' "${generation_b}" "${artifact_b}")"
 activate_c="$(runtime_activate "${activate_c_payload}")"
-[ "$(printf '%s' "${activate_c}" | json_field state)" = "failed" ] || fail "unready C activation did not fail: ${activate_c}"
+[ "$(printf '%s' "${activate_c}" | json_field state)" = "failed" ] || fail "unready C activation did not fail (state=$(printf '%s' "${activate_c}" | json_field state))"
 failure_code="$(printf '%s' "${activate_c}" | json_field error.code)"
 case "${failure_code}" in
   activation_start_failed|activation_readiness_failed) ;;

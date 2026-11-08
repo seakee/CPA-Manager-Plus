@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -413,8 +414,13 @@ func TestOpenCreatesPrivateDatabaseSidecarsAndDataKeyModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat baseDir: %v", err)
 	}
-	if got := dirInfo.Mode().Perm(); got != 0o700 {
-		t.Fatalf("baseDir mode = %#04o, want 0700", got)
+	if !dirInfo.IsDir() {
+		t.Fatalf("expected baseDir to be a directory")
+	}
+	if runtime.GOOS != "windows" {
+		if got := dirInfo.Mode().Perm(); got != 0o700 {
+			t.Fatalf("baseDir mode = %#04o, want 0700", got)
+		}
 	}
 
 	for _, filePath := range []string{keyPath, dbPath, dbPath + "-wal", dbPath + "-shm"} {
@@ -422,8 +428,13 @@ func TestOpenCreatesPrivateDatabaseSidecarsAndDataKeyModes(t *testing.T) {
 		if statErr != nil {
 			t.Fatalf("stat %s: %v", filePath, statErr)
 		}
-		if got := info.Mode().Perm(); got != 0o600 {
-			t.Fatalf("%s mode = %#04o, want 0600", filePath, got)
+		if !info.Mode().IsRegular() {
+			t.Fatalf("expected %s to be a regular file", filePath)
+		}
+		if runtime.GOOS != "windows" {
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Fatalf("%s mode = %#04o, want 0600", filePath, got)
+			}
 		}
 	}
 }

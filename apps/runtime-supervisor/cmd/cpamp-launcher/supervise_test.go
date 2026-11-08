@@ -58,6 +58,16 @@ func runTestHelperProcess(role string) {
 		}
 	}
 
+	if readyFile := os.Getenv("CPAMP_TEST_READY_FILE"); readyFile != "" {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(readyFile); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
 	if delayMS, _ := strconv.Atoi(os.Getenv("CPAMP_TEST_READY_DELAY_MS")); delayMS > 0 {
 		time.Sleep(time.Duration(delayMS) * time.Millisecond)
 	}
@@ -186,7 +196,6 @@ func fastTimings() TimingConfig {
 		ManagerShutdownTimeout:                100 * time.Millisecond,
 		SupervisorShutdownTimeout:             100 * time.Millisecond,
 		ProcessGroupKillGrace:                 60 * time.Millisecond,
-		ReadinessWaitTimeout:                  1500 * time.Millisecond,
 		ReadinessPollInterval:                 15 * time.Millisecond,
 	}
 }
@@ -725,7 +734,6 @@ func TestManagerBootstrapDiscoveryModeReadinessGating(t *testing.T) {
 	mgrAddr := reserveLoopbackAddr(t)
 
 	timings := fastTimings()
-	timings.ReadinessWaitTimeout = 2 * time.Second
 
 	var errBuf bytes.Buffer
 	cfg := SupervisorConfig{
@@ -764,4 +772,274 @@ func TestManagerBootstrapDiscoveryModeReadinessGating(t *testing.T) {
 	if strings.Contains(errBuf.String(), "manager readiness wait timed out") {
 		t.Fatalf("expected bootstrap discovery mode to satisfy readiness immediately, got stderr:\n%s", errBuf.String())
 	}
+}
+
+func assertNoRoleStarted(t *testing.T, eventFile, role string) {
+	t.Helper()
+	for _, e := range parseEvents(t, eventFile) {
+		if e.Kind == "start" && e.Role == role {
+			t.Fatalf("%s started before its upstream was ready", role)
+		}
+	}
+}
+
+func TestManagerDoesNotStartUntilSupervisorReady(t *testing.T) {
+	eventFile := filepath.Join(t.TempDir(), "events.log")
+	readyFile := filepath.Join(t.TempDir(), "supervisor.ready")
+	supAddr := reserveLoopbackAddr(t)
+
+	cfg := SupervisorConfig{
+		SupervisorSpec: helperChildSpec(t, "supervisor",
+			"CPAMP_TEST_EVENT_FILE="+eventFile,
+			"CPAMP_TEST_READY_FILE="+readyFile,
+			"CPAMP_TEST_TCP_LISTEN_ADDR="+supAddr,
+		),
+		ManagerSpec:       helperChildSpec(t, "manager", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		IngressSpec:       helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		SupervisorTCPAddr: supAddr,
+		Timings:           fastTimings(),
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSupervisor(ctx, cfg)
+	}()
+
+	waitForEvents(t, eventFile, 1, nil)
+	time.Sleep(400 * time.Millisecond)
+	assertNoRoleStarted(t, eventFile, "manager")
+	assertNoRoleStarted(t, eventFile, "ingress")
+
+	if err := os.WriteFile(readyFile, nil, 0o600); err != nil {
+		cancel()
+		t.Fatalf("publish supervisor readiness: %v", err)
+	}
+	waitForEvents(t, eventFile, 2, func(events []recordedEvent) bool {
+		for _, e := range events {
+			if e.Kind == "start" && e.Role == "manager" {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunSupervisor failed: %v", err)
+	}
+}
+
+func TestIngressDoesNotStartUntilManagerReady(t *testing.T) {
+	eventFile := filepath.Join(t.TempDir(), "events.log")
+	readyFile := filepath.Join(t.TempDir(), "manager.ready")
+	supAddr := reserveLoopbackAddr(t)
+	mgrAddr := reserveLoopbackAddr(t)
+
+	cfg := SupervisorConfig{
+		SupervisorSpec: helperChildSpec(t, "supervisor",
+			"CPAMP_TEST_EVENT_FILE="+eventFile,
+			"CPAMP_TEST_TCP_LISTEN_ADDR="+supAddr,
+		),
+		ManagerSpec: helperChildSpec(t, "manager",
+			"CPAMP_TEST_EVENT_FILE="+eventFile,
+			"CPAMP_TEST_READY_FILE="+readyFile,
+			"CPAMP_TEST_HTTP_LISTEN_ADDR="+mgrAddr,
+		),
+		IngressSpec:       helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		SupervisorTCPAddr: supAddr,
+		ManagerHealthURL:  "http://" + mgrAddr + "/health",
+		Timings:           fastTimings(),
+		Stdout:            &bytes.Buffer{},
+		Stderr:            &bytes.Buffer{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSupervisor(ctx, cfg)
+	}()
+
+	waitForEvents(t, eventFile, 2, func(events []recordedEvent) bool {
+		for _, e := range events {
+			if e.Kind == "start" && e.Role == "manager" {
+				return true
+			}
+		}
+		return false
+	})
+	time.Sleep(400 * time.Millisecond)
+	assertNoRoleStarted(t, eventFile, "ingress")
+
+	if err := os.WriteFile(readyFile, nil, 0o600); err != nil {
+		cancel()
+		t.Fatalf("publish manager readiness: %v", err)
+	}
+	waitForEvents(t, eventFile, 3, func(events []recordedEvent) bool {
+		for _, e := range events {
+			if e.Kind == "start" && e.Role == "ingress" {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunSupervisor failed: %v", err)
+	}
+}
+
+func TestUnreadySupervisorCrashLoopReturnsNonNilError(t *testing.T) {
+	t.Run("supervisor crashes 5 times while supervisor readiness gate waits", func(t *testing.T) {
+		eventFile := filepath.Join(t.TempDir(), "events.log")
+		supAddr := reserveLoopbackAddr(t)
+
+		timings := fastTimings()
+		timings.InitialBackoff = 10 * time.Millisecond
+		timings.MaxBackoff = 20 * time.Millisecond
+		timings.SupervisorShortRunWindow = 500 * time.Millisecond
+		timings.SupervisorMaxConsecutiveShortFailures = 5
+
+		cfg := SupervisorConfig{
+			SupervisorSpec: helperChildSpec(t, "supervisor",
+				"CPAMP_TEST_EVENT_FILE="+eventFile,
+				"CPAMP_TEST_EXIT_AFTER_MS=10",
+			),
+			ManagerSpec:       helperChildSpec(t, "manager", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			IngressSpec:       helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			SupervisorTCPAddr: supAddr,
+			Timings:           timings,
+			Stdout:            &bytes.Buffer{},
+			Stderr:            &bytes.Buffer{},
+		}
+
+		err := RunSupervisor(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "supervisor failed 5 consecutive starts") {
+			t.Fatalf("expected fatal supervisor crash-loop error from readiness gate, got: %v", err)
+		}
+		assertNoRoleStarted(t, eventFile, "manager")
+		assertNoRoleStarted(t, eventFile, "ingress")
+	})
+
+	t.Run("supervisor crashes 5 times while manager readiness gate waits", func(t *testing.T) {
+		eventFile := filepath.Join(t.TempDir(), "events.log")
+		mgrReadyFile := filepath.Join(t.TempDir(), "manager.ready")
+		supAddr := reserveLoopbackAddr(t)
+		mgrAddr := reserveLoopbackAddr(t)
+
+		timings := fastTimings()
+		timings.InitialBackoff = 10 * time.Millisecond
+		timings.MaxBackoff = 20 * time.Millisecond
+		timings.SupervisorShortRunWindow = 500 * time.Millisecond
+		timings.SupervisorMaxConsecutiveShortFailures = 5
+
+		cfg := SupervisorConfig{
+			SupervisorSpec: helperChildSpec(t, "supervisor",
+				"CPAMP_TEST_EVENT_FILE="+eventFile,
+				"CPAMP_TEST_TCP_LISTEN_ADDR="+supAddr,
+				"CPAMP_TEST_EXIT_AFTER_MS=40",
+			),
+			ManagerSpec: helperChildSpec(t, "manager",
+				"CPAMP_TEST_EVENT_FILE="+eventFile,
+				"CPAMP_TEST_READY_FILE="+mgrReadyFile,
+				"CPAMP_TEST_HTTP_LISTEN_ADDR="+mgrAddr,
+			),
+			IngressSpec:       helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			SupervisorTCPAddr: supAddr,
+			ManagerHealthURL:  "http://" + mgrAddr + "/health",
+			Timings:           timings,
+			Stdout:            &bytes.Buffer{},
+			Stderr:            &bytes.Buffer{},
+		}
+
+		err := RunSupervisor(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "supervisor failed 5 consecutive starts") {
+			t.Fatalf("expected fatal supervisor crash-loop error during manager readiness wait, got: %v", err)
+		}
+		assertNoRoleStarted(t, eventFile, "ingress")
+	})
+}
+
+func TestSignalDuringReadinessWaitReturnsNil(t *testing.T) {
+	t.Run("signal during supervisor readiness wait returns nil", func(t *testing.T) {
+		eventFile := filepath.Join(t.TempDir(), "events.log")
+		readyFile := filepath.Join(t.TempDir(), "supervisor.ready")
+		supAddr := reserveLoopbackAddr(t)
+
+		cfg := SupervisorConfig{
+			SupervisorSpec: helperChildSpec(t, "supervisor",
+				"CPAMP_TEST_EVENT_FILE="+eventFile,
+				"CPAMP_TEST_READY_FILE="+readyFile,
+				"CPAMP_TEST_TCP_LISTEN_ADDR="+supAddr,
+			),
+			ManagerSpec:       helperChildSpec(t, "manager", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			IngressSpec:       helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			SupervisorTCPAddr: supAddr,
+			Timings:           fastTimings(),
+			Stdout:            &bytes.Buffer{},
+			Stderr:            &bytes.Buffer{},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- RunSupervisor(ctx, cfg)
+		}()
+
+		waitForEvents(t, eventFile, 1, nil)
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("expected nil on external shutdown during supervisor readiness wait, got: %v", err)
+		}
+		assertNoRoleStarted(t, eventFile, "manager")
+		assertNoRoleStarted(t, eventFile, "ingress")
+	})
+
+	t.Run("signal during manager readiness wait returns nil", func(t *testing.T) {
+		eventFile := filepath.Join(t.TempDir(), "events.log")
+		readyFile := filepath.Join(t.TempDir(), "manager.ready")
+		supAddr := reserveLoopbackAddr(t)
+		mgrAddr := reserveLoopbackAddr(t)
+
+		cfg := SupervisorConfig{
+			SupervisorSpec: helperChildSpec(t, "supervisor",
+				"CPAMP_TEST_EVENT_FILE="+eventFile,
+				"CPAMP_TEST_TCP_LISTEN_ADDR="+supAddr,
+			),
+			ManagerSpec: helperChildSpec(t, "manager",
+				"CPAMP_TEST_EVENT_FILE="+eventFile,
+				"CPAMP_TEST_READY_FILE="+readyFile,
+				"CPAMP_TEST_HTTP_LISTEN_ADDR="+mgrAddr,
+			),
+			IngressSpec:       helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			SupervisorTCPAddr: supAddr,
+			ManagerHealthURL:  "http://" + mgrAddr + "/health",
+			Timings:           fastTimings(),
+			Stdout:            &bytes.Buffer{},
+			Stderr:            &bytes.Buffer{},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- RunSupervisor(ctx, cfg)
+		}()
+
+		waitForEvents(t, eventFile, 2, func(events []recordedEvent) bool {
+			for _, e := range events {
+				if e.Kind == "start" && e.Role == "manager" {
+					return true
+				}
+			}
+			return false
+		})
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("expected nil on external shutdown during manager readiness wait, got: %v", err)
+		}
+		assertNoRoleStarted(t, eventFile, "ingress")
+	})
 }

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -16,14 +17,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "cpamp-launcher is only supported on linux")
 		os.Exit(1)
 	}
-	prepared, err := prepare(PrepareConfigFromEnv(), DefaultSystem())
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	prepared, err := prepareContext(ctx, PrepareConfigFromEnv(), DefaultSystem())
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 
 	supCfg := NewSupervisorConfig(prepared, os.Environ())
 	if err := RunSupervisor(ctx, supCfg); err != nil {

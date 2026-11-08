@@ -10,11 +10,11 @@ import (
 )
 
 func openLockFile(path string, flags int) (*os.File, error) {
-	f, err := os.OpenFile(path, flags, 0o600)
-	if err == nil && flags&os.O_CREATE != 0 {
-		_ = f.Chmod(0o600)
-	}
-	return f, err
+	return os.OpenFile(path, flags, 0o600)
+}
+
+func tightenLockFile(file *os.File) error {
+	return file.Chmod(0o600)
 }
 
 func lockFile(file *os.File) error {

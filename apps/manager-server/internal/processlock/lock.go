@@ -70,6 +70,12 @@ func acquireExisting(databasePath string, flags int) (*Lock, error) {
 		_ = errors.Join(unlockFile(file), file.Close())
 		return nil, err
 	}
+	if flags&os.O_RDWR != 0 {
+		if err := tightenLockFile(file); err != nil {
+			_ = errors.Join(unlockFile(file), file.Close())
+			return nil, fmt.Errorf("chmod manager database process lock %s: %w", lockPath, err)
+		}
+	}
 	return lock, nil
 }
 
@@ -215,6 +221,10 @@ func acquire(databasePath string, exclusive bool) (*Lock, error) {
 	if err := lock.Validate(); err != nil {
 		_ = errors.Join(unlockFile(file), file.Close())
 		return nil, err
+	}
+	if err := tightenLockFile(file); err != nil {
+		_ = errors.Join(unlockFile(file), file.Close())
+		return nil, fmt.Errorf("chmod manager database process lock %s: %w", lockPath, err)
 	}
 	return lock, nil
 }

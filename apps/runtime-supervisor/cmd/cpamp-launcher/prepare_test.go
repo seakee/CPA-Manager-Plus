@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"io/fs"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -45,6 +47,21 @@ type fakeSystem struct {
 	chmodCalls  []modeRecord
 	mkdirCalls  []modeRecord
 	linkCalls   [][2]string
+	mutations   int
+	readDirHook func(string)
+	opHook      func(op, path string)
+}
+
+func (f *fakeSystem) runOpHook(op, cleaned string) {
+	if f.opHook != nil {
+		f.opHook(op, cleaned)
+	}
+}
+
+// noteMutation records a volume-mutating operation so tests can assert that a
+// refusal happened before any write, chown, chmod, link, or mkdir.
+func (f *fakeSystem) noteMutation() {
+	f.mutations++
 }
 
 func newFakeSystem(t *testing.T) *fakeSystem {
@@ -129,6 +146,7 @@ func (f *fakeSystem) mustSeedSymlink(t *testing.T, target, linkPath string, uid,
 
 func (f *fakeSystem) Lstat(virtualPath string) (FileStat, error) {
 	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("lstat", cleaned)
 	info, err := os.Lstat(f.hostPath(cleaned))
 	if err != nil {
 		return FileStat{}, err
@@ -156,11 +174,17 @@ func (f *fakeSystem) Lstat(virtualPath string) (FileStat, error) {
 }
 
 func (f *fakeSystem) ReadDir(virtualPath string) ([]fs.DirEntry, error) {
-	return os.ReadDir(f.hostPath(virtualPath))
+	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("readdir", cleaned)
+	if f.readDirHook != nil {
+		f.readDirHook(cleaned)
+	}
+	return os.ReadDir(f.hostPath(cleaned))
 }
 
 func (f *fakeSystem) ReadFile(virtualPath string) ([]byte, error) {
 	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("readfile", cleaned)
 	info, err := os.Lstat(f.hostPath(cleaned))
 	if err != nil {
 		return nil, err
@@ -173,6 +197,7 @@ func (f *fakeSystem) ReadFile(virtualPath string) ([]byte, error) {
 
 func (f *fakeSystem) WriteFile(virtualPath string, data []byte, perm fs.FileMode) error {
 	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("writefile", cleaned)
 	if err := os.WriteFile(f.hostPath(cleaned), data, 0o600); err != nil {
 		return err
 	}
@@ -182,14 +207,17 @@ func (f *fakeSystem) WriteFile(virtualPath string, data []byte, perm fs.FileMode
 	}
 	existing.perm = NormalizeUnixPerm(perm)
 	f.meta[cleaned] = existing
+	f.noteMutation()
 	return nil
 }
 
 func (f *fakeSystem) Mkdir(virtualPath string, perm fs.FileMode) error {
 	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("mkdir", cleaned)
 	if err := os.Mkdir(f.hostPath(cleaned), 0o700); err != nil {
 		return err
 	}
+	f.noteMutation()
 	normPerm := NormalizeUnixPerm(perm)
 	f.meta[cleaned] = nodeMeta{
 		uid:  0,
@@ -202,6 +230,7 @@ func (f *fakeSystem) Mkdir(virtualPath string, perm fs.FileMode) error {
 
 func (f *fakeSystem) Chmod(virtualPath string, perm fs.FileMode) error {
 	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("chmod", cleaned)
 	if _, err := os.Lstat(f.hostPath(cleaned)); err != nil {
 		return err
 	}
@@ -210,11 +239,13 @@ func (f *fakeSystem) Chmod(virtualPath string, perm fs.FileMode) error {
 	m.perm = normPerm
 	f.meta[cleaned] = m
 	f.chmodCalls = append(f.chmodCalls, modeRecord{Path: cleaned, Perm: normPerm})
+	f.noteMutation()
 	return nil
 }
 
 func (f *fakeSystem) Chown(virtualPath string, uid, gid int) error {
 	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("chown", cleaned)
 	if _, err := os.Lstat(f.hostPath(cleaned)); err != nil {
 		return err
 	}
@@ -223,11 +254,13 @@ func (f *fakeSystem) Chown(virtualPath string, uid, gid int) error {
 	m.gid = gid
 	f.meta[cleaned] = m
 	f.chownCalls = append(f.chownCalls, ownershipRecord{Path: cleaned, UID: uid, GID: gid})
+	f.noteMutation()
 	return nil
 }
 
 func (f *fakeSystem) Lchown(virtualPath string, uid, gid int) error {
 	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("lchown", cleaned)
 	if _, err := os.Lstat(f.hostPath(cleaned)); err != nil {
 		return err
 	}
@@ -236,17 +269,20 @@ func (f *fakeSystem) Lchown(virtualPath string, uid, gid int) error {
 	m.gid = gid
 	f.meta[cleaned] = m
 	f.lchownCalls = append(f.lchownCalls, ownershipRecord{Path: cleaned, UID: uid, GID: gid})
+	f.noteMutation()
 	return nil
 }
 
 func (f *fakeSystem) Link(oldname, newname string) error {
 	cleanOld := f.cleanPath(oldname)
 	cleanNew := f.cleanPath(newname)
+	f.runOpHook("link", cleanNew)
 	if err := os.Link(f.hostPath(cleanOld), f.hostPath(cleanNew)); err != nil {
 		return err
 	}
 	f.meta[cleanNew] = f.meta[cleanOld]
 	f.linkCalls = append(f.linkCalls, [2]string{cleanOld, cleanNew})
+	f.noteMutation()
 	return nil
 }
 
@@ -260,6 +296,7 @@ func (f *fakeSystem) Symlink(oldname, newname string) error {
 		return err
 	}
 	f.meta[cleanNew] = nodeMeta{uid: 0, gid: 0, perm: 0o0777}
+	f.noteMutation()
 	return nil
 }
 
@@ -270,6 +307,7 @@ func (f *fakeSystem) Remove(virtualPath string) error {
 	cleaned := f.cleanPath(virtualPath)
 	err := os.Remove(f.hostPath(cleaned))
 	delete(f.meta, cleaned)
+	f.noteMutation()
 	return err
 }
 
@@ -699,4 +737,163 @@ func TestPrepareArtifactManifestV8BootstrapSelection(t *testing.T) {
 			t.Fatalf("expected missing manifest error, got: %v", err)
 		}
 	})
+}
+
+func TestPrepareIgnoresManifestEnvOverrideForBootstrapDecision(t *testing.T) {
+	sys := newFakeSystem(t)
+	// The env override points at a valid 7.x manifest that would otherwise skip
+	// the v8 guard.
+	sys.mustSeedFile(t, "/data/forged/cpa-artifact.json", []byte(`{"schemaVersion":1,"engine":"cpa","version":"6.9.15","artifactId":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`), 0, 0, 0o0644)
+	// Unknown non-empty runtime root without a bootstrap marker.
+	sys.mustSeedDir(t, "/data/runtime", 0, 0, 0o0711)
+	sys.mustSeedDir(t, "/data/runtime/unknown", 0, 0, 0o0700)
+
+	before := sys.mutations
+	_, err := prepare(PrepareConfig{CPAArtifactManifestPath: "/data/forged/cpa-artifact.json"}, sys)
+	if err == nil || !strings.Contains(err.Error(), "nonempty volume without v8 bootstrap identity") {
+		t.Fatalf("expected v8 refusal despite forged 7.x manifest env, got: %v", err)
+	}
+	if sys.mutations != before {
+		t.Fatalf("refusal mutated the volume %d times; want 0", sys.mutations-before)
+	}
+}
+
+func TestPrepareRefusesNonLoopbackServiceAddresses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  PrepareConfig
+		want string
+	}{
+		{name: "supervisor wildcard addr", cfg: PrepareConfig{RuntimeAddr: "0.0.0.0:9081"}, want: "CPAMP_RUNTIME_ADDR must be a loopback address"},
+		{name: "supervisor hostname addr", cfg: PrepareConfig{RuntimeAddr: "example.com:9081"}, want: "CPAMP_RUNTIME_ADDR must be a loopback address"},
+		{name: "cpa wildcard addr", cfg: PrepareConfig{RuntimeCPAAddr: "0.0.0.0:8317"}, want: "CPAMP_RUNTIME_CPA_ADDR must be a loopback address"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := newFakeSystem(t)
+			before := sys.mutations
+			_, err := prepare(tc.cfg, sys)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q, got: %v", tc.want, err)
+			}
+			if sys.mutations != before {
+				t.Fatalf("refusal mutated the volume %d times; want 0", sys.mutations-before)
+			}
+		})
+	}
+}
+
+func TestPrepareStopsWhenCanceledDuringGatewayWalk(t *testing.T) {
+	cases := []struct {
+		name          string
+		preCancel     bool
+		triggerOp     string
+		triggerPath   string
+		wantZeroDirty bool
+	}{
+		{
+			name:          "pre-canceled before prepare starts",
+			preCancel:     true,
+			wantZeroDirty: true,
+		},
+		{
+			name:          "canceled after mountinfo read before seed/manifest check",
+			triggerOp:     "readfile",
+			triggerPath:   DefaultMountInfoPath,
+			wantZeroDirty: true,
+		},
+		{
+			name:          "canceled after checkV8Bootstrap before first volume mutation",
+			triggerOp:     "lstat",
+			triggerPath:   "/data/runtime/.cpamp-v8-bootstrap",
+			wantZeroDirty: true,
+		},
+		{
+			name:        "canceled mid-critical-section finishes marker+config before stopping at gateway walk",
+			triggerOp:   "mkdir",
+			triggerPath: "/data/runtime",
+		},
+		{
+			name:        "canceled after gateway config link finishes marker before stopping at gateway walk",
+			triggerOp:   "link",
+			triggerPath: "/data/runtime/gateway/config.yaml",
+		},
+		{
+			name:        "canceled at gateway root lchown before auth entry",
+			triggerOp:   "lchown",
+			triggerPath: "/data/runtime/gateway",
+		},
+		{
+			name:        "canceled at gateway/auth lchown before config.yaml entry",
+			triggerOp:   "lchown",
+			triggerPath: "/data/runtime/gateway/auth",
+		},
+		{
+			name:        "canceled at gateway/config.yaml lchown before logs entry",
+			triggerOp:   "lchown",
+			triggerPath: "/data/runtime/gateway/config.yaml",
+		},
+		{
+			name:        "canceled at gateway/logs lchown before plugins entry",
+			triggerOp:   "lchown",
+			triggerPath: "/data/runtime/gateway/logs",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := newFakeSystem(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.preCancel {
+				cancel()
+			} else {
+				sys.opHook = func(op, path string) {
+					if op == tc.triggerOp && path == tc.triggerPath {
+						cancel()
+					}
+				}
+			}
+
+			before := sys.mutations
+			if _, err := prepareContext(ctx, PrepareConfig{}, sys); !errors.Is(err, context.Canceled) {
+				t.Fatalf("expected context.Canceled, got: %v", err)
+			}
+			if tc.wantZeroDirty && sys.mutations != before {
+				t.Fatalf("pre-mutation cancellation mutated volume %d times; want 0", sys.mutations-before)
+			}
+
+			sys.opHook = nil
+			got, err := prepare(PrepareConfig{}, sys)
+			if err != nil {
+				t.Fatalf("second prepare after cancellation failed: %v", err)
+			}
+			sys.assertNode(t, "/data", 0, 10002, 0o1771, true)
+			sys.assertNode(t, "/data/runtime", 0, 0, 0o0711, true)
+			sys.assertNode(t, "/data/runtime/.cpamp-v8-bootstrap", 0, 0, 0o0444, false)
+			sys.assertNode(t, "/data/runtime/supervisor", 0, 10001, 0o0710, true)
+			sys.assertNode(t, "/data/runtime/gateway", 10001, 10001, 0o0700, true)
+			sys.assertNode(t, "/data/runtime/gateway/auth", 10001, 10001, 0o0700, true)
+			sys.assertNode(t, "/data/runtime/gateway/logs", 10001, 10001, 0o0700, true)
+			sys.assertNode(t, "/data/runtime/gateway/plugins", 10001, 10001, 0o0700, true)
+			sys.assertNode(t, "/data/runtime/gateway/config.yaml", 10001, 10001, 0o0600, false)
+			sys.assertNode(t, "/data/runtime-secret/token", 0, 10002, 0o0640, false)
+			if got.RuntimeToken == "" {
+				t.Fatalf("expected non-empty RuntimeToken after second prepare")
+			}
+		})
+	}
+}
+
+func TestShutdownBudgetFitsContainerGrace(t *testing.T) {
+	fixed := ShutdownFixedBudget()
+	if fixed > ShutdownFixedBudgetLimit {
+		t.Fatalf("fixed shutdown budget %s exceeds limit %s", fixed, ShutdownFixedBudgetLimit)
+	}
+	drain := DefaultDrainTimeout
+	if drain+fixed > drain+ShutdownFixedBudgetLimit {
+		t.Fatalf("drain+fixed=%s exceeds drain+limit=%s", drain+fixed, drain+ShutdownFixedBudgetLimit)
+	}
+	if drain+ShutdownFixedBudgetLimit > 150*time.Second {
+		t.Fatalf("default container grace must cover drain+limit (%s)", drain+ShutdownFixedBudgetLimit)
+	}
 }
