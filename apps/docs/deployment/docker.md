@@ -52,12 +52,12 @@ docker compose up -d --build
 配置实际外部访问 Origin。**生产或跨网访问应配置受控 TLS 反向代理并使用 `https://` Origin**（如 `https://cpamp.example.com`，请替换为你的真实域名并先配好反代与证书）；明文 `http://` 仅适用于本机或受控隔离测试网，切勿在不可信网络明文传输 Handoff、Admin Key 或 Client Key。若宿主机映射端口不同，请同步设置 `CPAMP_PUBLIC_PORT`。该地址不是 CPA 内部地址。
 
 ```bash
-docker compose exec -T -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite cpa-manager-plus cpa-manager-plus initialize
+docker compose exec -T -u 10002:10002 cpa-manager-plus cpa-manager-plus initialize
 # 若使用 docker run 启动：
-# docker exec -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite cpa-manager-plus cpa-manager-plus initialize
+# docker exec -u 10002:10002 cpa-manager-plus cpa-manager-plus initialize
 ```
 
-`initialize` 是一次性宿主授权命令，输出形如 `/.well-known/cpamp-bootstrap/ui#handoff=...`。将**包含 `#handoff=...` 在内的完整输出**拼到 `CPAMP_PUBLIC_ORIGIN` 后在浏览器打开；该短时认领凭证不得贴入截图或日志。若需重发或恢复认领，先停写库进程，再执行 `docker compose run --rm --no-deps -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite --entrypoint cpa-manager-plus cpa-manager-plus initialize`，随后重新 `up -d`；禁止删库重来。
+`initialize` 是一次性宿主授权命令，输出形如 `/.well-known/cpamp-bootstrap/ui#handoff=...`。将**包含 `#handoff=...` 在内的完整输出**拼到 `CPAMP_PUBLIC_ORIGIN` 后在浏览器打开；该短时认领凭证不得贴入截图或日志。若需重发或恢复认领，先停写库进程，再执行 `docker compose run --rm --no-deps -u 10002:10002 --entrypoint cpa-manager-plus cpa-manager-plus initialize`，随后重新 `up -d`；禁止删库重来。
 
 在浏览器中先设置并保存 CPAMP Admin Key，再选择安装模式：**New Managed**（新建托管 CPA，需 `full` 镜像）、**Adopt**（收纳迁移既有 CPA）或 **External**（连接独立维护的外部 CPA，`full` 与 `slim` 均支持）。Adopt / External 不是无条件成功路径：遇到向导提示的源配置、版本、凭据或证据拒绝时必须按提示修正或中止，不得手改安装记录绕过。External 要求外部 CPA 至少为 `v8.0.55`，详见[运行时模型说明](../guide/runtime-model.md)。
 

@@ -197,7 +197,7 @@ fi
 # Verify the documented in-place initializer command form as uid/gid 10002:10002
 # without any post-hoc ownership repair, then verify Manager bootstrap admits the
 # store and denies CPA/Ingress read access to /data/usage.sqlite and /data/data.key.
-doc_handoff="$("${compose[@]}" exec -T -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite cpa-manager-plus cpa-manager-plus initialize)"
+doc_handoff="$("${compose[@]}" exec -T -u 10002:10002 cpa-manager-plus cpa-manager-plus initialize)"
 case "${doc_handoff}" in
   "/.well-known/cpamp-bootstrap/ui#handoff="*) ;;
   *)

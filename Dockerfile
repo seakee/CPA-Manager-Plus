@@ -329,7 +329,14 @@ COPY --from=slim-evidence /image/usr/local/share/licenses/ /usr/local/share/lice
 COPY --from=slim-evidence /image/usr/local/share/cpamp/ /usr/local/share/cpamp/
 COPY docker/runtime/config.v8.default.seed.yaml /usr/local/share/cpamp/runtime/config.seed.yaml
 ENV USAGE_DATA_DIR=/data \
-    USAGE_DB_PATH=/data/usage.sqlite
+    CPA_UPSTREAM_URL=http://127.0.0.1:8317 \
+    USAGE_COLLECTOR_MODE=auto \
+    USAGE_RESP_QUEUE=usage \
+    USAGE_RESP_POP_SIDE=right \
+    USAGE_BATCH_SIZE=100 \
+    USAGE_POLL_INTERVAL_MS=500 \
+    USAGE_QUERY_LIMIT=50000 \
+    USAGE_CORS_ORIGINS=*
 EXPOSE 18317
 HEALTHCHECK --interval=5s --timeout=3s --retries=3 CMD ["sh", "-c", "nc -z 127.0.0.1 18317 && nc -z 127.0.0.1 18319 && nc -z 127.0.0.1 9081"]
 ENTRYPOINT ["/usr/local/bin/cpamp-launcher"]

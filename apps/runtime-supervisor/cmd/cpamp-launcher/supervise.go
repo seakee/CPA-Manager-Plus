@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -217,33 +219,18 @@ func BuildSupervisorChildEnv(prepared *PreparedRuntime, containerEnv map[string]
 	return formatEnvMap(env)
 }
 
-// BuildManagerChildEnv builds the clean environment for cpa-manager-plus.
-// CPAMP_RUNTIME_TOKEN is never included.
+// BuildManagerChildEnv builds the environment for cpa-manager-plus by passing
+// through the container environment (which carries image ENV defaults and user
+// overrides), stripping launcher/Supervisor-only secrets, and forcing the
+// single-container loopback addresses and token file path.
 func BuildManagerChildEnv(prepared *PreparedRuntime, containerEnv map[string]string) []string {
 	env := baseScratchEnv(containerEnv)
-
-	// Compose defaults for usage collector.
-	env["USAGE_COLLECTOR_MODE"] = "auto"
-	env["USAGE_RESP_QUEUE"] = "usage"
-	env["USAGE_RESP_POP_SIDE"] = "right"
-	env["USAGE_BATCH_SIZE"] = "100"
-	env["USAGE_POLL_INTERVAL_MS"] = "500"
-	env["USAGE_QUERY_LIMIT"] = "50000"
-	env["USAGE_CORS_ORIGINS"] = "*"
-
 	for k, v := range containerEnv {
-		if strings.HasPrefix(k, "USAGE_") && v != "" {
+		if k != "" {
 			env[k] = v
 		}
 	}
-	if pubOrigin := containerEnv["CPAMP_PUBLIC_ORIGIN"]; pubOrigin != "" {
-		env["CPAMP_PUBLIC_ORIGIN"] = pubOrigin
-	}
 
-	dataDir := prepared.DataDir
-	if dataDir == "" {
-		dataDir = DefaultDataDir
-	}
 	tokenFile := prepared.TokenFile
 	if tokenFile == "" {
 		tokenFile = DefaultRuntimeTokenFile
@@ -252,16 +239,8 @@ func BuildManagerChildEnv(prepared *PreparedRuntime, containerEnv map[string]str
 	if runtimeAddr == "" {
 		runtimeAddr = DefaultRuntimeAddr
 	}
-	cpaAddr := prepared.RuntimeCPAAddr
-	if cpaAddr == "" {
-		cpaAddr = DefaultRuntimeCPAAddr
-	}
 
 	env["HTTP_ADDR"] = DefaultManagerAddr
-	env["USAGE_DATA_DIR"] = dataDir
-	env["USAGE_DB_PATH"] = dataDir + "/usage.sqlite"
-	env["CPA_MANAGER_DATA_KEY_PATH"] = dataDir + "/data.key"
-	env["CPA_UPSTREAM_URL"] = "http://" + cpaAddr
 	env["CPAMP_RUNTIME_URL"] = "http://" + runtimeAddr
 	env["CPAMP_RUNTIME_TOKEN_FILE"] = tokenFile
 	env["CPAMP_INGRESS_CONTROL_URL"] = "http://" + DefaultIngressAdminAddr

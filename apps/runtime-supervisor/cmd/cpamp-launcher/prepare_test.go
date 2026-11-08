@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -359,9 +361,8 @@ func TestPrepareRestartIsIdempotentAndPreservesTokenAndManagerFiles(t *testing.T
 
 	// Existing Manager-owned files under /data must not be recursed into or re-chowned.
 	sys.mustSeedDir(t, "/data", 0, 0, 0o0755)
-	sys.mustSeedFile(t, "/data/usage.sqlite", []byte("sqlite"), 10002, 10002, 0o0600)
-	sys.mustSeedFile(t, "/data/data.key", []byte("key"), 10002, 10002, 0o0600)
-
+	sys.mustSeedFile(t, "/data/manager-state.db", []byte("sqlite"), 10002, 10002, 0o0600)
+	sys.mustSeedFile(t, "/data/manager-secret", []byte("key"), 10002, 10002, 0o0600)
 	first, err := prepare(PrepareConfig{}, sys)
 	if err != nil {
 		t.Fatalf("first prepare failed: %v", err)
@@ -382,8 +383,8 @@ func TestPrepareRestartIsIdempotentAndPreservesTokenAndManagerFiles(t *testing.T
 
 	// Verify /data was fixed to 0:10002 01771 while Manager files kept 10002:10002 0600.
 	sys.assertNode(t, "/data", 0, 10002, 0o1771, true)
-	sys.assertNode(t, "/data/usage.sqlite", 10002, 10002, 0o0600, false)
-	sys.assertNode(t, "/data/data.key", 10002, 10002, 0o0600, false)
+	sys.assertNode(t, "/data/manager-state.db", 10002, 10002, 0o0600, false)
+	sys.assertNode(t, "/data/manager-secret", 10002, 10002, 0o0600, false)
 	sys.assertNode(t, "/data/runtime-secret/token", 0, 10002, 0o0640, false)
 }
 

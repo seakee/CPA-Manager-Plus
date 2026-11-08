@@ -52,12 +52,12 @@ Preserve the single-container security boundary: no Docker socket mount, privile
 Configure the real public origin reachable from the deployment environment. **Prefer an HTTPS origin behind a configured TLS reverse proxy**, for example `https://cpamp.example.com`; replace it with your actual domain and configure the proxy/certificate first. Plain HTTP is only for trusted local/isolated test networks, never for sending Handoff, Admin Key, or Client Key over untrusted networks. Set `CPAMP_PUBLIC_PORT` as well if the host port differs. The origin is not CPA's internal URL.
 
 ```bash
-docker compose exec -T -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite cpa-manager-plus cpa-manager-plus initialize
+docker compose exec -T -u 10002:10002 cpa-manager-plus cpa-manager-plus initialize
 # Or when started via docker run:
-# docker exec -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite cpa-manager-plus cpa-manager-plus initialize
+# docker exec -u 10002:10002 cpa-manager-plus cpa-manager-plus initialize
 ```
 
-`initialize` is a one-shot host-authorized operation. It prints `/.well-known/cpamp-bootstrap/ui#handoff=...`. Append the **entire output, including the fragment**, to your public origin and open it in a browser. This short-lived claim credential must not enter screenshots or service logs. To reissue/resume, stop the writable Manager first, run `docker compose run --rm --no-deps -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite --entrypoint cpa-manager-plus cpa-manager-plus initialize`, then `up -d` again; do not delete the database to reset installation.
+`initialize` is a one-shot host-authorized operation. It prints `/.well-known/cpamp-bootstrap/ui#handoff=...`. Append the **entire output, including the fragment**, to your public origin and open it in a browser. This short-lived claim credential must not enter screenshots or service logs. To reissue/resume, stop the writable Manager first, run `docker compose run --rm --no-deps -u 10002:10002 --entrypoint cpa-manager-plus cpa-manager-plus initialize`, then `up -d` again; do not delete the database to reset installation.
 
 In the browser, set and save the CPAMP Admin Key, then choose **New Managed** (new managed CPA, requires `full`), **Adopt** (qualify and migrate an existing CPA), or **External** (connect to an independently operated CPA, supported on both `full` and `slim`). Adopt/External are not unconditional success paths: resolve the wizard's source, version, credential, or evidence refusals and stop if admission fails; do not edit installation records manually. External requires at least CPA `v8.0.55`; see [Runtime Model](../guide/runtime-model.md).
 

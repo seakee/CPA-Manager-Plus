@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -261,36 +263,34 @@ func TestChildEnvironmentBuilders(t *testing.T) {
 		RuntimeCPAAddr:          "127.0.0.1:8317",
 	}
 	containerEnv := map[string]string{
-		"PATH":                  "/usr/local/bin:/usr/bin:/bin",
-		"TZ":                    "UTC",
-		"CPAMP_RUNTIME_TOKEN":   strings.Repeat("a", 64),
-		"CPAMP_PUBLIC_ORIGIN":   "https://cpamp.example.com",
-		"USAGE_BATCH_SIZE":      "250",
-		"USAGE_CUSTOM_OVERRIDE": "enabled",
-		"UNRELATED_HOST_SECRET": "must-not-leak",
+		"PATH":                      "/usr/local/bin:/usr/bin:/bin",
+		"TZ":                        "UTC",
+		"CPAMP_RUNTIME_TOKEN":       strings.Repeat("a", 64),
+		"CPAMP_PUBLIC_ORIGIN":       "https://cpamp.example.com",
+		"EXAMPLE_PASSTHROUGH":       "1",
+		"HTTP_ADDR":                 "0.0.0.0:9999",
+		"CPAMP_RUNTIME_URL":         "http://127.0.0.1:19999",
+		"CPAMP_RUNTIME_TOKEN_FILE":  "/tmp/wrong-token",
+		"CPAMP_INGRESS_CONTROL_URL": "http://127.0.0.1:29999",
 	}
 
 	supEnv := parseEnvironMap(BuildSupervisorChildEnv(prepared, containerEnv))
 	if supEnv["CPAMP_RUNTIME_TOKEN"] != prepared.RuntimeToken {
 		t.Fatalf("supervisor missing CPAMP_RUNTIME_TOKEN")
 	}
-	if _, leaked := supEnv["UNRELATED_HOST_SECRET"]; leaked {
-		t.Fatalf("supervisor leaked UNRELATED_HOST_SECRET")
+	if _, leaked := supEnv["EXAMPLE_PASSTHROUGH"]; leaked {
+		t.Fatalf("supervisor leaked EXAMPLE_PASSTHROUGH")
 	}
 
 	mgrEnv := parseEnvironMap(BuildManagerChildEnv(prepared, containerEnv))
 	if _, leaked := mgrEnv["CPAMP_RUNTIME_TOKEN"]; leaked {
 		t.Fatalf("manager must never receive CPAMP_RUNTIME_TOKEN")
 	}
-	if _, leaked := mgrEnv["UNRELATED_HOST_SECRET"]; leaked {
-		t.Fatalf("manager leaked UNRELATED_HOST_SECRET")
-	}
 	if mgrEnv["HTTP_ADDR"] != "127.0.0.1:18319" ||
+		mgrEnv["CPAMP_RUNTIME_URL"] != "http://127.0.0.1:9081" ||
 		mgrEnv["CPAMP_RUNTIME_TOKEN_FILE"] != "/data/runtime-secret/token" ||
 		mgrEnv["CPAMP_INGRESS_CONTROL_URL"] != "http://127.0.0.1:9082" ||
-		mgrEnv["USAGE_BATCH_SIZE"] != "250" ||
-		mgrEnv["USAGE_COLLECTOR_MODE"] != "auto" ||
-		mgrEnv["USAGE_CUSTOM_OVERRIDE"] != "enabled" ||
+		mgrEnv["EXAMPLE_PASSTHROUGH"] != "1" ||
 		mgrEnv["CPAMP_PUBLIC_ORIGIN"] != "https://cpamp.example.com" ||
 		mgrEnv["TZ"] != "UTC" {
 		t.Fatalf("unexpected manager env: %#v", mgrEnv)
@@ -299,6 +299,9 @@ func TestChildEnvironmentBuilders(t *testing.T) {
 	ingEnv := parseEnvironMap(BuildIngressChildEnv(90*time.Second, containerEnv))
 	if _, leaked := ingEnv["CPAMP_RUNTIME_TOKEN"]; leaked {
 		t.Fatalf("ingress must never receive CPAMP_RUNTIME_TOKEN")
+	}
+	if _, leaked := ingEnv["EXAMPLE_PASSTHROUGH"]; leaked {
+		t.Fatalf("ingress leaked EXAMPLE_PASSTHROUGH")
 	}
 	if ingEnv["CPAMP_INGRESS_ADDR"] != "0.0.0.0:18317" ||
 		ingEnv["CPAMP_MANAGER_URL"] != "http://127.0.0.1:18319" ||
