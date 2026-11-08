@@ -54,6 +54,7 @@ Rollback notes:
 
 - [ ] Type check
 - [ ] Lint
+- [ ] Design token check (`npm run check:design-tokens`)
 - [ ] Tests
 - [ ] Build
 - [ ] Manual UI check

@@ -128,6 +128,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Check design tokens
+        run: npm run check:design-tokens
+
       - name: Test
         run: npm run test
 
