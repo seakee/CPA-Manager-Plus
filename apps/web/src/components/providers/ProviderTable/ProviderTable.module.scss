@@ -2,10 +2,10 @@
 @use '@/styles/mixins.scss' as *;
 
 // 类型 / 标识 / 地址 / 模型 / 优先级 / 近期请求 / 启用 / 操作
-$table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(220px, 0.82fr) 68px 112px;
+$table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(176px, 0.85fr) 56px 100px;
 
 @mixin provider-card-layout {
-  @include narrow-laptop {
+  @media (max-width: 1280px) {
     @content;
   }
 }
@@ -20,7 +20,7 @@ $table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(2
   display: grid;
   grid-template-columns: $table-columns;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   padding: $spacing-sm $spacing-md;
   font-size: 12px;
   font-weight: 600;
@@ -36,7 +36,7 @@ $table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(2
   display: grid;
   grid-template-columns: $table-columns;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   min-height: 58px;
   padding: 10px $spacing-md;
   border-bottom: 1px solid var(--border-subtle);
@@ -344,8 +344,10 @@ $table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(2
 
 .cellRecent {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: $spacing-sm;
+  column-gap: $spacing-sm;
+  row-gap: 4px;
   min-width: 0;
   width: auto;
   max-width: none;
@@ -364,9 +366,8 @@ $table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(2
 // 中和 ProviderStatusBar 默认样式中的纵向留白，保证单行对齐
 .recentBarWrap {
   flex: 1 1 88px;
-  min-width: 0;
+  min-width: 88px;
   max-width: 220px;
-
   > div {
     margin-top: 0;
     padding: 0;
@@ -394,14 +395,22 @@ $table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(2
 }
 
 .noRecent {
+  min-width: 0;
+  max-width: 100%;
   font-size: 12px;
   color: var(--text-tertiary);
+}
+
+.recentBarWrap ~ .noRecent {
+  flex: 1 1 56px;
+  max-width: max-content;
 }
 
 .statSuccess {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  min-width: 0;
   color: $success-color;
   flex-shrink: 0;
 }
@@ -410,6 +419,7 @@ $table-columns: 92px minmax(132px, 0.72fr) minmax(180px, 1fr) 96px 72px minmax(2
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  min-width: 0;
   color: $error-color;
   flex-shrink: 0;
 }

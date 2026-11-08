@@ -259,7 +259,7 @@
   overflow-y: auto;
   overflow-x: hidden;
   padding: 12px;
-  border-radius: 26px;
+  border-radius: var(--app-radius-lg);
   border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
   background: color-mix(in srgb, var(--bg-primary) 76%, transparent);
   --glass-blur: 14px;
@@ -279,6 +279,7 @@
   left: 0;
   top: 0;
   will-change: transform, width, max-height;
+  border-radius: var(--app-radius-lg);
   z-index: 45;
   opacity: 0;
   pointer-events: none;
@@ -294,7 +295,7 @@
   overflow-y: auto;
   overflow-x: hidden;
   padding: 12px;
-  border-radius: 26px;
+  border-radius: var(--app-radius-lg);
   border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
   background: color-mix(in srgb, var(--bg-primary) 96%, transparent);
   box-shadow: 0 24px 56px -34px rgba(0, 0, 0, 0.42);
@@ -330,7 +331,7 @@
   gap: 12px;
   width: 100%;
   padding: 13px;
-  border-radius: 18px;
+  border-radius: var(--app-radius-md);
   border: 1px solid transparent;
   background: transparent;
   color: inherit;
@@ -368,7 +369,7 @@
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 11px;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--surface-subtle) 88%, transparent);
   border: 1px solid color-mix(in srgb, var(--border-subtle) 84%, transparent);
   color: var(--primary-hover);
@@ -417,7 +418,7 @@
   min-width: 28px;
   height: 28px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--warning-bg);
   border: 1px solid var(--warning-border);
   color: var(--warning-text);

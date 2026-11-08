@@ -207,16 +207,13 @@ export function RuntimeStatusPage({
   }, [gateway, status, t]);
 
   return (
-    <main className="main-content runtime-status-page" data-testid="runtime-status-page">
+    <section className="runtime-status-page" data-testid="runtime-status-page">
       <header className="page-header">
-        <div>
-          <h1>{t('runtime_status.title', { defaultValue: 'Runtime status' })}</h1>
-          <p className="page-subtitle">
-            {status?.mode === 'external'
-              ? t('runtime_status.external_subtitle', { defaultValue: 'External CPA connection · read-only' })
-              : t('runtime_status.subtitle', { defaultValue: 'Observe the Manager and CPA gateway lifecycle separately.' })}
-          </p>
-        </div>
+        <p className="page-subtitle">
+          {status?.mode === 'external'
+            ? t('runtime_status.external_subtitle', { defaultValue: 'External CPA connection · read-only' })
+            : t('runtime_status.subtitle', { defaultValue: 'Observe the Manager and CPA gateway lifecycle separately.' })}
+        </p>
         <Button variant="secondary" onClick={() => void refresh()} disabled={loading || busy}>
           {loading ? t('common.loading', { defaultValue: 'Loading…' }) : t('common.refresh', { defaultValue: 'Refresh' })}
         </Button>
@@ -312,6 +309,6 @@ export function RuntimeStatusPage({
         <summary>{t('runtime_status.details', { defaultValue: 'Runtime details' })}</summary>
         <pre>{JSON.stringify({ mode: status?.mode, gateway, observedAt: status?.observedAt, operation }, null, 2)}</pre>
       </details>
-    </main>
+    </section>
   );
 }

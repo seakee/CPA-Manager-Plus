@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -220,20 +219,12 @@ export function ManagerUpdatePage() {
 
   return (
     <div className={styles.page}>
-      <nav className={styles.breadcrumb} aria-label={t('common.navigation')}>
-        <Link to="/system">{t('nav.system_info')}</Link>
-        <IconChevronRight size={13} aria-hidden="true" />
-        <span aria-current="page">{t('manager_updates.title')}</span>
-      </nav>
-      <div className={styles.heading}>
-        <h1 ref={titleRef} tabIndex={-1}>
-          {t('manager_updates.title')}
-        </h1>
-      </div>
       <section className={styles.productSection} aria-labelledby="cpamp-update-title">
         <div className={styles.heading}>
           <div>
-            <h2 id="cpamp-update-title">{t('manager_updates.product')}</h2>
+            <h2 id="cpamp-update-title" ref={titleRef} tabIndex={-1}>
+              {t('manager_updates.product')}
+            </h2>
             <p className={styles.subtitle}>
               {checkedTime
                 ? t('manager_updates.last_checked', { time: checkedTime })

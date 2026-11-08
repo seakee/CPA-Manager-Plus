@@ -1,32 +1,11 @@
 .page {
   width: 100%;
-  max-width: 860px;
-  margin: 0 auto;
   color: var(--text-primary);
 
   a:focus-visible,
   summary:focus-visible {
     outline: 2px solid var(--focus-border);
     outline-offset: 3px;
-  }
-}
-
-.breadcrumb {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 20px;
-  color: var(--text-secondary);
-  font-size: 12px;
-
-  a {
-    color: inherit;
-    text-decoration: none;
-
-    &:hover {
-      color: var(--color-primary);
-    }
   }
 }
 
@@ -42,19 +21,12 @@
     min-width: 0;
   }
 
-  h1 {
-    margin: 0;
-    font-size: 24px;
-    line-height: 1.4;
-    font-weight: 650;
-    outline: none;
-  }
-
   h2 {
     margin: 0;
     font-size: 20px;
     line-height: 1.4;
     font-weight: 650;
+    outline: none;
   }
 
   > button {
