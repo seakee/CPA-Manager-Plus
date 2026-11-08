@@ -147,7 +147,7 @@
   align-items: center;
   gap: 14px;
   padding: 14px 18px;
-  background: var(--surface-bg, var(--bg-card, rgba(255, 255, 255, 0.95)));
+  background: var(--app-surface);
   border: 1px solid var(--border-subtle);
   border-radius: var(--app-radius-md, 14px);
 }
@@ -375,7 +375,7 @@
   padding: 18px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--app-radius-md, 14px);
-  background: var(--bg-card);
+  background: var(--app-surface);
 }
 
 .system-additional-info > summary {
@@ -419,7 +419,7 @@
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--amber-500, #d97706);
+  background: var(--data-amber-base);
 }
 
 .summary {
@@ -453,7 +453,7 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--app-radius-md, 14px);
   padding: 18px;
-  background: var(--surface-bg, var(--bg-card));
+  background: var(--app-surface);
   cursor: pointer;
   transition:
     transform 0.15s ease,
@@ -586,7 +586,7 @@
 }
 
 .diff-old {
-  color: var(--red-500, #ef4444);
+  color: var(--data-badge-danger-text);
   text-decoration: line-through;
 }
 
@@ -595,7 +595,7 @@
 }
 
 .diff-new {
-  color: var(--emerald-600, #059669);
+  color: var(--data-badge-success-text);
   font-weight: 600;
 }
 
@@ -695,7 +695,7 @@
   padding: 4px 10px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--app-radius-sm, 6px);
-  background: var(--bg-card, var(--surface-bg));
+  background: var(--app-surface-muted);
   color: var(--text-primary);
   font-size: 13px;
 }
@@ -802,7 +802,7 @@
   padding: 12px 16px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--app-radius-md, 12px);
-  background: var(--bg-card, var(--surface-bg));
+  background: var(--app-surface);
 }
 
 .workspace-toolbar .search {
@@ -901,7 +901,7 @@
 }
 
 .field-dirty {
-  background: color-mix(in srgb, var(--accent-primary, #3b6cf6) 6%, transparent);
+  background: color-mix(in srgb, var(--primary-color) 6%, transparent);
 }
 
 .field-locked {
@@ -1018,8 +1018,8 @@
 }
 
 .editor-modes [aria-pressed='true'] {
-  border-color: var(--accent-primary, #3b6cf6);
-  color: var(--accent-primary, #3b6cf6);
+  border-color: var(--primary-color);
+  color: var(--primary-color);
 }
 
 @media (max-width: 720px) {

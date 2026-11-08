@@ -36,7 +36,7 @@
   padding: 14px 18px;
   border: 1px solid var(--border-subtle, var(--border-color));
   border-radius: var(--app-radius-md, 12px);
-  background: var(--bg-card, var(--surface-bg));
+  background: var(--app-surface);
 }
 
 .runtime-status-summary strong {
@@ -152,7 +152,7 @@
   padding: 14px 18px;
   border: 1px solid var(--border-subtle, var(--border-color));
   border-radius: var(--app-radius-md, 12px);
-  background: var(--bg-card, var(--surface-bg));
+  background: var(--app-surface);
 }
 
 .runtime-status-page details > summary {

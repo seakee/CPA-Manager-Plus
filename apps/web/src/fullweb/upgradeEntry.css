@@ -399,7 +399,7 @@
 .upgrade-pending code {
   padding: 1px 6px;
   border-radius: 6px;
-  background: var(--surface);
+  background: var(--bg-surface);
   font-size: 13px;
 }
 

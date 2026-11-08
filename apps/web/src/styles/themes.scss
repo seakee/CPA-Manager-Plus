@@ -39,6 +39,13 @@
   --app-radius-lg: 20px;
   --app-radius-md: 12px;
   --app-radius-sm: 8px;
+  --app-radius-xs: 6px;
+  --app-radius-pill: 9999px;
+  --control-height-md: 36px;
+  --control-height-sm: 32px;
+  --control-height-xs: 28px;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  --app-specular-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.65);
   --app-gap: 20px;
   --app-card-padding: 24px;
   --app-blur: 20px;
@@ -226,9 +233,9 @@
   --primary-hover: var(--color-primary-light-3);
   --primary-active: var(--color-primary-dark-2);
   --primary-contrast: #ffffff;
-  --primary-solid: var(--data-blue-dark-2);
-  --primary-solid-hover: var(--data-blue-base);
-  --primary-solid-active: #1d4ed8;
+  --primary-solid: #2563eb;
+  --primary-solid-hover: #1d4ed8;
+  --primary-solid-active: #1e40af;
   --primary-soft: var(--color-primary-light-8);
   --primary-subtle: var(--color-primary-light-9);
   --primary-ring: rgba(59, 130, 246, 0.22);
@@ -295,6 +302,7 @@
   --app-border-strong: rgba(255, 255, 255, 0.12);
   --app-shadow: none;
   --app-shadow-soft: none;
+  --app-specular-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   --app-text-primary: #e5e5e5;
   --app-text-regular: #a3a3a3;
   --app-text-muted: #7a7a7a;
@@ -472,9 +480,6 @@
   --primary-color: var(--color-primary);
   --primary-hover: var(--color-primary-light-3);
   --primary-active: var(--color-primary);
-  --primary-solid: var(--data-blue-base);
-  --primary-solid-hover: var(--data-blue-dark-2);
-  --primary-solid-active: var(--data-blue-base);
   --primary-ring: rgba(96, 165, 250, 0.28);
   --count-badge-text: var(--data-badge-info-text);
   --shadow: none;
