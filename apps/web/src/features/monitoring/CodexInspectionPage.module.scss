@@ -1,37 +1,14 @@
 .page,
 .settingsModal,
 .configDrawerOverlay {
-  --inspect-bg: var(--bg-secondary);
-  --inspect-surface: var(--bg-primary);
   --inspect-surface-elevated: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
-  --inspect-surface-muted: var(--surface-subtle);
   --inspect-surface-hover: color-mix(in srgb, var(--surface-subtle-hover) 74%, var(--bg-primary));
-  --inspect-line: var(--border-color);
-  --inspect-line-strong: var(--border-primary);
-  --inspect-ink: var(--text-primary);
   --inspect-muted: var(--text-secondary);
   --inspect-accent: var(--primary-color);
-  --inspect-accent-strong: var(--primary-active);
   --inspect-green: var(--success-color);
   --inspect-amber: var(--warning-color);
   --inspect-red: var(--error-color);
-  --monitor-bg: var(--inspect-bg);
-  --monitor-surface: var(--inspect-surface);
-  --monitor-surface-elevated: var(--inspect-surface-elevated);
-  --monitor-surface-muted: var(--inspect-surface-muted);
-  --monitor-surface-hover: var(--inspect-surface-hover);
-  --monitor-ink: var(--inspect-ink);
-  --monitor-muted: var(--inspect-muted);
-  --monitor-line: var(--inspect-line);
-  --monitor-line-strong: var(--inspect-line-strong);
-  --monitor-accent: var(--inspect-accent);
-  --monitor-accent-strong: var(--inspect-accent-strong);
-  --monitor-accent-soft: var(--color-primary-light-9);
-  --monitor-cyan: #06b6d4;
-  --monitor-green: var(--inspect-green);
-  --monitor-amber: var(--inspect-amber);
-  --monitor-red: var(--inspect-red);
-  color: var(--inspect-ink);
+  color: var(--text-primary);
 }
 
 .page {
@@ -43,9 +20,9 @@
 
 .panel {
   position: relative;
-  border: 1px solid var(--inspect-line);
-  border-radius: 24px;
-  background: var(--inspect-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--bg-primary);
   box-shadow: var(--shadow-lg);
 }
 
@@ -78,7 +55,7 @@
 
 .panelSubtitle {
   margin: 6px 0 0;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -146,12 +123,12 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 34px;
+  min-height: var(--control-height-sm);
   padding: 0 12px;
-  border-radius: 12px;
-  border: 1px solid var(--inspect-line);
+  border-radius: var(--app-radius-sm);
+  border: 1px solid var(--border-color);
   background: var(--inspect-surface-elevated);
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
   white-space: nowrap;
@@ -198,7 +175,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   min-width: 0;
@@ -207,23 +184,24 @@
 .statusMeta span {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
+  min-height: var(--control-height-xs);
   padding: 0 10px;
-  border-radius: 12px;
-  background: var(--inspect-surface-muted);
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
   white-space: nowrap;
 }
 
 .statusMeta .statusMetaHost {
-  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
-  color: var(--inspect-ink);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
   background: transparent;
-  border: 1px solid color-mix(in srgb, var(--inspect-line) 75%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-color) 75%, transparent);
 }
 
+.statusMeta .statusMetaWarn,
 .statusMetaWarn {
-  color: var(--data-badge-warning-text) !important;
-  background: var(--data-badge-warning-bg) !important;
+  color: var(--data-badge-warning-text);
+  background: var(--data-badge-warning-bg);
 }
 
 .iconButton,
@@ -233,9 +211,9 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  border: 1px solid var(--inspect-line);
-  background: var(--inspect-surface);
-  color: var(--inspect-ink);
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
   font-size: 12px;
   font-weight: 700;
   text-decoration: none;
@@ -249,32 +227,32 @@
 }
 
 .iconButton {
-  width: 34px;
-  height: 34px;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
   padding: 0;
-  border-radius: 12px;
+  border-radius: var(--app-radius-sm);
 }
 
 .foldButton {
-  min-height: 32px;
+  min-height: var(--control-height-sm);
   padding: 0 10px;
-  border-radius: 12px;
+  border-radius: var(--app-radius-sm);
 }
 
 .quickLink {
-  min-height: 32px;
+  min-height: var(--control-height-sm);
   padding: 0 10px;
-  border-radius: 12px;
-  color: var(--inspect-muted);
+  border-radius: var(--app-radius-sm);
+  color: var(--text-secondary);
 }
 
 .iconButton:hover,
 .foldButton:hover,
 .quickLink:hover {
   transform: translateY(-1px);
-  border-color: color-mix(in srgb, var(--inspect-accent) 32%, var(--inspect-line-strong));
+  border-color: color-mix(in srgb, var(--primary-color) 32%, var(--border-primary));
   background: var(--inspect-surface-hover);
-  color: var(--inspect-ink);
+  color: var(--text-primary);
 }
 
 .iconButton:disabled,
@@ -288,9 +266,9 @@
   display: grid;
   gap: 8px;
   padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px solid color-mix(in srgb, var(--inspect-accent) 22%, var(--inspect-line));
-  background: color-mix(in srgb, var(--inspect-accent) 6%, var(--inspect-surface));
+  border-radius: var(--app-radius-md);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
 }
 
 .progressHeader,
@@ -307,34 +285,35 @@
 }
 
 .progressHeader span {
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .progressTrack {
   position: relative;
   overflow: hidden;
   height: 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--inspect-line) 68%, transparent);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--border-color) 68%, transparent);
 }
 
 .progressBar {
   position: absolute;
   inset: 0 auto 0 0;
   border-radius: inherit;
-  background: var(--inspect-accent);
+  background: var(--primary-color);
 }
 
 .progressMeta {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .progressMeta strong {
-  color: var(--inspect-amber);
+  color: var(--warning-color);
 }
 
 .summaryGrid {
@@ -399,20 +378,22 @@
 .segmentedControl {
   display: inline-flex;
   align-items: stretch;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   flex-wrap: nowrap;
   gap: 0;
   min-width: 0;
   max-width: 100%;
   padding: 0;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--inspect-line) 86%, transparent);
-  background: color-mix(in srgb, var(--inspect-surface-elevated) 82%, var(--inspect-surface));
+  border-radius: var(--app-radius-md);
+  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+  background: color-mix(in srgb, var(--inspect-surface-elevated) 82%, var(--bg-primary));
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   box-sizing: border-box;
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
-  scrollbar-color: color-mix(in srgb, var(--inspect-muted) 34%, transparent) transparent;
+  scrollbar-color: color-mix(in srgb, var(--text-secondary) 34%, transparent) transparent;
   scrollbar-width: thin;
   -webkit-overflow-scrolling: touch;
 }
@@ -426,8 +407,8 @@
 }
 
 .segmentedControl::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--inspect-muted) 34%, transparent);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--text-secondary) 34%, transparent);
 }
 
 .resultsHeaderActions .segmentedControl,
@@ -442,13 +423,14 @@
   justify-content: center;
   flex: 0 0 auto;
   gap: 6px;
-  min-height: 32px;
+  height: calc(var(--control-height-sm) - 2px);
+  min-height: calc(var(--control-height-sm) - 2px);
   padding: 0 11px;
   border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--inspect-line) 72%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   border-radius: 0;
   background: transparent;
-  color: color-mix(in srgb, var(--inspect-muted) 84%, var(--inspect-ink));
+  color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
   font: inherit;
   font-size: 12px;
   font-weight: 700;
@@ -467,17 +449,17 @@
 }
 
 .segmentButton:hover {
-  color: var(--inspect-ink);
-  background: color-mix(in srgb, var(--inspect-accent) 5%, var(--inspect-surface));
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
   transform: none;
 }
 
 .segmentButtonActive,
 .segmentButtonActive:hover {
   border-left-color: transparent;
-  background: color-mix(in srgb, var(--inspect-accent) 12%, var(--inspect-surface));
-  color: var(--inspect-accent-strong);
-  font-weight: 800;
+  background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+  color: var(--primary-active);
+  font-weight: 700;
   box-shadow: none;
   transform: none;
 }
@@ -493,16 +475,17 @@
   min-width: 20px;
   height: 18px;
   padding: 0 6px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--inspect-line) 86%, transparent);
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--border-color) 86%, transparent);
   color: inherit;
   font-size: 11px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .segmentButtonActive .segmentCount {
-  background: color-mix(in srgb, var(--inspect-accent) 20%, var(--inspect-surface));
-  color: var(--inspect-accent-strong);
+  background: color-mix(in srgb, var(--primary-color) 20%, var(--bg-primary));
+  color: var(--primary-active);
 }
 
 .resultCardList {
@@ -518,10 +501,10 @@
     minmax(180px, 0.88fr);
   align-items: stretch;
   min-width: 0;
-  border: 1px solid var(--inspect-line);
-  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
   background: var(--inspect-surface-elevated);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow);
   overflow: hidden;
   transition:
     border-color 0.18s ease,
@@ -530,8 +513,8 @@
 }
 
 .resultCard:hover {
-  border-color: color-mix(in srgb, var(--inspect-accent) 52%, var(--inspect-line));
-  box-shadow: 0 6px 18px color-mix(in srgb, var(--inspect-accent) 9%, transparent);
+  border-color: color-mix(in srgb, var(--primary-color) 52%, var(--border-color));
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--primary-color) 9%, transparent);
   transform: translateY(-1px);
 }
 
@@ -552,11 +535,11 @@
   bottom: 8px;
   left: 10px;
   width: 1px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: linear-gradient(
     180deg,
     transparent,
-    color-mix(in srgb, var(--inspect-line-strong) 68%, transparent),
+    color-mix(in srgb, var(--border-primary) 68%, transparent),
     transparent
   );
   opacity: 0.68;
@@ -578,7 +561,7 @@
 }
 
 .resultSectionLabel {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
@@ -607,27 +590,28 @@
   align-items: center;
   min-height: 24px;
   padding: 0 8px;
-  border-radius: 6px;
+  border-radius: var(--app-radius-xs);
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .providerBadgeCodex {
-  background: color-mix(in srgb, var(--inspect-accent) 12%, var(--inspect-surface));
-  color: var(--inspect-accent-strong);
+  background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+  color: var(--primary-active);
 }
 
 .providerBadgeXai {
-  background: color-mix(in srgb, var(--inspect-amber) 13%, var(--inspect-surface));
-  color: var(--inspect-amber);
+  background: color-mix(in srgb, var(--warning-color) 13%, var(--bg-primary));
+  color: var(--warning-color);
 }
 
 .probeStateLine {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 14px;
   line-height: 1.35;
 }
@@ -645,15 +629,15 @@
 }
 
 .probeToneSuccess {
-  color: var(--inspect-green);
+  color: var(--success-color);
 }
 
 .probeToneFailed {
-  color: var(--inspect-red);
+  color: var(--error-color);
 }
 
 .probeToneSkipped {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
 }
 
 .resultPaginationBar {
@@ -663,15 +647,16 @@
   gap: 12px;
   margin-top: 10px;
   padding: 10px 12px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--inspect-surface-muted) 62%, var(--inspect-surface));
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--surface-subtle) 62%, var(--bg-primary));
 }
 
 .resultPaginationInfo {
   min-width: 0;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
   line-height: 1.4;
 }
@@ -689,8 +674,8 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 32px;
-  color: var(--inspect-muted);
+  min-height: var(--control-height-sm);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -703,9 +688,9 @@
 
 .resultPageSizeSelectTrigger {
   min-width: 96px;
-  height: 32px !important;
+  height: var(--control-height-sm) !important;
   padding: 0 2px 0 10px !important;
-  border-radius: 10px !important;
+  border-radius: var(--app-radius-sm) !important;
   font-size: 12px;
   font-weight: 700;
 }
@@ -724,8 +709,8 @@
 }
 
 .probeHttpStatus {
-  color: var(--inspect-muted);
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 700;
 }
@@ -744,8 +729,8 @@
   display: block;
   min-width: 0;
   overflow: hidden;
-  color: var(--inspect-muted);
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.45;
@@ -754,14 +739,14 @@
 }
 
 .primaryReason {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .primaryEvidence {
-  color: var(--inspect-accent-strong);
+  color: var(--primary-active);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -774,9 +759,9 @@
   min-height: 24px;
   max-width: 100%;
   padding: 0 8px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--inspect-accent) 8%, var(--inspect-surface));
-  color: var(--inspect-accent-strong);
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+  color: var(--primary-active);
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
@@ -796,7 +781,7 @@
 }
 
 .quotaWindowUnavailable {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -805,13 +790,13 @@
   display: block;
   width: 100%;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: repeating-linear-gradient(
     135deg,
-    var(--inspect-line) 0,
-    var(--inspect-line) 7px,
-    var(--inspect-surface-muted) 7px,
-    var(--inspect-surface-muted) 14px
+    var(--border-color) 0,
+    var(--border-color) 7px,
+    var(--surface-subtle) 7px,
+    var(--surface-subtle) 14px
   );
 }
 
@@ -839,23 +824,24 @@
 .quotaWindowLabel {
   min-width: 0;
   flex: 1 1 auto;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-weight: 700;
   overflow-wrap: anywhere;
 }
 
 .quotaWindowValue {
   flex: 0 0 auto;
-  color: var(--inspect-ink);
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .quotaWindowBar {
   height: 7px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--surface-subtle-strong);
 }
 
@@ -863,25 +849,25 @@
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--inspect-green);
+  background: var(--success-color);
   transition: width 0.2s ease;
 }
 
 .quotaWindowBarFillHigh {
-  background: var(--inspect-green);
+  background: var(--success-color);
 }
 
 .quotaWindowBarFillMedium {
-  background: var(--quota-medium-color, var(--inspect-amber));
+  background: var(--quota-medium-color, var(--warning-color));
 }
 
 .quotaWindowBarFillLow {
-  background: var(--inspect-red);
+  background: var(--error-color);
 }
 
 .quotaWindowReset {
-  color: var(--inspect-muted);
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
 
@@ -890,25 +876,26 @@
   align-items: center;
   min-height: 24px;
   padding: 0 8px;
-  border-radius: 6px;
-  background: var(--inspect-surface);
-  color: var(--inspect-muted);
+  border-radius: var(--app-radius-xs);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .stateEnabled {
-  color: var(--inspect-green);
-  background: color-mix(in srgb, var(--inspect-green) 8%, var(--inspect-surface));
+  color: var(--success-color);
+  background: color-mix(in srgb, var(--success-color) 8%, var(--bg-primary));
 }
 
 .stateDisabled {
-  color: var(--inspect-muted);
-  background: color-mix(in srgb, var(--inspect-muted) 12%, var(--inspect-surface));
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 12%, var(--bg-primary));
 }
 
 .monoCell {
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--font-mono);
   font-size: 13px;
 }
 
@@ -917,9 +904,10 @@
   align-items: center;
   min-height: 26px;
   padding: 0 10px;
-  border-radius: 12px;
+  border-radius: var(--app-radius-pill);
   font-size: 12px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .actionKeep {
@@ -969,7 +957,7 @@
   gap: 12px;
   align-items: start;
   padding: 8px 12px 8px 16px;
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   border: 0;
   background: transparent;
   transition: background-color 0.18s ease;
@@ -980,34 +968,35 @@
   position: absolute;
   inset: 6px auto 6px 4px;
   width: 3px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--inspect-muted) 40%, transparent);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--text-secondary) 40%, transparent);
 }
 
 .logRow:hover {
-  background: color-mix(in srgb, var(--inspect-surface-muted) 70%, var(--inspect-surface));
+  background: color-mix(in srgb, var(--surface-subtle) 70%, var(--bg-primary));
 }
 
 .logInfo::before {
-  background: var(--inspect-accent);
+  background: var(--primary-color);
 }
 
 .logSuccess::before {
-  background: var(--inspect-green);
+  background: var(--success-color);
 }
 
 .logWarning::before {
-  background: var(--inspect-amber);
+  background: var(--warning-color);
 }
 
 .logError::before {
-  background: var(--inspect-red);
+  background: var(--error-color);
 }
 
 .logTime {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .logMessage {
@@ -1018,9 +1007,9 @@
 
 .logCollapsedBar {
   padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--inspect-surface-muted);
-  color: var(--inspect-muted);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
   font-size: 13px;
 }
 
@@ -1038,9 +1027,9 @@
   display: grid;
   gap: 12px;
   padding: 14px 16px 16px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 8px;
-  background: var(--inspect-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
 }
 
 .settingsSectionHeader {
@@ -1048,11 +1037,11 @@
   align-items: center;
   gap: 10px;
   padding-bottom: 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--inspect-line) 82%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
 }
 
 .settingsSectionHeader > span:not(.settingsSectionIcon) {
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 15px;
   font-weight: 700;
   line-height: 1.4;
@@ -1064,9 +1053,9 @@
   width: 30px;
   height: 30px;
   flex: 0 0 30px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--inspect-accent) 12%, var(--inspect-surface));
-  color: var(--inspect-accent-strong);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+  color: var(--primary-active);
 }
 
 .settingsGrid {
@@ -1097,11 +1086,11 @@
 }
 
 .settingsField :global(.input) {
-  min-height: 40px;
+  min-height: var(--control-height-md);
 }
 
 .settingsField input {
-  min-height: 40px;
+  min-height: var(--control-height-md);
 }
 
 .settingsAutoContent {
@@ -1110,14 +1099,14 @@
 }
 
 .settingsAutoLabel {
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
 }
 
 .settingsAutoSubLabel {
   margin-top: 2px;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0;
@@ -1138,8 +1127,8 @@
 }
 
 .settingsAutoOption {
-  --auto-color: var(--inspect-accent);
-  --auto-color-strong: var(--inspect-accent-strong);
+  --auto-color: var(--primary-color);
+  --auto-color-strong: var(--primary-active);
 
   position: relative;
   display: grid;
@@ -1149,10 +1138,10 @@
   min-width: 0;
   min-height: 82px;
   padding: 10px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
   background: var(--inspect-surface-elevated);
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   text-align: left;
   cursor: pointer;
   transition:
@@ -1163,15 +1152,15 @@
 }
 
 .settingsAutoOption:hover {
-  border-color: var(--inspect-line-strong);
+  border-color: var(--border-primary);
   background: var(--inspect-surface-hover);
 }
 
 .settingsAutoOptionActive,
 .settingsAutoOptionActive:hover {
-  border-color: color-mix(in srgb, var(--auto-color) 52%, var(--inspect-line-strong));
+  border-color: color-mix(in srgb, var(--auto-color) 52%, var(--border-primary));
   background: color-mix(in srgb, var(--auto-color) 5%, var(--inspect-surface-elevated));
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow);
 }
 
 .settingsAutoOption:focus-visible {
@@ -1180,23 +1169,23 @@
 }
 
 .settingsAutoOptionNone {
-  --auto-color: var(--inspect-accent);
-  --auto-color-strong: var(--inspect-accent-strong);
+  --auto-color: var(--primary-color);
+  --auto-color-strong: var(--primary-active);
 }
 
 .settingsAutoOptionDisable {
-  --auto-color: var(--inspect-amber);
-  --auto-color-strong: var(--inspect-amber);
+  --auto-color: var(--warning-color);
+  --auto-color-strong: var(--warning-color);
 }
 
 .settingsAutoOptionEnable {
-  --auto-color: var(--inspect-green);
-  --auto-color-strong: var(--inspect-green);
+  --auto-color: var(--success-color);
+  --auto-color-strong: var(--success-color);
 }
 
 .settingsAutoOptionDelete {
-  --auto-color: var(--inspect-red);
-  --auto-color-strong: var(--inspect-red);
+  --auto-color: var(--error-color);
+  --auto-color-strong: var(--error-color);
 }
 
 .settingsAutoOptionIcon {
@@ -1204,8 +1193,8 @@
   place-items: center;
   width: 34px;
   height: 34px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--auto-color) 12%, var(--inspect-surface));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--auto-color) 12%, var(--bg-primary));
   color: var(--auto-color-strong);
 }
 
@@ -1216,14 +1205,14 @@
 }
 
 .settingsAutoOptionText strong {
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 700;
   line-height: 1.3;
 }
 
 .settingsAutoOptionText small {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.4;
@@ -1234,9 +1223,9 @@
   place-items: center;
   width: 22px;
   height: 22px;
-  border: 1px solid var(--inspect-line-strong);
-  border-radius: 8px;
-  color: var(--inspect-surface);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--app-radius-xs);
+  color: var(--bg-primary);
 }
 
 .settingsAutoOptionActive .settingsAutoOptionCheck {
@@ -1246,7 +1235,7 @@
 
 .settingsAutoHint {
   margin: 0;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -1254,28 +1243,28 @@
 .settingsAutoWarning {
   margin: 0;
   padding: 11px 12px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.5;
 }
 
 .settingsAutoWarningDisable {
-  border: 1px solid color-mix(in srgb, var(--inspect-amber) 36%, var(--inspect-line));
-  background: color-mix(in srgb, var(--inspect-amber) 12%, var(--inspect-surface));
-  color: var(--inspect-amber);
+  border: 1px solid color-mix(in srgb, var(--warning-color) 36%, var(--border-color));
+  background: color-mix(in srgb, var(--warning-color) 12%, var(--bg-primary));
+  color: var(--warning-color);
 }
 
 .settingsAutoWarningEnable {
-  border: 1px solid color-mix(in srgb, var(--inspect-green) 34%, var(--inspect-line));
-  background: color-mix(in srgb, var(--inspect-green) 10%, var(--inspect-surface));
-  color: var(--inspect-green);
+  border: 1px solid color-mix(in srgb, var(--success-color) 34%, var(--border-color));
+  background: color-mix(in srgb, var(--success-color) 10%, var(--bg-primary));
+  color: var(--success-color);
 }
 
 .settingsAutoWarningDelete {
-  border: 1px solid color-mix(in srgb, var(--inspect-red) 36%, var(--inspect-line));
-  background: color-mix(in srgb, var(--inspect-red) 10%, var(--inspect-surface));
-  color: var(--inspect-red);
+  border: 1px solid color-mix(in srgb, var(--error-color) 36%, var(--border-color));
+  background: color-mix(in srgb, var(--error-color) 10%, var(--bg-primary));
+  color: var(--error-color);
 }
 
 .settingsActionsBar {
@@ -1292,10 +1281,10 @@
 
 .serverError {
   padding: 11px 12px;
-  border: 1px solid color-mix(in srgb, var(--inspect-red) 34%, var(--inspect-line));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--inspect-red) 8%, var(--inspect-surface));
-  color: var(--inspect-red);
+  border: 1px solid color-mix(in srgb, var(--error-color) 34%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--error-color) 8%, var(--bg-primary));
+  color: var(--error-color);
   font-size: 13px;
   font-weight: 600;
   line-height: 1.55;
@@ -1308,10 +1297,10 @@
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  border: 1px solid color-mix(in srgb, var(--inspect-red) 34%, var(--inspect-line));
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--inspect-red) 8%, var(--inspect-surface));
-  color: var(--inspect-red);
+  border: 1px solid color-mix(in srgb, var(--error-color) 34%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--error-color) 8%, var(--bg-primary));
+  color: var(--error-color);
   font-size: 13px;
   font-weight: 600;
   line-height: 1.55;
@@ -1332,12 +1321,12 @@
 .infoNote {
   margin: 0;
   padding: 0;
-  border: 1px solid var(--inspect-line);
-  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
   background: var(--inspect-surface-elevated);
   font-size: 12px;
   line-height: 1.55;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
 }
 
 .infoNote > summary {
@@ -1347,7 +1336,7 @@
   padding: 8px 12px;
   list-style: none;
   cursor: pointer;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-weight: 700;
 }
 
@@ -1358,7 +1347,7 @@
 .infoNote > summary::after {
   content: '▾';
   font-size: 10px;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   transition: transform 0.18s ease;
 }
 
@@ -1390,10 +1379,10 @@
 }
 
 .infoNoteCompact > summary {
-  min-height: 32px;
+  min-height: var(--control-height-sm);
   padding: 0 10px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
   background: var(--inspect-surface-elevated);
 }
 
@@ -1404,9 +1393,9 @@
   z-index: 20;
   width: min(320px, calc(100vw - 48px));
   padding: 12px 16px 12px 30px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 12px;
-  background: var(--inspect-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
   box-shadow: var(--shadow-lg);
 }
 
@@ -1423,10 +1412,10 @@
   display: grid;
   gap: 10px;
   padding: 14px;
-  border: 1px solid color-mix(in srgb, var(--inspect-line) 72%, transparent);
-  border-radius: 16px;
-  background: var(--inspect-surface);
-  box-shadow: var(--shadow-sm);
+  border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
+  box-shadow: var(--shadow);
 }
 
 .configOverviewEmbedded {
@@ -1442,16 +1431,16 @@
 }
 
 .configOverviewCompact .configOverviewHeader {
-  min-height: 28px;
+  min-height: var(--control-height-xs);
 }
 
 .configOverviewCompact .configOverviewTitle {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
 .configOverviewCompact .configOverviewEdit {
-  min-height: 28px;
+  min-height: var(--control-height-xs);
   padding: 0 10px;
   border-color: transparent;
   background: transparent;
@@ -1475,10 +1464,10 @@
   gap: 6px;
   width: auto;
   height: auto;
-  min-height: 28px;
+  min-height: var(--control-height-xs);
   padding: 0 9px;
-  border-radius: 999px;
-  background: var(--inspect-surface-muted);
+  border-radius: var(--app-radius-pill);
+  background: var(--surface-subtle);
 }
 
 .configOverviewCompact .configOverviewLabel,
@@ -1510,9 +1499,9 @@
 
 .configOverviewTitle {
   display: block;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: 0.01em;
 }
 
@@ -1520,12 +1509,12 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 30px;
+  min-height: var(--control-height-sm);
   padding: 0 12px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
   background: var(--inspect-surface-elevated);
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
@@ -1536,8 +1525,8 @@
 }
 
 .configOverviewEdit:hover {
-  border-color: color-mix(in srgb, var(--inspect-accent) 55%, var(--inspect-line));
-  color: var(--inspect-accent-strong);
+  border-color: color-mix(in srgb, var(--primary-color) 55%, var(--border-color));
+  color: var(--primary-active);
 }
 
 .configOverviewGrid {
@@ -1560,13 +1549,13 @@
 }
 
 .configOverviewItem {
-  --overview-accent: var(--inspect-accent);
+  --overview-accent: var(--primary-color);
   display: grid;
   gap: 4px;
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--inspect-line) 68%, transparent);
-  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 68%, transparent);
+  border-radius: var(--app-radius-md);
   background: var(--inspect-surface-elevated);
   text-align: left;
   cursor: pointer;
@@ -1583,7 +1572,7 @@
   position: absolute;
   top: 9px;
   right: 9px;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   opacity: 0;
   transition: opacity 0.18s ease;
 }
@@ -1622,26 +1611,26 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 8px;
-  background: var(--inspect-surface);
-  color: var(--inspect-muted);
+  width: var(--control-height-xs);
+  height: var(--control-height-xs);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
   cursor: pointer;
 }
 
 .configOverviewCopy:hover,
 .configOverviewCopy:focus-visible {
-  color: var(--inspect-accent-strong);
-  border-color: var(--inspect-accent);
+  color: var(--primary-active);
+  border-color: var(--primary-color);
 }
 
 .configOverviewItem:hover {
-  border-color: color-mix(in srgb, var(--overview-accent) 52%, var(--inspect-line-strong));
+  border-color: color-mix(in srgb, var(--overview-accent) 52%, var(--border-primary));
   background: color-mix(in srgb, var(--overview-accent) 6%, var(--inspect-surface-elevated));
   transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--shadow);
 }
 
 .configOverviewItem:focus-visible {
@@ -1650,24 +1639,24 @@
 }
 
 .configOverviewItem.tone-good {
-  --overview-accent: var(--inspect-green);
+  --overview-accent: var(--success-color);
 }
 
 .configOverviewItem.tone-warn {
-  --overview-accent: var(--inspect-amber);
+  --overview-accent: var(--warning-color);
 }
 
 .configOverviewItem.tone-bad {
-  --overview-accent: var(--inspect-red);
+  --overview-accent: var(--error-color);
 }
 
 .configOverviewItem.tone-info {
-  --overview-accent: var(--inspect-accent);
+  --overview-accent: var(--primary-color);
 }
 
 .configOverviewLabel {
   overflow: hidden;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 700;
   line-height: 1.3;
@@ -1677,29 +1666,29 @@
 
 .configOverviewValue {
   overflow: hidden;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .configOverviewItem.tone-good .configOverviewValue {
-  color: var(--inspect-green);
+  color: var(--success-color);
 }
 
 .configOverviewItem.tone-warn .configOverviewValue {
-  color: var(--inspect-amber);
+  color: var(--warning-color);
 }
 
 .configOverviewItem.tone-bad .configOverviewValue {
-  color: var(--inspect-red);
+  color: var(--error-color);
 }
 
 .configOverviewHint {
   overflow: hidden;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.3;
@@ -1723,9 +1712,9 @@
   justify-content: space-between;
   gap: 16px;
   padding: 12px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 10px;
-  background: var(--inspect-surface-muted);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
 }
 
 .xaiInferenceToggle > div {
@@ -1734,12 +1723,12 @@
 }
 
 .xaiInferenceToggle strong {
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 13px;
 }
 
 .xaiInferenceToggle span {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -1749,10 +1738,10 @@
   align-items: flex-start;
   gap: 9px;
   padding: 11px 12px;
-  border: 1px solid color-mix(in srgb, var(--inspect-amber) 34%, var(--inspect-line));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--inspect-amber) 8%, var(--inspect-surface));
-  color: var(--inspect-ink);
+  border: 1px solid color-mix(in srgb, var(--warning-color) 34%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--warning-color) 8%, var(--bg-primary));
+  color: var(--text-primary);
   font-size: 12px;
   line-height: 1.55;
 }
@@ -1760,7 +1749,7 @@
 .xaiInferenceNotice svg {
   flex: 0 0 auto;
   margin-top: 1px;
-  color: var(--inspect-amber);
+  color: var(--warning-color);
 }
 
 .promptFieldFooter {
@@ -1769,7 +1758,7 @@
   justify-content: space-between;
   gap: 12px;
   margin-top: 6px;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -1803,12 +1792,12 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-height: 28px;
+  min-height: var(--control-height-xs);
   padding: 0 7px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--app-radius-xs);
   background: transparent;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -1816,7 +1805,7 @@
 
 .promptFieldActions button:hover {
   background: var(--inspect-surface-hover);
-  color: var(--inspect-ink);
+  color: var(--text-primary);
 }
 
 .promptFieldActions button:disabled {
@@ -1832,8 +1821,8 @@
   max-height: 100dvh;
   min-width: 0;
   overflow: hidden;
-  border-left: 1px solid var(--inspect-line);
-  background: var(--inspect-surface);
+  border-left: 1px solid var(--border-color);
+  background: var(--bg-primary);
   box-shadow: -18px 0 36px rgba(15, 23, 42, 0.18);
 }
 
@@ -1843,21 +1832,21 @@
   justify-content: space-between;
   gap: 14px;
   padding: 20px 22px 16px;
-  border-bottom: 1px solid var(--inspect-line);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .configDrawerHeader h2 {
   margin: 0;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 20px;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: 0;
   line-height: 1.25;
 }
 
 .configDrawerHeader p {
   margin: 6px 0 0;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.55;
 }
@@ -1866,13 +1855,13 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 10px;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  flex: 0 0 var(--control-height-sm);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
   background: var(--inspect-surface-elevated);
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   cursor: pointer;
   transition:
     border-color 0.18s ease,
@@ -1881,9 +1870,9 @@
 }
 
 .configDrawerClose:hover {
-  border-color: color-mix(in srgb, var(--inspect-accent) 32%, var(--inspect-line-strong));
+  border-color: color-mix(in srgb, var(--primary-color) 32%, var(--border-primary));
   background: var(--inspect-surface-hover);
-  color: var(--inspect-ink);
+  color: var(--text-primary);
 }
 
 .configDrawerBody {
@@ -1902,16 +1891,15 @@
 }
 
 .configDrawer :global(.form-group > label) {
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
   line-height: 1.4;
 }
 
 .configDrawer :global(input.input) {
-  height: 40px;
-  min-height: 40px;
-  padding: 0 12px;
+  height: var(--control-height-md);
+  min-height: var(--control-height-md);
   font-size: 14px;
   font-weight: 400;
   line-height: 1.4;
@@ -1933,9 +1921,9 @@
   display: grid;
   gap: 12px;
   padding: 14px;
-  border: 1px solid color-mix(in srgb, var(--inspect-line) 52%, transparent);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--inspect-surface-elevated) 42%, var(--inspect-surface));
+  border: 1px solid color-mix(in srgb, var(--border-color) 52%, transparent);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--inspect-surface-elevated) 42%, var(--bg-primary));
 }
 
 .configSectionStrategy .serverConfigGrid {
@@ -1952,9 +1940,9 @@
   justify-content: space-between;
   gap: 10px;
   min-width: 0;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.35;
 }
 
@@ -1966,14 +1954,14 @@
   justify-content: space-between;
   gap: 12px;
   padding: 14px 22px;
-  border-top: 1px solid var(--inspect-line);
-  background: var(--inspect-surface);
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
   box-shadow: 0 -10px 20px rgba(15, 23, 42, 0.08);
 }
 
 .configDrawerStatus {
   min-width: 0;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.4;
@@ -1999,12 +1987,12 @@
 .serverUnsavedBadge {
   display: inline-flex;
   align-items: center;
-  min-height: 30px;
+  min-height: var(--control-height-xs);
   padding: 0 10px;
-  border: 1px solid color-mix(in srgb, var(--inspect-amber) 34%, var(--inspect-line));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--inspect-amber) 10%, var(--inspect-surface));
-  color: var(--inspect-amber);
+  border: 1px solid color-mix(in srgb, var(--warning-color) 34%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--warning-color) 10%, var(--bg-primary));
+  color: var(--warning-color);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -2039,13 +2027,13 @@
 
 .scheduleTimePointHint {
   grid-column: 1 / -1;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
 }
 
 .configSelectTrigger {
-  height: 40px;
+  height: var(--control-height-md);
   font-size: 14px;
   font-weight: 500;
 }
@@ -2060,8 +2048,8 @@
 
 .advancedSection {
   margin-top: 4px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
   background: var(--inspect-surface-elevated);
 }
 
@@ -2073,7 +2061,7 @@
   padding: 12px 14px;
   list-style: none;
   cursor: pointer;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 700;
 }
@@ -2091,7 +2079,7 @@
 
 .advancedSummaryChevron {
   flex: 0 0 auto;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   transition: transform 0.18s ease;
 }
 
@@ -2100,7 +2088,7 @@
 }
 
 .advancedSummaryHint {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
 }
@@ -2128,7 +2116,7 @@
   gap: 10px;
   min-width: 0;
   margin: 0;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 700;
   line-height: 1.35;
@@ -2141,7 +2129,7 @@
   min-width: 24px;
   background: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--inspect-line-strong) 54%, transparent),
+    color-mix(in srgb, var(--border-primary) 54%, transparent),
     transparent
   );
 }
@@ -2164,11 +2152,11 @@
 .scheduleSegmented {
   display: inline-flex;
   align-items: stretch;
-  height: 40px;
+  height: var(--control-height-md);
   padding: 0;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--inspect-line) 86%, transparent);
-  background: color-mix(in srgb, var(--inspect-surface-elevated) 82%, var(--inspect-surface));
+  border-radius: var(--app-radius-md);
+  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+  background: color-mix(in srgb, var(--inspect-surface-elevated) 82%, var(--bg-primary));
 }
 
 .scheduleSegmentButton {
@@ -2176,12 +2164,12 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  min-height: 38px;
+  min-height: calc(var(--control-height-md) - 2px);
   padding: 0 16px;
   border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--inspect-line) 72%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   background: transparent;
-  color: color-mix(in srgb, var(--inspect-muted) 84%, var(--inspect-ink));
+  color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
   font-size: 14px;
   font-weight: 600;
   white-space: nowrap;
@@ -2193,22 +2181,22 @@
 
 .scheduleSegmentButton:first-child {
   border-left: 0;
-  border-radius: 12px 0 0 12px;
+  border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
 }
 
 .scheduleSegmentButton:last-child {
-  border-radius: 0 12px 12px 0;
+  border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
 }
 
 .scheduleSegmentButton:hover {
-  color: var(--inspect-ink);
-  background: color-mix(in srgb, var(--inspect-accent) 5%, var(--inspect-surface));
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
 }
 
 .scheduleSegmentButtonActive,
 .scheduleSegmentButtonActive:hover {
-  background: color-mix(in srgb, var(--inspect-accent) 12%, var(--inspect-surface));
-  color: var(--inspect-accent-strong);
+  background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+  color: var(--primary-active);
 }
 
 .scheduleSegmentButton:disabled {
@@ -2228,7 +2216,7 @@
 .serverFieldLabel {
   display: block;
   margin-bottom: 6px;
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
   line-height: 1.4;
@@ -2265,10 +2253,10 @@
   display: grid;
   gap: 8px;
   padding: 12px;
-  border: 1px solid var(--inspect-line);
-  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
   background: var(--inspect-surface-elevated);
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   text-align: left;
   cursor: pointer;
   scroll-snap-align: start;
@@ -2280,13 +2268,13 @@
 
 .runHistoryCard:hover {
   transform: translateY(-1px);
-  border-color: color-mix(in srgb, var(--inspect-accent) 32%, var(--inspect-line-strong));
+  border-color: color-mix(in srgb, var(--primary-color) 32%, var(--border-primary));
   background: var(--inspect-surface-hover);
 }
 
 .runHistoryCardActive {
-  border-color: color-mix(in srgb, var(--inspect-accent) 56%, var(--inspect-line-strong));
-  background: color-mix(in srgb, var(--inspect-accent) 8%, var(--inspect-surface));
+  border-color: color-mix(in srgb, var(--primary-color) 56%, var(--border-primary));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
 }
 
 .runHistoryCardHead {
@@ -2297,15 +2285,15 @@
 }
 
 .runHistoryCardId {
-  color: var(--inspect-muted);
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .runHistoryCardMeta {
   display: grid;
   gap: 2px;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -2322,34 +2310,35 @@
   align-items: center;
   gap: 4px;
   padding: 1px 8px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 11px;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .runHistoryCardPillDelete {
-  background: color-mix(in srgb, var(--inspect-red) 14%, var(--inspect-surface));
-  color: var(--inspect-red);
+  background: color-mix(in srgb, var(--error-color) 14%, var(--bg-primary));
+  color: var(--error-color);
 }
 
 .runHistoryCardPillDisable {
-  background: color-mix(in srgb, var(--inspect-amber) 14%, var(--inspect-surface));
-  color: var(--inspect-amber);
+  background: color-mix(in srgb, var(--warning-color) 14%, var(--bg-primary));
+  color: var(--warning-color);
 }
 
 .runHistoryCardPillEnable {
-  background: color-mix(in srgb, var(--inspect-green) 14%, var(--inspect-surface));
-  color: var(--inspect-green);
+  background: color-mix(in srgb, var(--success-color) 14%, var(--bg-primary));
+  color: var(--success-color);
 }
 
 .runHistoryCardPillReauth {
-  background: color-mix(in srgb, var(--inspect-accent) 14%, var(--inspect-surface));
-  color: var(--inspect-accent-strong);
+  background: color-mix(in srgb, var(--primary-color) 14%, var(--bg-primary));
+  color: var(--primary-active);
 }
 
 .runHistoryCardPillKeep {
-  background: var(--inspect-surface-muted);
-  color: var(--inspect-muted);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
 }
 
 .resultFilterBar {
@@ -2406,14 +2395,14 @@
   gap: 10px;
   place-items: center;
   padding: 16px 0;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 13px;
   text-align: center;
 }
 
 .logDetailDisclosure {
   margin-top: 4px;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -2427,11 +2416,11 @@
 .logDetailDisclosure pre {
   margin: 6px 0 0;
   padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--inspect-line) 78%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--inspect-surface-muted) 72%, var(--inspect-surface));
-  color: var(--inspect-muted);
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--surface-subtle) 72%, var(--bg-primary));
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -2442,7 +2431,7 @@
 .emptyBlockSmall {
   display: grid;
   place-items: center;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   text-align: center;
   font-size: 13px;
 }
@@ -2529,7 +2518,7 @@
   }
 
   .resultCardSection:nth-child(n + 3) {
-    border-top: 1px dashed var(--inspect-line);
+    border-top: 1px dashed var(--border-color);
   }
 
   .resultPaginationBar {
@@ -2545,7 +2534,7 @@
 
 @container codex-inspection-page (max-width: 640px) {
   .panel {
-    border-radius: 20px;
+    border-radius: 16px;
   }
 
   .panel {
@@ -2616,7 +2605,7 @@
     background: linear-gradient(
       90deg,
       transparent,
-      color-mix(in srgb, var(--inspect-line-strong) 68%, transparent),
+      color-mix(in srgb, var(--border-primary) 68%, transparent),
       transparent
     );
     opacity: 0.68;
@@ -2781,8 +2770,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: color-mix(in srgb, var(--inspect-surface-muted) 30%, transparent);
-  border-bottom: 1px solid var(--inspect-line);
+  background: color-mix(in srgb, var(--surface-subtle) 30%, transparent);
+  border-bottom: 1px solid var(--border-color);
   padding: 0 18px;
   min-height: 52px;
 }
@@ -2819,15 +2808,16 @@
 }
 
 .statusMetricLabel {
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
 }
 
 .statusMetricValue {
-  color: var(--inspect-ink);
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2838,9 +2828,9 @@
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--inspect-amber) 10%, var(--inspect-surface));
-  color: var(--inspect-amber);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--warning-color) 10%, var(--bg-primary));
+  color: var(--warning-color);
   font-size: 13px;
   font-weight: 600;
 }
@@ -2859,18 +2849,18 @@
   border: none;
   font-size: 15px;
   font-weight: 600;
-  color: var(--inspect-muted);
+  color: var(--text-secondary);
   cursor: pointer;
   position: relative;
   transition: color 0.2s ease;
   padding: 0 4px;
 
   &:hover {
-    color: var(--inspect-ink);
+    color: var(--text-primary);
   }
 
   &.credentialHealthTabActive {
-    color: var(--inspect-accent-strong);
+    color: var(--primary-active);
     &::after {
       content: '';
       position: absolute;
@@ -2878,8 +2868,8 @@
       left: 0;
       right: 0;
       height: 2px;
-      background: var(--inspect-accent-strong);
-      border-radius: 2px 2px 0 0;
+      background: var(--primary-active);
+      border-radius: var(--app-radius-pill) var(--app-radius-pill) 0 0;
     }
   }
 

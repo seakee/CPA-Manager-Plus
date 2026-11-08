@@ -4,9 +4,9 @@
   gap: $spacing-sm;
   min-width: 0;
   padding: 13px;
-  border: 1px solid var(--color-border, var(--gray-200));
-  border-radius: $radius-md;
-  background: var(--color-surface, var(--bg-primary, #fff));
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
 }
 
 .standardCard {
@@ -18,8 +18,8 @@
 .otherCard {
   background: color-mix(
     in srgb,
-    var(--color-surface-muted, var(--gray-50)) 36%,
-    var(--color-surface, #fff)
+    var(--app-surface-muted) 36%,
+    var(--bg-primary)
   );
 }
 
@@ -46,17 +46,17 @@
   flex: 0 0 30px;
   width: 30px;
   height: 30px;
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--color-primary) 10%, transparent);
-  color: var(--color-primary, var(--primary-color, #1677ff));
+  color: var(--primary-color);
 
   &[data-quota-window-icon='payg'],
   &[data-quota-window-icon='billing'] {
-    color: var(--color-warning, var(--warning-color, #f59e0b));
+    color: var(--warning-color);
   }
 
   &[data-quota-window-icon='product'] {
-    color: var(--color-success, var(--success-color, #16a34a));
+    color: var(--success-color);
   }
 
   &[data-quota-window-icon='model'] {
@@ -65,7 +65,7 @@
   }
 
   &[data-quota-window-icon='unknown'] {
-    color: var(--gray-500);
+    color: var(--text-secondary);
   }
 }
 
@@ -78,7 +78,7 @@
 
 .groupLabel {
   overflow: hidden;
-  color: var(--color-text-tertiary, var(--gray-500));
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 600;
   text-overflow: ellipsis;
@@ -89,9 +89,9 @@
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: var(--color-text, var(--gray-900));
+  color: var(--text-primary);
   font-size: 14px;
-  font-weight: 750;
+  font-weight: 700;
   line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -106,7 +106,7 @@
 
 .subtitle {
   overflow: hidden;
-  color: var(--color-text-secondary, var(--gray-600));
+  color: var(--text-secondary);
   font-size: 10px;
   line-height: 14px;
   text-overflow: ellipsis;
@@ -129,10 +129,10 @@
   max-width: min(180px, 100%);
   padding: 0 8px;
   overflow: hidden;
-  border: 1px solid var(--color-border, var(--gray-200));
-  border-radius: 5px;
-  background: var(--color-surface-muted, var(--gray-50));
-  color: var(--color-text-secondary, var(--gray-600));
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-xs);
+  background: var(--app-surface-muted);
+  color: var(--text-secondary);
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -142,7 +142,7 @@
   display: flex;
   align-items: baseline;
   gap: 5px;
-  color: var(--color-primary, var(--primary-color, #1677ff));
+  color: var(--primary-color);
   white-space: nowrap;
 
   span {
@@ -151,7 +151,7 @@
 
   strong {
     font-size: 22px;
-    font-weight: 760;
+    font-weight: 700;
     line-height: 24px;
     font-variant-numeric: tabular-nums;
   }
@@ -167,17 +167,18 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 12px;
-  color: var(--color-text-secondary, var(--gray-600));
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
 .amountLabel {
-  color: var(--color-text, var(--gray-900));
+  color: var(--text-primary);
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .metaEmpty {
-  color: var(--gray-500);
+  color: var(--text-secondary);
   font-style: italic;
 }
 
@@ -196,16 +197,16 @@
   min-width: 0;
   min-height: 204px;
   padding: $spacing-sm;
-  border: 1px solid var(--color-border, var(--gray-200));
-  border-radius: $radius-md;
-  background: var(--color-surface, #fff);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-primary);
 }
 
 .compareColumnPrediction {
   background: color-mix(
     in srgb,
-    var(--color-primary, var(--primary-color, #1677ff)) 5%,
-    var(--color-surface, #fff)
+    var(--primary-color) 5%,
+    var(--bg-primary)
   );
 }
 
@@ -214,14 +215,14 @@
   align-items: center;
   gap: 5px;
   min-width: 0;
-  color: var(--color-text, var(--gray-900));
+  color: var(--text-primary);
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   line-height: 18px;
 
   svg {
     flex: 0 0 auto;
-    color: var(--color-primary, var(--primary-color, #1677ff));
+    color: var(--primary-color);
   }
 }
 
@@ -229,7 +230,7 @@
   min-height: 17px;
   margin-top: 2px;
   overflow: hidden;
-  color: var(--color-text-tertiary, var(--gray-500));
+  color: var(--text-secondary);
   font-size: 9px;
   line-height: 14px;
   text-overflow: ellipsis;
@@ -295,11 +296,11 @@
 }
 
 .metricLabel {
-  color: var(--color-text-secondary, var(--gray-600));
+  color: var(--text-secondary);
 }
 
 .metricValue {
-  color: var(--color-text, var(--gray-900));
+  color: var(--text-primary);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -311,7 +312,7 @@
   flex: 1 1 auto;
   min-width: 0;
   padding: 10px 2px;
-  color: var(--color-text-tertiary, var(--gray-500));
+  color: var(--text-secondary);
   font-size: 10px;
   line-height: 1.45;
 }
@@ -321,8 +322,8 @@
   margin-top: $spacing-xs;
   padding-top: $spacing-sm;
   border-top: 1px dashed
-    color-mix(in srgb, var(--color-primary) 24%, var(--color-border, var(--gray-200)));
-  color: var(--color-text-tertiary, var(--gray-500));
+    color-mix(in srgb, var(--color-primary) 24%, var(--border-color));
+  color: var(--text-secondary);
   font-size: 10px;
   line-height: 15px;
   text-align: center;
@@ -331,7 +332,7 @@
 .modelEmptyUsage {
   margin-top: $spacing-xs;
   padding: 7px 2px;
-  color: var(--color-text-tertiary, var(--gray-500));
+  color: var(--text-secondary);
   font-size: 10px;
   line-height: 15px;
 }
@@ -343,12 +344,12 @@
   margin-top: $spacing-xs;
   padding: $spacing-sm $spacing-md;
   border: 1px solid var(--color-warning-light-5);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   background: var(--color-warning-light-9);
 
   strong {
     display: block;
-    color: var(--color-text, var(--gray-900));
+    color: var(--text-primary);
     font-size: 11px;
     line-height: 15px;
   }
@@ -379,7 +380,7 @@
   gap: $spacing-xs;
   margin-top: 1px;
   padding-top: $spacing-sm;
-  color: var(--color-text-tertiary, var(--gray-500));
+  color: var(--text-secondary);
   font-size: 10px;
 }
 
@@ -400,7 +401,7 @@
 }
 
 .sourceMetaSyncLabel {
-  color: var(--color-text-tertiary, var(--gray-500));
+  color: var(--text-secondary);
 }
 
 .sourceMetaWarnings {
@@ -408,7 +409,7 @@
   flex-wrap: wrap;
   gap: $spacing-xs $spacing-md;
   padding-top: $spacing-xs;
-  border-top: 1px dashed var(--color-border, var(--gray-200));
+  border-top: 1px dashed var(--border-color);
 }
 
 .sourceMetaWarn {
@@ -436,7 +437,7 @@
 }
 
 .compactLabel {
-  color: var(--color-text, var(--gray-900));
+  color: var(--text-primary);
   font-weight: 600;
 }
 
@@ -445,13 +446,13 @@
 }
 
 .compactValue {
-  color: var(--color-text, var(--gray-900));
+  color: var(--text-primary);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
 .compactReset {
-  color: var(--color-text-secondary, var(--gray-600));
+  color: var(--text-secondary);
   font-size: 11px;
   text-align: right;
 }

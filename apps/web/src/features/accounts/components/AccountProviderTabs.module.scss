@@ -6,40 +6,40 @@
 
 .tabs {
   box-sizing: border-box;
-  height: 36px;
+  height: var(--control-height-sm);
   max-width: 100%;
   padding: 0;
   gap: 0;
-  border-color: color-mix(in srgb, var(--accounts-border) 86%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--accounts-surface) 82%, var(--accounts-muted-surface));
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  border-color: color-mix(in srgb, var(--border-color) 86%, transparent);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
+  box-shadow: none;
 
   :global([role='tab']) {
     min-width: 0;
-    min-height: 34px;
+    min-height: 100%;
     padding: 0 16px;
     border-radius: 0;
-    color: color-mix(in srgb, var(--accounts-muted) 84%, var(--accounts-text));
+    color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
   }
 
   :global([role='tab'] + [role='tab']) {
-    border-left: 1px solid color-mix(in srgb, var(--accounts-border) 72%, transparent);
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   }
 
   :global([role='tab']:first-child) {
-    border-radius: 11px 0 0 11px;
+    border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
   }
 
   :global([role='tab']:last-child) {
-    border-radius: 0 11px 11px 0;
+    border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
   }
 
   :global([role='tab'][aria-selected='true']) {
     border-left-color: transparent;
-    background: color-mix(in srgb, var(--accounts-primary) 12%, var(--accounts-surface));
+    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
     box-shadow: none;
-    color: var(--accounts-brand-active);
+    color: var(--primary-active);
   }
 
   :global([role='tab'][aria-selected='true'] + [role='tab']) {
@@ -47,13 +47,13 @@
   }
 
   :global([role='tab']:hover) {
-    background: color-mix(in srgb, var(--accounts-primary) 5%, var(--accounts-surface));
-    color: var(--accounts-text);
+    background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+    color: var(--text-primary);
   }
 
   :global([role='tab'][aria-selected='true']:hover) {
-    background: color-mix(in srgb, var(--accounts-primary) 12%, var(--accounts-surface));
-    color: var(--accounts-brand-active);
+    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+    color: var(--primary-active);
   }
 
   @include mobile {
@@ -102,17 +102,19 @@
   min-width: 22px;
   height: 20px;
   padding: 0 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accounts-muted) 18%, var(--accounts-muted-surface));
-  color: var(--accounts-text);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--text-secondary) 18%, var(--surface-subtle));
+  color: var(--text-primary);
   font-size: 11px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .tabs :global([role='tab'][aria-selected='true']) .tabCount {
-  background: color-mix(in srgb, var(--accounts-primary) 22%, var(--accounts-surface));
-  color: var(--accounts-brand-active);
+  background: color-mix(in srgb, var(--primary-color) 22%, var(--bg-primary));
+  color: var(--primary-active);
 }
 
 @include mobile {

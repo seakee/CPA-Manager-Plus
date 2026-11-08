@@ -74,30 +74,14 @@ All interactive controls (search inputs, selects, segmented tabs, and buttons) w
 
 ## 7. Known Undefined-Variable Debt
 
-The following 15 CSS custom property names (67 reference sites across 13 feature stylesheets) are currently referenced without a matching definition and are locked under the R1 per-file/per-variable ratchet until their owning pages are restyled in subsequent UI batches:
+The following 4 CSS custom property names (9 reference sites across 5 stylesheets) are referenced without a matching definition. The R1 per-file/per-variable ratchet locks them until their owning pages are restyled:
 
-| Variable | Sites | Files | Fallback / Current Resolution | Target Replacement |
+| Variable | Sites | Files | Current Resolution | Target Replacement |
 | --- | --- | --- | --- | --- |
-| `--font-family-mono` | 12 | `features/oauth/CodexReauthDialog.module.scss` (1), `features/monitoring/CodexInspectionPage.module.scss` (8), `features/monitoring/styles/_monitoring-summary-table.scss` (2), `features/monitoring/components/FailureDetailsTooltip.module.scss` (1) | Renders its `var()` fallback (monospace font-family stack) | `var(--font-mono)` |
-| `--color-text-muted` | 1 | `features/monitoring/MonitoringCenterPage.module.scss` (1) | Renders its `var()` fallback (`features/monitoring/MonitoringCenterPage.module.scss:2318`) | `var(--text-muted)` |
-| `--matrix-intensity` | 1 | `features/usage-analytics/UsageAnalyticsPage.module.scss` (1) | Renders its `var()` fallback (`0%` inside `color-mix(...)`) | Remove unused rule or bind inline style |
-| `--gray-100` | 2 | `features/accounts/components/AccountHealthBadge.module.scss` (2) | Renders its `var()` fallback (`features/accounts/components/AccountHealthBadge.module.scss:76,86`) | `var(--surface-subtle)` / neutral badge token |
-| `--gray-400` | 2 | `features/accounts/components/AccountHealthBadge.module.scss` (2) | Renders its `var()` fallback (`features/accounts/components/AccountHealthBadge.module.scss:82,92`) | `var(--data-badge-neutral-text)` |
-| `--gray-200` | 7 | `features/accounts/components/AccountHealthBadge.module.scss` (2), `features/accounts/components/QuotaWindowCard.module.scss` (5) | Mixed: `AccountHealthBadge.module.scss:77,87` renders its `var()` fallback; `QuotaWindowCard.module.scss` uses `var(--color-border, var(--gray-200))` with no fallback on `--gray-200` (initial value if `--color-border` unset) | `var(--border-color)` / `var(--data-badge-neutral-border)` |
-| `--gray-500` | 10 | `features/accounts/components/AccountHealthBadge.module.scss` (1), `features/accounts/components/QuotaWindowCard.module.scss` (9) | Mixed: `AccountHealthBadge.module.scss:88` renders its `var()` fallback; `QuotaWindowCard.module.scss` has 2 bare `var(--gray-500)` sites (no fallback, resolve to `inherit`) and 7 nested `var(--color-text-tertiary, var(--gray-500))` sites with no fallback on `--gray-500` | `var(--text-tertiary)` |
-| `--gray-600` | 6 | `features/accounts/components/AccountHealthBadge.module.scss` (1), `features/accounts/components/QuotaWindowCard.module.scss` (5) | Mixed: `AccountHealthBadge.module.scss:78` renders its `var()` fallback; `QuotaWindowCard.module.scss` uses `var(--color-text-secondary, var(--gray-600))` with no fallback on `--gray-600` | `var(--text-secondary)` |
-| `--gray-50` | 2 | `features/accounts/components/QuotaWindowCard.module.scss` (2) | No fallback on `--gray-50` inside `var(--color-surface-muted, var(--gray-50))` (initial value if `--color-surface-muted` unset) | `var(--app-surface-muted)` |
-| `--gray-900` | 7 | `features/accounts/components/QuotaWindowCard.module.scss` (7) | No fallback on `--gray-900` inside `var(--color-text, var(--gray-900))` (initial value if `--color-text` unset) | `var(--text-primary)` |
+| `--font-family-mono` | 1 | `features/oauth/CodexReauthDialog.module.scss` (1) | Renders its `var()` fallback (monospace font-family stack) | `var(--font-mono)` |
 | `--surface-primary` | 2 | `features/oauth/CodexReauthDialog.module.scss` (2) | No fallback (`background` resolves to `transparent`) | `var(--app-surface)` |
-| `--accounts-accent-soft` | 1 | `features/accounts/AccountsPage.module.scss` (1) | No fallback (`background` resolves to `transparent`) | `var(--app-accent-soft)` |
-| `--shadow-sm` | 12 | `features/plugins/PluginStorePage.module.scss` (2), `features/plugins/PluginRuntimeSwitch.module.scss` (1), `features/plugins/PluginsPage.module.scss` (2), `features/accounts/AccountsPage.module.scss` (3), `features/monitoring/CodexInspectionPage.module.scss` (4) | No fallback (`box-shadow` resolves to `none`) | `var(--app-specular-highlight)` or `none` |
+| `--shadow-sm` | 5 | `features/plugins/PluginStorePage.module.scss` (2), `features/plugins/PluginRuntimeSwitch.module.scss` (1), `features/plugins/PluginsPage.module.scss` (2) | No fallback (`box-shadow` resolves to `none`) | `var(--app-specular-highlight)` or `none` |
 | `--app-shadow-md` | 1 | `features/dashboard/components/HealthAlertsCard.module.scss` (1) | No fallback (`box-shadow` resolves to `none`) | `var(--app-specular-highlight)` or `none` |
-| `--matrix-columns` | 1 | `features/usage-analytics/UsageAnalyticsPage.module.scss` (1) | No fallback (`grid-template-columns` resolves to `none`) | Remove unused rule or bind inline style |
-
-### Summary by Resolution Behavior
-
-- **Renders `var()` fallback currently**: `--font-family-mono` (12), `--color-text-muted` (1), `--matrix-intensity` (1), `--gray-100` (2), `--gray-400` (2), plus the `AccountHealthBadge.module.scss` sites of `--gray-200` (2), `--gray-500` (1), and `--gray-600` (1).
-- **No fallback (resolves to CSS property initial value)**: `--surface-primary` (2), `--accounts-accent-soft` (1), `--shadow-sm` (12), `--app-shadow-md` (1), `--matrix-columns` (1), and the `QuotaWindowCard.module.scss` sites of `--gray-50` (2), `--gray-200` (5), `--gray-500` (9), `--gray-600` (5), and `--gray-900` (7) when their outer `--color-*` custom property is not set.
 
 ## 8. Automated Governance (`check:design-tokens`)
 

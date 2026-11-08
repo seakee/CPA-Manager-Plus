@@ -47,7 +47,7 @@
   width: 5px;
   min-width: 5px;
   height: 16px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
 }
 
 .statusBarSuccess {
@@ -62,5 +62,5 @@
 }
 
 .statusBarEmpty {
-  background: color-mix(in srgb, var(--accounts-strong-border) 62%, transparent);
+  background: color-mix(in srgb, var(--border-primary) 62%, transparent);
 }

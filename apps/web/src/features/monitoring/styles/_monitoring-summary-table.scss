@@ -37,7 +37,7 @@
   }
 
   .summaryCard {
-    --summary-accent: var(--monitor-accent);
+    --summary-accent: var(--data-blue-base);
 
     isolation: isolate;
     overflow: visible;
@@ -76,7 +76,7 @@
   }
 
   .summaryCard:hover {
-    border-color: var(--monitor-line-strong);
+    border-color: var(--border-primary);
     box-shadow: var(--shadow-lg);
   }
 
@@ -96,7 +96,7 @@
     width: 28px;
     height: 28px;
     flex: 0 0 28px;
-    border-radius: 8px;
+    border-radius: var(--app-radius-sm);
     background: color-mix(in srgb, var(--summary-accent) 12%, transparent);
     color: var(--summary-accent);
   }
@@ -118,7 +118,7 @@
   .summaryLabel,
   .savedPricesHeader,
   .priceField label {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 600;
     letter-spacing: 0;
@@ -135,7 +135,7 @@
   .summaryValue {
     min-width: 0;
     max-width: 100%;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 24px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
@@ -163,7 +163,7 @@
   }
 
   .summaryValueWrap .summaryValue[tabindex='0']:focus-visible {
-    border-radius: 6px;
+    border-radius: var(--app-radius-xs);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--summary-accent) 28%, transparent);
   }
 
@@ -178,11 +178,11 @@
     min-width: min(160px, 100%);
     max-width: min(280px, calc(100vw - 32px));
     padding: 8px 10px;
-    border: 1px solid color-mix(in srgb, var(--monitor-accent) 78%, var(--monitor-line));
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--monitor-accent) 92%, var(--monitor-accent-strong));
-    color: var(--primary-contrast, #fff);
-    box-shadow: 0 14px 30px color-mix(in srgb, var(--monitor-accent) 28%, transparent);
+    border: 1px solid color-mix(in srgb, var(--data-blue-base) 78%, var(--border-color));
+    border-radius: var(--app-radius-md);
+    background: color-mix(in srgb, var(--data-blue-base) 92%, var(--data-blue-dark-2));
+    color: var(--primary-contrast);
+    box-shadow: 0 14px 30px color-mix(in srgb, var(--data-blue-base) 28%, transparent);
     opacity: 0;
     pointer-events: none;
     transform: translateY(4px);
@@ -198,8 +198,8 @@
     bottom: -5px;
     width: 9px;
     height: 9px;
-    border-right: 1px solid color-mix(in srgb, var(--monitor-accent) 78%, var(--monitor-line));
-    border-bottom: 1px solid color-mix(in srgb, var(--monitor-accent) 78%, var(--monitor-line));
+    border-right: 1px solid color-mix(in srgb, var(--data-blue-base) 78%, var(--border-color));
+    border-bottom: 1px solid color-mix(in srgb, var(--data-blue-base) 78%, var(--border-color));
     background: inherit;
     transform: rotate(45deg);
   }
@@ -211,7 +211,7 @@
   }
 
   .summaryValueTooltipLabel {
-    color: color-mix(in srgb, var(--primary-contrast, #fff) 72%, transparent);
+    color: color-mix(in srgb, var(--primary-contrast) 72%, transparent);
     font-size: 10px;
     font-weight: 700;
     line-height: 1.2;
@@ -219,9 +219,9 @@
   }
 
   .summaryValueTooltipValue {
-    color: var(--primary-contrast, #fff);
+    color: var(--primary-contrast);
     font-size: 13px;
-    font-weight: 800;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
     line-height: 1.2;
     overflow-wrap: anywhere;
@@ -233,7 +233,7 @@
 
   .summaryMeta {
     margin-top: 5px;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     display: block;
     font-size: 11px;
     font-weight: 500;
@@ -308,42 +308,42 @@
   }
 
   .tonegood {
-    color: var(--monitor-green);
+    color: var(--data-green-base);
   }
 
   .tonewarn {
-    color: var(--monitor-amber);
+    color: var(--data-amber-base);
   }
 
   .tonebad {
-    color: var(--monitor-red);
+    color: var(--data-red-base);
   }
 
   .statusBadge.tonegood {
-    border-color: color-mix(in srgb, var(--monitor-green) 26%, var(--monitor-line));
-    background: color-mix(in srgb, var(--monitor-green) 10%, var(--monitor-surface));
+    border-color: color-mix(in srgb, var(--data-green-base) 26%, var(--border-color));
+    background: color-mix(in srgb, var(--data-green-base) 10%, var(--bg-primary));
   }
 
   .statusBadge.tonewarn {
-    border-color: color-mix(in srgb, var(--monitor-amber) 24%, var(--monitor-line));
-    background: color-mix(in srgb, var(--monitor-amber) 10%, var(--monitor-surface));
+    border-color: color-mix(in srgb, var(--data-amber-base) 24%, var(--border-color));
+    background: color-mix(in srgb, var(--data-amber-base) 10%, var(--bg-primary));
   }
 
   .statusBadge.tonebad {
-    border-color: color-mix(in srgb, var(--monitor-red) 26%, var(--monitor-line));
-    background: color-mix(in srgb, var(--monitor-red) 10%, var(--monitor-surface));
+    border-color: color-mix(in srgb, var(--data-red-base) 26%, var(--border-color));
+    background: color-mix(in srgb, var(--data-red-base) 10%, var(--bg-primary));
   }
 
   .goodText {
-    color: var(--monitor-green);
+    color: var(--data-green-base);
   }
 
   .warnText {
-    color: var(--monitor-amber);
+    color: var(--data-amber-base);
   }
 
   .badText {
-    color: var(--monitor-red);
+    color: var(--data-red-base);
   }
 
   .patternBars {
@@ -353,9 +353,9 @@
     gap: 4px;
     align-items: center;
     padding: 7px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--monitor-line);
-    background: var(--monitor-surface-muted);
+    border-radius: var(--app-radius-pill);
+    border: 1px solid var(--border-color);
+    background: var(--surface-subtle);
   }
 
   .patternBarsPlain {
@@ -371,22 +371,22 @@
   .patternBar {
     width: 6px;
     height: 16px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--monitor-muted) 24%, transparent);
+    border-radius: var(--app-radius-pill);
+    background: color-mix(in srgb, var(--text-secondary) 24%, transparent);
   }
 
   .patternBarPlain {
     width: 5px;
     height: 22px;
-    border-radius: 999px;
+    border-radius: var(--app-radius-pill);
   }
 
   .patternSuccess {
-    background: var(--monitor-green);
+    background: var(--data-green-base);
   }
 
   .patternFailed {
-    background: var(--monitor-red);
+    background: var(--data-red-base);
   }
 
   .priceEditor {
@@ -413,12 +413,12 @@
   }
 
   .priceField :global(.input) {
-    min-height: 44px;
+    min-height: var(--control-height-md);
   }
 
   .priceField input,
   .priceField button {
-    min-height: 44px;
+    min-height: var(--control-height-md);
   }
 
   .priceFieldModel {
@@ -448,7 +448,7 @@
   }
 
   .savedPricesHeader {
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 14px;
     font-weight: 700;
     letter-spacing: 0;
@@ -457,12 +457,12 @@
 
   .savedPricesTableWrap {
     overflow-x: auto;
-    border: 1px solid color-mix(in srgb, var(--monitor-line-strong) 30%, var(--monitor-line));
-    border-radius: 16px;
+    border: 1px solid color-mix(in srgb, var(--border-primary) 30%, var(--border-color));
+    border-radius: var(--app-radius-md);
     background: linear-gradient(
       180deg,
       color-mix(in srgb, var(--monitor-surface-elevated) 90%, white 10%),
-      var(--monitor-surface)
+      var(--bg-primary)
     );
   }
 
@@ -474,9 +474,9 @@
 
   .savedPricesTable thead th {
     padding: 12px 14px 10px;
-    border-bottom: 1px solid color-mix(in srgb, var(--monitor-line) 90%, transparent);
-    background: color-mix(in srgb, var(--monitor-accent) 10%, var(--monitor-surface-muted));
-    color: var(--monitor-muted);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 90%, transparent);
+    background: color-mix(in srgb, var(--data-blue-base) 10%, var(--surface-subtle));
+    color: var(--text-secondary);
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0;
@@ -488,13 +488,14 @@
 
   .savedPricesTable tbody td {
     padding: 13px 14px;
-    border-top: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    color: var(--monitor-ink);
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    color: var(--text-primary);
     font-size: 14px;
     font-weight: 600;
+    font-variant-numeric: tabular-nums;
     line-height: 1.35;
     white-space: nowrap;
-    background: color-mix(in srgb, var(--monitor-surface) 88%, white 12%);
+    background: color-mix(in srgb, var(--bg-primary) 88%, white 12%);
     transition: background 0.18s ease;
   }
 
@@ -503,15 +504,15 @@
   }
 
   .savedPricesTable tbody tr:nth-child(odd) td {
-    background: color-mix(in srgb, var(--monitor-accent) 4%, var(--monitor-surface-elevated));
+    background: color-mix(in srgb, var(--data-blue-base) 4%, var(--monitor-surface-elevated));
   }
 
   .savedPricesTable tbody tr:nth-child(even) td {
-    background: color-mix(in srgb, var(--monitor-surface) 92%, var(--monitor-surface-elevated));
+    background: color-mix(in srgb, var(--bg-primary) 92%, var(--monitor-surface-elevated));
   }
 
   .savedPricesTable tbody tr:hover td {
-    background: color-mix(in srgb, var(--monitor-accent) 10%, var(--monitor-surface-hover));
+    background: color-mix(in srgb, var(--data-blue-base) 10%, var(--monitor-surface-hover));
   }
 
   .savedPricesTable th:last-child,
@@ -561,18 +562,12 @@
     --account-col-estimated-cost: 9%;
     --account-col-latest-request: 13%;
     --account-col-action: 12%;
-    --account-overview-columns: var(--account-col-account) var(--account-col-status)
-      var(--account-col-total-calls) var(--account-col-success-calls)
-      var(--account-col-failure-calls) var(--account-col-success-rate)
-      var(--account-col-total-tokens) var(--account-col-estimated-cost)
-      var(--account-col-latest-request) var(--account-col-action);
-
     min-width: 1180px;
     overflow: visible;
     border: 0;
     border-collapse: separate;
     border-spacing: 0 8px;
-    border-radius: 16px;
+    border-radius: var(--app-radius-md);
     background: transparent;
     table-layout: fixed;
   }
@@ -598,7 +593,7 @@
     border: 0;
     border-collapse: separate;
     border-spacing: 0 8px;
-    border-radius: 16px;
+    border-radius: var(--app-radius-md);
     background: transparent;
     table-layout: fixed;
   }
@@ -700,12 +695,12 @@
 
   .accountRowMenuButton {
     flex: 0 0 auto;
-    min-width: 30px;
-    min-height: 30px;
+    min-width: var(--control-height-xs);
+    min-height: var(--control-height-xs);
     padding: 0;
-    border-color: color-mix(in srgb, var(--monitor-line) 86%, transparent);
+    border-color: color-mix(in srgb, var(--border-color) 86%, transparent);
     background: transparent;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
   }
 
   .realtimeTable {
@@ -782,11 +777,11 @@
     top: 0;
     z-index: 2;
     padding: 8px 10px;
-    border-top: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    background: color-mix(in srgb, var(--monitor-surface) 92%, var(--monitor-surface-muted));
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    background: color-mix(in srgb, var(--bg-primary) 92%, var(--surface-subtle));
     text-align: left;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0;
@@ -795,13 +790,13 @@
   }
 
   .table thead th:first-child {
-    border-left: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 12px 0 0 12px;
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
   }
 
   .table thead th:last-child {
-    border-right: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 0 12px 12px 0;
+    border-right: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
   }
 
   .sortableHeaderButton {
@@ -823,7 +818,7 @@
 
   .sortableHeaderButton:hover {
     transform: none;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
   }
 
   .sortableHeaderButton:focus,
@@ -833,13 +828,13 @@
   }
 
   .sortableHeaderButton:focus-visible {
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
     text-decoration: underline;
     text-underline-offset: 3px;
   }
 
   .sortableHeaderButtonActive {
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
   }
 
   .sortIndicator {
@@ -849,7 +844,7 @@
     width: 14px;
     min-width: 14px;
     height: 14px;
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
   }
 
   .sortIndicator svg {
@@ -860,8 +855,9 @@
     padding: 12px 10px;
     vertical-align: middle;
     white-space: nowrap;
-    border-top: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
+    font-variant-numeric: tabular-nums;
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
     background: var(--monitor-surface-elevated);
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
     transition:
@@ -871,17 +867,17 @@
   }
 
   .table tbody td:first-child {
-    border-left: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 14px 0 0 14px;
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
   }
 
   .table tbody td:last-child {
-    border-right: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 0 14px 14px 0;
+    border-right: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
   }
 
   .table tbody tr:nth-child(even) td {
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 86%, var(--monitor-surface));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 86%, var(--bg-primary));
   }
 
   .table tbody tr:hover td {
@@ -890,14 +886,14 @@
 
   .accountOverviewTable thead th {
     padding: 10px 12px;
-    background: color-mix(in srgb, var(--monitor-surface) 88%, var(--monitor-surface-muted));
+    background: color-mix(in srgb, var(--bg-primary) 88%, var(--surface-subtle));
   }
 
   .table.accountOverviewTable tbody td {
     padding: 12px;
-    border-top: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    background: var(--monitor-surface);
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    background: var(--bg-primary);
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   }
 
@@ -907,13 +903,13 @@
   }
 
   .table.accountOverviewTable tbody td:first-child {
-    border-left: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 14px 0 0 14px;
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
   }
 
   .table.accountOverviewTable tbody td:last-child {
-    border-right: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 0 14px 14px 0;
+    border-right: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
   }
 
   .table.accountOverviewTable tbody tr:nth-child(even) td {
@@ -935,23 +931,23 @@
   }
 
   .table.accountOverviewTable tbody .accountOverviewRowExpanded td:first-child {
-    border-radius: 14px 0 0 0;
+    border-radius: var(--app-radius-md) 0 0 0;
   }
 
   .table.accountOverviewTable tbody .accountOverviewRowExpanded td:last-child {
-    border-radius: 0 14px 0 0;
+    border-radius: 0 var(--app-radius-md) 0 0;
   }
 
   .apiKeySummaryTable thead th {
     padding: 10px 12px;
-    background: color-mix(in srgb, var(--monitor-surface) 88%, var(--monitor-surface-muted));
+    background: color-mix(in srgb, var(--bg-primary) 88%, var(--surface-subtle));
   }
 
   .table.apiKeySummaryTable tbody td {
     padding: 12px;
-    border-top: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    background: var(--monitor-surface);
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    background: var(--bg-primary);
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   }
 
@@ -961,13 +957,13 @@
   }
 
   .table.apiKeySummaryTable tbody td:first-child {
-    border-left: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 14px 0 0 14px;
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
   }
 
   .table.apiKeySummaryTable tbody td:last-child {
-    border-right: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 0 14px 14px 0;
+    border-right: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
   }
 
   .table.apiKeySummaryTable tbody tr:nth-child(even) td {
@@ -989,11 +985,11 @@
   }
 
   .table.apiKeySummaryTable tbody .apiKeySummaryRowExpanded td:first-child {
-    border-radius: 14px 0 0 0;
+    border-radius: var(--app-radius-md) 0 0 0;
   }
 
   .table.apiKeySummaryTable tbody .apiKeySummaryRowExpanded td:last-child {
-    border-radius: 0 14px 0 0;
+    border-radius: 0 var(--app-radius-md) 0 0;
   }
 
   .table.accountOverviewTable tbody .accountDetailRow > td,
@@ -1001,11 +997,11 @@
     position: relative;
     padding: 0;
     border-top: 0;
-    border-right: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-left: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 0 0 14px 14px;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--monitor-surface));
+    border-right: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: 0 0 var(--app-radius-md) var(--app-radius-md);
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--bg-primary));
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
     white-space: normal;
   }
@@ -1018,7 +1014,7 @@
     right: 0;
     left: 0;
     height: 8px;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--monitor-surface));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--bg-primary));
     pointer-events: none;
   }
 
@@ -1026,29 +1022,29 @@
   .table.accountOverviewTable tbody .accountDetailRow > td:last-child,
   .table.apiKeySummaryTable tbody .apiKeyDetailRow > td:first-child,
   .table.apiKeySummaryTable tbody .apiKeyDetailRow > td:last-child {
-    border-radius: 0 0 14px 14px;
+    border-radius: 0 0 var(--app-radius-md) var(--app-radius-md);
   }
 
   .table.accountOverviewTable tbody .accountDetailRow:hover > td,
   .table.apiKeySummaryTable tbody .apiKeyDetailRow:hover > td {
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--monitor-surface));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--bg-primary));
   }
 
   .table.realtimeTable tbody td {
-    border-top: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-bottom: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    background: var(--monitor-surface);
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    background: var(--bg-primary);
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   }
 
   .table.realtimeTable tbody td:first-child {
-    border-left: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 14px 0 0 14px;
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: var(--app-radius-md) 0 0 var(--app-radius-md);
   }
 
   .table.realtimeTable tbody td:last-child {
-    border-right: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-    border-radius: 0 14px 14px 0;
+    border-right: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+    border-radius: 0 var(--app-radius-md) var(--app-radius-md) 0;
   }
 
   .table.realtimeTable tbody tr:nth-child(even) td {
@@ -1075,13 +1071,13 @@
 
   .primaryCell small,
   .statusCell small {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 11px;
   }
 
   .realtimeReasoningBadge {
     display: inline;
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
     font-size: 12px;
     font-weight: 700;
     line-height: 1.2;
@@ -1089,7 +1085,7 @@
   }
 
   .mutedCell {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
   }
 
   .realtimeRequestStatus {
@@ -1098,7 +1094,7 @@
     gap: 6px;
     min-height: 20px;
     font-size: 12px;
-    font-weight: 750;
+    font-weight: 700;
     line-height: 1.2;
     white-space: nowrap;
   }
@@ -1113,24 +1109,16 @@
   }
 
   .realtimeRequestStatusGood {
-    color: var(--monitor-green);
+    color: var(--data-green-base);
   }
 
   .realtimeRequestStatusBad {
-    color: var(--monitor-red);
+    color: var(--data-red-base);
   }
 
   .realtimeFailureTooltip {
-    --monitor-surface: var(--bg-primary);
     --monitor-surface-elevated: var(--app-surface-strong);
     --monitor-surface-hover: color-mix(in srgb, var(--surface-subtle-hover) 74%, var(--bg-primary));
-    --monitor-ink: var(--text-primary);
-    --monitor-muted: var(--text-secondary);
-    --monitor-line: var(--border-color);
-    --monitor-accent: var(--primary-color);
-    --monitor-accent-strong: var(--primary-active);
-    --monitor-red: var(--error-color);
-    --monitor-diagnostic-color: var(--monitor-red);
 
     position: fixed;
     z-index: 2030;
@@ -1143,11 +1131,11 @@
     overflow: auto;
     padding: 10px 12px;
     padding-right: 42px;
-    border: 1px solid color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
-    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--error-color) 26%, var(--border-color));
+    border-radius: var(--app-radius-md);
     background: var(--monitor-surface-elevated);
     box-shadow: var(--shadow-lg);
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 12px;
     line-height: 1.45;
     opacity: 0;
@@ -1176,18 +1164,18 @@
     top: -5px;
     bottom: auto;
     border-left: 1px solid
-      color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
+      color-mix(in srgb, var(--error-color) 26%, var(--border-color));
     border-top: 1px solid
-      color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
+      color-mix(in srgb, var(--error-color) 26%, var(--border-color));
   }
 
   .realtimeFailureTooltipAbove::before {
     top: auto;
     bottom: -5px;
     border-right: 1px solid
-      color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
+      color-mix(in srgb, var(--error-color) 26%, var(--border-color));
     border-bottom: 1px solid
-      color-mix(in srgb, var(--monitor-diagnostic-color) 26%, var(--monitor-line));
+      color-mix(in srgb, var(--error-color) 26%, var(--border-color));
   }
 
   .realtimeFailureTooltipOpen {
@@ -1207,37 +1195,37 @@
     width: 24px;
     height: 24px;
     padding: 0;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 84%, transparent);
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--monitor-surface) 88%, transparent);
-    color: var(--monitor-muted);
+    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+    border-radius: var(--app-radius-xs);
+    background: color-mix(in srgb, var(--bg-primary) 88%, transparent);
+    color: var(--text-secondary);
     cursor: pointer;
   }
 
   .realtimeFailureCopyButton:hover,
   .realtimeFailureCopyButton:focus-visible {
-    border-color: color-mix(in srgb, var(--monitor-accent) 36%, var(--monitor-line));
+    border-color: color-mix(in srgb, var(--primary-color) 36%, var(--border-color));
     background: var(--monitor-surface-hover);
-    color: var(--monitor-accent-strong);
+    color: var(--primary-active);
   }
 
   .realtimeFailureTooltipStatus {
-    color: var(--monitor-diagnostic-color);
+    color: var(--error-color);
     font-size: 11px;
-    font-weight: 750;
+    font-weight: 700;
     line-height: 1.2;
     white-space: nowrap;
   }
 
   .realtimeFailureTooltipBody {
     overflow-wrap: anywhere;
-    color: var(--monitor-ink);
-    font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
     white-space: pre-wrap;
   }
 
   .monoCell {
-    font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-family: var(--font-mono);
   }
 
   .statusCell {
@@ -1260,20 +1248,21 @@
     flex-wrap: wrap;
     margin-top: 14px;
     padding-top: 14px;
-    border-top: 1px solid var(--monitor-line);
+    border-top: 1px solid var(--border-color);
   }
 
   .paginationInfo {
     display: inline-flex;
     align-items: center;
     box-sizing: border-box;
-    min-height: 34px;
+    min-height: var(--control-height-sm);
     padding: 0 12px;
-    border-radius: 999px;
-    border: 1px solid var(--monitor-line);
+    border-radius: var(--app-radius-pill);
+    border: 1px solid var(--border-color);
     background: var(--monitor-surface-elevated);
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 12px;
+    font-variant-numeric: tabular-nums;
     line-height: 1.4;
   }
 
@@ -1289,9 +1278,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 34px;
+    min-height: var(--control-height-sm);
     margin-top: 10px;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 600;
   }
@@ -1301,12 +1290,12 @@
     align-items: center;
     box-sizing: border-box;
     gap: 8px;
-    min-height: 34px;
+    min-height: var(--control-height-sm);
     padding: 0 8px 0 12px;
-    border-radius: 999px;
-    border: 1px solid var(--monitor-line);
+    border-radius: var(--app-radius-pill);
+    border: 1px solid var(--border-color);
     background: var(--monitor-surface-elevated);
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 600;
   }
@@ -1318,13 +1307,13 @@
 
   .pageSizeSelectTrigger {
     min-width: 88px;
-    height: 30px !important;
+    height: var(--control-height-xs) !important;
     padding: 0 2px 0 8px !important;
     border: 0 !important;
-    border-radius: 999px !important;
+    border-radius: var(--app-radius-pill) !important;
     background: transparent !important;
     box-shadow: none !important;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 12px;
     font-weight: 700;
     line-height: 1;
@@ -1342,8 +1331,8 @@
     display: inline-flex;
     align-items: center;
     gap: 7px;
-    min-height: 34px;
-    color: var(--monitor-muted);
+    min-height: var(--control-height-sm);
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 600;
     white-space: nowrap;
@@ -1351,14 +1340,15 @@
 
   .pageJumpField input {
     width: 58px;
-    height: 34px;
+    height: var(--control-height-sm);
     padding: 0 8px;
-    border: 1px solid var(--monitor-line);
-    border-radius: 10px;
-    background: var(--monitor-surface);
-    color: var(--monitor-ink);
+    border: 1px solid var(--border-color);
+    border-radius: var(--app-radius-sm);
+    background: var(--bg-primary);
+    color: var(--text-primary);
     font: inherit;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
     text-align: center;
   }
 }

@@ -11,10 +11,11 @@
   align-items: center;
   gap: $spacing-xs;
   padding: 2px $spacing-sm;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.4;
+  white-space: nowrap;
   border: 1px solid transparent;
   transition: background $transition-fast;
 }
@@ -33,61 +34,61 @@
 }
 
 :global(.healthBadgeOk) {
-  background: var(--data-green-light-9, #f0fdf4);
-  border-color: var(--data-green-light-7, #bbf7d0);
-  color: var(--data-green-dark-2, #166534);
+  background: var(--data-green-light-9);
+  border-color: var(--data-green-light-7);
+  color: var(--data-green-dark-2);
 }
 
 :global(.healthBadgeOk .healthBadgeDot) {
-  background: var(--data-green-base, #16a34a);
+  background: var(--data-green-base);
 }
 
 :global(.healthBadgeWarning) {
-  background: var(--data-amber-light-9, #fffbeb);
-  border-color: var(--data-amber-light-7, #fde68a);
-  color: var(--data-amber-dark-2, #92400e);
+  background: var(--data-amber-light-9);
+  border-color: var(--data-amber-light-7);
+  color: var(--data-amber-dark-2);
 }
 
 :global(.healthBadgeWarning .healthBadgeDot) {
-  background: var(--data-amber-base, #d97706);
+  background: var(--data-amber-base);
 }
 
 :global(.healthBadgeCooldown) {
-  background: var(--data-blue-light-9, #eff6ff);
-  border-color: var(--data-blue-light-7, #bfdbfe);
-  color: var(--data-blue-dark-2, #1e40af);
+  background: var(--data-blue-light-9);
+  border-color: var(--data-blue-light-7);
+  color: var(--data-blue-dark-2);
 }
 
 :global(.healthBadgeCooldown .healthBadgeDot) {
-  background: var(--data-blue-base, #2563eb);
+  background: var(--data-blue-base);
 }
 
 :global(.healthBadgeCritical) {
-  background: var(--data-red-light-9, #fef2f2);
-  border-color: var(--data-red-light-7, #fecaca);
-  color: var(--data-red-dark-2, #991b1b);
+  background: var(--data-red-light-9);
+  border-color: var(--data-red-light-7);
+  color: var(--data-red-dark-2);
 }
 
 :global(.healthBadgeCritical .healthBadgeDot) {
-  background: var(--data-red-base, #dc2626);
+  background: var(--data-red-base);
 }
 
 :global(.healthBadgeDisabled) {
-  background: var(--gray-100, #f3f4f6);
-  border-color: var(--gray-200, #e5e7eb);
-  color: var(--gray-600, #4b5563);
+  background: var(--surface-subtle);
+  border-color: var(--data-badge-neutral-border);
+  color: var(--text-secondary);
 }
 
 :global(.healthBadgeDisabled .healthBadgeDot) {
-  background: var(--gray-400, #9ca3af);
+  background: var(--data-badge-neutral-text);
 }
 
 :global(.healthBadgeUnknown) {
-  background: var(--gray-100, #f3f4f6);
-  border-color: var(--gray-200, #e5e7eb);
-  color: var(--gray-500, #6b7280);
+  background: var(--surface-subtle);
+  border-color: var(--data-badge-neutral-border);
+  color: var(--text-secondary);
 }
 
 :global(.healthBadgeUnknown .healthBadgeDot) {
-  background: var(--gray-400, #9ca3af);
+  background: var(--data-badge-neutral-text);
 }

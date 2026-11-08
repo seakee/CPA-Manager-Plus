@@ -4,23 +4,9 @@
 
 .page,
 .monitorModal {
-  --monitor-bg: var(--bg-secondary);
-  --monitor-surface: var(--bg-primary);
   --monitor-surface-elevated: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
-  --monitor-surface-muted: var(--surface-subtle);
   --monitor-surface-hover: color-mix(in srgb, var(--surface-subtle-hover) 74%, var(--bg-primary));
-  --monitor-ink: var(--text-primary);
-  --monitor-muted: var(--text-secondary);
-  --monitor-line: var(--border-color);
-  --monitor-line-strong: var(--border-primary);
-  --monitor-accent: var(--data-blue-base);
-  --monitor-accent-strong: var(--data-blue-dark-2);
-  --monitor-accent-soft: var(--data-badge-info-bg);
-  --monitor-cyan: var(--data-cyan-base);
-  --monitor-green: var(--data-green-base);
-  --monitor-amber: var(--data-amber-base);
-  --monitor-red: var(--data-red-base);
-  color: var(--monitor-ink);
+  color: var(--text-primary);
 }
 
 .page {
@@ -36,17 +22,17 @@
   flex-wrap: wrap;
   gap: 6px 10px;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--monitor-amber) 38%, var(--monitor-line));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--monitor-amber) 8%, var(--monitor-surface));
-  color: var(--monitor-muted);
+  border: 1px solid color-mix(in srgb, var(--data-amber-base) 38%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--data-amber-base) 8%, var(--bg-primary));
+  color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.5;
 }
 
 .databaseMaintenanceHint strong {
-  color: var(--monitor-ink);
-  font-weight: 750;
+  color: var(--text-primary);
+  font-weight: 700;
 }
 
 .statusBar {
@@ -78,19 +64,20 @@
 .statusMeta span {
   display: inline-flex;
   align-items: center;
-  min-height: 32px;
+  min-height: var(--control-height-sm);
   padding: 0 10px;
-  border-radius: 12px;
-  background: var(--monitor-surface-muted);
-  color: var(--monitor-muted);
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
 }
 
+.statusMeta .statusMetaWarn,
 .statusMetaWarn {
-  color: var(--monitor-red) !important;
-  background: color-mix(in srgb, var(--monitor-red) 10%, var(--monitor-surface)) !important;
+  color: var(--data-red-base);
+  background: color-mix(in srgb, var(--data-red-base) 10%, var(--bg-primary));
 }
 
 .loadingOverlay {
@@ -107,9 +94,9 @@
   align-items: center;
   gap: 12px;
   padding: 16px 20px;
-  border-radius: 20px;
-  border: 1px solid var(--monitor-line);
-  background: var(--monitor-surface);
+  border-radius: var(--app-radius-lg);
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
   box-shadow: var(--shadow-lg);
 }
 
@@ -118,9 +105,9 @@
 .summaryCard {
   position: relative;
   overflow: hidden;
-  border: 1px solid var(--monitor-line);
-  border-radius: 14px;
-  background: var(--monitor-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--bg-primary);
   box-shadow: var(--shadow-lg);
 }
 
@@ -145,12 +132,12 @@
   display: inline-flex;
   width: fit-content;
   align-items: center;
-  min-height: 30px;
+  min-height: var(--control-height-xs);
   padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--monitor-accent) 18%, transparent);
-  background: color-mix(in srgb, var(--monitor-accent) 10%, var(--monitor-surface));
-  color: var(--monitor-accent-strong);
+  border-radius: var(--app-radius-pill);
+  border: 1px solid color-mix(in srgb, var(--data-blue-base) 18%, transparent);
+  background: color-mix(in srgb, var(--data-blue-base) 10%, var(--bg-primary));
+  color: var(--data-blue-dark-2);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
@@ -167,7 +154,7 @@
 .subtitle {
   margin: 0;
   max-width: 760px;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 14px;
   line-height: 1.7;
 }
@@ -182,14 +169,16 @@
 .segmentedControl {
   display: inline-flex;
   align-items: stretch;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   flex-wrap: nowrap;
   justify-content: flex-start;
   gap: 0;
   max-width: 100%;
   padding: 0;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-  background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--monitor-surface));
+  border-radius: var(--app-radius-md);
+  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+  background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--bg-primary));
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   box-sizing: border-box;
   overflow-x: auto;
@@ -226,9 +215,9 @@
   gap: 10px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid var(--monitor-line);
-  border-radius: 16px;
-  background: var(--monitor-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--bg-primary);
   box-shadow: var(--shadow);
 }
 
@@ -259,13 +248,13 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  height: 34px;
-  min-height: 34px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 10px;
-  border: 1px solid var(--monitor-line);
-  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
   background: var(--monitor-surface-elevated);
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font: inherit;
   font-size: 12px;
   font-weight: 700;
@@ -276,27 +265,27 @@
 }
 
 .actionButtonPrimary {
-  border-color: var(--monitor-accent);
-  background: var(--monitor-accent);
-  color: #fff;
+  border-color: var(--data-blue-base);
+  background: var(--data-blue-base);
+  color: var(--primary-contrast);
 }
 
 .quickNavLink {
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
 }
 
 .actionButton:hover,
 .filterToggleChip:hover {
   transform: translateY(-1px);
-  border-color: color-mix(in srgb, var(--monitor-accent) 35%, var(--monitor-line-strong));
+  border-color: color-mix(in srgb, var(--data-blue-base) 35%, var(--border-primary));
   background: var(--monitor-surface-hover);
-  color: var(--monitor-ink);
+  color: var(--text-primary);
 }
 
 .actionButtonPrimary:hover {
   border-color: var(--primary-hover);
   background: var(--primary-hover);
-  color: #fff;
+  color: var(--primary-contrast);
 }
 
 .actionButton:disabled,
@@ -312,13 +301,14 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  min-height: 34px;
+  height: calc(var(--control-height-sm) - 2px);
+  min-height: calc(var(--control-height-sm) - 2px);
   padding: 0 14px;
   border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--monitor-line) 72%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   border-radius: 0;
   background: transparent;
-  color: color-mix(in srgb, var(--monitor-muted) 84%, var(--monitor-ink));
+  color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
   font: inherit;
   font-size: 13px;
   font-weight: 700;
@@ -333,17 +323,17 @@
 }
 
 .segmentButton:hover {
-  color: var(--monitor-ink);
-  background: color-mix(in srgb, var(--monitor-accent) 5%, var(--monitor-surface));
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--data-blue-base) 5%, var(--bg-primary));
   transform: none;
 }
 
 .segmentButtonActive,
 .segmentButtonActive:hover {
   border-left-color: transparent;
-  background: color-mix(in srgb, var(--monitor-accent) 12%, var(--monitor-surface));
-  color: var(--monitor-accent-strong);
-  font-weight: 800;
+  background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
+  color: var(--data-blue-dark-2);
+  font-weight: 700;
   box-shadow: none;
   transform: none;
 }
@@ -370,12 +360,12 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
+  min-height: var(--control-height-md);
   padding: 0 13px;
   border: 0;
-  border-radius: 10px;
+  border-radius: var(--app-radius-sm);
   background: transparent;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font: inherit;
   font-size: 13px;
   font-weight: 700;
@@ -390,15 +380,15 @@
 }
 
 .tabButton:hover {
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   background: var(--monitor-surface-hover);
 }
 
 .tabButton:focus-visible {
   outline: 0;
-  background: color-mix(in srgb, var(--monitor-accent) 7%, var(--monitor-surface));
-  color: var(--monitor-accent-strong);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--monitor-accent) 22%, transparent);
+  background: color-mix(in srgb, var(--data-blue-base) 7%, var(--bg-primary));
+  color: var(--data-blue-dark-2);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--data-blue-base) 22%, transparent);
 }
 
 .tabButtonActiveCard:focus-visible {
@@ -407,14 +397,14 @@
 }
 
 .tabButtonActiveCard:focus-visible::after {
-  background: color-mix(in srgb, var(--monitor-accent) 16%, var(--monitor-surface));
+  background: color-mix(in srgb, var(--data-blue-base) 16%, var(--bg-primary));
 }
 
 .tabButtonActive,
 .tabButtonActive:hover {
-  background: var(--monitor-accent);
-  color: #fff;
-  box-shadow: 0 8px 18px color-mix(in srgb, var(--monitor-accent) 18%, transparent);
+  background: var(--data-blue-base);
+  color: var(--primary-contrast);
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--data-blue-base) 18%, transparent);
 }
 
 .tabIcon {
@@ -437,17 +427,19 @@
   min-width: 22px;
   height: 20px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--data-badge-neutral-bg);
   color: var(--data-badge-neutral-text);
   font-size: 11px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .tabButtonActive .tabBadge {
-  background: rgba(255, 255, 255, 0.22);
-  color: #fff;
+  background: color-mix(in srgb, var(--primary-contrast) 22%, transparent);
+  color: var(--primary-contrast);
 }
 
 .tabBadgeFailure {
@@ -456,8 +448,8 @@
 }
 
 .tabButtonActive .tabBadgeFailure {
-  background: rgba(255, 255, 255, 0.28);
-  color: #fff;
+  background: color-mix(in srgb, var(--primary-contrast) 28%, transparent);
+  color: var(--primary-contrast);
 }
 
 .tabsBarCards {
@@ -466,9 +458,9 @@
   gap: 0;
   max-width: 100%;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--monitor-surface));
+  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--bg-primary));
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   overflow: hidden;
 }
@@ -478,10 +470,10 @@
   min-height: 42px;
   padding: 0 18px;
   border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--monitor-line) 72%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   border-radius: 0;
   background: transparent;
-  color: color-mix(in srgb, var(--monitor-muted) 84%, var(--monitor-ink));
+  color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
   font-size: 13px;
   box-shadow: none;
 }
@@ -496,7 +488,7 @@
 }
 
 .tabButtonCard:hover {
-  background: color-mix(in srgb, var(--monitor-accent) 5%, var(--monitor-surface));
+  background: color-mix(in srgb, var(--data-blue-base) 5%, var(--bg-primary));
   transform: none;
 }
 
@@ -506,7 +498,7 @@
   inset: 0;
   z-index: 0;
   border-radius: 0;
-  background: color-mix(in srgb, var(--monitor-accent) 12%, var(--monitor-surface));
+  background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
 }
 
 .tabButtonActiveCard,
@@ -514,26 +506,26 @@
   border-left-color: transparent;
   border-radius: 0;
   background: transparent;
-  color: var(--monitor-accent-strong);
-  font-weight: 800;
+  color: var(--data-blue-dark-2);
+  font-weight: 700;
   box-shadow: none;
   transform: none;
 }
 
 .tabButtonActiveCard:hover::after {
-  background: color-mix(in srgb, var(--monitor-accent) 12%, var(--monitor-surface));
+  background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
 }
 
 .tabButtonActiveCard:first-child,
 .tabButtonActiveCard:first-child::after {
-  border-top-left-radius: 11px;
-  border-bottom-left-radius: 11px;
+  border-top-left-radius: calc(var(--app-radius-md) - 1px);
+  border-bottom-left-radius: calc(var(--app-radius-md) - 1px);
 }
 
 .tabButtonActiveCard:last-child,
 .tabButtonActiveCard:last-child::after {
-  border-top-right-radius: 11px;
-  border-bottom-right-radius: 11px;
+  border-top-right-radius: calc(var(--app-radius-md) - 1px);
+  border-bottom-right-radius: calc(var(--app-radius-md) - 1px);
 }
 
 .tabButtonCard:hover + .tabButtonActiveCard::after {
@@ -551,21 +543,21 @@
 }
 
 .tabButtonActiveCard .tabBadge {
-  background: color-mix(in srgb, var(--monitor-accent) 22%, var(--monitor-surface));
-  color: var(--monitor-accent-strong);
+  background: color-mix(in srgb, var(--data-blue-base) 22%, var(--bg-primary));
+  color: var(--data-blue-dark-2);
 }
 
 .tabButtonActiveCard .tabBadgeFailure {
-  background: color-mix(in srgb, var(--monitor-red) 20%, var(--monitor-surface));
-  color: var(--monitor-red);
+  background: color-mix(in srgb, var(--data-red-base) 20%, var(--bg-primary));
+  color: var(--data-red-base);
 }
 
 .dataPanel {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--monitor-line);
-  border-radius: 14px;
-  background: var(--monitor-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--bg-primary);
   box-shadow: var(--shadow);
   padding: 0;
 }
@@ -577,7 +569,7 @@
   gap: 12px;
   min-width: 0;
   padding: 12px 14px 10px;
-  background: color-mix(in srgb, var(--monitor-surface-muted) 24%, var(--monitor-surface));
+  background: color-mix(in srgb, var(--surface-subtle) 24%, var(--bg-primary));
 }
 
 .dataPanelTabs {
@@ -629,20 +621,20 @@
 
 .customRangeModalGrid :global(label) {
   margin-bottom: 5px;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
 }
 
 .customRangeInput {
-  min-height: 38px;
-  border-radius: 14px;
+  min-height: var(--control-height-md);
+  border-radius: var(--app-radius-sm);
   font-size: 12px;
 }
 
 .customRangeError {
   grid-column: 1 / -1;
-  color: var(--monitor-red);
+  color: var(--data-red-base);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.4;
@@ -662,7 +654,7 @@
 
 .usageImportFileName {
   overflow: hidden;
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -674,11 +666,11 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 13px;
 
   strong {
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-variant-numeric: tabular-nums;
   }
 }
@@ -686,31 +678,31 @@
 .usageImportProgressTrack {
   height: 10px;
   overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--monitor-line) 72%, transparent);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--border-color) 72%, transparent);
 
   span {
     display: block;
     height: 100%;
     border-radius: inherit;
-    background: linear-gradient(90deg, var(--monitor-accent), var(--monitor-cyan));
+    background: linear-gradient(90deg, var(--data-blue-base), var(--data-cyan-base));
     transition: width 0.18s ease;
   }
 }
 
 .usageImportBytes,
 .usageImportHint {
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
 }
 
 .usageImportError {
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--monitor-red) 36%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--monitor-red) 8%, transparent);
-  color: var(--monitor-red);
+  border: 1px solid color-mix(in srgb, var(--data-red-base) 36%, transparent);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--data-red-base) 8%, transparent);
+  color: var(--data-red-base);
   font-size: 12px;
   line-height: 1.5;
   overflow-wrap: anywhere;
@@ -742,10 +734,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 34px;
+  min-height: var(--control-height-sm);
   padding: 0 10px;
-  border-radius: 12px;
-  border: 1px solid var(--monitor-line);
+  border-radius: var(--app-radius-sm);
+  border: 1px solid var(--border-color);
   background: var(--monitor-surface-elevated);
 }
 
@@ -753,13 +745,13 @@
 .metaPill,
 .quickLink,
 .quickLinkButton {
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   white-space: nowrap;
 }
 
 .syncPill {
-  min-height: 38px;
+  min-height: var(--control-height-md);
   padding: 0 12px;
 }
 
@@ -783,9 +775,9 @@
 .quotaRefreshButton:hover,
 .refreshButton:hover {
   transform: translateY(-1px);
-  border-color: color-mix(in srgb, var(--monitor-accent) 35%, var(--monitor-line-strong));
+  border-color: color-mix(in srgb, var(--data-blue-base) 35%, var(--border-primary));
   background: var(--monitor-surface-hover);
-  color: var(--monitor-ink);
+  color: var(--text-primary);
 }
 
 .quickLinkButton:disabled,
@@ -798,29 +790,33 @@
 .clearButton,
 .inlineActionButton {
   gap: 8px;
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font-size: 12px;
   font-weight: 700;
   cursor: pointer;
+}
+
+.inlineActionButton {
+  min-height: var(--control-height-xs);
 }
 
 .autoRefreshField {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 36px;
-  min-height: 36px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 7px 0 9px;
-  border-radius: 12px;
-  border: 1px solid var(--monitor-line);
-  background: var(--monitor-surface);
+  border-radius: var(--app-radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
 }
 
 .autoRefreshLabel {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -833,13 +829,13 @@
 
 .autoRefreshSelectTrigger {
   min-width: 84px;
-  height: 32px !important;
+  height: var(--control-height-xs) !important;
   padding: 0 2px 0 8px !important;
   border: 0 !important;
-  border-radius: 10px !important;
+  border-radius: var(--app-radius-sm) !important;
   background: transparent !important;
   box-shadow: none !important;
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font-size: 12px;
   font-weight: 600;
   line-height: 1;
@@ -859,13 +855,13 @@
   justify-content: center;
   gap: 8px;
   min-width: 84px;
-  height: 32px;
-  min-height: 32px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 12px;
-  border: 1px solid var(--monitor-line);
-  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
   background: var(--monitor-surface-elevated);
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font: inherit;
   font-size: 12px;
   font-weight: 700;
@@ -874,9 +870,9 @@
 }
 
 .refreshControls .clearButton {
-  height: 32px;
-  min-height: 32px;
-  border-radius: 10px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
   white-space: nowrap;
 }
 
@@ -939,12 +935,12 @@
 
 .panelTitleHintIcon {
   flex: 0 0 auto;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
 }
 
 .panelSubtitle {
   margin: 6px 0 0;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -981,10 +977,10 @@
 }
 
 .accountOverviewSearchInput {
-  height: 32px;
-  min-height: 32px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 36px 0 12px;
-  border-radius: 10px;
+  border-radius: var(--app-radius-sm);
   font-size: 13px;
 }
 
@@ -993,13 +989,13 @@
   align-items: center;
   justify-content: center;
   gap: 7px;
-  height: 32px;
-  min-height: 32px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 12px;
-  border: 1px solid var(--monitor-line);
-  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
   background: var(--monitor-surface-elevated);
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font: inherit;
   font-size: 12px;
   font-weight: 700;
@@ -1009,7 +1005,7 @@
 
 .accountOverviewToolButton:hover {
   transform: translateY(-1px);
-  border-color: color-mix(in srgb, var(--monitor-accent) 35%, var(--monitor-line-strong));
+  border-color: color-mix(in srgb, var(--data-blue-base) 35%, var(--border-primary));
   background: var(--monitor-surface-hover);
 }
 
@@ -1020,15 +1016,15 @@
 }
 
 .accountOverviewFilterButtonActive {
-  border-color: color-mix(in srgb, var(--monitor-accent) 42%, var(--monitor-line-strong));
-  background: color-mix(in srgb, var(--monitor-accent) 10%, var(--monitor-surface-elevated));
-  color: var(--monitor-accent-strong);
+  border-color: color-mix(in srgb, var(--data-blue-base) 42%, var(--border-primary));
+  background: color-mix(in srgb, var(--data-blue-base) 10%, var(--monitor-surface-elevated));
+  color: var(--data-blue-dark-2);
 }
 
 .accountDisplayModeButtonActive {
-  border-color: color-mix(in srgb, var(--monitor-accent) 42%, var(--monitor-line-strong));
-  background: color-mix(in srgb, var(--monitor-accent) 10%, var(--monitor-surface-elevated));
-  color: var(--monitor-accent-strong);
+  border-color: color-mix(in srgb, var(--data-blue-base) 42%, var(--border-primary));
+  background: color-mix(in srgb, var(--data-blue-base) 10%, var(--monitor-surface-elevated));
+  color: var(--data-blue-dark-2);
 }
 
 .accountOverviewFilterCount {
@@ -1038,11 +1034,12 @@
   min-width: 20px;
   min-height: 20px;
   padding: 0 6px;
-  border-radius: 999px;
-  background: var(--monitor-accent);
-  color: white;
+  border-radius: var(--app-radius-pill);
+  background: var(--data-blue-base);
+  color: var(--primary-contrast);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
 }
 
@@ -1051,7 +1048,8 @@
 }
 
 .accountOverviewModeToggle .segmentButton {
-  min-height: 30px;
+  height: calc(var(--control-height-sm) - 2px);
+  min-height: calc(var(--control-height-sm) - 2px);
   padding: 0 12px;
   font-size: 12px;
 }
@@ -1065,7 +1063,7 @@
 }
 
 .accountOverviewSortLabel {
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -1078,9 +1076,9 @@
 
 .accountOverviewSortSelectTrigger {
   min-width: 132px;
-  height: 32px !important;
+  height: var(--control-height-sm) !important;
   padding: 0 2px 0 10px !important;
-  border-radius: 10px !important;
+  border-radius: var(--app-radius-sm) !important;
   font-size: 12px;
   font-weight: 700;
 }
@@ -1098,7 +1096,7 @@
 .pricingPanel,
 .accountPanel,
 .realtimePanel {
-  background: var(--monitor-surface);
+  background: var(--bg-primary);
 }
 
 .controlBar,
@@ -1107,7 +1105,7 @@
   gap: 10px;
   margin-bottom: 10px;
   padding-bottom: 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--monitor-line) 82%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
 }
 
 .controlBar {
@@ -1135,8 +1133,8 @@
 }
 
 .filterSelectTrigger {
-  height: 36px !important;
-  border-radius: 12px !important;
+  height: var(--control-height-sm) !important;
+  border-radius: var(--app-radius-sm) !important;
   font-size: 12px;
   font-weight: 600;
 }
@@ -1164,13 +1162,13 @@
 .filterChip {
   display: inline-flex;
   align-items: center;
-  min-height: 34px;
+  min-height: var(--control-height-sm);
   max-width: 100%;
   padding: 0 12px;
-  border-radius: 12px;
-  border: 1px solid var(--monitor-line);
-  background: var(--monitor-surface);
-  color: var(--monitor-muted);
+  border-radius: var(--app-radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   line-height: 1.4;
@@ -1187,12 +1185,12 @@
 .searchInput,
 .filterSearchInput {
   width: 100%;
-  height: 36px;
-  min-height: 36px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding-top: 0;
   padding-right: 40px;
   padding-bottom: 0;
-  border-radius: 12px;
+  border-radius: var(--app-radius-sm);
   font-size: 13px;
 }
 
@@ -1226,13 +1224,15 @@
 .inlineMetrics > span {
   display: inline-flex;
   align-items: center;
-  min-height: 30px;
+  min-height: var(--control-height-sm);
   padding: 0 10px;
-  border-radius: 12px;
-  border: 1px solid var(--monitor-line);
+  border-radius: var(--app-radius-sm);
+  border: 1px solid var(--border-color);
   background: var(--monitor-surface-elevated);
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .apiKeySummaryActions {
@@ -1241,10 +1241,10 @@
 }
 
 .inlineMetrics .apiKeyCountPill {
-  border-color: color-mix(in srgb, var(--monitor-accent) 28%, var(--monitor-line));
-  background: color-mix(in srgb, var(--monitor-accent) 10%, var(--monitor-surface));
-  color: var(--monitor-accent-strong);
-  font-weight: 800;
+  border-color: color-mix(in srgb, var(--data-blue-base) 28%, var(--border-color));
+  background: color-mix(in srgb, var(--data-blue-base) 10%, var(--bg-primary));
+  color: var(--data-blue-dark-2);
+  font-weight: 700;
 }
 
 .filterToggleChip {
@@ -1252,21 +1252,21 @@
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 32px;
-  min-height: 32px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 12px;
-  border: 1px solid color-mix(in srgb, var(--monitor-red) 30%, var(--monitor-line));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--monitor-red) 8%, var(--monitor-surface));
-  color: var(--monitor-red);
+  border: 1px solid color-mix(in srgb, var(--data-red-base) 30%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--data-red-base) 8%, var(--bg-primary));
+  color: var(--data-red-base);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .filterToggleChipActive {
-  border-color: color-mix(in srgb, var(--monitor-red) 44%, var(--monitor-line));
-  background: color-mix(in srgb, var(--monitor-red) 14%, var(--monitor-surface));
-  color: var(--monitor-red);
+  border-color: color-mix(in srgb, var(--data-red-base) 44%, var(--border-color));
+  background: color-mix(in srgb, var(--data-red-base) 14%, var(--bg-primary));
+  color: var(--data-red-base);
 }
 
 .errorBox,
@@ -1276,8 +1276,8 @@
   flex-wrap: wrap;
   gap: 8px;
   padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid var(--monitor-line);
+  border-radius: var(--app-radius-md);
+  border: 1px solid var(--border-color);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -1296,19 +1296,19 @@
 
 .errorBox {
   margin-top: 8px;
-  border-color: color-mix(in srgb, var(--monitor-red) 28%, var(--monitor-line));
-  background: color-mix(in srgb, var(--monitor-red) 10%, var(--monitor-surface));
-  color: var(--monitor-red);
+  border-color: color-mix(in srgb, var(--data-red-base) 28%, var(--border-color));
+  background: color-mix(in srgb, var(--data-red-base) 10%, var(--bg-primary));
+  color: var(--data-red-base);
 }
 
 .callout {
   margin-top: 8px;
-  border-color: color-mix(in srgb, var(--monitor-accent) 24%, var(--monitor-line));
-  background: color-mix(in srgb, var(--monitor-accent) 8%, var(--monitor-surface));
+  border-color: color-mix(in srgb, var(--data-blue-base) 24%, var(--border-color));
+  background: color-mix(in srgb, var(--data-blue-base) 8%, var(--bg-primary));
 }
 
 .configLink {
-  color: var(--monitor-accent);
+  color: var(--data-blue-base);
   font-weight: 700;
   text-decoration: none;
 
@@ -1357,21 +1357,21 @@
   cursor: help;
 
   &:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--monitor-accent) 55%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--data-blue-base) 55%, transparent);
     outline-offset: 2px;
-    border-radius: 3px;
+    border-radius: var(--app-radius-xs);
   }
 }
 
 .realtimeUsageTotal {
-  color: var(--monitor-ink);
+  color: var(--text-primary);
 }
 
 .realtimeUsageFlow {
   display: grid;
   grid-template-columns: max-content max-content;
   column-gap: 8px;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.25;
   white-space: nowrap;
@@ -1384,11 +1384,7 @@
 }
 
 .realtimeUsageTooltip {
-  --monitor-surface: var(--bg-primary);
   --monitor-surface-elevated: var(--app-surface-strong);
-  --monitor-ink: var(--text-primary);
-  --monitor-muted: var(--text-secondary);
-  --monitor-line: var(--border-color);
 
   position: fixed;
   z-index: 2030;
@@ -1398,11 +1394,11 @@
   min-width: 0;
   max-width: calc(100vw - 24px);
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--monitor-line) 86%, transparent);
-  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+  border-radius: var(--app-radius-md);
   background: var(--monitor-surface-elevated);
   box-shadow: var(--shadow-lg);
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font-size: 12px;
   line-height: 1.35;
   opacity: 0;
@@ -1433,11 +1429,11 @@
 }
 
 .realtimeUsageTooltipLabel {
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
 }
 
 .realtimeUsageTooltipValue {
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -1446,18 +1442,19 @@
   max-width: 100%;
 }
 
+.realtimeTable .primaryCell .realtimeModelText,
 .realtimeModelText {
   display: block;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap !important;
+  white-space: nowrap;
 }
 
 .realtimeApiKeyLine {
   display: block;
   max-width: 100%;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
 }
@@ -1465,7 +1462,7 @@
 .realtimeRequestMetadata {
   display: block;
   max-width: 100%;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 500;
 
@@ -1479,9 +1476,9 @@
   }
 
   summary:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--monitor-accent) 55%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--data-blue-base) 55%, transparent);
     outline-offset: 2px;
-    border-radius: 3px;
+    border-radius: var(--app-radius-xs);
   }
 
   small {
@@ -1501,15 +1498,22 @@
   white-space: nowrap;
 }
 
+.table thead th:is(
+  .realtimeLatencyColumn,
+  .realtimeTimeColumn,
+  .realtimeTpsColumn,
+  .realtimeCenteredColumn
+),
 .realtimeLatencyColumn,
 .realtimeTimeColumn,
 .realtimeTpsColumn,
 .realtimeCenteredColumn {
-  text-align: center !important;
+  text-align: center;
 }
 
+.table thead th.realtimeSettingsColumn,
 .realtimeSettingsColumn {
-  text-align: left !important;
+  text-align: left;
 }
 
 .realtimeCenteredColumn .primaryCell {
@@ -1528,7 +1532,7 @@
   row-gap: 3px;
   justify-content: start;
   min-width: 0;
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   line-height: 1.25;
@@ -1542,7 +1546,7 @@
 
 .realtimeSettingLabel,
 .realtimeMetricLabel {
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   font-weight: 400;
 }
 
@@ -1551,11 +1555,11 @@
 }
 
 .realtimeReasoningValue {
-  color: var(--monitor-accent-strong);
+  color: var(--data-blue-dark-2);
 }
 
 .realtimeServiceValue {
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
 }
 
 .realtimeMetricCell,
@@ -1564,7 +1568,7 @@
   align-items: center;
   justify-content: center;
   min-width: 0;
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -1581,7 +1585,7 @@
 .realtimeTpsCell {
   display: inline-block;
   min-width: 48px;
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.25;
@@ -1624,15 +1628,15 @@
 }
 
 .realtimeMetricText.goodText {
-  color: var(--monitor-green);
+  color: var(--data-green-base);
 }
 
 .realtimeMetricText.warnText {
-  color: var(--monitor-amber);
+  color: var(--data-amber-base);
 }
 
 .realtimeMetricText.badText {
-  color: var(--monitor-red);
+  color: var(--data-red-base);
 }
 
 .logTypeCell {
@@ -1650,22 +1654,22 @@
 
 .tableHeaderInfoIcon {
   display: block;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
 }
 
 .logRowFailed td {
-  border-top-color: color-mix(in srgb, var(--monitor-red) 28%, var(--monitor-line));
-  border-bottom-color: color-mix(in srgb, var(--monitor-red) 28%, var(--monitor-line));
-  background: color-mix(in srgb, var(--monitor-red) 7%, var(--monitor-surface-elevated));
+  border-top-color: color-mix(in srgb, var(--data-red-base) 28%, var(--border-color));
+  border-bottom-color: color-mix(in srgb, var(--data-red-base) 28%, var(--border-color));
+  background: color-mix(in srgb, var(--data-red-base) 7%, var(--monitor-surface-elevated));
 }
 
 .logRowFailed td:first-child,
 .logRowFailed td:last-child {
-  border-color: color-mix(in srgb, var(--monitor-red) 28%, var(--monitor-line));
+  border-color: color-mix(in srgb, var(--data-red-base) 28%, var(--border-color));
 }
 
 .logRowFailed:hover td {
-  background: color-mix(in srgb, var(--monitor-red) 9%, var(--monitor-surface-hover));
+  background: color-mix(in srgb, var(--data-red-base) 9%, var(--monitor-surface-hover));
 }
 
 .emptyBlock,
@@ -1673,7 +1677,7 @@
 .emptyBlockSmall {
   display: grid;
   place-items: center;
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   text-align: center;
   font-size: 14px;
 }
@@ -1688,11 +1692,11 @@
 }
 
 .emptyStateIcon {
-  color: color-mix(in srgb, var(--monitor-muted) 45%, transparent);
+  color: color-mix(in srgb, var(--text-secondary) 45%, transparent);
 }
 
 .emptyStateTitle {
-  color: var(--monitor-ink);
+  color: var(--text-primary);
   font-size: 15px;
   font-weight: 700;
 }
@@ -1701,7 +1705,7 @@
   display: grid;
   justify-items: center;
   width: min(100%, 760px);
-  color: var(--monitor-muted);
+  color: var(--text-secondary);
   text-align: center;
 }
 
@@ -1715,7 +1719,7 @@
   align-items: center;
   justify-self: center;
   gap: 4px;
-  color: var(--monitor-accent-strong);
+  color: var(--data-blue-dark-2);
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
@@ -1775,13 +1779,13 @@
   padding: 12px;
 
   strong {
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 14px;
   }
 
   span {
     max-width: 680px;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.5;
   }
@@ -1982,7 +1986,7 @@
   .masthead,
   .panel,
   .summaryCard {
-    border-radius: 12px;
+    border-radius: 16px;
   }
 
   .summaryCard,
@@ -2226,7 +2230,7 @@
   .accountOverviewMetricCard {
     gap: 4px;
     padding: 10px 8px;
-    border-radius: 14px;
+    border-radius: var(--app-radius-md);
   }
 
   .accountOverviewMetricLabel {
@@ -2247,7 +2251,7 @@
 
   .panel,
   .actionBar {
-    border-radius: 12px;
+    border-radius: 16px;
   }
 
   .panel {
@@ -2265,12 +2269,13 @@
   }
 
   .segmentedControl {
-    border-radius: 12px;
+    border-radius: var(--app-radius-md);
   }
 
   .segmentButton {
     flex: 0 0 auto;
-    min-height: 36px;
+    height: calc(var(--control-height-sm) - 2px);
+    min-height: calc(var(--control-height-sm) - 2px);
     padding: 0 12px;
   }
 
@@ -2279,6 +2284,7 @@
   }
 
   .autoRefreshField {
+    height: auto;
     flex-direction: column;
     align-items: stretch;
     padding: 12px;
@@ -2315,6 +2321,6 @@
 }
 
 .loadMoreEventsSummary {
-  color: var(--color-text-muted, #6b7280);
+  color: var(--text-muted);
   font-size: 13px;
 }

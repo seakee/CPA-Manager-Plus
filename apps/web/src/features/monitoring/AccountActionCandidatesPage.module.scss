@@ -1,24 +1,15 @@
 .page {
-  --action-surface: var(--bg-primary);
   --action-surface-raised: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
-  --action-surface-muted: var(--surface-subtle);
-  --action-line: var(--border-color);
-  --action-line-strong: var(--border-primary);
-  --action-ink: var(--text-primary);
-  --action-muted: var(--text-secondary);
-  --action-accent: var(--data-blue-base);
-  --action-danger: var(--data-red-base);
-  --action-warning: var(--data-amber-base);
   display: grid;
   gap: 12px;
   min-width: 0;
-  color: var(--action-ink);
+  color: var(--text-primary);
 }
 
 .hero,
 .panel {
-  border: 1px solid var(--action-line);
-  background: var(--action-surface);
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
   box-shadow: var(--shadow);
 }
 
@@ -30,7 +21,7 @@
   gap: 14px;
   align-items: end;
   padding: 16px;
-  border-radius: 18px;
+  border-radius: var(--app-radius-lg);
 }
 
 .hero::before {
@@ -39,8 +30,8 @@
   inset: 0;
   pointer-events: none;
   background:
-    linear-gradient(135deg, color-mix(in srgb, var(--action-danger) 12%, transparent), transparent 34%),
-    repeating-linear-gradient(90deg, transparent 0 18px, color-mix(in srgb, var(--action-line) 42%, transparent) 18px 19px);
+    linear-gradient(135deg, color-mix(in srgb, var(--data-red-base) 12%, transparent), transparent 34%),
+    repeating-linear-gradient(90deg, transparent 0 18px, color-mix(in srgb, var(--border-color) 42%, transparent) 18px 19px);
   opacity: 0.55;
 }
 
@@ -58,31 +49,31 @@
 .backLink {
   display: inline-flex;
   align-items: center;
-  min-height: 28px;
+  min-height: var(--control-height-xs);
   margin-bottom: 8px;
   padding: 0 10px;
-  border: 1px solid var(--action-line);
-  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--action-surface-raised) 92%, transparent);
-  color: var(--action-muted);
+  color: var(--text-secondary);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1;
   text-decoration: none;
   white-space: nowrap;
 }
 
 .backLink:hover {
-  border-color: color-mix(in srgb, var(--action-accent) 45%, var(--action-line-strong));
-  color: var(--action-ink);
+  border-color: color-mix(in srgb, var(--data-blue-base) 45%, var(--border-primary));
+  color: var(--text-primary);
 }
 
 .kicker {
   margin: 0 0 6px;
-  color: var(--action-danger);
+  color: var(--data-red-base);
   font-family: var(--font-mono);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
 }
@@ -90,14 +81,14 @@
 .title {
   margin: 0;
   font-size: clamp(24px, 3.4vw, 38px);
-  font-weight: 850;
+  font-weight: 700;
   letter-spacing: -0.04em;
 }
 
 .description {
   max-width: 820px;
   margin: 8px 0 0;
-  color: var(--action-muted);
+  color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -111,8 +102,8 @@
 .statCard {
   min-width: 120px;
   padding: 10px;
-  border: 1px solid var(--action-line);
-  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--action-surface-raised) 92%, transparent);
 }
 
@@ -120,11 +111,12 @@
   display: block;
   font-family: var(--font-mono);
   font-size: 22px;
-  font-weight: 850;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 .statLabel {
-  color: var(--action-muted);
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
@@ -134,9 +126,17 @@
   justify-content: space-between;
   gap: 10px;
   padding: 10px;
-  border: 1px solid var(--action-line);
-  border-radius: 16px;
-  background: var(--action-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--bg-primary);
+}
+
+.toolbar :global(.input) {
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding-top: 0;
+  padding-bottom: 0;
+  border-radius: var(--app-radius-sm);
 }
 
 .filterGroup,
@@ -148,6 +148,13 @@
   gap: 8px;
 }
 
+.actions :global(.btn) {
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .filterButton,
 .statusBadge,
 .actionBadge,
@@ -155,35 +162,37 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--action-line);
-  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-pill);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1;
   white-space: nowrap;
 }
 
 .filterButton {
-  min-height: 30px;
+  box-sizing: border-box;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 10px;
   background: var(--action-surface-raised);
-  color: var(--action-muted);
+  color: var(--text-secondary);
   cursor: pointer;
 }
 
 .filterButton:hover,
 .filterButtonActive {
-  border-color: color-mix(in srgb, var(--action-accent) 45%, var(--action-line-strong));
-  color: var(--action-ink);
+  border-color: color-mix(in srgb, var(--data-blue-base) 45%, var(--border-primary));
+  color: var(--text-primary);
 }
 
 .filterButtonActive {
-  background: color-mix(in srgb, var(--action-accent) 12%, var(--action-surface));
+  background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
 }
 
 .panel {
   overflow: hidden;
-  border-radius: 16px;
+  border-radius: var(--app-radius-lg);
 }
 
 .tableWrap {
@@ -199,17 +208,17 @@
 .table th,
 .table td {
   padding: 10px;
-  border-bottom: 1px solid var(--action-line);
+  border-bottom: 1px solid var(--border-color);
   text-align: left;
   vertical-align: top;
   font-size: 12px;
 }
 
 .table th {
-  background: var(--action-surface-muted);
-  color: var(--action-muted);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
   font-size: 11px;
-  font-weight: 850;
+  font-weight: 700;
 }
 
 .table tr:last-child td {
@@ -233,7 +242,7 @@
 .fileCell span,
 .reasonCell small,
 .timeCell small {
-  color: var(--action-muted);
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
@@ -242,12 +251,13 @@
 }
 
 .reasonCell strong {
-  color: var(--action-ink);
+  color: var(--text-primary);
   line-height: 1.45;
 }
 
+.reasonCell .errorText,
 .errorText {
-  color: #b42318 !important;
+  color: var(--data-badge-danger-text);
   font-weight: 700;
 }
 
@@ -286,16 +296,23 @@
 
 .metaPill {
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .timeCell {
   display: grid;
   gap: 3px;
   min-width: 150px;
+  font-variant-numeric: tabular-nums;
 }
 
 .rowActions {
   min-width: 270px;
+}
+
+.rowActions :global(.btn) {
+  height: var(--control-height-xs);
+  min-height: var(--control-height-xs);
 }
 
 .rowActions :global(.btn > span),
@@ -311,22 +328,22 @@
   gap: 8px;
   justify-items: center;
   padding: 42px 16px;
-  color: var(--action-muted);
+  color: var(--text-secondary);
   text-align: center;
 }
 
 .errorState {
-  color: var(--action-danger);
+  color: var(--data-red-base);
 }
 
 .evidenceBox {
   max-height: 62vh;
   overflow: auto;
   padding: 12px;
-  border: 1px solid var(--action-line);
-  border-radius: 12px;
-  background: var(--action-surface-muted);
-  color: var(--action-ink);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
+  color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.55;
