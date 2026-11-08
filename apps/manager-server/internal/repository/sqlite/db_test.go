@@ -387,3 +387,43 @@ func TestOpenWithOptionsPreservesUnrecognizedSQLiteError(t *testing.T) {
 		t.Fatalf("unrecognized SQLite error was misclassified: %q", message)
 	}
 }
+
+func TestOpenCreatesPrivateDatabaseSidecarsAndDataKeyModes(t *testing.T) {
+	baseDir := filepath.Join(t.TempDir(), "private-data")
+	dbPath := filepath.Join(baseDir, "usage.sqlite")
+	keyPath := filepath.Join(baseDir, "data.key")
+
+	if _, created, err := security.LoadOrCreateDataKey("", keyPath); err != nil || !created {
+		t.Fatalf("LoadOrCreateDataKey: created=%v err=%v", created, err)
+	}
+
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open(%s): %v", dbPath, err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+
+	if _, err := db.Exec(`insert into settings(key, value, updated_at_ms) values('mode_probe', '{}', 1)`); err != nil {
+		t.Fatalf("write sqlite row to materialize WAL/SHM: %v", err)
+	}
+
+	dirInfo, err := os.Lstat(baseDir)
+	if err != nil {
+		t.Fatalf("stat baseDir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Fatalf("baseDir mode = %#04o, want 0700", got)
+	}
+
+	for _, filePath := range []string{keyPath, dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		info, statErr := os.Lstat(filePath)
+		if statErr != nil {
+			t.Fatalf("stat %s: %v", filePath, statErr)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("%s mode = %#04o, want 0600", filePath, got)
+		}
+	}
+}

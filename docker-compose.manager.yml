@@ -2,24 +2,21 @@ services:
   cpa-manager-plus:
     build:
       context: .
-      dockerfile: Dockerfile.manager-server
+      dockerfile: Dockerfile
+      target: slim
       # Fail-closed identity: local builds must export
       # SOURCE_COMMIT="$(git rev-parse HEAD)" (VERSION defaults to dev).
       args:
         VERSION: '${VERSION:-dev}'
         SOURCE_COMMIT: '${SOURCE_COMMIT:-}'
-    image: seakee/cpa-manager-plus:latest
+    image: seakee/cpa-manager-plus:slim
     restart: unless-stopped
+    stop_grace_period: 120s
     ports:
       - "18317:18317"
     environment:
-      HTTP_ADDR: "0.0.0.0:18317"
-      USAGE_DB_PATH: "/data/usage.sqlite"
-      CPA_MANAGER_DATA_KEY_PATH: "/data/data.key"
-      # Optional: set CPA_MANAGER_ADMIN_KEY or CPA_MANAGER_ADMIN_KEY_FILE to provide
-      # a stable admin key. If omitted, the first startup log prints a generated key once.
-      # Optional: set CPA_MANAGER_DATA_KEY or CPA_MANAGER_DATA_KEY_FILE only when you
-      # manage this encryption key outside the /data volume.
+      CPAMP_PUBLIC_ORIGIN: "${CPAMP_PUBLIC_ORIGIN:-}"
+      CPAMP_DRAIN_TIMEOUT: "${CPAMP_DRAIN_TIMEOUT:-90s}"
       USAGE_COLLECTOR_MODE: "auto"
       USAGE_RESP_QUEUE: "usage"
       USAGE_RESP_POP_SIDE: "right"

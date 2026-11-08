@@ -213,7 +213,7 @@ export function readCpaV8Pin(dockerfile) {
 }
 
 export function loadCpaV8Pin(root = ROOT) {
-  return readCpaV8Pin(fs.readFileSync(path.join(root, 'Dockerfile.runtime'), 'utf8'));
+  return readCpaV8Pin(fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8'));
 }
 
 export const defaultImageTag = (pin) =>
@@ -662,7 +662,7 @@ export function createDocker({ exec = defaultDockerExec, runToken } = {}) {
     build({ image, root = ROOT }) {
       assert(image.startsWith(`${CONTAINER_PREFIX.slice(0, -1)}-cpa-v8:`), 'image outside the harness namespace');
       must(
-        ['build', '--platform', 'linux/amd64', '--target', 'runtime', '-f', 'Dockerfile.runtime', '-t', image, root],
+        ['build', '--platform', 'linux/amd64', '--target', 'full', '-f', 'Dockerfile', '-t', image, root],
         { timeoutMs: 1_800_000 }
       );
     },

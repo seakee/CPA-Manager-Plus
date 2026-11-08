@@ -263,7 +263,7 @@ def alpine_packages(database):
     return result
 
 
-def collect_base(root, kind, output):
+def collect_base(root, kind, output, component="base-image"):
     root = root.resolve()
     extra = None
     if kind == "alpine":
@@ -304,7 +304,7 @@ def collect_base(root, kind, output):
                                  "evidence": "installed-dpkg-database-and-copyright"})
         require(dependencies, "empty installed Debian package database")
         inputs = {"base-packages.tsv": sha256(database.read_bytes())}
-    return finish(output, "base-image", kind, dependencies, inputs, extra)
+    return finish(output, component, kind, dependencies, inputs, extra)
 
 
 def source_inventory(root):
@@ -336,8 +336,9 @@ def main():
     web.add_argument("--root", type=Path, required=True)
     base = sub.add_parser("base")
     base.add_argument("--kind", choices=("alpine", "debian"), required=True)
+    base.add_argument("--component", choices=("base-image", "glibc-runtime"), default="base-image")
     base.add_argument("--root", type=Path, required=True)
-    source = sub.add_parser("source")
+    source = sub.add_parser("source-inventory")
     source.add_argument("--root", type=Path, required=True)
     for child in (go, web, base, source):
         child.add_argument("--output", type=Path, required=True)
@@ -347,7 +348,7 @@ def main():
     elif args.mode == "web":
         collect_web(args.root, args.output)
     elif args.mode == "base":
-        collect_base(args.root, args.kind, args.output)
+        collect_base(args.root, args.kind, args.output, args.component)
     else:
         write_json(args.output, source_inventory(args.root))
 

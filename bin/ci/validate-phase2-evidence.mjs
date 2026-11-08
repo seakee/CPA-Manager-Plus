@@ -416,7 +416,7 @@ export function loadAndValidateContract(contractPath = defaultContractPath) {
 
 export function validateBundledDockerfile(
   contract,
-  dockerfilePath = path.join(repoRoot, 'Dockerfile.runtime')
+  dockerfilePath = path.join(repoRoot, 'Dockerfile')
 ) {
   const dockerfile = readFileSync(dockerfilePath, 'utf8');
   const current = contract.artifacts.find(

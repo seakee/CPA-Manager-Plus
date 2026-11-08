@@ -6,9 +6,12 @@ import { delimiter, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
 function loadYamlModule() {
   const candidates = [
     import.meta.url,
+    pathToFileURL(resolve(repoRoot, 'package.json')).href,
     pathToFileURL(resolve(process.cwd(), 'package.json')).href,
   ];
   for (const dir of (process.env.NODE_PATH ?? '').split(delimiter).filter(Boolean)) {
@@ -26,16 +29,14 @@ function loadYamlModule() {
 
 const yaml = loadYamlModule();
 
-export const ROLES = Object.freeze(['manager', 'ingress', 'runtime']);
+export const ROLES = Object.freeze(['slim', 'full']);
 export const COMPOSE_SERVICES = Object.freeze({
-  ingress: 'cpamp-ingress',
-  manager: 'cpamp-manager',
-  runtime: 'cpamp-runtime',
+  slim: 'cpa-manager-plus',
+  full: 'cpa-manager-plus',
 });
 export const DEFAULT_REPOSITORIES = Object.freeze({
-  manager: 'cpa-manager-plus',
-  ingress: 'cpamp-ingress',
-  runtime: 'cpamp-runtime',
+  slim: 'cpa-manager-plus',
+  full: 'cpa-manager-plus',
 });
 export const DEFAULT_REGISTRY_PREFIX = 'seakee';
 export const COMPOSE_FILENAME = 'docker-compose.v2-embedded.yml';
@@ -53,15 +54,18 @@ export const EXPECTED_API_PATH = '/phase4-test/api/v2/technical';
 
 export const PACKAGED_PATHS = Object.freeze({
   binaries: Object.freeze({
+    launcher: '/usr/local/bin/cpamp-launcher',
     manager: '/usr/local/bin/cpa-manager-plus',
     ingress: '/usr/local/bin/cpamp-ingress',
-    runtime: '/usr/local/bin/cpamp-runtime-supervisor',
+    'runtime-supervisor': '/usr/local/bin/cpamp-runtime-supervisor',
   }),
   provenance: '/usr/local/share/cpamp/provenance.json',
   webManifest: '/usr/local/share/cpamp/release/fullweb-manifest.json',
   apiContract: '/usr/local/share/cpamp/release/public-api-transport-contract.json',
   cpaBinary: '/usr/local/bin/cli-proxy-api',
   cpaArtifact: '/usr/local/share/cpamp/runtime/cpa-artifact.json',
+  cpaLicense: '/usr/local/share/licenses/cli-proxy-api/LICENSE',
+  seedConfig: '/usr/local/share/cpamp/runtime/config.seed.yaml',
 });
 
 const SHA256_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
@@ -71,7 +75,7 @@ const REGISTRY_PREFIX_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const PINNED_IMAGE_REF_RE =
   /^([A-Za-z0-9][A-Za-z0-9._/-]*\/[A-Za-z0-9._-]+):([A-Za-z0-9][A-Za-z0-9._+-]{0,127})@(sha256:[0-9a-f]{64})$/;
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+// repoRoot is defined above before loadYamlModule
 
 const fail = (message) => {
   throw new Error(`Embedded compose/pairing contract failed: ${message}`);
@@ -148,21 +152,9 @@ function parseTarEntries(buffer) {
 }
 
 export const CANONICAL_INGRESS_PORT_SPEC = '${CPAMP_PUBLIC_PORT:-18317}:18317';
-const EXPECTED_TOP_VOLUMES = Object.freeze([
-  'cpamp-manager-data',
-  'cpamp-runtime-data',
-  'cpamp-runtime-transport-secret',
-]);
+const EXPECTED_TOP_VOLUMES = Object.freeze(['cpamp-data']);
 const EXPECTED_SERVICE_MOUNTS = Object.freeze({
-  'cpamp-ingress': Object.freeze([]),
-  'cpamp-manager': Object.freeze([
-    'volume:cpamp-manager-data:/data:rw',
-    'volume:cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:ro',
-  ]),
-  'cpamp-runtime': Object.freeze([
-    'volume:cpamp-runtime-data:/runtime:rw',
-    'volume:cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:rw',
-  ]),
+  'cpa-manager-plus': Object.freeze(['volume:cpamp-data:/data:rw']),
 });
 
 export function extractFilesFromOciArchive(ociTarPath, wantedPaths, options = {}) {
@@ -220,6 +212,9 @@ export function extractFilesFromOciArchive(ociTarPath, wantedPaths, options = {}
     fail(`OCI image config rootfs.diff_ids mismatch in ${ociTarPath}`);
   }
   const wantedSet = new Set(wantedPaths.map((p) => (p.startsWith('/') ? p : `/${p}`)));
+  const forbiddenSet = new Set(
+    (options.forbiddenPaths ?? []).map((p) => (p.startsWith('/') ? p : `/${p}`))
+  );
   const found = new Map();
 
   for (let idx = 0; idx < layers.length; idx += 1) {
@@ -264,12 +259,17 @@ export function extractFilesFromOciArchive(ociTarPath, wantedPaths, options = {}
         }
         continue;
       }
-      if (wantedSet.has(canonical)) {
+      if (wantedSet.has(canonical) || forbiddenSet.has(canonical)) {
         found.set(canonical, bytes);
       }
     }
   }
 
+  for (const path of forbiddenSet) {
+    if (found.has(path)) {
+      fail(`unexpected packaged file ${path} in OCI archive ${ociTarPath}`);
+    }
+  }
   for (const path of wantedSet) {
     if (!found.has(path)) {
       fail(`missing packaged file ${path} in OCI archive ${ociTarPath}`);
@@ -290,14 +290,25 @@ export function extractFilesFromOciArchive(ociTarPath, wantedPaths, options = {}
 
 export function verifyOciArchiveAgainstRoleEvidence(ociTarPath, role, evidence) {
   const evImg = evidence.images[role];
-  const wanted = [PACKAGED_PATHS.binaries[role], PACKAGED_PATHS.provenance];
-  if (role === 'manager') {
-    wanted.push(PACKAGED_PATHS.webManifest, PACKAGED_PATHS.apiContract);
+  const cpaBundled = role === 'full';
+  const wanted = [
+    ...Object.values(PACKAGED_PATHS.binaries),
+    PACKAGED_PATHS.provenance,
+    PACKAGED_PATHS.webManifest,
+    PACKAGED_PATHS.apiContract,
+    PACKAGED_PATHS.cpaArtifact,
+    PACKAGED_PATHS.seedConfig,
+  ];
+  const forbiddenPaths = [];
+  if (cpaBundled) {
+    wanted.push(PACKAGED_PATHS.cpaBinary, PACKAGED_PATHS.cpaLicense);
+  } else {
+    forbiddenPaths.push(PACKAGED_PATHS.cpaBinary, PACKAGED_PATHS.cpaLicense);
   }
-  if (role === 'runtime') {
-    wanted.push(PACKAGED_PATHS.cpaBinary, PACKAGED_PATHS.cpaArtifact);
-  }
-  const inspected = extractFilesFromOciArchive(ociTarPath, wanted, { returnMetadata: true });
+  const inspected = extractFilesFromOciArchive(ociTarPath, wanted, {
+    returnMetadata: true,
+    forbiddenPaths,
+  });
   if (evImg.archiveSHA256 && inspected.archiveSHA256 !== evImg.archiveSHA256) {
     fail(
       `OCI archive SHA256 mismatch for ${role}: expected ${evImg.archiveSHA256}, got ${inspected.archiveSHA256}`
@@ -333,43 +344,55 @@ export function verifyOciArchiveAgainstRoleEvidence(ociTarPath, role, evidence) 
   ) {
     fail(`OCI archive build event label mismatch for ${role}`);
   }
-  const binaryPath = PACKAGED_PATHS.binaries[role];
-  const actualBinarySha = sha256Digest(inspected.files.get(binaryPath));
-  if (actualBinarySha !== evImg.packagedFiles[binaryPath]) {
-    fail(`OCI archive binary digest mismatch for ${role}`);
+  for (const binaryPath of Object.values(PACKAGED_PATHS.binaries)) {
+    const actualBinarySha = sha256Digest(inspected.files.get(binaryPath));
+    if (actualBinarySha !== evImg.packagedFiles[binaryPath]) {
+      fail(`OCI archive binary digest mismatch for ${role} (${binaryPath})`);
+    }
   }
   const provBytes = inspected.files.get(PACKAGED_PATHS.provenance);
   if (sha256Digest(provBytes) !== evImg.packagedFiles[PACKAGED_PATHS.provenance]) {
     fail(`OCI archive provenance digest mismatch for ${role}`);
   }
   const prov = JSON.parse(provBytes.toString('utf8'));
-  if (prov?.sourceCommit !== evidence.sourceCommitClaim || prov?.role !== role) {
+  if (
+    prov?.sourceCommit !== evidence.sourceCommitClaim ||
+    prov?.role !== 'cpamp' ||
+    Boolean(prov?.cpaBundled ?? true) !== cpaBundled
+  ) {
     fail(
       `OCI archive provenance sourceCommit/role mismatch for ${role}: ${String(prov?.sourceCommit)}`
     );
   }
-  if (role === 'runtime') {
+  const cpaArtifactBytes = inspected.files.get(PACKAGED_PATHS.cpaArtifact);
+  const actualCpaArtifactDocSha = sha256Digest(cpaArtifactBytes);
+  const expectedCpaArtifactDocSha = evImg.packagedFiles[PACKAGED_PATHS.cpaArtifact];
+  if (
+    !SHA256_DIGEST_RE.test(expectedCpaArtifactDocSha ?? '') ||
+    actualCpaArtifactDocSha !== expectedCpaArtifactDocSha
+  ) {
+    fail(`OCI archive CPA artifact manifest digest mismatch against evidence for ${role}`);
+  }
+  const parsedCpaArtifact = JSON.parse(cpaArtifactBytes.toString('utf8'));
+  if (cpaBundled) {
     const cpaBinaryBytes = inspected.files.get(PACKAGED_PATHS.cpaBinary);
-    const cpaArtifactBytes = inspected.files.get(PACKAGED_PATHS.cpaArtifact);
     const actualCpaSha = sha256Digest(cpaBinaryBytes);
     if (
       actualCpaSha !== EXPECTED_CPA_ARTIFACT_ID ||
       actualCpaSha !== evImg.packagedFiles[PACKAGED_PATHS.cpaBinary]
     ) {
-      fail('OCI archive official CPA v8.0.55 executable hash mismatch for runtime');
-    }
-    const actualCpaArtifactDocSha = sha256Digest(cpaArtifactBytes);
-    const expectedCpaArtifactDocSha = evImg.packagedFiles[PACKAGED_PATHS.cpaArtifact];
-    if (
-      !SHA256_DIGEST_RE.test(expectedCpaArtifactDocSha ?? '') ||
-      actualCpaArtifactDocSha !== expectedCpaArtifactDocSha
-    ) {
-      fail('OCI archive CPA artifact manifest digest mismatch against evidence for runtime');
+      fail(`OCI archive official CPA v8.0.55 executable hash mismatch for ${role}`);
     }
     assertCanonicalCpaArtifact(
-      JSON.parse(cpaArtifactBytes.toString('utf8')),
+      parsedCpaArtifact,
       EXPECTED_CPA_ARTIFACT_ID,
       actualCpaSha
+    );
+  } else {
+    assertCanonicalCpaArtifact(
+      parsedCpaArtifact,
+      parsedCpaArtifact?.artifactId,
+      parsedCpaArtifact?.artifactId
     );
   }
   return inspected;
@@ -509,59 +532,59 @@ export function validateCandidateEvidence(evidence) {
     if (!isPlainObject(files)) {
       fail(`${role} missing packagedFiles map`);
     }
-    const binaryPath = PACKAGED_PATHS.binaries[role];
-    if (!SHA256_DIGEST_RE.test(files[binaryPath] ?? '')) {
-      fail(`${role} missing or invalid binary digest for ${binaryPath}`);
+    for (const binaryPath of Object.values(PACKAGED_PATHS.binaries)) {
+      if (!SHA256_DIGEST_RE.test(files[binaryPath] ?? '')) {
+        fail(`${role} missing or invalid binary digest for ${binaryPath}`);
+      }
     }
     if (!SHA256_DIGEST_RE.test(files[PACKAGED_PATHS.provenance] ?? '')) {
       fail(`${role} missing or invalid provenance digest for ${PACKAGED_PATHS.provenance}`);
     }
-
-    if (role === 'manager') {
-      const compiledClaim = record.goBinaryIdentity?.managerCompiledSourceClaim;
-      if (compiledClaim !== sourceCommit) {
-        fail(
-          `Manager compiled source commit (${String(compiledClaim)}) differs from sourceCommitClaim (${sourceCommit})`
-        );
-      }
-      if (!SHA256_DIGEST_RE.test(files[PACKAGED_PATHS.webManifest] ?? '')) {
-        fail(`Manager missing packaged Full Web manifest digest (${PACKAGED_PATHS.webManifest})`);
-      }
-      if (!SHA256_DIGEST_RE.test(files[PACKAGED_PATHS.apiContract] ?? '')) {
-        fail(`Manager missing packaged API contract digest (${PACKAGED_PATHS.apiContract})`);
-      }
+    const compiledClaim = record.goBinaryIdentity?.managerCompiledSourceClaim;
+    if (compiledClaim !== sourceCommit) {
+      fail(
+        `Manager compiled source commit (${String(compiledClaim)}) differs from sourceCommitClaim (${sourceCommit})`
+      );
     }
-
-    if (role === 'runtime') {
+    if (!SHA256_DIGEST_RE.test(files[PACKAGED_PATHS.webManifest] ?? '')) {
+      fail(`${role} missing packaged Full Web manifest digest (${PACKAGED_PATHS.webManifest})`);
+    }
+    if (!SHA256_DIGEST_RE.test(files[PACKAGED_PATHS.apiContract] ?? '')) {
+      fail(`${role} missing packaged API contract digest (${PACKAGED_PATHS.apiContract})`);
+    }
+    if (!SHA256_DIGEST_RE.test(files[PACKAGED_PATHS.cpaArtifact] ?? '')) {
+      fail(
+        `${role} missing packaged CPA artifact manifest digest (${PACKAGED_PATHS.cpaArtifact})`
+      );
+    }
+    if (role === 'full') {
       if (files[PACKAGED_PATHS.cpaBinary] !== EXPECTED_CPA_ARTIFACT_ID) {
-        fail('Runtime packaged CPA executable hash mismatch');
+        fail('Full packaged CPA executable hash mismatch');
       }
-      if (!SHA256_DIGEST_RE.test(files[PACKAGED_PATHS.cpaArtifact] ?? '')) {
-        fail(
-          `Runtime missing packaged CPA artifact manifest digest (${PACKAGED_PATHS.cpaArtifact})`
-        );
-      }
+    } else if (files[PACKAGED_PATHS.cpaBinary] !== undefined) {
+      fail('Slim variant must not record a packaged CPA executable hash');
     }
   }
 
-  if (manifestDigests.size !== 3) {
-    fail('manager, ingress and runtime must have three distinct platformManifestDigests');
+  if (manifestDigests.size !== ROLES.length) {
+    fail('slim and full must have distinct platformManifestDigests');
   }
-  if (configDigests.size !== 3) {
-    fail('manager, ingress and runtime must have three distinct imageConfigDigests');
+  if (configDigests.size !== ROLES.length) {
+    fail('slim and full must have distinct imageConfigDigests');
   }
   return evidence;
 }
 
 export function resolveFullWebAndApiMetadata(evidence, options = {}) {
   validateCandidateEvidence(evidence);
-  const managerRecord = evidence.images.manager;
-  const expectedWebSha = managerRecord.packagedFiles[PACKAGED_PATHS.webManifest];
-  const expectedApiSha = managerRecord.packagedFiles[PACKAGED_PATHS.apiContract];
+  const fullRecord = evidence.images.full;
+  const expectedWebSha = fullRecord.packagedFiles[PACKAGED_PATHS.webManifest];
+  const expectedApiSha = fullRecord.packagedFiles[PACKAGED_PATHS.apiContract];
 
   const evidenceDir = options.evidenceDir ?? null;
   const roleOciPaths = options.roleOciPaths ?? {};
   const inspectedRoles = {};
+  const resolvedRolePaths = {};
   for (const role of ROLES) {
     const expectedArchiveName = `${role}.oci.tar`;
     if (evidence.images[role].archive !== expectedArchiveName) {
@@ -570,7 +593,7 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
       );
     }
     const explicitRolePath =
-      roleOciPaths[role] ?? (role === 'manager' ? options.managerOciPath : null);
+      roleOciPaths[role] ?? (role === 'full' ? options.fullOciPath : null);
     const candidateRolePath =
       explicitRolePath ??
       (evidenceDir ? resolve(evidenceDir, expectedArchiveName) : null);
@@ -579,14 +602,16 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
         `missing required OCI archive for ${role}: ${String(candidateRolePath ?? expectedArchiveName)}`
       );
     }
+    resolvedRolePaths[role] = candidateRolePath;
+  }
+  for (const role of ROLES) {
     inspectedRoles[role] = verifyOciArchiveAgainstRoleEvidence(
-      candidateRolePath,
+      resolvedRolePaths[role],
       role,
       evidence
     );
   }
-  const archiveFiles = inspectedRoles.manager.files;
-
+  const archiveFiles = inspectedRoles.full.files;
   let fullwebSummary = null;
   if (archiveFiles) {
     const rawWebManifest = archiveFiles.get(PACKAGED_PATHS.webManifest);
@@ -618,22 +643,22 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
     };
   }
 
-  if (isPlainObject(managerRecord.fullWebSummary)) {
-    const summary = managerRecord.fullWebSummary;
+  if (isPlainObject(fullRecord.fullWebSummary)) {
+    const summary = fullRecord.fullWebSummary;
     if (
       summary.manifestSHA256 !== expectedWebSha ||
       !SHA256_DIGEST_RE.test(summary.indexHtmlSHA256 ?? '') ||
       !Number.isInteger(summary.assetCount) ||
       summary.assetCount < 2
     ) {
-      fail('invalid manager.fullWebSummary in candidate evidence');
+      fail('invalid full.fullWebSummary in candidate evidence');
     }
     if (
       fullwebSummary &&
       (fullwebSummary.index_html_sha256 !== summary.indexHtmlSHA256 ||
         fullwebSummary.asset_count !== summary.assetCount)
     ) {
-      fail('manager.fullWebSummary in candidate evidence differs from Manager OCI archive');
+      fail('full.fullWebSummary in candidate evidence differs from Full OCI archive');
     }
     fullwebSummary = {
       manifest_sha256: summary.manifestSHA256,
@@ -658,7 +683,7 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
 
   if (!fullwebSummary) {
     fail(
-      'cannot resolve Full Web index.html digest and asset count: provide manager.fullWebSummary in candidate-evidence.json or manager.oci.tar in evidence directory'
+      'cannot resolve Full Web index.html digest and asset count: provide full.fullWebSummary in candidate-evidence.json or full.oci.tar in evidence directory'
     );
   }
 
@@ -688,8 +713,8 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
   ) {
     fail('unqualified or mismatched Web/API transport contract content');
   }
-  if (isPlainObject(managerRecord.apiTransportContract)) {
-    const evApi = managerRecord.apiTransportContract;
+  if (isPlainObject(fullRecord.apiTransportContract)) {
+    const evApi = fullRecord.apiTransportContract;
     if (
       evApi.sha256 !== expectedApiSha ||
       (evApi.contractId !== undefined && evApi.contractId !== EXPECTED_API_CONTRACT_ID) ||
@@ -697,7 +722,7 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
       evApi.apiSuffix !== EXPECTED_API_SUFFIX ||
       evApi.expectedPath !== EXPECTED_API_PATH
     ) {
-      fail('manager.apiTransportContract in candidate evidence differs from verified contract');
+      fail('full.apiTransportContract in candidate evidence differs from verified contract');
     }
   }
 
@@ -717,80 +742,35 @@ export function resolveFullWebAndApiMetadata(evidence, options = {}) {
 // (container target 18317/tcp, no other service or port mappings); the deployer may
 // set CPAMP_PUBLIC_PORT=[HOST_IP:]PORT at deployment time to choose host bind IP/port.
 export function renderEmbeddedComposeYaml(imageRefs) {
+  const fullRef =
+    typeof imageRefs === 'string'
+      ? imageRefs
+      : (imageRefs?.['cpa-manager-plus'] ?? imageRefs?.full);
+  parsePinnedImageReference(fullRef, 'full');
   for (const role of ROLES) {
-    parsePinnedImageReference(imageRefs?.[role], role);
+    if (imageRefs?.[role] !== undefined) {
+      parsePinnedImageReference(imageRefs[role], role);
+    }
   }
   const lines = [
-    '# Immutable v2 Embedded three-image deployment compose.',
-    '# Rendered from verified candidate evidence; every service image is digest-pinned.',
+    '# Immutable v2 Embedded single-image deployment compose.',
+    '# Rendered from verified candidate evidence; service image is digest-pinned.',
+    'name: cpa-manager-plus',
     'services:',
-    '  cpamp-ingress:',
-    `    image: '${imageRefs.ingress}'`,
+    '  cpa-manager-plus:',
+    `    image: '${fullRef}'`,
     '    restart: unless-stopped',
+    '    stop_grace_period: 120s',
     '    ports:',
     "      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
     '    environment:',
-    "      CPAMP_INGRESS_ADDR: '0.0.0.0:18317'",
-    "      CPAMP_MANAGER_URL: 'http://cpamp-manager:18317'",
-    "      CPAMP_GATEWAY_URL: 'http://cpamp-runtime:8317'",
-    "      CPAMP_INGRESS_CONTROL_ADDR: '0.0.0.0:9082'",
-    '    depends_on:',
-    '      - cpamp-manager',
-    '      - cpamp-runtime',
-    '',
-    '  cpamp-manager:',
-    `    image: '${imageRefs.manager}'`,
-    '    restart: unless-stopped',
-    '    expose:',
-    "      - '18317'",
-    '    environment:',
-    "      HTTP_ADDR: '0.0.0.0:18317'",
-    "      USAGE_DB_PATH: '/data/usage.sqlite'",
-    "      CPA_MANAGER_DATA_KEY_PATH: '/data/data.key'",
-    "      CPA_UPSTREAM_URL: 'http://cpamp-runtime:8317'",
-    "      CPAMP_RUNTIME_URL: 'http://cpamp-runtime:9081'",
-    "      CPAMP_RUNTIME_TOKEN_FILE: '/run/cpamp/runtime-secret/token'",
-    "      CPAMP_INGRESS_CONTROL_URL: 'http://cpamp-ingress:9082'",
     "      CPAMP_PUBLIC_ORIGIN: '${CPAMP_PUBLIC_ORIGIN:-}'",
-    "      USAGE_COLLECTOR_MODE: 'auto'",
-    "      USAGE_RESP_QUEUE: 'usage'",
-    "      USAGE_RESP_POP_SIDE: 'right'",
-    "      USAGE_BATCH_SIZE: '100'",
-    "      USAGE_POLL_INTERVAL_MS: '500'",
-    "      USAGE_QUERY_LIMIT: '50000'",
-    "      USAGE_CORS_ORIGINS: '*'",
+    "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
     '    volumes:',
-    '      - cpamp-manager-data:/data',
-    '      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:ro',
-    '    healthcheck:',
-    "      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:18317/health']",
-    '      interval: 10s',
-    '      timeout: 3s',
-    '      retries: 3',
-    '',
-    '  cpamp-runtime:',
-    `    image: '${imageRefs.runtime}'`,
-    '    restart: unless-stopped',
-    '    expose:',
-    "      - '8317'",
-    "      - '9081'",
-    '    environment:',
-    "      CPAMP_RUNTIME_ADDR: '0.0.0.0:9081'",
-    "      CPAMP_RUNTIME_IDENTITY: 'embedded-default'",
-    "      CPAMP_RUNTIME_JOURNAL_PATH: '/runtime/supervisor/operations.sqlite'",
-    "      CPAMP_RUNTIME_CPA_ADDR: '127.0.0.1:8317'",
-    "      CPAMP_RUNTIME_CPA_UID: '10001'",
-    "      CPAMP_RUNTIME_CPA_GID: '10001'",
-    "      CPAMP_CPA_EXECUTABLE: '/usr/local/bin/cli-proxy-api'",
-    "      CPAMP_RUNTIME_TOKEN_FILE: '/run/cpamp/runtime-secret/token'",
-    '    volumes:',
-    '      - cpamp-runtime-data:/runtime',
-    '      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret',
+    '      - cpamp-data:/data',
     '',
     'volumes:',
-    '  cpamp-manager-data:',
-    '  cpamp-runtime-data:',
-    '  cpamp-runtime-transport-secret:',
+    '  cpamp-data:',
     '',
   ];
   return lines.join('\n');
@@ -804,6 +784,7 @@ const interpolateComposeVars = (value, env = {}) =>
 const ALLOWED_SERVICE_KEYS = new Set([
   'image',
   'restart',
+  'stop_grace_period',
   'ports',
   'expose',
   'environment',
@@ -844,7 +825,7 @@ export function parseEmbeddedComposeText(composeText) {
     fail('compose YAML root must be a mapping');
   }
   for (const topKey of Object.keys(rawDoc)) {
-    if (topKey !== 'services' && topKey !== 'volumes') {
+    if (topKey !== 'name' && topKey !== 'services' && topKey !== 'volumes') {
       fail(`unexpected top-level compose section: ${topKey}`);
     }
   }
@@ -898,10 +879,10 @@ export function parseEmbeddedComposeText(composeText) {
         if (!Array.isArray(value)) {
           fail(`${serviceName}.ports must be a sequence`);
         }
-        if (serviceName !== 'cpamp-ingress') {
+        if (serviceName !== 'cpa-manager-plus') {
           if (value.length > 0) {
             fail(
-              `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317, but ${serviceName} defines ports`
+              `Runtime 13 Compose validation failed: expected only cpa-manager-plus 18317:18317, but ${serviceName} defines ports`
             );
           }
           normalized.ports = [];
@@ -909,18 +890,18 @@ export function parseEmbeddedComposeText(composeText) {
         }
         if (value.length !== 1) {
           fail(
-            `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317, got ${JSON.stringify(value)}`
+            `Runtime 13 Compose validation failed: expected only cpa-manager-plus 18317:18317, got ${JSON.stringify(value)}`
           );
         }
         const rawPortItem = value[0];
         if (typeof rawPortItem !== 'string') {
           fail(
-            `cpamp-ingress.ports must use canonical short syntax '${CANONICAL_INGRESS_PORT_SPEC}'; long-syntax or non-string port definitions are forbidden: ${JSON.stringify(rawPortItem)}`
+            `cpa-manager-plus.ports must use canonical short syntax '${CANONICAL_INGRESS_PORT_SPEC}'; long-syntax or non-string port definitions are forbidden: ${JSON.stringify(rawPortItem)}`
           );
         }
         if (rawPortItem !== CANONICAL_INGRESS_PORT_SPEC) {
           fail(
-            `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317 via canonical '${CANONICAL_INGRESS_PORT_SPEC}', got ${JSON.stringify(rawPortItem)}`
+            `Runtime 13 Compose validation failed: expected only cpa-manager-plus 18317:18317 via canonical '${CANONICAL_INGRESS_PORT_SPEC}', got ${JSON.stringify(rawPortItem)}`
           );
         }
         // Static template '${CPAMP_PUBLIC_PORT:-18317}:18317' verified above:
@@ -1017,14 +998,13 @@ export function parseEmbeddedComposeText(composeText) {
     }
     services[serviceName] = normalized;
   }
-
-  return { services, volumes };
+  return { name: rawDoc.name ?? 'cpa-manager-plus', services, volumes };
 }
 
 export function validateRuntime12ComposeDocument(document, options = {}) {
   const services = document?.services ?? {};
   const serviceNames = Object.keys(services).sort();
-  const expectedNames = Object.values(COMPOSE_SERVICES).sort();
+  const expectedNames = ['cpa-manager-plus'];
   if (JSON.stringify(serviceNames) !== JSON.stringify(expectedNames)) {
     fail(
       `compose must define exact services ${expectedNames.join(', ')}, got ${serviceNames.join(', ')}`
@@ -1064,17 +1044,23 @@ export function validateRuntime12ComposeDocument(document, options = {}) {
         fail(`${serviceName} must not run privileged`);
       }
     }
+    if (serviceConfig.network_mode === 'host') {
+      fail(`${serviceName} must not use host networking`);
+    }
+    if (serviceName === 'cpa-manager-plus' && 'user' in serviceConfig && String(serviceConfig.user ?? '') !== '') {
+      fail('cpa-manager-plus must start as root so cpamp-launcher can provision /data and drop privileges per child');
+    }
     parsePinnedImageReference(serviceConfig.image, serviceName);
 
     const ports = serviceConfig.ports ?? [];
-    if (serviceName === 'cpamp-ingress') {
+    if (serviceName === 'cpa-manager-plus') {
       if (!Array.isArray(ports) || ports.length !== 1 || !isPlainObject(ports[0])) {
-        fail(`cpamp-ingress must publish exactly one 18317:18317/tcp port`);
+        fail(`cpa-manager-plus must publish exactly one 18317:18317/tcp port`);
       }
       const portObj = ports[0];
       for (const portKey of Object.keys(portObj)) {
         if (!ALLOWED_PORT_OBJECT_KEYS.has(portKey)) {
-          fail(`forbidden cpamp-ingress port property: ${portKey}`);
+          fail(`forbidden cpa-manager-plus port property: ${portKey}`);
         }
       }
       if (
@@ -1084,12 +1070,12 @@ export function validateRuntime12ComposeDocument(document, options = {}) {
         Number(portObj.target) !== 18317
       ) {
         fail(
-          `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317/tcp, got ${JSON.stringify(portObj)}`
+          `Runtime 13 Compose validation failed: expected only cpa-manager-plus 18317:18317/tcp, got ${JSON.stringify(portObj)}`
         );
       }
     } else if (Array.isArray(ports) && ports.length > 0) {
       fail(
-        `Runtime 13 Compose validation failed: expected only cpamp-ingress 18317:18317, but ${serviceName} defines ports`
+        `Runtime 13 Compose validation failed: expected only cpa-manager-plus 18317:18317, but ${serviceName} defines ports`
       );
     }
 
@@ -1105,18 +1091,21 @@ export function validateRuntime12ComposeDocument(document, options = {}) {
         if ('read_only' in m && typeof m.read_only !== 'boolean') {
           fail(`${serviceName} volume read_only must be a boolean`);
         }
+        if (String(m.source ?? '').includes('docker.sock') || String(m.target ?? '').includes('docker.sock')) {
+          fail(`${serviceName} must not mount the Docker socket`);
+        }
         return `${m.type ?? 'volume'}:${m.source}:${m.target}:${m.read_only === true ? 'ro' : 'rw'}`;
       })
       .sort();
     const expectedMountSpecs = [...EXPECTED_SERVICE_MOUNTS[serviceName]].sort();
     if (JSON.stringify(actualMountSpecs) !== JSON.stringify(expectedMountSpecs)) {
       if (
-        serviceName === 'cpamp-manager' &&
+        serviceName === 'cpa-manager-plus' &&
         mounts.some(
-          (m) => m.target === '/run/cpamp/runtime-secret' && m.read_only !== true
+          (m) => m.target === '/data' && m.read_only === true
         )
       ) {
-        fail('Runtime transport secret must be read-only for Manager');
+        fail('cpa-manager-plus /data volume must be writable');
       }
       fail(
         `strict volume whitelist violation on ${serviceName}: expected [${expectedMountSpecs.join(', ')}], got [${actualMountSpecs.join(', ')}]`
@@ -1261,7 +1250,7 @@ export function verifyEmbeddedReleaseArtifacts({
     if (imgEntry.image_config_digest !== evImg.imageConfigDigest) {
       fail(`image_config_digest mismatch for ${role} in pairing`);
     }
-    const expectedBinarySha = evImg.packagedFiles[PACKAGED_PATHS.binaries[role]];
+    const expectedBinarySha = evImg.packagedFiles[PACKAGED_PATHS.binaries.manager];
     if (imgEntry.binary_sha256 !== expectedBinarySha) {
       fail(`binary_sha256 mismatch for ${role} in pairing`);
     }
@@ -1274,19 +1263,20 @@ export function verifyEmbeddedReleaseArtifacts({
     if (typeof imgEntry.image_ref !== 'string' || imgEntry.image_ref !== expectedImageRef) {
       fail(`image_ref missing or mismatched for ${role} in pairing`);
     }
-    const serviceName = COMPOSE_SERVICES[role];
-    const actualServiceImage = composeDoc.services[serviceName]?.image;
-    if (actualServiceImage !== expectedImageRef) {
-      fail(
-        `compose service ${serviceName} image (${String(actualServiceImage)}) does not match pairing (${expectedImageRef})`
-      );
+    if (role === 'full') {
+      const serviceName = 'cpa-manager-plus';
+      const actualServiceImage = composeDoc.services[serviceName]?.image;
+      if (actualServiceImage !== expectedImageRef) {
+        fail(
+          `compose service ${serviceName} image (${String(actualServiceImage)}) does not match pairing (${expectedImageRef})`
+        );
+      }
     }
   }
 
-  if (seenManifestDigests.size !== 3) {
-    fail('pairing images must have three distinct manifest digests');
+  if (seenManifestDigests.size !== ROLES.length) {
+    fail('pairing images must have distinct manifest digests for slim and full');
   }
-
   return { composeDoc, pairing };
 }
 
@@ -1339,7 +1329,7 @@ export function renderEmbeddedReleaseArtifacts(evidence, options = {}) {
       image_ref: imageRef,
       manifest_digest: manifestDigest,
       image_config_digest: evImg.imageConfigDigest,
-      binary_sha256: evImg.packagedFiles[PACKAGED_PATHS.binaries[role]],
+      binary_sha256: evImg.packagedFiles[PACKAGED_PATHS.binaries.manager],
       release_provenance_sha256: evImg.packagedFiles[PACKAGED_PATHS.provenance],
     };
   }
@@ -1393,7 +1383,7 @@ export const CLI_HELP_TEXT = [
   'Usage: node bin/release/render-embedded-compose.mjs --evidence <candidate-evidence.json> [options]',
   '',
   'Render or verify (`--verify`) immutable digest-pinned docker-compose.v2-embedded.yml and embedded-release-pairing.json.',
-  'Requires all three verified role OCI archives (manager.oci.tar, ingress.oci.tar, runtime.oci.tar).',
+  'Requires both verified variant OCI archives (slim.oci.tar, full.oci.tar).',
   '',
   'Contract guarantees and boundaries:',
   "  - Port template: guarantees static '${CPAMP_PUBLIC_PORT:-18317}:18317' on cpamp-ingress, container side 18317/tcp,",
@@ -1449,32 +1439,23 @@ function parseCliArgs(argv) {
       case '--registry-prefix':
         args.registryPrefix = next();
         break;
-      case '--manager-digest':
-        args.digests.manager = next();
+      case '--slim-digest':
+        args.digests.slim = next();
         break;
-      case '--ingress-digest':
-        args.digests.ingress = next();
+      case '--full-digest':
+        args.digests.full = next();
         break;
-      case '--runtime-digest':
-        args.digests.runtime = next();
+      case '--slim-image':
+        args.imageRefs.slim = next();
         break;
-      case '--manager-image':
-        args.imageRefs.manager = next();
+      case '--full-image':
+        args.imageRefs.full = next();
         break;
-      case '--ingress-image':
-        args.imageRefs.ingress = next();
+      case '--slim-oci':
+        args.roleOciPaths.slim = resolve(next());
         break;
-      case '--runtime-image':
-        args.imageRefs.runtime = next();
-        break;
-      case '--manager-oci':
-        args.roleOciPaths.manager = resolve(next());
-        break;
-      case '--ingress-oci':
-        args.roleOciPaths.ingress = resolve(next());
-        break;
-      case '--runtime-oci':
-        args.roleOciPaths.runtime = resolve(next());
+      case '--full-oci':
+        args.roleOciPaths.full = resolve(next());
         break;
       default:
         fail(`unknown argument: ${token}`);

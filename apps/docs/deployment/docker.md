@@ -1,52 +1,67 @@
 # Docker 部署
 
-## v2 Beta：Embedded 三镜像安装
+## v2：单镜像安装
 
-::: warning 选择正确的发布通道
-本节只适用于 v2 Beta。下方原有的单容器、`latest` 和独立 CPA 示例仅适用于 **1.x Stable**；`bin/install-cpamp.sh` 默认也仍安装 1.x。不要用它们替换 v2 三镜像组，也不要把已有 1.x 数据卷直接挂到 v2：先读 [升级与回滚](../operations/update.md)。
+::: warning 请先区分版本通道
+本节面向 v2 单镜像部署。下文原有的 1.x 单服务或独立 CPA Compose 示例仍属 **1.x 稳定线**说明；`bin/install-cpamp.sh` 默认也仍安装 1.x。切勿把 1.x 数据卷直接挂进 v2：从 1.x 升级请先阅读[升级与回滚](../operations/update.md)。
 :::
 
-### 下载同一次预发布的资产
+### 镜像构建目标：`full` 与 `slim`
 
-从 [GitHub Releases](https://github.com/seakee/CPA-Manager-Plus/releases) 选择实际已发布的 v2 Beta **Prerelease**，下载同一版本的 `docker-compose.v2-embedded.yml`、`embedded-release-pairing.json` 和 `checksums.txt`。发布前不存在对应下载；下面的版本号是示例，必须替换为实际目标版本。
+根 `Dockerfile` 提供两个构建目标（共享完全一致的 `cpamp-launcher`、`cpamp-runtime-supervisor`、`cpa-manager-plus` 与 `cpamp-ingress` 二进制）：
+
+| 构建目标 | 内置组件 | 当前支持范围 |
+| --- | --- | --- |
+| `full`（当前 Compose 默认） | CPAMP 全套组件 + 官方固定版本 CPA `v8.0.55` | 支持离线完成 **Fresh New / New Managed（新建托管 CPA）** 与 **External（连接外部 CPA）** |
+| `slim` | 仅 CPAMP 组件（不含 `cli-proxy-api` 二进制） | 在运行时 CPA 获取能力交付前，**仅支持 External（连接外部 CPA）** |
+
+### 单容器运行或 Docker Compose 启动
+
+v2 在单个容器内由 `cpamp-launcher` 统一拉起并监管 `Runtime Supervisor`（`127.0.0.1:9081`）、`Manager`（`127.0.0.1:18319`）、`Ingress`（对外 `0.0.0.0:18317`，控制口 `127.0.0.1:9082`）以及托管 `CPA`（`127.0.0.1:8317`），仅暴露单一端口 `18317` 与单一数据卷 `/data`：
+
+**方式一：`docker run`**
 
 ```bash
-export TAG=v2.0.0-beta.1
-curl -fLO "https://github.com/seakee/CPA-Manager-Plus/releases/download/$TAG/docker-compose.v2-embedded.yml"
-curl -fLO "https://github.com/seakee/CPA-Manager-Plus/releases/download/$TAG/embedded-release-pairing.json"
-curl -fLO "https://github.com/seakee/CPA-Manager-Plus/releases/download/$TAG/checksums.txt"
+docker build --target full \
+  --build-arg VERSION=dev \
+  --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" \
+  -t cpa-manager-plus:full-local .
+docker run -d \
+  --name cpa-manager-plus \
+  -p 18317:18317 \
+  -v cpamp-data:/data \
+  --stop-timeout 120 \
+  -e CPAMP_PUBLIC_ORIGIN='https://cpamp.example.com' \
+  cpa-manager-plus:full-local
 ```
 
-按 `checksums.txt` 核对下载的两份文件，并保留它们作为升级/回滚记录。配对记录绑定版本、源码提交、三镜像 Manifest Digest、Full Web 清单和 API 契约；不要混用不同版本的资产。Compose 中镜像为 `seakee/cpa-manager-plus:<tag>@sha256:<digest>`、`seakee/cpamp-ingress:<tag>@sha256:<digest>`、`seakee/cpamp-runtime:<tag>@sha256:<digest>`；不能移除 Digest、改用浮动标签或添加本地 `build:`。首个 Beta 的配对平台为 `linux/amd64`，不要把 Runtime 单独升级。
-
-### 拓扑、数据与公开入口
-
-| 服务 | 职责 | 持久化与端口边界 |
-| --- | --- | --- |
-| `cpamp-ingress` | Full Web、Manager API 与模型流量的统一入口 | 唯一公开端口 `${CPAMP_PUBLIC_PORT:-18317}:18317`；零卷挂载 |
-| `cpamp-manager` | 管理、SQLite、Full Web/API 配对 | `cpamp-manager-data` → `/data`；只读挂载 Runtime transport secret；不发布宿主机端口 |
-| `cpamp-runtime` | Runtime Supervisor 托管固定的官方 CPA `v8.0.55` | `cpamp-runtime-data` → `/runtime`；可写 transport secret；`8317`/`9081` 仅内部使用 |
-
-`cpamp-runtime-transport-secret` 挂到 Manager 与 Runtime 的 `/run/cpamp/runtime-secret`，不要暴露给 Ingress。保留发布 Compose 的隔离：不挂 Docker socket，不使用 privileged/host network，不公开 Runtime 控制端口。Compose 卷的实际名称含项目名前缀；持续在同一目录/同一项目下操作，备份整个 Manager 与 Runtime 数据集，见 [备份与恢复](../operations/backup.md)。
-
-### 首次初始化与认领
-
-先为外部入口配置可从部署环境访问的真实 origin。**优先使用已配置 TLS 反向代理的 HTTPS origin**，例如 `https://cpamp.example.com`；替换为实际域名并确认代理/证书已配置。明文 HTTP 只用于可信本地/隔离测试网络，不能通过非可信网络传递 Handoff、Admin Key 或 Client Key。非默认宿主机端口还需设置 `CPAMP_PUBLIC_PORT`。origin 不是 CPA 内网地址。
+**方式二：`docker compose`**
 
 ```bash
 export CPAMP_PUBLIC_ORIGIN='https://cpamp.example.com'
-docker compose -f docker-compose.v2-embedded.yml config
-docker compose -f docker-compose.v2-embedded.yml pull
-docker compose -f docker-compose.v2-embedded.yml up -d
-docker compose -f docker-compose.v2-embedded.yml exec -T cpamp-manager cpa-manager-plus initialize
+export VERSION=dev
+export SOURCE_COMMIT="$(git rev-parse HEAD)"
+docker compose config
+docker compose up -d --build
 ```
 
-`initialize` 是宿主机授权的一次性命令，输出 `/.well-known/cpamp-bootstrap/ui#handoff=...`。在公开 origin 后拼上**完整输出（含 fragment）**，在浏览器打开；它是短期敏感认领凭据，不要发截图或保存到服务日志。首次只读监听器可以保留运行；需要重新签发/恢复时，先停止可写 Manager，再用 `docker compose -f docker-compose.v2-embedded.yml run --rm --no-deps cpamp-manager initialize`，然后重新 `up -d`，不要删除数据库来重置安装。
+请保持单容器拓扑边界：不要挂载 Docker socket、启用 `privileged`、使用 `network_mode: host` 或将内部回环端口发布到宿主机。备份与恢复只需完整保留 `/data` 命名卷，详见[备份与恢复](../operations/backup.md)。可通过 `CPAMP_DRAIN_TIMEOUT`（默认 `90s`）调整停机排空超时，并保持容器 `--stop-timeout` / `stop_grace_period` 留有余量（如 `120s`）。
 
-浏览器里设置并保存 CPAMP Admin Key，选择 **New Managed**（新建托管 CPA）、**Adopt**（对已有 CPA 做资格检查和迁移）或 **External**（连接自行运维的 CPA）。Adopt/External 不是无条件成功路径：按向导检查报告处理不支持的来源、版本、凭证或不可证明的状态；遇到拒绝就停止，不手工修改安装记录。External 至少要求 CPA `v8.0.55`，详见 [运行模型](../guide/runtime-model.md)。
+### 初始化与认领
 
-New Managed 完成后保存向导给出的一次性首个 Client Key，用它通过公开入口验证模型请求，再开始生产流量。Admin Key、CPA Management Key 和 Client Key 不可混用。进程 `/health` 正常不等于安装完成或 Gateway 已就绪；以向导的安装完成、路由验证和客户端连通性为准。
+配置实际外部访问 Origin。**生产或跨网访问应配置受控 TLS 反向代理并使用 `https://` Origin**（如 `https://cpamp.example.com`，请替换为你的真实域名并先配好反代与证书）；明文 `http://` 仅适用于本机或受控隔离测试网，切勿在不可信网络明文传输 Handoff、Admin Key 或 Client Key。若宿主机映射端口不同，请同步设置 `CPAMP_PUBLIC_PORT`。该地址不是 CPA 内部地址。
 
+```bash
+docker compose exec -T -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite cpa-manager-plus cpa-manager-plus initialize
+# 若使用 docker run 启动：
+# docker exec -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite cpa-manager-plus cpa-manager-plus initialize
+```
+
+`initialize` 是一次性宿主授权命令，输出形如 `/.well-known/cpamp-bootstrap/ui#handoff=...`。将**包含 `#handoff=...` 在内的完整输出**拼到 `CPAMP_PUBLIC_ORIGIN` 后在浏览器打开；该短时认领凭证不得贴入截图或日志。若需重发或恢复认领，先停写库进程，再执行 `docker compose run --rm --no-deps -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite --entrypoint cpa-manager-plus cpa-manager-plus initialize`，随后重新 `up -d`；禁止删库重来。
+
+在浏览器中先设置并保存 CPAMP Admin Key，再选择安装模式：**New Managed**（新建托管 CPA，需 `full` 镜像）、**Adopt**（收纳迁移既有 CPA）或 **External**（连接独立维护的外部 CPA，`full` 与 `slim` 均支持）。Adopt / External 不是无条件成功路径：遇到向导提示的源配置、版本、凭据或证据拒绝时必须按提示修正或中止，不得手改安装记录绕过。External 要求外部 CPA 至少为 `v8.0.55`，详见[运行时模型说明](../guide/runtime-model.md)。
+
+New Managed 完成后请立即保存一次性首把 Client Key，并通过统一入口完成首次模型请求验证后再接入业务流量。Admin Key、CPA Management Key 与 Client Key 职责不同，不可混用。进程 `/health` 返回 200 不代表安装完成或网关已放行，必须以向导完成、路由校验与客户端实测为准。
 ## 1.x Stable：手动部署参考
 
 

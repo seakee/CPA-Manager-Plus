@@ -13,10 +13,10 @@ snapshot_root="$(mktemp -d "${TMPDIR:-/tmp}/cpamp-runtime14-failure.XXXXXX")"
 # Explicit historical baseline; the normal Docker/Compose default is CPA v8.
 compose=(docker compose --project-directory "${repo_root}" -f "${repo_root}/docker-compose.yml" -f "${repo_root}/bin/ci/runtime-v7-compatibility.compose.yml" -p "${project}")
 
-paused_manager=""
+paused_manager_pid=""
 stopped_cpa_pid=""
-disconnected_network=""
-disconnected_runtime=""
+stopped_supervisor_pid=""
+stopped_ingress_pid=""
 executable_moved="false"
 cpa_executable="/usr/local/bin/cli-proxy-api"
 cpa_restore_path="/usr/local/bin/cli-proxy-api.runtime14-restore"
@@ -24,17 +24,15 @@ cpa_restore_path="/usr/local/bin/cli-proxy-api.runtime14-restore"
 cleanup() {
   set +e
   docker rm -f "${initializer_name}" >/dev/null 2>&1 || true
-  if [ -n "${stopped_cpa_pid}" ]; then
-    "${compose[@]}" exec -T cpamp-runtime sh -ec 'kill -CONT "$1"' sh "${stopped_cpa_pid}" >/dev/null 2>&1
-  fi
+  for pid in "${stopped_cpa_pid}" "${stopped_supervisor_pid}" "${stopped_ingress_pid}" "${paused_manager_pid}"; do
+    if [ -n "${pid}" ]; then
+      "${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${pid}" >/dev/null 2>&1
+    fi
+  done
   if [ "${executable_moved}" = "true" ]; then
-    "${compose[@]}" exec -T cpamp-runtime sh -ec '
+    "${compose[@]}" exec -T cpa-manager-plus sh -ec '
       if [ -e "$2" ] && [ ! -e "$1" ]; then mv "$2" "$1"; fi
     ' sh "${cpa_executable}" "${cpa_restore_path}" >/dev/null 2>&1
-  fi
-  if [ -n "${paused_manager}" ]; then docker unpause "${paused_manager}" >/dev/null 2>&1; fi
-  if [ -n "${disconnected_network}" ] && [ -n "${disconnected_runtime}" ]; then
-    docker network connect --alias cpamp-runtime "${disconnected_network}" "${disconnected_runtime}" >/dev/null 2>&1
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1
   rm -rf "${snapshot_root}"
@@ -110,25 +108,31 @@ json_uint_field() {
   ' "${field}"
 }
 
+runtime_root() {
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec 'if [ -d /data/runtime ]; then printf /data/runtime; else printf /runtime; fi'
+}
+
 runtime_get_from_manager() {
   local request_path="$1"
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T --user 10002:10002 cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then token_file="$c"; break; fi
+    done
+    token="$(cat "${token_file}")"
     wget -qO- --timeout=4 \
       --header="Authorization: Bearer ${token}" \
       --header="X-CPAMP-Runtime-Features: active-gateway-artifact-v1" \
-      "http://cpamp-runtime:9081${1}"
+      "http://127.0.0.1:9081${1}"
   ' sh "${request_path}"
 }
 
 runtime_get_local() {
   local request_path="$1"
-  docker run --rm \
-    --network "container:${runtime_container}" \
-    --volumes-from "${runtime_container}:ro" \
-    --entrypoint sh \
-    seakee/cpa-manager-plus:latest -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then token_file="$c"; break; fi
+    done
+    token="$(cat "${token_file}")"
     wget -qO- -T 4 \
       --header="Authorization: Bearer ${token}" \
       --header="X-CPAMP-Runtime-Features: active-gateway-artifact-v1" \
@@ -168,8 +172,15 @@ wait_runtime_observation() {
   return 1
 }
 
+service_pid() {
+  local binary="$1"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    pidof "$1" | awk "{print \$1}"
+  ' sh "${binary}"
+}
+
 runtime_cpa_pid() {
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     for process_dir in /proc/[0-9]*; do
       if [ -r "${process_dir}/comm" ] && [ "$(cat "${process_dir}/comm")" = "cli-proxy-api" ]; then
         printf "%s" "${process_dir##*/}"
@@ -182,10 +193,18 @@ runtime_cpa_pid() {
 
 assert_cpa_pid_alive() {
   local expected_pid="$1"
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     test -r "/proc/${1}/comm"
     test "$(cat "/proc/${1}/comm")" = "cli-proxy-api"
   ' sh "${expected_pid}"
+}
+
+assert_service_pid_alive() {
+  local expected_pid="$1"
+  local description="$2"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    test -d "/proc/${1}"
+  ' sh "${expected_pid}" || fail "${description} is not running"
 }
 
 container_id() {
@@ -194,17 +213,6 @@ container_id() {
   id="$("${compose[@]}" ps --all -q "${service}")"
   test -n "${id}"
   printf '%s' "${id}"
-}
-
-container_running_by_id() {
-  local id="$1"
-  [ "$(docker inspect --format '{{.State.Running}}' "${id}" 2>/dev/null)" = "true" ]
-}
-
-assert_container_running() {
-  local id="$1"
-  local description="$2"
-  container_running_by_id "${id}" || fail "${description} is not running"
 }
 
 public_request() {
@@ -267,11 +275,11 @@ copy_sqlite_snapshot() (
 )
 
 snapshot_runtime_journal() {
-  copy_sqlite_snapshot cpamp-runtime /runtime/supervisor/operations.sqlite "$1"
+  copy_sqlite_snapshot cpa-manager-plus "$(runtime_root)/supervisor/operations.sqlite" "$1"
 }
 
 snapshot_manager_database() {
-  copy_sqlite_snapshot cpamp-manager /data/usage.sqlite "$1"
+  copy_sqlite_snapshot cpa-manager-plus /data/usage.sqlite "$1"
 }
 
 journal_count() {
@@ -415,16 +423,13 @@ fi
 assert_equal "$(printf '%s' "$baseline_status" | json_field activeGatewayArtifact.engine)" 'cpa' 'baseline artifact engine'
 assert_equal "$(printf '%s' "$baseline_status" | json_field activeGatewayArtifact.version)" '7.3.3' 'baseline trusted artifact version'
 assert_equal "$(printf '%s' "$baseline_status" | json_field cpaObservedVersion)" '7.3.3' 'baseline legacy version projection'
-runtime_binary_artifact_id="sha256:$("${compose[@]}" exec -T cpamp-runtime sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
+runtime_binary_artifact_id="sha256:$("${compose[@]}" exec -T cpa-manager-plus sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
 assert_equal "$baseline_artifact_id" "$runtime_binary_artifact_id" 'baseline exact executable artifact ID'
 baseline_cpa_pid="$(runtime_cpa_pid)"
 assert_cpa_pid_alive "${baseline_cpa_pid}"
 
-ingress_container="$(container_id cpamp-ingress)"
-manager_container="$(container_id cpamp-manager)"
-runtime_container="$(container_id cpamp-runtime)"
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
-  test "$(tr "\000" "\n" </proc/1/cmdline | head -n1)" = "/usr/local/bin/cpamp-runtime-supervisor"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
+  test "$(tr "\000" "\n" </proc/1/cmdline | head -n1)" = "/usr/local/bin/cpamp-launcher"
 '
 
 baseline_manager_database="$(snapshot_manager_database scenario-a-manager)"
@@ -436,51 +441,59 @@ assert_equal "$(journal_count "${baseline_journal}" start "${baseline_generation
 assert_manager_starts_are_reconcile_operations "${baseline_journal}"
 
 scenario 'B — Ingress hard failure is edge-only'
-ingress_started_before="$(docker inspect --format '{{.State.StartedAt}}' "${ingress_container}")"
-docker kill "${ingress_container}" >/dev/null
+ingress_pid_before="$(service_pid cpamp-ingress)"
+manager_pid_before="$(service_pid cpa-manager-plus)"
+supervisor_pid_before="$(service_pid cpamp-runtime-supervisor)"
+stopped_ingress_pid="${ingress_pid_before}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1"' sh "${ingress_pid_before}"
 assert_public_unavailable /health
-assert_container_running "${manager_container}" 'Manager container during Ingress failure'
-assert_container_running "${runtime_container}" 'Runtime container during Ingress failure'
+assert_service_pid_alive "${manager_pid_before}" 'Manager process during Ingress failure'
+assert_service_pid_alive "${supervisor_pid_before}" 'Runtime Supervisor process during Ingress failure'
 assert_cpa_pid_alive "${baseline_cpa_pid}"
 scenario_b_status="$(wait_runtime_observation ready armed local 30)"
 assert_equal "$(printf '%s' "${scenario_b_status}" | json_field runtimeIdentity)" "${baseline_identity}" 'Ingress failure RuntimeIdentity'
 assert_equal "$(printf '%s' "${scenario_b_status}" | json_uint_field runtimeGeneration)" "${baseline_generation}" 'Ingress failure RuntimeGeneration'
-docker start "${ingress_container}" >/dev/null
-retry 30 container_running_by_id "${ingress_container}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -KILL "$1"' sh "${ingress_pid_before}"
+stopped_ingress_pid=""
 wait_public_success /health 60
 wait_public_success /v1/models 60
 sleep 6
-assert_not_equal "$(docker inspect --format '{{.State.StartedAt}}' "${ingress_container}")" "${ingress_started_before}" 'Ingress process incarnation'
+assert_not_equal "$(service_pid cpamp-ingress)" "${ingress_pid_before}" 'Ingress process incarnation'
 scenario_b_journal="$(snapshot_runtime_journal scenario-b-journal)"
 assert_lifecycle_counts "${scenario_b_journal}" "${baseline_generation}" 1 0 0 'scenario B'
 assert_equal "$(runtime_cpa_pid)" "${baseline_cpa_pid}" 'Ingress failure CPA PID'
 
 scenario 'C — Manager hard failure preserves Gateway traffic'
-manager_started_before="$(docker inspect --format '{{.State.StartedAt}}' "${manager_container}")"
-docker kill "${manager_container}" >/dev/null
+manager_pid_before="$(service_pid cpa-manager-plus)"
+supervisor_pid_before="$(service_pid cpamp-runtime-supervisor)"
+paused_manager_pid="${manager_pid_before}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1"' sh "${manager_pid_before}"
 wait_public_success /v1/models 30
-assert_container_running "${runtime_container}" 'Runtime container during Manager failure'
+assert_service_pid_alive "${supervisor_pid_before}" 'Runtime Supervisor process during Manager failure'
 assert_cpa_pid_alive "${baseline_cpa_pid}"
 scenario_c_status="$(wait_runtime_observation ready armed local 30)"
 assert_equal "$(printf '%s' "${scenario_c_status}" | json_uint_field runtimeGeneration)" "${baseline_generation}" 'Manager failure RuntimeGeneration'
-docker start "${manager_container}" >/dev/null
-retry 30 container_running_by_id "${manager_container}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -KILL "$1"' sh "${manager_pid_before}"
+paused_manager_pid=""
 wait_public_success /health 90
 sleep 7
-assert_not_equal "$(docker inspect --format '{{.State.StartedAt}}' "${manager_container}")" "${manager_started_before}" 'Manager process incarnation'
+assert_not_equal "$(service_pid cpa-manager-plus)" "${manager_pid_before}" 'Manager process incarnation'
 assert_equal "$(runtime_cpa_pid)" "${baseline_cpa_pid}" 'Manager failure CPA PID'
 scenario_c_journal="$(snapshot_runtime_journal scenario-c-journal)"
 assert_lifecycle_counts "${scenario_c_journal}" "${baseline_generation}" 1 0 0 'scenario C'
 
 scenario 'D — Runtime hard failure creates a new generation'
-runtime_started_before="$(docker inspect --format '{{.State.StartedAt}}' "${runtime_container}")"
-docker kill "${runtime_container}" >/dev/null
+supervisor_pid_before="$(service_pid cpamp-runtime-supervisor)"
+stopped_supervisor_pid="${supervisor_pid_before}"
+stopped_cpa_pid="${baseline_cpa_pid}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1" "$2"' sh "${supervisor_pid_before}" "${baseline_cpa_pid}"
 wait_public_success /health 30
 assert_public_unavailable /v1/models
-docker pause "${manager_container}" >/dev/null
-paused_manager="${manager_container}"
-docker start "${runtime_container}" >/dev/null
-retry 30 container_running_by_id "${runtime_container}"
+paused_manager_pid="$(service_pid cpa-manager-plus)"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1"' sh "${paused_manager_pid}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -KILL "$1" "$2"' sh "${supervisor_pid_before}" "${baseline_cpa_pid}"
+stopped_supervisor_pid=""
+stopped_cpa_pid=""
 scenario_d_inactive="$(wait_runtime_observation offline inactive local 60)"
 scenario_d_generation="$(printf '%s' "${scenario_d_inactive}" | json_uint_field runtimeGeneration)"
 assert_not_equal "${scenario_d_generation}" '0' 'scenario D RuntimeGeneration must be non-zero'
@@ -489,13 +502,13 @@ assert_equal "$(printf '%s' "$scenario_d_inactive" | json_field activeGatewayArt
 scenario_d_pre_journal="$(snapshot_runtime_journal scenario-d-before-reconcile)"
 assert_equal "$(journal_count "${scenario_d_pre_journal}" start "${baseline_generation}" 'runtime-reconcile/v1:' succeeded -)" '1' 'old-generation Start evidence after Runtime restart'
 assert_equal "$(journal_count "${scenario_d_pre_journal}" start "${scenario_d_generation}" 'runtime-reconcile/v1:' - -)" '0' 'new generation before Manager reconcile'
-docker unpause "${manager_container}" >/dev/null
-paused_manager=""
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}"
+paused_manager_pid=""
 scenario_d_ready="$(wait_runtime_observation ready armed local 120)"
 assert_equal "$(printf '%s' "${scenario_d_ready}" | json_uint_field runtimeGeneration)" "${scenario_d_generation}" 'scenario D ready generation'
 wait_public_success /v1/models 60
 sleep 7
-assert_not_equal "$(docker inspect --format '{{.State.StartedAt}}' "${runtime_container}")" "${runtime_started_before}" 'Runtime process incarnation'
+assert_not_equal "$(service_pid cpamp-runtime-supervisor)" "${supervisor_pid_before}" 'Runtime Supervisor process incarnation'
 scenario_d_cpa_pid="$(runtime_cpa_pid)"
 scenario_d_journal="$(snapshot_runtime_journal scenario-d-journal)"
 assert_lifecycle_counts "${scenario_d_journal}" "${scenario_d_generation}" 1 0 0 'scenario D'
@@ -506,44 +519,22 @@ assert_equal "${scenario_d_desired}" 'running' 'scenario D desired lifecycle'
 assert_equal "${scenario_d_revision}" "${baseline_revision}" 'scenario D desired revision'
 assert_equal "${scenario_d_updated_at}" "${baseline_updated_at}" 'scenario D desired timestamp'
 
-scenario 'E — private Manager-to-Runtime network partition is observation-only'
-runtime_network_output="$(
-  docker inspect "${runtime_container}" | node -e '
-    const containers = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
-    const entries = Object.entries(containers[0]?.NetworkSettings?.Networks ?? {});
-    if (entries.length !== 1) process.exit(2);
-    const [name, details] = entries[0];
-    console.log(name);
-    for (const alias of details.Aliases ?? []) console.log(alias);
-  '
-)"
-network_name="$(printf '%s\n' "${runtime_network_output}" | sed -n '1p')"
-test -n "${network_name}" || fail 'could not resolve the Runtime Compose network'
-network_aliases=()
-while IFS= read -r alias; do
-  if [ -n "${alias}" ]; then network_aliases+=("${alias}"); fi
-done < <(printf '%s\n' "${runtime_network_output}" | sed -n '2,$p')
-if ! printf '%s\n' "${network_aliases[@]}" | grep -Fxq 'cpamp-runtime'; then
-  fail 'Runtime Compose network is missing the cpamp-runtime service alias'
-fi
-docker network disconnect "${network_name}" "${runtime_container}"
-disconnected_network="${network_name}"
-disconnected_runtime="${runtime_container}"
+scenario 'E — private Manager-to-Runtime control-plane outage is observation-only'
+stopped_supervisor_pid="$(service_pid cpamp-runtime-supervisor)"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1"' sh "${stopped_supervisor_pid}"
 wait_public_success /health 30
-assert_public_unavailable /v1/models
-scenario_e_status="$(wait_runtime_observation ready armed local 30)"
-assert_equal "$(printf '%s' "${scenario_e_status}" | json_uint_field runtimeGeneration)" "${scenario_d_generation}" 'partition RuntimeGeneration'
+wait_public_success /v1/models 30
+if runtime_get manager /v1/runtime/status >/dev/null 2>&1; then
+  fail 'Runtime Supervisor control plane remained reachable while stopped'
+fi
 assert_equal "$(runtime_cpa_pid)" "${scenario_d_cpa_pid}" 'partition CPA PID'
 sleep 7
 scenario_e_partition_journal="$(snapshot_runtime_journal scenario-e-partition-journal)"
 assert_lifecycle_counts "${scenario_e_partition_journal}" "${scenario_d_generation}" 1 0 0 'scenario E partition'
-network_connect_args=()
-for alias in "${network_aliases[@]}"; do
-  network_connect_args+=(--alias "${alias}")
-done
-docker network connect "${network_connect_args[@]}" "${network_name}" "${runtime_container}"
-disconnected_network=""
-disconnected_runtime=""
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${stopped_supervisor_pid}"
+stopped_supervisor_pid=""
+scenario_e_status="$(wait_runtime_observation ready armed local 30)"
+assert_equal "$(printf '%s' "${scenario_e_status}" | json_uint_field runtimeGeneration)" "${scenario_d_generation}" 'partition RuntimeGeneration'
 wait_public_success /v1/models 90
 scenario_e_reconnected="$(wait_runtime_observation ready armed manager 90)"
 assert_equal "$(printf '%s' "${scenario_e_reconnected}" | json_uint_field runtimeGeneration)" "${scenario_d_generation}" 'reconnected RuntimeGeneration'
@@ -553,7 +544,7 @@ assert_lifecycle_counts "${scenario_e_journal}" "${scenario_d_generation}" 1 0 0
 
 scenario 'F — readiness failure is not liveness failure'
 stopped_cpa_pid="${scenario_d_cpa_pid}"
-"${compose[@]}" exec -T cpamp-runtime sh -ec 'kill -STOP "$1"' sh "${stopped_cpa_pid}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1"' sh "${stopped_cpa_pid}"
 scenario_f_starting="$(wait_runtime_observation starting armed local 30)"
 assert_equal "$(printf '%s' "${scenario_f_starting}" | json_uint_field runtimeGeneration)" "${scenario_d_generation}" 'SIGSTOP RuntimeGeneration'
 assert_cpa_pid_alive "${stopped_cpa_pid}"
@@ -561,7 +552,7 @@ wait_public_success /health 30
 sleep 7
 scenario_f_paused_journal="$(snapshot_runtime_journal scenario-f-paused-journal)"
 assert_lifecycle_counts "${scenario_f_paused_journal}" "${scenario_d_generation}" 1 0 0 'scenario F SIGSTOP'
-"${compose[@]}" exec -T cpamp-runtime sh -ec 'kill -CONT "$1"' sh "${stopped_cpa_pid}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${stopped_cpa_pid}"
 stopped_cpa_pid=""
 scenario_f_ready="$(wait_runtime_observation ready armed local 60)"
 assert_equal "$(printf '%s' "${scenario_f_ready}" | json_uint_field runtimeGeneration)" "${scenario_d_generation}" 'SIGCONT RuntimeGeneration'
@@ -572,7 +563,7 @@ assert_lifecycle_counts "${scenario_f_journal}" "${scenario_d_generation}" 1 0 0
 
 scenario 'G — confirmed CPA exit is recovered only by Supervisor'
 scenario_g_old_pid="$(runtime_cpa_pid)"
-"${compose[@]}" exec -T cpamp-runtime sh -ec 'kill -KILL "$1"' sh "${scenario_g_old_pid}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -KILL "$1"' sh "${scenario_g_old_pid}"
 scenario_g_ready="$(wait_runtime_observation ready armed local 120)"
 assert_equal "$(printf '%s' "${scenario_g_ready}" | json_uint_field runtimeGeneration)" "${scenario_d_generation}" 'automatic recovery RuntimeGeneration'
 assert_equal "$(printf '%s' "$scenario_g_ready" | json_field activeGatewayArtifact.artifactId)" "$baseline_artifact_id" 'same-binary automatic recovery artifact identity'
@@ -586,7 +577,8 @@ assert_equal "$(journal_count "${scenario_g_journal}" auto_recovery "${scenario_
 wait_public_success /v1/models 60
 
 scenario 'H — bounded exhaustion creates a manual-intervention fence'
-docker restart "${runtime_container}" >/dev/null
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -TERM $(pidof cpamp-runtime-supervisor)'
+sleep 2
 scenario_h_baseline="$(wait_runtime_observation ready armed local 120)"
 scenario_h_generation="$(printf '%s' "${scenario_h_baseline}" | json_uint_field runtimeGeneration)"
 assert_not_equal "${scenario_h_generation}" "${scenario_d_generation}" 'scenario H setup must use a fresh generation'
@@ -595,13 +587,13 @@ scenario_h_pid="$(runtime_cpa_pid)"
 scenario_h_baseline_journal="$(snapshot_runtime_journal scenario-h-baseline-journal)"
 assert_lifecycle_counts "${scenario_h_baseline_journal}" "${scenario_h_generation}" 1 1 0 'scenario H baseline'
 
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
   test -x "$1"
   test ! -e "$2"
   mv "$1" "$2"
 ' sh "${cpa_executable}" "${cpa_restore_path}"
 executable_moved="true"
-"${compose[@]}" exec -T cpamp-runtime sh -ec 'kill -KILL "$1"' sh "${scenario_h_pid}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -KILL "$1"' sh "${scenario_h_pid}"
 scenario_h_manual="$(wait_runtime_observation offline manual_intervention local 120)"
 assert_equal "$(printf '%s' "${scenario_h_manual}" | json_uint_field runtimeGeneration)" "${scenario_h_generation}" 'manual-intervention RuntimeGeneration'
 assert_equal "$(printf '%s' "${scenario_h_manual}" | json_field recovery.attemptsRemaining)" '0' 'manual-intervention recovery budget'
@@ -621,7 +613,7 @@ read -r scenario_h_desired scenario_h_revision scenario_h_updated_at < <(desired
 assert_equal "${scenario_h_desired}" 'running' 'scenario H desired lifecycle'
 assert_equal "${scenario_h_revision}" "${baseline_revision}" 'scenario H desired revision'
 
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
   test -e "$2"
   test ! -e "$1"
   mv "$2" "$1"
@@ -639,17 +631,18 @@ assert_lifecycle_counts "${scenario_h_restored_journal}" "${scenario_h_generatio
 
 # Hold Manager so the new Supervisor incarnation can be observed before the
 # persisted desired=running state legitimately creates a generation-scoped Start.
-docker pause "${manager_container}" >/dev/null
-paused_manager="${manager_container}"
-docker restart "${runtime_container}" >/dev/null
+paused_manager_pid="$(service_pid cpa-manager-plus)"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1"' sh "${paused_manager_pid}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -TERM $(pidof cpamp-runtime-supervisor)'
+sleep 1
 scenario_h_new_inactive="$(wait_runtime_observation offline inactive local 60)"
 scenario_h_final_generation="$(printf '%s' "${scenario_h_new_inactive}" | json_uint_field runtimeGeneration)"
 assert_not_equal "${scenario_h_final_generation}" "${scenario_h_generation}" 'manual-intervention recovery must use a new generation'
 scenario_h_before_final_reconcile="$(snapshot_runtime_journal scenario-h-before-final-reconcile)"
 assert_equal "$(journal_count "${scenario_h_before_final_reconcile}" auto_recovery "${scenario_h_generation}" 'auto-recovery-' failed process_recovery_start_failed)" '3' 'failed recovery history after Supervisor restart'
 assert_equal "$(journal_count "${scenario_h_before_final_reconcile}" start "${scenario_h_final_generation}" 'runtime-reconcile/v1:' - -)" '0' 'final generation before Manager reconcile'
-docker unpause "${manager_container}" >/dev/null
-paused_manager=""
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}"
+paused_manager_pid=""
 scenario_h_final_ready="$(wait_runtime_observation ready armed local 120)"
 assert_equal "$(printf '%s' "${scenario_h_final_ready}" | json_uint_field runtimeGeneration)" "${scenario_h_final_generation}" 'final ready generation'
 assert_equal "$(printf '%s' "$scenario_h_final_ready" | json_field activeGatewayArtifact.artifactId)" "$baseline_artifact_id" 'restored same-binary artifact identity'

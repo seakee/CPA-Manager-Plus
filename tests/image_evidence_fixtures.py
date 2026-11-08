@@ -29,7 +29,7 @@ SOURCE["inputs"].update({name: evidence.digest(b"fixture " + name.encode())
 SOURCE_BYTES = evidence.encoded(SOURCE)
 
 
-def make_evidence(role, files, source_bytes=SOURCE_BYTES, cpa_official=True):
+def make_evidence(role, files, source_bytes=SOURCE_BYTES, cpa_official=True, cpa_bundled=True):
     """Use the real generator on synthetic originals and caller-supplied binaries."""
     lay = evidence.LAYOUTS[evidence.ROLE_TARGET[role]]
     target = evidence.ROLE_TARGET[role]
@@ -51,6 +51,9 @@ def make_evidence(role, files, source_bytes=SOURCE_BYTES, cpa_official=True):
             ecosystem = "npm"
             dependencies = [{"name": "example-web", "version": "1.0.0", "notices": notices}]
             inputs = {name: SOURCE["inputs"][name] for name in ("apps/web/package.json", "package-lock.json")}
+        elif component == "glibc-runtime":
+            ecosystem = "debian"
+            dependencies = [{"name": "libc6", "version": "2.36-r1", "notices": notices}]
         else:
             # The fixture base OS must match the role binding, otherwise every
             # role could claim the Alpine metadata-only boundary.
@@ -74,21 +77,25 @@ def make_evidence(role, files, source_bytes=SOURCE_BYTES, cpa_official=True):
             destination.write_bytes(data)
         source = root / "source.json"
         source.write_bytes(source_bytes)
-        evidence.build(root, role, VERSION, SHA, "linux/amd64", source, cpa_official=cpa_official)
+        evidence.build(root, role, VERSION, SHA, "linux/amd64", source,
+                       cpa_official=cpa_official, cpa_bundled=cpa_bundled)
         prefix = "/" if target == "image" else ""
         return {prefix + path.relative_to(root).as_posix(): path.read_bytes()
                 for path in root.rglob("*") if path.is_file() and path != source}
 
 
-def base_files(role):
+def base_files(role, cpa_bundled=True):
     lay = evidence.LAYOUTS[evidence.ROLE_TARGET[role]]
     files = {lay["binRoot"] + binary: ("fixture " + name).encode()
-             for name, binary in evidence.BINARIES[role]}
+             for name, binary in evidence.BINARIES[role]
+             if cpa_bundled or name != "cpa"}
     if any(name == "cpa" for name, _ in evidence.BINARIES[role]):
+        cpa_bytes = files.get(lay["binRoot"] + "cli-proxy-api", b"fixture cpa")
         files[lay["artifact"]] = evidence.encoded({
             "schemaVersion": 1, "engine": "cpa", "version": "8.0.13",
-            "artifactId": evidence.digest(files[lay["binRoot"] + "cli-proxy-api"])})
-        files[lay["licenseRoot"] + "cli-proxy-api/LICENSE"] = b"MIT fixture CPA license\n"
+            "artifactId": evidence.digest(cpa_bytes)})
+        if cpa_bundled:
+            files[lay["licenseRoot"] + "cli-proxy-api/LICENSE"] = b"MIT fixture CPA license\n"
     if "web" in evidence.PROVENANCE_COMPONENTS[role]:
         files[lay["webManifest"]] = b'{"schemaVersion":1,"files":[]}'
     return files

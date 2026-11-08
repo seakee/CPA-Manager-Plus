@@ -293,7 +293,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
     }
   });
 
-  it('renders digest-pinned three-image compose and pairing manifest that pass Runtime 12/18 validation', () => {
+  it('renders digest-pinned single-image compose and pairing manifest that pass Runtime 12/18 validation', () => {
     const evidence = makeCandidateEvidence();
     const { composeYaml, composeJson, pairing } = renderEmbeddedReleaseArtifacts(evidence, {
       version: 'v2.0.0-beta.1',
@@ -302,14 +302,8 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
     expect(composeYaml).not.toContain(':latest');
     expect(composeYaml).not.toMatch(/^\s*build\s*:/m);
     expect(composeYaml).not.toContain('CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK');
-    expect(composeJson.services['cpamp-ingress'].image).toBe(
-      `seakee/cpamp-ingress:v2.0.0-beta.1@${evidence.images.ingress.platformManifestDigest}`
-    );
-    expect(composeJson.services['cpamp-manager'].image).toBe(
-      `seakee/cpa-manager-plus:v2.0.0-beta.1@${evidence.images.manager.platformManifestDigest}`
-    );
-    expect(composeJson.services['cpamp-runtime'].image).toBe(
-      `seakee/cpamp-runtime:v2.0.0-beta.1@${evidence.images.runtime.platformManifestDigest}`
+    expect(composeJson.services['cpa-manager-plus'].image).toBe(
+      `seakee/cpa-manager-plus:v2.0.0-beta.1@${evidence.images.full.platformManifestDigest}`
     );
 
     expect(pairing).toMatchObject({
@@ -322,9 +316,9 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
         artifact_id: `sha256:${fixture.sha}`,
       },
       fullweb: {
-        manifest_sha256: evidence.images.manager.fullWebSummary.manifestSHA256,
-        index_html_sha256: evidence.images.manager.fullWebSummary.indexHtmlSHA256,
-        asset_count: evidence.images.manager.fullWebSummary.assetCount,
+        manifest_sha256: evidence.images.full.fullWebSummary.manifestSHA256,
+        index_html_sha256: evidence.images.full.fullWebSummary.indexHtmlSHA256,
+        asset_count: evidence.images.full.fullWebSummary.assetCount,
       },
       api_contract: {
         sha256: apiContractSha,
@@ -337,14 +331,11 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
         size: Buffer.byteLength(composeYaml, 'utf8'),
       },
     });
-    expect(pairing.images.manager.image_config_digest).toBe(
-      evidence.images.manager.imageConfigDigest
+    expect(pairing.images.slim.image_config_digest).toBe(
+      evidence.images.slim.imageConfigDigest
     );
-    expect(pairing.images.ingress.image_config_digest).toBe(
-      evidence.images.ingress.imageConfigDigest
-    );
-    expect(pairing.images.runtime.image_config_digest).toBe(
-      evidence.images.runtime.imageConfigDigest
+    expect(pairing.images.full.image_config_digest).toBe(
+      evidence.images.full.imageConfigDigest
     );
   });
 
@@ -362,7 +353,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       renderEmbeddedReleaseArtifacts(evidence, {
         version: 'v2.0.0-beta.1',
         imageRefs: {
-          manager:
+          full:
             'seakee/cpa-manager-plus:latest@sha256:be0dee922347da5e33bf9546bb86447a7afa9973e3bc77a965908a31e43a0258',
         },
       })
@@ -373,37 +364,36 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       renderEmbeddedReleaseArtifacts(evidence, {
         version: 'v2.0.0-beta.1',
         imageRefs: {
-          ingress: 'seakee/cpamp-ingress:v2.0.0-beta.1',
+          slim: 'seakee/cpa-manager-plus:v2.0.0-beta.1',
         },
       })
     ).toThrow(/@sha256/);
 
-    // 3. Mismatched explicit digest for any role
+    // 3. Mismatched explicit digest for any variant
     expect(() =>
       renderEmbeddedReleaseArtifacts(evidence, {
         version: 'v2.0.0-beta.1',
         digests: {
-          runtime: 'sha256:' + '9'.repeat(64),
+          full: 'sha256:' + '9'.repeat(64),
         },
       })
-    ).toThrow(/manifest digest mismatch for runtime/);
+    ).toThrow(/manifest digest mismatch for full/);
 
-    // 4. Mismatched source_commit across roles / Manager binary
+    // 4. Mismatched source_commit across variants / Manager binary
     const driftedSourceEvidence = structuredClone(evidence);
-    driftedSourceEvidence.images.manager.goBinaryIdentity.managerCompiledSourceClaim =
+    driftedSourceEvidence.images.full.goBinaryIdentity.managerCompiledSourceClaim =
       '0'.repeat(40);
     expect(() => renderEmbeddedReleaseArtifacts(driftedSourceEvidence)).toThrow(
       /Manager compiled source commit/
     );
 
-    for (const role of ['manager', 'ingress', 'runtime']) {
+    for (const role of ['slim', 'full']) {
       const driftedRoleEvidence = structuredClone(evidence);
       driftedRoleEvidence.images[role].sourceCommitClaim = '0'.repeat(40);
       expect(() => renderEmbeddedReleaseArtifacts(driftedRoleEvidence)).toThrow(
         new RegExp(`${role} sourceCommitClaim differs`)
       );
     }
-
     // 5. Tampered Full Web manifest or API contract digest in pairing
     const badWebPairing = structuredClone(pairing);
     badWebPairing.fullweb.manifest_sha256 = 'sha256:' + '0'.repeat(64);
@@ -427,24 +417,24 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
 
     // 6. Compose injected with CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK, extra port, deeper-indented extra port, or unrecognized property
     const loopbackCompose = composeYaml.replace(
-      "      CPAMP_RUNTIME_CPA_GID: '10001'",
-      "      CPAMP_RUNTIME_CPA_GID: '10001'\n      CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: '1'"
+      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'\n      CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: '1'"
     );
     expect(() => composeYamlToRuntime12ConfigJson(loopbackCompose)).toThrow(
       /CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK/
     );
 
     const extraPortCompose = composeYaml.replace(
-      "    expose:\n      - '18317'",
-      "    ports:\n      - '18318:18317'\n    expose:\n      - '18317'"
+      "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
+      "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'\n      - '18318:18317'"
     );
     expect(() => composeYamlToRuntime12ConfigJson(extraPortCompose)).toThrow(
-      /expected only cpamp-ingress 18317:18317/
+      /expected only cpa-manager-plus 18317:18317/
     );
 
     const deepIndentExtraPortCompose = composeYaml.replace(
-      "    expose:\n      - '18317'",
-      "    ports:\n        - '18318:18317'\n    expose:\n      - '18317'"
+      "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
+      "    ports:\n        - '${CPAMP_PUBLIC_PORT:-18317}:18317'\n        - '18318:18317'"
     );
     const resyncedDeepIndentPairing = structuredClone(pairing);
     resyncedDeepIndentPairing.compose.sha256 =
@@ -456,50 +446,50 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
         composeText: deepIndentExtraPortCompose,
         pairing: resyncedDeepIndentPairing,
       })
-    ).toThrow(/expected only cpamp-ingress 18317:18317/);
+    ).toThrow(/expected only cpa-manager-plus 18317:18317/);
 
     const unrecognizedKeyCompose = composeYaml.replace(
-      '    restart: unless-stopped\n    expose:\n      - \'18317\'',
-      '    restart: unless-stopped\n    extra_hosts:\n      - "host.docker.internal:host-gateway"\n    expose:\n      - \'18317\''
+      '    restart: unless-stopped\n',
+      '    restart: unless-stopped\n    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
     );
     expect(() => composeYamlToRuntime12ConfigJson(unrecognizedKeyCompose)).toThrow(
-      /unrecognized compose service property cpamp-manager\.extra_hosts/
+      /unrecognized compose service property cpa-manager-plus\.extra_hosts/
     );
 
     // 7. P1-2: Non-boolean quoted strings for privileged or read_only
     const quotedPrivilegedTrue = composeYaml.replace(
-      '  cpamp-runtime:\n',
-      '  cpamp-runtime:\n    privileged: "true"\n'
+      '  cpa-manager-plus:\n',
+      '  cpa-manager-plus:\n    privileged: "true"\n'
     );
     expect(() => composeYamlToRuntime12ConfigJson(quotedPrivilegedTrue)).toThrow(
-      /cpamp-runtime\.privileged must be a boolean/
+      /cpa-manager-plus\.privileged must be a boolean/
     );
     const quotedPrivilegedFalse = composeYaml.replace(
-      '  cpamp-runtime:\n',
-      '  cpamp-runtime:\n    privileged: "false"\n'
+      '  cpa-manager-plus:\n',
+      '  cpa-manager-plus:\n    privileged: "false"\n'
     );
     expect(() => composeYamlToRuntime12ConfigJson(quotedPrivilegedFalse)).toThrow(
-      /cpamp-runtime\.privileged must be a boolean/
+      /cpa-manager-plus\.privileged must be a boolean/
     );
     const quotedReadOnlyFalse = composeYaml.replace(
-      '      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:ro',
-      '      - type: volume\n        source: cpamp-runtime-transport-secret\n        target: /run/cpamp/runtime-secret\n        read_only: "false"'
+      '      - cpamp-data:/data',
+      '      - type: volume\n        source: cpamp-data\n        target: /data\n        read_only: "false"'
     );
     expect(() => composeYamlToRuntime12ConfigJson(quotedReadOnlyFalse)).toThrow(
-      /cpamp-manager volume read_only must be a boolean/
+      /cpa-manager-plus volume read_only must be a boolean/
     );
     const quotedReadOnlyTrue = composeYaml.replace(
-      '      - cpamp-runtime-transport-secret:/run/cpamp/runtime-secret:ro',
-      '      - type: volume\n        source: cpamp-runtime-transport-secret\n        target: /run/cpamp/runtime-secret\n        read_only: "true"'
+      '      - cpamp-data:/data',
+      '      - type: volume\n        source: cpamp-data\n        target: /data\n        read_only: "true"'
     );
     expect(() => composeYamlToRuntime12ConfigJson(quotedReadOnlyTrue)).toThrow(
-      /cpamp-manager volume read_only must be a boolean/
+      /cpa-manager-plus volume read_only must be a boolean/
     );
 
-    // 8. P1-3: Cross-role state volume mount on Manager
+    // 8. P1-3: Cross-role state volume mount on cpa-manager-plus
     const crossRoleMountCompose = composeYaml.replace(
-      '      - cpamp-manager-data:/data',
-      '      - cpamp-manager-data:/data\n      - cpamp-runtime-data:/runtime-copy'
+      '      - cpamp-data:/data',
+      '      - cpamp-data:/data\n      - cpamp-runtime-data:/runtime-copy'
     );
     const resyncedCrossMountPairing = structuredClone(pairing);
     resyncedCrossMountPairing.compose.sha256 =
@@ -511,7 +501,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
         composeText: crossRoleMountCompose,
         pairing: resyncedCrossMountPairing,
       })
-    ).toThrow(/strict volume whitelist violation on cpamp-manager/);
+    ).toThrow(/strict volume whitelist violation on cpa-manager-plus/);
 
     // 9. P1-4 / Round-3 P2: Canonical port template verifies deterministically without reading process.env,
     // while UDP protocol, long-syntax port object, or literal different container port fail closed.
@@ -520,38 +510,38 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       composeText: composeYaml,
       pairing,
     });
-    expect(verifiedPort18317.composeDoc.services['cpamp-ingress'].ports).toEqual([
+    expect(verifiedPort18317.composeDoc.services['cpa-manager-plus'].ports).toEqual([
       { mode: 'ingress', published: '18317', target: 18317, protocol: 'tcp' },
     ]);
 
     // Round-3 P1: Top-level volume overrides (name/external/driver/driver_opts/labels) fail closed
     for (const badVolBlock of [
-      '  cpamp-manager-data:\n    name: cpamp-shared-state\n',
-      '  cpamp-manager-data:\n    external: true\n',
-      '  cpamp-manager-data:\n    driver: local\n',
-      '  cpamp-manager-data:\n    driver_opts:\n      o: bind\n',
-      '  cpamp-manager-data:\n    labels:\n      env: prod\n',
+      '  cpamp-data:\n    name: cpamp-shared-state\n',
+      '  cpamp-data:\n    external: true\n',
+      '  cpamp-data:\n    driver: local\n',
+      '  cpamp-data:\n    driver_opts:\n      o: bind\n',
+      '  cpamp-data:\n    labels:\n      env: prod\n',
     ]) {
-      const badVolCompose = composeYaml.replace('  cpamp-manager-data:\n', badVolBlock);
+      const badVolCompose = composeYaml.replace('  cpamp-data:\n', badVolBlock);
       expect(() => composeYamlToRuntime12ConfigJson(badVolCompose)).toThrow(
-        /top-level volume cpamp-manager-data must be a canonical empty definition/
+        /top-level volume cpamp-data must be a canonical empty definition/
       );
     }
 
     // Round-3 P1: Service mount volume sub-options fail closed
     const badSubVolCompose = composeYaml.replace(
-      '      - cpamp-manager-data:/data',
-      '      - type: volume\n        source: cpamp-manager-data\n        target: /data\n        volume:\n          nocopy: true'
+      '      - cpamp-data:/data',
+      '      - type: volume\n        source: cpamp-data\n        target: /data\n        volume:\n          nocopy: true'
     );
     expect(() => composeYamlToRuntime12ConfigJson(badSubVolCompose)).toThrow(
-      /volume sub-options on cpamp-manager mounts are forbidden/
+      /volume sub-options on cpa-manager-plus mounts are forbidden/
     );
     const udpPortCompose = composeYaml.replace(
       "      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
       "      - '${CPAMP_PUBLIC_PORT:-18317}:18317/udp'"
     );
     expect(() => composeYamlToRuntime12ConfigJson(udpPortCompose)).toThrow(
-      /expected only cpamp-ingress 18317:18317 via canonical/
+      /expected only cpa-manager-plus 18317:18317 via canonical/
     );
 
     const diffContainerPortCompose = composeYaml.replace(
@@ -559,9 +549,8 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       "      - '${CPAMP_PUBLIC_PORT:-18317}:18318'"
     );
     expect(() => composeYamlToRuntime12ConfigJson(diffContainerPortCompose)).toThrow(
-      /expected only cpamp-ingress 18317:18317 via canonical/
+      /expected only cpa-manager-plus 18317:18317 via canonical/
     );
-
     const longFormPortCompose = composeYaml.replace(
       "      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
       '      - target: 18317\n        published: "18317"\n        protocol: udp\n        host_ip: "0.0.0.0"\n        mode: host'
@@ -582,35 +571,35 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
     ).toThrow(/api_contract summary mismatch/);
 
     const missingImageRefPairing = structuredClone(pairing);
-    delete missingImageRefPairing.images.manager.image_ref;
+    delete missingImageRefPairing.images.full.image_ref;
     expect(() =>
       verifyEmbeddedReleaseArtifacts({
         evidence,
         composeText: composeYaml,
         pairing: missingImageRefPairing,
       })
-    ).toThrow(/image_ref missing or mismatched for manager/);
+    ).toThrow(/image_ref missing or mismatched for full/);
   });
 
   function officialEvidence() {
     const evidence = makeCandidateEvidence();
     evidence.officialCPA.verifiedFinalImageExecutableSHA256 = EXPECTED_CPA_SHA256;
-    evidence.images.runtime.packagedFiles[PACKAGED_PATHS.cpaBinary] = EXPECTED_CPA_ARTIFACT_ID;
+    evidence.images.full.packagedFiles[PACKAGED_PATHS.cpaBinary] = EXPECTED_CPA_ARTIFACT_ID;
     return evidence;
   }
 
-  it('requires all three archives on every public release API regardless of caller options', () => {
+  it('requires both variant archives on every public release API regardless of caller options', () => {
     const evidence = officialEvidence();
     const { composeYaml, pairing } = renderEmbeddedReleaseArtifacts(makeCandidateEvidence());
     pairing.cpa.artifact_id = EXPECTED_CPA_ARTIFACT_ID;
     for (const options of [{}, { requireOciArchives: false }]) {
-      expect(() => publicRender(evidence, options)).toThrow(/missing required OCI archive for manager/);
-      expect(() => resolveFullWebAndApiMetadata(evidence, options)).toThrow(/missing required OCI archive for manager/);
+      expect(() => publicRender(evidence, options)).toThrow(/missing required OCI archive for slim/);
+      expect(() => resolveFullWebAndApiMetadata(evidence, options)).toThrow(/missing required OCI archive for slim/);
       expect(() => publicVerify({ evidence, composeText: composeYaml, pairing, ...options }))
-        .toThrow(/missing required OCI archive for manager/);
+        .toThrow(/missing required OCI archive for slim/);
     }
-    for (const missing of ['manager', 'ingress', 'runtime']) {
-      const roleOciPaths = Object.fromEntries(['manager', 'ingress', 'runtime'].map(role =>
+    for (const missing of ['slim', 'full']) {
+      const roleOciPaths = Object.fromEntries(['slim', 'full'].map(role =>
         [role, join(fixtureDir, role === missing ? `missing-${role}.oci.tar` : `${role}.oci.tar`)]));
       const error = new RegExp(`missing required OCI archive for ${missing}`);
       expect(() => publicRender(evidence, { roleOciPaths })).toThrow(error);
@@ -675,7 +664,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
     const { composeYaml, pairing } = renderEmbeddedReleaseArtifacts(syntheticEvidence);
     const syntheticPairing = structuredClone(pairing);
     expect(syntheticPairing.cpa.artifact_id).toBe(`sha256:${fixture.sha}`);
-    const runtimeTar = join(fixtureDir, 'runtime.oci.tar');
+    const fullTar = join(fixtureDir, 'full.oci.tar');
     const syntheticEvidencePath = join(fixtureDir, 'candidate-evidence.json');
     const syntheticPairingPath = join(fixtureDir, 'synthetic-pairing.json');
     const evidencePath = join(fixtureDir, 'official-evidence.json');
@@ -730,7 +719,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
       ).toThrow(/officialCPA pin mismatch/);
 
       expect(() =>
-        mod.verifyOciArchiveAgainstRoleEvidence(runtimeTar, 'runtime', evidence)
+        mod.verifyOciArchiveAgainstRoleEvidence(fullTar, 'full', evidence)
       ).toThrow(/official CPA v8\.0\.55 executable hash mismatch/);
       expect(() =>
         mod.resolveFullWebAndApiMetadata(evidence, { evidenceDir: fixtureDir })
@@ -880,7 +869,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
   it('rejects missing archives and malformed receipts in the isolated fixture', () => {
     const evidence = makeCandidateEvidence();
     const { composeYaml, pairing } = renderEmbeddedReleaseArtifacts(evidence);
-    for (const role of ['manager', 'ingress', 'runtime']) {
+    for (const role of ['slim', 'full']) {
       const path = join(fixtureDir, `${role}.oci.tar`);
       renameSync(path, path + '.saved');
       try {
@@ -891,10 +880,10 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
     }
     for (const archive of [null, '', 'wrong.tar']) {
       const bad = structuredClone(evidence);
-      bad.images.manager.archive = archive;
-      expect(() => renderEmbeddedReleaseArtifacts(bad)).toThrow(/invalid or missing archive filename for manager/);
+      bad.images.full.archive = archive;
+      expect(() => renderEmbeddedReleaseArtifacts(bad)).toThrow(/invalid or missing archive filename for full/);
     }
-    evidence.images.runtime.packagedFiles[PACKAGED_PATHS.cpaArtifact] = 'sha256:' + '7'.repeat(64);
+    evidence.images.full.packagedFiles[PACKAGED_PATHS.cpaArtifact] = 'sha256:' + '7'.repeat(64);
     expect(() => renderEmbeddedReleaseArtifacts(evidence)).toThrow(/CPA artifact manifest digest mismatch/);
     expect(() => verifyEmbeddedReleaseArtifacts({ evidence, composeText: composeYaml, pairing })).toThrow(/CPA artifact manifest digest mismatch/);
   });
@@ -910,8 +899,8 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
   });
 
   it('keeps template verification independent of deployment host binding', () => {
-    const refs = Object.fromEntries(['manager', 'ingress', 'runtime'].map(role => [role,
-      `seakee/${role}:v2.0.0-beta.1@${makeCandidateEvidence().images[role].platformManifestDigest}`]));
+    const refs = Object.fromEntries(['slim', 'full'].map(role => [role,
+      `seakee/cpa-manager-plus:v2.0.0-beta.1@${makeCandidateEvidence().images[role].platformManifestDigest}`]));
     const compose = renderEmbeddedComposeYaml(refs);
     const path = join(fixtureDir, 'port-template.yml');
     writeFileSync(path, compose);
@@ -924,7 +913,7 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
          import { readFileSync } from 'node:fs';
          console.log(JSON.stringify(composeYamlToRuntime12ConfigJson(readFileSync(process.argv[1], 'utf8'))));`, path],
         { cwd: new URL('..', import.meta.url), env, encoding: 'utf8' });
-      expect(JSON.parse(projected).services['cpamp-ingress'].ports).toEqual([
+      expect(JSON.parse(projected).services['cpa-manager-plus'].ports).toEqual([
         { mode: 'ingress', published: '18317', target: 18317, protocol: 'tcp' },
       ]);
     }

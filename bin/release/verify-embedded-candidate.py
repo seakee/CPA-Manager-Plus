@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a disposable, local-only OCI Embedded trio. Never publishes or signs a release.
+"""Verify disposable, local-only OCI Embedded single-image variants (slim and full). Never publishes or signs a release.
 
 Input archives must be produced by one explicitly identified candidate build event.
 A self-asserted build event is NOT protected-producer provenance.
@@ -20,7 +20,7 @@ import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
 
-ROLES = ("manager", "ingress", "runtime")
+ROLES = ("slim", "full")
 SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 SOURCE = "https://github.com/seakee/CPA-Manager-Plus"
 CANDIDATE_VERSION = "2.0.0-r1candidate"
@@ -35,40 +35,54 @@ NOTICE = "/usr/local/share/cpamp/release/third-party-inventory.txt"
 WEB_MANIFEST = "/usr/local/share/cpamp/release/fullweb-manifest.json"
 API_CONTRACT = "/usr/local/share/cpamp/release/public-api-transport-contract.json"
 API_CONTRACT_QUALIFICATION = "SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY"
+COMMON_WANTED = (
+    "/usr/local/bin/cpamp-launcher",
+    "/usr/local/bin/cpa-manager-plus",
+    "/usr/local/bin/cpamp-ingress",
+    "/usr/local/bin/cpamp-runtime-supervisor",
+    "/usr/local/share/cpamp/runtime/cpa-artifact.json",
+    "/usr/local/share/cpamp/runtime/config.seed.yaml",
+    LICENSE,
+    NOTICE,
+    WEB_MANIFEST,
+    API_CONTRACT,
+    image_evidence.PROVENANCE,
+    image_evidence.SOURCE_INVENTORY,
+)
 WANTED = {
-    "manager": ("/usr/local/bin/cpa-manager-plus", LICENSE, NOTICE, WEB_MANIFEST, API_CONTRACT),
-    "ingress": ("/usr/local/bin/cpamp-ingress", LICENSE, NOTICE),
-    "runtime": (
-        "/usr/local/bin/cpamp-runtime-supervisor",
+    "slim": COMMON_WANTED,
+    "full": COMMON_WANTED + (
         "/usr/local/bin/cli-proxy-api",
-        "/usr/local/share/cpamp/runtime/cpa-artifact.json",
-        "/usr/local/share/cpamp/runtime/config.seed.yaml",
-        "/usr/local/bin/cpamp-runtime-v8-entrypoint",
         "/usr/local/share/licenses/cli-proxy-api/LICENSE",
-        LICENSE, NOTICE,
     ),
 }
-WANTED = {role: paths + (image_evidence.PROVENANCE, image_evidence.SOURCE_INVENTORY)
-          for role, paths in WANTED.items()}
+FORBIDDEN = {
+    "slim": (
+        "/usr/local/bin/cli-proxy-api",
+        "/usr/local/share/licenses/cli-proxy-api/LICENSE",
+    ),
+    "full": (),
+}
 MAX_BLOB = 512 * 1024 * 1024
 MAX_FILE = 128 * 1024 * 1024
 MAX_UNCOMPRESSED_LAYER = 768 * 1024 * 1024
 GO_MODULES = {
+    "launcher": ("github.com/seakee/cpa-manager-plus/apps/runtime-supervisor", "cmd/cpamp-launcher"),
     "manager": ("github.com/seakee/cpa-manager-plus/apps/manager-server", "cmd/cpa-manager-plus"),
     "ingress": ("github.com/seakee/cpa-manager-plus/apps/ingress", "cmd/cpamp-ingress"),
-    "runtime": ("github.com/seakee/cpa-manager-plus/apps/runtime-supervisor", "cmd/cpamp-runtime-supervisor"),
+    "runtime-supervisor": ("github.com/seakee/cpa-manager-plus/apps/runtime-supervisor", "cmd/cpamp-runtime-supervisor"),
 }
 GO_BINARIES = {
+    "launcher": "/usr/local/bin/cpamp-launcher",
     "manager": "/usr/local/bin/cpa-manager-plus",
     "ingress": "/usr/local/bin/cpamp-ingress",
-    "runtime": "/usr/local/bin/cpamp-runtime-supervisor",
+    "runtime-supervisor": "/usr/local/bin/cpamp-runtime-supervisor",
 }
-RUNTIME_ENTRYPOINT = "/usr/local/bin/cpamp-runtime-v8-entrypoint"
-# Exact startup contract of the three R1-1 Dockerfile final stages.
+LAUNCHER_ENTRYPOINT = "/usr/local/bin/cpamp-launcher"
+# Exact startup contract of the single-image Dockerfile final stages.
 STARTUP = {
-    "manager": (["cpa-manager-plus"], None),
-    "ingress": (["/usr/local/bin/cpamp-ingress"], None),
-    "runtime": ([RUNTIME_ENTRYPOINT], ["/usr/local/bin/cpamp-runtime-supervisor"]),
+    "slim": ([LAUNCHER_ENTRYPOINT], None),
+    "full": ([LAUNCHER_ENTRYPOINT], None),
 }
 MANIFEST_TYPE = "application/vnd.oci.image.manifest.v1+json"
 CONFIG_TYPE = "application/vnd.oci.image.config.v1+json"
@@ -168,18 +182,23 @@ def check_manager_linker_identity(raw_flags, module, source_sha):
     try:
         tokens = shlex.split(raw_flags)
         # Go metadata records the entire -ldflags argument as a quoted string.
-        if len(tokens) == 1 and tokens[0].startswith("-X "):
+        if len(tokens) == 1 and (tokens[0].startswith("-X ") or tokens[0].startswith("-s ") or tokens[0].startswith("-w ")):
             tokens = shlex.split(tokens[0])
     except ValueError as exc:
         raise ValueError("invalid Manager linker flag quoting") from exc
     assignments = {}
-    for index in range(0, len(tokens), 2):
+    index = 0
+    while index < len(tokens):
+        if tokens[index] in ("-s", "-w"):
+            index += 1
+            continue
         require(index + 1 < len(tokens) and tokens[index] == "-X",
                 "unexpected Manager linker flag")
         key, separator, value = tokens[index + 1].partition("=")
         require(separator == "=" and key and key not in assignments,
                 "invalid or duplicate Manager linker assignment")
         assignments[key] = value
+        index += 2
     expected = {
         module + "/internal/buildinfo.SourceCommit": source_sha,
         module + "/internal/buildinfo.Version": CANDIDATE_VERSION,
@@ -237,10 +256,25 @@ def check_go_binary(data, role, source_sha):
             "goTarget": "linux/amd64",
             "managerCompiledSourceClaim": source_sha if role == "manager" else None}
 
+def check_go_binaries(files, source_sha):
+    components = {
+        component: check_go_binary(files[path], component, source_sha)
+        for component, path in GO_BINARIES.items()
+    }
+    manager_identity = components["manager"]
+    return {
+        "module": manager_identity["module"],
+        "entrypoint": manager_identity["entrypoint"],
+        "goTarget": "linux/amd64",
+        "managerCompiledSourceClaim": manager_identity["managerCompiledSourceClaim"],
+        "components": components,
+    }
 
-def final_files(archive, layers, diff_ids, wanted):
+
+def final_files(archive, layers, diff_ids, wanted, forbidden=()):
     result = {}
     permissions = {}
+    tracked = set(wanted) | set(forbidden)
     require(len(layers) == len(diff_ids), "OCI layer/diff_ids count mismatch")
     for descriptor, diff_id in zip(layers, diff_ids):
         raw = read_descriptor(archive, descriptor, (LAYER_TAR, LAYER_GZIP))
@@ -264,7 +298,7 @@ def final_files(archive, layers, diff_ids, wanted):
                             del result[target]
                             permissions.pop(target, None)
                     continue
-                if name not in wanted and (not name.startswith(image_evidence.LICENSE_ROOT) or member.isdir()):
+                if name not in tracked and (not name.startswith(image_evidence.LICENSE_ROOT) or member.isdir()):
                     continue
                 require(member.isfile() and member.size <= MAX_FILE,
                         "missing regular file in final image: " + name)
@@ -272,11 +306,12 @@ def final_files(archive, layers, diff_ids, wanted):
                 require(stream is not None, "unreadable final image file: " + name)
                 result[name] = stream.read()
                 permissions[name] = member.mode
+    unexpected = sorted(set(forbidden) & set(result))
+    require(not unexpected, "unexpected packaged files: " + ", ".join(unexpected))
     require(set(wanted) <= set(result), "missing packaged files: " +
             ", ".join(sorted(set(wanted) - set(result))))
     return result, permissions
-
-def inspect(path, role, source_sha, event, root_license, seed, runtime_entrypoint):
+def inspect(path, role, source_sha, event, root_license, seed):
     require(path.is_file(), "missing OCI archive: " + str(path))
     with tarfile.open(path, mode="r:*") as archive:
         layout = json_object(read_member(archive, "oci-layout", 4096), "oci-layout")
@@ -323,69 +358,82 @@ def inspect(path, role, source_sha, event, root_license, seed, runtime_entrypoin
         require(labels.get("io.cpamp.candidate.event") == event and
                 labels.get("io.cpamp.candidate.role") == role,
                 "candidate build event or role mismatch")
-        files, modes = final_files(archive, layers, rootfs["diff_ids"], WANTED[role])
+        files, modes = final_files(archive, layers, rootfs["diff_ids"], WANTED[role], FORBIDDEN[role])
         require(files[LICENSE] == root_license, "CPAMP LICENSE differs from source")
         inventory = json_object(files[NOTICE], "third-party inventory")
-        image_evidence.validate_inventory(inventory, role, files.__getitem__)
         provenance = json_object(files[image_evidence.PROVENANCE], "component provenance")
-        image_evidence.validate_provenance(provenance, role, CANDIDATE_VERSION, source_sha, files.__getitem__)
+        cpa_bundled = role == "full"
+        require(provenance.get("role") == "cpamp",
+                "component provenance role mismatch: " + role)
+        require(provenance.get("cpaBundled", True) is cpa_bundled,
+                "component provenance cpaBundled mismatch: " + role)
+        image_evidence.validate_inventory(
+            inventory, "cpamp", files.__getitem__, cpa_bundled=cpa_bundled
+        )
+        image_evidence.validate_provenance(
+            provenance, "cpamp", CANDIDATE_VERSION, source_sha, files.__getitem__,
+            cpa_bundled=cpa_bundled,
+        )
         require(provenance["platform"] == "linux/amd64", "provenance platform mismatch")
         for path_ in WANTED[role]:
             if path_.startswith("/usr/local/bin/"):
                 require(modes[path_] & 0o111 and not modes[path_] & 0o6000,
                         "final image file is not safely executable: " + path_)
-                if path_ == "/usr/local/bin/cpamp-runtime-v8-entrypoint":
-                    require(files[path_].startswith(b"#!/"),
-                            "runtime entrypoint script lacks shebang")
-                else:
-                    check_amd64_elf(files[path_], path_)
-        compiled_identity = check_go_binary(files[GO_BINARIES[role]], role, source_sha)
-        if role == "runtime":
-            require(files[RUNTIME_ENTRYPOINT] == runtime_entrypoint,
-                    "Runtime entrypoint differs from locked source")
+                check_amd64_elf(files[path_], path_)
+        compiled_identity = check_go_binaries(files, source_sha)
+        if cpa_bundled:
             require(hashlib.sha256(files["/usr/local/bin/cli-proxy-api"]).hexdigest() == CPA_SHA,
                     "official CPA v8.0.55 executable hash mismatch")
-            manifest_file = json_object(files["/usr/local/share/cpamp/runtime/cpa-artifact.json"],
-                                        "CPA artifact")
+            require(hashlib.sha256(files["/usr/local/share/licenses/cli-proxy-api/LICENSE"]).hexdigest()
+                    == CPA_LICENSE_SHA, "official CPA license mismatch")
+        manifest_file = json_object(files["/usr/local/share/cpamp/runtime/cpa-artifact.json"],
+                                    "CPA artifact")
+        if cpa_bundled:
             require(manifest_file == {"schemaVersion": 1, "engine": "cpa",
                                      "version": "8.0.55", "artifactId": "sha256:" + CPA_SHA},
                     "CPA artifact identity mismatch")
-            require(hashlib.sha256(files["/usr/local/share/licenses/cli-proxy-api/LICENSE"]).hexdigest()
-                    == CPA_LICENSE_SHA, "official CPA license mismatch")
-            require(files["/usr/local/share/cpamp/runtime/config.seed.yaml"] == seed,
-                    "official v8 default seed mismatch")
-        extra = {}
-        if role == "manager":
-            api_contract = json_object(files[API_CONTRACT], "Public API transport contract")
-            require(api_contract.get("schemaVersion") == 1 and
-                    api_contract.get("qualification") == API_CONTRACT_QUALIFICATION and
-                    api_contract.get("apiSuffix") == "/api/v2" and
-                    api_contract.get("expectedPath") == "/phase4-test/api/v2/technical",
-                    "unqualified or mismatched Web/API transport contract")
-            fullweb = json_object(files[WEB_MANIFEST], "Full Web file-set manifest")
-            require(fullweb.get("schemaVersion") == 1 and
-                    isinstance(fullweb.get("files"), list) and len(fullweb["files"]) > 0,
-                    "missing complete Full Web evidence")
-            names = [item.get("path") for item in fullweb["files"] if isinstance(item, dict)]
-            require(len(names) == len(fullweb["files"]) and len(set(names)) == len(names) and
-                    any(n == "index.html" for n in names) and
-                    all(isinstance(item.get("sha256"), str) and SHA.fullmatch(item["sha256"])
-                        for item in fullweb["files"]),
-                    "invalid Full Web file-set evidence")
-            index_html = next(item["sha256"] for item in fullweb["files"]
-                              if item["path"] == "index.html")
-            extra["fullWebSummary"] = {
+        else:
+            require(manifest_file.get("schemaVersion") == 1 and
+                    manifest_file.get("engine") == "cpa" and
+                    manifest_file.get("version") == "8.0.55" and
+                    isinstance(manifest_file.get("artifactId"), str) and
+                    SHA.fullmatch(manifest_file["artifactId"]) is not None,
+                    "CPA artifact identity mismatch")
+        require(files["/usr/local/share/cpamp/runtime/config.seed.yaml"] == seed,
+                "official v8 default seed mismatch")
+        api_contract = json_object(files[API_CONTRACT], "Public API transport contract")
+        require(api_contract.get("schemaVersion") == 1 and
+                api_contract.get("qualification") == API_CONTRACT_QUALIFICATION and
+                api_contract.get("apiSuffix") == "/api/v2" and
+                api_contract.get("expectedPath") == "/phase4-test/api/v2/technical",
+                "unqualified or mismatched Web/API transport contract")
+        fullweb = json_object(files[WEB_MANIFEST], "Full Web file-set manifest")
+        require(fullweb.get("schemaVersion") == 1 and
+                isinstance(fullweb.get("files"), list) and len(fullweb["files"]) > 0,
+                "missing complete Full Web evidence")
+        names = [item.get("path") for item in fullweb["files"] if isinstance(item, dict)]
+        require(len(names) == len(fullweb["files"]) and len(set(names)) == len(names) and
+                any(n == "index.html" for n in names) and
+                all(isinstance(item.get("sha256"), str) and SHA.fullmatch(item["sha256"])
+                    for item in fullweb["files"]),
+                "invalid Full Web file-set evidence")
+        index_html = next(item["sha256"] for item in fullweb["files"]
+                          if item["path"] == "index.html")
+        extra = {
+            "cpaBundled": cpa_bundled,
+            "fullWebSummary": {
                 "manifestSHA256": digest(files[WEB_MANIFEST]),
                 "indexHtmlSHA256": index_html,
                 "assetCount": len(fullweb["files"]),
-            }
-            extra["apiTransportContract"] = {
+            },
+            "apiTransportContract": {
                 "sha256": digest(files[API_CONTRACT]),
                 "contractId": api_contract.get("contractId"),
                 "qualification": api_contract["qualification"],
                 "apiSuffix": api_contract["apiSuffix"],
                 "expectedPath": api_contract["expectedPath"],
-            }
+            },
+        }
         return {
             "archive": path.name,
             "archiveSHA256": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -404,19 +452,29 @@ def verify(paths, source_sha, event, root):
     require(re.fullmatch(r"[A-Za-z0-9._-]{8,128}", event) is not None, "invalid build event")
     license_bytes = (root / "LICENSE").read_bytes()
     seed = (root / "docker/runtime/config.v8.default.seed.yaml").read_bytes()
-    runtime_entrypoint = (root / "docker/runtime/v8-entrypoint.sh").read_bytes()
     inventory_bytes = (root / "bin/release/embedded-third-party-inventory.txt").read_bytes()
     api_contract_bytes = (root / "tests/fixtures/r1-embedded-api-transport.json").read_bytes()
     result = {role: inspect(paths[role], role, source_sha, event,
-                            license_bytes, seed, runtime_entrypoint)
+                            license_bytes, seed)
               for role in ROLES}
     for role in ROLES:
         require(result[role]["packagedFiles"][image_evidence.SOURCE_INVENTORY] == digest(inventory_bytes),
                 "final image source dependency inventory differs from checked source: " + role)
-    require(result["manager"]["packagedFiles"][API_CONTRACT] == digest(api_contract_bytes),
-            "final Manager public API transport contract differs from checked source")
-    require(len({result[role]["platformManifestDigest"] for role in ROLES}) == 3,
-            "three different image manifests required")
+        require(result[role]["packagedFiles"][API_CONTRACT] == digest(api_contract_bytes),
+                "final image public API transport contract differs from checked source: " + role)
+    for shared_path in (
+        *GO_BINARIES.values(),
+        WEB_MANIFEST,
+        API_CONTRACT,
+        "/usr/local/share/cpamp/runtime/cpa-artifact.json",
+        "/usr/local/share/cpamp/runtime/config.seed.yaml",
+        LICENSE,
+        image_evidence.SOURCE_INVENTORY,
+    ):
+        require(result["slim"]["packagedFiles"][shared_path] == result["full"]["packagedFiles"][shared_path],
+                "shared packaged file digest differs between slim and full: " + shared_path)
+    require(len({result[role]["platformManifestDigest"] for role in ROLES}) == len(ROLES),
+            "distinct image manifests required for slim and full")
     return {
         "schemaVersion": 1,
         "status": "STRUCTURAL_CANDIDATE_EVIDENCE_ONLY_NOT_RELEASE_QUALIFIED",
@@ -477,9 +535,9 @@ def parse_compose_service_images(compose_text):
                 value = value[1:-1]
             require(services[current] is None, "duplicate image key in " + current)
             services[current] = value
-    expected_services = {"cpamp-" + role for role in ROLES}
+    expected_services = {"cpa-manager-plus"}
     require(set(services) == expected_services and all(services.values()),
-            "rendered compose must define image references for cpamp-ingress, cpamp-manager and cpamp-runtime")
+            "rendered compose must define image reference for cpa-manager-plus")
     return services
 
 
@@ -531,86 +589,98 @@ def verify_archive_anchor(path, role, evidence, pairing, source_commit):
                     "OCI archive build event label mismatch: " + role)
         layers = manifest.get("layers")
         rootfs = config.get("rootfs") or {}
-        wanted = {GO_BINARIES[role], image_evidence.PROVENANCE}
-        if role == "manager":
-            wanted.update({WEB_MANIFEST, API_CONTRACT})
-        if role == "runtime":
+        cpa_bundled = role == "full"
+        wanted = set(GO_BINARIES.values()) | {
+            image_evidence.PROVENANCE,
+            WEB_MANIFEST,
+            API_CONTRACT,
+            "/usr/local/share/cpamp/runtime/cpa-artifact.json",
+            "/usr/local/share/cpamp/runtime/config.seed.yaml",
+        }
+        if cpa_bundled:
             wanted.update({
                 "/usr/local/bin/cli-proxy-api",
-                "/usr/local/share/cpamp/runtime/cpa-artifact.json",
+                "/usr/local/share/licenses/cli-proxy-api/LICENSE",
             })
-        files, _ = final_files(archive, layers, rootfs.get("diff_ids") or [], wanted)
-        compiled_identity = check_go_binary(files[GO_BINARIES[role]], role, source_commit)
+        files, _ = final_files(archive, layers, rootfs.get("diff_ids") or [], wanted, FORBIDDEN[role])
+        compiled_identity = check_go_binaries(files, source_commit)
         require(compiled_identity.get("managerCompiledSourceClaim") ==
                 ev_img["goBinaryIdentity"].get("managerCompiledSourceClaim"),
                 "OCI archive Go binary source claim mismatch: " + role)
-        require(digest(files[GO_BINARIES[role]]) == ev_img["packagedFiles"][GO_BINARIES[role]] and
-                digest(files[GO_BINARIES[role]]) == pairing["images"][role]["binary_sha256"],
+        for bin_path in GO_BINARIES.values():
+            require(digest(files[bin_path]) == ev_img["packagedFiles"][bin_path],
+                    "OCI archive binary SHA256 mismatch: " + role)
+        require(digest(files[GO_BINARIES["manager"]]) == pairing["images"][role]["binary_sha256"],
                 "OCI archive binary SHA256 mismatch: " + role)
         provenance = json_object(files[image_evidence.PROVENANCE], "component provenance")
         require(provenance.get("sourceCommit") == source_commit and
-                provenance.get("role") == role,
+                provenance.get("role") == "cpamp" and
+                provenance.get("cpaBundled", True) is cpa_bundled,
                 "OCI archive provenance sourceCommit/role mismatch: " + role)
         require(digest(files[image_evidence.PROVENANCE]) == ev_img["packagedFiles"][image_evidence.PROVENANCE] and
                 digest(files[image_evidence.PROVENANCE]) == pairing["images"][role]["release_provenance_sha256"],
                 "OCI archive provenance SHA256 mismatch: " + role)
-        if role == "manager":
-            fullweb = json_object(files[WEB_MANIFEST], "Full Web file-set manifest")
-            require(fullweb.get("schemaVersion") == 1 and
-                    isinstance(fullweb.get("files"), list) and len(fullweb["files"]) >= 2,
-                    "invalid Full Web manifest in Manager OCI archive")
-            index_html = next(
-                (item["sha256"] for item in fullweb["files"]
-                 if isinstance(item, dict) and item.get("path") == "index.html"),
-                None,
-            )
-            require(isinstance(index_html, str) and SHA.fullmatch(index_html) is not None,
-                    "missing valid index.html entry in Manager OCI archive Full Web manifest")
-            web_sha = digest(files[WEB_MANIFEST])
-            require(web_sha == ev_img["packagedFiles"][WEB_MANIFEST] and
-                    pairing["fullweb"] == {
-                        "manifest_sha256": web_sha,
-                        "index_html_sha256": index_html,
-                        "asset_count": len(fullweb["files"]),
-                    },
-                    "OCI archive Full Web manifest or index.html summary mismatch against pairing")
-            if "fullWebSummary" in ev_img:
-                require(ev_img["fullWebSummary"] == {
-                    "manifestSHA256": web_sha,
-                    "indexHtmlSHA256": index_html,
-                    "assetCount": len(fullweb["files"]),
-                }, "OCI archive Full Web summary differs from manager.fullWebSummary")
-            api_obj = json_object(files[API_CONTRACT], "Public API transport contract")
-            api_sha = digest(files[API_CONTRACT])
-            require(api_sha == ev_img["packagedFiles"][API_CONTRACT] and
-                    pairing["api_contract"] == {
-                        "sha256": api_sha,
-                        "contract_id": api_obj.get("contractId"),
-                        "qualification": api_obj.get("qualification"),
-                        "api_suffix": api_obj.get("apiSuffix"),
-                        "expected_path": api_obj.get("expectedPath"),
-                    },
-                    "OCI archive API transport contract mismatch against pairing")
-        if role == "runtime":
+        fullweb = json_object(files[WEB_MANIFEST], "Full Web file-set manifest")
+        require(fullweb.get("schemaVersion") == 1 and
+                isinstance(fullweb.get("files"), list) and len(fullweb["files"]) >= 2,
+                "invalid Full Web manifest in OCI archive: " + role)
+        index_html = next(
+            (item["sha256"] for item in fullweb["files"]
+             if isinstance(item, dict) and item.get("path") == "index.html"),
+            None,
+        )
+        require(isinstance(index_html, str) and SHA.fullmatch(index_html) is not None,
+                "missing valid index.html entry in OCI archive Full Web manifest: " + role)
+        web_sha = digest(files[WEB_MANIFEST])
+        require(web_sha == ev_img["packagedFiles"][WEB_MANIFEST] and
+                pairing["fullweb"] == {
+                    "manifest_sha256": web_sha,
+                    "index_html_sha256": index_html,
+                    "asset_count": len(fullweb["files"]),
+                },
+                "OCI archive Full Web manifest or index.html summary mismatch against pairing")
+        if "fullWebSummary" in ev_img:
+            require(ev_img["fullWebSummary"] == {
+                "manifestSHA256": web_sha,
+                "indexHtmlSHA256": index_html,
+                "assetCount": len(fullweb["files"]),
+            }, "OCI archive Full Web summary differs from fullWebSummary: " + role)
+        api_obj = json_object(files[API_CONTRACT], "Public API transport contract")
+        api_sha = digest(files[API_CONTRACT])
+        require(api_sha == ev_img["packagedFiles"][API_CONTRACT] and
+                pairing["api_contract"] == {
+                    "sha256": api_sha,
+                    "contract_id": api_obj.get("contractId"),
+                    "qualification": api_obj.get("qualification"),
+                    "api_suffix": api_obj.get("apiSuffix"),
+                    "expected_path": api_obj.get("expectedPath"),
+                },
+                "OCI archive API transport contract mismatch against pairing")
+        cpa_artifact_path = "/usr/local/share/cpamp/runtime/cpa-artifact.json"
+        cpa_artifact_bytes = files[cpa_artifact_path]
+        require(digest(cpa_artifact_bytes) == ev_img["packagedFiles"].get(cpa_artifact_path),
+                "OCI archive CPA artifact manifest digest mismatch against evidence")
+        cpa_artifact = json_object(cpa_artifact_bytes, "CPA artifact manifest")
+        if cpa_bundled:
             cpa_bytes = files["/usr/local/bin/cli-proxy-api"]
             actual_cpa_digest = digest(cpa_bytes)
             require(hashlib.sha256(cpa_bytes).hexdigest() == CPA_SHA and
                     actual_cpa_digest == ev_img["packagedFiles"].get("/usr/local/bin/cli-proxy-api") and
                     actual_cpa_digest == pairing["cpa"]["artifact_id"],
                     "OCI archive official CPA v8.0.55 executable hash mismatch")
-            cpa_artifact_path = "/usr/local/share/cpamp/runtime/cpa-artifact.json"
-            cpa_artifact_bytes = files[cpa_artifact_path]
-            require(digest(cpa_artifact_bytes) == ev_img["packagedFiles"].get(cpa_artifact_path),
-                    "OCI archive CPA artifact manifest digest mismatch against evidence")
-            cpa_artifact = json_object(cpa_artifact_bytes, "CPA artifact manifest")
             require(cpa_artifact == {
                 "schemaVersion": 1,
                 "engine": "cpa",
                 "version": "8.0.55",
                 "artifactId": "sha256:" + CPA_SHA,
-            }, "OCI archive CPA artifact manifest mismatch for runtime")
-
-
+            }, "OCI archive CPA artifact manifest mismatch for " + role)
+        else:
+            require(cpa_artifact.get("schemaVersion") == 1 and
+                    cpa_artifact.get("engine") == "cpa" and
+                    cpa_artifact.get("version") == "8.0.55" and
+                    isinstance(cpa_artifact.get("artifactId"), str) and
+                    SHA.fullmatch(cpa_artifact["artifactId"]) is not None,
+                    "OCI archive CPA artifact manifest mismatch for " + role)
 def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=None):
     require(type(evidence) is dict and evidence.get("schemaVersion") == 1,
             "invalid candidate evidence for pairing verification")
@@ -626,30 +696,33 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
     image_evidence.identity(version, source_commit)
     require(version.lower() != "latest", "pairing version must not be latest")
     require(pairing.get("source_commit") == source_commit, "pairing source_commit mismatch")
-    require(evidence["images"]["manager"]["goBinaryIdentity"].get("managerCompiledSourceClaim") == source_commit,
-            "Manager compiled source commit mismatch")
+    for role in ROLES:
+        require(evidence["images"][role]["goBinaryIdentity"].get("managerCompiledSourceClaim") == source_commit,
+                "Manager compiled source commit mismatch")
     require(pairing.get("platform") == "linux/amd64" and evidence.get("platform") == "linux/amd64",
             "pairing platform mismatch")
     cpa_exec = evidence.get("officialCPA", {}).get("verifiedFinalImageExecutableSHA256")
     require(cpa_exec == CPA_SHA, "candidate evidence official CPA executable mismatch")
     require(pairing.get("cpa") == {"version": "8.0.55", "artifact_id": "sha256:" + CPA_SHA},
             "pairing CPA identity mismatch")
-    manager_record = evidence["images"]["manager"]
-    manager_files = manager_record["packagedFiles"]
+    full_record = evidence["images"]["full"]
+    full_files = full_record["packagedFiles"]
     fullweb = pairing.get("fullweb")
     require(type(fullweb) is dict and
-            fullweb.get("manifest_sha256") == manager_files.get(WEB_MANIFEST) and
+            fullweb.get("manifest_sha256") == full_files.get(WEB_MANIFEST) and
             isinstance(fullweb.get("index_html_sha256"), str) and
             SHA.fullmatch(fullweb["index_html_sha256"]) is not None and
             type(fullweb.get("asset_count")) is int and fullweb["asset_count"] >= 2,
             "pairing fullweb summary mismatch")
-    if "fullWebSummary" in manager_record:
-        require(fullweb["index_html_sha256"] == manager_record["fullWebSummary"]["indexHtmlSHA256"] and
-                fullweb["asset_count"] == manager_record["fullWebSummary"]["assetCount"],
-                "pairing fullweb summary differs from manager.fullWebSummary")
+    for role in ROLES:
+        role_record = evidence["images"][role]
+        if "fullWebSummary" in role_record:
+            require(fullweb["index_html_sha256"] == role_record["fullWebSummary"]["indexHtmlSHA256"] and
+                    fullweb["asset_count"] == role_record["fullWebSummary"]["assetCount"],
+                    "pairing fullweb summary differs from fullWebSummary")
     api_contract = pairing.get("api_contract")
     require(type(api_contract) is dict and
-            api_contract.get("sha256") == manager_files.get(API_CONTRACT) and
+            api_contract.get("sha256") == full_files.get(API_CONTRACT) and
             api_contract.get("contract_id") == API_CONTRACT_ID and
             api_contract.get("qualification") == API_CONTRACT_QUALIFICATION and
             api_contract.get("api_suffix") == "/api/v2" and
@@ -663,7 +736,7 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
     }, "pairing compose metadata mismatch")
     images = pairing.get("images")
     require(type(images) is dict and set(images) == set(ROLES),
-            "pairing images must contain manager, ingress and runtime")
+            "pairing images must contain slim and full")
     for role in ROLES:
         entry = images[role]
         require(type(entry) is dict, "invalid pairing image entry: " + role)
@@ -686,18 +759,19 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
                 "pairing manifest_digest mismatch: " + role)
         require(entry.get("image_config_digest") == ev_img["imageConfigDigest"],
                 "pairing image_config_digest mismatch: " + role)
-        require(entry.get("binary_sha256") == ev_img["packagedFiles"][GO_BINARIES[role]],
+        require(entry.get("binary_sha256") == ev_img["packagedFiles"][GO_BINARIES["manager"]],
                 "pairing binary_sha256 mismatch: " + role)
         require(entry.get("release_provenance_sha256") == ev_img["packagedFiles"][image_evidence.PROVENANCE],
                 "pairing release_provenance_sha256 mismatch: " + role)
         expected_ref = f"{repo}:{tag}@{manifest_digest}"
         require(entry.get("image_ref") == expected_ref, "pairing image_ref mismatch: " + role)
-        require(service_images["cpamp-" + role] == expected_ref,
-                "rendered compose image mismatch for cpamp-" + role)
+        if role == "full":
+            require(service_images["cpa-manager-plus"] == expected_ref,
+                    "rendered compose image mismatch for cpa-manager-plus")
     if archive_paths is None:
         archive_paths = {role: compose_path.parent / f"{role}.oci.tar" for role in ROLES}
     require(type(archive_paths) is dict and set(archive_paths) == set(ROLES),
-            "archive_paths must provide all three role OCI archives (manager, ingress, runtime)")
+            "archive_paths must provide both variant OCI archives (slim, full)")
     for role in ROLES:
         archive = archive_paths[role]
         require(isinstance(archive, Path) and archive.is_file(),
@@ -725,7 +799,8 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
             cli_args.extend([f"--{role}-oci", str(archive_paths[role])])
         cmd = ["node", str(renderer), *cli_args]
         proc = subprocess.run(
-            cmd, env=node_env, capture_output=True, text=True, timeout=20, check=False,
+            cmd, cwd=str(Path(__file__).resolve().parents[2]),
+            env=node_env, capture_output=True, text=True, timeout=20, check=False,
         )
     require(proc.returncode == 0,
             "compose/pairing topology verification failed: " +
@@ -736,14 +811,13 @@ def verify_rendered_pairing(evidence, compose_path, pairing_path, archive_paths=
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
-        epilog=("Certifies Go build identity with go version -m via verify_archive_anchor for all three OCI archives. "
+        epilog=("Certifies Go build identity with go version -m via verify_archive_anchor for both variant OCI archives. "
                 "Port verification guarantees the static ${CPAMP_PUBLIC_PORT:-18317}:18317 template, "
                 "container side 18317/tcp and no other ports. The deployer chooses host bind "
                 "address/port via CPAMP_PUBLIC_PORT=[HOST_IP:]PORT; verification does not read that variable."),
     )
-    parser.add_argument("--manager", type=Path, help="OCI archive from same local build event")
-    parser.add_argument("--ingress", type=Path)
-    parser.add_argument("--runtime", type=Path)
+    parser.add_argument("--slim", type=Path, help="Slim OCI archive from same local build event")
+    parser.add_argument("--full", type=Path, help="Full OCI archive from same local build event")
     parser.add_argument("--source-commit")
     parser.add_argument("--build-event")
     parser.add_argument("--source-root", type=Path, default=Path("."))
@@ -767,7 +841,7 @@ def main():
         return
     require(all(getattr(args, role) is not None for role in ROLES) and
             args.source_commit and args.build_event and args.out is not None,
-            "--manager, --ingress, --runtime, --source-commit, --build-event and --out are required")
+            "--slim, --full, --source-commit, --build-event and --out are required")
     evidence = verify({role: getattr(args, role) for role in ROLES},
                       args.source_commit, args.build_event, args.source_root)
     args.out.parent.mkdir(parents=True, exist_ok=True)

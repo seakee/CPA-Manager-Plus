@@ -11,7 +11,8 @@ The default Docker target/Compose still use v7.3.3; v8 requires the explicit
 > observed headers — is the recorded v8.0.13 bundle run and is kept as evidence
 > of that run. The current pin is v8.0.55 with
 > archive `4cd59325…` / executable `e48c85c7…`, documented in
-> `bin/ci/runtime-v8-default-smoke.md`; the bundle rerun on that pin is NOT RUN.
+> `bin/ci/runtime-v8-default-smoke.md`; current single-image invocation is
+> `python3 bin/ci/runtime-v8-bundle-smoke.py IMAGE NEW_EVIDENCE_DIRECTORY`.
 
 ## Pairing and historical applicability
 

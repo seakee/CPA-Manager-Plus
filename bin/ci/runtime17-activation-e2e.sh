@@ -58,24 +58,30 @@ json_uint_field() {
 
 runtime_get() {
   local request_path="$1"
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then token_file="$c"; break; fi
+    done
+    token="$(cat "${token_file}")"
     wget -qO- -T 5 \
       --header="Authorization: Bearer ${token}" \
       --header="X-CPAMP-Runtime-Features: active-gateway-artifact-v1" \
-      "http://cpamp-runtime:9081${1}"
+      "http://127.0.0.1:9081${1}"
   ' sh "${request_path}"
 }
 
 runtime_activate() {
   local payload="$1"
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then token_file="$c"; break; fi
+    done
+    token="$(cat "${token_file}")"
     wget -qO- -T 170 \
       --header="Authorization: Bearer ${token}" \
       --header="Content-Type: application/json" \
       --post-data="${1}" \
-      http://cpamp-runtime:9081/v1/runtime/operations/activate-update
+      http://127.0.0.1:9081/v1/runtime/operations/activate-update
   ' sh "${payload}"
 }
 
@@ -100,7 +106,7 @@ wait_ready() {
 }
 
 runtime_cpa_pid() {
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     for process_dir in /proc/[0-9]*; do
       if [ -r "${process_dir}/comm" ] && [ "$(cat "${process_dir}/comm")" = "cli-proxy-api" ]; then
         printf "%s" "${process_dir##*/}"
@@ -115,12 +121,14 @@ seed_stage() {
   local version="$1"
   local source="$2"
   local trailer="$3"
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     version="$1"
     source="$2"
     trailer="$3"
-    directory="/runtime/supervisor/artifacts/cpa/${version}"
-    cpa_gid="${CPAMP_RUNTIME_CPA_GID:?}"
+    rt_root="/data/runtime"
+    [ -d "${rt_root}" ] || rt_root="/runtime"
+    directory="${rt_root}/supervisor/artifacts/cpa/${version}"
+    cpa_gid="${CPAMP_RUNTIME_CPA_GID:-10001}"
     mkdir -p "${directory}"
     chmod 700 "${directory}"
     cp "${source}" "${directory}/cli-proxy-api"
@@ -141,7 +149,7 @@ assert_selection() {
   local expected_version="$1"
   local expected_artifact="$2"
   local selected
-  selected="$("${compose[@]}" exec -T cpamp-runtime cat /runtime/supervisor/active/cpa/selection.json)"
+  selected="$("${compose[@]}" exec -T cpa-manager-plus sh -ec 'rt_root="/data/runtime"; [ -d "${rt_root}" ] || rt_root="/runtime"; cat "${rt_root}/supervisor/active/cpa/selection.json"')"
   [ "$(printf '%s' "${selected}" | json_field schemaVersion)" = "1" ] || fail "selection schema is not v1"
   [ "$(printf '%s' "${selected}" | json_field engine)" = "cpa" ] || fail "selection engine is not cpa"
   [ "$(printf '%s' "${selected}" | json_field version)" = "${expected_version}" ] || fail "selection version changed"
@@ -185,7 +193,7 @@ pid_b="$(runtime_cpa_pid)"
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 assert_selection 7.3.4 "${artifact_b}"
 
-"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -TERM $(pidof cpamp-runtime-supervisor)'
 status_b_recreated="$(wait_ready "${artifact_b}" 120)"
 generation_b="$(printf '%s' "${status_b_recreated}" | json_uint_field runtimeGeneration)"
 [ "${generation_b}" != "${generation_a}" ] || fail "Runtime recreation did not rotate generation"
@@ -207,7 +215,7 @@ retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/nu
 assert_selection 7.3.4 "${artifact_b}"
 
 generation_before_second_recreate="$(printf '%s' "${status_after_rollback}" | json_uint_field runtimeGeneration)"
-"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -TERM $(pidof cpamp-runtime-supervisor)'
 status_after_second_recreate="$(wait_ready "${artifact_b}" 120)"
 generation_after_second_recreate="$(printf '%s' "${status_after_second_recreate}" | json_uint_field runtimeGeneration)"
 [ "${generation_after_second_recreate}" != "${generation_before_second_recreate}" ] || fail "second Runtime recreation did not rotate generation"

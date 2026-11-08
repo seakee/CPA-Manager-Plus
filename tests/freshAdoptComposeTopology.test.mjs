@@ -12,9 +12,9 @@ const composePath = path.join(repoRoot, 'docker-compose.yml');
 // is only meaningful while the Fresh record it authorizes is unreadable to every
 // other container: the Manager data volume holds the Fresh operation, its
 // admin credential and the protected adoption snapshot.
-const MANAGER_DATA_VOLUME = 'cpamp-manager-data';
+const MANAGER_DATA_VOLUME = 'cpamp-data';
 const MANAGER_DATA_TARGET = '/data';
-const MANAGER_SERVICE = 'cpamp-manager';
+const MANAGER_SERVICE = 'cpa-manager-plus';
 
 // A short-syntax source is a host path when it looks like one; anything else is
 // a named volume or a `${VAR}` interpolation, neither of which this file can
@@ -128,7 +128,7 @@ describe('Fresh adoption compose topology negative fixtures', () => {
   const fixture = (services) =>
     parseYaml(['services:', ...services, 'volumes:', `  ${MANAGER_DATA_VOLUME}:`].join('\n'));
 
-  const checkedInManager = ['  cpamp-manager:', '    volumes:', `      - ${MANAGER_DATA_VOLUME}:${MANAGER_DATA_TARGET}`];
+  const checkedInManager = [`  ${MANAGER_SERVICE}:`, '    volumes:', `      - ${MANAGER_DATA_VOLUME}:${MANAGER_DATA_TARGET}`];
 
   it('rejects a volumes_from reference to the Manager service', () => {
     const audit = auditComposeTopology(fixture([...checkedInManager, '  cpamp-runtime:', '    volumes_from:', `      - ${MANAGER_SERVICE}`]));
@@ -188,11 +188,11 @@ describe('Fresh adoption compose topology negative fixtures', () => {
 
   it('rejects the Manager service binding a host path onto its own data path', () => {
     const audit = auditComposeTopology(
-      fixture(['  cpamp-manager:', '    volumes:', `      - ./manager-data:${MANAGER_DATA_TARGET}`, '  cpamp-runtime:', '    image: unused']),
+      fixture([`  ${MANAGER_SERVICE}:`, '    volumes:', `      - ./manager-data:${MANAGER_DATA_TARGET}`, '  cpamp-runtime:', '    image: unused']),
     );
 
     expect(audit.hostBindsOfManagerData.map((volume) => `${volume.service}:${volume.source}:${volume.target}`)).toEqual([
-      `cpamp-manager:./manager-data:${MANAGER_DATA_TARGET}`,
+      `${MANAGER_SERVICE}:./manager-data:${MANAGER_DATA_TARGET}`,
     ]);
     expect(audit.managerDataMounts).toEqual([]);
   });

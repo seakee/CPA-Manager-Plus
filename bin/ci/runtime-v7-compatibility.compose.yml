@@ -1,6 +1,6 @@
 # Test-only pre-Fresh lifecycle/update regressions. Never use for deployment.
 services:
-  cpamp-runtime:
+  cpa-manager-plus:
     build:
       target: v7-compatibility
     image: cpamp-runtime:v7-compatibility-test

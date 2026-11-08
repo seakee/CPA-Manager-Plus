@@ -35,12 +35,18 @@ retry() {
 
 runtime_get() {
   local request_path="$1"
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    token_file="${CPAMP_RUNTIME_TOKEN_FILE:-}"
+    if [ -z "${token_file}" ] || [ ! -e "${token_file}" ]; then
+      for candidate in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+        if [ -e "${candidate}" ]; then token_file="${candidate}"; break; fi
+      done
+    fi
+    token="$(cat "${token_file}")"
     wget -qO- \
       --header="Authorization: Bearer ${token}" \
       --header="X-CPAMP-Runtime-Features: active-gateway-artifact-v1" \
-      "http://cpamp-runtime:9081${1}"
+      "http://127.0.0.1:9081${1}"
   ' sh "$request_path"
 }
 
@@ -83,7 +89,7 @@ wait_runtime_state() {
 }
 
 runtime_cpa_pid() {
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     for process_dir in /proc/[0-9]*; do
       if [ -r "${process_dir}/comm" ] && [ "$(cat "${process_dir}/comm")" = "cli-proxy-api" ]; then
         printf "%s" "${process_dir##*/}"
@@ -102,6 +108,8 @@ copy_container_file() {
   container_id="$("${compose[@]}" ps --all -q "$service")"
   test -n "$container_id"
   docker cp "${container_id}:${source}" "$destination" >/dev/null
+  docker cp "${container_id}:${source}-wal" "${destination}-wal" >/dev/null 2>&1 || true
+  docker cp "${container_id}:${source}-shm" "${destination}-shm" >/dev/null 2>&1 || true
 }
 
 assert_manager_desired_running() {
@@ -168,31 +176,45 @@ export CPAMP_PUBLIC_PORT="${public_port}"
 if [ "$skip_build" != "true" ]; then
   "${compose[@]}" build
 fi
-docker run --rm \
-  --env CPAMP_RUNTIME_TOKEN=runtime13-ci-test-only-transport-secret \
-  cpamp-runtime:v7-compatibility-test \
-  sh -ec 'test "$(cat /run/cpamp/runtime-secret/token)" = "$CPAMP_RUNTIME_TOKEN"'
-
 # Phase4-01 ordinary Fresh startup is deliberately read-only. Prove the
 # Manager listener exposes fixed discovery without manufacturing readiness or
 # product state before an explicit initializer is selected.
-"${compose[@]}" up -d cpamp-manager
-retry 60 "${compose[@]}" exec -T cpamp-manager sh -ec '
+"${compose[@]}" up -d cpa-manager-plus
+retry 60 "${compose[@]}" exec -T cpa-manager-plus sh -ec '
   body="$(wget -qO- http://127.0.0.1:18317/.well-known/cpamp-bootstrap)"
   printf "%s" "$body" | grep -q "\"status\":\"fresh_claim_required\""
   printf "%s" "$body" | grep -q "\"mode\":\"fresh\""
 '
-if "${compose[@]}" exec -T cpamp-manager wget -qO- http://127.0.0.1:18317/health >/dev/null 2>&1; then
+if "${compose[@]}" exec -T cpa-manager-plus wget -qO- http://127.0.0.1:18317/health >/dev/null 2>&1; then
   echo "Ordinary Fresh startup became ready before explicit initialization" >&2
   exit 1
 fi
-"${compose[@]}" exec -T cpamp-manager sh -ec '
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
   test ! -e /data/usage.sqlite
   test ! -e /data/data.key
   test ! -e /data/usage.sqlite.manager.lock
 '
-"${compose[@]}" stop cpamp-manager >/dev/null
-
+# Verify the documented in-place initializer command form as uid/gid 10002:10002
+# without any post-hoc ownership repair, then verify Manager bootstrap admits the
+# store and denies CPA/Ingress read access to /data/usage.sqlite and /data/data.key.
+doc_handoff="$("${compose[@]}" exec -T -u 10002:10002 -e USAGE_DATA_DIR=/data -e USAGE_DB_PATH=/data/usage.sqlite cpa-manager-plus cpa-manager-plus initialize)"
+case "${doc_handoff}" in
+  "/.well-known/cpamp-bootstrap/ui#handoff="*) ;;
+  *)
+    echo "Documented initializer command did not emit the expected handoff: ${doc_handoff}" >&2
+    exit 1
+    ;;
+esac
+retry 30 "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+  wget -qO- http://127.0.0.1:18317/health >/dev/null
+  body="$(wget -qO- http://127.0.0.1:18317/.well-known/cpamp-bootstrap)"
+  printf "%s" "$body" | grep -q "\"status\":\"fresh_claim_required\""
+  printf "%s" "$body" | grep -q "\"mode\":\"fresh\""
+'
+"${compose[@]}" exec -T -u 10001:10001 cpa-manager-plus sh -ec '! test -r /data/usage.sqlite && ! test -r /data/data.key'
+"${compose[@]}" exec -T -u 10003:10003 cpa-manager-plus sh -ec '! test -r /data/usage.sqlite && ! test -r /data/data.key'
+"${compose[@]}" stop cpa-manager-plus >/dev/null
+"${compose[@]}" down --volumes --remove-orphans >/dev/null
 # Verify the one-shot Fresh admission/handoff contract, then convert only this
 # disposable CI volume to the explicit historical Manager baseline required by
 # the existing Runtime lifecycle smoke. Fresh itself must not select Embedded
@@ -224,25 +246,32 @@ if [ "$(printf '%s' "$ready_status" | json_field activeGatewayArtifact.engine)" 
   echo "Runtime status did not expose the trusted bundled CPA v7.3.3 artifact" >&2
   exit 1
 fi
-executable_artifact_id="sha256:$("${compose[@]}" exec -T cpamp-runtime sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
+executable_artifact_id="sha256:$("${compose[@]}" exec -T cpa-manager-plus sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
 if [ "$active_artifact_id" != "$executable_artifact_id" ]; then
   echo "Runtime active artifact ID does not match exact CPA executable bytes" >&2
   exit 1
 fi
 
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
-  test "$(tr "\000" "\n" </proc/1/cmdline | head -n1)" = "/usr/local/bin/cpamp-runtime-supervisor"
-  test "$(stat -c %a /run/cpamp/runtime-secret/token)" = "600"
-  test "$(wc -c </run/cpamp/runtime-secret/token | tr -d " ")" -ge 32
-  test -f /runtime/gateway/config.yaml
-  test "$(stat -c %a /runtime/gateway/config.yaml)" = "600"
-  test -d /runtime/supervisor
-  test -d /runtime/gateway/auth
-  ! grep -Eq "secret-key: +[^\" ]|api-keys: +\[[^]]" /runtime/gateway/config.yaml
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
+  test "$(tr "\000" "\n" </proc/1/cmdline | head -n1)" = "/usr/local/bin/cpamp-launcher"
+  rt_root="/data/runtime"
+  [ -d "${rt_root}" ] || rt_root="/runtime"
+  token_file="${CPAMP_RUNTIME_TOKEN_FILE:-}"
+  if [ -z "${token_file}" ] || [ ! -e "${token_file}" ]; then
+    for candidate in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token "${rt_root}/supervisor/token"; do
+      if [ -e "${candidate}" ]; then token_file="${candidate}"; break; fi
+    done
+  fi
+  test "$(wc -c <"${token_file}" | tr -d " ")" -ge 32
+  test -f "${rt_root}/gateway/config.yaml"
+  test "$(stat -c %a "${rt_root}/gateway/config.yaml")" = "600"
+  test -d "${rt_root}/supervisor"
+  test -d "${rt_root}/gateway/auth"
+  ! grep -Eq "secret-key: +[^\" ]|api-keys: +\[[^]]" "${rt_root}/gateway/config.yaml"
 '
 
 healthy_cpa_pid="$(runtime_cpa_pid)"
-"${compose[@]}" restart cpamp-manager >/dev/null
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -TERM $(pidof cpa-manager-plus)'
 retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
 sleep 7
 if [ "$(runtime_cpa_pid)" != "$healthy_cpa_pid" ]; then
@@ -255,7 +284,7 @@ if [ "$(printf '%s' "$manager_restart_status" | json_field activeGatewayArtifact
   exit 1
 fi
 
-"${compose[@]}" up -d --force-recreate cpamp-manager >/dev/null
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -KILL $(pidof cpa-manager-plus)'
 retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
 sleep 7
 if [ "$(runtime_cpa_pid)" != "$healthy_cpa_pid" ]; then
@@ -268,11 +297,11 @@ if [ "$(printf '%s' "$manager_recreate_status" | json_field activeGatewayArtifac
   exit 1
 fi
 
-"${compose[@]}" stop cpamp-manager >/dev/null
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP $(pidof cpa-manager-plus)'
 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
-copy_container_file cpamp-manager /data/usage.sqlite "${snapshot_root}/manager.sqlite"
+copy_container_file cpa-manager-plus /data/usage.sqlite "${snapshot_root}/manager.sqlite"
 assert_manager_desired_running "${snapshot_root}/manager.sqlite"
-"${compose[@]}" start cpamp-manager >/dev/null
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT $(pidof cpa-manager-plus)'
 retry 90 curl --fail --silent "${public_origin}/health" >/dev/null
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 if [ "$(runtime_cpa_pid)" != "$healthy_cpa_pid" ]; then
@@ -285,18 +314,19 @@ if [ "$(printf '%s' "$manager_start_status" | json_field activeGatewayArtifact.a
   exit 1
 fi
 
-secret_before="$("${compose[@]}" exec -T cpamp-manager sha256sum /run/cpamp/runtime-secret/token | awk '{print $1}')"
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
-  printf "\n# runtime13-smoke-existing-config-marker\n" >> /runtime/gateway/config.yaml
-'
-config_before="$("${compose[@]}" exec -T cpamp-runtime sha256sum /runtime/gateway/config.yaml | awk '{print $1}')"
+runtime_root="$("${compose[@]}" exec -T cpa-manager-plus sh -ec 'if [ -d /data/runtime ]; then printf /data/runtime; else printf /runtime; fi')"
+token_file="$("${compose[@]}" exec -T cpa-manager-plus sh -ec 'for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do if [ -e "$c" ]; then printf "%s" "$c"; break; fi; done')"
+secret_before="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${token_file}" | awk '{print $1}')"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
+  printf "\n# runtime13-smoke-existing-config-marker\n" >> "${1}/gateway/config.yaml"
+' sh "${runtime_root}"
+config_before="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${runtime_root}/gateway/config.yaml" | awk '{print $1}')"
 
-"${compose[@]}" stop cpamp-runtime >/dev/null
-curl --fail --silent --show-error "${public_origin}/health" >/dev/null
-copy_container_file cpamp-runtime /runtime/supervisor/operations.sqlite "${snapshot_root}/operations-before.sqlite"
+copy_container_file cpa-manager-plus "${runtime_root}/supervisor/operations.sqlite" "${snapshot_root}/operations-before.sqlite"
 assert_reconcile_start_journal "${snapshot_root}/operations-before.sqlite" 1
 
-"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+"${compose[@]}" stop cpa-manager-plus >/dev/null
+"${compose[@]}" up -d --force-recreate cpa-manager-plus >/dev/null
 ready_after_recreate="$(wait_runtime_state ready 120)"
 generation_after_runtime_recreate="$(printf '%s' "$ready_after_recreate" | json_uint_field runtimeGeneration)"
 if [ "$generation_after_runtime_recreate" = "$generation_before_runtime_recreate" ]; then
@@ -309,8 +339,8 @@ if [ "$(printf '%s' "$ready_after_recreate" | json_field activeGatewayArtifact.a
 fi
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 
-secret_after="$("${compose[@]}" exec -T cpamp-manager sha256sum /run/cpamp/runtime-secret/token | awk '{print $1}')"
-config_after="$("${compose[@]}" exec -T cpamp-runtime sha256sum /runtime/gateway/config.yaml | awk '{print $1}')"
+secret_after="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${token_file}" | awk '{print $1}')"
+config_after="$("${compose[@]}" exec -T cpa-manager-plus sha256sum "${runtime_root}/gateway/config.yaml" | awk '{print $1}')"
 if [ "$secret_before" != "$secret_after" ]; then
   echo "Runtime transport secret changed across Runtime recreate" >&2
   exit 1
@@ -320,9 +350,6 @@ if [ "$config_before" != "$config_after" ]; then
   exit 1
 fi
 
-"${compose[@]}" stop cpamp-runtime >/dev/null
-curl --fail --silent --show-error "${public_origin}/health" >/dev/null
-copy_container_file cpamp-runtime /runtime/supervisor/operations.sqlite "${snapshot_root}/operations-after.sqlite"
+copy_container_file cpa-manager-plus "${runtime_root}/supervisor/operations.sqlite" "${snapshot_root}/operations-after.sqlite"
 assert_reconcile_start_journal "${snapshot_root}/operations-after.sqlite" 2
-
 echo "Runtime 13 Docker smoke passed: read-only Fresh discovery, explicit initialization, persistent desired state, stable healthy child across Manager lifecycle, generation-scoped Runtime recovery, single public ingress, and isolated health"

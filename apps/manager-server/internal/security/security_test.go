@@ -336,6 +336,42 @@ func TestLoadOrCreateDataKeyCreatesStableRestrictedFile(t *testing.T) {
 	}
 }
 
+func TestLoadOrCreateDataKeyTightensExistingPermissiveFile(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "data.key")
+	rawKey := []byte("0123456789abcdef0123456789abcdef")
+	encoded := base64.RawStdEncoding.EncodeToString(rawKey) + "\n"
+	if err := os.WriteFile(keyPath, []byte(encoded), 0o644); err != nil {
+		t.Fatalf("seed permissive data.key: %v", err)
+	}
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatalf("chmod 0644 data.key: %v", err)
+	}
+
+	// Read-only LoadExistingDataKey must not mutate permissions.
+	if _, err := LoadExistingDataKey("", keyPath); err != nil {
+		t.Fatalf("LoadExistingDataKey: %v", err)
+	}
+	infoBefore, err := os.Stat(keyPath)
+	if err != nil || infoBefore.Mode().Perm() != 0o644 {
+		t.Fatalf("mode after LoadExistingDataKey = %#04o, want 0644 (err=%v)", infoBefore.Mode().Perm(), err)
+	}
+
+	loaded, created, err := LoadOrCreateDataKey("", keyPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreateDataKey on existing 0644 file: %v", err)
+	}
+	if created || string(loaded) != string(rawKey) {
+		t.Fatalf("created=%v loaded=%x, want false / %x", created, loaded, rawKey)
+	}
+	infoAfter, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("stat tightened data.key: %v", err)
+	}
+	if got := infoAfter.Mode().Perm(); got != 0o600 {
+		t.Fatalf("tightened data.key mode = %#04o, want 0600", got)
+	}
+}
+
 func isAlnum(value string) bool {
 	for _, r := range value {
 		if r >= '0' && r <= '9' {

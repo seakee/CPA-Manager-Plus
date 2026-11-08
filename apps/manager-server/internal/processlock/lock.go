@@ -256,8 +256,12 @@ func resolveDatabasePath(databasePath string) (string, error) {
 	}
 	absolutePath = filepath.Clean(absolutePath)
 	directory := filepath.Dir(absolutePath)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
+	_, dirStatErr := os.Lstat(directory)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return "", fmt.Errorf("create manager database directory: %w", err)
+	}
+	if errors.Is(dirStatErr, os.ErrNotExist) {
+		_ = os.Chmod(directory, 0o700)
 	}
 	resolvedDirectory, err := filepath.EvalSymlinks(directory)
 	if err != nil {

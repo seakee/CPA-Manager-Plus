@@ -57,9 +57,7 @@ describe('PR check classifier', () => {
   it('runs the Frontend job when only a toolchain baseline file changes', () => {
     for (const filePath of [
       '.nvmrc',
-      'Dockerfile.manager-server',
-      'Dockerfile.ingress',
-      'Dockerfile.runtime',
+      'Dockerfile',
       'apps/manager-server/go.mod',
       'apps/ingress/go.mod',
       'apps/runtime-supervisor/go.mod',
@@ -329,11 +327,12 @@ describe('PR check classifier', () => {
       docker_all_images: true,
       docker: true,
     });
-    // Dockerfile.ingress carries both the Ingress build and the image base that
-    // tests/ciWorkflowIntegrity.test.mjs asserts, so both jobs run.
-    expect(classifyChangedFiles(['Dockerfile.ingress'])).toEqual({
+    // Dockerfile carries the Ingress, Supervisor, and Manager builds plus the
+    // image bases that tests/ciWorkflowIntegrity.test.mjs asserts.
+    expect(classifyChangedFiles(['Dockerfile'])).toEqual({
       ...noChecks,
       frontend: true,
+      runtime_supervisor: true,
       ingress: true,
       runtime_lifecycle: true,
       docker_all_images: true,
@@ -367,12 +366,13 @@ describe('PR check classifier', () => {
         docker: true,
       });
     }
-    // Dockerfile.runtime also carries the Go/Node image bases asserted by
+    // Dockerfile also carries the Go/Node image bases asserted by
     // tests/ciWorkflowIntegrity.test.mjs in the Frontend job.
-    expect(classifyChangedFiles(['Dockerfile.runtime'])).toEqual({
+    expect(classifyChangedFiles(['Dockerfile'])).toEqual({
       ...noChecks,
       frontend: true,
       runtime_supervisor: true,
+      ingress: true,
       runtime_lifecycle: true,
       docker_all_images: true,
       docker: true,
@@ -465,9 +465,7 @@ describe('PR check classifier', () => {
       'apps/runtime-supervisor/internal/journal/store.go',
       'apps/runtime-supervisor/internal/cpaprocess/process.go',
       'docker/runtime/entrypoint.sh',
-      'Dockerfile.manager-server',
-      'Dockerfile.ingress',
-      'Dockerfile.runtime',
+      'Dockerfile',
       'docker-compose.yml',
       'bin/ci/runtime12-docker-smoke.sh',
       'bin/ci/runtime14-failure-e2e.sh',

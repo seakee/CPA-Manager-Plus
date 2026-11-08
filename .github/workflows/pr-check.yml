@@ -793,35 +793,39 @@ jobs:
           docker compose config --format json | node bin/ci/validate-runtime12-compose.mjs
           docker compose -f docker-compose.manager.yml config >/dev/null
 
-      - name: Build Manager Server image
+      - name: Build CPAMP slim image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: Dockerfile.manager-server
+          file: Dockerfile
+          target: slim
+          tags: seakee/cpa-manager-plus:ci-slim
           push: false
           load: true
           build-args: |
             VERSION=ci
             SOURCE_COMMIT=${{ github.sha }}
 
-      - name: Build Ingress images
+      - name: Build CPAMP slim images
         if: needs.changes.outputs.docker_all_images == 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: Dockerfile.ingress
+          file: Dockerfile
+          target: slim
           platforms: linux/amd64,linux/arm64
           push: false
           build-args: |
             VERSION=ci
             SOURCE_COMMIT=${{ github.sha }}
 
-      - name: Build Runtime images with pinned CPA
+      - name: Build CPAMP full images with pinned CPA
         if: needs.changes.outputs.docker_all_images == 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: Dockerfile.runtime
+          file: Dockerfile
+          target: full
           platforms: linux/amd64,linux/arm64
           push: false
           build-args: |
@@ -840,7 +844,7 @@ jobs:
         run: |
           docker pull python:3.13-alpine
           python3 bin/ci/runtime-v8-default-smoke.py \
-            seakee/cpamp-runtime:latest seakee/cpa-manager-plus:latest seakee/cpamp-ingress:latest \
+            seakee/cpa-manager-plus:latest \
             bin/tmp/runtime-v8-default-ci
 
       - name: Reject unsupported CPA v8 architecture without fallback
@@ -848,7 +852,7 @@ jobs:
         run: |
           if docker buildx build --platform linux/riscv64 --target cpa-v8-download \
               --build-arg VERSION=ci --build-arg SOURCE_COMMIT=${{ github.sha }} \
-              -f Dockerfile.runtime . > /tmp/cpamp-unsupported-cpa-v8.log 2>&1; then
+              -f Dockerfile . > /tmp/cpamp-unsupported-cpa-v8.log 2>&1; then
             echo "Unsupported CPA architecture unexpectedly built"
             exit 1
           fi
@@ -861,8 +865,7 @@ jobs:
         env:
           VERSION: ci
           SOURCE_COMMIT: ${{ github.sha }}
-        run: docker compose -f docker-compose.yml -f bin/ci/runtime-v7-compatibility.compose.yml build cpamp-runtime
-
+        run: docker compose -f docker-compose.yml -f bin/ci/runtime-v7-compatibility.compose.yml build cpa-manager-plus
       - name: Run single-public-port Runtime smoke
         if: needs.changes.outputs.runtime_lifecycle == 'true'
         env:

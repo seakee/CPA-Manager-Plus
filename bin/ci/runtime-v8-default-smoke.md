@@ -72,14 +72,10 @@ Use unique local tags and new disposable evidence directories. No image push.
 ~~~sh
 revision=$(git rev-parse HEAD)
 docker buildx build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
-  -f Dockerfile.runtime --load -t cpamp-default-v8:task-amd64 .
-docker buildx build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
-  -f Dockerfile.manager-server --load -t cpamp-default-v8-manager:task .
-docker buildx build --platform linux/amd64 --build-arg VERSION=dev --build-arg SOURCE_COMMIT="$revision" \
-  -f Dockerfile.ingress --load -t cpamp-default-v8-ingress:task .
+  --target full -f Dockerfile --load -t cpamp-default-v8:task-amd64 .
 docker pull python:3.13-alpine
 python3 bin/ci/runtime-v8-default-smoke.py \
-  cpamp-default-v8:task-amd64 cpamp-default-v8-manager:task cpamp-default-v8-ingress:task \
+  cpamp-default-v8:task-amd64 \
   bin/tmp/runtime-default-v8/NEW_RUN
 ~~~
 

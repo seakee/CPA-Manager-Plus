@@ -119,7 +119,13 @@ func LoadOrCreateDataKey(rawValue string, keyPath string) ([]byte, bool, error) 
 	}
 	if data, err := os.ReadFile(keyPath); err == nil {
 		key, err := parseStoredDataKey(strings.TrimSpace(string(data)))
-		return key, false, err
+		if err != nil {
+			return nil, false, err
+		}
+		if err := os.Chmod(keyPath, 0o600); err != nil {
+			return nil, false, fmt.Errorf("chmod data key %s: %w", keyPath, err)
+		}
+		return key, false, nil
 	} else if !os.IsNotExist(err) {
 		return nil, false, fmt.Errorf("read data key %s: %w", keyPath, err)
 	}
@@ -127,12 +133,20 @@ func LoadOrCreateDataKey(rawValue string, keyPath string) ([]byte, bool, error) 
 	if err != nil {
 		return nil, false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
-		return nil, false, fmt.Errorf("create data key directory %s: %w", filepath.Dir(keyPath), err)
+	keyDir := filepath.Dir(keyPath)
+	_, dirStatErr := os.Lstat(keyDir)
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		return nil, false, fmt.Errorf("create data key directory %s: %w", keyDir, err)
+	}
+	if errors.Is(dirStatErr, os.ErrNotExist) {
+		_ = os.Chmod(keyDir, 0o700)
 	}
 	content := base64.RawStdEncoding.EncodeToString(key) + "\n"
 	if err := os.WriteFile(keyPath, []byte(content), 0o600); err != nil {
 		return nil, false, fmt.Errorf("write data key %s: %w", keyPath, err)
+	}
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		return nil, false, fmt.Errorf("chmod data key %s: %w", keyPath, err)
 	}
 	return key, true, nil
 }

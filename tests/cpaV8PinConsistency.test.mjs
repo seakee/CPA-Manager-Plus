@@ -53,7 +53,7 @@ function sha256Hex(input) {
 }
 
 function extractDockerfileV8Stage() {
-  const dockerfile = readText('Dockerfile.runtime');
+  const dockerfile = readText('Dockerfile');
   const match = dockerfile.match(
     /FROM[^\n]*AS cpa-v8-download([\s\S]*?)FROM[^\n]*AS supervisor-build/
   );
@@ -262,7 +262,7 @@ describe('CPA v8.0.55 pin consistency and NH2 network posture contract (§3 P10)
     expect(validateEvidence).toContain(`assetName: '${EXPECTED.amd64.asset}'`);
 
     for (const relPath of [
-      'Dockerfile.runtime',
+      'Dockerfile',
       '.github/workflows/pr-check.yml',
       'bin/ci/prepare-cpa-v8-artifact.py',
       'tests/fixtures/cpa-v8-qualification/manifest.json',
