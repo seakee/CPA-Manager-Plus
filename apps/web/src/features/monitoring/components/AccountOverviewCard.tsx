@@ -33,6 +33,7 @@ import {
   buildCacheTokenPresentation,
   formatAccountQuotaResetDisplay,
   formatPercent,
+  formatAverageOutputTps,
   getAccountStatusDotClassName,
   getAccountStatusLabel,
   getAccountStatusTone,
@@ -677,6 +678,10 @@ function AccountModelUsageList({
                       <small>{t('monitoring.account_overview_model_total_tokens_short')}</small>
                       <strong>{formatCompactNumber(model.totalTokens)}</strong>
                     </span>
+                    <span className={styles.accountModelStat} title={t('monitoring.average_output_tps_hint')}>
+                      <small>{t('monitoring.average_output_tps')}</small>
+                      <strong>{formatAverageOutputTps(model.averageOutputTps)}</strong>
+                    </span>
                     <span className={styles.accountModelStat}>
                       <small>{t('monitoring.account_overview_model_total_cost_short')}</small>
                       <strong>{hasPrices ? formatUsd(model.totalCost) : '--'}</strong>
@@ -741,12 +746,14 @@ export function AccountModelUsageTable({
   locale,
   t,
   limit = 2,
+  showAverageOutputTps = false,
 }: {
   row: { id: string; models: MonitoringAccountModelSpendRow[] };
   hasPrices: boolean;
   locale: string;
   t: TFunction;
   limit?: number;
+  showAverageOutputTps?: boolean;
 }) {
   const [showAll, setShowAll] = useState(false);
   const hasExtraModels = row.models.length > limit;
@@ -778,7 +785,10 @@ export function AccountModelUsageTable({
         </button>
       </div>
       {visibleModels.length > 0 ? (
-        <table className={styles.accountModelTable}>
+        <table
+          className={[styles.accountModelTable, showAverageOutputTps ? styles.accountModelTableWithTps : '']
+            .filter(Boolean).join(' ')}
+        >
           <thead>
             <tr>
               <th>{t('usage_stats.model_price_model')}</th>
@@ -788,6 +798,9 @@ export function AccountModelUsageTable({
               <th>{t('monitoring.account_overview_model_output_tokens_short')}</th>
               <th>{t('monitoring.account_overview_model_cached_tokens_short')}</th>
               <th>{t('monitoring.account_overview_model_total_tokens_short')}</th>
+              {showAverageOutputTps ? (
+                <th title={t('monitoring.average_output_tps_hint')}>{t('monitoring.average_output_tps')}</th>
+              ) : null}
               <th>{t('monitoring.account_overview_model_total_cost_short')}</th>
               <th>{latestRequestLabel}</th>
             </tr>
@@ -817,6 +830,7 @@ export function AccountModelUsageTable({
                     </span>
                   </td>
                   <td>{formatCompactNumber(model.totalTokens)}</td>
+                  {showAverageOutputTps ? <td>{formatAverageOutputTps(model.averageOutputTps)}</td> : null}
                   <td>{hasPrices ? formatUsd(model.totalCost) : '--'}</td>
                   <td>{new Date(model.lastSeenAt).toLocaleString(locale)}</td>
                 </tr>
@@ -863,7 +877,7 @@ export function AccountExpandedDetails({
         />
         <div className={styles.accountStructureModelPanel}>
           <AccountTokenMetricGrid metrics={tokenMetrics} t={t} variant="table" />
-          <AccountModelUsageTable row={row} hasPrices={hasPrices} locale={locale} t={t} />
+          <AccountModelUsageTable row={row} hasPrices={hasPrices} locale={locale} t={t} showAverageOutputTps />
         </div>
       </div>
     );

@@ -1080,6 +1080,9 @@ func Migrate(db *sql.DB) error {
 	if err := ensureDashboardHourlyRollupFormatVersion(db); err != nil {
 		return err
 	}
+	if err := ensureMonitoringOutputTPS(db); err != nil {
+		return err
+	}
 	return ensureModelPriceColumns(db)
 }
 

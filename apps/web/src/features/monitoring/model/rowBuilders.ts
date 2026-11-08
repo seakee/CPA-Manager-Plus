@@ -357,6 +357,8 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
           totalTokens: number;
           totalCost: number;
           lastSeenAt: number;
+          outputTpsSum: number;
+          outputTpsCount: number;
         }
       >;
       rows: MonitoringEventRow[];
@@ -372,6 +374,8 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       totalCost: number;
       latencySum: number;
       latencyCount: number;
+      outputTpsSum: number;
+      outputTpsCount: number;
       lastSeenAt: number;
     }
   >();
@@ -417,6 +421,8 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       totalCost: 0,
       latencySum: 0,
       latencyCount: 0,
+      outputTpsSum: 0,
+      outputTpsCount: 0,
       lastSeenAt: 0,
     };
 
@@ -462,7 +468,27 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
       totalTokens: 0,
       totalCost: 0,
       lastSeenAt: 0,
+      outputTpsSum: 0,
+      outputTpsCount: 0,
     };
+
+    // 逐请求累计有效样本，避免对不同样本量的模型均值再次取平均。
+    if (
+      !row.failed &&
+      Number.isFinite(row.outputTokens) &&
+      row.outputTokens > 0 &&
+      row.latencyMs !== null &&
+      Number.isFinite(row.latencyMs) &&
+      row.latencyMs > 0
+    ) {
+      const outputTps = (row.outputTokens * 1000) / row.latencyMs;
+      if (Number.isFinite(outputTps)) {
+        existing.outputTpsSum += outputTps;
+        existing.outputTpsCount += 1;
+        modelEntry.outputTpsSum += outputTps;
+        modelEntry.outputTpsCount += 1;
+      }
+    }
 
     modelEntry.totalCalls += 1;
     modelEntry.successCalls += row.failed ? 0 : 1;
@@ -518,11 +544,13 @@ export const buildAccountRows = (rows: MonitoringEventRow[]): MonitoringAccountR
         totalTokens: item.totalTokens,
         totalCost: item.totalCost,
         averageLatencyMs: item.latencyCount > 0 ? item.latencySum / item.latencyCount : null,
+        averageOutputTps: item.outputTpsCount > 0 ? item.outputTpsSum / item.outputTpsCount : null,
         lastSeenAt: item.lastSeenAt,
         recentPattern: buildRecentPattern(item.rows),
         models: Array.from(item.modelMap.values())
           .map((model) => ({
             ...model,
+            averageOutputTps: model.outputTpsCount > 0 ? model.outputTpsSum / model.outputTpsCount : null,
             successRate: model.totalCalls > 0 ? model.successCalls / model.totalCalls : 1,
           }))
           .sort(

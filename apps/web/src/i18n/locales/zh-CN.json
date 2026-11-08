@@ -3339,6 +3339,8 @@
     "account_overview_health_hint": "基于当前筛选范围内的请求统计。",
     "account_overview_status_hint": "账号当前启用状态，基于关联认证文件汇总。",
     "account_overview_success_rate_hint": "当前筛选范围内成功调用数占总调用数的比例。",
+    "average_output_tps": "平均 TPS",
+    "average_output_tps_hint": "成功请求的输出 token 数 / 总耗时（秒）的算术平均值，包含首 token 等待时间。仅统计输出 token 数和总耗时均为正数且有限的有效样本。",
     "account_overview_scope_current_filters": "统计范围：当前筛选条件",
     "account_overview_scope_range": "统计范围：{{range}}",
     "account_overview_tokens_title": "Tokens 使用",

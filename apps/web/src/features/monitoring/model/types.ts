@@ -266,6 +266,7 @@ export type MonitoringAccountModelSpendRow = {
   cacheCreationTokens: number;
   totalTokens: number;
   totalCost: number;
+  averageOutputTps?: number | null;
   lastSeenAt: number;
 };
 
@@ -294,6 +295,7 @@ export type MonitoringAccountRow = {
   totalTokens: number;
   totalCost: number;
   averageLatencyMs: number | null;
+  averageOutputTps?: number | null;
   lastSeenAt: number;
   recentPattern: boolean[];
   models: MonitoringAccountModelSpendRow[];

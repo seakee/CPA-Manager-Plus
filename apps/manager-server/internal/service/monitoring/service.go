@@ -609,6 +609,7 @@ type AccountStatRow struct {
 	TotalTokens          int64                 `json:"total_tokens"`
 	Cost                 float64               `json:"cost"`
 	AvgLatencyMS         *float64              `json:"average_latency_ms"`
+	AverageOutputTPS     *float64              `json:"average_output_tps"`
 	LastSeenMS           int64                 `json:"last_seen_ms"`
 	Models               []AccountModelStatRow `json:"models,omitempty"`
 }
@@ -693,22 +694,25 @@ type APIKeyTimelinePoint struct {
 }
 
 type AccountModelStatRow struct {
-	Model               string  `json:"model"`
-	Calls               int64   `json:"calls"`
-	SuccessCalls        int64   `json:"success_calls"`
-	FailureCalls        int64   `json:"failure_calls"`
-	SuccessRate         float64 `json:"success_rate"`
-	InputTokens         int64   `json:"input_tokens"`
-	OutputTokens        int64   `json:"output_tokens"`
-	CachedTokens        int64   `json:"cached_tokens"`
-	CacheReadTokens     int64   `json:"cache_read_tokens"`
-	CacheCreationTokens int64   `json:"cache_creation_tokens"`
-	CacheHitTokens      int64   `json:"cache_hit_tokens"`
-	CacheHitInputTokens int64   `json:"cache_hit_input_tokens"`
-	CacheHitRate        float64 `json:"cache_hit_rate"`
-	TotalTokens         int64   `json:"total_tokens"`
-	Cost                float64 `json:"cost"`
-	LastSeenMS          int64   `json:"last_seen_ms"`
+	Model               string   `json:"model"`
+	Calls               int64    `json:"calls"`
+	SuccessCalls        int64    `json:"success_calls"`
+	FailureCalls        int64    `json:"failure_calls"`
+	SuccessRate         float64  `json:"success_rate"`
+	InputTokens         int64    `json:"input_tokens"`
+	OutputTokens        int64    `json:"output_tokens"`
+	CachedTokens        int64    `json:"cached_tokens"`
+	CacheReadTokens     int64    `json:"cache_read_tokens"`
+	CacheCreationTokens int64    `json:"cache_creation_tokens"`
+	CacheHitTokens      int64    `json:"cache_hit_tokens"`
+	CacheHitInputTokens int64    `json:"cache_hit_input_tokens"`
+	CacheHitRate        float64  `json:"cache_hit_rate"`
+	TotalTokens         int64    `json:"total_tokens"`
+	Cost                float64  `json:"cost"`
+	LastSeenMS          int64    `json:"last_seen_ms"`
+	AverageOutputTPS    *float64 `json:"average_output_tps"`
+	outputTPSSum        float64
+	outputTPSSamples    int64
 }
 
 type APIKeyStatRow struct {
@@ -3127,13 +3131,15 @@ func buildFailureSources(stats []store.FailureSourceStat) []FailureSourceRow {
 }
 
 type accountStatAccumulator struct {
-	row            AccountStatRow
-	authIndices    map[string]struct{}
-	sources        map[string]struct{}
-	sourceHashes   map[string]struct{}
-	models         map[string]*AccountModelStatRow
-	latencySum     float64
-	latencySamples int64
+	row              AccountStatRow
+	authIndices      map[string]struct{}
+	sources          map[string]struct{}
+	sourceHashes     map[string]struct{}
+	models           map[string]*AccountModelStatRow
+	latencySum       float64
+	latencySamples   int64
+	outputTPSSum     float64
+	outputTPSSamples int64
 }
 
 type apiKeyStatAccumulator struct {
@@ -3223,6 +3229,16 @@ func buildAccountStats(stats []store.AccountModelStat, prices map[string]store.M
 			entry.latencySamples += stat.LatencySamples
 		}
 		addAccountModelStat(entry.models, stat.Model, stat.BillingModel, stat.Calls, stat.SuccessCalls, stat.FailureCalls, stat.InputTokens, stat.OutputTokens, stat.CachedTokens, stat.CacheReadTokens, stat.CacheCreationTokens, stat.TotalTokens, cost, stat.LastSeenMS)
+		entry.outputTPSSum += stat.OutputTPSSum
+		entry.outputTPSSamples += stat.OutputTPSSamples
+		modelKey := stat.Model
+		if strings.TrimSpace(modelKey) == "" {
+			modelKey = "-"
+		}
+		model := entry.models[modelKey]
+		model.outputTPSSum += stat.OutputTPSSum
+		model.outputTPSSamples += stat.OutputTPSSamples
+		model.AverageOutputTPS = averageOutputTPS(model.outputTPSSum, model.outputTPSSamples)
 	}
 
 	result := make([]AccountStatRow, 0, len(grouped))
@@ -3232,6 +3248,7 @@ func buildAccountStats(stats []store.AccountModelStat, prices map[string]store.M
 		entry.row.Sources = sortedSetValues(entry.sources)
 		entry.row.SourceHashes = sortedSetValues(entry.sourceHashes)
 		entry.row.Models = sortedAccountModelStats(entry.models)
+		entry.row.AverageOutputTPS = averageOutputTPS(entry.outputTPSSum, entry.outputTPSSamples)
 		if entry.latencySamples > 0 {
 			value := entry.latencySum / float64(entry.latencySamples)
 			entry.row.AvgLatencyMS = &value
@@ -3244,6 +3261,15 @@ func buildAccountStats(stats []store.AccountModelStat, prices map[string]store.M
 			(result[i].LastSeenMS == result[j].LastSeenMS && result[i].Calls == result[j].Calls && result[i].Cost > result[j].Cost)
 	})
 	return result
+}
+
+// 先累加逐请求速率及样本数，避免对模型或身份分组的平均值再次平均。
+func averageOutputTPS(sum float64, samples int64) *float64 {
+	if samples == 0 {
+		return nil
+	}
+	value := sum / float64(samples)
+	return &value
 }
 
 func buildCredentialStats(stats []store.CredentialModelStat, prices map[string]store.ModelPrice) []CredentialStatRow {

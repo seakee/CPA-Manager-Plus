@@ -289,6 +289,7 @@ const buildModelSpendRowsFromAnalytics = (
       cacheCreationTokens: row.cache_creation_tokens ?? 0,
       totalTokens: row.total_tokens,
       totalCost: row.cost,
+      averageOutputTps: row.average_output_tps ?? null,
       lastSeenAt: row.last_seen_ms,
     }))
     .sort((left, right) => right.totalCost - left.totalCost || right.totalCalls - left.totalCalls);
@@ -696,6 +697,7 @@ export const buildAccountRowsFromAnalytics = (
         totalTokens: row.total_tokens,
         totalCost: row.cost,
         averageLatencyMs: row.average_latency_ms,
+        averageOutputTps: row.average_output_tps ?? null,
         lastSeenAt: row.last_seen_ms,
         recentPattern: [],
         filterValue:
@@ -853,6 +855,7 @@ export const buildFilterOptionsFromAnalytics = (
         totalTokens: 0,
         totalCost: 0,
         averageLatencyMs: null,
+        averageOutputTps: null,
         lastSeenAt: 0,
         recentPattern: [],
         models: [],

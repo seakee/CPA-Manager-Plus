@@ -224,6 +224,8 @@ type AccountModelStat struct {
 	AvgLatencyMS                 sql.NullFloat64
 	LatencySumMS                 int64
 	LatencySamples               int64
+	OutputTPSSum                 float64
+	OutputTPSSamples             int64
 }
 
 type AccountWindowUsageQuery struct {
@@ -1551,7 +1553,9 @@ select
 	max(timestamp_ms),
 	coalesce(sum(case when latency_ms is not null and latency_ms != 0 then latency_ms else 0 end), 0),
 	avg(nullif(latency_ms, 0)),
-	count(nullif(latency_ms, 0))
+	count(nullif(latency_ms, 0)),
+	coalesce(sum(case when failed = 0 and output_tokens > 0 and latency_ms > 0 then output_tokens * 1000.0 / latency_ms else 0 end), 0),
+	count(case when failed = 0 and output_tokens > 0 and latency_ms > 0 then 1 end)
 from banded_usage_events `+where+`
 group by account_snapshot, auth_label_snapshot, coalesce(nullif(auth_provider_snapshot, ''), provider, ''), auth_account_id_snapshot, auth_index, source_hash, analytics_model_value, billing_model, pricing_model_value, context_threshold_tokens_value, coalesce(service_tier, '')
 order by max(timestamp_ms) desc, count(*) desc`, args...)
@@ -1596,6 +1600,8 @@ order by max(timestamp_ms) desc, count(*) desc`, args...)
 			&stat.LatencySumMS,
 			&stat.AvgLatencyMS,
 			&stat.LatencySamples,
+			&stat.OutputTPSSum,
+			&stat.OutputTPSSamples,
 		); err != nil {
 			return nil, err
 		}
