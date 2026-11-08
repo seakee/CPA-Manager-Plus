@@ -16,10 +16,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -95,6 +99,8 @@ type System interface {
 	Readlink(name string) (string, error)
 	Remove(path string) error
 	ReadRandom(dst []byte) error
+	Kill(pid int, sig syscall.Signal) error
+	OpenPID(pid int) (PIDHandle, error)
 }
 
 // PrepareConfig configures the launcher startup preparation step.
@@ -103,6 +109,9 @@ type PrepareConfig struct {
 	DataDir                 string
 	RuntimeRoot             string
 	MountInfoPath           string
+	ProcPath                string
+	QuiesceTimeout          time.Duration
+	ReapChildren            func()
 	TokenFile               string
 	SeedConfigPath          string
 	PasswdPath              string
@@ -171,6 +180,8 @@ func PrepareConfigFromEnv() PrepareConfig {
 	return PrepareConfig{
 		DataDir:                 DefaultDataDir,
 		MountInfoPath:           DefaultMountInfoPath,
+		ProcPath:                DefaultProcPath,
+		QuiesceTimeout:          CPAQuiescenceTimeout,
 		TokenFile:               envOrDefault("CPAMP_RUNTIME_TOKEN_FILE", DefaultRuntimeTokenFile),
 		SeedConfigPath:          DefaultSeedConfigPath,
 		PasswdPath:              DefaultPasswdPath,
@@ -218,6 +229,19 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 		return nil, err
 	}
 
+	reapChildren := cfg.ReapChildren
+	if reapChildren == nil {
+		reapChildren = childReaperFromContext(ctx)
+	}
+	if reapChildren == nil {
+		if _, isOSSys := sys.(osSystem); isOSSys {
+			reapChildren = reapZombieChildrenNonBlocking
+		}
+	}
+	if err := ensureCPAQuiescence(ctx, cfg.ProcPath, cpaUID, cfg.QuiesceTimeout, reapChildren, sys); err != nil {
+		return nil, err
+	}
+
 	runtimeRoot := cfg.RuntimeRoot
 	if runtimeRoot == "" {
 		mountinfo, readErr := sys.ReadFile(cfg.MountInfoPath)
@@ -251,6 +275,10 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 		}
 	}
 
+	if err := checkPreparationState(layout, cfg.ExplicitRuntimeToken, sys); err != nil {
+		return nil, err
+	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -259,30 +287,16 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 		return nil, err
 	}
 
-	for _, trustedDir := range []string{
-		layout.RuntimeRoot,
-		layout.SupervisorDir,
-		layout.ArtifactRoot,
-		layout.ArtifactCPARoot,
-	} {
+	for _, trustedDir := range layout.TrustedRootOwnedDirs() {
 		if err := ensureRootOwnedDirectory(trustedDir, sys); err != nil {
 			return nil, err
 		}
 	}
 
-	for _, gatewayDir := range []string{
-		layout.GatewayDir,
-		layout.GatewayAuthDir,
-		layout.GatewayLogsDir,
-		layout.GatewayPluginsDir,
-	} {
+	for _, gatewayDir := range layout.GatewayDirs() {
 		if err := ensureRealDirectory(gatewayDir, sys); err != nil {
 			return nil, err
 		}
-	}
-
-	if err := ensureRootOwnedDirectory(layout.TokenDir, sys); err != nil {
-		return nil, err
 	}
 
 	if err := sys.Chown(layout.RuntimeRoot, RootUID, RootGID); err != nil {
@@ -299,11 +313,7 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 		return nil, fmt.Errorf("failed to chmod token directory %s: %w", layout.TokenDir, err)
 	}
 
-	for _, supDir := range []string{
-		layout.SupervisorDir,
-		layout.ArtifactRoot,
-		layout.ArtifactCPARoot,
-	} {
+	for _, supDir := range layout.SupervisorDirs() {
 		if err := sys.Chown(supDir, RootUID, cpaGID); err != nil {
 			return nil, fmt.Errorf("failed to chown supervisor directory %s: %w", supDir, err)
 		}
@@ -327,21 +337,9 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 		}
 	}
 
-	if err := lchownRecursiveNoDereference(ctx, layout.GatewayDir, cpaUID, cpaGID, sys); err != nil {
+	if err := repairGatewayTree(ctx, layout, cpaUID, cpaGID, sys); err != nil {
 		return nil, err
 	}
-
-	for _, gatewayDir := range []string{
-		layout.GatewayDir,
-		layout.GatewayAuthDir,
-		layout.GatewayLogsDir,
-		layout.GatewayPluginsDir,
-	} {
-		if err := sys.Chmod(gatewayDir, GatewayDirMode); err != nil {
-			return nil, fmt.Errorf("failed to chmod gateway directory %s: %w", gatewayDir, err)
-		}
-	}
-
 	if layout.RuntimeRoot != DedicatedRuntimeMountPoint {
 		if err := ensureRuntimeCompatSymlink(layout.RuntimeRoot, sys); err != nil {
 			return nil, err
@@ -386,6 +384,12 @@ func applyPrepareDefaults(cfg PrepareConfig) PrepareConfig {
 	}
 	if cfg.MountInfoPath == "" {
 		cfg.MountInfoPath = DefaultMountInfoPath
+	}
+	if cfg.ProcPath == "" {
+		cfg.ProcPath = DefaultProcPath
+	}
+	if cfg.QuiesceTimeout <= 0 {
+		cfg.QuiesceTimeout = CPAQuiescenceTimeout
 	}
 	if cfg.TokenFile == "" {
 		cfg.TokenFile = filepath.Join(cfg.DataDir, "runtime-secret", "token")
@@ -519,21 +523,17 @@ func lookupGroupAccount(content []byte, groupname string) (int, bool) {
 }
 
 func ensureDataDir(dataDir string, sys System) error {
-	stat, err := sys.Lstat(dataDir)
+	exists, err := checkDataDirectory(dataDir, sys)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("failed to stat data directory %s: %w", dataDir, err)
-		}
+		return err
+	}
+	if !exists {
 		if mkErr := sys.Mkdir(dataDir, DataDirMode); mkErr != nil {
 			return fmt.Errorf("failed to create data directory %s: %w", dataDir, mkErr)
 		}
-		stat, err = sys.Lstat(dataDir)
-		if err != nil {
-			return fmt.Errorf("failed to stat data directory %s: %w", dataDir, err)
+		if _, err := checkDataDirectory(dataDir, sys); err != nil {
+			return err
 		}
-	}
-	if stat.Mode&fs.ModeSymlink != 0 || !stat.Mode.IsDir() {
-		return fmt.Errorf("Data directory is not a trusted directory: %s", dataDir)
 	}
 	if err := sys.Chown(dataDir, RootUID, ManagerGID); err != nil {
 		return fmt.Errorf("failed to chown data directory %s: %w", dataDir, err)
@@ -716,48 +716,30 @@ func initV8Bootstrap(layout RuntimeLayout, identity string, sys System) error {
 	return nil
 }
 
-func requireRootOwnedDirectory(dir string, sys System) error {
-	stat, err := sys.Lstat(dir)
-	if err != nil || stat.Mode&fs.ModeSymlink != 0 || !stat.Mode.IsDir() {
-		return fmt.Errorf("Supervisor persisted directory is not a trusted directory: %s", dir)
+func ensureRootOwnedDirectory(dir string, sys System) error {
+	exists, err := checkRootOwnedDirectory(dir, sys)
+	if err != nil {
+		return err
 	}
-	if stat.UID != RootUID {
-		return fmt.Errorf("Supervisor persisted directory owner is not root: %s (uid %d)", dir, stat.UID)
+	if !exists {
+		if mkErr := sys.Mkdir(dir, SupervisorDirMode); mkErr != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, mkErr)
+		}
+		return requireRootOwnedDirectory(dir, sys)
 	}
 	return nil
 }
 
-func ensureRootOwnedDirectory(dir string, sys System) error {
-	_, err := sys.Lstat(dir)
-	if err == nil {
-		return requireRootOwnedDirectory(dir, sys)
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("Supervisor persisted directory is not a trusted directory: %s", dir)
-	}
-	if mkErr := sys.Mkdir(dir, SupervisorDirMode); mkErr != nil {
-		return fmt.Errorf("failed to create directory %s: %w", dir, mkErr)
-	}
-	return requireRootOwnedDirectory(dir, sys)
-}
-
 func ensureRealDirectory(dir string, sys System) error {
-	stat, err := sys.Lstat(dir)
-	if err == nil {
-		if stat.Mode&fs.ModeSymlink != 0 || !stat.Mode.IsDir() {
-			return fmt.Errorf("Gateway state path is not a real directory: %s", dir)
+	exists, err := checkRealGatewayDirectory(dir, sys)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if mkErr := sys.Mkdir(dir, GatewayDirMode); mkErr != nil {
+			return fmt.Errorf("failed to create gateway directory %s: %w", dir, mkErr)
 		}
-		return nil
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("Gateway state path is not a real directory: %s", dir)
-	}
-	if mkErr := sys.Mkdir(dir, GatewayDirMode); mkErr != nil {
-		return fmt.Errorf("failed to create gateway directory %s: %w", dir, mkErr)
-	}
-	stat, err = sys.Lstat(dir)
-	if err != nil || stat.Mode&fs.ModeSymlink != 0 || !stat.Mode.IsDir() {
-		return fmt.Errorf("Gateway state path is not a real directory: %s", dir)
+		return requireRealGatewayDirectory(dir, sys)
 	}
 	return nil
 }
@@ -775,21 +757,11 @@ func validateRuntimeToken(candidate string) error {
 }
 
 func prepareRuntimeToken(tokenFile, explicitToken string, sys System) (string, error) {
-	if explicitToken != "" {
-		if err := validateRuntimeToken(explicitToken); err != nil {
-			return "", err
-		}
+	runtimeToken, err := checkRuntimeToken(tokenFile, explicitToken, sys)
+	if err != nil {
+		return "", err
 	}
-
-	stat, err := sys.Lstat(tokenFile)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", fmt.Errorf("failed to stat Runtime transport secret %s: %w", tokenFile, err)
-	}
-	if err == nil && (stat.Mode&fs.ModeSymlink != 0 || !stat.Mode.IsRegular()) {
-		return "", errors.New("failed to initialize Runtime transport secret")
-	}
-
-	if errors.Is(err, fs.ErrNotExist) {
+	if runtimeToken == "" {
 		candidate := explicitToken
 		if candidate == "" {
 			var randomBytes [32]byte
@@ -818,16 +790,12 @@ func prepareRuntimeToken(tokenFile, explicitToken string, sys System) (string, e
 		}
 	}
 
-	tokenBytes, readErr := sys.ReadFile(tokenFile)
-	if readErr != nil {
-		return "", errors.New("failed to initialize Runtime transport secret")
-	}
-	runtimeToken := string(tokenBytes)
-	if err := validateRuntimeToken(runtimeToken); err != nil {
+	runtimeToken, err = checkRuntimeToken(tokenFile, explicitToken, sys)
+	if err != nil {
 		return "", err
 	}
-	if explicitToken != "" && runtimeToken != explicitToken {
-		return "", errors.New("explicit Runtime transport secret does not match existing secret source")
+	if runtimeToken == "" {
+		return "", errors.New("failed to initialize Runtime transport secret")
 	}
 	if err := sys.Chown(tokenFile, RootUID, ManagerGID); err != nil {
 		return "", fmt.Errorf("failed to chown token file %s: %w", tokenFile, err)
@@ -839,15 +807,12 @@ func prepareRuntimeToken(tokenFile, explicitToken string, sys System) (string, e
 }
 
 func ensureGatewayConfig(configPath string, seedBytes []byte, sys System) error {
-	stat, err := sys.Lstat(configPath)
-	if err == nil {
-		if stat.Mode&fs.ModeSymlink != 0 || !stat.Mode.IsRegular() {
-			return errors.New("failed to initialize Gateway configuration")
-		}
-		return nil
+	exists, err := checkGatewayConfigFile(configPath, sys)
+	if err != nil {
+		return err
 	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		return errors.New("failed to initialize Gateway configuration")
+	if exists {
+		return nil
 	}
 
 	tmpFile := fmt.Sprintf("%s.tmp.%d", configPath, os.Getpid())
@@ -863,16 +828,181 @@ func ensureGatewayConfig(configPath string, seedBytes []byte, sys System) error 
 	linkErr := sys.Link(tmpFile, configPath)
 	_ = sys.Remove(tmpFile)
 	if linkErr != nil {
-		checkStat, checkErr := sys.Lstat(configPath)
-		if checkErr != nil || checkStat.Mode&fs.ModeSymlink != 0 || !checkStat.Mode.IsRegular() {
+		if ok, checkErr := checkGatewayConfigFile(configPath, sys); checkErr != nil || !ok {
 			return errors.New("failed to initialize Gateway configuration")
 		}
 	}
 	return nil
 }
 
-func lchownRecursiveNoDereference(ctx context.Context, path string, uid, gid int, sys System) error {
+func repairGatewayTree(ctx context.Context, layout RuntimeLayout, cpaUID, cpaGID int, sys System) error {
+	if _, isOSSys := sys.(osSystem); isOSSys {
+		return repairGatewayTreeNoFollowFD(ctx, layout, cpaUID, cpaGID)
+	}
+	if err := lchownGatewayTreeNoFollow(ctx, layout.GatewayDir, layout.GatewayDir, cpaUID, cpaGID, sys); err != nil {
+		return err
+	}
+	for _, gatewayDir := range layout.GatewayDirs() {
+		if err := requireRealGatewayDirectory(gatewayDir, sys); err != nil {
+			return err
+		}
+		if err := sys.Chmod(gatewayDir, GatewayDirMode); err != nil {
+			return fmt.Errorf("failed to chmod gateway directory %s: %w", gatewayDir, err)
+		}
+	}
+	return nil
+}
+
+func repairGatewayTreeNoFollowFD(ctx context.Context, layout RuntimeLayout, cpaUID, cpaGID int) error {
+	rootFD, err := openRealDirFD(unix.AT_FDCWD, layout.GatewayDir, layout.GatewayDir)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(rootFD)
+
+	if err := walkGatewayDirFD(ctx, rootFD, layout.GatewayDir, cpaUID, cpaGID); err != nil {
+		return err
+	}
+	if err := unix.Fchmod(rootFD, uint32(NormalizeUnixPerm(GatewayDirMode))); err != nil {
+		return fmt.Errorf("failed to chmod gateway directory %s: %w", layout.GatewayDir, err)
+	}
+	for _, fullSubPath := range layout.GatewayDirs() {
+		if fullSubPath == layout.GatewayDir {
+			continue
+		}
+		subName := filepath.Base(fullSubPath)
+		subFD, openErr := openRealDirFD(rootFD, subName, fullSubPath)
+		if openErr != nil {
+			return openErr
+		}
+		chownErr := unix.Fchown(subFD, cpaUID, cpaGID)
+		chmodErr := unix.Fchmod(subFD, uint32(NormalizeUnixPerm(GatewayDirMode)))
+		_ = unix.Close(subFD)
+		if chownErr != nil {
+			return fmt.Errorf("failed to chown gateway directory %s: %w", fullSubPath, chownErr)
+		}
+		if chmodErr != nil {
+			return fmt.Errorf("failed to chmod gateway directory %s: %w", fullSubPath, chmodErr)
+		}
+	}
+	return nil
+}
+
+func openRealDirFD(parentFD int, name, displayPath string) (int, error) {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("Gateway state path is not a real directory: %s: %w", displayPath, err)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || (st.Mode&unix.S_IFMT) != unix.S_IFDIR {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("Gateway state path is not a real directory: %s", displayPath)
+	}
+	return fd, nil
+}
+
+func readDirFromFD(dirFD int, displayPath string) ([]fs.DirEntry, error) {
+	dupFD, err := unix.Dup(dirFD)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dup directory fd for %s: %w", displayPath, err)
+	}
+	unix.CloseOnExec(dupFD)
+	f := os.NewFile(uintptr(dupFD), displayPath)
+	if f == nil {
+		_ = unix.Close(dupFD)
+		return nil, fmt.Errorf("failed to wrap directory fd for %s", displayPath)
+	}
+	entries, readErr := f.ReadDir(-1)
+	_ = f.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read directory %s: %w", displayPath, readErr)
+	}
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int {
+		return strings.Compare(a.Name(), b.Name())
+	})
+	return entries, nil
+}
+
+func readDirNoFollow(path string) ([]fs.DirEntry, error) {
+	fd, err := openRealDirFD(unix.AT_FDCWD, path, path)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+	return readDirFromFD(fd, path)
+}
+
+func walkGatewayDirFD(ctx context.Context, dirFD int, dirPath string, uid, gid int) error {
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := unix.Fchown(dirFD, uid, gid); err != nil {
+		return fmt.Errorf("failed to fchown %s: %w", dirPath, err)
+	}
+	entries, err := readDirFromFD(dirFD, dirPath)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := entry.Name()
+		childPath := filepath.Join(dirPath, name)
+		var st unix.Stat_t
+		if err := unix.Fstatat(dirFD, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("failed to fstatat %s: %w", childPath, err)
+		}
+		if (st.Mode & unix.S_IFMT) == unix.S_IFDIR {
+			childFD, openErr := openRealDirFD(dirFD, name, childPath)
+			if openErr != nil {
+				return openErr
+			}
+			walkErr := walkGatewayDirFD(ctx, childFD, childPath, uid, gid)
+			_ = unix.Close(childFD)
+			if walkErr != nil {
+				return walkErr
+			}
+			continue
+		}
+		if err := unix.Fchownat(dirFD, name, uid, gid, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return fmt.Errorf("failed to fchownat %s: %w", childPath, err)
+		}
+	}
+	return nil
+}
+
+func requireGatewayAncestorsRealDirs(rootDir, targetPath string, sys System) error {
+	cleanRoot := filepath.Clean(rootDir)
+	cleanTarget := filepath.Clean(targetPath)
+	if cleanTarget == cleanRoot {
+		return requireRealGatewayDirectory(cleanRoot, sys)
+	}
+	rel, err := filepath.Rel(cleanRoot, filepath.Dir(cleanTarget))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("Gateway state path is outside root %s: %s", cleanRoot, cleanTarget)
+	}
+	cur := cleanRoot
+	if err := requireRealGatewayDirectory(cur, sys); err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		if err := requireRealGatewayDirectory(cur, sys); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func lchownGatewayTreeNoFollow(ctx context.Context, rootDir, path string, uid, gid int, sys System) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := requireGatewayAncestorsRealDirs(rootDir, path, sys); err != nil {
 		return err
 	}
 	stat, err := sys.Lstat(path)
@@ -887,17 +1017,52 @@ func lchownRecursiveNoDereference(ctx context.Context, path string, uid, gid int
 	}
 	entries, err := sys.ReadDir(path)
 	if err != nil {
-		return fmt.Errorf("failed to read directory %s: %w", path, err)
+		return fmt.Errorf("Gateway state path is not a real directory: %s: %w", path, err)
+	}
+	if err := requireRealGatewayDirectory(path, sys); err != nil {
+		return err
 	}
 	for _, entry := range entries {
 		childPath := filepath.Join(path, entry.Name())
-		if err := lchownRecursiveNoDereference(ctx, childPath, uid, gid, sys); err != nil {
+		if err := lchownGatewayTreeNoFollow(ctx, rootDir, childPath, uid, gid, sys); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+type reapContextKey struct{}
+
+func withChildReaper(ctx context.Context, reap func()) context.Context {
+	if reap == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, reapContextKey{}, reap)
+}
+
+func childReaperFromContext(ctx context.Context) func() {
+	if ctx == nil {
+		return nil
+	}
+	if fn, ok := ctx.Value(reapContextKey{}).(func()); ok {
+		return fn
+	}
+	return nil
+}
+
+func reapZombieChildrenNonBlocking() {
+	for {
+		var status syscall.WaitStatus
+		wpid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+		if wpid > 0 {
+			continue
+		}
+		if err == nil || errors.Is(err, syscall.ECHILD) || errors.Is(err, syscall.EINTR) {
+			return
+		}
+		return
+	}
+}
 func envOrDefault(key, fallback string) string {
 	if val := os.Getenv(key); val != "" {
 		return val
@@ -940,7 +1105,7 @@ func (osSystem) Lstat(path string) (FileStat, error) {
 }
 
 func (osSystem) ReadDir(path string) ([]fs.DirEntry, error) {
-	return os.ReadDir(path)
+	return readDirNoFollow(path)
 }
 
 func (osSystem) ReadFile(path string) ([]byte, error) {
@@ -956,7 +1121,12 @@ func (osSystem) Mkdir(path string, perm fs.FileMode) error {
 }
 
 func (osSystem) Chmod(path string, perm fs.FileMode) error {
-	return os.Chmod(path, ToOSFileMode(perm))
+	fd, err := unix.Openat(unix.AT_FDCWD, path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	return unix.Fchmod(fd, uint32(NormalizeUnixPerm(perm)))
 }
 
 func (osSystem) Chown(path string, uid, gid int) error {
@@ -980,28 +1150,17 @@ func (osSystem) Readlink(name string) (string, error) {
 }
 
 func ensureRuntimeCompatSymlink(runtimeRoot string, sys System) error {
-	stat, err := sys.Lstat(DedicatedRuntimeMountPoint)
-	if err == nil {
-		if stat.Mode&fs.ModeSymlink != 0 {
-			target, linkErr := sys.Readlink(DedicatedRuntimeMountPoint)
-			if linkErr != nil || target != runtimeRoot {
-				return fmt.Errorf("unexpected symlink at %s -> %s (want %s)", DedicatedRuntimeMountPoint, target, runtimeRoot)
-			}
-			return sys.Lchown(DedicatedRuntimeMountPoint, RootUID, RootGID)
+	state, err := checkRuntimeCompatSymlinkState(runtimeRoot, sys)
+	if err != nil {
+		return err
+	}
+	switch state {
+	case compatSymlinkValid:
+		return sys.Lchown(DedicatedRuntimeMountPoint, RootUID, RootGID)
+	case compatSymlinkEmptyDir:
+		if rmErr := sys.Remove(DedicatedRuntimeMountPoint); rmErr != nil {
+			return fmt.Errorf("failed to remove empty %s directory: %w", DedicatedRuntimeMountPoint, rmErr)
 		}
-		if stat.Mode.IsDir() {
-			entries, dirErr := sys.ReadDir(DedicatedRuntimeMountPoint)
-			if dirErr != nil || len(entries) > 0 {
-				return fmt.Errorf("unmounted %s directory is not empty", DedicatedRuntimeMountPoint)
-			}
-			if rmErr := sys.Remove(DedicatedRuntimeMountPoint); rmErr != nil {
-				return fmt.Errorf("failed to remove empty %s directory: %w", DedicatedRuntimeMountPoint, rmErr)
-			}
-		} else {
-			return fmt.Errorf("unexpected file at %s", DedicatedRuntimeMountPoint)
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("failed to stat %s: %w", DedicatedRuntimeMountPoint, err)
 	}
 
 	if err := sys.Symlink(runtimeRoot, DedicatedRuntimeMountPoint); err != nil {
@@ -1012,6 +1171,7 @@ func ensureRuntimeCompatSymlink(runtimeRoot string, sys System) error {
 	}
 	return nil
 }
+
 func (osSystem) Remove(path string) error {
 	return os.Remove(path)
 }
@@ -1019,6 +1179,14 @@ func (osSystem) Remove(path string) error {
 func (osSystem) ReadRandom(dst []byte) error {
 	_, err := rand.Read(dst)
 	return err
+}
+
+func (osSystem) Kill(pid int, sig syscall.Signal) error {
+	return syscall.Kill(pid, sig)
+}
+
+func (osSystem) OpenPID(pid int) (PIDHandle, error) {
+	return openOSPIDHandle(pid)
 }
 
 func extractStatUIDGID(info fs.FileInfo) (int, int, bool) {

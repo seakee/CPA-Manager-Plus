@@ -113,15 +113,16 @@ func parseDrainTimeoutEnv(getenv func(string) string) time.Duration {
 
 // SupervisorConfig configures the process supervisor for the three child services.
 type SupervisorConfig struct {
-	SupervisorSpec    ChildSpec
-	ManagerSpec       ChildSpec
-	IngressSpec       ChildSpec
-	SupervisorTCPAddr string
-	ManagerHealthURL  string
-	Timings           TimingConfig
-	Stdout            io.Writer
-	Stderr            io.Writer
-	SetCredentials    bool
+	SupervisorSpec        ChildSpec
+	ManagerSpec           ChildSpec
+	IngressSpec           ChildSpec
+	SupervisorTCPAddr     string
+	ManagerHealthURL      string
+	Timings               TimingConfig
+	Stdout                io.Writer
+	Stderr                io.Writer
+	SetCredentials        bool
+	BeforeSupervisorStart func(context.Context, ChildSpec) (ChildSpec, error)
 }
 
 // NewSupervisorConfig builds the production SupervisorConfig from PreparedRuntime
@@ -164,12 +165,13 @@ func NewSupervisorConfig(prepared *PreparedRuntime, environ []string) Supervisor
 			GID:        prepared.IngressGID,
 			ClearSupp:  true,
 		},
-		SupervisorTCPAddr: prepared.RuntimeAddr,
-		ManagerHealthURL:  "http://" + DefaultManagerAddr + "/health",
-		Timings:           timings,
-		Stdout:            os.Stdout,
-		Stderr:            os.Stderr,
-		SetCredentials:    os.Geteuid() == 0,
+		SupervisorTCPAddr:     prepared.RuntimeAddr,
+		ManagerHealthURL:      "http://" + DefaultManagerAddr + "/health",
+		Timings:               timings,
+		Stdout:                os.Stdout,
+		Stderr:                os.Stderr,
+		SetCredentials:        os.Geteuid() == 0,
+		BeforeSupervisorStart: supervisorPreparation(prepared, envMap, DefaultSystem()),
 	}
 }
 
@@ -738,9 +740,21 @@ func superviseService(
 			notifyStarted()
 			return
 		}
-		child, err := reaper.startChild(svc.spec, cfg.SetCredentials, stdoutW, stderrW)
+		spec := svc.spec
+		var err error
+		if isSupervisor && cfg.BeforeSupervisorStart != nil {
+			spec, err = cfg.BeforeSupervisorStart(withChildReaper(shutdownCtx, reaper.reapAvailable), spec)
+		}
+		var child *runningChild
+		if err == nil && shutdownCtx.Err() == nil {
+			child, err = reaper.startChild(spec, cfg.SetCredentials, stdoutW, stderrW)
+		} else if err == nil {
+			err = shutdownCtx.Err()
+		}
 		if err == nil {
 			svc.current = child
+		} else {
+			svc.current = nil
 		}
 		svc.mu.Unlock()
 

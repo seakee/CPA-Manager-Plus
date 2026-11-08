@@ -353,7 +353,7 @@ artifact_b="$(seed_stage 7.3.4 /usr/local/bin/cli-proxy-api runtime18-candidate-
 [ "${artifact_b}" != "${artifact_a}" ] || fail "candidate B must differ from bundled A"
 assert_execution_corridor "${pid_a}" 7.3.4
 activate_b="$(activate runtime18-activate-b "${generation_a}" "${artifact_a}" 7.3.4)"
-[ "$(printf '%s' "${activate_b}" | json_field state)" = succeeded ] || fail "A to B activation failed: ${activate_b}"
+[ "$(printf '%s' "${activate_b}" | json_field state)" = succeeded ] || fail "A to B activation failed (state=$(printf '%s' "${activate_b}" | json_field state))"
 status_b="$(wait_ready "${artifact_b}")"
 [ "$(printf '%s' "${status_b}" | json_field recovery.state)" = armed ] || fail "B recovery is not armed"
 pid_b="$(runtime_cpa_pid)"
@@ -383,8 +383,8 @@ retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/nu
 artifact_d="$(seed_stage 7.3.6 /usr/local/bin/cli-proxy-api runtime18-inaccessible-d)"
 "${compose[@]}" exec -T cpa-manager-plus chmod 500 "${rt_root}/supervisor/artifacts/cpa/7.3.6"
 activate_d="$(activate runtime18-activate-d "${generation_b}" "${artifact_b}" 7.3.6)"
-[ "$(printf '%s' "${activate_d}" | json_field state)" = failed ] || fail "inaccessible D did not fail closed: ${activate_d}"
-[ "$(printf '%s' "${activate_d}" | json_field error.code)" = activation_start_failed ] || fail "inaccessible D was not a spawn failure: ${activate_d}"
+[ "$(printf '%s' "${activate_d}" | json_field state)" = failed ] || fail "inaccessible D did not fail closed (state=$(printf '%s' "${activate_d}" | json_field state))"
+[ "$(printf '%s' "${activate_d}" | json_field error.code)" = activation_start_failed ] || fail "inaccessible D was not a spawn failure (code=$(printf '%s' "${activate_d}" | json_field error.code))"
 status_after_d="$(wait_ready "${artifact_b}")"
 pid_after_d="$(runtime_cpa_pid)"
 assert_cpa_identity "${pid_after_d}"
@@ -392,7 +392,7 @@ assert_cpa_identity "${pid_after_d}"
 
 artifact_c="$(seed_stage 7.3.5 /bin/true '')"
 activate_c="$(activate runtime18-activate-c "${generation_b}" "${artifact_b}" 7.3.5)"
-[ "$(printf '%s' "${activate_c}" | json_field state)" = failed ] || fail "unready C did not fail: ${activate_c}"
+[ "$(printf '%s' "${activate_c}" | json_field state)" = failed ] || fail "unready C did not fail (state=$(printf '%s' "${activate_c}" | json_field state))"
 failure_code="$(printf '%s' "${activate_c}" | json_field error.code)"
 case "${failure_code}" in
   activation_start_failed|activation_readiness_failed) ;;

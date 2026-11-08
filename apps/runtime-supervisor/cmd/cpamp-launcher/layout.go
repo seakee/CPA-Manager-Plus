@@ -29,6 +29,7 @@ const (
 	DefaultRuntimeRoot              = "/data/runtime"
 	DedicatedRuntimeMountPoint      = "/runtime"
 	DefaultMountInfoPath            = "/proc/self/mountinfo"
+	DefaultProcPath                 = "/proc"
 	DefaultRuntimeSecretDir         = "/data/runtime-secret"
 	DefaultRuntimeTokenFile         = "/data/runtime-secret/token"
 	DefaultSeedConfigPath           = "/usr/local/share/cpamp/runtime/config.seed.yaml"
@@ -65,6 +66,8 @@ const (
 	ChildIODrainTimeout          = 1 * time.Second
 	DefaultReadinessPollInterval = 100 * time.Millisecond
 	ReadinessLogInterval         = 15 * time.Second
+	CPAQuiescenceTimeout         = 5 * time.Second
+	CPAQuiescencePollInterval    = 10 * time.Millisecond
 
 	// ShutdownFixedBudgetLimit bounds every stop-stage budget that is not the
 	// configurable drain window. The container stop grace must be at least
@@ -102,6 +105,39 @@ type RuntimeLayout struct {
 	GatewayConfigPath   string
 	TokenDir            string
 	TokenFile           string
+}
+
+// TrustedRootOwnedDirs returns the persisted directories that must be real
+// root-owned directories (never symlinks).
+func (l RuntimeLayout) TrustedRootOwnedDirs() []string {
+	return []string{
+		l.RuntimeRoot,
+		l.SupervisorDir,
+		l.ArtifactRoot,
+		l.ArtifactCPARoot,
+		l.TokenDir,
+	}
+}
+
+// SupervisorDirs returns the Supervisor-private directories that must be owned
+// by root:10001 with mode 0710.
+func (l RuntimeLayout) SupervisorDirs() []string {
+	return []string{
+		l.SupervisorDir,
+		l.ArtifactRoot,
+		l.ArtifactCPARoot,
+	}
+}
+
+// GatewayDirs returns the Gateway state directories that must be real
+// directories owned by 10001:10001 with mode 0700.
+func (l RuntimeLayout) GatewayDirs() []string {
+	return []string{
+		l.GatewayDir,
+		l.GatewayAuthDir,
+		l.GatewayLogsDir,
+		l.GatewayPluginsDir,
+	}
 }
 
 // ResolveRuntimeLayout computes all derived paths from the data dir, runtime root, and token file path.

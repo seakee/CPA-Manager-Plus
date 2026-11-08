@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -39,17 +41,20 @@ type modeRecord struct {
 }
 
 type fakeSystem struct {
-	root        string
-	meta        map[string]nodeMeta
-	randomBytes [32]byte
-	chownCalls  []ownershipRecord
-	lchownCalls []ownershipRecord
-	chmodCalls  []modeRecord
-	mkdirCalls  []modeRecord
-	linkCalls   [][2]string
-	mutations   int
-	readDirHook func(string)
-	opHook      func(op, path string)
+	root          string
+	meta          map[string]nodeMeta
+	randomBytes   [32]byte
+	chownCalls    []ownershipRecord
+	lchownCalls   []ownershipRecord
+	chmodCalls    []modeRecord
+	mkdirCalls    []modeRecord
+	linkCalls     [][2]string
+	mutations     int
+	killCalls     []int
+	keepAlivePIDs map[int]bool
+	openPIDHook   func(pid int) (PIDHandle, error)
+	readDirHook   func(string)
+	opHook        func(op, path string)
 }
 
 func (f *fakeSystem) runOpHook(op, cleaned string) {
@@ -179,7 +184,7 @@ func (f *fakeSystem) ReadDir(virtualPath string) ([]fs.DirEntry, error) {
 	if f.readDirHook != nil {
 		f.readDirHook(cleaned)
 	}
-	return os.ReadDir(f.hostPath(cleaned))
+	return readDirNoFollow(f.hostPath(cleaned))
 }
 
 func (f *fakeSystem) ReadFile(virtualPath string) ([]byte, error) {
@@ -231,8 +236,12 @@ func (f *fakeSystem) Mkdir(virtualPath string, perm fs.FileMode) error {
 func (f *fakeSystem) Chmod(virtualPath string, perm fs.FileMode) error {
 	cleaned := f.cleanPath(virtualPath)
 	f.runOpHook("chmod", cleaned)
-	if _, err := os.Lstat(f.hostPath(cleaned)); err != nil {
+	info, err := os.Lstat(f.hostPath(cleaned))
+	if err != nil {
 		return err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("Gateway state path is not a real directory: %s", cleaned)
 	}
 	normPerm := NormalizeUnixPerm(perm)
 	m := f.meta[cleaned]
@@ -316,6 +325,27 @@ func (f *fakeSystem) ReadRandom(dst []byte) error {
 	return nil
 }
 
+func (f *fakeSystem) Kill(pid int, sig syscall.Signal) error {
+	f.killCalls = append(f.killCalls, pid)
+	if f.keepAlivePIDs != nil && f.keepAlivePIDs[pid] {
+		return nil
+	}
+	procDir := fmt.Sprintf("/proc/%d", pid)
+	_ = os.RemoveAll(f.hostPath(procDir))
+	delete(f.meta, procDir)
+	delete(f.meta, procDir+"/status")
+	return nil
+}
+
+func (f *fakeSystem) OpenPID(pid int) (PIDHandle, error) {
+	if f.openPIDHook != nil {
+		return f.openPIDHook(pid)
+	}
+	if _, err := os.Lstat(f.hostPath(fmt.Sprintf("/proc/%d/status", pid))); err != nil {
+		return nil, syscall.ESRCH
+	}
+	return sysKillPIDHandle{}, nil
+}
 func (f *fakeSystem) assertNode(t *testing.T, virtualPath string, wantUID, wantGID int, wantPerm fs.FileMode, wantDir bool) {
 	t.Helper()
 	stat, err := f.Lstat(virtualPath)
