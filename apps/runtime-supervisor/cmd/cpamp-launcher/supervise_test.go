@@ -29,6 +29,10 @@ func TestMain(m *testing.M) {
 }
 
 func runTestHelperProcess(role string) {
+	if role == "detached-stdout-holder" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
 	eventFile := os.Getenv("CPAMP_TEST_EVENT_FILE")
 	recordEvent := func(kind string) {
 		if eventFile == "" {
@@ -42,8 +46,8 @@ func runTestHelperProcess(role string) {
 		_ = f.Close()
 	}
 
-	recordEvent("start")
-	fmt.Printf("started %s pid=%d\n", role, os.Getpid())
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
 	if subPIDFile := os.Getenv("CPAMP_TEST_SPAWN_SUBCHILD_PID_FILE"); subPIDFile != "" {
 		subCmd := exec.Command(os.Args[0])
@@ -57,6 +61,24 @@ func runTestHelperProcess(role string) {
 			_ = os.WriteFile(subPIDFile, []byte(strconv.Itoa(subCmd.Process.Pid)), 0o600)
 		}
 	}
+
+	if holderPIDFile := os.Getenv("CPAMP_TEST_SPAWN_DETACHED_STDOUT_HOLDER_PID_FILE"); holderPIDFile != "" {
+		holderCmd := exec.Command(os.Args[0])
+		holderCmd.Env = append(os.Environ(),
+			"CPAMP_TEST_HELPER_ROLE=detached-stdout-holder",
+			"CPAMP_TEST_SPAWN_DETACHED_STDOUT_HOLDER_PID_FILE=",
+			"CPAMP_TEST_EVENT_FILE=",
+		)
+		holderCmd.Stdout = os.Stdout
+		holderCmd.Stderr = os.Stderr
+		holderCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := holderCmd.Start(); err == nil && holderCmd.Process != nil {
+			_ = os.WriteFile(holderPIDFile, []byte(strconv.Itoa(holderCmd.Process.Pid)), 0o600)
+		}
+	}
+
+	recordEvent("start")
+	fmt.Printf("started %s pid=%d\n", role, os.Getpid())
 
 	if readyFile := os.Getenv("CPAMP_TEST_READY_FILE"); readyFile != "" {
 		deadline := time.Now().Add(10 * time.Second)
@@ -136,9 +158,7 @@ func runTestHelperProcess(role string) {
 		os.Exit(1)
 	}
 
-	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-
+	// sigCh already registered before recording "start".
 	for range sigCh {
 		recordEvent("sigterm")
 		if os.Getenv("CPAMP_TEST_IGNORE_SIGTERM") == "1" {
@@ -196,6 +216,8 @@ func fastTimings() TimingConfig {
 		ManagerShutdownTimeout:                100 * time.Millisecond,
 		SupervisorShutdownTimeout:             100 * time.Millisecond,
 		ProcessGroupKillGrace:                 60 * time.Millisecond,
+		SIGKILLReapWait:                       50 * time.Millisecond,
+		ChildIODrainTimeout:                   80 * time.Millisecond,
 		ReadinessPollInterval:                 15 * time.Millisecond,
 	}
 }
@@ -1042,4 +1064,139 @@ func TestSignalDuringReadinessWaitReturnsNil(t *testing.T) {
 		}
 		assertNoRoleStarted(t, eventFile, "ingress")
 	})
+}
+
+func TestShutdownBoundedWithDetachedGrandchildHoldingStdout(t *testing.T) {
+	eventFile := filepath.Join(t.TempDir(), "events.log")
+	holderPIDFile := filepath.Join(t.TempDir(), "holder.pid")
+	t.Cleanup(func() {
+		if raw, err := os.ReadFile(holderPIDFile); err == nil {
+			if pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw))); convErr == nil && pid > 0 {
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+
+	var errBuf bytes.Buffer
+	cfg := SupervisorConfig{
+		SupervisorSpec: helperChildSpec(t, "supervisor", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		ManagerSpec:    helperChildSpec(t, "manager", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		IngressSpec: helperChildSpec(t, "ingress",
+			"CPAMP_TEST_EVENT_FILE="+eventFile,
+			"CPAMP_TEST_SPAWN_DETACHED_STDOUT_HOLDER_PID_FILE="+holderPIDFile,
+		),
+		Timings: fastTimings(),
+		Stdout:  &bytes.Buffer{},
+		Stderr:  &errBuf,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSupervisor(ctx, cfg)
+	}()
+
+	waitForEvents(t, eventFile, 3, func(events []recordedEvent) bool {
+		starts := 0
+		for _, e := range events {
+			if e.Kind == "start" {
+				starts++
+			}
+		}
+		return starts >= 3
+	})
+
+	shutdownStart := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSupervisor failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("shutdown stalled on detached grandchild holding stdout")
+	}
+	if elapsed := time.Since(shutdownStart); elapsed > 1500*time.Millisecond {
+		t.Fatalf("shutdown took %s; expected bounded completion within budget", elapsed)
+	}
+
+	events := parseEvents(t, eventFile)
+	var sigtermOrder []string
+	for _, e := range events {
+		if e.Kind == "sigterm" {
+			sigtermOrder = append(sigtermOrder, e.Role)
+		}
+	}
+	if strings.Join(sigtermOrder, ",") != "ingress,manager,supervisor" {
+		t.Fatalf("sigterm order=%v, want [ingress manager supervisor]", sigtermOrder)
+	}
+	if !strings.Contains(errBuf.String(), "stdio did not close within") {
+		t.Fatalf("expected stderr log noting stdio drain timeout, got:\n%s", errBuf.String())
+	}
+}
+
+type blockingOutputWriter struct {
+	unblockCh chan struct{}
+}
+
+func (w *blockingOutputWriter) Write(p []byte) (int, error) {
+	<-w.unblockCh
+	return len(p), nil
+}
+
+func TestShutdownBoundedWithBlockedOutputWriter(t *testing.T) {
+	eventFile := filepath.Join(t.TempDir(), "events.log")
+	bw := &blockingOutputWriter{unblockCh: make(chan struct{})}
+	defer close(bw.unblockCh)
+
+	cfg := SupervisorConfig{
+		SupervisorSpec: helperChildSpec(t, "supervisor", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		ManagerSpec:    helperChildSpec(t, "manager", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		IngressSpec:    helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		Timings:        fastTimings(),
+		Stdout:         bw,
+		Stderr:         bw,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSupervisor(ctx, cfg)
+	}()
+
+	waitForEvents(t, eventFile, 3, func(events []recordedEvent) bool {
+		starts := 0
+		for _, e := range events {
+			if e.Kind == "start" {
+				starts++
+			}
+		}
+		return starts >= 3
+	})
+
+	shutdownStart := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunSupervisor failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("shutdown stalled on blocked output writer")
+	}
+	if elapsed := time.Since(shutdownStart); elapsed > 1500*time.Millisecond {
+		t.Fatalf("shutdown with blocked writer took %s; expected bounded completion", elapsed)
+	}
+
+	events := parseEvents(t, eventFile)
+	var sigtermOrder []string
+	for _, e := range events {
+		if e.Kind == "sigterm" {
+			sigtermOrder = append(sigtermOrder, e.Role)
+		}
+	}
+	if strings.Join(sigtermOrder, ",") != "ingress,manager,supervisor" {
+		t.Fatalf("sigterm order=%v, want [ingress manager supervisor]", sigtermOrder)
+	}
 }

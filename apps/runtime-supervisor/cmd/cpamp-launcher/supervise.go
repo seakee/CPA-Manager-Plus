@@ -48,6 +48,8 @@ type TimingConfig struct {
 	ManagerShutdownTimeout                time.Duration
 	SupervisorShutdownTimeout             time.Duration
 	ProcessGroupKillGrace                 time.Duration
+	SIGKILLReapWait                       time.Duration
+	ChildIODrainTimeout                   time.Duration
 	ReadinessPollInterval                 time.Duration
 }
 
@@ -81,6 +83,12 @@ func (t TimingConfig) withDefaults(getenv func(string) string) TimingConfig {
 	}
 	if t.ProcessGroupKillGrace <= 0 {
 		t.ProcessGroupKillGrace = ProcessGroupKillGrace
+	}
+	if t.SIGKILLReapWait <= 0 {
+		t.SIGKILLReapWait = SIGKILLReapWait
+	}
+	if t.ChildIODrainTimeout <= 0 {
+		t.ChildIODrainTimeout = ChildIODrainTimeout
 	}
 	if t.ReadinessPollInterval <= 0 {
 		t.ReadinessPollInterval = DefaultReadinessPollInterval
@@ -231,13 +239,8 @@ func BuildManagerChildEnv(prepared *PreparedRuntime, containerEnv map[string]str
 	if tokenFile == "" {
 		tokenFile = DefaultRuntimeTokenFile
 	}
-	runtimeAddr := prepared.RuntimeAddr
-	if runtimeAddr == "" {
-		runtimeAddr = DefaultRuntimeAddr
-	}
-
 	env["HTTP_ADDR"] = DefaultManagerAddr
-	env["CPAMP_RUNTIME_URL"] = "http://" + runtimeAddr
+	env["CPAMP_RUNTIME_URL"] = "http://" + DefaultRuntimeAddr
 	env["CPAMP_RUNTIME_TOKEN_FILE"] = tokenFile
 	env["CPAMP_INGRESS_CONTROL_URL"] = "http://" + DefaultIngressAdminAddr
 
@@ -261,21 +264,82 @@ func BuildIngressChildEnv(drainTimeout time.Duration, containerEnv map[string]st
 	return formatEnvMap(env)
 }
 
+type lineWriteReq struct {
+	dst     io.Writer
+	line    string
+	flushCh chan struct{}
+}
+
+// lineSink decouples child and launcher log writes from potentially blocked
+// stdout/stderr sinks so a stalled consumer cannot hold up child pipe draining
+// or ordered shutdown.
+type lineSink struct {
+	ch     chan lineWriteReq
+	stopCh chan struct{}
+}
+
+func newLineSink() *lineSink {
+	s := &lineSink{
+		ch:     make(chan lineWriteReq, 4096),
+		stopCh: make(chan struct{}),
+	}
+	go func() {
+		for req := range s.ch {
+			if req.flushCh != nil {
+				close(req.flushCh)
+				return
+			}
+			if req.dst != nil {
+				_, _ = io.WriteString(req.dst, req.line)
+			}
+		}
+	}()
+	return s
+}
+
+func (s *lineSink) flushAndStop(timeout time.Duration) {
+	if s == nil {
+		return
+	}
+	if timeout <= 0 {
+		timeout = 50 * time.Millisecond
+	}
+	flushCh := make(chan struct{})
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case s.ch <- lineWriteReq{flushCh: flushCh}:
+		select {
+		case <-flushCh:
+		case <-timer.C:
+		}
+	case <-timer.C:
+	}
+	close(s.stopCh)
+}
+
 type syncLineWriter struct {
-	mu  sync.Mutex
-	dst io.Writer
+	sink *lineSink
+	dst  io.Writer
 }
 
 func (w *syncLineWriter) writePrefixedLine(prefix, line string) {
-	if w == nil || w.dst == nil {
+	if w == nil || w.dst == nil || w.sink == nil {
 		return
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	_, _ = io.WriteString(w.dst, prefix)
-	_, _ = io.WriteString(w.dst, line)
 	if !strings.HasSuffix(line, "\n") {
-		_, _ = io.WriteString(w.dst, "\n")
+		line += "\n"
+	}
+	msg := prefix + line
+	select {
+	case <-w.sink.stopCh:
+		return
+	default:
+	}
+	select {
+	case w.sink.ch <- lineWriteReq{dst: w.dst, line: msg}:
+	case <-w.sink.stopCh:
+	default:
 	}
 }
 
@@ -354,12 +418,32 @@ func (r *centralReaper) reapAvailable() {
 }
 
 type runningChild struct {
-	spec      ChildSpec
-	pid       int
-	pgid      int
-	startedAt time.Time
-	exitCh    <-chan syscall.WaitStatus
-	ioDone    chan struct{}
+	spec           ChildSpec
+	pid            int
+	pgid           int
+	startedAt      time.Time
+	exitCh         <-chan syscall.WaitStatus
+	ioDone         chan struct{}
+	closePipesOnce sync.Once
+	outR           *os.File
+	errR           *os.File
+}
+
+func (c *runningChild) closeOutputPipes() {
+	if c == nil {
+		return
+	}
+	c.closePipesOnce.Do(func() {
+		for _, pipeReader := range []*os.File{c.outR, c.errR} {
+			if pipeReader == nil {
+				continue
+			}
+			_ = pipeReader.SetReadDeadline(time.Now())
+			go func(f *os.File) {
+				_ = f.Close()
+			}(pipeReader)
+		}
+	})
 }
 
 func (r *centralReaper) startChild(
@@ -438,6 +522,8 @@ func (r *centralReaper) startChild(
 		startedAt: time.Now(),
 		exitCh:    exitCh,
 		ioDone:    ioDone,
+		outR:      outR,
+		errR:      errR,
 	}, nil
 }
 
@@ -474,8 +560,10 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 		cfg.Stderr = os.Stderr
 	}
 
-	stdoutW := &syncLineWriter{dst: cfg.Stdout}
-	stderrW := &syncLineWriter{dst: cfg.Stderr}
+	sink := newLineSink()
+	defer sink.flushAndStop(cfg.Timings.SIGKILLReapWait)
+	stdoutW := &syncLineWriter{sink: sink, dst: cfg.Stdout}
+	stderrW := &syncLineWriter{sink: sink, dst: cfg.Stderr}
 	fixedBudget := ShutdownFixedBudget()
 	stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf(
 		"shutdown budget: drain=%s fixed=%s worst-case=%s; container stop grace must be >= drain+%s (>= %s)",
@@ -519,7 +607,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 
 	shutdownAndReturn := func() error {
 		beginShutdown()
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
+		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
 		select {
 		case err := <-fatalErrCh:
 			return err
@@ -531,7 +619,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 	select {
 	case <-supFirstStart:
 	case err := <-fatalErrCh:
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
+		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
@@ -547,7 +635,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 
 	select {
 	case err := <-fatalErrCh:
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
+		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
@@ -570,7 +658,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 	select {
 	case <-mgrFirstStart:
 	case err := <-fatalErrCh:
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
+		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
@@ -587,7 +675,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 
 	select {
 	case err := <-fatalErrCh:
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
+		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
@@ -610,7 +698,7 @@ func RunSupervisor(ctx context.Context, cfg SupervisorConfig) error {
 	select {
 	case err := <-fatalErrCh:
 		beginShutdown()
-		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings)
+		shutdownServices(ingSvc, mgrSvc, supSvc, reaper, cfg.Timings, stderrW)
 		return err
 	case <-ctx.Done():
 		return shutdownAndReturn()
@@ -666,9 +754,9 @@ func superviseService(
 			<-child.exitCh
 			uptime = time.Since(child.startedAt)
 			if isSupervisor {
-				terminateAndReapProcessGroup(child.pgid, reaper, cfg.Timings.ProcessGroupKillGrace)
+				terminateAndReapProcessGroup(child.pgid, reaper, cfg.Timings.ProcessGroupKillGrace, cfg.Timings.SIGKILLReapWait)
 			}
-			<-child.ioDone
+			waitChildIODone(child, svc.spec.Name, cfg.Timings.ChildIODrainTimeout, stderrW)
 		}
 
 		svc.mu.Lock()
@@ -727,6 +815,7 @@ func shutdownServices(
 	ingSvc, mgrSvc, supSvc *managedService,
 	reaper *centralReaper,
 	timings TimingConfig,
+	stderrW *syncLineWriter,
 ) {
 	for _, svc := range []*managedService{ingSvc, mgrSvc, supSvc} {
 		if svc == nil {
@@ -738,11 +827,11 @@ func shutdownServices(
 	}
 
 	// 1. SIGTERM Ingress; wait up to drain timeout + 5s; SIGKILL if still alive.
-	stopSingleService(ingSvc, reaper, timings.DrainTimeout+timings.IngressDrainGraceExtra, false, 0)
+	stopSingleService(ingSvc, reaper, timings.DrainTimeout+timings.IngressDrainGraceExtra, false, 0, timings.SIGKILLReapWait, timings.ChildIODrainTimeout, stderrW)
 	// 2. SIGTERM Manager; wait up to 15s; then SIGKILL.
-	stopSingleService(mgrSvc, reaper, timings.ManagerShutdownTimeout, false, 0)
+	stopSingleService(mgrSvc, reaper, timings.ManagerShutdownTimeout, false, 0, timings.SIGKILLReapWait, timings.ChildIODrainTimeout, stderrW)
 	// 3. SIGTERM Supervisor; wait up to 15s; then kill and reap its process group (CPA).
-	stopSingleService(supSvc, reaper, timings.SupervisorShutdownTimeout, true, timings.ProcessGroupKillGrace)
+	stopSingleService(supSvc, reaper, timings.SupervisorShutdownTimeout, true, timings.ProcessGroupKillGrace, timings.SIGKILLReapWait, timings.ChildIODrainTimeout, stderrW)
 }
 
 func stopSingleService(
@@ -751,6 +840,9 @@ func stopSingleService(
 	timeout time.Duration,
 	killProcessGroupAfter bool,
 	pgKillGrace time.Duration,
+	sigkillReapWait time.Duration,
+	ioDrainTimeout time.Duration,
+	stderrW *syncLineWriter,
 ) {
 	if svc == nil {
 		return
@@ -771,16 +863,70 @@ func stopSingleService(
 	case <-timer.C:
 		_ = syscall.Kill(-child.pgid, syscall.SIGKILL)
 		_ = syscall.Kill(child.pid, syscall.SIGKILL)
-		<-child.exitCh
+		if !waitChildExitAfterSIGKILL(child, reaper, sigkillReapWait) {
+			stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf(
+				"%s (pid %d) did not exit within %s after SIGKILL; continuing shutdown",
+				svc.spec.Name,
+				child.pid,
+				sigkillReapWait,
+			))
+		}
 	}
 
 	if killProcessGroupAfter {
-		terminateAndReapProcessGroup(child.pgid, reaper, pgKillGrace)
+		terminateAndReapProcessGroup(child.pgid, reaper, pgKillGrace, sigkillReapWait)
 	}
-	<-child.ioDone
+	waitChildIODone(child, svc.spec.Name, ioDrainTimeout, stderrW)
 }
 
-func terminateAndReapProcessGroup(pgid int, reaper *centralReaper, grace time.Duration) {
+func waitChildExitAfterSIGKILL(child *runningChild, reaper *centralReaper, wait time.Duration) bool {
+	if wait <= 0 {
+		wait = SIGKILLReapWait
+	}
+	deadline := time.Now().Add(wait)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		reaper.reapAvailable()
+		select {
+		case <-child.exitCh:
+			return true
+		default:
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		select {
+		case <-child.exitCh:
+			return true
+		case <-ticker.C:
+		}
+	}
+}
+
+func waitChildIODone(child *runningChild, name string, timeout time.Duration, stderrW *syncLineWriter) {
+	if child == nil {
+		return
+	}
+	if timeout <= 0 {
+		timeout = ChildIODrainTimeout
+	}
+	timer := time.NewTimer(timeout)
+	select {
+	case <-child.ioDone:
+		timer.Stop()
+	case <-timer.C:
+		stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf(
+			"%s (pid %d) stdio did not close within %s; detaching output pipes and continuing",
+			name,
+			child.pid,
+			timeout,
+		))
+		child.closeOutputPipes()
+	}
+}
+
+func terminateAndReapProcessGroup(pgid int, reaper *centralReaper, grace, sigkillWait time.Duration) {
 	if pgid <= 0 {
 		return
 	}
@@ -791,6 +937,9 @@ func terminateAndReapProcessGroup(pgid int, reaper *centralReaper, grace time.Du
 	if grace <= 0 {
 		grace = 100 * time.Millisecond
 	}
+	if sigkillWait <= 0 {
+		sigkillWait = SIGKILLReapWait
+	}
 	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
 		reaper.reapAvailable()
@@ -800,7 +949,7 @@ func terminateAndReapProcessGroup(pgid int, reaper *centralReaper, grace time.Du
 		time.Sleep(10 * time.Millisecond)
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	killDeadline := time.Now().Add(SIGKILLReapWait)
+	killDeadline := time.Now().Add(sigkillWait)
 	for time.Now().Before(killDeadline) {
 		reaper.reapAvailable()
 		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {

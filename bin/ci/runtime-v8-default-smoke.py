@@ -121,6 +121,7 @@ def main():
                 assert v["code"] == 503 and v["body"].strip() == "gateway pending configuration", (
                     method, path, v["code"], len(body_bytes), hashlib.sha256(body_bytes).hexdigest()
                 )
+        for key in (None, "incorrect-client-key"):
             assert http("http://cpa-manager-plus:8317/v1/models", key)["code"] == 0
             assert http("http://cpa-manager-plus:9081/v1/runtime/status", key)["code"] == 0
         events.append({"boundary": label, "result": "PASS"})

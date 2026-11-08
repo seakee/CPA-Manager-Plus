@@ -465,21 +465,25 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
         /stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/
       );
     }
-    const nonLoopbackRuntimeAddrCompose = composeYaml.replace(
-      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
-      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'\n      CPAMP_RUNTIME_ADDR: '0.0.0.0:9081'"
-    );
-    expect(() => composeYamlToRuntime12ConfigJson(nonLoopbackRuntimeAddrCompose)).toThrow(
-      /CPAMP_RUNTIME_ADDR override must stay on in-container loopback 127\.0\.0\.1:9081/
-    );
+    for (const badRuntimeAddr of ['0.0.0.0:9081', '127.0.0.1:9000', '[::1]:9081', '127.0.0.2:9081', 'localhost:9081']) {
+      const badRuntimeAddrCompose = composeYaml.replace(
+        "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+        `      CPAMP_DRAIN_TIMEOUT: '\${CPAMP_DRAIN_TIMEOUT:-90s}'\n      CPAMP_RUNTIME_ADDR: '${badRuntimeAddr}'`
+      );
+      expect(() => composeYamlToRuntime12ConfigJson(badRuntimeAddrCompose)).toThrow(
+        /CPAMP_RUNTIME_ADDR override must stay on in-container loopback 127\.0\.0\.1:9081/
+      );
+    }
 
-    const nonLoopbackCpaAddrCompose = composeYaml.replace(
-      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
-      "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'\n      CPAMP_RUNTIME_CPA_ADDR: '0.0.0.0:8317'"
-    );
-    expect(() => composeYamlToRuntime12ConfigJson(nonLoopbackCpaAddrCompose)).toThrow(
-      /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
-    );
+    for (const badCpaAddr of ['0.0.0.0:8317', '127.0.0.1:9000', '[::1]:8317', '127.0.0.2:8317', 'localhost:8317']) {
+      const badCpaAddrCompose = composeYaml.replace(
+        "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+        `      CPAMP_DRAIN_TIMEOUT: '\${CPAMP_DRAIN_TIMEOUT:-90s}'\n      CPAMP_RUNTIME_CPA_ADDR: '${badCpaAddr}'`
+      );
+      expect(() => composeYamlToRuntime12ConfigJson(badCpaAddrCompose)).toThrow(
+        /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
+      );
+    }
     const extraPortCompose = composeYaml.replace(
       "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
       "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'\n      - '18318:18317'"

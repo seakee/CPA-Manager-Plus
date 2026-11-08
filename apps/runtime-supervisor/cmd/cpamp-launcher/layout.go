@@ -62,6 +62,7 @@ const (
 	SupervisorShutdownTimeout    = 15 * time.Second
 	ProcessGroupKillGrace        = 5 * time.Second
 	SIGKILLReapWait              = 500 * time.Millisecond
+	ChildIODrainTimeout          = 1 * time.Second
 	DefaultReadinessPollInterval = 100 * time.Millisecond
 	ReadinessLogInterval         = 15 * time.Second
 
@@ -72,9 +73,17 @@ const (
 )
 
 // ShutdownFixedBudget returns the worst-case time the launcher can spend on
-// shutdown stages other than the configurable drain window.
+// shutdown stages other than the configurable drain window:
+//   - Ingress: IngressDrainGraceExtra + SIGKILLReapWait + ChildIODrainTimeout
+//   - Manager: ManagerShutdownTimeout + SIGKILLReapWait + ChildIODrainTimeout
+//   - Supervisor: SupervisorShutdownTimeout + SIGKILLReapWait + ProcessGroupKillGrace + SIGKILLReapWait + ChildIODrainTimeout
 func ShutdownFixedBudget() time.Duration {
-	return IngressDrainGraceExtra + ManagerShutdownTimeout + SupervisorShutdownTimeout + ProcessGroupKillGrace + SIGKILLReapWait
+	return IngressDrainGraceExtra +
+		ManagerShutdownTimeout +
+		SupervisorShutdownTimeout +
+		ProcessGroupKillGrace +
+		4*SIGKILLReapWait +
+		3*ChildIODrainTimeout
 }
 
 // RuntimeLayout holds the resolved filesystem paths produced for a runtime root.

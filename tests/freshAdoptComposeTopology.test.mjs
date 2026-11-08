@@ -308,16 +308,30 @@ describe('Fresh adoption compose topology negative fixtures', () => {
     longDrainShortGraceDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = '120s';
     longDrainShortGraceDoc.services['cpa-manager-plus'].stop_grace_period = '150s';
     expect(() => runValidator(longDrainShortGraceDoc)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
-    const badRuntimeAddrDoc = structuredClone(validDoc);
-    badRuntimeAddrDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_ADDR = '0.0.0.0:9081';
-    expect(() => runValidator(badRuntimeAddrDoc)).toThrow(
-      /CPAMP_RUNTIME_ADDR override must stay on in-container loopback 127\.0\.0\.1:9081/
-    );
+    for (const badRuntimeAddr of ['0.0.0.0:9081', '127.0.0.1:9000', '[::1]:9081', '127.0.0.2:9081', 'localhost:9081']) {
+      const badRuntimeAddrDoc = structuredClone(validDoc);
+      badRuntimeAddrDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_ADDR = badRuntimeAddr;
+      expect(() => runValidator(badRuntimeAddrDoc)).toThrow(
+        /CPAMP_RUNTIME_ADDR override must stay on in-container loopback 127\.0\.0\.1:9081/
+      );
+      const badRuntimeAddrRenderDoc = structuredClone(pinnedDocForRender);
+      badRuntimeAddrRenderDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_ADDR = badRuntimeAddr;
+      expect(() => validateRuntime12ComposeDocument(badRuntimeAddrRenderDoc, { validateComposeScript: false })).toThrow(
+        /CPAMP_RUNTIME_ADDR override must stay on in-container loopback 127\.0\.0\.1:9081/
+      );
+    }
 
-    const badCpaAddrDoc = structuredClone(validDoc);
-    badCpaAddrDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_CPA_ADDR = '0.0.0.0:8317';
-    expect(() => runValidator(badCpaAddrDoc)).toThrow(
-      /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
-    );
+    for (const badCpaAddr of ['0.0.0.0:8317', '127.0.0.1:9000', '[::1]:8317', '127.0.0.2:8317', 'localhost:8317']) {
+      const badCpaAddrDoc = structuredClone(validDoc);
+      badCpaAddrDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_CPA_ADDR = badCpaAddr;
+      expect(() => runValidator(badCpaAddrDoc)).toThrow(
+        /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
+      );
+      const badCpaAddrRenderDoc = structuredClone(pinnedDocForRender);
+      badCpaAddrRenderDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_CPA_ADDR = badCpaAddr;
+      expect(() => validateRuntime12ComposeDocument(badCpaAddrRenderDoc, { validateComposeScript: false })).toThrow(
+        /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
+      );
+    }
   });
 });

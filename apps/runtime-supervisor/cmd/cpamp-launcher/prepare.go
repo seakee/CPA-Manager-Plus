@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -207,10 +206,10 @@ func prepareContext(ctx context.Context, cfg PrepareConfig, sys System) (*Prepar
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := validateLoopbackAddr("CPAMP_RUNTIME_ADDR", cfg.RuntimeAddr); err != nil {
+	if err := validateCanonicalServiceAddr("CPAMP_RUNTIME_ADDR", cfg.RuntimeAddr, DefaultRuntimeAddr); err != nil {
 		return nil, err
 	}
-	if err := validateLoopbackAddr("CPAMP_RUNTIME_CPA_ADDR", cfg.RuntimeCPAAddr); err != nil {
+	if err := validateCanonicalServiceAddr("CPAMP_RUNTIME_CPA_ADDR", cfg.RuntimeCPAAddr, DefaultRuntimeCPAAddr); err != nil {
 		return nil, err
 	}
 
@@ -458,16 +457,12 @@ func validateCPAIdentity(cfg PrepareConfig, sys System) (int, int, error) {
 	return uid, gid, nil
 }
 
-// validateLoopbackAddr enforces that a service address stays on container
-// loopback, so no environment override can publish an internal listener.
-func validateLoopbackAddr(name, addr string) error {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("%s must be a loopback host:port address: %w", name, err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("%s must be a loopback address, got %q", name, addr)
+// validateCanonicalServiceAddr enforces that embedded internal service
+// addresses match their fixed canonical loopback host:port values so the
+// listener and internal routing topology cannot diverge.
+func validateCanonicalServiceAddr(name, addr, canonical string) error {
+	if addr != canonical {
+		return fmt.Errorf("%s must be the canonical loopback address %s, got %q", name, canonical, addr)
 	}
 	return nil
 }

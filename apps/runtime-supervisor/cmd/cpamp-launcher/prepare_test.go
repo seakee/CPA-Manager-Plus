@@ -764,9 +764,17 @@ func TestPrepareRefusesNonLoopbackServiceAddresses(t *testing.T) {
 		cfg  PrepareConfig
 		want string
 	}{
-		{name: "supervisor wildcard addr", cfg: PrepareConfig{RuntimeAddr: "0.0.0.0:9081"}, want: "CPAMP_RUNTIME_ADDR must be a loopback address"},
-		{name: "supervisor hostname addr", cfg: PrepareConfig{RuntimeAddr: "example.com:9081"}, want: "CPAMP_RUNTIME_ADDR must be a loopback address"},
-		{name: "cpa wildcard addr", cfg: PrepareConfig{RuntimeCPAAddr: "0.0.0.0:8317"}, want: "CPAMP_RUNTIME_CPA_ADDR must be a loopback address"},
+		{name: "supervisor wildcard addr", cfg: PrepareConfig{RuntimeAddr: "0.0.0.0:9081"}, want: "CPAMP_RUNTIME_ADDR must be the canonical loopback address 127.0.0.1:9081"},
+		{name: "supervisor hostname addr", cfg: PrepareConfig{RuntimeAddr: "example.com:9081"}, want: "CPAMP_RUNTIME_ADDR must be the canonical loopback address 127.0.0.1:9081"},
+		{name: "supervisor non-canonical port", cfg: PrepareConfig{RuntimeAddr: "127.0.0.1:9000"}, want: "CPAMP_RUNTIME_ADDR must be the canonical loopback address 127.0.0.1:9081"},
+		{name: "supervisor ipv6 loopback", cfg: PrepareConfig{RuntimeAddr: "[::1]:9081"}, want: "CPAMP_RUNTIME_ADDR must be the canonical loopback address 127.0.0.1:9081"},
+		{name: "supervisor alternate ipv4 loopback", cfg: PrepareConfig{RuntimeAddr: "127.0.0.2:9081"}, want: "CPAMP_RUNTIME_ADDR must be the canonical loopback address 127.0.0.1:9081"},
+		{name: "supervisor localhost name", cfg: PrepareConfig{RuntimeAddr: "localhost:9081"}, want: "CPAMP_RUNTIME_ADDR must be the canonical loopback address 127.0.0.1:9081"},
+		{name: "cpa wildcard addr", cfg: PrepareConfig{RuntimeCPAAddr: "0.0.0.0:8317"}, want: "CPAMP_RUNTIME_CPA_ADDR must be the canonical loopback address 127.0.0.1:8317"},
+		{name: "cpa non-canonical port", cfg: PrepareConfig{RuntimeCPAAddr: "127.0.0.1:9000"}, want: "CPAMP_RUNTIME_CPA_ADDR must be the canonical loopback address 127.0.0.1:8317"},
+		{name: "cpa ipv6 loopback", cfg: PrepareConfig{RuntimeCPAAddr: "[::1]:8317"}, want: "CPAMP_RUNTIME_CPA_ADDR must be the canonical loopback address 127.0.0.1:8317"},
+		{name: "cpa alternate ipv4 loopback", cfg: PrepareConfig{RuntimeCPAAddr: "127.0.0.2:8317"}, want: "CPAMP_RUNTIME_CPA_ADDR must be the canonical loopback address 127.0.0.1:8317"},
+		{name: "cpa localhost name", cfg: PrepareConfig{RuntimeCPAAddr: "localhost:8317"}, want: "CPAMP_RUNTIME_CPA_ADDR must be the canonical loopback address 127.0.0.1:8317"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sys := newFakeSystem(t)
@@ -780,6 +788,20 @@ func TestPrepareRefusesNonLoopbackServiceAddresses(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("exact canonical values accepted", func(t *testing.T) {
+		sys := newFakeSystem(t)
+		got, err := prepare(PrepareConfig{
+			RuntimeAddr:    DefaultRuntimeAddr,
+			RuntimeCPAAddr: DefaultRuntimeCPAAddr,
+		}, sys)
+		if err != nil {
+			t.Fatalf("expected canonical addresses to succeed, got: %v", err)
+		}
+		if got.RuntimeAddr != DefaultRuntimeAddr || got.RuntimeCPAAddr != DefaultRuntimeCPAAddr {
+			t.Fatalf("got RuntimeAddr=%q RuntimeCPAAddr=%q", got.RuntimeAddr, got.RuntimeCPAAddr)
+		}
+	})
 }
 
 func TestPrepareStopsWhenCanceledDuringGatewayWalk(t *testing.T) {
@@ -886,6 +908,18 @@ func TestPrepareStopsWhenCanceledDuringGatewayWalk(t *testing.T) {
 
 func TestShutdownBudgetFitsContainerGrace(t *testing.T) {
 	fixed := ShutdownFixedBudget()
+	wantFixed := IngressDrainGraceExtra +
+		ManagerShutdownTimeout +
+		SupervisorShutdownTimeout +
+		ProcessGroupKillGrace +
+		4*SIGKILLReapWait +
+		3*ChildIODrainTimeout
+	if fixed != wantFixed {
+		t.Fatalf("fixed shutdown budget=%s, want %s", fixed, wantFixed)
+	}
+	if fixed != 45*time.Second {
+		t.Fatalf("fixed shutdown budget=%s, want 45s", fixed)
+	}
 	if fixed > ShutdownFixedBudgetLimit {
 		t.Fatalf("fixed shutdown budget %s exceeds limit %s", fixed, ShutdownFixedBudgetLimit)
 	}
