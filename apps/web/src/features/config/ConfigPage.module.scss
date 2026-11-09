@@ -25,11 +25,9 @@
   min-width: 0;
   padding: 10px;
   border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-  border-radius: 16px;
+  border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--bg-primary) 84%, var(--surface-subtle));
-  box-shadow:
-    0 1px 2px rgba(15, 23, 42, 0.04),
-    inset 0 1px 0 color-mix(in srgb, var(--bg-primary) 92%, transparent);
+  box-shadow: var(--app-specular-highlight);
 
   @include mobile {
     align-items: stretch;
@@ -45,7 +43,7 @@
   gap: 7px;
   min-height: 32px;
   padding: 0 11px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
   background: color-mix(in srgb, var(--bg-primary) 86%, transparent);
   color: var(--text-primary);
@@ -102,7 +100,7 @@
   gap: $spacing-lg;
   padding: 20px;
   border: 1px solid var(--glass-border);
-  border-radius: 8px;
+  border-radius: var(--app-radius-lg);
   background: var(--glass-bg);
 }
 
@@ -138,7 +136,7 @@
   min-width: 0;
   padding: 12px;
   border: 1px solid color-mix(in srgb, var(--border-subtle) 84%, transparent);
-  border-radius: 8px;
+  border-radius: var(--app-radius-md);
 
   :global(.form-group) {
     margin-bottom: 0;
@@ -185,7 +183,7 @@
   max-width: 100%;
   padding: 0 10px;
   border: 1px solid color-mix(in srgb, var(--primary-color) 26%, var(--border-color));
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--primary-color) 9%, var(--bg-primary));
   color: var(--text-primary);
   font-size: 12px;
@@ -205,7 +203,7 @@
     min-width: 0;
     padding: $spacing-sm $spacing-md;
     border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
-    border-radius: 8px;
+    border-radius: var(--app-radius-sm);
     background: var(--bg-primary);
   }
 
@@ -230,7 +228,7 @@
 .managerDependencyNote {
   padding: 10px 12px;
   border: 1px solid var(--warning-border);
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: var(--warning-bg);
   color: var(--warning-text);
   font-size: 13px;
@@ -240,7 +238,7 @@
 .managerQueueNote {
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--warning-border) 70%, var(--border-color));
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--warning-bg) 74%, var(--bg-primary));
   color: var(--warning-text);
   font-size: 13px;
@@ -250,7 +248,7 @@
 .managerStatusNote {
   padding: 10px 12px;
   border: 1px solid var(--warning-border);
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: var(--warning-bg);
   color: var(--warning-text);
   font-size: 13px;
@@ -284,7 +282,7 @@
   max-width: 100%;
   padding: 0 10px;
   border: 1px solid transparent;
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   font-size: 12px;
   font-weight: 700;
   line-height: 1.2;
@@ -320,7 +318,7 @@
 .managerConnectionRiskNote {
   padding: 10px 12px;
   border: 1px solid var(--failure-badge-border);
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: var(--failure-badge-bg);
   color: var(--failure-badge-text);
   font-size: 13px;
@@ -347,7 +345,7 @@
   height: 28px;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--app-radius-xs);
   background: transparent;
   color: var(--text-secondary);
   font-size: 14px;
@@ -377,7 +375,7 @@
   gap: 8px;
   padding: 8px 12px;
   border: 1px solid color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
   color: var(--text-primary);
   font-size: 13px;
@@ -431,14 +429,20 @@
   font-weight: 600;
 }
 
-.managerSelectTrigger {
-  height: 40px !important;
-  padding: 0 12px !important;
-  background-color: var(--bg-primary) !important;
-  border-radius: 12px !important;
-  box-shadow: none !important;
-  font-size: 14px !important;
-  font-weight: 400 !important;
+.managerField .managerSelectTrigger {
+  height: 40px;
+  padding: 0 12px;
+  background-color: var(--bg-primary);
+  border-radius: var(--app-radius-md);
+  box-shadow: none;
+  font-size: 14px;
+  font-weight: 400;
+
+  &:focus,
+  &[aria-expanded='true'] {
+    background-color: var(--bg-primary);
+    box-shadow: none;
+  }
 }
 
 .managerMetaGrid {
@@ -453,7 +457,7 @@
   > div {
     min-width: 0;
     padding: $spacing-sm $spacing-md;
-    border-radius: 8px;
+    border-radius: var(--app-radius-sm);
     background: var(--surface-subtle);
   }
 
@@ -516,10 +520,14 @@
   flex: 1;
   height: 38px;
   min-height: 38px;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-  border-radius: 12px !important;
-  padding-right: 132px !important;
+
+  &:global(.input),
+  &:global(.input.input-with-right-element) {
+    padding-top: 0;
+    padding-bottom: 0;
+    border-radius: var(--app-radius-md);
+    padding-right: 132px;
+  }
 }
 
 .searchRight {
@@ -533,7 +541,7 @@
   align-items: center;
   min-height: 28px;
   padding: 0 10px;
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--bg-primary) 88%, transparent);
   border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
   color: var(--text-secondary);
@@ -550,18 +558,18 @@
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 12px;
-  background: var(--primary-color);
-  border: 1px solid var(--primary-color);
-  color: #fff;
+  border-radius: var(--app-radius-md);
+  background: var(--primary-solid);
+  border: 1px solid var(--primary-solid);
+  color: var(--primary-contrast);
   transition:
     background-color $transition-fast,
     border-color $transition-fast,
     opacity $transition-fast;
 
   &:hover:not(:disabled) {
-    background: var(--primary-hover);
-    border-color: var(--primary-hover);
+    background: var(--primary-solid-hover);
+    border-color: var(--primary-solid-hover);
   }
 
   &:disabled {
@@ -575,18 +583,18 @@
   gap: 6px;
   flex-shrink: 0;
 
-  button {
+  button:global(.btn) {
     min-width: 34px;
     width: 34px;
     height: 34px;
-    padding: 0 !important;
-    border-radius: 12px;
+    padding: 0;
+    border-radius: var(--app-radius-md);
   }
 
   @include mobile {
     justify-content: stretch;
 
-    button {
+    button:global(.btn) {
       flex: 1;
       width: auto;
     }
@@ -598,7 +606,7 @@
   flex: 0 0 auto;
   height: clamp(420px, 64vh, 980px);
   border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
-  border-radius: 28px;
+  border-radius: var(--app-radius-lg);
   overflow: hidden;
   background: color-mix(in srgb, var(--bg-primary) 90%, transparent);
 
@@ -641,16 +649,16 @@
     }
 
     .cm-selectionMatch {
-      background: rgba(255, 193, 7, 0.3);
+      background: color-mix(in srgb, var(--warning-color) 30%, transparent);
     }
 
     .cm-searchMatch {
-      background: rgba(255, 193, 7, 0.4);
-      outline: 1px solid rgba(255, 193, 7, 0.6);
+      background: color-mix(in srgb, var(--warning-color) 40%, transparent);
+      outline: 1px solid color-mix(in srgb, var(--warning-color) 60%, transparent);
     }
 
     .cm-searchMatch-selected {
-      background: rgba(255, 152, 0, 0.5);
+      background: color-mix(in srgb, var(--data-amber-dark-2) 50%, transparent);
     }
 
     [data-theme='dark'] & {
@@ -659,7 +667,7 @@
       }
 
       .cm-selectionMatch {
-        background: rgba(255, 193, 7, 0.2);
+        background: color-mix(in srgb, var(--warning-color) 20%, transparent);
       }
     }
   }
@@ -672,9 +680,9 @@
 }
 
 .saved {
-  color: var(--success-color);
-  background: color-mix(in srgb, var(--success-color) 12%, var(--bg-primary));
-  border-color: color-mix(in srgb, var(--success-color) 28%, var(--border-color));
+  color: var(--success-badge-text);
+  background: var(--success-badge-bg);
+  border-color: var(--success-badge-border);
 }
 
 .error {
@@ -704,7 +712,7 @@
   backdrop-filter: var(--glass-backdrop-filter);
   -webkit-backdrop-filter: var(--glass-backdrop-filter);
   border: 1px solid var(--glass-border);
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   box-shadow: var(--shadow-lg);
   max-width: inherit;
   overflow-x: auto;
@@ -721,7 +729,7 @@
   min-width: 0;
   min-height: 28px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   border: 1px solid transparent;
   background: color-mix(in srgb, var(--text-primary) 6%, transparent);
   color: var(--text-primary);
@@ -748,7 +756,7 @@
   justify-content: center;
   width: 40px;
   height: 40px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   cursor: pointer;
   color: var(--text-primary);
   transition:
@@ -777,9 +785,9 @@
   right: 8px;
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--warning-color);
-  box-shadow: 0 0 0 2px rgba($warning-color, 0.25);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-color) 25%, transparent);
 }
 
 @media (max-width: 1200px) {
