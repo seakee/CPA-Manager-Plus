@@ -13,7 +13,7 @@
   gap: 7px;
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--primary-color) 18%, var(--border-color));
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
 }
 
@@ -33,6 +33,7 @@
   strong,
   span {
     font-size: 12px;
+    font-variant-numeric: tabular-nums;
     line-height: 1.35;
     white-space: nowrap;
   }
@@ -51,8 +52,8 @@
   }
 
   div:last-child strong {
-    color: var(--primary-color);
-    font-weight: 800;
+    color: color-mix(in srgb, var(--data-badge-info-text) 72%, var(--text-primary));
+    font-weight: 700;
   }
 }
 
@@ -60,7 +61,7 @@
   position: relative;
   height: 8px;
   overflow: hidden;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--border-color) 72%, transparent);
 }
 
@@ -89,7 +90,7 @@
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   background: var(--bg-primary);
 }
 
@@ -122,7 +123,7 @@
   strong {
     color: var(--text-primary);
     font-size: 13px;
-    font-weight: 750;
+    font-weight: 700;
     line-height: 1.35;
     overflow-wrap: anywhere;
   }
@@ -140,14 +141,15 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  color: $success-color;
+  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   line-height: 1.35;
 }
 
-.groupFailureCount {
-  color: $error-color !important;
+.groupSummary .groupFailureCount {
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
 }
 
 .groupRows {
@@ -173,7 +175,7 @@
   width: 22px;
   height: 22px;
   margin-top: 1px;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   background: var(--surface-subtle);
   color: var(--text-tertiary);
 }
@@ -217,6 +219,7 @@
 .resultMetric {
   color: var(--text-tertiary);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   line-height: 1.35;
   white-space: nowrap;
 }
@@ -233,7 +236,7 @@
 }
 
 .resultReason {
-  color: $error-color;
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   font-size: 12px;
   font-weight: 500;
   line-height: 1.45;
@@ -241,7 +244,7 @@
 }
 
 .resultMessageError {
-  color: $error-color;
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
 }
 
 .statusBadge {
@@ -249,25 +252,26 @@
   align-items: center;
   height: 18px;
   padding: 0 6px;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .statusSuccess {
-  background: var(--success-badge-bg, #d1fae5);
-  color: var(--success-badge-text, #065f46);
+  background: var(--success-badge-bg);
+  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
 }
 
 .statusError {
   background: var(--failure-badge-bg);
-  color: var(--failure-badge-text);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
 }
 
 .statusRunning {
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-color);
+  color: color-mix(in srgb, var(--data-badge-info-text) 72%, var(--text-primary));
 }
 
 .statusPending {
@@ -280,14 +284,14 @@
   height: 14px;
   border: 2px solid color-mix(in srgb, var(--primary-color) 22%, transparent);
   border-top-color: var(--primary-color);
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   animation: spin 0.8s linear infinite;
 }
 
 .pendingDot {
   width: 8px;
   height: 8px;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   background: var(--text-tertiary);
 }
 

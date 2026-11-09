@@ -1,7 +1,7 @@
 @use '@/styles/variables.scss' as *;
 @use '@/styles/mixins.scss' as *;
 
-$toolbar-control-height: 36px;
+$toolbar-control-height: var(--control-height-sm);
 
 .toolbar {
   position: sticky;
@@ -14,7 +14,7 @@ $toolbar-control-height: 36px;
   margin: 0 0 $spacing-md;
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
-  border-radius: $radius-lg;
+  border-radius: var(--app-radius-lg);
 }
 
 .kindTabs {
@@ -24,9 +24,8 @@ $toolbar-control-height: 36px;
   max-width: 100%;
   padding: 0;
   border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -82,8 +81,8 @@ $toolbar-control-height: 36px;
 .kindTabButtonActive:hover:not(:disabled) {
   border-left-color: transparent;
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
-  color: var(--primary-active);
-  font-weight: 800;
+  color: color-mix(in srgb, var(--primary-active) 72%, var(--text-primary));
+  font-weight: 700;
 }
 
 .kindTabButtonActive + .kindTabButton {
@@ -127,17 +126,19 @@ $toolbar-control-height: 36px;
   min-width: 22px;
   height: 20px;
   padding: 0 8px;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--text-tertiary) 18%, var(--surface-subtle));
   color: var(--text-primary);
   font-size: 11px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .kindTabButtonActive .kindTabBadge {
   background: color-mix(in srgb, var(--primary-color) 22%, var(--bg-primary));
-  color: var(--primary-active);
+  color: color-mix(in srgb, var(--primary-active) 72%, var(--text-primary));
 }
 
 .controls {
@@ -157,7 +158,7 @@ $toolbar-control-height: 36px;
   max-width: 320px;
   height: $toolbar-control-height;
   border: 1px solid var(--border-subtle);
-  border-radius: 12px;
+  border-radius: var(--app-radius-sm);
   background: var(--surface-subtle);
   transition:
     background-color $transition-fast,
@@ -182,7 +183,7 @@ $toolbar-control-height: 36px;
 .searchInput {
   flex: 1;
   min-width: 0;
-  height: 100%;
+  height: $toolbar-control-height;
   padding: 0 8px;
   border: 0;
   background: transparent;
@@ -203,7 +204,7 @@ $toolbar-control-height: 36px;
   @include button-reset;
   @include flex-center;
   width: 30px;
-  height: 100%;
+  height: $toolbar-control-height;
   color: var(--text-secondary);
   flex-shrink: 0;
 
@@ -230,7 +231,7 @@ $toolbar-control-height: 36px;
   width: 96px;
   height: $toolbar-control-height;
   border: 1px solid var(--border-subtle);
-  border-radius: 11px;
+  border-radius: var(--app-radius-sm);
   background: var(--surface-subtle);
   overflow: hidden;
   transition:
@@ -264,7 +265,7 @@ $toolbar-control-height: 36px;
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
-  height: 100%;
+  height: $toolbar-control-height;
   padding: 0 8px 0 10px;
   border: 0;
   background: transparent;
@@ -292,12 +293,14 @@ $toolbar-control-height: 36px;
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
-  border-radius: $radius-full;
-  background: var(--primary-color);
-  color: var(--primary-contrast, #fff);
+  border-radius: var(--app-radius-pill);
+  background: var(--primary-solid);
+  color: var(--primary-contrast);
   font-size: 11px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
+  white-space: nowrap;
   flex-shrink: 0;
 }
 
@@ -314,7 +317,7 @@ $toolbar-control-height: 36px;
   align-items: center;
   justify-content: center;
   width: 30px;
-  height: 100%;
+  height: $toolbar-control-height;
   padding: 0;
   border: 0;
   border-left: 1px solid var(--border-primary);
@@ -344,7 +347,8 @@ $toolbar-control-height: 36px;
   overflow: hidden;
   background: var(--bg-primary);
   border: 1px solid var(--border-primary);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
+  /* floating layer: elevation allowed */
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
   display: flex;
   flex-direction: column;
@@ -373,7 +377,7 @@ $toolbar-control-height: 36px;
   gap: $spacing-sm;
   width: 100%;
   padding: 8px;
-  border-radius: 6px;
+  border-radius: var(--app-radius-sm);
   cursor: pointer;
   transition: background $transition-fast;
 
@@ -408,7 +412,7 @@ $toolbar-control-height: 36px;
   align-items: center;
   height: $toolbar-control-height;
   border: 1px solid var(--border-subtle);
-  border-radius: 11px;
+  border-radius: var(--app-radius-sm);
   background: var(--surface-subtle);
   overflow: visible;
   transition:
@@ -459,7 +463,7 @@ $toolbar-control-height: 36px;
   width: $toolbar-control-height;
   height: $toolbar-control-height;
   border: 0;
-  border-radius: 0 10px 10px 0;
+  border-radius: 0 var(--app-radius-sm) var(--app-radius-sm) 0;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
@@ -493,8 +497,9 @@ $toolbar-control-height: 36px;
   min-width: 100%;
   padding: 4px;
   border: 1px solid var(--border-primary);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   background: var(--bg-primary);
+  /* floating layer: elevation allowed */
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
@@ -505,7 +510,7 @@ $toolbar-control-height: 36px;
   width: 100%;
   min-height: 30px;
   padding: 0 10px;
-  border-radius: 7px;
+  border-radius: var(--app-radius-sm);
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
@@ -522,7 +527,7 @@ $toolbar-control-height: 36px;
 }
 
 .sortDropdownItemSelected {
-  color: var(--primary-color);
+  color: color-mix(in srgb, var(--primary-active) 72%, var(--text-primary));
   font-weight: 700;
 }
 
@@ -532,7 +537,7 @@ $toolbar-control-height: 36px;
 }
 
 .sortDropdownItemSelected.sortDropdownItemHighlighted {
-  color: var(--primary-color);
+  color: color-mix(in srgb, var(--primary-active) 72%, var(--text-primary));
 }
 
 .sortControls:focus-within {
@@ -555,7 +560,7 @@ $toolbar-control-height: 36px;
   margin-left: auto;
   height: $toolbar-control-height;
   padding: 0 12px;
-  border-radius: 12px;
+  border-radius: var(--app-radius-sm);
   font-size: 13px;
   font-weight: 600;
 
@@ -568,16 +573,28 @@ $toolbar-control-height: 36px;
 .addButton.addButton {
   height: $toolbar-control-height;
   padding: 0 14px;
-  border-radius: 12px;
-  border-color: transparent;
-  background: var(--primary-color);
-  color: var(--primary-contrast, #fff);
+  border-radius: var(--app-radius-sm);
+  border-color: var(--primary-solid);
+  background: var(--primary-solid);
+  color: var(--primary-contrast);
   font-size: 13px;
   font-weight: 600;
 
-  &:hover {
-    border-color: transparent;
-    background: color-mix(in srgb, var(--primary-color) 86%, #000);
+  &:hover:not(:disabled) {
+    border-color: var(--primary-solid-hover);
+    background: var(--primary-solid-hover);
+  }
+
+  &:active:not(:disabled) {
+    border-color: var(--primary-solid-active);
+    background: var(--primary-solid-active);
+  }
+
+  &:focus-visible:not(:disabled) {
+    border-color: var(--primary-solid);
+    background: var(--primary-solid);
+    color: var(--primary-contrast);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary-contrast) 42%, transparent);
   }
 
   @include mobile {

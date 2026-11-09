@@ -66,7 +66,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
     row-gap: 6px;
     padding: $spacing-md;
     border: 1px solid var(--border-color);
-    border-radius: $radius-md;
+    border-radius: var(--app-radius-md);
     margin-bottom: $spacing-sm;
     background: var(--bg-primary);
   }
@@ -155,7 +155,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   @include text-ellipsis;
 }
 
@@ -238,7 +238,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   height: 30px;
   padding: 0 4px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--app-radius-xs);
   outline: none;
   background: transparent;
   text-align: center;
@@ -280,7 +280,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   height: 30px;
   padding: 0 3px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--app-radius-xs);
   outline: none;
   appearance: textfield;
   background: transparent;
@@ -411,7 +411,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   align-items: center;
   gap: 3px;
   min-width: 0;
-  color: $success-color;
+  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
   flex-shrink: 0;
 }
 
@@ -420,7 +420,7 @@ $table-columns: 84px minmax(112px, 0.75fr) minmax(140px, 1fr) 64px 60px minmax(1
   align-items: center;
   gap: 3px;
   min-width: 0;
-  color: $error-color;
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   flex-shrink: 0;
 }
 
