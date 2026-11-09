@@ -81,9 +81,14 @@ All interactive controls (search inputs, selects, segmented tabs, and buttons) w
 ## 6. Authoring Rules
 
 - **No raw colour literals outside `themes.scss`**: Hex (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`) and functional (`rgb()`, `rgba()`, `hsl()`, `hsla()`, `hwb()`, `lab()`, `lch()`, `oklab()`, `oklch()`, `color()`) colour literals belong in `apps/web/src/styles/themes.scss`. Component and feature stylesheets must reference CSS custom properties. `color-mix()` itself is not counted as a colour literal (only raw literals inside its arguments are counted), and CSS named colours (`red`, `white`, etc.) remain out of scope for lexical scanning.
+  - Replace a literal only with a token whose meaning and value match in both themes. When no such token exists and a swap would change the appearance, keep the literal with a one-line comment giving the reason; it stays counted in the R5 baseline. Accepted cases today: CodeMirror selection and search-match highlights (`ConfigPage.module.scss`), the GitHub brand tile (`SystemPage.module.scss`), and the sidebar navigation white specular gradient (`layout.scss`). New cases need reviewer sign-off in the pull request.
 - **Avoid `!important`**: Maintain flat selector specificity in CSS/SCSS modules instead of overriding rules with `!important`.
+  - To override a shared component (for example the `Select` trigger), qualify the selector with its parent or repeat the class (`.parent .trigger, .trigger.trigger`) so it outranks the shared rule, rather than adding `!important`.
+  - When removing an existing `!important`, confirm in the browser that the computed value is unchanged in every state the declaration targeted (default, hover, active, focus-visible, expanded, disabled) in both themes.
 - **Page headers**: Top-level pages reached directly from the sidebar must not render a duplicate in-page `<h1>` or breadcrumb header (the shell top bar breadcrumb serves as the page title). Drill-down subpages keep a lightweight back navigation bar.
 - **Contrast**: Body copy, badge labels, and button text must maintain at least `4.5:1` contrast against their background fill in both light and dark themes.
+  - White text on a coloured fill uses the solid ramps (`--primary-solid*` / `--danger-solid*` with `--primary-contrast`), never the theme-adaptive `--primary-color`.
+  - Status text tinted with a badge text token can fall below `4.5:1` on light surfaces. Mix it with the primary text colour, for example `color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary))`; danger text typically needs about `75%`. Measure the result in both themes.
 
 ## 7. Undefined Variables
 
@@ -163,3 +168,13 @@ Custom properties that TS/TSX sets at runtime (inline `style={{ '--name': value 
   - Single-line `//` comments are stripped only in `.scss` and `.ts`/`.tsx` files, not in `.css` (R1-07).
   - CI workflow integrity tests lock the `Frontend` job step ordering (`npm ci` -> `Lint` -> `Check design tokens` -> `Test`) and `npm run check:design-tokens` command (R1-08).
   - Unused `valueOffset` declaration metadata was removed (R1-09).
+
+## 9. Style Pull Request Checklist
+
+For pull requests that change stylesheets or the look of UI components:
+
+- **Scope**: do not change behaviour, routes, i18n text, `data-testid`, or class names referenced from TSX or tests; do not add dependencies.
+- **Visible changes**: list every visible change (radius, colour, shadow, height, spacing, font weight) under User Impact, in light and dark themes. Reviewers treat a visible change that is not listed, or that breaks the rules above, as a regression.
+- **Contrast**: measure every changed text colour against its background in both themes and report the ratios.
+- **Screenshots**: attach light and dark screenshots of the changed surfaces.
+- **Baseline after a rebase**: when `bin/ci/design-token-baseline.json` conflicts, start from the base branch's file, run `npm run check:design-tokens -- --update-baseline`, and confirm that no per-file entry is higher than on the base. Use `--allow-increase` only for an exception documented here (for example the chart radius tokens in `themes.scss`) and state it in the pull request.

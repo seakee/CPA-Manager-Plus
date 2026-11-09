@@ -185,6 +185,7 @@
   flex-shrink: 0;
 
   &.github {
+    // Accepted colour literal: GitHub brand tile stays dark in both themes.
     background-color: #24292f;
   }
 

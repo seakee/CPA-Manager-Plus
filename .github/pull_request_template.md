@@ -28,7 +28,8 @@
 
 ## User Impact
 
-<!-- What users will notice. Use "No user-facing behavior change" if applicable. -->
+<!-- What users will notice. Use "No user-facing behavior change" if applicable.
+For UI changes, list every visible change (radius, colour, shadow, height, spacing, font weight) in light and dark themes; see docs/development/ui-design-system.md. -->
 
 ## Compatibility / Runtime Notes
 
