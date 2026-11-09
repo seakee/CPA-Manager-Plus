@@ -211,6 +211,7 @@ Recommended CPA version: `v7.3.4+`. The HTTP usage queue needs `v6.10.8+`.
 - CPA Management Keys are encrypted before SQLite persistence; backups require the SQLite files and `data.key`.
 - Normal APIs and JSONL exports expose redacted failure summaries, never raw failure bodies or stored raw JSON.
 - CPAMP is intended for traffic and credentials you are authorized to operate.
+- Suspect a security vulnerability? [Report it privately](https://github.com/seakee/CPA-Manager-Plus/security/advisories/new) and follow the [Security Policy](SECURITY.md); do not disclose unpatched exploit details in public Issues.
 
 ## Development
 
