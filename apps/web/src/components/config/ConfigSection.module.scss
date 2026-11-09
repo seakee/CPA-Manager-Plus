@@ -49,7 +49,7 @@
   justify-content: center;
   width: 30px;
   height: 30px;
-  border-radius: 10px;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--surface-subtle) 88%, transparent);
   border: 1px solid color-mix(in srgb, var(--border-subtle) 80%, transparent);
   color: var(--text-secondary);

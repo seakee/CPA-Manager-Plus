@@ -61,7 +61,7 @@
   display: grid;
   gap: 8px;
   padding: 12px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   border: 1px solid var(--border-color);
   background: color-mix(in srgb, var(--surface-subtle) 42%, var(--bg-primary));
 }
@@ -71,7 +71,7 @@
 }
 
 .statusOn {
-  border-color: color-mix(in srgb, var(--success-color, #16a34a) 34%, var(--border-color));
+  border-color: color-mix(in srgb, var(--success-color) 34%, var(--border-color));
 }
 
 .statusBlocked {
@@ -112,7 +112,7 @@
 .dependencyNote {
   margin: 0;
   padding: 7px 10px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   border: 1px solid color-mix(in srgb, var(--warning-color) 40%, transparent);
   background: color-mix(in srgb, var(--warning-color) 10%, transparent);
   color: var(--text-secondary);
@@ -129,7 +129,7 @@
 .advancedInfo {
   margin: 0;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   border: 1px solid var(--border-color);
   background: color-mix(in srgb, var(--surface-subtle) 44%, transparent);
 }
@@ -198,7 +198,7 @@
   display: grid;
   gap: 4px;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   border: 1px solid color-mix(in srgb, var(--error-color) 40%, transparent);
   background: color-mix(in srgb, var(--error-color) 8%, transparent);
   color: var(--text-primary);

@@ -8,9 +8,11 @@ $diff-gutter-width: 50px;
 $diff-prefix-width: 20px;
 
 // GitHub-inspired diff colors (theme-adaptive via color-mix)
-$diff-add-color: #3fb950;
-$diff-del-color: #f85149;
-$diff-hunk-color: #388bfd;
+$diff-add-color: var(--color-success);
+$diff-del-color: var(--color-danger);
+$diff-hunk-color: var(--color-primary);
+$diff-add-text-color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+$diff-del-text-color: color-mix(in srgb, var(--data-badge-danger-text) 92%, var(--text-primary));
 
 .diffModal {
   :global(.modal-body) {
@@ -30,7 +32,7 @@ $diff-hunk-color: #388bfd;
 .emptyState {
   flex: 1;
   border: 1px dashed var(--border-subtle-dashed);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   background: var(--surface-subtle);
   color: var(--text-secondary);
   font-size: 14px;
@@ -84,11 +86,11 @@ $diff-hunk-color: #388bfd;
 }
 
 .statAdditions {
-  color: $diff-add-color;
+  color: $diff-add-text-color;
 }
 
 .statDeletions {
-  color: $diff-del-color;
+  color: $diff-del-text-color;
 }
 
 .statBar {
@@ -229,7 +231,7 @@ $diff-hunk-color: #388bfd;
   }
 
   .linePrefix {
-    color: $diff-del-color;
+    color: $diff-del-text-color;
   }
 
   .lineText {
@@ -249,7 +251,7 @@ $diff-hunk-color: #388bfd;
   }
 
   .linePrefix {
-    color: $diff-add-color;
+    color: $diff-add-text-color;
   }
 
   .lineText {
