@@ -286,6 +286,26 @@
           white-space: nowrap;
           background: var(--data-badge-info-bg);
           color: color-mix(in srgb, var(--data-badge-info-text) 70%, var(--text-primary));
+
+          &.configBadgeRoundRobin {
+            color: color-mix(in srgb, var(--data-badge-info-text) 70%, var(--text-primary));
+            background: var(--data-badge-info-bg);
+          }
+
+          &.configBadgeWeightedRoundRobin {
+            color: var(--data-violet-dark-2);
+            background: var(--data-violet-light-9);
+          }
+
+          &.configBadgeFillFirst {
+            color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+            background: var(--data-badge-success-bg);
+          }
+
+          &.configBadgeUnknown {
+            color: color-mix(in srgb, var(--data-badge-neutral-text) 70%, var(--text-primary));
+            background: var(--data-badge-neutral-bg);
+          }
         }
       }
     }
@@ -300,26 +320,6 @@
       &:hover { text-decoration: underline; }
     }
   }
-}
-
-.configBadgeRoundRobin {
-  color: color-mix(in srgb, var(--data-badge-info-text) 70%, var(--text-primary));
-  background: var(--data-badge-info-bg);
-}
-
-.configBadgeWeightedRoundRobin {
-  color: var(--data-violet-dark-2);
-  background: var(--data-violet-light-9);
-}
-
-.configBadgeFillFirst {
-  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
-  background: var(--data-badge-success-bg);
-}
-
-.configBadgeUnknown {
-  color: var(--text-tertiary);
-  background: var(--app-surface-muted);
 }
 
 @keyframes pulse {
