@@ -24,7 +24,7 @@
   margin: 0 0 10px;
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--surface-subtle) 72%, var(--bg-primary));
 
   @include mobile {
@@ -74,7 +74,7 @@
   min-width: 0;
   padding: 10px 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   background-color: var(--surface-subtle);
 
   @include mobile {
@@ -129,7 +129,7 @@
   padding: 3px 7px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-  border-radius: 7px;
+  border-radius: var(--app-radius-xs);
   background: var(--bg-primary);
   color: var(--text-primary);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
@@ -156,7 +156,7 @@
   }
 
   &:focus-visible {
-    border-radius: 4px;
+    border-radius: var(--app-radius-xs);
     outline: 2px solid color-mix(in srgb, var(--primary-color) 36%, transparent);
     outline-offset: 2px;
   }
@@ -226,7 +226,7 @@
   padding: 2px 6px;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
   color: color-mix(in srgb, var(--primary-color) 76%, var(--text-primary));
   font-size: 11px;
@@ -257,7 +257,7 @@
   min-width: 28px;
   min-height: 28px;
   padding: 0 5px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
 }
 
 .aliasChartSection {
@@ -309,9 +309,8 @@
   padding: 0;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
 
   :global(.btn.btn-sm) {
     min-width: 0;
@@ -340,7 +339,7 @@
     border-left-color: transparent;
     background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
     color: var(--primary-active);
-    font-weight: 800;
+    font-weight: 700;
   }
 
   :global(.btn.btn-sm.btn-secondary + .btn.btn-sm) {

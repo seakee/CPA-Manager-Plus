@@ -32,7 +32,7 @@
   width: 38px;
   min-height: 38px;
   border: 1px solid var(--glass-border);
-  border-radius: 10px;
+  border-radius: var(--app-radius-sm);
   background: var(--app-surface-muted);
   color: var(--text-primary);
   box-shadow: var(--glass-shadow);
@@ -210,7 +210,7 @@
     min-width: 0;
     color: var(--text-primary);
     font-size: 15px;
-    font-weight: 800;
+    font-weight: 700;
     line-height: 1.35;
     overflow-wrap: anywhere;
   }
@@ -237,8 +237,8 @@
   height: 30px;
   margin-top: 1px;
   border-radius: 50%;
-  background: var(--primary-gradient);
-  color: var(--primary-contrast, #fff);
+  background: var(--primary-solid);
+  color: var(--primary-contrast);
 }
 
 .connectionCopy {
@@ -274,7 +274,7 @@
     left: calc(50% + 24px);
     right: calc(-50% + 24px);
     height: 2px;
-    border-radius: 999px;
+    border-radius: var(--app-radius-pill);
     background: color-mix(in srgb, var(--primary-color) 16%, var(--app-border));
   }
 }
@@ -291,7 +291,7 @@
   background: var(--app-surface-strong);
   color: var(--text-secondary);
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .stepLabel {
@@ -310,9 +310,9 @@
 }
 
 .stepItemActive .stepIndex {
-  border-color: var(--primary-color);
-  background: var(--primary-gradient);
-  color: #fff;
+  border-color: var(--primary-solid);
+  background: var(--primary-solid);
+  color: var(--primary-contrast);
 }
 
 .stepItemDone {
@@ -351,7 +351,7 @@
     margin: 0;
     color: var(--text-primary);
     font-size: 22px;
-    font-weight: 800;
+    font-weight: 700;
     line-height: 1.2;
   }
 }
@@ -360,11 +360,11 @@
   display: inline-flex;
   width: fit-content;
   padding: 3px 9px;
-  border-radius: 9px;
+  border-radius: var(--app-radius-xs);
   background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
   color: var(--primary-color);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .stepFields {
@@ -474,7 +474,7 @@
   gap: 12px;
 
   button {
-    border-radius: 10px;
+    border-radius: var(--app-radius-sm);
     font-size: 15px;
   }
 
@@ -483,9 +483,13 @@
   }
 }
 
-.setupBackButton {
-  color: var(--text-secondary) !important;
-  background: var(--app-surface-muted) !important;
+.loginCard .stepActions .setupBackButton {
+  &,
+  &:hover:not(:disabled),
+  :global([data-theme='dark']) & {
+    color: var(--text-secondary);
+    background: var(--app-surface-muted);
+  }
 }
 
 .setupNextButton > span {
@@ -507,10 +511,10 @@
 
 .errorBox {
   padding: 10px 12px;
-  border: 1px solid rgba($error-color, 0.4);
-  border-radius: $radius-md;
-  background: rgba($error-color, 0.1);
-  color: $error-color;
+  border: 1px solid var(--data-badge-danger-border);
+  border-radius: var(--app-radius-sm);
+  background: var(--data-badge-danger-bg);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   font-size: 13px;
   line-height: 1.5;
 }
@@ -587,14 +591,14 @@
   height: 3px;
   margin-top: $spacing-md;
   overflow: hidden;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   background: var(--border-color);
 }
 
 .splashLoaderBar {
   width: 100%;
   height: 100%;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   background: var(--primary-gradient);
   animation: splashLoading 1.2s ease-in-out infinite;
 }

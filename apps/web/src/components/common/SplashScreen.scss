@@ -59,7 +59,7 @@
   width: 120px;
   height: 3px;
   background: var(--border-color);
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   overflow: hidden;
   margin-top: $spacing-md;
 }
@@ -68,7 +68,7 @@
   width: 100%;
   height: 100%;
   background: var(--primary-color);
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   animation: splash-loading 1.2s ease-in-out infinite;
   transform-origin: left;
 }

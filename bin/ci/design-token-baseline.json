@@ -3,56 +3,23 @@
   "rules": {
     "undefined-var": {},
     "radius": {
-      "apps/web/src/components/common/DatabaseMaintenanceBanner.module.scss": 2,
-      "apps/web/src/components/common/SecondaryScreenShell.module.scss": 1,
       "apps/web/src/components/modelAlias/ModelMappingDiagram.module.scss": 3,
-      "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 3,
-      "apps/web/src/features/login/LoginPage.module.scss": 4,
-      "apps/web/src/features/system/components/DatabaseStatusCard.module.scss": 1,
-      "apps/web/src/features/system/ManagerUpdatePage.module.scss": 2,
-      "apps/web/src/features/system/RuntimeStatusPage.scss": 1,
-      "apps/web/src/styles/layout.scss": 1,
       "apps/web/src/styles/themes.scss": 2
     },
-    "font-weight": {
-      "apps/web/src/components/common/DatabaseMaintenanceBanner.module.scss": 4,
-      "apps/web/src/components/common/SecondaryScreenShell.module.scss": 1,
-      "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 1,
-      "apps/web/src/features/login/LoginPage.module.scss": 4,
-      "apps/web/src/features/system/components/DatabaseStatusCard.module.scss": 3,
-      "apps/web/src/features/system/ManagerUpdatePage.module.scss": 2,
-      "apps/web/src/features/system/RuntimeStatusPage.scss": 1
-    },
+    "font-weight": {},
     "scss-radius-var": {
-      "apps/web/src/components/common/SplashScreen.scss": 2,
       "apps/web/src/components/modelAlias/ModelMappingDiagram.module.scss": 1,
-      "apps/web/src/features/authFiles/components/AuthJsonPasteModal.module.scss": 2,
-      "apps/web/src/features/authFiles/components/OAuthEditorModals.module.scss": 3,
-      "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 2,
-      "apps/web/src/features/login/LoginPage.module.scss": 3,
-      "apps/web/src/features/system/SystemPage.module.scss": 6,
-      "apps/web/src/styles/global.scss": 1,
       "apps/web/src/styles/variables.scss": 4
     },
     "color-literal": {
-      "apps/web/src/components/common/DatabaseMaintenanceBanner.module.scss": 12,
-      "apps/web/src/components/common/SecondaryScreenShell.module.scss": 1,
       "apps/web/src/components/modelAlias/ModelMappingDiagram.module.scss": 3,
-      "apps/web/src/features/authFiles/components/AuthJsonPasteModal.module.scss": 1,
-      "apps/web/src/features/authFiles/components/OAuthEditorModals.module.scss": 2,
-      "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 1,
       "apps/web/src/features/config/ConfigPage.module.scss": 5,
-      "apps/web/src/features/login/LoginPage.module.scss": 4,
-      "apps/web/src/features/system/components/DatabaseStatusCard.module.scss": 7,
-      "apps/web/src/features/system/ManagerUpdates.module.scss": 1,
-      "apps/web/src/features/system/SystemPage.module.scss": 2,
-      "apps/web/src/styles/layout.scss": 10,
-      "apps/web/src/styles/mixins.scss": 2,
+      "apps/web/src/features/system/SystemPage.module.scss": 1,
+      "apps/web/src/styles/layout.scss": 4,
       "apps/web/src/styles/variables.scss": 18
     },
     "important": {
-      "apps/web/src/components/ui/Drawer.module.scss": 1,
-      "apps/web/src/features/login/LoginPage.module.scss": 2
+      "apps/web/src/components/ui/Drawer.module.scss": 1
     }
   },
   "scssRadiusDefinitions": {

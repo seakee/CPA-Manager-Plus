@@ -29,7 +29,7 @@
   min-width: 0;
   text-align: center;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -109,19 +109,13 @@
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   --glass-blur: 12px;
   background: var(--glass-bg);
   backdrop-filter: var(--glass-backdrop-filter);
   -webkit-backdrop-filter: var(--glass-backdrop-filter);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow);
-}
-
-:global([data-theme='dark']) {
-  .floatingActionSurface {
-    box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-  }
 }
 
 @media (max-width: 1200px) {

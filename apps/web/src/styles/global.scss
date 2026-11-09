@@ -51,7 +51,7 @@ body.modal-open .content {
 
 ::-webkit-scrollbar-thumb {
   background: var(--border-color);
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
 
   &:hover {
     background: var(--border-hover);

@@ -252,8 +252,8 @@
   .visual-effects-menu-popover {
     border-color: color-mix(in srgb, var(--primary-color) 18%, var(--app-border-strong));
     box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.72),
-      0 0 0 1px rgba(15, 23, 42, 0.04);
+      inset 0 0 0 1px color-mix(in srgb, var(--app-surface-strong) 72%, transparent),
+      0 0 0 1px color-mix(in srgb, var(--app-border) 50%, transparent);
   }
 }
 
@@ -632,7 +632,7 @@
     height: var(--sidebar-icon-size);
     display: block;
     object-fit: contain;
-    border-radius: 5px;
+    border-radius: var(--app-radius-xs);
   }
 }
 
@@ -708,14 +708,14 @@
   :root {
     --sidebar-panel-width: min(280px, calc(100vw - 24px));
     --sidebar-active-width: 0px;
-    --sidebar-bg-color: rgba(255, 255, 255, 0.94);
-    --sidebar-logo-bg-color: rgba(255, 255, 255, 0.88);
+    --sidebar-bg-color: color-mix(in srgb, var(--app-surface-strong) 94%, transparent);
+    --sidebar-logo-bg-color: color-mix(in srgb, var(--app-surface-strong) 88%, transparent);
     --floating-control-size: 34px;
   }
 
   [data-theme='dark'] {
-    --sidebar-bg-color: rgba(24, 28, 40, 0.92);
-    --sidebar-logo-bg-color: rgba(24, 28, 40, 0.86);
+    --sidebar-bg-color: color-mix(in srgb, var(--app-surface-strong) 92%, transparent);
+    --sidebar-logo-bg-color: color-mix(in srgb, var(--app-surface-strong) 86%, transparent);
   }
 
   .app-shell,
