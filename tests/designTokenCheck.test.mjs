@@ -8,6 +8,7 @@ import {
   buildBaselineFromFindings,
   collectFindings,
   compareToBaseline,
+  stripComments,
   validateBaseline,
 } from '../bin/ci/check-design-tokens.mjs';
 
@@ -175,6 +176,115 @@ describe('design token checker', () => {
     const invalid = run();
     expect(invalid.status).toBe(1);
     expect(invalid.stderr).toContain('Invalid custom property name in runtime property registry');
+  });
+
+  it('CLI hard-fails when the runtime property registry has an unsupported version', () => {
+    const root = createFixtureTree({
+      'components/Bar.tsx': `export const Bar = () => <div style={{ '--bar-width': '1px' }} />;\n`,
+      'components/Bar.module.scss': `.bar { width: var(--bar-width); }\n`,
+    });
+    const ciDir = path.join(root, 'ci');
+    mkdirSync(ciDir);
+    const baselineFile = path.join(ciDir, 'design-token-baseline.json');
+    const registryFile = path.join(ciDir, 'custom-runtime-properties.json');
+    writeFileSync(
+      baselineFile,
+      JSON.stringify({ version: 2, rules: emptyRules, scssRadiusDefinitions: {} }),
+      'utf8'
+    );
+    writeFileSync(
+      registryFile,
+      JSON.stringify({ version: 2, properties: { '--bar-width': 'components/Bar.tsx: inline style' } }),
+      'utf8'
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [scriptPath, '--root', root, '--baseline', baselineFile, '--runtime-properties', registryFile],
+      { encoding: 'utf8' }
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Invalid runtime property registry');
+    expect(result.stderr).toContain('Unsupported runtime property registry version: expected 1, got 2');
+  });
+
+  it('CLI hard-fails when a runtime property registry entry has an empty or whitespace-only note', () => {
+    const root = createFixtureTree({
+      'components/Bar.tsx': `export const Bar = () => <div style={{ '--bar-width': '1px' }} />;\n`,
+      'components/Bar.module.scss': `.bar { width: var(--bar-width); }\n`,
+    });
+    const ciDir = path.join(root, 'ci');
+    mkdirSync(ciDir);
+    const baselineFile = path.join(ciDir, 'design-token-baseline.json');
+    const registryFile = path.join(ciDir, 'custom-runtime-properties.json');
+    writeFileSync(
+      baselineFile,
+      JSON.stringify({ version: 2, rules: emptyRules, scssRadiusDefinitions: {} }),
+      'utf8'
+    );
+
+    for (const invalidNote of ['', '   \t\n  ']) {
+      writeFileSync(
+        registryFile,
+        JSON.stringify({ version: 1, properties: { '--bar-width': invalidNote } }),
+        'utf8'
+      );
+      const result = spawnSync(
+        process.execPath,
+        [scriptPath, '--root', root, '--baseline', baselineFile, '--runtime-properties', registryFile],
+        { encoding: 'utf8' }
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('Invalid runtime property registry');
+      expect(result.stderr).toContain(
+        'Runtime property "--bar-width" needs a non-empty note naming where it is set'
+      );
+    }
+  });
+
+  it('CLI hard-fails on a stale runtime property registry entry even when running --update-baseline --allow-increase', () => {
+    const root = createFixtureTree({
+      'components/Bar.tsx': `export const Bar = () => <div style={{ '--bar-width': '1px' }} />;\n`,
+      'components/Bar.module.scss': `.bar { width: var(--bar-width); border-radius: 14px; }\n`,
+    });
+    const ciDir = path.join(root, 'ci');
+    mkdirSync(ciDir);
+    const baselineFile = path.join(ciDir, 'design-token-baseline.json');
+    const registryFile = path.join(ciDir, 'custom-runtime-properties.json');
+    const initialBaseline = { version: 2, rules: emptyRules, scssRadiusDefinitions: {} };
+    writeFileSync(baselineFile, JSON.stringify(initialBaseline, null, 2), 'utf8');
+    writeFileSync(
+      registryFile,
+      JSON.stringify({
+        version: 1,
+        properties: {
+          '--bar-width': 'components/Bar.tsx: inline style',
+          '--stale-prop': 'components/Removed.tsx: former inline style',
+        },
+      }),
+      'utf8'
+    );
+
+    const updateWithStale = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--root',
+        root,
+        '--baseline',
+        baselineFile,
+        '--runtime-properties',
+        registryFile,
+        '--update-baseline',
+        '--allow-increase',
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(updateWithStale.status).toBe(1);
+    expect(updateWithStale.stderr).toContain(
+      'bin/ci/design-token-runtime-properties.json:1 runtime-property registered runtime custom property "--stale-prop" is not set as a quoted literal in any scanned TS/TSX file; remove the stale entry'
+    );
+    expect(JSON.parse(readFileSync(baselineFile, 'utf8'))).toEqual(initialBaseline);
   });
 
   it('R4 counts $radius-* evaluated through Sass interpolation inside strings and url(), but not plain string text or string literals inside the interpolation', () => {
@@ -827,5 +937,347 @@ describe('design token checker', () => {
       { encoding: 'utf8' }
     );
     expect(passingRun.status).toBe(0);
+  });
+
+  it('maintains WCAG AA (>= 4.5:1) contrast for .btn-danger text against --danger-solid, --danger-solid-hover, and --danger-solid-active in light and dark themes', () => {
+    const themesRaw = readFileSync(path.join(repoRoot, 'apps/web/src/styles/themes.scss'), 'utf8');
+    const componentsRaw = readFileSync(
+      path.join(repoRoot, 'apps/web/src/styles/components.scss'),
+      'utf8'
+    );
+
+    const listTopLevelBlocks = (source) => {
+      const blocks = [];
+      let headerStart = 0;
+      let cursor = 0;
+      while (cursor < source.length) {
+        const ch = source[cursor];
+        if (ch === ';') {
+          headerStart = cursor + 1;
+          cursor += 1;
+          continue;
+        }
+        if (ch === '{') {
+          const selectorHeader = source.slice(headerStart, cursor).trim();
+          const openBrace = cursor;
+          let depth = 1;
+          cursor += 1;
+          while (cursor < source.length && depth > 0) {
+            if (source[cursor] === '{') depth += 1;
+            else if (source[cursor] === '}') depth -= 1;
+            cursor += 1;
+          }
+          const body = source.slice(openBrace + 1, cursor - 1);
+          const selectors = selectorHeader
+            .split(',')
+            .map((item) => item.trim().replace(/\s+/g, ' '))
+            .filter(Boolean);
+          blocks.push({ selectorHeader, selectors, body });
+          headerStart = cursor;
+          continue;
+        }
+        cursor += 1;
+      }
+      return blocks;
+    };
+
+    const normalizeSelector = (selector) =>
+      selector
+        .trim()
+        .replace(/['"]/g, "'")
+        .replace(/\s+/g, ' ');
+
+    const findMatchingBlocks = (source, targetSelector, { optional = false } = {}) => {
+      const normalizedTarget = normalizeSelector(targetSelector);
+      const matches = listTopLevelBlocks(source).filter((block) =>
+        block.selectors.some((sel) => normalizeSelector(sel) === normalizedTarget)
+      );
+      if (!optional && matches.length === 0) {
+        throw new Error(`Selector block not found for selector item: ${targetSelector}`);
+      }
+      return matches.map((block) => block.body);
+    };
+
+    const extractDirectDeclarations = (blockBodies) => {
+      const bodies = Array.isArray(blockBodies) ? blockBodies : [blockBodies];
+      const declarations = {};
+      for (const blockBody of bodies) {
+        let directText = '';
+        let depth = 0;
+        for (let i = 0; i < blockBody.length; i += 1) {
+          const ch = blockBody[i];
+          if (ch === '{') {
+            depth += 1;
+          } else if (ch === '}') {
+            depth = Math.max(0, depth - 1);
+          } else if (depth === 0) {
+            directText += ch;
+          }
+        }
+        for (const match of directText.matchAll(/([A-Za-z_-][A-Za-z0-9_-]*)\s*:\s*([^;]+);/g)) {
+          const prop = match[1].trim();
+          const val = match[2].trim();
+          declarations[prop] = val;
+          if (prop === 'background-color' || prop === 'background') {
+            declarations.__bgExpr = val;
+          }
+        }
+      }
+      return declarations;
+    };
+
+    // Verify grouped selector lists (e.g. `&.btn-danger, &.btn-critical {`) are matched per item.
+    expect(
+      extractDirectDeclarations(
+        findMatchingBlocks(
+          '&.btn-danger, &.btn-critical { color: var(--primary-contrast); }',
+          '&.btn-danger'
+        )
+      )
+    ).toEqual({ color: 'var(--primary-contrast)' });
+
+    const extractScopedDangerRules = (scopeSource) => {
+      const btnBlocks = findMatchingBlocks(scopeSource, '.btn', { optional: true });
+      const btnDecls = extractDirectDeclarations(btnBlocks);
+      const nestedDangerBlocks = btnBlocks.flatMap((block) =>
+        findMatchingBlocks(block, '&.btn-danger', { optional: true })
+      );
+      const flatDangerBlocks = findMatchingBlocks(scopeSource, '.btn.btn-danger', {
+        optional: true,
+      });
+      const dangerBlocks = [...nestedDangerBlocks, ...flatDangerBlocks];
+      const dangerDecls = extractDirectDeclarations(dangerBlocks);
+      const hoverBlocks = [
+        ...dangerBlocks.flatMap((block) =>
+          findMatchingBlocks(block, '&:hover', { optional: true })
+        ),
+        ...findMatchingBlocks(scopeSource, '.btn.btn-danger:hover', { optional: true }),
+      ];
+      const activeBlocks = [
+        ...dangerBlocks.flatMap((block) =>
+          findMatchingBlocks(block, '&:active', { optional: true })
+        ),
+        ...findMatchingBlocks(scopeSource, '.btn.btn-danger:active', { optional: true }),
+      ];
+      return {
+        btnDecls,
+        dangerDecls,
+        hoverDecls: extractDirectDeclarations(hoverBlocks),
+        activeDecls: extractDirectDeclarations(activeBlocks),
+      };
+    };
+
+    const extractVarTokenName = (valueExpr) => {
+      const match = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,[^)]+)?\)$/.exec(valueExpr ?? '');
+      if (!match) {
+        throw new Error(
+          `Expected single CSS var() token reference, got: ${JSON.stringify(valueExpr)}`
+        );
+      }
+      return match[1];
+    };
+
+    const parseCssColorToRgb = (rawColor) => {
+      const value = rawColor.trim();
+      const hex6 = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(value);
+      if (hex6) {
+        return [
+          Number.parseInt(hex6[1], 16),
+          Number.parseInt(hex6[2], 16),
+          Number.parseInt(hex6[3], 16),
+        ];
+      }
+      const hex3 = /^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/.exec(value);
+      if (hex3) {
+        return [
+          Number.parseInt(hex3[1] + hex3[1], 16),
+          Number.parseInt(hex3[2] + hex3[2], 16),
+          Number.parseInt(hex3[3] + hex3[3], 16),
+        ];
+      }
+      const rgbMatch = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/.exec(value);
+      if (rgbMatch) {
+        return [
+          Number.parseInt(rgbMatch[1], 10),
+          Number.parseInt(rgbMatch[2], 10),
+          Number.parseInt(rgbMatch[3], 10),
+        ];
+      }
+      throw new Error(`Unsupported or unresolved color value: ${JSON.stringify(rawColor)}`);
+    };
+
+    const resolveColorInTheme = (exprOrToken, tokenMap) => {
+      let current = exprOrToken.trim();
+      if (current.startsWith('--')) {
+        current = `var(${current})`;
+      }
+      const seen = new Set();
+      while (true) {
+        const varMatch = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,\s*([^)]+))?\)$/.exec(current);
+        if (!varMatch) break;
+        const [, tokenName, fallback] = varMatch;
+        if (seen.has(tokenName)) {
+          throw new Error(`Circular token reference involving ${tokenName}`);
+        }
+        seen.add(tokenName);
+        const nextValue = tokenMap[tokenName] ?? fallback?.trim();
+        if (!nextValue) {
+          throw new Error(`Undefined token ${tokenName}`);
+        }
+        current = nextValue;
+      }
+      return parseCssColorToRgb(current);
+    };
+
+    const toLinearChannel = (channel8Bit) => {
+      const srgb = channel8Bit / 255;
+      return srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+    };
+
+    const relativeLuminance = ([r, g, b]) =>
+      0.2126 * toLinearChannel(r) + 0.7152 * toLinearChannel(g) + 0.0722 * toLinearChannel(b);
+
+    const wcagContrastRatio = (rgbA, rgbB) => {
+      const lumA = relativeLuminance(rgbA);
+      const lumB = relativeLuminance(rgbB);
+      const lighter = Math.max(lumA, lumB);
+      const darker = Math.min(lumA, lumB);
+      return (lighter + 0.05) / (darker + 0.05);
+    };
+
+    const evaluateDangerButtonContrast = (themesSource, componentsSource) => {
+      const themesScss = stripComments(themesSource, {
+        isScript: false,
+        allowLineComments: true,
+      });
+      const componentsScss = stripComments(componentsSource, {
+        isScript: false,
+        allowLineComments: true,
+      });
+
+      const rootTokens = extractDirectDeclarations(findMatchingBlocks(themesScss, ':root'));
+      const darkOverrides = extractDirectDeclarations(
+        findMatchingBlocks(themesScss, "[data-theme='dark']")
+      );
+      const themeTokenMaps = {
+        light: rootTokens,
+        dark: { ...rootTokens, ...darkOverrides },
+      };
+
+      const baseRules = extractScopedDangerRules(componentsScss);
+      const darkScopeBlocks = findMatchingBlocks(componentsScss, "[data-theme='dark']", {
+        optional: true,
+      });
+      const darkRules = extractScopedDangerRules(darkScopeBlocks.join('\n'));
+
+      // Cascade chains ordered from highest to lowest priority per specificity & source order:
+      // base .btn (0,1,0) < base .btn.btn-danger (0,2,0) <= dark .btn (0,2,0, later)
+      // < base .btn.btn-danger:hover|:active (0,3,0) <= dark .btn.btn-danger (0,3,0, later)
+      // < dark .btn.btn-danger:hover|:active (0,4,0).
+      const chainsByTheme = {
+        light: {
+          resting: [baseRules.dangerDecls, baseRules.btnDecls],
+          hover: [baseRules.hoverDecls, baseRules.dangerDecls, baseRules.btnDecls],
+          active: [baseRules.activeDecls, baseRules.dangerDecls, baseRules.btnDecls],
+        },
+        dark: {
+          resting: [
+            darkRules.dangerDecls,
+            darkRules.btnDecls,
+            baseRules.dangerDecls,
+            baseRules.btnDecls,
+          ],
+          hover: [
+            darkRules.hoverDecls,
+            darkRules.dangerDecls,
+            baseRules.hoverDecls,
+            darkRules.btnDecls,
+            baseRules.dangerDecls,
+            baseRules.btnDecls,
+          ],
+          active: [
+            darkRules.activeDecls,
+            darkRules.dangerDecls,
+            baseRules.activeDecls,
+            darkRules.btnDecls,
+            baseRules.dangerDecls,
+            baseRules.btnDecls,
+          ],
+        },
+      };
+
+      const resolveFromChain = (chain) => {
+        const textExpr = chain.map((d) => d.color).find((v) => v !== undefined);
+        const bgExpr = chain.map((d) => d.__bgExpr).find((v) => v !== undefined);
+        return {
+          textExpr,
+          bgToken: extractVarTokenName(bgExpr),
+        };
+      };
+
+      const results = {};
+      for (const [themeName, tokenMap] of Object.entries(themeTokenMaps)) {
+        results[themeName] = {};
+        for (const [stateName, chain] of Object.entries(chainsByTheme[themeName])) {
+          const { textExpr, bgToken } = resolveFromChain(chain);
+          const textRgb = resolveColorInTheme(textExpr, tokenMap);
+          const bgRgb = resolveColorInTheme(bgToken, tokenMap);
+          results[themeName][stateName] = {
+            textExpr,
+            bgToken,
+            ratio: wcagContrastRatio(textRgb, bgRgb),
+          };
+        }
+      }
+      return results;
+    };
+
+    // (a) Real stylesheets: verify >= 4.5:1 contrast across all states/themes and resolved background tokens.
+    const realResults = evaluateDangerButtonContrast(themesRaw, componentsRaw);
+    for (const themeName of ['light', 'dark']) {
+      for (const [stateName, { textExpr, bgToken, ratio }] of Object.entries(
+        realResults[themeName]
+      )) {
+        expect(
+          ratio,
+          `.btn-danger (${stateName}) text (${textExpr}) vs ${bgToken} in ${themeName} theme must be >= 4.5:1 (got ${ratio.toFixed(2)}:1)`
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+
+      expect([
+        realResults[themeName].resting.bgToken,
+        realResults[themeName].hover.bgToken,
+        realResults[themeName].active.bgToken,
+      ]).toEqual(['--danger-solid', '--danger-solid-hover', '--danger-solid-active']);
+    }
+
+    // (b) Counterexample 1: injecting `background-color: var(--data-red-base);` into dark `.btn.btn-danger`
+    // overrides the base danger backgrounds in dark theme and drops contrast below 4.5:1 (~2.77:1).
+    const componentsWithDarkRedBg = componentsRaw.replace(
+      /(\.btn\.btn-primary,\s*\.btn\.btn-danger\s*\{\s*color:\s*var\(--primary-contrast\);)/,
+      '$1\n    background-color: var(--data-red-base);'
+    );
+    expect(componentsWithDarkRedBg).not.toBe(componentsRaw);
+    const darkRedBgResults = evaluateDangerButtonContrast(themesRaw, componentsWithDarkRedBg);
+    expect(darkRedBgResults.dark.resting.bgToken).toBe('--data-red-base');
+    expect(darkRedBgResults.dark.hover.bgToken).toBe('--data-red-base');
+    expect(darkRedBgResults.dark.active.bgToken).toBe('--data-red-base');
+    expect(darkRedBgResults.dark.resting.ratio).toBeLessThan(4.5);
+    expect(darkRedBgResults.dark.hover.ratio).toBeLessThan(4.5);
+    expect(darkRedBgResults.dark.active.ratio).toBeLessThan(4.5);
+
+    // (b) Counterexample 2: changing dark `.btn.btn-danger` text colour to `var(--app-bg)`
+    // drops dark resting contrast below 4.5:1 (~4.10:1).
+    const componentsWithDarkAppBgText = componentsRaw.replace(
+      /(\.btn\.btn-primary,\s*\.btn\.btn-danger\s*\{\s*)color:\s*var\(--primary-contrast\);/,
+      '$1color: var(--app-bg);'
+    );
+    expect(componentsWithDarkAppBgText).not.toBe(componentsRaw);
+    const darkAppBgTextResults = evaluateDangerButtonContrast(
+      themesRaw,
+      componentsWithDarkAppBgText
+    );
+    expect(darkAppBgTextResults.dark.resting.textExpr).toBe('var(--app-bg)');
+    expect(darkAppBgTextResults.dark.resting.ratio).toBeLessThan(4.5);
   });
 });

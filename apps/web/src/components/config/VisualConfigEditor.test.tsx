@@ -104,8 +104,13 @@ type MutationSubscription = {
   observer: MutationObserver;
 };
 
+type ObservedSize = {
+  width: number;
+  height: number;
+};
+
 type ResizeSubscription = {
-  targets: Set<Element>;
+  targets: Map<Element, ObservedSize>;
   callback: ResizeObserverCallback;
   observer: ResizeObserver;
 };
@@ -173,12 +178,18 @@ class MockHTMLElement {
   }
 
   notifyResize(): void {
+    const target = this as unknown as Element;
+    const rect = this.getBoundingClientRect();
     for (const subscription of activeResizeSubscriptions) {
-      if (subscription.targets.has(this as unknown as Element)) {
-        pendingResizeCallbacks.add(() => {
-          subscription.callback([], subscription.observer);
-        });
+      const lastSize = subscription.targets.get(target);
+      if (!lastSize) continue;
+      if (lastSize.width === rect.width && lastSize.height === rect.height) {
+        continue;
       }
+      subscription.targets.set(target, { width: rect.width, height: rect.height });
+      pendingResizeCallbacks.add(() => {
+        subscription.callback([], subscription.observer);
+      });
     }
   }
 
@@ -228,14 +239,15 @@ class MockResizeObserver {
 
   constructor(callback: ResizeObserverCallback) {
     this.subscription = {
-      targets: new Set<Element>(),
+      targets: new Map<Element, ObservedSize>(),
       callback,
       observer: this as unknown as ResizeObserver,
     };
   }
 
   observe(target: Element): void {
-    this.subscription.targets.add(target);
+    const rect = target.getBoundingClientRect();
+    this.subscription.targets.set(target, { width: rect.width, height: rect.height });
     activeResizeSubscriptions.add(this.subscription);
   }
 
@@ -253,13 +265,10 @@ describe('VisualConfigEditor floating sidebar positioning', () => {
   let renderer: ReactTestRenderer | undefined;
   let nextFrameId = 1;
   const queuedAnimationFrames = new Map<number, FrameRequestCallback>();
+  let cancelAnimationFrameSpy = vi.fn<(id: number) => void>();
 
-  const flushObserversAndAnimationFrames = () => {
-    while (
-      pendingMutationCallbacks.size > 0 ||
-      pendingResizeCallbacks.size > 0 ||
-      queuedAnimationFrames.size > 0
-    ) {
+  const flushObserversOnly = () => {
+    while (pendingMutationCallbacks.size > 0 || pendingResizeCallbacks.size > 0) {
       const mutationTasks = Array.from(pendingMutationCallbacks);
       pendingMutationCallbacks.clear();
       for (const task of mutationTasks) {
@@ -271,6 +280,16 @@ describe('VisualConfigEditor floating sidebar positioning', () => {
       for (const task of resizeTasks) {
         task();
       }
+    }
+  };
+
+  const flushObserversAndAnimationFrames = () => {
+    while (
+      pendingMutationCallbacks.size > 0 ||
+      pendingResizeCallbacks.size > 0 ||
+      queuedAnimationFrames.size > 0
+    ) {
+      flushObserversOnly();
 
       const frameEntries = Array.from(queuedAnimationFrames.entries());
       queuedAnimationFrames.clear();
@@ -294,9 +313,10 @@ describe('VisualConfigEditor floating sidebar positioning', () => {
       return id;
     };
 
-    const cancelAnimationFrameStub = (id: number): void => {
+    const cancelAnimationFrameStub = vi.fn((id: number): void => {
       queuedAnimationFrames.delete(id);
-    };
+    });
+    cancelAnimationFrameSpy = cancelAnimationFrameStub;
 
     const headerElement = new MockHTMLElement('main-header', {
       top: 0,
@@ -482,5 +502,235 @@ describe('VisualConfigEditor floating sidebar positioning', () => {
     expect(floatingSidebarElement.style.opacity).toBe('');
     expect(floatingSidebarElement.style.pointerEvents).toBe('');
     expect(floatingSidebarElement.style.clipPath).toBe('');
+  });
+
+  it('cancels a pending animation frame on unmount before the scheduled callback can update layout', () => {
+    const editorContainer = new MockHTMLElement('content');
+    editorContainer.stubBoundingClientRect({
+      top: 72,
+      left: 24,
+      width: 1200,
+      height: 800,
+    });
+
+    const visualEditorElement = new MockHTMLElement(styles.visualEditor, {
+      top: 96,
+      left: 24,
+      width: 1200,
+      height: 720,
+    });
+
+    const workspaceElement = new MockHTMLElement(styles.workspace, {
+      top: 96,
+      left: 24,
+      width: 1200,
+      height: 720,
+    });
+
+    const sidebarAnchorElement = new MockHTMLElement(styles.sidebar, {
+      top: 96,
+      left: 24,
+      width: 240,
+      height: 600,
+    });
+
+    const floatingSidebarElement = new MockHTMLElement(styles.floatingSidebarContainer, {
+      top: 0,
+      left: 0,
+      width: 240,
+      height: 220,
+    });
+
+    editorContainer.appendChild(visualEditorElement);
+    visualEditorElement.appendChild(workspaceElement);
+
+    act(() => {
+      renderer = create(
+        <VisualConfigEditor
+          values={DEFAULT_VISUAL_VALUES}
+          onChange={vi.fn()}
+          onPersistApiKeyMutation={vi.fn(async () => [])}
+          onRefreshApiKeys={vi.fn(async () => [])}
+          onApiKeyOperationStart={vi.fn()}
+          onApiKeyOperationEnd={vi.fn()}
+        />,
+        {
+          createNodeMock: (element) => {
+            const className =
+              typeof element.props === 'object' &&
+              element.props !== null &&
+              'className' in element.props &&
+              typeof element.props.className === 'string'
+                ? element.props.className
+                : '';
+            if (className === styles.workspace) return workspaceElement;
+            if (className === styles.sidebar) return sidebarAnchorElement;
+            if (className === styles.floatingSidebarContainer) return floatingSidebarElement;
+            return new MockHTMLElement(className);
+          },
+        }
+      );
+    });
+    flushObserversAndAnimationFrames();
+
+    expect(floatingSidebarElement.style.transform).toBe('translate3d(24px, 96px, 0)');
+    cancelAnimationFrameSpy.mockClear();
+
+    const errorBanner = new MockHTMLElement('error-box', {
+      top: 76,
+      left: 24,
+      width: 1200,
+      height: 64,
+    });
+
+    // Fire the observer so requestPositionUpdate schedules a RAF, but do not run the RAF yet.
+    act(() => {
+      editorContainer.prepend(errorBanner);
+      flushObserversOnly();
+    });
+
+    expect(queuedAnimationFrames.size).toBe(1);
+    const [scheduledFrameId] = Array.from(queuedAnimationFrames.keys());
+    expect(floatingSidebarElement.style.transform).toBe('translate3d(24px, 96px, 0)');
+
+    // Unmount while the scheduled RAF is still pending.
+    act(() => {
+      renderer?.unmount();
+      renderer = undefined;
+    });
+
+    expect(cancelAnimationFrameSpy).toHaveBeenCalledWith(scheduledFrameId);
+    expect(queuedAnimationFrames.has(scheduledFrameId)).toBe(false);
+
+    // Flushing remaining frames after unmount must never update layout on the unmounted element.
+    act(() => {
+      flushObserversAndAnimationFrames();
+    });
+
+    expect(floatingSidebarElement.style.transform).toBe('');
+    expect(floatingSidebarElement.style.width).toBe('');
+    expect(floatingSidebarElement.style.maxHeight).toBe('');
+    expect(floatingSidebarElement.style.opacity).toBe('');
+    expect(floatingSidebarElement.style.pointerEvents).toBe('');
+    expect(floatingSidebarElement.style.clipPath).toBe('');
+  });
+
+  it('repositions the floating sidebar via ResizeObserver when an existing .error-box grows in height without DOM child mutations', () => {
+    const editorContainer = new MockHTMLElement('content');
+    editorContainer.stubBoundingClientRect({
+      top: 72,
+      left: 24,
+      width: 1200,
+      height: 800,
+    });
+
+    const visualEditorElement = new MockHTMLElement(styles.visualEditor, {
+      top: 96,
+      left: 24,
+      width: 1200,
+      height: 720,
+    });
+
+    const workspaceElement = new MockHTMLElement(styles.workspace, {
+      top: 96,
+      left: 24,
+      width: 1200,
+      height: 720,
+    });
+
+    const sidebarAnchorElement = new MockHTMLElement(styles.sidebar, {
+      top: 96,
+      left: 24,
+      width: 240,
+      height: 600,
+    });
+
+    const floatingSidebarElement = new MockHTMLElement(styles.floatingSidebarContainer, {
+      top: 0,
+      left: 0,
+      width: 240,
+      height: 220,
+    });
+
+    const errorBanner = new MockHTMLElement('error-box', {
+      top: 76,
+      left: 24,
+      width: 1200,
+      height: 64,
+    });
+
+    editorContainer.appendChild(errorBanner);
+    editorContainer.appendChild(visualEditorElement);
+    visualEditorElement.appendChild(workspaceElement);
+
+    act(() => {
+      renderer = create(
+        <VisualConfigEditor
+          values={DEFAULT_VISUAL_VALUES}
+          onChange={vi.fn()}
+          onPersistApiKeyMutation={vi.fn(async () => [])}
+          onRefreshApiKeys={vi.fn(async () => [])}
+          onApiKeyOperationStart={vi.fn()}
+          onApiKeyOperationEnd={vi.fn()}
+        />,
+        {
+          createNodeMock: (element) => {
+            const className =
+              typeof element.props === 'object' &&
+              element.props !== null &&
+              'className' in element.props &&
+              typeof element.props.className === 'string'
+                ? element.props.className
+                : '';
+            if (className === styles.workspace) return workspaceElement;
+            if (className === styles.sidebar) return sidebarAnchorElement;
+            if (className === styles.floatingSidebarContainer) return floatingSidebarElement;
+            return new MockHTMLElement(className);
+          },
+        }
+      );
+    });
+    flushObserversAndAnimationFrames();
+
+    // Initial banner bottom is 76 + 64 = 140px -> sidebar top is 140 + 8 = 148px.
+    expect(floatingSidebarElement.style.transform).toBe('translate3d(24px, 148px, 0)');
+
+    // Negative check: growing only the unobserved .error-box without resizing any observed target
+    // does not fire the size-aware ResizeObserver mock.
+    errorBanner.stubBoundingClientRect({
+      top: 76,
+      left: 24,
+      width: 1200,
+      height: 112,
+    });
+    act(() => {
+      errorBanner.notifyResize();
+      editorContainer.notifyResize();
+      workspaceElement.notifyResize();
+      sidebarAnchorElement.notifyResize();
+      expect(pendingMutationCallbacks.size).toBe(0);
+      expect(pendingResizeCallbacks.size).toBe(0);
+      flushObserversAndAnimationFrames();
+    });
+    expect(floatingSidebarElement.style.transform).toBe('translate3d(24px, 148px, 0)');
+
+    // In auto-height layout (ConfigPage .content flex column), the 48px banner growth (64px -> 112px)
+    // expands the enclosing observed editorContainer height (800px -> 848px) with no childList mutation.
+    editorContainer.stubBoundingClientRect({
+      top: 72,
+      left: 24,
+      width: 1200,
+      height: 848,
+    });
+
+    act(() => {
+      editorContainer.notifyResize();
+      expect(pendingMutationCallbacks.size).toBe(0);
+      expect(pendingResizeCallbacks.size).toBe(1);
+      flushObserversAndAnimationFrames();
+    });
+
+    // Sidebar re-measures via ResizeObserver alone to 188 + 8 = 196px.
+    expect(floatingSidebarElement.style.transform).toBe('translate3d(24px, 196px, 0)');
   });
 });
