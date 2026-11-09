@@ -32,7 +32,8 @@ type startupHTTPHandler struct {
 	projection        bootstrap.PublicDiscovery
 	readOnlyDiscovery http.Handler
 	upgradeAuth       http.Handler
-	upgradeWizard     http.Handler
+	upgradeWizard     *upgradewizard.Handler
+	upgradeArtifact   upgradewizard.ArtifactRuntime
 	next              atomic.Value // *startupHandlerTarget
 	lifecycle         atomic.Value // routingdomain.DiscoveryLifecycle
 	ready             atomic.Bool
@@ -135,6 +136,18 @@ func (h *startupHTTPHandler) serveDiscovery(w http.ResponseWriter, r *http.Reque
 	bootstrapdiscovery.Handler{Discovery: h.projection}.ServeHTTP(w, r)
 }
 
+// SetUpgradeArtifact attaches the Runtime Supervisor artifact client to the
+// startup Upgrade surface so the wizard can observe and prepare the pinned CPA
+// engine while an Upgrade operation is unfinished.
+func (h *startupHTTPHandler) SetUpgradeArtifact(artifact upgradewizard.ArtifactRuntime) {
+	h.projectionMu.Lock()
+	defer h.projectionMu.Unlock()
+	h.upgradeArtifact = artifact
+	if h.upgradeWizard != nil {
+		h.upgradeWizard.Artifact = artifact
+	}
+}
+
 // EnableReadOnlyDiscovery projects only current, read-only evidence. Fresh or
 // partial sources with no database are inventory-only observations. Existing
 // databases may use a bounded rollback-mode SQLite read snapshot without
@@ -188,6 +201,7 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 			PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
 			Database:     func() string { return paths.Database },
 			Timeout:      upgradewizard.DefaultTimeout,
+			Artifact:     h.upgradeArtifact,
 		}
 	}
 	if admitted != nil {
@@ -218,6 +232,7 @@ func (h *startupHTTPHandler) BeginWritableStartup() {
 	h.readOnlyDiscovery = nil
 	h.upgradeAuth = nil
 	h.upgradeWizard = nil
+	h.upgradeArtifact = nil
 }
 
 func (h *startupHTTPHandler) discoveryLifecycle() routingdomain.DiscoveryLifecycle {

@@ -320,4 +320,210 @@ describe('upgrade authentication lifecycle', () => {
     expect(page).toContain('it is the record this page acts on');
     expect(renderer.root.findAllByProps({ 'data-testid': 'upgrade-flow' })).toHaveLength(1);
   });
+
+  it('wires the upgrade artifact transport through the real UpgradeAuthenticationEntry on cpa_import', async () => {
+    const digest = 'sha256:' + 'e'.repeat(64);
+    const recordedCpaImport = {
+      contractVersion: 'cpamp.upgrade-wizard.v1',
+      recorded: true,
+      stage: 'reconcile',
+      stageKnown: true,
+      nextAction: 'cpa_import',
+      domainsDone: ['source_copy', 'usage_events'],
+      sourceKind: 'cpamp_1x',
+      sourceVersion: 'v1.14.4',
+      manualItems: [],
+      errorCode: '',
+      errorDetail: '',
+      reconciliation: { mismatchDays: [], mismatchDaysTotal: 0, mismatchDaysTruncated: false },
+    };
+    const artifactCalls: Array<{ url: string; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/installation/upgrade/status')) {
+          return Response.json(recordedCpaImport);
+        }
+        if (url.endsWith('/installation/upgrade/runtime/artifact')) {
+          artifactCalls.push({ url, init });
+          return Response.json({
+            schemaVersion: 1,
+            pinned: { version: '8.0.55', artifactId: digest },
+            active: { artifactId: digest, origin: 'acquired' },
+            required: false,
+            operation: null,
+            cdnPresets: [],
+          });
+        }
+        if (url.endsWith('/installation/upgrade/runtime/artifact/probe')) {
+          artifactCalls.push({ url, init });
+          return Response.json({ reachable: true, code: '' });
+        }
+        throw new Error(`unexpected request: ${url}`);
+      })
+    );
+
+    await act(async () => {
+      renderer = create(<UpgradeAuthenticationEntry />);
+    });
+    await act(async () => {
+      await adapter().authenticate('old-key', false);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
+    expect(
+      renderer.root.findAllByProps({ 'data-testid': 'upgrade-cpa-import-ready' })
+    ).toHaveLength(1);
+    expect(JSON.stringify(renderer.toJSON())).toContain('upgrade cpa-import');
+    expect(artifactCalls.length).toBeGreaterThanOrEqual(1);
+    expect(artifactCalls[0].url).toBe(
+      '/.well-known/cpamp-bootstrap/api/v2/installation/upgrade/runtime/artifact'
+    );
+    expect(artifactCalls[0].init).toMatchObject({
+      method: 'GET',
+      mode: 'same-origin',
+      credentials: 'omit',
+      redirect: 'error',
+      headers: {
+        Accept: 'application/json',
+        Authorization: 'Bearer old-key',
+      },
+    });
+  });
+
+  it.each(['status', 'upload'] as const)(
+    'revokes an in-flight artifact %s when the entry receives pagehide and creates a fresh session on re-authentication',
+    async (kind) => {
+      const digest = 'sha256:' + 'e'.repeat(64);
+      const record = {
+        contractVersion: 'cpamp.upgrade-wizard.v1',
+        recorded: true,
+        stage: 'reconcile',
+        stageKnown: true,
+        nextAction: 'cpa_import',
+        domainsDone: ['source_copy', 'usage_events'],
+        sourceKind: 'upgraded-legacy',
+        sourceVersion: 'v1.14.10',
+        manualItems: [],
+        errorCode: '',
+        errorDetail: '',
+        reconciliation: { mismatchDays: [], mismatchDaysTotal: 0, mismatchDaysTruncated: false },
+      };
+      const artifact = {
+        schemaVersion: 1,
+        pinned: { version: '8.0.55', artifactId: digest },
+        active: null,
+        required: true,
+        operation: null,
+        cdnPresets: [],
+      };
+      let pending: RequestInit | undefined;
+      let phase: 'hanging' | 'reauthenticated' = 'hanging';
+      const reauthArtifactCalls: Array<{ url: string; init?: RequestInit }> = [];
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: unknown, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/installation/upgrade/status')) {
+            return Promise.resolve(Response.json(record));
+          }
+          if (url.endsWith('/runtime/artifact/probe')) {
+            return Promise.resolve(Response.json({ reachable: true, code: '' }));
+          }
+          if (phase === 'reauthenticated' && url.endsWith('/runtime/artifact')) {
+            reauthArtifactCalls.push({ url, init });
+            return Promise.resolve(
+              Response.json({
+                ...artifact,
+                active: { artifactId: digest, origin: 'acquired' },
+                required: false,
+              })
+            );
+          }
+          if (url.endsWith('/runtime/artifact') && kind !== 'status') {
+            return Promise.resolve(Response.json(artifact));
+          }
+          if (
+            (kind === 'status' && url.endsWith('/runtime/artifact')) ||
+            (kind === 'upload' && url.endsWith('/runtime/artifact/upload'))
+          ) {
+            pending = init;
+            return new Promise<Response>(() => {});
+          }
+          throw new Error(`unexpected request ${url}`);
+        })
+      );
+
+      await act(async () => {
+        renderer = create(<UpgradeAuthenticationEntry />);
+      });
+      await act(async () => {
+        await adapter().authenticate('review-source-admin', false);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      if (kind === 'upload') {
+        await act(async () => {
+          renderer.root.findByProps({ 'data-testid': 'artifact-source-upload' }).props.onClick();
+        });
+        const file = new Blob([new Uint8Array([0x1f, 0x8b, 0x08, 0])], {
+          type: 'application/gzip',
+        });
+        await act(async () => {
+          void renderer.root
+            .findByProps({ 'data-testid': 'artifact-upload-input' })
+            .props.onChange({ target: { files: [file], value: 'review.tar.gz' } });
+        });
+        // Upload has no 15s deadline; only the session lifecycle signal can abort it.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(15_000);
+        });
+        expect(pending?.signal?.aborted).toBe(false);
+      }
+      expect(pending).toBeDefined();
+      const pagehideCalls = vi
+        .mocked(window.addEventListener)
+        .mock.calls.filter(([name]) => name === 'pagehide');
+      const onPagehide = pagehideCalls[pagehideCalls.length - 1]?.[1] as () => void;
+      expect(onPagehide).toBeTypeOf('function');
+      await act(async () => {
+        onPagehide();
+      });
+      expect(renderer.root.findAllByType(FullWebLoginPage)).toHaveLength(1);
+      expect({
+        hasCancellationSignal: !!pending?.signal,
+        aborted: pending?.signal?.aborted ?? false,
+      }).toEqual({ hasCancellationSignal: true, aborted: true });
+
+      // Re-authenticating creates a fresh session controller so subsequent artifact calls work.
+      phase = 'reauthenticated';
+      await act(async () => {
+        await adapter().authenticate('review-source-admin-reauth', false);
+      });
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      expect(reauthArtifactCalls).toHaveLength(1);
+      expect(reauthArtifactCalls[0].init?.signal?.aborted).toBe(false);
+      expect(reauthArtifactCalls[0].init?.headers).toMatchObject({
+        Authorization: 'Bearer review-source-admin-reauth',
+      });
+      expect(
+        renderer.root.findAllByProps({ 'data-testid': 'upgrade-cpa-import-ready' })
+      ).toHaveLength(1);
+    }
+  );
 });

@@ -52,6 +52,12 @@ const en = {
   error_archive_too_large: 'The archive exceeds the 64 MiB upload limit.',
   error_invalid_request: 'The preparation request was rejected as invalid.',
   error_unauthorized: 'Your session is not authorized to prepare the CPA engine.',
+  error_upgrade_artifact_unavailable:
+    'The CPA engine can only be prepared while an active upgrade operation is in progress.',
+  error_upgrade_source_timeout: 'The upgrade source check is taking longer than expected.',
+  error_upgrade_source_unreadable: 'The upgrade source or operation state could not be read.',
+  error_upgrade_source_symlinked:
+    'The 1.x database is reached through a link, not as the file itself.',
   error_unknown: 'The CPA engine could not be prepared.',
   remedy_archive:
     'Wrong or damaged file; download CLIProxyAPI_{version}_linux_<arch>.tar.gz from the official release and try again.',
@@ -67,6 +73,13 @@ const en = {
   remedy_too_large: 'Select the official CLIProxyAPI .tar.gz archive (at most 64 MiB).',
   remedy_invalid_request: 'Check the selected source or CDN prefix and try again.',
   remedy_unauthorized: 'Reopen the wizard from a valid handoff link or sign in again.',
+  remedy_upgrade_artifact_unavailable:
+    'Start the upgrade copy-in on the Manager host first, or refresh the upgrade status if it has already completed.',
+  remedy_upgrade_source_timeout: 'Retry shortly once the source check finishes.',
+  remedy_upgrade_source_unreadable:
+    'Check the mounted 1.x volume and Manager database on the host, then retry.',
+  remedy_upgrade_source_symlinked:
+    'Mount the data directory itself, without linked files, then try again.',
 };
 
 const zh: typeof en = {
@@ -121,6 +134,10 @@ const zh: typeof en = {
   error_archive_too_large: '归档文件超过 64 MiB 上传上限。',
   error_invalid_request: '准备请求参数无效。',
   error_unauthorized: '当前会话无权执行引擎准备操作。',
+  error_upgrade_artifact_unavailable: '仅在已记录且尚未完成的升级操作期间可准备 CPA 引擎。',
+  error_upgrade_source_timeout: '升级来源检查耗时较长，暂未完成。',
+  error_upgrade_source_unreadable: '无法读取升级来源或操作状态。',
+  error_upgrade_source_symlinked: '1.x 数据库是通过链接访问的，而不是普通文件。',
   error_unknown: '未能完成 CPA 引擎准备。',
   remedy_archive:
     '文件错误或已损坏；请从官方发布页下载 CLIProxyAPI_{version}_linux_<arch>.tar.gz 后重试。',
@@ -135,6 +152,11 @@ const zh: typeof en = {
   remedy_too_large: '请选择官方 CLIProxyAPI .tar.gz 发布包（不超过 64 MiB）。',
   remedy_invalid_request: '请检查所选来源或 CDN 前缀格式后重试。',
   remedy_unauthorized: '请通过有效的初始化授权链接重新打开向导或重新登录。',
+  remedy_upgrade_artifact_unavailable:
+    '请先在 Manager 宿主机上启动升级复制操作，或刷新升级状态确认是否已完成。',
+  remedy_upgrade_source_timeout: '请稍候片刻后重试。',
+  remedy_upgrade_source_unreadable: '请检查宿主机上挂载的 1.x 卷与 Manager 数据库后重试。',
+  remedy_upgrade_source_symlinked: '请挂载数据目录本身（不要使用链接文件）后重试。',
 };
 
 const tw: typeof en = {
@@ -189,6 +211,10 @@ const tw: typeof en = {
   error_archive_too_large: '封存檔超過 64 MiB 上傳上限。',
   error_invalid_request: '準備請求參數無效。',
   error_unauthorized: '目前工作階段無權執行引擎準備操作。',
+  error_upgrade_artifact_unavailable: '僅在已記錄且尚未完成的升級操作期間可準備 CPA 引擎。',
+  error_upgrade_source_timeout: '升級來源檢查耗時較長，暫未完成。',
+  error_upgrade_source_unreadable: '無法讀取升級來源或操作狀態。',
+  error_upgrade_source_symlinked: '1.x 資料庫是透過連結存取，而不是一般檔案。',
   error_unknown: '未能完成 CPA 引擎準備。',
   remedy_archive:
     '檔案錯誤或已損毀；請從官方發佈頁下載 CLIProxyAPI_{version}_linux_<arch>.tar.gz 後重試。',
@@ -203,6 +229,11 @@ const tw: typeof en = {
   remedy_too_large: '請選擇官方 CLIProxyAPI .tar.gz 發佈套件（不超過 64 MiB）。',
   remedy_invalid_request: '請檢查所選來源或 CDN 前綴格式後重試。',
   remedy_unauthorized: '請透過有效的初始化授權連結重新開啟精靈或重新登入。',
+  remedy_upgrade_artifact_unavailable:
+    '請先在 Manager 主機上啟動升級複製操作，或重新整理升級狀態確認是否已完成。',
+  remedy_upgrade_source_timeout: '請稍候片刻後重試。',
+  remedy_upgrade_source_unreadable: '請檢查主機上掛載的 1.x 磁碟區與 Manager 資料庫後重試。',
+  remedy_upgrade_source_symlinked: '請掛載資料目錄本身（不要使用連結檔案）後重試。',
 };
 
 const ru: typeof en = {
@@ -258,6 +289,14 @@ const ru: typeof en = {
   error_archive_too_large: 'Размер архива превышает лимит загрузки 64 МиБ.',
   error_invalid_request: 'Запрос на подготовку отклонён как некорректный.',
   error_unauthorized: 'Текущая сессия не авторизована для подготовки движка CPA.',
+  error_upgrade_artifact_unavailable:
+    'Подготовка движка CPA доступна только при наличии активной незавершённой операции обновления.',
+  error_upgrade_source_timeout:
+    'Проверка источника обновления занимает больше времени, чем ожидалось.',
+  error_upgrade_source_unreadable:
+    'Не удалось прочитать источник обновления или состояние операции.',
+  error_upgrade_source_symlinked:
+    'База 1.x доступна через ссылку, а не как сам файл.',
   error_unknown: 'Не удалось подготовить движок CPA.',
   remedy_archive:
     'Неверный или повреждённый файл; скачайте CLIProxyAPI_{version}_linux_<arch>.tar.gz из официального релиза и повторите попытку.',
@@ -273,6 +312,13 @@ const ru: typeof en = {
   remedy_too_large: 'Выберите официальный архив CLIProxyAPI .tar.gz (не более 64 МиБ).',
   remedy_invalid_request: 'Проверьте выбранный источник или префикс CDN и повторите попытку.',
   remedy_unauthorized: 'Откройте мастер заново по актуальной ссылке handoff или войдите снова.',
+  remedy_upgrade_artifact_unavailable:
+    'Сначала запустите копирование обновления на хосте Manager или обновите статус операции, если она уже завершена.',
+  remedy_upgrade_source_timeout: 'Повторите попытку немного позже.',
+  remedy_upgrade_source_unreadable:
+    'Проверьте смонтированный том 1.x и базу Manager на хосте, затем повторите попытку.',
+  remedy_upgrade_source_symlinked:
+    'Смонтируйте сам каталог данных, без файлов-ссылок, и повторите.',
 };
 
 export type FreshArtifactTextKey = keyof typeof en;

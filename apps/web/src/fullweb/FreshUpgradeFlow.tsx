@@ -12,6 +12,8 @@ import {
   upgradeWizardText as t,
 } from '../i18n/upgradeWizard';
 import { BOOTSTRAP_ROOT } from './bootstrapTransport';
+import { FreshArtifactStep } from './FreshArtifactStep';
+import type { ArtifactTransportLike } from './freshArtifact';
 import { FullWebIcon } from './FullWebIcon';
 import { readRoutingContext } from './routingContext';
 // The wizard reads the operation and runs the one action that can advance it.
@@ -478,6 +480,7 @@ type BootState =
 export function FreshUpgradeFlow({
   read,
   verify,
+  artifact,
   language = fullWebLanguage(),
   pollDelays = DEFAULT_POLL_DELAYS,
   onRecordedOperation,
@@ -487,6 +490,7 @@ export function FreshUpgradeFlow({
   // wizard without it offers no way to advance the operation and the page stays
   // a reader.
   verify?: UpgradeWizardVerify;
+  artifact?: ArtifactTransportLike;
   language?: string;
   pollDelays?: number[];
   // The host page needs the one fact the read establishes — whether an operation
@@ -500,8 +504,8 @@ export function FreshUpgradeFlow({
   const [acknowledged, setAcknowledged] = useState(false);
   const [status, setStatus] = useState<StatusState>({ phase: 'idle', failures: 0 });
   const [verification, setVerification] = useState<VerifyState>({ phase: 'idle' });
+  const [artifactReady, setArtifactReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
-
   const delayFor = useCallback(
     (index: number) => pollDelays[Math.min(index, pollDelays.length - 1)] ?? 15_000,
     [pollDelays]
@@ -607,7 +611,14 @@ export function FreshUpgradeFlow({
     step === 'progress' && operationSettled(status.value) ? 'result' : step;
   const record = status.value;
   const preflightReport = preflight.phase === 'ok' ? preflight.value : undefined;
+  const showArtifactStep =
+    Boolean(artifact) && Boolean(record?.recorded) && record?.nextAction === 'cpa_import';
 
+  useEffect(() => {
+    if (!showArtifactStep) {
+      setArtifactReady(false);
+    }
+  }, [showArtifactStep]);
   const reread = () => {
     setStatus({ phase: 'idle', failures: 0 });
     setAttempt((current) => current + 1);
@@ -936,6 +947,29 @@ export function FreshUpgradeFlow({
                 </div>
               )}
             </>
+          )}
+          {showArtifactStep && artifact && (
+            <div className="upgrade-artifact" data-testid="upgrade-cpa-import-artifact">
+              <FreshArtifactStep
+                transport={artifact}
+                onReady={() => setArtifactReady(true)}
+              />
+              {artifactReady && (
+                <div
+                  className="upgrade-notice upgrade-notice-ready"
+                  role="status"
+                  data-testid="upgrade-cpa-import-ready"
+                >
+                  <FullWebIcon name="check" size={24} />
+                  <div>
+                    <h3>{t('cpaImportReadyTitle', language)}</h3>
+                    <p>
+                      {t('cpaImportReadyHelp', language)} <code>upgrade cpa-import</code>
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
           {record?.recorded && record.nextAction === 'verify' && verify && (
             <div className="upgrade-notice" data-testid="upgrade-verify-offer">

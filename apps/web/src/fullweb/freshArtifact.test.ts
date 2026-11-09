@@ -150,7 +150,7 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
 
   it('maps every artifact error code to its message key and remedy across all four locales', () => {
     const codes = Object.keys(ARTIFACT_ERROR_CODES) as ArtifactErrorCode[];
-    expect(codes).toHaveLength(14);
+    expect(codes).toHaveLength(21);
 
     expect(ARTIFACT_ERROR_MAP.archive_invalid.remedyKey).toBe('remedy_archive');
     expect(ARTIFACT_ERROR_MAP.artifact_mismatch.remedyKey).toBe('remedy_archive');
@@ -158,6 +158,21 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
     expect(ARTIFACT_ERROR_MAP.download_failed.remedyKey).toBe('remedy_network');
     expect(ARTIFACT_ERROR_MAP.recovery_required.remedyKey).toBe('remedy_recovery');
     expect(ARTIFACT_ERROR_MAP.unsupported_platform.remedyKey).toBe('remedy_unsupported_platform');
+    expect(ARTIFACT_ERROR_MAP.upgrade_artifact_unavailable.remedyKey).toBe(
+      'remedy_upgrade_artifact_unavailable'
+    );
+    expect(ARTIFACT_ERROR_MAP.upgrade_credential_timeout.remedyKey).toBe(
+      'remedy_upgrade_source_timeout'
+    );
+    expect(ARTIFACT_ERROR_MAP.upgrade_mount_timeout.remedyKey).toBe(
+      'remedy_upgrade_source_timeout'
+    );
+    expect(ARTIFACT_ERROR_MAP.upgrade_preflight_timeout.remedyKey).toBe(
+      'remedy_upgrade_source_timeout'
+    );
+    expect(ARTIFACT_ERROR_MAP.upgrade_source_symlinked.remedyKey).toBe(
+      'remedy_upgrade_source_symlinked'
+    );
 
     for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru']) {
       for (const code of codes) {

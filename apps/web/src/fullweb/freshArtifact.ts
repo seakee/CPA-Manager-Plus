@@ -29,7 +29,14 @@ export type ArtifactErrorCode =
   | 'artifact_already_active'
   | 'archive_too_large'
   | 'invalid_request'
-  | 'unauthorized';
+  | 'unauthorized'
+  | 'upgrade_artifact_unavailable'
+  | 'upgrade_credential_timeout'
+  | 'upgrade_mount_timeout'
+  | 'upgrade_preflight_timeout'
+  | 'upgrade_source_unreadable'
+  | 'upgrade_operation_unreadable'
+  | 'upgrade_source_symlinked';
 
 export const ARTIFACT_ERROR_CODES: Record<ArtifactErrorCode, true> = {
   archive_invalid: true,
@@ -46,6 +53,13 @@ export const ARTIFACT_ERROR_CODES: Record<ArtifactErrorCode, true> = {
   archive_too_large: true,
   invalid_request: true,
   unauthorized: true,
+  upgrade_artifact_unavailable: true,
+  upgrade_credential_timeout: true,
+  upgrade_mount_timeout: true,
+  upgrade_preflight_timeout: true,
+  upgrade_source_unreadable: true,
+  upgrade_operation_unreadable: true,
+  upgrade_source_symlinked: true,
 };
 
 export function isArtifactErrorCode(value: unknown): value is ArtifactErrorCode {
@@ -154,6 +168,34 @@ export const ARTIFACT_ERROR_MAP: Record<
   unauthorized: {
     messageKey: 'error_unauthorized',
     remedyKey: 'remedy_unauthorized',
+  },
+  upgrade_artifact_unavailable: {
+    messageKey: 'error_upgrade_artifact_unavailable',
+    remedyKey: 'remedy_upgrade_artifact_unavailable',
+  },
+  upgrade_credential_timeout: {
+    messageKey: 'error_upgrade_source_timeout',
+    remedyKey: 'remedy_upgrade_source_timeout',
+  },
+  upgrade_mount_timeout: {
+    messageKey: 'error_upgrade_source_timeout',
+    remedyKey: 'remedy_upgrade_source_timeout',
+  },
+  upgrade_preflight_timeout: {
+    messageKey: 'error_upgrade_source_timeout',
+    remedyKey: 'remedy_upgrade_source_timeout',
+  },
+  upgrade_source_unreadable: {
+    messageKey: 'error_upgrade_source_unreadable',
+    remedyKey: 'remedy_upgrade_source_unreadable',
+  },
+  upgrade_operation_unreadable: {
+    messageKey: 'error_upgrade_source_unreadable',
+    remedyKey: 'remedy_upgrade_source_unreadable',
+  },
+  upgrade_source_symlinked: {
+    messageKey: 'error_upgrade_source_symlinked',
+    remedyKey: 'remedy_upgrade_source_symlinked',
   },
 };
 

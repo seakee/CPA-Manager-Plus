@@ -368,4 +368,109 @@ describe('FreshArtifactStep', () => {
     expect(onReady).not.toHaveBeenCalled();
     expect(byID('artifact-error').props['data-error-code']).toBe('recovery_required');
   });
+
+  it('handles lifecycle aborts quietly without flashing an error and stops polling immediately', async () => {
+    let pollCount = 0;
+    const transport: ArtifactTransport = {
+      readStatus: vi.fn(async () => {
+        pollCount += 1;
+        if (pollCount === 1) {
+          return makeStatus();
+        }
+        throw { kind: 'aborted', aborted: true, status: 0 };
+      }),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<() => Promise<ArtifactOperation>>(async () => ({
+        id: 'op-abort',
+        source: 'github',
+        phase: 'downloading',
+        receivedBytes: 128,
+        totalBytes: 1024,
+        code: '',
+      })),
+      upload: vi.fn<() => Promise<ArtifactOperation>>(async () => {
+        throw { kind: 'aborted', aborted: true, status: 0 };
+      }),
+    };
+    const onReady = vi.fn();
+
+    await act(async () => {
+      renderer = create(<FreshArtifactStep transport={transport} onReady={onReady} />);
+    });
+
+    await click('artifact-acquire-btn');
+    expect(allByID('artifact-operation-progress')).toHaveLength(1);
+
+    // Poll fires at 2000ms and rejects with lifecycle abort -> stops polling quietly with no error banner
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(pollCount).toBe(2);
+    expect(allByID('artifact-error')).toHaveLength(0);
+
+    // No subsequent poll is scheduled
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16000);
+    });
+    expect(pollCount).toBe(2);
+  });
+
+  it('treats 503 upgrade_credential_timeout during status polling as a transient read failure counted toward the 3-failure abort, never ready', async () => {
+    let pollCount = 0;
+    const transport: ArtifactTransport = {
+      readStatus: vi.fn(async () => {
+        pollCount += 1;
+        if (pollCount === 1) {
+          return makeStatus();
+        }
+        throw { kind: 'http', status: 503, code: 'upgrade_credential_timeout' };
+      }),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<() => Promise<ArtifactOperation>>(async () => ({
+        id: 'op-timeout',
+        source: 'github',
+        phase: 'downloading',
+        receivedBytes: 256,
+        totalBytes: 2048,
+        code: '',
+      })),
+      upload: vi.fn(),
+    };
+    const onReady = vi.fn();
+
+    await act(async () => {
+      renderer = create(<FreshArtifactStep transport={transport} onReady={onReady} />);
+    });
+
+    await click('artifact-acquire-btn');
+    expect(allByID('artifact-operation-progress')).toHaveLength(1);
+
+    // 1st transient 503 timeout at 2000ms -> keeps polling, no error banner yet
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(pollCount).toBe(2);
+    expect(allByID('artifact-error')).toHaveLength(0);
+
+    // 2nd transient 503 timeout at 4000ms -> keeps polling, no error banner yet
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(pollCount).toBe(3);
+    expect(allByID('artifact-error')).toHaveLength(0);
+
+    // 3rd consecutive 503 timeout at 8000ms -> aborts polling and displays mapped retryable timeout message
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+    expect(pollCount).toBe(4);
+    expect(byID('artifact-error').props['data-error-code']).toBe('upgrade_credential_timeout');
+    expect(onReady).not.toHaveBeenCalled();
+
+    // No 4th poll after 3 consecutive failures
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16000);
+    });
+    expect(pollCount).toBe(4);
+  });
 });

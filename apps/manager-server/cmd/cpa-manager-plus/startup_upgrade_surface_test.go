@@ -19,6 +19,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/bootstrapdiscovery"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
+	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 )
 
 // TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere is the M1 contract at
@@ -189,13 +190,18 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 			if testCase.preflightErr != "" && !strings.Contains(body, `"`+testCase.preflightErr+`"`) {
 				t.Fatalf("preflight did not name %s: %s", testCase.preflightErr, body)
 			}
+			status, body = request(http.MethodGet, base+"/runtime/artifact", testCase.accepted, "")
+			if status != http.StatusServiceUnavailable || !strings.Contains(body, `"runtime_unavailable"`) {
+				t.Fatalf("runtime/artifact with the resolved key = %d: %s", status, body)
+			}
 
 			// The other file's key is a wrong key on every leaf, never a source
 			// verdict: the surface has one credential, not two.
 			for name, target := range map[string][2]string{
-				"entry page": {http.MethodPost, upgradeauth.Path},
-				"preflight":  {http.MethodGet, base + "/preflight"},
-				"status":     {http.MethodGet, base + "/status"},
+				"entry page":       {http.MethodPost, upgradeauth.Path},
+				"preflight":        {http.MethodGet, base + "/preflight"},
+				"status":           {http.MethodGet, base + "/status"},
+				"runtime/artifact": {http.MethodGet, base + "/runtime/artifact"},
 			} {
 				status, body = request(target[0], target[1], testCase.refused, "")
 				if status != http.StatusUnauthorized || !strings.Contains(body, `"admin_unauthorized"`) {
@@ -205,7 +211,7 @@ func TestStartupUpgradeSurfaceAcceptsOneCredentialEverywhere(t *testing.T) {
 
 			// L4 at the surface boundary: a cross-site browser gets the entry
 			// leaf's answer on the reads as well, with the resolved key.
-			for _, resource := range []string{"/preflight", "/status"} {
+			for _, resource := range []string{"/preflight", "/status", "/runtime/artifact"} {
 				status, body = request(http.MethodGet, base+resource, testCase.accepted, "https://attacker.test")
 				if status != http.StatusForbidden || !strings.Contains(body, `"origin_rejected"`) {
 					t.Fatalf("%s from another site = %d: %s", resource, status, body)
@@ -253,14 +259,22 @@ func upgradeSurfaceManagerStore(t *testing.T, key string, observable bool) strin
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	sourceRoot := configuredLegacyRoot()
+	sourceDigest := strings.Repeat("a", 64)
+	if sourceRoot != "" {
+		if digest, err := upgradeservice.SourceFingerprint(t.Context(), sourceRoot); err == nil && digest != "" {
+			sourceDigest = digest
+		}
+	}
 	if err := upgradeoperation.New(db).Put(t.Context(), model.UpgradeOperation{
 		Stage:                   model.UpgradeStageCopyIn,
 		DomainsDone:             []string{model.UpgradeDomainSourceCopy},
 		SourceKind:              "upgraded-legacy",
 		SourceVersion:           "1.14.4",
-		SourceFingerprintBefore: "fingerprint-before-value",
-		SourceFingerprintAfter:  "fingerprint-after-value",
-		BackupManifestSHA256:    "backup-manifest-value",
+		SourceRoot:              sourceRoot,
+		SourceFingerprintBefore: sourceDigest,
+		SourceFingerprintAfter:  sourceDigest,
+		BackupManifestSHA256:    strings.Repeat("b", 64),
 		ManualItems:             []string{},
 	}); err != nil {
 		_ = db.Close()

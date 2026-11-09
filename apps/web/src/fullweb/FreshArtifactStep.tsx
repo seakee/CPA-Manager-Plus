@@ -53,6 +53,16 @@ function isRunningPhase(phase: ArtifactOperation['phase'] | undefined): boolean 
   return phase === 'downloading' || phase === 'verifying' || phase === 'installing';
 }
 
+function isAbortedArtifactError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const candidate = error as { kind?: unknown; aborted?: unknown; name?: unknown };
+  return (
+    candidate.kind === 'aborted' ||
+    candidate.aborted === true ||
+    candidate.name === 'AbortError'
+  );
+}
+
 export interface FreshArtifactStepProps {
   transport: ArtifactTransportLike;
   onReady: () => void;
@@ -136,8 +146,8 @@ export function FreshArtifactStep({
       const result = await probeArtifact(transport, credential);
       if (!aliveRef.current) return;
       setProbeState(result.reachable ? 'reachable' : 'unreachable');
-    } catch {
-      if (!aliveRef.current) return;
+    } catch (err) {
+      if (!aliveRef.current || isAbortedArtifactError(err)) return;
       setProbeState('unreachable');
     }
   }, [transport, credential]);
@@ -166,7 +176,7 @@ export function FreshArtifactStep({
       }
       void runProbe();
     } catch (err) {
-      if (!aliveRef.current) return;
+      if (!aliveRef.current || isAbortedArtifactError(err)) return;
       setStatus(null);
       setStatusPhase('unavailable');
       setError(formatArtifactError(err));
@@ -226,6 +236,10 @@ export function FreshArtifactStep({
         scheduleNext();
       } catch (err) {
         if (cancelled || !aliveRef.current) return;
+        if (isAbortedArtifactError(err)) {
+          setPolling(false);
+          return;
+        }
         failures += 1;
         if (failures >= POLL_FAILURE_LIMIT) {
           setPolling(false);
@@ -285,7 +299,7 @@ export function FreshArtifactStep({
       setPolling(true);
       setPollRun((c) => c + 1);
     } catch (err) {
-      if (!aliveRef.current) return;
+      if (!aliveRef.current || isAbortedArtifactError(err)) return;
       const mapped = formatArtifactError(err, version);
       if (mapped.code === 'artifact_already_active') {
         notifyReady();
@@ -326,7 +340,7 @@ export function FreshArtifactStep({
       setPolling(true);
       setPollRun((c) => c + 1);
     } catch (err) {
-      if (!aliveRef.current) return;
+      if (!aliveRef.current || isAbortedArtifactError(err)) return;
       const mapped = formatArtifactError(err, version);
       if (mapped.code === 'artifact_already_active') {
         notifyReady();

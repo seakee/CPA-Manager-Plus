@@ -6,9 +6,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // digestChunkSize is the bounded batch size shared by the source fingerprint
@@ -72,6 +75,106 @@ type symlinkedSourceFile struct{ name string }
 func (e *symlinkedSourceFile) Error() string { return "source file " + e.name + " is a symbolic link" }
 
 func (e *symlinkedSourceFile) Unwrap() error { return ErrSourceSymlinked }
+
+// SourceFingerprint returns the canonical SHA-256 digest of a 1.x source root
+// using the same snapshot walk as preflight, copy-in, reconcile, rollback, and
+// verify.
+func SourceFingerprint(ctx context.Context, root string) (string, error) {
+	fp, err := fingerprintSource(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	return fp.Digest, nil
+}
+
+// SourceTreeMetadata describes the metadata state of every entry covered by
+// SourceFingerprint without reading any file contents.
+type SourceTreeMetadata struct {
+	Key        string
+	TotalBytes int64
+}
+
+// IdentifySourceTree computes a metadata digest and total regular-file byte
+// size over the exact file set covered by SourceFingerprint using only
+// os.Lstat, os.ReadDir, and copyinmarker.Identity (zero file content reads).
+func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, error) {
+	if err := ctx.Err(); err != nil {
+		return SourceTreeMetadata{}, err
+	}
+	entries := make([]manifestEntry, 0, len(sourceFingerprintFiles)+8)
+	for _, name := range sourceFingerprintFiles {
+		if err := ctx.Err(); err != nil {
+			return SourceTreeMetadata{}, err
+		}
+		path := filepath.Join(root, name)
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return SourceTreeMetadata{}, err
+		}
+		if !info.Mode().IsRegular() {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return SourceTreeMetadata{}, &symlinkedSourceFile{name: name}
+			}
+			return SourceTreeMetadata{}, fmt.Errorf("source file %s is not a regular file", name)
+		}
+		entries = append(entries, manifestEntry{relative: name, size: info.Size()})
+	}
+	archives, err := collectArchiveEntries(ctx, root, filepath.Join(root, archivesDirName))
+	if err != nil {
+		return SourceTreeMetadata{}, err
+	}
+	entries = append(entries, archives...)
+	unexpected, err := collectUnexpectedRootEntries(root)
+	if err != nil {
+		return SourceTreeMetadata{}, err
+	}
+	entries = append(entries, unexpected...)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].relative < entries[j].relative })
+
+	metaHash := sha256.New()
+	var total int64
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return SourceTreeMetadata{}, err
+		}
+		fullPath := filepath.Join(root, filepath.FromSlash(entry.relative))
+		info, err := os.Lstat(fullPath)
+		if err != nil {
+			return SourceTreeMetadata{}, err
+		}
+		identity, err := copyinmarker.Identity(fullPath)
+		if err != nil {
+			return SourceTreeMetadata{}, err
+		}
+		if _, err := fmt.Fprintf(
+			metaHash,
+			"%s\x00%t\x00%d\x00%d\x00%d\x00%d\x00%d\n",
+			entry.relative,
+			entry.directory,
+			uint32(info.Mode()),
+			identity.Device,
+			identity.Inode,
+			info.Size(),
+			info.ModTime().UnixNano(),
+		); err != nil {
+			return SourceTreeMetadata{}, err
+		}
+		if !entry.directory {
+			if total < 0 || info.Size() > math.MaxInt64-total {
+				total = math.MaxInt64
+			} else {
+				total += info.Size()
+			}
+		}
+	}
+	return SourceTreeMetadata{
+		Key:        hex.EncodeToString(metaHash.Sum(nil)),
+		TotalBytes: total,
+	}, nil
+}
 
 // fingerprintSource hashes a stable manifest of the source tree. Repeating it on
 // an unchanged stopped source always returns the same value, and any change to

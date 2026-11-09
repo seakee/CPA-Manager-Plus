@@ -55,6 +55,13 @@ const (
 	// runs. GET and HEAD on it are refused, so every read of the surface stays a
 	// read, and it is the only route here that writes.
 	VerifySuffix = "/installation/upgrade/verify"
+	// ArtifactStatusSuffix, ArtifactProbeSuffix, ArtifactAcquireSuffix and
+	// ArtifactUploadSuffix proxy the four bounded Runtime Supervisor artifact
+	// endpoints while a recorded Upgrade operation is still in progress.
+	ArtifactStatusSuffix  = "/installation/upgrade/runtime/artifact"
+	ArtifactProbeSuffix   = "/installation/upgrade/runtime/artifact/probe"
+	ArtifactAcquireSuffix = "/installation/upgrade/runtime/artifact/acquire"
+	ArtifactUploadSuffix  = "/installation/upgrade/runtime/artifact/upload"
 )
 
 // DefaultTimeout bounds one read-only preflight. A 1.x source is inspected
@@ -264,7 +271,11 @@ type Handler struct {
 	// Manager's own configuration, exactly as the import does, so a handler built
 	// without it cannot observe a different authority than the CLI would.
 	Runtime upgradeservice.VerifyRuntime
-
+	// Artifact is the Manager-owned Supervisor artifact client used to observe
+	// and prepare the pinned CPA engine while an Upgrade operation is in
+	// progress. Optional: when nil, the artifact routes report 503
+	// runtime_unavailable.
+	Artifact ArtifactRuntime
 	// lookupMount is the test seam for the mount lookup: a test substitutes a
 	// lookup that never answers to prove the bound and the one-in-flight rule.
 	// Production leaves it nil and the package's own inspectMount runs, so no
@@ -337,6 +348,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// that answer, and the sourceRoot marker asks the same question again.
 	mount := h.resolveMount(r.Context())
 	if !h.authenticate(w, r, mount, key) {
+		return
+	}
+	if artifactResource, ok := matchArtifactSuffix(r.URL.Path); ok {
+		h.serveArtifact(w, r, mount, artifactResource)
 		return
 	}
 	if r.URL.RawQuery != "" {
