@@ -7,6 +7,7 @@ This specification defines the token contracts, layout conventions, and automate
 ## 1. Primary Actions and Accent Tokens
 
 - **Solid primary fills**: Filled primary buttons, primary action pills, and checked switch tracks use `--primary-solid`, `--primary-solid-hover`, and `--primary-solid-active` paired with `--primary-contrast` text. This ramp is shared across light and dark themes so button text maintains `>= 4.5:1` contrast in every state.
+- **Solid danger fills**: Filled destructive buttons use `--danger-solid`, `--danger-solid-hover`, and `--danger-solid-active` with `--primary-contrast` text, shared across themes for the same reason. `--color-danger` / `--error-color` stay for status text, badges, and charts.
 - **Links, focus, and accents**: Text links, active indicators, focus rings, and non-filled accent highlights use `--primary-color` (with `--primary-hover`, `--primary-active`, `--primary-soft`, `--primary-subtle`, `--primary-ring`, and `--focus-*`), which adapts per theme.
 - Do not pair `--primary-contrast` text with `--primary-color` fills on dark surfaces; use `--primary-solid*` for filled controls.
 

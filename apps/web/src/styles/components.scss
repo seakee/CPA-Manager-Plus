@@ -95,18 +95,18 @@ button:disabled {
   }
 
   &.btn-danger {
-    background-color: var(--color-danger);
-    border-color: var(--color-danger);
+    background-color: var(--danger-solid);
+    border-color: var(--danger-solid);
     color: var(--primary-contrast);
 
     &:hover {
-      background-color: var(--color-danger-light-3);
-      border-color: var(--color-danger-light-3);
+      background-color: var(--danger-solid-hover);
+      border-color: var(--danger-solid-hover);
     }
 
     &:active {
-      background-color: var(--color-danger-dark-2);
-      border-color: var(--color-danger-dark-2);
+      background-color: var(--danger-solid-active);
+      border-color: var(--danger-solid-active);
     }
   }
 
@@ -187,7 +187,8 @@ button:disabled {
     color: var(--text-primary);
   }
 
-  .btn.btn-primary {
+  .btn.btn-primary,
+  .btn.btn-danger {
     color: var(--primary-contrast);
   }
 
@@ -494,7 +495,7 @@ textarea {
 }
 
 .loading-spinner {
-  // Fallback: legacy white spinner (in case color-mix is unsupported)
+  // Fallback without color-mix: themed border ring with a contrast-colour top arc.
   border: 3px solid var(--border-color);
   border-top-color: var(--primary-contrast);
   border-radius: 50%;
