@@ -47,16 +47,16 @@
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #ccc;
+      background: var(--data-slate-light-5);
 
       &.good {
-        background: #10b981;
+        background: var(--data-emerald-base);
       }
       &.warn {
-        background: #f59e0b;
+        background: var(--color-warning);
       }
       &.bad {
-        background: #ef4444;
+        background: var(--color-danger);
       }
     }
 
@@ -71,14 +71,17 @@
     }
     .value {
       font-weight: 600;
+      font-variant-numeric: tabular-nums;
       color: var(--text-primary);
     }
     .count {
       font-weight: 600;
-      color: #ef4444;
+      font-variant-numeric: tabular-nums;
+      color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
     }
     .percent {
       font-size: 11px;
+      font-variant-numeric: tabular-nums;
       color: var(--text-tertiary);
     }
   }
