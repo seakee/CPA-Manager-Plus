@@ -433,6 +433,7 @@ describe('PR check classifier', () => {
       'bin/ci/runtime18-secret-state-e2e.sh',
       'bin/ci/runtime19-phase1-exit-e2e.sh',
       'bin/ci/runtime-v8-default-smoke.py',
+      'bin/ci/runtime-slim-acquire-smoke.py',
       'bin/ci/runtime-v7-compatibility.compose.yml',
       'bin/ci/validate-runtime12-compose.mjs',
     ]) {

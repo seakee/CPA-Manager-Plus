@@ -30,6 +30,7 @@ type Handler struct {
 	// adoption this carrier's own claim committed, so it is delegated exactly as
 	// the runtime observation is, and never served by this package.
 	Adoption http.Handler
+	Artifact http.Handler
 	// Upgrade serves the Upgrade wizard routes: the two reads and the one verify
 	// action that runs the completion gate. Nil keeps them closed, so an
 	// installation that mounts no Upgrade reader answers 503.
@@ -108,7 +109,7 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, result)
 		return
 	}
-	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet, "installation/adoption": http.MethodGet}
+	known := map[string]string{"operation": http.MethodGet, "admin/generate": http.MethodPost, "admin/commit": http.MethodPost, "routing/prepare": http.MethodPost, "routing/activate": http.MethodPost, "strategy": http.MethodPost, "installation/runtime": http.MethodGet, "installation/adoption": http.MethodGet, "runtime/artifact": http.MethodGet, "runtime/artifact/probe": http.MethodPost, "runtime/artifact/acquire": http.MethodPost, "runtime/artifact/upload": http.MethodPut}
 	method, ok := known[resource]
 	if !ok {
 		http.NotFound(w, r)
@@ -205,6 +206,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.Adoption.ServeHTTP(w, r)
+	case "runtime/artifact", "runtime/artifact/probe", "runtime/artifact/acquire", "runtime/artifact/upload":
+		if h.Artifact == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		h.Artifact.ServeHTTP(w, r)
 	}
 }
 

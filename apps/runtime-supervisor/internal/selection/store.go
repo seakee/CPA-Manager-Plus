@@ -127,6 +127,14 @@ func newStore(
 	return store, nil
 }
 
+// StageStore returns the underlying validated stage store owned by this selection store.
+func (s *Store) StageStore() *runtimeupdate.Store {
+	if s == nil {
+		return nil
+	}
+	return s.stages
+}
+
 // Load resolves the persistent authority at Supervisor startup. Absence is the
 // only state that permits the bundled image descriptor fallback.
 func (s *Store) Load(bundled Descriptor) (Descriptor, error) {

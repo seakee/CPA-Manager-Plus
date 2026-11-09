@@ -847,6 +847,14 @@ jobs:
             seakee/cpa-manager-plus:latest \
             bin/tmp/runtime-v8-default-ci
 
+      - name: Run slim runtime CPA acquisition smoke
+        if: needs.changes.outputs.runtime_lifecycle == 'true'
+        run: |
+          python3 bin/ci/runtime-slim-acquire-smoke.py \
+            seakee/cpa-manager-plus:ci-slim \
+            seakee/cpa-manager-plus:latest \
+            bin/tmp/runtime-slim-acquire-ci
+
       - name: Reject unsupported CPA v8 architecture without fallback
         if: needs.changes.outputs.runtime_lifecycle == 'true'
         run: |

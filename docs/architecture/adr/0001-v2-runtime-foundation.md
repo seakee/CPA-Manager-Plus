@@ -559,6 +559,23 @@ automatic recovery authority before selection commit, and activation does not
 change Runtime generation or resume as a workflow across Supervisor
 generations.
 
+When a slim Runtime image omits the bundled CPA executable, the image-pinned
+artifact manifest `artifactId` remains the sole trust root for first-time
+runtime acquisition. The official GitHub Release source, a user-selected HTTPS
+CDN prefix, and a local archive upload are untrusted transports only; the CDN
+transport refuses connections to non-public destination addresses (self-hosted
+LAN mirrors are out of scope for the first release), the official source never
+falls back to a CDN automatically, and Manager still cannot supply a target
+version, filesystem path, checksum, command, or rollback
+target. Verified acquisition stages the pinned version and exact `artifactId`
+alongside the extracted `LICENSE`, then commits the finalized `selection.json`
+and refreshes the active artifact observation without performing a process
+transition; a subsequent `Start` or destination cutover consumes that selected
+stage. This acquisition surface sits intentionally outside the destination
+qualification pin while preserving the pinned Fresh gate requirement that
+`ActiveGatewayArtifact` equals the qualified `artifactId`, matching the existing
+prepare and activate update paths.
+
 ## Phase 1 implementation boundary
 
 Phase 1 MUST establish:
