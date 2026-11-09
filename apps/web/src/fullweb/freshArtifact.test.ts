@@ -7,6 +7,8 @@ import {
   acquireArtifact,
   createPublicArtifactTransport,
   formatArtifactError,
+  formatArtifactPinnedMismatch,
+  isArtifactPinnedMismatch,
   isArtifactReady,
   isArtifactRecoveryRequired,
   mapArtifactErrorCode,
@@ -104,6 +106,18 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
     );
     expect(isArtifactRecoveryRequired(activeWithRecoveryRequired)).toBe(true);
     expect(isArtifactReady(activeWithRecoveryRequired)).toBe(false);
+
+    // active.artifactId !== pinned.artifactId is never ready and is flagged as a pinned mismatch
+    const mismatched = parseArtifactStatus(
+      validStatus({
+        active: { artifactId: 'sha256:' + 'b'.repeat(64), origin: 'bundled' },
+        required: false,
+      })
+    );
+    expect(isArtifactPinnedMismatch(mismatched)).toBe(true);
+    expect(isArtifactReady(mismatched)).toBe(false);
+    expect(isArtifactPinnedMismatch(active)).toBe(false);
+    expect(formatArtifactPinnedMismatch('8.0.55', 'en').code).toBe('pinned_mismatch');
   });
 
   it('validates operation and probe wire contracts strictly', () => {
@@ -150,29 +164,46 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
 
   it('maps every artifact error code to its message key and remedy across all four locales', () => {
     const codes = Object.keys(ARTIFACT_ERROR_CODES) as ArtifactErrorCode[];
-    expect(codes).toHaveLength(21);
+    expect(codes).toHaveLength(28);
 
-    expect(ARTIFACT_ERROR_MAP.archive_invalid.remedyKey).toBe('remedy_archive');
-    expect(ARTIFACT_ERROR_MAP.artifact_mismatch.remedyKey).toBe('remedy_archive');
-    expect(ARTIFACT_ERROR_MAP.source_unreachable.remedyKey).toBe('remedy_network');
-    expect(ARTIFACT_ERROR_MAP.download_failed.remedyKey).toBe('remedy_network');
-    expect(ARTIFACT_ERROR_MAP.recovery_required.remedyKey).toBe('remedy_recovery');
-    expect(ARTIFACT_ERROR_MAP.unsupported_platform.remedyKey).toBe('remedy_unsupported_platform');
-    expect(ARTIFACT_ERROR_MAP.upgrade_artifact_unavailable.remedyKey).toBe(
-      'remedy_upgrade_artifact_unavailable'
-    );
-    expect(ARTIFACT_ERROR_MAP.upgrade_credential_timeout.remedyKey).toBe(
-      'remedy_upgrade_source_timeout'
-    );
-    expect(ARTIFACT_ERROR_MAP.upgrade_mount_timeout.remedyKey).toBe(
-      'remedy_upgrade_source_timeout'
-    );
-    expect(ARTIFACT_ERROR_MAP.upgrade_preflight_timeout.remedyKey).toBe(
-      'remedy_upgrade_source_timeout'
-    );
-    expect(ARTIFACT_ERROR_MAP.upgrade_source_symlinked.remedyKey).toBe(
-      'remedy_upgrade_source_symlinked'
-    );
+    // Table-driven check of every server code reachable on the Fresh and Upgrade artifact routes.
+    const serverArtifactCodes: Array<[ArtifactErrorCode, string]> = [
+      ['archive_invalid', 'remedy_archive'],
+      ['artifact_mismatch', 'remedy_archive'],
+      ['source_unreachable', 'remedy_network'],
+      ['download_failed', 'remedy_network'],
+      ['recovery_required', 'remedy_recovery'],
+      ['unsupported_platform', 'remedy_unsupported_platform'],
+      ['install_failed', 'remedy_install_failed'],
+      ['runtime_unavailable', 'remedy_runtime_unavailable'],
+      ['acquisition_in_progress', 'remedy_in_progress'],
+      ['artifact_conflict', 'remedy_conflict'],
+      ['artifact_already_active', 'remedy_already_active'],
+      ['archive_too_large', 'remedy_too_large'],
+      ['invalid_request', 'remedy_invalid_request'],
+      ['unauthorized', 'remedy_unauthorized'],
+      ['admin_unauthorized', 'remedy_admin_unauthorized'],
+      ['origin_rejected', 'remedy_origin_rejected'],
+      ['method_not_allowed', 'remedy_invalid_request'],
+      ['upgrade_artifact_unavailable', 'remedy_upgrade_artifact_unavailable'],
+      ['upgrade_credential_timeout', 'remedy_upgrade_source_timeout'],
+      ['upgrade_mount_timeout', 'remedy_upgrade_source_timeout'],
+      ['upgrade_preflight_timeout', 'remedy_upgrade_source_timeout'],
+      ['upgrade_legacy_root_missing', 'remedy_upgrade_legacy_root_missing'],
+      ['upgrade_legacy_root_unusable', 'remedy_upgrade_legacy_root_unusable'],
+      ['upgrade_source_missing', 'remedy_upgrade_source_missing'],
+      ['upgrade_source_unreadable', 'remedy_upgrade_source_unreadable'],
+      ['upgrade_operation_unreadable', 'remedy_upgrade_operation_unreadable'],
+      ['upgrade_operation_invalid', 'remedy_upgrade_operation_invalid'],
+      ['upgrade_source_symlinked', 'remedy_upgrade_source_symlinked'],
+    ];
+    for (const [serverCode, expectedRemedyKey] of serverArtifactCodes) {
+      expect(ARTIFACT_ERROR_MAP[serverCode].remedyKey).toBe(expectedRemedyKey);
+      const mapped = mapArtifactErrorCode(serverCode, '8.0.55', 'en');
+      expect(mapped.code).toBe(serverCode);
+      expect(mapped.code).not.toBe('unknown');
+      expect(mapped.remedyKey).toBe(expectedRemedyKey);
+    }
 
     for (const locale of ['en', 'zh-CN', 'zh-TW', 'ru']) {
       for (const code of codes) {

@@ -954,7 +954,30 @@ describe('Full Web upgrade wizard', () => {
     }
     expect(artifactTransport.readStatus).not.toHaveBeenCalled();
 
-    // 3. On cpa_import with artifact transport -> panel renders, not ready while required === true, then shows host hint on ready.
+    // 3. Mismatched active.artifactId !== pinned.artifactId on cpa_import -> never ready, shows pinned_mismatch error.
+    currentArtifactStatus = makeArtifactStatus({
+      active: { artifactId: 'sha256:' + 'f'.repeat(64), origin: 'bundled' },
+      required: false,
+    });
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          stage: 'reconcile',
+          nextAction: 'cpa_import',
+          domainsDone: ['source_copy', 'usage_events'],
+        })
+      ),
+      vi.fn(),
+      artifactTransport
+    );
+    expect(byTestId('fresh-artifact-step')).toBeTruthy();
+    expect(byTestId('artifact-error').props['data-error-code']).toBe('pinned_mismatch');
+    expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+
+    // 4. On cpa_import with artifact transport -> panel renders, not ready while required === true, then shows host hint on ready.
+    currentArtifactStatus = makeArtifactStatus();
     await mount(
       resumeRead(() =>
         statusDocument({
@@ -968,7 +991,7 @@ describe('Full Web upgrade wizard', () => {
     );
     expect(byTestId('fresh-artifact-step')).toBeTruthy();
     expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
-    expect(artifactTransport.readStatus).toHaveBeenCalledTimes(1);
+    expect(artifactTransport.readStatus).toHaveBeenCalledTimes(2);
 
     // Acquire succeeds -> onReady -> shows host hint to run `upgrade cpa-import`.
     currentArtifactStatus = makeArtifactStatus({

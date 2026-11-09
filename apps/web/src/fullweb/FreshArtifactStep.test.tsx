@@ -473,4 +473,30 @@ describe('FreshArtifactStep', () => {
     });
     expect(pollCount).toBe(4);
   });
+
+  it('blocks readiness and acquisition controls when active.artifactId does not match pinned.artifactId', async () => {
+    const transport: ArtifactTransport = {
+      readStatus: vi.fn(async () =>
+        makeStatus({
+          active: { artifactId: 'sha256:' + 'f'.repeat(64), origin: 'bundled' },
+          required: false,
+        })
+      ),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn(),
+      upload: vi.fn(),
+    };
+    const onReady = vi.fn();
+
+    await act(async () => {
+      renderer = create(<FreshArtifactStep transport={transport} onReady={onReady} />);
+    });
+
+    expect(onReady).not.toHaveBeenCalled();
+    expect(transport.probe).not.toHaveBeenCalled();
+    expect(byID('artifact-error').props['data-error-code']).toBe('pinned_mismatch');
+    expect(allByID('artifact-acquire-btn')).toHaveLength(0);
+    expect(allByID('artifact-source-github')).toHaveLength(0);
+    expect(allByID('artifact-status-retry')).toHaveLength(1);
+  });
 });

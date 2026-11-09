@@ -30,12 +30,19 @@ export type ArtifactErrorCode =
   | 'archive_too_large'
   | 'invalid_request'
   | 'unauthorized'
+  | 'admin_unauthorized'
+  | 'origin_rejected'
+  | 'method_not_allowed'
   | 'upgrade_artifact_unavailable'
   | 'upgrade_credential_timeout'
   | 'upgrade_mount_timeout'
   | 'upgrade_preflight_timeout'
+  | 'upgrade_legacy_root_missing'
+  | 'upgrade_legacy_root_unusable'
+  | 'upgrade_source_missing'
   | 'upgrade_source_unreadable'
   | 'upgrade_operation_unreadable'
+  | 'upgrade_operation_invalid'
   | 'upgrade_source_symlinked';
 
 export const ARTIFACT_ERROR_CODES: Record<ArtifactErrorCode, true> = {
@@ -53,12 +60,19 @@ export const ARTIFACT_ERROR_CODES: Record<ArtifactErrorCode, true> = {
   archive_too_large: true,
   invalid_request: true,
   unauthorized: true,
+  admin_unauthorized: true,
+  origin_rejected: true,
+  method_not_allowed: true,
   upgrade_artifact_unavailable: true,
   upgrade_credential_timeout: true,
   upgrade_mount_timeout: true,
   upgrade_preflight_timeout: true,
+  upgrade_legacy_root_missing: true,
+  upgrade_legacy_root_unusable: true,
+  upgrade_source_missing: true,
   upgrade_source_unreadable: true,
   upgrade_operation_unreadable: true,
+  upgrade_operation_invalid: true,
   upgrade_source_symlinked: true,
 };
 
@@ -169,6 +183,18 @@ export const ARTIFACT_ERROR_MAP: Record<
     messageKey: 'error_unauthorized',
     remedyKey: 'remedy_unauthorized',
   },
+  admin_unauthorized: {
+    messageKey: 'error_admin_unauthorized',
+    remedyKey: 'remedy_admin_unauthorized',
+  },
+  origin_rejected: {
+    messageKey: 'error_origin_rejected',
+    remedyKey: 'remedy_origin_rejected',
+  },
+  method_not_allowed: {
+    messageKey: 'error_invalid_request',
+    remedyKey: 'remedy_invalid_request',
+  },
   upgrade_artifact_unavailable: {
     messageKey: 'error_upgrade_artifact_unavailable',
     remedyKey: 'remedy_upgrade_artifact_unavailable',
@@ -185,13 +211,29 @@ export const ARTIFACT_ERROR_MAP: Record<
     messageKey: 'error_upgrade_source_timeout',
     remedyKey: 'remedy_upgrade_source_timeout',
   },
+  upgrade_legacy_root_missing: {
+    messageKey: 'error_upgrade_legacy_root_missing',
+    remedyKey: 'remedy_upgrade_legacy_root_missing',
+  },
+  upgrade_legacy_root_unusable: {
+    messageKey: 'error_upgrade_legacy_root_unusable',
+    remedyKey: 'remedy_upgrade_legacy_root_unusable',
+  },
+  upgrade_source_missing: {
+    messageKey: 'error_upgrade_source_missing',
+    remedyKey: 'remedy_upgrade_source_missing',
+  },
   upgrade_source_unreadable: {
     messageKey: 'error_upgrade_source_unreadable',
     remedyKey: 'remedy_upgrade_source_unreadable',
   },
   upgrade_operation_unreadable: {
-    messageKey: 'error_upgrade_source_unreadable',
-    remedyKey: 'remedy_upgrade_source_unreadable',
+    messageKey: 'error_upgrade_operation_unreadable',
+    remedyKey: 'remedy_upgrade_operation_unreadable',
+  },
+  upgrade_operation_invalid: {
+    messageKey: 'error_upgrade_operation_invalid',
+    remedyKey: 'remedy_upgrade_operation_invalid',
   },
   upgrade_source_symlinked: {
     messageKey: 'error_upgrade_source_symlinked',
@@ -200,12 +242,29 @@ export const ARTIFACT_ERROR_MAP: Record<
 };
 
 export interface MappedArtifactError {
-  code: ArtifactErrorCode | 'unknown';
+  code: ArtifactErrorCode | 'pinned_mismatch' | 'unknown';
   messageKey: FreshArtifactTextKey;
   remedyKey: FreshArtifactTextKey;
   message: string;
   remedy: string;
   text: string;
+}
+
+export function formatArtifactPinnedMismatch(
+  version = '<version>',
+  language?: string
+): MappedArtifactError {
+  const vars = { version: version.trim() || '<version>' };
+  const message = artifactText('error_pinned_mismatch', vars, language);
+  const remedy = artifactText('remedy_pinned_mismatch', vars, language);
+  return {
+    code: 'pinned_mismatch',
+    messageKey: 'error_pinned_mismatch',
+    remedyKey: 'remedy_pinned_mismatch',
+    message,
+    remedy,
+    text: `${message} ${remedy}`,
+  };
 }
 
 export function mapArtifactErrorCode(
@@ -450,11 +509,22 @@ export function isArtifactRecoveryRequired(
   );
 }
 
+export function isArtifactPinnedMismatch(
+  status: ArtifactStatus | null | undefined
+): boolean {
+  return (
+    !!status &&
+    status.active !== null &&
+    status.active.artifactId !== status.pinned.artifactId
+  );
+}
+
 export function isArtifactReady(status: ArtifactStatus | null | undefined): boolean {
   return (
     !!status &&
     status.required === false &&
     status.active !== null &&
+    status.active.artifactId === status.pinned.artifactId &&
     !isArtifactRecoveryRequired(status)
   );
 }

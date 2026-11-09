@@ -57,6 +57,7 @@ async function setup(
     artifactRequired?: boolean;
     artifactRecheck503?: boolean;
     artifactRecoveryRequired?: boolean;
+    artifactPinnedMismatch?: boolean;
     artifactErrorCode?: string;
     artifactErrorStatus?: number;
     lost?: string;
@@ -108,7 +109,9 @@ async function setup(
         active: artifactRequired
           ? null
           : {
-              artifactId: runtime.activeGatewayArtifact.artifactId,
+              artifactId: options.artifactPinnedMismatch
+                ? 'sha256:' + 'f'.repeat(64)
+                : runtime.activeGatewayArtifact.artifactId,
               origin: 'bundled',
             },
         required: artifactRequired,
@@ -813,6 +816,21 @@ it('keeps gate active and shows restart guidance when status reports recovery_re
   expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
   expect(byID('setup-execute').props.disabled).toBe(true);
   expect(byID('artifact-error').props['data-error-code']).toBe('recovery_required');
+  expect(
+    transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
+  ).toBe(false);
+});
+
+it('keeps gate active and blocks execute when active.artifactId does not match pinned.artifactId', async () => {
+  const { transport } = await setup({
+    artifactRequired: false,
+    artifactPinnedMismatch: true,
+  });
+  await click('setup-review');
+
+  expect(renderer.root.findAllByProps({ 'data-testid': 'fresh-artifact-step' })).toHaveLength(1);
+  expect(byID('setup-execute').props.disabled).toBe(true);
+  expect(byID('artifact-error').props['data-error-code']).toBe('pinned_mismatch');
   expect(
     transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
   ).toBe(false);

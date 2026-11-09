@@ -52,12 +52,24 @@ const en = {
   error_archive_too_large: 'The archive exceeds the 64 MiB upload limit.',
   error_invalid_request: 'The preparation request was rejected as invalid.',
   error_unauthorized: 'Your session is not authorized to prepare the CPA engine.',
+  error_admin_unauthorized:
+    'This session is not authorized to access the upgrade runtime artifact.',
+  error_origin_rejected:
+    'Cross-site requests to the upgrade runtime artifact endpoint are not permitted.',
   error_upgrade_artifact_unavailable:
     'The CPA engine can only be prepared while an active upgrade operation is in progress.',
   error_upgrade_source_timeout: 'The upgrade source check is taking longer than expected.',
-  error_upgrade_source_unreadable: 'The upgrade source or operation state could not be read.',
+  error_upgrade_legacy_root_missing: 'No 1.x data directory is mounted.',
+  error_upgrade_legacy_root_unusable: 'The mounted 1.x data directory cannot be used.',
+  error_upgrade_source_missing: 'The mounted 1.x directory has no usage.sqlite.',
+  error_upgrade_source_unreadable: 'The 1.x database cannot be read safely.',
+  error_upgrade_operation_unreadable: 'The operation record cannot be read.',
+  error_upgrade_operation_invalid:
+    'The recorded upgrade operation is inconsistent and cannot be used.',
   error_upgrade_source_symlinked:
     'The 1.x database is reached through a link, not as the file itself.',
+  error_pinned_mismatch:
+    'The active CPA engine on this host does not match the version pinned in this image ({version}).',
   error_unknown: 'The CPA engine could not be prepared.',
   remedy_archive:
     'Wrong or damaged file; download CLIProxyAPI_{version}_linux_<arch>.tar.gz from the official release and try again.',
@@ -73,13 +85,25 @@ const en = {
   remedy_too_large: 'Select the official CLIProxyAPI .tar.gz archive (at most 64 MiB).',
   remedy_invalid_request: 'Check the selected source or CDN prefix and try again.',
   remedy_unauthorized: 'Reopen the wizard from a valid handoff link or sign in again.',
+  remedy_admin_unauthorized: 'Verify your 1.x administrator key again.',
+  remedy_origin_rejected:
+    'Open the wizard directly from the configured CPAMP public origin and try again.',
   remedy_upgrade_artifact_unavailable:
     'Start the upgrade copy-in on the Manager host first, or refresh the upgrade status if it has already completed.',
   remedy_upgrade_source_timeout: 'Retry shortly once the source check finishes.',
-  remedy_upgrade_source_unreadable:
-    'Check the mounted 1.x volume and Manager database on the host, then retry.',
+  remedy_upgrade_legacy_root_missing: 'Mount the 1.x data directory read-only and try again.',
+  remedy_upgrade_legacy_root_unusable:
+    'Check the mounted 1.x volume and its permissions on the host, then try again.',
+  remedy_upgrade_source_missing:
+    'Check that the whole 1.x data directory is mounted read-only, then try again.',
+  remedy_upgrade_source_unreadable: 'Check the volume and its permissions on the host.',
+  remedy_upgrade_operation_unreadable: 'Check the Manager database on the host.',
+  remedy_upgrade_operation_invalid:
+    'Inspect or roll back the upgrade operation on the Manager host before retrying.',
   remedy_upgrade_source_symlinked:
     'Mount the data directory itself, without linked files, then try again.',
+  remedy_pinned_mismatch:
+    'Browser preparation refuses to overwrite a different active engine. Align the container image and runtime store on the host, then retry.',
 };
 
 const zh: typeof en = {
@@ -134,10 +158,18 @@ const zh: typeof en = {
   error_archive_too_large: '归档文件超过 64 MiB 上传上限。',
   error_invalid_request: '准备请求参数无效。',
   error_unauthorized: '当前会话无权执行引擎准备操作。',
+  error_admin_unauthorized: '当前会话无权访问升级运行时引擎接口。',
+  error_origin_rejected: '拒绝跨站点访问升级运行时引擎接口。',
   error_upgrade_artifact_unavailable: '仅在已记录且尚未完成的升级操作期间可准备 CPA 引擎。',
   error_upgrade_source_timeout: '升级来源检查耗时较长，暂未完成。',
-  error_upgrade_source_unreadable: '无法读取升级来源或操作状态。',
+  error_upgrade_legacy_root_missing: '未挂载 1.x 数据目录。',
+  error_upgrade_legacy_root_unusable: '已挂载的 1.x 数据目录不可用。',
+  error_upgrade_source_missing: '已挂载的 1.x 目录中没有 usage.sqlite。',
+  error_upgrade_source_unreadable: '无法安全读取 1.x 数据库。',
+  error_upgrade_operation_unreadable: '无法读取操作记录。',
+  error_upgrade_operation_invalid: '已记录的升级操作数据不一致，无法继续使用。',
   error_upgrade_source_symlinked: '1.x 数据库是通过链接访问的，而不是普通文件。',
+  error_pinned_mismatch: '当前宿主机已激活的 CPA 引擎与本镜像固定版本（{version}）不一致。',
   error_unknown: '未能完成 CPA 引擎准备。',
   remedy_archive:
     '文件错误或已损坏；请从官方发布页下载 CLIProxyAPI_{version}_linux_<arch>.tar.gz 后重试。',
@@ -152,11 +184,20 @@ const zh: typeof en = {
   remedy_too_large: '请选择官方 CLIProxyAPI .tar.gz 发布包（不超过 64 MiB）。',
   remedy_invalid_request: '请检查所选来源或 CDN 前缀格式后重试。',
   remedy_unauthorized: '请通过有效的初始化授权链接重新打开向导或重新登录。',
+  remedy_admin_unauthorized: '请重新验证 1.x 管理员密钥。',
+  remedy_origin_rejected: '请直接通过已配置的 CPAMP 公共 Origin 打开向导后重试。',
   remedy_upgrade_artifact_unavailable:
     '请先在 Manager 宿主机上启动升级复制操作，或刷新升级状态确认是否已完成。',
   remedy_upgrade_source_timeout: '请稍候片刻后重试。',
-  remedy_upgrade_source_unreadable: '请检查宿主机上挂载的 1.x 卷与 Manager 数据库后重试。',
+  remedy_upgrade_legacy_root_missing: '请只读挂载 1.x 数据目录后重试。',
+  remedy_upgrade_legacy_root_unusable: '请在宿主机上检查挂载的 1.x 卷和权限后重试。',
+  remedy_upgrade_source_missing: '请确认整个 1.x 数据目录都以只读方式挂载后重试。',
+  remedy_upgrade_source_unreadable: '请在宿主机上检查卷和权限。',
+  remedy_upgrade_operation_unreadable: '请在宿主机上检查 Manager 数据库。',
+  remedy_upgrade_operation_invalid: '请先在 Manager 宿主机上检查或回滚该升级操作后再试。',
   remedy_upgrade_source_symlinked: '请挂载数据目录本身（不要使用链接文件）后重试。',
+  remedy_pinned_mismatch:
+    '浏览器准备操作不会覆盖已激活的其他版本引擎。请在宿主机上使容器镜像与运行时目录保持一致后重试。',
 };
 
 const tw: typeof en = {
@@ -211,10 +252,18 @@ const tw: typeof en = {
   error_archive_too_large: '封存檔超過 64 MiB 上傳上限。',
   error_invalid_request: '準備請求參數無效。',
   error_unauthorized: '目前工作階段無權執行引擎準備操作。',
+  error_admin_unauthorized: '目前工作階段無權存取升級執行階段引擎介面。',
+  error_origin_rejected: '拒絕跨站點存取升級執行階段引擎介面。',
   error_upgrade_artifact_unavailable: '僅在已記錄且尚未完成的升級操作期間可準備 CPA 引擎。',
   error_upgrade_source_timeout: '升級來源檢查耗時較長，暫未完成。',
-  error_upgrade_source_unreadable: '無法讀取升級來源或操作狀態。',
+  error_upgrade_legacy_root_missing: '未掛載 1.x 資料目錄。',
+  error_upgrade_legacy_root_unusable: '已掛載的 1.x 資料目錄不可用。',
+  error_upgrade_source_missing: '已掛載的 1.x 目錄中沒有 usage.sqlite。',
+  error_upgrade_source_unreadable: '無法安全讀取 1.x 資料庫。',
+  error_upgrade_operation_unreadable: '無法讀取操作記錄。',
+  error_upgrade_operation_invalid: '已記錄的升級操作資料不一致，無法繼續使用。',
   error_upgrade_source_symlinked: '1.x 資料庫是透過連結存取，而不是一般檔案。',
+  error_pinned_mismatch: '目前主機已啟用的 CPA 引擎與本映像固定版本（{version}）不一致。',
   error_unknown: '未能完成 CPA 引擎準備。',
   remedy_archive:
     '檔案錯誤或已損毀；請從官方發佈頁下載 CLIProxyAPI_{version}_linux_<arch>.tar.gz 後重試。',
@@ -229,11 +278,20 @@ const tw: typeof en = {
   remedy_too_large: '請選擇官方 CLIProxyAPI .tar.gz 發佈套件（不超過 64 MiB）。',
   remedy_invalid_request: '請檢查所選來源或 CDN 前綴格式後重試。',
   remedy_unauthorized: '請透過有效的初始化授權連結重新開啟精靈或重新登入。',
+  remedy_admin_unauthorized: '請重新驗證 1.x 管理員金鑰。',
+  remedy_origin_rejected: '請直接透過已設定的 CPAMP 公開 Origin 開啟精靈後重試。',
   remedy_upgrade_artifact_unavailable:
     '請先在 Manager 主機上啟動升級複製操作，或重新整理升級狀態確認是否已完成。',
   remedy_upgrade_source_timeout: '請稍候片刻後重試。',
-  remedy_upgrade_source_unreadable: '請檢查主機上掛載的 1.x 磁碟區與 Manager 資料庫後重試。',
+  remedy_upgrade_legacy_root_missing: '請以唯讀方式掛載 1.x 資料目錄後重試。',
+  remedy_upgrade_legacy_root_unusable: '請在主機上檢查掛載的 1.x 磁碟區與權限後重試。',
+  remedy_upgrade_source_missing: '請確認整個 1.x 資料目錄都以唯讀方式掛載後重試。',
+  remedy_upgrade_source_unreadable: '請在主機上檢查磁碟區與權限。',
+  remedy_upgrade_operation_unreadable: '請在主機上檢查 Manager 資料庫。',
+  remedy_upgrade_operation_invalid: '請先在 Manager 主機上檢查或回滾該升級操作後再試。',
   remedy_upgrade_source_symlinked: '請掛載資料目錄本身（不要使用連結檔案）後重試。',
+  remedy_pinned_mismatch:
+    '瀏覽器準備操作不會覆寫已啟用的其他版本引擎。請在主機上使容器映像與執行階段目錄保持一致後重試。',
 };
 
 const ru: typeof en = {
@@ -289,14 +347,25 @@ const ru: typeof en = {
   error_archive_too_large: 'Размер архива превышает лимит загрузки 64 МиБ.',
   error_invalid_request: 'Запрос на подготовку отклонён как некорректный.',
   error_unauthorized: 'Текущая сессия не авторизована для подготовки движка CPA.',
+  error_admin_unauthorized:
+    'У этого сеанса нет прав доступа к артефакту среды выполнения обновления.',
+  error_origin_rejected:
+    'Межсайтовые запросы к ресурсу артефакта обновления запрещены.',
   error_upgrade_artifact_unavailable:
     'Подготовка движка CPA доступна только при наличии активной незавершённой операции обновления.',
   error_upgrade_source_timeout:
     'Проверка источника обновления занимает больше времени, чем ожидалось.',
-  error_upgrade_source_unreadable:
-    'Не удалось прочитать источник обновления или состояние операции.',
+  error_upgrade_legacy_root_missing: 'Каталог данных 1.x не смонтирован.',
+  error_upgrade_legacy_root_unusable: 'Смонтированный каталог данных 1.x непригоден.',
+  error_upgrade_source_missing: 'В смонтированном каталоге 1.x нет usage.sqlite.',
+  error_upgrade_source_unreadable: 'База 1.x не читается безопасно.',
+  error_upgrade_operation_unreadable: 'Запись операции не читается.',
+  error_upgrade_operation_invalid:
+    'Записанная операция обновления противоречива и не может быть использована.',
   error_upgrade_source_symlinked:
     'База 1.x доступна через ссылку, а не как сам файл.',
+  error_pinned_mismatch:
+    'Активный движок CPA на этом хосте не соответствует версии, зафиксированной в этом образе ({version}).',
   error_unknown: 'Не удалось подготовить движок CPA.',
   remedy_archive:
     'Неверный или повреждённый файл; скачайте CLIProxyAPI_{version}_linux_<arch>.tar.gz из официального релиза и повторите попытку.',
@@ -312,13 +381,25 @@ const ru: typeof en = {
   remedy_too_large: 'Выберите официальный архив CLIProxyAPI .tar.gz (не более 64 МиБ).',
   remedy_invalid_request: 'Проверьте выбранный источник или префикс CDN и повторите попытку.',
   remedy_unauthorized: 'Откройте мастер заново по актуальной ссылке handoff или войдите снова.',
+  remedy_admin_unauthorized: 'Проверьте ключ администратора 1.x ещё раз.',
+  remedy_origin_rejected:
+    'Откройте мастер напрямую с настроенного публичного источника CPAMP и повторите попытку.',
   remedy_upgrade_artifact_unavailable:
     'Сначала запустите копирование обновления на хосте Manager или обновите статус операции, если она уже завершена.',
   remedy_upgrade_source_timeout: 'Повторите попытку немного позже.',
-  remedy_upgrade_source_unreadable:
-    'Проверьте смонтированный том 1.x и базу Manager на хосте, затем повторите попытку.',
+  remedy_upgrade_legacy_root_missing: 'Смонтируйте каталог данных 1.x только для чтения и повторите.',
+  remedy_upgrade_legacy_root_unusable:
+    'Проверьте смонтированный том 1.x и его права на хосте, затем повторите попытку.',
+  remedy_upgrade_source_missing:
+    'Проверьте, что каталог данных 1.x смонтирован целиком и только для чтения, и повторите.',
+  remedy_upgrade_source_unreadable: 'Проверьте том и его права на хосте.',
+  remedy_upgrade_operation_unreadable: 'Проверьте базу Manager на хосте.',
+  remedy_upgrade_operation_invalid:
+    'Проверьте или откатите операцию обновления на хосте Manager перед повторной попыткой.',
   remedy_upgrade_source_symlinked:
     'Смонтируйте сам каталог данных, без файлов-ссылок, и повторите.',
+  remedy_pinned_mismatch:
+    'Подготовка через браузер не перезаписывает другой активный движок. Приведите образ контейнера и хранилище среды выполнения на хосте в соответствие, затем повторите попытку.',
 };
 
 export type FreshArtifactTextKey = keyof typeof en;

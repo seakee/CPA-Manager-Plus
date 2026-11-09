@@ -234,6 +234,35 @@ describe('upgradeArtifactTransport', () => {
       expect(mappedTimeout.text).toContain('taking longer');
       expect(mappedTimeout.text).toContain('Retry shortly');
 
+      for (const [statusCode, serverCode] of [
+        [401, 'admin_unauthorized'],
+        [403, 'origin_rejected'],
+        [405, 'method_not_allowed'],
+        [503, 'upgrade_mount_timeout'],
+        [503, 'upgrade_legacy_root_missing'],
+        [503, 'upgrade_legacy_root_unusable'],
+        [503, 'upgrade_source_missing'],
+        [503, 'upgrade_source_unreadable'],
+        [503, 'upgrade_operation_unreadable'],
+        [503, 'upgrade_operation_invalid'],
+        [503, 'upgrade_source_symlinked'],
+      ] as const) {
+        fetcher.mockResolvedValueOnce(
+          Response.json(
+            { code: serverCode, error: { code: serverCode } },
+            { status: statusCode }
+          )
+        );
+        let thrown: unknown;
+        try {
+          await transport.readStatus();
+        } catch (err) {
+          thrown = err;
+        }
+        const mapped = formatArtifactError(thrown, '8.0.55', 'en');
+        expect(mapped.code).toBe(serverCode);
+        expect(mapped.code).not.toBe('unknown');
+      }
       // Rejects oversize uploads, invalid CDN prefixes, and empty credentials client-side without touching fetch.
       const countBeforeGuards = fetcher.mock.calls.length;
       const oversize = { size: ARTIFACT_MAX_UPLOAD_BYTES + 1 } as Blob;

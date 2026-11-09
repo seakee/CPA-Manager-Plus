@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -88,15 +89,19 @@ func SourceFingerprint(ctx context.Context, root string) (string, error) {
 }
 
 // SourceTreeMetadata describes the metadata state of every entry covered by
-// SourceFingerprint without reading any file contents.
+// SourceFingerprint without reading any file contents. When Uncacheable is
+// true (for example if the platform cannot provide a change timestamp), Key is
+// empty and callers must run the full fingerprint without caching.
 type SourceTreeMetadata struct {
-	Key        string
-	TotalBytes int64
+	Key         string
+	TotalBytes  int64
+	Uncacheable bool
 }
 
 // IdentifySourceTree computes a metadata digest and total regular-file byte
 // size over the exact file set covered by SourceFingerprint using only
-// os.Lstat, os.ReadDir, and copyinmarker.Identity (zero file content reads).
+// os.Lstat, os.ReadDir, copyinmarker.Identity, and copyinmarker.ChangeStamp
+// (zero file content reads).
 func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, error) {
 	if err := ctx.Err(); err != nil {
 		return SourceTreeMetadata{}, err
@@ -136,6 +141,7 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 
 	metaHash := sha256.New()
 	var total int64
+	uncacheable := false
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return SourceTreeMetadata{}, err
@@ -149,9 +155,17 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 		if err != nil {
 			return SourceTreeMetadata{}, err
 		}
+		changeStamp, err := copyinmarker.ChangeStamp(fullPath)
+		if err != nil {
+			if errors.Is(err, copyinmarker.ErrChangeStampUnavailable) {
+				uncacheable = true
+			} else {
+				return SourceTreeMetadata{}, err
+			}
+		}
 		if _, err := fmt.Fprintf(
 			metaHash,
-			"%s\x00%t\x00%d\x00%d\x00%d\x00%d\x00%d\n",
+			"%s\x00%t\x00%d\x00%d\x00%d\x00%d\x00%d\x00%s\n",
 			entry.relative,
 			entry.directory,
 			uint32(info.Mode()),
@@ -159,6 +173,7 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 			identity.Inode,
 			info.Size(),
 			info.ModTime().UnixNano(),
+			changeStamp,
 		); err != nil {
 			return SourceTreeMetadata{}, err
 		}
@@ -169,6 +184,12 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 				total += info.Size()
 			}
 		}
+	}
+	if uncacheable {
+		return SourceTreeMetadata{
+			TotalBytes:  total,
+			Uncacheable: true,
+		}, nil
 	}
 	return SourceTreeMetadata{
 		Key:        hex.EncodeToString(metaHash.Sum(nil)),

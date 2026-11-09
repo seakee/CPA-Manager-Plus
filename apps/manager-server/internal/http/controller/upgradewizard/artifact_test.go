@@ -871,6 +871,289 @@ func TestArtifactProofCacheSingleFlightAndTimeout(t *testing.T) {
 	}
 }
 
+func TestArtifactIdentifySourceTreeErrorClassification(t *testing.T) {
+	origIdentify := artifactIdentifySourceTree
+	origCache := defaultArtifactProofCache
+	t.Cleanup(func() {
+		artifactIdentifySourceTree = origIdentify
+		defaultArtifactProofCache = origCache
+	})
+
+	var supervisorCalls atomic.Int32
+	_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+
+	// 1. Symlinked data.key in mounted source -> 503 upgrade_source_symlinked, 0 Supervisor calls.
+	t.Run("data-key-symlink", func(t *testing.T) {
+		root := legacySourceDir(t)
+		database := recordedArtifactStore(t, v2StoreAdminKey, root)
+		targetKey := filepath.Join(t.TempDir(), "external.key")
+		if err := os.WriteFile(targetKey, []byte("0123456789abcdef0123456789abcdef"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dataKeyPath := filepath.Join(root, "data.key")
+		if err := os.Remove(dataKeyPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(targetKey, dataKeyPath); err != nil {
+			t.Fatal(err)
+		}
+		handler := newHandler(root, database)
+		handler.Artifact = client
+		for _, route := range upgradeArtifactRouteSpecs() {
+			before := supervisorCalls.Load()
+			rec := doUpgradeArtifactRequest(t, handler, route.method, testPrefix+route.suffix, bearer(testAdminKey), route.contentType, strings.NewReader(route.body), int64(len(route.body)))
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"`+CodeSourceSymlinked+`"`) {
+				t.Fatalf("data.key symlink %s %s = %d: %s, want 503 %s", route.method, route.suffix, rec.Code, rec.Body.String(), CodeSourceSymlinked)
+			}
+			if supervisorCalls.Load() != before {
+				t.Fatalf("data.key symlink contacted Supervisor")
+			}
+		}
+	})
+
+	// 2. Symlinked usage.sqlite-wal in mounted source -> 503 upgrade_source_symlinked, 0 Supervisor calls.
+	t.Run("wal-symlink", func(t *testing.T) {
+		root := legacySourceDir(t)
+		walPath := filepath.Join(root, "usage.sqlite-wal")
+		if err := os.WriteFile(walPath, []byte{}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		database := recordedArtifactStore(t, v2StoreAdminKey, root)
+		handler := newHandler(root, database)
+		handler.Artifact = client
+		// Warm the credential cache so the request reaches IdentifySourceTree.
+		warm := doUpgradeArtifactRequest(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), "", nil, 0)
+		if warm.Code != http.StatusOK {
+			t.Fatalf("warm status = %d: %s", warm.Code, warm.Body.String())
+		}
+		targetWAL := filepath.Join(t.TempDir(), "external-wal")
+		if err := os.Rename(walPath, targetWAL); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(targetWAL, walPath); err != nil {
+			t.Fatal(err)
+		}
+		for _, route := range upgradeArtifactRouteSpecs() {
+			before := supervisorCalls.Load()
+			rec := doUpgradeArtifactRequest(t, handler, route.method, testPrefix+route.suffix, bearer(testAdminKey), route.contentType, strings.NewReader(route.body), int64(len(route.body)))
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"`+CodeSourceSymlinked+`"`) {
+				t.Fatalf("WAL symlink %s %s = %d: %s, want 503 %s", route.method, route.suffix, rec.Code, rec.Body.String(), CodeSourceSymlinked)
+			}
+			if supervisorCalls.Load() != before {
+				t.Fatalf("WAL symlink contacted Supervisor")
+			}
+		}
+	})
+
+	// 3. Unreadable / invalid usage-archives directory -> 503 upgrade_source_unreadable, 0 Supervisor calls.
+	t.Run("unreadable-archives-dir", func(t *testing.T) {
+		root := legacySourceDir(t)
+		database := recordedArtifactStore(t, v2StoreAdminKey, root)
+		// Replace usage-archives directory with a non-directory file so IdentifySourceTree fails with an I/O / layout error.
+		if err := os.WriteFile(filepath.Join(root, "usage-archives"), []byte("not-a-dir"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		handler := newHandler(root, database)
+		handler.Artifact = client
+		for _, route := range upgradeArtifactRouteSpecs() {
+			before := supervisorCalls.Load()
+			rec := doUpgradeArtifactRequest(t, handler, route.method, testPrefix+route.suffix, bearer(testAdminKey), route.contentType, strings.NewReader(route.body), int64(len(route.body)))
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"`+CodeSourceUnreadable+`"`) {
+				t.Fatalf("unreadable archives %s %s = %d: %s, want 503 %s", route.method, route.suffix, rec.Code, rec.Body.String(), CodeSourceUnreadable)
+			}
+			if supervisorCalls.Load() != before {
+				t.Fatalf("unreadable archives contacted Supervisor")
+			}
+		}
+	})
+
+	// 4. Real deadline during IdentifySourceTree -> 503 upgrade_credential_timeout, 0 Supervisor calls.
+	t.Run("identify-source-tree-deadline", func(t *testing.T) {
+		root := legacySourceDir(t)
+		database := recordedArtifactStore(t, v2StoreAdminKey, root)
+		artifactIdentifySourceTree = func(context.Context, string) (upgradeservice.SourceTreeMetadata, error) {
+			return upgradeservice.SourceTreeMetadata{}, context.DeadlineExceeded
+		}
+		defer func() {
+			artifactIdentifySourceTree = origIdentify
+		}()
+		handler := newHandler(root, database)
+		handler.Artifact = client
+		for _, route := range upgradeArtifactRouteSpecs() {
+			before := supervisorCalls.Load()
+			rec := doUpgradeArtifactRequest(t, handler, route.method, testPrefix+route.suffix, bearer(testAdminKey), route.contentType, strings.NewReader(route.body), int64(len(route.body)))
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), `"`+CodeCredentialTimeout+`"`) {
+				t.Fatalf("IdentifySourceTree timeout %s %s = %d: %s, want 503 %s", route.method, route.suffix, rec.Code, rec.Body.String(), CodeCredentialTimeout)
+			}
+			if supervisorCalls.Load() != before {
+				t.Fatalf("IdentifySourceTree timeout contacted Supervisor")
+			}
+		}
+	})
+}
+
+func TestArtifactSameInodeSameSizeRestoredMtimeInvalidatesCacheViaChangeStamp(t *testing.T) {
+	origFingerprint := artifactSourceFingerprint
+	origIdentify := artifactIdentifySourceTree
+	origCache := defaultArtifactProofCache
+	t.Cleanup(func() {
+		artifactSourceFingerprint = origFingerprint
+		artifactIdentifySourceTree = origIdentify
+		defaultArtifactProofCache = origCache
+	})
+
+	defaultArtifactProofCache = newArtifactProofCache()
+	root := legacySourceDir(t)
+	archiveDir := filepath.Join(root, "usage-archives")
+	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(archiveDir, "retained.jsonl")
+	initialContent := []byte("aaaaaaa\n")
+	mutatedContent := []byte("bbbbbbb\n")
+	if err := os.WriteFile(archivePath, initialContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixedMtime := time.Unix(1700000000, 123456000)
+	if err := os.Chtimes(archivePath, fixedMtime, fixedMtime); err != nil {
+		t.Fatal(err)
+	}
+
+	origInfo, err := os.Lstat(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origIdentity, err := copyinmarker.Identity(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStamp, err := copyinmarker.ChangeStamp(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origMeta, err := upgradeservice.IdentifySourceTree(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	database := recordedArtifactStore(t, v2StoreAdminKey, root)
+	var supervisorCalls atomic.Int32
+	_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+	handler := newHandler(root, database)
+	handler.Artifact = client
+
+	var fingerprintCalls atomic.Int32
+	artifactSourceFingerprint = func(ctx context.Context, r string) (string, error) {
+		fingerprintCalls.Add(1)
+		return origFingerprint(ctx, r)
+	}
+
+	// Poll 1 warms the proof cache; Poll 2 hits the proof cache without re-reading file contents.
+	for poll := range 2 {
+		rec := doUpgradeArtifactRequest(t, handler, http.MethodGet, testPrefix+ArtifactStatusSuffix, bearer(testAdminKey), "", nil, 0)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("initial poll %d = %d: %s", poll, rec.Code, rec.Body.String())
+		}
+	}
+	if got := fingerprintCalls.Load(); got != 1 {
+		t.Fatalf("fingerprintCalls before rewrite = %d, want 1", got)
+	}
+
+	// Rewrite archivePath in-place (same inode, same size) and restore the exact mtime,
+	// waiting until the kernel's ctime tick advances if the filesystem uses coarse ticks.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f, err := os.OpenFile(archivePath, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteAt(mutatedContent, 0); err != nil {
+			_ = f.Close()
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(archivePath, fixedMtime, fixedMtime); err != nil {
+			t.Fatal(err)
+		}
+		newStamp, err := copyinmarker.ChangeStamp(archivePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if newStamp != origStamp || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	afterInfo, err := os.Lstat(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterIdentity, err := copyinmarker.Identity(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterIdentity != origIdentity {
+		t.Fatalf("expected same inode/device %+v, got %+v", origIdentity, afterIdentity)
+	}
+	if afterInfo.Size() != origInfo.Size() {
+		t.Fatalf("expected same size %d, got %d", origInfo.Size(), afterInfo.Size())
+	}
+	if afterInfo.ModTime().UnixNano() != origInfo.ModTime().UnixNano() {
+		t.Fatalf("expected restored mtime %d, got %d", origInfo.ModTime().UnixNano(), afterInfo.ModTime().UnixNano())
+	}
+	afterMeta, err := upgradeservice.IdentifySourceTree(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterMeta.Key == origMeta.Key {
+		t.Fatalf("expected IdentifySourceTree metadata key to change after in-place rewrite with restored mtime")
+	}
+
+	// Poll 3 must miss the cache, recompute SourceFingerprint, and return 409 with 0 Supervisor calls.
+	beforeSup := supervisorCalls.Load()
+	rec := doUpgradeArtifactRequest(t, handler, http.MethodGet, testPrefix+ArtifactStatusSuffix, bearer(testAdminKey), "", nil, 0)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"`+CodeArtifactUnavailable+`"`) {
+		t.Fatalf("after in-place rewrite with restored mtime = %d: %s, want 409 %s", rec.Code, rec.Body.String(), CodeArtifactUnavailable)
+	}
+	if got := fingerprintCalls.Load(); got != 2 {
+		t.Fatalf("fingerprintCalls after in-place rewrite = %d, want 2", got)
+	}
+	if supervisorCalls.Load() != beforeSup {
+		t.Fatalf("in-place rewrite contacted Supervisor")
+	}
+
+	// Fail-closed when change stamp is unavailable: Uncacheable metadata never caches and runs full proof every poll.
+	if err := os.WriteFile(archivePath, initialContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	uncacheableDB := recordedArtifactStore(t, v2StoreAdminKey, root)
+	uncacheableHandler := newHandler(root, uncacheableDB)
+	uncacheableHandler.Artifact = client
+	fingerprintCalls.Store(0)
+	artifactIdentifySourceTree = func(ctx context.Context, r string) (upgradeservice.SourceTreeMetadata, error) {
+		meta, err := origIdentify(ctx, r)
+		if err != nil {
+			return meta, err
+		}
+		return upgradeservice.SourceTreeMetadata{
+			TotalBytes:  meta.TotalBytes,
+			Uncacheable: true,
+		}, nil
+	}
+	for poll := range 2 {
+		rec := doUpgradeArtifactRequest(t, uncacheableHandler, http.MethodGet, testPrefix+ArtifactStatusSuffix, bearer(testAdminKey), "", nil, 0)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("uncacheable poll %d = %d: %s", poll, rec.Code, rec.Body.String())
+		}
+	}
+	if got := fingerprintCalls.Load(); got != 2 {
+		t.Fatalf("uncacheable fingerprintCalls across 2 polls = %d, want 2", got)
+	}
+}
+
 func TestArtifactSourceProofPollCost(t *testing.T) {
 	for _, layout := range []string{"database-16MiB", "wal-16MiB", "archive-64MiB"} {
 		t.Run(layout, func(t *testing.T) {

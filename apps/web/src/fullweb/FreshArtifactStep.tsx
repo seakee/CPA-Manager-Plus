@@ -5,6 +5,8 @@ import {
   ARTIFACT_MAX_UPLOAD_BYTES,
   acquireArtifact,
   formatArtifactError,
+  formatArtifactPinnedMismatch,
+  isArtifactPinnedMismatch,
   isArtifactReady,
   mapArtifactErrorCode,
   parseArtifactStatus,
@@ -110,6 +112,9 @@ export function FreshArtifactStep({
     if (validatedInitial === undefined) {
       return mapArtifactErrorCode(undefined);
     }
+    if (validatedInitial && isArtifactPinnedMismatch(validatedInitial)) {
+      return formatArtifactPinnedMismatch(validatedInitial.pinned.version);
+    }
     if (validatedInitial?.operation?.phase === 'failed') {
       return mapArtifactErrorCode(
         validatedInitial.operation.code,
@@ -164,6 +169,10 @@ export function FreshArtifactStep({
       if (next.cdnPresets.length > 0 && selectedPresetId === 'custom' && !customPrefix) {
         setSelectedPresetId(next.cdnPresets[0].id);
       }
+      if (isArtifactPinnedMismatch(next)) {
+        setError(formatArtifactPinnedMismatch(next.pinned.version));
+        return;
+      }
       if (isArtifactReady(next)) {
         notifyReady();
         return;
@@ -186,6 +195,9 @@ export function FreshArtifactStep({
   useEffect(() => {
     if (validatedInitial === undefined) return;
     if (validatedInitial) {
+      if (isArtifactPinnedMismatch(validatedInitial)) {
+        return;
+      }
       if (isArtifactReady(validatedInitial)) {
         notifyReady();
         return;
@@ -219,6 +231,11 @@ export function FreshArtifactStep({
         failures = 0;
         setStatus(next);
         setOperation(next.operation);
+        if (isArtifactPinnedMismatch(next)) {
+          setPolling(false);
+          setError(formatArtifactPinnedMismatch(next.pinned.version));
+          return;
+        }
         if (isArtifactReady(next)) {
           setPolling(false);
           notifyReady();
@@ -257,6 +274,7 @@ export function FreshArtifactStep({
   }, [polling, pollRun, transport, credential, notifyReady, status?.pinned.version]);
 
   const version = status?.pinned.version || '<version>';
+  const pinnedMismatch = isArtifactPinnedMismatch(status);
   const busy = submitting || uploading || polling || statusPhase === 'loading';
 
   const effectiveCDNPrefix = (() => {
@@ -269,7 +287,7 @@ export function FreshArtifactStep({
   })();
 
   const handleAcquire = async () => {
-    if (busy || !status) return;
+    if (busy || !status || pinnedMismatch) return;
     setValidationMessage('');
     setError(null);
     if (source === 'cdn' && !validCDNPrefix(effectiveCDNPrefix)) {
@@ -316,7 +334,7 @@ export function FreshArtifactStep({
     if (event.target) {
       event.target.value = '';
     }
-    if (!file || busy || !status) return;
+    if (!file || busy || !status || pinnedMismatch) return;
     setValidationMessage('');
     setError(null);
     if (file.size > ARTIFACT_MAX_UPLOAD_BYTES) {
@@ -407,30 +425,31 @@ export function FreshArtifactStep({
             </div>
           </dl>
 
-          <div
-            className="artifact-probe-bar"
-            role="status"
-            data-testid="artifact-probe-status"
-            data-probe={probeState}
-          >
-            <span>
-              {probeState === 'checking' || probeState === 'idle'
-                ? artifactText('probeChecking')
-                : probeState === 'reachable'
-                  ? artifactText('probeReachable')
-                  : artifactText('probeUnreachable')}
-            </span>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              data-testid="artifact-probe-retry"
-              disabled={probeState === 'checking' || busy}
-              onClick={() => void runProbe()}
+          {!pinnedMismatch && (
+            <div
+              className="artifact-probe-bar"
+              role="status"
+              data-testid="artifact-probe-status"
+              data-probe={probeState}
             >
-              {artifactText('probeRetry')}
-            </button>
-          </div>
-
+              <span>
+                {probeState === 'checking' || probeState === 'idle'
+                  ? artifactText('probeChecking')
+                  : probeState === 'reachable'
+                    ? artifactText('probeReachable')
+                    : artifactText('probeUnreachable')}
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                data-testid="artifact-probe-retry"
+                disabled={probeState === 'checking' || busy}
+                onClick={() => void runProbe()}
+              >
+                {artifactText('probeRetry')}
+              </button>
+            </div>
+          )}
           {error && (
             <div
               className="alert alert-warn"
@@ -486,155 +505,180 @@ export function FreshArtifactStep({
             </div>
           )}
 
-          <div className="artifact-options" role="group" aria-label={artifactText('sourceHeading')}>
-            <button
-              type="button"
-              data-testid="artifact-source-github"
-              className={`journey-choice ${source === 'github' ? 'selected' : ''}`}
-              aria-pressed={source === 'github'}
-              disabled={busy}
-              onClick={() => {
-                setSource('github');
-                setValidationMessage('');
-              }}
-            >
-              <span className="journey-radio" aria-hidden="true" />
-              <span>
-                <h2>{artifactText('sourceGithubTitle')}</h2>
-                <p>{artifactText('sourceGithubDesc')}</p>
-              </span>
-            </button>
-
-            <button
-              type="button"
-              data-testid="artifact-source-cdn"
-              className={`journey-choice ${source === 'cdn' ? 'selected' : ''}`}
-              aria-pressed={source === 'cdn'}
-              disabled={busy}
-              onClick={() => {
-                setSource('cdn');
-                setValidationMessage('');
-              }}
-            >
-              <span className="journey-radio" aria-hidden="true" />
-              <span>
-                <h2>{artifactText('sourceCdnTitle')}</h2>
-                <p>{artifactText('sourceCdnDesc')}</p>
-              </span>
-            </button>
-
-            {source === 'cdn' && (
-              <div className="artifact-cdn-controls" data-testid="artifact-cdn-panel">
-                {status.cdnPresets.length > 0 && (
-                  <div className="journey-field">
-                    <label className="form-label" htmlFor="artifact-cdn-preset">
-                      {artifactText('cdnPresetLabel')}
-                    </label>
-                    <select
-                      id="artifact-cdn-preset"
-                      data-testid="artifact-cdn-preset-select"
-                      className="form-input"
-                      value={selectedPresetId}
-                      disabled={busy}
-                      onChange={(e) => setSelectedPresetId(e.target.value)}
-                    >
-                      {status.cdnPresets.map((preset) => (
-                        <option key={preset.id} value={preset.id}>
-                          {preset.prefix}
-                        </option>
-                      ))}
-                      <option value="custom">{artifactText('cdnCustomOption')}</option>
-                    </select>
-                  </div>
-                )}
-
-                {(status.cdnPresets.length === 0 || selectedPresetId === 'custom') && (
-                  <div className="journey-field">
-                    <label className="form-label" htmlFor="artifact-cdn-custom-prefix">
-                      {artifactText('cdnCustomLabel')}
-                    </label>
-                    <input
-                      id="artifact-cdn-custom-prefix"
-                      data-testid="artifact-cdn-prefix-input"
-                      className="form-input"
-                      type="url"
-                      placeholder={artifactText('cdnCustomPlaceholder')}
-                      value={customPrefix}
-                      disabled={busy}
-                      autoComplete="off"
-                      spellCheck={false}
-                      onChange={(e) => {
-                        setCustomPrefix(e.target.value);
-                        setValidationMessage('');
-                      }}
-                    />
-                  </div>
-                )}
-
-                <p className="artifact-third-party-note" data-testid="artifact-cdn-third-party-note">
-                  {artifactText('cdnThirdPartyNote')}
-                </p>
-              </div>
-            )}
-
-            <button
-              type="button"
-              data-testid="artifact-source-upload"
-              className={`journey-choice ${source === 'upload' ? 'selected' : ''}`}
-              aria-pressed={source === 'upload'}
-              disabled={busy}
-              onClick={() => {
-                setSource('upload');
-                setValidationMessage('');
-              }}
-            >
-              <span className="journey-radio" aria-hidden="true" />
-              <span>
-                <h2>{artifactText('sourceUploadTitle')}</h2>
-                <p>{artifactText('sourceUploadDesc')}</p>
-              </span>
-            </button>
-
-            {source === 'upload' && (
-              <div className="artifact-upload-controls" data-testid="artifact-upload-panel">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".tar.gz,application/gzip,application/x-gzip"
-                  className="artifact-file-input"
-                  data-testid="artifact-upload-input"
+          {pinnedMismatch ? (
+            <div className="artifact-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                data-testid="artifact-status-retry"
+                disabled={busy}
+                onClick={() => void loadStatus()}
+              >
+                {artifactText('retryStatus')}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div
+                className="artifact-options"
+                role="group"
+                aria-label={artifactText('sourceHeading')}
+              >
+                <button
+                  type="button"
+                  data-testid="artifact-source-github"
+                  className={`journey-choice ${source === 'github' ? 'selected' : ''}`}
+                  aria-pressed={source === 'github'}
                   disabled={busy}
-                  onChange={(e) => void handleFileChange(e)}
-                />
+                  onClick={() => {
+                    setSource('github');
+                    setValidationMessage('');
+                  }}
+                >
+                  <span className="journey-radio" aria-hidden="true" />
+                  <span>
+                    <h2>{artifactText('sourceGithubTitle')}</h2>
+                    <p>{artifactText('sourceGithubDesc')}</p>
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="artifact-source-cdn"
+                  className={`journey-choice ${source === 'cdn' ? 'selected' : ''}`}
+                  aria-pressed={source === 'cdn'}
+                  disabled={busy}
+                  onClick={() => {
+                    setSource('cdn');
+                    setValidationMessage('');
+                  }}
+                >
+                  <span className="journey-radio" aria-hidden="true" />
+                  <span>
+                    <h2>{artifactText('sourceCdnTitle')}</h2>
+                    <p>{artifactText('sourceCdnDesc')}</p>
+                  </span>
+                </button>
+
+                {source === 'cdn' && (
+                  <div className="artifact-cdn-controls" data-testid="artifact-cdn-panel">
+                    {status.cdnPresets.length > 0 && (
+                      <div className="journey-field">
+                        <label className="form-label" htmlFor="artifact-cdn-preset">
+                          {artifactText('cdnPresetLabel')}
+                        </label>
+                        <select
+                          id="artifact-cdn-preset"
+                          data-testid="artifact-cdn-preset-select"
+                          className="form-input"
+                          value={selectedPresetId}
+                          disabled={busy}
+                          onChange={(e) => setSelectedPresetId(e.target.value)}
+                        >
+                          {status.cdnPresets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>
+                              {preset.prefix}
+                            </option>
+                          ))}
+                          <option value="custom">{artifactText('cdnCustomOption')}</option>
+                        </select>
+                      </div>
+                    )}
+
+                    {(status.cdnPresets.length === 0 || selectedPresetId === 'custom') && (
+                      <div className="journey-field">
+                        <label className="form-label" htmlFor="artifact-cdn-custom-prefix">
+                          {artifactText('cdnCustomLabel')}
+                        </label>
+                        <input
+                          id="artifact-cdn-custom-prefix"
+                          data-testid="artifact-cdn-prefix-input"
+                          className="form-input"
+                          type="url"
+                          placeholder={artifactText('cdnCustomPlaceholder')}
+                          value={customPrefix}
+                          disabled={busy}
+                          autoComplete="off"
+                          spellCheck={false}
+                          onChange={(e) => {
+                            setCustomPrefix(e.target.value);
+                            setValidationMessage('');
+                          }}
+                        />
+                      </div>
+                    )}
+
+                    <p
+                      className="artifact-third-party-note"
+                      data-testid="artifact-cdn-third-party-note"
+                    >
+                      {artifactText('cdnThirdPartyNote')}
+                    </p>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  data-testid="artifact-source-upload"
+                  className={`journey-choice ${source === 'upload' ? 'selected' : ''}`}
+                  aria-pressed={source === 'upload'}
+                  disabled={busy}
+                  onClick={() => {
+                    setSource('upload');
+                    setValidationMessage('');
+                  }}
+                >
+                  <span className="journey-radio" aria-hidden="true" />
+                  <span>
+                    <h2>{artifactText('sourceUploadTitle')}</h2>
+                    <p>{artifactText('sourceUploadDesc')}</p>
+                  </span>
+                </button>
+
+                {source === 'upload' && (
+                  <div className="artifact-upload-controls" data-testid="artifact-upload-panel">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".tar.gz,application/gzip,application/x-gzip"
+                      className="artifact-file-input"
+                      data-testid="artifact-upload-input"
+                      disabled={busy}
+                      onChange={(e) => void handleFileChange(e)}
+                    />
+                    <div className="artifact-actions">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        data-testid="artifact-upload-btn"
+                        disabled={busy}
+                        onClick={() => fileInputRef.current?.click()}
+                      >
+                        {uploading
+                          ? artifactText('uploadBusy')
+                          : artifactText('uploadSelectButton')}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {(source === 'github' || source === 'cdn') && (
                 <div className="artifact-actions">
                   <button
                     type="button"
                     className="btn btn-primary"
-                    data-testid="artifact-upload-btn"
+                    data-testid="artifact-acquire-btn"
                     disabled={busy}
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={() => void handleAcquire()}
                   >
-                    {uploading ? artifactText('uploadBusy') : artifactText('uploadSelectButton')}
+                    {submitting || polling
+                      ? artifactText('acquireBusy')
+                      : artifactText('acquireStartButton')}
                   </button>
                 </div>
-              </div>
-            )}
-          </div>
-
-          {(source === 'github' || source === 'cdn') && (
-            <div className="artifact-actions">
-              <button
-                type="button"
-                className="btn btn-primary"
-                data-testid="artifact-acquire-btn"
-                disabled={busy}
-                onClick={() => void handleAcquire()}
-              >
-                {submitting || polling
-                  ? artifactText('acquireBusy')
-                  : artifactText('acquireStartButton')}
-              </button>
-            </div>
+              )}
+            </>
           )}
         </>
       )}

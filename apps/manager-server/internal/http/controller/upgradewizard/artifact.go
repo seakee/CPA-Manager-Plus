@@ -291,15 +291,19 @@ func (c *artifactProofCache) verify(
 	}
 	metaCtx, metaCancel := context.WithTimeout(ctx, baseTimeout)
 	meta, err := artifactIdentifySourceTree(metaCtx, mountedRoot)
+	metaTimedOut := metaCtx.Err() != nil
 	metaCancel()
 	if err != nil {
-		if metaCtx.Err() != nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		if metaTimedOut || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return errArtifactProofTimeout
 		}
 		return err
 	}
+	budget := artifactProofBudget(baseTimeout, meta.TotalBytes)
+	if meta.Uncacheable || meta.Key == "" {
+		return verifySourceFingerprintUncached(ctx, budget, mountedRoot, expectedBefore, expectedAfter)
+	}
 	cacheKey := canonicalRoot + "@" + expectedBefore + ":" + expectedAfter + "@" + meta.Key
-
 	for {
 		if err := ctx.Err(); err != nil {
 			return errArtifactProofTimeout
@@ -318,7 +322,6 @@ func (c *artifactProofCache) verify(
 			flight := &artifactProofFlight{done: make(chan struct{})}
 			c.flights[cacheKey] = flight
 			c.mu.Unlock()
-			budget := artifactProofBudget(baseTimeout, meta.TotalBytes)
 			go c.runFlight(cacheKey, flight, budget, mountedRoot, expectedBefore, expectedAfter)
 			return flight.wait(ctx)
 		default:
@@ -344,10 +347,32 @@ func (c *artifactProofCache) verify(
 		flight := &artifactProofFlight{done: make(chan struct{})}
 		c.flights[cacheKey] = flight
 		c.mu.Unlock()
-		budget := artifactProofBudget(baseTimeout, meta.TotalBytes)
 		go c.runFlight(cacheKey, flight, budget, mountedRoot, expectedBefore, expectedAfter)
 		return flight.wait(ctx)
 	}
+}
+
+func verifySourceFingerprintUncached(
+	ctx context.Context,
+	budget time.Duration,
+	mountedRoot string,
+	expectedBefore string,
+	expectedAfter string,
+) error {
+	flightCtx, cancel := context.WithTimeout(ctx, budget)
+	digest, err := artifactSourceFingerprint(flightCtx, mountedRoot)
+	timedOut := flightCtx.Err() != nil
+	cancel()
+	if err != nil {
+		if timedOut || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return errArtifactProofTimeout
+		}
+		return err
+	}
+	if digest != "" && ((expectedAfter != "" && digest == expectedAfter) || digest == expectedBefore) {
+		return nil
+	}
+	return errArtifactProofMismatch
 }
 
 func (c *artifactProofCache) runFlight(

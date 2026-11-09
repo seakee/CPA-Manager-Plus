@@ -104,9 +104,6 @@ export function createUpgradeArtifactTransport(
       if (lifecycleSignal?.aborted) {
         throw { kind: 'aborted', aborted: true, status: 0 };
       }
-      if (response.status === 401 || response.status === 403) {
-        throw { kind: 'authentication', status: response.status, code: 'unauthorized' };
-      }
       if (!response.ok) {
         let code: string | undefined;
         try {
@@ -125,6 +122,13 @@ export function createUpgradeArtifactTransport(
           }
         } catch {
           /* A failure without a JSON envelope keeps its status. */
+        }
+        if (response.status === 401 || response.status === 403) {
+          throw {
+            kind: 'authentication',
+            status: response.status,
+            code: code ?? 'unauthorized',
+          };
         }
         throw {
           kind: 'http',

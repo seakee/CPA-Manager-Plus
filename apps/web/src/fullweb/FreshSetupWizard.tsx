@@ -24,6 +24,8 @@ import { FullWebIcon } from './FullWebIcon';
 import { FreshArtifactStep } from './FreshArtifactStep';
 import {
   formatArtifactError,
+  formatArtifactPinnedMismatch,
+  isArtifactPinnedMismatch,
   isArtifactReady,
   isArtifactRecoveryRequired,
   mapArtifactErrorCode,
@@ -273,6 +275,8 @@ export function FreshSetupWizard({
             setError(
               mapArtifactErrorCode('recovery_required', artifactStatus.pinned.version).text
             );
+          } else if (isArtifactPinnedMismatch(artifactStatus)) {
+            setError(formatArtifactPinnedMismatch(artifactStatus.pinned.version).text);
           }
           return;
         }
