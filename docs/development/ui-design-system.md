@@ -105,7 +105,7 @@ The following 15 CSS custom property names (67 reference sites across 13 feature
 
 | Rule | ID | Behaviour |
 | --- | --- | --- |
-| R1 | `undefined-var` | Strict per-file, per-variable ratchet. Every `var(--name)` reference must match a custom property definition (`--name:` in CSS/SCSS, top-level keys of the object literal written directly as a JSX `style={{ ... }}` attribute value including multi-line `style={{ ... } as X}`, or the first argument of `.style.setProperty('--name', ...)` / `.setProperty('--name', ...)` in TS/TSX). Any new undefined variable or count increase fails. |
+| R1 | `undefined-var` | Strict per-file, per-variable ratchet. Every `var(--name)` reference must match a custom property definition: `--name:` in CSS/SCSS, or an entry in the runtime property registry (`bin/ci/design-token-runtime-properties.json`) for names that TS/TSX sets at runtime. TS/TSX source is not parsed for definitions. Any new undefined variable or count increase fails. |
 | R2 | `radius` | Per-file ratchet on `border-radius`, `border-*-*-radius`, and `--*radius*` custom-property declarations whose shorthand parts are outside the allowed radius scale or expressions (`var()`, `calc()`, `min()`, `max()`, `clamp()`, `$`, `#{`). |
 | R3 | `font-weight` | Per-file ratchet on `font-weight` declarations and on numeric weight tokens (`1`–`1000`) or `bolder`/`lighter` that precede the font-size in `font` shorthand declarations, outside `400`, `500`, `600`, `700`, `normal`, `bold`, `inherit`, `initial`, `unset`, `revert`, `revert-layer`, `var(...)`, or `$...`. Words after the font-size or after the first comma are family names and are not checked. |
 | R4 | `scss-radius-var` | Per-file ratchet on `$radius-*` uses, plus a hard failure (even with `--allow-increase`) if `variables.scss` defines a new `$radius-*` name or changes the raw value of any recorded entry in `scssRadiusDefinitions`. Removing a definition is allowed and tightens the baseline. |
@@ -130,11 +130,30 @@ npm run check:design-tokens -- --init
 - `--update-baseline` rewrites `bin/ci/design-token-baseline.json` to current counts and exits `1` if any count would increase or if any R4 hard failure occurs.
 - Intentional exceptions that increase a count require explicit reviewer sign-off in the pull request and `--update-baseline --allow-increase` (new or mutated `$radius-*` definitions in `variables.scss` still fail).
 
+### Runtime Custom Properties
+
+Custom properties that TS/TSX sets at runtime (inline `style={{ '--name': value }}` or `element.style.setProperty('--name', value)`) are not discovered from source. List each one in `bin/ci/design-token-runtime-properties.json`:
+
+```json
+{
+  "version": 1,
+  "properties": {
+    "--content-center-x": "components/layout/MainLayout.tsx: content centre via setProperty"
+  }
+}
+```
+
+- Each key must be a valid `--name`, and each value a non-empty note naming where the property is set.
+- R1 treats registered names as defined. A stylesheet that reads a runtime property which is not registered fails R1, and the remediation message points to the registry.
+- A registered name that no longer appears as a quoted literal (`'--name'`, `"--name"` or `` `--name` ``) in any scanned TS/TSX file is a hard failure, so stale entries cannot keep masking references. Remove the entry when the code stops setting the property.
+- The registry is read from the same directory as the baseline (override with `--runtime-properties <path>`). A missing default registry means no runtime definitions; an explicitly passed path that cannot be read, or an invalid registry, fails the run.
+
 ### Known Limitations
 
 - **Intentional scope boundaries**:
   - **No Sass evaluation**: SCSS maps, `@each`/`@for`-generated declarations, mixins/functions that synthesize property names, and interpolated property names (such as `border-#{$side}-radius: 3px`) are not evaluated.
-  - **Global custom-property existence (R1)**: R1 checks that a `--name` is defined somewhere in the scanned tree rather than modelling per-theme or per-selector CSS cascade scope (for example, a variable declared only under `[data-theme='dark']` counts as defined globally), and it does not verify that a `.setProperty()` receiver is `CSSStyleDeclaration` or follow non-inline style objects bound to `style={helperObj}`.
+  - **Global custom-property existence (R1)**: R1 checks that a `--name` is defined somewhere in the scanned tree (or registered as a runtime property) rather than modelling per-theme or per-selector CSS cascade scope (for example, a variable declared only under `[data-theme='dark']` counts as defined globally).
+  - **Runtime property registry (R1)**: the stale check only confirms that each registered name appears as a quoted literal in some scanned TS/TSX file; it does not verify that the literal is actually passed to an inline style or `.setProperty()`.
   - **Stylesheet-only rules (R2, R3, R5, R6)**: R2, R3, R5, and R6 inspect `.css`/`.scss` stylesheets only and do not inspect `.ts`/`.tsx` files.
   - **Colour function and keyword scope (R5)**: `color-mix()` itself is not counted as a colour literal (only colour literals inside its arguments count), and CSS named colours (`red`, `white`, etc.) are not counted.
   - **CSS identifier escapes**: Plain CSS backslash escapes in identifiers (for example `--\66 oo`) are not decoded.
@@ -144,9 +163,8 @@ npm run check:design-tokens -- --init
   - An ID selector that looks like a 3-, 4-, 6-, or 8-digit hex colour and appears in a selector-bearing at-rule prelude (`@extend #abc`, `@at-root #abc`, `@scope (#abc)`, `@supports selector(#abc)`) is counted as a colour literal.
   - R3 `font` shorthand inspection treats the first dimension, percentage, unitless zero, size keyword, or `size/line-height` token as the font-size and checks only the tokens before it; a font-size supplied through `var()`/`calc()`/`$`/`#{}` is not recognised, so a later family named `bolder`/`lighter` would still be counted. It does not parse the full CSS `font` shorthand grammar.
   - Nested quotes of the same kind inside an interpolated string (`"a #{"b"} c"`) end the outer string early; use the other quote style inside the interpolation.
-  - In TS/TSX, an apostrophe or double quote in JSX text is read as the start of a string up to the next matching quote on the same line, so a real `style={{ ... }}` later on that line may not count as a definition (reported as an undefined variable). Put the element on its own line or escape the character (`&apos;`).
 - **Resolved in baseline schema v2**:
-  - TS/TSX custom-property definitions are restricted to top-level keys of the object literal written directly as a JSX `style={{ ... }}` attribute value (the attribute must sit inside an open `<Tag` or generic `<Tag<T>` start tag, so class fields, plain assignments, nested objects, and call arguments do not count) and `.setProperty('--name', ...)` calls; JSX-looking text inside quoted strings or template-literal text does not count, while code inside `${...}` does (R1-01, R2-01, R3-01, R4-01).
+  - TS/TSX no longer defines custom properties by inference. Names set at runtime through inline styles or `.setProperty()` count as defined only when listed in `bin/ci/design-token-runtime-properties.json`, which removes the lexical TSX scanning behind R1-01, R2-01, R3-01, R4-01 and R5-01.
   - Quoted strings and `url(...)` contents in `.css`/`.scss` are masked across R1, R4, R5, and R6, while `#{...}` interpolation bodies, including those inside strings and `url(...)`, remain inspected; string literals inside an interpolation body are masked again (R1-02, R2-02, R3-02).
   - Numeric weight tokens (`1`–`1000`) and `bolder`/`lighter` before the font-size in `font` shorthand declarations are checked by R3; family names after the size, including after a unitless `0` size, are not (R1-03, R2-03, R3-03).
   - Legacy `$radius-*` definitions in `variables.scss` freeze both variable name and raw value in `scssRadiusDefinitions` (R1-04).

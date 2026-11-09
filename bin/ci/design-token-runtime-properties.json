@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "properties": {
+    "--accent-color": "features/dashboard/components/UsageMetricsCard.tsx: metric card inline style",
+    "--cell-intensity": "features/dashboard/components/TrafficOverviewCard.tsx: health cell inline style",
+    "--config-action-bar-height": "features/config/ConfigPage.tsx: floating action bar height via setProperty",
+    "--content-center-x": "components/layout/MainLayout.tsx: content centre via setProperty",
+    "--metric-color": "features/usage-analytics/UsageAnalyticsPage.tsx: metric chip inline style",
+    "--rank-color": "features/dashboard/components/TrafficOverviewCard.tsx, features/usage-analytics/UsageAnalyticsPage.tsx: rank bar inline style",
+    "--rank-share": "features/dashboard/components/TrafficOverviewCard.tsx, features/usage-analytics/UsageAnalyticsPage.tsx: rank bar inline style",
+    "--secondary-shell-floating-action-height": "components/common/SecondaryScreenShell.tsx: floating action height via setProperty",
+    "--share": "features/dashboard/components/UsageMetricsCard.tsx: rank bar inline style",
+    "--usage-summary-columns": "features/usage-analytics/components/UsageSummaryCards.tsx: summary grid inline style"
+  }
+}

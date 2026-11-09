@@ -45,45 +45,24 @@ afterEach(() => {
 });
 
 describe('design token checker', () => {
-  it('R1 flags undefined variables, including fallback and multiline forms, and accepts definitions only from SCSS, JSX inline styles, and .setProperty()', () => {
+  it('R1 flags undefined variables, including fallback and multiline forms, and accepts definitions only from CSS/SCSS declarations and the runtime property registry', () => {
     const root = createFixtureTree({
       'styles/themes.scss': `:root {\n  --defined-in-scss: #2563eb;\n}\n`,
       'components/Widget.tsx': [
-        `export function Widget(styles: Record<string, string>, el: HTMLElement) {`,
-        `  document.documentElement.style.setProperty('--defined-via-set-prop', '12px');`,
-        `  el.style['--not-defined-by-assignment'] = '8px';`,
-        `  const translations = { '--not-defined-by-object-key': 'display text' };`,
-        `  const style = { '--not-defined-by-local-var': '1' };`,
+        `export function Widget(styles: Record<string, string>) {`,
+        `  document.documentElement.style.setProperty('--registered-runtime', '12px');`,
+        `  document.documentElement.style.setProperty('--unregistered-set-prop', '4px');`,
         `  const readOnly = styles['--not-defined-by-read'];`,
         `  const cssRef = 'var(--not-defined-by-read)';`,
-        `  const dynamicKey = '--defined-via-template';`,
-        `  return (`,
-        `    <div`,
-        `      data-x={readOnly}`,
-        `      data-y={cssRef}`,
-        `      data-z={translations['--not-defined-by-object-key']}`,
-        `      data-w={style['--not-defined-by-local-var']}`,
-        `      style={`,
-        `        {`,
-        `          '--defined-in-tsx': '1',`,
-        `          ['--defined-in-brackets']: '2',`,
-        '          [`--defined-in-backticks`]: `var(--${dynamicKey})`,',
-        `        } as Record<string, string>`,
-        `      }`,
-        `    />`,
-        `  );`,
+        `  return <div data-x={readOnly} data-y={cssRef} style={{ '--unregistered-inline': '1' }} />;`,
         `}`,
       ].join('\n'),
       'components/Widget.module.scss': [
         `.widget {`,
         `  color: var(--defined-in-scss);`,
-        `  padding: var(--defined-via-set-prop);`,
-        `  opacity: var(--defined-in-tsx);`,
-        `  z-index: var(--defined-in-brackets);`,
-        `  line-height: var(--defined-in-backticks);`,
-        `  margin: var(--not-defined-by-assignment);`,
-        `  top: var(--not-defined-by-object-key);`,
-        `  left: var(--not-defined-by-local-var);`,
+        `  padding: var(--registered-runtime);`,
+        `  opacity: var(--unregistered-inline);`,
+        `  margin: var(--unregistered-set-prop);`,
         `  background: var(--missing-direct);`,
         `  border-color: var(--missing-with-fallback, var(--defined-in-scss));`,
         `  outline-color: var(`,
@@ -97,21 +76,21 @@ describe('design token checker', () => {
       'types/global.d.ts': `export type Ignored = 'var(--ignored-in-dts)';\n`,
     });
 
-    const findings = collectFindings(root);
+    const findings = collectFindings(root, { runtimeProperties: ['--registered-runtime'] });
 
     expect(findings.rules['undefined-var']).toEqual({
       'components/Widget.module.scss': {
         '--missing-direct': 1,
         '--missing-multiline': 1,
         '--missing-with-fallback': 1,
-        '--not-defined-by-assignment': 1,
-        '--not-defined-by-local-var': 1,
-        '--not-defined-by-object-key': 1,
+        '--unregistered-inline': 1,
+        '--unregistered-set-prop': 1,
       },
       'components/Widget.tsx': {
         '--not-defined-by-read': 1,
       },
     });
+    expect(findings.staleRuntimeProperties).toEqual([]);
 
     const comparison = compareToBaseline(findings, {
       version: 2,
@@ -124,64 +103,78 @@ describe('design token checker', () => {
         .filter((item) => item.rule === 'undefined-var')
         .map((item) => [item.file, item.line, item.name])
     ).toEqual([
-      ['components/Widget.module.scss', 10, '--missing-direct'],
-      ['components/Widget.module.scss', 12, '--missing-multiline'],
-      ['components/Widget.module.scss', 11, '--missing-with-fallback'],
-      ['components/Widget.module.scss', 7, '--not-defined-by-assignment'],
-      ['components/Widget.module.scss', 9, '--not-defined-by-local-var'],
-      ['components/Widget.module.scss', 8, '--not-defined-by-object-key'],
-      ['components/Widget.tsx', 7, '--not-defined-by-read'],
+      ['components/Widget.module.scss', 6, '--missing-direct'],
+      ['components/Widget.module.scss', 8, '--missing-multiline'],
+      ['components/Widget.module.scss', 7, '--missing-with-fallback'],
+      ['components/Widget.module.scss', 4, '--unregistered-inline'],
+      ['components/Widget.module.scss', 5, '--unregistered-set-prop'],
+      ['components/Widget.tsx', 5, '--not-defined-by-read'],
     ]);
   });
 
-  it('R1 counts only top-level keys of a JSX style object as definitions, including generic JSX tags, not class fields, nested call arguments, or JSX-looking text in strings', () => {
+  it('R1 hard-fails registered runtime properties that no TS/TSX file sets as a quoted literal', () => {
     const root = createFixtureTree({
-      'components/Hint.tsx': [
-        `export class ThemeHint {`,
-        `  style = { '--from-class-field': 'not css' };`,
-        `}`,
-        `const pick = (config: Record<string, string>) => config.color;`,
-        `export const Demo = (base: object, v: string) => (`,
-        `  <div`,
-        `    className="demo"`,
-        `    onClick={() => pick({})}`,
-        `    style={{ ...base, color: pick({ '--from-nested-arg': 'red' }), ['--from-style']: v } as object}`,
-        `  />`,
-        `);`,
-        `export const Generic = () => (`,
-        `  <Widget<Map<string, number>> item="ok" style={{ '--from-generic-tag': 'red' }} />`,
-        `);`,
-        `const closed = <b>text</b>; style = { '--after-closed-tag': 1 };`,
-        `export const quoted = "<Widget<string> style={{ '--in-quoted-string': 'x' }} />";`,
-        'export const templated = `<div style={{ \'--in-template-text\': 1 }} />`;',
-        `export const sample = "el.style.setProperty('--in-set-property-string', '1')";`,
-        'export const mixed = `${<i style={{ \'--in-template-code\': 1 }} />}`;',
-      ].join('\n'),
-      'components/Hint.module.scss': [
-        `.hint {`,
-        `  color: var(--from-class-field);`,
-        `  background: var(--from-nested-arg);`,
-        `  border-color: var(--from-style);`,
-        `  outline-color: var(--from-generic-tag);`,
-        `  fill: var(--after-closed-tag);`,
-        `  stroke: var(--in-quoted-string);`,
-        `  caret-color: var(--in-template-text);`,
-        `  column-rule-color: var(--in-set-property-string);`,
-        `  text-decoration-color: var(--in-template-code);`,
-        `}`,
-      ].join('\n'),
+      'components/Live.tsx': `export const Live = () => <div style={{ '--live': 1 }} />;\n`,
+      'components/Notes.tsx': `// '--commented-out' is not a use\nexport const note = 'plain';\n`,
+      'components/Live.module.scss': `.live { width: var(--live); height: var(--gone); }\n`,
     });
 
-    expect(collectFindings(root).rules['undefined-var']).toEqual({
-      'components/Hint.module.scss': {
-        '--after-closed-tag': 1,
-        '--from-class-field': 1,
-        '--from-nested-arg': 1,
-        '--in-quoted-string': 1,
-        '--in-set-property-string': 1,
-        '--in-template-text': 1,
-      },
+    const findings = collectFindings(root, {
+      runtimeProperties: ['--live', '--gone', '--commented-out'],
     });
+    expect(findings.rules['undefined-var']).toEqual({});
+    expect(findings.staleRuntimeProperties).toEqual(['--commented-out', '--gone']);
+
+    const comparison = compareToBaseline(findings, {
+      version: 2,
+      rules: emptyRules,
+      scssRadiusDefinitions: {},
+    });
+    expect(comparison.passed).toBe(false);
+    expect(comparison.hardFailures.map((item) => [item.rule, item.name])).toEqual([
+      ['runtime-property', '--commented-out'],
+      ['runtime-property', '--gone'],
+    ]);
+  });
+
+  it('CLI reads the runtime property registry next to the baseline and fails closed on an explicit missing or invalid registry', () => {
+    const root = createFixtureTree({
+      'components/Bar.tsx': `export const Bar = () => <div style={{ '--bar-width': '1px' }} />;\n`,
+      'components/Bar.module.scss': `.bar { width: var(--bar-width); }\n`,
+    });
+    const ciDir = path.join(root, 'ci');
+    mkdirSync(ciDir);
+    const baselineFile = path.join(ciDir, 'design-token-baseline.json');
+    writeFileSync(
+      baselineFile,
+      JSON.stringify({ version: 2, rules: emptyRules, scssRadiusDefinitions: {} }),
+      'utf8'
+    );
+    const run = (...extra) =>
+      spawnSync(process.execPath, [scriptPath, '--root', root, '--baseline', baselineFile, ...extra], {
+        encoding: 'utf8',
+      });
+
+    const withoutRegistry = run();
+    expect(withoutRegistry.status).toBe(1);
+    expect(withoutRegistry.stderr).toContain('undefined CSS variable "--bar-width"');
+
+    const registryFile = path.join(ciDir, 'design-token-runtime-properties.json');
+    writeFileSync(
+      registryFile,
+      JSON.stringify({ version: 1, properties: { '--bar-width': 'components/Bar.tsx: inline style' } }),
+      'utf8'
+    );
+    expect(run().status).toBe(0);
+
+    const explicitMissing = run('--runtime-properties', path.join(ciDir, 'absent.json'));
+    expect(explicitMissing.status).toBe(1);
+    expect(explicitMissing.stderr).toContain('Failed to read runtime property registry');
+
+    writeFileSync(registryFile, JSON.stringify({ version: 1, properties: { 'bar-width': '' } }), 'utf8');
+    const invalid = run();
+    expect(invalid.status).toBe(1);
+    expect(invalid.stderr).toContain('Invalid custom property name in runtime property registry');
   });
 
   it('R4 counts $radius-* evaluated through Sass interpolation inside strings and url(), but not plain string text or string literals inside the interpolation', () => {

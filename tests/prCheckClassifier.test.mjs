@@ -112,13 +112,14 @@ describe('PR check classifier', () => {
     expect(classifyChangedFiles(['bin/ci/panel-lite-cpa-v8-other.mjs'])).toEqual(noChecks);
   });
 
-  // The design-token checker and its committed ratchet baseline run in the
-  // Frontend job. A PR that changes only the checker or its baseline must still
-  // schedule that job.
-  it('runs the Frontend job when only the design token checker or baseline changes', () => {
+  // The design-token checker, its committed ratchet baseline and its runtime
+  // property registry run in the Frontend job. A PR that changes only one of
+  // them must still schedule that job.
+  it('runs the Frontend job when only the design token checker, baseline or registry changes', () => {
     for (const filePath of [
       'bin/ci/check-design-tokens.mjs',
       'bin/ci/design-token-baseline.json',
+      'bin/ci/design-token-runtime-properties.json',
       'tests/designTokenCheck.test.mjs',
     ]) {
       expect(classifyChangedFiles([filePath])).toEqual({ ...noChecks, frontend: true });

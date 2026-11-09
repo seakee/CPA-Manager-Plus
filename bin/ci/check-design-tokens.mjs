@@ -5,8 +5,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const defaultRootDir = path.join(repoRoot, 'apps/web/src');
 const defaultBaselinePath = path.join(repoRoot, 'bin/ci/design-token-baseline.json');
+// The runtime custom-property registry sits next to the baseline file.
+const RUNTIME_PROPERTIES_FILENAME = 'design-token-runtime-properties.json';
 
 const BASELINE_VERSION = 2;
+const RUNTIME_PROPERTIES_VERSION = 1;
 
 const RATCHET_FILE_RULES = [
   'radius',
@@ -146,167 +149,6 @@ const consumeBalanced = (src, start, openChar, closeChar) => {
     index += 1;
   }
   return index;
-};
-
-const consumeScriptBraces = (src, start) => {
-  let index = start + 1;
-  let depth = 1;
-  while (index < src.length && depth > 0) {
-    const ch = src[index];
-    if (ch === "'" || ch === '"' || ch === '`') {
-      index = consumeQuoted(src, index);
-      continue;
-    }
-    if (ch === '{') depth += 1;
-    else if (ch === '}') depth -= 1;
-    index += 1;
-  }
-  return index;
-};
-
-// [start, end) ranges of quoted strings and template-literal text in comment-
-// stripped TS/TSX; `${...}` bodies inside templates are code and excluded.
-// Single/double-quoted strings end at a newline, which bounds the damage from
-// an apostrophe in JSX text being read as a quote.
-const collectScriptStringRanges = (src) => {
-  const ranges = [];
-  const scanTemplate = (start) => {
-    let index = start + 1;
-    let segmentStart = start;
-    while (index < src.length) {
-      const ch = src[index];
-      if (ch === '\\') {
-        index += 2;
-        continue;
-      }
-      if (ch === '`') {
-        ranges.push([segmentStart, index + 1]);
-        return index + 1;
-      }
-      if (ch === '$' && src[index + 1] === '{') {
-        ranges.push([segmentStart, index]);
-        index = scanCode(index + 2, true);
-        segmentStart = index - 1;
-        continue;
-      }
-      index += 1;
-    }
-    ranges.push([segmentStart, index]);
-    return index;
-  };
-  const scanCode = (start, stopAtBrace) => {
-    let index = start;
-    let depth = 0;
-    while (index < src.length) {
-      const ch = src[index];
-      if (ch === "'" || ch === '"') {
-        const end = consumeQuoted(src, index);
-        ranges.push([index, end]);
-        index = end;
-        continue;
-      }
-      if (ch === '`') {
-        index = scanTemplate(index);
-        continue;
-      }
-      if (ch === '{') depth += 1;
-      else if (ch === '}') {
-        if (stopAtBrace && depth === 0) return index + 1;
-        depth -= 1;
-      }
-      index += 1;
-    }
-    return index;
-  };
-  scanCode(0, false);
-  return ranges;
-};
-
-// True when `index` sits among the attributes of an open JSX tag: walking back
-// over attribute strings and `{...}` values reaches `<Tag` (optionally with
-// TSX type arguments, `<Tag<T>`) before any other `>`, unmatched `{`/`(`, or
-// `;`. Class fields and plain assignments fail this.
-const isInsideJsxOpeningTag = (src, index) => {
-  let depth = 0;
-  let cursor = index - 1;
-  while (cursor >= 0) {
-    const ch = src[cursor];
-    if (ch === "'" || ch === '"' || ch === '`') {
-      cursor -= 1;
-      while (cursor >= 0 && !(src[cursor] === ch && src[cursor - 1] !== '\\')) cursor -= 1;
-      cursor -= 1;
-      continue;
-    }
-    if (ch === '}') depth += 1;
-    else if (ch === '{') {
-      if (depth === 0) return false;
-      depth -= 1;
-    } else if (depth === 0) {
-      if (ch === '<') return /[A-Za-z]/.test(src[cursor + 1] ?? '');
-      if (ch === '>') return findGenericTagStart(src, cursor) !== -1;
-      if (ch === '(' || ch === ')' || ch === ';') return false;
-    }
-    cursor -= 1;
-  }
-  return false;
-};
-
-// For a `>` that closes TSX type arguments directly after a JSX tag name
-// (`<Tag<T>`, `<Ns.Tag<Map<K, V>>`), return the index of the tag's `<`; else -1.
-const findGenericTagStart = (src, closeIndex) => {
-  let angle = 0;
-  let cursor = closeIndex;
-  while (cursor >= 0) {
-    const ch = src[cursor];
-    if (ch === '>') angle += 1;
-    else if (ch === '<') {
-      angle -= 1;
-      if (angle === 0) break;
-    } else if (!/[\w$.,\s[\]|&'"]/.test(ch)) {
-      return -1;
-    }
-    cursor -= 1;
-  }
-  if (cursor < 0) return -1;
-  const tagMatch = /<[A-Za-z][\w$.]*$/.exec(src.slice(Math.max(0, cursor - 200), cursor));
-  return tagMatch ? cursor - tagMatch[0].length : -1;
-};
-
-// Custom-property keys at the top level of the object literal written directly
-// as a `style={{ ... }}` value; nested objects and call arguments are ignored.
-const collectStyleObjectKeys = (src, exprOpenIndex) => {
-  let objStart = exprOpenIndex + 1;
-  while (/\s/.test(src[objStart] ?? '')) objStart += 1;
-  if (src[objStart] !== '{') return [];
-  const objEnd = consumeScriptBraces(src, objStart);
-  const body = src.slice(objStart + 1, objEnd - 1);
-  const entries = [];
-  let depth = 0;
-  let start = 0;
-  let index = 0;
-  while (index < body.length) {
-    const ch = body[index];
-    if (ch === "'" || ch === '"' || ch === '`') {
-      index = consumeQuoted(body, index);
-      continue;
-    }
-    if (ch === '{' || ch === '(' || ch === '[') depth += 1;
-    else if (ch === '}' || ch === ')' || ch === ']') depth -= 1;
-    else if (ch === ',' && depth === 0) {
-      entries.push(body.slice(start, index));
-      start = index + 1;
-    }
-    index += 1;
-  }
-  entries.push(body.slice(start));
-  const names = [];
-  for (const entry of entries) {
-    const keyMatch = entry
-      .trim()
-      .match(/^(?:\[\s*['"`](--[A-Za-z0-9_-]+)['"`]\s*\]|['"`](--[A-Za-z0-9_-]+)['"`])\s*:/);
-    if (keyMatch) names.push(keyMatch[1] ?? keyMatch[2]);
-  }
-  return names;
 };
 
 export const stripComments = (source, { isScript = false, allowLineComments = true } = {}) => {
@@ -755,7 +597,7 @@ const resolveScanContext = (rootDir = defaultRootDir) => {
   return { scanDir: resolvedRoot, baseDir: resolvedRoot };
 };
 
-export const collectFindings = (rootDir = defaultRootDir) => {
+export const collectFindings = (rootDir = defaultRootDir, { runtimeProperties = [] } = {}) => {
   const { scanDir, baseDir } = resolveScanContext(rootDir);
   const themesFilePath = path.join(scanDir, 'styles/themes.scss');
   const variablesFilePaths = new Set([
@@ -764,7 +606,10 @@ export const collectFindings = (rootDir = defaultRootDir) => {
   ]);
   const files = walkScannedFiles(scanDir);
 
-  const definedVars = new Set();
+  // TS/TSX never defines custom properties implicitly: names set at runtime
+  // (inline styles, setProperty) count only when listed in the registry.
+  const definedVars = new Set(runtimeProperties);
+  const unseenRuntimeProperties = new Set(runtimeProperties);
   const varReferences = [];
   const occurrencesByRule = {
     'undefined-var': {},
@@ -813,23 +658,10 @@ export const collectFindings = (rootDir = defaultRootDir) => {
 
     if (isScript) {
       collectVarRefs(cleaned, cleaned, relPath, lineStarts);
-      const stringRanges = collectScriptStringRanges(cleaned);
-      const inString = (offset) =>
-        stringRanges.some(([start, end]) => offset > start && offset < end);
-      for (const attrMatch of cleaned.matchAll(/(?<![A-Za-z0-9_.$])style\s*=\s*\{/g)) {
-        if (inString(attrMatch.index) || !isInsideJsxOpeningTag(cleaned, attrMatch.index)) {
-          continue;
+      for (const name of unseenRuntimeProperties) {
+        if (new RegExp(`['"\`]${name}['"\`]`).test(cleaned)) {
+          unseenRuntimeProperties.delete(name);
         }
-        const openBraceIndex = attrMatch.index + attrMatch[0].length - 1;
-        for (const name of collectStyleObjectKeys(cleaned, openBraceIndex)) {
-          definedVars.add(name);
-        }
-      }
-      for (const match of cleaned.matchAll(
-        /\.setProperty\s*\(\s*['"`](--[A-Za-z0-9_-]+)['"`]/g
-      )) {
-        if (inString(match.index)) continue;
-        definedVars.add(match[1]);
       }
       continue;
     }
@@ -978,6 +810,7 @@ export const collectFindings = (rootDir = defaultRootDir) => {
     scssRadiusDefinitions: sortObjectKeys(scssRadiusDefs),
     scssRadiusDefinitionSites,
     occurrencesByRule,
+    staleRuntimeProperties: [...unseenRuntimeProperties].sort((a, b) => a.localeCompare(b)),
   };
 };
 
@@ -1065,6 +898,31 @@ export const validateBaseline = (baseline) => {
   return errors;
 };
 
+// The registry lists custom properties that TS/TSX sets at runtime (inline
+// styles, setProperty). Shape: { version: 1, properties: { "--name": "note" } }.
+export const validateRuntimeProperties = (registry) => {
+  if (!isPlainObject(registry)) return ['Runtime property registry must be a JSON object'];
+  const errors = [];
+  if (registry.version !== RUNTIME_PROPERTIES_VERSION) {
+    errors.push(
+      `Unsupported runtime property registry version: expected ${RUNTIME_PROPERTIES_VERSION}, got ${JSON.stringify(registry.version)}`
+    );
+  }
+  if (!isPlainObject(registry.properties)) {
+    errors.push('Runtime property registry is missing a valid "properties" object');
+    return errors;
+  }
+  for (const [name, note] of Object.entries(registry.properties)) {
+    if (!/^--[A-Za-z0-9_-]+$/.test(name)) {
+      errors.push(`Invalid custom property name in runtime property registry: "${name}"`);
+    }
+    if (typeof note !== 'string' || note.trim() === '') {
+      errors.push(`Runtime property "${name}" needs a non-empty note naming where it is set`);
+    }
+  }
+  return errors;
+};
+
 export const compareToBaseline = (findings, baseline = {}) => {
   const failures = [];
   const hardFailures = [];
@@ -1090,6 +948,18 @@ export const compareToBaseline = (findings, baseline = {}) => {
       tightenNotices,
       increases,
     };
+  }
+
+  for (const name of findings.staleRuntimeProperties ?? []) {
+    const hardFailure = {
+      file: 'bin/ci/design-token-runtime-properties.json',
+      line: 1,
+      rule: 'runtime-property',
+      name,
+      message: `registered runtime custom property "${name}" is not set as a quoted literal in any scanned TS/TSX file; remove the stale entry`,
+    };
+    failures.push(hardFailure);
+    hardFailures.push(hardFailure);
   }
 
   const baselineRules = baseline.rules;
@@ -1272,6 +1142,7 @@ const summarizeUndefinedDebt = (undefinedRuleMap = {}) => {
 const parseCliArgs = (argv) => {
   let rootDir = defaultRootDir;
   let baselinePath = defaultBaselinePath;
+  let runtimePropertiesPath = null;
   let updateBaseline = false;
   let allowIncrease = false;
   let initBaseline = false;
@@ -1283,6 +1154,9 @@ const parseCliArgs = (argv) => {
       index += 1;
     } else if (arg === '--baseline') {
       baselinePath = argv[index + 1];
+      index += 1;
+    } else if (arg === '--runtime-properties') {
+      runtimePropertiesPath = argv[index + 1];
       index += 1;
     } else if (arg === '--update-baseline') {
       updateBaseline = true;
@@ -1298,6 +1172,11 @@ const parseCliArgs = (argv) => {
   return {
     rootDir: path.resolve(rootDir),
     baselinePath: path.resolve(baselinePath),
+    runtimePropertiesPath: path.resolve(
+      runtimePropertiesPath ??
+        path.join(path.dirname(path.resolve(baselinePath)), RUNTIME_PROPERTIES_FILENAME)
+    ),
+    runtimePropertiesExplicit: runtimePropertiesPath !== null,
     updateBaseline,
     allowIncrease,
     initBaseline,
@@ -1313,7 +1192,31 @@ export const runCli = (argv = process.argv.slice(2)) => {
     return 1;
   }
 
-  const findings = collectFindings(options.rootDir);
+  let registry = { version: RUNTIME_PROPERTIES_VERSION, properties: {} };
+  // A missing default registry means no runtime definitions, the strictest
+  // setting; an explicitly requested registry must exist.
+  if (options.runtimePropertiesExplicit || existsSync(options.runtimePropertiesPath)) {
+    try {
+      registry = JSON.parse(readFileSync(options.runtimePropertiesPath, 'utf8'));
+    } catch (error) {
+      console.error(
+        `Failed to read runtime property registry ${options.runtimePropertiesPath}: ${error.message}`
+      );
+      return 1;
+    }
+  }
+  const registryErrors = validateRuntimeProperties(registry);
+  if (registryErrors.length > 0) {
+    console.error(`Invalid runtime property registry in ${options.runtimePropertiesPath}:`);
+    for (const err of registryErrors) {
+      console.error(`  ${err}`);
+    }
+    return 1;
+  }
+
+  const findings = collectFindings(options.rootDir, {
+    runtimeProperties: Object.keys(registry.properties),
+  });
 
   if (options.initBaseline) {
     if (options.updateBaseline) {
@@ -1393,7 +1296,7 @@ export const runCli = (argv = process.argv.slice(2)) => {
       console.error(`${failure.file}:${failure.line} ${failure.rule} ${failure.message}`);
     }
     console.error(
-      'Remediation: use theme tokens from apps/web/src/styles/themes.scss, concentric radius scale tokens, and 400-700 font weights (see docs/development/ui-design-system.md).'
+      'Remediation: use theme tokens from apps/web/src/styles/themes.scss, concentric radius scale tokens, and 400-700 font weights; register custom properties that TS/TSX sets at runtime in bin/ci/design-token-runtime-properties.json (see docs/development/ui-design-system.md).'
     );
   }
 
