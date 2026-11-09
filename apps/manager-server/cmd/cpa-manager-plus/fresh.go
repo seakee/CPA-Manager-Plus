@@ -94,6 +94,7 @@ type freshApplication struct {
 	routing         *freshrouting.Service
 	strategy        *freshstrategy.Service
 	runtime         runtimeservice.RuntimeClient
+	artifact        *runtimeservice.ArtifactClient
 	runtimeExternal *runtimeservice.ExternalClient
 	runtimeSettings setting.Repository
 	runtimeJournal  *freshRuntimeJournal
@@ -234,7 +235,9 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 		return managerCfg.CPAConnection.CPABaseURL, managerCfg.CPAConnection.ManagementKey, nil
 	}
 	if cfg.EmbeddedRuntimeConfigured() {
-		runtime = runtimeservice.NewEmbeddedClientWithTokenSource(cfg.RuntimeURL, runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile))
+		tokenSource := runtimeservice.NewFileRuntimeTokenSource(cfg.RuntimeTokenFile)
+		runtime = runtimeservice.NewEmbeddedClientWithTokenSource(cfg.RuntimeURL, tokenSource)
+		a.artifact = runtimeservice.NewArtifactClientWithTokenSource(cfg.RuntimeURL, tokenSource)
 	} else {
 		a.runtimeExternal = runtimeservice.NewExternalClientWithConnectionSource(externalConnection)
 		// An External CPA stays rule-read-only on the gateway page: without an
@@ -348,8 +351,8 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	a.upgradeWizard = a.newUpgradeWizard()
 	a.fixed = freshbootstrap.Handler{Authority: a.authority, Routing: a.routing, Current: a.current,
 		Shell: httpapi.BootstrapWebHandler(), Strategy: http.HandlerFunc(a.fixedStrategy), Runtime: http.HandlerFunc(a.fixedRuntime),
-		Adoption: http.HandlerFunc(a.fixedAdoption),
-		Upgrade:  a.upgradeWizard}
+		Adoption: http.HandlerFunc(a.fixedAdoption), Artifact: http.HandlerFunc(a.fixedArtifact),
+		Upgrade: a.upgradeWizard}
 	return a
 }
 
@@ -481,6 +484,7 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 				// adoption reads it exactly as it reads the runtime
 				// observation.
 				resource == "installation/adoption" && r.Method == http.MethodGet ||
+				runtimeArtifactResource(resource) ||
 				(resource == "strategy" || resource == "complete") && r.Method == http.MethodPost)
 		if !allowed || a.authority.ValidateContinuation(record, continuation) != nil {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -513,6 +517,8 @@ func (a *freshApplication) canonicalAPI(w http.ResponseWriter, r *http.Request) 
 		a.externalRebindRoute(w, r, op, strings.TrimPrefix(strings.TrimPrefix(resource, "external/rebind"), "/"))
 	case resource == "runtime/status":
 		a.runtimeStatus(w, r, op)
+	case resource == "runtime/artifact" || strings.HasPrefix(resource, "runtime/artifact/"):
+		a.runtimeArtifact(w, r, op, resource)
 	case resource == "runtime/operations" || strings.HasPrefix(resource, "runtime/operations/"):
 		a.runtimeOperations(w, r, op, resource)
 	case resource == "operation" && r.Method == http.MethodGet:

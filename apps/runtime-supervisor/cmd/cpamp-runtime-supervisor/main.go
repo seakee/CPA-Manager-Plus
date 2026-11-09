@@ -167,6 +167,9 @@ func run(ctx context.Context, cfg config) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, handler.Close()) }()
+	if err := enableArtifactRoutes(cfg, handler); err != nil {
+		return err
+	}
 	listener, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", cfg.addr, err)

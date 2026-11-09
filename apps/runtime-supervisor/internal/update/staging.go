@@ -24,6 +24,8 @@ const (
 	stagedArtifactSchemaVersion = 1
 	stagedExecutableName        = "cli-proxy-api"
 	stagedMetadataName          = "artifact.json"
+	stagedLicenseName           = "LICENSE"
+	maxExtractedLicenseBytes    = 1 << 20
 	maxStagedMetadataBytes      = 16 << 10
 	maxExtractedBinaryBytes     = 256 << 20
 	maxExpandedArchiveBytes     = 512 << 20
@@ -385,6 +387,20 @@ func (s *Store) verifyFinalizedPath(finalPath, version string) (Metadata, bool, 
 	actual, err := digestFile(executablePath, maxExtractedBinaryBytes)
 	if err != nil || actual != metadata.ArtifactID {
 		return Metadata{}, true, fmt.Errorf("%w: finalized executable digest differs", ErrStageConflict)
+	}
+	licensePath := filepath.Join(finalPath, stagedLicenseName)
+	licenseInfo, err := os.Lstat(licensePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Metadata{}, true, fmt.Errorf("%w: finalized license stat failed: %v", ErrStageConflict, err)
+	}
+	if err == nil {
+		if !licenseInfo.Mode().IsRegular() || licenseInfo.Mode().Perm() != 0o444 ||
+			licenseInfo.Size() <= 0 || licenseInfo.Size() > maxExtractedLicenseBytes {
+			return Metadata{}, true, fmt.Errorf("%w: finalized license type, size or permissions differ", ErrStageConflict)
+		}
+		if err := filetrust.RequireCurrentProcessOwner(licenseInfo); err != nil {
+			return Metadata{}, true, fmt.Errorf("%w: finalized license: %w", ErrStageConflict, err)
+		}
 	}
 	return metadata, true, nil
 }
