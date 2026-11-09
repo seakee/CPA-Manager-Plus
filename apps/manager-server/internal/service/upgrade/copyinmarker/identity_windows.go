@@ -63,5 +63,8 @@ func ChangeStamp(path string) (string, error) {
 		(*byte)(unsafe.Pointer(&basic)), uint32(unsafe.Sizeof(basic))); err != nil {
 		return "", ErrChangeStampUnavailable
 	}
+	if basic.ChangeTime == 0 {
+		return "", ErrChangeStampUnavailable
+	}
 	return strconv.FormatInt(basic.ChangeTime, 10), nil
 }

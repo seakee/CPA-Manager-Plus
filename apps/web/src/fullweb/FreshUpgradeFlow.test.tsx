@@ -976,6 +976,40 @@ describe('Full Web upgrade wizard', () => {
     await act(async () => renderer!.unmount());
     renderer = undefined;
 
+    // 3b. Both active.artifactId !== pinned.artifactId AND recovery_required -> recovery_required wins, onReady not called, acquire/upload absent.
+    currentArtifactStatus = makeArtifactStatus({
+      active: { artifactId: 'sha256:' + 'f'.repeat(64), origin: 'bundled' },
+      required: false,
+      operation: {
+        id: 'op-rec-mismatch',
+        source: 'upload',
+        phase: 'failed',
+        receivedBytes: 512,
+        totalBytes: 512,
+        code: 'recovery_required',
+      },
+    });
+    await mount(
+      resumeRead(() =>
+        statusDocument({
+          stage: 'reconcile',
+          nextAction: 'cpa_import',
+          domainsDone: ['source_copy', 'usage_events'],
+        })
+      ),
+      vi.fn(),
+      artifactTransport
+    );
+    expect(byTestId('fresh-artifact-step')).toBeTruthy();
+    expect(byTestId('artifact-error').props['data-error-code']).toBe('recovery_required');
+    expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
+    expect(allByTestId('artifact-acquire-btn')).toHaveLength(0);
+    expect(allByTestId('artifact-upload-btn')).toHaveLength(0);
+    expect(allByTestId('artifact-source-github')).toHaveLength(0);
+    expect(allByTestId('artifact-source-upload')).toHaveLength(0);
+    await act(async () => renderer!.unmount());
+    renderer = undefined;
+
     // 4. On cpa_import with artifact transport -> panel renders, not ready while required === true, then shows host hint on ready.
     currentArtifactStatus = makeArtifactStatus();
     await mount(
@@ -991,7 +1025,7 @@ describe('Full Web upgrade wizard', () => {
     );
     expect(byTestId('fresh-artifact-step')).toBeTruthy();
     expect(allByTestId('upgrade-cpa-import-ready')).toHaveLength(0);
-    expect(artifactTransport.readStatus).toHaveBeenCalledTimes(2);
+    expect(artifactTransport.readStatus).toHaveBeenCalledTimes(3);
 
     // Acquire succeeds -> onReady -> shows host hint to run `upgrade cpa-import`.
     currentArtifactStatus = makeArtifactStatus({

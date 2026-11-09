@@ -29,6 +29,8 @@ const CodeArtifactUnavailable = "upgrade_artifact_unavailable"
 const (
 	sourceKindUpgradedLegacy    = "upgraded-legacy"
 	artifactProofCacheEntries   = 16
+	artifactProofRecentEntries  = 16
+	artifactProofRecentTTL      = 5 * time.Minute
 	artifactProofFlightLimit    = 4
 	artifactProofBytesPerSecond = 64 << 20
 	artifactProofMaxBudget      = 5 * time.Minute
@@ -262,20 +264,43 @@ func (f *artifactProofFlight) wait(ctx context.Context) error {
 	}
 }
 
+// artifactProofCache bounds repeated full-source SHA-256 proofs across browser
+// status/probe/acquire/upload calls:
+//   - When the filesystem reports a per-entry change timestamp (ctime /
+//     ChangeTime), positive matches are cached in entries keyed by
+//     canonicalRoot + expected digests + stamped metadata Key.
+//   - Without a change timestamp (meta.Uncacheable || meta.Key == ""), a
+//     positive proof is never cached indefinitely: it runs as a detached
+//     single-flight under the shared 4-slot limit and is trusted in recent
+//     only for a bounded window (completion + 5 minutes), while tree metadata
+//     (entry set, mode, device, inode, size, mtime via BaseKey) is still
+//     compared on every request. Failures and mismatches are never stored.
 type artifactProofCache struct {
-	mu      sync.Mutex
-	entries map[string]struct{}
-	order   []string
-	flights map[string]*artifactProofFlight
-	slots   chan struct{}
+	mu          sync.Mutex
+	now         func() time.Time
+	entries     map[string]struct{}
+	order       []string
+	recent      map[string]time.Time
+	recentOrder []string
+	flights     map[string]*artifactProofFlight
+	slots       chan struct{}
 }
 
 func newArtifactProofCache() *artifactProofCache {
 	return &artifactProofCache{
+		now:     time.Now,
 		entries: make(map[string]struct{}, artifactProofCacheEntries),
+		recent:  make(map[string]time.Time, artifactProofRecentEntries),
 		flights: make(map[string]*artifactProofFlight),
 		slots:   make(chan struct{}, artifactProofFlightLimit),
 	}
+}
+
+func (c *artifactProofCache) currentTime() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func (c *artifactProofCache) verify(
@@ -300,37 +325,35 @@ func (c *artifactProofCache) verify(
 		return err
 	}
 	budget := artifactProofBudget(baseTimeout, meta.TotalBytes)
-	if meta.Uncacheable || meta.Key == "" {
-		// An uncached proof hashes the whole source, so it shares the flight
-		// limit with cached proofs instead of running once per poll unbounded.
-		select {
-		case c.slots <- struct{}{}:
-		case <-ctx.Done():
-			return errArtifactProofTimeout
-		}
-		defer func() { <-c.slots }()
-		return verifySourceFingerprintUncached(ctx, budget, mountedRoot, expectedBefore, expectedAfter)
+	recentOnly := meta.Uncacheable || meta.Key == ""
+	var flightKey string
+	canRememberRecent := false
+	if recentOnly {
+		flightKey = "recent:" + canonicalRoot + "@" + expectedBefore + ":" + expectedAfter + "@" + meta.BaseKey
+		canRememberRecent = meta.BaseKey != ""
+	} else {
+		flightKey = "stamped:" + canonicalRoot + "@" + expectedBefore + ":" + expectedAfter + "@" + meta.Key
 	}
-	cacheKey := canonicalRoot + "@" + expectedBefore + ":" + expectedAfter + "@" + meta.Key
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return errArtifactProofTimeout
 		}
 		c.mu.Lock()
-		if _, ok := c.entries[cacheKey]; ok {
+		if c.hitLocked(flightKey, recentOnly, canRememberRecent) {
 			c.mu.Unlock()
 			return nil
 		}
-		if flight, ok := c.flights[cacheKey]; ok {
+		if flight, ok := c.flights[flightKey]; ok {
 			c.mu.Unlock()
 			return flight.wait(ctx)
 		}
 		select {
 		case c.slots <- struct{}{}:
 			flight := &artifactProofFlight{done: make(chan struct{})}
-			c.flights[cacheKey] = flight
+			c.flights[flightKey] = flight
 			c.mu.Unlock()
-			go c.runFlight(cacheKey, flight, budget, mountedRoot, expectedBefore, expectedAfter)
+			go c.runFlight(flightKey, recentOnly, canRememberRecent, flight, budget, mountedRoot, expectedBefore, expectedAfter)
 			return flight.wait(ctx)
 		default:
 			c.mu.Unlock()
@@ -342,49 +365,47 @@ func (c *artifactProofCache) verify(
 			return errArtifactProofTimeout
 		}
 		c.mu.Lock()
-		if _, ok := c.entries[cacheKey]; ok {
+		if c.hitLocked(flightKey, recentOnly, canRememberRecent) {
 			c.mu.Unlock()
 			<-c.slots
 			return nil
 		}
-		if flight, ok := c.flights[cacheKey]; ok {
+		if flight, ok := c.flights[flightKey]; ok {
 			c.mu.Unlock()
 			<-c.slots
 			return flight.wait(ctx)
 		}
 		flight := &artifactProofFlight{done: make(chan struct{})}
-		c.flights[cacheKey] = flight
+		c.flights[flightKey] = flight
 		c.mu.Unlock()
-		go c.runFlight(cacheKey, flight, budget, mountedRoot, expectedBefore, expectedAfter)
+		go c.runFlight(flightKey, recentOnly, canRememberRecent, flight, budget, mountedRoot, expectedBefore, expectedAfter)
 		return flight.wait(ctx)
 	}
 }
 
-func verifySourceFingerprintUncached(
-	ctx context.Context,
-	budget time.Duration,
-	mountedRoot string,
-	expectedBefore string,
-	expectedAfter string,
-) error {
-	flightCtx, cancel := context.WithTimeout(ctx, budget)
-	digest, err := artifactSourceFingerprint(flightCtx, mountedRoot)
-	timedOut := flightCtx.Err() != nil
-	cancel()
-	if err != nil {
-		if timedOut || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return errArtifactProofTimeout
-		}
-		return err
+func (c *artifactProofCache) hitLocked(key string, recentOnly bool, canRememberRecent bool) bool {
+	if !recentOnly {
+		_, ok := c.entries[key]
+		return ok
 	}
-	if digest != "" && ((expectedAfter != "" && digest == expectedAfter) || digest == expectedBefore) {
-		return nil
+	if !canRememberRecent {
+		return false
 	}
-	return errArtifactProofMismatch
+	expiresAt, ok := c.recent[key]
+	if !ok {
+		return false
+	}
+	if c.currentTime().Before(expiresAt) {
+		return true
+	}
+	c.deleteRecentLocked(key)
+	return false
 }
 
 func (c *artifactProofCache) runFlight(
-	cacheKey string,
+	flightKey string,
+	recentOnly bool,
+	canRememberRecent bool,
 	flight *artifactProofFlight,
 	budget time.Duration,
 	mountedRoot string,
@@ -394,7 +415,7 @@ func (c *artifactProofCache) runFlight(
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			c.mu.Lock()
-			delete(c.flights, cacheKey)
+			delete(c.flights, flightKey)
 			flight.err = errors.New("source provenance proof panicked")
 			close(flight.done)
 			c.mu.Unlock()
@@ -426,9 +447,13 @@ func (c *artifactProofCache) runFlight(
 
 	c.mu.Lock()
 	if resultErr == nil {
-		c.rememberLocked(cacheKey)
+		if !recentOnly {
+			c.rememberLocked(flightKey)
+		} else if canRememberRecent {
+			c.rememberRecentLocked(flightKey, c.currentTime().Add(artifactProofRecentTTL))
+		}
 	}
-	delete(c.flights, cacheKey)
+	delete(c.flights, flightKey)
 	flight.err = resultErr
 	close(flight.done)
 	c.mu.Unlock()
@@ -445,6 +470,38 @@ func (c *artifactProofCache) rememberLocked(key string) {
 		oldest := c.order[0]
 		c.order = c.order[1:]
 		delete(c.entries, oldest)
+	}
+}
+
+func (c *artifactProofCache) rememberRecentLocked(key string, expiresAt time.Time) {
+	now := c.currentTime()
+	kept := c.recentOrder[:0]
+	for _, existing := range c.recentOrder {
+		if existing == key {
+			continue
+		}
+		if exp, ok := c.recent[existing]; ok && now.Before(exp) {
+			kept = append(kept, existing)
+		} else {
+			delete(c.recent, existing)
+		}
+	}
+	c.recentOrder = append(kept, key)
+	c.recent[key] = expiresAt
+	for len(c.recentOrder) > artifactProofRecentEntries {
+		oldest := c.recentOrder[0]
+		c.recentOrder = c.recentOrder[1:]
+		delete(c.recent, oldest)
+	}
+}
+
+func (c *artifactProofCache) deleteRecentLocked(key string) {
+	delete(c.recent, key)
+	for i, existing := range c.recentOrder {
+		if existing == key {
+			c.recentOrder = append(c.recentOrder[:i], c.recentOrder[i+1:]...)
+			return
+		}
 	}
 }
 

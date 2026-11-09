@@ -1154,6 +1154,216 @@ func TestArtifactSameInodeSameSizeRestoredMtimeInvalidatesCacheViaChangeStamp(t 
 	}
 }
 
+func TestArtifactUncacheableDetachedSingleFlightAndBoundedRecentProof(t *testing.T) {
+	origFingerprint := artifactSourceFingerprint
+	origIdentify := artifactIdentifySourceTree
+	origCache := defaultArtifactProofCache
+	t.Cleanup(func() {
+		artifactSourceFingerprint = origFingerprint
+		artifactIdentifySourceTree = origIdentify
+		defaultArtifactProofCache = origCache
+	})
+
+	var clockMu sync.Mutex
+	nowTime := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	advanceClock := func(d time.Duration) {
+		clockMu.Lock()
+		nowTime = nowTime.Add(d)
+		clockMu.Unlock()
+	}
+	cache := newArtifactProofCache()
+	cache.now = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return nowTime
+	}
+	defaultArtifactProofCache = cache
+
+	// Force IdentifySourceTree to take the uncacheable path (Key == "", Uncacheable == true)
+	// while still computing BaseKey over (entry set, mode, dev, ino, size, mtime).
+	artifactIdentifySourceTree = func(ctx context.Context, r string) (upgradeservice.SourceTreeMetadata, error) {
+		meta, err := origIdentify(ctx, r)
+		if err != nil {
+			return meta, err
+		}
+		return upgradeservice.SourceTreeMetadata{
+			BaseKey:     meta.BaseKey,
+			TotalBytes:  meta.TotalBytes,
+			Uncacheable: true,
+		}, nil
+	}
+
+	root := legacySourceDir(t)
+	database := recordedArtifactStore(t, v2StoreAdminKey, root)
+	var supervisorCalls atomic.Int32
+	_, client := newFakeArtifactSupervisor(t, &supervisorCalls)
+	handler := newHandler(root, database)
+	handler.Artifact = client
+
+	// Warm credential verification so short-deadline requests exercise artifactProofCache directly.
+	if warm := doUpgradeArtifactRequest(t, handler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), "", nil, 0); warm.Code != http.StatusOK {
+		t.Fatalf("warm status = %d: %s", warm.Code, warm.Body.String())
+	}
+
+	// 1. First request has a short ctx and times out with 503 upgrade_credential_timeout (0 Supervisor calls),
+	// while the detached flight keeps running. Releasing the flight lets the second request succeed with 1 total fingerprint call.
+	var fingerprintCalls atomic.Int32
+	flightEntered := make(chan struct{})
+	flightRelease := make(chan struct{})
+	var enteredOnce sync.Once
+	artifactSourceFingerprint = func(ctx context.Context, r string) (string, error) {
+		fingerprintCalls.Add(1)
+		enteredOnce.Do(func() { close(flightEntered) })
+		<-flightRelease
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return origFingerprint(ctx, r)
+	}
+
+	shortCtx, shortCancel := context.WithCancel(context.Background())
+	go func() {
+		<-flightEntered
+		time.Sleep(10 * time.Millisecond)
+		shortCancel()
+	}()
+	req1 := httptest.NewRequest(http.MethodGet, testPrefix+ArtifactStatusSuffix, nil).WithContext(shortCtx)
+	req1.Host = "manager.test"
+	req1.Header.Set("Authorization", bearer(testAdminKey))
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	shortCancel()
+	if rec1.Code != http.StatusServiceUnavailable || !strings.Contains(rec1.Body.String(), `"`+CodeCredentialTimeout+`"`) {
+		t.Fatalf("aborted first poll = %d: %s, want 503 %s", rec1.Code, rec1.Body.String(), CodeCredentialTimeout)
+	}
+	if supervisorCalls.Load() != 0 {
+		t.Fatalf("timed-out first poll contacted Supervisor %d times", supervisorCalls.Load())
+	}
+
+	// Release the still-running detached flight; second request succeeds with 200 and 1 total fingerprint call.
+	close(flightRelease)
+	rec2 := doUpgradeArtifactRequest(t, handler, http.MethodGet, testPrefix+ArtifactStatusSuffix, bearer(testAdminKey), "", nil, 0)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second poll after flight release = %d: %s, want 200", rec2.Code, rec2.Body.String())
+	}
+	if got := fingerprintCalls.Load(); got != 1 {
+		t.Fatalf("fingerprintCalls after detached flight completion = %d, want 1", got)
+	}
+	if got := supervisorCalls.Load(); got != 1 {
+		t.Fatalf("supervisorCalls after second poll = %d, want 1", got)
+	}
+
+	// Within the 5-minute window, another poll reuses the recent proof without re-hashing.
+	artifactSourceFingerprint = func(ctx context.Context, r string) (string, error) {
+		fingerprintCalls.Add(1)
+		return origFingerprint(ctx, r)
+	}
+	advanceClock(4 * time.Minute)
+	rec3 := doUpgradeArtifactRequest(t, handler, http.MethodGet, testPrefix+ArtifactStatusSuffix, bearer(testAdminKey), "", nil, 0)
+	if rec3.Code != http.StatusOK || fingerprintCalls.Load() != 1 {
+		t.Fatalf("poll within 5m window = %d (fingerprintCalls=%d), want 200 and 1", rec3.Code, fingerprintCalls.Load())
+	}
+
+	// 2. Advancing the clock past completion + 5 minutes expires the recent proof and recomputes.
+	advanceClock(2 * time.Minute)
+	rec4 := doUpgradeArtifactRequest(t, handler, http.MethodGet, testPrefix+ArtifactStatusSuffix, bearer(testAdminKey), "", nil, 0)
+	if rec4.Code != http.StatusOK || fingerprintCalls.Load() != 2 {
+		t.Fatalf("poll after 5m expiry = %d (fingerprintCalls=%d), want 200 and 2", rec4.Code, fingerprintCalls.Load())
+	}
+
+	// 3. A mismatch is never remembered in recent: consecutive requests both recompute and return 409 with 0 Supervisor calls.
+	if err := os.WriteFile(filepath.Join(root, "unrecorded-extra"), []byte("mismatch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := range 2 {
+		beforeCalls := fingerprintCalls.Load()
+		beforeSup := supervisorCalls.Load()
+		recMismatch := doUpgradeArtifactRequest(t, handler, http.MethodGet, testPrefix+ArtifactStatusSuffix, bearer(testAdminKey), "", nil, 0)
+		if recMismatch.Code != http.StatusConflict || !strings.Contains(recMismatch.Body.String(), `"`+CodeArtifactUnavailable+`"`) {
+			t.Fatalf("mismatch attempt %d = %d: %s, want 409", attempt, recMismatch.Code, recMismatch.Body.String())
+		}
+		if fingerprintCalls.Load() != beforeCalls+1 {
+			t.Fatalf("mismatch attempt %d did not recompute (before=%d, after=%d)", attempt, beforeCalls, fingerprintCalls.Load())
+		}
+		if supervisorCalls.Load() != beforeSup {
+			t.Fatalf("mismatch attempt %d contacted Supervisor", attempt)
+		}
+	}
+
+	// 4. Slot limit holds: with all 4 slots busy, a 5th uncacheable request with an expiring ctx returns 503 timeout cleanly.
+	slotEntered := make(chan struct{}, artifactProofFlightLimit)
+	slotRelease := make(chan struct{})
+	artifactSourceFingerprint = func(ctx context.Context, r string) (string, error) {
+		slotEntered <- struct{}{}
+		<-slotRelease
+		return origFingerprint(ctx, r)
+	}
+	var busyWG sync.WaitGroup
+	for i := range artifactProofFlightLimit {
+		busyRoot := legacySourceDir(t)
+		busyDB := recordedArtifactStore(t, v2StoreAdminKey, busyRoot)
+		busyHandler := newHandler(busyRoot, busyDB)
+		busyHandler.Artifact = client
+		if warm := doUpgradeArtifactRequest(t, busyHandler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), "", nil, 0); warm.Code != http.StatusOK {
+			t.Fatalf("busy warm %d = %d", i, warm.Code)
+		}
+		busyWG.Add(1)
+		go func(h *Handler) {
+			defer busyWG.Done()
+			_ = doUpgradeArtifactRequest(t, h, http.MethodGet, testPrefix+ArtifactStatusSuffix, bearer(testAdminKey), "", nil, 0)
+		}(busyHandler)
+	}
+	for range artifactProofFlightLimit {
+		<-slotEntered
+	}
+
+	fifthRoot := legacySourceDir(t)
+	fifthDB := recordedArtifactStore(t, v2StoreAdminKey, fifthRoot)
+	fifthHandler := newHandler(fifthRoot, fifthDB)
+	fifthHandler.Artifact = client
+	if warm := doUpgradeArtifactRequest(t, fifthHandler, http.MethodGet, testPrefix+StatusSuffix, bearer(testAdminKey), "", nil, 0); warm.Code != http.StatusOK {
+		t.Fatalf("fifth warm = %d", warm.Code)
+	}
+	fifthIdentified := make(chan struct{})
+	var fifthOnce sync.Once
+	artifactIdentifySourceTree = func(ctx context.Context, r string) (upgradeservice.SourceTreeMetadata, error) {
+		meta, err := origIdentify(ctx, r)
+		if err != nil {
+			return meta, err
+		}
+		if r == fifthRoot {
+			fifthOnce.Do(func() { close(fifthIdentified) })
+		}
+		return upgradeservice.SourceTreeMetadata{
+			BaseKey:     meta.BaseKey,
+			TotalBytes:  meta.TotalBytes,
+			Uncacheable: true,
+		}, nil
+	}
+	beforeSup := supervisorCalls.Load()
+	fifthCtx, fifthCancel := context.WithCancel(context.Background())
+	go func() {
+		<-fifthIdentified
+		time.Sleep(15 * time.Millisecond)
+		fifthCancel()
+	}()
+	fifthReq := httptest.NewRequest(http.MethodGet, testPrefix+ArtifactStatusSuffix, nil).WithContext(fifthCtx)
+	fifthReq.Host = "manager.test"
+	fifthReq.Header.Set("Authorization", bearer(testAdminKey))
+	fifthRec := httptest.NewRecorder()
+	fifthHandler.ServeHTTP(fifthRec, fifthReq)
+	fifthCancel()
+	if fifthRec.Code != http.StatusServiceUnavailable || !strings.Contains(fifthRec.Body.String(), `"`+CodeCredentialTimeout+`"`) {
+		t.Fatalf("fifth slot-saturated request = %d: %s, want 503 %s", fifthRec.Code, fifthRec.Body.String(), CodeCredentialTimeout)
+	}
+	if supervisorCalls.Load() != beforeSup {
+		t.Fatalf("fifth slot-saturated request contacted Supervisor")
+	}
+
+	close(slotRelease)
+	busyWG.Wait()
+}
+
 func TestArtifactSourceProofPollCost(t *testing.T) {
 	for _, layout := range []string{"database-16MiB", "wal-16MiB", "archive-64MiB"} {
 		t.Run(layout, func(t *testing.T) {

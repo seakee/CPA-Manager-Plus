@@ -8,6 +8,7 @@ import {
   formatArtifactPinnedMismatch,
   isArtifactPinnedMismatch,
   isArtifactReady,
+  isArtifactRecoveryRequired,
   mapArtifactErrorCode,
   parseArtifactStatus,
   probeArtifact,
@@ -112,8 +113,14 @@ export function FreshArtifactStep({
     if (validatedInitial === undefined) {
       return mapArtifactErrorCode(undefined);
     }
-    if (validatedInitial && isArtifactPinnedMismatch(validatedInitial)) {
-      return formatArtifactPinnedMismatch(validatedInitial.pinned.version);
+    if (isArtifactRecoveryRequired(validatedInitial)) {
+      return mapArtifactErrorCode(
+        'recovery_required',
+        validatedInitial?.pinned.version
+      );
+    }
+    if (isArtifactPinnedMismatch(validatedInitial)) {
+      return formatArtifactPinnedMismatch(validatedInitial?.pinned.version);
     }
     if (validatedInitial?.operation?.phase === 'failed') {
       return mapArtifactErrorCode(
@@ -169,6 +176,10 @@ export function FreshArtifactStep({
       if (next.cdnPresets.length > 0 && selectedPresetId === 'custom' && !customPrefix) {
         setSelectedPresetId(next.cdnPresets[0].id);
       }
+      if (isArtifactRecoveryRequired(next)) {
+        setError(mapArtifactErrorCode('recovery_required', next.pinned.version));
+        return;
+      }
       if (isArtifactPinnedMismatch(next)) {
         setError(formatArtifactPinnedMismatch(next.pinned.version));
         return;
@@ -195,6 +206,9 @@ export function FreshArtifactStep({
   useEffect(() => {
     if (validatedInitial === undefined) return;
     if (validatedInitial) {
+      if (isArtifactRecoveryRequired(validatedInitial)) {
+        return;
+      }
       if (isArtifactPinnedMismatch(validatedInitial)) {
         return;
       }
@@ -231,6 +245,11 @@ export function FreshArtifactStep({
         failures = 0;
         setStatus(next);
         setOperation(next.operation);
+        if (isArtifactRecoveryRequired(next)) {
+          setPolling(false);
+          setError(mapArtifactErrorCode('recovery_required', next.pinned.version));
+          return;
+        }
         if (isArtifactPinnedMismatch(next)) {
           setPolling(false);
           setError(formatArtifactPinnedMismatch(next.pinned.version));
@@ -274,7 +293,9 @@ export function FreshArtifactStep({
   }, [polling, pollRun, transport, credential, notifyReady, status?.pinned.version]);
 
   const version = status?.pinned.version || '<version>';
-  const pinnedMismatch = isArtifactPinnedMismatch(status);
+  const recoveryRequired = isArtifactRecoveryRequired(status);
+  const pinnedMismatch = !recoveryRequired && isArtifactPinnedMismatch(status);
+  const preparationBlocked = recoveryRequired || pinnedMismatch;
   const busy = submitting || uploading || polling || statusPhase === 'loading';
 
   const effectiveCDNPrefix = (() => {
@@ -287,7 +308,7 @@ export function FreshArtifactStep({
   })();
 
   const handleAcquire = async () => {
-    if (busy || !status || pinnedMismatch) return;
+    if (busy || !status || preparationBlocked) return;
     setValidationMessage('');
     setError(null);
     if (source === 'cdn' && !validCDNPrefix(effectiveCDNPrefix)) {
@@ -334,7 +355,7 @@ export function FreshArtifactStep({
     if (event.target) {
       event.target.value = '';
     }
-    if (!file || busy || !status || pinnedMismatch) return;
+    if (!file || busy || !status || preparationBlocked) return;
     setValidationMessage('');
     setError(null);
     if (file.size > ARTIFACT_MAX_UPLOAD_BYTES) {
@@ -425,7 +446,7 @@ export function FreshArtifactStep({
             </div>
           </dl>
 
-          {!pinnedMismatch && (
+          {!preparationBlocked && (
             <div
               className="artifact-probe-bar"
               role="status"
@@ -505,7 +526,7 @@ export function FreshArtifactStep({
             </div>
           )}
 
-          {pinnedMismatch ? (
+          {preparationBlocked ? (
             <div className="artifact-actions">
               <button
                 type="button"

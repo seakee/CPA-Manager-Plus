@@ -499,4 +499,86 @@ describe('FreshArtifactStep', () => {
     expect(allByID('artifact-source-github')).toHaveLength(0);
     expect(allByID('artifact-status-retry')).toHaveLength(1);
   });
+
+  it('prioritizes recovery_required over pinned_mismatch when both conditions hold, keeping onReady blocked and acquire/upload controls absent', async () => {
+    const mismatchedRecoveryStatus = makeStatus({
+      active: { artifactId: 'sha256:' + 'f'.repeat(64), origin: 'bundled' },
+      required: false,
+      operation: {
+        id: 'op-rec-mismatch',
+        source: 'upload',
+        phase: 'failed',
+        receivedBytes: 512,
+        totalBytes: 512,
+        code: 'recovery_required',
+      },
+    });
+    const transport: ArtifactTransport = {
+      readStatus: vi.fn(async () => mismatchedRecoveryStatus),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn(),
+      upload: vi.fn(),
+    };
+    const onReady = vi.fn();
+
+    // 1. loadStatus path
+    await act(async () => {
+      renderer = create(<FreshArtifactStep transport={transport} onReady={onReady} />);
+    });
+    expect(onReady).not.toHaveBeenCalled();
+    expect(transport.probe).not.toHaveBeenCalled();
+    expect(byID('artifact-error').props['data-error-code']).toBe('recovery_required');
+    expect(allByID('artifact-acquire-btn')).toHaveLength(0);
+    expect(allByID('artifact-upload-btn')).toHaveLength(0);
+    expect(allByID('artifact-source-github')).toHaveLength(0);
+    expect(allByID('artifact-source-upload')).toHaveLength(0);
+    await act(async () => renderer!.unmount());
+
+    // 2. initialStatus path
+    await act(async () => {
+      renderer = create(
+        <FreshArtifactStep
+          transport={transport}
+          initialStatus={mismatchedRecoveryStatus}
+          onReady={onReady}
+        />
+      );
+    });
+    expect(onReady).not.toHaveBeenCalled();
+    expect(transport.probe).not.toHaveBeenCalled();
+    expect(byID('artifact-error').props['data-error-code']).toBe('recovery_required');
+    expect(allByID('artifact-acquire-btn')).toHaveLength(0);
+    expect(allByID('artifact-upload-btn')).toHaveLength(0);
+    await act(async () => renderer!.unmount());
+
+    // 3. polling path
+    let pollCall = 0;
+    const pollTransport: ArtifactTransport = {
+      readStatus: vi.fn(async () => {
+        pollCall += 1;
+        return pollCall === 1 ? makeStatus() : mismatchedRecoveryStatus;
+      }),
+      probe: vi.fn(async () => ({ reachable: true, code: '' })),
+      acquire: vi.fn<() => Promise<ArtifactOperation>>(async () => ({
+        id: 'op-poll-both',
+        source: 'github',
+        phase: 'downloading',
+        receivedBytes: 128,
+        totalBytes: 512,
+        code: '',
+      })),
+      upload: vi.fn(),
+    };
+    await act(async () => {
+      renderer = create(<FreshArtifactStep transport={pollTransport} onReady={onReady} />);
+    });
+    await click('artifact-acquire-btn');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(onReady).not.toHaveBeenCalled();
+    expect(byID('artifact-error').props['data-error-code']).toBe('recovery_required');
+    expect(allByID('artifact-acquire-btn')).toHaveLength(0);
+    expect(allByID('artifact-upload-btn')).toHaveLength(0);
+  });
 });
