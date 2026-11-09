@@ -949,59 +949,127 @@ describe('design token checker', () => {
       { isScript: false, allowLineComments: true }
     );
 
-    const findBalancedBlock = (source, selectorPattern, searchStart = 0) => {
-      const regex = new RegExp(selectorPattern, 'g');
-      regex.lastIndex = searchStart;
-      const match = regex.exec(source);
-      if (!match) {
-        throw new Error(`Selector block not found for pattern: ${selectorPattern}`);
-      }
-      const openBrace = match.index + match[0].lastIndexOf('{');
-      let depth = 1;
-      let cursor = openBrace + 1;
-      while (cursor < source.length && depth > 0) {
-        if (source[cursor] === '{') depth += 1;
-        else if (source[cursor] === '}') depth -= 1;
+    const listTopLevelBlocks = (source) => {
+      const blocks = [];
+      let headerStart = 0;
+      let cursor = 0;
+      while (cursor < source.length) {
+        const ch = source[cursor];
+        if (ch === ';') {
+          headerStart = cursor + 1;
+          cursor += 1;
+          continue;
+        }
+        if (ch === '{') {
+          const selectorHeader = source.slice(headerStart, cursor).trim();
+          const openBrace = cursor;
+          let depth = 1;
+          cursor += 1;
+          while (cursor < source.length && depth > 0) {
+            if (source[cursor] === '{') depth += 1;
+            else if (source[cursor] === '}') depth -= 1;
+            cursor += 1;
+          }
+          const body = source.slice(openBrace + 1, cursor - 1);
+          const selectors = selectorHeader
+            .split(',')
+            .map((item) => item.trim().replace(/\s+/g, ' '))
+            .filter(Boolean);
+          blocks.push({ selectorHeader, selectors, body });
+          headerStart = cursor;
+          continue;
+        }
         cursor += 1;
       }
-      return source.slice(openBrace + 1, cursor - 1);
+      return blocks;
     };
 
-    const extractDirectDeclarations = (blockBody) => {
-      let directText = '';
-      let depth = 0;
-      for (let i = 0; i < blockBody.length; i += 1) {
-        const ch = blockBody[i];
-        if (ch === '{') {
-          depth += 1;
-        } else if (ch === '}') {
-          depth = Math.max(0, depth - 1);
-        } else if (depth === 0) {
-          directText += ch;
-        }
+    const normalizeSelector = (selector) =>
+      selector
+        .trim()
+        .replace(/['"]/g, "'")
+        .replace(/\s+/g, ' ');
+
+    const findMatchingBlocks = (source, targetSelector, { optional = false } = {}) => {
+      const normalizedTarget = normalizeSelector(targetSelector);
+      const matches = listTopLevelBlocks(source).filter((block) =>
+        block.selectors.some((sel) => normalizeSelector(sel) === normalizedTarget)
+      );
+      if (!optional && matches.length === 0) {
+        throw new Error(`Selector block not found for selector item: ${targetSelector}`);
       }
+      return matches.map((block) => block.body);
+    };
+
+    const extractDirectDeclarations = (blockBodies) => {
+      const bodies = Array.isArray(blockBodies) ? blockBodies : [blockBodies];
       const declarations = {};
-      for (const match of directText.matchAll(/([A-Za-z_-][A-Za-z0-9_-]*)\s*:\s*([^;]+);/g)) {
-        declarations[match[1].trim()] = match[2].trim();
+      for (const blockBody of bodies) {
+        let directText = '';
+        let depth = 0;
+        for (let i = 0; i < blockBody.length; i += 1) {
+          const ch = blockBody[i];
+          if (ch === '{') {
+            depth += 1;
+          } else if (ch === '}') {
+            depth = Math.max(0, depth - 1);
+          } else if (depth === 0) {
+            directText += ch;
+          }
+        }
+        for (const match of directText.matchAll(/([A-Za-z_-][A-Za-z0-9_-]*)\s*:\s*([^;]+);/g)) {
+          declarations[match[1].trim()] = match[2].trim();
+        }
       }
       return declarations;
     };
 
-    const rootTokens = extractDirectDeclarations(findBalancedBlock(themesScss, '(?:^|\\n)\\s*:root\\s*\\{'));
+    // Verify grouped selector lists (e.g. `&.btn-danger, &.btn-critical {`) are matched per item.
+    expect(
+      extractDirectDeclarations(
+        findMatchingBlocks('&.btn-danger, &.btn-critical { color: var(--primary-contrast); }', '&.btn-danger')
+      )
+    ).toEqual({ color: 'var(--primary-contrast)' });
+
+    const rootTokens = extractDirectDeclarations(findMatchingBlocks(themesScss, ':root'));
     const darkOverrides = extractDirectDeclarations(
-      findBalancedBlock(themesScss, "\\[data-theme=['\"]dark['\"]\\]\\s*\\{")
+      findMatchingBlocks(themesScss, "[data-theme='dark']")
     );
     const themeTokenMaps = {
       light: rootTokens,
       dark: { ...rootTokens, ...darkOverrides },
     };
 
-    const btnBlock = findBalancedBlock(componentsScss, '(?:^|\\n)\\s*\\.btn\\s*\\{');
-    const btnDecls = extractDirectDeclarations(btnBlock);
-    const dangerBlock = findBalancedBlock(btnBlock, '&\\.btn-danger\\s*\\{');
-    const dangerDecls = extractDirectDeclarations(dangerBlock);
-    const hoverDecls = extractDirectDeclarations(findBalancedBlock(dangerBlock, '&:hover\\s*\\{'));
-    const activeDecls = extractDirectDeclarations(findBalancedBlock(dangerBlock, '&:active\\s*\\{'));
+    const extractScopedDangerRules = (scopeSource) => {
+      const btnBlocks = findMatchingBlocks(scopeSource, '.btn', { optional: true });
+      const btnDecls = extractDirectDeclarations(btnBlocks);
+      const nestedDangerBlocks = btnBlocks.flatMap((block) =>
+        findMatchingBlocks(block, '&.btn-danger', { optional: true })
+      );
+      const flatDangerBlocks = findMatchingBlocks(scopeSource, '.btn.btn-danger', { optional: true });
+      const dangerBlocks = [...nestedDangerBlocks, ...flatDangerBlocks];
+      const dangerDecls = extractDirectDeclarations(dangerBlocks);
+      const hoverBlocks = [
+        ...dangerBlocks.flatMap((block) => findMatchingBlocks(block, '&:hover', { optional: true })),
+        ...findMatchingBlocks(scopeSource, '.btn.btn-danger:hover', { optional: true }),
+      ];
+      const activeBlocks = [
+        ...dangerBlocks.flatMap((block) => findMatchingBlocks(block, '&:active', { optional: true })),
+        ...findMatchingBlocks(scopeSource, '.btn.btn-danger:active', { optional: true }),
+      ];
+      return {
+        btnDecls,
+        dangerDecls,
+        hoverDecls: extractDirectDeclarations(hoverBlocks),
+        activeDecls: extractDirectDeclarations(activeBlocks),
+      };
+    };
+
+    const baseRules = extractScopedDangerRules(componentsScss);
+    const darkScopeBlocks = findMatchingBlocks(componentsScss, "[data-theme='dark']", {
+      optional: true,
+    });
+    const darkRules = extractScopedDangerRules(darkScopeBlocks.join('\n'));
 
     const extractVarTokenName = (valueExpr) => {
       const match = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,[^)]+)?\)$/.exec(valueExpr ?? '');
@@ -1011,29 +1079,46 @@ describe('design token checker', () => {
       return match[1];
     };
 
-    const restingBgToken = extractVarTokenName(dangerDecls['background-color'] ?? dangerDecls.background);
-    const hoverBgToken = extractVarTokenName(hoverDecls['background-color'] ?? hoverDecls.background);
-    const activeBgToken = extractVarTokenName(activeDecls['background-color'] ?? activeDecls.background);
+    const restingBgToken = extractVarTokenName(
+      baseRules.dangerDecls['background-color'] ?? baseRules.dangerDecls.background
+    );
+    const hoverBgToken = extractVarTokenName(
+      baseRules.hoverDecls['background-color'] ?? baseRules.hoverDecls.background
+    );
+    const activeBgToken = extractVarTokenName(
+      baseRules.activeDecls['background-color'] ?? baseRules.activeDecls.background
+    );
     expect([restingBgToken, hoverBgToken, activeBgToken]).toEqual([
       '--danger-solid',
       '--danger-solid-hover',
       '--danger-solid-active',
     ]);
 
-    const stateRules = [
-      {
-        bgToken: restingBgToken,
-        textExpr: dangerDecls.color ?? btnDecls.color,
-      },
-      {
-        bgToken: hoverBgToken,
-        textExpr: hoverDecls.color ?? dangerDecls.color ?? btnDecls.color,
-      },
-      {
-        bgToken: activeBgToken,
-        textExpr: activeDecls.color ?? dangerDecls.color ?? btnDecls.color,
-      },
-    ];
+    const lightBaseTextExpr = baseRules.dangerDecls.color ?? baseRules.btnDecls.color;
+    const darkBaseTextExpr =
+      darkRules.dangerDecls.color ??
+      baseRules.dangerDecls.color ??
+      darkRules.btnDecls.color ??
+      baseRules.btnDecls.color;
+
+    const stateRulesByTheme = {
+      light: [
+        { bgToken: restingBgToken, textExpr: lightBaseTextExpr },
+        { bgToken: hoverBgToken, textExpr: baseRules.hoverDecls.color ?? lightBaseTextExpr },
+        { bgToken: activeBgToken, textExpr: baseRules.activeDecls.color ?? lightBaseTextExpr },
+      ],
+      dark: [
+        { bgToken: restingBgToken, textExpr: darkBaseTextExpr },
+        {
+          bgToken: hoverBgToken,
+          textExpr: darkRules.hoverDecls.color ?? baseRules.hoverDecls.color ?? darkBaseTextExpr,
+        },
+        {
+          bgToken: activeBgToken,
+          textExpr: darkRules.activeDecls.color ?? baseRules.activeDecls.color ?? darkBaseTextExpr,
+        },
+      ],
+    };
 
     const parseCssColorToRgb = (rawColor) => {
       const value = rawColor.trim();
@@ -1104,7 +1189,7 @@ describe('design token checker', () => {
     };
 
     for (const [themeName, tokenMap] of Object.entries(themeTokenMaps)) {
-      for (const { bgToken, textExpr } of stateRules) {
+      for (const { bgToken, textExpr } of stateRulesByTheme[themeName]) {
         const textRgb = resolveColorInTheme(textExpr, tokenMap);
         const bgRgb = resolveColorInTheme(bgToken, tokenMap);
         const ratio = wcagContrastRatio(textRgb, bgRgb);
