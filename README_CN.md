@@ -209,6 +209,7 @@ docker run -d \
 - CPA Management Key 入库前会加密；备份需要同时保存 SQLite 文件和 `data.key`。
 - 普通 API 和 JSONL 导出只暴露脱敏失败摘要，不返回原始失败体或保存的原始 JSON。
 - CPAMP 只应用于你有权管理的流量和凭证。
+- 发现疑似安全漏洞？请通过 [GitHub 私密报告](https://github.com/seakee/CPA-Manager-Plus/security/advisories/new) 提交，并参阅[安全政策](SECURITY.md)；不要在公开 Issue 中披露未修复漏洞的利用细节。
 
 ## 开发
 
