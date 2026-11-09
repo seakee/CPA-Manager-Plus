@@ -581,4 +581,45 @@ describe('FreshArtifactStep', () => {
     expect(allByID('artifact-acquire-btn')).toHaveLength(0);
     expect(allByID('artifact-upload-btn')).toHaveLength(0);
   });
+
+  it.each(['upgrade_source_symlinked', 'upgrade_source_unstamped'] as const)(
+    'surfaces %s immediately during polling without counting it as retryable noise',
+    async (refusalCode) => {
+      let pollCount = 0;
+      const transport: ArtifactTransport = {
+        readStatus: vi.fn(async () => {
+          pollCount += 1;
+          if (pollCount === 1) return makeStatus();
+          throw { kind: 'http', status: 503, code: refusalCode };
+        }),
+        probe: vi.fn(async () => ({ reachable: true, code: '' })),
+        acquire: vi.fn<() => Promise<ArtifactOperation>>(async () => ({
+          id: `op-${refusalCode}`,
+          source: 'github',
+          phase: 'downloading',
+          receivedBytes: 256,
+          totalBytes: 2048,
+          code: '',
+        })),
+        upload: vi.fn(),
+      };
+      const onReady = vi.fn();
+
+      await act(async () => {
+        renderer = create(<FreshArtifactStep transport={transport} onReady={onReady} />);
+      });
+      await click('artifact-acquire-btn');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(pollCount).toBe(2);
+      expect(byID('artifact-error').props['data-error-code']).toBe(refusalCode);
+      expect(onReady).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(16000);
+      });
+      expect(pollCount).toBe(2);
+    }
+  );
 });

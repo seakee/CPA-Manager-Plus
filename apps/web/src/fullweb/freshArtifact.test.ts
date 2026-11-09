@@ -164,7 +164,7 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
 
   it('maps every artifact error code to its message key and remedy across all four locales', () => {
     const codes = Object.keys(ARTIFACT_ERROR_CODES) as ArtifactErrorCode[];
-    expect(codes).toHaveLength(28);
+    expect(codes).toHaveLength(29);
 
     // Table-driven check of every server code reachable on the Fresh and Upgrade artifact routes.
     const serverArtifactCodes: Array<[ArtifactErrorCode, string]> = [
@@ -196,6 +196,7 @@ describe('freshArtifact parsers, error mapping and transport helpers', () => {
       ['upgrade_operation_unreadable', 'remedy_upgrade_operation_unreadable'],
       ['upgrade_operation_invalid', 'remedy_upgrade_operation_invalid'],
       ['upgrade_source_symlinked', 'remedy_upgrade_source_symlinked'],
+      ['upgrade_source_unstamped', 'remedy_upgrade_source_unstamped'],
     ];
     for (const [serverCode, expectedRemedyKey] of serverArtifactCodes) {
       expect(ARTIFACT_ERROR_MAP[serverCode].remedyKey).toBe(expectedRemedyKey);

@@ -68,6 +68,8 @@ const en = {
     'The recorded upgrade operation is inconsistent and cannot be used.',
   error_upgrade_source_symlinked:
     'The 1.x database is reached through a link, not as the file itself.',
+  error_upgrade_source_unstamped:
+    'The 1.x data is on a filesystem without file change times, so the upgrade cannot verify that the source is unchanged.',
   error_pinned_mismatch:
     'The active CPA engine on this host does not match the version pinned in this image ({version}).',
   error_unknown: 'The CPA engine could not be prepared.',
@@ -102,6 +104,8 @@ const en = {
     'Inspect or roll back the upgrade operation on the Manager host before retrying.',
   remedy_upgrade_source_symlinked:
     'Mount the data directory itself, without linked files, then try again.',
+  remedy_upgrade_source_unstamped:
+    'Move or copy the 1.x data directory to an NTFS, ext4, or APFS volume, remount it, and retry.',
   remedy_pinned_mismatch:
     'Browser preparation refuses to overwrite a different active engine. Align the container image and runtime store on the host, then retry.',
 };
@@ -169,6 +173,8 @@ const zh: typeof en = {
   error_upgrade_operation_unreadable: '无法读取操作记录。',
   error_upgrade_operation_invalid: '已记录的升级操作数据不一致，无法继续使用。',
   error_upgrade_source_symlinked: '1.x 数据库是通过链接访问的，而不是普通文件。',
+  error_upgrade_source_unstamped:
+    '1.x 数据所在的文件系统不记录文件变更时间，升级流程无法校验源数据未被改动。',
   error_pinned_mismatch: '当前宿主机已激活的 CPA 引擎与本镜像固定版本（{version}）不一致。',
   error_unknown: '未能完成 CPA 引擎准备。',
   remedy_archive:
@@ -196,6 +202,8 @@ const zh: typeof en = {
   remedy_upgrade_operation_unreadable: '请在宿主机上检查 Manager 数据库。',
   remedy_upgrade_operation_invalid: '请先在 Manager 宿主机上检查或回滚该升级操作后再试。',
   remedy_upgrade_source_symlinked: '请挂载数据目录本身（不要使用链接文件）后重试。',
+  remedy_upgrade_source_unstamped:
+    '请将 1.x 数据目录移动或复制到 NTFS、ext4 或 APFS 卷，重新挂载后重试。',
   remedy_pinned_mismatch:
     '浏览器准备操作不会覆盖已激活的其他版本引擎。请在宿主机上使容器镜像与运行时目录保持一致后重试。',
 };
@@ -263,6 +271,8 @@ const tw: typeof en = {
   error_upgrade_operation_unreadable: '無法讀取操作記錄。',
   error_upgrade_operation_invalid: '已記錄的升級操作資料不一致，無法繼續使用。',
   error_upgrade_source_symlinked: '1.x 資料庫是透過連結存取，而不是一般檔案。',
+  error_upgrade_source_unstamped:
+    '1.x 資料所在的檔案系統不記錄檔案變更時間，升級流程無法驗證來源資料未被更動。',
   error_pinned_mismatch: '目前主機已啟用的 CPA 引擎與本映像固定版本（{version}）不一致。',
   error_unknown: '未能完成 CPA 引擎準備。',
   remedy_archive:
@@ -290,6 +300,8 @@ const tw: typeof en = {
   remedy_upgrade_operation_unreadable: '請在主機上檢查 Manager 資料庫。',
   remedy_upgrade_operation_invalid: '請先在 Manager 主機上檢查或回滾該升級操作後再試。',
   remedy_upgrade_source_symlinked: '請掛載資料目錄本身（不要使用連結檔案）後重試。',
+  remedy_upgrade_source_unstamped:
+    '請將 1.x 資料目錄移動或複製到 NTFS、ext4 或 APFS 磁碟區，重新掛載後重試。',
   remedy_pinned_mismatch:
     '瀏覽器準備操作不會覆寫已啟用的其他版本引擎。請在主機上使容器映像與執行階段目錄保持一致後重試。',
 };
@@ -364,6 +376,8 @@ const ru: typeof en = {
     'Записанная операция обновления противоречива и не может быть использована.',
   error_upgrade_source_symlinked:
     'База 1.x доступна через ссылку, а не как сам файл.',
+  error_upgrade_source_unstamped:
+    'Данные 1.x находятся на файловой системе без меток изменения файлов, поэтому обновление не может подтвердить неизменность источника.',
   error_pinned_mismatch:
     'Активный движок CPA на этом хосте не соответствует версии, зафиксированной в этом образе ({version}).',
   error_unknown: 'Не удалось подготовить движок CPA.',
@@ -398,6 +412,8 @@ const ru: typeof en = {
     'Проверьте или откатите операцию обновления на хосте Manager перед повторной попыткой.',
   remedy_upgrade_source_symlinked:
     'Смонтируйте сам каталог данных, без файлов-ссылок, и повторите.',
+  remedy_upgrade_source_unstamped:
+    'Переместите или скопируйте каталог данных 1.x на том NTFS, ext4 или APFS, перемонтируйте его и повторите попытку.',
   remedy_pinned_mismatch:
     'Подготовка через браузер не перезаписывает другой активный движок. Приведите образ контейнера и хранилище среды выполнения на хосте в соответствие, затем повторите попытку.',
 };

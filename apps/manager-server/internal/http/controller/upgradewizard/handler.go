@@ -121,6 +121,10 @@ const (
 	// authentication does not inspect that marker at all.
 	CodeSourceMissing    = upgradeservice.CodeSourceMissing
 	CodeSourceUnreadable = upgradeservice.CodeSourceUnreadable
+	// CodeSourceUnstamped is returned on the Upgrade runtime artifact surface when
+	// the mounted 1.x source is on a filesystem without change timestamps (such as
+	// FAT/exFAT), so freshness cannot be proven; move it to NTFS, ext4, or APFS.
+	CodeSourceUnstamped = "upgrade_source_unstamped"
 	// CodeOperationInvalid is the row's own verdict: the recorded operation
 	// contradicts itself or the schema (a timestamp pair that runs backwards, a
 	// list column that is not a JSON string array, a reconciliation body that is

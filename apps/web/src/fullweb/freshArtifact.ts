@@ -43,7 +43,8 @@ export type ArtifactErrorCode =
   | 'upgrade_source_unreadable'
   | 'upgrade_operation_unreadable'
   | 'upgrade_operation_invalid'
-  | 'upgrade_source_symlinked';
+  | 'upgrade_source_symlinked'
+  | 'upgrade_source_unstamped';
 
 export const ARTIFACT_ERROR_CODES: Record<ArtifactErrorCode, true> = {
   archive_invalid: true,
@@ -74,6 +75,7 @@ export const ARTIFACT_ERROR_CODES: Record<ArtifactErrorCode, true> = {
   upgrade_operation_unreadable: true,
   upgrade_operation_invalid: true,
   upgrade_source_symlinked: true,
+  upgrade_source_unstamped: true,
 };
 
 export function isArtifactErrorCode(value: unknown): value is ArtifactErrorCode {
@@ -239,6 +241,10 @@ export const ARTIFACT_ERROR_MAP: Record<
     messageKey: 'error_upgrade_source_symlinked',
     remedyKey: 'remedy_upgrade_source_symlinked',
   },
+  upgrade_source_unstamped: {
+    messageKey: 'error_upgrade_source_unstamped',
+    remedyKey: 'remedy_upgrade_source_unstamped',
+  },
 };
 
 export interface MappedArtifactError {
@@ -317,6 +323,24 @@ export function extractArtifactErrorCode(error: unknown): ArtifactErrorCode | un
   if (candidate.status === 413) return 'archive_too_large';
   return undefined;
 }
+const NON_TRANSIENT_READ_CODES: Partial<Record<ArtifactErrorCode, true>> = {
+  unauthorized: true,
+  admin_unauthorized: true,
+  origin_rejected: true,
+  method_not_allowed: true,
+  unsupported_platform: true,
+  upgrade_artifact_unavailable: true,
+  upgrade_legacy_root_missing: true,
+  upgrade_source_missing: true,
+  upgrade_operation_invalid: true,
+  upgrade_source_symlinked: true,
+  upgrade_source_unstamped: true,
+};
+
+export function isNonTransientArtifactReadError(error: unknown): boolean {
+  const code = extractArtifactErrorCode(error);
+  return code !== undefined && NON_TRANSIENT_READ_CODES[code] === true;
+}
 
 export function formatArtifactError(
   error: unknown,
@@ -325,7 +349,6 @@ export function formatArtifactError(
 ): MappedArtifactError {
   return mapArtifactErrorCode(extractArtifactErrorCode(error), version, language);
 }
-
 export function validCDNPrefix(prefix: string): boolean {
   const trimmed = prefix.trim();
   if (!trimmed) return false;

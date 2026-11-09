@@ -9,6 +9,7 @@ import {
   isArtifactPinnedMismatch,
   isArtifactReady,
   isArtifactRecoveryRequired,
+  isNonTransientArtifactReadError,
   mapArtifactErrorCode,
   parseArtifactStatus,
   probeArtifact,
@@ -274,6 +275,11 @@ export function FreshArtifactStep({
         if (cancelled || !aliveRef.current) return;
         if (isAbortedArtifactError(err)) {
           setPolling(false);
+          return;
+        }
+        if (isNonTransientArtifactReadError(err)) {
+          setPolling(false);
+          setError(formatArtifactError(err, status?.pinned.version));
           return;
         }
         failures += 1;

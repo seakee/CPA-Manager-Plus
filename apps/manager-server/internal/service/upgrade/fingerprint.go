@@ -89,14 +89,12 @@ func SourceFingerprint(ctx context.Context, root string) (string, error) {
 }
 
 // SourceTreeMetadata describes the metadata state of every entry covered by
-// SourceFingerprint without reading any file contents. BaseKey hashes the
-// entry set, mode, device, inode, size, and mtime without a change timestamp;
-// Key additionally incorporates copyinmarker.ChangeStamp when available. When
-// Uncacheable is true (for example on a filesystem without ctime/ChangeTime),
-// Key is empty while BaseKey remains populated for bounded recent-proof lookup.
+// SourceFingerprint without reading any file contents. Key incorporates each
+// entry's relative path, mode, device, inode, size, mtime, and
+// copyinmarker.ChangeStamp. When Uncacheable is true (for example on a
+// filesystem without ctime/ChangeTime), Key is empty and callers fail closed.
 type SourceTreeMetadata struct {
 	Key         string
-	BaseKey     string
 	TotalBytes  int64
 	Uncacheable bool
 }
@@ -143,9 +141,7 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 	sort.Slice(entries, func(i, j int) bool { return entries[i].relative < entries[j].relative })
 
 	metaHash := sha256.New()
-	baseHash := sha256.New()
 	var total int64
-	uncacheable := false
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return SourceTreeMetadata{}, err
@@ -159,9 +155,16 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 		if err != nil {
 			return SourceTreeMetadata{}, err
 		}
+		changeStamp, err := copyinmarker.ChangeStamp(fullPath)
+		if err != nil {
+			if errors.Is(err, copyinmarker.ErrChangeStampUnavailable) {
+				return SourceTreeMetadata{Uncacheable: true}, nil
+			}
+			return SourceTreeMetadata{}, err
+		}
 		if _, err := fmt.Fprintf(
-			baseHash,
-			"%s\x00%t\x00%d\x00%d\x00%d\x00%d\x00%d\n",
+			metaHash,
+			"%s\x00%t\x00%d\x00%d\x00%d\x00%d\x00%d\x00%s\n",
 			entry.relative,
 			entry.directory,
 			uint32(info.Mode()),
@@ -169,32 +172,9 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 			identity.Inode,
 			info.Size(),
 			info.ModTime().UnixNano(),
+			changeStamp,
 		); err != nil {
 			return SourceTreeMetadata{}, err
-		}
-		changeStamp, err := copyinmarker.ChangeStamp(fullPath)
-		if err != nil {
-			if errors.Is(err, copyinmarker.ErrChangeStampUnavailable) {
-				uncacheable = true
-			} else {
-				return SourceTreeMetadata{}, err
-			}
-		}
-		if !uncacheable {
-			if _, err := fmt.Fprintf(
-				metaHash,
-				"%s\x00%t\x00%d\x00%d\x00%d\x00%d\x00%d\x00%s\n",
-				entry.relative,
-				entry.directory,
-				uint32(info.Mode()),
-				identity.Device,
-				identity.Inode,
-				info.Size(),
-				info.ModTime().UnixNano(),
-				changeStamp,
-			); err != nil {
-				return SourceTreeMetadata{}, err
-			}
 		}
 		if !entry.directory {
 			if total < 0 || info.Size() > math.MaxInt64-total {
@@ -204,17 +184,8 @@ func IdentifySourceTree(ctx context.Context, root string) (SourceTreeMetadata, e
 			}
 		}
 	}
-	baseKey := hex.EncodeToString(baseHash.Sum(nil))
-	if uncacheable {
-		return SourceTreeMetadata{
-			BaseKey:     baseKey,
-			TotalBytes:  total,
-			Uncacheable: true,
-		}, nil
-	}
 	return SourceTreeMetadata{
 		Key:        hex.EncodeToString(metaHash.Sum(nil)),
-		BaseKey:    baseKey,
 		TotalBytes: total,
 	}, nil
 }

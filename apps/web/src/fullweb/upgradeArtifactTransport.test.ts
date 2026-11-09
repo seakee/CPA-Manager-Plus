@@ -246,6 +246,7 @@ describe('upgradeArtifactTransport', () => {
         [503, 'upgrade_operation_unreadable'],
         [503, 'upgrade_operation_invalid'],
         [503, 'upgrade_source_symlinked'],
+        [503, 'upgrade_source_unstamped'],
       ] as const) {
         fetcher.mockResolvedValueOnce(
           Response.json(
