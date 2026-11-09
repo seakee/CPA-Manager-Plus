@@ -483,9 +483,15 @@
   }
 }
 
+// Keeps the neutral colours in every state the former !important covered.
+// Focus-visible repeats the class to outrank the global
+// `.btn:not(.btn-primary):not(.btn-danger):focus-visible:not(:disabled)` (0,5,0);
+// the global focus border and inset ring still apply.
 .loginCard .stepActions .setupBackButton {
   &,
-  &:hover:not(:disabled),
+  &:hover,
+  &:active,
+  &.setupBackButton:focus-visible:not(:disabled),
   :global([data-theme='dark']) & {
     color: var(--text-secondary);
     background: var(--app-surface-muted);
