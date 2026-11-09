@@ -307,12 +307,7 @@ func (e *Executor) EnableArtifactAcquisition(manifestPath string, sources ...Acq
 		state.goarch = "amd64"
 	}
 	if trimmedManifest != "" {
-		pinned, err := loadPinnedArtifactManifest(trimmedManifest)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-		} else {
+		if pinned, err := loadPinnedArtifactManifest(trimmedManifest); err == nil {
 			state.pinned = &pinned
 		}
 	}

@@ -433,3 +433,78 @@ func TestEnableArtifactRoutesNoOpWhenExecutorNil(t *testing.T) {
 	}
 	assertArtifactErrorCode(t, rec, lifecycle.ArtifactCodeUnsupportedPlatform)
 }
+
+func TestRunStartsAndAnswersStatusWithMinimalAdoptionEnvAndPrefixedManifestVersion(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		manifestContent string
+	}{
+		{
+			name:            "v-prefixed version manifest from adoption harness",
+			manifestContent: `{"schemaVersion":1,"engine":"cpa","version":"v8.0.55","artifactId":"%s"}`,
+		},
+		{
+			name:            "no manifest configured",
+			manifestContent: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targetRoot := t.TempDir()
+			cpaPath := filepath.Join(targetRoot, "cli-proxy-api")
+			binary := []byte("#!/bin/sh\necho adoption-cpa\n")
+			if err := os.WriteFile(cpaPath, binary, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sum := sha256.Sum256(binary)
+			artifactID := "sha256:" + hex.EncodeToString(sum[:])
+
+			var manifestPath string
+			if tc.manifestContent != "" {
+				manifestPath = filepath.Join(targetRoot, "artifact.json")
+				if err := os.WriteFile(manifestPath, []byte(fmt.Sprintf(tc.manifestContent, artifactID)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			env := map[string]string{
+				"CPAMP_RUNTIME_ADDR":          "127.0.0.1:0",
+				"CPAMP_RUNTIME_IDENTITY":      "isolated-adopt-runtime",
+				"CPAMP_RUNTIME_TOKEN":         "isolated-runtime-transport-token",
+				"CPAMP_RUNTIME_JOURNAL_PATH":  filepath.Join(targetRoot, "operations.sqlite"),
+				"CPAMP_CPA_EXECUTABLE":        cpaPath,
+				"CPAMP_CPA_ARTIFACT_MANIFEST": manifestPath,
+				"CPAMP_RUNTIME_CPA_ADDR":      "127.0.0.1:18399",
+			}
+			cfg, err := loadConfig(func(key string) string { return env[key] }, fixedGeneration(77))
+			if err != nil {
+				t.Fatalf("loadConfig() error = %v", err)
+			}
+
+			rh, err := newRuntimeHandler(t.Context(), cfg)
+			if err != nil {
+				t.Fatalf("newRuntimeHandler() error = %v", err)
+			}
+			t.Cleanup(func() { _ = rh.Close() })
+
+			if err := enableArtifactRoutes(cfg, rh); err != nil {
+				t.Fatalf("enableArtifactRoutes() error = %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/v1/runtime/status", nil)
+			req.Header.Set("Authorization", "Bearer isolated-runtime-transport-token")
+			req.Header.Set(protocol.ArtifactObservationHeader, protocol.ArtifactObservationFeature)
+			rec := httptest.NewRecorder()
+			rh.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /v1/runtime/status = %d (%s), want 200", rec.Code, rec.Body.String())
+			}
+			var status runtimeResponse
+			if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+				t.Fatalf("decode /v1/runtime/status: %v", err)
+			}
+			if status.RuntimeIdentity != "isolated-adopt-runtime" || status.ActiveGatewayArtifact == nil || status.ActiveGatewayArtifact.ArtifactID != artifactID {
+				t.Fatalf("/v1/runtime/status = %+v, want identity isolated-adopt-runtime and artifact %s", status, artifactID)
+			}
+		})
+	}
+}

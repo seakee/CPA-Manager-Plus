@@ -39,10 +39,8 @@ func enableArtifactRoutes(cfg config, runtime *runtimeHandler, opts ...lifecycle
 	if runtime == nil {
 		return errors.New("runtime handler is required")
 	}
-	if !cfg.privateConfiguration && runtime.executor != nil {
-		if err := runtime.executor.EnableArtifactAcquisition(cfg.cpaArtifactManifest, opts...); err != nil {
-			return err
-		}
+	if !cfg.privateConfiguration && runtime.executor != nil && strings.TrimSpace(cfg.cpaArtifactManifest) != "" {
+		_ = runtime.executor.EnableArtifactAcquisition(cfg.cpaArtifactManifest, opts...)
 	}
 	runtime.Handler = newArtifactRoutesHandler(cfg.token, runtime.executor, runtime.Handler)
 	return nil
