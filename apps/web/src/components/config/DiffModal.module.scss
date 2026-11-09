@@ -102,7 +102,7 @@ $diff-del-text-color: color-mix(in srgb, var(--data-badge-danger-text) 92%, var(
 .statBlock {
   width: 8px;
   height: 8px;
-  border-radius: var(--app-radius-xs);
+  border-radius: 2px;
 }
 
 .statBlockAdd {

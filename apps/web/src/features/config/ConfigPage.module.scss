@@ -649,16 +649,16 @@
     }
 
     .cm-selectionMatch {
-      background: color-mix(in srgb, var(--warning-color) 30%, transparent);
+      background: rgba(255, 193, 7, 0.3);
     }
 
     .cm-searchMatch {
-      background: color-mix(in srgb, var(--warning-color) 40%, transparent);
-      outline: 1px solid color-mix(in srgb, var(--warning-color) 60%, transparent);
+      background: rgba(255, 193, 7, 0.4);
+      outline: 1px solid rgba(255, 193, 7, 0.6);
     }
 
     .cm-searchMatch-selected {
-      background: color-mix(in srgb, var(--data-amber-dark-2) 50%, transparent);
+      background: rgba(255, 152, 0, 0.5);
     }
 
     [data-theme='dark'] & {
@@ -667,7 +667,7 @@
       }
 
       .cm-selectionMatch {
-        background: color-mix(in srgb, var(--warning-color) 20%, transparent);
+        background: rgba(255, 193, 7, 0.2);
       }
     }
   }

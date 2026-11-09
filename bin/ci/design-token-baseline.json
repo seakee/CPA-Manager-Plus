@@ -5,6 +5,7 @@
     "radius": {
       "apps/web/src/components/common/DatabaseMaintenanceBanner.module.scss": 2,
       "apps/web/src/components/common/SecondaryScreenShell.module.scss": 1,
+      "apps/web/src/components/config/DiffModal.module.scss": 1,
       "apps/web/src/components/modelAlias/ModelMappingDiagram.module.scss": 3,
       "apps/web/src/features/aiProviders/AiProvidersPage.module.scss": 1,
       "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 3,
@@ -48,6 +49,7 @@
       "apps/web/src/features/authFiles/components/AuthJsonPasteModal.module.scss": 1,
       "apps/web/src/features/authFiles/components/OAuthEditorModals.module.scss": 2,
       "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 1,
+      "apps/web/src/features/config/ConfigPage.module.scss": 5,
       "apps/web/src/features/dashboard/components/CollectorStatusCard.module.scss": 7,
       "apps/web/src/features/dashboard/components/HealthAlertsCard.module.scss": 5,
       "apps/web/src/features/dashboard/components/TrafficOverviewCard.module.scss": 1,
