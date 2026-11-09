@@ -2,6 +2,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PublicApiError, type PublicApiClient } from '@/fullweb/publicApi';
+import i18n from '@/i18n';
 import { RuntimeStatusPage } from './RuntimeStatusPage';
 
 const DIGEST = 'sha256:' + 'd'.repeat(64);
@@ -24,7 +25,8 @@ function embeddedStatus() {
 describe('RuntimeStatusPage artifact origin display', () => {
   let renderer: ReactTestRenderer | undefined;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await i18n.changeLanguage('zh-CN');
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     vi.useFakeTimers();
     vi.stubGlobal('window', {
