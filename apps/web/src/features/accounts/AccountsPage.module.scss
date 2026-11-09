@@ -2721,7 +2721,7 @@
   border-right: 0;
   border-left: 0;
   border-radius: 0;
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
   scrollbar-width: none;
 
   &::-webkit-scrollbar {
@@ -2785,7 +2785,7 @@
   border: 1px solid color-mix(in srgb, var(--data-red-base) 35%, transparent);
   border-left: 3px solid var(--data-red-base);
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--data-red-base) 8%, var(--bg-primary));
+  background: color-mix(in srgb, var(--data-red-base) 8%, var(--app-surface-strong));
   color: var(--text-primary);
 
   span {
@@ -2845,7 +2845,7 @@
   min-width: 0;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-md);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--text-primary) 4%, transparent);
 }
 
@@ -2860,10 +2860,10 @@
   background:
     linear-gradient(
       135deg,
-      color-mix(in srgb, var(--overview-accent) 11%, var(--bg-primary)),
-      color-mix(in srgb, var(--overview-accent) 3%, var(--bg-primary)) 62%
+      color-mix(in srgb, var(--overview-accent) 11%, var(--app-surface-strong)),
+      color-mix(in srgb, var(--overview-accent) 3%, var(--app-surface-strong)) 62%
     ),
-    var(--bg-primary);
+    var(--app-surface-strong);
 
   &::after {
     content: '';
@@ -2908,7 +2908,7 @@
   flex-direction: column;
   gap: 12px;
   padding: 15px;
-  background: color-mix(in srgb, var(--primary-color) 3%, var(--bg-primary));
+  background: color-mix(in srgb, var(--primary-color) 3%, var(--app-surface-strong));
 }
 
 .overviewRecentStatusLayout {
@@ -2934,7 +2934,7 @@
   padding: 11px 12px;
   border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 
   span {
     min-width: 0;
@@ -2979,7 +2979,7 @@
   padding: 11px 12px;
   border: 1px solid color-mix(in srgb, var(--primary-color) 15%, var(--border-color));
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 }
 
 .overviewRecentStatusTimelineHeader {
@@ -3198,7 +3198,7 @@
   padding: 9px 11px;
   border: 1px solid color-mix(in srgb, var(--data-red-base) 30%, var(--border-color));
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--data-red-base) 7%, var(--bg-primary));
+  background: color-mix(in srgb, var(--data-red-base) 7%, var(--app-surface-strong));
 
   span {
     color: var(--data-red-base);
@@ -3229,11 +3229,11 @@
   flex-direction: column;
   gap: 12px;
   padding: 15px;
-  background: color-mix(in srgb, var(--surface-subtle) 44%, var(--bg-primary));
+  background: color-mix(in srgb, var(--surface-subtle) 44%, var(--app-surface-strong));
 }
 
 .overviewActivityCard {
-  background: color-mix(in srgb, var(--primary-color) 3%, var(--bg-primary));
+  background: color-mix(in srgb, var(--primary-color) 3%, var(--app-surface-strong));
 }
 
 .overviewCardHeader {
@@ -3270,12 +3270,12 @@
   width: 34px;
   height: 34px;
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
   color: var(--primary-color);
 }
 
 .overviewDecisionCard .overviewSectionIcon {
-  background: color-mix(in srgb, var(--overview-accent) 13%, var(--bg-primary));
+  background: color-mix(in srgb, var(--overview-accent) 13%, var(--app-surface-strong));
   color: var(--overview-accent);
 }
 
@@ -3304,7 +3304,7 @@
     padding: 9px 10px;
     border: 1px solid color-mix(in srgb, var(--overview-accent) 16%, var(--border-color));
     border-radius: var(--app-radius-sm);
-    background: color-mix(in srgb, var(--bg-primary) 84%, transparent);
+    background: color-mix(in srgb, var(--app-surface-strong) 84%, transparent);
   }
 
   span {
@@ -3382,7 +3382,7 @@
     padding: 9px 10px;
     border: 1px solid color-mix(in srgb, var(--border-color) 76%, transparent);
     border-radius: var(--app-radius-sm);
-    background: color-mix(in srgb, var(--bg-primary) 86%, transparent);
+    background: color-mix(in srgb, var(--app-surface-strong) 86%, transparent);
   }
 
   dt {
@@ -3438,7 +3438,7 @@
   padding: 16px;
   border: 1px dashed var(--border-color);
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--surface-subtle) 54%, var(--bg-primary));
+  background: color-mix(in srgb, var(--surface-subtle) 54%, var(--app-surface-strong));
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
@@ -3452,12 +3452,12 @@
   gap: 12px;
   padding: 13px 14px;
   border-color: color-mix(in srgb, var(--data-amber-base) 42%, var(--border-color));
-  background: color-mix(in srgb, var(--data-amber-base) 7%, var(--bg-primary));
+  background: color-mix(in srgb, var(--data-amber-base) 7%, var(--app-surface-strong));
 
   &[data-overview-attention-priority='critical'],
   &[data-overview-attention-priority='high'] {
     border-color: color-mix(in srgb, var(--data-red-base) 42%, var(--border-color));
-    background: color-mix(in srgb, var(--data-red-base) 7%, var(--bg-primary));
+    background: color-mix(in srgb, var(--data-red-base) 7%, var(--app-surface-strong));
 
     .overviewAttentionIcon {
       background: color-mix(in srgb, var(--data-red-base) 13%, transparent);
@@ -3501,7 +3501,7 @@
   padding: 11px 12px;
   border: 1px dashed color-mix(in srgb, var(--border-color) 84%, transparent);
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--surface-subtle) 72%, var(--bg-primary));
+  background: color-mix(in srgb, var(--surface-subtle) 72%, var(--app-surface-strong));
 
   strong {
     color: var(--text-primary);
@@ -3606,7 +3606,7 @@
   padding: 9px 11px;
   border: 1px solid color-mix(in srgb, var(--data-amber-base) 30%, var(--border-color));
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--data-amber-base) 7%, var(--bg-primary));
+  background: color-mix(in srgb, var(--data-amber-base) 7%, var(--app-surface-strong));
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
@@ -3655,12 +3655,12 @@
 }
 
 .accountModelsInlineStatus {
-  background: color-mix(in srgb, var(--surface-subtle) 50%, var(--bg-primary));
+  background: color-mix(in srgb, var(--surface-subtle) 50%, var(--app-surface-strong));
 }
 
 .accountModelsWarning {
   border-color: color-mix(in srgb, var(--data-amber-base) 32%, var(--border-color));
-  background: color-mix(in srgb, var(--data-amber-base) 7%, var(--bg-primary));
+  background: color-mix(in srgb, var(--data-amber-base) 7%, var(--app-surface-strong));
 
   :global(.btn) {
     flex: 0 0 auto;
@@ -3723,7 +3723,7 @@
   overflow: hidden;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-pill);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
   color: var(--text-secondary);
   font: inherit;
   font-size: 11px;
@@ -3740,13 +3740,13 @@
 
 .accountModelsRuleChipCredential {
   border-color: color-mix(in srgb, var(--data-amber-base) 32%, var(--border-color));
-  background: color-mix(in srgb, var(--data-amber-base) 8%, var(--bg-primary));
+  background: color-mix(in srgb, var(--data-amber-base) 8%, var(--app-surface-strong));
   color: var(--data-amber-base);
 }
 
 .accountModelsRuleChipGlobal {
   border-color: color-mix(in srgb, var(--data-red-base) 28%, var(--border-color));
-  background: color-mix(in srgb, var(--data-red-base) 7%, var(--bg-primary));
+  background: color-mix(in srgb, var(--data-red-base) 7%, var(--app-surface-strong));
   color: var(--data-red-base);
 }
 
@@ -3765,12 +3765,12 @@
   padding: 11px 12px;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 }
 
 .accountModelRowExcluded {
   border-color: color-mix(in srgb, var(--data-amber-base) 26%, var(--border-color));
-  background: color-mix(in srgb, var(--data-amber-base) 4%, var(--bg-primary));
+  background: color-mix(in srgb, var(--data-amber-base) 4%, var(--app-surface-strong));
 }
 
 .accountModelMain {
@@ -3890,7 +3890,7 @@
   padding: 14px;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--surface-subtle) 32%, var(--bg-primary));
+  background: color-mix(in srgb, var(--surface-subtle) 32%, var(--app-surface-strong));
 
   :global(.form-group) {
     margin-bottom: 0;
@@ -3942,7 +3942,7 @@
   padding: 13px;
   border: 1px solid color-mix(in srgb, var(--primary-color) 17%, var(--border-color));
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--primary-color) 4%, var(--bg-primary));
+  background: color-mix(in srgb, var(--primary-color) 4%, var(--app-surface-strong));
 }
 
 .configurationFieldLabel {
@@ -3967,7 +3967,7 @@
   padding: 11px 12px;
   border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 
   > div {
     display: grid;
@@ -4002,7 +4002,7 @@
   overflow: hidden;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-md);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 
   > summary {
     display: flex;
@@ -4110,7 +4110,7 @@
   overflow: auto;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--surface-subtle) 66%, var(--bg-primary));
+  background: color-mix(in srgb, var(--surface-subtle) 66%, var(--app-surface-strong));
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 11px;
@@ -4248,7 +4248,7 @@
 
 .quotaSummaryPanel {
   min-width: 0;
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 }
 
 .quotaSection {
@@ -4295,7 +4295,7 @@
   padding: $spacing-sm;
   border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 }
 
 .quotaSummaryMetricBlue {
@@ -4505,7 +4505,7 @@
   display: grid;
   gap: 12px;
   margin-bottom: 12px;
-  background: color-mix(in srgb, var(--app-accent-soft) 48%, var(--bg-primary));
+  background: color-mix(in srgb, var(--app-accent-soft) 48%, var(--app-surface-strong));
 }
 
 .detailQuotaUsageSummaryHeader {
@@ -4600,7 +4600,7 @@
     min-width: 0;
     padding: 8px;
     border-radius: var(--app-radius-sm);
-    background: var(--bg-primary);
+    background: var(--app-surface-strong);
   }
 
   > div > div {
@@ -4684,7 +4684,7 @@
   padding: 10px;
   border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 }
 
 .detailQuotaWindowHeader {
@@ -4752,7 +4752,7 @@
   padding: 8px;
   border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 
   strong {
     min-width: 0;
@@ -4869,7 +4869,7 @@
   padding: 13px;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-md);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 }
 
 .quotaResetHeader {
@@ -4900,20 +4900,20 @@
 
 .quotaResetIcon {
   margin-right: 0;
-  background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
   color: var(--primary-color);
 }
 
 .quotaResetAction:global(.btn.btn-secondary) {
   min-height: var(--control-height-sm);
   border-color: color-mix(in srgb, var(--primary-color) 36%, var(--border-color));
-  background: color-mix(in srgb, var(--primary-color) 7%, var(--bg-primary));
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--app-surface-strong));
   color: var(--primary-color);
   font-weight: 700;
 
   &:hover:not(:disabled) {
     border-color: color-mix(in srgb, var(--primary-color) 58%, var(--border-color));
-    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+    background: color-mix(in srgb, var(--primary-color) 12%, var(--app-surface-strong));
     color: var(--primary-color);
   }
 
@@ -5014,7 +5014,7 @@
   padding: 8px 10px;
   border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--surface-subtle) 26%, var(--bg-primary));
+  background: color-mix(in srgb, var(--surface-subtle) 26%, var(--app-surface-strong));
   color: var(--text-secondary);
   font-size: 11px;
 
@@ -5061,7 +5061,7 @@
   height: 22px;
   margin-right: 6px;
   border-radius: var(--app-radius-xs);
-  background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
   color: var(--primary-color);
 }
 
@@ -5077,7 +5077,7 @@
     padding: 0 10px;
     border: 0;
     border-right: 1px solid var(--border-color);
-    background: var(--bg-primary);
+    background: var(--app-surface-strong);
     color: var(--text-secondary);
     font-size: 11px;
     font-weight: 700;
@@ -5106,7 +5106,7 @@
 .quotaWindowFilters button.quotaWindowFilterActive,
 .quotaWindowFilters button.quotaWindowFilterActive:hover,
 .quotaWindowFilterActive {
-  background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
   color: var(--primary-color);
 }
 
@@ -5317,7 +5317,7 @@
 .drawerMoreActions {
   min-height: var(--control-height-md);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 }
 
 .rulesGrid {
@@ -6285,7 +6285,7 @@
 
 .drawerSection {
   border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--surface-subtle) 36%, var(--bg-primary));
+  background: color-mix(in srgb, var(--surface-subtle) 36%, var(--app-surface-strong));
 }
 
 @include tablet {
@@ -6963,7 +6963,7 @@
   padding: 14px;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--surface-subtle) 36%, var(--bg-primary));
+  background: color-mix(in srgb, var(--surface-subtle) 36%, var(--app-surface-strong));
 }
 
 .drawerUsageHeader {
@@ -7007,7 +7007,7 @@
   padding: 10px;
   border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
 
   span {
     min-width: 0;
@@ -7105,7 +7105,7 @@
   min-width: 0;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-md);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
   box-shadow: 0 8px 24px color-mix(in srgb, var(--text-primary) 4%, transparent);
 }
 
@@ -7297,7 +7297,7 @@
   padding: 0 10px;
   border: 1px solid var(--border-primary);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
   color: var(--text-primary);
   font-size: 12px;
   font-weight: 700;
@@ -7305,7 +7305,7 @@
 
   &:hover:not(:disabled) {
     border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-color));
-    background: color-mix(in srgb, var(--primary-color) 4%, var(--bg-primary));
+    background: color-mix(in srgb, var(--primary-color) 4%, var(--app-surface-strong));
   }
 
   :global(svg) {
@@ -7347,8 +7347,8 @@
   border-radius: var(--app-radius-sm);
   background: linear-gradient(
     180deg,
-    var(--bg-primary),
-    color-mix(in srgb, var(--surface-subtle) 22%, var(--bg-primary))
+    var(--app-surface-strong),
+    color-mix(in srgb, var(--surface-subtle) 22%, var(--app-surface-strong))
   );
 
   > div {
@@ -7419,7 +7419,7 @@
   padding: 8px 10px;
   border: 1px solid color-mix(in srgb, var(--data-red-base) 22%, var(--border-color));
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, var(--data-red-base) 4%, var(--bg-primary));
+  background: color-mix(in srgb, var(--data-red-base) 4%, var(--app-surface-strong));
 
   span {
     color: var(--text-secondary);
@@ -7453,7 +7453,7 @@
   padding: 10px 12px;
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-sm);
-  background: var(--bg-primary);
+  background: var(--app-surface-strong);
   transition:
     border-color 0.16s,
     box-shadow 0.16s,

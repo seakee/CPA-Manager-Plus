@@ -1235,14 +1235,10 @@
   color: var(--data-badge-neutral-text);
 }
 
+// Warning pair; text mixed toward --text-primary: 5.0:1 light, 8.2:1 dark.
 .severitymedium {
-  background: color-mix(in srgb, #f97316 14%, var(--bg-primary));
-  color: #9a3412;
-}
-
-// Light #9a3412 on the orange tint is 6.3:1; dark amber-base on it is 8.4:1.
-:global([data-theme='dark']) .severitymedium {
-  color: var(--data-amber-base);
+  background: var(--data-badge-warning-bg);
+  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
 }
 
 .severityhigh {

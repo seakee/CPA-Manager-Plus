@@ -139,7 +139,7 @@
       "apps/web/src/features/system/components/DatabaseStatusCard.module.scss": 7,
       "apps/web/src/features/system/ManagerUpdates.module.scss": 1,
       "apps/web/src/features/system/SystemPage.module.scss": 2,
-      "apps/web/src/features/usage-analytics/UsageAnalyticsPage.module.scss": 6,
+      "apps/web/src/features/usage-analytics/UsageAnalyticsPage.module.scss": 4,
       "apps/web/src/fullweb/consoleWorkspace.css": 1,
       "apps/web/src/index.css": 10,
       "apps/web/src/styles/components.scss": 8,
