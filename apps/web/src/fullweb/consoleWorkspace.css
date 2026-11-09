@@ -1017,9 +1017,12 @@
   gap: 8px;
 }
 
-.editor-modes [aria-pressed='true'] {
+/* Beats the dark `.btn.btn-secondary` and hover colour rules; the mix keeps
+   text >= 4.5:1 on the resting and hover fills in both themes. */
+.editor-modes .btn.btn-secondary[aria-pressed='true'],
+.editor-modes .btn.btn-secondary[aria-pressed='true']:hover {
   border-color: var(--primary-color);
-  color: var(--primary-color);
+  color: color-mix(in srgb, var(--primary-active) 75%, var(--text-primary));
 }
 
 @media (max-width: 720px) {
