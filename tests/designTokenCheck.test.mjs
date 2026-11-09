@@ -134,7 +134,7 @@ describe('design token checker', () => {
     ]);
   });
 
-  it('R1 counts only top-level keys of a JSX style object as definitions, including generic JSX tags, not class fields or nested call arguments', () => {
+  it('R1 counts only top-level keys of a JSX style object as definitions, including generic JSX tags, not class fields, nested call arguments, or JSX-looking text in strings', () => {
     const root = createFixtureTree({
       'components/Hint.tsx': [
         `export class ThemeHint {`,
@@ -152,6 +152,10 @@ describe('design token checker', () => {
         `  <Widget<Map<string, number>> item="ok" style={{ '--from-generic-tag': 'red' }} />`,
         `);`,
         `const closed = <b>text</b>; style = { '--after-closed-tag': 1 };`,
+        `export const quoted = "<Widget<string> style={{ '--in-quoted-string': 'x' }} />";`,
+        'export const templated = `<div style={{ \'--in-template-text\': 1 }} />`;',
+        `export const sample = "el.style.setProperty('--in-set-property-string', '1')";`,
+        'export const mixed = `${<i style={{ \'--in-template-code\': 1 }} />}`;',
       ].join('\n'),
       'components/Hint.module.scss': [
         `.hint {`,
@@ -160,6 +164,10 @@ describe('design token checker', () => {
         `  border-color: var(--from-style);`,
         `  outline-color: var(--from-generic-tag);`,
         `  fill: var(--after-closed-tag);`,
+        `  stroke: var(--in-quoted-string);`,
+        `  caret-color: var(--in-template-text);`,
+        `  column-rule-color: var(--in-set-property-string);`,
+        `  text-decoration-color: var(--in-template-code);`,
         `}`,
       ].join('\n'),
     });
@@ -169,6 +177,9 @@ describe('design token checker', () => {
         '--after-closed-tag': 1,
         '--from-class-field': 1,
         '--from-nested-arg': 1,
+        '--in-quoted-string': 1,
+        '--in-set-property-string': 1,
+        '--in-template-text': 1,
       },
     });
   });

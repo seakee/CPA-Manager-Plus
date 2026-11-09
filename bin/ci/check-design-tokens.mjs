@@ -164,6 +164,64 @@ const consumeScriptBraces = (src, start) => {
   return index;
 };
 
+// [start, end) ranges of quoted strings and template-literal text in comment-
+// stripped TS/TSX; `${...}` bodies inside templates are code and excluded.
+// Single/double-quoted strings end at a newline, which bounds the damage from
+// an apostrophe in JSX text being read as a quote.
+const collectScriptStringRanges = (src) => {
+  const ranges = [];
+  const scanTemplate = (start) => {
+    let index = start + 1;
+    let segmentStart = start;
+    while (index < src.length) {
+      const ch = src[index];
+      if (ch === '\\') {
+        index += 2;
+        continue;
+      }
+      if (ch === '`') {
+        ranges.push([segmentStart, index + 1]);
+        return index + 1;
+      }
+      if (ch === '$' && src[index + 1] === '{') {
+        ranges.push([segmentStart, index]);
+        index = scanCode(index + 2, true);
+        segmentStart = index - 1;
+        continue;
+      }
+      index += 1;
+    }
+    ranges.push([segmentStart, index]);
+    return index;
+  };
+  const scanCode = (start, stopAtBrace) => {
+    let index = start;
+    let depth = 0;
+    while (index < src.length) {
+      const ch = src[index];
+      if (ch === "'" || ch === '"') {
+        const end = consumeQuoted(src, index);
+        ranges.push([index, end]);
+        index = end;
+        continue;
+      }
+      if (ch === '`') {
+        index = scanTemplate(index);
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        if (stopAtBrace && depth === 0) return index + 1;
+        depth -= 1;
+      }
+      index += 1;
+    }
+    return index;
+  };
+  scanCode(0, false);
+  return ranges;
+};
+
 // True when `index` sits among the attributes of an open JSX tag: walking back
 // over attribute strings and `{...}` values reaches `<Tag` (optionally with
 // TSX type arguments, `<Tag<T>`) before any other `>`, unmatched `{`/`(`, or
@@ -755,8 +813,13 @@ export const collectFindings = (rootDir = defaultRootDir) => {
 
     if (isScript) {
       collectVarRefs(cleaned, cleaned, relPath, lineStarts);
+      const stringRanges = collectScriptStringRanges(cleaned);
+      const inString = (offset) =>
+        stringRanges.some(([start, end]) => offset > start && offset < end);
       for (const attrMatch of cleaned.matchAll(/(?<![A-Za-z0-9_.$])style\s*=\s*\{/g)) {
-        if (!isInsideJsxOpeningTag(cleaned, attrMatch.index)) continue;
+        if (inString(attrMatch.index) || !isInsideJsxOpeningTag(cleaned, attrMatch.index)) {
+          continue;
+        }
         const openBraceIndex = attrMatch.index + attrMatch[0].length - 1;
         for (const name of collectStyleObjectKeys(cleaned, openBraceIndex)) {
           definedVars.add(name);
@@ -765,6 +828,7 @@ export const collectFindings = (rootDir = defaultRootDir) => {
       for (const match of cleaned.matchAll(
         /\.setProperty\s*\(\s*['"`](--[A-Za-z0-9_-]+)['"`]/g
       )) {
+        if (inString(match.index)) continue;
         definedVars.add(match[1]);
       }
       continue;
