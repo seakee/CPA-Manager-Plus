@@ -343,6 +343,27 @@ describe('GitHub Actions workflow integrity', () => {
     expect(checkedJobs).toBeGreaterThan(0);
   });
 
+  it('runs the design token check in Frontend after npm ci and Lint and before Test', () => {
+    const workflow = parseYaml(readWorkflow('pr-check.yml'));
+    const steps = workflow.jobs.frontend.steps;
+    const installIndex = steps.findIndex(
+      (step) => step.name === 'Install dependencies' && step.run === 'npm ci'
+    );
+    const lintIndex = steps.findIndex(
+      (step) => step.name === 'Lint' && step.run === 'npm run lint'
+    );
+    const checkTokensIndex = steps.findIndex((step) => step.name === 'Check design tokens');
+    const testIndex = steps.findIndex(
+      (step) => step.name === 'Test' && step.run === 'npm run test'
+    );
+
+    expect(installIndex).toBeGreaterThanOrEqual(0);
+    expect(lintIndex).toBeGreaterThan(installIndex);
+    expect(checkTokensIndex).toBeGreaterThan(lintIndex);
+    expect(steps[checkTokensIndex].run).toBe('npm run check:design-tokens');
+    expect(testIndex).toBeGreaterThan(checkTokensIndex);
+  });
+
   it('locks the dependency versions that close the known advisories', () => {
     const lock = JSON.parse(readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'));
     const locked = (name) => lock.packages[`node_modules/${name}`]?.version;

@@ -43,7 +43,8 @@ git rebase upstream/dev
 ## Local Verification
 
 Frontend work follows the [Data Loading & Refresh Interaction](docs/development/data-loading-and-refresh.md)
-contract. It is the default for v2 and later development, and for v1 refresh fixes.
+contract and the [UI Design System](docs/development/ui-design-system.md) token and
+contrast rules. Both are the default for v2 and later development, and for v1 refresh fixes.
 
 Use the narrowest checks that cover your change, then run broader checks when
 the change crosses frontend, Manager Server, packaging, or runtime boundaries.
@@ -51,6 +52,7 @@ the change crosses frontend, Manager Server, packaging, or runtime boundaries.
 | Area | Command |
 | --- | --- |
 | Frontend type and lint | `npm run type-check` and `npm run lint` |
+| Frontend design tokens | `npm run check:design-tokens` |
 | Frontend and repository tests | `npm run test` |
 | Frontend bundle | `npm run build` |
 | Manager Server | `npm run manager-server:test` |

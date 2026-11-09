@@ -84,6 +84,11 @@ const triggersFrontend = (filePath) =>
   // same change and must keep that job scheduled.
   filePath === 'bin/ci/readiness-gate-bc.mjs' ||
   filePath === 'bin/ci/readiness-gate-bc.test.mjs' ||
+  // The design-token checker, its committed baseline and its runtime property
+  // registry run in the Frontend job alongside tests/designTokenCheck.test.mjs.
+  filePath === 'bin/ci/check-design-tokens.mjs' ||
+  filePath === 'bin/ci/design-token-baseline.json' ||
+  filePath === 'bin/ci/design-token-runtime-properties.json' ||
   startsWithPath(filePath, 'docs/architecture/evidence') ||
   startsWithPath(filePath, 'bin/release');
 
