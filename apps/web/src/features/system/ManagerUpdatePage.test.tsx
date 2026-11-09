@@ -34,6 +34,7 @@ vi.mock('react-i18next', () => ({
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let renderer: ReactTestRenderer | undefined;
+const headingFocusMock = vi.fn();
 const release = (version = 'v1.12.11'): ReleaseInfo => ({
   schema_version: 1,
   release: { version, stage: 'stable', source_commit: 'a'.repeat(40) },
@@ -111,7 +112,21 @@ async function renderPage() {
       </MemoryRouter>
     );
     if (renderer) renderer.update(page);
-    else renderer = create(page);
+    else
+      renderer = create(page, {
+        createNodeMock: (element) => {
+          if (
+            element.type === 'h2' &&
+            typeof element.props === 'object' &&
+            element.props !== null &&
+            'id' in element.props &&
+            element.props.id === 'cpamp-update-title'
+          ) {
+            return { focus: headingFocusMock };
+          }
+          return { focus: vi.fn() };
+        },
+      });
   });
 }
 
@@ -120,6 +135,12 @@ describe('ManagerUpdatePage', () => {
     mocks.cpa.available = true;
     mocks.cpa.canCheck = true;
     await renderPage();
+    expect(renderer!.root.findAllByType('nav')).toHaveLength(0);
+    expect(renderer!.root.findAllByType('h1')).toHaveLength(0);
+    const firstHeading = renderer!.root.findByProps({ id: 'cpamp-update-title' });
+    expect(firstHeading.type).toBe('h2');
+    expect(firstHeading.props.tabIndex).toBe(-1);
+    expect(headingFocusMock).toHaveBeenCalledWith({ preventScroll: true });
     expect(renderer!.root.findByProps({ 'aria-labelledby': 'cpamp-update-title' })).toBeDefined();
     expect(renderer!.root.findByProps({ 'aria-labelledby': 'cpa-update-title' })).toBeDefined();
     await act(async () => {

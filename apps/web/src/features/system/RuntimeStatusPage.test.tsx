@@ -76,6 +76,10 @@ describe('Runtime status page', () => {
       post: vi.fn(),
     } as unknown as RuntimeClient;
     await renderPage(client);
+    const rootSection = renderer!.root.findByProps({ 'data-testid': 'runtime-status-page' });
+    expect(rootSection.type).toBe('section');
+    expect(rootSection.props.className).toBe('runtime-status-page');
+    expect(renderer!.root.findAllByType('h1')).toHaveLength(0);
     const content = text(renderer!.root);
     expect(content).toContain('外部 CPA 连接');
     expect(content).toContain('8.0.55');

@@ -436,8 +436,8 @@ export function VisualConfigEditor({
 
     /* ---- Cache header height – recomputed only on resize ---- */
     const computeHeaderHeight = () => {
-      const header = document.querySelector('.main-header') as HTMLElement | null;
-      if (header) return header.getBoundingClientRect().height;
+      const header = document.querySelector('.main-header');
+      if (header instanceof HTMLElement) return header.getBoundingClientRect().height;
 
       const raw = getComputedStyle(document.documentElement).getPropertyValue('--header-height');
       const parsed = Number.parseFloat(raw);
@@ -445,20 +445,36 @@ export function VisualConfigEditor({
     };
     let headerHeight = computeHeaderHeight();
 
-    /* ---- Cache content scroller – resolved once ---- */
-    const contentScroller = document.querySelector('.content') as HTMLElement | null;
+    /* ---- Cache content scroller and enclosing editor container – resolved once ---- */
+    const contentScroller = document.querySelector('.content');
+    const editorContainer =
+      workspaceElement.parentElement?.parentElement ?? workspaceElement.parentElement;
 
     /* ---- Cache floating height from previous frame ---- */
     let cachedFloatingHeight = floatingElement.getBoundingClientRect().height || 200;
 
     let frameId = 0;
 
+    const computeBannerBottom = (workspaceTop: number, baseTop: number) => {
+      if (!editorContainer) return baseTop;
+      let clearanceTop = baseTop;
+      for (const child of Array.from(editorContainer.children)) {
+        if (!(child instanceof HTMLElement) || !child.classList.contains('error-box')) continue;
+        const rect = child.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        if (rect.top <= workspaceTop + 1 && rect.bottom > baseTop) {
+          clearanceTop = Math.max(clearanceTop, rect.bottom + 8);
+        }
+      }
+      return clearanceTop;
+    };
+
     const updateFloatingPosition = () => {
       frameId = 0;
 
       const anchorRect = anchorElement.getBoundingClientRect();
       const workspaceRect = workspaceElement.getBoundingClientRect();
-      const stickyTop = headerHeight + 4;
+      const stickyTop = computeBannerBottom(workspaceRect.top, headerHeight + 4);
       const viewportPadding = 16;
       const maxTop = workspaceRect.bottom - cachedFloatingHeight;
       const unclampedTop = Math.min(Math.max(anchorRect.top, stickyTop), maxTop);
@@ -500,19 +516,32 @@ export function VisualConfigEditor({
 
     window.addEventListener('resize', handleResize);
     window.addEventListener('scroll', requestPositionUpdate, { passive: true });
-    contentScroller?.addEventListener('scroll', requestPositionUpdate, { passive: true });
+    if (contentScroller instanceof HTMLElement) {
+      contentScroller.addEventListener('scroll', requestPositionUpdate, { passive: true });
+    }
 
     const resizeObserver =
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(requestPositionUpdate);
     resizeObserver?.observe(anchorElement);
     resizeObserver?.observe(workspaceElement);
+    if (editorContainer) {
+      resizeObserver?.observe(editorContainer);
+    }
 
+    const mutationObserver =
+      typeof MutationObserver === 'undefined' ? null : new MutationObserver(requestPositionUpdate);
+    if (editorContainer) {
+      mutationObserver?.observe(editorContainer, { childList: true });
+    }
     return () => {
       if (frameId) cancelAnimationFrame(frameId);
+      mutationObserver?.disconnect();
       resizeObserver?.disconnect();
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('scroll', requestPositionUpdate);
-      contentScroller?.removeEventListener('scroll', requestPositionUpdate);
+      if (contentScroller instanceof HTMLElement) {
+        contentScroller.removeEventListener('scroll', requestPositionUpdate);
+      }
       clearFloatingStyles();
     };
   }, [shouldRenderFloatingSidebar]);
