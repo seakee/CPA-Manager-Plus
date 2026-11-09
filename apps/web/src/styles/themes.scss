@@ -81,7 +81,19 @@
   --bg-error-light: #fef0f0;
   --floating-surface: var(--app-surface);
   --floating-border: var(--app-border);
-  --floating-shadow: none;
+  --floating-shadow-sm: 0 8px 24px rgba(0, 0, 0, 0.14);
+  --floating-shadow-md: 0 12px 28px rgba(15, 23, 42, 0.16);
+  --floating-shadow-lg:
+    0 16px 32px rgba(15, 23, 42, 0.14),
+    0 0 0 1px color-mix(in srgb, var(--primary-color) 8%, transparent);
+  --floating-shadow-xl:
+    0 18px 36px rgba(15, 23, 42, 0.16),
+    0 0 0 1px color-mix(in srgb, var(--app-input-border-focus) 10%, transparent);
+  --floating-shadow-dialog: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+  --floating-shadow-drawer: -24px 0 48px rgba(15, 23, 42, 0.18);
+  --overlay-scrim: rgba(0, 0, 0, 0.35);
+  --overlay-scrim-backdrop: rgb(8 8 8 / 0.46);
+  --overlay-scrim-drawer: rgba(15, 23, 42, 0.52);
 
   --text-primary: var(--app-text-primary);
   --text-secondary: var(--app-text-regular);
@@ -339,7 +351,19 @@
   --bg-error-light: #2b1719;
   --floating-surface: var(--app-surface);
   --floating-border: var(--app-border);
-  --floating-shadow: none;
+  --floating-shadow-sm: 0 8px 24px rgba(0, 0, 0, 0.14);
+  --floating-shadow-md: 0 12px 28px rgba(15, 23, 42, 0.16);
+  --floating-shadow-lg:
+    0 16px 32px rgba(0, 0, 0, 0.42),
+    0 0 0 1px color-mix(in srgb, var(--primary-color) 14%, transparent);
+  --floating-shadow-xl:
+    0 18px 36px rgba(0, 0, 0, 0.42),
+    0 0 0 1px color-mix(in srgb, var(--app-input-border-focus) 16%, transparent);
+  --floating-shadow-dialog: 0 10px 15px -3px rgb(0 0 0 / 0.1);
+  --floating-shadow-drawer: -24px 0 48px rgba(15, 23, 42, 0.18);
+  --overlay-scrim: rgba(0, 0, 0, 0.35);
+  --overlay-scrim-backdrop: rgb(8 8 8 / 0.46);
+  --overlay-scrim-drawer: rgba(15, 23, 42, 0.52);
 
   --text-primary: var(--app-text-primary);
   --text-secondary: var(--app-text-regular);

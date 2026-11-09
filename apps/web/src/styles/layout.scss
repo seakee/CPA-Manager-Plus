@@ -358,7 +358,7 @@
   border: 0;
   padding: 0;
   margin: 0;
-  background: rgb(8 8 8 / 0.46);
+  background: var(--overlay-scrim-backdrop);
   opacity: 0;
   pointer-events: none;
   transition: opacity $transition-fast;

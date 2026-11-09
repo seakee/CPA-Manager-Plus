@@ -3070,7 +3070,7 @@
   line-height: 1.5;
   white-space: nowrap;
   /* floating layer: elevation allowed */
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  box-shadow: var(--floating-shadow-sm);
   z-index: $z-dropdown;
   pointer-events: none;
   color: var(--text-primary);

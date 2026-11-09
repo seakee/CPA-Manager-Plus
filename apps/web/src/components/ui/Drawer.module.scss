@@ -7,7 +7,7 @@
   z-index: $z-modal;
   display: flex;
   justify-content: flex-end;
-  background: rgba(15, 23, 42, 0.52);
+  background: var(--overlay-scrim-drawer);
 
   @include mobile {
     align-items: flex-end;
@@ -31,7 +31,7 @@
   background: var(--app-surface-strong, var(--bg-primary));
   border-left: 1px solid var(--border-color);
   /* floating layer: elevation allowed */
-  box-shadow: -24px 0 48px rgba(15, 23, 42, 0.18);
+  box-shadow: var(--floating-shadow-drawer);
   outline: none;
 
   @include mobile {

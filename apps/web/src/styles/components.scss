@@ -523,7 +523,7 @@ textarea {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--overlay-scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -562,7 +562,7 @@ textarea {
   border-radius: var(--app-radius-md);
   border: 1px solid var(--border-color);
   /* floating layer: elevation allowed */
-  box-shadow: $shadow-lg;
+  box-shadow: var(--floating-shadow-dialog);
   max-width: 100%;
   max-height: calc(100vh - #{$spacing-lg * 2});
   overflow: hidden;
