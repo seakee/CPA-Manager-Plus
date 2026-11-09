@@ -940,13 +940,10 @@ describe('design token checker', () => {
   });
 
   it('maintains WCAG AA (>= 4.5:1) contrast for .btn-danger text against --danger-solid, --danger-solid-hover, and --danger-solid-active in light and dark themes', () => {
-    const themesScss = stripComments(
-      readFileSync(path.join(repoRoot, 'apps/web/src/styles/themes.scss'), 'utf8'),
-      { isScript: false, allowLineComments: true }
-    );
-    const componentsScss = stripComments(
-      readFileSync(path.join(repoRoot, 'apps/web/src/styles/components.scss'), 'utf8'),
-      { isScript: false, allowLineComments: true }
+    const themesRaw = readFileSync(path.join(repoRoot, 'apps/web/src/styles/themes.scss'), 'utf8');
+    const componentsRaw = readFileSync(
+      path.join(repoRoot, 'apps/web/src/styles/components.scss'),
+      'utf8'
     );
 
     const listTopLevelBlocks = (source) => {
@@ -1018,7 +1015,12 @@ describe('design token checker', () => {
           }
         }
         for (const match of directText.matchAll(/([A-Za-z_-][A-Za-z0-9_-]*)\s*:\s*([^;]+);/g)) {
-          declarations[match[1].trim()] = match[2].trim();
+          const prop = match[1].trim();
+          const val = match[2].trim();
+          declarations[prop] = val;
+          if (prop === 'background-color' || prop === 'background') {
+            declarations.__bgExpr = val;
+          }
         }
       }
       return declarations;
@@ -1027,18 +1029,12 @@ describe('design token checker', () => {
     // Verify grouped selector lists (e.g. `&.btn-danger, &.btn-critical {`) are matched per item.
     expect(
       extractDirectDeclarations(
-        findMatchingBlocks('&.btn-danger, &.btn-critical { color: var(--primary-contrast); }', '&.btn-danger')
+        findMatchingBlocks(
+          '&.btn-danger, &.btn-critical { color: var(--primary-contrast); }',
+          '&.btn-danger'
+        )
       )
     ).toEqual({ color: 'var(--primary-contrast)' });
-
-    const rootTokens = extractDirectDeclarations(findMatchingBlocks(themesScss, ':root'));
-    const darkOverrides = extractDirectDeclarations(
-      findMatchingBlocks(themesScss, "[data-theme='dark']")
-    );
-    const themeTokenMaps = {
-      light: rootTokens,
-      dark: { ...rootTokens, ...darkOverrides },
-    };
 
     const extractScopedDangerRules = (scopeSource) => {
       const btnBlocks = findMatchingBlocks(scopeSource, '.btn', { optional: true });
@@ -1046,15 +1042,21 @@ describe('design token checker', () => {
       const nestedDangerBlocks = btnBlocks.flatMap((block) =>
         findMatchingBlocks(block, '&.btn-danger', { optional: true })
       );
-      const flatDangerBlocks = findMatchingBlocks(scopeSource, '.btn.btn-danger', { optional: true });
+      const flatDangerBlocks = findMatchingBlocks(scopeSource, '.btn.btn-danger', {
+        optional: true,
+      });
       const dangerBlocks = [...nestedDangerBlocks, ...flatDangerBlocks];
       const dangerDecls = extractDirectDeclarations(dangerBlocks);
       const hoverBlocks = [
-        ...dangerBlocks.flatMap((block) => findMatchingBlocks(block, '&:hover', { optional: true })),
+        ...dangerBlocks.flatMap((block) =>
+          findMatchingBlocks(block, '&:hover', { optional: true })
+        ),
         ...findMatchingBlocks(scopeSource, '.btn.btn-danger:hover', { optional: true }),
       ];
       const activeBlocks = [
-        ...dangerBlocks.flatMap((block) => findMatchingBlocks(block, '&:active', { optional: true })),
+        ...dangerBlocks.flatMap((block) =>
+          findMatchingBlocks(block, '&:active', { optional: true })
+        ),
         ...findMatchingBlocks(scopeSource, '.btn.btn-danger:active', { optional: true }),
       ];
       return {
@@ -1065,59 +1067,14 @@ describe('design token checker', () => {
       };
     };
 
-    const baseRules = extractScopedDangerRules(componentsScss);
-    const darkScopeBlocks = findMatchingBlocks(componentsScss, "[data-theme='dark']", {
-      optional: true,
-    });
-    const darkRules = extractScopedDangerRules(darkScopeBlocks.join('\n'));
-
     const extractVarTokenName = (valueExpr) => {
       const match = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,[^)]+)?\)$/.exec(valueExpr ?? '');
       if (!match) {
-        throw new Error(`Expected single CSS var() token reference, got: ${JSON.stringify(valueExpr)}`);
+        throw new Error(
+          `Expected single CSS var() token reference, got: ${JSON.stringify(valueExpr)}`
+        );
       }
       return match[1];
-    };
-
-    const restingBgToken = extractVarTokenName(
-      baseRules.dangerDecls['background-color'] ?? baseRules.dangerDecls.background
-    );
-    const hoverBgToken = extractVarTokenName(
-      baseRules.hoverDecls['background-color'] ?? baseRules.hoverDecls.background
-    );
-    const activeBgToken = extractVarTokenName(
-      baseRules.activeDecls['background-color'] ?? baseRules.activeDecls.background
-    );
-    expect([restingBgToken, hoverBgToken, activeBgToken]).toEqual([
-      '--danger-solid',
-      '--danger-solid-hover',
-      '--danger-solid-active',
-    ]);
-
-    const lightBaseTextExpr = baseRules.dangerDecls.color ?? baseRules.btnDecls.color;
-    const darkBaseTextExpr =
-      darkRules.dangerDecls.color ??
-      baseRules.dangerDecls.color ??
-      darkRules.btnDecls.color ??
-      baseRules.btnDecls.color;
-
-    const stateRulesByTheme = {
-      light: [
-        { bgToken: restingBgToken, textExpr: lightBaseTextExpr },
-        { bgToken: hoverBgToken, textExpr: baseRules.hoverDecls.color ?? lightBaseTextExpr },
-        { bgToken: activeBgToken, textExpr: baseRules.activeDecls.color ?? lightBaseTextExpr },
-      ],
-      dark: [
-        { bgToken: restingBgToken, textExpr: darkBaseTextExpr },
-        {
-          bgToken: hoverBgToken,
-          textExpr: darkRules.hoverDecls.color ?? baseRules.hoverDecls.color ?? darkBaseTextExpr,
-        },
-        {
-          bgToken: activeBgToken,
-          textExpr: darkRules.activeDecls.color ?? baseRules.activeDecls.color ?? darkBaseTextExpr,
-        },
-      ],
     };
 
     const parseCssColorToRgb = (rawColor) => {
@@ -1188,16 +1145,139 @@ describe('design token checker', () => {
       return (lighter + 0.05) / (darker + 0.05);
     };
 
-    for (const [themeName, tokenMap] of Object.entries(themeTokenMaps)) {
-      for (const { bgToken, textExpr } of stateRulesByTheme[themeName]) {
-        const textRgb = resolveColorInTheme(textExpr, tokenMap);
-        const bgRgb = resolveColorInTheme(bgToken, tokenMap);
-        const ratio = wcagContrastRatio(textRgb, bgRgb);
+    const evaluateDangerButtonContrast = (themesSource, componentsSource) => {
+      const themesScss = stripComments(themesSource, {
+        isScript: false,
+        allowLineComments: true,
+      });
+      const componentsScss = stripComments(componentsSource, {
+        isScript: false,
+        allowLineComments: true,
+      });
+
+      const rootTokens = extractDirectDeclarations(findMatchingBlocks(themesScss, ':root'));
+      const darkOverrides = extractDirectDeclarations(
+        findMatchingBlocks(themesScss, "[data-theme='dark']")
+      );
+      const themeTokenMaps = {
+        light: rootTokens,
+        dark: { ...rootTokens, ...darkOverrides },
+      };
+
+      const baseRules = extractScopedDangerRules(componentsScss);
+      const darkScopeBlocks = findMatchingBlocks(componentsScss, "[data-theme='dark']", {
+        optional: true,
+      });
+      const darkRules = extractScopedDangerRules(darkScopeBlocks.join('\n'));
+
+      // Cascade chains ordered from highest to lowest priority per specificity & source order:
+      // base .btn (0,1,0) < base .btn.btn-danger (0,2,0) <= dark .btn (0,2,0, later)
+      // < base .btn.btn-danger:hover|:active (0,3,0) <= dark .btn.btn-danger (0,3,0, later)
+      // < dark .btn.btn-danger:hover|:active (0,4,0).
+      const chainsByTheme = {
+        light: {
+          resting: [baseRules.dangerDecls, baseRules.btnDecls],
+          hover: [baseRules.hoverDecls, baseRules.dangerDecls, baseRules.btnDecls],
+          active: [baseRules.activeDecls, baseRules.dangerDecls, baseRules.btnDecls],
+        },
+        dark: {
+          resting: [
+            darkRules.dangerDecls,
+            darkRules.btnDecls,
+            baseRules.dangerDecls,
+            baseRules.btnDecls,
+          ],
+          hover: [
+            darkRules.hoverDecls,
+            darkRules.dangerDecls,
+            baseRules.hoverDecls,
+            darkRules.btnDecls,
+            baseRules.dangerDecls,
+            baseRules.btnDecls,
+          ],
+          active: [
+            darkRules.activeDecls,
+            darkRules.dangerDecls,
+            baseRules.activeDecls,
+            darkRules.btnDecls,
+            baseRules.dangerDecls,
+            baseRules.btnDecls,
+          ],
+        },
+      };
+
+      const resolveFromChain = (chain) => {
+        const textExpr = chain.map((d) => d.color).find((v) => v !== undefined);
+        const bgExpr = chain.map((d) => d.__bgExpr).find((v) => v !== undefined);
+        return {
+          textExpr,
+          bgToken: extractVarTokenName(bgExpr),
+        };
+      };
+
+      const results = {};
+      for (const [themeName, tokenMap] of Object.entries(themeTokenMaps)) {
+        results[themeName] = {};
+        for (const [stateName, chain] of Object.entries(chainsByTheme[themeName])) {
+          const { textExpr, bgToken } = resolveFromChain(chain);
+          const textRgb = resolveColorInTheme(textExpr, tokenMap);
+          const bgRgb = resolveColorInTheme(bgToken, tokenMap);
+          results[themeName][stateName] = {
+            textExpr,
+            bgToken,
+            ratio: wcagContrastRatio(textRgb, bgRgb),
+          };
+        }
+      }
+      return results;
+    };
+
+    // (a) Real stylesheets: verify >= 4.5:1 contrast across all states/themes and resolved background tokens.
+    const realResults = evaluateDangerButtonContrast(themesRaw, componentsRaw);
+    for (const themeName of ['light', 'dark']) {
+      for (const [stateName, { textExpr, bgToken, ratio }] of Object.entries(
+        realResults[themeName]
+      )) {
         expect(
           ratio,
-          `.btn-danger text (${textExpr}) vs ${bgToken} in ${themeName} theme must be >= 4.5:1 (got ${ratio.toFixed(2)}:1)`
+          `.btn-danger (${stateName}) text (${textExpr}) vs ${bgToken} in ${themeName} theme must be >= 4.5:1 (got ${ratio.toFixed(2)}:1)`
         ).toBeGreaterThanOrEqual(4.5);
       }
+
+      expect([
+        realResults[themeName].resting.bgToken,
+        realResults[themeName].hover.bgToken,
+        realResults[themeName].active.bgToken,
+      ]).toEqual(['--danger-solid', '--danger-solid-hover', '--danger-solid-active']);
     }
+
+    // (b) Counterexample 1: injecting `background-color: var(--data-red-base);` into dark `.btn.btn-danger`
+    // overrides the base danger backgrounds in dark theme and drops contrast below 4.5:1 (~2.77:1).
+    const componentsWithDarkRedBg = componentsRaw.replace(
+      /(\.btn\.btn-primary,\s*\.btn\.btn-danger\s*\{\s*color:\s*var\(--primary-contrast\);)/,
+      '$1\n    background-color: var(--data-red-base);'
+    );
+    expect(componentsWithDarkRedBg).not.toBe(componentsRaw);
+    const darkRedBgResults = evaluateDangerButtonContrast(themesRaw, componentsWithDarkRedBg);
+    expect(darkRedBgResults.dark.resting.bgToken).toBe('--data-red-base');
+    expect(darkRedBgResults.dark.hover.bgToken).toBe('--data-red-base');
+    expect(darkRedBgResults.dark.active.bgToken).toBe('--data-red-base');
+    expect(darkRedBgResults.dark.resting.ratio).toBeLessThan(4.5);
+    expect(darkRedBgResults.dark.hover.ratio).toBeLessThan(4.5);
+    expect(darkRedBgResults.dark.active.ratio).toBeLessThan(4.5);
+
+    // (b) Counterexample 2: changing dark `.btn.btn-danger` text colour to `var(--app-bg)`
+    // drops dark resting contrast below 4.5:1 (~4.10:1).
+    const componentsWithDarkAppBgText = componentsRaw.replace(
+      /(\.btn\.btn-primary,\s*\.btn\.btn-danger\s*\{\s*)color:\s*var\(--primary-contrast\);/,
+      '$1color: var(--app-bg);'
+    );
+    expect(componentsWithDarkAppBgText).not.toBe(componentsRaw);
+    const darkAppBgTextResults = evaluateDangerButtonContrast(
+      themesRaw,
+      componentsWithDarkAppBgText
+    );
+    expect(darkAppBgTextResults.dark.resting.textExpr).toBe('var(--app-bg)');
+    expect(darkAppBgTextResults.dark.resting.ratio).toBeLessThan(4.5);
   });
 });
