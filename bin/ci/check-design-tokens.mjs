@@ -165,8 +165,9 @@ const consumeScriptBraces = (src, start) => {
 };
 
 // True when `index` sits among the attributes of an open JSX tag: walking back
-// over attribute strings and `{...}` values reaches `<Tag` before any `>`,
-// unmatched `{`/`(`, or `;`. Class fields and plain assignments fail this.
+// over attribute strings and `{...}` values reaches `<Tag` (optionally with
+// TSX type arguments, `<Tag<T>`) before any other `>`, unmatched `{`/`(`, or
+// `;`. Class fields and plain assignments fail this.
 const isInsideJsxOpeningTag = (src, index) => {
   let depth = 0;
   let cursor = index - 1;
@@ -184,11 +185,33 @@ const isInsideJsxOpeningTag = (src, index) => {
       depth -= 1;
     } else if (depth === 0) {
       if (ch === '<') return /[A-Za-z]/.test(src[cursor + 1] ?? '');
-      if (ch === '>' || ch === '(' || ch === ')' || ch === ';') return false;
+      if (ch === '>') return findGenericTagStart(src, cursor) !== -1;
+      if (ch === '(' || ch === ')' || ch === ';') return false;
     }
     cursor -= 1;
   }
   return false;
+};
+
+// For a `>` that closes TSX type arguments directly after a JSX tag name
+// (`<Tag<T>`, `<Ns.Tag<Map<K, V>>`), return the index of the tag's `<`; else -1.
+const findGenericTagStart = (src, closeIndex) => {
+  let angle = 0;
+  let cursor = closeIndex;
+  while (cursor >= 0) {
+    const ch = src[cursor];
+    if (ch === '>') angle += 1;
+    else if (ch === '<') {
+      angle -= 1;
+      if (angle === 0) break;
+    } else if (!/[\w$.,\s[\]|&'"]/.test(ch)) {
+      return -1;
+    }
+    cursor -= 1;
+  }
+  if (cursor < 0) return -1;
+  const tagMatch = /<[A-Za-z][\w$.]*$/.exec(src.slice(Math.max(0, cursor - 200), cursor));
+  return tagMatch ? cursor - tagMatch[0].length : -1;
 };
 
 // Custom-property keys at the top level of the object literal written directly
@@ -469,6 +492,7 @@ const maskStyleSource = (cleaned, nonValueRanges) => {
   const withoutSelectors = chars.join('');
   // Blank literal text but keep Sass `#{...}` bodies: Sass evaluates them even
   // inside quoted strings and url(), so their expressions must stay visible.
+  // String literals inside such a body are text again and are masked in turn.
   const maskLiteral = (start, end) => {
     let cursor = start;
     while (cursor < end) {
@@ -476,7 +500,19 @@ const maskStyleSource = (cleaned, nonValueRanges) => {
         const interpEnd = Math.min(consumeBalanced(withoutSelectors, cursor + 1, '{', '}'), end);
         chars[cursor] = ' ';
         chars[cursor + 1] = ' ';
-        if (withoutSelectors[interpEnd - 1] === '}') chars[interpEnd - 1] = ' ';
+        const bodyEnd = withoutSelectors[interpEnd - 1] === '}' ? interpEnd - 1 : interpEnd;
+        if (bodyEnd < interpEnd) chars[bodyEnd] = ' ';
+        let inner = cursor + 2;
+        while (inner < bodyEnd) {
+          const innerCh = withoutSelectors[inner];
+          if (innerCh === "'" || innerCh === '"') {
+            const quoteEnd = Math.min(consumeQuoted(withoutSelectors, inner), bodyEnd);
+            maskLiteral(inner, quoteEnd);
+            inner = quoteEnd;
+            continue;
+          }
+          inner += 1;
+        }
         cursor = interpEnd;
         continue;
       }
@@ -597,13 +633,15 @@ const FONT_SIZE_KEYWORDS = new Set([
   'math',
 ]);
 
-// A font-size token: a dimension/percentage, a size keyword, or `size/line-height`.
+// A font-size token: a dimension/percentage, a unitless zero length, a size
+// keyword, or `size/line-height`.
 const isFontSizeToken = (token) => {
   const size = token.split('/')[0];
   return (
     token.includes('/') ||
     FONT_SIZE_KEYWORDS.has(size) ||
-    /^[+-]?(?:\d+\.?\d*|\.\d+)(?:%|[a-z]+)$/.test(size)
+    /^[+-]?(?:\d+\.?\d*|\.\d+)(?:%|[a-z]+)$/.test(size) ||
+    /^[+-]?(?:0+\.?0*|\.0+)$/.test(size)
   );
 };
 

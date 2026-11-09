@@ -134,7 +134,7 @@ describe('design token checker', () => {
     ]);
   });
 
-  it('R1 counts only top-level keys of a JSX style object as definitions, not class fields or nested call arguments', () => {
+  it('R1 counts only top-level keys of a JSX style object as definitions, including generic JSX tags, not class fields or nested call arguments', () => {
     const root = createFixtureTree({
       'components/Hint.tsx': [
         `export class ThemeHint {`,
@@ -148,25 +148,32 @@ describe('design token checker', () => {
         `    style={{ ...base, color: pick({ '--from-nested-arg': 'red' }), ['--from-style']: v } as object}`,
         `  />`,
         `);`,
+        `export const Generic = () => (`,
+        `  <Widget<Map<string, number>> item="ok" style={{ '--from-generic-tag': 'red' }} />`,
+        `);`,
+        `const closed = <b>text</b>; style = { '--after-closed-tag': 1 };`,
       ].join('\n'),
       'components/Hint.module.scss': [
         `.hint {`,
         `  color: var(--from-class-field);`,
         `  background: var(--from-nested-arg);`,
         `  border-color: var(--from-style);`,
+        `  outline-color: var(--from-generic-tag);`,
+        `  fill: var(--after-closed-tag);`,
         `}`,
       ].join('\n'),
     });
 
     expect(collectFindings(root).rules['undefined-var']).toEqual({
       'components/Hint.module.scss': {
+        '--after-closed-tag': 1,
         '--from-class-field': 1,
         '--from-nested-arg': 1,
       },
     });
   });
 
-  it('R4 counts $radius-* evaluated through Sass interpolation inside strings and url(), but not plain string text', () => {
+  it('R4 counts $radius-* evaluated through Sass interpolation inside strings and url(), but not plain string text or string literals inside the interpolation', () => {
     const root = createFixtureTree({
       'components/Badge.module.scss': [
         `.interpolated::after {`,
@@ -177,6 +184,9 @@ describe('design token checker', () => {
         `  content: "$radius-sm var(--plain-text) !important";`,
         `  background: url("/$radius-sm.svg");`,
         `}`,
+        `.literalInInterpolation::after {`,
+        `  content: "radius: #{'$radius-sm'} #{'var(--literal-in-interp)'}";`,
+        `}`,
       ].join('\n'),
     });
 
@@ -186,19 +196,21 @@ describe('design token checker', () => {
     expect(rules.important).toEqual({});
   });
 
-  it('R3 checks font shorthand weights only before the font-size, treating later words as family names', () => {
+  it('R3 checks font shorthand weights only before the font-size (including a unitless zero), treating later words as family names', () => {
     const root = createFixtureTree({
       'components/Type.module.scss': [
         `.familyBolder { font: 14px bolder, sans-serif; }`,
         `.familyLighter { font: 14px/1.4 lighter, sans-serif; }`,
+        `.familyAfterZero { font: 0 bolder, sans-serif; }`,
         `.allowed { font: italic 600 small serif; }`,
         `.weightBolder { font: bolder 14px sans-serif; }`,
         `.weightNumeric { font: italic 650 1rem/1.5 serif; }`,
+        `.weightBeforeZero { font: bolder 0 sans-serif; }`,
       ].join('\n'),
     });
 
     expect(collectFindings(root).rules['font-weight']).toEqual({
-      'components/Type.module.scss': 2,
+      'components/Type.module.scss': 3,
     });
   });
 
