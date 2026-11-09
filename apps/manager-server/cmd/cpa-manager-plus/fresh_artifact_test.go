@@ -591,12 +591,14 @@ func TestFreshArtifactSupervisorErrorPassthroughAndRuntimeDown(t *testing.T) {
 		{http.StatusConflict, "unsupported_platform"},
 		{http.StatusConflict, "acquisition_in_progress"},
 		{http.StatusConflict, "artifact_conflict"},
+		{http.StatusConflict, "artifact_already_active"},
 		{http.StatusRequestEntityTooLarge, "archive_too_large"},
 		{http.StatusUnprocessableEntity, "archive_invalid"},
 		{http.StatusUnprocessableEntity, "artifact_mismatch"},
 		{http.StatusBadGateway, "source_unreachable"},
 		{http.StatusBadGateway, "download_failed"},
 		{http.StatusInternalServerError, "install_failed"},
+		{http.StatusInternalServerError, "recovery_required"},
 	}
 
 	for _, tc := range codes {

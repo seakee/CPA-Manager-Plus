@@ -25,6 +25,48 @@ const (
 	artifactUploadTimeout  = 15 * time.Minute
 )
 
+const (
+	ArtifactCodeInvalidRequest        = "invalid_request"
+	ArtifactCodeUnauthorized          = "unauthorized"
+	ArtifactCodeUnsupportedPlatform   = "unsupported_platform"
+	ArtifactCodeAcquisitionInProgress = "acquisition_in_progress"
+	ArtifactCodeArtifactConflict      = "artifact_conflict"
+	ArtifactCodeArtifactAlreadyActive = "artifact_already_active"
+	ArtifactCodeArchiveTooLarge       = "archive_too_large"
+	ArtifactCodeArchiveInvalid        = "archive_invalid"
+	ArtifactCodeArtifactMismatch      = "artifact_mismatch"
+	ArtifactCodeSourceUnreachable     = "source_unreachable"
+	ArtifactCodeDownloadFailed        = "download_failed"
+	ArtifactCodeInstallFailed         = "install_failed"
+	ArtifactCodeRecoveryRequired      = "recovery_required"
+)
+
+// KnownArtifactErrorStatus returns the canonical HTTP status for a Supervisor
+// artifact error code.
+func KnownArtifactErrorStatus(code string) (int, bool) {
+	switch code {
+	case ArtifactCodeInvalidRequest:
+		return http.StatusBadRequest, true
+	case ArtifactCodeUnauthorized:
+		return http.StatusUnauthorized, true
+	case ArtifactCodeUnsupportedPlatform,
+		ArtifactCodeAcquisitionInProgress,
+		ArtifactCodeArtifactConflict,
+		ArtifactCodeArtifactAlreadyActive:
+		return http.StatusConflict, true
+	case ArtifactCodeArchiveTooLarge:
+		return http.StatusRequestEntityTooLarge, true
+	case ArtifactCodeArchiveInvalid, ArtifactCodeArtifactMismatch:
+		return http.StatusUnprocessableEntity, true
+	case ArtifactCodeSourceUnreachable, ArtifactCodeDownloadFailed:
+		return http.StatusBadGateway, true
+	case ArtifactCodeInstallFailed, ArtifactCodeRecoveryRequired:
+		return http.StatusInternalServerError, true
+	default:
+		return 0, false
+	}
+}
+
 // ArtifactError preserves the Supervisor artifact endpoint's machine-readable
 // error code and HTTP status without echoing untrusted remote messages.
 type ArtifactError struct {
@@ -378,5 +420,10 @@ func decodeArtifactError(response *http.Response) error {
 	if err := decodeStrictJSON(response.Body, &envelope); err != nil || strings.TrimSpace(envelope.Code) == "" {
 		return nil
 	}
-	return &ArtifactError{Code: strings.TrimSpace(envelope.Code), HTTPStatus: response.StatusCode}
+	code := strings.TrimSpace(envelope.Code)
+	status := response.StatusCode
+	if knownStatus, ok := KnownArtifactErrorStatus(code); ok {
+		status = knownStatus
+	}
+	return &ArtifactError{Code: code, HTTPStatus: status}
 }

@@ -472,6 +472,7 @@ func (e *Executor) completeActivation(
 	}
 	return result, nil
 }
+
 const originStageRequestFile = ".stage-request.json"
 
 type activationDestinationJournal struct {
@@ -496,7 +497,7 @@ func spawnFailureCodeForOperationType(opType string) string {
 }
 
 func (j *activationDestinationJournal) Resolve(ctx context.Context, authority journal.Authority, intent journal.Intent) (journal.Operation, bool, error) {
-	if intent.OperationType == "stage_destination" {
+	if intent.OperationType == "stage_destination" && !j.executor.activeSelectionAmbiguous {
 		if err := j.executor.restoreOriginStageRequestLocked(); err != nil {
 			return journal.Operation{}, false, err
 		}

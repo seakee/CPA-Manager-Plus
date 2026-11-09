@@ -198,6 +198,8 @@ func TestArtifactClientStatusProbeAcquireAndUpload(t *testing.T) {
 }
 
 func TestArtifactClientMapsSupervisorErrorCodesAndRejectsUnknownFields(t *testing.T) {
+	var uploadCode string
+	var uploadStatus int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -207,8 +209,8 @@ func TestArtifactClientMapsSupervisorErrorCodesAndRejectsUnknownFields(t *testin
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"code":"acquisition_in_progress"}`))
 		case "/v1/runtime/artifact/upload":
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			_, _ = w.Write([]byte(`{"code":"artifact_mismatch"}`))
+			w.WriteHeader(uploadStatus)
+			_, _ = w.Write([]byte(`{"code":"` + uploadCode + `"}`))
 		}
 	}))
 	defer server.Close()
@@ -224,9 +226,20 @@ func TestArtifactClientMapsSupervisorErrorCodesAndRejectsUnknownFields(t *testin
 		t.Fatalf("Acquire() error = %v (code=%q status=%d ok=%v)", err, code, status, ok)
 	}
 
-	_, err = client.Upload(t.Context(), strings.NewReader("archive"), 7)
-	code, status, ok = ArtifactErrorCode(err)
-	if !ok || status != http.StatusUnprocessableEntity || code != "artifact_mismatch" {
-		t.Fatalf("Upload() error = %v (code=%q status=%d ok=%v)", err, code, status, ok)
+	for _, tc := range []struct {
+		code   string
+		status int
+	}{
+		{code: ArtifactCodeArtifactMismatch, status: http.StatusUnprocessableEntity},
+		{code: ArtifactCodeArtifactAlreadyActive, status: http.StatusConflict},
+		{code: ArtifactCodeRecoveryRequired, status: http.StatusInternalServerError},
+	} {
+		uploadCode = tc.code
+		uploadStatus = tc.status
+		_, err = client.Upload(t.Context(), strings.NewReader("archive"), 7)
+		code, status, ok = ArtifactErrorCode(err)
+		if !ok || status != tc.status || code != tc.code {
+			t.Fatalf("Upload(%s) error = %v (code=%q status=%d ok=%v)", tc.code, err, code, status, ok)
+		}
 	}
 }

@@ -350,7 +350,7 @@ func TestStoreAcquireStagesVerifiedArtifactAndLicenseAndHandlesConflicts(t *test
 
 	var downloads int
 	var phases []string
-	metadata, err := store.Acquire(
+	firstStage, err := store.AcquireStage(
 		t.Context(),
 		"8.0.55",
 		wantArtifactID,
@@ -366,14 +366,15 @@ func TestStoreAcquireStagesVerifiedArtifactAndLicenseAndHandlesConflicts(t *test
 		func(phase string) { phases = append(phases, phase) },
 	)
 	if err != nil {
-		t.Fatalf("Acquire() error = %v", err)
+		t.Fatalf("AcquireStage() error = %v", err)
 	}
-	if downloads != 1 || metadata.ArtifactID != wantArtifactID ||
+	metadata := firstStage.Metadata
+	if !firstStage.CreatedStage || downloads != 1 || metadata.ArtifactID != wantArtifactID ||
 		metadata.SourceArchiveDigest != wantArchiveDigest || metadata.Version != "8.0.55" {
-		t.Fatalf("Acquire() downloads=%d metadata=%#v", downloads, metadata)
+		t.Fatalf("AcquireStage() created=%v downloads=%d metadata=%#v", firstStage.CreatedStage, downloads, metadata)
 	}
 	if strings.Join(phases, ",") != "downloading,verifying,installing" {
-		t.Fatalf("Acquire() phases = %v", phases)
+		t.Fatalf("AcquireStage() phases = %v", phases)
 	}
 
 	finalDir := filepath.Join(root, "8.0.55")
@@ -389,23 +390,46 @@ func TestStoreAcquireStagesVerifiedArtifactAndLicenseAndHandlesConflicts(t *test
 		t.Fatalf("ResolveFinalized() = %#v, %v", resolved, err)
 	}
 
-	// Second call with the same artifactId reuses the existing finalized stage without downloading.
-	reused, err := store.Acquire(
+	// Even when a matching finalized stage already exists, Store.Acquire must
+	// still consume and verify the archive stream; a tampered archive must fail
+	// with ErrArtifactMismatch.
+	tamperedArchive := tarGzip(t,
+		archiveEntry{name: stagedExecutableName, typeFlag: tar.TypeReg, data: []byte("#!/bin/sh\necho tampered\n")},
+		archiveEntry{name: stagedLicenseName, typeFlag: tar.TypeReg, data: license},
+	)
+	if _, err := store.AcquireStage(
 		t.Context(),
 		"8.0.55",
 		wantArtifactID,
-		func(context.Context, io.Writer, ProgressFunc) error {
+		func(_ context.Context, dst io.Writer, _ ProgressFunc) error {
 			downloads++
-			return errors.New("unexpected download")
+			_, writeErr := dst.Write(tamperedArchive)
+			return writeErr
+		},
+		nil,
+		nil,
+	); !errors.Is(err, ErrArtifactMismatch) || downloads != 2 {
+		t.Fatalf("tampered AcquireStage() against existing stage = %v, downloads=%d; want ErrArtifactMismatch, 2", err, downloads)
+	}
+
+	// Second call with a verified archive reuses the existing finalized stage with CreatedStage=false.
+	reusedStage, err := store.AcquireStage(
+		t.Context(),
+		"8.0.55",
+		wantArtifactID,
+		func(_ context.Context, dst io.Writer, _ ProgressFunc) error {
+			downloads++
+			_, writeErr := dst.Write(archive)
+			return writeErr
 		},
 		nil,
 		nil,
 	)
-	if err != nil || reused != metadata || downloads != 1 {
-		t.Fatalf("idempotent Acquire() = %#v, downloads=%d, err=%v", reused, downloads, err)
+	if err != nil || reusedStage.CreatedStage || reusedStage.Metadata != metadata || downloads != 3 {
+		t.Fatalf("reused AcquireStage() = %#v, downloads=%d, err=%v", reusedStage, downloads, err)
 	}
 
-	// Conflicting artifactId for the same version is refused without overwriting.
+	// Conflicting artifactId for the same version is refused before downloading.
 	otherID := artifact.ID("sha256:" + strings.Repeat("b", 64))
 	if _, err := store.Acquire(
 		t.Context(),
@@ -417,7 +441,7 @@ func TestStoreAcquireStagesVerifiedArtifactAndLicenseAndHandlesConflicts(t *test
 		},
 		nil,
 		nil,
-	); !errors.Is(err, ErrArtifactConflict) || downloads != 1 {
+	); !errors.Is(err, ErrArtifactConflict) || downloads != 3 {
 		t.Fatalf("conflicting Acquire() error = %v, downloads=%d; want ErrArtifactConflict", err, downloads)
 	}
 	gotBinary, err := os.ReadFile(filepath.Join(finalDir, stagedExecutableName))
@@ -701,7 +725,7 @@ func TestStoreAcquireBackfillsMissingLicenseOnPreparedStage(t *testing.T) {
 		archiveEntry{name: stagedExecutableName, typeFlag: tar.TypeReg, data: binary},
 		archiveEntry{name: stagedLicenseName, typeFlag: tar.TypeReg, data: license},
 	)
-	acquiredMeta, err := store.Acquire(
+	acquiredStage, err := store.AcquireStage(
 		t.Context(),
 		"8.0.55",
 		wantArtifactID,
@@ -714,10 +738,10 @@ func TestStoreAcquireBackfillsMissingLicenseOnPreparedStage(t *testing.T) {
 		nil,
 	)
 	if err != nil {
-		t.Fatalf("Acquire(with LICENSE) error = %v", err)
+		t.Fatalf("AcquireStage(with LICENSE) error = %v", err)
 	}
-	if acquireDownloads != 2 || acquiredMeta != stagedMeta {
-		t.Fatalf("Acquire(with LICENSE) downloads=%d meta=%+v, want 2 and %+v", acquireDownloads, acquiredMeta, stagedMeta)
+	if acquiredStage.CreatedStage || acquireDownloads != 2 || acquiredStage.Metadata != stagedMeta {
+		t.Fatalf("AcquireStage(with LICENSE) created=%v downloads=%d meta=%+v, want false, 2 and %+v", acquiredStage.CreatedStage, acquireDownloads, acquiredStage.Metadata, stagedMeta)
 	}
 	assertMode(t, filepath.Join(finalDir, stagedLicenseName), 0o444)
 	gotLicense, err := os.ReadFile(filepath.Join(finalDir, stagedLicenseName))
@@ -728,20 +752,67 @@ func TestStoreAcquireBackfillsMissingLicenseOnPreparedStage(t *testing.T) {
 		t.Fatal("HasAcquiredStage() = false after LICENSE backfill")
 	}
 
-	// 4. Subsequent Store.Acquire reuses the now-complete stage without downloading again.
-	reusedMeta, err := store.Acquire(
+	// 4. Subsequent Store.AcquireStage still verifies archive bytes and reuses the existing stage with CreatedStage=false.
+	reusedStage, err := store.AcquireStage(
 		t.Context(),
 		"8.0.55",
 		wantArtifactID,
-		func(context.Context, io.Writer, ProgressFunc) error {
+		func(_ context.Context, dst io.Writer, _ ProgressFunc) error {
 			acquireDownloads++
-			return errors.New("unexpected download")
+			_, writeErr := dst.Write(archiveWithLicense)
+			return writeErr
 		},
 		nil,
 		nil,
 	)
-	if err != nil || reusedMeta != stagedMeta || acquireDownloads != 2 {
-		t.Fatalf("reused Acquire() = %+v, downloads=%d, err=%v", reusedMeta, acquireDownloads, err)
+	if err != nil || reusedStage.CreatedStage || reusedStage.Metadata != stagedMeta || acquireDownloads != 3 {
+		t.Fatalf("reused AcquireStage() = %+v, downloads=%d, err=%v", reusedStage, acquireDownloads, err)
+	}
+}
+
+func TestStoreAcquireStageRemovesNewlyCreatedStageOnPostRenameFailure(t *testing.T) {
+	binary := []byte("#!/bin/sh\necho post-rename-failure-cpa\n")
+	binarySum := sha256.Sum256(binary)
+	wantArtifactID := artifact.ID("sha256:" + hex.EncodeToString(binarySum[:]))
+	license := []byte("MIT License\n")
+	archive := tarGzip(t,
+		archiveEntry{name: stagedExecutableName, typeFlag: tar.TypeReg, data: binary},
+		archiveEntry{name: stagedLicenseName, typeFlag: tar.TypeReg, data: license},
+	)
+
+	root := t.TempDir()
+	store, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var observedFinalOnDisk bool
+	acquirePostRenameHook = func(finalPath string) error {
+		if info, statErr := os.Lstat(finalPath); statErr == nil && info.IsDir() {
+			observedFinalOnDisk = true
+		}
+		return errors.New("injected post-rename failure")
+	}
+	defer func() {
+		acquirePostRenameHook = nil
+	}()
+
+	if _, err := store.AcquireStage(
+		t.Context(),
+		"8.0.55",
+		wantArtifactID,
+		CopyUploadArchive(bytes.NewReader(archive), int64(len(archive))),
+		nil,
+		nil,
+	); !errors.Is(err, ErrStaging) {
+		t.Fatalf("AcquireStage() with post-rename failure = %v, want ErrStaging", err)
+	}
+	if !observedFinalOnDisk {
+		t.Fatal("acquirePostRenameHook did not observe renamed final stage on disk")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("stage root after post-rename failure = %v, %v; want newly created stage removed", entries, err)
 	}
 }
 

@@ -579,6 +579,397 @@ func TestAcquireArtifactCDNStrictNonPublicRefusalAndPreparedStageLicenseBackfill
 	}
 }
 
+type faultSelectionStore struct {
+	*selection.Store
+	commitErr   error
+	commitCalls int
+}
+
+func (s *faultSelectionStore) Commit(descriptor selection.Descriptor) error {
+	s.commitCalls++
+	if s.commitErr != nil {
+		return s.commitErr
+	}
+	return s.Store.Commit(descriptor)
+}
+
+type countingFailReader struct {
+	data  []byte
+	reads int
+}
+
+func (r *countingFailReader) Read(p []byte) (int, error) {
+	r.reads++
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func TestAcquireArtifactAdmissionAndCommitPreconditions(t *testing.T) {
+	// 1. Finalized stage + nil observation -> artifact_conflict.
+	stageNilEnv := newSlimAcquireTestEnv(t)
+	if _, err := stageNilEnv.stageStore.AcquireStage(
+		t.Context(),
+		stageNilEnv.pinnedVersion,
+		stageNilEnv.pinnedID,
+		runtimeupdate.CopyUploadArchive(bytes.NewReader(stageNilEnv.archive), int64(len(stageNilEnv.archive))),
+		nil,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	stagedDesc, err := stageNilEnv.selectionStore.ResolveFinalized(stageNilEnv.pinnedVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stageNilEnv.executor.mu.Lock()
+	stageNilEnv.executor.active = stagedDesc
+	stageNilEnv.executor.executable = stagedDesc.ExecutablePath
+	stageNilEnv.executor.mu.Unlock()
+	// stageNilEnv.observer still has nil Observation() because Refresh was not called on stagedDesc.
+	if _, _, err := stageNilEnv.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{
+		Source:    ArtifactSourceCDN,
+		CDNPrefix: "https://127.0.0.1:8443/cdn",
+	}); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+		t.Fatalf("finalized stage + nil observation AcquireArtifact() = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeArtifactConflict)
+	}
+	if _, err := stageNilEnv.executor.UploadArtifact(t.Context(), bytes.NewReader(stageNilEnv.archive), int64(len(stageNilEnv.archive))); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+		t.Fatalf("finalized stage + nil observation UploadArtifact() = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeArtifactConflict)
+	}
+
+	// 2. Bundled selection + nil observation + existing file at executable path -> artifact_conflict.
+	bundledFileEnv := newSlimAcquireTestEnv(t)
+	if err := os.WriteFile(bundledFileEnv.missingBundled, []byte("#!/bin/sh\necho unexpected-file-at-bundled-path\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Do not refresh observer: observation remains nil while file exists on disk.
+	if _, _, err := bundledFileEnv.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{
+		Source:    ArtifactSourceCDN,
+		CDNPrefix: "https://127.0.0.1:8443/cdn",
+	}); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+		t.Fatalf("bundled + nil observation + existing file AcquireArtifact() = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeArtifactConflict)
+	}
+	if _, err := bundledFileEnv.executor.UploadArtifact(t.Context(), bytes.NewReader(bundledFileEnv.archive), int64(len(bundledFileEnv.archive))); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+		t.Fatalf("bundled + nil observation + existing file UploadArtifact() = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeArtifactConflict)
+	}
+	assertNoStageOrSelection(t, bundledFileEnv)
+
+	// 3. Slim gap + running process (StateRunning and non-exited state) -> artifact_conflict.
+	for _, activeState := range []cpaprocess.State{cpaprocess.StateRunning, cpaprocess.State("starting")} {
+		procEnv := newSlimAcquireTestEnv(t)
+		procEnv.process.mu.Lock()
+		procEnv.process.state = cpaprocess.Observation{State: activeState, PID: 9001, InstanceID: 1}
+		procEnv.process.mu.Unlock()
+		if _, _, err := procEnv.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{
+			Source:    ArtifactSourceCDN,
+			CDNPrefix: "https://127.0.0.1:8443/cdn",
+		}); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+			t.Fatalf("slim gap + process %s AcquireArtifact() = %v (code %q), want %q", activeState, err, ArtifactErrorCode(err), ArtifactCodeArtifactConflict)
+		}
+		if _, err := procEnv.executor.UploadArtifact(t.Context(), bytes.NewReader(procEnv.archive), int64(len(procEnv.archive))); ArtifactErrorCode(err) != ArtifactCodeArtifactConflict {
+			t.Fatalf("slim gap + process %s UploadArtifact() = %v (code %q), want %q", activeState, err, ArtifactErrorCode(err), ArtifactCodeArtifactConflict)
+		}
+		assertNoStageOrSelection(t, procEnv)
+	}
+
+	// 4. Active selection flipped to a different artifact while downloading -> Commit not called, newly created stage removed.
+	enteredDownload := make(chan struct{})
+	releaseDownload := make(chan struct{})
+	var flipEnv *acquireTestEnv
+	flipEnv = newSlimAcquireTestEnv(t, WithOfficialAcquisitionSource(&stubAcquireSource{
+		downloadFn: func(_ context.Context, _ string, dst io.Writer, _ runtimeupdate.ProgressFunc) error {
+			close(enteredDownload)
+			<-releaseDownload
+			_, err := dst.Write(flipEnv.archive)
+			return err
+		},
+	}))
+	faultStore := &faultSelectionStore{Store: flipEnv.selectionStore}
+	flipEnv.executor.mu.Lock()
+	flipEnv.executor.selections = faultStore
+	flipEnv.executor.mu.Unlock()
+
+	if _, started, err := flipEnv.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{Source: ArtifactSourceGitHub}); err != nil || !started {
+		t.Fatalf("AcquireArtifact() started=%v, err=%v", started, err)
+	}
+	<-enteredDownload
+
+	// Flip active selection to a different bundled executable while download is in flight.
+	if err := os.WriteFile(flipEnv.missingBundled, []byte("#!/bin/sh\necho different-active-artifact\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	otherSum := sha256.Sum256([]byte("#!/bin/sh\necho different-active-artifact\n"))
+	otherID := artifact.ID("sha256:" + hex.EncodeToString(otherSum[:]))
+	otherManifest := filepath.Join(flipEnv.root, "other-manifest.json")
+	if err := os.WriteFile(otherManifest, []byte(fmt.Sprintf("{\"schemaVersion\":1,\"engine\":\"cpa\",\"version\":\"8.0.54\",\"artifactId\":%q}\n", otherID)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := flipEnv.observer.RefreshFrom(flipEnv.missingBundled, otherManifest); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseDownload)
+
+	settled := awaitAcquisitionTerminal(t, flipEnv.executor)
+	if settled.Operation == nil || settled.Operation.Phase != ArtifactPhaseFailed || settled.Operation.Code != ArtifactCodeArtifactConflict {
+		t.Fatalf("flipped selection settled = %+v, want failed with %q", settled, ArtifactCodeArtifactConflict)
+	}
+	if faultStore.commitCalls != 0 {
+		t.Fatalf("selections.Commit was called %d times after active selection flipped; want 0", faultStore.commitCalls)
+	}
+	assertNoStageOrSelection(t, flipEnv)
+}
+
+type stubAcquireSource struct {
+	probeFn    func(ctx context.Context, version string) error
+	downloadFn func(ctx context.Context, version string, destination io.Writer, progress runtimeupdate.ProgressFunc) error
+}
+
+func (s *stubAcquireSource) Probe(ctx context.Context, version string) error {
+	if s.probeFn != nil {
+		return s.probeFn(ctx, version)
+	}
+	return nil
+}
+
+func (s *stubAcquireSource) DownloadArchive(ctx context.Context, version string, destination io.Writer, progress runtimeupdate.ProgressFunc) error {
+	return s.downloadFn(ctx, version, destination, progress)
+}
+
+func TestAcquireArtifactCommitIrreversibleAndRecoveryRequired(t *testing.T) {
+	t.Run("observer refresh failure after Commit enters recovery_required and blocks mutating paths", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t, WithAcquisitionPostCommitHooks(
+			func() error { return fmt.Errorf("injected observer refresh failure") },
+			nil,
+		))
+		destRoot := filepath.Join(env.supervisorRoot, "destination")
+		gatewayAuth := filepath.Join(env.root, "gateway", "auth")
+		if err := env.executor.EnableDestination(destRoot, gatewayAuth, "127.0.0.1:8317", nil, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(destRoot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		origStageReq := DestinationRequest{
+			OperationID:               "stage-before-acquire",
+			ExpectedRuntimeIdentity:   "runtime-s2a",
+			ExpectedRuntimeGeneration: 1,
+			ExpectedActiveArtifactID:  artifact.ID("sha256:1111111111111111111111111111111111111111111111111111111111111111"),
+			SourceIdentity:            "managed:sha256:2222222222222222222222222222222222222222222222222222222222222222",
+			SourceClass:               SourceClassNewManaged,
+			APIKeys:                   []string{"sk-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},
+			ManagementKey:             "3333333333333333333333333333333333333333333333333333333333333333",
+		}
+		if err := env.executor.writeAtomicDestinationJSONLocked("stage.json", origStageReq); err != nil {
+			t.Fatal(err)
+		}
+
+		op, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive)))
+		if ArtifactErrorCode(err) != ArtifactCodeRecoveryRequired || op.Phase != ArtifactPhaseFailed || op.Code != ArtifactCodeRecoveryRequired {
+			t.Fatalf("UploadArtifact() with post-commit refresh failure = %+v, %v (code %q); want recovery_required", op, err, ArtifactErrorCode(err))
+		}
+		// Commit was not rolled back: selection.json and stage remain on disk.
+		if _, err := os.Stat(filepath.Join(env.selectionRoot, "selection.json")); err != nil {
+			t.Fatalf("selection.json missing after committed selection: %v", err)
+		}
+		if !env.stageStore.HasAcquiredStage(env.pinnedVersion, env.pinnedID) {
+			t.Fatal("committed stage was removed after post-commit failure")
+		}
+		env.executor.recoveryMu.Lock()
+		gotRecoveryState := env.executor.recoveryState
+		env.executor.recoveryMu.Unlock()
+		if gotRecoveryState != RecoveryStateManualIntervention {
+			t.Fatalf("recoveryState = %q, want %q", gotRecoveryState, RecoveryStateManualIntervention)
+		}
+		assertMutatingLifecycleBlockedAfterRecoveryRequired(t, env)
+	})
+
+	t.Run("destination sync failure after Commit enters recovery_required and blocks Start", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t, WithAcquisitionPostCommitHooks(
+			nil,
+			func() error { return fmt.Errorf("injected destination sync failure") },
+		))
+		op, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive)))
+		if ArtifactErrorCode(err) != ArtifactCodeRecoveryRequired || op.Phase != ArtifactPhaseFailed || op.Code != ArtifactCodeRecoveryRequired {
+			t.Fatalf("UploadArtifact() with post-commit destination failure = %+v, %v (code %q); want recovery_required", op, err, ArtifactErrorCode(err))
+		}
+		if _, err := os.Stat(filepath.Join(env.selectionRoot, "selection.json")); err != nil {
+			t.Fatalf("selection.json missing after committed selection: %v", err)
+		}
+		if !env.stageStore.HasAcquiredStage(env.pinnedVersion, env.pinnedID) {
+			t.Fatal("committed stage was removed after post-commit destination failure")
+		}
+		assertMutatingLifecycleBlockedAfterRecoveryRequired(t, env)
+	})
+
+	t.Run("ambiguous selection Commit keeps stage and enters recovery_required", func(t *testing.T) {
+		env := newSlimAcquireTestEnv(t)
+		faultStore := &faultSelectionStore{
+			Store:     env.selectionStore,
+			commitErr: fmt.Errorf("%w: injected ambiguous directory sync", selection.ErrSelectionPublicationAmbiguous),
+		}
+		env.executor.mu.Lock()
+		env.executor.selections = faultStore
+		env.executor.mu.Unlock()
+
+		op, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive)))
+		if ArtifactErrorCode(err) != ArtifactCodeRecoveryRequired || op.Phase != ArtifactPhaseFailed || op.Code != ArtifactCodeRecoveryRequired {
+			t.Fatalf("UploadArtifact() with ambiguous Commit = %+v, %v (code %q); want recovery_required", op, err, ArtifactErrorCode(err))
+		}
+		// Stage MUST be kept when Commit outcome is ambiguous.
+		if !env.stageStore.HasAcquiredStage(env.pinnedVersion, env.pinnedID) {
+			t.Fatal("newly created stage was removed despite ambiguous Commit")
+		}
+		assertMutatingLifecycleBlockedAfterRecoveryRequired(t, env)
+	})
+}
+
+func assertMutatingLifecycleBlockedAfterRecoveryRequired(t *testing.T, env *acquireTestEnv) {
+	t.Helper()
+	if _, err := env.executor.Start(t.Context(), StartRequest{
+		OperationID:               "start-blocked",
+		ExpectedRuntimeIdentity:   "runtime-s2a",
+		ExpectedRuntimeGeneration: 1,
+		ExpectedActiveArtifactID:  env.pinnedID,
+	}); !errorsIs(err, journal.ErrOperationStateConflict) {
+		t.Fatalf("Start after recovery_required = %v, want ErrOperationStateConflict", err)
+	}
+	if _, err := env.executor.Restart(t.Context(), RestartRequest{
+		OperationID:               "restart-blocked",
+		ExpectedRuntimeIdentity:   "runtime-s2a",
+		ExpectedRuntimeGeneration: 1,
+	}); !errorsIs(err, journal.ErrOperationStateConflict) {
+		t.Fatalf("Restart after recovery_required = %v, want ErrOperationStateConflict", err)
+	}
+	if _, _, err := env.executor.AcquireArtifact(t.Context(), ArtifactAcquireRequest{
+		Source:    ArtifactSourceCDN,
+		CDNPrefix: "https://127.0.0.1:8443/cdn",
+	}); ArtifactErrorCode(err) != ArtifactCodeRecoveryRequired {
+		t.Fatalf("AcquireArtifact after recovery_required = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeRecoveryRequired)
+	}
+	if _, err := env.executor.UploadArtifact(t.Context(), bytes.NewReader(env.archive), int64(len(env.archive))); ArtifactErrorCode(err) != ArtifactCodeRecoveryRequired {
+		t.Fatalf("UploadArtifact after recovery_required = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeRecoveryRequired)
+	}
+}
+
+func errorsIs(err, target error) bool {
+	return err != nil && (err == target || bytes.Contains([]byte(err.Error()), []byte(target.Error())))
+}
+
+func TestAcquireArtifactPreCommitFailureStageCleanupOwnership(t *testing.T) {
+	// 1. Selection pre-rename failure when THIS acquisition created <version>/ removes the newly created stage.
+	createdEnv := newSlimAcquireTestEnv(t)
+	faultCreated := &faultSelectionStore{
+		Store:     createdEnv.selectionStore,
+		commitErr: fmt.Errorf("%w: injected pre-rename temp file failure", selection.ErrSelectionNotPublished),
+	}
+	createdEnv.executor.mu.Lock()
+	createdEnv.executor.selections = faultCreated
+	createdEnv.executor.mu.Unlock()
+
+	op, err := createdEnv.executor.UploadArtifact(t.Context(), bytes.NewReader(createdEnv.archive), int64(len(createdEnv.archive)))
+	if ArtifactErrorCode(err) != ArtifactCodeInstallFailed || op.Phase != ArtifactPhaseFailed || op.Code != ArtifactCodeInstallFailed {
+		t.Fatalf("UploadArtifact() with pre-rename commit failure = %+v, %v; want install_failed", op, err)
+	}
+	assertNoStageOrSelection(t, createdEnv)
+
+	// 2. Selection pre-rename failure when <version>/ was a pre-existing prepare_update stage NEVER removes the pre-existing stage.
+	existingEnv := newSlimAcquireTestEnv(t)
+	binary := []byte("#!/bin/sh\necho s2a-acquired-gateway\n")
+	archiveWithoutLicense := buildAcquireTarGzip(t,
+		acquireArchiveEntry{name: "cli-proxy-api", typeflag: tar.TypeReg, data: binary},
+	)
+	archiveSum := sha256.Sum256(archiveWithoutLicense)
+	if _, err := existingEnv.stageStore.Stage(t.Context(), runtimeupdate.Release{
+		Version:       existingEnv.pinnedVersion,
+		AssetName:     "CLIProxyAPI_8.0.55_linux_amd64.tar.gz",
+		AssetURL:      "https://github.com/router-for-me/CLIProxyAPI/releases/download/v8.0.55/CLIProxyAPI_8.0.55_linux_amd64.tar.gz",
+		ArchiveDigest: "sha256:" + hex.EncodeToString(archiveSum[:]),
+		ArchiveSize:   int64(len(archiveWithoutLicense)),
+	}, func(_ context.Context, _ runtimeupdate.Release, dst io.Writer) error {
+		_, writeErr := dst.Write(archiveWithoutLicense)
+		return writeErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	faultExisting := &faultSelectionStore{
+		Store:     existingEnv.selectionStore,
+		commitErr: fmt.Errorf("%w: injected pre-rename temp file failure", selection.ErrSelectionNotPublished),
+	}
+	existingEnv.executor.mu.Lock()
+	existingEnv.executor.selections = faultExisting
+	existingEnv.executor.mu.Unlock()
+
+	if _, err := existingEnv.executor.UploadArtifact(t.Context(), bytes.NewReader(existingEnv.archive), int64(len(existingEnv.archive))); ArtifactErrorCode(err) != ArtifactCodeInstallFailed {
+		t.Fatalf("UploadArtifact() on pre-existing stage with commit failure = %v, want install_failed", err)
+	}
+	if _, err := existingEnv.stageStore.ResolveFinalized(existingEnv.pinnedVersion); err != nil {
+		t.Fatalf("pre-existing prepare_update stage was removed on pre-commit failure: %v", err)
+	}
+}
+
+func TestUploadArtifactAdmissionAndAlwaysVerifiesUploadedBytes(t *testing.T) {
+	// 1. Full image (bundled pinned binary active) + valid upload -> 409 artifact_already_active without reading body, origin stays bundled, no selection.json.
+	fullEnv := newSlimAcquireTestEnv(t)
+	bundledBinary := []byte("#!/bin/sh\necho s2a-acquired-gateway\n")
+	if err := os.WriteFile(fullEnv.missingBundled, bundledBinary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := fullEnv.observer.RefreshFrom(fullEnv.missingBundled, fullEnv.manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	reader := &countingFailReader{data: fullEnv.archive}
+	if _, err := fullEnv.executor.UploadArtifact(t.Context(), reader, int64(len(fullEnv.archive))); ArtifactErrorCode(err) != ArtifactCodeArtifactAlreadyActive {
+		t.Fatalf("full image UploadArtifact() = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeArtifactAlreadyActive)
+	}
+	if reader.reads != 0 {
+		t.Fatalf("UploadArtifact() read %d times when bundled artifact was already active; want 0", reader.reads)
+	}
+	status, err := fullEnv.executor.ArtifactStatus()
+	if err != nil || status.Active == nil || status.Active.Origin != ArtifactOriginBundled || status.Required {
+		t.Fatalf("full image ArtifactStatus() after rejected upload = %+v, %v", status, err)
+	}
+	assertNoStageOrSelection(t, fullEnv)
+
+	// 2. Existing matching stage on disk (not yet committed) + tampered upload -> artifact_mismatch.
+	stagedEnv := newSlimAcquireTestEnv(t)
+	if _, err := stagedEnv.stageStore.AcquireStage(
+		t.Context(),
+		stagedEnv.pinnedVersion,
+		stagedEnv.pinnedID,
+		runtimeupdate.CopyUploadArchive(bytes.NewReader(stagedEnv.archive), int64(len(stagedEnv.archive))),
+		nil,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	tamperedArchive := buildAcquireTarGzip(t,
+		acquireArchiveEntry{name: "cli-proxy-api", typeflag: tar.TypeReg, data: []byte("#!/bin/sh\necho tampered-binary\n")},
+		acquireArchiveEntry{name: "LICENSE", typeflag: tar.TypeReg, data: []byte("MIT License\n")},
+	)
+	if _, err := stagedEnv.executor.UploadArtifact(t.Context(), bytes.NewReader(tamperedArchive), int64(len(tamperedArchive))); ArtifactErrorCode(err) != ArtifactCodeArtifactMismatch {
+		t.Fatalf("existing stage + tampered upload = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeArtifactMismatch)
+	}
+	if _, err := os.Stat(filepath.Join(stagedEnv.selectionRoot, "selection.json")); !os.IsNotExist(err) {
+		t.Fatalf("selection.json should not exist after tampered upload: %v", err)
+	}
+
+	// 3. Valid upload succeeds, and a second upload after successful acquisition returns 409 artifact_already_active without consuming the body.
+	op, err := stagedEnv.executor.UploadArtifact(t.Context(), bytes.NewReader(stagedEnv.archive), int64(len(stagedEnv.archive)))
+	if err != nil || op.Phase != ArtifactPhaseSucceeded {
+		t.Fatalf("valid UploadArtifact() = %+v, %v", op, err)
+	}
+	secondReader := &countingFailReader{data: stagedEnv.archive}
+	if _, err := stagedEnv.executor.UploadArtifact(t.Context(), secondReader, int64(len(stagedEnv.archive))); ArtifactErrorCode(err) != ArtifactCodeArtifactAlreadyActive {
+		t.Fatalf("second UploadArtifact() = %v (code %q), want %q", err, ArtifactErrorCode(err), ArtifactCodeArtifactAlreadyActive)
+	}
+	if secondReader.reads != 0 {
+		t.Fatalf("second UploadArtifact() read %d times when acquired artifact was already active; want 0", secondReader.reads)
+	}
+}
+
 func newOfficialAndCDNTLSClient(server *httptest.Server) *http.Client {
 	baseTransport := server.Client().Transport.(*http.Transport).Clone()
 	targetAddr := server.Listener.Addr().String()

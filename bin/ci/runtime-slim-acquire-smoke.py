@@ -556,7 +556,8 @@ def main(argv):
 
         slim_dc("down", "-v", "--remove-orphans", check=False)
 
-        # Step (f): full image, fresh volume -> GET returns required=false and active.origin=="bundled".
+        # Step (f): full image, fresh volume -> GET returns required=false and active.origin=="bundled";
+        # PUT upload returns 409 artifact_already_active and origin stays bundled.
         full_port = pick_smoke_port()
         full_dc, full_override = make_dc(full_project, full_meta, full_port, "full")
         full_dc("up", "-d", "--no-build", "--pull", "never")
@@ -576,8 +577,45 @@ def main(argv):
             "origin": "bundled",
         }, full_artifact
         assert full_artifact.get("operation") is None, full_artifact
-        evidence["stepF_fullImageArtifact"] = full_artifact
 
+        full_upload_code, full_upload_resp = public_http(
+            full_origin,
+            bootstrap_api + "runtime/artifact/upload",
+            method="PUT",
+            body=build_tampered_archive(),
+            content_type="application/gzip",
+            auth_scheme="Fresh",
+            auth_token=full_session_token,
+        )
+        assert full_upload_code == 409 and full_upload_resp == {"code": "artifact_already_active"}, (
+            full_upload_code,
+            full_upload_resp,
+        )
+        code, full_after_upload = public_http(
+            full_origin,
+            bootstrap_api + "runtime/artifact",
+            auth_scheme="Fresh",
+            auth_token=full_session_token,
+        )
+        assert code == 200 and full_after_upload.get("active") == {
+            "artifactId": expected_artifact_id,
+            "origin": "bundled",
+        }, (code, full_after_upload)
+        full_dc(
+            "exec",
+            "-T",
+            "cpa-manager-plus",
+            "sh",
+            "-eu",
+            "-c",
+            "test ! -e /data/runtime/supervisor/active/cpa/selection.json",
+        )
+        evidence["stepF_fullImageArtifact"] = full_artifact
+        evidence["stepF_fullImageUploadRejected"] = {
+            "uploadStatus": full_upload_code,
+            "uploadResponse": full_upload_resp,
+            "statusAfterUpload": full_after_upload,
+        }
         evidence["result"] = "PASS"
     finally:
         for name, dc_fn in (("slim", slim_dc), ("full", full_dc)):

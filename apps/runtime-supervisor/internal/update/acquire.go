@@ -46,10 +46,22 @@ func CopyUploadArchive(src io.Reader, contentLength int64) AcquireDownloadFunc {
 	}
 }
 
+// AcquireStageResult records the verified stage metadata alongside whether this
+// acquisition created the finalized <version>/ directory itself (so pre-commit
+// failures can remove a newly created stage without ever removing a
+// pre-existing prepare_update stage).
+type AcquireStageResult struct {
+	Metadata     Metadata
+	CreatedStage bool
+}
+
+var acquirePostRenameHook func(finalPath string) error
+
 // Acquire verifies and atomically stages the pinned CPA version and exact
 // executable artifactId from any transport (official GitHub, CDN prefix, or
-// raw upload). An existing finalized stage for version with the same artifactId
-// is reused without overwriting; a conflicting finalized stage is refused with
+// raw upload). It always consumes and verifies the archive stream first; an
+// existing finalized stage for version with the same artifactId is then reused
+// without overwriting, while a conflicting finalized stage is refused with
 // ErrArtifactConflict.
 func (s *Store) Acquire(
 	ctx context.Context,
@@ -59,24 +71,40 @@ func (s *Store) Acquire(
 	progress ProgressFunc,
 	onPhase func(string),
 ) (Metadata, error) {
-	if err := ctx.Err(); err != nil {
+	res, err := s.AcquireStage(ctx, version, expectedArtifactID, download, progress, onPhase)
+	if err != nil {
 		return Metadata{}, err
 	}
+	return res.Metadata, nil
+}
+
+// AcquireStage performs Acquire and reports whether the finalized <version>/
+// stage directory was newly created by this operation.
+func (s *Store) AcquireStage(
+	ctx context.Context,
+	version string,
+	expectedArtifactID artifact.ID,
+	download AcquireDownloadFunc,
+	progress ProgressFunc,
+	onPhase func(string),
+) (AcquireStageResult, error) {
+	if err := ctx.Err(); err != nil {
+		return AcquireStageResult{}, err
+	}
 	if s == nil || download == nil || ValidateVersion(version) != nil || !expectedArtifactID.IsValid() {
-		return Metadata{}, fmt.Errorf("%w: invalid acquire request", ErrStaging)
+		return AcquireStageResult{}, fmt.Errorf("%w: invalid acquire request", ErrStaging)
 	}
 	finalPath := filepath.Join(s.root, version)
-	if metadata, complete, _, err := s.verifyAcquiredFinal(finalPath, version, expectedArtifactID); complete || err != nil {
-		return metadata, err
+	if _, _, _, err := s.verifyAcquiredFinal(finalPath, version, expectedArtifactID); err != nil {
+		return AcquireStageResult{}, err
 	}
-
 	temporary, err := os.MkdirTemp(s.root, temporaryPrefix)
 	if err != nil {
-		return Metadata{}, fmt.Errorf("%w: create operation temporary directory: %v", ErrStaging, err)
+		return AcquireStageResult{}, fmt.Errorf("%w: create operation temporary directory: %v", ErrStaging, err)
 	}
 	defer os.RemoveAll(temporary)
 	if err := os.Chmod(temporary, 0o700); err != nil {
-		return Metadata{}, fmt.Errorf("%w: restrict operation temporary directory: %v", ErrStaging, err)
+		return AcquireStageResult{}, fmt.Errorf("%w: restrict operation temporary directory: %v", ErrStaging, err)
 	}
 
 	if onPhase != nil {
@@ -85,7 +113,7 @@ func (s *Store) Acquire(
 	archivePath := filepath.Join(temporary, "source.tar.gz")
 	archiveFile, err := os.OpenFile(archivePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return Metadata{}, fmt.Errorf("%w: create temporary archive: %v", ErrStaging, err)
+		return AcquireStageResult{}, fmt.Errorf("%w: create temporary archive: %v", ErrStaging, err)
 	}
 	archiveHasher := sha256.New()
 	boundedWriter := &boundedArchiveWriter{
@@ -96,13 +124,13 @@ func (s *Store) Acquire(
 	syncErr := archiveFile.Sync()
 	closeErr := archiveFile.Close()
 	if downloadErr != nil {
-		return Metadata{}, downloadErr
+		return AcquireStageResult{}, downloadErr
 	}
 	if boundedWriter.written == 0 {
-		return Metadata{}, fmt.Errorf("%w: archive is empty", ErrArchiveInvalid)
+		return AcquireStageResult{}, fmt.Errorf("%w: archive is empty", ErrArchiveInvalid)
 	}
 	if err := errors.Join(syncErr, closeErr); err != nil {
-		return Metadata{}, fmt.Errorf("%w: persist temporary archive: %v", ErrStaging, err)
+		return AcquireStageResult{}, fmt.Errorf("%w: persist temporary archive: %v", ErrStaging, err)
 	}
 	sourceArchiveDigest := "sha256:" + hex.EncodeToString(archiveHasher.Sum(nil))
 
@@ -111,10 +139,10 @@ func (s *Store) Acquire(
 	}
 	publication := filepath.Join(temporary, "final")
 	if err := os.Mkdir(publication, 0o700); err != nil {
-		return Metadata{}, fmt.Errorf("%w: create publication directory: %v", ErrStaging, err)
+		return AcquireStageResult{}, fmt.Errorf("%w: create publication directory: %v", ErrStaging, err)
 	}
 	if err := extractAcquiredStage(archivePath, publication, expectedArtifactID); err != nil {
-		return Metadata{}, err
+		return AcquireStageResult{}, err
 	}
 	metadata := Metadata{
 		SchemaVersion:       stagedArtifactSchemaVersion,
@@ -124,51 +152,95 @@ func (s *Store) Acquire(
 		SourceArchiveDigest: sourceArchiveDigest,
 	}
 	if err := writeMetadata(filepath.Join(publication, stagedMetadataName), metadata); err != nil {
-		return Metadata{}, err
+		return AcquireStageResult{}, err
 	}
 	if err := syncDirectory(publication); err != nil {
-		return Metadata{}, fmt.Errorf("%w: sync publication directory: %v", ErrStaging, err)
+		return AcquireStageResult{}, fmt.Errorf("%w: sync publication directory: %v", ErrStaging, err)
 	}
 
 	if onPhase != nil {
 		onPhase("installing")
 	}
 	existing, complete, existsWithoutLicense, err := s.verifyAcquiredFinal(finalPath, version, expectedArtifactID)
-	if complete || err != nil {
-		return existing, err
+	if err != nil {
+		return AcquireStageResult{}, err
 	}
+	if complete {
+		return AcquireStageResult{Metadata: existing, CreatedStage: false}, nil
+	}
+	createdStage := false
 	if existsWithoutLicense {
 		if err := s.installLicenseIntoExistingStage(finalPath, filepath.Join(publication, stagedLicenseName)); err != nil {
-			return Metadata{}, err
+			return AcquireStageResult{}, err
 		}
 	} else {
 		if err := os.Rename(publication, finalPath); err != nil {
 			raceMeta, raceComplete, raceNoLicense, verifyErr := s.verifyAcquiredFinal(finalPath, version, expectedArtifactID)
-			if raceComplete || verifyErr != nil {
-				return raceMeta, verifyErr
+			if verifyErr != nil {
+				return AcquireStageResult{}, verifyErr
+			}
+			if raceComplete {
+				return AcquireStageResult{Metadata: raceMeta, CreatedStage: false}, nil
 			}
 			if !raceNoLicense {
-				return Metadata{}, fmt.Errorf("%w: atomically publish finalized stage: %v", ErrStaging, err)
+				return AcquireStageResult{}, fmt.Errorf("%w: atomically publish finalized stage: %v", ErrStaging, err)
 			}
 			if installErr := s.installLicenseIntoExistingStage(finalPath, filepath.Join(publication, stagedLicenseName)); installErr != nil {
-				return Metadata{}, installErr
+				return AcquireStageResult{}, installErr
 			}
+		} else {
+			createdStage = true
 		}
-		if err := s.prepareFinalizedExecutionDirectory(finalPath); err != nil {
-			return Metadata{}, err
-		}
-		if err := syncDirectory(s.root); err != nil {
-			return Metadata{}, fmt.Errorf("%w: sync staging root: %v", ErrStaging, err)
+		if createdStage {
+			postRenameErr := func() error {
+				if acquirePostRenameHook != nil {
+					if hookErr := acquirePostRenameHook(finalPath); hookErr != nil {
+						return fmt.Errorf("%w: %v", ErrStaging, hookErr)
+					}
+				}
+				if prepErr := s.prepareFinalizedExecutionDirectory(finalPath); prepErr != nil {
+					return prepErr
+				}
+				if syncErr := syncDirectory(s.root); syncErr != nil {
+					return fmt.Errorf("%w: sync staging root: %v", ErrStaging, syncErr)
+				}
+				return nil
+			}()
+			if postRenameErr != nil {
+				_ = s.RemoveCreatedStage(version)
+				return AcquireStageResult{}, postRenameErr
+			}
 		}
 	}
 	verified, verifiedComplete, _, err := s.verifyAcquiredFinal(finalPath, version, expectedArtifactID)
 	if err != nil || !verifiedComplete {
+		if createdStage {
+			_ = s.RemoveCreatedStage(version)
+		}
 		if err == nil {
 			err = fmt.Errorf("%w: finalized stage disappeared", ErrStaging)
 		}
-		return Metadata{}, err
+		return AcquireStageResult{}, err
 	}
-	return verified, nil
+	return AcquireStageResult{Metadata: verified, CreatedStage: createdStage}, nil
+}
+
+// RemoveCreatedStage removes a finalized <version>/ stage directory that was
+// created by the current acquisition when selection commit has definitely not
+// occurred.
+func (s *Store) RemoveCreatedStage(version string) error {
+	if s == nil || ValidateVersion(version) != nil {
+		return fmt.Errorf("%w: invalid stage version for removal", ErrStaging)
+	}
+	finalPath := filepath.Join(s.root, version)
+	if info, err := os.Lstat(finalPath); err == nil && info.IsDir() {
+		_ = os.Chmod(finalPath, 0o700)
+	}
+	if err := os.RemoveAll(finalPath); err != nil {
+		return fmt.Errorf("%w: remove uncommitted stage: %v", ErrStaging, err)
+	}
+	_ = syncDirectory(s.root)
+	return nil
 }
 
 // HasAcquiredStage reports whether version has a finalized stage matching

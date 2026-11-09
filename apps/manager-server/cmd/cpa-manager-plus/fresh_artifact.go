@@ -274,9 +274,15 @@ func (r *maxBytesTrackingReader) Close() error {
 }
 
 func writeFreshArtifactUpstreamError(w http.ResponseWriter, err error) {
-	if code, status, ok := runtimeservice.ArtifactErrorCode(err); ok && status >= 400 && status <= 599 && code != "" {
-		writeFreshArtifactError(w, status, code)
-		return
+	if code, status, ok := runtimeservice.ArtifactErrorCode(err); ok && code != "" {
+		if knownStatus, known := runtimeservice.KnownArtifactErrorStatus(code); known {
+			writeFreshArtifactError(w, knownStatus, code)
+			return
+		}
+		if status >= 400 && status <= 599 {
+			writeFreshArtifactError(w, status, code)
+			return
+		}
 	}
 	writeFreshArtifactError(w, http.StatusServiceUnavailable, "runtime_unavailable")
 }

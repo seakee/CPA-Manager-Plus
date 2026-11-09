@@ -237,7 +237,8 @@ func artifactHTTPStatus(code string) int {
 		return http.StatusUnauthorized
 	case lifecycle.ArtifactCodeUnsupportedPlatform,
 		lifecycle.ArtifactCodeAcquisitionInProgress,
-		lifecycle.ArtifactCodeArtifactConflict:
+		lifecycle.ArtifactCodeArtifactConflict,
+		lifecycle.ArtifactCodeArtifactAlreadyActive:
 		return http.StatusConflict
 	case lifecycle.ArtifactCodeArchiveTooLarge:
 		return http.StatusRequestEntityTooLarge
@@ -247,6 +248,8 @@ func artifactHTTPStatus(code string) int {
 	case lifecycle.ArtifactCodeSourceUnreachable,
 		lifecycle.ArtifactCodeDownloadFailed:
 		return http.StatusBadGateway
+	case lifecycle.ArtifactCodeRecoveryRequired:
+		return http.StatusInternalServerError
 	default:
 		return http.StatusInternalServerError
 	}

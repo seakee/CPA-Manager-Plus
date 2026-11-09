@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/artifact"
+	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/cpaprocess"
 	"github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/selection"
 	runtimeupdate "github.com/seakee/cpa-manager-plus/apps/runtime-supervisor/internal/update"
 )
@@ -43,12 +44,14 @@ const (
 	ArtifactCodeUnsupportedPlatform   = "unsupported_platform"
 	ArtifactCodeAcquisitionInProgress = "acquisition_in_progress"
 	ArtifactCodeArtifactConflict      = "artifact_conflict"
+	ArtifactCodeArtifactAlreadyActive = "artifact_already_active"
 	ArtifactCodeArchiveTooLarge       = "archive_too_large"
 	ArtifactCodeArchiveInvalid        = "archive_invalid"
 	ArtifactCodeArtifactMismatch      = "artifact_mismatch"
 	ArtifactCodeSourceUnreachable     = "source_unreachable"
 	ArtifactCodeDownloadFailed        = "download_failed"
 	ArtifactCodeInstallFailed         = "install_failed"
+	ArtifactCodeRecoveryRequired      = "recovery_required"
 
 	AcquireArtifactExecutionTimeout = 10 * time.Minute
 	maxPinnedManifestBytes          = 16 << 10
@@ -57,6 +60,8 @@ const (
 var (
 	ErrAcquisitionInProgress = errors.New("artifact acquisition is already in progress")
 	ErrAcquisitionFailed     = errors.New("artifact acquisition failed")
+	ErrArtifactAlreadyActive = errors.New("pinned artifact is already active")
+	ErrRecoveryRequired      = errors.New("artifact selection committed; supervisor recovery is required")
 )
 
 // ArtifactError pairs a contract error code with the underlying cause.
@@ -100,6 +105,10 @@ func ArtifactErrorCode(err error) string {
 		return ArtifactCodeAcquisitionInProgress
 	case errors.Is(err, runtimeupdate.ErrArtifactConflict), errors.Is(err, runtimeupdate.ErrStageConflict), errors.Is(err, ErrActiveArtifactMismatch):
 		return ArtifactCodeArtifactConflict
+	case errors.Is(err, ErrArtifactAlreadyActive):
+		return ArtifactCodeArtifactAlreadyActive
+	case errors.Is(err, ErrRecoveryRequired):
+		return ArtifactCodeRecoveryRequired
 	case errors.Is(err, runtimeupdate.ErrArchiveTooLarge):
 		return ArtifactCodeArchiveTooLarge
 	case errors.Is(err, runtimeupdate.ErrArtifactMismatch):
@@ -233,27 +242,38 @@ func WithAcquisitionCDNLookupIP(lookup runtimeupdate.CDNLookupIPAddrFunc) Acquis
 	}
 }
 
+// WithAcquisitionPostCommitHooks configures fault-injection callbacks invoked
+// after selections.Commit succeeds during observer refresh and destination sync.
+func WithAcquisitionPostCommitHooks(refreshHook, destinationSyncHook func() error) AcquisitionOption {
+	return func(s *artifactAcquisitionState) {
+		s.postCommitRefreshHook = refreshHook
+		s.postCommitDestinationHook = destinationSyncHook
+	}
+}
+
 type stageStoreProvider interface {
 	StageStore() *runtimeupdate.Store
 }
 
 type artifactAcquisitionState struct {
-	mu                 sync.Mutex
-	manifestPath       string
-	pinned             *ArtifactPinnedStatus
-	goos               string
-	goarch             string
-	platformOverridden bool
-	customSource       bool
-	httpClient         *http.Client
-	rootCAs            *x509.CertPool
-	officialSource     OfficialAcquisitionSource
-	cdnFactory         func(prefix string) (CDNAcquisitionSource, error)
-	cdnAddrPolicy      runtimeupdate.CDNAddrPolicy
-	cdnLookupIP        runtimeupdate.CDNLookupIPAddrFunc
-	inFlight           bool
-	currentOp          *ArtifactOperationStatus
-	opSeq              uint64
+	mu                        sync.Mutex
+	manifestPath              string
+	pinned                    *ArtifactPinnedStatus
+	goos                      string
+	goarch                    string
+	platformOverridden        bool
+	customSource              bool
+	httpClient                *http.Client
+	rootCAs                   *x509.CertPool
+	officialSource            OfficialAcquisitionSource
+	cdnFactory                func(prefix string) (CDNAcquisitionSource, error)
+	cdnAddrPolicy             runtimeupdate.CDNAddrPolicy
+	cdnLookupIP               runtimeupdate.CDNLookupIPAddrFunc
+	postCommitRefreshHook     func() error
+	postCommitDestinationHook func() error
+	inFlight                  bool
+	currentOp                 *ArtifactOperationStatus
+	opSeq                     uint64
 }
 
 var executorAcquisitions sync.Map // map[*Executor]*artifactAcquisitionState
@@ -565,7 +585,7 @@ func (e *Executor) AcquireArtifact(ctx context.Context, req ArtifactAcquireReque
 		return ArtifactOperationStatus{}, false, storeErr
 	}
 
-	alreadyActive, conflictErr := e.checkActiveArtifactPrecondition(pinned, selections, stageStore, observer)
+	alreadyActive, conflictErr := e.evaluateAcquisitionAdmission(state.manifestPath, pinned, selections, stageStore, observer)
 	if conflictErr != nil {
 		state.mu.Unlock()
 		return ArtifactOperationStatus{}, false, conflictErr
@@ -668,9 +688,32 @@ func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLe
 		state.mu.Unlock()
 		return ArtifactOperationStatus{}, storeErr
 	}
-	if _, conflictErr := e.checkActiveArtifactPrecondition(pinned, selections, stageStore, observer); conflictErr != nil {
+	alreadyActive, conflictErr := e.evaluateAcquisitionAdmission(state.manifestPath, pinned, selections, stageStore, observer)
+	if conflictErr != nil {
 		state.mu.Unlock()
 		return ArtifactOperationStatus{}, conflictErr
+	}
+	if alreadyActive {
+		state.mu.Unlock()
+		return ArtifactOperationStatus{}, &ArtifactError{
+			Code: ArtifactCodeArtifactAlreadyActive,
+			Err:  ErrArtifactAlreadyActive,
+		}
+	}
+	if finalized, resolveErr := stageStore.ResolveFinalized(pinned.Version); resolveErr == nil {
+		if finalized.Metadata.ArtifactID != pinned.ArtifactID {
+			state.mu.Unlock()
+			return ArtifactOperationStatus{}, &ArtifactError{
+				Code: ArtifactCodeArtifactConflict,
+				Err:  runtimeupdate.ErrArtifactConflict,
+			}
+		}
+	} else if errors.Is(resolveErr, runtimeupdate.ErrStageConflict) {
+		state.mu.Unlock()
+		return ArtifactOperationStatus{}, &ArtifactError{
+			Code: ArtifactCodeArtifactConflict,
+			Err:  resolveErr,
+		}
 	}
 	if contentLength > runtimeupdate.MaxAcquisitionArchiveBytes {
 		state.mu.Unlock()
@@ -720,7 +763,8 @@ func (e *Executor) UploadArtifact(ctx context.Context, body io.Reader, contentLe
 	)
 }
 
-func (e *Executor) checkActiveArtifactPrecondition(
+func (e *Executor) evaluateAcquisitionAdmission(
+	manifestPath string,
 	pinned ArtifactPinnedStatus,
 	selections activeSelectionStore,
 	stageStore *runtimeupdate.Store,
@@ -728,30 +772,115 @@ func (e *Executor) checkActiveArtifactPrecondition(
 ) (alreadyActive bool, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.closed.Load() || e.activeSelectionAmbiguous {
+	return e.evaluateAcquisitionAdmissionLocked(manifestPath, pinned, selections, stageStore, observer)
+}
+
+func (e *Executor) evaluateAcquisitionAdmissionLocked(
+	manifestPath string,
+	pinned ArtifactPinnedStatus,
+	selections activeSelectionStore,
+	stageStore *runtimeupdate.Store,
+	observer activeArtifactRefresher,
+) (alreadyActive bool, err error) {
+	if e.closed.Load() {
 		return false, &ArtifactError{Code: ArtifactCodeInstallFailed, Err: ErrPersistenceUnavailable}
 	}
-	if observer == nil {
+	if e.activeSelectionAmbiguous {
+		return false, &ArtifactError{Code: ArtifactCodeRecoveryRequired, Err: ErrRecoveryRequired}
+	}
+	descriptor := e.currentDescriptorLocked()
+	procState := e.process.Observe().State
+	processRunning := procState != cpaprocess.StateNotStarted && procState != cpaprocess.StateExited
+	if descriptor.IsFinalizedStage() {
+		if descriptor.ArtifactID != pinned.ArtifactID || (descriptor.Version != "" && descriptor.Version != pinned.Version) {
+			return false, &ArtifactError{
+				Code: ArtifactCodeArtifactConflict,
+				Err:  runtimeupdate.ErrArtifactConflict,
+			}
+		}
+		if observer == nil {
+			return false, &ArtifactError{
+				Code: ArtifactCodeArtifactConflict,
+				Err:  runtimeupdate.ErrArtifactConflict,
+			}
+		}
+		observed := observer.Observation()
+		if observed == nil || !observed.ArtifactID.IsValid() || observed.ArtifactID != pinned.ArtifactID || (observed.Version != "" && observed.Version != pinned.Version) {
+			return false, &ArtifactError{
+				Code: ArtifactCodeArtifactConflict,
+				Err:  runtimeupdate.ErrArtifactConflict,
+			}
+		}
+		if selections != nil {
+			revalidated, revalidateErr := selections.Revalidate(descriptor)
+			if revalidateErr != nil || revalidated.ArtifactID != pinned.ArtifactID {
+				return false, &ArtifactError{
+					Code: ArtifactCodeArtifactConflict,
+					Err:  runtimeupdate.ErrArtifactConflict,
+				}
+			}
+		}
+		if stageStore != nil && stageStore.HasAcquiredStage(pinned.Version, pinned.ArtifactID) {
+			return true, nil
+		}
+		if processRunning {
+			return false, &ArtifactError{
+				Code: ArtifactCodeArtifactConflict,
+				Err:  runtimeupdate.ErrArtifactConflict,
+			}
+		}
 		return false, nil
 	}
-	observed := observer.Observation()
-	if observed == nil || !observed.ArtifactID.IsValid() {
-		return false, nil
-	}
-	if observed.ArtifactID != pinned.ArtifactID {
+
+	execPath := strings.TrimSpace(descriptor.ExecutablePath)
+	if execPath == "" {
 		return false, &ArtifactError{
 			Code: ArtifactCodeArtifactConflict,
 			Err:  runtimeupdate.ErrArtifactConflict,
 		}
 	}
-	if e.active.IsFinalizedStage() {
-		if selections != nil {
-			if _, err := selections.Revalidate(e.active); err != nil {
-				return false, &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
+	info, statErr := os.Lstat(execPath)
+	if errors.Is(statErr, os.ErrNotExist) {
+		if processRunning {
+			return false, &ArtifactError{
+				Code: ArtifactCodeArtifactConflict,
+				Err:  runtimeupdate.ErrArtifactConflict,
 			}
 		}
-		if stageStore != nil && !stageStore.HasAcquiredStage(pinned.Version, pinned.ArtifactID) {
-			return false, nil
+		if observer != nil {
+			if observed := observer.Observation(); observed != nil && observed.ArtifactID.IsValid() {
+				return false, &ArtifactError{
+					Code: ArtifactCodeArtifactConflict,
+					Err:  runtimeupdate.ErrArtifactConflict,
+				}
+			}
+		}
+		return false, nil
+	}
+	if statErr != nil || !info.Mode().IsRegular() || observer == nil {
+		return false, &ArtifactError{
+			Code: ArtifactCodeArtifactConflict,
+			Err:  runtimeupdate.ErrArtifactConflict,
+		}
+	}
+	observed := observer.Observation()
+	if observed == nil || !observed.ArtifactID.IsValid() || observed.ArtifactID != pinned.ArtifactID || (observed.Version != "" && observed.Version != pinned.Version) {
+		return false, &ArtifactError{
+			Code: ArtifactCodeArtifactConflict,
+			Err:  runtimeupdate.ErrArtifactConflict,
+		}
+	}
+	verifyManifest := strings.TrimSpace(descriptor.MetadataPath)
+	if verifyManifest == "" {
+		verifyManifest = strings.TrimSpace(manifestPath)
+	}
+	diskObserver := artifact.NewObserver(execPath, verifyManifest)
+	refreshErr := diskObserver.Refresh()
+	diskObs := diskObserver.Observation()
+	if refreshErr != nil || diskObs == nil || diskObs.ArtifactID != pinned.ArtifactID || (diskObs.Version != "" && diskObs.Version != pinned.Version) {
+		return false, &ArtifactError{
+			Code: ArtifactCodeArtifactConflict,
+			Err:  runtimeupdate.ErrArtifactConflict,
 		}
 	}
 	return true, nil
@@ -796,12 +925,13 @@ func (e *Executor) executeArtifactAcquisition(
 		return opCopy, &ArtifactError{Code: code, Err: err}
 	}
 
-	if _, err := stageStore.Acquire(ctx, pinned.Version, pinned.ArtifactID, download, updateProgress, updatePhase); err != nil {
+	stageRes, err := stageStore.AcquireStage(ctx, pinned.Version, pinned.ArtifactID, download, updateProgress, updatePhase)
+	if err != nil {
 		return failOperation(err)
 	}
 
 	updatePhase(ArtifactPhaseInstalling)
-	if err := e.commitAcquiredStage(pinned, selections, observer); err != nil {
+	if err := e.commitAcquiredStage(state, pinned, selections, stageStore, observer, stageRes.CreatedStage); err != nil {
 		return failOperation(err)
 	}
 
@@ -817,42 +947,120 @@ func (e *Executor) executeArtifactAcquisition(
 	return opCopy, nil
 }
 
+func (e *Executor) markAcquisitionRecoveryRequiredLocked() {
+	e.activeSelectionAmbiguous = true
+	e.disableRecovery(RecoveryStateManualIntervention)
+}
+
+func (e *Executor) preverifyDestinationSyncLocked(artifactID artifact.ID) error {
+	if e.destination == nil {
+		return nil
+	}
+	staged, err := e.destination.load()
+	if err != nil || staged == nil {
+		return err
+	}
+	if !artifactID.IsValid() {
+		return ErrActiveArtifactMismatch
+	}
+	if _, err := e.loadOriginStageRequestLocked(); err != nil {
+		return err
+	}
+	updated := *staged
+	updated.ExpectedActiveArtifactID = artifactID
+	return updated.Validate()
+}
+
 func (e *Executor) commitAcquiredStage(
+	state *artifactAcquisitionState,
 	pinned ArtifactPinnedStatus,
 	selections activeSelectionStore,
+	stageStore *runtimeupdate.Store,
 	observer activeArtifactRefresher,
+	createdStage bool,
 ) error {
+	cleanupCreatedStage := func() {
+		if createdStage && stageStore != nil {
+			_ = stageStore.RemoveCreatedStage(pinned.Version)
+		}
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.closed.Load() || e.activeSelectionAmbiguous {
-		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: ErrPersistenceUnavailable}
+
+	alreadyActive, conflictErr := e.evaluateAcquisitionAdmissionLocked(state.manifestPath, pinned, selections, stageStore, observer)
+	if conflictErr != nil {
+		cleanupCreatedStage()
+		return conflictErr
 	}
-	if observed := observer.Observation(); observed != nil && observed.ArtifactID.IsValid() && observed.ArtifactID != pinned.ArtifactID {
-		return &ArtifactError{Code: ArtifactCodeArtifactConflict, Err: runtimeupdate.ErrArtifactConflict}
+	if alreadyActive {
+		if !e.currentDescriptorLocked().IsFinalizedStage() {
+			cleanupCreatedStage()
+			return &ArtifactError{Code: ArtifactCodeArtifactConflict, Err: runtimeupdate.ErrArtifactConflict}
+		}
+		return nil
 	}
+
 	candidate, err := selections.ResolveFinalized(pinned.Version)
 	if err != nil {
+		cleanupCreatedStage()
 		if errors.Is(err, runtimeupdate.ErrStageConflict) || errors.Is(err, runtimeupdate.ErrArtifactConflict) {
 			return &ArtifactError{Code: ArtifactCodeArtifactConflict, Err: err}
 		}
 		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
 	}
 	if candidate.ArtifactID != pinned.ArtifactID {
+		cleanupCreatedStage()
 		return &ArtifactError{Code: ArtifactCodeArtifactConflict, Err: runtimeupdate.ErrArtifactConflict}
 	}
-	if err := selections.Commit(candidate); err != nil {
-		if errors.Is(err, selection.ErrSelectionPublicationAmbiguous) {
-			e.activeSelectionAmbiguous = true
+	if observer == nil {
+		cleanupCreatedStage()
+		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: ErrPersistenceUnavailable}
+	}
+	candidateObserver := artifact.NewObserver(candidate.ExecutablePath, candidate.MetadataPath)
+	err = candidateObserver.Refresh()
+	candidateObs := candidateObserver.Observation()
+	if err != nil || candidateObs == nil || candidateObs.ArtifactID != pinned.ArtifactID || (candidateObs.Version != "" && candidateObs.Version != pinned.Version) {
+		cleanupCreatedStage()
+		if err == nil {
+			err = runtimeupdate.ErrArtifactConflict
 		}
 		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
 	}
-	if err := refreshSelectedDescriptor(observer, &candidate); err != nil {
+	if err := e.preverifyDestinationSyncLocked(candidate.ArtifactID); err != nil {
+		cleanupCreatedStage()
 		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
 	}
+
+	if err := selections.Commit(candidate); err != nil {
+		if errors.Is(err, selection.ErrSelectionPublicationAmbiguous) {
+			e.markAcquisitionRecoveryRequiredLocked()
+			return &ArtifactError{
+				Code: ArtifactCodeRecoveryRequired,
+				Err:  errors.Join(ErrRecoveryRequired, err),
+			}
+		}
+		cleanupCreatedStage()
+		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
+	}
+
 	e.active = candidate
 	e.executable = candidate.ExecutablePath
-	if err := e.syncDestinationExpectedArtifactLocked(candidate.ArtifactID); err != nil {
-		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
+
+	refreshErr := refreshSelectedDescriptor(observer, &candidate)
+	if refreshErr == nil && state.postCommitRefreshHook != nil {
+		refreshErr = state.postCommitRefreshHook()
+	}
+	destErr := e.syncDestinationExpectedArtifactLocked(candidate.ArtifactID)
+	if destErr == nil && state.postCommitDestinationHook != nil {
+		destErr = state.postCommitDestinationHook()
+	}
+	if postCommitErr := errors.Join(refreshErr, destErr); postCommitErr != nil {
+		e.markAcquisitionRecoveryRequiredLocked()
+		return &ArtifactError{
+			Code: ArtifactCodeRecoveryRequired,
+			Err:  errors.Join(ErrRecoveryRequired, postCommitErr),
+		}
 	}
 	return nil
 }

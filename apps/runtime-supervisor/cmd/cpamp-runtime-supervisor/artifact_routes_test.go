@@ -314,6 +314,32 @@ func TestArtifactRoutesUploadAndIdempotentAcquireAndProtocolCoexistence(t *testi
 		t.Fatalf("idempotent POST acquire = %d, %s", acqRec.Code, acqRec.Body.String())
 	}
 
+	// Second PUT /v1/runtime/artifact/upload returns 409 artifact_already_active.
+	secondUploadReq := httptest.NewRequest(http.MethodPut, artifactUploadPath, bytes.NewReader(h.archive))
+	secondUploadReq.Header.Set("Authorization", "Bearer runtime-token")
+	secondUploadReq.Header.Set("Content-Type", "application/gzip")
+	secondUploadRec := httptest.NewRecorder()
+	h.handler.ServeHTTP(secondUploadRec, secondUploadReq)
+	if secondUploadRec.Code != http.StatusConflict {
+		t.Fatalf("second PUT upload = %d, want 409 (%s)", secondUploadRec.Code, secondUploadRec.Body.String())
+	}
+	assertArtifactErrorCode(t, secondUploadRec, lifecycle.ArtifactCodeArtifactAlreadyActive)
+
+	// Post-commit failure maps to 500 recovery_required.
+	recoveryHarness := newRouteTestHarness(t, lifecycle.WithAcquisitionPostCommitHooks(
+		func() error { return fmt.Errorf("post-commit refresh failure") },
+		nil,
+	))
+	recReq := httptest.NewRequest(http.MethodPut, artifactUploadPath, bytes.NewReader(recoveryHarness.archive))
+	recReq.Header.Set("Authorization", "Bearer runtime-token")
+	recReq.Header.Set("Content-Type", "application/gzip")
+	recResp := httptest.NewRecorder()
+	recoveryHarness.handler.ServeHTTP(recResp, recReq)
+	if recResp.Code != http.StatusInternalServerError {
+		t.Fatalf("post-commit failure PUT upload = %d, want 500 (%s)", recResp.Code, recResp.Body.String())
+	}
+	assertArtifactErrorCode(t, recResp, lifecycle.ArtifactCodeRecoveryRequired)
+
 	// Runtime Protocol /v1/runtime/status now reports the acquired ActiveGatewayArtifact.
 	rtStatus := requestRuntime(t, h.handler, "/v1/runtime/status")
 	if rtStatus.ActiveGatewayArtifact == nil || rtStatus.ActiveGatewayArtifact.ArtifactID != h.pinnedID ||
