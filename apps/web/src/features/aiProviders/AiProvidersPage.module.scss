@@ -59,7 +59,7 @@
 
 .pageSizeSelectTrigger {
   height: 30px;
-  border-radius: 10px;
+  border-radius: var(--app-radius-sm);
   padding: 0 10px;
   font-size: 12px;
 }
@@ -101,7 +101,7 @@
   max-width: 100%;
   overflow-wrap: anywhere;
   word-break: break-all;
-  font-family: 'Monaco', 'Menlo', 'Consolas', 'Ubuntu Mono', monospace;
+  font-family: var(--font-mono);
 }
 
 // 模型标签容器
@@ -126,7 +126,7 @@
   background: var(--surface-subtle);
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
-  border-radius: 14px;
+  border-radius: var(--app-radius-xs);
   padding: 4px 10px;
   font-size: 12px;
   transition: all 0.15s ease;
@@ -175,7 +175,7 @@
   width: 100%;
   padding: 8px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: var(--bg-primary);
   cursor: pointer;
   transition:
@@ -237,7 +237,7 @@
   color: var(--data-badge-info-text);
   background: var(--data-badge-info-bg);
   border: 1px solid var(--data-badge-info-border);
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   padding: 2px 8px;
   white-space: nowrap;
 }
@@ -322,13 +322,14 @@
   bottom: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
-  background: var(--bg-primary, #fff);
-  border: 1px solid var(--border-subtle, #d8e5f2);
-  border-radius: 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-xs);
   padding: 6px 10px;
   font-size: 11px;
   line-height: 1.5;
   white-space: nowrap;
+  /* floating layer: elevation allowed */
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
   z-index: $z-dropdown;
   pointer-events: none;
@@ -342,7 +343,7 @@
     left: 50%;
     transform: translateX(-50%);
     border: 5px solid transparent;
-    border-top-color: var(--bg-primary, #fff);
+    border-top-color: var(--bg-primary);
   }
 
   &::before {
@@ -352,7 +353,7 @@
     left: 50%;
     transform: translateX(-50%);
     border: 6px solid transparent;
-    border-top-color: var(--border-subtle, #d8e5f2);
+    border-top-color: var(--border-subtle);
   }
 }
 
@@ -394,11 +395,11 @@
 }
 
 .tooltipSuccess {
-  color: var(--success-color, #22c55e);
+  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
 }
 
 .tooltipFailure {
-  color: var(--danger-color, #ef4444);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
 }
 
 .tooltipRate {
@@ -414,24 +415,26 @@
   min-width: 48px;
   font-size: 12px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   padding: 4px 8px;
-  border-radius: 6px;
+  border-radius: var(--app-radius-xs);
+  color: var(--text-secondary);
   background: var(--surface-subtle);
 }
 
 .statusRateHigh {
-  color: var(--success-badge-text, #065f46);
-  background: var(--success-badge-bg, #d1fae5);
+  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  background: var(--success-badge-bg);
 }
 
 .statusRateMedium {
-  color: var(--warning-text, #92400e);
-  background: var(--warning-bg, #fef3c7);
+  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+  background: var(--warning-bg);
 }
 
 .statusRateLow {
-  color: var(--failure-badge-text);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   background: var(--failure-badge-bg);
 }
 
@@ -629,19 +632,19 @@
 .connectivitySuccess,
 .connectivityError {
   padding: $spacing-sm $spacing-md;
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   font-size: 13px;
   line-height: 1.5;
 }
 
 .connectivitySuccess {
-  color: var(--success-color);
+  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
   border: 1px solid color-mix(in srgb, var(--success-color) 32%, var(--border-color));
   background: color-mix(in srgb, var(--success-color) 8%, var(--bg-primary));
 }
 
 .connectivityError {
-  color: var(--danger-color);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   border: 1px solid color-mix(in srgb, var(--danger-color) 32%, var(--border-color));
   background: color-mix(in srgb, var(--danger-color) 8%, var(--bg-primary));
 }
@@ -654,7 +657,7 @@
   margin-top: 0;
   padding: $spacing-sm $spacing-md;
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   background: var(--surface-subtle);
 
   @include mobile {
@@ -750,7 +753,7 @@
 
 .keyTableShell {
   overflow-x: auto;
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
 }
 
 // 表头
@@ -763,7 +766,7 @@
   background: var(--surface-subtle-strong);
   border: 1px solid var(--border-subtle);
   border-bottom: none;
-  border-radius: $radius-md $radius-md 0 0;
+  border-radius: var(--app-radius-md) var(--app-radius-md) 0 0;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-secondary);
@@ -785,7 +788,7 @@
   align-items: center;
 
   &:last-child {
-    border-radius: 0 0 $radius-md $radius-md;
+    border-radius: 0 0 var(--app-radius-md) var(--app-radius-md);
   }
 
   &:hover {
@@ -826,7 +829,7 @@
   cursor: help;
 
   &:focus-visible {
-    border-radius: $radius-sm;
+    border-radius: var(--app-radius-xs);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 35%, transparent);
   }
 }
@@ -839,9 +842,10 @@
   padding: 8px 10px;
   overflow-x: hidden;
   overflow-y: auto;
-  background: var(--bg-primary, #fff);
-  border: 1px solid var(--border-subtle, #d8e5f2);
-  border-radius: 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-xs);
+  /* floating layer: elevation allowed */
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
   color: var(--text-primary);
   font-size: 11px;
@@ -854,7 +858,7 @@
 
 .keyStatusTooltipText {
   display: block;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -877,7 +881,7 @@
 }
 
 .keyTableWeightError {
-  color: $error-color;
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   font-size: 10px;
   line-height: 1.25;
   text-align: left;
@@ -894,7 +898,7 @@
   gap: $spacing-xs;
   flex-shrink: 0;
   white-space: nowrap;
-  background-color: var(--app-surface-strong, #fff);
+  background-color: var(--app-surface-strong);
   background-image: linear-gradient(var(--surface-subtle), var(--surface-subtle));
   box-shadow: -1px 0 0 var(--border-subtle);
 }
@@ -953,40 +957,26 @@
 // 暗色主题适配
 :global([data-theme='dark']) {
   .modelTag {
-    background: rgba($primary-color, 0.1);
+    background: color-mix(in srgb, var(--primary-color) 10%, transparent);
     border-color: var(--border-secondary);
   }
 
   .statusBlockIdle {
-    background-color: var(--border-primary, #374151);
+    background-color: var(--border-primary);
   }
 
   .statusTooltip {
-    background: var(--bg-secondary, #1f2937);
-    border-color: var(--border-primary, #374151);
+    background: var(--bg-secondary);
+    border-color: var(--border-primary);
+    /* floating layer: elevation allowed */
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 
     &::after {
-      border-top-color: var(--bg-secondary, #1f2937);
+      border-top-color: var(--bg-secondary);
     }
 
     &::before {
-      border-top-color: var(--border-primary, #374151);
+      border-top-color: var(--border-primary);
     }
-  }
-
-  .statusRateHigh {
-    background: rgba(34, 197, 94, 0.2);
-    color: #86efac;
-  }
-
-  .statusRateMedium {
-    background: rgba(251, 191, 36, 0.2);
-    color: #fde68a;
-  }
-
-  .statusRateLow {
-    background: rgba($error-color, 0.24);
-    color: #f1b0a6;
   }
 }
