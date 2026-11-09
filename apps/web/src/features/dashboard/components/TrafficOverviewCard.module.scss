@@ -32,6 +32,10 @@
     gap: 12px;
     min-width: 0;
     h3 { font-size: 16px; font-weight: 600; margin: 0; }
+
+    &.healthHeader {
+      align-items: flex-start;
+    }
   }
 }
 
@@ -119,7 +123,8 @@
 
   strong {
     color: var(--text-primary);
-    font-weight: 800;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
   }
 }
 
@@ -138,7 +143,7 @@
 }
 
 .healthHeader {
-  align-items: flex-start !important;
+  align-items: flex-start;
 }
 
 .healthTitle {
@@ -148,7 +153,7 @@
   min-width: 0;
 
   h3 {
-    margin-top: 0 !important;
+    margin-top: 0;
   }
 
   p {
@@ -169,12 +174,14 @@
 
   strong {
     padding: 6px 10px;
-    border-radius: 8px;
+    border-radius: var(--app-radius-sm);
     background: var(--data-emerald-light-9);
-    color: var(--data-emerald-base);
+    color: color-mix(in srgb, var(--data-emerald-dark-2) 62%, var(--text-primary));
     font-size: 13px;
-    font-weight: 800;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
     line-height: 1;
+    white-space: nowrap;
   }
 }
 
@@ -251,7 +258,7 @@
   width: 100%;
   aspect-ratio: 1;
   min-height: 6px;
-  border-radius: 2px;
+  border-radius: var(--radius-data-sm);
   background: var(--app-surface-muted);
 }
 
@@ -264,7 +271,7 @@
 }
 
 .healthEmpty {
-  background: color-mix(in srgb, var(--app-surface-muted), #111827 12%);
+  background: var(--data-track-bg);
 }
 
 .healthGood {
@@ -326,7 +333,7 @@
   i {
     width: 9px;
     height: 9px;
-    border-radius: 2px;
+    border-radius: var(--radius-data-sm);
   }
 }
 
@@ -361,7 +368,8 @@
     min-width: 0;
     color: var(--text-primary);
     font-size: 20px;
-    font-weight: 800;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
     line-height: 1;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -383,7 +391,7 @@
   min-width: 0;
   padding: 7px;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--app-radius-sm);
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
@@ -421,7 +429,7 @@
   min-width: 0;
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 
   span {
     min-width: 0;
@@ -435,7 +443,7 @@
   width: 8px;
   height: 8px;
   flex: 0 0 auto;
-  border-radius: 2px;
+  border-radius: var(--radius-data-sm);
 }
 
 .tokenRankMeta {
@@ -444,14 +452,14 @@
   gap: 7px;
   color: var(--text-tertiary);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 
   strong {
     color: var(--text-primary);
     font-size: 12px;
-    font-weight: 750;
+    font-weight: 700;
   }
 }
 
@@ -459,7 +467,7 @@
   display: block;
   height: 7px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--data-track-bg);
 }
 

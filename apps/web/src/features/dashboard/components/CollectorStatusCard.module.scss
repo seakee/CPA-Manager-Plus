@@ -40,6 +40,7 @@
     .label { color: var(--text-tertiary); }
     .value {
       font-weight: 600;
+      font-variant-numeric: tabular-nums;
       color: var(--text-primary);
       display: flex;
       align-items: center;
@@ -52,18 +53,18 @@
     }
 
     .statusText { color: var(--text-primary); }
-    .statusOk { color: #10b981; }
-    .statusWarn { color: #f59e0b; }
+    .statusOk { color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary)); }
+    .statusWarn { color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary)); }
     .statusDot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #10b981;
+      background: var(--data-emerald-base);
       display: inline-block;
     }
 
     .statusWarn .statusDot {
-      background: #f59e0b;
+      background: var(--color-warning);
     }
   }
 }
@@ -79,9 +80,9 @@
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px;
-  border: 1px solid rgba(245, 158, 11, 0.24);
+  border: 1px solid var(--data-badge-warning-border);
   border-radius: var(--app-radius-sm);
-  background: rgba(245, 158, 11, 0.08);
+  background: var(--data-badge-warning-bg);
   font-size: 12px;
 
   span {
@@ -89,7 +90,7 @@
   }
 
   strong {
-    color: #f59e0b;
+    color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
     font-weight: 600;
     overflow-wrap: anywhere;
   }

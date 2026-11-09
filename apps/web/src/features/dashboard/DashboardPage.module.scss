@@ -10,7 +10,6 @@
   backdrop-filter: var(--glass-backdrop-filter);
   border: 1px solid var(--glass-border);
   border-radius: var(--app-radius-md);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
 
   .headerLeft,
   .headerRight {
@@ -37,18 +36,20 @@
       width: 10px;
       height: 10px;
       border-radius: 50%;
-      box-shadow: 0 0 8px currentColor;
-
-      &.connected { color: #10b981; background: #10b981; }
-      &.connecting { color: #f59e0b; background: #f59e0b; animation: pulse 1.5s infinite; }
-      &.disconnected { color: #ef4444; background: #ef4444; }
+      &.connected { background: var(--data-emerald-base); }
+      &.connecting { background: var(--color-warning); animation: pulse 1.5s infinite; }
+      &.disconnected { background: var(--color-danger); }
     }
 
     .statusInfo {
       display: flex;
       flex-direction: column;
       .statusLabel { font-size: 11px; color: var(--text-tertiary); line-height: 1; margin-bottom: 2px; }
-      .statusValue { font-size: 13px; font-weight: 600; color: #10b981; }
+      .statusValue {
+        font-size: 13px;
+        font-weight: 600;
+        color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+      }
     }
   }
 
@@ -72,7 +73,7 @@
     display: flex;
     flex-direction: column;
     align-items: flex-end;
-    .time { font-size: 16px; font-weight: 600; line-height: 1; white-space: nowrap; }
+    .time { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1; white-space: nowrap; }
     .date { font-size: 12px; color: var(--text-tertiary); }
   }
 
@@ -127,7 +128,7 @@
       width: 4px;
       height: 16px;
       background: var(--color-primary);
-      border-radius: 2px;
+      border-radius: var(--app-radius-pill);
     }
   }
 }
@@ -205,13 +206,13 @@
         justify-content: center;
         background: var(--app-accent-soft);
         color: var(--color-primary);
-        border-radius: 10px;
+        border-radius: var(--app-radius-sm);
       }
 
       .bentoContent {
         display: flex;
         flex-direction: column;
-        .bentoValue { font-size: 30px; font-weight: 700; line-height: 1.2; order: 2; }
+        .bentoValue { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.2; order: 2; }
         .bentoLabel { font-size: 14px; color: var(--text-primary); margin-top: 4px; order: 1; }
         .bentoSublabel {
           order: 3;
@@ -261,8 +262,10 @@
 
         .configLabel { font-size: 13px; color: var(--text-tertiary); }
         .configValue {
-          font-size: 13px; font-weight: 600;
-          &.on { color: #10b981; }
+          font-size: 13px;
+          font-weight: 600;
+          font-variant-numeric: tabular-nums;
+          &.on { color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary)); }
           &.off { color: var(--text-muted); }
         }
         .configValueMono {
@@ -276,12 +279,13 @@
         }
         .configBadge {
           padding: 2px 8px;
-          border-radius: 4px;
+          border-radius: var(--app-radius-xs);
           font-size: 11px;
           font-weight: 600;
           text-transform: uppercase;
-          background: var(--app-accent-soft);
-          color: var(--color-primary);
+          white-space: nowrap;
+          background: var(--data-badge-info-bg);
+          color: color-mix(in srgb, var(--data-badge-info-text) 70%, var(--text-primary));
         }
       }
     }
@@ -299,18 +303,18 @@
 }
 
 .configBadgeRoundRobin {
-  color: var(--color-primary);
-  background: var(--app-accent-soft);
+  color: color-mix(in srgb, var(--data-badge-info-text) 70%, var(--text-primary));
+  background: var(--data-badge-info-bg);
 }
 
 .configBadgeWeightedRoundRobin {
-  color: #8b5cf6;
-  background: rgba(139, 92, 246, 0.12);
+  color: var(--data-violet-dark-2);
+  background: var(--data-violet-light-9);
 }
 
 .configBadgeFillFirst {
-  color: #10b981;
-  background: rgba(16, 185, 129, 0.12);
+  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
+  background: var(--data-badge-success-bg);
 }
 
 .configBadgeUnknown {
