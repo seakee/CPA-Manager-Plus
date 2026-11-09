@@ -1,22 +1,14 @@
 .page {
-  --usage-surface: var(--bg-primary);
-  --usage-muted-surface: var(--surface-subtle);
-  --usage-border: var(--border-color);
-  --usage-strong-border: var(--border-primary);
-  --usage-text: var(--text-primary);
-  --usage-muted: var(--text-secondary);
-  --usage-primary: var(--primary-color);
-  --usage-primary-soft: var(--color-primary-light-9);
   display: grid;
-  gap: 16px;
+  gap: 14px;
   min-width: 0;
-  color: var(--usage-text);
+  color: var(--text-primary);
 }
 
 .compactSelectTrigger {
-  min-width: 150px !important;
-  height: 32px !important;
-  border-radius: 10px !important;
+  height: var(--control-height-sm) !important;
+  padding: 0 2px 0 10px !important;
+  border-radius: var(--app-radius-sm) !important;
   font-size: 12px;
   font-weight: 700;
 }
@@ -31,16 +23,15 @@
 .anomalyPanel,
 .alertPanel,
 .emptyState {
-  border: 1px solid var(--usage-border);
-  border-radius: 14px;
-  background: var(--usage-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--bg-primary);
   box-shadow: var(--shadow-lg);
 }
 
 .controlsPanel {
   display: grid;
   overflow: hidden;
-  border-radius: 18px;
 }
 
 .controlsTabsRow {
@@ -50,7 +41,7 @@
   min-width: 0;
   padding: 14px 16px;
   overflow-x: auto;
-  border-bottom: 1px solid color-mix(in srgb, var(--usage-border) 72%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   scrollbar-width: thin;
 }
 
@@ -64,7 +55,7 @@
   gap: 14px;
   min-width: 0;
   padding: 14px 16px 16px;
-  background: color-mix(in srgb, var(--usage-muted-surface) 34%, var(--usage-surface));
+  background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
 }
 
 .controlBar {
@@ -75,31 +66,34 @@
 }
 
 .segmentedControl {
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   min-width: 0;
   max-width: 100%;
   overflow-x: auto;
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
-  background: var(--usage-muted-surface);
-  scrollbar-width: thin;
+  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--surface-subtle) 82%, var(--bg-primary));
+  box-shadow: none;
 }
 
 .segmentButton {
-  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   flex: 0 0 auto;
-  min-height: 34px;
+  height: calc(var(--control-height-sm) - 2px);
+  min-height: calc(var(--control-height-sm) - 2px);
   padding: 0 14px;
   border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--usage-border) 72%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   border-radius: 0;
   background: transparent;
-  color: color-mix(in srgb, var(--usage-muted) 84%, var(--usage-text));
-  font: inherit;
+  color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
   font-size: 13px;
   font-weight: 700;
   line-height: 1;
@@ -113,17 +107,17 @@
 }
 
 .segmentButton:hover {
-  color: var(--usage-text);
-  background: color-mix(in srgb, var(--usage-primary) 5%, var(--usage-surface));
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
   transform: none;
 }
 
 .segmentButtonActive,
 .segmentButtonActive:hover {
   border-left-color: transparent;
-  background: color-mix(in srgb, var(--usage-primary) 12%, var(--usage-surface));
-  color: var(--usage-primary);
-  font-weight: 800;
+  background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+  color: var(--primary-color);
+  font-weight: 700;
   box-shadow: none;
   transform: none;
 }
@@ -141,8 +135,16 @@
   min-width: 0;
 }
 
+.refreshControls :global(.btn),
+.customRangeRow :global(.btn) {
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .filterMeta {
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
@@ -152,12 +154,12 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 34px;
+  min-height: var(--control-height-sm);
   padding: 0 12px;
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
-  background: var(--usage-muted-surface);
-  color: var(--usage-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
+  color: var(--primary-color);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -165,8 +167,8 @@
 }
 
 .filterActionButton:hover {
-  border-color: color-mix(in srgb, var(--usage-primary) 35%, var(--usage-strong-border));
-  background: color-mix(in srgb, var(--usage-primary) 6%, var(--usage-surface));
+  border-color: color-mix(in srgb, var(--primary-color) 35%, var(--border-primary));
+  background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
 }
 
 .filterBar {
@@ -180,19 +182,19 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 38px;
+  min-height: var(--control-height-sm);
   padding: 0 12px;
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
-  background: var(--usage-surface);
-  color: var(--usage-muted);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
 
   input {
     flex: 1 1 260px;
     min-width: 0;
     border: 0;
     background: transparent;
-    color: var(--usage-text);
+    color: var(--text-primary);
     font: inherit;
     font-size: 13px;
     outline: none;
@@ -207,14 +209,14 @@
   width: 26px;
   height: 26px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--app-radius-xs);
   background: transparent;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   cursor: pointer;
 
   &:hover {
-    background: color-mix(in srgb, var(--usage-primary) 8%, var(--usage-surface));
-    color: var(--usage-primary);
+    background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+    color: var(--primary-color);
   }
 }
 
@@ -226,8 +228,8 @@
 }
 
 .filterSelectTrigger {
-  height: 36px !important;
-  border-radius: 12px !important;
+  height: var(--control-height-sm) !important;
+  border-radius: var(--app-radius-sm) !important;
   font-size: 12px;
   font-weight: 600;
 }
@@ -249,13 +251,13 @@
 .customRangeRow input,
 .advancedGrid input,
 .apiSearchBar input {
-  min-height: 38px;
+  min-height: var(--control-height-sm);
   min-width: 0;
   padding: 0 12px;
-  border: 1px solid var(--usage-border);
-  border-radius: 10px;
-  background: var(--usage-surface);
-  color: var(--usage-text);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
   font: inherit;
 }
 
@@ -271,6 +273,10 @@
 
   label {
     display: grid;
+    gap: 5px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
   }
 }
 
@@ -289,7 +295,7 @@
 }
 
 .usageSummaryCard {
-  --summary-accent: var(--usage-primary);
+  --summary-accent: var(--primary-color);
 
   position: relative;
   isolation: isolate;
@@ -300,9 +306,9 @@
   min-width: 0;
   min-height: 112px;
   padding: 12px;
-  border: 1px solid var(--usage-border);
+  border: 1px solid color-mix(in srgb, var(--summary-accent) 18%, var(--border-color));
   border-radius: var(--app-radius-md);
-  background: var(--usage-surface);
+  background: color-mix(in srgb, var(--summary-accent) 5%, var(--bg-primary));
   box-shadow: var(--shadow);
   transition:
     transform 0.18s ease,
@@ -355,7 +361,7 @@
 
 .usageSummaryCard:hover {
   z-index: 5;
-  border-color: var(--usage-strong-border);
+  border-color: var(--border-primary);
   box-shadow: var(--shadow-lg);
   transform: translateY(-1px);
 }
@@ -380,7 +386,7 @@
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--summary-accent) 12%, transparent);
   color: var(--summary-accent);
 
@@ -393,7 +399,7 @@
 .usageSummaryLabel {
   min-width: 0;
   overflow: hidden;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0;
@@ -422,7 +428,7 @@
 .usageSummaryValue {
   min-width: 0;
   max-width: 100%;
-  color: var(--usage-text);
+  color: var(--text-primary);
   font-size: 24px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -437,8 +443,8 @@
 }
 
 .usageSummaryValue[tabindex='0']:focus-visible {
-  border-radius: 6px;
-  outline: 0;
+  border-radius: var(--app-radius-xs);
+  outline: 2px solid color-mix(in srgb, var(--primary-color) 42%, transparent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--summary-accent) 28%, transparent);
 }
 
@@ -453,10 +459,10 @@
   min-width: min(160px, 100%);
   max-width: min(280px, calc(100vw - 32px));
   padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--summary-accent) 78%, var(--usage-border));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--summary-accent) 92%, var(--usage-text));
-  color: var(--primary-contrast, #fff);
+  border: 1px solid color-mix(in srgb, var(--summary-accent) 78%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--summary-accent) 92%, var(--text-primary));
+  color: var(--primary-contrast);
   box-shadow: 0 14px 30px color-mix(in srgb, var(--summary-accent) 28%, transparent);
   opacity: 0;
   pointer-events: none;
@@ -473,8 +479,8 @@
   left: 16px;
   width: 9px;
   height: 9px;
-  border-right: 1px solid color-mix(in srgb, var(--summary-accent) 78%, var(--usage-border));
-  border-bottom: 1px solid color-mix(in srgb, var(--summary-accent) 78%, var(--usage-border));
+  border-right: 1px solid color-mix(in srgb, var(--summary-accent) 78%, var(--border-color));
+  border-bottom: 1px solid color-mix(in srgb, var(--summary-accent) 78%, var(--border-color));
   background: inherit;
   transform: rotate(45deg);
 }
@@ -486,7 +492,7 @@
 }
 
 .usageSummaryValueTooltipLabel {
-  color: color-mix(in srgb, var(--primary-contrast, #fff) 72%, transparent);
+  color: color-mix(in srgb, var(--primary-contrast) 72%, transparent);
   font-size: 10px;
   font-weight: 700;
   line-height: 1.2;
@@ -494,9 +500,9 @@
 }
 
 .usageSummaryValueTooltipValue {
-  color: var(--primary-contrast, #fff);
+  color: var(--primary-contrast);
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
   overflow-wrap: anywhere;
@@ -505,10 +511,9 @@
 .usageSummaryMeta {
   display: block;
   margin-top: 5px;
-  color: var(--usage-muted);
   font-size: 11px;
   font-weight: 500;
-  line-height: 1.35;
+  color: var(--text-secondary);
   overflow-wrap: anywhere;
 }
 
@@ -539,27 +544,27 @@
 }
 
 .summaryAccentAmber {
-  --summary-accent: #f59e0b;
+  --summary-accent: var(--data-amber-base);
 }
 
 .summaryAccentBlue {
-  --summary-accent: #3b82f6;
+  --summary-accent: var(--data-blue-base);
 }
 
 .summaryAccentCyan {
-  --summary-accent: #06b6d4;
+  --summary-accent: var(--data-cyan-base);
 }
 
 .summaryAccentGreen {
-  --summary-accent: #10b981;
+  --summary-accent: var(--data-emerald-base);
 }
 
 .summaryAccentRed {
-  --summary-accent: #ef4444;
+  --summary-accent: var(--data-red-base);
 }
 
 .summaryAccentTeal {
-  --summary-accent: #14b8a6;
+  --summary-accent: var(--data-teal-base);
 }
 
 .tonegood {
@@ -604,7 +609,7 @@
   h3,
   p {
     margin: 4px 0 0;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.5;
   }
@@ -613,7 +618,7 @@
   a {
     border: 0;
     background: transparent;
-    color: var(--usage-primary);
+    color: var(--primary-color);
     font-size: 13px;
     font-weight: 700;
     cursor: pointer;
@@ -628,14 +633,15 @@
   button {
     display: inline-flex;
     align-items: center;
-    gap: 8px;
-    min-height: 34px;
-    padding: 0 12px;
-    border: 1px solid var(--usage-border);
-    border-radius: 10px;
-    background: var(--usage-surface);
-    color: var(--usage-muted);
-    font-size: 13px;
+    gap: 7px;
+    min-height: var(--control-height-sm);
+    padding: 0 11px;
+    border: 1px solid var(--border-color);
+    border-radius: var(--app-radius-sm);
+    background: var(--surface-subtle);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 12px;
     font-weight: 700;
     cursor: pointer;
 
@@ -643,28 +649,29 @@
       width: 10px;
       height: 10px;
       border: 2px solid var(--metric-color, currentColor);
-      border-radius: 3px;
-      background: transparent !important;
+      border-radius: var(--app-radius-xs);
+      background: transparent;
+      box-sizing: border-box;
+      transition:
+        background-color 0.14s ease,
+        border-color 0.14s ease,
+        box-shadow 0.14s ease;
+    }
+
+    &:hover {
+      border-color: color-mix(in srgb, var(--metric-color, var(--primary-color)) 38%, var(--border-color));
+      color: var(--text-primary);
     }
   }
 
   .metricChipActive {
-    border-color: color-mix(
-      in srgb,
-      var(--metric-color, var(--usage-primary)) 38%,
-      var(--usage-border)
-    );
-    background: color-mix(
-      in srgb,
-      var(--metric-color, var(--usage-primary)) 10%,
-      var(--usage-surface)
-    );
-    color: color-mix(in srgb, var(--metric-color, var(--usage-primary)) 78%, var(--usage-text));
-    box-shadow: inset 0 0 0 1px
-      color-mix(in srgb, var(--metric-color, var(--usage-primary)) 10%, transparent);
+    border-color: color-mix(in srgb, var(--metric-color, var(--primary-color)) 44%, var(--border-color));
+    background: color-mix(in srgb, var(--metric-color, var(--primary-color)) 10%, var(--bg-primary));
+    color: var(--text-primary);
 
     span {
-      background: var(--metric-color, currentColor) !important;
+      background: var(--metric-color, currentColor);
+      box-shadow: 0 0 0 2px color-mix(in srgb, var(--metric-color, currentColor) 18%, transparent);
     }
   }
 }
@@ -703,7 +710,7 @@
   justify-content: space-between;
   width: 148px;
   transform: translateX(-50%);
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
@@ -715,7 +722,7 @@
   min-height: 180px;
   place-items: center;
   gap: 8px;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 700;
   text-align: center;
@@ -732,8 +739,9 @@
   padding: 12px;
 
   b {
-    color: #0f172a;
-    font-size: 13px;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 700;
   }
 }
 
@@ -741,8 +749,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 18px;
-  color: #64748b;
+  gap: 14px;
+  color: var(--text-secondary);
   font-size: 12px;
 
   span {
@@ -752,8 +760,9 @@
   }
 
   strong {
-    color: #0f172a;
-    font-weight: 800;
+    color: var(--text-primary);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
   }
 }
 
@@ -774,10 +783,10 @@
   gap: 12px;
   min-width: 0;
   padding: 2px 2px 6px;
-  border-bottom: 1px solid color-mix(in srgb, var(--usage-border), transparent 30%);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color), transparent 30%);
 
   span {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     line-height: 1;
     white-space: nowrap;
@@ -786,9 +795,10 @@
   strong {
     min-width: 0;
     overflow: hidden;
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 20px;
-    font-weight: 800;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
     line-height: 1;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -808,16 +818,16 @@
   min-width: 0;
   padding: 7px;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--app-radius-sm);
   background: transparent;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   transition:
     border-color 0.16s ease,
     background-color 0.16s ease;
 
   &:hover {
-    border-color: var(--usage-border);
-    background: color-mix(in srgb, var(--usage-muted-surface), transparent 35%);
+    border-color: var(--border-color);
+    background: color-mix(in srgb, var(--surface-subtle), transparent 35%);
   }
 }
 
@@ -834,9 +844,9 @@
   align-items: center;
   gap: 7px;
   min-width: 0;
-  color: color-mix(in srgb, var(--usage-muted) 82%, var(--usage-text));
+  color: color-mix(in srgb, var(--text-secondary) 82%, var(--text-primary));
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 
   span {
     min-width: 0;
@@ -850,23 +860,23 @@
   flex: 0 0 auto;
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: var(--app-radius-xs);
 }
 
 .costShareRankMeta {
   display: inline-flex;
   align-items: baseline;
   gap: 7px;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 
   strong {
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 12px;
-    font-weight: 750;
+    font-weight: 700;
   }
 }
 
@@ -874,8 +884,8 @@
   display: block;
   height: 7px;
   overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--usage-muted-surface), transparent 18%);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--surface-subtle), transparent 18%);
 }
 
 .costShareRankBar {
@@ -909,7 +919,7 @@
 
   p {
     margin-top: 4px;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 13px;
   }
 }
@@ -923,19 +933,20 @@
   span {
     min-height: 24px;
     padding: 3px 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--error-color) 10%, var(--usage-surface));
+    border-radius: var(--app-radius-pill);
+    background: color-mix(in srgb, var(--error-color) 10%, var(--bg-primary));
     color: var(--error-color);
     font-size: 12px;
     font-weight: 700;
+    white-space: nowrap;
   }
 }
 
 .anomalyMetrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
   overflow: hidden;
 
   div {
@@ -943,7 +954,7 @@
     gap: 4px;
     min-width: 0;
     padding: 12px;
-    border-right: 1px solid var(--usage-border);
+    border-right: 1px solid var(--border-color);
 
     &:last-child {
       border-right: 0;
@@ -952,13 +963,14 @@
 
   span,
   em {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-style: normal;
   }
 
   strong {
     font-size: 16px;
+    font-variant-numeric: tabular-nums;
   }
 
   em {
@@ -978,7 +990,7 @@
     gap: 4px;
     margin: 0;
     padding-left: 18px;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
   }
 }
@@ -1024,12 +1036,13 @@
   max-width: 100%;
 
   .segmentButton {
-    min-height: 32px;
+    height: calc(var(--control-height-sm) - 2px);
+    min-height: calc(var(--control-height-sm) - 2px);
     padding: 0 14px;
     border: 0;
-    border-left: 1px solid color-mix(in srgb, var(--usage-border) 72%, transparent);
+    border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
     background: transparent;
-    color: color-mix(in srgb, var(--usage-muted) 84%, var(--usage-text));
+    color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
     box-shadow: none;
     transform: none;
 
@@ -1038,8 +1051,8 @@
     }
 
     &:hover {
-      background: color-mix(in srgb, var(--usage-primary) 5%, var(--usage-surface));
-      color: var(--usage-text);
+      background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+      color: var(--text-primary);
       transform: none;
     }
   }
@@ -1047,9 +1060,9 @@
   .segmentButtonActive,
   .segmentButtonActive:hover {
     border-left-color: transparent;
-    background: color-mix(in srgb, var(--usage-primary) 12%, var(--usage-surface));
-    color: var(--usage-primary);
-    font-weight: 800;
+    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+    color: var(--primary-color);
+    font-weight: 700;
     box-shadow: none;
     transform: none;
   }
@@ -1078,9 +1091,9 @@
 
   h3 {
     margin: 0;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 13px;
-    font-weight: 800;
+    font-weight: 700;
     line-height: 1.3;
   }
 }
@@ -1088,9 +1101,9 @@
 .apiSearchBar {
   flex: 0 1 320px;
   padding: 0 12px;
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
-  background: var(--usage-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-primary);
 
   input {
     flex: 1 1 120px;
@@ -1124,15 +1137,16 @@
   th,
   td {
     padding: 10px 12px;
-    border-bottom: 1px solid var(--usage-border);
+    border-bottom: 1px solid var(--border-color);
     text-align: left;
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
 
   th {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
   }
 
   tbody tr {
@@ -1140,17 +1154,19 @@
 
     &:hover,
     &.selectedRow {
-      background: var(--usage-primary-soft);
+      background: var(--color-primary-light-9);
     }
   }
 }
 
+.tableWrap .modelTable,
 .modelTable {
-  min-width: 860px !important;
+  min-width: 860px;
 }
 
+.tableWrap .modelRankTable,
 .modelRankTable {
-  min-width: 1180px !important;
+  min-width: 1180px;
 }
 
 // Rank tables are almost entirely numeric from the third column on;
@@ -1164,16 +1180,19 @@
   }
 }
 
+.tableWrap .apiKeyTable,
 .apiKeyTable {
-  min-width: 1120px !important;
+  min-width: 1120px;
 }
 
+.tableWrap .anomalyTable,
 .anomalyTable {
-  min-width: 980px !important;
+  min-width: 980px;
 }
 
+.tableWrap .apiKeyContextTable,
 .apiKeyContextTable {
-  min-width: 1080px !important;
+  min-width: 1080px;
 
   th:nth-child(n + 6),
   td:nth-child(n + 6) {
@@ -1181,8 +1200,9 @@
   }
 }
 
+.tableWrap .drilldownTable,
 .drilldownTable {
-  min-width: 920px !important;
+  min-width: 920px;
 }
 
 .inlineEmpty {
@@ -1191,7 +1211,7 @@
   place-items: center;
   align-content: center;
   gap: 8px;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 700;
   text-align: center;
@@ -1204,23 +1224,25 @@
   align-items: center;
   min-height: 24px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .severitylow {
-  background: color-mix(in srgb, #0ea5a7 13%, var(--usage-surface));
-  color: #0f766e;
+  background: var(--data-badge-neutral-bg);
+  color: var(--data-badge-neutral-text);
 }
 
+// Warning pair; text mixed toward --text-primary: 5.0:1 light, 8.2:1 dark.
 .severitymedium {
-  background: color-mix(in srgb, #f97316 14%, var(--usage-surface));
-  color: #c2410c;
+  background: var(--data-badge-warning-bg);
+  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
 }
 
 .severityhigh {
-  background: color-mix(in srgb, var(--error-color) 12%, var(--usage-surface));
+  background: color-mix(in srgb, var(--error-color) 12%, var(--bg-primary));
   color: var(--error-color);
 }
 
@@ -1233,38 +1255,37 @@
   em {
     min-height: 22px;
     padding: 2px 7px;
-    border-radius: 999px;
-    background: var(--usage-muted-surface);
-    color: var(--usage-muted);
+    border-radius: var(--app-radius-pill);
+    background: var(--surface-subtle);
+    color: var(--text-secondary);
     font-size: 12px;
     font-style: normal;
     font-weight: 700;
+    white-space: nowrap;
   }
 }
 
 .linkButton {
   border: 0;
   background: transparent;
-  color: var(--usage-primary);
+  color: var(--primary-color);
   font: inherit;
-  font-weight: 800;
+  font-weight: 700;
   cursor: pointer;
 }
 
 .monoCell {
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .statusFailed {
-  background: color-mix(in srgb, var(--error-color) 10%, var(--usage-surface));
+  background: color-mix(in srgb, var(--error-color) 10%, var(--bg-primary));
   color: var(--error-color);
 }
 
 .statusSuccess {
-  background: color-mix(in srgb, var(--success-color) 12%, var(--usage-surface));
+  background: color-mix(in srgb, var(--success-color) 12%, var(--bg-primary));
   color: var(--success-color);
 }
 
@@ -1283,20 +1304,20 @@
   justify-content: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--app-radius-xs);
   background: transparent;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   cursor: pointer;
 }
 
 .entityCopyButton:hover {
-  border-color: color-mix(in srgb, var(--usage-primary) 30%, var(--usage-border));
-  background: color-mix(in srgb, var(--usage-primary) 8%, var(--usage-surface));
-  color: var(--usage-primary);
+  border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+  color: var(--primary-color);
 }
 
 .entityCopyButton:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--usage-primary) 45%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--primary-color) 45%, transparent);
   outline-offset: 2px;
 }
 
@@ -1304,7 +1325,7 @@
   display: inline-flex;
   align-items: center;
   min-height: 26px;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
 }
@@ -1319,8 +1340,8 @@
   gap: 10px;
   align-items: center;
   padding: 12px;
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
 
   div {
     display: grid;
@@ -1330,7 +1351,7 @@
 
   span,
   em {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-style: normal;
   }
@@ -1367,23 +1388,23 @@
     gap: 5px;
     min-width: 0;
     padding: 10px 12px;
-    border: 1px solid var(--usage-border);
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--usage-muted-surface) 70%, var(--usage-surface));
+    border: 1px solid var(--border-color);
+    border-radius: var(--app-radius-md);
+    background: color-mix(in srgb, var(--surface-subtle) 70%, var(--bg-primary));
   }
 
   span {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 700;
   }
 
   strong {
     min-width: 0;
     overflow: hidden;
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1404,9 +1425,9 @@
 
   h3 {
     margin: 0;
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 14px;
-    font-weight: 800;
+    font-weight: 700;
     line-height: 1.3;
   }
 }
@@ -1421,13 +1442,13 @@
     gap: 6px;
     min-width: 0;
     padding: 12px;
-    border: 1px solid var(--usage-border);
-    border-radius: 12px;
-    background: var(--usage-muted-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--app-radius-md);
+    background: var(--surface-subtle);
   }
 
   span {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 700;
   }
@@ -1436,6 +1457,7 @@
     min-width: 0;
     overflow: hidden;
     font-size: 18px;
+    font-variant-numeric: tabular-nums;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1463,8 +1485,8 @@
     min-height: 28px;
     padding: 6px 8px;
     overflow: hidden;
-    border-radius: 8px;
-    background: var(--usage-muted-surface);
+    border-radius: var(--app-radius-sm);
+    background: var(--surface-subtle);
     font-size: 12px;
     font-weight: 700;
   }
@@ -1473,7 +1495,7 @@
     position: absolute;
     inset: 0 auto 0 0;
     z-index: 0;
-    background: color-mix(in srgb, var(--usage-primary) 18%, transparent);
+    background: color-mix(in srgb, var(--primary-color) 18%, transparent);
   }
 
   b,
@@ -1490,8 +1512,9 @@
   }
 
   em {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-style: normal;
+    font-variant-numeric: tabular-nums;
   }
 }
 
@@ -1499,7 +1522,7 @@
   display: inline-flex;
   min-height: 34px;
   align-items: center;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
 }
@@ -1515,10 +1538,10 @@
   gap: 4px 10px;
   min-width: 0;
   padding: 12px;
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
-  background: var(--usage-muted-surface);
-  color: var(--usage-text);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
+  color: var(--text-primary);
   text-align: left;
   cursor: pointer;
 
@@ -1528,8 +1551,8 @@
     width: 30px;
     height: 30px;
     place-items: center;
-    border-radius: 10px;
-    background: color-mix(in srgb, currentColor 10%, var(--usage-surface));
+    border-radius: var(--app-radius-sm);
+    background: color-mix(in srgb, currentColor 10%, var(--bg-primary));
   }
 
   strong,
@@ -1544,7 +1567,7 @@
   }
 
   em {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-style: normal;
     line-height: 1.45;
@@ -1552,7 +1575,7 @@
 }
 
 .insightinfo {
-  color: #2563eb;
+  color: var(--data-blue-dark-2);
 }
 
 .insightsuccess {
@@ -1567,28 +1590,30 @@
   color: var(--error-color);
 }
 
+.tableWrap .compactTable,
 .compactTable {
-  min-width: 760px !important;
+  min-width: 760px;
 }
 
+.tableWrap .providerOverviewTable,
 .providerOverviewTable {
-  min-width: 1040px !important;
+  min-width: 1040px;
 }
 
 .toggleControl {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 32px;
-  color: var(--usage-muted);
+  min-height: var(--control-height-sm);
+  color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
   white-space: nowrap;
 
   input {
     width: 16px;
     height: 16px;
-    accent-color: var(--usage-primary);
+    accent-color: var(--primary-color);
   }
 }
 
@@ -1607,9 +1632,9 @@
   align-items: center;
   min-width: 0;
   padding: 10px;
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
-  background: var(--usage-muted-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
 
   div {
     display: grid;
@@ -1626,7 +1651,7 @@
   }
 
   div span {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
   }
 }
@@ -1638,17 +1663,18 @@
   min-height: 28px;
   align-items: center;
   overflow: hidden;
-  border-radius: 9px;
-  background: var(--usage-surface);
-  color: var(--usage-text);
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 
   i {
     position: absolute;
     inset: 0 auto 0 0;
     z-index: 0;
-    background: color-mix(in srgb, var(--usage-primary) 18%, transparent);
+    background: color-mix(in srgb, var(--primary-color) 18%, transparent);
   }
 
   b {
@@ -1665,25 +1691,26 @@
   align-items: center;
   min-height: 32px;
   padding: 0 4px;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 12px;
 
   i {
     width: 9px;
     height: 9px;
-    border-radius: 999px;
+    border-radius: 50%;
   }
 
   b {
     overflow: hidden;
-    color: var(--usage-text);
+    color: var(--text-primary);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   em {
     font-style: normal;
-    font-weight: 800;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
   }
 }
 
@@ -1692,23 +1719,24 @@
   align-items: center;
   min-height: 24px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .quotanormal {
-  background: color-mix(in srgb, var(--success-color) 12%, var(--usage-surface));
+  background: color-mix(in srgb, var(--success-color) 12%, var(--bg-primary));
   color: var(--success-color);
 }
 
 .quotawarning {
-  background: color-mix(in srgb, #f97316 14%, var(--usage-surface));
+  background: color-mix(in srgb, #f97316 14%, var(--bg-primary));
   color: #c2410c;
 }
 
 .quotaexhausted {
-  background: color-mix(in srgb, var(--error-color) 12%, var(--usage-surface));
+  background: color-mix(in srgb, var(--error-color) 12%, var(--bg-primary));
   color: var(--error-color);
 }
 
@@ -1719,9 +1747,9 @@
   align-items: center;
   min-width: 0;
   padding: 10px;
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
-  background: var(--usage-muted-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
 
   span {
     display: grid;
@@ -1738,7 +1766,7 @@
   }
 
   em {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-style: normal;
   }
@@ -1765,34 +1793,35 @@
 
   > span {
     flex: 0 0 auto;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
   }
 }
 
 .heatmapSegmented,
 .heatmapDateTabs {
   max-width: 100%;
-  border-radius: 10px;
-  background: var(--usage-muted-surface);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
 
   .segmentButton {
-    min-height: 32px;
+    height: calc(var(--control-height-sm) - 2px);
+    min-height: calc(var(--control-height-sm) - 2px);
     padding: 0 12px;
-    color: color-mix(in srgb, var(--usage-muted) 84%, var(--usage-text));
+    color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
     font-size: 12px;
   }
 
   .segmentButton:hover {
-    color: var(--usage-text);
+    color: var(--text-primary);
   }
 
   .segmentButtonActive,
   .segmentButtonActive:hover {
-    background: color-mix(in srgb, var(--usage-primary) 12%, var(--usage-surface));
-    color: var(--usage-primary);
-    font-weight: 800;
+    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+    color: var(--primary-color);
+    font-weight: 700;
   }
 }
 
@@ -1822,24 +1851,24 @@
   }
 
   span {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 850;
+    font-weight: 700;
   }
 
   h2 {
     margin: 0;
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 20px;
-    font-weight: 880;
+    font-weight: 700;
     letter-spacing: 0;
   }
 
   p {
     margin: 0;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 13px;
-    font-weight: 650;
+    font-weight: 600;
   }
 }
 
@@ -1853,8 +1882,8 @@
     padding: 0;
     border: 0;
     background: transparent;
-    color: var(--usage-primary);
-    font-weight: 800;
+    color: var(--primary-color);
+    font-weight: 700;
     cursor: pointer;
   }
 }
@@ -1882,13 +1911,14 @@
   gap: 6px;
   min-height: 24px;
   padding: 4px 8px;
-  border: 1px solid var(--usage-border);
-  border-radius: 999px;
-  background: var(--usage-surface);
-  color: var(--usage-muted);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-pill);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1;
+  white-space: nowrap;
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
 }
 
@@ -1910,7 +1940,7 @@
 }
 
 .heatmapDetailMetricCard {
-  --heatmap-detail-accent: var(--usage-primary);
+  --heatmap-detail-accent: var(--primary-color);
 
   position: relative;
   isolation: isolate;
@@ -1921,9 +1951,9 @@
   min-width: 0;
   min-height: 92px;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--heatmap-detail-accent) 18%, var(--usage-border));
+  border: 1px solid color-mix(in srgb, var(--heatmap-detail-accent) 18%, var(--border-color));
   border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--heatmap-detail-accent) 5%, var(--usage-surface));
+  background: color-mix(in srgb, var(--heatmap-detail-accent) 5%, var(--bg-primary));
   box-shadow: var(--shadow);
   transition:
     transform 0.18s ease,
@@ -1933,8 +1963,8 @@
 }
 
 .heatmapDetailMetricCard:hover {
-  border-color: color-mix(in srgb, var(--heatmap-detail-accent) 38%, var(--usage-border));
-  background: color-mix(in srgb, var(--heatmap-detail-accent) 7%, var(--usage-surface));
+  border-color: color-mix(in srgb, var(--heatmap-detail-accent) 38%, var(--border-color));
+  background: color-mix(in srgb, var(--heatmap-detail-accent) 7%, var(--bg-primary));
   box-shadow: var(--shadow-lg);
   transform: translateY(-1px);
 }
@@ -1955,7 +1985,7 @@
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--heatmap-detail-accent) 13%, transparent);
   color: var(--heatmap-detail-accent);
 
@@ -1968,7 +1998,7 @@
 .heatmapDetailMetricLabel {
   min-width: 0;
   overflow: hidden;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0;
@@ -1984,9 +2014,9 @@
   max-width: 100%;
   margin-top: auto;
   overflow: hidden;
-  color: var(--usage-text);
+  color: var(--text-primary);
   font-size: 20px;
-  font-weight: 850;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
   letter-spacing: 0;
@@ -2021,19 +2051,19 @@
 }
 
 .heatmapDetailMetricBlue {
-  --heatmap-detail-accent: #3b82f6;
+  --heatmap-detail-accent: var(--data-blue-base);
 }
 
 .heatmapDetailMetricTeal {
-  --heatmap-detail-accent: #14b8a6;
+  --heatmap-detail-accent: var(--data-teal-base);
 }
 
 .heatmapDetailMetricAmber {
-  --heatmap-detail-accent: #f59e0b;
+  --heatmap-detail-accent: var(--data-amber-base);
 }
 
 .heatmapDetailMetricRed {
-  --heatmap-detail-accent: #ef4444;
+  --heatmap-detail-accent: var(--data-red-base);
 }
 
 .heatmapDetailMetricDanger {
@@ -2049,9 +2079,9 @@
   gap: 10px;
   min-width: 0;
   padding: 12px;
-  border: 1px solid color-mix(in srgb, var(--usage-primary) 12%, var(--usage-border));
+  border: 1px solid color-mix(in srgb, var(--primary-color) 12%, var(--border-color));
   border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--usage-primary) 3%, var(--usage-surface));
+  background: color-mix(in srgb, var(--primary-color) 3%, var(--bg-primary));
 }
 
 .heatmapComparisonHeader {
@@ -2064,17 +2094,17 @@
   span {
     min-width: 0;
     overflow: hidden;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   strong {
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 18px;
-    font-weight: 880;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
     line-height: 1.1;
     white-space: nowrap;
@@ -2095,9 +2125,9 @@
   min-height: 70px;
   padding: 10px 10px 10px 13px;
   overflow: hidden;
-  border: 1px solid var(--usage-border);
-  border-radius: 10px;
-  background: var(--usage-muted-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
 
   &::before {
     position: absolute;
@@ -2111,10 +2141,10 @@
   em {
     min-width: 0;
     overflow: hidden;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-style: normal;
-    font-weight: 800;
+    font-weight: 700;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -2123,9 +2153,9 @@
 .heatmapComparisonLabel {
   min-width: 0;
   overflow: hidden;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2148,69 +2178,69 @@
   }
 
   strong {
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 13px;
-    font-weight: 850;
+    font-weight: 700;
   }
 
   b {
     font-size: 14px;
-    font-weight: 880;
+    font-weight: 700;
   }
 }
 
 .heatmapComparisonAbove {
-  border-color: color-mix(in srgb, var(--usage-primary) 16%, var(--usage-border));
+  border-color: color-mix(in srgb, var(--primary-color) 16%, var(--border-color));
 
   &::before {
-    background: var(--usage-primary);
+    background: var(--primary-color);
   }
 
   b,
   em {
-    color: var(--usage-primary);
+    color: var(--primary-color);
   }
 }
 
 .heatmapComparisonBelow {
   &::before {
-    background: var(--usage-muted);
+    background: var(--text-secondary);
   }
 
   b,
   em {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
   }
 }
 
 .heatmapComparisonWarn {
-  border-color: color-mix(in srgb, #d97706 18%, var(--usage-border));
+  border-color: color-mix(in srgb, var(--data-amber-dark-2) 18%, var(--border-color));
 
   &::before {
-    background: #d97706;
+    background: var(--data-amber-dark-2);
   }
 
   b,
   em {
-    color: #d97706;
+    color: var(--data-amber-dark-2);
   }
 }
 
 .heatmapComparisonRisk {
-  border-color: color-mix(in srgb, #dc2626 18%, var(--usage-border));
+  border-color: color-mix(in srgb, var(--data-red-dark-2) 18%, var(--border-color));
 
   &::before {
-    background: #dc2626;
+    background: var(--data-red-dark-2);
   }
 
   b,
   em {
-    color: #dc2626;
+    color: var(--data-red-dark-2);
   }
 }
 
 .heatmapComparisonGood {
-  border-color: color-mix(in srgb, var(--success-color) 16%, var(--usage-border));
+  border-color: color-mix(in srgb, var(--success-color) 16%, var(--border-color));
 
   &::before {
     background: var(--success-color);
@@ -2224,12 +2254,12 @@
 
 .heatmapComparisonEven {
   &::before {
-    background: var(--usage-muted);
+    background: var(--text-secondary);
   }
 
   b,
   em {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
   }
 }
 
@@ -2238,20 +2268,20 @@
   gap: 2px;
   min-width: 92px;
   padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--usage-primary) 18%, var(--usage-border));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--usage-primary) 8%, var(--usage-surface));
+  border: 1px solid color-mix(in srgb, var(--primary-color) 18%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
 
   span {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 700;
   }
 
   strong {
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 14px;
-    font-weight: 880;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
 }
@@ -2263,9 +2293,9 @@
 
   > h3 {
     margin: 0;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 13px;
-    font-weight: 850;
+    font-weight: 700;
   }
 }
 
@@ -2283,9 +2313,9 @@
 
   h3 {
     margin: 0;
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 13px;
-    font-weight: 850;
+    font-weight: 700;
   }
 
   .heatmapContributorRow {
@@ -2293,9 +2323,9 @@
     gap: 8px;
     min-width: 0;
     padding: 10px;
-    border: 1px solid var(--usage-border);
-    border-radius: 12px;
-    background: var(--usage-muted-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--app-radius-md);
+    background: var(--surface-subtle);
   }
 }
 
@@ -2325,7 +2355,7 @@
   }
 
   em {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-style: normal;
   }
@@ -2339,19 +2369,19 @@
 .heatmapContributorProgress {
   overflow: hidden;
   height: 5px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--usage-border) 72%, transparent);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--border-color) 72%, transparent);
 
   span {
     display: block;
     height: 100%;
     border-radius: inherit;
-    background: var(--usage-primary);
+    background: var(--primary-color);
   }
 }
 
 .deltaUp {
-  color: var(--usage-primary);
+  color: var(--primary-color);
 }
 
 .deltaDown {
@@ -2372,9 +2402,9 @@
 
   h3 {
     margin: 0;
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 13px;
-    font-weight: 850;
+    font-weight: 700;
   }
 }
 
@@ -2388,10 +2418,10 @@
   min-height: 62px;
   padding: 10px 10px 10px 14px;
   overflow: hidden;
-  border: 1px solid var(--usage-border);
-  border-radius: 12px;
-  background: var(--usage-muted-surface);
-  color: var(--usage-text);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
+  color: var(--text-primary);
   text-align: left;
   cursor: pointer;
   box-shadow: none;
@@ -2406,8 +2436,8 @@
   }
 
   &:hover {
-    border-color: color-mix(in srgb, var(--usage-primary) 24%, var(--usage-border));
-    background: color-mix(in srgb, var(--usage-primary) 4%, var(--usage-surface));
+    border-color: color-mix(in srgb, var(--primary-color) 24%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 4%, var(--bg-primary));
     transform: none;
   }
 
@@ -2418,21 +2448,21 @@
 }
 
 .heatmapHighlightCardRequest::before {
-  background: var(--usage-primary);
+  background: var(--primary-color);
 }
 
 .heatmapHighlightCardCost::before {
-  background: #d97706;
+  background: var(--data-amber-dark-2);
 }
 
 .heatmapHighlightCardFailure::before {
-  background: #dc2626;
+  background: var(--data-red-dark-2);
 }
 
 .heatmapHighlightCardSelected {
-  border-color: color-mix(in srgb, var(--usage-primary) 42%, var(--usage-border));
-  background: color-mix(in srgb, var(--usage-primary) 8%, var(--usage-surface));
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--usage-primary) 16%, transparent) inset;
+  border-color: color-mix(in srgb, var(--primary-color) 42%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-color) 16%, transparent) inset;
 }
 
 .heatmapHighlightRank {
@@ -2442,11 +2472,11 @@
   width: 28px;
   min-width: 28px;
   height: 24px;
-  border-radius: 999px;
-  background: var(--usage-surface);
-  color: var(--usage-muted);
+  border-radius: var(--app-radius-pill);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 850;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2464,68 +2494,15 @@
   }
 
   strong {
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 13px;
   }
 
   em {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-style: normal;
   }
-}
-
-.matrixControls {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.matrixHeatmap {
-  display: grid;
-  grid-template-columns: minmax(140px, 1.2fr) repeat(var(--matrix-columns), minmax(96px, 1fr));
-  gap: 6px;
-  min-width: 780px;
-  overflow-x: auto;
-}
-
-.matrixRow {
-  display: contents;
-}
-
-.matrixCorner,
-.matrixAxisLabel,
-.matrixCell {
-  display: inline-flex;
-  align-items: center;
-  min-width: 0;
-  min-height: 38px;
-  padding: 0 10px;
-  border: 1px solid var(--usage-border);
-  border-radius: 10px;
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.matrixCorner,
-.matrixAxisLabel {
-  overflow: hidden;
-  background: var(--usage-muted-surface);
-  color: var(--usage-muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.matrixCell {
-  justify-content: flex-end;
-  background: color-mix(
-    in srgb,
-    var(--usage-primary) var(--matrix-intensity, 0%),
-    var(--usage-surface)
-  );
-  color: color-mix(in srgb, var(--usage-primary) 65%, var(--usage-text));
 }
 
 .alertPanel,
@@ -2545,7 +2522,7 @@
   }
 
   span {
-    color: var(--usage-muted);
+    color: var(--text-secondary);
     font-size: 13px;
   }
 }
@@ -2553,12 +2530,12 @@
 .emptyState {
   justify-content: center;
   min-height: 180px;
-  color: var(--usage-muted);
+  color: var(--text-secondary);
   text-align: center;
   flex-direction: column;
 
   strong {
-    color: var(--usage-text);
+    color: var(--text-primary);
     font-size: 16px;
   }
 }
@@ -2636,7 +2613,7 @@
 
   .anomalyMetrics div {
     border-right: 0;
-    border-bottom: 1px solid var(--usage-border);
+    border-bottom: 1px solid var(--border-color);
 
     &:last-child {
       border-bottom: 0;
@@ -2676,10 +2653,6 @@
 
   .providerItem {
     grid-template-columns: 1fr;
-  }
-
-  .matrixControls {
-    justify-content: flex-start;
   }
 
   .heatmapToolbar {

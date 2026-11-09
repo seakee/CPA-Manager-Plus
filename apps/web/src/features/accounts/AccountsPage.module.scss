@@ -2,23 +2,7 @@
 @use '../../styles/mixins' as *;
 
 @mixin accounts-theme-vars {
-  --accounts-surface: var(--bg-primary);
-  --accounts-strong-surface: var(--app-surface-strong, var(--bg-primary));
-  --accounts-muted-surface: var(--surface-subtle);
-  --accounts-border: var(--border-color);
-  --accounts-strong-border: var(--border-primary);
-  --accounts-text: var(--text-primary);
-  --accounts-muted: var(--text-secondary);
-  --accounts-brand: var(--data-blue-base);
-  --accounts-brand-active: var(--primary-active, var(--primary-color));
-  --accounts-primary: var(--accounts-brand);
-  --accounts-success: var(--data-green-base);
-  --accounts-warning: var(--data-amber-base);
-  --accounts-danger: var(--data-red-base);
-  --accounts-info: var(--data-blue-base);
-  --accounts-indigo: var(--data-violet-base, var(--primary-color));
-  --accounts-neutral: var(--accounts-muted);
-  --accounts-overlay: color-mix(in srgb, var(--accounts-brand-active) 30%, transparent);
+  --accounts-overlay: color-mix(in srgb, var(--primary-active) 30%, transparent);
 }
 
 .container {
@@ -53,17 +37,6 @@
 }
 
 .metricsSection {
-  --monitor-surface: var(--accounts-surface);
-  --monitor-ink: var(--accounts-text);
-  --monitor-muted: var(--accounts-muted);
-  --monitor-line: var(--accounts-border);
-  --monitor-line-strong: var(--accounts-strong-border);
-  --monitor-accent: var(--accounts-brand);
-  --monitor-accent-strong: var(--accounts-brand-active);
-  --monitor-green: var(--accounts-success);
-  --monitor-amber: var(--accounts-warning);
-  --monitor-red: var(--accounts-danger);
-
   container: monitoring-page / inline-size;
   min-width: 0;
 }
@@ -83,24 +56,24 @@
 }
 
 @container monitoring-page (max-width: 768px) {
-  .metricsGrid {
+  .metricsSection .metricsGrid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     grid-auto-rows: auto;
     gap: 6px;
 
     :global(.card) {
-      min-height: unset !important;
-      height: auto !important;
-      padding: 7px 8px !important;
-      border-radius: 10px !important;
+      min-height: unset;
+      height: auto;
+      padding: 7px 8px;
+      border-radius: var(--app-radius-md);
     }
 
     [class*='summaryCardChart'] {
-      display: none !important;
+      display: none;
     }
 
     [class*='summaryMeta'] {
-      display: none !important;
+      display: none;
     }
 
     [class*='summaryCardHeader'] {
@@ -108,82 +81,82 @@
     }
 
     [class*='summaryIcon'] {
-      width: 20px !important;
-      height: 20px !important;
-      flex: 0 0 20px !important;
-      border-radius: 5px !important;
+      width: 20px;
+      height: 20px;
+      flex: 0 0 20px;
+      border-radius: var(--app-radius-xs);
 
       svg {
-        width: 12px !important;
-        height: 12px !important;
+        width: 12px;
+        height: 12px;
       }
     }
 
     [class*='summaryLabel'] {
-      font-size: 10.5px !important;
-      line-height: 1.2 !important;
+      font-size: 10.5px;
+      line-height: 1.2;
     }
 
     [class*='summaryCardBody'] {
-      margin-top: 2px !important;
+      margin-top: 2px;
     }
 
     [class*='summaryValue'] {
-      font-size: 18px !important;
-      line-height: 1.15 !important;
+      font-size: 18px;
+      line-height: 1.15;
     }
   }
 }
 
 @media (max-width: $breakpoint-mobile) {
-  .metricsGrid {
-    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
-    grid-auto-rows: auto !important;
-    gap: 6px !important;
+  .metricsSection .metricsGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-auto-rows: auto;
+    gap: 6px;
 
     :global(.card) {
-      min-height: unset !important;
-      height: auto !important;
-      padding: 7px 8px !important;
-      border-radius: 10px !important;
+      min-height: unset;
+      height: auto;
+      padding: 7px 8px;
+      border-radius: var(--app-radius-md);
     }
 
     [class*='summaryCardChart'] {
-      display: none !important;
+      display: none;
     }
 
     [class*='summaryMeta'] {
-      display: none !important;
+      display: none;
     }
 
     [class*='summaryCardHeader'] {
-      gap: 4px !important;
+      gap: 4px;
     }
 
     [class*='summaryIcon'] {
-      width: 20px !important;
-      height: 20px !important;
-      flex: 0 0 20px !important;
-      border-radius: 5px !important;
+      width: 20px;
+      height: 20px;
+      flex: 0 0 20px;
+      border-radius: var(--app-radius-xs);
 
       svg {
-        width: 12px !important;
-        height: 12px !important;
+        width: 12px;
+        height: 12px;
       }
     }
 
     [class*='summaryLabel'] {
-      font-size: 10.5px !important;
-      line-height: 1.2 !important;
+      font-size: 10.5px;
+      line-height: 1.2;
     }
 
     [class*='summaryCardBody'] {
-      margin-top: 2px !important;
+      margin-top: 2px;
     }
 
     [class*='summaryValue'] {
-      font-size: 18px !important;
-      line-height: 1.15 !important;
+      font-size: 18px;
+      line-height: 1.15;
     }
   }
 }
@@ -195,7 +168,7 @@
   align-items: center;
   padding: 12px;
   border: 1px solid var(--glass-border);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   background: var(--glass-bg);
 
   :global(.form-group) {
@@ -204,7 +177,7 @@
 
   :global(.input),
   :global(button) {
-    min-height: 36px;
+    min-height: var(--control-height-sm);
   }
 
   @include tablet {
@@ -222,8 +195,9 @@
 
 .selectionModeButton:global(.btn.btn-sm) {
   justify-content: center;
-  min-height: 36px;
-  border-radius: 12px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
 }
 
 .selectionControls {
@@ -243,7 +217,7 @@
   > span {
     color: var(--text-tertiary, var(--text-secondary));
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 700;
     line-height: 1;
   }
 }
@@ -251,7 +225,7 @@
 .errorBox {
   padding: 12px;
   border: 1px solid var(--danger-color);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--danger-color) 10%, transparent);
   color: var(--danger-color);
   font-size: 13px;
@@ -260,9 +234,9 @@
 .loadingPanel,
 .tablePanel {
   border: 1px solid var(--glass-border);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-lg);
   background: var(--glass-bg);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--app-specular-highlight);
 }
 
 .panelHeader {
@@ -323,7 +297,7 @@
   > span {
     color: var(--text-secondary);
     font-size: 13px;
-    font-weight: 800;
+    font-weight: 700;
   }
 
   > small {
@@ -358,12 +332,12 @@
 
   :global(.btn) {
     justify-content: center;
-    width: 30px;
-    min-width: 30px;
-    height: 30px;
-    min-height: 30px;
+    width: var(--control-height-xs);
+    min-width: var(--control-height-xs);
+    height: var(--control-height-xs);
+    min-height: var(--control-height-xs);
     padding: 0;
-    border-radius: 8px;
+    border-radius: var(--app-radius-sm);
   }
 }
 
@@ -394,7 +368,7 @@
   align-items: center;
   min-height: 34px;
   padding: 2px 12px 0;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
 
@@ -434,7 +408,7 @@
   min-height: 104px;
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-  border-radius: 8px;
+  border-radius: var(--app-radius-md);
   background: var(--bg-primary);
   cursor: default;
   transition:
@@ -466,9 +440,9 @@
   min-height: 250px;
   padding: 14px 16px;
   border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   background: var(--bg-primary);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  box-shadow: var(--app-specular-highlight);
   cursor: pointer;
   transition:
     transform 0.16s ease,
@@ -479,7 +453,7 @@
   &:hover {
     transform: translateY(-2px);
     border-color: color-mix(in srgb, var(--primary-color) 32%, var(--border-color));
-    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+    box-shadow: var(--app-specular-highlight);
   }
 
   &.accountCardSelected {
@@ -498,7 +472,7 @@
 
   &.accountGridCardDisabled {
     opacity: 0.76;
-    background: color-mix(in srgb, var(--bg-primary) 88%, var(--accounts-muted-surface));
+    background: color-mix(in srgb, var(--bg-primary) 88%, var(--surface-subtle));
   }
 }
 
@@ -534,9 +508,9 @@
   padding: 0;
   margin-left: 1px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--app-radius-xs);
   background: transparent;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   cursor: pointer;
   flex-shrink: 0;
   vertical-align: middle;
@@ -553,23 +527,23 @@
 
   &:hover,
   &:focus-visible {
-    background: color-mix(in srgb, var(--accounts-primary) 10%, transparent);
-    color: var(--accounts-primary);
+    background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+    color: var(--primary-color);
   }
 
   &:focus-visible {
-    outline: 2px solid var(--accounts-primary);
+    outline: 2px solid var(--primary-color);
     outline-offset: 1px;
   }
 }
 
 .accountPinButtonActive {
-  color: var(--accounts-primary);
+  color: var(--primary-color);
   opacity: 1;
 
   &:hover {
-    background: color-mix(in srgb, var(--accounts-primary) 12%, transparent);
-    color: var(--accounts-primary);
+    background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+    color: var(--primary-color);
   }
 }
 
@@ -640,13 +614,15 @@
     gap: 4px;
     height: 22px;
     padding: 0 8.5px;
-    border-radius: 6px;
+    border-radius: var(--app-radius-xs);
     font-size: 11.5px;
     font-weight: 600;
+    font-variant-numeric: tabular-nums;
     line-height: 1;
-    border: 1px solid color-mix(in srgb, var(--accounts-border) 80%, transparent);
-    background: var(--accounts-surface);
-    color: var(--accounts-muted);
+    white-space: nowrap;
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    background: var(--bg-primary);
+    color: var(--text-secondary);
     cursor: pointer;
     transition:
       border-color 0.14s ease,
@@ -654,16 +630,16 @@
       color 0.14s ease;
 
     &:hover:not(:disabled) {
-      border-color: color-mix(in srgb, var(--accounts-primary) 40%, var(--accounts-border));
-      background: color-mix(in srgb, var(--accounts-primary) 6%, var(--accounts-surface));
-      color: var(--accounts-primary);
+      border-color: color-mix(in srgb, var(--primary-color) 40%, var(--border-color));
+      background: color-mix(in srgb, var(--primary-color) 6%, var(--bg-primary));
+      color: var(--primary-color);
     }
   }
 
   .accountPriorityMetaDanger {
-    border-color: color-mix(in srgb, var(--error-color) 35%, var(--accounts-border));
+    border-color: color-mix(in srgb, var(--error-color) 35%, var(--border-color));
     color: var(--error-color);
-    background: color-mix(in srgb, var(--error-color) 6%, var(--accounts-surface));
+    background: color-mix(in srgb, var(--error-color) 6%, var(--bg-primary));
   }
 }
 
@@ -673,13 +649,15 @@
   gap: 3px;
   height: 22px;
   padding: 0 8.5px;
-  border-radius: 6px;
+  border-radius: var(--app-radius-xs);
   font-size: 11.5px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
-  background: color-mix(in srgb, var(--accounts-primary) 9%, var(--accounts-muted-surface));
-  color: var(--accounts-primary);
-  border: 1px solid color-mix(in srgb, var(--accounts-primary) 18%, transparent);
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--primary-color) 9%, var(--surface-subtle));
+  color: var(--primary-color);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 18%, transparent);
 }
 
 .accountPlanBadgeSep {
@@ -688,17 +666,17 @@
 }
 
 .accountPlanBadgeDaysNormal {
-  color: var(--accounts-primary);
+  color: var(--primary-color);
 }
 
 .accountPlanBadgeDaysWarning {
-  color: var(--warning-color, #d97706);
+  color: var(--warning-color);
   font-weight: 700;
 }
 
 .accountPlanBadgeDaysDanger {
-  color: var(--danger-color, #ef4444);
-  font-weight: 750;
+  color: var(--danger-color);
+  font-weight: 700;
 }
 
 .accountResetCreditsButton {
@@ -707,12 +685,13 @@
   gap: 4px;
   height: 22px;
   padding: 0 8.5px;
-  border-radius: 6px;
+  border-radius: var(--app-radius-xs);
   font-size: 11.5px;
   font-weight: 600;
   line-height: 1;
-  border: 1px solid color-mix(in srgb, var(--primary-color) 35%, var(--accounts-border));
-  background: color-mix(in srgb, var(--primary-color) 7%, var(--accounts-surface));
+  white-space: nowrap;
+  border: 1px solid color-mix(in srgb, var(--primary-color) 35%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--bg-primary));
   color: var(--primary-color);
   cursor: pointer;
   user-select: none;
@@ -722,8 +701,8 @@
     color 0.14s ease;
 
   &:hover {
-    border-color: color-mix(in srgb, var(--primary-color) 60%, var(--accounts-border));
-    background: color-mix(in srgb, var(--primary-color) 14%, var(--accounts-surface));
+    border-color: color-mix(in srgb, var(--primary-color) 60%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 14%, var(--bg-primary));
   }
 
   &:active {
@@ -749,14 +728,14 @@
 
   .accountResetCreditsCount {
     font-size: 11.5px;
-    font-weight: 750;
+    font-weight: 700;
     line-height: 1;
     font-variant-numeric: tabular-nums;
   }
 
   .accountResetCreditsLabel {
     font-size: 10.5px;
-    font-weight: 550;
+    font-weight: 600;
     opacity: 0.88;
     line-height: 1;
   }
@@ -771,12 +750,12 @@
   width: 100%;
   height: 18px;
   font-size: 11.5px;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   line-height: 18px;
   user-select: text;
   box-sizing: border-box;
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: var(--app-radius-xs);
   padding: 0 4px;
   margin: 0 -4px;
   transition:
@@ -784,20 +763,19 @@
     color 0.14s ease;
 
   &:hover {
-    background: color-mix(in srgb, var(--accounts-primary) 8%, transparent);
-    color: var(--accounts-primary);
+    background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+    color: var(--primary-color);
 
     .accountGridCardNoteIcon {
-      color: var(--accounts-primary);
+      color: var(--primary-color);
       opacity: 1;
     }
 
     .accountGridCardNotePlaceholder {
-      color: var(--accounts-primary);
+      color: var(--primary-color);
       opacity: 0.85;
     }
   }
-
   &.accountGridCardNoteRowEmpty {
     opacity: 0.6;
 
@@ -811,15 +789,15 @@
 
     &:hover {
       background: transparent;
-      color: var(--accounts-muted);
+      color: var(--text-secondary);
 
       .accountGridCardNoteIcon {
-        color: var(--accounts-muted);
+        color: var(--text-secondary);
         opacity: 0.65;
       }
 
       .accountGridCardNotePlaceholder {
-        color: var(--accounts-muted);
+        color: var(--text-secondary);
         opacity: 1;
       }
     }
@@ -836,7 +814,7 @@
   .accountGridCardNoteIcon {
     flex-shrink: 0;
     opacity: 0.65;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     transition: opacity 0.14s ease, color 0.14s ease;
   }
 
@@ -870,7 +848,7 @@
   .accountGridCardNoteIcon {
     flex-shrink: 0;
     opacity: 0.85;
-    color: var(--accounts-primary);
+    color: var(--primary-color);
   }
 }
 
@@ -882,14 +860,14 @@
   font-size: 11px;
   line-height: 16px;
   color: var(--text-primary);
-  background: var(--accounts-surface);
-  border: 1px solid var(--accounts-primary);
-  border-radius: 3px;
+  background: var(--bg-primary);
+  border: 1px solid var(--primary-color);
+  border-radius: var(--app-radius-xs);
   outline: none;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accounts-primary) 25%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary-color) 25%, transparent);
 
   &::placeholder {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     opacity: 0.6;
   }
 }
@@ -902,7 +880,7 @@
   gap: 6px;
   min-width: 0;
   padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--accounts-border) 60%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
   box-sizing: border-box;
   cursor: pointer;
   transition: color 0.15s ease, opacity 0.15s ease;
@@ -911,7 +889,7 @@
     .accountGridCardRecentStatusTitleGroup {
       .accountGridCardRecentStatusIcon,
       .accountGridCardRecentStatusTitle {
-        color: var(--accounts-primary);
+        color: var(--primary-color);
       }
     }
   }
@@ -925,7 +903,7 @@
   min-width: 0;
   padding-top: 8px;
   margin-top: auto;
-  border-top: 1px solid color-mix(in srgb, var(--accounts-border) 60%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
   box-sizing: border-box;
 
   .quotaWindowCard {
@@ -942,7 +920,7 @@
     align-items: center;
     justify-content: center;
     min-height: 44px;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 12px;
   }
 }
@@ -955,7 +933,7 @@
 
   > .quotaWindowCard + .quotaWindowCard {
     padding-top: 7px;
-    border-top: 1px dashed color-mix(in srgb, var(--accounts-border) 65%, transparent);
+    border-top: 1px dashed color-mix(in srgb, var(--border-color) 65%, transparent);
   }
 
   .accountGridCardQuotaGroup {
@@ -967,7 +945,7 @@
 
   .accountGridCardQuotaGroup + .accountGridCardQuotaGroup {
     padding-top: 8px;
-    border-top: 1px dashed color-mix(in srgb, var(--accounts-border) 52%, transparent);
+    border-top: 1px dashed color-mix(in srgb, var(--border-color) 52%, transparent);
   }
 }
 
@@ -986,14 +964,14 @@
   min-width: 0;
 
   .accountGridCardRecentStatusIcon {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     flex-shrink: 0;
   }
 
   .accountGridCardRecentStatusTitle {
     font-size: 11px;
     font-weight: 700;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     white-space: nowrap;
   }
 }
@@ -1011,10 +989,10 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: var(--data-green-base, #10b981);
+  color: var(--data-green-base);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-
+  white-space: nowrap;
   .metricDot {
     width: 5px;
     height: 5px;
@@ -1027,9 +1005,10 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 
   .metricDot {
     width: 5px;
@@ -1040,7 +1019,7 @@
   }
 
   &.hasFailure {
-    color: var(--error-color, #ef4444);
+    color: var(--error-color);
 
     .metricDot {
       opacity: 1;
@@ -1055,8 +1034,8 @@
   min-width: 0;
 
   .statusBar {
-    display: grid !important;
-    grid-template-columns: minmax(0, 1fr) auto !important;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 8px;
     width: 100%;
@@ -1068,7 +1047,7 @@
 
   .statusBlock {
     height: 6px;
-    border-radius: 999px;
+    border-radius: var(--app-radius-pill);
   }
 
   .statusRate {
@@ -1086,21 +1065,21 @@
   gap: 3px;
   margin-top: 2px;
   padding: 6px 8px;
-  border: 1px solid color-mix(in srgb, var(--accounts-danger) 28%, var(--accounts-border));
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--accounts-danger) 7%, var(--accounts-surface));
+  border: 1px solid color-mix(in srgb, var(--data-red-base) 28%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--data-red-base) 7%, var(--bg-primary));
 
   .accountGridCardRecentStatusMessageLabel {
-    color: var(--accounts-danger);
+    color: var(--data-red-base);
     font-size: 10px;
-    font-weight: 800;
+    font-weight: 700;
     letter-spacing: 0.02em;
     line-height: 1.2;
   }
 
   .accountGridCardRecentStatusMessageText {
     margin: 0;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 11px;
     line-height: 1.35;
     overflow: hidden;
@@ -1118,7 +1097,7 @@
   justify-content: space-between;
   gap: 8px;
   padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--accounts-border) 65%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 65%, transparent);
   min-width: 0;
 }
 
@@ -1130,15 +1109,15 @@
   gap: 8px;
   min-width: 0;
 
-  .accountIconButton,
-  .rowDetailButton {
-    height: 28px;
-    min-height: 28px !important;
-    border-radius: 7px;
+  .accountIconButton:global(.btn),
+  .rowDetailButton:global(.btn) {
+    height: var(--control-height-xs);
+    min-height: var(--control-height-xs);
+    border-radius: var(--app-radius-sm);
   }
 
-  .accountIconButton {
-    width: 28px;
+  .accountIconButton:global(.btn) {
+    width: var(--control-height-xs);
     padding: 0;
   }
 }
@@ -1209,8 +1188,8 @@
 }
 
 @media (max-width: $breakpoint-tablet) {
-  .viewModeSwitcher {
-    display: none !important;
+  .viewModeSwitcher.viewModeSwitcher {
+    display: none;
   }
 
   .accountCardHeader {
@@ -1276,7 +1255,7 @@
 }
 
 .accountProviderFallback {
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
 }
 
 .accountIdentityText {
@@ -1314,7 +1293,8 @@
 .accountPlanRemaining {
   max-width: 100%;
   font-size: 11px;
-  color: var(--accounts-muted);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
   line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
@@ -1347,7 +1327,7 @@
   overflow: hidden;
   color: var(--text-primary);
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1396,7 +1376,7 @@
   &:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--primary-color) 42%, transparent);
     outline-offset: 2px;
-    border-radius: 6px;
+    border-radius: var(--app-radius-xs);
   }
 }
 
@@ -1408,12 +1388,12 @@
   min-height: 18px;
   padding: 0 6px;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accounts-success) 18%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accounts-success) 10%, var(--bg-primary));
-  color: var(--accounts-success);
+  border: 1px solid color-mix(in srgb, var(--data-green-base) 18%, transparent);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--data-green-base) 10%, var(--bg-primary));
+  color: var(--data-green-base);
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1;
   pointer-events: none;
   text-overflow: ellipsis;
@@ -1436,11 +1416,11 @@
   max-width: 96px;
   padding: 0 8px;
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: var(--surface-subtle);
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1517,7 +1497,7 @@
   &:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--primary-color) 48%, transparent);
     outline-offset: -2px;
-    border-radius: 6px;
+    border-radius: var(--app-radius-xs);
   }
 }
 
@@ -1537,7 +1517,7 @@
   min-width: 0;
   height: auto;
   padding-top: 8px;
-  border-top: 1px solid color-mix(in srgb, var(--accounts-border) 65%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 65%, transparent);
 
   .accountHistoryGrid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1550,9 +1530,9 @@
     gap: 1px 3px;
     min-height: 48px;
     padding: 7px 4px;
-    border: 1px solid color-mix(in srgb, var(--accounts-border) 72%, transparent);
-    border-radius: 7px;
-    background: color-mix(in srgb, var(--accounts-surface) 42%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    border-radius: var(--app-radius-sm);
+    background: color-mix(in srgb, var(--bg-primary) 42%, transparent);
     box-sizing: border-box;
 
     strong {
@@ -1576,7 +1556,7 @@
 .accountHistoryMetricLabel {
   min-width: 0;
   overflow: hidden;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.25;
   text-overflow: ellipsis;
@@ -1599,7 +1579,7 @@
     min-width: 0;
     overflow: hidden;
     font-size: 12.75px;
-    font-weight: 800;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
     line-height: 1.15;
     text-overflow: ellipsis;
@@ -1613,14 +1593,14 @@
   width: 17px;
   height: 17px;
   place-items: center;
-  border-radius: 6px;
+  border-radius: var(--app-radius-xs);
   background: color-mix(in srgb, var(--text-secondary) 7%, transparent);
   color: color-mix(in srgb, var(--text-secondary) 76%, var(--text-primary));
 }
 
 .accountHistoryMetricRequests .accountHistoryIcon {
-  background: color-mix(in srgb, var(--accounts-info) 12%, transparent);
-  color: var(--accounts-info);
+  background: color-mix(in srgb, var(--data-blue-base) 12%, transparent);
+  color: var(--data-blue-base);
 }
 
 .accountHistoryMetricTokens .accountHistoryIcon {
@@ -1629,13 +1609,13 @@
 }
 
 .accountHistoryMetricCost .accountHistoryIcon {
-  background: color-mix(in srgb, var(--accounts-warning) 13%, transparent);
-  color: var(--accounts-warning);
+  background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
+  color: var(--data-amber-base);
 }
 
 .accountHistoryMetricSuccess .accountHistoryIcon {
-  background: color-mix(in srgb, var(--accounts-success) 12%, transparent);
-  color: var(--accounts-success);
+  background: color-mix(in srgb, var(--data-green-base) 12%, transparent);
+  color: var(--data-green-base);
 }
 
 .accountHistoryFootnote {
@@ -1674,29 +1654,32 @@
   padding: 0;
   overflow: hidden;
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .accountPriorityMeta {
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
 }
 
 .accountPriorityMetaDanger {
-  color: var(--accounts-danger);
+  color: var(--data-red-base);
 }
 
 .accountPriorityButton {
   appearance: none;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--app-radius-xs);
   cursor: pointer;
   padding: 1px 5px;
   margin: -1px -5px;
   font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 
   &:hover:not(:disabled) {
@@ -1725,14 +1708,15 @@
   padding: 0 4px;
   margin: 0;
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   font-family: inherit;
+  font-variant-numeric: tabular-nums;
   line-height: 18px;
   text-align: center;
   color: var(--text-primary);
   background: var(--bg-primary);
   border: 1px solid var(--primary-color);
-  border-radius: 4px;
+  border-radius: var(--app-radius-xs);
   outline: none;
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 20%, transparent);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -1786,9 +1770,10 @@
   }
 }
 
+.accountCardQuotaMeta .quotaResetMeta,
 .quotaResetMeta {
-  flex-shrink: 0 !important;
-  color: var(--text-secondary) !important;
+  flex-shrink: 0;
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -1830,11 +1815,11 @@
     top: 6px;
     bottom: 6px;
     width: 1px;
-    border-radius: $radius-full;
+    border-radius: var(--app-radius-pill);
     background: linear-gradient(
       180deg,
       transparent,
-      color-mix(in srgb, var(--accounts-strong-border) 68%, transparent),
+      color-mix(in srgb, var(--border-primary) 68%, transparent),
       transparent
     );
     opacity: 0.68;
@@ -1860,13 +1845,13 @@
   height: auto;
   min-height: 58px;
   align-self: center;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--border-color) 34%, transparent);
 }
 
 .accountSideActions {
   display: grid;
-  grid-template-rows: 30px 30px;
+  grid-template-rows: var(--control-height-xs) var(--control-height-xs);
   align-items: center;
   justify-items: center;
   gap: 4px;
@@ -1878,8 +1863,7 @@
   align-items: center;
   justify-content: center;
   width: 54px;
-  height: 30px;
-
+  height: var(--control-height-xs);
   :global(label) {
     transform: scale(0.9);
     transform-origin: center;
@@ -1893,12 +1877,12 @@
 }
 
 .accountIconButtonRefresh:global(.btn) {
-  background: color-mix(in srgb, var(--accounts-info) 10%, var(--bg-primary));
-  color: var(--accounts-info);
+  background: color-mix(in srgb, var(--data-blue-base) 10%, var(--bg-primary));
+  color: var(--data-blue-base);
 
   &:hover {
-    border-color: color-mix(in srgb, var(--accounts-info) 24%, transparent);
-    background: color-mix(in srgb, var(--accounts-info) 16%, var(--bg-primary));
+    border-color: color-mix(in srgb, var(--data-blue-base) 24%, transparent);
+    background: color-mix(in srgb, var(--data-blue-base) 16%, var(--bg-primary));
   }
 }
 
@@ -1947,13 +1931,14 @@
   flex: 0 0 auto;
   width: 54px;
   min-width: 54px;
+  height: var(--control-height-xs);
+  min-height: var(--control-height-xs);
   padding: 0 8px;
   background: color-mix(in srgb, var(--primary-color) 7%, var(--bg-primary));
   color: var(--primary-color);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1;
-
   &:hover {
     border-color: color-mix(in srgb, var(--primary-color) 20%, transparent);
     background: color-mix(in srgb, var(--primary-color) 13%, var(--bg-primary));
@@ -2035,11 +2020,11 @@
   align-items: center;
   height: 18px;
   padding: 0 6px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 80%, var(--accounts-surface));
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 65%, transparent);
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--surface-subtle) 80%, var(--bg-primary));
+  border: 1px solid color-mix(in srgb, var(--border-color) 65%, transparent);
   font-size: 10.5px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--text-secondary);
   line-height: 1;
   letter-spacing: 0.01em;
@@ -2056,22 +2041,22 @@
   gap: 2.5px;
   color: var(--text-primary);
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1;
 }
 
 .quotaWindowPercentPrefix {
   font-size: 10px;
-  font-weight: 550;
-  color: var(--accounts-muted);
+  font-weight: 600;
+  color: var(--text-secondary);
   line-height: 1;
   user-select: none;
 }
 
 .quotaWindowPercentValue {
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   color: var(--text-primary);
   line-height: 1;
 }
@@ -2089,8 +2074,8 @@
   display: inline-block;
   width: 1px;
   height: 9px;
-  background-color: color-mix(in srgb, var(--accounts-muted) 55%, transparent);
-  border-radius: 0.5px;
+  background-color: color-mix(in srgb, var(--text-secondary) 55%, transparent);
+  border-radius: var(--app-radius-pill);
   flex-shrink: 0;
   user-select: none;
 }
@@ -2100,7 +2085,7 @@
   align-items: center;
   height: 15px;
   margin-left: auto;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
@@ -2116,11 +2101,11 @@
   gap: 2.5px;
   color: var(--primary-color);
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1;
   user-select: none;
-  border-radius: 3px;
+  border-radius: var(--app-radius-xs);
   padding: 1px 3px;
 }
 
@@ -2138,7 +2123,7 @@
 
 .quotaWindowResetCreditsCount {
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
@@ -2179,9 +2164,9 @@
   justify-content: center;
   width: 15px;
   height: 15px;
-  border-radius: 3.5px;
-  background: color-mix(in srgb, var(--accounts-brand) 12%, transparent);
-  color: var(--accounts-brand);
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--data-blue-base) 12%, transparent);
+  color: var(--data-blue-base);
   line-height: 1;
   flex-shrink: 0;
   user-select: none;
@@ -2193,9 +2178,9 @@
   justify-content: center;
   width: 15px;
   height: 15px;
-  border-radius: 3.5px;
-  background: color-mix(in srgb, var(--accounts-indigo) 14%, transparent);
-  color: var(--accounts-indigo);
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--data-violet-base) 14%, transparent);
+  color: var(--data-violet-base);
   line-height: 1;
   flex-shrink: 0;
   user-select: none;
@@ -2205,7 +2190,7 @@
 .quotaForecastLabel {
   font-size: 11px;
   font-weight: 600;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   user-select: none;
   line-height: 1;
   white-space: nowrap;
@@ -2221,7 +2206,7 @@
 }
 
 .quotaWindowSlash {
-  color: color-mix(in srgb, var(--accounts-muted) 65%, transparent);
+  color: color-mix(in srgb, var(--text-secondary) 65%, transparent);
   font-size: 11px;
   font-weight: 400;
   line-height: 1;
@@ -2230,7 +2215,7 @@
 
 .quotaWindowTokenCompact {
   font-size: 11px;
-  font-weight: 450;
+  font-weight: 500;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -2240,7 +2225,7 @@
 .quotaWindowCostPredicted {
   font-size: 11px;
   font-weight: 500;
-  color: color-mix(in srgb, var(--text-primary) 70%, var(--accounts-muted));
+  color: color-mix(in srgb, var(--text-primary) 70%, var(--text-secondary));
   font-variant-numeric: tabular-nums;
   line-height: 1;
   white-space: nowrap;
@@ -2248,8 +2233,8 @@
 
 .quotaWindowTokenPredictedCompact {
   font-size: 11px;
-  font-weight: 450;
-  color: var(--accounts-muted);
+  font-weight: 500;
+  color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
   line-height: 1;
   white-space: nowrap;
@@ -2293,13 +2278,14 @@
   width: 34px;
   min-width: 34px;
   height: 18px;
-  border: 1px solid color-mix(in srgb, var(--accounts-brand) 18%, transparent);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accounts-brand) 8%, transparent);
-  color: var(--accounts-brand);
+  border: 1px solid color-mix(in srgb, var(--data-blue-base) 18%, transparent);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--data-blue-base) 8%, transparent);
+  color: var(--data-blue-base);
   font-size: 10px;
-  font-weight: 850;
+  font-weight: 700;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .quotaMatrixCells {
@@ -2323,7 +2309,7 @@
   overflow: hidden;
   color: var(--text-secondary);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2338,9 +2324,11 @@
 .quotaMatrixPercent {
   color: var(--text-primary);
   font-size: 11px;
-  font-weight: 850;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
   text-align: right;
+  white-space: nowrap;
 }
 
 @media (min-width: #{$breakpoint-tablet + 1}) and (max-width: 1535px) {
@@ -2389,9 +2377,10 @@
   justify-content: center;
   min-height: 22px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -2442,8 +2431,9 @@
   }
 }
 
+.statusStack .inspectionHint,
 .inspectionHint {
-  color: var(--accounts-warning) !important;
+  color: var(--data-amber-base);
 }
 
 .statusBadgeRow {
@@ -2461,9 +2451,9 @@
   min-height: 20px;
   padding: 0 7px;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1.2;
   white-space: nowrap;
 }
@@ -2481,13 +2471,13 @@
 }
 
 .statusBadgedanger {
-  background: color-mix(in srgb, var(--accounts-danger) 12%, transparent);
-  color: var(--accounts-danger);
+  background: color-mix(in srgb, var(--data-red-base) 12%, transparent);
+  color: var(--data-red-base);
 }
 
 .statusBadgewarning {
-  background: color-mix(in srgb, var(--accounts-warning) 14%, transparent);
-  color: var(--accounts-warning);
+  background: color-mix(in srgb, var(--data-amber-base) 14%, transparent);
+  color: var(--data-amber-base);
 }
 
 .statusBadgeinfo {
@@ -2517,7 +2507,7 @@
 .quotaTrack {
   height: 6px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: color-mix(in srgb, var(--border-color) 58%, transparent);
 }
 
@@ -2539,15 +2529,15 @@
 }
 
 .quotaBarGood {
-  background: var(--accounts-success);
+  background: var(--data-green-base);
 }
 
 .quotaBarWarn {
-  background: var(--accounts-warning);
+  background: var(--data-amber-base);
 }
 
 .quotaBarBad {
-  background: var(--accounts-danger);
+  background: var(--data-red-base);
 }
 
 .quotaBarNeutral {
@@ -2560,22 +2550,18 @@
 }
 
 .priorityBad {
-  background: color-mix(in srgb, var(--accounts-danger) 12%, transparent);
-  color: var(--accounts-danger);
+  background: color-mix(in srgb, var(--data-red-base) 12%, transparent);
+  color: var(--data-red-base);
 }
 
 .accountsPagination {
-  --monitor-surface: var(--accounts-surface);
   --monitor-surface-elevated: color-mix(
     in srgb,
-    var(--accounts-surface) 82%,
-    var(--accounts-muted-surface)
+    var(--bg-primary) 82%,
+    var(--surface-subtle)
   );
-  --monitor-muted: var(--accounts-muted);
-  --monitor-line: var(--accounts-border);
-  --monitor-ink: var(--accounts-text);
   padding: 12px 16px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 28%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--surface-subtle) 28%, var(--bg-primary));
 }
 
 .compactTable {
@@ -2597,7 +2583,7 @@
   th {
     color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
     background: color-mix(in srgb, var(--surface-subtle) 72%, transparent);
   }
 
@@ -2612,10 +2598,8 @@
 
 .accountDetailDrawer {
   @include accounts-theme-vars;
-  --accounts-surface: var(--accounts-strong-surface);
-  background: var(--accounts-surface);
-  color: var(--accounts-text);
-
+  background: var(--app-surface-strong);
+  color: var(--text-primary);
   @include mobile {
     height: 100dvh;
     max-height: 100dvh;
@@ -2695,8 +2679,8 @@
   gap: 4px;
   padding: 2px 6px;
   margin: -2px 0;
-  border-radius: $radius-sm;
-  font-family: $font-mono;
+  border-radius: var(--app-radius-xs);
+  font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-secondary);
   cursor: pointer;
@@ -2709,7 +2693,7 @@
   white-space: nowrap;
 
   &:hover {
-    background: var(--surface-subtle-hover, rgba(0, 0, 0, 0.05));
+    background: var(--surface-subtle-hover);
     color: var(--text-primary);
   }
 
@@ -2732,12 +2716,12 @@
   overflow-x: auto;
   margin-inline: -$spacing-lg;
   padding: 0 calc(#{$spacing-lg} + 3px);
-  border: 1px solid var(--accounts-border);
-  border-top-color: color-mix(in srgb, var(--accounts-border) 76%, transparent);
+  border: 1px solid var(--border-color);
+  border-top-color: color-mix(in srgb, var(--border-color) 76%, transparent);
   border-right: 0;
   border-left: 0;
   border-radius: 0;
-  background: var(--accounts-surface);
+  background: var(--app-surface-strong);
   scrollbar-width: none;
 
   &::-webkit-scrollbar {
@@ -2753,14 +2737,14 @@
     border: 0;
     border-radius: 0;
     background: transparent;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 14px;
     font-weight: 700;
     cursor: pointer;
     white-space: nowrap;
 
     &:hover {
-      color: var(--accounts-primary);
+      color: var(--primary-color);
       background: transparent;
     }
   }
@@ -2775,11 +2759,12 @@
   }
 }
 
+.drawerTabs button.drawerTabActive,
 .drawerTabActive {
-  border-color: transparent !important;
-  background: transparent !important;
-  color: var(--accounts-primary) !important;
-  font-weight: 700 !important;
+  border-color: transparent;
+  background: transparent;
+  color: var(--primary-color);
+  font-weight: 700;
 
   &::after {
     position: absolute;
@@ -2787,8 +2772,8 @@
     bottom: -1px;
     left: 8px;
     height: 2px;
-    border-radius: 2px 2px 0 0;
-    background: var(--accounts-primary);
+    border-radius: var(--app-radius-pill);
+    background: var(--primary-color);
     content: '';
   }
 }
@@ -2797,21 +2782,21 @@
   display: grid;
   gap: 4px;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--accounts-danger) 35%, transparent);
-  border-left: 3px solid var(--accounts-danger);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accounts-danger) 8%, var(--accounts-surface));
-  color: var(--accounts-text);
+  border: 1px solid color-mix(in srgb, var(--data-red-base) 35%, transparent);
+  border-left: 3px solid var(--data-red-base);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--data-red-base) 8%, var(--app-surface-strong));
+  color: var(--text-primary);
 
   span {
     font-size: 12px;
     font-weight: 700;
-    color: var(--accounts-danger);
+    color: var(--data-red-base);
   }
 
   p {
     margin: 0;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.5;
   }
@@ -2830,12 +2815,12 @@
   strong {
     font-size: 14px;
     font-weight: 600;
-    color: var(--accounts-text);
+    color: var(--text-primary);
   }
 }
 
 .collapsibleChevron {
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -2858,27 +2843,27 @@
 .overviewActivityCard,
 .overviewAttentionCard {
   min-width: 0;
-  border: 1px solid var(--accounts-border);
-  border-radius: 12px;
-  background: var(--accounts-surface);
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--accounts-text) 4%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--app-surface-strong);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text-primary) 4%, transparent);
 }
 
 .overviewDecisionCard {
-  --overview-accent: var(--accounts-primary);
+  --overview-accent: var(--primary-color);
   position: relative;
   display: grid;
   gap: 14px;
   padding: 18px;
   overflow: hidden;
-  border-color: color-mix(in srgb, var(--overview-accent) 34%, var(--accounts-border));
+  border-color: color-mix(in srgb, var(--overview-accent) 34%, var(--border-color));
   background:
     linear-gradient(
       135deg,
-      color-mix(in srgb, var(--overview-accent) 11%, var(--accounts-surface)),
-      color-mix(in srgb, var(--overview-accent) 3%, var(--accounts-surface)) 62%
+      color-mix(in srgb, var(--overview-accent) 11%, var(--app-surface-strong)),
+      color-mix(in srgb, var(--overview-accent) 3%, var(--app-surface-strong)) 62%
     ),
-    var(--accounts-surface);
+    var(--app-surface-strong);
 
   &::after {
     content: '';
@@ -2893,7 +2878,7 @@
   }
 
   &[data-overview-health='available'] {
-    --overview-accent: var(--accounts-success);
+    --overview-accent: var(--data-green-base);
   }
 
   &[data-overview-health='five_hour_cooldown'],
@@ -2901,7 +2886,7 @@
   &[data-overview-health='monthly_cooldown'],
   &[data-overview-health='limited'],
   &[data-overview-health='partial'] {
-    --overview-accent: var(--accounts-warning);
+    --overview-accent: var(--data-amber-base);
   }
 
   &[data-overview-health='reauth'],
@@ -2909,12 +2894,12 @@
   &[data-overview-health='weekly_exhausted'],
   &[data-overview-health='monthly_exhausted'],
   &[data-overview-health='exception'] {
-    --overview-accent: var(--accounts-danger);
+    --overview-accent: var(--data-red-base);
   }
 
   &[data-overview-health='disabled'],
   &[data-overview-health='raw'] {
-    --overview-accent: var(--accounts-neutral);
+    --overview-accent: var(--text-secondary);
   }
 }
 
@@ -2923,7 +2908,7 @@
   flex-direction: column;
   gap: 12px;
   padding: 15px;
-  background: color-mix(in srgb, var(--accounts-primary) 3%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--primary-color) 3%, var(--app-surface-strong));
 }
 
 .overviewRecentStatusLayout {
@@ -2947,13 +2932,13 @@
   gap: 8px;
   min-width: 0;
   padding: 11px 12px;
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 78%, transparent);
-  border-radius: 9px;
-  background: var(--accounts-surface);
+  border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
 
   span {
     min-width: 0;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     font-weight: 700;
     line-height: 1.3;
@@ -2962,7 +2947,7 @@
 
   strong {
     flex: 0 0 auto;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 17px;
     font-variant-numeric: tabular-nums;
     line-height: 1;
@@ -2970,18 +2955,18 @@
 }
 
 .overviewRecentStatusMetricSuccess {
-  border-color: color-mix(in srgb, var(--accounts-success) 26%, var(--accounts-border));
+  border-color: color-mix(in srgb, var(--data-green-base) 26%, var(--border-color));
 
   strong {
-    color: var(--accounts-success);
+    color: var(--data-green-base);
   }
 }
 
 .overviewRecentStatusMetricFailure {
-  border-color: color-mix(in srgb, var(--accounts-danger) 24%, var(--accounts-border));
+  border-color: color-mix(in srgb, var(--data-red-base) 24%, var(--border-color));
 
   strong {
-    color: var(--accounts-danger);
+    color: var(--data-red-base);
   }
 }
 
@@ -2992,9 +2977,9 @@
   gap: 9px;
   min-width: 0;
   padding: 11px 12px;
-  border: 1px solid color-mix(in srgb, var(--accounts-primary) 15%, var(--accounts-border));
-  border-radius: 9px;
-  background: var(--accounts-surface);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 15%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
 }
 
 .overviewRecentStatusTimelineHeader {
@@ -3007,16 +2992,16 @@
   span:first-child {
     min-width: 0;
     overflow: hidden;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 700;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   span:last-child {
     flex: 0 0 auto;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 10px;
     white-space: nowrap;
   }
@@ -3056,7 +3041,7 @@
 .statusBlock {
   width: 100%;
   height: 6px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   transition:
     transform 0.15s ease,
     opacity 0.15s ease;
@@ -3077,13 +3062,14 @@
   bottom: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
-  background: var(--bg-primary, #fff);
-  border: 1px solid var(--border-subtle, #d8e5f2);
-  border-radius: 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--app-radius-md);
   padding: 8px 10px;
   font-size: 11px;
   line-height: 1.5;
   white-space: nowrap;
+  /* floating layer: elevation allowed */
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
   z-index: $z-dropdown;
   pointer-events: none;
@@ -3096,7 +3082,7 @@
     left: 50%;
     transform: translateX(-50%);
     border: 5px solid transparent;
-    border-top-color: var(--bg-primary, #fff);
+    border-top-color: var(--bg-primary);
   }
 
   &::before {
@@ -3106,7 +3092,7 @@
     left: 50%;
     transform: translateX(-50%);
     border: 6px solid transparent;
-    border-top-color: var(--border-subtle, #d8e5f2);
+    border-top-color: var(--border-subtle);
   }
 }
 
@@ -3157,6 +3143,7 @@
 .tooltipRate {
   color: var(--text-secondary);
   margin-left: 2px;
+  font-variant-numeric: tabular-nums;
 }
 
 .statusRate {
@@ -3167,9 +3154,10 @@
   min-width: 54px;
   font-size: 12px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   padding: 6px 10px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--surface-subtle);
   flex-shrink: 0;
 
@@ -3208,21 +3196,21 @@
   display: grid;
   gap: 4px;
   padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--accounts-danger) 30%, var(--accounts-border));
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--accounts-danger) 7%, var(--accounts-surface));
+  border: 1px solid color-mix(in srgb, var(--data-red-base) 30%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--data-red-base) 7%, var(--app-surface-strong));
 
   span {
-    color: var(--accounts-danger);
+    color: var(--data-red-base);
     font-size: 10px;
-    font-weight: 800;
+    font-weight: 700;
     letter-spacing: 0.02em;
   }
 
   p {
     margin: 0;
     overflow-wrap: anywhere;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 12px;
     line-height: 1.45;
   }
@@ -3241,17 +3229,11 @@
   flex-direction: column;
   gap: 12px;
   padding: 15px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 44%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--surface-subtle) 44%, var(--app-surface-strong));
 }
 
 .overviewActivityCard {
-  --usage-surface: var(--accounts-surface);
-  --usage-border: var(--accounts-border);
-  --usage-strong-border: var(--accounts-strong-border);
-  --usage-text: var(--accounts-text);
-  --usage-muted: var(--accounts-muted);
-  --usage-primary: var(--accounts-primary);
-  background: color-mix(in srgb, var(--accounts-primary) 3%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--primary-color) 3%, var(--app-surface-strong));
 }
 
 .overviewCardHeader {
@@ -3273,7 +3255,7 @@
   h3 {
     min-width: 0;
     margin: 0;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 14px;
     line-height: 1.35;
   }
@@ -3287,13 +3269,13 @@
   flex: 0 0 auto;
   width: 34px;
   height: 34px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--accounts-primary) 10%, var(--accounts-surface));
-  color: var(--accounts-primary);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
+  color: var(--primary-color);
 }
 
 .overviewDecisionCard .overviewSectionIcon {
-  background: color-mix(in srgb, var(--overview-accent) 13%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--overview-accent) 13%, var(--app-surface-strong));
   color: var(--overview-accent);
 }
 
@@ -3302,7 +3284,7 @@
   z-index: 1;
   max-width: 620px;
   margin: 0;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 15px;
   font-weight: 700;
   line-height: 1.55;
@@ -3320,20 +3302,20 @@
     gap: 3px;
     min-width: 0;
     padding: 9px 10px;
-    border: 1px solid color-mix(in srgb, var(--overview-accent) 16%, var(--accounts-border));
-    border-radius: 9px;
-    background: color-mix(in srgb, var(--accounts-surface) 84%, transparent);
+    border: 1px solid color-mix(in srgb, var(--overview-accent) 16%, var(--border-color));
+    border-radius: var(--app-radius-sm);
+    background: color-mix(in srgb, var(--app-surface-strong) 84%, transparent);
   }
 
   span {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
   }
 
   strong {
     min-width: 0;
     overflow: hidden;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 12px;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -3351,7 +3333,7 @@
 
 .overviewPrimaryValue {
   min-width: 0;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: clamp(20px, 3vw, 28px);
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
@@ -3366,23 +3348,23 @@
   flex: 0 0 auto;
   min-height: 24px;
   padding: 0 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accounts-primary) 9%, transparent);
-  color: var(--accounts-primary);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--primary-color) 9%, transparent);
+  color: var(--primary-color);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   white-space: nowrap;
 }
 
 .overviewCredentialState strong {
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 20px;
   line-height: 1.2;
 }
 
 .overviewCardDescription {
   margin: 0;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -3398,13 +3380,13 @@
     gap: 3px;
     min-width: 0;
     padding: 9px 10px;
-    border: 1px solid color-mix(in srgb, var(--accounts-border) 76%, transparent);
-    border-radius: 9px;
-    background: color-mix(in srgb, var(--accounts-surface) 86%, transparent);
+    border: 1px solid color-mix(in srgb, var(--border-color) 76%, transparent);
+    border-radius: var(--app-radius-sm);
+    background: color-mix(in srgb, var(--app-surface-strong) 86%, transparent);
   }
 
   dt {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 10px;
     font-weight: 700;
     line-height: 1.3;
@@ -3414,9 +3396,9 @@
     min-width: 0;
     margin: 0;
     overflow-wrap: anywhere;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
     line-height: 1.35;
   }
 }
@@ -3431,33 +3413,33 @@
   gap: 5px;
   margin-top: auto;
   padding: 3px 1px;
-  color: var(--accounts-primary);
+  color: var(--primary-color);
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
   cursor: pointer;
 
   &:hover {
-    color: var(--accounts-brand-active);
+    color: var(--primary-active);
   }
 
   &:focus-visible {
-    border-radius: 4px;
-    outline: 2px solid color-mix(in srgb, var(--accounts-primary) 58%, transparent);
+    border-radius: var(--app-radius-xs);
+    outline: 2px solid color-mix(in srgb, var(--primary-color) 58%, transparent);
     outline-offset: 2px;
   }
 }
 
 .overviewScopePillFallback {
-  background: color-mix(in srgb, var(--accounts-warning) 12%, transparent);
-  color: var(--accounts-warning);
+  background: color-mix(in srgb, var(--data-amber-base) 12%, transparent);
+  color: var(--data-amber-base);
 }
 
 .overviewEmptyState {
   padding: 16px;
-  border: 1px dashed var(--accounts-border);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 54%, var(--accounts-surface));
-  color: var(--accounts-muted);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--surface-subtle) 54%, var(--app-surface-strong));
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
   text-align: center;
@@ -3469,17 +3451,17 @@
   align-items: center;
   gap: 12px;
   padding: 13px 14px;
-  border-color: color-mix(in srgb, var(--accounts-warning) 42%, var(--accounts-border));
-  background: color-mix(in srgb, var(--accounts-warning) 7%, var(--accounts-surface));
+  border-color: color-mix(in srgb, var(--data-amber-base) 42%, var(--border-color));
+  background: color-mix(in srgb, var(--data-amber-base) 7%, var(--app-surface-strong));
 
   &[data-overview-attention-priority='critical'],
   &[data-overview-attention-priority='high'] {
-    border-color: color-mix(in srgb, var(--accounts-danger) 42%, var(--accounts-border));
-    background: color-mix(in srgb, var(--accounts-danger) 7%, var(--accounts-surface));
+    border-color: color-mix(in srgb, var(--data-red-base) 42%, var(--border-color));
+    background: color-mix(in srgb, var(--data-red-base) 7%, var(--app-surface-strong));
 
     .overviewAttentionIcon {
-      background: color-mix(in srgb, var(--accounts-danger) 13%, transparent);
-      color: var(--accounts-danger);
+      background: color-mix(in srgb, var(--data-red-base) 13%, transparent);
+      color: var(--data-red-base);
     }
   }
 
@@ -3489,8 +3471,8 @@
 }
 
 .overviewAttentionIcon {
-  background: color-mix(in srgb, var(--accounts-warning) 13%, transparent);
-  color: var(--accounts-warning);
+  background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
+  color: var(--data-amber-base);
 }
 
 .overviewAttentionBody {
@@ -3500,7 +3482,7 @@
 
   p {
     margin: 0;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.45;
   }
@@ -3508,7 +3490,7 @@
 
 .overviewAttentionHeading {
   margin: 0;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 13px;
   line-height: 1.4;
 }
@@ -3517,12 +3499,12 @@
   display: grid;
   gap: 3px;
   padding: 11px 12px;
-  border: 1px dashed color-mix(in srgb, var(--accounts-border) 84%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 72%, var(--accounts-surface));
+  border: 1px dashed color-mix(in srgb, var(--border-color) 84%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--surface-subtle) 72%, var(--app-surface-strong));
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 13px;
   }
 
@@ -3544,7 +3526,7 @@
   justify-content: center;
   gap: 9px;
   min-height: 180px;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 13px;
 }
 
@@ -3565,11 +3547,11 @@
   align-items: center;
   min-height: 22px;
   padding: 0 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accounts-warning) 13%, transparent);
-  color: var(--accounts-warning);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
+  color: var(--data-amber-base);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -3583,9 +3565,9 @@
 
 .configurationToolbarButton:global(.btn.btn-secondary) {
   opacity: 1;
-  border-color: var(--accounts-strong-border);
-  background: var(--accounts-strong-surface);
-  color: var(--accounts-text);
+  border-color: var(--border-primary);
+  background: var(--app-surface-strong);
+  color: var(--text-primary);
 
   &:hover:not(:disabled) {
     border-color: var(--border-hover);
@@ -3596,9 +3578,9 @@
 
 .configurationToolbarButton:global(.btn.btn-secondary:disabled) {
   opacity: 1;
-  border-color: var(--accounts-border);
-  background: var(--accounts-strong-surface);
-  color: var(--text-tertiary, var(--accounts-muted));
+  border-color: var(--border-color);
+  background: var(--app-surface-strong);
+  color: var(--text-tertiary, var(--text-secondary));
 }
 
 .configurationToolbarButton:global(.btn.btn-primary) {
@@ -3610,22 +3592,22 @@
   border-color: color-mix(
     in srgb,
     var(--primary-solid, var(--primary-color)) 38%,
-    var(--accounts-strong-surface)
+    var(--app-surface-strong)
   );
   background: color-mix(
     in srgb,
     var(--primary-solid, var(--primary-color)) 38%,
-    var(--accounts-strong-surface)
+    var(--app-surface-strong)
   );
-  color: var(--text-tertiary, var(--accounts-muted));
+  color: var(--text-tertiary, var(--text-secondary));
 }
 
 .configurationReadOnlyNotice {
   padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--accounts-warning) 30%, var(--accounts-border));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accounts-warning) 7%, var(--accounts-surface));
-  color: var(--accounts-muted);
+  border: 1px solid color-mix(in srgb, var(--data-amber-base) 30%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--data-amber-base) 7%, var(--app-surface-strong));
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -3651,7 +3633,7 @@
 
   strong {
     overflow: hidden;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 13px;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -3665,20 +3647,20 @@
   gap: 8px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid var(--accounts-border);
-  border-radius: 8px;
-  color: var(--accounts-muted);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
 }
 
 .accountModelsInlineStatus {
-  background: color-mix(in srgb, var(--accounts-muted-surface) 50%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--surface-subtle) 50%, var(--app-surface-strong));
 }
 
 .accountModelsWarning {
-  border-color: color-mix(in srgb, var(--accounts-warning) 32%, var(--accounts-border));
-  background: color-mix(in srgb, var(--accounts-warning) 7%, var(--accounts-surface));
+  border-color: color-mix(in srgb, var(--data-amber-base) 32%, var(--border-color));
+  background: color-mix(in srgb, var(--data-amber-base) 7%, var(--app-surface-strong));
 
   :global(.btn) {
     flex: 0 0 auto;
@@ -3692,7 +3674,7 @@
   flex: 1 1 auto;
   gap: 8px;
   min-width: 0;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -3708,20 +3690,20 @@
   }
 
   :global(.input) {
-    min-height: 34px;
+    min-height: var(--control-height-sm);
     padding: 6px 8px;
     font-size: 12px;
     line-height: 1.35;
   }
 
   :global([role='tablist']) {
-    min-height: 34px;
+    min-height: var(--control-height-sm);
     gap: 2px;
     padding: 1px;
   }
 
   :global([role='tablist'] [role='tab']) {
-    min-height: 30px;
+    min-height: var(--control-height-xs);
     padding: 0 12px;
     font-size: 12px;
     line-height: 1.2;
@@ -3739,10 +3721,10 @@
   max-width: 100%;
   padding: 5px 8px;
   overflow: hidden;
-  border: 1px solid var(--accounts-border);
-  border-radius: 999px;
-  background: var(--accounts-surface);
-  color: var(--accounts-muted);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-pill);
+  background: var(--app-surface-strong);
+  color: var(--text-secondary);
   font: inherit;
   font-size: 11px;
   line-height: 1.2;
@@ -3751,21 +3733,21 @@
   cursor: pointer;
 
   &:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--accounts-primary) 52%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--primary-color) 52%, transparent);
     outline-offset: 2px;
   }
 }
 
 .accountModelsRuleChipCredential {
-  border-color: color-mix(in srgb, var(--accounts-warning) 32%, var(--accounts-border));
-  background: color-mix(in srgb, var(--accounts-warning) 8%, var(--accounts-surface));
-  color: var(--accounts-warning);
+  border-color: color-mix(in srgb, var(--data-amber-base) 32%, var(--border-color));
+  background: color-mix(in srgb, var(--data-amber-base) 8%, var(--app-surface-strong));
+  color: var(--data-amber-base);
 }
 
 .accountModelsRuleChipGlobal {
-  border-color: color-mix(in srgb, var(--accounts-danger) 28%, var(--accounts-border));
-  background: color-mix(in srgb, var(--accounts-danger) 7%, var(--accounts-surface));
-  color: var(--accounts-danger);
+  border-color: color-mix(in srgb, var(--data-red-base) 28%, var(--border-color));
+  background: color-mix(in srgb, var(--data-red-base) 7%, var(--app-surface-strong));
+  color: var(--data-red-base);
 }
 
 .accountModelsList {
@@ -3781,14 +3763,14 @@
   gap: 12px;
   min-width: 0;
   padding: 11px 12px;
-  border: 1px solid var(--accounts-border);
-  border-radius: 9px;
-  background: var(--accounts-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
 }
 
 .accountModelRowExcluded {
-  border-color: color-mix(in srgb, var(--accounts-warning) 26%, var(--accounts-border));
-  background: color-mix(in srgb, var(--accounts-warning) 4%, var(--accounts-surface));
+  border-color: color-mix(in srgb, var(--data-amber-base) 26%, var(--border-color));
+  background: color-mix(in srgb, var(--data-amber-base) 4%, var(--app-surface-strong));
 }
 
 .accountModelMain {
@@ -3814,7 +3796,7 @@
   overflow: hidden;
   border: 0;
   background: transparent;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font: inherit;
   font-family: var(--font-mono);
   font-size: 12px;
@@ -3829,12 +3811,12 @@
 
   svg {
     flex: 0 0 auto;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
   }
 
   &:focus-visible {
-    border-radius: 3px;
-    outline: 2px solid color-mix(in srgb, var(--accounts-primary) 52%, transparent);
+    border-radius: var(--app-radius-xs);
+    outline: 2px solid color-mix(in srgb, var(--primary-color) 52%, transparent);
     outline-offset: 2px;
   }
 }
@@ -3844,41 +3826,41 @@
   align-items: center;
   min-height: 20px;
   padding: 0 7px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 700;
   white-space: nowrap;
 }
 
 .accountModelScopeAvailable {
-  background: color-mix(in srgb, var(--accounts-success) 11%, transparent);
-  color: var(--accounts-success);
+  background: color-mix(in srgb, var(--data-green-base) 11%, transparent);
+  color: var(--data-green-base);
 }
 
 .accountModelScopeUnknown {
-  background: color-mix(in srgb, var(--accounts-muted) 11%, transparent);
-  color: var(--accounts-muted);
+  background: color-mix(in srgb, var(--text-secondary) 11%, transparent);
+  color: var(--text-secondary);
 }
 
 .accountModelScopeCredential {
-  background: color-mix(in srgb, var(--accounts-warning) 13%, transparent);
-  color: var(--accounts-warning);
+  background: color-mix(in srgb, var(--data-amber-base) 13%, transparent);
+  color: var(--data-amber-base);
 }
 
 .accountModelScopeGlobal {
-  background: color-mix(in srgb, var(--accounts-danger) 11%, transparent);
-  color: var(--accounts-danger);
+  background: color-mix(in srgb, var(--data-red-base) 11%, transparent);
+  color: var(--data-red-base);
 }
 
 .accountModelScopeBoth {
-  background: color-mix(in srgb, var(--accounts-primary) 11%, transparent);
-  color: var(--accounts-primary);
+  background: color-mix(in srgb, var(--primary-color) 11%, transparent);
+  color: var(--primary-color);
 }
 
 .accountModelDisplayName,
 .accountModelMeta {
   overflow: hidden;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.4;
   text-overflow: ellipsis;
@@ -3906,16 +3888,16 @@
   gap: 12px;
   min-width: 0;
   padding: 14px;
-  border: 1px solid var(--accounts-border);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 32%, var(--accounts-surface));
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--surface-subtle) 32%, var(--app-surface-strong));
 
   :global(.form-group) {
     margin-bottom: 0;
   }
 
   :global(.form-group > label) {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 13px;
     line-height: 1.35;
   }
@@ -3935,7 +3917,7 @@
 .configurationSectionTitle {
   min-width: 0;
   margin: 0;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 14px;
   line-height: 1.35;
 }
@@ -3958,20 +3940,20 @@
   gap: 13px;
   min-width: 0;
   padding: 13px;
-  border: 1px solid color-mix(in srgb, var(--accounts-primary) 17%, var(--accounts-border));
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--accounts-primary) 4%, var(--accounts-surface));
+  border: 1px solid color-mix(in srgb, var(--primary-color) 17%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--primary-color) 4%, var(--app-surface-strong));
 }
 
 .configurationFieldLabel {
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
 }
 
 .configurationFieldHint {
   margin: -5px 0 0;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -3983,9 +3965,9 @@
   gap: 16px;
   min-width: 0;
   padding: 11px 12px;
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 82%, transparent);
-  border-radius: 9px;
-  background: var(--accounts-surface);
+  border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
 
   > div {
     display: grid;
@@ -3999,26 +3981,28 @@
   }
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 13px;
   }
 
   p {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.45;
   }
 }
 
+.configurationTextareaInvalid:global(.input),
+.configurationTextareaInvalid:global(.input):focus,
 .configurationTextareaInvalid {
-  border-color: var(--accounts-danger) !important;
+  border-color: var(--data-red-base);
 }
 
 .configurationRawDataDetails {
   overflow: hidden;
-  border: 1px solid var(--accounts-border);
-  border-radius: 10px;
-  background: var(--accounts-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--app-surface-strong);
 
   > summary {
     display: flex;
@@ -4026,15 +4010,15 @@
     justify-content: space-between;
     gap: 12px;
     padding: 12px 14px;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
     cursor: pointer;
   }
 
   &[open] > summary {
-    border-bottom: 1px solid var(--accounts-border);
-    color: var(--accounts-text);
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-primary);
   }
 }
 
@@ -4050,11 +4034,11 @@
   align-items: center;
   min-height: 20px;
   padding: 0 7px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accounts-primary) 9%, transparent);
-  color: var(--accounts-primary);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--primary-color) 9%, transparent);
+  color: var(--primary-color);
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -4075,9 +4059,9 @@
     gap: 3px;
     min-width: 0;
     padding: 9px 10px;
-    border: 1px solid color-mix(in srgb, var(--accounts-border) 78%, transparent);
-    border-radius: 8px;
-    background: var(--accounts-muted-surface);
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    border-radius: var(--app-radius-sm);
+    background: var(--surface-subtle);
   }
 
   dt,
@@ -4087,7 +4071,7 @@
   }
 
   dt {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 10px;
     font-weight: 700;
   }
@@ -4095,8 +4079,8 @@
   dd {
     overflow: hidden;
     overflow-wrap: anywhere;
-    color: var(--accounts-text);
-    font-family: $font-mono;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
     font-size: 11px;
     font-weight: 700;
     white-space: normal;
@@ -4111,7 +4095,7 @@
 
   p {
     margin: 0;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     line-height: 1.45;
   }
@@ -4124,17 +4108,17 @@
   margin: 0;
   padding: 11px 12px;
   overflow: auto;
-  border: 1px solid var(--accounts-border);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 66%, var(--accounts-surface));
-  color: var(--accounts-text);
-  font-family: $font-mono;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--surface-subtle) 66%, var(--app-surface-strong));
+  color: var(--text-primary);
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.55;
   white-space: pre;
 
   &:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--accounts-primary) 55%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--primary-color) 55%, transparent);
     outline-offset: 2px;
   }
 }
@@ -4145,7 +4129,7 @@
   gap: 8px;
 
   strong {
-    color: var(--accounts-danger);
+    color: var(--data-red-base);
   }
 
   p {
@@ -4156,7 +4140,7 @@
 .drawerSection {
   padding: 14px;
   border: 1px solid var(--border-color);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
 
   h3 {
     margin: 0 0 10px;
@@ -4209,21 +4193,12 @@
     margin: 0;
     color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
     line-height: 1.35;
   }
 }
 
 .quotaTab {
-  --color-surface: var(--accounts-surface);
-  --color-surface-muted: var(--accounts-muted-surface);
-  --color-border: var(--accounts-border);
-  --color-text: var(--accounts-text);
-  --color-text-secondary: var(--accounts-muted);
-  --color-text-tertiary: var(--accounts-muted);
-  --color-primary: var(--accounts-brand);
-  --color-success: var(--accounts-success);
-  --color-warning: var(--accounts-warning);
   display: grid;
   gap: 14px;
   min-width: 0;
@@ -4244,7 +4219,7 @@
 
   p {
     margin: 0;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     line-height: 1.45;
   }
@@ -4252,10 +4227,10 @@
 
 .quotaPageTitle {
   margin: 0;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 18px;
   line-height: 25px;
-  font-weight: 750;
+  font-weight: 700;
 }
 
 .quotaTabActions {
@@ -4273,7 +4248,7 @@
 
 .quotaSummaryPanel {
   min-width: 0;
-  background: var(--accounts-surface);
+  background: var(--app-surface-strong);
 }
 
 .quotaSection {
@@ -4296,10 +4271,10 @@
   h3 {
     flex: 0 0 auto;
     margin: 0;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 15px;
     line-height: 21px;
-    font-weight: 750;
+    font-weight: 700;
   }
 }
 
@@ -4318,25 +4293,25 @@
   min-width: 0;
   min-height: 84px;
   padding: $spacing-sm;
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 78%, transparent);
-  border-radius: $radius-md;
-  background: var(--accounts-surface);
+  border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
 }
 
 .quotaSummaryMetricBlue {
-  --quota-summary-accent: var(--accounts-brand);
+  --quota-summary-accent: var(--data-blue-base);
 }
 
 .quotaSummaryMetricGreen {
-  --quota-summary-accent: var(--accounts-success);
+  --quota-summary-accent: var(--data-green-base);
 }
 
 .quotaSummaryMetricTeal {
-  --quota-summary-accent: var(--data-teal-base, var(--accounts-primary));
+  --quota-summary-accent: var(--data-teal-base, var(--primary-color));
 }
 
 .quotaSummaryMetricAmber {
-  --quota-summary-accent: var(--accounts-warning);
+  --quota-summary-accent: var(--data-amber-base);
 }
 
 .quotaSummaryMetricHeader {
@@ -4351,7 +4326,7 @@
 .quotaSummaryMetricLabel {
   min-width: 0;
   overflow: hidden;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 14px;
   text-overflow: ellipsis;
@@ -4372,7 +4347,7 @@
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 18px;
   line-height: 24px;
   font-variant-numeric: tabular-nums;
@@ -4386,8 +4361,8 @@
 }
 
 .quotaSummaryValue[tabindex='0']:focus-visible {
-  border-radius: $radius-sm;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accounts-brand) 28%, transparent);
+  border-radius: var(--app-radius-xs);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--data-blue-base) 28%, transparent);
 }
 
 .quotaSummaryValueTooltip {
@@ -4401,10 +4376,10 @@
   min-width: 140px;
   max-width: min(240px, calc(100vw - 32px));
   padding: $spacing-sm $spacing-md;
-  border: 1px solid color-mix(in srgb, var(--quota-summary-accent) 78%, var(--accounts-border));
-  border-radius: $radius-md;
-  background: color-mix(in srgb, var(--quota-summary-accent) 92%, var(--accounts-text));
-  color: var(--primary-contrast, #fff);
+  border: 1px solid color-mix(in srgb, var(--quota-summary-accent) 78%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--quota-summary-accent) 92%, var(--text-primary));
+  color: var(--primary-contrast);
   box-shadow: $shadow-md;
   opacity: 0;
   pointer-events: none;
@@ -4422,9 +4397,9 @@
   width: 9px;
   height: 9px;
   border-right: 1px solid
-    color-mix(in srgb, var(--quota-summary-accent) 78%, var(--accounts-border));
+    color-mix(in srgb, var(--quota-summary-accent) 78%, var(--border-color));
   border-bottom: 1px solid
-    color-mix(in srgb, var(--quota-summary-accent) 78%, var(--accounts-border));
+    color-mix(in srgb, var(--quota-summary-accent) 78%, var(--border-color));
   background: inherit;
   transform: translateX(-50%) rotate(45deg);
 }
@@ -4436,7 +4411,7 @@
 }
 
 .quotaSummaryValueTooltipLabel {
-  color: color-mix(in srgb, var(--primary-contrast, #fff) 72%, transparent);
+  color: color-mix(in srgb, var(--primary-contrast) 72%, transparent);
   font-size: 10px;
   font-weight: 700;
   line-height: 1.2;
@@ -4444,9 +4419,9 @@
 }
 
 .quotaSummaryValueTooltipValue {
-  color: var(--primary-contrast, #fff);
+  color: var(--primary-contrast);
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
   overflow-wrap: anywhere;
@@ -4461,14 +4436,14 @@
   min-width: 0;
   max-width: 100%;
   margin-left: auto;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   text-align: right;
 
   strong {
     min-width: 0;
     max-width: 100%;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
@@ -4480,7 +4455,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -4498,16 +4473,16 @@
   h3 {
     flex: 0 0 auto;
     margin: 0;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 15px;
     line-height: 21px;
-    font-weight: 750;
+    font-weight: 700;
   }
 
   span {
     min-width: 0;
     overflow: hidden;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -4522,7 +4497,7 @@
 
 .quotaEmpty {
   margin: 0;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -4530,7 +4505,7 @@
   display: grid;
   gap: 12px;
   margin-bottom: 12px;
-  background: color-mix(in srgb, var(--accounts-accent-soft) 48%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--app-accent-soft) 48%, var(--app-surface-strong));
 }
 
 .detailQuotaUsageSummaryHeader {
@@ -4540,12 +4515,12 @@
   gap: 12px;
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 13px;
   }
 
   span {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
   }
 }
@@ -4572,9 +4547,9 @@
   flex: 0 0 auto;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accounts-primary) 12%, transparent);
-  color: var(--accounts-primary);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
+  color: var(--primary-color);
 }
 
 .detailQuotaUsageRange {
@@ -4597,7 +4572,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 4px 14px;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
 
   span {
@@ -4608,7 +4583,7 @@
   }
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-weight: 700;
   }
 }
@@ -4624,8 +4599,8 @@
     gap: 10px;
     min-width: 0;
     padding: 8px;
-    border-radius: 8px;
-    background: var(--accounts-surface);
+    border-radius: var(--app-radius-sm);
+    background: var(--app-surface-strong);
   }
 
   > div > div {
@@ -4636,14 +4611,14 @@
 
   span {
     overflow: hidden;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 14px;
     font-variant-numeric: tabular-nums;
   }
@@ -4656,27 +4631,27 @@
   flex: 0 0 auto;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
 }
 
 .metricIconBlue {
-  background: color-mix(in srgb, var(--accounts-brand) 12%, transparent);
-  color: var(--accounts-brand);
+  background: color-mix(in srgb, var(--data-blue-base) 12%, transparent);
+  color: var(--data-blue-base);
 }
 
 .metricIconGreen {
-  background: color-mix(in srgb, var(--accounts-success) 12%, transparent);
-  color: var(--accounts-success);
+  background: color-mix(in srgb, var(--data-green-base) 12%, transparent);
+  color: var(--data-green-base);
 }
 
 .metricIconTeal {
-  background: color-mix(in srgb, var(--data-teal-base, var(--accounts-primary)) 12%, transparent);
-  color: var(--data-teal-base, var(--accounts-primary));
+  background: color-mix(in srgb, var(--data-teal-base, var(--primary-color)) 12%, transparent);
+  color: var(--data-teal-base, var(--primary-color));
 }
 
 .metricIconAmber {
-  background: color-mix(in srgb, var(--accounts-warning) 12%, transparent);
-  color: var(--accounts-warning);
+  background: color-mix(in srgb, var(--data-amber-base) 12%, transparent);
+  color: var(--data-amber-base);
 }
 
 .detailInlineNote {
@@ -4707,9 +4682,9 @@
 .detailCandidateItem {
   min-width: 0;
   padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 84%, transparent);
-  border-radius: 8px;
-  background: var(--accounts-surface);
+  border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
 }
 
 .detailQuotaWindowHeader {
@@ -4729,7 +4704,7 @@
   strong {
     min-width: 0;
     overflow: hidden;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 13px;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -4738,14 +4713,14 @@
   span {
     min-width: 0;
     overflow: hidden;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   b {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 14px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -4764,7 +4739,7 @@
 .detailEvidenceGrid span {
   min-width: 0;
   overflow: hidden;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4775,14 +4750,14 @@
   gap: 3px;
   min-width: 0;
   padding: 8px;
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 72%, transparent);
-  border-radius: 8px;
-  background: var(--accounts-surface);
+  border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
 
   strong {
     min-width: 0;
     overflow: hidden;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 13px;
     font-variant-numeric: tabular-nums;
     text-overflow: ellipsis;
@@ -4817,13 +4792,13 @@
   }
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 13px;
   }
 
   span,
   small {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
   }
 
@@ -4858,6 +4833,7 @@
   min-width: 0;
 }
 
+.detailCandidateItem .detailCandidateStatus,
 .detailCandidateStatus {
   display: inline-flex;
   align-items: center;
@@ -4865,11 +4841,11 @@
   max-width: 120px;
   padding: 0 7px;
   overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accounts-primary) 9%, transparent);
-  color: var(--accounts-primary) !important;
-  font-size: 11px !important;
-  font-weight: 800;
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--primary-color) 9%, transparent);
+  color: var(--primary-color);
+  font-size: 11px;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4891,9 +4867,9 @@
   gap: 12px;
   min-width: 0;
   padding: 13px;
-  border: 1px solid var(--accounts-border);
-  border-radius: $radius-md;
-  background: var(--accounts-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--app-surface-strong);
 }
 
 .quotaResetHeader {
@@ -4924,27 +4900,27 @@
 
 .quotaResetIcon {
   margin-right: 0;
-  background: color-mix(in srgb, var(--primary-color) 10%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
   color: var(--primary-color);
 }
 
 .quotaResetAction:global(.btn.btn-secondary) {
-  min-height: 30px;
-  border-color: color-mix(in srgb, var(--primary-color) 36%, var(--accounts-border));
-  background: color-mix(in srgb, var(--primary-color) 7%, var(--accounts-surface));
+  min-height: var(--control-height-sm);
+  border-color: color-mix(in srgb, var(--primary-color) 36%, var(--border-color));
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--app-surface-strong));
   color: var(--primary-color);
-  font-weight: 750;
+  font-weight: 700;
 
   &:hover:not(:disabled) {
-    border-color: color-mix(in srgb, var(--primary-color) 58%, var(--accounts-border));
-    background: color-mix(in srgb, var(--primary-color) 12%, var(--accounts-surface));
+    border-color: color-mix(in srgb, var(--primary-color) 58%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 12%, var(--app-surface-strong));
     color: var(--primary-color);
   }
 
   &:disabled {
-    border-color: var(--accounts-border);
-    background: var(--accounts-muted-surface);
-    color: var(--accounts-muted);
+    border-color: var(--border-color);
+    background: var(--surface-subtle);
+    color: var(--text-secondary);
     opacity: 0.58;
   }
 }
@@ -4957,9 +4933,9 @@
   h3 {
     margin: 0;
     overflow: hidden;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 14px;
-    font-weight: 750;
+    font-weight: 700;
     line-height: 18px;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -4967,7 +4943,7 @@
 
   span {
     overflow: hidden;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 10px;
     line-height: 14px;
     text-overflow: ellipsis;
@@ -4984,12 +4960,12 @@
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   white-space: nowrap;
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 20px;
     font-variant-numeric: tabular-nums;
     line-height: 22px;
@@ -4997,17 +4973,17 @@
 }
 
 .quotaResetCountUnit {
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 10px;
   font-weight: 700;
 }
 
 .quotaResetAvailabilityNote {
   padding: 7px 10px;
-  border: 1px solid var(--accounts-border);
-  border-radius: 8px;
-  background: var(--accounts-muted-surface);
-  color: var(--accounts-muted);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
@@ -5015,11 +4991,11 @@
   display: grid;
   gap: 6px;
   padding-top: 10px;
-  border-top: 1px solid var(--accounts-border);
+  border-top: 1px solid var(--border-color);
 }
 
 .quotaResetExpiryLabel {
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 700;
 }
@@ -5036,10 +5012,10 @@
   gap: 10px;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 84%, transparent);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 26%, var(--accounts-surface));
-  color: var(--accounts-muted);
+  border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--surface-subtle) 26%, var(--app-surface-strong));
+  color: var(--text-secondary);
   font-size: 11px;
 
   span {
@@ -5051,7 +5027,7 @@
 
   strong {
     flex: 0 0 auto;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 12px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -5064,12 +5040,12 @@
   justify-content: space-between;
   gap: 10px;
   padding-top: 10px;
-  border-top: 1px solid var(--accounts-border);
-  color: var(--accounts-muted);
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
   font-size: 11px;
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 12px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -5084,27 +5060,27 @@
   width: 22px;
   height: 22px;
   margin-right: 6px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--accounts-primary) 10%, var(--accounts-surface));
-  color: var(--accounts-primary);
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
+  color: var(--primary-color);
 }
 
 .quotaWindowFilters {
   display: inline-flex;
   flex: 0 0 auto;
   overflow: hidden;
-  border: 1px solid var(--accounts-border);
-  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
 
   button {
-    min-height: 30px;
+    min-height: var(--control-height-sm);
     padding: 0 10px;
     border: 0;
-    border-right: 1px solid var(--accounts-border);
-    background: var(--accounts-surface);
-    color: var(--accounts-muted);
+    border-right: 1px solid var(--border-color);
+    background: var(--app-surface-strong);
+    color: var(--text-secondary);
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 700;
     cursor: pointer;
 
     &:last-child {
@@ -5112,8 +5088,8 @@
     }
 
     &:hover {
-      background: var(--accounts-muted-surface);
-      color: var(--accounts-text);
+      background: var(--surface-subtle);
+      color: var(--text-primary);
     }
   }
 }
@@ -5127,9 +5103,11 @@
   flex-wrap: wrap;
 }
 
+.quotaWindowFilters button.quotaWindowFilterActive,
+.quotaWindowFilters button.quotaWindowFilterActive:hover,
 .quotaWindowFilterActive {
-  background: color-mix(in srgb, var(--accounts-primary) 10%, var(--accounts-surface)) !important;
-  color: var(--accounts-primary) !important;
+  background: color-mix(in srgb, var(--primary-color) 10%, var(--app-surface-strong));
+  color: var(--primary-color);
 }
 
 .quotaWindowGroups {
@@ -5160,15 +5138,15 @@
     display: inline-flex;
     align-items: center;
     margin: 0;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
   }
 
   span {
     min-width: 0;
     overflow: hidden;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -5178,11 +5156,13 @@
     flex: 0 0 auto;
     min-width: 22px;
     padding: 2px 7px;
-    border-radius: 999px;
-    background: var(--accounts-muted-surface);
-    color: var(--accounts-muted);
+    border-radius: var(--app-radius-pill);
+    background: var(--surface-subtle);
+    color: var(--text-secondary);
     font-size: 11px;
+    font-variant-numeric: tabular-nums;
     text-align: center;
+    white-space: nowrap;
   }
 }
 
@@ -5309,35 +5289,35 @@
   align-items: center;
   padding: 2px 7px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .eventStatusSuccess {
-  background: color-mix(in srgb, var(--accounts-success) 13%, transparent);
-  color: var(--accounts-success);
+  background: color-mix(in srgb, var(--data-green-base) 13%, transparent);
+  color: var(--data-green-base);
 }
 
 .eventStatusFailed {
-  background: color-mix(in srgb, var(--accounts-danger) 13%, transparent);
-  color: var(--accounts-danger);
+  background: color-mix(in srgb, var(--data-red-base) 13%, transparent);
+  color: var(--data-red-base);
 }
 
 .drawerActions {
   justify-content: flex-end;
 
   :global(.btn) {
-    min-height: 36px;
+    min-height: var(--control-height-md);
   }
 }
 
 .drawerMoreActions {
-  min-height: 36px;
-  border-radius: 8px;
-  background: var(--accounts-surface);
+  min-height: var(--control-height-md);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
 }
 
 .rulesGrid {
@@ -5372,9 +5352,9 @@
 .rulePanel {
   padding: 16px;
   border: 1px solid var(--glass-border);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-lg);
   background: var(--glass-bg);
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--app-specular-highlight);
 
   h2 {
     margin: 0 0 12px;
@@ -5523,8 +5503,8 @@
 .previewEmpty {
   margin: 0;
   padding: 12px;
-  border: 1px dashed var(--accounts-border);
-  border-radius: 8px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--app-radius-sm);
   color: var(--text-secondary);
   font-size: 12px;
   text-align: center;
@@ -5550,7 +5530,7 @@
   border-color: color-mix(in srgb, var(--error-color) 34%, var(--border-color));
 
   .previewStatus {
-    background: color-mix(in srgb, var(--error-color) 10%, var(--accounts-surface));
+    background: color-mix(in srgb, var(--error-color) 10%, var(--bg-primary));
     color: var(--error-color);
   }
 }
@@ -5559,7 +5539,7 @@
   border-color: color-mix(in srgb, var(--primary-color) 34%, var(--border-color));
 
   .previewStatus {
-    background: color-mix(in srgb, var(--primary-color) 10%, var(--accounts-surface));
+    background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
     color: var(--primary-active);
   }
 }
@@ -5578,8 +5558,8 @@
 
 .previewStatus {
   padding: 2px 7px;
-  border-radius: $radius-full;
-  background: var(--accounts-muted-surface);
+  border-radius: var(--app-radius-pill);
+  background: var(--surface-subtle);
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
@@ -5618,10 +5598,10 @@
   gap: 12px;
   width: 100%;
   padding: 10px 12px;
-  border: 1px dashed color-mix(in srgb, var(--primary-color) 30%, var(--accounts-border));
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--primary-color) 5%, var(--accounts-surface));
-  color: var(--accounts-text);
+  border: 1px dashed color-mix(in srgb, var(--primary-color) 30%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
+  color: var(--text-primary);
   font: inherit;
   font-size: 12px;
   font-weight: 700;
@@ -5635,8 +5615,8 @@
   }
 
   &:hover {
-    border-color: color-mix(in srgb, var(--primary-color) 48%, var(--accounts-border));
-    background: color-mix(in srgb, var(--primary-color) 8%, var(--accounts-surface));
+    border-color: color-mix(in srgb, var(--primary-color) 48%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 8%, var(--bg-primary));
   }
 
   &:focus-visible {
@@ -5652,7 +5632,7 @@
   min-height: 180px;
   padding: 18px;
   border: 1px solid var(--glass-border);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   background: var(--glass-bg);
 
   h2 {
@@ -5676,7 +5656,7 @@
   display: grid;
   gap: 16px;
   min-width: 0;
-  color: var(--accounts-text);
+  color: var(--text-primary);
 }
 
 .controlsPanel,
@@ -5684,9 +5664,9 @@
 .tablePanel,
 .loadingPanel,
 .rulePanel {
-  border: 1px solid var(--accounts-border);
-  border-radius: 14px;
-  background: var(--accounts-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--bg-primary);
   box-shadow: var(--shadow-lg);
 }
 
@@ -5694,7 +5674,7 @@
   display: grid;
   min-width: 0;
   overflow: visible;
-  border-radius: 18px;
+  border-radius: var(--app-radius-lg);
 }
 
 .controlsTabsRow {
@@ -5732,12 +5712,14 @@
   min-width: 18px;
   min-height: 18px;
   padding: 2px 6px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--data-badge-info-bg);
   color: var(--data-badge-info-text);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 .controlsFilterPanel {
@@ -5746,7 +5728,7 @@
   min-width: 0;
   overflow: visible;
   padding: 14px 16px 16px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 34%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
 }
 
 .toolbar {
@@ -5760,21 +5742,22 @@
 
   :global(.input),
   :global(button) {
-    min-height: 36px;
+    min-height: var(--control-height-sm);
   }
 }
 
 .toolbarSearchInput {
-  height: 36px;
-  min-height: 36px;
-  border-radius: 12px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
   font-size: 13px;
 }
 
-.toolbarSelectTrigger {
-  height: 36px !important;
-  min-height: 36px !important;
-  border-radius: 12px !important;
+.toolbar .toolbarSelectTrigger,
+.toolbarSelectTrigger.toolbarSelectTrigger {
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
   font-size: 13px;
 }
 
@@ -5785,8 +5768,9 @@
 .mobileFilterButton:global(.btn.btn-sm) {
   gap: 7px;
   justify-content: center;
-  min-height: 36px;
-  border-radius: 12px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
 }
 
 .mobileFilterCount {
@@ -5796,18 +5780,20 @@
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
-  border-radius: 999px;
-  background: var(--accounts-primary);
+  border-radius: var(--app-radius-pill);
+  background: var(--primary-color);
   color: var(--bg-primary);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .mobileFilterSummary {
   min-width: 0;
   overflow: hidden;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -5819,10 +5805,11 @@
   display: flex;
   align-items: center;
   min-width: 0;
-  height: 36px;
-  border: 1px solid var(--accounts-border);
-  border-radius: 12px;
-  background: var(--accounts-muted-surface);
+  box-sizing: border-box;
+  height: var(--control-height-sm);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--surface-subtle);
   overflow: visible;
   transition:
     border-color 0.16s ease,
@@ -5830,8 +5817,8 @@
 
   &:hover,
   &:focus-within {
-    border-color: color-mix(in srgb, var(--accounts-primary) 42%, var(--accounts-border));
-    background: color-mix(in srgb, var(--accounts-primary) 6%, var(--accounts-muted-surface));
+    border-color: color-mix(in srgb, var(--primary-color) 42%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 6%, var(--surface-subtle));
   }
 }
 
@@ -5841,14 +5828,14 @@
   justify-content: flex-start;
   flex: 1 1 auto;
   min-width: 78px;
-  height: 34px;
-  min-height: 34px;
+  height: 100%;
+  min-height: 0;
   padding: 0 4px 0 12px;
   border: 0;
-  border-radius: 11px 0 0 11px;
+  border-radius: var(--app-radius-sm) 0 0 var(--app-radius-sm);
   background: transparent;
   box-shadow: none;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   cursor: pointer;
   transform: none;
 
@@ -5858,7 +5845,7 @@
     border: 0;
     background: transparent;
     box-shadow: none;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     transform: none;
   }
 }
@@ -5881,13 +5868,13 @@
   justify-content: center;
   flex: 0 0 36px;
   width: 36px;
-  height: 34px;
-  min-height: 34px;
+  height: 100%;
+  min-height: 0;
   padding: 0;
   border: 0;
-  border-radius: 0 11px 11px 0;
+  border-radius: 0 var(--app-radius-sm) var(--app-radius-sm) 0;
   background: transparent;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   cursor: pointer;
   transition:
     background-color 0.16s ease,
@@ -5896,8 +5883,8 @@
   &:hover:not(:disabled),
   &:focus-visible:not(:disabled) {
     outline: 0;
-    background: color-mix(in srgb, var(--accounts-primary) 10%, transparent);
-    color: var(--accounts-primary);
+    background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+    color: var(--primary-color);
   }
 
   &:disabled {
@@ -5916,9 +5903,9 @@
   gap: 4px;
   min-width: 100%;
   padding: 4px;
-  border: 1px solid var(--accounts-strong-border);
-  border-radius: 12px;
-  background: var(--accounts-surface);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--app-radius-md);
+  background: var(--bg-primary);
   box-shadow: var(--shadow-lg);
 }
 
@@ -5926,12 +5913,12 @@
   display: flex;
   align-items: center;
   width: 100%;
-  min-height: 30px;
+  min-height: var(--control-height-sm);
   padding: 0 10px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--app-radius-sm);
   background: transparent;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font: inherit;
   font-size: 13px;
   font-weight: 500;
@@ -5942,25 +5929,24 @@
   &:hover,
   &:focus-visible {
     outline: 0;
-    background: color-mix(in srgb, var(--accounts-primary) 7%, var(--accounts-muted-surface));
-    color: var(--accounts-text);
+    background: color-mix(in srgb, var(--primary-color) 7%, var(--surface-subtle));
+    color: var(--text-primary);
   }
 }
 
 .accountSortDropdownItemSelected {
-  color: var(--accounts-primary);
+  color: var(--primary-color);
   font-weight: 700;
 }
 
 .accountSortDropdownItemHighlighted {
-  background: color-mix(in srgb, var(--accounts-primary) 7%, var(--accounts-muted-surface));
-  color: var(--accounts-text);
+  background: color-mix(in srgb, var(--primary-color) 7%, var(--surface-subtle));
+  color: var(--text-primary);
 }
 
 .accountSortDropdownItemSelected.accountSortDropdownItemHighlighted {
-  color: var(--accounts-primary);
+  color: var(--primary-color);
 }
-
 .accountSortDirectionIcon {
   display: inline-flex;
   align-items: center;
@@ -5982,17 +5968,18 @@
   flex-wrap: nowrap;
   justify-content: flex-start;
   gap: 0;
-  height: 34px;
+  height: var(--control-height-sm);
   padding: 0;
-  border-radius: 10px;
-  border: 1px solid var(--accounts-border);
-  background: color-mix(in srgb, var(--accounts-surface) 80%, var(--accounts-muted-surface));
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  border-radius: var(--app-radius-md);
+  border: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-primary) 80%, var(--surface-subtle));
+  box-shadow: none;
   box-sizing: border-box;
   flex-shrink: 0;
   overflow: hidden;
 }
 
+.viewModeSwitcher .viewModeButton,
 .viewModeButton {
   position: relative;
   display: inline-flex;
@@ -6000,13 +5987,13 @@
   justify-content: center;
   flex: 0 0 auto;
   height: 100%;
-  min-height: 100% !important;
+  min-height: 100%;
   padding: 0 13px;
   border: 0;
-  border-left: 1px solid var(--accounts-border);
+  border-left: 1px solid var(--border-color);
   border-radius: 0;
   background: transparent;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font: inherit;
   font-size: 13px;
   font-weight: 600;
@@ -6023,14 +6010,14 @@
   }
 
   &:hover {
-    color: var(--accounts-text);
-    background: color-mix(in srgb, var(--accounts-primary) 6%, transparent);
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--primary-color) 6%, transparent);
   }
 
   &.viewModeButtonActive {
     border-left-color: transparent;
-    background: color-mix(in srgb, var(--accounts-primary) 12%, var(--accounts-surface));
-    color: var(--accounts-primary);
+    background: color-mix(in srgb, var(--primary-color) 12%, var(--bg-primary));
+    color: var(--primary-color);
     font-weight: 700;
     box-shadow: none;
   }
@@ -6065,10 +6052,10 @@
   flex-direction: column;
   max-height: min(82vh, 640px);
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
   border-bottom: 0;
-  border-radius: 20px 20px 0 0;
-  background: var(--accounts-surface);
+  border-radius: var(--app-radius-lg) var(--app-radius-lg) 0 0;
+  background: var(--bg-primary);
   box-shadow: var(--shadow-lg);
 }
 
@@ -6078,11 +6065,11 @@
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--accounts-border) 72%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
 
   h2 {
     margin: 0;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 16px;
     line-height: 1.25;
   }
@@ -6092,7 +6079,7 @@
     max-width: 260px;
     margin-top: 3px;
     overflow: hidden;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 700;
     text-overflow: ellipsis;
@@ -6138,7 +6125,7 @@
   grid-template-columns: 1fr 1fr;
   gap: 10px;
   padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
-  border-top: 1px solid color-mix(in srgb, var(--accounts-border) 72%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
 
   :global(.btn) {
     width: 100%;
@@ -6165,12 +6152,12 @@
 
 .batchBar {
   padding: 12px 16px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 34%, var(--accounts-surface));
+  background: color-mix(in srgb, var(--surface-subtle) 34%, var(--bg-primary));
 }
 
 .tableScroller {
   position: relative;
-  border-top: 1px solid color-mix(in srgb, var(--accounts-border) 72%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   scrollbar-gutter: stable;
 }
 
@@ -6182,21 +6169,21 @@
   height: 0;
   pointer-events: none;
   content: '';
-  box-shadow: -16px 0 18px -18px var(--accounts-border);
+  box-shadow: -16px 0 18px -18px var(--border-color);
 }
 
 .compactTable {
   th,
   td {
-    border-bottom-color: color-mix(in srgb, var(--accounts-border) 72%, transparent);
+    border-bottom-color: color-mix(in srgb, var(--border-color) 72%, transparent);
   }
 
   th {
     position: sticky;
     top: 0;
     z-index: 1;
-    background: color-mix(in srgb, var(--accounts-muted-surface) 78%, var(--accounts-surface));
-    color: var(--accounts-muted);
+    background: color-mix(in srgb, var(--surface-subtle) 78%, var(--bg-primary));
+    color: var(--text-secondary);
     letter-spacing: 0;
   }
 
@@ -6205,7 +6192,7 @@
   }
 
   tbody tr:hover {
-    background: color-mix(in srgb, var(--accounts-primary) 5%, var(--accounts-surface));
+    background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
   }
 
   th:last-child,
@@ -6213,17 +6200,17 @@
     position: sticky;
     right: 0;
     z-index: 2;
-    background: var(--accounts-surface);
-    box-shadow: -1px 0 0 var(--accounts-border);
+    background: var(--bg-primary);
+    box-shadow: -1px 0 0 var(--border-color);
   }
 
   th:last-child {
     z-index: 3;
-    background: color-mix(in srgb, var(--accounts-muted-surface) 90%, var(--accounts-surface));
+    background: color-mix(in srgb, var(--surface-subtle) 90%, var(--bg-primary));
   }
 
   tbody tr:hover td:last-child {
-    background: color-mix(in srgb, var(--accounts-primary) 5%, var(--accounts-surface));
+    background: color-mix(in srgb, var(--primary-color) 5%, var(--bg-primary));
   }
 }
 
@@ -6231,12 +6218,12 @@
   gap: 3px;
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 13px;
   }
 
   span {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
   }
 }
 
@@ -6245,18 +6232,18 @@
 .priority,
 .priorityBad {
   min-height: 22px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-pill);
 }
 
 .statusBadge,
 .statusBadgeButton {
   min-height: 21px;
-  border-radius: 7px;
+  border-radius: var(--app-radius-pill);
 }
 
 .quotaTrack {
   height: 8px;
-  background: color-mix(in srgb, var(--accounts-border) 62%, transparent);
+  background: color-mix(in srgb, var(--border-color) 62%, transparent);
 }
 
 .splitGrid,
@@ -6291,14 +6278,14 @@
   gap: 8px;
 
   div {
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--accounts-muted-surface) 78%, var(--accounts-surface));
+    border-radius: var(--app-radius-sm);
+    background: color-mix(in srgb, var(--surface-subtle) 78%, var(--bg-primary));
   }
 }
 
 .drawerSection {
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 36%, var(--accounts-surface));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--surface-subtle) 36%, var(--app-surface-strong));
 }
 
 @include tablet {
@@ -6538,6 +6525,11 @@
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
+
+  :global(.btn) {
+    height: var(--control-height-sm);
+    min-height: var(--control-height-sm);
+  }
 }
 
 .statusStack {
@@ -6675,17 +6667,17 @@
     gap: 8px 10px;
     min-height: 0;
     padding: 10px;
-    border-color: color-mix(in srgb, var(--accounts-border) 90%, transparent);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--accounts-surface) 94%, var(--accounts-muted-surface));
-    box-shadow: var(--shadow-sm);
+    border-color: color-mix(in srgb, var(--border-color) 90%, transparent);
+    border-radius: var(--app-radius-md);
+    background: color-mix(in srgb, var(--bg-primary) 94%, var(--surface-subtle));
+    box-shadow: var(--app-specular-highlight);
   }
 
   .accountCardIdentity {
     grid-column: 1 / -1;
     gap: 4px;
     padding: 0 2px 8px 0;
-    border-bottom: 1px solid color-mix(in srgb, var(--accounts-border) 76%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 76%, transparent);
   }
 
   .accountIdentityBadgeRow {
@@ -6727,7 +6719,7 @@
   .accountCardBusiness,
   .accountCardRecommendation {
     padding-top: 8px;
-    border-top: 1px solid color-mix(in srgb, var(--accounts-border) 64%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 64%, transparent);
   }
 
   .accountCardDetailTrigger.accountCardEvidence,
@@ -6760,7 +6752,7 @@
 
     & + & {
       padding-top: 8px;
-      border-top: 1px solid color-mix(in srgb, var(--accounts-border) 64%, transparent);
+      border-top: 1px solid color-mix(in srgb, var(--border-color) 64%, transparent);
       border-left: 0;
     }
   }
@@ -6855,9 +6847,9 @@
   gap: 10px;
   min-height: 56px;
   padding: 10px 12px;
-  border: 1px solid var(--accounts-border);
-  border-radius: 14px;
-  background: var(--accounts-strong-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-lg);
+  background: var(--app-surface-strong);
   box-shadow: var(--shadow-lg);
 }
 
@@ -6887,13 +6879,13 @@
   > :global(.select-trigger),
   > :global(.dropdown-trigger) {
     flex: 0 0 auto;
-    height: 36px;
-    min-height: 36px;
+    height: var(--control-height-sm);
+    min-height: var(--control-height-sm);
   }
 }
 
 .batchSelectionText {
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
   white-space: nowrap;
@@ -6901,9 +6893,9 @@
 
 .floatingBatchMore {
   flex: 0 0 auto;
-  height: 36px;
-  min-height: 36px;
-  border-radius: 12px;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
 }
 
 .batchPriorityModal {
@@ -6931,7 +6923,7 @@
 .batchDeletePreviewWarning {
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--danger-color) 35%, transparent);
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--danger-color) 8%, transparent);
   color: var(--danger-color);
 }
@@ -6969,9 +6961,9 @@
   gap: 14px;
   min-width: 0;
   padding: 14px;
-  border: 1px solid var(--accounts-border);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--accounts-muted-surface) 36%, var(--accounts-surface));
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--surface-subtle) 36%, var(--app-surface-strong));
 }
 
 .drawerUsageHeader {
@@ -6983,18 +6975,18 @@
 
   h3 {
     margin: 0 0 4px;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 14px;
   }
 
   p {
     margin: 0;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 12px;
   }
 
   > strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 18px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -7013,16 +7005,16 @@
   min-width: 0;
   min-height: 58px;
   padding: 10px;
-  border: 1px solid color-mix(in srgb, var(--accounts-border) 84%, transparent);
-  border-radius: 8px;
-  background: var(--accounts-surface);
+  border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
 
   span {
     min-width: 0;
     overflow: hidden;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 700;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -7030,9 +7022,9 @@
   strong {
     min-width: 0;
     overflow: hidden;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 15px;
-    font-weight: 800;
+    font-weight: 700;
     font-variant-numeric: tabular-nums;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -7054,12 +7046,12 @@
 }
 
 .drawerQuotaMeterHeader {
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
 
   strong {
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 14px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
@@ -7069,8 +7061,8 @@
 .drawerQuotaTrack {
   height: 9px;
   overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accounts-border) 62%, transparent);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--border-color) 62%, transparent);
 }
 
 .drawerQuotaBar {
@@ -7080,7 +7072,7 @@
 }
 
 .drawerQuotaMeta {
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
 
   span {
@@ -7106,15 +7098,15 @@
   max-width: 100%;
   min-width: 0;
   overflow-x: clip;
-  color: var(--accounts-text);
+  color: var(--text-primary);
 }
 
 .diagnosticCard {
   min-width: 0;
-  border: 1px solid var(--accounts-border);
-  border-radius: 12px;
-  background: var(--accounts-surface);
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--accounts-text) 4%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--app-surface-strong);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text-primary) 4%, transparent);
 }
 
 .diagnosticConclusionCard {
@@ -7147,7 +7139,7 @@
   min-width: 0;
   gap: 8px;
   margin: 0;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 700;
   line-height: 1.35;
@@ -7156,7 +7148,7 @@
     flex: 0 0 auto;
     width: 16px;
     height: 16px;
-    color: var(--accounts-primary);
+    color: var(--primary-color);
   }
 }
 
@@ -7166,25 +7158,25 @@
   flex: 0 0 auto;
   min-height: 22px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 11px;
   font-weight: 700;
   white-space: nowrap;
 }
 
 .diagnosticEvidenceStatusCurrent {
-  background: color-mix(in srgb, var(--accounts-success) 12%, transparent);
-  color: var(--accounts-success);
+  background: color-mix(in srgb, var(--data-green-base) 12%, transparent);
+  color: var(--data-green-base);
 }
 
 .diagnosticEvidenceStatusOutdated {
-  background: color-mix(in srgb, var(--accounts-warning) 14%, transparent);
-  color: var(--accounts-warning);
+  background: color-mix(in srgb, var(--data-amber-base) 14%, transparent);
+  color: var(--data-amber-base);
 }
 
 .diagnosticEvidenceStatusConflict {
-  background: color-mix(in srgb, var(--accounts-danger) 12%, transparent);
-  color: var(--accounts-danger);
+  background: color-mix(in srgb, var(--data-red-base) 12%, transparent);
+  color: var(--data-red-base);
 }
 
 .diagnosticConclusionMain {
@@ -7204,9 +7196,9 @@
   height: 20px;
   margin-top: 1px;
   border-radius: 50%;
-  background: var(--accounts-success);
-  color: #fff;
-  box-shadow: 0 4px 10px color-mix(in srgb, var(--accounts-success) 18%, transparent);
+  background: var(--data-green-base);
+  color: var(--primary-contrast);
+  box-shadow: 0 4px 10px color-mix(in srgb, var(--data-green-base) 18%, transparent);
 
   :global(svg) {
     width: 13px;
@@ -7214,14 +7206,14 @@
   }
 
   &[data-diagnostic-priority='medium'] {
-    background: var(--accounts-warning);
-    box-shadow: 0 4px 10px color-mix(in srgb, var(--accounts-warning) 18%, transparent);
+    background: var(--data-amber-base);
+    box-shadow: 0 4px 10px color-mix(in srgb, var(--data-amber-base) 18%, transparent);
   }
 
   &[data-diagnostic-priority='high'],
   &[data-diagnostic-priority='critical'] {
-    background: var(--accounts-danger);
-    box-shadow: 0 4px 10px color-mix(in srgb, var(--accounts-danger) 18%, transparent);
+    background: var(--data-red-base);
+    box-shadow: 0 4px 10px color-mix(in srgb, var(--data-red-base) 18%, transparent);
   }
 }
 
@@ -7231,7 +7223,7 @@
   strong {
     display: block;
     margin-bottom: 4px;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 15px;
     font-weight: 700;
     line-height: 1.35;
@@ -7239,7 +7231,7 @@
 
   p {
     margin: 0;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.5;
   }
@@ -7251,7 +7243,7 @@
   flex-wrap: wrap;
   gap: 0;
   margin-top: 0;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 11px;
 
   > span {
@@ -7260,7 +7252,7 @@
     min-width: 0;
     gap: 6px;
     padding: 0 10px;
-    border-right: 1px solid color-mix(in srgb, var(--accounts-border) 90%, transparent);
+    border-right: 1px solid color-mix(in srgb, var(--border-color) 90%, transparent);
 
     &:first-child {
       padding-left: 0;
@@ -7275,17 +7267,17 @@
     flex: 0 0 auto;
     width: 14px;
     height: 14px;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
   }
 
   strong {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-weight: 700;
     white-space: nowrap;
   }
 
   > span > span {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     white-space: nowrap;
   }
 }
@@ -7299,21 +7291,21 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  min-height: 32px;
-  height: 32px;
+  min-height: var(--control-height-sm);
+  height: var(--control-height-sm);
   gap: 6px;
   padding: 0 10px;
-  border: 1px solid var(--accounts-strong-border);
-  border-radius: 9px;
-  background: var(--accounts-surface);
-  color: var(--accounts-text);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
+  color: var(--text-primary);
   font-size: 12px;
   font-weight: 700;
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--accounts-text) 3%, transparent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text-primary) 3%, transparent);
 
   &:hover:not(:disabled) {
-    border-color: color-mix(in srgb, var(--accounts-primary) 30%, var(--accounts-border));
-    background: color-mix(in srgb, var(--accounts-primary) 4%, var(--accounts-surface));
+    border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-color));
+    background: color-mix(in srgb, var(--primary-color) 4%, var(--app-surface-strong));
   }
 
   :global(svg) {
@@ -7326,7 +7318,7 @@
 .diagnosticEmptyState {
   margin: 0;
   padding: 14px 0 6px;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 13px;
 }
 
@@ -7351,12 +7343,12 @@
   height: 64px;
   gap: 8px;
   padding: 9px 10px;
-  border: 1px solid var(--accounts-border);
-  border-radius: 9px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
   background: linear-gradient(
     180deg,
-    var(--accounts-surface),
-    color-mix(in srgb, var(--accounts-muted-surface) 22%, var(--accounts-surface))
+    var(--app-surface-strong),
+    color-mix(in srgb, var(--surface-subtle) 22%, var(--app-surface-strong))
   );
 
   > div {
@@ -7373,7 +7365,7 @@
   > div > span {
     margin-bottom: 4px;
     overflow: visible;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     font-weight: 700;
     white-space: nowrap;
@@ -7381,7 +7373,7 @@
 
   > div > strong {
     overflow: visible;
-    color: var(--accounts-text);
+    color: var(--text-primary);
     font-size: 17px;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
@@ -7407,43 +7399,43 @@
 }
 
 .diagnosticKpiIconBlue {
-  background: color-mix(in srgb, var(--accounts-primary) 10%, transparent);
-  color: var(--accounts-primary);
+  background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+  color: var(--primary-color);
 }
 
 .diagnosticKpiIconPurple {
-  background: color-mix(in srgb, var(--accounts-indigo) 10%, transparent);
-  color: var(--accounts-indigo);
+  background: color-mix(in srgb, var(--data-violet-base) 10%, transparent);
+  color: var(--data-violet-base);
 }
 
 .diagnosticKpiIconGreen {
-  background: color-mix(in srgb, var(--accounts-success) 10%, transparent);
-  color: var(--accounts-success);
+  background: color-mix(in srgb, var(--data-green-base) 10%, transparent);
+  color: var(--data-green-base);
 }
 
 .diagnosticRecentFailure {
   display: grid;
   gap: 3px;
   padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--accounts-danger) 22%, var(--accounts-border));
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--accounts-danger) 4%, var(--accounts-surface));
+  border: 1px solid color-mix(in srgb, var(--data-red-base) 22%, var(--border-color));
+  border-radius: var(--app-radius-sm);
+  background: color-mix(in srgb, var(--data-red-base) 4%, var(--app-surface-strong));
 
   span {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     font-weight: 700;
   }
 
   strong {
-    color: var(--accounts-danger);
+    color: var(--data-red-base);
     font-size: 12px;
     line-height: 1.45;
     overflow-wrap: anywhere;
   }
 
   small {
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     line-height: 1.4;
   }
@@ -7459,17 +7451,17 @@
 .diagnosticRequestRow {
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid var(--accounts-border);
-  border-radius: 9px;
-  background: var(--accounts-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface-strong);
   transition:
     border-color 0.16s,
     box-shadow 0.16s,
     transform 0.16s;
 
   &:hover {
-    border-color: color-mix(in srgb, var(--accounts-primary) 28%, var(--accounts-border));
-    box-shadow: 0 3px 10px color-mix(in srgb, var(--accounts-text) 5%, transparent);
+    border-color: color-mix(in srgb, var(--primary-color) 28%, var(--border-color));
+    box-shadow: 0 3px 10px color-mix(in srgb, var(--text-primary) 5%, transparent);
     transform: translateY(-1px);
   }
 }
@@ -7488,16 +7480,17 @@
   overflow: hidden;
 }
 
+.diagnosticRequestId .diagnosticCopyButton,
 .diagnosticCopyButton {
   max-width: 100%;
   padding: 1px 0;
-  color: var(--accounts-text);
-  font-size: 12px !important;
-  font-weight: 700 !important;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
 
   &:hover {
     background: transparent;
-    color: var(--accounts-primary);
+    color: var(--primary-color);
   }
 }
 
@@ -7508,7 +7501,7 @@
 }
 
 .diagnosticRequestTime {
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -7517,9 +7510,9 @@
 .diagnosticRequestModel {
   max-width: 120px;
   overflow: hidden;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -7530,20 +7523,22 @@
   flex-wrap: wrap;
   gap: 8px 14px;
   margin-top: 8px;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 
   b {
-    color: var(--accounts-text);
-    font-weight: 720;
+    color: var(--text-primary);
+    font-weight: 700;
   }
 }
 
+.diagnosticRequestRow .diagnosticRequestFailure,
 .diagnosticRequestFailure {
   margin: 6px 0 0;
-  color: var(--accounts-danger) !important;
-  font-size: 11px !important;
+  color: var(--data-red-base);
+  font-size: 11px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
@@ -7554,15 +7549,15 @@
   justify-content: space-between;
   gap: 12px;
   padding: 10px 2px 0;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   font-size: 12px;
 
   a {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    color: var(--accounts-primary);
-    font-weight: 650;
+    color: var(--primary-color);
+    font-weight: 600;
     text-decoration: none;
 
     &:hover {
@@ -7584,7 +7579,7 @@
   gap: 8px;
   cursor: pointer;
   list-style: none;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-size: 14px;
   font-weight: 700;
 }
@@ -7608,13 +7603,13 @@
     flex: 0 0 auto;
     width: 16px;
     height: 16px;
-    color: var(--accounts-primary);
+    color: var(--primary-color);
   }
 }
 
 .diagnosticEvidenceCard > summary > small {
   margin-left: auto;
-  color: var(--accounts-danger);
+  color: var(--data-red-base);
   font-size: 11px;
   font-weight: 700;
 }
@@ -7624,7 +7619,7 @@
   margin-left: auto;
   width: 16px;
   height: 16px;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   transition: transform 0.2s ease;
 }
 
@@ -7646,9 +7641,9 @@
 
   h4 {
     margin: 0;
-    color: var(--accounts-muted);
+    color: var(--text-secondary);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
   }
 }
 
@@ -7671,18 +7666,18 @@
   align-items: center;
   min-height: 28px;
   margin: 0;
-  border-bottom: 1px solid color-mix(in srgb, var(--accounts-border) 82%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
   font-size: 12px;
 }
 
 .diagnosticInspectionEvidenceGroup dt {
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
 }
 
 .diagnosticInspectionEvidenceGroup dd {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   font-weight: 700;
 }
 

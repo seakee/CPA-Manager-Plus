@@ -4,17 +4,17 @@
   align-items: center;
   gap: 6px;
   padding: 1px 6px;
-  border-radius: $radius-sm;
-  font-family: $font-mono;
+  border-radius: var(--app-radius-xs);
+  font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--accounts-text);
+  color: var(--text-primary);
   cursor: pointer;
   max-width: 100%;
   background: transparent;
   transition: background $transition-fast, color $transition-fast;
 
   &:hover {
-    background: color-mix(in srgb, var(--accounts-muted) 14%, var(--accounts-surface));
+    background: color-mix(in srgb, var(--text-secondary) 14%, var(--bg-primary));
   }
 
   &:focus-visible {
@@ -32,7 +32,7 @@
 
 .icon {
   flex-shrink: 0;
-  color: var(--accounts-muted);
+  color: var(--text-secondary);
   display: inline-flex;
   align-items: center;
 }

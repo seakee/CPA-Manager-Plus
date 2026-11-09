@@ -1,27 +1,17 @@
 .page {
-  --pricing-surface: var(--bg-primary);
   --pricing-surface-elevated: color-mix(in srgb, var(--bg-primary) 84%, var(--surface-subtle));
-  --pricing-surface-muted: var(--surface-subtle);
   --pricing-surface-hover: color-mix(in srgb, var(--surface-subtle-hover) 74%, var(--bg-primary));
-  --pricing-line: var(--border-color);
-  --pricing-line-strong: var(--border-primary);
-  --pricing-ink: var(--text-primary);
-  --pricing-muted: var(--text-secondary);
-  --pricing-accent: var(--data-blue-base);
-  --pricing-accent-strong: var(--data-blue-dark-2);
-  --pricing-accent-soft: var(--data-badge-info-bg);
-  --pricing-red: var(--data-red-base);
   display: grid;
   gap: 10px;
   min-width: 0;
-  color: var(--pricing-ink);
+  color: var(--text-primary);
 }
 
 .actionBar,
 .pricePanel {
   min-width: 0;
-  border: 1px solid var(--pricing-line);
-  background: var(--pricing-surface);
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
   box-shadow: var(--shadow);
 }
 
@@ -31,7 +21,7 @@
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  border-radius: 16px;
+  border-radius: var(--app-radius-lg);
 }
 
 .titleGroup,
@@ -50,10 +40,10 @@
 .tierClearNotice {
   grid-column: 1 / -1;
   padding: 7px 9px;
-  border: 1px solid color-mix(in srgb, var(--warning-color) 35%, var(--pricing-line));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--warning-color) 8%, var(--pricing-surface));
-  color: var(--pricing-muted);
+  border: 1px solid color-mix(in srgb, var(--warning-color) 35%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--warning-color) 8%, var(--bg-primary));
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
@@ -69,10 +59,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--pricing-line);
-  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
   background: var(--pricing-surface-elevated);
-  color: var(--pricing-ink);
+  color: var(--text-primary);
   font: inherit;
   font-size: 12px;
   font-weight: 700;
@@ -85,21 +75,21 @@
 .metaPill,
 .filterButton,
 .confirmButton {
-  min-height: 30px;
+  min-height: var(--control-height-xs);
   padding: 0 9px;
 }
 
 .backLink {
-  color: var(--pricing-muted);
+  color: var(--text-secondary);
 }
 
 .backLink:hover,
 .filterButton:hover,
 .iconAction:hover,
 .confirmButton:hover {
-  border-color: color-mix(in srgb, var(--pricing-accent) 35%, var(--pricing-line-strong));
+  border-color: color-mix(in srgb, var(--data-blue-base) 35%, var(--border-primary));
   background: var(--pricing-surface-hover);
-  color: var(--pricing-ink);
+  color: var(--text-primary);
 }
 
 .actionGroup {
@@ -109,7 +99,7 @@
 .metaPill {
   max-width: 520px;
   overflow: hidden;
-  color: var(--pricing-muted);
+  color: var(--text-secondary);
   text-overflow: ellipsis;
 }
 
@@ -124,7 +114,7 @@
   display: grid;
   gap: 10px;
   padding: 10px;
-  border-radius: 14px;
+  border-radius: var(--app-radius-lg);
 }
 
 .panelToolbar {
@@ -146,30 +136,34 @@
 
 .searchWrap :global(.input),
 .compactInput {
-  min-height: 32px;
+  min-height: var(--control-height-sm);
   padding: 6px 30px 6px 9px;
-  border-radius: 11px;
+  border-radius: var(--app-radius-sm);
   font-size: 12px;
   line-height: 1.2;
 }
 
 .filterGroup {
+  box-sizing: border-box;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   flex-wrap: nowrap;
   gap: 0;
-  border: 1px solid color-mix(in srgb, var(--pricing-line) 86%, transparent);
-  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
+  border-radius: var(--app-radius-md);
   background: var(--pricing-surface-elevated);
   overflow: hidden;
 }
 
 .filterButton {
   gap: 7px;
-  min-height: 32px;
+  height: calc(var(--control-height-sm) - 2px);
+  min-height: calc(var(--control-height-sm) - 2px);
   border: 0;
-  border-left: 1px solid color-mix(in srgb, var(--pricing-line) 72%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
   border-radius: 0;
   background: transparent;
-  color: color-mix(in srgb, var(--pricing-muted) 84%, var(--pricing-ink));
+  color: color-mix(in srgb, var(--text-secondary) 84%, var(--text-primary));
 }
 
 .filterButton:first-child {
@@ -183,22 +177,23 @@
   min-width: 20px;
   height: 18px;
   padding: 0 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--pricing-muted) 14%, var(--pricing-surface));
-  color: var(--pricing-ink);
+  border-radius: var(--app-radius-pill);
+  background: color-mix(in srgb, var(--text-secondary) 14%, var(--bg-primary));
+  color: var(--text-primary);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 .filterButtonActive,
 .filterButtonActive:hover {
   border-left-color: transparent;
-  background: color-mix(in srgb, var(--pricing-accent) 12%, var(--pricing-surface));
-  color: var(--pricing-accent-strong);
+  background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
+  color: var(--data-blue-dark-2);
 }
 
 .filterButtonActive strong {
-  background: color-mix(in srgb, var(--pricing-accent) 22%, var(--pricing-surface));
-  color: var(--pricing-accent-strong);
+  background: color-mix(in srgb, var(--data-blue-base) 22%, var(--bg-primary));
+  color: var(--data-blue-dark-2);
 }
 
 .sourceResults {
@@ -211,20 +206,21 @@
   gap: 5px;
   min-height: 24px;
   padding: 0 8px;
-  border: 1px solid var(--pricing-line);
-  border-radius: 999px;
-  background: var(--pricing-surface-muted);
-  color: var(--pricing-muted);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-pill);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .sourceResults strong {
-  color: var(--pricing-ink);
+  color: var(--text-primary);
 }
 
 .sourceResults .sourceResultError {
-  border-color: color-mix(in srgb, var(--pricing-red) 35%, var(--pricing-line));
-  color: var(--pricing-red);
+  border-color: color-mix(in srgb, var(--data-red-base) 35%, var(--border-color));
+  color: var(--data-red-base);
 }
 
 .compactEditor {
@@ -234,13 +230,13 @@
   gap: 8px;
   min-width: 0;
   padding: 8px;
-  border: 1px solid color-mix(in srgb, var(--pricing-accent) 22%, var(--pricing-line));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--pricing-accent) 5%, var(--pricing-surface));
+  border: 1px solid color-mix(in srgb, var(--data-blue-base) 22%, var(--border-color));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--data-blue-base) 5%, var(--bg-primary));
 }
 
 .compactEditor :global(label) {
-  color: var(--pricing-muted);
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 700;
 }
@@ -257,8 +253,8 @@
 
 .tableWrap {
   overflow-x: auto;
-  border: 1px solid var(--pricing-line);
-  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-md);
 }
 
 .priceTable {
@@ -270,17 +266,18 @@
 .priceTable th,
 .priceTable td {
   padding: 8px 10px;
-  border-bottom: 1px solid var(--pricing-line);
+  border-bottom: 1px solid var(--border-color);
   text-align: left;
   vertical-align: middle;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .priceTable th {
-  background: var(--pricing-surface-muted);
-  color: var(--pricing-muted);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1;
 }
 
@@ -321,20 +318,20 @@
   width: fit-content;
   max-width: 100%;
   padding: 3px 6px;
-  border: 1px solid color-mix(in srgb, var(--pricing-accent) 22%, var(--pricing-line));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--pricing-accent) 6%, var(--pricing-surface));
+  border: 1px solid color-mix(in srgb, var(--data-blue-base) 22%, var(--border-color));
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--data-blue-base) 6%, var(--bg-primary));
 }
 
 .tierBadge strong {
-  color: var(--pricing-accent-strong);
+  color: var(--data-blue-dark-2);
   font-family: var(--font-mono);
   font-size: 10px;
 }
 
 .tierBadge small {
   overflow: hidden;
-  color: var(--pricing-muted);
+  color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 9px;
   text-overflow: ellipsis;
@@ -342,13 +339,13 @@
 }
 
 .modelContent span {
-  color: var(--pricing-muted);
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
 .sourceCell {
   max-width: 260px;
-  color: var(--pricing-muted);
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
@@ -361,12 +358,13 @@
 .sourceBadge {
   width: fit-content;
   padding: 2px 7px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--data-badge-neutral-bg);
   color: var(--data-badge-neutral-text);
   font-family: inherit;
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .sourceContent small,
@@ -390,8 +388,8 @@
 }
 
 .iconAction {
-  width: 30px;
-  height: 30px;
+  width: var(--control-height-xs);
+  height: var(--control-height-xs);
   padding: 0;
 }
 
@@ -405,28 +403,28 @@
 .candidateControl select {
   width: 100%;
   min-width: 0;
-  height: 30px;
-  border: 1px solid var(--pricing-line);
-  border-radius: 10px;
-  background: var(--pricing-surface);
-  color: var(--pricing-ink);
+  height: var(--control-height-xs);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
   font-size: 12px;
 }
 
 .confirmButton {
   gap: 6px;
-  border-color: color-mix(in srgb, var(--pricing-accent) 45%, var(--pricing-line));
-  background: color-mix(in srgb, var(--pricing-accent) 10%, var(--pricing-surface));
-  color: var(--pricing-accent-strong);
+  border-color: color-mix(in srgb, var(--data-blue-base) 45%, var(--border-color));
+  background: color-mix(in srgb, var(--data-blue-base) 10%, var(--bg-primary));
+  color: var(--data-blue-dark-2);
 }
 
 .emptyState,
 .unmatchedBlock {
   padding: 12px;
-  border: 1px dashed var(--pricing-line);
-  border-radius: 12px;
-  background: var(--pricing-surface-muted);
-  color: var(--pricing-muted);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--app-radius-md);
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -436,7 +434,7 @@
 }
 
 .unmatchedBlock strong {
-  color: var(--pricing-ink);
+  color: var(--text-primary);
 }
 
 @media (max-width: 1080px) {

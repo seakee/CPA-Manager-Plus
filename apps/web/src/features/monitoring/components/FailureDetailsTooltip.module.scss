@@ -4,7 +4,7 @@
   width: fit-content;
   max-width: 100%;
   align-items: center;
-  border-radius: 4px;
+  border-radius: var(--app-radius-xs);
   outline: none;
 }
 
@@ -14,15 +14,8 @@
 }
 
 .tooltip {
-  --failure-surface: var(--bg-primary);
   --failure-surface-elevated: color-mix(in srgb, var(--bg-primary) 82%, var(--surface-subtle));
   --failure-surface-hover: color-mix(in srgb, var(--surface-subtle-hover) 74%, var(--bg-primary));
-  --failure-ink: var(--text-primary);
-  --failure-muted: var(--text-secondary);
-  --failure-line: var(--border-color);
-  --failure-accent: var(--primary-color);
-  --failure-accent-strong: var(--primary-active);
-  --failure-red: var(--error-color);
 
   position: fixed;
   z-index: 2030;
@@ -34,11 +27,11 @@
   max-height: 240px;
   overflow: auto;
   padding: 10px 42px 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
-  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--error-color) 26%, var(--border-color));
+  border-radius: var(--app-radius-md);
   background: var(--failure-surface-elevated);
   box-shadow: var(--shadow-lg);
-  color: var(--failure-ink);
+  color: var(--text-primary);
   font-size: 12px;
   line-height: 1.45;
   opacity: 0;
@@ -66,15 +59,15 @@
 .tooltipBelow::before {
   top: -5px;
   bottom: auto;
-  border-left: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
-  border-top: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
+  border-left: 1px solid color-mix(in srgb, var(--error-color) 26%, var(--border-color));
+  border-top: 1px solid color-mix(in srgb, var(--error-color) 26%, var(--border-color));
 }
 
 .tooltipAbove::before {
   top: auto;
   bottom: -5px;
-  border-right: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
-  border-bottom: 1px solid color-mix(in srgb, var(--failure-red) 26%, var(--failure-line));
+  border-right: 1px solid color-mix(in srgb, var(--error-color) 26%, var(--border-color));
+  border-bottom: 1px solid color-mix(in srgb, var(--error-color) 26%, var(--border-color));
 }
 
 .tooltipOpen {
@@ -94,31 +87,31 @@
   width: 24px;
   height: 24px;
   padding: 0;
-  border: 1px solid color-mix(in srgb, var(--failure-line) 84%, transparent);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--failure-surface) 88%, transparent);
-  color: var(--failure-muted);
+  border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+  border-radius: var(--app-radius-xs);
+  background: color-mix(in srgb, var(--bg-primary) 88%, transparent);
+  color: var(--text-secondary);
   cursor: pointer;
 }
 
 .copyButton:hover,
 .copyButton:focus-visible {
-  border-color: color-mix(in srgb, var(--failure-accent) 36%, var(--failure-line));
+  border-color: color-mix(in srgb, var(--primary-color) 36%, var(--border-color));
   background: var(--failure-surface-hover);
-  color: var(--failure-accent-strong);
+  color: var(--primary-active);
 }
 
 .status {
-  color: var(--failure-red);
+  color: var(--error-color);
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 700;
   line-height: 1.2;
   white-space: nowrap;
 }
 
 .body {
   overflow-wrap: anywhere;
-  color: var(--failure-ink);
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
   white-space: pre-wrap;
 }

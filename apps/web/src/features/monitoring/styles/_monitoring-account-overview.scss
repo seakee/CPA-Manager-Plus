@@ -23,7 +23,7 @@
     height: 18px;
     align-items: center;
     justify-content: center;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     align-self: center;
   }
 
@@ -36,7 +36,7 @@
 
   .accountButton:hover {
     transform: none;
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
   }
 
   .accountButton:focus,
@@ -46,7 +46,7 @@
   }
 
   .accountButton:focus-visible {
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
   }
 
   .accountButtonLabel {
@@ -60,7 +60,7 @@
 
   .accountButton small {
     grid-column: 2;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     line-height: 1.45;
     overflow: hidden;
@@ -69,7 +69,7 @@
   }
 
   .accountButtonMuted {
-    color: color-mix(in srgb, var(--monitor-ink) 66%, var(--monitor-muted));
+    color: color-mix(in srgb, var(--text-primary) 66%, var(--text-secondary));
   }
 
   .expandedAccountButton {
@@ -77,27 +77,27 @@
   }
 
   .focusedRow td {
-    border-color: color-mix(in srgb, var(--monitor-accent) 36%, var(--monitor-line));
-    background: color-mix(in srgb, var(--monitor-accent) 7%, var(--monitor-surface-elevated));
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--monitor-accent) 18%, transparent);
+    border-color: color-mix(in srgb, var(--data-blue-base) 36%, var(--border-color));
+    background: color-mix(in srgb, var(--data-blue-base) 7%, var(--monitor-surface-elevated));
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--data-blue-base) 18%, transparent);
   }
 
   .accountOverviewRowExpanded td {
-    border-color: color-mix(in srgb, var(--monitor-line) 90%, transparent);
+    border-color: color-mix(in srgb, var(--border-color) 90%, transparent);
   }
 
   .accountOverviewRowDisabled td {
-    color: color-mix(in srgb, var(--monitor-ink) 70%, var(--monitor-muted));
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 74%, var(--monitor-surface));
+    color: color-mix(in srgb, var(--text-primary) 70%, var(--text-secondary));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 74%, var(--bg-primary));
   }
 
   .table.accountOverviewTable tbody .focusedRow td {
-    background: color-mix(in srgb, var(--monitor-accent) 7%, var(--monitor-surface-elevated));
+    background: color-mix(in srgb, var(--data-blue-base) 7%, var(--monitor-surface-elevated));
     box-shadow: none;
   }
 
   .table.accountOverviewTable tbody .focusedRow td:first-child {
-    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--monitor-accent) 72%, transparent);
+    box-shadow: inset 3px 0 0 color-mix(in srgb, var(--data-blue-base) 72%, transparent);
   }
 
   .table.accountOverviewTable tbody .accountOverviewRowExpanded td {
@@ -106,37 +106,37 @@
   }
 
   .table.accountOverviewTable tbody .accountOverviewRowDisabled td {
-    color: color-mix(in srgb, var(--monitor-ink) 70%, var(--monitor-muted));
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 74%, var(--monitor-surface));
+    color: color-mix(in srgb, var(--text-primary) 70%, var(--text-secondary));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 74%, var(--bg-primary));
   }
 
   .table.accountOverviewTable tbody .accountDetailRow > td {
     padding: 0;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--monitor-surface));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--bg-primary));
     box-shadow: none;
     white-space: normal;
   }
 
   .table.accountOverviewTable tbody .accountDetailRow:hover > td {
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--monitor-surface));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--bg-primary));
     box-shadow: none;
   }
 
   .table.apiKeySummaryTable tbody .apiKeyDetailRow > td {
     padding: 0;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--monitor-surface));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--bg-primary));
     box-shadow: none;
     white-space: normal;
   }
 
   .table.apiKeySummaryTable tbody .apiKeyDetailRow:hover > td {
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--monitor-surface));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--bg-primary));
     box-shadow: none;
   }
 
   .table.accountOverviewTable tbody .accountDetailRow > td > .expandedAccountDetails,
   .table.apiKeySummaryTable tbody .apiKeyDetailRow > td > .apiKeyExpandedDetails {
-    border-radius: 0 0 13px 13px;
+    border-radius: 0 0 var(--app-radius-md) var(--app-radius-md);
   }
 
   .expandedAccountDetails {
@@ -148,12 +148,12 @@
     padding: 14px 16px 16px;
     border: 0;
     border-radius: 0;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--monitor-surface));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--bg-primary));
   }
 
   .apiKeyExpandedDetails {
     padding: 14px 16px 16px;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--monitor-surface));
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 78%, var(--bg-primary));
   }
 
   .accountStructureModelPanel {
@@ -162,9 +162,9 @@
     align-items: stretch;
     min-width: 0;
     overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 82%, transparent);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--monitor-accent) 5%, var(--monitor-surface-elevated));
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    border-radius: var(--app-radius-md);
+    background: color-mix(in srgb, var(--data-blue-base) 5%, var(--monitor-surface-elevated));
   }
 
   .accountStructureModelPanel > .accountTokenStructurePanel {
@@ -181,7 +181,7 @@
     bottom: 16px;
     right: 0;
     width: 1px;
-    background: color-mix(in srgb, var(--monitor-line) 90%, transparent);
+    background: color-mix(in srgb, var(--border-color) 90%, transparent);
   }
 
   .accountStructureModelPanel > .accountModelTablePanel {
@@ -197,32 +197,32 @@
     max-width: 100%;
     min-height: 22px;
     padding: 0;
-    border-radius: 999px;
+    border-radius: var(--app-radius-pill);
     border: 0;
     background: transparent;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 700;
     white-space: nowrap;
   }
 
   .accountStatusBadgeenabled {
-    color: var(--success-badge-text, #065f46);
+    color: var(--success-badge-text);
   }
 
   .accountStatusBadgedisabled,
   .accountStatusBadgeunavailable {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
   }
 
   .accountStatusBadgemixed {
-    color: var(--warning-text, #92400e);
+    color: var(--warning-text);
   }
 
   .accountStatusDot {
     width: 8px;
     height: 8px;
-    border-radius: 999px;
+    border-radius: 50%;
     background: currentColor;
     flex: 0 0 auto;
   }
@@ -233,9 +233,9 @@
     height: 20px;
     align-items: center;
     justify-content: center;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--monitor-accent) 12%, var(--monitor-surface));
-    color: var(--monitor-accent-strong);
+    border-radius: var(--app-radius-sm);
+    background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
+    color: var(--data-blue-dark-2);
     flex: 0 0 auto;
   }
 
@@ -257,21 +257,21 @@
 
   .apiKeyCopyButton {
     display: inline-flex;
-    width: 28px;
-    height: 28px;
+    width: var(--control-height-xs);
+    height: var(--control-height-xs);
     align-items: center;
     justify-content: center;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 84%, transparent);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 74%, var(--monitor-surface));
-    color: var(--monitor-muted);
+    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+    border-radius: var(--app-radius-sm);
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 74%, var(--bg-primary));
+    color: var(--text-secondary);
     cursor: pointer;
   }
 
   .apiKeyCopyButton:hover {
-    border-color: color-mix(in srgb, var(--monitor-accent) 30%, var(--monitor-line));
-    background: color-mix(in srgb, var(--monitor-accent) 8%, var(--monitor-surface));
-    color: var(--monitor-accent-strong);
+    border-color: color-mix(in srgb, var(--data-blue-base) 30%, var(--border-color));
+    background: color-mix(in srgb, var(--data-blue-base) 8%, var(--bg-primary));
+    color: var(--data-blue-dark-2);
     transform: none;
   }
 
@@ -280,25 +280,25 @@
     align-items: center;
     min-height: 24px;
     padding: 0 8px;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--monitor-accent) 12%, var(--monitor-surface));
-    color: var(--monitor-accent-strong);
+    border-radius: var(--app-radius-xs);
+    background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
+    color: var(--data-blue-dark-2);
     font-size: 12px;
-    font-weight: 800;
+    font-weight: 700;
     white-space: nowrap;
   }
 
   .accountStatusDotEnabled {
-    color: var(--monitor-green);
+    color: var(--data-green-base);
   }
 
   .accountStatusDotDisabled,
   .accountStatusDotUnavailable {
-    color: color-mix(in srgb, var(--monitor-muted) 58%, transparent);
+    color: color-mix(in srgb, var(--text-secondary) 58%, transparent);
   }
 
   .accountStatusDotMixed {
-    color: var(--monitor-amber);
+    color: var(--data-amber-base);
   }
 
   .accountOverviewCardGrid {
@@ -315,24 +315,24 @@
     height: auto;
     min-width: 0;
     padding: 16px;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 84%, transparent);
-    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+    border-radius: var(--app-radius-md);
     background: linear-gradient(
       180deg,
-      color-mix(in srgb, var(--monitor-accent) 3%, var(--monitor-surface)) 0%,
-      var(--monitor-surface) 100%
+      color-mix(in srgb, var(--data-blue-base) 3%, var(--bg-primary)) 0%,
+      var(--bg-primary) 100%
     );
     box-shadow: var(--shadow);
   }
 
   .accountOverviewCardExpanded {
-    border-color: color-mix(in srgb, var(--monitor-accent) 26%, var(--monitor-line));
+    border-color: color-mix(in srgb, var(--data-blue-base) 26%, var(--border-color));
   }
 
   .accountOverviewCardFocused {
-    border-color: color-mix(in srgb, var(--monitor-accent) 42%, var(--monitor-line));
+    border-color: color-mix(in srgb, var(--data-blue-base) 42%, var(--border-color));
     box-shadow:
-      0 0 0 1px color-mix(in srgb, var(--monitor-accent) 18%, transparent),
+      0 0 0 1px color-mix(in srgb, var(--data-blue-base) 18%, transparent),
       var(--shadow-lg);
   }
 
@@ -357,7 +357,7 @@
   .accountOverviewCardTimestamp {
     min-width: 0;
     overflow: hidden;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.45;
     text-overflow: ellipsis;
@@ -377,18 +377,18 @@
   }
 
   .accountFocusButton {
-    min-height: 26px;
+    min-height: var(--control-height-xs);
     padding: 0 8px;
     gap: 5px;
-    border-color: color-mix(in srgb, var(--monitor-line) 56%, transparent);
+    border-color: color-mix(in srgb, var(--border-color) 56%, transparent);
     background: color-mix(in srgb, var(--monitor-surface-elevated) 58%, transparent);
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     font-weight: 700;
   }
 
   .accountMetaSeparator {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
   }
 
   .accountOverviewStatusSection,
@@ -397,9 +397,9 @@
     gap: 12px;
     min-width: 0;
     padding: 16px;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 82%, transparent);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 86%, var(--monitor-surface));
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    border-radius: var(--app-radius-md);
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 86%, var(--bg-primary));
   }
 
   .accountTokenPanel {
@@ -407,9 +407,9 @@
     gap: 12px;
     min-width: 0;
     padding: 12px;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 78%, transparent);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--monitor-surface));
+    border: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent);
+    border-radius: var(--app-radius-md);
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--bg-primary));
   }
 
   .accountTokenStructurePanel {
@@ -444,7 +444,7 @@
     gap: 8px;
     min-width: 0;
     padding: 8px 10px;
-    border-radius: 10px;
+    border-radius: var(--app-radius-sm);
     background: var(--monitor-surface-elevated);
   }
 
@@ -453,7 +453,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0;
@@ -477,33 +477,34 @@
 
   .tokenStructureRowValue {
     flex: 0 0 auto;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 13px;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
     line-height: 1.2;
     letter-spacing: 0;
     white-space: nowrap;
   }
 
   .tokenStructureRowInput {
-    background: color-mix(in srgb, var(--monitor-green) 14%, var(--monitor-surface-elevated));
+    background: color-mix(in srgb, var(--data-green-base) 14%, var(--monitor-surface-elevated));
   }
   .tokenStructureRowInput .tokenStructureRowIcon {
-    color: var(--monitor-green);
+    color: var(--data-green-base);
   }
 
   .tokenStructureRowOutput {
-    background: color-mix(in srgb, var(--monitor-amber) 16%, var(--monitor-surface-elevated));
+    background: color-mix(in srgb, var(--data-amber-base) 16%, var(--monitor-surface-elevated));
   }
   .tokenStructureRowOutput .tokenStructureRowIcon {
-    color: var(--monitor-amber);
+    color: var(--data-amber-base);
   }
 
   .tokenStructureRowCached {
-    background: color-mix(in srgb, var(--monitor-cyan) 14%, var(--monitor-surface-elevated));
+    background: color-mix(in srgb, var(--data-cyan-base) 14%, var(--monitor-surface-elevated));
   }
   .tokenStructureRowCached .tokenStructureRowIcon {
-    color: var(--monitor-cyan);
+    color: var(--data-cyan-base);
   }
 
   .accountSectionHeader {
@@ -517,7 +518,7 @@
 
   .accountSectionHeader strong {
     min-width: 0;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 14px;
     line-height: 1.25;
   }
@@ -525,7 +526,7 @@
   .accountSectionInfo {
     display: inline-flex;
     align-items: center;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
   }
 
   .tokenStructureList {
@@ -557,7 +558,7 @@
   .healthMetricItem span {
     min-width: 0;
     overflow: hidden;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     line-height: 1.25;
     text-overflow: ellipsis;
@@ -567,35 +568,36 @@
   .healthMetricItem strong {
     min-width: 0;
     overflow: hidden;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 16px;
+    font-variant-numeric: tabular-nums;
     line-height: 1.25;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   .primaryText {
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
   }
 
   .healthMetricItem .goodText {
-    color: var(--monitor-green);
+    color: var(--data-green-base);
   }
 
   .healthMetricItem .warnText {
-    color: var(--monitor-amber);
+    color: var(--data-amber-base);
   }
 
   .healthMetricItem .badText {
-    color: var(--monitor-red);
+    color: var(--data-red-base);
   }
 
   .healthMetricItem .primaryText {
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
   }
 
   .accountScopeText {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 12px;
     line-height: 1.4;
   }
@@ -627,7 +629,7 @@
     align-items: center;
     background: transparent;
     border: 0;
-    border-radius: 999px;
+    border-radius: var(--app-radius-pill);
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
   }
@@ -641,13 +643,13 @@
   .monitoringStatusBlockButton:focus-visible .monitoringStatusBlock {
     transform: scaleY(1.35);
     opacity: 1;
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--monitor-accent) 28%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--data-blue-base) 28%, transparent);
   }
 
   .monitoringStatusBlock {
     width: 100%;
     height: 7px;
-    border-radius: 999px;
+    border-radius: var(--app-radius-pill);
     opacity: 0.92;
     transform-origin: center;
     transition:
@@ -656,7 +658,7 @@
   }
 
   .monitoringStatusBlockIdle {
-    background-color: color-mix(in srgb, var(--monitor-line) 82%, transparent);
+    background-color: color-mix(in srgb, var(--border-color) 82%, transparent);
   }
 
   .monitoringStatusTooltip {
@@ -666,11 +668,11 @@
     transform: translateX(-50%);
     z-index: 4;
     padding: 6px 10px;
-    border: 1px solid var(--monitor-line);
-    border-radius: 8px;
-    background: var(--monitor-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--app-radius-md);
+    background: var(--bg-primary);
     box-shadow: var(--shadow-lg);
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 11px;
     line-height: 1.5;
     white-space: nowrap;
@@ -684,7 +686,7 @@
     left: 50%;
     transform: translateX(-50%);
     border: 5px solid transparent;
-    border-top-color: var(--monitor-surface);
+    border-top-color: var(--bg-primary);
   }
 
   .monitoringStatusTooltip::before {
@@ -694,7 +696,7 @@
     left: 50%;
     transform: translateX(-50%);
     border: 6px solid transparent;
-    border-top-color: var(--monitor-line);
+    border-top-color: var(--border-color);
   }
 
   .monitoringStatusTooltipLeft {
@@ -724,7 +726,7 @@
   .monitoringTooltipTime {
     display: block;
     margin-bottom: 2px;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
   }
 
   .monitoringTooltipStats {
@@ -734,15 +736,15 @@
   }
 
   .monitoringTooltipSuccess {
-    color: var(--success-color, #22c55e);
+    color: var(--success-color);
   }
 
   .monitoringTooltipFailure {
-    color: var(--error-color, #ef4444);
+    color: var(--error-color);
   }
 
   .monitoringTooltipRate {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
   }
 
   .monitoringStatusRate {
@@ -750,11 +752,12 @@
     align-items: center;
     min-height: 30px;
     padding: 0 10px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 88%, var(--monitor-surface));
-    color: var(--monitor-muted);
+    border-radius: var(--app-radius-pill);
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 88%, var(--bg-primary));
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
 
@@ -763,18 +766,18 @@
   }
 
   .monitoringStatusRateHigh {
-    color: var(--success-badge-text, #065f46);
-    background: var(--success-badge-bg, #d1fae5);
+    color: var(--success-badge-text);
+    background: var(--success-badge-bg);
   }
 
   .monitoringStatusRateMedium {
-    color: var(--warning-text, #92400e);
-    background: var(--warning-bg, #fef3c7);
+    color: var(--warning-text);
+    background: var(--warning-bg);
   }
 
   .monitoringStatusRateLow {
-    color: var(--failure-badge-text, #7f1d1d);
-    background: var(--failure-badge-bg, #fee2e2);
+    color: var(--failure-badge-text);
+    background: var(--failure-badge-bg);
   }
 
   .accountOverviewMetricGrid {
@@ -796,9 +799,9 @@
     min-height: 68px;
     min-width: 0;
     padding: 12px;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 80%, transparent);
-    border-radius: 10px;
-    background: var(--monitor-surface);
+    border: 1px solid color-mix(in srgb, var(--border-color) 80%, transparent);
+    border-radius: var(--app-radius-md);
+    background: var(--bg-primary);
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   }
 
@@ -807,7 +810,7 @@
     align-items: center;
     gap: 4px;
     min-width: 0;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 10px;
     font-weight: 700;
     line-height: 1.3;
@@ -821,34 +824,35 @@
     align-items: center;
     justify-content: center;
     flex: 0 0 auto;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--monitor-accent) 11%, var(--monitor-surface));
-    color: var(--monitor-accent-strong);
+    border-radius: var(--app-radius-xs);
+    background: color-mix(in srgb, var(--data-blue-base) 11%, var(--bg-primary));
+    color: var(--data-blue-dark-2);
   }
 
   .accountMetricIconTotal {
-    background: color-mix(in srgb, var(--monitor-accent) 13%, var(--monitor-surface));
-    color: var(--monitor-accent-strong);
+    background: color-mix(in srgb, var(--data-blue-base) 13%, var(--bg-primary));
+    color: var(--data-blue-dark-2);
   }
 
   .accountMetricIconInput {
-    background: color-mix(in srgb, var(--monitor-green) 13%, var(--monitor-surface));
-    color: var(--monitor-green);
+    background: color-mix(in srgb, var(--data-green-base) 13%, var(--bg-primary));
+    color: var(--data-green-base);
   }
 
   .accountMetricIconOutput {
-    background: color-mix(in srgb, var(--monitor-amber) 17%, var(--monitor-surface));
-    color: var(--monitor-amber);
+    background: color-mix(in srgb, var(--data-amber-base) 17%, var(--bg-primary));
+    color: var(--data-amber-base);
   }
 
   .accountMetricIconCached {
-    background: color-mix(in srgb, var(--monitor-cyan) 14%, var(--monitor-surface));
-    color: var(--monitor-cyan);
+    background: color-mix(in srgb, var(--data-cyan-base) 14%, var(--bg-primary));
+    color: var(--data-cyan-base);
   }
 
   .accountOverviewMetricValue {
     font-size: 16px;
-    font-weight: 750;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
     line-height: 1.35;
     overflow-wrap: anywhere;
     word-break: break-word;
@@ -871,12 +875,12 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    min-height: 28px;
+    min-height: var(--control-height-xs);
     padding: 0 9px;
-    border: 1px solid var(--monitor-line);
-    border-radius: 999px;
-    background: var(--monitor-surface);
-    color: var(--monitor-ink);
+    border: 1px solid var(--border-color);
+    border-radius: var(--app-radius-pill);
+    background: var(--bg-primary);
+    color: var(--text-primary);
     font: inherit;
     font-size: 11px;
     font-weight: 700;
@@ -896,9 +900,9 @@
     gap: 10px;
     min-width: 0;
     padding: 14px;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 82%, transparent);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--monitor-accent) 5%, var(--monitor-surface-elevated));
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    border-radius: var(--app-radius-md);
+    background: color-mix(in srgb, var(--data-blue-base) 5%, var(--monitor-surface-elevated));
   }
 
   .quotaSectionHeader {
@@ -922,7 +926,7 @@
   .quotaSectionTitleGroup span,
   .quotaEntryMain small,
   .quotaWindowRow small {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 11px;
   }
 
@@ -937,9 +941,9 @@
     gap: 14px;
     min-width: 0;
     padding: 14px 16px;
-    border-radius: 16px;
+    border-radius: var(--app-radius-md);
     border: 0;
-    background: color-mix(in srgb, var(--monitor-accent) 6%, var(--monitor-surface-elevated));
+    background: color-mix(in srgb, var(--data-blue-base) 6%, var(--monitor-surface-elevated));
   }
 
   .quotaCompactHeader {
@@ -955,9 +959,9 @@
     gap: 10px;
     min-width: 0;
     padding: 12px;
-    border-radius: 10px;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 82%, transparent);
-    background: color-mix(in srgb, var(--monitor-surface) 78%, var(--monitor-surface-elevated));
+    border-radius: var(--app-radius-md);
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--bg-primary) 78%, var(--monitor-surface-elevated));
   }
 
   .quotaEntryHeader,
@@ -991,8 +995,9 @@
   }
 
   .quotaWindowHeader span {
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 12px;
+    font-variant-numeric: tabular-nums;
   }
 
   .quotaWindowLabel {
@@ -1019,19 +1024,19 @@
     width: 16px;
     height: 16px;
     flex: 0 0 auto;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     cursor: help;
     outline: none;
   }
 
   .quotaInfoTrigger:hover,
   .quotaInfoTrigger:focus-visible {
-    color: var(--monitor-ink);
+    color: var(--text-primary);
   }
 
   .quotaInfoTrigger:focus-visible {
     border-radius: 50%;
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--monitor-accent) 24%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--data-blue-base) 24%, transparent);
   }
 
   .quotaInfoIcon {
@@ -1048,11 +1053,11 @@
     min-width: 210px;
     max-width: min(320px, calc(100vw - 32px));
     padding: 8px 10px;
-    border: 1px solid var(--monitor-line);
-    border-radius: 8px;
-    background: var(--monitor-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--app-radius-md);
+    background: var(--bg-primary);
     box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 11px;
     line-height: 1.45;
     opacity: 0;
@@ -1073,8 +1078,8 @@
     left: 6px;
     width: 9px;
     height: 9px;
-    border-right: 1px solid var(--monitor-line);
-    border-bottom: 1px solid var(--monitor-line);
+    border-right: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
     background: inherit;
     transform: rotate(45deg);
   }
@@ -1094,12 +1099,12 @@
   }
 
   .quotaInfoTooltipLabel {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     white-space: nowrap;
   }
 
   .quotaInfoTooltipValue {
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-weight: 700;
     overflow-wrap: anywhere;
   }
@@ -1108,15 +1113,15 @@
     position: relative;
     overflow: hidden;
     height: 8px;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--monitor-line) 68%, transparent);
+    border-radius: var(--app-radius-pill);
+    background: color-mix(in srgb, var(--border-color) 68%, transparent);
   }
 
   .quotaProgressBar {
     position: absolute;
     inset: 0 auto 0 0;
     border-radius: inherit;
-    background: var(--monitor-accent);
+    background: var(--data-blue-base);
   }
 
   .quotaStateMessage {
@@ -1125,15 +1130,15 @@
     min-height: 44px;
     place-items: center start;
     padding: 10px 12px;
-    border-radius: 14px;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 82%, transparent);
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--monitor-surface));
-    color: var(--monitor-muted);
+    border-radius: var(--app-radius-md);
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--bg-primary));
+    color: var(--text-secondary);
     font-size: 12px;
   }
 
   .quotaStateMessage small {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 11px;
   }
 
@@ -1141,22 +1146,22 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    min-height: 30px;
+    min-height: var(--control-height-xs);
     margin-top: 4px;
     padding: 0 12px;
-    border: 1px solid color-mix(in srgb, var(--monitor-accent) 56%, var(--monitor-line));
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--monitor-accent) 12%, var(--monitor-surface));
-    color: var(--monitor-ink);
+    border: 1px solid color-mix(in srgb, var(--data-blue-base) 56%, var(--border-color));
+    border-radius: var(--app-radius-pill);
+    background: color-mix(in srgb, var(--data-blue-base) 12%, var(--bg-primary));
+    color: var(--text-primary);
     font: inherit;
     font-size: 12px;
-    font-weight: 760;
+    font-weight: 700;
     cursor: pointer;
   }
 
   .quotaRetryButton:hover:not(:disabled) {
-    border-color: var(--monitor-accent);
-    background: color-mix(in srgb, var(--monitor-accent) 18%, var(--monitor-surface));
+    border-color: var(--data-blue-base);
+    background: color-mix(in srgb, var(--data-blue-base) 18%, var(--bg-primary));
   }
 
   .quotaRetryButton:disabled {
@@ -1170,9 +1175,9 @@
     gap: 10px;
     min-width: 0;
     padding: 14px;
-    border: 1px solid color-mix(in srgb, var(--monitor-line) 82%, transparent);
-    border-radius: 12px;
-    background: color-mix(in srgb, var(--monitor-surface-elevated) 86%, var(--monitor-surface));
+    border: 1px solid color-mix(in srgb, var(--border-color) 82%, transparent);
+    border-radius: var(--app-radius-md);
+    background: color-mix(in srgb, var(--monitor-surface-elevated) 86%, var(--bg-primary));
   }
 
   .accountModelListPanel {
@@ -1185,11 +1190,11 @@
   .accountModelViewAllButton {
     display: inline-flex;
     align-items: center;
-    min-height: 28px;
+    min-height: var(--control-height-xs);
     padding: 0;
     border: 0;
     background: transparent;
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
     font: inherit;
     font-size: 12px;
     font-weight: 700;
@@ -1198,7 +1203,7 @@
 
   .accountModelViewAllButton:hover {
     transform: none;
-    color: var(--monitor-accent);
+    color: var(--data-blue-base);
   }
 
   .accountModelViewAllButton:disabled {
@@ -1216,7 +1221,7 @@
     gap: 6px;
     min-width: 0;
     padding: 10px 0;
-    border-top: 1px solid color-mix(in srgb, var(--monitor-line) 84%, transparent);
+    border-top: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
   }
 
   .accountModelItem:first-child {
@@ -1240,7 +1245,7 @@
 
   .accountModelRow:hover {
     transform: none;
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
   }
 
   .accountModelRow:focus,
@@ -1250,7 +1255,7 @@
   }
 
   .accountModelRow:focus-visible {
-    color: var(--monitor-accent-strong);
+    color: var(--data-blue-dark-2);
   }
 
   .accountModelStat {
@@ -1262,7 +1267,7 @@
   }
 
   .accountModelStat small {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 11px;
     font-weight: 700;
     line-height: 1.4;
@@ -1272,9 +1277,10 @@
 
   .accountModelStat strong {
     min-width: 0;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 11px;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
     line-height: 1.4;
     white-space: nowrap;
   }
@@ -1284,7 +1290,7 @@
     flex-wrap: wrap;
     gap: 4px 8px;
     min-width: 0;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
   }
 
   .accountModelChevron {
@@ -1292,7 +1298,7 @@
     align-items: center;
     justify-content: center;
     min-width: 14px;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
   }
 
   .accountModelExpanded {
@@ -1300,7 +1306,7 @@
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 8px 12px;
     padding: 8px 10px 4px;
-    border-top: 1px dashed color-mix(in srgb, var(--monitor-line) 80%, transparent);
+    border-top: 1px dashed color-mix(in srgb, var(--border-color) 80%, transparent);
   }
 
   .accountModelExpandedItem {
@@ -1312,7 +1318,7 @@
   .accountModelExpandedItem small {
     min-width: 0;
     overflow: hidden;
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 10px;
     font-weight: 700;
     line-height: 1.2;
@@ -1325,9 +1331,10 @@
   .accountModelExpandedItem strong {
     min-width: 0;
     overflow: hidden;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-size: 12px;
     font-weight: 700;
+    font-variant-numeric: tabular-nums;
     line-height: 1.3;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1338,7 +1345,7 @@
     min-width: 0;
     max-width: 100%;
     overflow: hidden;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
     font-weight: 700;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -1353,14 +1360,14 @@
   .accountModelTable th,
   .accountModelTable td {
     padding: 8px 4px;
-    border-bottom: 1px solid color-mix(in srgb, var(--monitor-line) 84%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
     text-align: left;
     vertical-align: middle;
     font-size: 11px;
   }
 
   .accountModelTable th {
-    color: var(--monitor-muted);
+    color: var(--text-secondary);
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0;
@@ -1371,7 +1378,8 @@
 
   .accountModelTable td {
     overflow: hidden;
-    color: var(--monitor-ink);
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1417,15 +1425,15 @@
   }
 
   .accountModelTable .goodText {
-    color: var(--monitor-green);
+    color: var(--data-green-base);
   }
 
   .accountModelTable .warnText {
-    color: var(--monitor-amber);
+    color: var(--data-amber-base);
   }
 
   .accountModelTable .badText {
-    color: var(--monitor-red);
+    color: var(--data-red-base);
   }
 
   .table .accountModelTable {
