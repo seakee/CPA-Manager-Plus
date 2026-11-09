@@ -349,7 +349,7 @@ $toolbar-control-height: var(--control-height-sm);
   border: 1px solid var(--border-primary);
   border-radius: var(--app-radius-md);
   /* floating layer: elevation allowed */
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--floating-shadow-lg);
   display: flex;
   flex-direction: column;
   z-index: $z-dropdown;
@@ -500,7 +500,7 @@ $toolbar-control-height: var(--control-height-sm);
   border-radius: var(--app-radius-md);
   background: var(--bg-primary);
   /* floating layer: elevation allowed */
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--floating-shadow-lg);
 }
 
 .sortDropdownItem {

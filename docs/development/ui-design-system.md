@@ -33,17 +33,17 @@ This specification defines the token contracts, layout conventions, and automate
 - **Elevation and overlay scrims**:
   - Non-floating drop shadows (`--app-shadow`, `--app-shadow-soft`, `--glass-shadow`, `--shadow`, `--shadow-lg`) are `none`.
   - The only elevation cue on cards and panels is `--app-specular-highlight` (`box-shadow: var(--app-specular-highlight)`).
-  - Floating layers (menus, popovers, tooltips, dialogs, drawers) may keep a drop shadow so they separate from the page. Mark each one with `/* floating layer: elevation allowed */` and use the `--floating-shadow-*` scale defined per theme in `themes.scss` (do not duplicate `[data-theme='dark']` shadow overrides in component stylesheets):
-    - `--floating-shadow-sm`: compact inline status tooltips (e.g. account status bar hover tooltip).
-    - `--floating-shadow-md`: portaled floating tooltips (`InfoTooltip`, `AccountRequestTimeTooltip`).
-    - `--floating-shadow-lg`: floating action and context menus (`DropdownMenu`, including its subtle accent ring).
+  - Floating layers (menus, popovers, tooltips, dialogs, drawers) may keep a drop shadow so they separate from the page. New or edited floating layers must be marked with `/* floating layer: elevation allowed */` and use the `--floating-shadow-*` scale defined per theme in `themes.scss` (do not duplicate `[data-theme='dark']` shadow overrides in component stylesheets); any remaining literal floating-layer shadow is legacy debt to migrate when touched:
+    - `--floating-shadow-sm`: compact status tooltips that show a short, non-scrolling summary next to their trigger (account status bar hover tooltip, AI provider status bar tooltip).
+    - `--floating-shadow-md`: tooltips that carry explanations or details, whether inline or portaled, including scrollable or interactive ones (`InfoTooltip`, `AccountRequestTimeTooltip`, monitoring quota tooltip, `FailureDetailsTooltip`, AI provider key test status tooltip). Pick by content, not by how the layer is rendered.
+    - `--floating-shadow-lg`: floating action and context menus (`DropdownMenu`, `ProviderToolbar` model and sort dropdowns, `ModelMappingDiagram` context menu, including the subtle accent ring).
     - `--floating-shadow-xl`: form select popovers (`Select`, including its input-focus accent ring).
     - `--floating-shadow-dialog`: centered modal dialogs (`.modal`).
-    - `--floating-shadow-drawer`: side drawer panels (`Drawer` panel edge shadow).
+    - `--floating-shadow-drawer`: side drawer panels (`Drawer` panel edge shadow, Codex inspection config drawer).
   - Overlay backdrops use the `--overlay-scrim*` tokens from `themes.scss`:
     - `--overlay-scrim`: centered modal dialog backdrop (`.modal-overlay`).
     - `--overlay-scrim-backdrop`: mobile navigation sidebar backdrop (`.sidebar-backdrop`).
-    - `--overlay-scrim-drawer`: slide-over drawer backdrop (`Drawer` overlay).
+    - `--overlay-scrim-drawer`: slide-over drawer backdrop (`Drawer` overlay, Codex inspection config drawer overlay).
 
 ## 3. Concentric Radius Scale
 
@@ -58,7 +58,7 @@ Border radii follow a concentric scale from outer containers inward:
 | Pills and status capsules | `--app-radius-pill` | `9999px` |
 
 - Literal radius values in stylesheets are restricted to `0`, `6px`, `8px`, `12px`, `16px`, `20px`, `9999px`, `50%`, `inherit`, `initial`, `unset`, `revert`, `revert-layer`, or expressions using `var()`, `calc()`, `min()`, `max()`, or `clamp()`.
-- **Data-visualisation radius tokens (chart elements only)**: `apps/web/src/styles/themes.scss` defines `--radius-data-sm` (`2px`) and `--radius-data` (`3px`) in `:root` exclusively for chart and data-visualisation elements (bars, progress/rank bars, heat cells, legend swatches, and sparkline segments) so their compact geometry is preserved. Ordinary UI elements (cards, badges, buttons, and rows) must use the concentric role scale (`--app-radius-*`) instead.
+- **Data-visualisation radius tokens (chart elements only)**: `apps/web/src/styles/themes.scss` defines `--radius-data-sm` (`2px`) and `--radius-data` (`3px`) in `:root` exclusively for chart and data-visualisation elements (bars, progress/rank bars, heat cells, AI provider status blocks, config diff stat cells, legend swatches, and sparkline segments) so their compact geometry is preserved. Ordinary UI elements (cards, badges, buttons, and rows) must use the concentric role scale (`--app-radius-*`) instead.
 - Legacy SCSS variables in `apps/web/src/styles/variables.scss` (`$radius-sm`, `$radius-md`, `$radius-lg`, `$radius-full`) remain temporarily and are migrated per component role as pages are touched. Their names and raw values (`{ "$radius-full": "9999px", "$radius-lg": "12px", "$radius-md": "8px", "$radius-sm": "4px" }`) are frozen in `scssRadiusDefinitions`; defining a new `$radius-*` variable or changing a recorded variable's value fails even with `--allow-increase`, while removing a definition is permitted and tightens the baseline.
 
 ## 4. Control Heights
