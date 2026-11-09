@@ -164,6 +164,70 @@ const consumeScriptBraces = (src, start) => {
   return index;
 };
 
+// True when `index` sits among the attributes of an open JSX tag: walking back
+// over attribute strings and `{...}` values reaches `<Tag` before any `>`,
+// unmatched `{`/`(`, or `;`. Class fields and plain assignments fail this.
+const isInsideJsxOpeningTag = (src, index) => {
+  let depth = 0;
+  let cursor = index - 1;
+  while (cursor >= 0) {
+    const ch = src[cursor];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      cursor -= 1;
+      while (cursor >= 0 && !(src[cursor] === ch && src[cursor - 1] !== '\\')) cursor -= 1;
+      cursor -= 1;
+      continue;
+    }
+    if (ch === '}') depth += 1;
+    else if (ch === '{') {
+      if (depth === 0) return false;
+      depth -= 1;
+    } else if (depth === 0) {
+      if (ch === '<') return /[A-Za-z]/.test(src[cursor + 1] ?? '');
+      if (ch === '>' || ch === '(' || ch === ')' || ch === ';') return false;
+    }
+    cursor -= 1;
+  }
+  return false;
+};
+
+// Custom-property keys at the top level of the object literal written directly
+// as a `style={{ ... }}` value; nested objects and call arguments are ignored.
+const collectStyleObjectKeys = (src, exprOpenIndex) => {
+  let objStart = exprOpenIndex + 1;
+  while (/\s/.test(src[objStart] ?? '')) objStart += 1;
+  if (src[objStart] !== '{') return [];
+  const objEnd = consumeScriptBraces(src, objStart);
+  const body = src.slice(objStart + 1, objEnd - 1);
+  const entries = [];
+  let depth = 0;
+  let start = 0;
+  let index = 0;
+  while (index < body.length) {
+    const ch = body[index];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      index = consumeQuoted(body, index);
+      continue;
+    }
+    if (ch === '{' || ch === '(' || ch === '[') depth += 1;
+    else if (ch === '}' || ch === ')' || ch === ']') depth -= 1;
+    else if (ch === ',' && depth === 0) {
+      entries.push(body.slice(start, index));
+      start = index + 1;
+    }
+    index += 1;
+  }
+  entries.push(body.slice(start));
+  const names = [];
+  for (const entry of entries) {
+    const keyMatch = entry
+      .trim()
+      .match(/^(?:\[\s*['"`](--[A-Za-z0-9_-]+)['"`]\s*\]|['"`](--[A-Za-z0-9_-]+)['"`])\s*:/);
+    if (keyMatch) names.push(keyMatch[1] ?? keyMatch[2]);
+  }
+  return names;
+};
+
 export const stripComments = (source, { isScript = false, allowLineComments = true } = {}) => {
   let out = '';
 
@@ -403,22 +467,35 @@ const maskStyleSource = (cleaned, nonValueRanges) => {
     }
   }
   const withoutSelectors = chars.join('');
+  // Blank literal text but keep Sass `#{...}` bodies: Sass evaluates them even
+  // inside quoted strings and url(), so their expressions must stay visible.
+  const maskLiteral = (start, end) => {
+    let cursor = start;
+    while (cursor < end) {
+      if (withoutSelectors[cursor] === '#' && withoutSelectors[cursor + 1] === '{') {
+        const interpEnd = Math.min(consumeBalanced(withoutSelectors, cursor + 1, '{', '}'), end);
+        chars[cursor] = ' ';
+        chars[cursor + 1] = ' ';
+        if (withoutSelectors[interpEnd - 1] === '}') chars[interpEnd - 1] = ' ';
+        cursor = interpEnd;
+        continue;
+      }
+      if (chars[cursor] !== '\n') chars[cursor] = ' ';
+      cursor += 1;
+    }
+  };
   let index = 0;
   while (index < withoutSelectors.length) {
     const ch = chars[index];
     if (ch === "'" || ch === '"') {
       const end = consumeQuoted(withoutSelectors, index);
-      for (let cursor = index; cursor < end; cursor += 1) {
-        if (chars[cursor] !== '\n') chars[cursor] = ' ';
-      }
+      maskLiteral(index, end);
       index = end;
       continue;
     }
     const urlEnd = ch === ' ' ? -1 : consumeUrl(withoutSelectors, index);
     if (urlEnd !== -1) {
-      for (let cursor = index; cursor < urlEnd; cursor += 1) {
-        if (chars[cursor] !== '\n') chars[cursor] = ' ';
-      }
+      maskLiteral(index, urlEnd);
       index = urlEnd;
       continue;
     }
@@ -506,6 +583,30 @@ const isAllowedFontWeight = (rawValue) => {
   );
 };
 
+const FONT_SIZE_KEYWORDS = new Set([
+  'xx-small',
+  'x-small',
+  'small',
+  'medium',
+  'large',
+  'x-large',
+  'xx-large',
+  'xxx-large',
+  'smaller',
+  'larger',
+  'math',
+]);
+
+// A font-size token: a dimension/percentage, a size keyword, or `size/line-height`.
+const isFontSizeToken = (token) => {
+  const size = token.split('/')[0];
+  return (
+    token.includes('/') ||
+    FONT_SIZE_KEYWORDS.has(size) ||
+    /^[+-]?(?:\d+\.?\d*|\.\d+)(?:%|[a-z]+)$/.test(size)
+  );
+};
+
 const isAllowedFontShorthand = (rawValue) => {
   const value = rawValue.replace(/!important\b/gi, '').trim();
   if (!value) return true;
@@ -527,10 +628,12 @@ const isAllowedFontShorthand = (rawValue) => {
       index += 1;
     }
   }
-  const withoutLineHeight = stripped.replace(/\/\s*[^\s,;]+/g, ' ');
-  for (const rawToken of withoutLineHeight.split(/[\s,]+/)) {
-    const token = rawToken.trim().toLowerCase();
-    if (!token) continue;
+  // CSS `font` grammar puts weight before the mandatory font-size; everything
+  // after the size (or after the first comma) is the family list, where
+  // `bolder`/`lighter` are plain family names.
+  for (const rawToken of stripped.match(/[^\s,]+|,/g) ?? []) {
+    const token = rawToken.toLowerCase();
+    if (token === ',' || isFontSizeToken(token)) break;
     if (token === 'bolder' || token === 'lighter') {
       return false;
     }
@@ -615,17 +718,10 @@ export const collectFindings = (rootDir = defaultRootDir) => {
     if (isScript) {
       collectVarRefs(cleaned, cleaned, relPath, lineStarts);
       for (const attrMatch of cleaned.matchAll(/(?<![A-Za-z0-9_.$])style\s*=\s*\{/g)) {
-        const prefix = cleaned.slice(0, attrMatch.index);
-        if (/(?:^|[\s;,(])(?:const|let|var|type|interface)\s+$/.test(prefix)) {
-          continue;
-        }
+        if (!isInsideJsxOpeningTag(cleaned, attrMatch.index)) continue;
         const openBraceIndex = attrMatch.index + attrMatch[0].length - 1;
-        const closeBraceIndex = consumeScriptBraces(cleaned, openBraceIndex);
-        const exprSlice = cleaned.slice(openBraceIndex + 1, closeBraceIndex - 1);
-        for (const keyMatch of exprSlice.matchAll(
-          /(?:\[\s*['"`](--[A-Za-z0-9_-]+)['"`]\s*\]|['"`](--[A-Za-z0-9_-]+)['"`])\s*:/g
-        )) {
-          definedVars.add(keyMatch[1] ?? keyMatch[2]);
+        for (const name of collectStyleObjectKeys(cleaned, openBraceIndex)) {
+          definedVars.add(name);
         }
       }
       for (const match of cleaned.matchAll(

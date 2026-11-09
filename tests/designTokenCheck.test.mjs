@@ -134,6 +134,74 @@ describe('design token checker', () => {
     ]);
   });
 
+  it('R1 counts only top-level keys of a JSX style object as definitions, not class fields or nested call arguments', () => {
+    const root = createFixtureTree({
+      'components/Hint.tsx': [
+        `export class ThemeHint {`,
+        `  style = { '--from-class-field': 'not css' };`,
+        `}`,
+        `const pick = (config: Record<string, string>) => config.color;`,
+        `export const Demo = (base: object, v: string) => (`,
+        `  <div`,
+        `    className="demo"`,
+        `    onClick={() => pick({})}`,
+        `    style={{ ...base, color: pick({ '--from-nested-arg': 'red' }), ['--from-style']: v } as object}`,
+        `  />`,
+        `);`,
+      ].join('\n'),
+      'components/Hint.module.scss': [
+        `.hint {`,
+        `  color: var(--from-class-field);`,
+        `  background: var(--from-nested-arg);`,
+        `  border-color: var(--from-style);`,
+        `}`,
+      ].join('\n'),
+    });
+
+    expect(collectFindings(root).rules['undefined-var']).toEqual({
+      'components/Hint.module.scss': {
+        '--from-class-field': 1,
+        '--from-nested-arg': 1,
+      },
+    });
+  });
+
+  it('R4 counts $radius-* evaluated through Sass interpolation inside strings and url(), but not plain string text', () => {
+    const root = createFixtureTree({
+      'components/Badge.module.scss': [
+        `.interpolated::after {`,
+        `  content: "radius: #{$radius-sm}";`,
+        `  background: url("/asset-#{$radius-sm}.svg");`,
+        `}`,
+        `.plain::after {`,
+        `  content: "$radius-sm var(--plain-text) !important";`,
+        `  background: url("/$radius-sm.svg");`,
+        `}`,
+      ].join('\n'),
+    });
+
+    const { rules } = collectFindings(root);
+    expect(rules['scss-radius-var']).toEqual({ 'components/Badge.module.scss': 2 });
+    expect(rules['undefined-var']).toEqual({});
+    expect(rules.important).toEqual({});
+  });
+
+  it('R3 checks font shorthand weights only before the font-size, treating later words as family names', () => {
+    const root = createFixtureTree({
+      'components/Type.module.scss': [
+        `.familyBolder { font: 14px bolder, sans-serif; }`,
+        `.familyLighter { font: 14px/1.4 lighter, sans-serif; }`,
+        `.allowed { font: italic 600 small serif; }`,
+        `.weightBolder { font: bolder 14px sans-serif; }`,
+        `.weightNumeric { font: italic 650 1rem/1.5 serif; }`,
+      ].join('\n'),
+    });
+
+    expect(collectFindings(root).rules['font-weight']).toEqual({
+      'components/Type.module.scss': 2,
+    });
+  });
+
   it('R1 enforces a per-file and per-variable ratchet so an unknown variable name in an already-baselined file fails', () => {
     const root = createFixtureTree({
       'styles/themes.scss': `:root {\n  --app-surface: #fff;\n}\n`,
