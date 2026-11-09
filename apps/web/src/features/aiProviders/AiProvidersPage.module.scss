@@ -301,7 +301,7 @@
 .statusBlock {
   width: 100%;
   height: 8px;
-  border-radius: 2px;
+  border-radius: var(--radius-data-sm);
   transition:
     transform 0.15s ease,
     opacity 0.15s ease;
@@ -330,7 +330,7 @@
   line-height: 1.5;
   white-space: nowrap;
   /* floating layer: elevation allowed */
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--floating-shadow-sm);
   z-index: $z-dropdown;
   pointer-events: none;
   color: var(--text-primary);
@@ -846,7 +846,7 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--app-radius-xs);
   /* floating layer: elevation allowed */
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--floating-shadow-sm);
   color: var(--text-primary);
   font-size: 11px;
   line-height: 1.5;
@@ -968,8 +968,6 @@
   .statusTooltip {
     background: var(--bg-secondary);
     border-color: var(--border-primary);
-    /* floating layer: elevation allowed */
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
 
     &::after {
       border-top-color: var(--bg-secondary);

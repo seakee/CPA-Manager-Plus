@@ -245,7 +245,8 @@
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-lg);
   z-index: 9999;
   min-width: 120px;
   overflow: hidden;

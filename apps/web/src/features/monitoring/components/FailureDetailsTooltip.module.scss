@@ -30,7 +30,8 @@
   border: 1px solid color-mix(in srgb, var(--error-color) 26%, var(--border-color));
   border-radius: var(--app-radius-md);
   background: var(--failure-surface-elevated);
-  box-shadow: var(--shadow-lg);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-md);
   color: var(--text-primary);
   font-size: 12px;
   line-height: 1.45;

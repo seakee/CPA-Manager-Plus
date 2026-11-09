@@ -1704,7 +1704,7 @@
   z-index: 1200;
   display: flex;
   justify-content: flex-end;
-  background: rgba(15, 23, 42, 0.16);
+  background: var(--overlay-scrim-drawer);
 }
 
 .xaiInferenceToggle {
@@ -1824,7 +1824,8 @@
   overflow: hidden;
   border-left: 1px solid var(--border-color);
   background: var(--bg-primary);
-  box-shadow: -18px 0 36px rgba(15, 23, 42, 0.18);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-drawer);
 }
 
 .configDrawerHeader {
