@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "rules": {
     "undefined-var": {
       "apps/web/src/features/accounts/AccountsPage.module.scss": {
@@ -229,10 +229,10 @@
       "apps/web/src/features/usage-analytics/UsageAnalyticsPage.module.scss": 15
     }
   },
-  "scssRadiusDefinitions": [
-    "$radius-full",
-    "$radius-lg",
-    "$radius-md",
-    "$radius-sm"
-  ]
+  "scssRadiusDefinitions": {
+    "$radius-full": "9999px",
+    "$radius-lg": "12px",
+    "$radius-md": "8px",
+    "$radius-sm": "4px"
+  }
 }

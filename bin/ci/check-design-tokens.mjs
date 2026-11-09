@@ -6,6 +6,8 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 const defaultRootDir = path.join(repoRoot, 'apps/web/src');
 const defaultBaselinePath = path.join(repoRoot, 'bin/ci/design-token-baseline.json');
 
+const BASELINE_VERSION = 2;
+
 const RATCHET_FILE_RULES = [
   'radius',
   'font-weight',
@@ -13,6 +15,8 @@ const RATCHET_FILE_RULES = [
   'color-literal',
   'important',
 ];
+const ALL_RULE_KEYS = ['undefined-var', ...RATCHET_FILE_RULES];
+
 
 const ALLOWED_RADIUS_PARTS = new Set([
   '0',
@@ -144,7 +148,23 @@ const consumeBalanced = (src, start, openChar, closeChar) => {
   return index;
 };
 
-export const stripComments = (source, { isScript = false } = {}) => {
+const consumeScriptBraces = (src, start) => {
+  let index = start + 1;
+  let depth = 1;
+  while (index < src.length && depth > 0) {
+    const ch = src[index];
+    if (ch === "'" || ch === '"' || ch === '`') {
+      index = consumeQuoted(src, index);
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') depth -= 1;
+    index += 1;
+  }
+  return index;
+};
+
+export const stripComments = (source, { isScript = false, allowLineComments = true } = {}) => {
   let out = '';
 
   const scanTemplate = (start) => {
@@ -187,7 +207,7 @@ export const stripComments = (source, { isScript = false } = {}) => {
         continue;
       }
 
-      if (ch === '/' && source[index + 1] === '/') {
+      if (allowLineComments && ch === '/' && source[index + 1] === '/') {
         const nl = source.indexOf('\n', index + 2);
         const end = nl === -1 ? source.length : nl;
         out += blankSpan(source, index, end);
@@ -281,7 +301,6 @@ const scanStyleSource = (cleaned) => {
       propName,
       rawName,
       propOffset,
-      valueOffset: colonOffset + 1,
       valueText: cleaned.slice(colonOffset + 1, stmtEnd),
     });
   };
@@ -376,7 +395,7 @@ const scanStyleSource = (cleaned) => {
   return { declarations, nonValueRanges };
 };
 
-const maskForColorScan = (cleaned, nonValueRanges) => {
+const maskStyleSource = (cleaned, nonValueRanges) => {
   const chars = cleaned.split('');
   for (const [start, end] of nonValueRanges) {
     for (let index = start; index < end; index += 1) {
@@ -384,26 +403,38 @@ const maskForColorScan = (cleaned, nonValueRanges) => {
     }
   }
   const withoutSelectors = chars.join('');
-  let out = '';
   let index = 0;
   while (index < withoutSelectors.length) {
-    const ch = withoutSelectors[index];
+    const ch = chars[index];
     if (ch === "'" || ch === '"') {
       const end = consumeQuoted(withoutSelectors, index);
-      out += blankSpan(withoutSelectors, index, end);
+      for (let cursor = index; cursor < end; cursor += 1) {
+        if (chars[cursor] !== '\n') chars[cursor] = ' ';
+      }
       index = end;
       continue;
     }
-    const urlEnd = consumeUrl(withoutSelectors, index);
+    const urlEnd = ch === ' ' ? -1 : consumeUrl(withoutSelectors, index);
     if (urlEnd !== -1) {
-      out += blankSpan(withoutSelectors, index, urlEnd);
+      for (let cursor = index; cursor < urlEnd; cursor += 1) {
+        if (chars[cursor] !== '\n') chars[cursor] = ' ';
+      }
       index = urlEnd;
       continue;
     }
-    out += ch;
+    if (ch === '#' && chars[index + 1] === '{') {
+      const interpEnd = consumeBalanced(withoutSelectors, index + 1, '{', '}');
+      chars[index] = ' ';
+      chars[index + 1] = ' ';
+      if (interpEnd > index + 2 && withoutSelectors[interpEnd - 1] === '}') {
+        chars[interpEnd - 1] = ' ';
+      }
+      index += 2;
+      continue;
+    }
     index += 1;
   }
-  return out;
+  return chars.join('');
 };
 
 const walkScannedFiles = (dir) => {
@@ -475,6 +506,44 @@ const isAllowedFontWeight = (rawValue) => {
   );
 };
 
+const isAllowedFontShorthand = (rawValue) => {
+  const value = rawValue.replace(/!important\b/gi, '').trim();
+  if (!value) return true;
+  let stripped = '';
+  let index = 0;
+  while (index < value.length) {
+    const ch = value[index];
+    if (ch === "'" || ch === '"') {
+      index = consumeQuoted(value, index);
+      stripped += ' ';
+    } else if (ch === '#' && value[index + 1] === '{') {
+      index = consumeBalanced(value, index + 1, '{', '}');
+      stripped += ' ';
+    } else if (ch === '(') {
+      index = consumeBalanced(value, index, '(', ')');
+      stripped += ' ';
+    } else {
+      stripped += ch;
+      index += 1;
+    }
+  }
+  const withoutLineHeight = stripped.replace(/\/\s*[^\s,;]+/g, ' ');
+  for (const rawToken of withoutLineHeight.split(/[\s,]+/)) {
+    const token = rawToken.trim().toLowerCase();
+    if (!token) continue;
+    if (token === 'bolder' || token === 'lighter') {
+      return false;
+    }
+    if (/^\d+(?:\.\d+)?$/.test(token)) {
+      const numeric = Number(token);
+      if (numeric >= 1 && numeric <= 1000 && !ALLOWED_FONT_WEIGHTS.has(token)) {
+        return false;
+      }
+    }
+  }
+  return true;
+};
+
 const resolveScanContext = (rootDir = defaultRootDir) => {
   const resolvedRoot = path.resolve(rootDir);
   if (resolvedRoot === defaultRootDir) {
@@ -506,7 +575,7 @@ export const collectFindings = (rootDir = defaultRootDir) => {
     'color-literal': {},
     important: {},
   };
-  const scssRadiusDefSet = new Set();
+  const scssRadiusDefs = {};
   const scssRadiusDefinitionSites = [];
 
   const recordOccurrence = (rule, file, line, message) => {
@@ -516,17 +585,10 @@ export const collectFindings = (rootDir = defaultRootDir) => {
     occurrencesByRule[rule][file].push({ file, line, rule, message });
   };
 
-  for (const absolutePath of files) {
-    const relPath = toPosixPath(path.relative(baseDir, absolutePath));
-    const ext = path.extname(absolutePath);
-    const isScript = ext === '.ts' || ext === '.tsx';
-    const rawContent = readFileSync(absolutePath, 'utf8');
-    const cleaned = stripComments(rawContent, { isScript });
-    const lineStarts = buildLineStarts(cleaned);
-
-    for (const match of cleaned.matchAll(/\bvar\(\s*(--[A-Za-z0-9_-]*)/g)) {
+  const collectVarRefs = (scanSource, rawCleaned, relPath, lineStarts) => {
+    for (const match of scanSource.matchAll(/\bvar\(\s*(--[A-Za-z0-9_-]*)/g)) {
       const varName = match[1];
-      const remainder = cleaned.slice(match.index + match[0].length);
+      const remainder = rawCleaned.slice(match.index + match[0].length);
       if (remainder.startsWith('${') || remainder.startsWith('#{') || remainder.startsWith('$')) {
         continue;
       }
@@ -537,18 +599,37 @@ export const collectFindings = (rootDir = defaultRootDir) => {
         name: varName,
       });
     }
+  };
+
+  for (const absolutePath of files) {
+    const relPath = toPosixPath(path.relative(baseDir, absolutePath));
+    const ext = path.extname(absolutePath);
+    const isScript = ext === '.ts' || ext === '.tsx';
+    const rawContent = readFileSync(absolutePath, 'utf8');
+    const cleaned = stripComments(rawContent, {
+      isScript,
+      allowLineComments: ext !== '.css',
+    });
+    const lineStarts = buildLineStarts(cleaned);
 
     if (isScript) {
-      for (const match of cleaned.matchAll(/['"`](--[A-Za-z0-9_-]+)['"`]\s*:/g)) {
-        definedVars.add(match[1]);
+      collectVarRefs(cleaned, cleaned, relPath, lineStarts);
+      for (const attrMatch of cleaned.matchAll(/(?<![A-Za-z0-9_.$])style\s*=\s*\{/g)) {
+        const prefix = cleaned.slice(0, attrMatch.index);
+        if (/(?:^|[\s;,(])(?:const|let|var|type|interface)\s+$/.test(prefix)) {
+          continue;
+        }
+        const openBraceIndex = attrMatch.index + attrMatch[0].length - 1;
+        const closeBraceIndex = consumeScriptBraces(cleaned, openBraceIndex);
+        const exprSlice = cleaned.slice(openBraceIndex + 1, closeBraceIndex - 1);
+        for (const keyMatch of exprSlice.matchAll(
+          /(?:\[\s*['"`](--[A-Za-z0-9_-]+)['"`]\s*\]|['"`](--[A-Za-z0-9_-]+)['"`])\s*:/g
+        )) {
+          definedVars.add(keyMatch[1] ?? keyMatch[2]);
+        }
       }
       for (const match of cleaned.matchAll(
-        /\[\s*['"`](--[A-Za-z0-9_-]+)['"`]\s*\]\s*(?::|=(?!=))/g
-      )) {
-        definedVars.add(match[1]);
-      }
-      for (const match of cleaned.matchAll(
-        /(?:\.|\b)setProperty\(\s*['"`](--[A-Za-z0-9_-]+)['"`]/g
+        /\.setProperty\s*\(\s*['"`](--[A-Za-z0-9_-]+)['"`]/g
       )) {
         definedVars.add(match[1]);
       }
@@ -558,21 +639,26 @@ export const collectFindings = (rootDir = defaultRootDir) => {
     const isThemesFile = absolutePath === themesFilePath;
     const isVariablesFile = variablesFilePaths.has(absolutePath);
     const { declarations, nonValueRanges } = scanStyleSource(cleaned);
+    const maskedStyle = maskStyleSource(cleaned, nonValueRanges);
+
+    collectVarRefs(maskedStyle, cleaned, relPath, lineStarts);
 
     for (const decl of declarations) {
       const declLine = offsetToLine(lineStarts, decl.propOffset);
       const compactValue = decl.valueText.replace(/\s+/g, ' ').trim();
+      const propLower = decl.propName.toLowerCase();
 
       if (/^--[A-Za-z0-9_-]+$/.test(decl.rawName)) {
         definedVars.add(decl.rawName);
       }
 
       if (isVariablesFile && /^\$radius-[A-Za-z0-9_-]+$/.test(decl.rawName)) {
-        scssRadiusDefSet.add(decl.rawName);
+        scssRadiusDefs[decl.rawName] = compactValue;
         scssRadiusDefinitionSites.push({
           file: relPath,
           line: declLine,
           name: decl.rawName,
+          value: compactValue,
         });
       }
 
@@ -591,7 +677,10 @@ export const collectFindings = (rootDir = defaultRootDir) => {
         }
       }
 
-      if (decl.propName.toLowerCase() === 'font-weight' && !isAllowedFontWeight(decl.valueText)) {
+      if (
+        (propLower === 'font-weight' && !isAllowedFontWeight(decl.valueText)) ||
+        (propLower === 'font' && !isAllowedFontShorthand(decl.valueText))
+      ) {
         recordOccurrence(
           'font-weight',
           relPath,
@@ -602,8 +691,7 @@ export const collectFindings = (rootDir = defaultRootDir) => {
     }
 
     if (!isThemesFile) {
-      const colorMaskable = maskForColorScan(cleaned, nonValueRanges);
-      for (const match of colorMaskable.matchAll(
+      for (const match of maskedStyle.matchAll(
         /(?<![A-Za-z0-9_$-])#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g
       )) {
         recordOccurrence(
@@ -613,7 +701,9 @@ export const collectFindings = (rootDir = defaultRootDir) => {
           `colour literal "${match[0]}" outside styles/themes.scss`
         );
       }
-      for (const match of colorMaskable.matchAll(/\b(?:rgba?|hsla?)\s*\(/gi)) {
+      for (const match of maskedStyle.matchAll(
+        /(?<![A-Za-z0-9_$-])(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\s*\(/gi
+      )) {
         recordOccurrence(
           'color-literal',
           relPath,
@@ -623,7 +713,7 @@ export const collectFindings = (rootDir = defaultRootDir) => {
       }
     }
 
-    for (const match of cleaned.matchAll(/\$radius-[A-Za-z0-9_-]+/g)) {
+    for (const match of maskedStyle.matchAll(/\$radius-[A-Za-z0-9_-]+/g)) {
       recordOccurrence(
         'scss-radius-var',
         relPath,
@@ -632,7 +722,7 @@ export const collectFindings = (rootDir = defaultRootDir) => {
       );
     }
 
-    for (const match of cleaned.matchAll(/!important\b/gi)) {
+    for (const match of maskedStyle.matchAll(/!important\b/gi)) {
       recordOccurrence(
         'important',
         relPath,
@@ -687,7 +777,7 @@ export const collectFindings = (rootDir = defaultRootDir) => {
   return {
     filesScanned: files.length,
     rules,
-    scssRadiusDefinitions: [...scssRadiusDefSet].sort((a, b) => a.localeCompare(b)),
+    scssRadiusDefinitions: sortObjectKeys(scssRadiusDefs),
     scssRadiusDefinitionSites,
     occurrencesByRule,
   };
@@ -709,21 +799,102 @@ export const buildBaselineFromFindings = (findings) => {
   }
 
   return {
-    version: 1,
+    version: BASELINE_VERSION,
     rules,
-    scssRadiusDefinitions: [...(findings.scssRadiusDefinitions ?? [])].sort((a, b) =>
-      a.localeCompare(b)
-    ),
+    scssRadiusDefinitions: sortObjectKeys(findings.scssRadiusDefinitions ?? {}),
   };
 };
 
+const isPlainObject = (value) =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+export const validateBaseline = (baseline) => {
+  const errors = [];
+  if (!isPlainObject(baseline)) {
+    return ['Baseline must be a JSON object'];
+  }
+  if (baseline.version !== BASELINE_VERSION) {
+    errors.push(
+      `Unsupported baseline version: expected ${BASELINE_VERSION}, got ${JSON.stringify(baseline.version)}`
+    );
+  }
+  if (!isPlainObject(baseline.rules)) {
+    errors.push('Baseline is missing a valid "rules" object');
+  } else {
+    for (const ruleKey of ALL_RULE_KEYS) {
+      const ruleEntry = baseline.rules[ruleKey];
+      if (!isPlainObject(ruleEntry)) {
+        errors.push(`Baseline "rules.${ruleKey}" must be an object`);
+        continue;
+      }
+      if (ruleKey === 'undefined-var') {
+        for (const [file, varMap] of Object.entries(ruleEntry)) {
+          if (!isPlainObject(varMap)) {
+            errors.push(`Baseline "rules.undefined-var[${file}]" must be an object`);
+            continue;
+          }
+          for (const [varName, count] of Object.entries(varMap)) {
+            if (!Number.isInteger(count) || count < 0) {
+              errors.push(
+                `Baseline "rules.undefined-var[${file}][${varName}]" must be a non-negative integer`
+              );
+            }
+          }
+        }
+      } else {
+        for (const [file, count] of Object.entries(ruleEntry)) {
+          if (!Number.isInteger(count) || count < 0) {
+            errors.push(`Baseline "rules.${ruleKey}[${file}]" must be a non-negative integer`);
+          }
+        }
+      }
+    }
+  }
+  if (!isPlainObject(baseline.scssRadiusDefinitions)) {
+    errors.push('Baseline "scssRadiusDefinitions" must be a "{ name: rawValue }" object');
+  } else {
+    for (const [name, rawValue] of Object.entries(baseline.scssRadiusDefinitions)) {
+      if (!/^\$radius-[A-Za-z0-9_-]+$/.test(name)) {
+        errors.push(`Invalid SCSS radius variable name in baseline: "${name}"`);
+      }
+      if (typeof rawValue !== 'string' || rawValue.trim() === '') {
+        errors.push(
+          `Baseline "scssRadiusDefinitions[${name}]" must be a non-empty raw value string`
+        );
+      }
+    }
+  }
+  return errors;
+};
+
 export const compareToBaseline = (findings, baseline = {}) => {
-  const baselineRules = baseline?.rules ?? {};
   const failures = [];
   const hardFailures = [];
   const tightenNotices = [];
   const increases = [];
+  const schemaErrors = validateBaseline(baseline);
 
+  if (schemaErrors.length > 0) {
+    for (const message of schemaErrors) {
+      const hardFailure = {
+        file: 'bin/ci/design-token-baseline.json',
+        line: 1,
+        rule: 'baseline-schema',
+        message,
+      };
+      failures.push(hardFailure);
+      hardFailures.push(hardFailure);
+    }
+    return {
+      passed: false,
+      failures,
+      hardFailures,
+      tightenNotices,
+      increases,
+    };
+  }
+
+  const baselineRules = baseline.rules;
   const currentUndefined = findings.rules?.['undefined-var'] ?? {};
   const baselineUndefined = baselineRules['undefined-var'] ?? {};
   const allUndefinedFiles = new Set([
@@ -827,27 +998,50 @@ export const compareToBaseline = (findings, baseline = {}) => {
     }
   }
 
-  if (Array.isArray(baseline?.scssRadiusDefinitions)) {
-    const allowedDefs = new Set(baseline.scssRadiusDefinitions);
-    for (const defName of findings.scssRadiusDefinitions ?? []) {
-      if (!allowedDefs.has(defName)) {
-        const site = (findings.scssRadiusDefinitionSites ?? []).find(
-          (candidate) => candidate.name === defName
-        );
-        const file = site?.file ?? 'apps/web/src/styles/variables.scss';
-        const line = site?.line ?? 1;
-        const hardFailure = {
-          file,
-          line,
-          rule: 'scss-radius-var',
-          name: defName,
-          current: 1,
-          baseline: 0,
-          message: `new SCSS radius variable definition "${defName}" is not allowed in variables.scss`,
-        };
-        failures.push(hardFailure);
-        hardFailures.push(hardFailure);
-      }
+  const allowedDefs = baseline.scssRadiusDefinitions;
+  const currentDefs = findings.scssRadiusDefinitions ?? {};
+  for (const [defName, currentValue] of Object.entries(currentDefs)) {
+    const site = (findings.scssRadiusDefinitionSites ?? []).find(
+      (candidate) => candidate.name === defName
+    );
+    const file = site?.file ?? 'apps/web/src/styles/variables.scss';
+    const line = site?.line ?? 1;
+    if (!Object.prototype.hasOwnProperty.call(allowedDefs, defName)) {
+      const hardFailure = {
+        file,
+        line,
+        rule: 'scss-radius-var',
+        name: defName,
+        current: currentValue,
+        baseline: null,
+        message: `new SCSS radius variable definition "${defName}" is not allowed in variables.scss`,
+      };
+      failures.push(hardFailure);
+      hardFailures.push(hardFailure);
+    } else if (allowedDefs[defName] !== currentValue) {
+      const hardFailure = {
+        file,
+        line,
+        rule: 'scss-radius-var',
+        name: defName,
+        current: currentValue,
+        baseline: allowedDefs[defName],
+        message: `SCSS radius variable "${defName}" value changed from "${allowedDefs[defName]}" to "${currentValue}" in variables.scss`,
+      };
+      failures.push(hardFailure);
+      hardFailures.push(hardFailure);
+    }
+  }
+  for (const defName of Object.keys(allowedDefs)) {
+    if (!Object.prototype.hasOwnProperty.call(currentDefs, defName)) {
+      tightenNotices.push({
+        rule: 'scss-radius-var',
+        file: 'apps/web/src/styles/variables.scss',
+        name: defName,
+        current: 0,
+        baseline: 1,
+        message: `scssRadiusDefinitions (${defName}): removed from variables.scss`,
+      });
     }
   }
 
@@ -882,6 +1076,7 @@ const parseCliArgs = (argv) => {
   let baselinePath = defaultBaselinePath;
   let updateBaseline = false;
   let allowIncrease = false;
+  let initBaseline = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -895,6 +1090,8 @@ const parseCliArgs = (argv) => {
       updateBaseline = true;
     } else if (arg === '--allow-increase') {
       allowIncrease = true;
+    } else if (arg === '--init') {
+      initBaseline = true;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
@@ -905,6 +1102,7 @@ const parseCliArgs = (argv) => {
     baselinePath: path.resolve(baselinePath),
     updateBaseline,
     allowIncrease,
+    initBaseline,
   };
 };
 
@@ -918,29 +1116,69 @@ export const runCli = (argv = process.argv.slice(2)) => {
   }
 
   const findings = collectFindings(options.rootDir);
-  const existingBaseline = existsSync(options.baselinePath)
-    ? JSON.parse(readFileSync(options.baselinePath, 'utf8'))
-    : null;
+
+  if (options.initBaseline) {
+    if (options.updateBaseline) {
+      console.error('Cannot combine --init with --update-baseline');
+      return 1;
+    }
+    if (existsSync(options.baselinePath)) {
+      console.error(
+        `Refusing to overwrite existing design token baseline with --init: ${options.baselinePath}`
+      );
+      return 1;
+    }
+    const nextBaseline = buildBaselineFromFindings(findings);
+    writeFileSync(options.baselinePath, `${JSON.stringify(nextBaseline, null, 2)}\n`, 'utf8');
+    console.log(
+      `Initialized design token baseline: ${toPosixPath(path.relative(repoRoot, options.baselinePath))}`
+    );
+    return 0;
+  }
+
+  if (!existsSync(options.baselinePath)) {
+    console.error(
+      `Missing design token baseline file: ${options.baselinePath} (use --init for first-time generation)`
+    );
+    return 1;
+  }
+
+  let existingBaseline;
+  try {
+    existingBaseline = JSON.parse(readFileSync(options.baselinePath, 'utf8'));
+  } catch (error) {
+    console.error(
+      `Failed to read design token baseline file ${options.baselinePath}: ${error.message}`
+    );
+    return 1;
+  }
+
+  const schemaErrors = validateBaseline(existingBaseline);
+  if (schemaErrors.length > 0) {
+    console.error(`Invalid design token baseline schema in ${options.baselinePath}:`);
+    for (const err of schemaErrors) {
+      console.error(`  ${err}`);
+    }
+    return 1;
+  }
 
   if (options.updateBaseline) {
-    if (existingBaseline) {
-      const comparison = compareToBaseline(findings, existingBaseline);
-      if (comparison.hardFailures.length > 0) {
-        for (const failure of comparison.hardFailures) {
-          console.error(`${failure.file}:${failure.line} ${failure.rule} ${failure.message}`);
-        }
-        return 1;
+    const comparison = compareToBaseline(findings, existingBaseline);
+    if (comparison.hardFailures.length > 0) {
+      for (const failure of comparison.hardFailures) {
+        console.error(`${failure.file}:${failure.line} ${failure.rule} ${failure.message}`);
       }
-      if (!options.allowIncrease && comparison.increases.length > 0) {
-        console.error(
-          'Refusing to update baseline because violation counts increased (pass --allow-increase if intentional):'
-        );
-        for (const inc of comparison.increases) {
-          const label = inc.name ? `${inc.file} (${inc.name})` : inc.file;
-          console.error(`  ${inc.rule} ${label}: ${inc.baseline} -> ${inc.current}`);
-        }
-        return 1;
+      return 1;
+    }
+    if (!options.allowIncrease && comparison.increases.length > 0) {
+      console.error(
+        'Refusing to update baseline because violation counts increased (pass --allow-increase if intentional):'
+      );
+      for (const inc of comparison.increases) {
+        const label = inc.name ? `${inc.file} (${inc.name})` : inc.file;
+        console.error(`  ${inc.rule} ${label}: ${inc.baseline} -> ${inc.current}`);
       }
+      return 1;
     }
 
     const nextBaseline = buildBaselineFromFindings(findings);
@@ -950,12 +1188,6 @@ export const runCli = (argv = process.argv.slice(2)) => {
     );
     return 0;
   }
-
-  if (!existingBaseline) {
-    console.error(`Missing design token baseline file: ${options.baselinePath}`);
-    return 1;
-  }
-
   const comparison = compareToBaseline(findings, existingBaseline);
 
   if (comparison.failures.length > 0) {

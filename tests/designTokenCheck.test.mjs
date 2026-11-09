@@ -8,6 +8,7 @@ import {
   buildBaselineFromFindings,
   collectFindings,
   compareToBaseline,
+  validateBaseline,
 } from '../bin/ci/check-design-tokens.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,32 +45,45 @@ afterEach(() => {
 });
 
 describe('design token checker', () => {
-  it('R1 flags undefined variables, including fallback and multiline forms, and accepts definitions from SCSS, TSX inline styles, assignment, and setProperty while rejecting plain computed reads', () => {
+  it('R1 flags undefined variables, including fallback and multiline forms, and accepts definitions only from SCSS, JSX inline styles, and .setProperty()', () => {
     const root = createFixtureTree({
       'styles/themes.scss': `:root {\n  --defined-in-scss: #2563eb;\n}\n`,
       'components/Widget.tsx': [
         `export function Widget(styles: Record<string, string>, el: HTMLElement) {`,
         `  document.documentElement.style.setProperty('--defined-via-set-prop', '12px');`,
-        `  el.style['--defined-via-assignment'] = '8px';`,
+        `  el.style['--not-defined-by-assignment'] = '8px';`,
+        `  const translations = { '--not-defined-by-object-key': 'display text' };`,
+        `  const style = { '--not-defined-by-local-var': '1' };`,
         `  const readOnly = styles['--not-defined-by-read'];`,
         `  const cssRef = 'var(--not-defined-by-read)';`,
         `  const dynamicKey = '--defined-via-template';`,
-        `  const style = {`,
-        `    '--defined-in-tsx': '1',`,
-        `    ['--defined-in-brackets']: '2',`,
-        '    [`--defined-in-backticks`]: `var(--${dynamicKey})`,',
-        `  };`,
-        `  return <div data-x={readOnly} data-y={cssRef} style={style} />;`,
+        `  return (`,
+        `    <div`,
+        `      data-x={readOnly}`,
+        `      data-y={cssRef}`,
+        `      data-z={translations['--not-defined-by-object-key']}`,
+        `      data-w={style['--not-defined-by-local-var']}`,
+        `      style={`,
+        `        {`,
+        `          '--defined-in-tsx': '1',`,
+        `          ['--defined-in-brackets']: '2',`,
+        '          [`--defined-in-backticks`]: `var(--${dynamicKey})`,',
+        `        } as Record<string, string>`,
+        `      }`,
+        `    />`,
+        `  );`,
         `}`,
       ].join('\n'),
       'components/Widget.module.scss': [
         `.widget {`,
         `  color: var(--defined-in-scss);`,
         `  padding: var(--defined-via-set-prop);`,
-        `  margin: var(--defined-via-assignment);`,
         `  opacity: var(--defined-in-tsx);`,
         `  z-index: var(--defined-in-brackets);`,
         `  line-height: var(--defined-in-backticks);`,
+        `  margin: var(--not-defined-by-assignment);`,
+        `  top: var(--not-defined-by-object-key);`,
+        `  left: var(--not-defined-by-local-var);`,
         `  background: var(--missing-direct);`,
         `  border-color: var(--missing-with-fallback, var(--defined-in-scss));`,
         `  outline-color: var(`,
@@ -90,23 +104,33 @@ describe('design token checker', () => {
         '--missing-direct': 1,
         '--missing-multiline': 1,
         '--missing-with-fallback': 1,
+        '--not-defined-by-assignment': 1,
+        '--not-defined-by-local-var': 1,
+        '--not-defined-by-object-key': 1,
       },
       'components/Widget.tsx': {
         '--not-defined-by-read': 1,
       },
     });
 
-    const comparison = compareToBaseline(findings, { version: 1, rules: {} });
+    const comparison = compareToBaseline(findings, {
+      version: 2,
+      rules: emptyRules,
+      scssRadiusDefinitions: {},
+    });
     expect(comparison.passed).toBe(false);
     expect(
       comparison.failures
         .filter((item) => item.rule === 'undefined-var')
         .map((item) => [item.file, item.line, item.name])
     ).toEqual([
-      ['components/Widget.module.scss', 8, '--missing-direct'],
-      ['components/Widget.module.scss', 10, '--missing-multiline'],
-      ['components/Widget.module.scss', 9, '--missing-with-fallback'],
-      ['components/Widget.tsx', 5, '--not-defined-by-read'],
+      ['components/Widget.module.scss', 10, '--missing-direct'],
+      ['components/Widget.module.scss', 12, '--missing-multiline'],
+      ['components/Widget.module.scss', 11, '--missing-with-fallback'],
+      ['components/Widget.module.scss', 7, '--not-defined-by-assignment'],
+      ['components/Widget.module.scss', 9, '--not-defined-by-local-var'],
+      ['components/Widget.module.scss', 8, '--not-defined-by-object-key'],
+      ['components/Widget.tsx', 7, '--not-defined-by-read'],
     ]);
   });
 
@@ -124,8 +148,9 @@ describe('design token checker', () => {
     const findings = collectFindings(root);
 
     const matchingBaseline = {
-      version: 1,
+      version: 2,
       rules: {
+        ...emptyRules,
         'undefined-var': {
           'features/Page.module.scss': {
             '--brand-new-missing': 1,
@@ -133,18 +158,21 @@ describe('design token checker', () => {
           },
         },
       },
+      scssRadiusDefinitions: {},
     };
     expect(compareToBaseline(findings, matchingBaseline).passed).toBe(true);
 
     const swappedNameBaseline = {
-      version: 1,
+      version: 2,
       rules: {
+        ...emptyRules,
         'undefined-var': {
           'features/Page.module.scss': {
             '--legacy-shadow': 2,
           },
         },
       },
+      scssRadiusDefinitions: {},
     };
     const swappedResult = compareToBaseline(findings, swappedNameBaseline);
     expect(swappedResult.passed).toBe(false);
@@ -325,13 +353,94 @@ describe('design token checker', () => {
         important: { 'a.scss': 2 },
       },
     ],
+    [
+      'R1-01 flags undefined CSS variables when the same key appears only in a non-style TS/TSX object literal',
+      {
+        'features/demo/notAStyle.tsx': `export const translations = { '--missing-design-token': 'display text' };\n`,
+        'features/demo/Demo.module.scss': `.demo { color: var(--missing-design-token); }\n`,
+      },
+      {
+        ...emptyRules,
+        'undefined-var': {
+          'features/demo/Demo.module.scss': { '--missing-design-token': 1 },
+        },
+      },
+    ],
+    [
+      'R1-02 ignores var(), !important, and $radius-* inside quoted strings and url() in .css/.scss while inspecting #{} bodies',
+      {
+        'a.scss': [
+          `.tip::after {`,
+          `  content: "var(--example-not-real) !important $radius-md";`,
+          `  background-image: url("https://example.org/var(--url-fragment).svg?x=!important&$radius-md");`,
+          `}`,
+        ].join('\n'),
+      },
+      emptyRules,
+    ],
+    [
+      'R1-03 flags disallowed weights in font shorthand while allowing inherit, system font keywords, and var()/$ expressions',
+      {
+        'flagged.scss': [
+          `.a { font: 900 14px Arial, sans-serif; }`,
+          `.b { font: italic bolder 13px/1.4 Inter, sans-serif; }`,
+          `.c { font: lighter 12px sans-serif; }`,
+        ].join('\n'),
+        'allowed.scss': [
+          `:root { --font-shorthand: 500 14px sans-serif; }`,
+          `.d { font: inherit; }`,
+          `.e { font: caption; }`,
+          `.f { font: 600 14px/2 Arial, sans-serif; }`,
+          `.g { font: var(--font-shorthand); }`,
+          `.h { font: $font-shorthand; }`,
+        ].join('\n'),
+      },
+      {
+        ...emptyRules,
+        'font-weight': { 'flagged.scss': 3 },
+      },
+    ],
+    [
+      'R1-06 counts oklch, oklab, lab, lch, hwb, and color() in R5 while ignoring color-mix() without literals, background-color(), and named colours',
+      {
+        'modern.scss': [
+          `.demo {`,
+          `  color: oklch(60% 0.1 240);`,
+          `  background: color(display-p3 1 0 0);`,
+          `  border-color: hwb(120 10% 20%);`,
+          `  outline-color: lab(50% 40 59.5);`,
+          `  fill: lch(52.2% 72.2 50);`,
+          `  stroke: oklab(0.6 0.1 -0.1);`,
+          `  box-shadow: 0 0 0 1px color-mix(in srgb, var(--defined-a) 20%, transparent);`,
+          `  caret-color: red;`,
+          `  filter: background-color(var(--defined-a));`,
+          `}`,
+        ].join('\n'),
+        'styles/themes.scss': `:root { --defined-a: #123456; }\n`,
+      },
+      {
+        ...emptyRules,
+        'color-literal': { 'modern.scss': 6 },
+      },
+    ],
+    [
+      'R1-07 treats // as a comment in .scss and script files but not in .css',
+      {
+        'plain.css': `.demo {\n  --link-text: https://example.org; color: #123456;\n}\n`,
+        'styled.scss': `.demo {\n  --link-text: https://example.org; color: #123456;\n}\n`,
+      },
+      {
+        ...emptyRules,
+        'color-literal': { 'plain.css': 1 },
+      },
+    ],
   ])('%s', (_label, files, expectedRules) => {
     const root = createFixtureTree(files);
     const findings = collectFindings(root);
     expect(findings.rules).toEqual(expectedRules);
   });
 
-  it('R4 counts $radius-* uses and hard-fails on new $radius-* definitions in styles/variables.scss even with --update-baseline --allow-increase', () => {
+  it('R4 freezes legacy $radius-* names and raw values in styles/variables.scss and hard-fails on new or modified definitions even with --allow-increase while allowing removals', () => {
     const root = createFixtureTree({
       'styles/variables.scss': `$radius-sm: 4px;\n$radius-md: 8px;\n`,
       'components/Box.module.scss': `.box {\n  border-radius: $radius-md;\n}\n`,
@@ -343,34 +452,35 @@ describe('design token checker', () => {
       'components/Box.module.scss': 1,
       'styles/variables.scss': 2,
     });
-    expect(initialFindings.scssRadiusDefinitions).toEqual(['$radius-md', '$radius-sm']);
+    expect(initialFindings.scssRadiusDefinitions).toEqual({
+      '$radius-md': '8px',
+      '$radius-sm': '4px',
+    });
 
     const initialBaseline = buildBaselineFromFindings(initialFindings);
     writeFileSync(baselineFile, JSON.stringify(initialBaseline, null, 2), 'utf8');
 
+    // 1. Changing an existing definition's value ($radius-sm: 4px -> 14px) hard-fails
     writeFileSync(
       path.join(root, 'styles/variables.scss'),
-      `$radius-sm: 4px;\n$radius-md: 8px;\n$radius-xl: 24px;\n`,
+      `$radius-sm: 14px;\n$radius-md: 8px;\n`,
       'utf8'
     );
-
-    const updatedFindings = collectFindings(root);
-    expect(updatedFindings.rules['scss-radius-var']).toEqual({
-      'components/Box.module.scss': 1,
-      'styles/variables.scss': 3,
-    });
-    const comparison = compareToBaseline(updatedFindings, initialBaseline);
-    expect(comparison.passed).toBe(false);
-    expect(comparison.hardFailures).toEqual([
+    const mutatedValueFindings = collectFindings(root);
+    const mutatedValueComparison = compareToBaseline(mutatedValueFindings, initialBaseline);
+    expect(mutatedValueComparison.passed).toBe(false);
+    expect(mutatedValueComparison.hardFailures).toEqual([
       expect.objectContaining({
         file: 'styles/variables.scss',
-        line: 3,
+        line: 1,
         rule: 'scss-radius-var',
-        name: '$radius-xl',
+        name: '$radius-sm',
+        current: '14px',
+        baseline: '4px',
       }),
     ]);
 
-    const refusedCli = spawnSync(
+    const refusedValueChangeCli = spawnSync(
       process.execPath,
       [
         scriptPath,
@@ -383,12 +493,143 @@ describe('design token checker', () => {
       ],
       { encoding: 'utf8' }
     );
-    expect(refusedCli.status).toBe(1);
-    expect(refusedCli.stderr).toContain(
+    expect(refusedValueChangeCli.status).toBe(1);
+    expect(refusedValueChangeCli.stderr).toContain(
+      'SCSS radius variable "$radius-sm" value changed from "4px" to "14px"'
+    );
+
+    // 2. Adding a new $radius-* definition hard-fails
+    writeFileSync(
+      path.join(root, 'styles/variables.scss'),
+      `$radius-sm: 4px;\n$radius-md: 8px;\n$radius-xl: 24px;\n`,
+      'utf8'
+    );
+
+    const addedDefFindings = collectFindings(root);
+    const addedDefComparison = compareToBaseline(addedDefFindings, initialBaseline);
+    expect(addedDefComparison.passed).toBe(false);
+    expect(addedDefComparison.hardFailures).toEqual([
+      expect.objectContaining({
+        file: 'styles/variables.scss',
+        line: 3,
+        rule: 'scss-radius-var',
+        name: '$radius-xl',
+      }),
+    ]);
+
+    const refusedNewDefCli = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--root',
+        root,
+        '--baseline',
+        baselineFile,
+        '--update-baseline',
+        '--allow-increase',
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(refusedNewDefCli.status).toBe(1);
+    expect(refusedNewDefCli.stderr).toContain(
       'new SCSS radius variable definition "$radius-xl" is not allowed in variables.scss'
     );
     const preservedBaseline = JSON.parse(readFileSync(baselineFile, 'utf8'));
-    expect(preservedBaseline.scssRadiusDefinitions).toEqual(['$radius-md', '$radius-sm']);
+    expect(preservedBaseline.scssRadiusDefinitions).toEqual({
+      '$radius-md': '8px',
+      '$radius-sm': '4px',
+    });
+
+    // 3. Removing a legacy definition is allowed and tightens the baseline
+    writeFileSync(path.join(root, 'styles/variables.scss'), `$radius-md: 8px;\n`, 'utf8');
+    const removedDefFindings = collectFindings(root);
+    const removedDefComparison = compareToBaseline(removedDefFindings, initialBaseline);
+    expect(removedDefComparison.passed).toBe(true);
+    expect(removedDefComparison.hardFailures).toHaveLength(0);
+  });
+
+  it('R1-05 fails closed on missing, unreadable, wrong-version, or schema-incomplete baselines and requires --init without overwriting', () => {
+    const root = createFixtureTree({
+      'styles/variables.scss': `$radius-sm: 4px;\n`,
+      'components/Box.module.scss': `.box { border-radius: 8px; }\n`,
+    });
+    const baselineFile = path.join(root, 'baseline.json');
+
+    // Missing baseline fails both normal check and --update-baseline --allow-increase
+    const missingCheck = spawnSync(
+      process.execPath,
+      [scriptPath, '--root', root, '--baseline', baselineFile],
+      { encoding: 'utf8' }
+    );
+    expect(missingCheck.status).toBe(1);
+    expect(missingCheck.stderr).toContain('Missing design token baseline file');
+
+    const missingUpdate = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--root',
+        root,
+        '--baseline',
+        baselineFile,
+        '--update-baseline',
+        '--allow-increase',
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(missingUpdate.status).toBe(1);
+    expect(missingUpdate.stderr).toContain('Missing design token baseline file');
+
+    // --init creates the baseline when it does not exist
+    const initCreate = spawnSync(
+      process.execPath,
+      [scriptPath, '--root', root, '--baseline', baselineFile, '--init'],
+      { encoding: 'utf8' }
+    );
+    expect(initCreate.status).toBe(0);
+    const createdBaseline = JSON.parse(readFileSync(baselineFile, 'utf8'));
+    expect(createdBaseline.version).toBe(2);
+    expect(createdBaseline.scssRadiusDefinitions).toEqual({ '$radius-sm': '4px' });
+
+    // --init refuses to overwrite an existing baseline file
+    const initOverwrite = spawnSync(
+      process.execPath,
+      [scriptPath, '--root', root, '--baseline', baselineFile, '--init'],
+      { encoding: 'utf8' }
+    );
+    expect(initOverwrite.status).toBe(1);
+    expect(initOverwrite.stderr).toContain(
+      'Refusing to overwrite existing design token baseline with --init'
+    );
+
+    // Wrong version or missing scssRadiusDefinitions fails closed
+    const findings = collectFindings(root);
+    const wrongVersionBaseline = { ...createdBaseline, version: 1 };
+    expect(validateBaseline(wrongVersionBaseline)).toEqual(
+      expect.arrayContaining([expect.stringContaining('Unsupported baseline version')])
+    );
+    expect(compareToBaseline(findings, wrongVersionBaseline).passed).toBe(false);
+
+    const missingRadiusDefsBaseline = {
+      version: 2,
+      rules: createdBaseline.rules,
+    };
+    writeFileSync(baselineFile, JSON.stringify(missingRadiusDefsBaseline, null, 2), 'utf8');
+    const invalidSchemaUpdate = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--root',
+        root,
+        '--baseline',
+        baselineFile,
+        '--update-baseline',
+        '--allow-increase',
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(invalidSchemaUpdate.status).toBe(1);
+    expect(invalidSchemaUpdate.stderr).toContain('scssRadiusDefinitions');
   });
 
   it('R5 exempts only <root>/styles/themes.scss and still checks other themes.scss files', () => {
