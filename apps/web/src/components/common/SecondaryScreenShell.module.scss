@@ -115,7 +115,8 @@
   backdrop-filter: var(--glass-backdrop-filter);
   -webkit-backdrop-filter: var(--glass-backdrop-filter);
   border: 1px solid var(--glass-border);
-  box-shadow: var(--glass-shadow);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-lg);
 }
 
 @media (max-width: 1200px) {

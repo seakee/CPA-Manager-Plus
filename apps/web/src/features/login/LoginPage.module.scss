@@ -66,15 +66,20 @@
   min-width: 112px;
   max-width: calc(100vw - 24px);
   padding: 6px;
-  border: 1px solid var(--glass-border);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-primary));
   border-radius: var(--app-radius-md);
-  background: color-mix(in srgb, var(--app-surface-strong) 96%, transparent);
-  box-shadow: var(--glass-shadow);
+  background: var(--floating-surface);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-lg);
   backdrop-filter: var(--glass-backdrop-filter);
   -webkit-backdrop-filter: var(--glass-backdrop-filter);
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+:global([data-theme='dark']) .languagePopover {
+  border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-primary));
 }
 
 .languageOption {

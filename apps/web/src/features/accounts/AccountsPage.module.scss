@@ -6850,7 +6850,8 @@
   border: 1px solid var(--border-color);
   border-radius: var(--app-radius-lg);
   background: var(--app-surface-strong);
-  box-shadow: var(--shadow-lg);
+  /* floating layer: elevation allowed */
+  box-shadow: var(--floating-shadow-lg);
 }
 
 .floatingBatchActionLeft,

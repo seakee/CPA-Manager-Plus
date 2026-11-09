@@ -671,7 +671,8 @@
     border: 1px solid var(--border-color);
     border-radius: var(--app-radius-md);
     background: var(--bg-primary);
-    box-shadow: var(--shadow-lg);
+    /* floating layer: elevation allowed */
+    box-shadow: var(--floating-shadow-sm);
     color: var(--text-primary);
     font-size: 11px;
     line-height: 1.5;

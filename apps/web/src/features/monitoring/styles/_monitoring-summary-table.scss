@@ -182,7 +182,8 @@
     border-radius: var(--app-radius-md);
     background: color-mix(in srgb, var(--data-blue-base) 92%, var(--data-blue-dark-2));
     color: var(--primary-contrast);
-    box-shadow: 0 14px 30px color-mix(in srgb, var(--data-blue-base) 28%, transparent);
+    /* floating layer: elevation allowed */
+    box-shadow: var(--floating-shadow-md);
     opacity: 0;
     pointer-events: none;
     transform: translateY(4px);
@@ -1134,7 +1135,8 @@
     border: 1px solid color-mix(in srgb, var(--error-color) 26%, var(--border-color));
     border-radius: var(--app-radius-md);
     background: var(--monitor-surface-elevated);
-    box-shadow: var(--shadow-lg);
+    /* floating layer: elevation allowed */
+    box-shadow: var(--floating-shadow-md);
     color: var(--text-primary);
     font-size: 12px;
     line-height: 1.45;
