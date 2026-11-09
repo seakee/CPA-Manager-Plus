@@ -648,6 +648,8 @@
       background: var(--bg-hover);
     }
 
+    // Accepted colour literals: no amber token keeps the same value in both
+    // themes, so the CodeMirror match highlights keep their original values.
     .cm-selectionMatch {
       background: rgba(255, 193, 7, 0.3);
     }

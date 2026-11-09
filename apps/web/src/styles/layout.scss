@@ -570,6 +570,8 @@
     backdrop-filter $transition-fast,
     -webkit-backdrop-filter $transition-fast;
 
+  // Accepted colour literals: the white specular gradient on hover/active is
+  // theme-independent and has no token.
   &:hover {
     background:
       linear-gradient(135deg, rgb(255 255 255 / 0.18), rgb(255 255 255 / 0.04)),
