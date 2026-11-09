@@ -11,6 +11,7 @@ import {
 import { useLocation } from 'react-router-dom';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
+import { getRangeDisplayBounds } from '@/features/monitoring/model/range';
 import {
   buildRealtimeMonitorRows,
   getRangeBounds,
@@ -498,6 +499,7 @@ export function MonitoringCenterPage() {
   );
 
   const {
+    rangeBounds: monitoringRangeBounds,
     loading: monitoringLoading,
     error: monitoringError,
     authFiles,
@@ -892,11 +894,12 @@ export function MonitoringCenterPage() {
   const accountStatusNowMs = monitoringLastRefreshedAt?.getTime() ?? Date.now();
   const accountStatusBounds = useMemo(
     () => {
-      const bounds = getRangeBounds(timeRange, accountStatusNowMs, customTimeRange);
-      if (!bounds || timeRange !== 'yesterday') return bounds;
-      return { ...bounds, endMs: bounds.endMs - 1 };
+      const bounds = timeRange === '24h'
+        ? monitoringRangeBounds
+        : getRangeBounds(timeRange, accountStatusNowMs, customTimeRange);
+      return getRangeDisplayBounds(timeRange, bounds);
     },
-    [accountStatusNowMs, customTimeRange, timeRange]
+    [accountStatusNowMs, customTimeRange, monitoringRangeBounds, timeRange]
   );
   const accountOverviewScopeText = useMemo(
     () => formatAccountOverviewScopeText(accountStatusBounds, i18n.language, t),

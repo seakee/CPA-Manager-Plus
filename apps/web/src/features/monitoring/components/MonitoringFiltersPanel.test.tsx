@@ -43,6 +43,7 @@ describe('MonitoringFiltersPanel time ranges', () => {
     );
 
     const rangeLabels = [
+      'monitoring.range_24h',
       'monitoring.range_today',
       'monitoring.range_yesterday',
       'monitoring.range_7d',

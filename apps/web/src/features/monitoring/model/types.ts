@@ -32,6 +32,7 @@ export type MonitoringAuthMeta = {
 };
 
 export type MonitoringTimeRange =
+  | '24h'
   | 'today'
   | 'yesterday'
   | '7d'
@@ -408,6 +409,7 @@ export interface UseMonitoringDataParams {
 }
 
 export interface UseMonitoringDataReturn {
+  rangeBounds: MonitoringCustomTimeRange | null;
   loading: boolean;
   error: string;
   authFiles: AuthFileItem[];

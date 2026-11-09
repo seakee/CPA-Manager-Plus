@@ -95,6 +95,7 @@ See [Choosing A CPA Panel](https://seakee.github.io/CPA-Manager-Plus/docs/en/gui
 
 - Persist requests from the CPA usage queue in local SQLite and search account, client API key, and realtime request views.
 - Inspect status, latency, token, cache, trace, and redacted failure evidence without exposing raw failure bodies.
+- Select **24 hours** for a live window from 24 hours before the current local hour through the latest refresh, including current-hour requests. The historical start advances at each hour boundary even with auto-refresh off; today and yesterday remain calendar-day presets.
 - Export or import request history as JSONL.
 - Open the [Monitoring Demo](https://seakee.github.io/CPA-Manager-Plus/#/demo/monitoring).
 

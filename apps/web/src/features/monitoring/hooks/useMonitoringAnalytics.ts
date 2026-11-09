@@ -38,6 +38,7 @@ export interface UseMonitoringAnalyticsReturn {
   error: string;
   data: MonitoringAnalyticsResponse | null;
   dataStale: boolean;
+  dataBounds?: { startMs: number; endMs: number } | null;
   lastRefreshedAt: Date | null;
   serviceBase: string;
   unavailableReason: RequestMonitoringUnavailableReason | '';
@@ -95,6 +96,7 @@ export function useMonitoringAnalytics({
   const availability = useRequestMonitoringAvailability();
   const [data, setData] = useState<MonitoringAnalyticsResponse | null>(null);
   const [dataScopeStateKey, setDataScopeStateKey] = useState('');
+  const [dataBounds, setDataBounds] = useState<{ startMs: number; endMs: number } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
@@ -171,6 +173,7 @@ export function useMonitoringAnalytics({
     lastRequestKeyRef.current = '';
     lastStartedAtRef.current = 0;
     setData(null);
+    setDataBounds(null);
     setDataScopeStateKey('');
     setLastRefreshedAt(null);
     setError('');
@@ -189,6 +192,7 @@ export function useMonitoringAnalytics({
         inFlightRequestIdentityKeyRef.current = '';
         inFlightRequestIdRef.current = 0;
         setData(null);
+        setDataBounds(null);
         setDataScopeStateKey('');
         setLastRefreshedAt(null);
         setLoading(false);
@@ -231,6 +235,7 @@ export function useMonitoringAnalytics({
         if (requestIdRef.current !== requestId || connectionScopeRef.current !== connectionScope)
           return;
         setData(response);
+        setDataBounds({ startMs: request.from_ms, endMs: request.to_ms });
         setDataScopeStateKey(activeDataScopeKey);
         setLastRefreshedAt(new Date());
       } catch (err) {
@@ -289,6 +294,7 @@ export function useMonitoringAnalytics({
       error,
       data: scopedData,
       dataStale,
+      dataBounds,
       lastRefreshedAt,
       serviceBase,
       unavailableReason: availability.reason,
@@ -300,6 +306,7 @@ export function useMonitoringAnalytics({
       enabled,
       error,
       dataStale,
+      dataBounds,
       lastRefreshedAt,
       loading,
       refresh,

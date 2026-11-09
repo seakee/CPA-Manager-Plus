@@ -50,9 +50,9 @@ export const buildRangeFilteredRows = (
   timeRange: MonitoringTimeRange,
   customTimeRange: MonitoringCustomTimeRange | null | undefined,
   searchQuery: string,
-  searchApiKeyHash?: string
+  searchApiKeyHash?: string,
+  nowMs = Date.now()
 ) => {
-  const nowMs = Date.now();
   const bounds = getRangeBounds(timeRange, nowMs, customTimeRange);
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const normalizedSearchApiKeyHash = String(searchApiKeyHash || '')
@@ -62,7 +62,7 @@ export const buildRangeFilteredRows = (
 
   return rows.filter((row) => {
     const outsideEnd =
-      timeRange === 'yesterday'
+      (timeRange === 'yesterday' || timeRange === '24h')
         ? row.timestampMs >= bounds.endMs
         : row.timestampMs > bounds.endMs;
     if (row.timestampMs < bounds.startMs || outsideEnd) {

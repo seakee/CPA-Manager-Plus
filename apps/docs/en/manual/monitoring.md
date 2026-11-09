@@ -27,6 +27,12 @@ If the page says request monitoring is disabled, enable it in [Configuration](./
 
 Failure summaries are sanitized. Raw failure bodies stay in local SQLite and are not exposed through normal APIs or JSONL exports.
 
+## Time Ranges
+
+The **24 hours** preset starts 24 elapsed hours before the current local hour and ends at the latest refresh, including current-hour requests. At 10:32, the window is yesterday 10:00 (included) through today 10:32 (excluded); each normal refresh advances the end while the start stays fixed within that hour. Its actual duration is at least 24 hours and less than 25 hours. The hourly timer advances the historical start even when auto-refresh is off, and catches up when you return to the tab; it does not replace or change normal polling. The selected preset is remembered in this browser.
+
+Account/API key/request views, summaries, filter selectors, and hourly charts share this window. The local fallback hourly timeline has 25 chronological timestamp-based buckets: 24 past hours plus the current partial hour, with repeated daylight-saving hours kept separate. Manager Server-provided charts retain the server's existing daylight-saving bucketing behavior. Today, yesterday, and the existing longer presets keep their current calendar-day behavior. Displayed bounds stay attached to the data snapshot while a refresh is pending or fails.
+
 ## Common Investigation Flow
 
 1. Select the time range first. Use a short range for active incidents and a larger range for trend review.

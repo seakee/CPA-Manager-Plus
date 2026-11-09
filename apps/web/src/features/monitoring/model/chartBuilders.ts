@@ -1,5 +1,14 @@
 import { joinUnique } from './base';
-import { buildDayLabel, padNumber, shouldUseHourlyTimeline } from './range';
+import {
+  buildDayLabel,
+  buildHourLabel,
+  buildLocalDayKey,
+  formatHourOffset,
+  getRangeBounds,
+  HOUR_MS,
+  padNumber,
+  shouldUseHourlyTimeline,
+} from './range';
 import type {
   MonitoringChannelRow,
   MonitoringCustomTimeRange,
@@ -18,8 +27,33 @@ import type {
 export const buildTimeline = (
   rows: MonitoringEventRow[],
   timeRange: MonitoringTimeRange,
-  customTimeRange?: MonitoringCustomTimeRange | null
+  customTimeRange?: MonitoringCustomTimeRange | null,
+  nowMs = Date.now()
 ): { granularity: 'hour' | 'day'; points: MonitoringTimelinePoint[] } => {
+  if (timeRange === '24h') {
+    const bounds = getRangeBounds(timeRange, nowMs)!;
+    const points = Array.from({ length: 25 }, (_, index) => {
+      const timestamp = bounds.startMs + index * HOUR_MS;
+      return { label: buildHourLabel(timestamp), requests: 0, tokens: 0, cost: 0 };
+    });
+    // Timestamp indices keep both occurrences of a repeated local hour.
+    rows.forEach((row) => {
+      const index = Math.floor((row.timestampMs - bounds.startMs) / HOUR_MS);
+      const bucket = points[index];
+      if (!bucket) return;
+      bucket.requests += 1;
+      bucket.tokens += row.totalTokens;
+      bucket.cost += row.totalCost;
+    });
+    const labels = points.map((point) => point.label);
+    points.forEach((point, index) => {
+      if (labels.indexOf(point.label) !== labels.lastIndexOf(point.label)) {
+        const timestamp = bounds.startMs + index * HOUR_MS;
+        point.label = `${buildDayLabel(buildLocalDayKey(timestamp))} ${point.label} (UTC${formatHourOffset(timestamp)})`;
+      }
+    });
+    return { granularity: 'hour', points };
+  }
   if (shouldUseHourlyTimeline(timeRange, customTimeRange)) {
     const map = new Map<string, MonitoringTimelinePoint>();
 

@@ -3092,6 +3092,7 @@
     "toolbar_title": "即時篩選與刷新",
     "realtime_console_eyebrow": "即時運行監控",
     "console_subtitle": "按帳號與時間範圍追蹤呼叫規模、成功失敗、Token 結構與花費，並提供接近請求日誌的即時監控表。",
+    "range_24h": "24 小時",
     "range_today": "今天",
     "range_yesterday": "昨天",
     "range_7d": "7 天",
