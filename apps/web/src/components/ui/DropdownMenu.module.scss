@@ -57,9 +57,7 @@
   border-radius: var(--app-radius-md);
   background: var(--bg-primary);
   /* floating layer: elevation allowed */
-  box-shadow:
-    0 16px 32px rgba(15, 23, 42, 0.14),
-    0 0 0 1px color-mix(in srgb, var(--primary-color) 8%, transparent);
+  box-shadow: var(--floating-shadow-lg);
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.4;
@@ -67,10 +65,6 @@
 
 :global([data-theme='dark']) .menu {
   border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-primary));
-  /* floating layer: elevation allowed */
-  box-shadow:
-    0 16px 32px rgba(0, 0, 0, 0.42),
-    0 0 0 1px color-mix(in srgb, var(--primary-color) 14%, transparent);
 }
 
 .item {

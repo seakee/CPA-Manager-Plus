@@ -30,10 +30,20 @@ This specification defines the token contracts, layout conventions, and automate
   - Dashed/hover borders: `--border-subtle-dashed`, `--border-hover`.
 - **Semantic status palettes**:
   - Status badges and feedback use `--data-badge-{success,warning,danger,info,neutral}-{text,bg,border}` (and their `--success-badge-*`, `--warning-*`, `--failure-badge-*`, `--info-*` aliases) or `--data-{blue,emerald,green,amber,red,violet,cyan,teal,slate}-*`.
-- **Elevation**:
-  - Drop shadows (`--app-shadow`, `--app-shadow-soft`, `--glass-shadow`, `--floating-shadow`, `--shadow`, `--shadow-lg`) are `none`.
+- **Elevation and overlay scrims**:
+  - Non-floating drop shadows (`--app-shadow`, `--app-shadow-soft`, `--glass-shadow`, `--shadow`, `--shadow-lg`) are `none`.
   - The only elevation cue on cards and panels is `--app-specular-highlight` (`box-shadow: var(--app-specular-highlight)`).
-  - Floating layers (menus, popovers, tooltips, dialogs, drawers) may keep a drop shadow so they separate from the page. Mark each one with `/* floating layer: elevation allowed */`.
+  - Floating layers (menus, popovers, tooltips, dialogs, drawers) may keep a drop shadow so they separate from the page. Mark each one with `/* floating layer: elevation allowed */` and use the `--floating-shadow-*` scale defined per theme in `themes.scss` (do not duplicate `[data-theme='dark']` shadow overrides in component stylesheets):
+    - `--floating-shadow-sm`: compact inline status tooltips (e.g. account status bar hover tooltip).
+    - `--floating-shadow-md`: portaled floating tooltips (`InfoTooltip`, `AccountRequestTimeTooltip`).
+    - `--floating-shadow-lg`: floating action and context menus (`DropdownMenu`, including its subtle accent ring).
+    - `--floating-shadow-xl`: form select popovers (`Select`, including its input-focus accent ring).
+    - `--floating-shadow-dialog`: centered modal dialogs (`.modal`).
+    - `--floating-shadow-drawer`: side drawer panels (`Drawer` panel edge shadow).
+  - Overlay backdrops use the `--overlay-scrim*` tokens from `themes.scss`:
+    - `--overlay-scrim`: centered modal dialog backdrop (`.modal-overlay`).
+    - `--overlay-scrim-backdrop`: mobile navigation sidebar backdrop (`.sidebar-backdrop`).
+    - `--overlay-scrim-drawer`: slide-over drawer backdrop (`Drawer` overlay).
 
 ## 3. Concentric Radius Scale
 

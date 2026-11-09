@@ -27,7 +27,7 @@
   border-radius: var(--app-radius-md);
   background: var(--bg-primary);
   /* floating layer: elevation allowed */
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+  box-shadow: var(--floating-shadow-md);
   color: var(--text-primary);
   line-height: 1.4;
   pointer-events: none;
