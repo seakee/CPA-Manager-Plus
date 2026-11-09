@@ -47,25 +47,18 @@
       "apps/web/src/features/authFiles/components/OAuthRuleCards.module.scss": 1,
       "apps/web/src/features/config/ConfigPage.module.scss": 5,
       "apps/web/src/features/login/LoginPage.module.scss": 4,
-      "apps/web/src/features/monitoring/CodexInspectionPage.module.scss": 4,
-      "apps/web/src/features/monitoring/MonitoringCenterPage.module.scss": 2,
-      "apps/web/src/features/monitoring/styles/_monitoring-account-overview.scss": 2,
-      "apps/web/src/features/monitoring/styles/_monitoring-summary-table.scss": 5,
+      "apps/web/src/features/monitoring/CodexInspectionPage.module.scss": 2,
+      "apps/web/src/features/monitoring/styles/_monitoring-account-overview.scss": 1,
       "apps/web/src/features/system/components/DatabaseStatusCard.module.scss": 7,
       "apps/web/src/features/system/ManagerUpdates.module.scss": 1,
       "apps/web/src/features/system/SystemPage.module.scss": 2,
-      "apps/web/src/features/usage-analytics/UsageAnalyticsPage.module.scss": 4,
       "apps/web/src/styles/layout.scss": 10,
       "apps/web/src/styles/mixins.scss": 2,
       "apps/web/src/styles/variables.scss": 18
     },
     "important": {
       "apps/web/src/components/ui/Drawer.module.scss": 1,
-      "apps/web/src/features/login/LoginPage.module.scss": 2,
-      "apps/web/src/features/monitoring/CodexInspectionPage.module.scss": 3,
-      "apps/web/src/features/monitoring/MonitoringCenterPage.module.scss": 14,
-      "apps/web/src/features/monitoring/styles/_monitoring-summary-table.scss": 9,
-      "apps/web/src/features/usage-analytics/UsageAnalyticsPage.module.scss": 5
+      "apps/web/src/features/login/LoginPage.module.scss": 2
     }
   },
   "scssRadiusDefinitions": {
