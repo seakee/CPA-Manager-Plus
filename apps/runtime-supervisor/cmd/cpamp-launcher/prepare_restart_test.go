@@ -331,23 +331,21 @@ func seedProcStatus(t *testing.T, sys *fakeSystem, pid int, ruid, euid, suid, fs
 }
 
 func TestCPAQuiescenceBeforePrepareAndRestart(t *testing.T) {
-	t.Run("kills only uid 10001 processes across real effective saved and fs uids", func(t *testing.T) {
+	t.Run("kills only pure uid 10001 processes and spares pid 1 root manager and ingress", func(t *testing.T) {
 		sys := newFakeSystem(t)
 		seedProcStatus(t, sys, 1, 0, 0, 0, 0)
 		seedProcStatus(t, sys, 200, 0, 0, 0, 0)
 		seedProcStatus(t, sys, 301, 10002, 10002, 10002, 10002)
 		seedProcStatus(t, sys, 302, 10003, 10003, 10003, 10003)
 		seedProcStatus(t, sys, 401, 10001, 10001, 10001, 10001)
-		seedProcStatus(t, sys, 402, 0, 10001, 0, 0)
-		seedProcStatus(t, sys, 403, 0, 0, 10001, 0)
-		seedProcStatus(t, sys, 404, 0, 0, 0, 10001)
+		seedProcStatus(t, sys, 402, 10001, 10001, 10001, 10001)
 
 		prepared, err := prepare(PrepareConfig{}, sys)
 		if err != nil {
 			t.Fatalf("prepare failed: %v", err)
 		}
 		slices.Sort(sys.killCalls)
-		wantKilled := []int{401, 402, 403, 404}
+		wantKilled := []int{401, 402}
 		if !slices.Equal(sys.killCalls, wantKilled) {
 			t.Fatalf("killed PIDs=%v, want %v", sys.killCalls, wantKilled)
 		}
@@ -362,7 +360,6 @@ func TestCPAQuiescenceBeforePrepareAndRestart(t *testing.T) {
 			t.Fatalf("restart killed PIDs=%v, want [505]", sys.killCalls)
 		}
 	})
-
 	t.Run("refuses with zero volume mutations when uid 10001 process cannot be quiesced", func(t *testing.T) {
 		sys := newFakeSystem(t)
 		prepared, err := prepare(PrepareConfig{}, sys)
@@ -541,6 +538,316 @@ func TestQuiescenceSkipsProcessThatChangesUIDAndRefusesWhenPidfdUnavailable(t *t
 		}
 		if sys.mutations != before {
 			t.Fatalf("pidfd ENOSYS refusal mutated volume %d times; want 0", sys.mutations-before)
+		}
+	})
+}
+
+func TestPrivatePIDNamespaceAndProcfsPreconditions(t *testing.T) {
+	t.Run("pid != 1 refuses with zero kills and zero volume mutations", func(t *testing.T) {
+		sys := newFakeSystem(t)
+		sys.selfPID = 42
+		seedProcStatus(t, sys, 401, CPAUID, CPAUID, CPAUID, CPAUID)
+		before := sys.mutations
+
+		_, err := prepare(PrepareConfig{}, sys)
+		if err == nil || !strings.Contains(err.Error(), "cpamp-launcher must run as PID 1 in a private PID namespace (got pid 42)") {
+			t.Fatalf("expected non-PID-1 refusal, got: %v", err)
+		}
+		if len(sys.killCalls) != 0 {
+			t.Fatalf("expected 0 Kill calls when pid != 1, got %v", sys.killCalls)
+		}
+		if sys.mutations != before {
+			t.Fatalf("non-PID-1 refusal mutated volume %d times; want 0", sys.mutations-before)
+		}
+	})
+
+	t.Run("/proc not procfs refuses with zero kills and zero volume mutations", func(t *testing.T) {
+		sys := newFakeSystem(t)
+		sys.procfsMagic = 0xef53 // ext4/non-procfs magic
+		seedProcStatus(t, sys, 401, CPAUID, CPAUID, CPAUID, CPAUID)
+		before := sys.mutations
+
+		_, err := prepare(PrepareConfig{}, sys)
+		if err == nil || !strings.Contains(err.Error(), "proc path /proc is not a procfs mount") {
+			t.Fatalf("expected non-procfs refusal, got: %v", err)
+		}
+		if len(sys.killCalls) != 0 {
+			t.Fatalf("expected 0 Kill calls when /proc is not procfs, got %v", sys.killCalls)
+		}
+		if sys.mutations != before {
+			t.Fatalf("non-procfs refusal mutated volume %d times; want 0", sys.mutations-before)
+		}
+	})
+
+	t.Run("/proc/self mismatch refuses with zero kills and zero volume mutations", func(t *testing.T) {
+		sys := newFakeSystem(t)
+		sys.mustSeedSymlink(t, "19", DefaultProcPath+"/self", RootUID, RootGID)
+		seedProcStatus(t, sys, 401, CPAUID, CPAUID, CPAUID, CPAUID)
+		before := sys.mutations
+
+		_, err := prepare(PrepareConfig{}, sys)
+		if err == nil || !strings.Contains(err.Error(), "proc self at /proc/self resolved to \"19\", want \"1\"") {
+			t.Fatalf("expected /proc/self mismatch refusal, got: %v", err)
+		}
+		if len(sys.killCalls) != 0 {
+			t.Fatalf("expected 0 Kill calls on /proc/self mismatch, got %v", sys.killCalls)
+		}
+		if sys.mutations != before {
+			t.Fatalf("/proc/self mismatch refusal mutated volume %d times; want 0", sys.mutations-before)
+		}
+	})
+
+	for _, tc := range []struct {
+		name      string
+		mntID     int
+		mountinfo string
+		wantErr   string
+	}{
+		{
+			name:      "hidepid=2 refused",
+			mntID:     612,
+			mountinfo: "612 600 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw,hidepid=2,gid=65534\n",
+			wantErr:   "procfs at /proc (mnt_id 612) is mounted with hidepid=2; cpamp-launcher requires an unfiltered procfs (no hidepid)",
+		},
+		{
+			name:      "hidepid=invisible refused",
+			mntID:     612,
+			mountinfo: "612 600 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw,hidepid=invisible,gid=65534\n",
+			wantErr:   "procfs at /proc (mnt_id 612) is mounted with hidepid=invisible; cpamp-launcher requires an unfiltered procfs (no hidepid)",
+		},
+		{
+			name:      "hidepid=1 refused",
+			mntID:     612,
+			mountinfo: "612 600 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw,hidepid=1\n",
+			wantErr:   "procfs at /proc (mnt_id 612) is mounted with hidepid=1; cpamp-launcher requires an unfiltered procfs (no hidepid)",
+		},
+		{
+			name:      "hidepid=noaccess refused",
+			mntID:     612,
+			mountinfo: "612 600 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw,hidepid=noaccess\n",
+			wantErr:   "procfs at /proc (mnt_id 612) is mounted with hidepid=noaccess; cpamp-launcher requires an unfiltered procfs (no hidepid)",
+		},
+		{
+			name:      "visible mount by mnt_id is filtered while last mountinfo record is clean -> refused",
+			mntID:     237,
+			mountinfo: "237 249 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw,hidepid=invisible,gid=65534\n249 600 0:64 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n",
+			wantErr:   "procfs at /proc (mnt_id 237) is mounted with hidepid=invisible; cpamp-launcher requires an unfiltered procfs (no hidepid)",
+		},
+		{
+			name:      "mnt_id not found in mountinfo refused",
+			mntID:     999,
+			mountinfo: "612 600 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n",
+			wantErr:   "procfs mount entry with mnt_id 999 for /proc not found in /proc/self/mountinfo; cpamp-launcher requires an unfiltered procfs (no hidepid)",
+		},
+		{
+			name:      "no proc entry for procPath refused",
+			mntID:     612,
+			mountinfo: "36 35 0:32 / / rw,relatime - overlay overlay rw\n",
+			wantErr:   "procfs mount entry with mnt_id 612 for /proc not found in /proc/self/mountinfo; cpamp-launcher requires an unfiltered procfs (no hidepid)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := newFakeSystem(t)
+			sys.procMountID = tc.mntID
+			sys.mustSeedFile(t, DefaultMountInfoPath, []byte(tc.mountinfo), RootUID, RootGID, 0o0444)
+			seedProcStatus(t, sys, 401, CPAUID, CPAUID, CPAUID, CPAUID)
+			before := sys.mutations
+
+			_, err := prepare(PrepareConfig{}, sys)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected %q, got: %v", tc.wantErr, err)
+			}
+			if len(sys.killCalls) != 0 {
+				t.Fatalf("expected 0 Kill calls, got %v", sys.killCalls)
+			}
+			if sys.mutations != before {
+				t.Fatalf("refusal mutated volume %d times; want 0", sys.mutations-before)
+			}
+		})
+	}
+
+	t.Run("visible mount by mnt_id is clean while earlier record is filtered -> accepted", func(t *testing.T) {
+		sys := newFakeSystem(t)
+		sys.procMountID = 249
+		sys.mustSeedFile(t, DefaultMountInfoPath, []byte(
+			"237 600 0:64 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw,hidepid=invisible,gid=65534\n"+
+				"249 237 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw,hidepid=0,subset=pid\n",
+		), RootUID, RootGID, 0o0444)
+		if _, err := prepare(PrepareConfig{}, sys); err != nil {
+			t.Fatalf("expected visible clean mount (mnt_id 249) to succeed, got: %v", err)
+		}
+	})
+
+	t.Run("MountID error refuses with zero kills and zero volume mutations", func(t *testing.T) {
+		sys := newFakeSystem(t)
+		sys.mountIDErr = syscall.EACCES
+		seedProcStatus(t, sys, 401, CPAUID, CPAUID, CPAUID, CPAUID)
+		before := sys.mutations
+
+		_, err := prepare(PrepareConfig{}, sys)
+		if err == nil || !strings.Contains(err.Error(), "failed to resolve mount ID for /proc (cpamp-launcher requires an unfiltered procfs with no hidepid)") {
+			t.Fatalf("expected MountID error refusal, got: %v", err)
+		}
+		if len(sys.killCalls) != 0 {
+			t.Fatalf("expected 0 Kill calls on MountID error, got %v", sys.killCalls)
+		}
+		if sys.mutations != before {
+			t.Fatalf("MountID error refusal mutated volume %d times; want 0", sys.mutations-before)
+		}
+	})
+
+	t.Run("parseFDInfoMountID parses mnt_id line", func(t *testing.T) {
+		got, err := parseFDInfoMountID([]byte("pos:\t0\nflags:\t0200000\nmnt_id:\t237\nino:\t1\n"))
+		if err != nil || got != 237 {
+			t.Fatalf("parseFDInfoMountID = (%d, %v), want (237, nil)", got, err)
+		}
+	})
+
+	t.Run("mountinfo missing refuses with zero kills and zero volume mutations", func(t *testing.T) {
+		sys := newFakeSystem(t)
+		if err := os.Remove(sys.hostPath(DefaultMountInfoPath)); err != nil {
+			t.Fatal(err)
+		}
+		delete(sys.meta, DefaultMountInfoPath)
+		seedProcStatus(t, sys, 401, CPAUID, CPAUID, CPAUID, CPAUID)
+		before := sys.mutations
+
+		_, err := prepare(PrepareConfig{}, sys)
+		if err == nil || !strings.Contains(err.Error(), "failed to read /proc/self/mountinfo (cpamp-launcher requires an unfiltered procfs with no hidepid)") {
+			t.Fatalf("expected missing mountinfo refusal, got: %v", err)
+		}
+		if len(sys.killCalls) != 0 {
+			t.Fatalf("expected 0 Kill calls when mountinfo missing, got %v", sys.killCalls)
+		}
+		if sys.mutations != before {
+			t.Fatalf("missing mountinfo refusal mutated volume %d times; want 0", sys.mutations-before)
+		}
+	})
+
+	t.Run("status EACCES refuses with zero kills and zero volume mutations", func(t *testing.T) {
+		sys := newFakeSystem(t)
+		seedProcStatus(t, sys, 401, CPAUID, CPAUID, CPAUID, CPAUID)
+		sys.readFileErr = map[string]error{
+			"/proc/401/status": syscall.EACCES,
+		}
+		before := sys.mutations
+
+		_, err := prepare(PrepareConfig{}, sys)
+		if err == nil || !strings.Contains(err.Error(), "failed to read /proc/401/status (cpamp-launcher requires an unfiltered procfs with no hidepid)") {
+			t.Fatalf("expected status EACCES refusal, got: %v", err)
+		}
+		if len(sys.killCalls) != 0 {
+			t.Fatalf("expected 0 Kill calls on status EACCES, got %v", sys.killCalls)
+		}
+		if sys.mutations != before {
+			t.Fatalf("status EACCES refusal mutated volume %d times; want 0", sys.mutations-before)
+		}
+	})
+}
+
+func TestMissingProcWhileFakeCPAExistsRefusesWithoutMutationOrSupervisorSpawn(t *testing.T) {
+	sys := newFakeSystem(t)
+	prepared, err := prepare(PrepareConfig{}, sys)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a lingering CPA process while /proc becomes unavailable before a restart.
+	seedProcStatus(t, sys, 401, CPAUID, CPAUID, CPAUID, CPAUID)
+	if err := os.RemoveAll(sys.hostPath(DefaultProcPath)); err != nil {
+		t.Fatal(err)
+	}
+	delete(sys.meta, DefaultProcPath)
+
+	before := sys.mutations
+	gate := supervisorPreparation(prepared, nil, sys)
+	if _, err := gate(context.Background(), ChildSpec{}); err == nil || !strings.Contains(err.Error(), "failed to stat procfs at /proc") {
+		t.Fatalf("expected missing /proc refusal, got: %v", err)
+	}
+	if len(sys.killCalls) != 0 {
+		t.Fatalf("expected 0 Kill calls when /proc is missing, got %v", sys.killCalls)
+	}
+	if sys.mutations != before {
+		t.Fatalf("missing /proc refusal mutated volume %d times; want 0", sys.mutations-before)
+	}
+
+	// Verify RunSupervisor never spawns the Supervisor when /proc is missing.
+	eventFile := filepath.Join(t.TempDir(), "events.log")
+	if err := os.WriteFile(eventFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := SupervisorConfig{
+		SupervisorSpec:        helperChildSpec(t, "supervisor", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		ManagerSpec:           helperChildSpec(t, "manager", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		IngressSpec:           helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+		BeforeSupervisorStart: gate,
+		Timings:               fastTimings(),
+		Stdout:                &bytes.Buffer{},
+		Stderr:                &bytes.Buffer{},
+	}
+	cfg.Timings.InitialBackoff = 15 * time.Millisecond
+	cfg.Timings.MaxBackoff = 15 * time.Millisecond
+
+	if err := RunSupervisor(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "supervisor failed 5 consecutive starts") {
+		t.Fatalf("expected fatal refusal from missing /proc, got: %v", err)
+	}
+	assertNoRoleStarted(t, eventFile, "supervisor")
+	assertNoRoleStarted(t, eventFile, "manager")
+	assertNoRoleStarted(t, eventFile, "ingress")
+}
+
+func TestProcUIDClassificationAndMixedUIDRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		uids [4]int
+		want string
+	}{
+		{
+			name: "mixed [10001,10002,10002,10002]",
+			uids: [4]int{10001, 10002, 10002, 10002},
+			want: "process 410 has mixed CPA and non-CPA UIDs [real=10001 effective=10002 saved=10002 fs=10002]",
+		},
+		{
+			name: "mixed [10002,10003,10001,10002]",
+			uids: [4]int{10002, 10003, 10001, 10002},
+			want: "process 410 has mixed CPA and non-CPA UIDs [real=10002 effective=10003 saved=10001 fs=10002]",
+		},
+		{
+			name: "mixed [0,10001,0,0]",
+			uids: [4]int{0, 10001, 0, 0},
+			want: "process 410 has mixed CPA and non-CPA UIDs [real=0 effective=10001 saved=0 fs=0]",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sys := newFakeSystem(t)
+			seedProcStatus(t, sys, 409, CPAUID, CPAUID, CPAUID, CPAUID)
+			seedProcStatus(t, sys, 410, tc.uids[0], tc.uids[1], tc.uids[2], tc.uids[3])
+			before := sys.mutations
+
+			_, err := prepare(PrepareConfig{}, sys)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected mixed-UID refusal %q, got: %v", tc.want, err)
+			}
+			if len(sys.killCalls) != 0 {
+				t.Fatalf("expected 0 Kill calls on mixed-UID refusal, got %v", sys.killCalls)
+			}
+			if sys.mutations != before {
+				t.Fatalf("mixed-UID refusal mutated volume %d times; want 0", sys.mutations-before)
+			}
+		})
+	}
+
+	t.Run("pure Manager pure Ingress and pure CPA handled appropriately", func(t *testing.T) {
+		sys := newFakeSystem(t)
+		seedProcStatus(t, sys, 301, ManagerUID, ManagerUID, ManagerUID, ManagerUID)
+		seedProcStatus(t, sys, 302, IngressUID, IngressUID, IngressUID, IngressUID)
+		seedProcStatus(t, sys, 401, CPAUID, CPAUID, CPAUID, CPAUID)
+
+		if _, err := prepare(PrepareConfig{}, sys); err != nil {
+			t.Fatalf("unexpected error with pure Manager, pure Ingress, and pure CPA: %v", err)
+		}
+		if !slices.Equal(sys.killCalls, []int{401}) {
+			t.Fatalf("killed PIDs=%v, want [401] (only pure CPA killed)", sys.killCalls)
 		}
 	})
 }

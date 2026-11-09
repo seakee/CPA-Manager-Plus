@@ -189,5 +189,26 @@ func SelectRuntimeRoot(mountinfo []byte) string {
 }
 
 func unescapeMountInfoPath(raw string) string {
-	return strings.ReplaceAll(raw, `\040`, " ")
+	if !strings.ContainsRune(raw, '\\') {
+		return raw
+	}
+	var b strings.Builder
+	b.Grow(len(raw))
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\\' && i+3 < len(raw) &&
+			isOctalDigit(raw[i+1]) && isOctalDigit(raw[i+2]) && isOctalDigit(raw[i+3]) {
+			val := int(raw[i+1]-'0')<<6 | int(raw[i+2]-'0')<<3 | int(raw[i+3]-'0')
+			if val <= 0o377 {
+				b.WriteByte(byte(val))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(raw[i])
+	}
+	return b.String()
+}
+
+func isOctalDigit(c byte) bool {
+	return c >= '0' && c <= '7'
 }

@@ -101,6 +101,9 @@ type System interface {
 	ReadRandom(dst []byte) error
 	Kill(pid int, sig syscall.Signal) error
 	OpenPID(pid int) (PIDHandle, error)
+	Getpid() int
+	StatfsType(path string) (int64, error)
+	MountID(path string) (int, error)
 }
 
 // PrepareConfig configures the launcher startup preparation step.
@@ -1189,6 +1192,17 @@ func (osSystem) OpenPID(pid int) (PIDHandle, error) {
 	return openOSPIDHandle(pid)
 }
 
+func (osSystem) Getpid() int {
+	return os.Getpid()
+}
+
+func (osSystem) StatfsType(path string) (int64, error) {
+	return statfsMagic(path)
+}
+
+func (osSystem) MountID(path string) (int, error) {
+	return lookupMountID(path)
+}
 func extractStatUIDGID(info fs.FileInfo) (int, int, bool) {
 	if info == nil || info.Sys() == nil {
 		return 0, 0, false

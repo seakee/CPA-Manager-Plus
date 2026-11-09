@@ -45,7 +45,7 @@ docker compose config
 docker compose up -d --build
 ```
 
-请保持单容器拓扑边界：不要挂载 Docker socket、启用 `privileged`、使用 `network_mode: host` 或将内部回环端口发布到宿主机。备份与恢复只需完整保留 `/data` 命名卷，详见[备份与恢复](../operations/backup.md)。可通过 `CPAMP_DRAIN_TIMEOUT`（默认 `90s`）调整停机排空超时，并必须满足 `--stop-timeout` / `stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s`（默认 `150s`）。
+请保持单容器拓扑边界：不要挂载 Docker socket、启用 `privileged`、使用 `network_mode: host` 或将内部回环端口发布到宿主机；禁止使用 `--pid=host`、`--pid=container:...`、`--init` 或在 Compose 中配置 `pid:` / `init: true`，且不要对 `/proc` 挂载 `hidepid`（`cpamp-launcher` 必须作为独立容器 PID 命名空间的 PID 1 运行并拥有未过滤的 `/proc` 视图，且容器内 UID `10001` 专供受管 CPA 进程使用）。备份与恢复只需完整保留 `/data` 命名卷，详见[备份与恢复](../operations/backup.md)。可通过 `CPAMP_DRAIN_TIMEOUT`（默认 `90s`）调整停机排空超时，并必须满足 `--stop-timeout` / `stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s`（默认 `150s`）。
 
 ### 初始化与认领
 

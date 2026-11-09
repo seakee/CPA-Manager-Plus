@@ -857,6 +857,17 @@ export function parseEmbeddedComposeText(composeText) {
     if ('build' in rawService) {
       fail(`${serviceName} must not define a build block`);
     }
+    if ('pid' in rawService && rawService.pid !== undefined && rawService.pid !== null && String(rawService.pid).trim() !== '') {
+      fail(`${serviceName} must not set pid (${JSON.stringify(rawService.pid)}); cpamp-launcher requires a private container PID namespace`);
+    }
+    if ('init' in rawService) {
+      if (typeof rawService.init !== 'boolean') {
+        fail(`${serviceName}.init must be a boolean`);
+      }
+      if (rawService.init === true) {
+        fail(`${serviceName} must not set init: true; cpamp-launcher must run as PID 1`);
+      }
+    }
     for (const key of Object.keys(rawService)) {
       if (!ALLOWED_SERVICE_KEYS.has(key)) {
         fail(`unrecognized compose service property ${serviceName}.${key}`);
@@ -1099,6 +1110,17 @@ export function validateRuntime12ComposeDocument(document, options = {}) {
     }
     if (serviceConfig.network_mode === 'host') {
       fail(`${serviceName} must not use host networking`);
+    }
+    if ('pid' in serviceConfig && serviceConfig.pid !== undefined && serviceConfig.pid !== null && String(serviceConfig.pid).trim() !== '') {
+      fail(`${serviceName} must not set pid (${JSON.stringify(serviceConfig.pid)}); cpamp-launcher requires a private container PID namespace`);
+    }
+    if ('init' in serviceConfig) {
+      if (typeof serviceConfig.init !== 'boolean') {
+        fail(`${serviceName}.init must be a boolean`);
+      }
+      if (serviceConfig.init === true) {
+        fail(`${serviceName} must not set init: true; cpamp-launcher must run as PID 1`);
+      }
     }
     if (serviceName === 'cpa-manager-plus' && 'user' in serviceConfig && String(serviceConfig.user ?? '') !== '') {
       fail('cpa-manager-plus must start as root so cpamp-launcher can provision /data and drop privileges per child');

@@ -104,6 +104,17 @@ if (
 if (cpamp.user) {
   fail('cpa-manager-plus must start as root so cpamp-launcher can provision /data and drop privileges per child');
 }
+if ('pid' in cpamp && cpamp.pid !== undefined && cpamp.pid !== null && String(cpamp.pid).trim() !== '') {
+  fail(`cpa-manager-plus must not set pid (${JSON.stringify(cpamp.pid)}); cpamp-launcher requires a private container PID namespace`);
+}
+if ('init' in cpamp) {
+  if (typeof cpamp.init !== 'boolean') {
+    fail('cpa-manager-plus.init must be a boolean');
+  }
+  if (cpamp.init === true) {
+    fail('cpa-manager-plus must not set init: true; cpamp-launcher must run as PID 1');
+  }
+}
 const env = cpamp.environment ?? {};
 const drainTimeoutRaw =
   env.CPAMP_DRAIN_TIMEOUT && String(env.CPAMP_DRAIN_TIMEOUT).trim() !== ''

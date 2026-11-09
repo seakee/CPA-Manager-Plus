@@ -3,16 +3,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+)
+
+const (
+	// ProcSuperMagic is the Linux statfs f_type magic for procfs (PROC_SUPER_MAGIC).
+	ProcSuperMagic int64 = 0x9fa0
 )
 
 type compatSymlinkState int
@@ -21,6 +26,14 @@ const (
 	compatSymlinkMissing compatSymlinkState = iota
 	compatSymlinkValid
 	compatSymlinkEmptyDir
+)
+
+type uidClassification int
+
+const (
+	uidClassNoCPA uidClassification = iota
+	uidClassPureCPA
+	uidClassMixed
 )
 
 // PIDHandle represents an open process reference (backed by a Linux pidfd in
@@ -181,13 +194,156 @@ func checkRuntimeToken(tokenFile, explicitToken string, sys System) (string, err
 	return token, nil
 }
 
-// ensureCPAQuiescence enumerates procPath, opens a pidfd for any process whose
-// real, effective, saved, or filesystem UID in /proc/<pid>/status equals
-// cpaUID, re-verifies the process's /proc/<pid>/status while holding the pidfd
-// (so a reused PID is never signalled if it now belongs to Manager/Ingress or
-// another non-CPA identity), sends SIGKILL through the pidfd, and repeats until
-// two consecutive scans find no matching processes.
-// PID 1, the launcher itself, Manager (10002), and Ingress (10003) are never signaled.
+// validatePrivatePIDNamespaceAndProcfs enforces that cpamp-launcher is PID 1 of
+// a private PID namespace and that procPath is a genuine, unfiltered procfs
+// mount (no hidepid) for that namespace before any /proc enumeration or
+// signalling can occur.
+func validatePrivatePIDNamespaceAndProcfs(procPath string, sys System) (int, error) {
+	selfPID := sys.Getpid()
+	if selfPID != 1 {
+		return 0, fmt.Errorf(
+			"cpamp-launcher must run as PID 1 in a private PID namespace (got pid %d); do not use --pid=host, --pid=container, or --init",
+			selfPID,
+		)
+	}
+	cleanProcPath := filepath.Clean(procPath)
+	stat, err := sys.Lstat(cleanProcPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to stat procfs at %s: %w", cleanProcPath, err)
+	}
+	if stat.Mode&fs.ModeSymlink != 0 || !stat.Mode.IsDir() {
+		return 0, fmt.Errorf("proc path %s is not a real directory", cleanProcPath)
+	}
+	fsMagic, err := sys.StatfsType(cleanProcPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to statfs proc path %s: %w", cleanProcPath, err)
+	}
+	if fsMagic != ProcSuperMagic {
+		return 0, fmt.Errorf("proc path %s is not a procfs mount (magic 0x%x, want 0x%x)", cleanProcPath, fsMagic, ProcSuperMagic)
+	}
+	procSelfPath := filepath.Join(cleanProcPath, "self")
+	selfTarget, err := sys.Readlink(procSelfPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to readlink %s: %w", procSelfPath, err)
+	}
+	if strings.TrimSpace(selfTarget) != "1" {
+		return 0, fmt.Errorf("proc self at %s resolved to %q, want \"1\" for private PID namespace", procSelfPath, selfTarget)
+	}
+	mntID, err := sys.MountID(cleanProcPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to resolve mount ID for %s (cpamp-launcher requires an unfiltered procfs with no hidepid): %w", cleanProcPath, err)
+	}
+
+	mountInfoPath := filepath.Join(cleanProcPath, "self", "mountinfo")
+	mountInfoBytes, err := sys.ReadFile(mountInfoPath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read %s (cpamp-launcher requires an unfiltered procfs with no hidepid): %w", mountInfoPath, err)
+	}
+	if err := validateUnfilteredProcMountInfo(cleanProcPath, mountInfoPath, mntID, mountInfoBytes); err != nil {
+		return 0, err
+	}
+	return selfPID, nil
+}
+
+// validateUnfilteredProcMountInfo locates the mountinfo record whose mount ID
+// (field 1) equals wantMountID (obtained from <procPath>/self/fdinfo/<fd>),
+// requires its decoded mount point to equal cleanProcPath and its fstype to
+// equal "proc", and refuses any hidepid option other than "0" or "off".
+func validateUnfilteredProcMountInfo(cleanProcPath, mountInfoPath string, wantMountID int, mountInfoBytes []byte) error {
+	var (
+		found         bool
+		matchedFields []string
+		matchedSepIdx int
+	)
+	for _, rawLine := range bytes.Split(mountInfoBytes, []byte{'\n'}) {
+		line := strings.TrimSpace(string(rawLine))
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 10 || !isDecimalDigits(fields[0]) {
+			continue
+		}
+		recMountID, err := strconv.Atoi(fields[0])
+		if err != nil || recMountID != wantMountID {
+			continue
+		}
+		sepIdx := -1
+		for i := 6; i < len(fields); i++ {
+			if fields[i] == "-" {
+				sepIdx = i
+				break
+			}
+		}
+		if sepIdx < 0 || len(fields) < sepIdx+4 {
+			return fmt.Errorf("malformed mountinfo entry (mnt_id %d) for %s in %s; cpamp-launcher requires an unfiltered procfs (no hidepid)", wantMountID, cleanProcPath, mountInfoPath)
+		}
+		found = true
+		matchedFields = fields
+		matchedSepIdx = sepIdx
+		break
+	}
+	if !found {
+		return fmt.Errorf("procfs mount entry with mnt_id %d for %s not found in %s; cpamp-launcher requires an unfiltered procfs (no hidepid)", wantMountID, cleanProcPath, mountInfoPath)
+	}
+
+	gotMountPoint := unescapeMountInfoPath(matchedFields[4])
+	if gotMountPoint != cleanProcPath {
+		return fmt.Errorf("mount entry with mnt_id %d in %s has mount point %q, want %q; cpamp-launcher requires an unfiltered procfs (no hidepid)", wantMountID, mountInfoPath, gotMountPoint, cleanProcPath)
+	}
+
+	fstype := matchedFields[matchedSepIdx+1]
+	if fstype != "proc" {
+		return fmt.Errorf("mount entry with mnt_id %d for %s in %s has fstype %q, want \"proc\"; cpamp-launcher requires an unfiltered procfs (no hidepid)", wantMountID, cleanProcPath, mountInfoPath, fstype)
+	}
+
+	for _, optsCSV := range []string{matchedFields[5], matchedFields[matchedSepIdx+3]} {
+		for _, opt := range strings.Split(optsCSV, ",") {
+			opt = strings.TrimSpace(opt)
+			if opt == "" {
+				continue
+			}
+			if opt == "hidepid" {
+				return fmt.Errorf("procfs at %s (mnt_id %d) is mounted with %s; cpamp-launcher requires an unfiltered procfs (no hidepid) for full process visibility", cleanProcPath, wantMountID, opt)
+			}
+			if strings.HasPrefix(opt, "hidepid=") {
+				val := strings.TrimPrefix(opt, "hidepid=")
+				if val != "0" && val != "off" {
+					return fmt.Errorf("procfs at %s (mnt_id %d) is mounted with %s; cpamp-launcher requires an unfiltered procfs (no hidepid) for full process visibility", cleanProcPath, wantMountID, opt)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// parseFDInfoMountID extracts the decimal mnt_id value from Linux
+// /proc/self/fdinfo/<fd> contents.
+func parseFDInfoMountID(fdInfoBytes []byte) (int, error) {
+	for _, rawLine := range strings.Split(string(fdInfoBytes), "\n") {
+		line := strings.TrimSpace(rawLine)
+		if !strings.HasPrefix(line, "mnt_id:") {
+			continue
+		}
+		valStr := strings.TrimSpace(strings.TrimPrefix(line, "mnt_id:"))
+		if !isDecimalDigits(valStr) {
+			return 0, fmt.Errorf("invalid mnt_id value %q in fdinfo", valStr)
+		}
+		mntID, err := strconv.Atoi(valStr)
+		if err != nil || mntID < 0 {
+			return 0, fmt.Errorf("invalid mnt_id value %q in fdinfo", valStr)
+		}
+		return mntID, nil
+	}
+	return 0, errors.New("mnt_id not found in fdinfo")
+}
+
+// ensureCPAQuiescence verifies the private PID namespace and unfiltered procfs
+// mount, enumerates procPath, refuses immediately if any process mixes cpaUID
+// with a protected/non-CPA UID (0, 10002, 10003), and for pure cpaUID processes
+// opens a pidfd, re-verifies /proc/<pid>/status while holding the pidfd, sends
+// SIGKILL through the pidfd, and repeats until two consecutive scans find no
+// matching processes.
 func ensureCPAQuiescence(
 	ctx context.Context,
 	procPath string,
@@ -202,7 +358,10 @@ func ensureCPAQuiescence(
 	if timeout <= 0 {
 		timeout = CPAQuiescenceTimeout
 	}
-	selfPID := os.Getpid()
+	selfPID, err := validatePrivatePIDNamespaceAndProcfs(procPath, sys)
+	if err != nil {
+		return err
+	}
 	deadline := time.Now().Add(timeout)
 	consecutiveClean := 0
 
@@ -246,14 +405,11 @@ func ensureCPAQuiescence(
 
 func killCPAProcessesInProc(procPath string, cpaUID, selfPID int, sys System) ([]int, error) {
 	entries, err := sys.ReadDir(procPath)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to read proc directory %s: %w", procPath, err)
 	}
 
-	var matched []int
+	var candidates []int
 	for _, entry := range entries {
 		name := entry.Name()
 		if !isDecimalDigits(name) {
@@ -264,14 +420,26 @@ func killCPAProcessesInProc(procPath string, cpaUID, selfPID int, sys System) ([
 			continue
 		}
 		statusPath := filepath.Join(procPath, name, "status")
-		matchedInitial, err := statusFileMatchesCPA(statusPath, cpaUID, sys)
+		class, uids, present, err := classifyStatusFile(statusPath, cpaUID, sys)
 		if err != nil {
 			return nil, err
 		}
-		if !matchedInitial {
+		if !present {
 			continue
 		}
+		switch class {
+		case uidClassNoCPA:
+			continue
+		case uidClassMixed:
+			return nil, formatMixedUIDRefusal(pid, uids)
+		case uidClassPureCPA:
+			candidates = append(candidates, pid)
+		}
+	}
 
+	var matched []int
+	for _, pid := range candidates {
+		statusPath := filepath.Join(procPath, strconv.Itoa(pid), "status")
 		handle, openErr := sys.OpenPID(pid)
 		if errors.Is(openErr, syscall.ESRCH) || errors.Is(openErr, fs.ErrNotExist) {
 			continue
@@ -284,16 +452,20 @@ func killCPAProcessesInProc(procPath string, cpaUID, selfPID int, sys System) ([
 		}
 
 		// With the process handle (pidfd) held, re-read /proc/<pid>/status to
-		// confirm the numeric PID still belongs to the CPA UID and was not
-		// reused by Manager, Ingress, or another identity before OpenPID.
-		stillMatches, verifyErr := statusFileMatchesCPA(statusPath, cpaUID, sys)
+		// confirm the numeric PID still belongs to a pure CPA process and was
+		// not reused by Manager, Ingress, root, or a mixed-UID identity.
+		class, uids, present, verifyErr := classifyStatusFile(statusPath, cpaUID, sys)
 		if verifyErr != nil {
 			_ = handle.Close()
 			return nil, verifyErr
 		}
-		if !stillMatches {
+		if !present || class == uidClassNoCPA {
 			_ = handle.Close()
 			continue
+		}
+		if class == uidClassMixed {
+			_ = handle.Close()
+			return nil, formatMixedUIDRefusal(pid, uids)
 		}
 
 		matched = append(matched, pid)
@@ -304,6 +476,13 @@ func killCPAProcessesInProc(procPath string, cpaUID, selfPID int, sys System) ([
 		}
 	}
 	return matched, nil
+}
+
+func formatMixedUIDRefusal(pid int, uids [4]int) error {
+	return fmt.Errorf(
+		"refusing startup: process %d has mixed CPA and non-CPA UIDs [real=%d effective=%d saved=%d fs=%d]",
+		pid, uids[0], uids[1], uids[2], uids[3],
+	)
 }
 
 func signalPIDHandle(handle PIDHandle, pid int, sig syscall.Signal, sys System) error {
@@ -318,19 +497,20 @@ type sysKillPIDHandle struct{}
 func (sysKillPIDHandle) Signal(syscall.Signal) error { return nil }
 func (sysKillPIDHandle) Close() error                { return nil }
 
-func statusFileMatchesCPA(statusPath string, cpaUID int, sys System) (bool, error) {
+func classifyStatusFile(statusPath string, cpaUID int, sys System) (uidClassification, [4]int, bool, error) {
+	var zero [4]int
 	statusBytes, readErr := sys.ReadFile(statusPath)
 	if errors.Is(readErr, fs.ErrNotExist) || errors.Is(readErr, syscall.ESRCH) {
-		return false, nil
+		return uidClassNoCPA, zero, false, nil
 	}
 	if readErr != nil {
-		return false, fmt.Errorf("failed to read %s: %w", statusPath, readErr)
+		return uidClassNoCPA, zero, false, fmt.Errorf("failed to read %s (cpamp-launcher requires an unfiltered procfs with no hidepid): %w", statusPath, readErr)
 	}
 	uids, ok := parseProcStatusUIDs(statusBytes)
 	if !ok {
-		return false, fmt.Errorf("invalid Uid line in %s", statusPath)
+		return uidClassNoCPA, zero, false, fmt.Errorf("invalid Uid line in %s", statusPath)
 	}
-	return procUIDsMatchCPA(uids, cpaUID), nil
+	return classifyProcUIDs(uids, cpaUID), uids, true, nil
 }
 
 func parseProcStatusUIDs(statusBytes []byte) ([4]int, bool) {
@@ -359,15 +539,25 @@ func parseProcStatusUIDs(statusBytes []byte) ([4]int, bool) {
 	return uids, false
 }
 
-func procUIDsMatchCPA(uids [4]int, cpaUID int) bool {
+// classifyProcUIDs classifies a process's [real, effective, saved, fs] UIDs:
+//   - uidClassNoCPA: no field equals cpaUID
+//   - uidClassPureCPA: every field equals cpaUID (none is 0, 10002, 10003, or any other non-CPA UID)
+//   - uidClassMixed: at least one field equals cpaUID and at least one field is a non-CPA UID (such as 0, 10002, or 10003)
+func classifyProcUIDs(uids [4]int, cpaUID int) uidClassification {
 	hasCPA := false
+	hasNonCPA := false
 	for _, uid := range uids {
-		if uid == ManagerUID || uid == IngressUID {
-			return false
-		}
 		if uid == cpaUID {
 			hasCPA = true
+		} else {
+			hasNonCPA = true
 		}
 	}
-	return hasCPA
+	if !hasCPA {
+		return uidClassNoCPA
+	}
+	if hasNonCPA {
+		return uidClassMixed
+	}
+	return uidClassPureCPA
 }

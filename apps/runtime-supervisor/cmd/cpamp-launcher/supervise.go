@@ -757,14 +757,12 @@ func superviseService(
 			svc.current = nil
 		}
 		svc.mu.Unlock()
-
-		notifyStarted()
-
 		var uptime time.Duration
 		if err != nil {
 			stderrW.writePrefixedLine("[launcher] ", fmt.Sprintf("failed to start %s: %v", svc.spec.Name, err))
 			uptime = 0
 		} else {
+			notifyStarted()
 			<-child.exitCh
 			uptime = time.Since(child.startedAt)
 			if isSupervisor {

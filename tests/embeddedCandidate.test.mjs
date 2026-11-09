@@ -484,6 +484,24 @@ describe('Immutable v2 Embedded compose and pairing contracts', () => {
         /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
       );
     }
+
+    for (const badPid of ['host', 'service:other', 'container:other']) {
+      const badPidCompose = composeYaml.replace(
+        '    stop_grace_period: 150s',
+        `    stop_grace_period: 150s\n    pid: '${badPid}'`
+      );
+      expect(() => composeYamlToRuntime12ConfigJson(badPidCompose)).toThrow(
+        /cpa-manager-plus must not set pid/
+      );
+    }
+
+    const badInitCompose = composeYaml.replace(
+      '    stop_grace_period: 150s',
+      '    stop_grace_period: 150s\n    init: true'
+    );
+    expect(() => composeYamlToRuntime12ConfigJson(badInitCompose)).toThrow(
+      /cpa-manager-plus must not set init: true/
+    );
     const extraPortCompose = composeYaml.replace(
       "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'",
       "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'\n      - '18318:18317'"

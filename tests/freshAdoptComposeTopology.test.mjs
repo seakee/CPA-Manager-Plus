@@ -333,5 +333,27 @@ describe('Fresh adoption compose topology negative fixtures', () => {
         /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
       );
     }
+
+    for (const badPid of ['host', 'service:other', 'container:other']) {
+      const badPidDoc = structuredClone(validDoc);
+      badPidDoc.services['cpa-manager-plus'].pid = badPid;
+      expect(() => runValidator(badPidDoc)).toThrow(/cpa-manager-plus must not set pid/);
+
+      const badPidRenderDoc = structuredClone(pinnedDocForRender);
+      badPidRenderDoc.services['cpa-manager-plus'].pid = badPid;
+      expect(() => validateRuntime12ComposeDocument(badPidRenderDoc, { validateComposeScript: false })).toThrow(
+        /cpa-manager-plus must not set pid/
+      );
+    }
+
+    const badInitDoc = structuredClone(validDoc);
+    badInitDoc.services['cpa-manager-plus'].init = true;
+    expect(() => runValidator(badInitDoc)).toThrow(/cpa-manager-plus must not set init: true/);
+
+    const badInitRenderDoc = structuredClone(pinnedDocForRender);
+    badInitRenderDoc.services['cpa-manager-plus'].init = true;
+    expect(() => validateRuntime12ComposeDocument(badInitRenderDoc, { validateComposeScript: false })).toThrow(
+      /cpa-manager-plus must not set init: true/
+    );
   });
 });

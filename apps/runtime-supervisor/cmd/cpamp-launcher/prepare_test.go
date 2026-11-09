@@ -53,6 +53,11 @@ type fakeSystem struct {
 	killCalls     []int
 	keepAlivePIDs map[int]bool
 	openPIDHook   func(pid int) (PIDHandle, error)
+	selfPID       int
+	procfsMagic   int64
+	procMountID   int
+	mountIDErr    error
+	readFileErr   map[string]error
 	readDirHook   func(string)
 	opHook        func(op, path string)
 }
@@ -80,11 +85,18 @@ func newFakeSystem(t *testing.T) *fakeSystem {
 		root:        root,
 		meta:        make(map[string]nodeMeta),
 		randomBytes: rnd,
+		selfPID:     1,
+		procfsMagic: ProcSuperMagic,
+		procMountID: 612,
 	}
 	sys.mustSeedFile(t, DefaultSeedConfigPath, []byte(testSeedYAML), 0, 0, 0o0644)
 	sys.mustSeedFile(t, DefaultCPAArtifactManifestPath, []byte(`{"schemaVersion":1,"engine":"cpa","version":"8.0.55","artifactId":"sha256:e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7"}`), 0, 0, 0o0644)
 	sys.mustSeedFile(t, DefaultPasswdPath, []byte(testPasswdEntry), 0, 0, 0o0644)
 	sys.mustSeedFile(t, DefaultGroupPath, []byte(testGroupEntry), 0, 0, 0o0644)
+	sys.mustSeedDir(t, DefaultProcPath, RootUID, RootGID, 0o0555)
+	sys.mustSeedDir(t, DefaultProcPath+"/1", RootUID, RootGID, 0o0555)
+	sys.mustSeedSymlink(t, "1", DefaultProcPath+"/self", RootUID, RootGID)
+	sys.mustSeedFile(t, DefaultMountInfoPath, []byte("612 600 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n"), RootUID, RootGID, 0o0444)
 	return sys
 }
 
@@ -190,6 +202,11 @@ func (f *fakeSystem) ReadDir(virtualPath string) ([]fs.DirEntry, error) {
 func (f *fakeSystem) ReadFile(virtualPath string) ([]byte, error) {
 	cleaned := f.cleanPath(virtualPath)
 	f.runOpHook("readfile", cleaned)
+	if f.readFileErr != nil {
+		if err, ok := f.readFileErr[cleaned]; ok && err != nil {
+			return nil, err
+		}
+	}
 	info, err := os.Lstat(f.hostPath(cleaned))
 	if err != nil {
 		return nil, err
@@ -345,6 +362,37 @@ func (f *fakeSystem) OpenPID(pid int) (PIDHandle, error) {
 		return nil, syscall.ESRCH
 	}
 	return sysKillPIDHandle{}, nil
+}
+
+func (f *fakeSystem) Getpid() int {
+	return f.selfPID
+}
+
+func (f *fakeSystem) StatfsType(virtualPath string) (int64, error) {
+	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("statfs", cleaned)
+	if _, err := os.Lstat(f.hostPath(cleaned)); err != nil {
+		return 0, err
+	}
+	if cleaned == DefaultProcPath {
+		return f.procfsMagic, nil
+	}
+	return 0xef53, nil
+}
+
+func (f *fakeSystem) MountID(virtualPath string) (int, error) {
+	cleaned := f.cleanPath(virtualPath)
+	f.runOpHook("mountid", cleaned)
+	if f.mountIDErr != nil {
+		return 0, f.mountIDErr
+	}
+	if _, err := os.Lstat(f.hostPath(cleaned)); err != nil {
+		return 0, err
+	}
+	if cleaned == DefaultProcPath {
+		return f.procMountID, nil
+	}
+	return 1, nil
 }
 func (f *fakeSystem) assertNode(t *testing.T, virtualPath string, wantUID, wantGID int, wantPerm fs.FileMode, wantDir bool) {
 	t.Helper()
@@ -589,12 +637,19 @@ func TestSelectRuntimeRootAndMountPrecedence(t *testing.T) {
 		"36 35 0:32 / / rw,relatime - overlay overlay rw",
 		"37 36 259:1 /volumes/data /data rw,relatime - ext4 /dev/nvme0n1p1 rw",
 		"38 36 259:2 /volumes/runtime /runtime rw,relatime - ext4 /dev/nvme0n1p2 rw",
+		"612 36 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
 	}, "\n") + "\n")
 
 	mountinfoWithoutRuntime := []byte(strings.Join([]string{
 		"36 35 0:32 / / rw,relatime - overlay overlay rw",
 		"37 36 259:1 /volumes/data /data rw,relatime - ext4 /dev/nvme0n1p1 rw",
+		"38 36 259:2 /volumes/escaped /runtime\\134sub rw,relatime - ext4 /dev/nvme0n1p2 rw",
+		"612 36 0:65 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
 	}, "\n") + "\n")
+
+	if got := unescapeMountInfoPath(`/runtime\134sub\040dir\011tab\012nl`); got != "/runtime\\sub dir\ttab\nnl" {
+		t.Fatalf("unescapeMountInfoPath = %q, want %q", got, "/runtime\\sub dir\ttab\nnl")
+	}
 
 	if got := SelectRuntimeRoot(mountinfoWithRuntime); got != "/runtime" {
 		t.Fatalf("SelectRuntimeRoot(with /runtime) = %q, want /runtime", got)

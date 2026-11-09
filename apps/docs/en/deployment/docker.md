@@ -45,7 +45,7 @@ docker compose config
 docker compose up -d --build
 ```
 
-Preserve the single-container security boundary: no Docker socket mount, privileged mode, host networking, or published internal loopback ports. Back up the `/data` volume as a complete unit; see [Backup And Restore](../operations/backup.md). Configure graceful drain duration via `CPAMP_DRAIN_TIMEOUT` (default `90s`) and ensure `--stop-timeout` / `stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s` (default `150s`).
+Preserve the single-container security boundary: no Docker socket mount, privileged mode, host networking, or published internal loopback ports; do not use `--pid=host`, `--pid=container:...`, `--init`, or Compose `pid:` / `init: true`, and do not mount `/proc` with `hidepid` (`cpamp-launcher` must run as PID 1 in a private container PID namespace with an unfiltered `/proc` procfs view, and container UID `10001` is reserved for the managed CPA process). Back up the `/data` volume as a complete unit; see [Backup And Restore](../operations/backup.md). Configure graceful drain duration via `CPAMP_DRAIN_TIMEOUT` (default `90s`) and ensure `--stop-timeout` / `stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s` (default `150s`).
 
 ### Initialize And Claim The Installation
 
