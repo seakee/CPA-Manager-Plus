@@ -149,7 +149,7 @@
   padding: 14px 18px;
   background: var(--app-surface);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-md, 14px);
+  border-radius: var(--app-radius-md);
 }
 
 .gateway-toolbar .search-box {
@@ -161,7 +161,7 @@
   padding: 8px 12px;
   font-size: 13px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm, 8px);
+  border-radius: var(--app-radius-sm);
   background: var(--bg-subtle);
   color: var(--text-primary);
 }
@@ -206,7 +206,7 @@
   gap: 6px;
   padding: 8px 14px;
   border: 0;
-  border-radius: var(--app-radius-sm, 8px);
+  border-radius: var(--app-radius-sm);
   background: transparent;
   color: var(--text-secondary);
   font-size: 13px;
@@ -232,15 +232,17 @@
 
 .gateway-tab-count {
   padding: 1px 6px;
-  border-radius: var(--app-radius-sm, 8px);
+  border-radius: var(--app-radius-xs);
   background: var(--accent-soft);
   color: var(--accent);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .gateway-tab-count.has-errors {
   background: var(--bg-subtle);
-  color: var(--danger, #dc2626);
+  color: var(--danger);
 }
 
 .fresh-gateway-workspace [role='tabpanel']:focus-visible {
@@ -374,7 +376,7 @@
 .system-additional-info {
   padding: 18px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-md, 14px);
+  border-radius: var(--app-radius-md);
   background: var(--app-surface);
 }
 
@@ -436,6 +438,7 @@
 .summary strong {
   display: block;
   font-size: 18px;
+  font-variant-numeric: tabular-nums;
   margin-top: 6px;
 }
 
@@ -451,7 +454,7 @@
   flex-direction: column;
   text-align: left;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-md, 14px);
+  border-radius: var(--app-radius-md);
   padding: 18px;
   background: var(--app-surface);
   cursor: pointer;
@@ -552,7 +555,7 @@
   padding: 8px 10px;
   font-size: 13px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm, 6px);
+  border-radius: var(--app-radius-sm);
   background: var(--bg-subtle);
   color: var(--text-primary);
 }
@@ -565,7 +568,7 @@
 
 .diff-item {
   padding: 12px;
-  border-radius: var(--app-radius-sm, 8px);
+  border-radius: var(--app-radius-sm);
   background: var(--bg-subtle);
   border: 1px solid var(--border-subtle);
 }
@@ -673,7 +676,7 @@
   gap: 12px;
   padding: 12px 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm, 8px);
+  border-radius: var(--app-radius-sm);
   background: var(--bg-subtle);
 }
 
@@ -694,7 +697,7 @@
   display: inline-block;
   padding: 4px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm, 6px);
+  border-radius: var(--app-radius-xs);
   background: var(--app-surface-muted);
   color: var(--text-primary);
   font-size: 13px;
@@ -719,7 +722,7 @@
   align-items: center;
   padding: 3px 9px;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--bg-subtle);
   color: var(--text-secondary);
   font-size: 11px;
@@ -746,7 +749,7 @@
   margin: 4px 0 0;
   padding: 10px 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm, 8px);
+  border-radius: var(--app-radius-sm);
   background: var(--bg-subtle);
   color: var(--text-secondary);
   font-size: 12px;
@@ -801,7 +804,7 @@
   gap: 12px;
   padding: 12px 16px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-md, 12px);
+  border-radius: var(--app-radius-md);
   background: var(--app-surface);
 }
 
@@ -818,7 +821,7 @@
   padding: 8px 10px;
   font-size: 13px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm, 6px);
+  border-radius: var(--app-radius-sm);
   background: var(--bg-subtle);
   color: var(--text-primary);
 }
@@ -852,6 +855,7 @@
   margin: 2px 0 0;
   font-size: 20px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   color: var(--text-primary);
 }
 
@@ -950,7 +954,7 @@
   gap: 12px;
   padding: 10px 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm, 6px);
+  border-radius: var(--app-radius-sm);
 }
 
 .rule-summary .actions,
@@ -962,7 +966,7 @@
 
 .rule-form fieldset {
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm, 6px);
+  border-radius: var(--app-radius-md);
   padding: 12px;
 }
 
@@ -995,7 +999,7 @@
   padding: 7px 9px;
   font-size: 13px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--app-radius-sm, 6px);
+  border-radius: var(--app-radius-sm);
   background: var(--bg-subtle);
   color: var(--text-primary);
 }

@@ -33,10 +33,12 @@
 }
 .key-count {
   padding: 3px 9px;
-  border-radius: var(--app-radius-sm);
+  border-radius: var(--app-radius-pill);
   color: var(--count-badge-text);
   background: var(--count-badge-bg);
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .key-filter-panel {
   display: flex;
@@ -111,6 +113,7 @@
   margin-left: auto;
   font-size: 23px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   line-height: 1.2;
 }
 .key-summary-value.is-unavailable {
@@ -227,9 +230,10 @@
   padding: 3px 7px;
   margin: 2px 0;
   border: 1px solid transparent;
-  border-radius: var(--app-radius-sm);
+  border-radius: var(--app-radius-pill);
   font-size: 11px;
   line-height: 1.5;
+  white-space: nowrap;
 }
 .key-state-pill.is-saved {
   color: var(--data-badge-info-text);
@@ -431,6 +435,7 @@
 }
 .key-usage-cell strong {
   font-size: 13px;
+  font-variant-numeric: tabular-nums;
 }
 .key-usage-cell small {
   display: block;
@@ -473,6 +478,7 @@
 }
 .key-usage-series time {
   color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 .key-readonly-field {
   display: flex;

@@ -7,6 +7,7 @@ This specification defines the token contracts, layout conventions, and automate
 ## 1. Primary Actions and Accent Tokens
 
 - **Solid primary fills**: Filled primary buttons, primary action pills, and checked switch tracks use `--primary-solid`, `--primary-solid-hover`, and `--primary-solid-active` paired with `--primary-contrast` text. This ramp is shared across light and dark themes so button text maintains `>= 4.5:1` contrast in every state.
+- **Solid danger fills**: Filled destructive buttons use `--danger-solid`, `--danger-solid-hover`, and `--danger-solid-active` with `--primary-contrast` text, shared across themes for the same reason. `--color-danger` / `--error-color` stay for status text, badges, and charts.
 - **Links, focus, and accents**: Text links, active indicators, focus rings, and non-filled accent highlights use `--primary-color` (with `--primary-hover`, `--primary-active`, `--primary-soft`, `--primary-subtle`, `--primary-ring`, and `--focus-*`), which adapts per theme.
 - Do not pair `--primary-contrast` text with `--primary-color` fills on dark surfaces; use `--primary-solid*` for filled controls.
 
@@ -32,6 +33,7 @@ This specification defines the token contracts, layout conventions, and automate
 - **Elevation**:
   - Drop shadows (`--app-shadow`, `--app-shadow-soft`, `--glass-shadow`, `--floating-shadow`, `--shadow`, `--shadow-lg`) are `none`.
   - The only elevation cue on cards and panels is `--app-specular-highlight` (`box-shadow: var(--app-specular-highlight)`).
+  - Floating layers (menus, popovers, tooltips, dialogs, drawers) may keep a drop shadow so they separate from the page. Mark each one with `/* floating layer: elevation allowed */`.
 
 ## 3. Concentric Radius Scale
 
@@ -72,16 +74,9 @@ All interactive controls (search inputs, selects, segmented tabs, and buttons) w
 - **Page headers**: Top-level pages reached directly from the sidebar must not render a duplicate in-page `<h1>` or breadcrumb header (the shell top bar breadcrumb serves as the page title). Drill-down subpages keep a lightweight back navigation bar.
 - **Contrast**: Body copy, badge labels, and button text must maintain at least `4.5:1` contrast against their background fill in both light and dark themes.
 
-## 7. Known Undefined-Variable Debt
+## 7. Undefined Variables
 
-The following 4 CSS custom property names (9 reference sites across 5 stylesheets) are referenced without a matching definition. The R1 per-file/per-variable ratchet locks them until their owning pages are restyled:
-
-| Variable | Sites | Files | Current Resolution | Target Replacement |
-| --- | --- | --- | --- | --- |
-| `--font-family-mono` | 1 | `features/oauth/CodexReauthDialog.module.scss` (1) | Renders its `var()` fallback (monospace font-family stack) | `var(--font-mono)` |
-| `--surface-primary` | 2 | `features/oauth/CodexReauthDialog.module.scss` (2) | No fallback (`background` resolves to `transparent`) | `var(--app-surface)` |
-| `--shadow-sm` | 5 | `features/plugins/PluginStorePage.module.scss` (2), `features/plugins/PluginRuntimeSwitch.module.scss` (1), `features/plugins/PluginsPage.module.scss` (2) | No fallback (`box-shadow` resolves to `none`) | `var(--app-specular-highlight)` or `none` |
-| `--app-shadow-md` | 1 | `features/dashboard/components/HealthAlertsCard.module.scss` (1) | No fallback (`box-shadow` resolves to `none`) | `var(--app-specular-highlight)` or `none` |
+There is no known undefined-variable debt. The R1 baseline is empty, so any `var(--name)` without a matching definition fails CI. Replace it with an existing token from `themes.scss` rather than adding an alias.
 
 ## 8. Automated Governance (`check:design-tokens`)
 

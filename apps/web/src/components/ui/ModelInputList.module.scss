@@ -118,7 +118,7 @@
   padding: $spacing-xs $spacing-sm;
   overflow-wrap: anywhere;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--surface-subtle);
   color: var(--text-secondary);
   font-size: 12px;

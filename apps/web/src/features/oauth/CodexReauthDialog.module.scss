@@ -21,7 +21,7 @@
   min-width: 0;
   padding: $spacing-sm $spacing-md;
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   background: var(--surface-subtle);
 
   @include mobile {
@@ -41,7 +41,7 @@
 .linkPreview {
   min-width: 0;
   color: var(--text-primary);
-  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -59,8 +59,8 @@
   gap: $spacing-md;
   padding: $spacing-md;
   border: 1px solid color-mix(in srgb, var(--primary-color) 24%, var(--border-subtle));
-  border-radius: $radius-md;
-  background: color-mix(in srgb, var(--primary-color) 5%, var(--surface-primary));
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--primary-color) 5%, var(--app-surface));
 }
 
 .primaryActionRow {
@@ -87,8 +87,8 @@
   min-width: 0;
   padding: $spacing-xs $spacing-sm;
   border: 1px dashed var(--border-subtle);
-  border-radius: $radius-sm;
-  background: var(--surface-primary);
+  border-radius: var(--app-radius-sm);
+  background: var(--app-surface);
 
   @include mobile {
     grid-template-columns: 1fr;
@@ -110,7 +110,7 @@
   gap: $spacing-sm;
   padding: $spacing-sm $spacing-md;
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   background: var(--surface-subtle);
 
   :global(.form-group) {
@@ -120,29 +120,29 @@
 
 .status {
   padding: $spacing-sm $spacing-md;
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   font-size: 13px;
   line-height: 1.45;
 }
 
 .statusWaiting {
-  background: color-mix(in srgb, var(--primary-color) 12%, transparent);
-  color: var(--primary-color);
+  background: var(--data-badge-info-bg);
+  color: var(--data-badge-info-text);
 }
 
 .statusSuccess {
-  background: rgba(34, 197, 94, 0.12);
-  color: #16a34a;
+  background: var(--data-badge-success-bg);
+  color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
 }
 
 .statusError {
-  background: rgba($error-color, 0.12);
-  color: var(--danger-color);
+  background: var(--data-badge-danger-bg);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
 }
 
 .statusWarning {
-  background: rgba(245, 158, 11, 0.12);
-  color: #d97706;
+  background: var(--data-badge-warning-bg);
+  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
 }
 
 .footer {

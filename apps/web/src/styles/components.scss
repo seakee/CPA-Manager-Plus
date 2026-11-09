@@ -14,8 +14,8 @@ button:disabled {
   justify-content: center;
   gap: $spacing-sm;
   border: 1px solid transparent;
-  border-radius: var(--app-radius-md);
-  height: 40px;
+  border-radius: var(--app-radius-sm);
+  height: var(--control-height-md);
   padding: 0 14px;
   font-size: 14px;
   font-weight: 600;
@@ -44,15 +44,15 @@ button:disabled {
 
   &.btn-primary {
     background: var(--primary-solid, var(--primary-color));
-    color: var(--primary-contrast, #fff);
+    color: var(--primary-contrast);
     border-color: var(--primary-solid, var(--primary-color));
-    box-shadow: 0 8px 18px -14px color-mix(in srgb, var(--primary-solid, var(--primary-color)) 72%, transparent);
+    box-shadow: none;
 
     &:hover {
       background: var(--primary-solid-hover, var(--primary-hover));
       transform: translateY(-1px);
       border-color: var(--primary-solid-hover, var(--primary-hover));
-      box-shadow: 0 10px 22px -14px color-mix(in srgb, var(--primary-solid, var(--primary-color)) 76%, transparent);
+      box-shadow: none;
     }
 
     &:active {
@@ -95,18 +95,18 @@ button:disabled {
   }
 
   &.btn-danger {
-    background-color: var(--color-danger);
-    border-color: var(--color-danger);
-    color: #fff;
+    background-color: var(--danger-solid);
+    border-color: var(--danger-solid);
+    color: var(--primary-contrast);
 
     &:hover {
-      background-color: var(--color-danger-light-3);
-      border-color: var(--color-danger-light-3);
+      background-color: var(--danger-solid-hover);
+      border-color: var(--danger-solid-hover);
     }
 
     &:active {
-      background-color: var(--color-danger-dark-2);
-      border-color: var(--color-danger-dark-2);
+      background-color: var(--danger-solid-active);
+      border-color: var(--danger-solid-active);
     }
   }
 
@@ -130,36 +130,36 @@ button:disabled {
   }
 
   &:where(.btn-sm) {
-    height: 34px;
+    height: var(--control-height-sm);
     padding: 0 12px;
-    border-radius: var(--app-radius-md);
+    border-radius: var(--app-radius-sm);
     font-size: 13px;
     gap: 6px;
   }
 
   &:where(.btn-xs) {
-    height: 30px;
+    height: var(--control-height-xs);
     padding: 0 10px;
-    border-radius: 10px;
+    border-radius: var(--app-radius-sm);
     font-size: 12px;
     gap: 6px;
   }
 
   &:where(.btn-icon-only) {
-    width: 40px;
-    min-width: 40px;
+    width: var(--control-height-md);
+    min-width: var(--control-height-md);
     padding: 0;
     gap: 0;
   }
 
   &:where(.btn-sm):where(.btn-icon-only) {
-    width: 34px;
-    min-width: 34px;
+    width: var(--control-height-sm);
+    min-width: var(--control-height-sm);
   }
 
   &:where(.btn-xs):where(.btn-icon-only) {
-    width: 30px;
-    min-width: 30px;
+    width: var(--control-height-xs);
+    min-width: var(--control-height-xs);
   }
 
   &:disabled {
@@ -187,7 +187,8 @@ button:disabled {
     color: var(--text-primary);
   }
 
-  .btn.btn-primary {
+  .btn.btn-primary,
+  .btn.btn-danger {
     color: var(--primary-contrast);
   }
 
@@ -293,9 +294,10 @@ textarea {
   align-items: center;
   gap: 6px;
   padding: 4px 10px;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   font-size: 13px;
   border: 1px solid var(--border-color);
+  white-space: nowrap;
   margin-bottom: $spacing-md;
 
   // 确保后续内容换行显示
@@ -403,13 +405,13 @@ textarea {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 30px;
-    height: 30px;
+    width: var(--control-height-xs);
+    height: var(--control-height-xs);
     padding: 0;
     background: transparent;
     border: none;
     color: var(--text-secondary);
-    border-radius: $radius-md;
+    border-radius: var(--app-radius-sm);
     cursor: pointer;
     transition:
       color 0.15s ease,
@@ -444,7 +446,7 @@ textarea {
     width: 44px;
     height: 24px;
     background: var(--border-color);
-    border-radius: $radius-full;
+    border-radius: var(--app-radius-pill);
     position: relative;
     transition: background $transition-fast;
   }
@@ -455,9 +457,9 @@ textarea {
     left: 3px;
     width: 18px;
     height: 18px;
-    background: #fff;
-    border-radius: $radius-full;
-    box-shadow: $shadow-sm;
+    background: var(--primary-contrast);
+    border-radius: var(--app-radius-pill);
+    box-shadow: none;
     transition: transform $transition-fast;
   }
 
@@ -484,17 +486,18 @@ textarea {
 
 .pill {
   padding: 4px 10px;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   background: var(--surface-subtle);
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .loading-spinner {
-  // Fallback: legacy white spinner (in case color-mix is unsupported)
-  border: 3px solid rgba(255, 255, 255, 0.2);
-  border-top-color: #fff;
+  // Fallback without color-mix: themed border ring with a contrast-colour top arc.
+  border: 3px solid var(--border-color);
+  border-top-color: var(--primary-contrast);
   border-radius: 50%;
   width: 16px;
   height: 16px;
@@ -556,8 +559,9 @@ textarea {
 
 .modal {
   background: var(--bg-primary);
-  border-radius: $radius-lg;
+  border-radius: var(--app-radius-md);
   border: 1px solid var(--border-color);
+  /* floating layer: elevation allowed */
   box-shadow: $shadow-lg;
   max-width: 100%;
   max-height: calc(100vh - #{$spacing-lg * 2});
@@ -603,14 +607,14 @@ textarea {
   position: absolute;
   top: 12px;
   right: 12px;
-  width: 32px;
-  height: 32px;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
   padding: 0;
   background: var(--surface-subtle);
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   cursor: pointer;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -685,7 +689,7 @@ textarea {
 
   .modal {
     max-height: calc(100vh - #{$spacing-md * 2});
-    border-radius: $radius-md;
+    border-radius: var(--app-radius-sm);
   }
 
   @supports (height: 100dvh) {
@@ -716,7 +720,7 @@ textarea {
 
 .empty-state {
   border: 1px dashed var(--border-subtle-dashed);
-  border-radius: $radius-lg;
+  border-radius: var(--app-radius-md);
   padding: $spacing-lg;
   background: var(--surface-subtle);
   display: flex;
@@ -733,7 +737,7 @@ textarea {
   .empty-icon {
     width: 42px;
     height: 42px;
-    border-radius: $radius-full;
+    border-radius: var(--app-radius-pill);
     border: 2px solid var(--border-subtle);
     background: var(--surface-subtle-strong);
     display: grid;
@@ -786,7 +790,7 @@ textarea {
 
 .item-row {
   border: 1px solid var(--border-color);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   padding: $spacing-md;
   background: var(--bg-primary);
   display: flex;
@@ -821,11 +825,11 @@ textarea {
 }
 
 .error-box {
-  background: rgba($error-color, 0.1);
-  border: 1px solid rgba($error-color, 0.4);
-  border-radius: $radius-md;
+  background: var(--data-badge-danger-bg);
+  border: 1px solid var(--data-badge-danger-border);
+  border-radius: var(--app-radius-sm);
   padding: $spacing-sm $spacing-md;
-  color: $error-color;
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
 }
 
 .stack {
@@ -851,7 +855,7 @@ textarea {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-color);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   overflow: hidden;
 
   .table-header,
@@ -890,7 +894,7 @@ textarea {
 
 .stat-card {
   border: 1px solid var(--border-color);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   padding: $spacing-md;
   background: var(--bg-primary);
   display: flex;
@@ -903,7 +907,8 @@ textarea {
   }
 
   .stat-value {
-    font-weight: 800;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
     color: var(--text-primary);
     font-size: 18px;
   }
@@ -912,7 +917,7 @@ textarea {
 .log-viewer {
   background: var(--surface-subtle);
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   padding: $spacing-md;
   max-height: 520px;
   overflow: auto;
@@ -932,7 +937,7 @@ textarea {
   .log-line-warning {
     color: var(--data-badge-warning-text);
     background: var(--data-badge-warning-bg);
-    border-radius: 4px;
+    border-radius: var(--app-radius-xs);
     padding: 2px 6px;
   }
 }

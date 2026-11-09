@@ -22,7 +22,7 @@
   justify-content: center;
   width: 24px;
   height: 24px;
-  border-radius: $radius-sm;
+  border-radius: var(--app-radius-xs);
   border: 1px solid var(--border-color);
   background: var(--surface-subtle);
   color: var(--text-secondary);
@@ -62,7 +62,7 @@
   margin: 0;
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 .oauthSection {
@@ -89,22 +89,22 @@
 
 .oauthStatus {
   padding: $spacing-md;
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   font-size: 14px;
 
   &.success {
-    background-color: rgba(34, 197, 94, 0.1);
-    color: #16a34a;
+    background-color: var(--data-badge-success-bg);
+    color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
   }
 
   &.error {
-    background-color: rgba($error-color, 0.12);
-    color: $error-color;
+    background-color: var(--data-badge-danger-bg);
+    color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   }
 
   &.waiting {
-    background-color: rgba($primary-color, 0.12);
-    color: var(--primary-color);
+    background-color: var(--data-badge-info-bg);
+    color: var(--data-badge-info-text);
   }
 }
 
@@ -123,7 +123,7 @@
 .authUrlBox {
   background: var(--surface-subtle);
   border: 1px dashed var(--border-subtle-dashed);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   padding: $spacing-md;
   display: flex;
   flex-direction: column;
@@ -191,14 +191,22 @@
   align-items: center;
   gap: $spacing-sm;
   flex-wrap: wrap;
+
+  :global(.btn.btn-sm) {
+    height: var(--control-height-sm);
+    min-height: var(--control-height-sm);
+  }
 }
 
 .fileName {
+  display: flex;
+  align-items: center;
   flex: 1;
   min-width: 220px;
-  padding: 10px 12px;
+  min-height: var(--control-height-sm);
+  padding: 0 12px;
   border: 1px solid var(--border-color);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   background: var(--bg-primary);
   color: var(--text-primary);
   font-size: 14px;
@@ -211,7 +219,7 @@
 .connectionBox {
   background: var(--surface-subtle);
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
   padding: $spacing-md;
   display: flex;
   flex-direction: column;

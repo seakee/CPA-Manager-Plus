@@ -1,3 +1,7 @@
+@mixin warning-status-text {
+  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
+}
+
 .page {
   display: flex;
   flex-direction: column;
@@ -7,19 +11,19 @@
 .errorBox,
 .warningBox {
   padding: 12px 14px;
-  border-radius: 10px;
+  border-radius: var(--app-radius-md);
   font-size: 13px;
   line-height: 1.5;
 }
 
 .errorBox {
-  color: var(--danger-color);
-  border: 1px solid color-mix(in srgb, var(--danger-color) 36%, transparent);
-  background: color-mix(in srgb, var(--danger-color) 8%, var(--bg-primary));
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
+  border: 1px solid var(--data-badge-danger-border);
+  background: var(--data-badge-danger-bg);
 }
 
 .warningBox {
-  color: var(--warning-text);
+  @include warning-status-text;
   border: 1px solid var(--warning-border);
   background: var(--warning-bg);
 }
@@ -29,7 +33,7 @@
 .emptySurface {
   border: 1px solid var(--border-color);
   background: var(--bg-primary);
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
 }
 
 .tabSurface,
@@ -41,7 +45,7 @@
 .tabSurface {
   gap: 14px;
   padding: 12px;
-  border-radius: 16px;
+  border-radius: var(--app-radius-lg);
 }
 
 .controlPanel {
@@ -53,7 +57,7 @@
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 12px;
-  min-height: 38px;
+  min-height: var(--control-height-sm);
 }
 
 .summaryTabs {
@@ -74,11 +78,11 @@
   align-items: center;
   gap: 7px;
   min-width: 0;
-  min-height: 34px;
+  min-height: var(--control-height-sm);
   max-width: 100%;
   padding: 0 10px;
   border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
-  border-radius: 10px;
+  border-radius: var(--app-radius-sm);
   background: color-mix(in srgb, var(--surface-subtle) 76%, var(--bg-primary));
   color: var(--text-secondary);
   font-size: 12px;
@@ -90,26 +94,27 @@
     overflow: hidden;
     color: var(--text-primary);
     font-size: 13px;
-    font-weight: 800;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
   &[data-tone='enabled'] {
-    border-color: color-mix(in srgb, var(--success-color) 34%, var(--border-color));
-    background: color-mix(in srgb, var(--success-color) 8%, var(--bg-primary));
+    border-color: var(--data-badge-success-border);
+    background: var(--data-badge-success-bg);
 
     strong {
-      color: var(--success-color);
+      color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
     }
   }
 
   &[data-tone='disabled'] {
-    border-color: color-mix(in srgb, var(--warning-text) 34%, var(--border-color));
-    background: color-mix(in srgb, var(--warning-text) 8%, var(--bg-primary));
+    border-color: var(--data-badge-warning-border);
+    background: var(--data-badge-warning-bg);
 
     strong {
-      color: var(--warning-text);
+      @include warning-status-text;
     }
   }
 
@@ -119,7 +124,7 @@
 }
 
 .summaryMetricLabel {
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-weight: 700;
   white-space: nowrap;
 }
@@ -138,13 +143,27 @@
     left: 2px;
     width: min(520px, 62%);
     height: 1px;
-    border-radius: 999px;
+    border-radius: var(--app-radius-pill);
     background: color-mix(in srgb, var(--border-color) 72%, transparent);
     content: '';
   }
 
   :global(.form-group) {
     margin-bottom: 0;
+  }
+
+  :global(.input) {
+    height: var(--control-height-sm);
+    min-height: var(--control-height-sm);
+    padding-top: 0;
+    padding-bottom: 0;
+    border-radius: var(--app-radius-sm);
+  }
+
+  :global(.btn.btn-sm) {
+    height: var(--control-height-sm);
+    min-height: var(--control-height-sm);
+    border-radius: var(--app-radius-sm);
   }
 }
 
@@ -165,12 +184,12 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-  border-radius: 12px;
+  border-radius: var(--app-radius-lg);
 }
 
 .emptySurface {
   padding: 18px;
-  border-radius: 12px;
+  border-radius: var(--app-radius-lg);
 }
 
 .tableHeader,
@@ -185,7 +204,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 .tableHeader {
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-color);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
 }
@@ -226,7 +245,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   justify-content: center;
   width: 40px;
   height: 40px;
-  border-radius: 10px;
+  border-radius: var(--app-radius-sm);
   background: var(--surface-subtle);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
@@ -258,7 +277,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   margin-top: 4px;
   min-width: 0;
   overflow: hidden;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -290,7 +309,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   align-items: center;
   height: 22px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 12px;
   font-weight: 600;
   border: 1px solid var(--data-badge-neutral-border);
@@ -300,13 +319,13 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 .badgeOn {
-  color: var(--data-badge-success-text);
+  color: color-mix(in srgb, var(--data-badge-success-text) 65%, var(--text-primary));
   border-color: var(--data-badge-success-border);
   background: var(--data-badge-success-bg);
 }
 
 .badgeWarn {
-  color: var(--data-badge-warning-text);
+  @include warning-status-text;
   border-color: var(--data-badge-warning-border);
   background: var(--data-badge-warning-bg);
 }
@@ -320,7 +339,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   min-width: 0;
   max-width: 100%;
   gap: 6px;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 12px;
   flex-wrap: wrap;
 
@@ -338,7 +357,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   }
 
   [data-tone='warning'] {
-    color: var(--warning-text);
+    @include warning-status-text;
   }
 }
 
@@ -357,7 +376,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   align-items: center;
   height: 22px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
   background: color-mix(in srgb, var(--surface-subtle) 74%, var(--bg-primary));
   color: var(--text-secondary);
@@ -392,6 +411,10 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   font-size: 12px;
 }
 
+.pathText {
+  font-family: var(--font-mono);
+}
+
 .toggleCell {
   justify-content: flex-start;
 }
@@ -403,19 +426,25 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   span {
     min-width: 0;
   }
+
+  :global(.btn.btn-sm) {
+    height: var(--control-height-xs);
+    min-height: var(--control-height-xs);
+    border-radius: var(--app-radius-sm);
+  }
 }
 
 .moreButton {
-  width: 32px;
-  min-width: 32px;
-  height: 32px;
+  width: var(--control-height-xs);
+  min-width: var(--control-height-xs);
+  height: var(--control-height-xs);
   padding: 0;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
 }
 
 .skeletonRow {
   height: 78px;
-  border-radius: 12px;
+  border-radius: var(--app-radius-md);
   background: linear-gradient(
     90deg,
     var(--surface-subtle),
@@ -481,7 +510,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 .fieldError {
-  color: var(--danger-color);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
 }
 
 .formField {
@@ -501,7 +530,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   width: 100%;
   box-sizing: border-box;
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--app-radius-sm);
   background: var(--bg-primary);
   color: var(--text-primary);
   font: inherit;
@@ -516,7 +545,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
   min-height: 140px;
   padding: 10px 12px;
   resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
@@ -533,7 +562,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 .arrayInput {
-  min-height: 36px;
+  min-height: var(--control-height-md);
   padding: 0 10px;
 }
 
@@ -542,7 +571,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 }
 
 .iconButton:global(.btn.btn-sm) {
-  min-width: 32px;
+  min-width: var(--control-height-sm);
   padding-inline: 8px;
 }
 
@@ -587,9 +616,9 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
     min-height: 0;
     padding: 12px;
     border: 1px solid var(--border-color);
-    border-radius: 12px;
+    border-radius: var(--app-radius-md);
     background: var(--bg-primary);
-    box-shadow: var(--shadow-sm);
+    box-shadow: none;
 
     &:last-child {
       border-bottom: 1px solid var(--border-color);
@@ -598,7 +627,7 @@ $plugin-table-columns: minmax(220px, 1.2fr) minmax(136px, 0.68fr) minmax(180px, 
 
   .cellCaption {
     display: inline-flex;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     font-size: 12px;
     font-weight: 700;
   }
