@@ -416,14 +416,6 @@
   }
 }
 
-.dirty-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--data-amber-base);
-}
-
 .summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -595,11 +587,6 @@
 
 .diff-arrow {
   color: var(--text-tertiary);
-}
-
-.diff-new {
-  color: var(--data-badge-success-text);
-  font-weight: 600;
 }
 
 .recovery-steps {

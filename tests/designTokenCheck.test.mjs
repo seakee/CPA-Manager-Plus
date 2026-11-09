@@ -8,6 +8,7 @@ import {
   buildBaselineFromFindings,
   collectFindings,
   compareToBaseline,
+  stripComments,
   validateBaseline,
 } from '../bin/ci/check-design-tokens.mjs';
 
@@ -175,6 +176,115 @@ describe('design token checker', () => {
     const invalid = run();
     expect(invalid.status).toBe(1);
     expect(invalid.stderr).toContain('Invalid custom property name in runtime property registry');
+  });
+
+  it('CLI hard-fails when the runtime property registry has an unsupported version', () => {
+    const root = createFixtureTree({
+      'components/Bar.tsx': `export const Bar = () => <div style={{ '--bar-width': '1px' }} />;\n`,
+      'components/Bar.module.scss': `.bar { width: var(--bar-width); }\n`,
+    });
+    const ciDir = path.join(root, 'ci');
+    mkdirSync(ciDir);
+    const baselineFile = path.join(ciDir, 'design-token-baseline.json');
+    const registryFile = path.join(ciDir, 'custom-runtime-properties.json');
+    writeFileSync(
+      baselineFile,
+      JSON.stringify({ version: 2, rules: emptyRules, scssRadiusDefinitions: {} }),
+      'utf8'
+    );
+    writeFileSync(
+      registryFile,
+      JSON.stringify({ version: 2, properties: { '--bar-width': 'components/Bar.tsx: inline style' } }),
+      'utf8'
+    );
+
+    const result = spawnSync(
+      process.execPath,
+      [scriptPath, '--root', root, '--baseline', baselineFile, '--runtime-properties', registryFile],
+      { encoding: 'utf8' }
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('Invalid runtime property registry');
+    expect(result.stderr).toContain('Unsupported runtime property registry version: expected 1, got 2');
+  });
+
+  it('CLI hard-fails when a runtime property registry entry has an empty or whitespace-only note', () => {
+    const root = createFixtureTree({
+      'components/Bar.tsx': `export const Bar = () => <div style={{ '--bar-width': '1px' }} />;\n`,
+      'components/Bar.module.scss': `.bar { width: var(--bar-width); }\n`,
+    });
+    const ciDir = path.join(root, 'ci');
+    mkdirSync(ciDir);
+    const baselineFile = path.join(ciDir, 'design-token-baseline.json');
+    const registryFile = path.join(ciDir, 'custom-runtime-properties.json');
+    writeFileSync(
+      baselineFile,
+      JSON.stringify({ version: 2, rules: emptyRules, scssRadiusDefinitions: {} }),
+      'utf8'
+    );
+
+    for (const invalidNote of ['', '   \t\n  ']) {
+      writeFileSync(
+        registryFile,
+        JSON.stringify({ version: 1, properties: { '--bar-width': invalidNote } }),
+        'utf8'
+      );
+      const result = spawnSync(
+        process.execPath,
+        [scriptPath, '--root', root, '--baseline', baselineFile, '--runtime-properties', registryFile],
+        { encoding: 'utf8' }
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('Invalid runtime property registry');
+      expect(result.stderr).toContain(
+        'Runtime property "--bar-width" needs a non-empty note naming where it is set'
+      );
+    }
+  });
+
+  it('CLI hard-fails on a stale runtime property registry entry even when running --update-baseline --allow-increase', () => {
+    const root = createFixtureTree({
+      'components/Bar.tsx': `export const Bar = () => <div style={{ '--bar-width': '1px' }} />;\n`,
+      'components/Bar.module.scss': `.bar { width: var(--bar-width); border-radius: 14px; }\n`,
+    });
+    const ciDir = path.join(root, 'ci');
+    mkdirSync(ciDir);
+    const baselineFile = path.join(ciDir, 'design-token-baseline.json');
+    const registryFile = path.join(ciDir, 'custom-runtime-properties.json');
+    const initialBaseline = { version: 2, rules: emptyRules, scssRadiusDefinitions: {} };
+    writeFileSync(baselineFile, JSON.stringify(initialBaseline, null, 2), 'utf8');
+    writeFileSync(
+      registryFile,
+      JSON.stringify({
+        version: 1,
+        properties: {
+          '--bar-width': 'components/Bar.tsx: inline style',
+          '--stale-prop': 'components/Removed.tsx: former inline style',
+        },
+      }),
+      'utf8'
+    );
+
+    const updateWithStale = spawnSync(
+      process.execPath,
+      [
+        scriptPath,
+        '--root',
+        root,
+        '--baseline',
+        baselineFile,
+        '--runtime-properties',
+        registryFile,
+        '--update-baseline',
+        '--allow-increase',
+      ],
+      { encoding: 'utf8' }
+    );
+    expect(updateWithStale.status).toBe(1);
+    expect(updateWithStale.stderr).toContain(
+      'bin/ci/design-token-runtime-properties.json:1 runtime-property registered runtime custom property "--stale-prop" is not set as a quoted literal in any scanned TS/TSX file; remove the stale entry'
+    );
+    expect(JSON.parse(readFileSync(baselineFile, 'utf8'))).toEqual(initialBaseline);
   });
 
   it('R4 counts $radius-* evaluated through Sass interpolation inside strings and url(), but not plain string text or string literals inside the interpolation', () => {
@@ -827,5 +937,182 @@ describe('design token checker', () => {
       { encoding: 'utf8' }
     );
     expect(passingRun.status).toBe(0);
+  });
+
+  it('maintains WCAG AA (>= 4.5:1) contrast for .btn-danger text against --danger-solid, --danger-solid-hover, and --danger-solid-active in light and dark themes', () => {
+    const themesScss = stripComments(
+      readFileSync(path.join(repoRoot, 'apps/web/src/styles/themes.scss'), 'utf8'),
+      { isScript: false, allowLineComments: true }
+    );
+    const componentsScss = stripComments(
+      readFileSync(path.join(repoRoot, 'apps/web/src/styles/components.scss'), 'utf8'),
+      { isScript: false, allowLineComments: true }
+    );
+
+    const findBalancedBlock = (source, selectorPattern, searchStart = 0) => {
+      const regex = new RegExp(selectorPattern, 'g');
+      regex.lastIndex = searchStart;
+      const match = regex.exec(source);
+      if (!match) {
+        throw new Error(`Selector block not found for pattern: ${selectorPattern}`);
+      }
+      const openBrace = match.index + match[0].lastIndexOf('{');
+      let depth = 1;
+      let cursor = openBrace + 1;
+      while (cursor < source.length && depth > 0) {
+        if (source[cursor] === '{') depth += 1;
+        else if (source[cursor] === '}') depth -= 1;
+        cursor += 1;
+      }
+      return source.slice(openBrace + 1, cursor - 1);
+    };
+
+    const extractDirectDeclarations = (blockBody) => {
+      let directText = '';
+      let depth = 0;
+      for (let i = 0; i < blockBody.length; i += 1) {
+        const ch = blockBody[i];
+        if (ch === '{') {
+          depth += 1;
+        } else if (ch === '}') {
+          depth = Math.max(0, depth - 1);
+        } else if (depth === 0) {
+          directText += ch;
+        }
+      }
+      const declarations = {};
+      for (const match of directText.matchAll(/([A-Za-z_-][A-Za-z0-9_-]*)\s*:\s*([^;]+);/g)) {
+        declarations[match[1].trim()] = match[2].trim();
+      }
+      return declarations;
+    };
+
+    const rootTokens = extractDirectDeclarations(findBalancedBlock(themesScss, '(?:^|\\n)\\s*:root\\s*\\{'));
+    const darkOverrides = extractDirectDeclarations(
+      findBalancedBlock(themesScss, "\\[data-theme=['\"]dark['\"]\\]\\s*\\{")
+    );
+    const themeTokenMaps = {
+      light: rootTokens,
+      dark: { ...rootTokens, ...darkOverrides },
+    };
+
+    const btnBlock = findBalancedBlock(componentsScss, '(?:^|\\n)\\s*\\.btn\\s*\\{');
+    const btnDecls = extractDirectDeclarations(btnBlock);
+    const dangerBlock = findBalancedBlock(btnBlock, '&\\.btn-danger\\s*\\{');
+    const dangerDecls = extractDirectDeclarations(dangerBlock);
+    const hoverDecls = extractDirectDeclarations(findBalancedBlock(dangerBlock, '&:hover\\s*\\{'));
+    const activeDecls = extractDirectDeclarations(findBalancedBlock(dangerBlock, '&:active\\s*\\{'));
+
+    const extractVarTokenName = (valueExpr) => {
+      const match = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,[^)]+)?\)$/.exec(valueExpr ?? '');
+      if (!match) {
+        throw new Error(`Expected single CSS var() token reference, got: ${JSON.stringify(valueExpr)}`);
+      }
+      return match[1];
+    };
+
+    const restingBgToken = extractVarTokenName(dangerDecls['background-color'] ?? dangerDecls.background);
+    const hoverBgToken = extractVarTokenName(hoverDecls['background-color'] ?? hoverDecls.background);
+    const activeBgToken = extractVarTokenName(activeDecls['background-color'] ?? activeDecls.background);
+    expect([restingBgToken, hoverBgToken, activeBgToken]).toEqual([
+      '--danger-solid',
+      '--danger-solid-hover',
+      '--danger-solid-active',
+    ]);
+
+    const stateRules = [
+      {
+        bgToken: restingBgToken,
+        textExpr: dangerDecls.color ?? btnDecls.color,
+      },
+      {
+        bgToken: hoverBgToken,
+        textExpr: hoverDecls.color ?? dangerDecls.color ?? btnDecls.color,
+      },
+      {
+        bgToken: activeBgToken,
+        textExpr: activeDecls.color ?? dangerDecls.color ?? btnDecls.color,
+      },
+    ];
+
+    const parseCssColorToRgb = (rawColor) => {
+      const value = rawColor.trim();
+      const hex6 = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(value);
+      if (hex6) {
+        return [
+          Number.parseInt(hex6[1], 16),
+          Number.parseInt(hex6[2], 16),
+          Number.parseInt(hex6[3], 16),
+        ];
+      }
+      const hex3 = /^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/.exec(value);
+      if (hex3) {
+        return [
+          Number.parseInt(hex3[1] + hex3[1], 16),
+          Number.parseInt(hex3[2] + hex3[2], 16),
+          Number.parseInt(hex3[3] + hex3[3], 16),
+        ];
+      }
+      const rgbMatch = /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/.exec(value);
+      if (rgbMatch) {
+        return [
+          Number.parseInt(rgbMatch[1], 10),
+          Number.parseInt(rgbMatch[2], 10),
+          Number.parseInt(rgbMatch[3], 10),
+        ];
+      }
+      throw new Error(`Unsupported or unresolved color value: ${JSON.stringify(rawColor)}`);
+    };
+
+    const resolveColorInTheme = (exprOrToken, tokenMap) => {
+      let current = exprOrToken.trim();
+      if (current.startsWith('--')) {
+        current = `var(${current})`;
+      }
+      const seen = new Set();
+      while (true) {
+        const varMatch = /^var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,\s*([^)]+))?\)$/.exec(current);
+        if (!varMatch) break;
+        const [, tokenName, fallback] = varMatch;
+        if (seen.has(tokenName)) {
+          throw new Error(`Circular token reference involving ${tokenName}`);
+        }
+        seen.add(tokenName);
+        const nextValue = tokenMap[tokenName] ?? fallback?.trim();
+        if (!nextValue) {
+          throw new Error(`Undefined token ${tokenName}`);
+        }
+        current = nextValue;
+      }
+      return parseCssColorToRgb(current);
+    };
+
+    const toLinearChannel = (channel8Bit) => {
+      const srgb = channel8Bit / 255;
+      return srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+    };
+
+    const relativeLuminance = ([r, g, b]) =>
+      0.2126 * toLinearChannel(r) + 0.7152 * toLinearChannel(g) + 0.0722 * toLinearChannel(b);
+
+    const wcagContrastRatio = (rgbA, rgbB) => {
+      const lumA = relativeLuminance(rgbA);
+      const lumB = relativeLuminance(rgbB);
+      const lighter = Math.max(lumA, lumB);
+      const darker = Math.min(lumA, lumB);
+      return (lighter + 0.05) / (darker + 0.05);
+    };
+
+    for (const [themeName, tokenMap] of Object.entries(themeTokenMaps)) {
+      for (const { bgToken, textExpr } of stateRules) {
+        const textRgb = resolveColorInTheme(textExpr, tokenMap);
+        const bgRgb = resolveColorInTheme(bgToken, tokenMap);
+        const ratio = wcagContrastRatio(textRgb, bgRgb);
+        expect(
+          ratio,
+          `.btn-danger text (${textExpr}) vs ${bgToken} in ${themeName} theme must be >= 4.5:1 (got ${ratio.toFixed(2)}:1)`
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
   });
 });
