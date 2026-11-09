@@ -56,9 +56,9 @@ elif [[ "$(docker buildx inspect 2>/dev/null | awk '/^Driver:/ {print $2; exit}'
   exit 1
 fi
 
-# Materialize one commit-addressed, disposable context. All three builds and
+# Materialize one commit-addressed, disposable context. All variant builds and
 # the final verifier consume this same tree; the caller's working tree cannot
-# change the bytes between Manager, Ingress and Runtime builds.
+# change the bytes between slim and full builds.
 snapshot="$(mktemp -d "${TMPDIR:-/tmp}/cpamp-r1-context.XXXXXXXX")"
 cleanup() {
   chmod -R u+w "$snapshot" >/dev/null 2>&1 || :
@@ -80,12 +80,9 @@ chmod -R a-w "$snapshot"
 # Stamped labels are candidate source claims, NOT signed producer provenance.
 mkdir -p "$output"
 
-for role in manager ingress runtime; do
-  case "$role" in
-    manager) file=Dockerfile.manager-server; target=; ;;
-    ingress) file=Dockerfile.ingress; target=; ;;
-    runtime) file=Dockerfile.runtime; target=runtime; ;;
-  esac
+for role in slim full; do
+  file=Dockerfile
+  target="$role"
   args=(
     --platform linux/amd64
     --build-arg "SOURCE_COMMIT=$source_sha"
@@ -112,9 +109,8 @@ done
 
 python3 "$snapshot/bin/release/verify-embedded-candidate.py" \
   --source-root "$snapshot" --source-commit "$source_sha" --build-event "$event" \
-  --manager "$output/manager.oci.tar" \
-  --ingress "$output/ingress.oci.tar" \
-  --runtime "$output/runtime.oci.tar" \
+  --slim "$output/slim.oci.tar" \
+  --full "$output/full.oci.tar" \
   --out "$output/candidate-evidence.json"
 
 if [[ -d "$PWD/node_modules" ]]; then
@@ -127,9 +123,8 @@ node "$snapshot/bin/release/render-embedded-compose.mjs" \
 
 python3 "$snapshot/bin/release/verify-embedded-candidate.py" \
   --evidence "$output/candidate-evidence.json" \
-  --manager "$output/manager.oci.tar" \
-  --ingress "$output/ingress.oci.tar" \
-  --runtime "$output/runtime.oci.tar" \
+  --slim "$output/slim.oci.tar" \
+  --full "$output/full.oci.tar" \
   --verify-compose "$output/docker-compose.v2-embedded.yml" \
   --verify-pairing "$output/embedded-release-pairing.json"
 
@@ -140,7 +135,7 @@ python3 "$snapshot/bin/release/verify-embedded-candidate.py" \
 # failure with no fallback build.
 if [[ "${CPAMP_CANDIDATE_LOAD:-0}" == "1" ]]; then
   load_records=()
-  for role in manager ingress runtime; do
+  for role in slim full; do
     reference="cpamp-r1-$role:candidate"
     if ! docker load --input "$output/$role.docker.tar" >/dev/null; then
       echo "STOP: docker load rejected the build transport for $role." >&2
@@ -202,7 +197,7 @@ print(json.dumps({
     "layerDigestsMatchOCI": True,
     "layers": len(oci_layers),
     "transport": "docker-format export of the same buildx invocation",
-}, sort_keys=True))
+}))
 PY
 )"
     load_records+=("$record")

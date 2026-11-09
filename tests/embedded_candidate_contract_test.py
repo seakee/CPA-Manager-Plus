@@ -68,42 +68,37 @@ def make_oci(destination, role, license_bytes, *,
              bad_mode=None, invalid_elf=False, wrong_module=False, wrong_source_stamp=False,
              wrong_sha_suffix=False, wrong_version_suffix=False, wrong_entrypoint=False,
              wrong_cmd=False, runtime_script=MOCK_RUNTIME_ENTRYPOINT, mutate_evidence=None):
+    cpa_bundled = role == "full"
     files = {
         "/usr/local/share/licenses/cpamp/LICENSE": license_bytes,
-    }
-    if role == "manager":
-        files["/usr/local/bin/cpa-manager-plus"] = (
+        "/usr/local/bin/cpamp-launcher": ROLE_BINARIES["launcher"],
+        "/usr/local/bin/cpa-manager-plus": (
             sample_elf() if invalid_elf else
             ROLE_BINARIES["ingress"] if wrong_module else
             ROLE_BINARIES["manager_wrong_stamp"] if wrong_source_stamp else
             ROLE_BINARIES["manager_sha_suffix"] if wrong_sha_suffix else
             ROLE_BINARIES["manager_version_suffix"] if wrong_version_suffix else
             ROLE_BINARIES["manager"]
-        )
-        files[subject.API_CONTRACT] = api_contract
-        files[subject.WEB_MANIFEST] = json.dumps({
+        ),
+        "/usr/local/bin/cpamp-ingress": ROLE_BINARIES["ingress"],
+        "/usr/local/bin/cpamp-runtime-supervisor": ROLE_BINARIES["runtime-supervisor"],
+        subject.API_CONTRACT: api_contract,
+        subject.WEB_MANIFEST: json.dumps({
             "schemaVersion": 1, "files": [
                 {"path": "index.html", "sha256": blob(b"<html/>")},
                 {"path": "assets/a.js", "sha256": blob(b"x")},
             ],
-        }).encode()
-    elif role == "ingress":
-        files["/usr/local/bin/cpamp-ingress"] = (
-            sample_elf() if invalid_elf else ROLE_BINARIES["ingress"]
-        )
-    elif role == "runtime":
-        files["/usr/local/bin/cpamp-runtime-supervisor"] = (
-            sample_elf() if invalid_elf else ROLE_BINARIES["runtime"]
-        )
-        files["/usr/local/bin/cli-proxy-api"] = ROLE_BINARIES["ingress"]
-        files["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = json.dumps({
+        }).encode(),
+        "/usr/local/share/cpamp/runtime/cpa-artifact.json": json.dumps({
             "schemaVersion": 1, "engine": "cpa", "version": "8.0.55",
             "artifactId": blob(ROLE_BINARIES["ingress"]),
-        }).encode()
-        files["/usr/local/share/cpamp/runtime/config.seed.yaml"] = b"seed"
-        files["/usr/local/bin/cpamp-runtime-v8-entrypoint"] = runtime_script
+        }).encode(),
+        "/usr/local/share/cpamp/runtime/config.seed.yaml": b"seed",
+    }
+    if cpa_bundled:
+        files["/usr/local/bin/cli-proxy-api"] = ROLE_BINARIES["ingress"]
         files["/usr/local/share/licenses/cli-proxy-api/LICENSE"] = b"official"
-    files = make_evidence(role, files, source_inventory)
+    files = make_evidence("cpamp", files, source_inventory, cpa_bundled=cpa_bundled)
     if mutate_evidence is not None:
         files = mutate_evidence(files)
     if missing:
@@ -162,8 +157,8 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         cls.go_fixture_tmp = tempfile.TemporaryDirectory(prefix="cpamp-go-binary-fixture-")
         cls.addClassCleanup(cls.go_fixture_tmp.cleanup)
         base = Path(cls.go_fixture_tmp.name)
-        for key in ("manager", "manager_wrong_stamp", "manager_sha_suffix",
-                    "manager_version_suffix", "ingress", "runtime"):
+        for key in ("launcher", "manager", "manager_wrong_stamp", "manager_sha_suffix",
+                    "manager_version_suffix", "ingress", "runtime-supervisor"):
             role = "manager" if key.startswith("manager") else key
             module, command = subject.GO_MODULES[role]
             work = base / key
@@ -204,6 +199,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             if completed.returncode != 0:
                 raise AssertionError("cannot create local Go fixture: " + completed.stderr)
             ROLE_BINARIES[key] = (work / "candidate").read_bytes()
+        ROLE_BINARIES["runtime"] = ROLE_BINARIES["runtime-supervisor"]
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -212,19 +208,22 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         self.license = b"MIT License\n"
         self.file = self.root / "candidate.tar"
 
-    def inspect(self, role="manager", **kwargs):
+    def inspect(self, role="slim", unpinned_cpa=False, **kwargs):
         make_oci(self.file, role, self.license, **kwargs)
-        return subject.inspect(self.file, role, SHA, EVENT, self.license, b"seed",
-                               MOCK_RUNTIME_ENTRYPOINT)
+        if unpinned_cpa:
+            return subject.inspect(self.file, role, SHA, EVENT, self.license, b"seed")
+        fake_cpa = hashlib.sha256(ROLE_BINARIES["ingress"]).hexdigest()
+        fake_license = hashlib.sha256(b"official").hexdigest()
+        with patch.object(subject, "CPA_SHA", fake_cpa), patch.object(
+                subject, "CPA_LICENSE_SHA", fake_license):
+            return subject.inspect(self.file, role, SHA, EVENT, self.license, b"seed")
 
-    def test_three_role_structural_receipt_with_mocked_official_fixture(self):
+    def test_two_variant_structural_receipt_with_mocked_official_fixture(self):
         # Only this fixture mocks CPA official hashes; production verifier uses immutable pins.
         (self.root / "LICENSE").write_bytes(self.license)
         seed = self.root / "docker/runtime/config.v8.default.seed.yaml"
         seed.parent.mkdir(parents=True)
         seed.write_bytes(b"seed")
-        entrypoint = self.root / "docker/runtime/v8-entrypoint.sh"
-        entrypoint.write_bytes(MOCK_RUNTIME_ENTRYPOINT)
         inventory = self.root / "bin/release/embedded-third-party-inventory.txt"
         inventory.parent.mkdir(parents=True)
         inventory.write_bytes(SOURCE_BYTES)
@@ -244,43 +243,44 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             self.assertEqual(receipt["status"],
                              "STRUCTURAL_CANDIDATE_EVIDENCE_ONLY_NOT_RELEASE_QUALIFIED")
             self.assertEqual(set(receipt["images"]), set(subject.ROLES))
-            self.assertEqual(len({x["platformManifestDigest"] for x in receipt["images"].values()}), 3)
+            self.assertEqual(len({x["platformManifestDigest"] for x in receipt["images"].values()}), 2)
             self.assertEqual(set(receipt["licenseCoverage"]), set(subject.ROLES))
             self.assertEqual(receipt["licenseCoveragePolicy"]["alpineBasePackages"],
                              subject.image_evidence.ALPINE_POLICY)
+            self.assertFalse(receipt["images"]["slim"]["cpaBundled"])
+            self.assertTrue(receipt["images"]["full"]["cpaBundled"])
             for role, record in receipt["images"].items():
                 base = record["licenseCoverage"]["base-image"]
-                if role == "runtime":
-                    self.assertEqual(base["policy"], "debian-copyright-files-fail-closed")
-                    self.assertEqual(base["packages"], 1)
-                else:
-                    self.assertEqual((base["metadataOnlyPackages"], base["packagedNoticePackages"]),
-                                     (1, 0), role)
-            make_oci(archives["ingress"], "ingress", self.license, event="wrong-event")
+                self.assertEqual((base["metadataOnlyPackages"], base["packagedNoticePackages"]),
+                                 (1, 0), role)
+                glibc = record["licenseCoverage"]["glibc-runtime"]
+                self.assertEqual(glibc["policy"], "debian-copyright-files-fail-closed")
+                self.assertEqual(glibc["packages"], 1)
+            make_oci(archives["slim"], "slim", self.license, event="wrong-event")
             with self.assertRaisesRegex(ValueError, "build event"):
                 subject.verify(archives, SHA, EVENT, self.root)
-            make_oci(archives["ingress"], "ingress", self.license, source_inventory=SOURCE_BYTES + b" ")
+            make_oci(archives["slim"], "slim", self.license, source_inventory=SOURCE_BYTES + b" ")
             with self.assertRaisesRegex(ValueError, "source dependency inventory differs"):
                 subject.verify(archives, SHA, EVENT, self.root)
-            make_oci(archives["ingress"], "ingress", self.license)
-            make_oci(archives["manager"], "manager", self.license, api_contract=MOCK_API_CONTRACT + b" ")
+            make_oci(archives["slim"], "slim", self.license)
+            make_oci(archives["full"], "full", self.license, api_contract=MOCK_API_CONTRACT + b" ")
             with self.assertRaisesRegex(ValueError, "public API transport contract differs"):
                 subject.verify(archives, SHA, EVENT, self.root)
 
-    def test_manager_positive_manifest_and_binary_hashes(self):
-        evidence = self.inspect()
-        self.assertEqual(evidence["platform"], "linux/amd64")
-        self.assertEqual(len(evidence["platformManifestDigest"]), 71)
-        self.assertIn(subject.WEB_MANIFEST, evidence["packagedFiles"])
-        self.assertNotEqual(evidence["ociLayoutIndexDigest"],
-                            evidence["platformManifestDigest"])
-
-    def test_ingress_positive(self):
-        evidence = self.inspect("ingress")
-        self.assertIn("/usr/local/bin/cpamp-ingress", evidence["packagedFiles"])
+    def test_slim_and_full_positive_manifest_and_binary_hashes(self):
+        slim_ev = self.inspect("slim")
+        self.assertEqual(slim_ev["platform"], "linux/amd64")
+        self.assertEqual(len(slim_ev["platformManifestDigest"]), 71)
+        self.assertIn(subject.WEB_MANIFEST, slim_ev["packagedFiles"])
+        self.assertNotIn("/usr/local/bin/cli-proxy-api", slim_ev["packagedFiles"])
+        self.assertNotEqual(slim_ev["ociLayoutIndexDigest"],
+                            slim_ev["platformManifestDigest"])
+        full_ev = self.inspect("full")
+        self.assertIn("/usr/local/bin/cli-proxy-api", full_ev["packagedFiles"])
+        self.assertIn("/usr/local/bin/cpamp-ingress", full_ev["packagedFiles"])
 
     def test_receipt_records_explicit_alpine_metadata_coverage(self):
-        receipt = self.inspect("ingress")
+        receipt = self.inspect("slim")
         base = receipt["licenseCoverage"]["base-image"]
         self.assertEqual(base["policy"], subject.image_evidence.ALPINE_POLICY)
         self.assertEqual(base["originalTexts"], "available-packaged-notices-only")
@@ -288,7 +288,6 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         self.assertEqual(base["packagedNoticePackages"], 0)
         self.assertEqual(receipt["licenseCoverage"]["ingress"]["policy"],
                          subject.image_evidence.ORIGINAL_TEXT_POLICY)
-
     def test_receipt_rejects_false_alpine_packaged_notice_claim(self):
         def falsify(files):
             path = subject.image_evidence.notice_path("base-image", "inventory.json")
@@ -307,22 +306,22 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             return files
 
         with self.assertRaisesRegex(ValueError, "invalid installed Alpine license evidence"):
-            self.inspect("ingress", mutate_evidence=falsify)
+            self.inspect("slim", mutate_evidence=falsify)
 
     @staticmethod
-    def rewrite_base_inventory(files, role, change):
-        """Rewrite the base component and recompute every dependent digest.
+    def rewrite_component_inventory(files, component_name, change, cpa_bundled=False):
+        """Rewrite a component inventory and recompute every dependent digest.
 
         Provenance is re-validated here, so only a semantic rule may reject the
         resulting image: no hash, summary, or identity check can be responsible.
         """
         image_evidence = subject.image_evidence
-        path = image_evidence.notice_path("base-image", "inventory.json")
+        path = image_evidence.notice_path(component_name, "inventory.json")
         inventory = json.loads(files[path])
         change(inventory)
         files[path] = image_evidence.encoded(inventory)
         aggregate = json.loads(files[subject.NOTICE])
-        component = aggregate["components"]["base-image"]
+        component = aggregate["components"][component_name]
         component["inventory"] = inventory
         component["inventorySHA256"] = image_evidence.digest(files[path])
         aggregate["licenseCoverage"] = image_evidence.license_coverage(aggregate["components"])
@@ -331,11 +330,11 @@ class EmbeddedCandidateContracts(unittest.TestCase):
         provenance["licenseInventorySHA256"] = image_evidence.digest(files[subject.NOTICE])
         provenance["licenseCoverage"] = aggregate["licenseCoverage"]
         files[image_evidence.PROVENANCE] = image_evidence.encoded(provenance)
-        image_evidence.validate_provenance(provenance, role, subject.CANDIDATE_VERSION, SHA,
-                                           files.__getitem__)
+        image_evidence.validate_provenance(provenance, "cpamp", subject.CANDIDATE_VERSION, SHA,
+                                           files.__getitem__, cpa_bundled=cpa_bundled)
         return files
 
-    def test_receipt_rejects_runtime_base_image_downgraded_to_alpine(self):
+    def test_receipt_rejects_glibc_runtime_downgraded_to_alpine(self):
         def reclassify(files):
             def change(value):
                 package = {"name": "musl", "version": "1.2.5-r1", "licenseExpression": "MIT",
@@ -343,10 +342,10 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 value.update(ecosystem="alpine", dependencies=[package],
                              coveragePolicy=subject.image_evidence.ALPINE_POLICY,
                              coverage=subject.image_evidence.alpine_coverage([package]))
-            return self.rewrite_base_inventory(files, "runtime", change)
+            return self.rewrite_component_inventory(files, "glibc-runtime", change, cpa_bundled=True)
 
-        with self.assertRaisesRegex(ValueError, "base-image ecosystem differs from the image role"):
-            self.inspect("runtime", mutate_evidence=reclassify)
+        with self.assertRaisesRegex(ValueError, "glibc-runtime ecosystem must be debian"):
+            self.inspect("full", mutate_evidence=reclassify)
 
     def test_receipt_rejects_alpine_package_reusing_another_package_notice(self):
         data = b"original busybox license\n"
@@ -367,11 +366,10 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 value.update(dependencies=packages,
                              coveragePolicy=subject.image_evidence.ALPINE_POLICY,
                              coverage=subject.image_evidence.alpine_coverage(packages))
-            return self.rewrite_base_inventory(files, "manager", change)
+            return self.rewrite_component_inventory(files, "base-image", change, cpa_bundled=False)
 
         with self.assertRaisesRegex(ValueError, "does not belong to its package"):
-            self.inspect("manager", mutate_evidence=cross_reference)
-
+            self.inspect("slim", mutate_evidence=cross_reference)
     def test_reject_invalid_descriptor_size(self):
         with self.assertRaisesRegex(ValueError, "descriptor size"):
             self.inspect(bad_descriptor_size=True)
@@ -398,8 +396,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
 
     def test_reject_non_executable_entrypoint(self):
         with self.assertRaisesRegex(ValueError, "not safely executable"):
-            self.inspect("runtime", bad_mode="/usr/local/bin/cpamp-runtime-v8-entrypoint")
-
+            self.inspect("full", bad_mode="/usr/local/bin/cpamp-launcher")
     def test_reject_fake_elf_header_without_loadable_segments(self):
         with self.assertRaisesRegex(ValueError, "invalid ELF program headers"):
             self.inspect(invalid_elf=True)
@@ -424,11 +421,14 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Entrypoint/Cmd mismatch"):
                     self.inspect(role, wrong_cmd=True)
 
-    def test_reject_runtime_bootstrap_script_source_mismatch(self):
-        with self.assertRaisesRegex(ValueError, "Runtime entrypoint differs from locked source"):
-            self.inspect("runtime",
-                         runtime_script=MOCK_RUNTIME_ENTRYPOINT + b"echo tampered\\n")
-
+    def test_reject_runtime_seed_config_mismatch(self):
+        make_oci(self.file, "full", self.license)
+        fake_cpa = hashlib.sha256(ROLE_BINARIES["ingress"]).hexdigest()
+        fake_license = hashlib.sha256(b"official").hexdigest()
+        with patch.object(subject, "CPA_SHA", fake_cpa), patch.object(
+                subject, "CPA_LICENSE_SHA", fake_license):
+            with self.assertRaisesRegex(ValueError, "official v8 default seed mismatch"):
+                subject.inspect(self.file, "full", SHA, EVENT, self.license, b"tampered-seed")
     def test_reject_manager_source_commit_with_correct_prefix(self):
         with self.assertRaisesRegex(ValueError, "Manager compiled source/version stamp mismatch"):
             self.inspect(wrong_sha_suffix=True)
@@ -459,11 +459,18 @@ class EmbeddedCandidateContracts(unittest.TestCase):
 
     def test_reject_missing_notice_inventory(self):
         with self.assertRaisesRegex(ValueError, "missing packaged files"):
-            self.inspect("ingress", missing=subject.NOTICE)
+            self.inspect("slim", missing=subject.NOTICE)
 
-    def test_reject_runtime_with_unpinned_cpa(self):
+    def test_reject_full_with_unpinned_cpa(self):
         with self.assertRaisesRegex(ValueError, "official CPA"):
-            self.inspect("runtime")
+            self.inspect("full", unpinned_cpa=True)
+
+    def test_reject_slim_bundling_cpa_binary(self):
+        with self.assertRaisesRegex(ValueError, "unexpected packaged files"):
+            self.inspect("slim", mutate_evidence=lambda files: {
+                **files,
+                "/usr/local/bin/cli-proxy-api": ROLE_BINARIES["ingress"],
+            })
 
     def test_verify_rendered_compose_and_pairing_against_oci_receipt(self):
         (self.root / "LICENSE").write_bytes(self.license)
@@ -573,11 +580,11 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 "e48c85c75a19adae186cbee590f6e6143fd8085417d8066b545e8533877175f7",
             )
 
-            # Round-4 P1 regression: unpatched CLI renderer must reject runtime.oci.tar whose CPA executable
+            # Round-4 P1 regression: unpatched CLI renderer must reject full.oci.tar whose CPA executable
             # bytes (fake_cpa) do not match the official v8.0.55 pin even if cpa-artifact.json is self-consistent
             mismatch_ev = json.loads(json.dumps(receipt))
             mismatch_ev["officialCPA"]["verifiedFinalImageExecutableSHA256"] = real_cpa_sha
-            mismatch_ev["images"]["runtime"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
+            mismatch_ev["images"]["full"]["packagedFiles"]["/usr/local/bin/cli-proxy-api"] = (
                 "sha256:" + real_cpa_sha
             )
             evidence_path.write_text(json.dumps(mismatch_ev, indent=2) + "\n", encoding="utf-8")
@@ -587,7 +594,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 capture_output=True, text=True, timeout=20, check=False)
             self.assertNotEqual(mismatch_render.returncode, 0)
             self.assertIn(
-                "OCI archive official CPA v8.0.55 executable hash mismatch for runtime",
+                "OCI archive official CPA v8.0.55 executable hash mismatch for full",
                 mismatch_render.stderr,
             )
 
@@ -598,6 +605,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             rendered = subprocess.run(
                 ["node", str(render_runner), "--evidence", str(evidence_path),
                  "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
+                cwd=str(VERIFIER.parents[2]),
                 capture_output=True, text=True, timeout=20, check=False)
             self.assertEqual(rendered.returncode, 0, rendered.stdout + "\n" + rendered.stderr)
 
@@ -613,13 +621,12 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                  "--evidence", str(mismatch_ev_path),
                  "--compose", str(compose_path),
                  "--pairing", str(mismatch_pairing_path),
-                 "--manager-oci", str(archives["manager"]),
-                 "--ingress-oci", str(archives["ingress"]),
-                 "--runtime-oci", str(archives["runtime"])],
+                 "--slim-oci", str(archives["slim"]),
+                 "--full-oci", str(archives["full"])],
                 capture_output=True, text=True, timeout=20, check=False)
             self.assertNotEqual(mismatch_verify_node.returncode, 0)
             self.assertIn(
-                "OCI archive official CPA v8.0.55 executable hash mismatch for runtime",
+                "OCI archive official CPA v8.0.55 executable hash mismatch for full",
                 mismatch_verify_node.stderr,
             )
             mismatch_verify_py = subprocess.run(
@@ -627,16 +634,14 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                  "--evidence", str(mismatch_ev_path),
                  "--verify-compose", str(compose_path),
                  "--verify-pairing", str(mismatch_pairing_path),
-                 "--manager", str(archives["manager"]),
-                 "--ingress", str(archives["ingress"]),
-                 "--runtime", str(archives["runtime"])],
+                 "--slim", str(archives["slim"]),
+                 "--full", str(archives["full"])],
                 capture_output=True, text=True, timeout=20, check=False)
             self.assertNotEqual(mismatch_verify_py.returncode, 0)
             self.assertIn(
                 "OCI archive official CPA v8.0.55 executable hash mismatch",
                 mismatch_verify_py.stderr,
             )
-
             test_archives = dict(archives)
             with redirect_fixture_node(subject, render_runner):
                 verified = subject.verify_rendered_pairing(
@@ -652,8 +657,8 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 archive = archives[role]
                 original_archive = archive.read_bytes()
                 try:
-                    wrong_binary = ROLE_BINARIES["runtime" if role == "ingress" else "ingress"]
-                    binary_path = subject.GO_BINARIES[role]
+                    wrong_binary = ROLE_BINARIES["runtime-supervisor"]
+                    binary_path = subject.GO_BINARIES["ingress"]
                     make_oci(
                         archive, role, self.license, api_contract=real_api_bytes,
                         mutate_evidence=lambda files: {**files, binary_path: wrong_binary},
@@ -673,9 +678,10 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     rendered_wrong = subprocess.run(
                         ["node", str(render_runner), "--evidence", str(evidence_path),
                          "--compose-out", str(compose_path), "--pairing-out", str(pairing_path)],
+                        cwd=str(VERIFIER.parents[2]),
                         capture_output=True, text=True, timeout=20, check=False)
                     self.assertEqual(rendered_wrong.returncode, 0, rendered_wrong.stderr)
-                    with self.assertRaisesRegex(ValueError, "Go compiled module/entrypoint mismatch: " + role):
+                    with self.assertRaisesRegex(ValueError, "Go compiled module/entrypoint mismatch: ingress"):
                         subject.verify_rendered_pairing(
                             wrong_identity, compose_path, pairing_path, test_archives)
                 finally:
@@ -686,7 +692,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
 
             # Round-4 P1 regression: tampered cpa-artifact.json digest in evidence fails closed
             bad_cpa_art_ev = json.loads(json.dumps(receipt_for_node))
-            bad_cpa_art_ev["images"]["runtime"]["packagedFiles"][
+            bad_cpa_art_ev["images"]["full"]["packagedFiles"][
                 "/usr/local/share/cpamp/runtime/cpa-artifact.json"
             ] = "sha256:" + "7" * 64
             with self.assertRaisesRegex(
@@ -694,15 +700,15 @@ class EmbeddedCandidateContracts(unittest.TestCase):
             ):
                 subject.verify_rendered_pairing(
                     bad_cpa_art_ev, compose_path, pairing_path, test_archives)
-            # Round-3 regression: missing any single role archive or archive=None/""/wrong fails closed
-            with self.assertRaisesRegex(ValueError, "missing required OCI archive for runtime"):
+            # Round-3 regression: missing any single variant archive or archive=None/""/wrong fails closed
+            with self.assertRaisesRegex(ValueError, "missing required OCI archive for full"):
                 subject.verify_rendered_pairing(
                     receipt_for_node, compose_path, pairing_path,
-                    {"manager": archives["manager"], "ingress": archives["ingress"], "runtime": None})
+                    {"slim": archives["slim"], "full": None})
             for bad_archive_val in (None, "", "wrong.tar"):
                 bad_ev_arch = json.loads(json.dumps(receipt_for_node))
-                bad_ev_arch["images"]["manager"]["archive"] = bad_archive_val
-                with self.assertRaisesRegex(ValueError, "invalid or missing archive filename for manager"):
+                bad_ev_arch["images"]["full"]["archive"] = bad_archive_val
+                with self.assertRaisesRegex(ValueError, "invalid or missing archive filename for full"):
                     subject.verify_rendered_pairing(
                         bad_ev_arch, compose_path, pairing_path, test_archives)
 
@@ -711,7 +717,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 original_compose = compose_path.read_text(encoding="utf-8")
                 compose_path.write_text(
                     original_compose.replace(
-                        "@" + receipt_for_node["images"]["ingress"]["platformManifestDigest"],
+                        "@" + receipt_for_node["images"]["full"]["platformManifestDigest"],
                         ":latest"),
                     encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "must not reference :latest"):
@@ -728,7 +734,9 @@ class EmbeddedCandidateContracts(unittest.TestCase):
 
                 # Negative 3: loopback env in compose
                 compose_path.write_text(
-                    original_compose + "      CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: '1'\n",
+                    original_compose.replace(
+                        "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'",
+                        "      CPAMP_DRAIN_TIMEOUT: '${CPAMP_DRAIN_TIMEOUT:-90s}'\n      CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK: '1'"),
                     encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "CPAMP_RUNTIME_CPA_LISTEN_LOOPBACK"):
                     subject.verify_rendered_pairing(
@@ -739,7 +747,7 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 # Negative 4: tampered pairing digest
                 original_pairing = json.loads(pairing_path.read_text(encoding="utf-8"))
                 bad_pairing = json.loads(json.dumps(original_pairing))
-                bad_pairing["images"]["manager"]["manifest_digest"] = "sha256:" + "f" * 64
+                bad_pairing["images"]["full"]["manifest_digest"] = "sha256:" + "f" * 64
                 pairing_path.write_text(json.dumps(bad_pairing), encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "pairing manifest_digest mismatch"):
                     subject.verify_rendered_pairing(
@@ -754,69 +762,71 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                     synced["compose"]["size"] = len(raw_bytes)
                     pairing_path.write_text(json.dumps(synced), encoding="utf-8")
 
-                # Negative 5: extra port on cpamp-manager (normal and deeper-indented YAML)
+                # Negative 5: extra port on cpa-manager-plus (normal and deeper-indented YAML)
                 for port_block in (
-                    "    ports:\n      - '18318:18317'\n    expose:\n      - '18317'",
-                    "    ports:\n        - '18318:18317'\n    expose:\n      - '18317'",
+                    "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'\n      - '18318:18317'",
+                    "    ports:\n        - '${CPAMP_PUBLIC_PORT:-18317}:18317'\n        - '18318:18317'",
                 ):
                     write_resynced_compose(
-                        original_compose.replace("    expose:\n      - '18317'", port_block)
+                        original_compose.replace(
+                            "    ports:\n      - '${CPAMP_PUBLIC_PORT:-18317}:18317'", port_block
+                        )
                     )
                     with self.assertRaisesRegex(
-                        ValueError, "expected only cpamp-ingress 18317:18317"
+                        ValueError, "expected only cpa-manager-plus 18317:18317"
                     ):
                         subject.verify_rendered_pairing(
                             receipt_for_node, compose_path, pairing_path, test_archives)
 
-                # Negative 6: privileged: true / "true", network_mode: host, writable / "false" secret on manager, cross-role mount, UDP/long port
+                # Negative 6: privileged: true / "true", network_mode: host, read-only /data, cross-role mount
                 write_resynced_compose(
                     original_compose.replace(
-                        "  cpamp-runtime:\n", "  cpamp-runtime:\n    privileged: true\n"
+                        "  cpa-manager-plus:\n", "  cpa-manager-plus:\n    privileged: true\n"
                     )
                 )
-                with self.assertRaisesRegex(ValueError, "cpamp-runtime must not run privileged"):
+                with self.assertRaisesRegex(ValueError, "cpa-manager-plus must not run privileged"):
                     subject.verify_rendered_pairing(
                         receipt_for_node, compose_path, pairing_path, test_archives)
 
                 write_resynced_compose(
                     original_compose.replace(
-                        "  cpamp-runtime:\n", '  cpamp-runtime:\n    privileged: "true"\n'
+                        "  cpa-manager-plus:\n", '  cpa-manager-plus:\n    privileged: "true"\n'
                     )
                 )
-                with self.assertRaisesRegex(ValueError, "cpamp-runtime.privileged must be a boolean"):
+                with self.assertRaisesRegex(ValueError, "cpa-manager-plus.privileged must be a boolean"):
                     subject.verify_rendered_pairing(
                         receipt_for_node, compose_path, pairing_path, test_archives)
 
                 write_resynced_compose(
                     original_compose.replace(
-                        "  cpamp-runtime:\n", "  cpamp-runtime:\n    network_mode: host\n"
+                        "  cpa-manager-plus:\n", "  cpa-manager-plus:\n    network_mode: host\n"
                     )
                 )
                 with self.assertRaisesRegex(
-                    ValueError, "cpamp-runtime must not use host networking"
+                    ValueError, "cpa-manager-plus must not use host networking"
                 ):
                     subject.verify_rendered_pairing(
                         receipt_for_node, compose_path, pairing_path, test_archives)
 
                 write_resynced_compose(
                     original_compose.replace(
-                        "/run/cpamp/runtime-secret:ro", "/run/cpamp/runtime-secret"
+                        "- cpamp-data:/data", "- cpamp-data:/data:ro"
                     )
                 )
                 with self.assertRaisesRegex(
-                    ValueError, "Runtime transport secret must be read-only for Manager"
+                    ValueError, "cpa-manager-plus /data volume must be writable"
                 ):
                     subject.verify_rendered_pairing(
                         receipt_for_node, compose_path, pairing_path, test_archives)
 
                 write_resynced_compose(
                     original_compose.replace(
-                        "      - cpamp-manager-data:/data",
-                        "      - cpamp-manager-data:/data\n      - cpamp-runtime-data:/runtime-copy",
+                        "      - cpamp-data:/data",
+                        "      - cpamp-data:/data\n      - cpamp-runtime-data:/runtime-copy",
                     )
                 )
                 with self.assertRaisesRegex(
-                    ValueError, "strict volume whitelist violation on cpamp-manager"
+                    ValueError, "strict volume whitelist violation on cpa-manager-plus"
                 ):
                     subject.verify_rendered_pairing(
                         receipt_for_node, compose_path, pairing_path, test_archives)
@@ -824,16 +834,15 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 # Round-3 regression: top-level volume override (name/external/driver/driver_opts/labels)
                 write_resynced_compose(
                     original_compose.replace(
-                        "  cpamp-manager-data:\n",
-                        "  cpamp-manager-data:\n    name: cpamp-shared-state\n",
+                        "  cpamp-data:\n",
+                        "  cpamp-data:\n    name: cpamp-shared-state\n",
                     )
                 )
                 with self.assertRaisesRegex(
-                    ValueError, "top-level volume cpamp-manager-data must be a canonical empty definition"
+                    ValueError, "top-level volume cpamp-data must be a canonical empty definition"
                 ):
                     subject.verify_rendered_pairing(
                         receipt_for_node, compose_path, pairing_path, test_archives)
-
                 # Restore valid compose and pairing, then test per-role sourceCommitClaim drift
                 compose_path.write_text(original_compose, encoding="utf-8")
                 pairing_path.write_text(json.dumps(original_pairing), encoding="utf-8")
@@ -848,18 +857,18 @@ class EmbeddedCandidateContracts(unittest.TestCase):
 
                 # Negative 7 (P1-1): Archives unchanged, evidence+pairing+compose consistently forged
                 # Case A: consistently forged manager platformManifestDigest
-                real_mgr_manifest = receipt_for_node["images"]["manager"]["platformManifestDigest"]
-                forged_mgr_manifest = "sha256:" + "9" * 64
+                real_full_manifest = receipt_for_node["images"]["full"]["platformManifestDigest"]
+                forged_full_manifest = "sha256:" + "9" * 64
                 forged_ev_a = json.loads(json.dumps(receipt_for_node))
-                forged_ev_a["images"]["manager"]["platformManifestDigest"] = forged_mgr_manifest
-                forged_compose_a = original_compose.replace(real_mgr_manifest, forged_mgr_manifest)
+                forged_ev_a["images"]["full"]["platformManifestDigest"] = forged_full_manifest
+                forged_compose_a = original_compose.replace(real_full_manifest, forged_full_manifest)
                 forged_compose_a_bytes = forged_compose_a.encode("utf-8")
                 compose_path.write_bytes(forged_compose_a_bytes)
                 forged_pairing_a = json.loads(json.dumps(original_pairing))
-                forged_pairing_a["images"]["manager"]["manifest_digest"] = forged_mgr_manifest
-                forged_pairing_a["images"]["manager"]["image_ref"] = (
-                    forged_pairing_a["images"]["manager"]["image_ref"].replace(
-                        real_mgr_manifest, forged_mgr_manifest
+                forged_pairing_a["images"]["full"]["manifest_digest"] = forged_full_manifest
+                forged_pairing_a["images"]["full"]["image_ref"] = (
+                    forged_pairing_a["images"]["full"]["image_ref"].replace(
+                        real_full_manifest, forged_full_manifest
                     )
                 )
                 forged_pairing_a["compose"]["sha256"] = blob(forged_compose_a_bytes)
@@ -876,9 +885,10 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 forged_commit = "1" * 40
                 forged_ev_b = json.loads(json.dumps(receipt_for_node))
                 forged_ev_b["sourceCommitClaim"] = forged_commit
-                forged_ev_b["images"]["manager"]["goBinaryIdentity"]["managerCompiledSourceClaim"] = (
-                    forged_commit
-                )
+                for role in subject.ROLES:
+                    forged_ev_b["images"][role]["goBinaryIdentity"]["managerCompiledSourceClaim"] = (
+                        forged_commit
+                    )
                 forged_pairing_b = json.loads(json.dumps(original_pairing))
                 forged_pairing_b["source_commit"] = forged_commit
                 pairing_path.write_text(json.dumps(forged_pairing_b), encoding="utf-8")
@@ -891,7 +901,8 @@ class EmbeddedCandidateContracts(unittest.TestCase):
                 # Case C: consistently forged fullWebSummary.indexHtmlSHA256 across evidence + pairing
                 forged_index_sha = "sha256:" + "8" * 64
                 forged_ev_c = json.loads(json.dumps(receipt_for_node))
-                forged_ev_c["images"]["manager"]["fullWebSummary"]["indexHtmlSHA256"] = forged_index_sha
+                for role in subject.ROLES:
+                    forged_ev_c["images"][role]["fullWebSummary"]["indexHtmlSHA256"] = forged_index_sha
                 forged_pairing_c = json.loads(json.dumps(original_pairing))
                 forged_pairing_c["fullweb"]["index_html_sha256"] = forged_index_sha
                 pairing_path.write_text(json.dumps(forged_pairing_c), encoding="utf-8")
@@ -957,64 +968,72 @@ def build_tar_bytes(entries):
     return buf.getvalue()
 
 images = {{}}
-for idx, role in enumerate(("manager", "ingress", "runtime"), start=1):
+for idx, role in enumerate(("slim", "full"), start=1):
     archive = pathlib.Path(a[a.index("--" + role) + 1])
-    bin_path = {{
-        "manager": "/usr/local/bin/cpa-manager-plus",
-        "ingress": "/usr/local/bin/cpamp-ingress",
-        "runtime": "/usr/local/bin/cpamp-runtime-supervisor",
-    }}[role]
-    bin_bytes = ("mock-bin-" + role).encode("utf-8")
-    prov_bytes = json.dumps({{"sourceCommit": commit, "role": role}}).encode("utf-8")
+    cpa_bundled = role == "full"
+    prov_bytes = json.dumps({{"sourceCommit": commit, "role": "cpamp", "cpaBundled": cpa_bundled}}).encode("utf-8")
+    idx_sha = "sha256:" + "c" * 64
+    web_bytes = json.dumps({{
+        "schemaVersion": 1,
+        "indexHtmlSHA256": idx_sha,
+        "assetCount": 2,
+        "files": [
+            {{"path": "index.html", "sha256": idx_sha, "size": 10}},
+            {{"path": "assets/app.js", "sha256": "sha256:" + "d" * 64, "size": 20}},
+        ],
+    }}).encode("utf-8")
+    web_sha = s256(web_bytes)
+    cpa_bytes = b"mock-cpa-binary"
+    cpa_art_bytes = json.dumps({{
+        "schemaVersion": 1,
+        "engine": "cpa",
+        "version": "8.0.55",
+        "artifactId": s256(cpa_bytes),
+    }}).encode("utf-8")
+    seed_bytes = b"seed"
     layer_entries = {{
-        bin_path.lstrip("/"): bin_bytes,
+        "usr/local/bin/cpamp-launcher": b"mock-bin-launcher",
+        "usr/local/bin/cpa-manager-plus": b"mock-bin-manager",
+        "usr/local/bin/cpamp-ingress": b"mock-bin-ingress",
+        "usr/local/bin/cpamp-runtime-supervisor": b"mock-bin-runtime-supervisor",
         "usr/local/share/cpamp/provenance.json": prov_bytes,
+        "usr/local/share/cpamp/release/fullweb-manifest.json": web_bytes,
+        "usr/local/share/cpamp/release/public-api-transport-contract.json": api_bytes,
+        "usr/local/share/cpamp/runtime/cpa-artifact.json": cpa_art_bytes,
+        "usr/local/share/cpamp/runtime/config.seed.yaml": seed_bytes,
     }}
     packaged = {{
-        bin_path: s256(bin_bytes),
+        "/usr/local/bin/cpamp-launcher": s256(b"mock-bin-launcher"),
+        "/usr/local/bin/cpa-manager-plus": s256(b"mock-bin-manager"),
+        "/usr/local/bin/cpamp-ingress": s256(b"mock-bin-ingress"),
+        "/usr/local/bin/cpamp-runtime-supervisor": s256(b"mock-bin-runtime-supervisor"),
         "/usr/local/share/cpamp/provenance.json": s256(prov_bytes),
+        "/usr/local/share/cpamp/release/fullweb-manifest.json": web_sha,
+        "/usr/local/share/cpamp/release/public-api-transport-contract.json": api_sha,
+        "/usr/local/share/cpamp/runtime/cpa-artifact.json": s256(cpa_art_bytes),
+        "/usr/local/share/cpamp/runtime/config.seed.yaml": s256(seed_bytes),
     }}
-    extra = {{}}
-    if role == "manager":
-        idx_sha = "sha256:" + "c" * 64
-        web_bytes = json.dumps({{
-            "schemaVersion": 1,
-            "indexHtmlSHA256": idx_sha,
-            "assetCount": 2,
-            "files": [
-                {{"path": "index.html", "sha256": idx_sha, "size": 10}},
-                {{"path": "assets/app.js", "sha256": "sha256:" + "d" * 64, "size": 20}},
-            ],
-        }}).encode("utf-8")
-        web_sha = s256(web_bytes)
-        layer_entries["usr/local/share/cpamp/release/fullweb-manifest.json"] = web_bytes
-        layer_entries["usr/local/share/cpamp/release/public-api-transport-contract.json"] = api_bytes
-        packaged["/usr/local/share/cpamp/release/fullweb-manifest.json"] = web_sha
-        packaged["/usr/local/share/cpamp/release/public-api-transport-contract.json"] = api_sha
-        extra["fullWebSummary"] = {{
+    if cpa_bundled:
+        lic_bytes = b"official"
+        layer_entries["usr/local/bin/cli-proxy-api"] = cpa_bytes
+        layer_entries["usr/local/share/licenses/cli-proxy-api/LICENSE"] = lic_bytes
+        packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + cpa_sha
+        packaged["/usr/local/share/licenses/cli-proxy-api/LICENSE"] = s256(lic_bytes)
+    extra = {{
+        "cpaBundled": cpa_bundled,
+        "fullWebSummary": {{
             "manifestSHA256": web_sha,
             "indexHtmlSHA256": idx_sha,
             "assetCount": 2,
-        }}
-        extra["apiTransportContract"] = {{
+        }},
+        "apiTransportContract": {{
             "sha256": api_sha,
             "contractId": "cpamp-r1-embedded-public-api-transport-v1",
             "qualification": "SOURCE_TRANSPORT_CONTRACT_ONLY_NOT_COMPLETE_WEB_API_COMPATIBILITY",
             "apiSuffix": "/api/v2",
             "expectedPath": "/phase4-test/api/v2/technical",
-        }}
-    if role == "runtime":
-        cpa_bytes = b"mock-cpa-binary"
-        cpa_art_bytes = json.dumps({{
-            "schemaVersion": 1,
-            "engine": "cpa",
-            "version": "8.0.55",
-            "artifactId": s256(cpa_bytes),
-        }}).encode("utf-8")
-        layer_entries["usr/local/bin/cli-proxy-api"] = cpa_bytes
-        layer_entries["usr/local/share/cpamp/runtime/cpa-artifact.json"] = cpa_art_bytes
-        packaged["/usr/local/bin/cli-proxy-api"] = "sha256:" + cpa_sha
-        packaged["/usr/local/share/cpamp/runtime/cpa-artifact.json"] = s256(cpa_art_bytes)
+        }},
+    }}
     layer_tar = build_tar_bytes(layer_entries)
     diff_id = s256(layer_tar)
     layer_gz = gzip.compress(layer_tar)
@@ -1080,7 +1099,7 @@ for idx, role in enumerate(("manager", "ingress", "runtime"), start=1):
         "platformManifestDigest": manifest_digest,
         "imageConfigDigest": cfg,
         "goBinaryIdentity": {{
-            "managerCompiledSourceClaim": commit if role == "manager" else None,
+            "managerCompiledSourceClaim": commit,
         }},
         "packagedFiles": packaged,
         **extra,
@@ -1113,9 +1132,7 @@ class CandidateBuilderSnapshotContracts(unittest.TestCase):
             source = base / "source"
             source.mkdir()
             for name, content in {
-                "Dockerfile.manager-server": b"FROM scratch\n",
-                "Dockerfile.ingress": b"FROM scratch\n",
-                "Dockerfile.runtime": b"FROM scratch\n",
+                "Dockerfile": b"FROM scratch\n",
                 "source.txt": b"original source bytes\n",
             }.items():
                 (source / name).write_bytes(content)
@@ -1124,7 +1141,7 @@ class CandidateBuilderSnapshotContracts(unittest.TestCase):
             verifier = source / "bin/release/verify-embedded-candidate.py"
             verifier.write_text(MOCK_VERIFIER_SCRIPT.format(extra_checks="""\
 assert (root / "source.txt").read_text() == "original source bytes\\n"
-for role in ("manager", "ingress", "runtime"):
+for role in ("slim", "full"):
     archive = pathlib.Path(a[a.index("--" + role) + 1])
     assert archive.read_text() == "fake OCI " + role
 """), encoding="utf-8")
@@ -1158,11 +1175,7 @@ commit = [item.split("=", 1)[1] for item in args
 source = pathlib.Path(os.environ["FAKE_SOURCE_DIR"])
 assert context.resolve() != source.resolve()
 assert dockerfile.parent == context
-assert dockerfile.name == {
-    "manager": "Dockerfile.manager-server",
-    "ingress": "Dockerfile.ingress",
-    "runtime": "Dockerfile.runtime",
-}[role]
+assert dockerfile.name == "Dockerfile"
 assert (context / "source.txt").read_text() == "original source bytes\\n"
 assert (context / "source.txt").stat().st_mode & 0o222 == 0
 assert commit == os.environ["FAKE_COMMIT"]
@@ -1179,8 +1192,8 @@ pathlib.Path(target).write_text("fake OCI " + role)
 with open(os.environ["FAKE_RECORD"], "a", encoding="utf-8") as log:
     log.write(json.dumps({"role": role, "context": str(context),
                           "event": event, "commit": commit}) + "\\n")
-if role == "manager":
-    (source / "source.txt").write_text("MUTATED AFTER MANAGER BUILD\\n")
+if role == "slim":
+    (source / "source.txt").write_text("MUTATED AFTER SLIM BUILD\\n")
 """, encoding="utf-8")
             docker.chmod(0o755)
             output = base / "candidate-output"
@@ -1198,12 +1211,12 @@ if role == "manager":
                              result.stdout + "\n" + result.stderr)
             events = [json.loads(row) for row in record.read_text().splitlines()]
             self.assertEqual([row["role"] for row in events],
-                             ["manager", "ingress", "runtime"])
+                             ["slim", "full"])
             self.assertEqual({row["commit"] for row in events}, {pinned_commit})
             self.assertEqual(len({row["event"] for row in events}), 1)
             self.assertEqual(len({row["context"] for row in events}), 1)
             self.assertEqual((source / "source.txt").read_text(),
-                             "MUTATED AFTER MANAGER BUILD\n")
+                             "MUTATED AFTER SLIM BUILD\n")
             snapshot = Path(events[0]["context"])
             self.assertFalse(snapshot.exists(), "disposable source snapshot was not removed")
             self.assertTrue((output / "candidate-evidence.json").exists())
@@ -1245,8 +1258,7 @@ class CandidateLoadContracts(unittest.TestCase):
             base = Path(temp)
             source = base / "source"
             source.mkdir()
-            for name in ("Dockerfile.manager-server", "Dockerfile.ingress", "Dockerfile.runtime"):
-                (source / name).write_bytes(b"FROM scratch\n")
+            (source / "Dockerfile").write_bytes(b"FROM scratch\n")
             (source / "source.txt").write_bytes(b"original source bytes\n")
             stage_mock_candidate_repo(source)
             script_in_source = source / "bin/release/build-embedded-candidate.sh"
@@ -1327,10 +1339,10 @@ with open(os.environ["FAKE_LOAD_RECORD"], "a", encoding="utf-8") as log:
                                       cwd=source, env=env, capture_output=True, text=True,
                                       timeout=40)
             self.assertEqual(accepted.returncode, 0, accepted.stdout + "\n" + accepted.stderr)
-            for role in ("manager", "ingress", "runtime"):
+            for role in ("slim", "full"):
                 self.assertIn("LOAD PASS cpamp-r1-" + role + ":candidate", accepted.stdout)
             evidence = json.loads((output / "load-evidence.json").read_text())
-            self.assertEqual(set(evidence["images"]), {"manager", "ingress", "runtime"})
+            self.assertEqual(set(evidence["images"]), {"slim", "full"})
             for role, record in evidence["images"].items():
                 self.assertTrue(record["configBlobMatchesOCI"], record)
                 self.assertTrue(record["layerDigestsMatchOCI"], record)
@@ -1339,8 +1351,7 @@ with open(os.environ["FAKE_LOAD_RECORD"], "a", encoding="utf-8") as log:
                 self.assertEqual(record["transport"],
                                  "docker-format export of the same buildx invocation")
             self.assertEqual((base / "loaded.txt").read_text().split(),
-                             ["manager", "ingress", "runtime"])
-
+                             ["slim", "full"])
             env["FAKE_LOAD_DRIFT"] = "1"
             drifted = base / "drifted-output"
             mismatch = subprocess.run(["bash", str(script_in_source), str(drifted)],
@@ -1358,13 +1369,12 @@ class CandidateBuilderSelectionContracts(unittest.TestCase):
     def fixture(self, base):
         source = base / "source"
         source.mkdir()
-        for name in ("Dockerfile.manager-server", "Dockerfile.ingress", "Dockerfile.runtime"):
-            (source / name).write_bytes(b"FROM scratch\n")
+        (source / "Dockerfile").write_bytes(b"FROM scratch\n")
         stage_mock_candidate_repo(source)
         script = source / "bin/release/build-embedded-candidate.sh"
         (source / "bin/release/verify-embedded-candidate.py").write_text(
             MOCK_VERIFIER_SCRIPT.format(extra_checks="""\
-for role in ("manager", "ingress", "runtime"):
+for role in ("slim", "full"):
     assert pathlib.Path(a[a.index("--" + role) + 1]).exists()
 """), encoding="utf-8")
         subprocess.run(["git", "init", "-q"], cwd=source, check=True)
@@ -1431,7 +1441,7 @@ with open(os.environ["FAKE_BUILD_RECORD"], "a", encoding="utf-8") as log:
             self.assertEqual(result.returncode, 0, result.stdout + "\n" + result.stderr)
             events = [json.loads(row) for row in
                       (base / "builds.jsonl").read_text().splitlines()]
-            self.assertEqual([row["role"] for row in events], ["manager", "ingress", "runtime"])
+            self.assertEqual([row["role"] for row in events], ["slim", "full"])
             self.assertEqual({row["builder"] for row in events}, {""})
             self.assertTrue((base / "out" / "candidate-evidence.json").exists())
 
@@ -1446,7 +1456,7 @@ with open(os.environ["FAKE_BUILD_RECORD"], "a", encoding="utf-8") as log:
             self.assertEqual(result.returncode, 0, result.stdout + "\n" + result.stderr)
             events = [json.loads(row) for row in
                       (base / "builds.jsonl").read_text().splitlines()]
-            self.assertEqual([row["role"] for row in events], ["manager", "ingress", "runtime"])
+            self.assertEqual([row["role"] for row in events], ["slim", "full"])
             self.assertEqual({row["builder"] for row in events}, {"cpamp-test-builder"})
 
     def test_missing_selected_builder_stops_before_building(self):

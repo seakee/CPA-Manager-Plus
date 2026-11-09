@@ -46,6 +46,7 @@ SOURCE_INVENTORY = LAYOUTS["image"]["sourceInventory"]
 COMPONENTS = {"manager": ("manager", "web", "base-image"),
               "ingress": ("ingress", "base-image"),
               "runtime": ("runtime-supervisor", "base-image"),
+              "cpamp": ("manager", "web", "ingress", "runtime-supervisor", "base-image", "glibc-runtime"),
               # A tarball cannot own the host OS, so it has no base-image
               # component: it ships only the licenses of the Go modules and
               # the embedded Web closure it actually links.
@@ -53,6 +54,11 @@ COMPONENTS = {"manager": ("manager", "web", "base-image"),
 BINARIES = {"manager": (("manager", "cpa-manager-plus"),),
             "ingress": (("ingress", "cpamp-ingress"),),
             "runtime": (("runtime-supervisor", "cpamp-runtime-supervisor"), ("cpa", "cli-proxy-api")),
+            "cpamp": (("launcher", "cpamp-launcher"),
+                      ("manager", "cpa-manager-plus"),
+                      ("ingress", "cpamp-ingress"),
+                      ("runtime-supervisor", "cpamp-runtime-supervisor"),
+                      ("cpa", "cli-proxy-api")),
             "native": (("manager", "cpa-manager-plus"),
                        ("ingress", "cpa-manager-plus-ingress"),
                        ("runtime-supervisor", "cpa-manager-plus-runtime-supervisor"),
@@ -60,10 +66,12 @@ BINARIES = {"manager": (("manager", "cpa-manager-plus"),),
 PROVENANCE_COMPONENTS = {"manager": ("manager", "web"),
                          "ingress": ("ingress",),
                          "runtime": ("runtime-supervisor", "cpa"),
+                         "cpamp": ("launcher", "manager", "ingress", "runtime-supervisor", "cpa", "web"),
                          "native": ("manager", "ingress", "runtime-supervisor", "cpa", "web")}
 ROLE_TARGET = {role: ("native" if role == "native" else "image") for role in COMPONENTS}
 MODULES = {"manager": "apps/manager-server", "ingress": "apps/ingress",
            "runtime-supervisor": "apps/runtime-supervisor"}
+BINARY_MODULES = {**MODULES, "launcher": "apps/runtime-supervisor"}
 SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 VERIFIED_STATUS = "VERIFIED_LICENSE_COLLECTION"
 # A v2 Native package built with a CPA artifact that is not the Dockerfile pin
@@ -81,7 +89,7 @@ ALPINE_PACKAGED = "installed-apk-database-and-packaged-notices"
 ORIGINAL_TEXT_POLICY = "original-license-texts-fail-closed"
 # The base OS of each role is fixed by its Dockerfile. Binding it here keeps a
 # runtime image from being relabelled as Alpine database-metadata coverage.
-BASE_ECOSYSTEMS = {"manager": "alpine", "ingress": "alpine", "runtime": "debian"}
+BASE_ECOSYSTEMS = {"manager": "alpine", "ingress": "alpine", "runtime": "debian", "cpamp": "alpine"}
 
 
 def require(condition, message):
@@ -132,7 +140,7 @@ def license_coverage(components):
         if name == "base-image" and inventory.get("ecosystem") == "alpine":
             result[name] = {"policy": ALPINE_POLICY, "originalTexts": "available-packaged-notices-only",
                             **alpine_coverage(dependencies)}
-        elif name == "base-image":
+        elif name in ("base-image", "glibc-runtime") and inventory.get("ecosystem") == "debian":
             result[name] = {"policy": "debian-copyright-files-fail-closed",
                             "originalTexts": "complete-for-installed-packages",
                             "packages": len(dependencies)}
@@ -143,7 +151,7 @@ def license_coverage(components):
     return result
 
 
-def validate_inventory(value, role, read_file, expected_source=None, allow_unpinned=False):
+def validate_inventory(value, role, read_file, expected_source=None, allow_unpinned=False, cpa_bundled=True):
     lay = layout(role)
     target = ROLE_TARGET[role]
     allowed_status = (VERIFIED_STATUS, UNPINNED_STATUS) if allow_unpinned else (VERIFIED_STATUS,)
@@ -168,6 +176,9 @@ def validate_inventory(value, role, read_file, expected_source=None, allow_unpin
         if component == "base-image":
             require(inventory.get("ecosystem") == BASE_ECOSYSTEMS[role],
                     "base-image ecosystem differs from the image role: " + component)
+        elif component == "glibc-runtime":
+            require(inventory.get("ecosystem") == "debian",
+                    "glibc-runtime ecosystem must be debian: " + component)
         if component in MODULES:
             for name in ("go.mod", "go.sum"):
                 key = MODULES[component] + "/" + name
@@ -220,11 +231,11 @@ def validate_inventory(value, role, read_file, expected_source=None, allow_unpin
     require(value.get("licenseCoverage") == license_coverage(value["components"]),
             "license coverage summary differs from component inventories")
     require(read_file(lay["licenseRoot"] + "cpamp/LICENSE"), "missing CPAMP LICENSE")
-    if any(name == "cpa" for name, _ in BINARIES[role]):
+    if any(name == "cpa" for name, _ in BINARIES[role]) and cpa_bundled:
         require(read_file(lay["licenseRoot"] + "cli-proxy-api/LICENSE"), "missing CPA LICENSE")
 
 
-def validate_provenance(value, role, version, commit, read_file, allow_unpinned=False):
+def validate_provenance(value, role, version, commit, read_file, allow_unpinned=False, cpa_bundled=None):
     lay = layout(role)
     identity(version, commit)
     require(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1,
@@ -243,10 +254,19 @@ def validate_provenance(value, role, version, commit, read_file, allow_unpinned=
     coverage = json.loads(aggregate).get("licenseCoverage")
     require(isinstance(coverage, dict) and coverage and value.get("licenseCoverage") == coverage,
             "provenance license coverage differs from aggregate inventory")
+    if cpa_bundled is None:
+        cpa_bundled = value.get("cpaBundled", True) if role == "cpamp" else True
+    require(type(cpa_bundled) is bool and (cpa_bundled or role == "cpamp"), "invalid cpaBundled claim")
     components = value.get("components")
-    expected = list(PROVENANCE_COMPONENTS[role])
+    expected = [name for name in PROVENANCE_COMPONENTS[role] if cpa_bundled or name != "cpa"]
     require(isinstance(components, list) and [item.get("name") for item in components] == expected,
             "incomplete provenance components")
+    if role == "cpamp" and not cpa_bundled:
+        artifact = json.loads(read_file(lay["artifact"]))
+        require(artifact.get("schemaVersion") == 1 and artifact.get("engine") == "cpa" and
+                isinstance(artifact.get("version"), str) and artifact["version"] and
+                SHA.fullmatch(artifact.get("artifactId", "")),
+                "CPA artifact manifest is missing or invalid")
     paths = {name: lay["binRoot"] + binary for name, binary in BINARIES[role]}
     paths["web"] = lay["webManifest"]
     for item in components:
@@ -268,17 +288,19 @@ def validate_provenance(value, role, version, commit, read_file, allow_unpinned=
         else:
             require(item.get("source") == SOURCE and item.get("sourceCommit") == commit and
                     item.get("version") == version, "component source claim mismatch")
-        if item["name"] in MODULES:
-            require(item.get("module") == "github.com/seakee/cpa-manager-plus/" + MODULES[item["name"]],
+        if item["name"] in BINARY_MODULES:
+            require(item.get("module") == "github.com/seakee/cpa-manager-plus/" + BINARY_MODULES[item["name"]],
                     "component Go module identity mismatch")
 
 
-def build(root, role, version, commit, platform, source_inventory, cpa_official=True):
+def build(root, role, version, commit, platform, source_inventory, cpa_official=True, cpa_bundled=True):
     lay = layout(role)
     target = ROLE_TARGET[role]
     identity(version, commit)
     if not cpa_official and role != "native":
         raise ValueError("only the Native package can carry unpinned CPA evidence")
+    if not cpa_bundled and role != "cpamp":
+        raise ValueError("only the cpamp image role can omit bundled CPA")
     status = VERIFIED_STATUS if cpa_official else UNPINNED_STATUS
     def read_file(path):
         return (root / path.lstrip("/")).read_bytes()
@@ -295,10 +317,12 @@ def build(root, role, version, commit, platform, source_inventory, cpa_official=
                            "not legal approval"),
                  "licenseCoverage": license_coverage(components),
                  "sourceInventorySHA256": digest(source_path.read_bytes()), "components": components}
-    validate_inventory(inventory, role, read_file, allow_unpinned=not cpa_official)
+    validate_inventory(inventory, role, read_file, allow_unpinned=not cpa_official, cpa_bundled=cpa_bundled)
     (root / lay["inventory"].lstrip("/")).write_bytes(encoded(inventory))
     items = []
     for name, binary in BINARIES[role]:
+        if name == "cpa" and not cpa_bundled:
+            continue
         path = lay["binRoot"] + binary
         item = {"name": name, "path": path, "sha256": digest(read_file(path))}
         if name == "cpa":
@@ -311,7 +335,7 @@ def build(root, role, version, commit, platform, source_inventory, cpa_official=
                 item.update(version=artifact["version"], source=UNPINNED_CPA_SOURCE)
         else:
             item.update(version=version, source=SOURCE, sourceCommit=commit,
-                        module="github.com/seakee/cpa-manager-plus/" + MODULES[name])
+                        module="github.com/seakee/cpa-manager-plus/" + BINARY_MODULES[name])
         items.append(item)
     if "web" in PROVENANCE_COMPONENTS[role]:
         path = lay["webManifest"]
@@ -323,7 +347,10 @@ def build(root, role, version, commit, platform, source_inventory, cpa_official=
                   "licenseInventorySHA256": digest(read_file(lay["inventory"]))}
     if role == "native":
         provenance["status"] = status
-    validate_provenance(provenance, role, version, commit, read_file, allow_unpinned=not cpa_official)
+    if not cpa_bundled:
+        provenance["cpaBundled"] = False
+    validate_provenance(provenance, role, version, commit, read_file,
+                        allow_unpinned=not cpa_official, cpa_bundled=cpa_bundled)
     (root / lay["provenance"].lstrip("/")).write_bytes(encoded(provenance))
     return provenance
 
@@ -338,12 +365,17 @@ def main():
     parser.add_argument("--source-inventory", type=Path, required=True)
     parser.add_argument("--cpa-unpinned", action="store_true",
                         help="Native only: label evidence as local, never as the official CPA release")
+    parser.add_argument("--without-cpa", action="store_true",
+                        help="cpamp role only: slim target without bundled cli-proxy-api binary")
     args = parser.parse_args()
     try:
         if args.cpa_unpinned and args.role != "native":
             raise ValueError("--cpa-unpinned is only valid for the Native role")
+        if args.without_cpa and args.role != "cpamp":
+            raise ValueError("--without-cpa is only valid for the cpamp role")
         build(args.root, args.role, args.version, args.source_commit, args.platform,
-              args.source_inventory, cpa_official=not args.cpa_unpinned)
+              args.source_inventory, cpa_official=not args.cpa_unpinned,
+              cpa_bundled=not args.without_cpa)
     except (ValueError, OSError, KeyError, TypeError) as exc:
         # Keep the published image diagnostic prefix stable; only the Native
         # package uses the generalized wording.

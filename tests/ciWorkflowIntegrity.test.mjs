@@ -278,30 +278,25 @@ describe('GitHub Actions workflow integrity', () => {
     }
 
     expectAtLeast(readRepoFile('.nvmrc').trim(), '24.22.1', '.nvmrc');
+    const dockerfileText = readRepoFile('Dockerfile');
     expectAtLeast(
-      readRepoFile('Dockerfile.manager-server').match(/node:(\d+\.\d+\.\d+)-alpine/)?.[1],
+      dockerfileText.match(/node:(\d+\.\d+\.\d+)-alpine/)?.[1],
       '22.23.4',
-      'Dockerfile.manager-server node base'
+      'Dockerfile node base'
     );
+    expect(dockerfileText, 'Dockerfile').not.toContain('golang:1.24');
+    expect(dockerfileText, 'Dockerfile').not.toMatch(/node:\d+-alpine/);
 
-    const imageGoVersions = {};
-    for (const dockerfile of [
-      'Dockerfile.manager-server',
-      'Dockerfile.ingress',
-      'Dockerfile.runtime',
-    ]) {
-      const text = readRepoFile(dockerfile);
-      imageGoVersions[dockerfile] = text.match(/golang:(\d+\.\d+\.\d+)-alpine/)?.[1];
-      expectAtLeast(imageGoVersions[dockerfile], '1.26.10', `${dockerfile} golang base`);
-      expect(text, dockerfile).not.toContain('golang:1.24');
-      expect(text, dockerfile).not.toMatch(/node:\d+-alpine/);
+    const imageGoMatches = [...dockerfileText.matchAll(/golang:(\d+\.\d+\.\d+)-alpine/g)].map(
+      (match) => match[1]
+    );
+    expect(imageGoMatches.length).toBeGreaterThanOrEqual(3);
+    for (const version of imageGoMatches) {
+      expectAtLeast(version, '1.26.10', 'Dockerfile golang base');
     }
+    expect(new Set(imageGoMatches).size, JSON.stringify(imageGoMatches)).toBe(1);
     expect(
-      new Set(Object.values(imageGoVersions)).size,
-      JSON.stringify(imageGoVersions)
-    ).toBe(1);
-    expect(
-      Object.values(imageGoVersions)[0],
+      imageGoMatches[0],
       'build images must match the module Go directive'
     ).toBe(Object.values(goVersions)[0]);
 
@@ -486,7 +481,7 @@ describe('GitHub Actions workflow integrity', () => {
       'unsupported official CPA v8 target: linux/riscv64 (no v7 fallback)'
     );
     expect(lifecycleSteps[3]).toContain(
-      'run: docker compose -f docker-compose.yml -f bin/ci/runtime-v7-compatibility.compose.yml build cpamp-runtime'
+      'run: docker compose -f docker-compose.yml -f bin/ci/runtime-v7-compatibility.compose.yml build cpa-manager-plus'
     );
     const focusedSmoke = dockerJob.indexOf('run: bin/ci/runtime12-docker-smoke.sh');
     const failureE2E = dockerJob.indexOf('run: bin/ci/runtime14-failure-e2e.sh');
@@ -514,11 +509,7 @@ describe('GitHub Actions workflow integrity', () => {
   });
 
   it('passes fail-closed image identity to every Docker build caller', () => {
-    const imageDockerfiles = [
-      'Dockerfile.ingress',
-      'Dockerfile.manager-server',
-      'Dockerfile.runtime',
-    ];
+    const imageDockerfiles = ['Dockerfile'];
     const mergeCommit = '${{ github.sha }}';
     const readYaml = (relative) => parseYaml(readFileSync(path.join(repoRoot, relative), 'utf8'));
     const stepsOf = (parsed) => Object.values(parsed.jobs).flatMap((job) => job.steps ?? []);
@@ -529,7 +520,11 @@ describe('GitHub Actions workflow integrity', () => {
     // github.sha: the PR head SHA names different bytes when the base moved.
     const pullRequest = readYaml('.github/workflows/pr-check.yml');
     const dockerBuilds = imageBuilds(pullRequest);
-    expect(dockerBuilds.map((step) => step.with.file).sort()).toEqual(imageDockerfiles);
+    expect(dockerBuilds.map((step) => [step.with.file, step.with.target])).toEqual([
+      ['Dockerfile', 'slim'],
+      ['Dockerfile', 'slim'],
+      ['Dockerfile', 'full'],
+    ]);
     for (const step of dockerBuilds) {
       expect(step.with['build-args'], step.name).toContain('VERSION=ci');
       expect(step.with['build-args'], step.name).toContain(`SOURCE_COMMIT=${mergeCommit}`);
@@ -599,11 +594,7 @@ describe('GitHub Actions workflow integrity', () => {
 
     // Every buildable Compose service forwards both args. The empty
     // SOURCE_COMMIT default keeps local builds fail-closed.
-    for (const file of [
-      'docker-compose.yml',
-      'docker-compose.manager.yml',
-      'docker-compose.fresh-auth-proof.yml',
-    ]) {
+    for (const file of ['docker-compose.yml', 'docker-compose.manager.yml']) {
       const services = readYaml(file).services;
       const buildable = Object.entries(services).filter(([, service]) => service.build);
       expect(buildable.length, file).toBeGreaterThan(0);

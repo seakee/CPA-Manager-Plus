@@ -56,9 +56,7 @@ const triggersFrontend = (filePath) =>
   // which the Frontend job runs: the Node baseline, every image base and every
   // Go module manifest that carries the Go directive.
   filePath === '.nvmrc' ||
-  filePath === 'Dockerfile.manager-server' ||
-  filePath === 'Dockerfile.ingress' ||
-  filePath === 'Dockerfile.runtime' ||
+  filePath === 'Dockerfile' ||
   filePath === 'apps/manager-server/go.mod' ||
   filePath === 'apps/ingress/go.mod' ||
   filePath === 'apps/runtime-supervisor/go.mod' ||
@@ -95,11 +93,11 @@ const triggersManagerServer = (filePath) =>
 const triggersRuntimeSupervisor = (filePath) =>
   startsWithPath(filePath, 'apps/runtime-supervisor') ||
   startsWithPath(filePath, 'docker/runtime') ||
-  filePath === 'Dockerfile.runtime' ||
+  filePath === 'Dockerfile' ||
   startsWithPath(filePath, 'bin/ci/runtime-boundary');
 
 const triggersIngress = (filePath) =>
-  startsWithPath(filePath, 'apps/ingress') || filePath === 'Dockerfile.ingress';
+  startsWithPath(filePath, 'apps/ingress') || filePath === 'Dockerfile';
 
 const managerServerModuleFile = (filePath, relativePath) =>
   startsWithPath(filePath, `apps/manager-server/${relativePath}`);
@@ -159,9 +157,7 @@ const triggersRuntimeLifecycle = (filePath) =>
   filePath.startsWith('bin/ci/runtime18-') ||
   filePath.startsWith('bin/ci/runtime19-') ||
   filePath === 'bin/ci/validate-runtime12-compose.mjs' ||
-  filePath === 'Dockerfile.manager-server' ||
-  filePath === 'Dockerfile.ingress' ||
-  filePath === 'Dockerfile.runtime' ||
+  filePath === 'Dockerfile' ||
   filePath === 'docker-compose.yml' ||
   filePath === 'docker-compose.manager.yml';
 
@@ -193,9 +189,7 @@ const triggersDocker = (filePath) =>
   filePath.startsWith('bin/ci/runtime18-') ||
   filePath.startsWith('bin/ci/runtime19-') ||
   filePath === 'bin/ci/validate-runtime12-compose.mjs' ||
-  filePath === 'Dockerfile.manager-server' ||
-  filePath === 'Dockerfile.ingress' ||
-  filePath === 'Dockerfile.runtime' ||
+  filePath === 'Dockerfile' ||
   filePath === 'docker-compose.yml' ||
   filePath === 'docker-compose.manager.yml' ||
   filePath === '.dockerignore' ||

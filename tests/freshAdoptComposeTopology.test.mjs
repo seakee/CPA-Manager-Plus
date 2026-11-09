@@ -1,9 +1,11 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { describe, expect, it } from 'vitest';
-
+import { parseGoDurationSeconds } from '../bin/ci/validate-runtime12-compose.mjs';
+import { validateRuntime12ComposeDocument } from '../bin/release/render-embedded-compose.mjs';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const composePath = path.join(repoRoot, 'docker-compose.yml');
 
@@ -12,9 +14,9 @@ const composePath = path.join(repoRoot, 'docker-compose.yml');
 // is only meaningful while the Fresh record it authorizes is unreadable to every
 // other container: the Manager data volume holds the Fresh operation, its
 // admin credential and the protected adoption snapshot.
-const MANAGER_DATA_VOLUME = 'cpamp-manager-data';
+const MANAGER_DATA_VOLUME = 'cpamp-data';
 const MANAGER_DATA_TARGET = '/data';
-const MANAGER_SERVICE = 'cpamp-manager';
+const MANAGER_SERVICE = 'cpa-manager-plus';
 
 // A short-syntax source is a host path when it looks like one; anything else is
 // a named volume or a `${VAR}` interpolation, neither of which this file can
@@ -128,7 +130,7 @@ describe('Fresh adoption compose topology negative fixtures', () => {
   const fixture = (services) =>
     parseYaml(['services:', ...services, 'volumes:', `  ${MANAGER_DATA_VOLUME}:`].join('\n'));
 
-  const checkedInManager = ['  cpamp-manager:', '    volumes:', `      - ${MANAGER_DATA_VOLUME}:${MANAGER_DATA_TARGET}`];
+  const checkedInManager = [`  ${MANAGER_SERVICE}:`, '    volumes:', `      - ${MANAGER_DATA_VOLUME}:${MANAGER_DATA_TARGET}`];
 
   it('rejects a volumes_from reference to the Manager service', () => {
     const audit = auditComposeTopology(fixture([...checkedInManager, '  cpamp-runtime:', '    volumes_from:', `      - ${MANAGER_SERVICE}`]));
@@ -188,12 +190,170 @@ describe('Fresh adoption compose topology negative fixtures', () => {
 
   it('rejects the Manager service binding a host path onto its own data path', () => {
     const audit = auditComposeTopology(
-      fixture(['  cpamp-manager:', '    volumes:', `      - ./manager-data:${MANAGER_DATA_TARGET}`, '  cpamp-runtime:', '    image: unused']),
+      fixture([`  ${MANAGER_SERVICE}:`, '    volumes:', `      - ./manager-data:${MANAGER_DATA_TARGET}`, '  cpamp-runtime:', '    image: unused']),
     );
 
     expect(audit.hostBindsOfManagerData.map((volume) => `${volume.service}:${volume.source}:${volume.target}`)).toEqual([
-      `cpamp-manager:./manager-data:${MANAGER_DATA_TARGET}`,
+      `${MANAGER_SERVICE}:./manager-data:${MANAGER_DATA_TARGET}`,
     ]);
     expect(audit.managerDataMounts).toEqual([]);
+  });
+
+  it('validates stop_grace_period >= CPAMP_DRAIN_TIMEOUT + 60s and CPAMP_RUNTIME_ADDR loopback in validate-runtime12-compose.mjs', () => {
+    const validatorPath = path.join(repoRoot, 'bin', 'ci', 'validate-runtime12-compose.mjs');
+    const validDoc = {
+      services: {
+        'cpa-manager-plus': {
+          image: 'seakee/cpa-manager-plus:latest',
+          stop_grace_period: '2m30s',
+          ports: [{ mode: 'ingress', published: '18317', target: 18317, protocol: 'tcp' }],
+          environment: {
+            CPAMP_PUBLIC_ORIGIN: '',
+            CPAMP_DRAIN_TIMEOUT: '90s',
+          },
+          volumes: [{ type: 'volume', source: 'cpamp-data', target: '/data' }],
+        },
+      },
+      volumes: { 'cpamp-data': {} },
+    };
+    const runValidator = (doc) =>
+      execFileSync(process.execPath, [validatorPath], {
+        cwd: repoRoot,
+        input: JSON.stringify(doc),
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+    const validDurationTable = [
+      ['1.5m', 90],
+      ['90000ms', 90],
+      ['1m30s', 90],
+      ['2h', 7200],
+      ['.5m', 30],
+      ['1.m', 60],
+      ['500us', 0.0005],
+      ['500µs', 0.0005],
+      ['500μs', 0.0005],
+      ['1000ns', 1e-6],
+      ['0', 0],
+      ['+150s', 150],
+    ];
+    const pinnedDocForRender = {
+      ...validDoc,
+      services: {
+        'cpa-manager-plus': {
+          ...validDoc.services['cpa-manager-plus'],
+          image: `seakee/cpa-manager-plus:v2.0.0-beta.1@sha256:${'a'.repeat(64)}`,
+        },
+      },
+    };
+    for (const [input, expected] of validDurationTable) {
+      expect(parseGoDurationSeconds(input)).toBeCloseTo(expected, 9);
+      if (expected > 0) {
+        const graceStr = `${Math.ceil(Math.max(150, expected + 60))}s`;
+        const docA = structuredClone(validDoc);
+        docA.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = input;
+        docA.services['cpa-manager-plus'].stop_grace_period = graceStr;
+        expect(() => runValidator(docA)).not.toThrow();
+
+        const docB = structuredClone(pinnedDocForRender);
+        docB.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = input;
+        docB.services['cpa-manager-plus'].stop_grace_period = graceStr;
+        expect(() => validateRuntime12ComposeDocument(docB, { validateComposeScript: false })).not.toThrow();
+      }
+    }
+    for (const invalid of ['90', 'abc', '-1s', '', '.s', '1d']) {
+      expect(Number.isNaN(parseGoDurationSeconds(invalid))).toBe(true);
+      if (invalid !== '') {
+        const docA = structuredClone(validDoc);
+        docA.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = invalid;
+        expect(() => runValidator(docA)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+
+        const docB = structuredClone(pinnedDocForRender);
+        docB.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = invalid;
+        expect(() => validateRuntime12ComposeDocument(docB, { validateComposeScript: false })).toThrow(
+          /stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/
+        );
+      }
+    }
+    expect(() => runValidator(validDoc)).not.toThrow();
+
+    for (const validDrain of ['1.5m', '90000ms', '1m30s']) {
+      const fractionalDrainDoc = structuredClone(validDoc);
+      fractionalDrainDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = validDrain;
+      expect(() => runValidator(fractionalDrainDoc)).not.toThrow();
+    }
+
+    const fractionalOverBudgetDoc = structuredClone(validDoc);
+    fractionalOverBudgetDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = '1.75m';
+    fractionalOverBudgetDoc.services['cpa-manager-plus'].stop_grace_period = '150s';
+    expect(() => runValidator(fractionalOverBudgetDoc)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+
+    const fractionalWithinCustomGraceDoc = structuredClone(validDoc);
+    fractionalWithinCustomGraceDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = '1.75m';
+    fractionalWithinCustomGraceDoc.services['cpa-manager-plus'].stop_grace_period = '2m45s';
+    expect(() => runValidator(fractionalWithinCustomGraceDoc)).not.toThrow();
+
+    for (const invalidDrain of ['90', 'abc', '-1s']) {
+      const badDrainDoc = structuredClone(validDoc);
+      badDrainDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = invalidDrain;
+      expect(() => runValidator(badDrainDoc)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+    }
+
+    const shortGraceDoc = structuredClone(validDoc);
+    shortGraceDoc.services['cpa-manager-plus'].stop_grace_period = '2m0s';
+    expect(() => runValidator(shortGraceDoc)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+
+    const longDrainShortGraceDoc = structuredClone(validDoc);
+    longDrainShortGraceDoc.services['cpa-manager-plus'].environment.CPAMP_DRAIN_TIMEOUT = '120s';
+    longDrainShortGraceDoc.services['cpa-manager-plus'].stop_grace_period = '150s';
+    expect(() => runValidator(longDrainShortGraceDoc)).toThrow(/stop_grace_period >= CPAMP_DRAIN_TIMEOUT \+ 60s/);
+    for (const badRuntimeAddr of ['0.0.0.0:9081', '127.0.0.1:9000', '[::1]:9081', '127.0.0.2:9081', 'localhost:9081']) {
+      const badRuntimeAddrDoc = structuredClone(validDoc);
+      badRuntimeAddrDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_ADDR = badRuntimeAddr;
+      expect(() => runValidator(badRuntimeAddrDoc)).toThrow(
+        /CPAMP_RUNTIME_ADDR override must stay on in-container loopback 127\.0\.0\.1:9081/
+      );
+      const badRuntimeAddrRenderDoc = structuredClone(pinnedDocForRender);
+      badRuntimeAddrRenderDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_ADDR = badRuntimeAddr;
+      expect(() => validateRuntime12ComposeDocument(badRuntimeAddrRenderDoc, { validateComposeScript: false })).toThrow(
+        /CPAMP_RUNTIME_ADDR override must stay on in-container loopback 127\.0\.0\.1:9081/
+      );
+    }
+
+    for (const badCpaAddr of ['0.0.0.0:8317', '127.0.0.1:9000', '[::1]:8317', '127.0.0.2:8317', 'localhost:8317']) {
+      const badCpaAddrDoc = structuredClone(validDoc);
+      badCpaAddrDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_CPA_ADDR = badCpaAddr;
+      expect(() => runValidator(badCpaAddrDoc)).toThrow(
+        /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
+      );
+      const badCpaAddrRenderDoc = structuredClone(pinnedDocForRender);
+      badCpaAddrRenderDoc.services['cpa-manager-plus'].environment.CPAMP_RUNTIME_CPA_ADDR = badCpaAddr;
+      expect(() => validateRuntime12ComposeDocument(badCpaAddrRenderDoc, { validateComposeScript: false })).toThrow(
+        /CPAMP_RUNTIME_CPA_ADDR override must stay on in-container loopback 127\.0\.0\.1:8317/
+      );
+    }
+
+    for (const badPid of ['host', 'service:other', 'container:other']) {
+      const badPidDoc = structuredClone(validDoc);
+      badPidDoc.services['cpa-manager-plus'].pid = badPid;
+      expect(() => runValidator(badPidDoc)).toThrow(/cpa-manager-plus must not set pid/);
+
+      const badPidRenderDoc = structuredClone(pinnedDocForRender);
+      badPidRenderDoc.services['cpa-manager-plus'].pid = badPid;
+      expect(() => validateRuntime12ComposeDocument(badPidRenderDoc, { validateComposeScript: false })).toThrow(
+        /cpa-manager-plus must not set pid/
+      );
+    }
+
+    const badInitDoc = structuredClone(validDoc);
+    badInitDoc.services['cpa-manager-plus'].init = true;
+    expect(() => runValidator(badInitDoc)).toThrow(/cpa-manager-plus must not set init: true/);
+
+    const badInitRenderDoc = structuredClone(pinnedDocForRender);
+    badInitRenderDoc.services['cpa-manager-plus'].init = true;
+    expect(() => validateRuntime12ComposeDocument(badInitRenderDoc, { validateComposeScript: false })).toThrow(
+      /cpa-manager-plus must not set init: true/
+    );
   });
 });

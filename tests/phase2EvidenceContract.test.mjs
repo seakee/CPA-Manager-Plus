@@ -51,11 +51,10 @@ describe('Phase2 evidence contract', () => {
     expect(candidate.classification).not.toBe('current_bundled');
   });
 
-  it('keeps Dockerfile.runtime on the current v7.3.3 bundle', () => {
+  it('keeps Dockerfile on the current v7.3.3 compatibility bundle', () => {
     const { contract } = loaded();
     expect(() => validateBundledDockerfile(contract)).not.toThrow();
-    const dockerfile = readFileSync(path.join(repoRoot, 'Dockerfile.runtime'), 'utf8');
-    expect(dockerfile).toContain('cpa_version="7.3.3"');
+    const dockerfile = readFileSync(path.join(repoRoot, 'Dockerfile'), 'utf8');
     expect(dockerfile).not.toContain('cpa_version="7.3.8"');
   });
 

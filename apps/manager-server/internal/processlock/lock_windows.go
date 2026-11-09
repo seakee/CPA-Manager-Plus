@@ -47,6 +47,10 @@ func openLockFile(path string, flags int) (*os.File, error) {
 	return os.NewFile(uintptr(handle), path), nil
 }
 
+func tightenLockFile(*os.File) error {
+	return nil
+}
+
 func lockFile(file *os.File) error {
 	var overlapped windows.Overlapped
 	err := windows.LockFileEx(

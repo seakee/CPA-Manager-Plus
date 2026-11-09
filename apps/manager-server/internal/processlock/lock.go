@@ -70,6 +70,12 @@ func acquireExisting(databasePath string, flags int) (*Lock, error) {
 		_ = errors.Join(unlockFile(file), file.Close())
 		return nil, err
 	}
+	if flags&os.O_RDWR != 0 {
+		if err := tightenLockFile(file); err != nil {
+			_ = errors.Join(unlockFile(file), file.Close())
+			return nil, fmt.Errorf("chmod manager database process lock %s: %w", lockPath, err)
+		}
+	}
 	return lock, nil
 }
 
@@ -216,6 +222,10 @@ func acquire(databasePath string, exclusive bool) (*Lock, error) {
 		_ = errors.Join(unlockFile(file), file.Close())
 		return nil, err
 	}
+	if err := tightenLockFile(file); err != nil {
+		_ = errors.Join(unlockFile(file), file.Close())
+		return nil, fmt.Errorf("chmod manager database process lock %s: %w", lockPath, err)
+	}
 	return lock, nil
 }
 
@@ -256,8 +266,12 @@ func resolveDatabasePath(databasePath string) (string, error) {
 	}
 	absolutePath = filepath.Clean(absolutePath)
 	directory := filepath.Dir(absolutePath)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
+	_, dirStatErr := os.Lstat(directory)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return "", fmt.Errorf("create manager database directory: %w", err)
+	}
+	if errors.Is(dirStatErr, os.ErrNotExist) {
+		_ = os.Chmod(directory, 0o700)
 	}
 	resolvedDirectory, err := filepath.EvalSymlinks(directory)
 	if err != nil {

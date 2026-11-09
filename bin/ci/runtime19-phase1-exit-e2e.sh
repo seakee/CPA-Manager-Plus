@@ -13,13 +13,13 @@ snapshot_root="$(mktemp -d "${TMPDIR:-/tmp}/cpamp-runtime19-exit.XXXXXX")"
 # Explicit historical baseline; the normal Docker/Compose default is CPA v8.
 compose=(docker compose --project-directory "${repo_root}" -f "${repo_root}/docker-compose.yml" -f "${repo_root}/bin/ci/runtime-v7-compatibility.compose.yml" -p "${project}")
 
-paused_manager=""
+paused_manager_pid=""
 
 cleanup() {
   set +e
   docker rm -f "${initializer_name}" >/dev/null 2>&1 || true
-  if [ -n "${paused_manager}" ]; then
-    docker unpause "${paused_manager}" >/dev/null 2>&1 || true
+  if [ -n "${paused_manager_pid}" ]; then
+    "${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}" >/dev/null 2>&1 || true
   fi
   "${compose[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -rf "${snapshot_root}"
@@ -101,27 +101,47 @@ container_id() {
   printf '%s' "${id}"
 }
 
+runtime_root() {
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec 'if [ -d /data/runtime ]; then printf /data/runtime; else printf /runtime; fi'
+}
+
+runtime_token_file() {
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then printf "%s" "$c"; exit 0; fi
+    done
+    printf /data/runtime-secret/token
+  '
+}
+
+service_pid() {
+  local binary="$1"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    pidof "$1" | awk "{print \$1}"
+  ' sh "${binary}"
+}
+
 runtime_get_from_manager() {
   local request_path="$1"
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T --user 10002:10002 cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then token_file="$c"; break; fi
+    done
+    token="$(cat "${token_file}")"
     wget -qO- -T 5 \
       --header="Authorization: Bearer ${token}" \
       --header="X-CPAMP-Runtime-Features: active-gateway-artifact-v1" \
-      "http://cpamp-runtime:9081${1}"
+      "http://127.0.0.1:9081${1}"
   ' sh "${request_path}"
 }
 
 runtime_get_local() {
   local request_path="$1"
-  local runtime_id
-  runtime_id="$(container_id cpamp-runtime)"
-  docker run --rm \
-    --network "container:${runtime_id}" \
-    --volumes-from "${runtime_id}:ro" \
-    --entrypoint sh \
-    seakee/cpa-manager-plus:latest -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then token_file="$c"; break; fi
+    done
+    token="$(cat "${token_file}")"
     wget -qO- -T 5 \
       --header="Authorization: Bearer ${token}" \
       --header="X-CPAMP-Runtime-Features: active-gateway-artifact-v1" \
@@ -141,16 +161,18 @@ runtime_get() {
 
 runtime_activate() {
   local payload="$1"
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then token_file="$c"; break; fi
+    done
+    token="$(cat "${token_file}")"
     wget -qO- -T 170 \
       --header="Authorization: Bearer ${token}" \
       --header="Content-Type: application/json" \
       --post-data="${1}" \
-      http://cpamp-runtime:9081/v1/runtime/operations/activate-update
+      http://127.0.0.1:9081/v1/runtime/operations/activate-update
   ' sh "${payload}"
 }
-
 activate() {
   local operation_id="$1"
   local generation="$2"
@@ -189,7 +211,7 @@ wait_runtime_observation() {
 }
 
 runtime_cpa_pid() {
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     for process_dir in /proc/[0-9]*; do
       if [ -r "${process_dir}/comm" ] && [ "$(cat "${process_dir}/comm")" = "cli-proxy-api" ]; then
         printf "%s" "${process_dir#/proc/}"
@@ -202,7 +224,7 @@ runtime_cpa_pid() {
 
 assert_cpa_pid_alive() {
   local expected_pid="$1"
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     test -r "/proc/${1}/comm"
     test "$(cat "/proc/${1}/comm")" = "cli-proxy-api"
   ' sh "${expected_pid}"
@@ -217,11 +239,11 @@ assert_no_cpa() {
 assert_cpa_identity() {
   local pid="$1"
   local actual_uid actual_gid actual_groups expected_uid expected_gid
-  actual_uid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
-  actual_gid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
-  actual_groups="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Groups:" { $1 = ""; sub(/^ +/, ""); print; exit }' "/proc/${pid}/status")"
-  expected_uid="$("${compose[@]}" exec -T cpamp-runtime sh -ec 'printf %s "$CPAMP_RUNTIME_CPA_UID"')"
-  expected_gid="$("${compose[@]}" exec -T cpamp-runtime sh -ec 'printf %s "$CPAMP_RUNTIME_CPA_GID"')"
+  actual_uid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
+  actual_gid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
+  actual_groups="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Groups:" { $1 = ""; sub(/^ +/, ""); print; exit }' "/proc/${pid}/status")"
+  expected_uid="$("${compose[@]}" exec -T cpa-manager-plus sh -ec 'printf %s "${CPAMP_RUNTIME_CPA_UID:-10001}"')"
+  expected_gid="$("${compose[@]}" exec -T cpa-manager-plus sh -ec 'printf %s "${CPAMP_RUNTIME_CPA_GID:-10001}"')"
   assert_equal "${actual_uid}" "${expected_uid}" "CPA PID ${pid} UID"
   assert_equal "${actual_gid}" "${expected_gid}" "CPA PID ${pid} GID"
   assert_equal "${actual_groups}" "${expected_gid}" "CPA PID ${pid} supplementary groups"
@@ -231,12 +253,14 @@ assert_cpa_identity() {
 assert_gateway_writable() {
   local pid="$1"
   local uid gid
-  uid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
-  gid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
-  "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime sh -ec '
-    test -r /runtime/gateway/config.yaml
-    test -w /runtime/gateway
-    marker=/runtime/gateway/.runtime19-cpa-write
+  uid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
+  gid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
+  "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus sh -ec '
+    rt_root="/data/runtime"
+    [ ! -d /data/runtime ] && [ -d /runtime ] && rt_root="/runtime"
+    test -r "${rt_root}/gateway/config.yaml"
+    test -w "${rt_root}/gateway"
+    marker="${rt_root}/gateway/.runtime19-cpa-write"
     printf runtime19 >"${marker}"
     test "$(cat "${marker}")" = runtime19
     rm "${marker}"
@@ -245,64 +269,71 @@ assert_gateway_writable() {
 
 assert_secret_and_private_state_denied() {
   local pid="$1"
-  local uid gid
-  uid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
-  gid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime cat /run/cpamp/runtime-secret/token >/dev/null 2>&1; then
+  local uid gid rt_root token_file
+  uid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
+  gid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
+  rt_root="$(runtime_root)"
+  token_file="$(runtime_token_file)"
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus cat "${token_file}" >/dev/null 2>&1; then
     fail "CPA identity can read the Runtime transport secret"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime ls /runtime/supervisor >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus ls "${rt_root}/supervisor" >/dev/null 2>&1; then
     fail "CPA identity can enumerate Supervisor private state"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime cat /runtime/supervisor/operations.sqlite >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus cat "${rt_root}/supervisor/operations.sqlite" >/dev/null 2>&1; then
     fail "CPA identity can read the Supervisor journal"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime cat /runtime/supervisor/active/cpa/selection.json >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus cat "${rt_root}/supervisor/active/cpa/selection.json" >/dev/null 2>&1; then
     fail "CPA identity can read active selection"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime cat /runtime/supervisor/artifacts/cpa/.runtime19-private/marker >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus cat "${rt_root}/supervisor/artifacts/cpa/.runtime19-private/marker" >/dev/null 2>&1; then
     fail "CPA identity can read unrelated Supervisor artifact state"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime sh -ec 'printf x >>/runtime/supervisor/operations.sqlite' >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus sh -ec "printf x >>'${rt_root}/supervisor/operations.sqlite'" >/dev/null 2>&1; then
     fail "CPA identity can mutate Supervisor private state"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime sh -ec "tr '\000' '\n' </proc/${pid}/environ" |
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus sh -ec "tr '\000' '\n' </proc/${pid}/environ" |
     grep -Eq '^(CPAMP_RUNTIME_|CPAMP_CPA_EXECUTABLE=|CPAMP_CPA_ARTIFACT_MANIFEST=)'; then
     fail "CPA environment contains Supervisor-private Runtime configuration"
   fi
 }
 
 assert_mount_isolation() {
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
+  local rt_root token_file token_dir
+  rt_root="$(runtime_root)"
+  token_file="$(runtime_token_file)"
+  token_dir="${token_file%/*}"
+  "${compose[@]}" exec -T --user 10002:10002 cpa-manager-plus sh -ec '
     test -d /data
-    test ! -e /runtime
-    test -r /run/cpamp/runtime-secret/token
-    ! touch /run/cpamp/runtime-secret/.runtime19-write-probe
-  ' >/dev/null 2>&1 || fail "Manager data, Runtime, or read-only token boundary changed"
-  "${compose[@]}" exec -T cpamp-ingress sh -ec '
-    test ! -e /data
-    test ! -e /runtime
-    test ! -e /run/cpamp/runtime-secret
-  ' || fail "Ingress gained Manager, Runtime, or token storage"
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+    test ! -w "$1/supervisor"
+    test -r "$2"
+    ! touch "$3/.runtime19-write-probe"
+  ' sh "${rt_root}" "${token_file}" "${token_dir}" >/dev/null 2>&1 || fail "Manager data, Runtime, or read-only token boundary changed"
+  "${compose[@]}" exec -T --user 10003:10003 cpa-manager-plus sh -ec '
+    ! ls /data >/dev/null 2>&1
+    ! test -r "$2"
+    ! ls "$1/supervisor" >/dev/null 2>&1
+  ' sh "${rt_root}" "${token_file}" || fail "Ingress gained Manager, Runtime, or token storage"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     test "$(awk '\''$1 == "Uid:" { print $2; exit }'\'' /proc/1/status)" = 0
-    test -r /run/cpamp/runtime-secret/token
-    test -w /runtime/supervisor
-  ' || fail "Runtime Supervisor is not the privileged Runtime owner"
+    test -r "$2"
+    test -w "$1/supervisor"
+  ' sh "${rt_root}" "${token_file}" || fail "Runtime Supervisor is not the privileged Runtime owner"
 }
 
 assert_execution_corridor() {
   local pid="$1"
   local version="$2"
-  local uid gid executable
-  uid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
-  gid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
-  executable="/runtime/supervisor/artifacts/cpa/${version}/cli-proxy-api"
-  "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime test -r "${executable}" ||
+  local uid gid rt_root executable
+  uid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
+  gid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
+  rt_root="$(runtime_root)"
+  executable="${rt_root}/supervisor/artifacts/cpa/${version}/cli-proxy-api"
+  "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus test -r "${executable}" ||
     fail "CPA cannot read finalized ${version} executable"
-  "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime test -x "${executable}" ||
+  "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus test -x "${executable}" ||
     fail "CPA cannot execute finalized ${version} executable"
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime ls /runtime/supervisor/artifacts/cpa >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus ls "${rt_root}/supervisor/artifacts/cpa" >/dev/null 2>&1; then
     fail "artifact execution corridor permits store enumeration"
   fi
 }
@@ -311,12 +342,14 @@ seed_stage() {
   local version="$1"
   local source="$2"
   local trailer="$3"
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     version="$1"
     source="$2"
     trailer="$3"
-    cpa_gid="${CPAMP_RUNTIME_CPA_GID:?}"
-    directory="/runtime/supervisor/artifacts/cpa/${version}"
+    rt_root="/data/runtime"
+    [ ! -d /data/runtime ] && [ -d /runtime ] && rt_root="/runtime"
+    cpa_gid="${CPAMP_RUNTIME_CPA_GID:-10001}"
+    directory="${rt_root}/supervisor/artifacts/cpa/${version}"
     mkdir -p "${directory}"
     chmod 700 "${directory}"
     cp "${source}" "${directory}/cli-proxy-api"
@@ -337,7 +370,7 @@ assert_selection() {
   local expected_version="$1"
   local expected_artifact="$2"
   local selected
-  selected="$("${compose[@]}" exec -T cpamp-runtime cat /runtime/supervisor/active/cpa/selection.json)"
+  selected="$("${compose[@]}" exec -T cpa-manager-plus cat "$(runtime_root)/supervisor/active/cpa/selection.json")"
   assert_equal "$(printf '%s' "${selected}" | json_field schemaVersion)" 1 "selection schema"
   assert_equal "$(printf '%s' "${selected}" | json_field engine)" cpa "selection engine"
   assert_equal "$(printf '%s' "${selected}" | json_field version)" "${expected_version}" "selection version"
@@ -375,12 +408,7 @@ public_gateway_signature() {
 }
 
 private_gateway_signature() {
-  local runtime_id
-  runtime_id="$(container_id cpamp-runtime)"
-  docker run --rm \
-    --network "container:${runtime_id}" \
-    --entrypoint sh \
-    seakee/cpa-manager-plus:latest -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     body="$(mktemp)"
     headers="$(mktemp)"
     cleanup_probe() { rm -f "${body}" "${headers}"; }
@@ -445,11 +473,11 @@ copy_sqlite_snapshot() (
 )
 
 snapshot_runtime_journal() {
-  copy_sqlite_snapshot cpamp-runtime /runtime/supervisor/operations.sqlite "$1"
+  copy_sqlite_snapshot cpa-manager-plus "$(runtime_root)/supervisor/operations.sqlite" "$1"
 }
 
 snapshot_manager_database() {
-  copy_sqlite_snapshot cpamp-manager /data/usage.sqlite "$1"
+  copy_sqlite_snapshot cpa-manager-plus /data/usage.sqlite "$1"
 }
 
 journal_count() {
@@ -545,11 +573,11 @@ PY
 }
 
 runtime_secret_digest() {
-  "${compose[@]}" exec -T cpamp-runtime sha256sum /run/cpamp/runtime-secret/token | awk '{print $1}'
+  "${compose[@]}" exec -T cpa-manager-plus sha256sum "$(runtime_token_file)" | awk '{print $1}'
 }
 
 gateway_config_digest() {
-  "${compose[@]}" exec -T cpamp-runtime sha256sum /runtime/gateway/config.yaml | awk '{print $1}'
+  "${compose[@]}" exec -T cpa-manager-plus sha256sum "$(runtime_root)/gateway/config.yaml" | awk '{print $1}'
 }
 
 cd "${repo_root}"
@@ -579,19 +607,20 @@ assert_equal "${runtime_identity}" embedded-default "baseline Runtime identity"
 assert_not_equal "${generation_a}" 0 "baseline RuntimeGeneration"
 assert_equal "${attempts_a}" 3 "baseline recovery budget"
 [[ "${artifact_a}" =~ ^sha256:[0-9a-f]{64}$ ]] || fail "bundled A artifact is not canonical: ${artifact_a}"
-bundled_artifact="sha256:$("${compose[@]}" exec -T cpamp-runtime sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
+bundled_artifact="sha256:$("${compose[@]}" exec -T cpa-manager-plus sha256sum /usr/local/bin/cli-proxy-api | awk '{print $1}')"
 assert_equal "${artifact_a}" "${bundled_artifact}" "baseline bundled A exact artifact"
 pid_a="$(runtime_cpa_pid)"
 assert_cpa_pid_alive "${pid_a}"
 assert_cpa_identity "${pid_a}"
 
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
-  mkdir -p /runtime/supervisor/artifacts/cpa/.runtime19-private
-  chmod 700 /runtime/supervisor/artifacts/cpa/.runtime19-private
-  printf private >/runtime/supervisor/artifacts/cpa/.runtime19-private/marker
-  chmod 600 /runtime/supervisor/artifacts/cpa/.runtime19-private/marker
-  test ! -e /runtime/supervisor/active/cpa/selection.json
-'
+rt_root="$(runtime_root)"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
+  mkdir -p "$1/supervisor/artifacts/cpa/.runtime19-private"
+  chmod 700 "$1/supervisor/artifacts/cpa/.runtime19-private"
+  printf private >"$1/supervisor/artifacts/cpa/.runtime19-private/marker"
+  chmod 600 "$1/supervisor/artifacts/cpa/.runtime19-private/marker"
+  test ! -e "$1/supervisor/active/cpa/selection.json"
+' sh "${rt_root}"
 assert_gateway_writable "${pid_a}"
 assert_secret_and_private_state_denied "${pid_a}"
 assert_mount_isolation
@@ -611,9 +640,9 @@ assert_equal "$(journal_count "${journal_a}" activate_update - - - -)" 0 "fresh 
 assert_manager_starts_are_reconcile_operations "${journal_a}"
 
 scenario 'B — Manager down / real Gateway data-plane independence'
-"${compose[@]}" stop cpamp-manager >/dev/null
-manager_id="$(container_id cpamp-manager)"
-assert_equal "$(docker inspect --format '{{.State.Running}}' "${manager_id}")" false "Manager stopped state"
+paused_manager_pid="$(service_pid cpa-manager-plus)"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1"' sh "${paused_manager_pid}"
+assert_equal "$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "State:" { print $2; exit }' "/proc/${paused_manager_pid}/status")" T "Manager stopped state"
 private_gateway_down="$(private_gateway_signature)"
 public_gateway_down="$(wait_public_gateway_signature "${private_gateway_a}" 30)"
 assert_equal "${private_gateway_down}" "${private_gateway_a}" "private CPA route while Manager is down"
@@ -628,7 +657,8 @@ assert_equal "$(journal_count "${journal_manager_down}" auto_recovery - - - -)" 
 assert_equal "$(journal_count "${journal_manager_down}" stop - - - -)" 0 "Manager-down Stop count"
 assert_equal "$(journal_count "${journal_manager_down}" restart - - - -)" 0 "Manager-down Restart count"
 
-"${compose[@]}" start cpamp-manager >/dev/null
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}"
+paused_manager_pid=""
 wait_public_health 90
 wait_runtime_observation ready armed "${artifact_a}" manager 60 >/dev/null
 sleep 7
@@ -665,10 +695,10 @@ assert_equal "$(journal_count "${journal_b}" start "${generation_a}" 'runtime-re
 assert_equal "$(journal_count "${journal_b}" activate_update "${generation_a}" runtime19-activate-b succeeded -)" 1 "B activation journal evidence"
 
 scenario 'D — Runtime recreate / selected B persistence'
-manager_id="$(container_id cpamp-manager)"
-docker pause "${manager_id}" >/dev/null
-paused_manager="${manager_id}"
-"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+paused_manager_pid="$(service_pid cpa-manager-plus)"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1"' sh "${paused_manager_pid}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -TERM $(pidof cpamp-runtime-supervisor)'
+sleep 1
 status_b_inactive="$(wait_runtime_observation offline inactive "${artifact_b}" local 60)"
 generation_b="$(printf '%s' "${status_b_inactive}" | json_uint_field runtimeGeneration)"
 assert_not_equal "${generation_b}" "${generation_a}" "Runtime recreation generation"
@@ -677,8 +707,8 @@ assert_equal "$(gateway_config_digest)" "${config_digest_a}" "Runtime recreate G
 assert_equal "$(runtime_secret_digest)" "${secret_digest_a}" "Runtime recreate secret digest"
 journal_before_b_reconcile="$(snapshot_runtime_journal scenario-d-before-reconcile)"
 assert_equal "$(journal_count "${journal_before_b_reconcile}" start "${generation_b}" 'runtime-reconcile/v1:' - -)" 0 "new generation pre-reconcile Start count"
-docker unpause "${manager_id}" >/dev/null
-paused_manager=""
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}"
+paused_manager_pid=""
 status_b_recreated="$(wait_runtime_observation ready armed "${artifact_b}" local 120)"
 assert_equal "$(printf '%s' "${status_b_recreated}" | json_uint_field runtimeGeneration)" "${generation_b}" "recreated B generation"
 pid_b_recreated="$(runtime_cpa_pid)"
@@ -697,7 +727,7 @@ assert_equal "${updated_at_b}" "${updated_at_a}" "Runtime recreate desired times
 
 scenario 'E — automatic recovery of selected B'
 pid_b_before_recovery="$(runtime_cpa_pid)"
-"${compose[@]}" exec -T cpamp-runtime sh -ec 'kill -KILL "$1"' sh "${pid_b_before_recovery}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -KILL "$1"' sh "${pid_b_before_recovery}"
 status_b_recovered="$(wait_runtime_observation ready armed "${artifact_b}" local 120)"
 assert_equal "$(printf '%s' "${status_b_recovered}" | json_uint_field runtimeGeneration)" "${generation_b}" "B recovery RuntimeGeneration"
 assert_equal "$(printf '%s' "${status_b_recovered}" | json_field recovery.attemptsRemaining)" 2 "B recovery remaining budget"
@@ -732,9 +762,9 @@ assert_equal "$(journal_count "${journal_after_c}" activate_update - - - -)" 2 "
 assert_equal "$(journal_count "${journal_after_c}" activate_update "${generation_b}" runtime19-activate-c failed "${failure_code_c}")" 1 "candidate C failed evidence"
 
 scenario 'G — selected B recovery exhaustion / manual-intervention fence'
-selected_b=/runtime/supervisor/artifacts/cpa/7.3.4/cli-proxy-api
-selected_b_restore=/runtime/supervisor/artifacts/cpa/7.3.4/cli-proxy-api.runtime19-restore
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
+selected_b="${rt_root}/supervisor/artifacts/cpa/7.3.4/cli-proxy-api"
+selected_b_restore="${rt_root}/supervisor/artifacts/cpa/7.3.4/cli-proxy-api.runtime19-restore"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
   test -x "$1"
   test ! -e "$2"
   test -x /usr/local/bin/cli-proxy-api
@@ -742,7 +772,7 @@ selected_b_restore=/runtime/supervisor/artifacts/cpa/7.3.4/cli-proxy-api.runtime
 ' sh "${selected_b}" "${selected_b_restore}"
 assert_cpa_pid_alive "${pid_after_c}"
 wait_public_gateway_signature "${private_gateway_after_c}" 30 >/dev/null
-"${compose[@]}" exec -T cpamp-runtime sh -ec 'kill -KILL "$1"' sh "${pid_after_c}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -KILL "$1"' sh "${pid_after_c}"
 status_manual="$(wait_runtime_observation offline manual_intervention - local 120)"
 assert_equal "$(printf '%s' "${status_manual}" | json_uint_field runtimeGeneration)" "${generation_b}" "manual-intervention generation"
 assert_equal "$(printf '%s' "${status_manual}" | json_field recovery.attemptsRemaining)" 0 "manual-intervention recovery budget"
@@ -765,7 +795,7 @@ assert_equal "${desired_manual}" running "manual-intervention desired lifecycle"
 assert_equal "${revision_manual}" "${revision_a}" "manual-intervention desired revision"
 assert_equal "${updated_at_manual}" "${updated_at_a}" "manual-intervention desired timestamp"
 
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
   test ! -e "$1"
   test -e "$2"
   mv "$2" "$1"
@@ -778,18 +808,18 @@ assert_no_cpa
 journal_manual_repaired="$(snapshot_runtime_journal scenario-g-repaired-journal)"
 assert_equal "$(journal_count "${journal_manual_repaired}" - - - - -)" "${manual_operation_count}" "repair-only journal size"
 
-manager_id="$(container_id cpamp-manager)"
-docker pause "${manager_id}" >/dev/null
-paused_manager="${manager_id}"
-"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+paused_manager_pid="$(service_pid cpa-manager-plus)"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -STOP "$1"' sh "${paused_manager_pid}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -TERM $(pidof cpamp-runtime-supervisor)'
+sleep 1
 status_new_generation_inactive="$(wait_runtime_observation offline inactive "${artifact_b}" local 60)"
 generation_repaired="$(printf '%s' "${status_new_generation_inactive}" | json_uint_field runtimeGeneration)"
 assert_not_equal "${generation_repaired}" "${generation_b}" "manual repair new RuntimeGeneration"
 assert_selection 7.3.4 "${artifact_b}"
 journal_before_repaired_start="$(snapshot_runtime_journal scenario-g-before-repaired-start)"
 assert_equal "$(journal_count "${journal_before_repaired_start}" start "${generation_repaired}" 'runtime-reconcile/v1:' - -)" 0 "repaired generation pre-reconcile Start count"
-docker unpause "${manager_id}" >/dev/null
-paused_manager=""
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -CONT "$1"' sh "${paused_manager_pid}"
+paused_manager_pid=""
 status_repaired="$(wait_runtime_observation ready armed "${artifact_b}" local 120)"
 assert_equal "$(printf '%s' "${status_repaired}" | json_uint_field runtimeGeneration)" "${generation_repaired}" "repaired B ready generation"
 pid_repaired="$(runtime_cpa_pid)"

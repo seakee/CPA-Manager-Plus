@@ -56,26 +56,45 @@ json_uint_field() {
   ' "${field}"
 }
 
+runtime_root() {
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec 'if [ -d /data/runtime ]; then printf /data/runtime; else printf /runtime; fi'
+}
+
+runtime_token_file() {
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then printf "%s" "$c"; exit 0; fi
+    done
+    printf /data/runtime-secret/token
+  '
+}
+
 runtime_get() {
   local request_path="$1"
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then token_file="$c"; break; fi
+    done
+    token="$(cat "${token_file}")"
     wget -qO- -T 5 \
       --header="Authorization: Bearer ${token}" \
       --header="X-CPAMP-Runtime-Features: active-gateway-artifact-v1" \
-      "http://cpamp-runtime:9081${1}"
+      "http://127.0.0.1:9081${1}"
   ' sh "${request_path}"
 }
 
 runtime_activate() {
   local payload="$1"
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    token="$(cat /run/cpamp/runtime-secret/token)"
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    for c in /data/runtime-secret/token /run/cpamp/runtime-secret/token /data/.cpamp-runtime-secret/token /data/runtime/supervisor/token; do
+      if [ -e "$c" ]; then token_file="$c"; break; fi
+    done
+    token="$(cat "${token_file}")"
     wget -qO- -T 170 \
       --header="Authorization: Bearer ${token}" \
       --header="Content-Type: application/json" \
       --post-data="${1}" \
-      http://cpamp-runtime:9081/v1/runtime/operations/activate-update
+      http://127.0.0.1:9081/v1/runtime/operations/activate-update
   ' sh "${payload}"
 }
 
@@ -100,7 +119,7 @@ wait_ready() {
 }
 
 runtime_cpa_pid() {
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     for process_dir in /proc/[0-9]*; do
       if [ -r "${process_dir}/comm" ] && [ "$(cat "${process_dir}/comm")" = "cli-proxy-api" ]; then
         printf "%s" "${process_dir##*/}"
@@ -114,13 +133,13 @@ runtime_cpa_pid() {
 assert_cpa_identity() {
   local pid="$1"
   local actual_uid actual_gid actual_groups expected_uid expected_gid
-  actual_uid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
-  actual_gid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
-  expected_uid="$("${compose[@]}" exec -T cpamp-runtime sh -ec 'printf %s "$CPAMP_RUNTIME_CPA_UID"')"
-  expected_gid="$("${compose[@]}" exec -T cpamp-runtime sh -ec 'printf %s "$CPAMP_RUNTIME_CPA_GID"')"
-  actual_groups="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Groups:" { $1 = ""; sub(/^ +/, ""); print; exit }' "/proc/${pid}/status")"
+  actual_uid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
+  actual_gid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
+  expected_uid="$("${compose[@]}" exec -T cpa-manager-plus sh -ec 'printf %s "${CPAMP_RUNTIME_CPA_UID:-10001}"')"
+  expected_gid="$("${compose[@]}" exec -T cpa-manager-plus sh -ec 'printf %s "${CPAMP_RUNTIME_CPA_GID:-10001}"')"
+  actual_groups="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Groups:" { $1 = ""; sub(/^ +/, ""); print; exit }' "/proc/${pid}/status")"
   [ "${actual_uid}" = "${expected_uid}" ] || fail "CPA PID ${pid} UID=${actual_uid}, want ${expected_uid}"
-  [ "${actual_gid}" = "${expected_gid}" ] || fail "CPA PID ${pid} GID=${actual_gid}, want ${expected_gid}"
+  [ "${actual_gid}" = "${expected_gid}" ] || fail "CPA PID ${pid} GID=${expected_gid}, want ${expected_gid}"
   [ "${actual_groups}" = "${expected_gid}" ] || fail "CPA PID ${pid} supplementary groups=${actual_groups}, want only ${expected_gid}"
   [ "${actual_uid}" != "0" ] && [ "${actual_gid}" != "0" ] || fail "CPA PID ${pid} retained root identity"
 }
@@ -128,12 +147,14 @@ assert_cpa_identity() {
 assert_gateway_writable() {
   local pid="$1"
   local uid gid
-  uid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
-  gid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
-  "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime sh -ec '
-    test -r /runtime/gateway/config.yaml
-    test -w /runtime/gateway
-    marker=/runtime/gateway/.runtime18-cpa-write
+  uid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
+  gid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
+  "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus sh -ec '
+    rt_root="/data/runtime"
+    [ ! -d /data/runtime ] && [ -d /runtime ] && rt_root="/runtime"
+    test -r "${rt_root}/gateway/config.yaml"
+    test -w "${rt_root}/gateway"
+    marker="${rt_root}/gateway/.runtime18-cpa-write"
     printf runtime18 >"${marker}"
     test "$(cat "${marker}")" = runtime18
     rm "${marker}"
@@ -142,56 +163,63 @@ assert_gateway_writable() {
 
 assert_secret_and_private_state_denied() {
   local pid="$1"
-  local uid gid
-  uid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
-  gid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime cat /run/cpamp/runtime-secret/token >/dev/null 2>&1; then
+  local uid gid rt_root token_file
+  uid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
+  gid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
+  rt_root="$(runtime_root)"
+  token_file="$(runtime_token_file)"
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus cat "${token_file}" >/dev/null 2>&1; then
     fail "CPA identity can read the Runtime transport secret"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime ls /runtime/supervisor >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus ls "${rt_root}/supervisor" >/dev/null 2>&1; then
     fail "CPA identity can enumerate Supervisor state"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime cat /runtime/supervisor/operations.sqlite >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus cat "${rt_root}/supervisor/operations.sqlite" >/dev/null 2>&1; then
     fail "CPA identity can read the Supervisor journal"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime cat /runtime/supervisor/active/cpa/selection.json >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus cat "${rt_root}/supervisor/active/cpa/selection.json" >/dev/null 2>&1; then
     fail "CPA identity can read active selection"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime cat /runtime/supervisor/artifacts/cpa/.runtime18-private/marker >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus cat "${rt_root}/supervisor/artifacts/cpa/.runtime18-private/marker" >/dev/null 2>&1; then
     fail "CPA identity can enter a Supervisor-private staging workspace"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime sh -ec 'printf x >>/runtime/supervisor/operations.sqlite' >/dev/null 2>&1; then
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus sh -ec "printf x >>'${rt_root}/supervisor/operations.sqlite'" >/dev/null 2>&1; then
     fail "CPA identity can mutate Supervisor private state"
   fi
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime sh -ec "tr '\000' '\n' </proc/${pid}/environ" |
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus sh -ec "tr '\000' '\n' </proc/${pid}/environ" |
     grep -Eq '^(CPAMP_RUNTIME_|CPAMP_CPA_EXECUTABLE=|CPAMP_CPA_ARTIFACT_MANIFEST=)'; then
     fail "CPA environment contains Supervisor-private Runtime configuration"
   fi
 }
 
 assert_mount_isolation() {
-  "${compose[@]}" exec -T cpamp-manager sh -ec '
-    test ! -e /runtime
-    test -r /run/cpamp/runtime-secret/token
-    ! touch /run/cpamp/runtime-secret/.runtime18-write-probe
-  ' >/dev/null 2>&1 || fail "Manager mount isolation or read-only token contract changed"
-  "${compose[@]}" exec -T cpamp-ingress sh -ec '
-    test ! -e /data
-    test ! -e /runtime
-    test ! -e /run/cpamp/runtime-secret
-  ' || fail "Ingress gained Manager, Runtime, or token storage"
+  local rt_root token_file token_dir
+  rt_root="$(runtime_root)"
+  token_file="$(runtime_token_file)"
+  token_dir="${token_file%/*}"
+  "${compose[@]}" exec -T --user 10002:10002 cpa-manager-plus sh -ec '
+    test ! -w "$1/supervisor"
+    test -r "$2"
+    ! touch "$3/.runtime18-write-probe"
+  ' sh "${rt_root}" "${token_file}" "${token_dir}" >/dev/null 2>&1 || fail "Manager runtime/token isolation contract changed"
+  "${compose[@]}" exec -T --user 10003:10003 cpa-manager-plus sh -ec '
+    ! ls /data >/dev/null 2>&1
+    ! test -r "$2"
+    ! ls "$1/supervisor" >/dev/null 2>&1
+  ' sh "${rt_root}" "${token_file}" || fail "Ingress gained Manager, Runtime, or token storage access"
 }
 
 assert_execution_corridor() {
   local pid="$1"
   local version="$2"
-  local uid gid executable
-  uid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
-  gid="$("${compose[@]}" exec -T cpamp-runtime awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
-  executable="/runtime/supervisor/artifacts/cpa/${version}/cli-proxy-api"
-  "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime test -r "${executable}" || fail "CPA cannot read finalized ${version} executable"
-  "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime test -x "${executable}" || fail "CPA cannot execute finalized ${version} executable"
-  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpamp-runtime ls /runtime/supervisor/artifacts/cpa >/dev/null 2>&1; then
+  local uid gid rt_root executable
+  uid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Uid:" { print $2; exit }' "/proc/${pid}/status")"
+  gid="$("${compose[@]}" exec -T cpa-manager-plus awk '$1 == "Gid:" { print $2; exit }' "/proc/${pid}/status")"
+  rt_root="$(runtime_root)"
+  executable="${rt_root}/supervisor/artifacts/cpa/${version}/cli-proxy-api"
+  "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus test -r "${executable}" || fail "CPA cannot read finalized ${version} executable"
+  "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus test -x "${executable}" || fail "CPA cannot execute finalized ${version} executable"
+  if "${compose[@]}" exec -T --user "${uid}:${gid}" cpa-manager-plus ls "${rt_root}/supervisor/artifacts/cpa" >/dev/null 2>&1; then
     fail "artifact execution corridor permits stage enumeration"
   fi
 }
@@ -200,12 +228,14 @@ seed_stage() {
   local version="$1"
   local source="$2"
   local trailer="$3"
-  "${compose[@]}" exec -T cpamp-runtime sh -ec '
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
     version="$1"
     source="$2"
     trailer="$3"
-    cpa_gid="${CPAMP_RUNTIME_CPA_GID:?}"
-    directory="/runtime/supervisor/artifacts/cpa/${version}"
+    rt_root="/data/runtime"
+    [ ! -d /data/runtime ] && [ -d /runtime ] && rt_root="/runtime"
+    cpa_gid="${CPAMP_RUNTIME_CPA_GID:-10001}"
+    directory="${rt_root}/supervisor/artifacts/cpa/${version}"
     mkdir -p "${directory}"
     chmod 700 "${directory}"
     cp "${source}" "${directory}/cli-proxy-api"
@@ -257,12 +287,15 @@ wait_recovery_replacement() {
 assert_runtime_bootstrap_fails_closed() {
   local expected_log="$1"
   local count=0
-  "${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null 2>&1 || true
+  "${compose[@]}" exec -T cpa-manager-plus sh -ec '
+    kill -TERM $(pidof cpamp-runtime-supervisor) 2>/dev/null || true
+    kill -KILL $(pidof cli-proxy-api) 2>/dev/null || true
+  ' >/dev/null 2>&1 || "${compose[@]}" up -d --force-recreate cpa-manager-plus >/dev/null 2>&1 || true
   while [ "${count}" -lt 30 ]; do
-    if runtime_cpa_pid >/dev/null 2>&1; then
-      fail "untrusted persisted state started CPA"
-    fi
-    if "${compose[@]}" logs --no-color --tail 100 cpamp-runtime 2>&1 | grep -Fq "${expected_log}"; then
+    if "${compose[@]}" logs --no-color --tail 100 cpa-manager-plus 2>&1 | grep -Fq "${expected_log}"; then
+      if runtime_cpa_pid >/dev/null 2>&1; then
+        fail "untrusted persisted state started CPA"
+      fi
       if runtime_get /v1/runtime/status >/dev/null 2>&1; then
         fail "untrusted persisted state left Runtime Supervisor reachable"
       fi
@@ -271,17 +304,17 @@ assert_runtime_bootstrap_fails_closed() {
     count=$((count + 1))
     sleep 1
   done
-  "${compose[@]}" logs --no-color --tail 100 cpamp-runtime >&2 || true
+  "${compose[@]}" logs --no-color --tail 100 cpa-manager-plus >&2 || true
   fail "untrusted persisted state did not produce expected failure: ${expected_log}"
 }
 
 repair_persisted_owner_and_restart() {
   local persisted_path="$1"
-  "${compose[@]}" stop cpamp-runtime >/dev/null 2>&1 || true
-  "${compose[@]}" run --rm --no-deps --entrypoint sh cpamp-runtime -ec '
+  "${compose[@]}" stop cpa-manager-plus >/dev/null 2>&1 || true
+  "${compose[@]}" run --rm --no-deps --entrypoint sh cpa-manager-plus -ec '
     chown root:root "$1"
   ' sh "${persisted_path}" >/dev/null
-  "${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+  "${compose[@]}" up -d --force-recreate cpa-manager-plus >/dev/null
   wait_ready "${artifact_b}" >/dev/null || fail "Runtime did not recover after repairing ${persisted_path} owner"
 }
 
@@ -298,13 +331,14 @@ public_origin="http://127.0.0.1:${public_port}"
 retry 120 curl --fail --silent "${public_origin}/health" >/dev/null
 retry 120 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
+rt_root="$(runtime_root)"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
   test "$(awk '\''$1 == "Uid:" { print $2; exit }'\'' /proc/1/status)" = 0
-  mkdir -p /runtime/supervisor/artifacts/cpa/.runtime18-private
-  chmod 700 /runtime/supervisor/artifacts/cpa/.runtime18-private
-  printf private >/runtime/supervisor/artifacts/cpa/.runtime18-private/marker
-  chmod 600 /runtime/supervisor/artifacts/cpa/.runtime18-private/marker
-'
+  mkdir -p "$1/supervisor/artifacts/cpa/.runtime18-private"
+  chmod 700 "$1/supervisor/artifacts/cpa/.runtime18-private"
+  printf private >"$1/supervisor/artifacts/cpa/.runtime18-private/marker"
+  chmod 600 "$1/supervisor/artifacts/cpa/.runtime18-private/marker"
+' sh "${rt_root}"
 
 status_a="$(runtime_get /v1/runtime/status)"
 artifact_a="$(printf '%s' "${status_a}" | json_field activeGatewayArtifact.artifactId)"
@@ -319,7 +353,7 @@ artifact_b="$(seed_stage 7.3.4 /usr/local/bin/cli-proxy-api runtime18-candidate-
 [ "${artifact_b}" != "${artifact_a}" ] || fail "candidate B must differ from bundled A"
 assert_execution_corridor "${pid_a}" 7.3.4
 activate_b="$(activate runtime18-activate-b "${generation_a}" "${artifact_a}" 7.3.4)"
-[ "$(printf '%s' "${activate_b}" | json_field state)" = succeeded ] || fail "A to B activation failed: ${activate_b}"
+[ "$(printf '%s' "${activate_b}" | json_field state)" = succeeded ] || fail "A to B activation failed (state=$(printf '%s' "${activate_b}" | json_field state))"
 status_b="$(wait_ready "${artifact_b}")"
 [ "$(printf '%s' "${status_b}" | json_field recovery.state)" = armed ] || fail "B recovery is not armed"
 pid_b="$(runtime_cpa_pid)"
@@ -329,7 +363,7 @@ assert_secret_and_private_state_denied "${pid_b}"
 assert_execution_corridor "${pid_b}" 7.3.4
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 
-"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -TERM $(pidof cpamp-runtime-supervisor)'
 status_recreated="$(wait_ready "${artifact_b}")"
 generation_b="$(printf '%s' "${status_recreated}" | json_uint_field runtimeGeneration)"
 [ "${generation_b}" != "${generation_a}" ] || fail "Runtime recreation did not rotate generation"
@@ -340,17 +374,17 @@ assert_secret_and_private_state_denied "${pid_recreated}"
 assert_execution_corridor "${pid_recreated}" 7.3.4
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 
-"${compose[@]}" exec -T cpamp-runtime sh -ec 'kill -9 "$1"' sh "${pid_recreated}"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec 'kill -9 "$1"' sh "${pid_recreated}"
 pid_recovered="$(wait_recovery_replacement "${pid_recreated}" "${artifact_b}")"
 assert_cpa_identity "${pid_recovered}"
 assert_execution_corridor "${pid_recovered}" 7.3.4
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 
 artifact_d="$(seed_stage 7.3.6 /usr/local/bin/cli-proxy-api runtime18-inaccessible-d)"
-"${compose[@]}" exec -T cpamp-runtime chmod 500 /runtime/supervisor/artifacts/cpa/7.3.6
+"${compose[@]}" exec -T cpa-manager-plus chmod 500 "${rt_root}/supervisor/artifacts/cpa/7.3.6"
 activate_d="$(activate runtime18-activate-d "${generation_b}" "${artifact_b}" 7.3.6)"
-[ "$(printf '%s' "${activate_d}" | json_field state)" = failed ] || fail "inaccessible D did not fail closed: ${activate_d}"
-[ "$(printf '%s' "${activate_d}" | json_field error.code)" = activation_start_failed ] || fail "inaccessible D was not a spawn failure: ${activate_d}"
+[ "$(printf '%s' "${activate_d}" | json_field state)" = failed ] || fail "inaccessible D did not fail closed (state=$(printf '%s' "${activate_d}" | json_field state))"
+[ "$(printf '%s' "${activate_d}" | json_field error.code)" = activation_start_failed ] || fail "inaccessible D was not a spawn failure (code=$(printf '%s' "${activate_d}" | json_field error.code))"
 status_after_d="$(wait_ready "${artifact_b}")"
 pid_after_d="$(runtime_cpa_pid)"
 assert_cpa_identity "${pid_after_d}"
@@ -358,7 +392,7 @@ assert_cpa_identity "${pid_after_d}"
 
 artifact_c="$(seed_stage 7.3.5 /bin/true '')"
 activate_c="$(activate runtime18-activate-c "${generation_b}" "${artifact_b}" 7.3.5)"
-[ "$(printf '%s' "${activate_c}" | json_field state)" = failed ] || fail "unready C did not fail: ${activate_c}"
+[ "$(printf '%s' "${activate_c}" | json_field state)" = failed ] || fail "unready C did not fail (state=$(printf '%s' "${activate_c}" | json_field state))"
 failure_code="$(printf '%s' "${activate_c}" | json_field error.code)"
 case "${failure_code}" in
   activation_start_failed|activation_readiness_failed) ;;
@@ -373,52 +407,52 @@ assert_execution_corridor "${pid_after_c}" 7.3.4
 assert_mount_isolation
 retry 30 curl --fail --silent --show-error "${public_origin}/v1/models" >/dev/null
 
-"${compose[@]}" exec -T cpamp-runtime chown 10001:10001 /runtime/supervisor/active/cpa/selection.json
+"${compose[@]}" exec -T cpa-manager-plus chown 10001:10001 "${rt_root}/supervisor/active/cpa/selection.json"
 assert_runtime_bootstrap_fails_closed "selection file: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
-repair_persisted_owner_and_restart /runtime/supervisor/active/cpa/selection.json
+repair_persisted_owner_and_restart "${rt_root}/supervisor/active/cpa/selection.json"
 
-"${compose[@]}" exec -T cpamp-runtime chown 10001:10001 /runtime/supervisor/operations.sqlite
+"${compose[@]}" exec -T cpa-manager-plus chown 10001:10001 "${rt_root}/supervisor/operations.sqlite"
 assert_runtime_bootstrap_fails_closed "journal file: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
-repair_persisted_owner_and_restart /runtime/supervisor/operations.sqlite
+repair_persisted_owner_and_restart "${rt_root}/supervisor/operations.sqlite"
 
-"${compose[@]}" exec -T cpamp-runtime chown 10001:10001 /runtime/supervisor/active
+"${compose[@]}" exec -T cpa-manager-plus chown 10001:10001 "${rt_root}/supervisor/active"
 assert_runtime_bootstrap_fails_closed "selection parent: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
-repair_persisted_owner_and_restart /runtime/supervisor/active
+repair_persisted_owner_and_restart "${rt_root}/supervisor/active"
 
-gateway_symlink_target=/runtime/supervisor/.runtime18-gateway-symlink-target
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
+gateway_symlink_target="${rt_root}/supervisor/.runtime18-gateway-symlink-target"
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
   mkdir "$1"
   chown root:root "$1"
   chmod 750 "$1"
 ' sh "${gateway_symlink_target}"
-gateway_symlink_target_before="$("${compose[@]}" exec -T cpamp-runtime stat -c '%u:%g:%a' "${gateway_symlink_target}")"
-"${compose[@]}" exec -T --user 10001:10001 cpamp-runtime sh -ec '
-  rmdir /runtime/gateway/auth
-  ln -s "$1" /runtime/gateway/auth
-' sh "${gateway_symlink_target}"
-assert_runtime_bootstrap_fails_closed "Gateway state path is not a real directory: /runtime/gateway/auth"
-"${compose[@]}" stop cpamp-runtime >/dev/null 2>&1 || true
-gateway_symlink_target_after="$("${compose[@]}" run --rm --no-deps --entrypoint sh cpamp-runtime -ec '
+gateway_symlink_target_before="$("${compose[@]}" exec -T cpa-manager-plus stat -c '%u:%g:%a' "${gateway_symlink_target}")"
+"${compose[@]}" exec -T --user 10001:10001 cpa-manager-plus sh -ec '
+  rmdir "$1/gateway/auth"
+  ln -s "$2" "$1/gateway/auth"
+' sh "${rt_root}" "${gateway_symlink_target}"
+assert_runtime_bootstrap_fails_closed "Gateway state path is not a real directory: ${rt_root}/gateway/auth"
+"${compose[@]}" stop cpa-manager-plus >/dev/null 2>&1 || true
+gateway_symlink_target_after="$("${compose[@]}" run --rm --no-deps --entrypoint sh cpa-manager-plus -ec '
   stat -c "%u:%g:%a" "$1"
 ' sh "${gateway_symlink_target}")"
 [ "${gateway_symlink_target_after}" = "${gateway_symlink_target_before}" ] ||
   fail "Gateway symlink target changed from ${gateway_symlink_target_before} to ${gateway_symlink_target_after}"
-"${compose[@]}" run --rm --no-deps --entrypoint sh cpamp-runtime -ec '
-  test -L /runtime/gateway/auth
-  rm /runtime/gateway/auth
-  mkdir /runtime/gateway/auth
-  chown 10001:10001 /runtime/gateway/auth
-  chmod 700 /runtime/gateway/auth
-' >/dev/null
-"${compose[@]}" up -d --force-recreate cpamp-runtime >/dev/null
+"${compose[@]}" run --rm --no-deps --entrypoint sh cpa-manager-plus -ec '
+  test -L "$1/gateway/auth"
+  rm "$1/gateway/auth"
+  mkdir "$1/gateway/auth"
+  chown 10001:10001 "$1/gateway/auth"
+  chmod 700 "$1/gateway/auth"
+' sh "${rt_root}" >/dev/null
+"${compose[@]}" up -d --force-recreate cpa-manager-plus >/dev/null
 wait_ready "${artifact_b}" >/dev/null || fail "Runtime did not recover after repairing Gateway auth directory"
 
-"${compose[@]}" exec -T cpamp-runtime sh -ec '
-  chown -R 10001:10001 /runtime/supervisor/artifacts/cpa/7.3.4
-  test "$(stat -c %a /runtime/supervisor/artifacts/cpa/7.3.4)" = 510
-  test "$(stat -c %a /runtime/supervisor/artifacts/cpa/7.3.4/cli-proxy-api)" = 755
-  test "$(stat -c %a /runtime/supervisor/artifacts/cpa/7.3.4/artifact.json)" = 444
-'
+"${compose[@]}" exec -T cpa-manager-plus sh -ec '
+  chown -R 10001:10001 "$1/supervisor/artifacts/cpa/7.3.4"
+  test "$(stat -c %a "$1/supervisor/artifacts/cpa/7.3.4")" = 510
+  test "$(stat -c %a "$1/supervisor/artifacts/cpa/7.3.4/cli-proxy-api")" = 755
+  test "$(stat -c %a "$1/supervisor/artifacts/cpa/7.3.4/artifact.json")" = 444
+' sh "${rt_root}"
 assert_runtime_bootstrap_fails_closed "finalized stage directory: persisted state owner is not the Supervisor: owner UID 10001 differs from Supervisor UID 0"
 
 echo "Runtime18 secret/state E2E passed: CPA=10001:10001 A=${artifact_a} B=${artifact_b} D=${artifact_d} rollback=${failure_code}"

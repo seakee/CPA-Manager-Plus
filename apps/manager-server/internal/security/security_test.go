@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -323,7 +324,7 @@ func TestLoadOrCreateDataKeyCreatesStableRestrictedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat data key: %v", err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("data key permissions = %o, want 600", info.Mode().Perm())
 	}
 
@@ -333,6 +334,47 @@ func TestLoadOrCreateDataKeyCreatesStableRestrictedFile(t *testing.T) {
 	}
 	if created || string(second) != string(first) {
 		t.Fatalf("second created=%v key stable=%v", created, string(second) == string(first))
+	}
+}
+
+func TestLoadOrCreateDataKeyTightensExistingPermissiveFile(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "data.key")
+	rawKey := []byte("0123456789abcdef0123456789abcdef")
+	encoded := base64.RawStdEncoding.EncodeToString(rawKey) + "\n"
+	if err := os.WriteFile(keyPath, []byte(encoded), 0o644); err != nil {
+		t.Fatalf("seed permissive data.key: %v", err)
+	}
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatalf("chmod 0644 data.key: %v", err)
+	}
+
+	// Read-only LoadExistingDataKey must not mutate permissions.
+	if _, err := LoadExistingDataKey("", keyPath); err != nil {
+		t.Fatalf("LoadExistingDataKey: %v", err)
+	}
+	infoBefore, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("stat data key after LoadExistingDataKey: %v", err)
+	}
+	if runtime.GOOS != "windows" && infoBefore.Mode().Perm() != 0o644 {
+		t.Fatalf("mode after LoadExistingDataKey = %#04o, want 0644", infoBefore.Mode().Perm())
+	}
+
+	loaded, created, err := LoadOrCreateDataKey("", keyPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreateDataKey on existing 0644 file: %v", err)
+	}
+	if created || string(loaded) != string(rawKey) {
+		t.Fatalf("created=%v loaded=%x, want false / %x", created, loaded, rawKey)
+	}
+	infoAfter, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("stat tightened data.key: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if got := infoAfter.Mode().Perm(); got != 0o600 {
+			t.Fatalf("tightened data.key mode = %#04o, want 0600", got)
+		}
 	}
 }
 

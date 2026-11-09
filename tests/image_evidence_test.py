@@ -712,13 +712,28 @@ class ImageEvidenceTests(unittest.TestCase):
             self.assertEqual(inventory["licenseCoverage"][component]["originalTexts"],
                              "complete-for-installed-dependencies")
 
+    def test_cpamp_slim_omits_bundled_cpa_binary_while_preserving_pinned_artifact_manifest(self):
+        files = make_evidence("cpamp", base_files("cpamp", cpa_bundled=False), cpa_bundled=False)
+        lay = evidence.LAYOUTS["image"]
+        inventory = json.loads(files[lay["inventory"]])
+        provenance = json.loads(files[lay["provenance"]])
+        self.assertIs(provenance.get("cpaBundled"), False)
+        self.assertEqual([item["name"] for item in provenance["components"]],
+                         ["launcher", "manager", "ingress", "runtime-supervisor", "web"])
+        self.assertEqual(inventory["licenseCoverage"]["glibc-runtime"],
+                         {"policy": "debian-copyright-files-fail-closed",
+                          "originalTexts": "complete-for-installed-packages", "packages": 1})
+        evidence.validate_inventory(inventory, "cpamp", files.__getitem__, SOURCE_BYTES, cpa_bundled=False)
+        evidence.validate_provenance(provenance, "cpamp", VERSION, SHA, files.__getitem__, cpa_bundled=False)
+        with self.assertRaisesRegex(ValueError, "only the cpamp image role"):
+            make_evidence("manager", base_files("manager"), cpa_bundled=False)
+
 
 class DockerContracts(unittest.TestCase):
     GUARD = re.compile(r'RUN set -eu; \\\n(?:    [^\n]+\n)*?    case "\$SOURCE_COMMIT" in [^\n]*\n')
     IDENTITY_ARGS = ("VERSION", "SOURCE_COMMIT", "TARGETOS", "TARGETARCH")
     # External fetches and release-artifact compilation. The web-package-test
-    # stage only runs Go tests against the module cache prepared by its parent.
-    NETWORK_OR_BUILD = ("apk add", "apt-get", "wget", "npm ci", "npm run build",
+    NETWORK_OR_BUILD = ("apk add", "apt-get", "wget ", "npm ci", "npm run build",
                         "go mod download", "go build")
 
     @staticmethod
@@ -739,84 +754,77 @@ class DockerContracts(unittest.TestCase):
             (VERSION, "", False), (VERSION, "unknown", False), (VERSION, "abc", False),
             (VERSION, SHA.upper(), False), (VERSION, "a" * 128, False),
         )
-        for name in ("manager-server", "ingress", "runtime"):
-            text = (ROOT / ("Dockerfile." + name)).read_text()
-            with self.subTest(image=name):
-                self.assertNotIn("ARG VERSION=", text)
-                self.assertNotIn("ARG SOURCE_COMMIT=", text)
-                # The weak early guards must not survive beside the strict one.
-                self.assertNotIn('test "$VERSION" != unknown', text)
-                self.assertNotIn('test "$SOURCE_COMMIT" != unknown', text)
-                for label in ("version=$VERSION", "revision=$SOURCE_COMMIT", 'source="' + evidence.SOURCE + '"'):
-                    self.assertIn("org.opencontainers.image." + label, text)
-                self.assertIn("COPY LICENSE /image/usr/local/share/licenses/cpamp/LICENSE", text)
-                self.assertIn("/image/usr/local/share/licenses/ /usr/local/share/licenses/", text)
-                self.assertIn("/image/usr/local/share/cpamp/ /usr/local/share/cpamp/", text)
-                self.assertIn("/tools/image-evidence.py", text)
-                guards = self.GUARD.findall(text)
-                self.assertTrue(guards, "no strict early identity guard")
-                self.assertEqual(set(guards), {guards[0]}, "identity guards must be identical")
-                shell = guards[0][len("RUN "):]
-                for version, commit, success in identity_cases:
-                    result = subprocess.run(
-                        ["sh", "-c", shell],
-                        env=dict(os.environ, VERSION=version, SOURCE_COMMIT=commit),
-                        capture_output=True)
-                    with self.subTest(version=version, commit=commit):
-                        self.assertEqual(result.returncode == 0, success, result.stderr)
-        self.assertIn('RUN VERSION="$VERSION" npm run build',
-                      (ROOT / "Dockerfile.manager-server").read_text())
+        text = (ROOT / "Dockerfile").read_text()
+        self.assertNotIn("ARG VERSION=", text)
+        self.assertNotIn("ARG SOURCE_COMMIT=", text)
+        # The weak early guards must not survive beside the strict one.
+        self.assertNotIn('test "$VERSION" != unknown', text)
+        self.assertNotIn('test "$SOURCE_COMMIT" != unknown', text)
+        for label in ("version=$VERSION", "revision=$SOURCE_COMMIT", 'source="' + evidence.SOURCE + '"'):
+            self.assertIn("org.opencontainers.image." + label, text)
+        self.assertIn("COPY LICENSE /image/usr/local/share/licenses/cpamp/LICENSE", text)
+        self.assertIn("/image/usr/local/share/licenses/ /usr/local/share/licenses/", text)
+        self.assertIn("/image/usr/local/share/cpamp/ /usr/local/share/cpamp/", text)
+        self.assertIn("/tools/image-evidence.py", text)
+        guards = self.GUARD.findall(text)
+        self.assertTrue(guards, "no strict early identity guard")
+        self.assertEqual(set(guards), {guards[0]}, "identity guards must be identical")
+        shell = guards[0][len("RUN "):]
+        for version, commit, success in identity_cases:
+            result = subprocess.run(
+                ["sh", "-c", shell],
+                env=dict(os.environ, VERSION=version, SOURCE_COMMIT=commit),
+                capture_output=True)
+            with self.subTest(version=version, commit=commit):
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+        self.assertIn('RUN VERSION="$VERSION" npm run build', text)
 
     def test_every_network_or_build_stage_validates_identity_first(self):
-        for file_name in ("Dockerfile.manager-server", "Dockerfile.ingress", "Dockerfile.runtime"):
-            stages = self.stages((ROOT / file_name).read_text())
-            for stage, body in stages:
-                commands = [body.index(marker) for marker in self.NETWORK_OR_BUILD if marker in body]
-                if not commands:
-                    continue
-                with self.subTest(image=file_name, stage=stage):
-                    declared = re.findall(r"^ARG (\w+)$", body, re.M)
-                    self.assertIn("VERSION", declared, "stage must declare VERSION")
-                    self.assertIn("SOURCE_COMMIT", declared, "stage must declare SOURCE_COMMIT")
-                    guards = list(self.GUARD.finditer(body))
-                    self.assertTrue(guards, "stage must validate identity before network/build work")
-                    self.assertLess(guards[0].start(), min(commands),
-                                    "identity guard must precede the first network or build command")
-            if file_name == "Dockerfile.runtime":
-                guarded = {stage for stage, body in stages if self.GUARD.search(body)}
-                # The CPA download stages fetch third-party bytes even when they
-                # are built alone as an unsupported-architecture probe.
-                self.assertLessEqual({"cpa-download", "cpa-v8-download"}, guarded)
+        stages = self.stages((ROOT / "Dockerfile").read_text())
+        for stage, body in stages:
+            commands = [body.index(marker) for marker in self.NETWORK_OR_BUILD if marker in body]
+            if not commands:
+                continue
+            with self.subTest(stage=stage):
+                declared = re.findall(r"^ARG (\w+)$", body, re.M)
+                self.assertIn("VERSION", declared, "stage must declare VERSION")
+                self.assertIn("SOURCE_COMMIT", declared, "stage must declare SOURCE_COMMIT")
+                guards = list(self.GUARD.finditer(body))
+                self.assertTrue(guards, "stage must validate identity before network/build work")
+                self.assertLess(guards[0].start(), min(commands),
+                                "identity guard must precede the first network or build command")
+        guarded = {stage for stage, body in stages if self.GUARD.search(body)}
+        # The CPA download stages fetch third-party bytes even when they
+        # are built alone as an unsupported-architecture probe.
+        self.assertLessEqual({"cpa-download", "cpa-v8-download"}, guarded)
 
     def test_every_image_evidence_stage_declares_identity_args(self):
         # ARG is stage-scoped: a stage that runs the evidence generator must
         # declare the arguments it reads in its own FROM block.
-        for name in ("manager-server", "ingress", "runtime"):
-            text = (ROOT / ("Dockerfile." + name)).read_text()
-            stages = [block for block in text.split("\nFROM ")[1:] if "/tools/image-evidence.py" in block]
-            with self.subTest(image=name):
-                self.assertTrue(stages, "no stage runs the evidence generator")
-            for block in stages:
-                header, _, body = block.partition("\n")
-                declared = re.findall(r"^ARG (\w+)$", body, re.M)
-                with self.subTest(image=name, stage=header.split(" AS ")[-1]):
-                    for argument in self.IDENTITY_ARGS:
-                        self.assertIn(argument, declared)
+        text = (ROOT / "Dockerfile").read_text()
+        stages = [block for block in text.split("\nFROM ")[1:] if "/tools/image-evidence.py" in block]
+        self.assertTrue(stages, "no stage runs the evidence generator")
+        for block in stages:
+            header, _, body = block.partition("\n")
+            declared = re.findall(r"^ARG (\w+)$", body, re.M)
+            with self.subTest(stage=header.split(" AS ")[-1]):
+                for argument in self.IDENTITY_ARGS:
+                    self.assertIn(argument, declared)
 
     def test_base_package_snapshot_precedes_audit_dependency_install(self):
-        for name, stage, snapshot, interpreter in (
-                ("manager-server", "FROM manager-base AS manager-evidence", "cp /lib/apk/db/installed", "apk add --no-cache python3"),
-                ("ingress", "FROM ingress-base AS ingress-evidence", "cp /lib/apk/db/installed", "apk add --no-cache python3"),
-                ("runtime", "FROM runtime-os AS runtime-evidence", "dpkg-query -W", "apt-get install -y --no-install-recommends python3")):
-            text = (ROOT / ("Dockerfile." + name)).read_text().split(stage, 1)[1]
-            with self.subTest(image=name):
-                self.assertLess(text.index(snapshot), text.index(interpreter))
-                self.assertIn("base --kind", text)
+        text = (ROOT / "Dockerfile").read_text()
+        slim_evidence = text.split("FROM cpamp-base AS slim-evidence", 1)[1].split("\nFROM ", 1)[0]
+        self.assertLess(slim_evidence.index("cp /lib/apk/db/installed"),
+                        slim_evidence.index("apk add --no-cache python3"))
+        self.assertIn("base --kind alpine", slim_evidence)
+        self.assertIn("base --kind debian --component glibc-runtime", slim_evidence)
+        glibc_stage = text.split("FROM debian:bookworm-slim AS glibc-runtime", 1)[1].split("\nFROM ", 1)[0]
+        self.assertIn("dpkg-query -W", glibc_stage)
 
-    def test_runtime_preserves_cpa_original_in_all_targets(self):
-        text = (ROOT / "Dockerfile.runtime").read_text()
+    def test_bundled_targets_preserve_cpa_original_license(self):
+        text = (ROOT / "Dockerfile").read_text()
         self.assertIn('tar -xOzf "/tmp/${asset_name}" LICENSE > /out/CPA-LICENSE', text)
-        for stage in ("v8-amd64-candidate", "v8-amd64-loopback-proof", "v7-compatibility", "runtime"):
+        for stage in ("v7-compatibility", "full"):
             block = text.split(" AS " + stage + "\n", 1)[1].split("\nFROM ", 1)[0]
             with self.subTest(stage=stage):
                 self.assertIn("/usr/local/share/licenses/cli-proxy-api/LICENSE", block)
@@ -827,7 +835,6 @@ class DockerContracts(unittest.TestCase):
         self.assertIn('--build-arg "SOURCE_COMMIT=$source_sha"', block)
         self.assertIn("--build-arg VERSION=2.0.0-r1candidate", block)
         subprocess.run(["bash", "-n", "bin/release/build-embedded-candidate.sh"], cwd=ROOT, check=True)
-
 
 if __name__ == "__main__":
     unittest.main()

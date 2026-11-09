@@ -627,7 +627,8 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: Dockerfile.manager-server
+          file: Dockerfile
+          target: slim
           platforms: linux/amd64,linux/arm64
           push: ${{ env.DRY_RUN != 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -664,9 +665,8 @@ jobs:
             --pairing-out "${candidate_dir}/embedded-release-pairing.json"
           python3 bin/release/verify-embedded-candidate.py \
             --evidence "${candidate_dir}/candidate-evidence.json" \
-            --manager "${candidate_dir}/manager.oci.tar" \
-            --ingress "${candidate_dir}/ingress.oci.tar" \
-            --runtime "${candidate_dir}/runtime.oci.tar" \
+            --slim "${candidate_dir}/slim.oci.tar" \
+            --full "${candidate_dir}/full.oci.tar" \
             --verify-compose "${candidate_dir}/docker-compose.v2-embedded.yml" \
             --verify-pairing "${candidate_dir}/embedded-release-pairing.json"
 

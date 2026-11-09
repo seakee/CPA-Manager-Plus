@@ -11,7 +11,7 @@ server_src="${repo_root}/apps/manager-server"
 ingress_src="${repo_root}/apps/ingress"
 supervisor_src="${repo_root}/apps/runtime-supervisor"
 native_script_src="${repo_root}/bin/native"
-runtime_dockerfile="${repo_root}/Dockerfile.runtime"
+runtime_dockerfile="${repo_root}/Dockerfile"
 license_source_inventory="${repo_root}/bin/release/embedded-third-party-inventory.txt"
 
 if [ -n "${PACKAGE_MODE:-}" ]; then

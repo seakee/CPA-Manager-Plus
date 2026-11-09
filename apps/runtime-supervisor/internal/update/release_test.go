@@ -228,9 +228,9 @@ func TestAcceptedV733GitHubDigestsMatchPinnedDockerArchives(t *testing.T) {
 		t.Fatal("runtime.Caller did not identify the release test source")
 	}
 	repositoryRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", ".."))
-	dockerfile, err := os.ReadFile(filepath.Join(repositoryRoot, "Dockerfile.runtime"))
+	dockerfile, err := os.ReadFile(filepath.Join(repositoryRoot, "Dockerfile"))
 	if err != nil {
-		t.Fatalf("read repository Dockerfile.runtime: %v", err)
+		t.Fatalf("read repository Dockerfile: %v", err)
 	}
 	dockerfileText := string(dockerfile)
 	version := regexp.MustCompile(`cpa_version="([^"]+)"`).FindStringSubmatch(dockerfileText)

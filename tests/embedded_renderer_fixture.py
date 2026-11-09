@@ -38,7 +38,7 @@ try {
   const evidence = JSON.parse(readFileSync(evidencePath));
   const { dirname, join } = await import('node:path');
   const evidenceDir = dirname(evidencePath);
-  const roleOciPaths = Object.fromEntries(['manager', 'ingress', 'runtime'].map(role =>
+  const roleOciPaths = Object.fromEntries(['slim', 'full'].map(role =>
     [role, get('--' + role + '-oci') ?? join(evidenceDir, role + '.oci.tar')]));
   if (args.includes('--verify')) {
     const result = verifyEmbeddedReleaseArtifacts({ evidence, evidenceDir, roleOciPaths,
@@ -67,6 +67,7 @@ def redirect_fixture_node(subject, runner):
     def run(cmd, *args, **kwargs):
         if len(cmd) > 1 and cmd[:2] == ["node", renderer]:
             cmd = ["node", str(runner), *cmd[2:]]
+        kwargs.setdefault("cwd", str(REPO))
         return real_run(cmd, *args, **kwargs)
 
     return patch.object(subject.subprocess, "run", side_effect=run)

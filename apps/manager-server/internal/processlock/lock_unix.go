@@ -13,6 +13,10 @@ func openLockFile(path string, flags int) (*os.File, error) {
 	return os.OpenFile(path, flags, 0o600)
 }
 
+func tightenLockFile(file *os.File) error {
+	return file.Chmod(0o600)
+}
+
 func lockFile(file *os.File) error {
 	err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {

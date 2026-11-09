@@ -10,7 +10,7 @@ if [ -z "${project}" ] || [ -z "${initializer_name}" ]; then
   exit 2
 fi
 
-compose=(docker compose --project-directory "${repo_root}" -p "${project}")
+compose=(docker compose --project-directory "${repo_root}" -f "${repo_root}/docker-compose.yml" -f "${repo_root}/bin/ci/runtime-v7-compatibility.compose.yml" -p "${project}")
 scratch_root="$(mktemp -d "${TMPDIR:-/tmp}/cpamp-runtime-manager-baseline.XXXXXX")"
 
 cleanup() {
@@ -21,7 +21,7 @@ trap cleanup EXIT HUP INT TERM
 
 # Phase4-03 initialize is intentionally a one-shot Fresh admission/handoff
 # command. Verify that exact contract first; never wait for a daemon or /health.
-"${compose[@]}" run -d --no-deps --name "${initializer_name}" cpamp-manager initialize >/dev/null
+"${compose[@]}" run -d --no-deps --entrypoint /usr/local/bin/cpa-manager-plus --name "${initializer_name}" cpa-manager-plus initialize >/dev/null
 exit_code="$(docker wait "${initializer_name}")"
 if [ "${exit_code}" != "0" ]; then
   echo "Fresh initializer exited with status ${exit_code}" >&2
@@ -104,9 +104,12 @@ docker cp "${scratch_root}/data/usage.sqlite" "${initializer_name}:/data/usage.s
 # Fresh uses a non-empty same-inode receipt as ownership evidence. Historical
 # Manager startup uses the existing empty retained marker. Remove any copied
 # WAL sidecars and convert only the disposable test marker before startup.
-"${compose[@]}" run --rm --no-deps --entrypoint sh cpamp-manager -ec '
+"${compose[@]}" run --rm --no-deps --entrypoint sh cpa-manager-plus -ec '
   rm -f /data/usage.sqlite-wal /data/usage.sqlite-shm
   : > /data/usage.sqlite.manager.lock
+  chown root:10002 /data
+  chmod 1771 /data
+  chown 10002:10002 /data/usage.sqlite /data/data.key /data/usage.sqlite.manager.lock
   test -s /data/usage.sqlite
   test -s /data/data.key
   test -e /data/usage.sqlite.manager.lock

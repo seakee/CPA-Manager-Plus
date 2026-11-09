@@ -22,11 +22,15 @@ func OpenWithOptions(options Options) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+	if err := ensureDatabaseParentDirectory(filepath.Dir(dbPath)); err != nil {
 		return nil, err
 	}
+	precreated := preparePrivateDatabaseFile(dbPath)
 	db, err := sql.Open("sqlite", dataSourceName(dbPath))
 	if err != nil {
+		if precreated {
+			removeEmptyPrecreatedFile(dbPath)
+		}
 		return nil, enrichOpenError(dbPath, err)
 	}
 	db.SetMaxOpenConns(options.maxOpenConns())
@@ -34,9 +38,73 @@ func OpenWithOptions(options Options) (*sql.DB, error) {
 	db.SetConnMaxIdleTime(options.connMaxIdleTime())
 	if err := Migrate(db); err != nil {
 		_ = db.Close()
+		if precreated {
+			removeEmptyPrecreatedFile(dbPath)
+		}
 		return nil, enrichOpenError(dbPath, err)
 	}
+	if err := enforcePrivateDatabaseFiles(dbPath); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+func ensureDatabaseParentDirectory(dir string) error {
+	if _, err := os.Lstat(dir); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(dir, 0o700)
+}
+
+func preparePrivateDatabaseFile(dbPath string) bool {
+	info, err := os.Lstat(dbPath)
+	if errors.Is(err, os.ErrNotExist) {
+		f, createErr := os.OpenFile(dbPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if createErr != nil {
+			return false
+		}
+		_ = f.Close()
+		_ = os.Chmod(dbPath, 0o600)
+		return true
+	}
+	if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o200 != 0 {
+		_ = os.Chmod(dbPath, 0o600)
+		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+			if sideInfo, sideErr := os.Lstat(dbPath + suffix); sideErr == nil && sideInfo.Mode().IsRegular() {
+				_ = os.Chmod(dbPath+suffix, 0o600)
+			}
+		}
+	}
+	return false
+}
+
+func removeEmptyPrecreatedFile(dbPath string) {
+	if info, err := os.Lstat(dbPath); err == nil && info.Mode().IsRegular() && info.Size() == 0 {
+		_ = os.Remove(dbPath)
+	}
+}
+
+func enforcePrivateDatabaseFiles(dbPath string) error {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		candidate := dbPath + suffix
+		info, err := os.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			if err := os.Chmod(candidate, 0o600); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // enrichOpenError adds actionable context to the few SQLite result codes known

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -397,5 +398,52 @@ func TestAcquireSerializesHardLinkedDatabasePaths(t *testing.T) {
 	second, err := Acquire(aliasPath)
 	if second != nil || !errors.Is(err, ErrHardLinked) {
 		t.Fatalf("hard-link alias lock = %#v err=%v, want ErrHardLinked", second, err)
+	}
+}
+
+func TestAcquireExistingTightensPermissiveMarkerWhileReadOnlyPathsPreserveMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "usage.sqlite")
+	if err := os.WriteFile(path, []byte("sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := path + ".manager.lock"
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(marker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ProbeExisting(path); err != nil {
+		t.Fatalf("ProbeExisting: %v", err)
+	}
+	roLock, err := AcquireExistingReadOnly(path)
+	if err != nil {
+		t.Fatalf("AcquireExistingReadOnly: %v", err)
+	}
+	if err := roLock.Close(); err != nil {
+		t.Fatalf("close roLock: %v", err)
+	}
+	infoBefore, err := os.Lstat(marker)
+	if err != nil {
+		t.Fatalf("stat marker after read-only paths: %v", err)
+	}
+	if runtime.GOOS != "windows" && infoBefore.Mode().Perm() != 0o644 {
+		t.Fatalf("read-only paths modified marker mode to %#04o, want 0644", infoBefore.Mode().Perm())
+	}
+
+	rwLock, err := AcquireExisting(path)
+	if err != nil {
+		t.Fatalf("AcquireExisting: %v", err)
+	}
+	defer func() { _ = rwLock.Close() }()
+
+	infoAfter, err := os.Lstat(marker)
+	if err != nil {
+		t.Fatalf("stat marker after AcquireExisting: %v", err)
+	}
+	if runtime.GOOS != "windows" && infoAfter.Mode().Perm() != 0o600 {
+		t.Fatalf("AcquireExisting marker mode = %#04o, want 0600", infoAfter.Mode().Perm())
 	}
 }

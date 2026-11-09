@@ -391,26 +391,22 @@ The logical architecture is identical across platforms. Platform differences are
 #### Docker Embedded — Phase 1 priority
 
 ```text
-cpamp-ingress container
-  -> public :18317 transport mux
-
-cpamp-manager container
-  -> Manager internal :18317
-
-cpamp-runtime container
-  -> Runtime Supervisor (PID 1, internal :9081)
-      -> CPA child process (internal :8317)
+seakee/cpa-manager-plus container
+  -> cpamp-launcher (PID 1, root)
+       -> cpamp-runtime-supervisor (root, loopback 127.0.0.1:9081)
+            -> cli-proxy-api (uid 10001:10001, loopback 127.0.0.1:8317)
+       -> cpa-manager-plus (uid 10002:10002, loopback 127.0.0.1:18319)
+       -> cpamp-ingress (uid 10003:10003, public 0.0.0.0:18317, control 127.0.0.1:9082)
 ```
 
-Only Ingress publishes a host port by default. Manager data and Runtime data use separate storage ownership. Runtime state is internally divided between Supervisor journal state and Gateway work/config/auth/log/plugin state. Ingress mounts neither data set. Runtime Supervisor does not require Docker socket access to manage CPA.
+Docker Embedded ships as a single container image (`seakee/cpa-manager-plus`) with `cpamp-launcher` as PID 1. Only Ingress (`0.0.0.0:18317`) publishes a host port by default; Runtime Supervisor (`127.0.0.1:9081`), CPA (`127.0.0.1:8317`), Manager (`127.0.0.1:18319`), and Ingress control (`127.0.0.1:9082`) bind to container loopback. Runtime Supervisor does not require Docker socket access to manage CPA.
 
-Docker Phase 1 has three deployment/container failure domains:
+State is consolidated under a single `/data` volume (`root:10002`, mode `01771` sticky) with strict filesystem ownership separation:
 
-1. `cpamp-ingress` edge container.
-2. `cpamp-manager` container.
-3. `cpamp-runtime` container.
-
-Within `cpamp-runtime`, Runtime Supervisor and CPA remain separate processes with distinct roles, ownership, state, and authority, but they share the Runtime container failure domain. Phase 1 does not guarantee that the CPA child survives Runtime Supervisor PID 1 exit or Runtime container crash, stop, or kill.
+- Manager state (`/data/usage.sqlite*`, `/data/data.key`, `/data/usage-archives/`) is owned by `cpamp-manager` (`10002:10002`). The sticky bit on `/data` prevents Manager from renaming or unlinking root-owned subdirectories.
+- Runtime transport secret lives at `/data/runtime-secret/token` (directory `root:10002` `0750`, file `root:10002` `0640`), readable by Supervisor and Manager (`CPAMP_RUNTIME_TOKEN_FILE`) and inaccessible to CPA (`10001`) and Ingress (`10003`).
+- Runtime root defaults to `/data/runtime` (or `/runtime` when mounted as a dedicated mount point), owned by `root:root` (`0711`). Within it, `<runtimeRoot>/supervisor` (`root:10001`, `0710`) holds the Supervisor private journal and finalized artifact store, and `<runtimeRoot>/gateway` (`10001:10001`, `0700`) holds CPA-writable Gateway state (`config.yaml`, `auth/`, `logs/`, `plugins/`).
+- Ingress (`10003:10003`) owns no persistent directory and cannot read Manager databases, the Runtime transport secret, or Supervisor/Gateway private state.
 
 Docker Embedded keeps Runtime Supervisor as the privileged execution owner and
 runs every CPA child as the fixed image-owned non-root identity `10001:10001`.
@@ -421,7 +417,7 @@ identity that cannot be applied is a spawn failure and MUST NOT fall back to a
 root CPA process. Native or other deployments without a configured child
 identity retain their existing process behavior.
 
-`/runtime/gateway` is CPA-owned writable Gateway state. Runtime transport
+`<runtimeRoot>/gateway` is CPA-owned writable Gateway state. Runtime transport
 credentials and Supervisor journal, selection, control, and temporary staging
 state remain Supervisor-owned and unreadable/unwritable to the CPA identity.
 Finalized Runtime16 CPA artifacts remain in the Supervisor artifact store: the
@@ -431,10 +427,7 @@ directory enumeration or access to sibling private state. Existing persisted
 Runtime16/17 stages and selection are reconciled idempotently to this corridor
 without rewriting their trusted metadata or exact bytes.
 
-Manager retains `/data` plus a read-only Runtime-token mount and no `/runtime`;
-Ingress retains no Manager data, Runtime state, or Runtime-token mount.
-
-Phase 1 does not introduce a separate CPA container, Docker socket orchestration, or another lifecycle sidecar/controller. The Ingress failure domain exists only to provide the unified public L7 transport edge.
+Phase 1 does not introduce a separate CPA container, Docker socket orchestration, or another lifecycle sidecar/controller. The Ingress process domain exists only to provide the unified public L7 transport edge.
 
 #### Native Linux
 
@@ -466,23 +459,24 @@ Future Native topology may provide different OS/service failure and survival sem
 
 ### 9. Failure-domain requirements
 
-The architecture distinguishes application behavior invariants from deployment survival guarantees.
+The architecture distinguishes application behavior invariants from process-domain and container survival guarantees.
 
 Application behavior invariants:
 
-- Manager crash, restart, or temporary unavailability MUST NOT cause the control path to intentionally terminate a healthy CPA gateway. While Ingress and the Runtime container remain healthy, model traffic continues through `AI Client -> Ingress -> CPA/Gateway -> Provider` without traversing Manager or Supervisor.
+- Manager crash, restart, or temporary unavailability MUST NOT cause the control path to intentionally terminate a healthy CPA gateway. While Ingress and the Runtime Supervisor/CPA processes remain healthy, model traffic continues through `AI Client -> Ingress -> CPA/Gateway -> Provider` without traversing Manager or Supervisor.
 - CPA child crash, exit, or readiness failure MUST NOT make Manager Console/API unavailable. Manager MUST be able to eventually observe and report the CPA runtime condition; the concrete lifecycle states are defined by later lifecycle work.
 - Runtime Supervisor MUST NOT intentionally terminate a healthy CPA merely because Manager disconnects, a status request fails, ordinary reconciliation fails, or the control path has a transient failure.
 - Manager health MUST be independently observable from CPA runtime health.
 
-Deployment survival guarantee:
+Process-domain and deployment survival guarantees:
 
-- Manager container failure MUST NOT stop an otherwise healthy Runtime container. Docker Phase 1 treats Manager and Runtime as separate deployment/container failure domains; this does not claim independence from a shared host or container-engine failure.
-- Runtime/Gateway container failure MUST NOT make an otherwise healthy Manager route unavailable through a healthy Ingress.
-- Ingress failure makes the unified public endpoint unavailable without merging Manager and Runtime ownership or process lifecycles.
-- Docker Phase 1 does not guarantee CPA child survival after Runtime Supervisor PID 1 exits or the Runtime container crashes, stops, or is killed. Supervisor and CPA share that deployment failure domain.
+- Under `cpamp-launcher` (PID 1), Ingress, Manager, and Runtime Supervisor operate as separate supervised process domains within the single container. Each process runs in its own process group under its dedicated OS UID/GID.
+- `cpamp-launcher` restarts any crashed child process individually with capped exponential backoff (`1s` doubling to a `30s` cap, reset after `60s` of healthy uptime). A Manager or Ingress process crash never terminates PID 1 or stops the sibling processes.
+- When Runtime Supervisor exits (crash or shutdown), `cpamp-launcher` terminates and reaps the Supervisor process group so no residual CPA process outlives its Supervisor incarnation. If Runtime Supervisor fails `5` consecutive starts that each live less than `10s`, `cpamp-launcher` performs an ordered shutdown and exits non-zero so the container runtime can observe the unrecoverable failure.
+- Before every Runtime Supervisor start, including an in-container restart, `cpamp-launcher` enforces two deployment trust preconditions before any `/proc` enumeration, signal, or volume mutation: (1) the container must run in a private PID namespace with `cpamp-launcher` as PID 1 and an unfiltered `procfs` mounted at `/proc` (`os.Getpid() == 1`, `/proc` mounted as `procfs` with `PROC_SUPER_MAGIC`, `/proc/self` resolving to `1`, and `/proc/self/mountinfo` confirming `/proc` has `fstype=proc` without `hidepid`; shared PID namespaces such as `--pid=host` / `--pid=container:...`, external init wrappers such as `--init` / `init: true`, and `hidepid` mounts are refused fail-closed), and (2) UID `10001` (`cpamp-cpa`) is dedicated exclusively to CPA inside that private namespace. Under those preconditions, `cpamp-launcher` enumerates `/proc` (failing closed if `/proc` or any `/proc/<pid>/status` cannot be read due to permission errors), immediately refuses startup without signalling if any process mixes UID `10001` with a non-CPA UID (`0`, `10002`, `10003`), quiesces any pure UID-`10001` processes (`[10001, 10001, 10001, 10001]`) via Linux `pidfd_open` + `/proc/<pid>/status` UID re-verification + `pidfd_send_signal` until two consecutive scans find none, and repeats the same filesystem preparation checks and descriptor-relative no-follow Gateway repairs as initial startup, preserving the resolved paths and transport credential. Existing untrusted directories, Gateway state paths, bootstrap config/identity, or transport secret cause refusal before volume mutation and before Supervisor spawn. Refusals are logged and count as failed short starts under the same backoff and fatal-exit policy; Manager and Ingress continue running until that policy requires ordered shutdown. The old Supervisor process group is terminated and reaped before another start is attempted. Selection, journal, and finalized artifact ownership remain Supervisor-enforced checks and are not repaired by launcher preparation.
+- Container stop, crash, or kill takes all processes inside the container down together (`SIGTERM` drains Ingress first, then Manager, then Runtime Supervisor and its CPA process group).
 
-Logical ownership, security/authority, state ownership, process role, and deployment failure domain are separate architectural dimensions. Sharing the Runtime container failure domain does not merge ownership: Runtime Supervisor remains the Execution Plane, and CPA remains the Data Plane.
+Logical ownership, security/authority, state ownership, process role, and process failure domain remain distinct architectural dimensions: Runtime Supervisor remains the Execution Plane, Manager remains the Control Plane, Ingress remains the stateless transport edge, and CPA remains the Data Plane.
 
 ### 10. Update ownership
 
@@ -607,7 +601,7 @@ A separate local SQLite journal adds a small persistence component, but avoids u
 4. Manager may access CPA Management API directly; Supervisor is lifecycle execution, not a management proxy.
 5. Embedded and External share the same application-level RuntimeClient contract.
 6. Privileged runtime side effects require durable operation intent first.
-7. Docker Phase 1 keeps Ingress, Manager, and Runtime as separate deployment failure domains; only Ingress publishes the default host port, while Supervisor and CPA keep distinct roles, ownership, state, and authority within the shared Runtime container failure domain.
+7. Docker Phase 1 runs Ingress, Manager, and Runtime Supervisor as isolated process domains under `cpamp-launcher` (PID 1) in one container; only Ingress publishes the default host port, while Supervisor and CPA keep distinct roles, ownership, state, and authority within the Supervisor process group.
 8. Before mutation capability is enabled, each Runtime Supervisor process incarnation must establish a new authority epoch by freshly sampling an opaque random generation; Manager only observes and echoes it.
 9. Mutations fence both Runtime identity and generation before idempotency resolution, durable intent, or side effects.
 10. For one Runtime identity, durable operation ID idempotency spans Supervisor generations: replaying the same logical request never executes its side effect twice, and conflicting reuse fails closed.
