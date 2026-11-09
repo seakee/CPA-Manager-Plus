@@ -168,7 +168,7 @@
 
 .segmentedControl {
   display: inline-flex;
-  align-items: stretch;
+  align-items: center;
   height: var(--control-height-sm);
   min-height: var(--control-height-sm);
   flex-wrap: nowrap;
@@ -179,7 +179,7 @@
   border-radius: var(--app-radius-md);
   border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
   background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--bg-primary));
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  box-shadow: none;
   box-sizing: border-box;
   overflow-x: auto;
   overflow-y: hidden;
@@ -301,8 +301,8 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  height: calc(var(--control-height-sm) - 2px);
-  min-height: calc(var(--control-height-sm) - 2px);
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 14px;
   border: 0;
   border-left: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
@@ -461,7 +461,7 @@
   border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
   border-radius: var(--app-radius-md);
   background: color-mix(in srgb, var(--monitor-surface-elevated) 82%, var(--bg-primary));
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  box-shadow: none;
   overflow: hidden;
 }
 
@@ -827,26 +827,28 @@
   flex: 0 0 auto;
 }
 
-.autoRefreshSelectTrigger {
+.autoRefreshSelect .autoRefreshSelectTrigger,
+.autoRefreshSelectTrigger.autoRefreshSelectTrigger {
   min-width: 84px;
-  height: var(--control-height-xs) !important;
-  padding: 0 2px 0 8px !important;
-  border: 0 !important;
-  border-radius: var(--app-radius-sm) !important;
-  background: transparent !important;
-  box-shadow: none !important;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
+  padding: 0 2px 0 8px;
+  border: 0;
+  border-radius: var(--app-radius-sm);
+  background: transparent;
+  box-shadow: none;
   color: var(--text-primary);
   font-size: 12px;
   font-weight: 600;
   line-height: 1;
-}
 
-.autoRefreshSelectTrigger:hover,
-.autoRefreshSelectTrigger:focus,
-.autoRefreshSelectTrigger[aria-expanded='true'] {
-  border: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
+  &:hover,
+  &:focus,
+  &[aria-expanded='true'] {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
 }
 
 .refreshButton {
@@ -1048,8 +1050,8 @@
 }
 
 .accountOverviewModeToggle .segmentButton {
-  height: calc(var(--control-height-sm) - 2px);
-  min-height: calc(var(--control-height-sm) - 2px);
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 12px;
   font-size: 12px;
 }
@@ -1074,11 +1076,12 @@
   flex: 0 0 auto;
 }
 
-.accountOverviewSortSelectTrigger {
+.accountOverviewSortSelect .accountOverviewSortSelectTrigger,
+.accountOverviewSortSelectTrigger.accountOverviewSortSelectTrigger {
   min-width: 132px;
-  height: var(--control-height-sm) !important;
-  padding: 0 2px 0 10px !important;
-  border-radius: var(--app-radius-sm) !important;
+  height: var(--control-height-sm);
+  padding: 0 2px 0 10px;
+  border-radius: var(--app-radius-sm);
   font-size: 12px;
   font-weight: 700;
 }
@@ -1132,9 +1135,10 @@
   gap: 8px;
 }
 
-.filterSelectTrigger {
-  height: var(--control-height-sm) !important;
-  border-radius: var(--app-radius-sm) !important;
+.filterGrid .filterSelectTrigger,
+.filterSelectTrigger.filterSelectTrigger {
+  height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
   font-size: 12px;
   font-weight: 600;
 }
@@ -2274,8 +2278,8 @@
 
   .segmentButton {
     flex: 0 0 auto;
-    height: calc(var(--control-height-sm) - 2px);
-    min-height: calc(var(--control-height-sm) - 2px);
+    height: var(--control-height-sm);
+    min-height: var(--control-height-sm);
     padding: 0 12px;
   }
 
@@ -2294,7 +2298,8 @@
     width: 100%;
   }
 
-  .autoRefreshSelectTrigger {
+  .autoRefreshSelect .autoRefreshSelectTrigger,
+  .autoRefreshSelectTrigger.autoRefreshSelectTrigger {
     width: 100%;
     min-width: 0;
   }

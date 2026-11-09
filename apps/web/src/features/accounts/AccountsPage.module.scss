@@ -5964,7 +5964,7 @@
 
 .viewModeSwitcher {
   display: inline-flex;
-  align-items: stretch;
+  align-items: center;
   flex-wrap: nowrap;
   justify-content: flex-start;
   gap: 0;
@@ -5986,8 +5986,8 @@
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  height: 100%;
-  min-height: 100%;
+  height: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   padding: 0 13px;
   border: 0;
   border-left: 1px solid var(--border-color);

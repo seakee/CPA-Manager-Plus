@@ -388,7 +388,7 @@
   border-radius: var(--app-radius-md);
   border: 1px solid color-mix(in srgb, var(--border-color) 86%, transparent);
   background: color-mix(in srgb, var(--inspect-surface-elevated) 82%, var(--bg-primary));
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  box-shadow: none;
   box-sizing: border-box;
   overflow-x: auto;
   overflow-y: hidden;
@@ -686,11 +686,12 @@
   flex: 0 0 auto;
 }
 
-.resultPageSizeSelectTrigger {
+.resultPageSizeSelect .resultPageSizeSelectTrigger,
+.resultPageSizeSelectTrigger.resultPageSizeSelectTrigger {
   min-width: 96px;
-  height: var(--control-height-sm) !important;
-  padding: 0 2px 0 10px !important;
-  border-radius: var(--app-radius-sm) !important;
+  height: var(--control-height-sm);
+  padding: 0 2px 0 10px;
+  border-radius: var(--app-radius-sm);
   font-size: 12px;
   font-weight: 700;
 }
@@ -1956,7 +1957,7 @@
   padding: 14px 22px;
   border-top: 1px solid var(--border-color);
   background: var(--bg-primary);
-  box-shadow: 0 -10px 20px rgba(15, 23, 42, 0.08);
+  box-shadow: none;
 }
 
 .configDrawerStatus {

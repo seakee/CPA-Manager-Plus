@@ -5,10 +5,11 @@
   color: var(--text-primary);
 }
 
-.compactSelectTrigger {
-  height: var(--control-height-sm) !important;
-  padding: 0 2px 0 10px !important;
-  border-radius: var(--app-radius-sm) !important;
+.page .compactSelectTrigger,
+.compactSelectTrigger.compactSelectTrigger {
+  height: var(--control-height-sm);
+  padding: 0 2px 0 10px;
+  border-radius: var(--app-radius-sm);
   font-size: 12px;
   font-weight: 700;
 }
@@ -227,9 +228,10 @@
   gap: 8px;
 }
 
-.filterSelectTrigger {
-  height: var(--control-height-sm) !important;
-  border-radius: var(--app-radius-sm) !important;
+.filterGrid .filterSelectTrigger,
+.filterSelectTrigger.filterSelectTrigger {
+  height: var(--control-height-sm);
+  border-radius: var(--app-radius-sm);
   font-size: 12px;
   font-weight: 600;
 }
@@ -1583,7 +1585,7 @@
 }
 
 .insightwarning {
-  color: #f97316;
+  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
 }
 
 .insightdanger {
@@ -1731,8 +1733,8 @@
 }
 
 .quotawarning {
-  background: color-mix(in srgb, #f97316 14%, var(--bg-primary));
-  color: #c2410c;
+  background: var(--data-badge-warning-bg);
+  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
 }
 
 .quotaexhausted {
@@ -1919,7 +1921,7 @@
   font-weight: 700;
   line-height: 1;
   white-space: nowrap;
-  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  box-shadow: none;
 }
 
 .heatmapDetailBodySingle {
