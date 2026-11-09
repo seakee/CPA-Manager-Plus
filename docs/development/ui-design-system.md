@@ -34,8 +34,8 @@ This specification defines the token contracts, layout conventions, and automate
   - Non-floating drop shadows (`--app-shadow`, `--app-shadow-soft`, `--glass-shadow`, `--shadow`, `--shadow-lg`) are `none`.
   - The only elevation cue on cards and panels is `--app-specular-highlight` (`box-shadow: var(--app-specular-highlight)`).
   - Floating layers (menus, popovers, tooltips, dialogs, drawers) may keep a drop shadow so they separate from the page. New or edited floating layers must be marked with `/* floating layer: elevation allowed */` and use the `--floating-shadow-*` scale defined per theme in `themes.scss` (do not duplicate `[data-theme='dark']` shadow overrides in component stylesheets); any remaining literal floating-layer shadow is legacy debt to migrate when touched:
-    - `--floating-shadow-sm`: compact inline status tooltips (account status bar hover tooltip, AI provider status bar and key test status tooltips).
-    - `--floating-shadow-md`: portaled and floating tooltips (`InfoTooltip`, `AccountRequestTimeTooltip`, monitoring quota tooltip, `FailureDetailsTooltip`).
+    - `--floating-shadow-sm`: compact status tooltips that show a short, non-scrolling summary next to their trigger (account status bar hover tooltip, AI provider status bar tooltip).
+    - `--floating-shadow-md`: tooltips that carry explanations or details, whether inline or portaled, including scrollable or interactive ones (`InfoTooltip`, `AccountRequestTimeTooltip`, monitoring quota tooltip, `FailureDetailsTooltip`, AI provider key test status tooltip). Pick by content, not by how the layer is rendered.
     - `--floating-shadow-lg`: floating action and context menus (`DropdownMenu`, `ProviderToolbar` model and sort dropdowns, `ModelMappingDiagram` context menu, including the subtle accent ring).
     - `--floating-shadow-xl`: form select popovers (`Select`, including its input-focus accent ring).
     - `--floating-shadow-dialog`: centered modal dialogs (`.modal`).
