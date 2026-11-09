@@ -301,6 +301,14 @@ func (c *artifactProofCache) verify(
 	}
 	budget := artifactProofBudget(baseTimeout, meta.TotalBytes)
 	if meta.Uncacheable || meta.Key == "" {
+		// An uncached proof hashes the whole source, so it shares the flight
+		// limit with cached proofs instead of running once per poll unbounded.
+		select {
+		case c.slots <- struct{}{}:
+		case <-ctx.Done():
+			return errArtifactProofTimeout
+		}
+		defer func() { <-c.slots }()
 		return verifySourceFingerprintUncached(ctx, budget, mountedRoot, expectedBefore, expectedAfter)
 	}
 	cacheKey := canonicalRoot + "@" + expectedBefore + ":" + expectedAfter + "@" + meta.Key
