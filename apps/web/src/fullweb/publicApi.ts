@@ -80,12 +80,35 @@ const GATEWAY_ERROR_CODES: Record<string, true> = {
   ...EXTERNAL_ERROR_CODES,
 };
 
+// The runtime artifact surface carries bounded error codes on 400/409/413/422/500/502/503.
+const ARTIFACT_ERROR_CODES: Record<string, true> = {
+  archive_invalid: true,
+  artifact_mismatch: true,
+  source_unreachable: true,
+  download_failed: true,
+  recovery_required: true,
+  unsupported_platform: true,
+  install_failed: true,
+  runtime_unavailable: true,
+  acquisition_in_progress: true,
+  artifact_conflict: true,
+  artifact_already_active: true,
+  archive_too_large: true,
+  invalid_request: true,
+  unauthorized: true,
+};
+
+const isArtifactResource = (resource: string) =>
+  resource === 'runtime/artifact' ||
+  resource === 'runtime/artifact/probe' ||
+  resource === 'runtime/artifact/acquire' ||
+  resource === 'runtime/artifact/upload';
+
 // Every resource whose failure carries a typed code the page must act on. The
 // payload is parsed for exactly these; every other failure stays a bare HTTP
 // error, because a page must never guess a cause from a status alone.
 const isTypedErrorResource = (resource: string) =>
-  isGatewayConfigResource(resource) || isExternalResource(resource);
-
+  isGatewayConfigResource(resource) || isExternalResource(resource) || isArtifactResource(resource);
 export class PublicApiError extends Error {
   constructor(
     readonly kind: PublicApiErrorKind,
@@ -116,6 +139,7 @@ export interface PublicApiClient {
   get: <T = unknown>(resource: string, credential?: FullWebCredential) => Promise<T>;
   post: <T = unknown>(resource: string, body: unknown, credential: FullWebCredential) => Promise<T>;
   put: <T = unknown>(resource: string, body: unknown, credential: FullWebCredential) => Promise<T>;
+  uploadArtifact?: <T = unknown>(body: BodyInit, credential: FullWebCredential) => Promise<T>;
 }
 
 export function createPublicApiClient(
@@ -154,22 +178,27 @@ export function createPublicApiClient(
     ) {
       throw new PublicApiError('routing_unavailable');
     }
+    const isGzipUpload = resource === 'runtime/artifact/upload' && method === 'PUT';
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (credential) headers.Authorization = `Bearer ${credential.value}`;
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (body !== undefined) {
+      headers['Content-Type'] = isGzipUpload ? 'application/gzip' : 'application/json';
+    }
     const controller =
-      body !== undefined ||
-      resource === 'operation' ||
-      resource === 'installation/runtime' ||
-      // One progress poll, bounded by the same 15 s as every other read: the
-      // flow's own timer decides when the next poll starts.
-      resource === 'installation/adoption' ||
-      resource === 'runtime/status' ||
-      resource === 'runtime/operations' ||
-      resource.startsWith('runtime/operations/') ||
-      resource.startsWith('api-keys/') ||
-      resource === 'settings/update-channel' ||
-      isTypedErrorResource(resource)
+      !isGzipUpload &&
+      (body !== undefined ||
+        resource === 'operation' ||
+        resource === 'installation/runtime' ||
+        // One progress poll, bounded by the same 15 s as every other read: the
+        // flow's own timer decides when the next poll starts.
+        resource === 'installation/adoption' ||
+        resource === 'runtime/status' ||
+        resource === 'runtime/artifact' ||
+        resource === 'runtime/operations' ||
+        resource.startsWith('runtime/operations/') ||
+        resource.startsWith('api-keys/') ||
+        resource === 'settings/update-channel' ||
+        isTypedErrorResource(resource))
         ? new AbortController()
         : undefined;
     const timer = controller ? setTimeout(() => controller.abort(), 15000) : undefined;
@@ -182,8 +211,9 @@ export function createPublicApiClient(
               // A payload rule family is arbitrary JSON and may hold integers wider
               // than a double: stringify keeps them exact instead of sending a
               // rounded number back to the Manager.
-              body:
-                resource === 'strategy'
+              body: isGzipUpload
+                ? (body as BodyInit)
+                : resource === 'strategy'
                   ? runtimeRequestJSON(body)
                   : resource.startsWith('gateway/config/rules/')
                     ? stringifyGatewayJSON(body)
@@ -224,19 +254,25 @@ export function createPublicApiClient(
         // about an adoption's own run, so they are read for both statuses the
         // server uses: a 409 for "not yet" and a 503 for "cannot be proven".
         const completeResource = resource === 'complete';
+        const artifactResource = isArtifactResource(resource);
         if (
-          (retryResource ||
+          artifactResource ||
+          ((retryResource ||
             externalResource ||
             operationResource ||
             completeResource ||
             (resource === 'strategy' && response.status === 409)) &&
-          (response.status === 409 ||
-            response.status === 503 ||
-            (retryResource && (response.status === 400 || response.status === 422)))
+            (response.status === 409 ||
+              response.status === 503 ||
+              (retryResource && (response.status === 400 || response.status === 422))))
         ) {
           try {
             const payload = (await response.json()) as Record<string, unknown>;
-            if (retryResource || externalResource) {
+            if (artifactResource) {
+              if (typeof payload.code === 'string' && ARTIFACT_ERROR_CODES[payload.code] === true) {
+                code = payload.code;
+              }
+            } else if (retryResource || externalResource) {
               // Only a recognised code unlocks the diagnostic: an unrecognised
               // upstream payload must not smuggle its message into the UI.
               const known = retryResource ? GATEWAY_ERROR_CODES : EXTERNAL_ERROR_CODES;
@@ -329,6 +365,8 @@ export function createPublicApiClient(
       request<T>(resource, credential, body),
     put: <T = unknown>(resource: string, body: unknown, credential: FullWebCredential) =>
       request<T>(resource, credential, body, 'PUT'),
+    uploadArtifact: <T = unknown>(body: BodyInit, credential: FullWebCredential) =>
+      request<T>('runtime/artifact/upload', credential, body, 'PUT'),
   };
   return api;
 }

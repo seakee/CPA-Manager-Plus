@@ -35,6 +35,14 @@ type artifactRoutesHandler struct {
 	next        http.Handler
 }
 
+// enableArtifactRoutes mounts the /v1/runtime/artifact* surface alongside the
+// Runtime Protocol handler. When CPAMP_CPA_ARTIFACT_MANIFEST is unset, when the
+// Supervisor runs in private-configuration or read-only mode, or when the
+// platform/stores are unsupported, acquisition stays unconfigured and the
+// artifact routes return 409 unsupported_platform; when a manifest path is
+// configured, acquisition is enabled and any unreadable or invalid manifest
+// file surfaces lazily as 500 install_failed without blocking Supervisor
+// startup or /v1/runtime/status.
 func enableArtifactRoutes(cfg config, runtime *runtimeHandler, opts ...lifecycle.AcquisitionOption) error {
 	if runtime == nil {
 		return errors.New("runtime handler is required")

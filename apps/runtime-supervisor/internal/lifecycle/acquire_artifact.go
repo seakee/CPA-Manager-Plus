@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"runtime"
@@ -251,6 +252,14 @@ func WithAcquisitionPostCommitHooks(refreshHook, destinationSyncHook func() erro
 	}
 }
 
+// WithAcquisitionStageCleanupHook configures a fault-injection callback invoked
+// when removing a newly created stage after a pre-commit failure.
+func WithAcquisitionStageCleanupHook(hook func(version string) error) AcquisitionOption {
+	return func(s *artifactAcquisitionState) {
+		s.stageCleanupHook = hook
+	}
+}
+
 type stageStoreProvider interface {
 	StageStore() *runtimeupdate.Store
 }
@@ -271,6 +280,7 @@ type artifactAcquisitionState struct {
 	cdnLookupIP               runtimeupdate.CDNLookupIPAddrFunc
 	postCommitRefreshHook     func() error
 	postCommitDestinationHook func() error
+	stageCleanupHook          func(version string) error
 	inFlight                  bool
 	currentOp                 *ArtifactOperationStatus
 	opSeq                     uint64
@@ -426,6 +436,13 @@ func (e *Executor) ArtifactStatus() (ArtifactStatusResponse, error) {
 		return ArtifactStatusResponse{}, err
 	}
 	state.mu.Lock()
+	if !runtimeupdate.SupportedPlatform(state.goos, state.goarch) {
+		state.mu.Unlock()
+		return ArtifactStatusResponse{}, &ArtifactError{
+			Code: ArtifactCodeUnsupportedPlatform,
+			Err:  runtimeupdate.ErrUnsupportedPlatform,
+		}
+	}
 	pinned, err := state.resolvePinnedLocked()
 	var opCopy *ArtifactOperationStatus
 	if state.currentOp != nil {
@@ -435,6 +452,9 @@ func (e *Executor) ArtifactStatus() (ArtifactStatusResponse, error) {
 	state.mu.Unlock()
 	if err != nil {
 		return ArtifactStatusResponse{}, err
+	}
+	if _, _, _, storeErr := e.resolveAcquisitionStores(); storeErr != nil {
+		return ArtifactStatusResponse{}, storeErr
 	}
 
 	var active *ArtifactActiveStatus
@@ -471,6 +491,13 @@ func (e *Executor) ProbeArtifactSource(ctx context.Context) (ArtifactProbeRespon
 		return ArtifactProbeResponse{}, err
 	}
 	state.mu.Lock()
+	if !runtimeupdate.SupportedPlatform(state.goos, state.goarch) {
+		state.mu.Unlock()
+		return ArtifactProbeResponse{}, &ArtifactError{
+			Code: ArtifactCodeUnsupportedPlatform,
+			Err:  runtimeupdate.ErrUnsupportedPlatform,
+		}
+	}
 	pinned, err := state.resolvePinnedLocked()
 	if err != nil {
 		state.mu.Unlock()
@@ -908,6 +935,7 @@ func (e *Executor) executeArtifactAcquisition(
 	}
 	failOperation := func(err error) (ArtifactOperationStatus, error) {
 		code := ArtifactErrorCode(err)
+		log.Printf("runtime artifact acquisition %s failed (%s): %v", opID, code, err)
 		state.mu.Lock()
 		var opCopy ArtifactOperationStatus
 		if state.currentOp != nil && state.currentOp.ID == opID {
@@ -974,9 +1002,31 @@ func (e *Executor) commitAcquiredStage(
 	observer activeArtifactRefresher,
 	createdStage bool,
 ) error {
-	cleanupCreatedStage := func() {
-		if createdStage && stageStore != nil {
-			_ = stageStore.RemoveCreatedStage(pinned.Version)
+	cleanupCreatedStage := func(cause error) error {
+		if !createdStage || stageStore == nil {
+			return cause
+		}
+		var cleanupErr error
+		if state.stageCleanupHook != nil {
+			cleanupErr = state.stageCleanupHook(pinned.Version)
+		}
+		if cleanupErr == nil {
+			cleanupErr = stageStore.RemoveCreatedStage(pinned.Version)
+		}
+		if cleanupErr == nil {
+			return cause
+		}
+		code := ArtifactErrorCode(cause)
+		var artifactErr *ArtifactError
+		if errors.As(cause, &artifactErr) && artifactErr != nil {
+			return &ArtifactError{
+				Code: code,
+				Err:  errors.Join(artifactErr.Err, cleanupErr),
+			}
+		}
+		return &ArtifactError{
+			Code: code,
+			Err:  errors.Join(cause, cleanupErr),
 		}
 	}
 
@@ -985,46 +1035,39 @@ func (e *Executor) commitAcquiredStage(
 
 	alreadyActive, conflictErr := e.evaluateAcquisitionAdmissionLocked(state.manifestPath, pinned, selections, stageStore, observer)
 	if conflictErr != nil {
-		cleanupCreatedStage()
-		return conflictErr
+		return cleanupCreatedStage(conflictErr)
 	}
 	if alreadyActive {
 		if !e.currentDescriptorLocked().IsFinalizedStage() {
-			cleanupCreatedStage()
-			return &ArtifactError{Code: ArtifactCodeArtifactConflict, Err: runtimeupdate.ErrArtifactConflict}
+			return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeArtifactConflict, Err: runtimeupdate.ErrArtifactConflict})
 		}
 		return nil
 	}
 
 	candidate, err := selections.ResolveFinalized(pinned.Version)
 	if err != nil {
-		cleanupCreatedStage()
 		if errors.Is(err, runtimeupdate.ErrStageConflict) || errors.Is(err, runtimeupdate.ErrArtifactConflict) {
-			return &ArtifactError{Code: ArtifactCodeArtifactConflict, Err: err}
+			return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeArtifactConflict, Err: err})
 		}
-		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
+		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: err})
 	}
 	if candidate.ArtifactID != pinned.ArtifactID {
-		cleanupCreatedStage()
-		return &ArtifactError{Code: ArtifactCodeArtifactConflict, Err: runtimeupdate.ErrArtifactConflict}
+		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeArtifactConflict, Err: runtimeupdate.ErrArtifactConflict})
 	}
 	if observer == nil {
-		cleanupCreatedStage()
-		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: ErrPersistenceUnavailable}
+		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: ErrPersistenceUnavailable})
 	}
 	candidateObserver := artifact.NewObserver(candidate.ExecutablePath, candidate.MetadataPath)
 	err = candidateObserver.Refresh()
 	candidateObs := candidateObserver.Observation()
 	if err != nil || candidateObs == nil || candidateObs.ArtifactID != pinned.ArtifactID || (candidateObs.Version != "" && candidateObs.Version != pinned.Version) {
-		cleanupCreatedStage()
 		if err == nil {
 			err = runtimeupdate.ErrArtifactConflict
 		}
-		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
+		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: err})
 	}
 	if err := e.preverifyDestinationSyncLocked(candidate.ArtifactID); err != nil {
-		cleanupCreatedStage()
-		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
+		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: err})
 	}
 
 	if err := selections.Commit(candidate); err != nil {
@@ -1035,10 +1078,8 @@ func (e *Executor) commitAcquiredStage(
 				Err:  errors.Join(ErrRecoveryRequired, err),
 			}
 		}
-		cleanupCreatedStage()
-		return &ArtifactError{Code: ArtifactCodeInstallFailed, Err: err}
+		return cleanupCreatedStage(&ArtifactError{Code: ArtifactCodeInstallFailed, Err: err})
 	}
-
 	e.active = candidate
 	e.executable = candidate.ExecutablePath
 

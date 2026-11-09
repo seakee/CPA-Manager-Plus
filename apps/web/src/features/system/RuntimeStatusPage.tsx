@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { useAuthStore, useNotificationStore } from '@/stores';
 import { createPublicApiClient, PublicApiError } from '@/fullweb/publicApi';
 import type { FullWebCredential, PublicApiClient } from '@/fullweb/publicApi';
+import type { ArtifactStatus } from '@/fullweb/freshArtifact';
 import './RuntimeStatusPage.scss';
 
 export type RuntimeStatusGateway = {
@@ -56,6 +57,29 @@ function newRequestId() {
   return `runtime-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function parseEngineArtifact(value: unknown): Pick<ArtifactStatus, 'active' | 'required'> | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.schemaVersion !== 1 || typeof raw.required !== 'boolean') return null;
+  if (raw.active === null || raw.active === undefined) {
+    return raw.required ? { active: null, required: true } : null;
+  }
+  if (typeof raw.active !== 'object') return null;
+  const active = raw.active as Record<string, unknown>;
+  if (
+    typeof active.artifactId !== 'string' ||
+    !/^sha256:[a-f0-9]{64}$/.test(active.artifactId) ||
+    (active.origin !== 'bundled' && active.origin !== 'acquired') ||
+    raw.required !== false
+  ) {
+    return null;
+  }
+  return {
+    active: { artifactId: active.artifactId, origin: active.origin },
+    required: false,
+  };
+}
+
 export function RuntimeStatusPage({
   client = defaultClient,
   credential,
@@ -71,6 +95,7 @@ export function RuntimeStatusPage({
   const managerCredential = credential || auth.managementKey;
   const [status, setStatus] = useState<RuntimeStatusResponse | null>(null);
   const [operation, setOperation] = useState<RuntimeOperation | null>(null);
+  const [artifact, setArtifact] = useState<Pick<ArtifactStatus, 'active' | 'required'> | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -83,16 +108,29 @@ export function RuntimeStatusPage({
       return;
     }
     const requestId = ++requestRef.current;
+    const adminCredential: FullWebCredential = {
+      kind: 'admin',
+      value: managerCredential,
+    };
+    const artifactPromise = client
+      .get<unknown>('runtime/artifact', adminCredential)
+      .then((raw) => parseEngineArtifact(raw))
+      .catch(() => null);
     try {
-      const next = await client.get<RuntimeStatusResponse>('runtime/status', {
-        kind: 'admin',
-        value: managerCredential,
-      });
-      if (requestId === requestRef.current) setStatus(next);
+      const [next, nextArtifact] = await Promise.all([
+        client.get<RuntimeStatusResponse>('runtime/status', adminCredential),
+        artifactPromise,
+      ]);
+      if (requestId === requestRef.current) {
+        setStatus(next);
+        setArtifact(nextArtifact);
+      }
     } catch (error) {
+      const nextArtifact = await artifactPromise;
       if (error instanceof PublicApiError && error.kind === 'authentication') {
         onUnauthorized?.();
       } else if (requestId === requestRef.current) {
+        setArtifact(nextArtifact);
         setStatus((current) =>
           current
             ? { ...current, status: 'unknown', errorCode: 'manager_unreachable' }
@@ -248,6 +286,28 @@ export function RuntimeStatusPage({
               <Button variant="secondary" onClick={() => requestAction('stop')} disabled={busy || !gateway.capabilities?.includes('stop')}>
                 {t('runtime_status.stop', { defaultValue: 'Stop' })}
               </Button>
+            </div>
+          )}
+          {status?.mode !== 'external' && artifact && (
+            <div className="runtime-status-version" data-testid="runtime-status-engine-source">
+              <dl>
+                <div>
+                  <dt>{t('runtime_status.engine_source', { defaultValue: '引擎版本来源' })}</dt>
+                  <dd data-testid="runtime-status-engine-source-value">
+                    {artifact.active?.origin === 'bundled'
+                      ? t('runtime_status.engine_source_bundled', {
+                          defaultValue: '固定版本（镜像自带）',
+                        })
+                      : artifact.active?.origin === 'acquired'
+                        ? t('runtime_status.engine_source_acquired', {
+                            defaultValue: '固定版本（运行时获取）',
+                          })
+                        : t('runtime_status.engine_source_required', {
+                            defaultValue: '尚未准备',
+                          })}
+                  </dd>
+                </div>
+              </dl>
             </div>
           )}
           {status?.mode === 'external' && (

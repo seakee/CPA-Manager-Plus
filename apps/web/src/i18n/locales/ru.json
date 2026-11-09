@@ -253,7 +253,11 @@
     "version_unverified": "Не подтверждено",
     "writes": "Запись",
     "writes_blocked": "Заблокирована этой версией",
-    "writes_allowed": "Не заблокирована этой версией"
+    "writes_allowed": "Не заблокирована этой версией",
+    "engine_source": "Источник версии движка",
+    "engine_source_bundled": "Фиксированная версия (встроена в образ)",
+    "engine_source_acquired": "Фиксированная версия (получена во время выполнения)",
+    "engine_source_required": "Ещё не подготовлена"
   },
   "cpa_updates": {
     "title": "CPA Engine",

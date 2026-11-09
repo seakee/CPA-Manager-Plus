@@ -571,10 +571,16 @@ target. Verified acquisition stages the pinned version and exact `artifactId`
 alongside the extracted `LICENSE`, then commits the finalized `selection.json`
 and refreshes the active artifact observation without performing a process
 transition; a subsequent `Start` or destination cutover consumes that selected
-stage. This acquisition surface sits intentionally outside the destination
-qualification pin while preserving the pinned Fresh gate requirement that
-`ActiveGatewayArtifact` equals the qualified `artifactId`, matching the existing
-prepare and activate update paths.
+stage. When runtime acquisition is not available in a deployment (for example,
+when `CPAMP_CPA_ARTIFACT_MANIFEST` is unset, in private-configuration or
+read-only mode, or on an unsupported OS/architecture), the artifact endpoints
+return HTTP 409 `unsupported_platform`; when acquisition is configured with a
+manifest path whose file is missing, unreadable, or invalid, the artifact
+endpoints return HTTP 500 `install_failed` as an image defect without blocking
+Supervisor startup or `/v1/runtime/status`. This acquisition surface sits
+intentionally outside the destination qualification pin while preserving the
+pinned Fresh gate requirement that `ActiveGatewayArtifact` equals the qualified
+`artifactId`, matching the existing prepare and activate update paths.
 
 ## Phase 1 implementation boundary
 

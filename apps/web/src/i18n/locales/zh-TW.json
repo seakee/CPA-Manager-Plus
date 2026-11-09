@@ -253,7 +253,11 @@
     "version_unverified": "未驗證",
     "writes": "寫入",
     "writes_blocked": "該版本阻止寫入",
-    "writes_allowed": "該版本未阻止寫入"
+    "writes_allowed": "該版本未阻止寫入",
+    "engine_source": "引擎版本來源",
+    "engine_source_bundled": "固定版本（映像自帶）",
+    "engine_source_acquired": "固定版本（執行階段取得）",
+    "engine_source_required": "尚未準備"
   },
   "cpa_updates": {
     "title": "CPA Engine",

@@ -332,4 +332,133 @@ describe('Fresh routing prepare, cutover and lost-response recovery', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
     }
   );
+
+  it('sends runtime/artifact status, probe, acquire and raw gzip upload over both fixed bootstrap and post-cutover canonical carriers', async () => {
+    const archive = new Blob([new Uint8Array([0x1f, 0x8b, 0x08, 0x00])], {
+      type: 'application/gzip',
+    });
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(reply(prepared))
+      .mockResolvedValueOnce(reply({ schemaVersion: 1 }))
+      .mockResolvedValueOnce(reply({ reachable: true, code: '' }))
+      .mockResolvedValueOnce(reply({ operation: { id: 'op-1' } }))
+      .mockResolvedValueOnce(reply({ operation: { id: 'op-2' } }))
+      .mockResolvedValueOnce(reply(committed))
+      .mockResolvedValueOnce(reply(state))
+      .mockResolvedValueOnce(reply({ schemaVersion: 1 }))
+      .mockResolvedValueOnce(reply({ reachable: true, code: '' }))
+      .mockResolvedValueOnce(reply({ operation: { id: 'op-3' } }))
+      .mockResolvedValueOnce(reply({ operation: { id: 'op-4' } }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: 'unsupported_platform' }), { status: 409 })
+      );
+
+    const client = createBootstrapTransport(fetchMock);
+    await client.start({ ...handoff, resume: true });
+
+    await client.request('runtime/artifact');
+    await client.request('runtime/artifact/probe', {});
+    await client.request('runtime/artifact/acquire', { source: 'github' });
+    await client.uploadArtifact(archive);
+
+    const fixedBase = 'https://manager.example/.well-known/cpamp-bootstrap/api/v2/';
+    expect(fetchMock.mock.calls[1]).toEqual([
+      `${fixedBase}runtime/artifact`,
+      expect.objectContaining({
+        method: 'GET',
+        headers: { Accept: 'application/json', Authorization: `Fresh ${handoff.token}` },
+      }),
+    ]);
+    expect(fetchMock.mock.calls[2]).toEqual([
+      `${fixedBase}runtime/artifact/probe`,
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Fresh ${handoff.token}`,
+        },
+        body: '{}',
+      }),
+    ]);
+    expect(fetchMock.mock.calls[3]).toEqual([
+      `${fixedBase}runtime/artifact/acquire`,
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: `Fresh ${handoff.token}`,
+        },
+        body: JSON.stringify({ source: 'github' }),
+      }),
+    ]);
+    expect(fetchMock.mock.calls[4][0]).toBe(`${fixedBase}runtime/artifact/upload`);
+    expect(fetchMock.mock.calls[4][1]).toMatchObject({
+      method: 'PUT',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/gzip',
+        Authorization: `Fresh ${handoff.token}`,
+      },
+    });
+    expect(fetchMock.mock.calls[4][1]?.body).toBe(archive);
+
+    expect(await client.activateRouting()).toBe('/console');
+
+    await client.request('runtime/artifact');
+    await client.request('runtime/artifact/probe', {});
+    await client.request('runtime/artifact/acquire', {
+      source: 'cdn',
+      cdnPrefix: 'https://mirror.example.com/',
+    });
+    await client.request('runtime/artifact/upload', archive);
+
+    const canonicalBase = 'https://manager.example/console/api/v2/';
+    expect(fetchMock.mock.calls[7][0]).toBe(`${canonicalBase}runtime/artifact`);
+    expect(fetchMock.mock.calls[8][0]).toBe(`${canonicalBase}runtime/artifact/probe`);
+    expect(fetchMock.mock.calls[9][0]).toBe(`${canonicalBase}runtime/artifact/acquire`);
+    expect(fetchMock.mock.calls[10][0]).toBe(`${canonicalBase}runtime/artifact/upload`);
+    expect(fetchMock.mock.calls[10][1]?.body).toBe(archive);
+    expect(fetchMock.mock.calls[10][1]?.headers).toEqual({
+      Accept: 'application/json',
+      'Content-Type': 'application/gzip',
+      Authorization: `Fresh ${handoff.token}`,
+    });
+
+    await expect(client.request('runtime/artifact')).rejects.toMatchObject({
+      kind: 'conflict',
+      status: 409,
+      code: 'unsupported_platform',
+    });
+  });
+
+  it('does not abort a raw gzip upload at the 15s JSON read deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const archive = new Blob([new Uint8Array([0x1f, 0x8b, 0x08, 0x00])], {
+        type: 'application/gzip',
+      });
+      let resolveUpload!: (res: Response) => void;
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(reply(prepared))
+        .mockImplementationOnce((_url, options) => {
+          expect(options?.signal).toBeUndefined();
+          return new Promise<Response>((resolve) => {
+            resolveUpload = resolve;
+          });
+        });
+      const client = createBootstrapTransport(fetchMock);
+      await client.start({ ...handoff, resume: true });
+
+      const pending = client.uploadArtifact(archive);
+      await vi.advanceTimersByTimeAsync(20_000);
+      resolveUpload(reply({ operation: { id: 'op-slow' } }));
+      await expect(pending).resolves.toEqual({ operation: { id: 'op-slow' } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

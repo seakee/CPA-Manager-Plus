@@ -492,4 +492,102 @@ describe('canonical Full Web Public API transport', () => {
       createPublicApiClient(() => context, transport).get('technical')
     ).rejects.toMatchObject({ kind: 'network' });
   });
+
+  it('sends runtime/artifact status, probe, acquire and raw gzip upload with admin Bearer auth and parses artifact error codes', async () => {
+    browserOrigin();
+    const archive = new Blob([new Uint8Array([0x1f, 0x8b, 0x08, 0x00])], {
+      type: 'application/gzip',
+    });
+    const transport = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ schemaVersion: 1 }))
+      .mockResolvedValueOnce(Response.json({ reachable: true, code: '' }))
+      .mockResolvedValueOnce(Response.json({ operation: { id: 'op-1' } }))
+      .mockResolvedValueOnce(Response.json({ operation: { id: 'op-2' } }))
+      .mockResolvedValueOnce(
+        Response.json({ code: 'artifact_mismatch' }, { status: 422 })
+      );
+    const client = createPublicApiClient(() => context, transport);
+
+    await client.get('runtime/artifact', credential);
+    await client.post('runtime/artifact/probe', {}, credential);
+    await client.post('runtime/artifact/acquire', { source: 'github' }, credential);
+    await client.uploadArtifact!(archive, credential);
+
+    const base = 'https://manager.example:18317/phase4-test/api/v2/';
+    expect(transport.mock.calls[0]).toEqual([
+      `${base}runtime/artifact`,
+      expect.objectContaining({
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: 'Bearer full-web-admin-secret',
+        },
+      }),
+    ]);
+    expect(transport.mock.calls[1]).toEqual([
+      `${base}runtime/artifact/probe`,
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer full-web-admin-secret',
+        },
+        body: '{}',
+      }),
+    ]);
+    expect(transport.mock.calls[2]).toEqual([
+      `${base}runtime/artifact/acquire`,
+      expect.objectContaining({
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer full-web-admin-secret',
+        },
+        body: JSON.stringify({ source: 'github' }),
+      }),
+    ]);
+    expect(transport.mock.calls[3][0]).toBe(`${base}runtime/artifact/upload`);
+    expect(transport.mock.calls[3][1]).toMatchObject({
+      method: 'PUT',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/gzip',
+        Authorization: 'Bearer full-web-admin-secret',
+      },
+    });
+    expect(transport.mock.calls[3][1]?.body).toBe(archive);
+
+    await expect(client.put('runtime/artifact/upload', archive, credential)).rejects.toMatchObject({
+      kind: 'http',
+      status: 422,
+      code: 'artifact_mismatch',
+    });
+  });
+
+  it('does not abort a raw gzip upload at the 15s JSON read deadline', async () => {
+    browserOrigin();
+    vi.useFakeTimers();
+    try {
+      const archive = new Blob([new Uint8Array([0x1f, 0x8b, 0x08, 0x00])], {
+        type: 'application/gzip',
+      });
+      let resolveUpload!: (res: Response) => void;
+      const transport = vi.fn<typeof fetch>((_url, options) => {
+        expect(options?.signal).toBeUndefined();
+        return new Promise<Response>((resolve) => {
+          resolveUpload = resolve;
+        });
+      });
+      const client = createPublicApiClient(() => context, transport);
+      const pending = client.uploadArtifact!(archive, credential);
+      await vi.advanceTimersByTimeAsync(20_000);
+      resolveUpload(Response.json({ operation: { id: 'op-slow' } }));
+      await expect(pending).resolves.toEqual({ operation: { id: 'op-slow' } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

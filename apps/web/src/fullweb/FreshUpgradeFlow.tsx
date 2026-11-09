@@ -14,7 +14,6 @@ import {
 import { BOOTSTRAP_ROOT } from './bootstrapTransport';
 import { FullWebIcon } from './FullWebIcon';
 import { readRoutingContext } from './routingContext';
-
 // The wizard reads the operation and runs the one action that can advance it.
 // The reads only report what the operation recorded: the read-only preflight
 // report and the operation row projection. The action is the same completion gate
@@ -464,7 +463,6 @@ type BootState =
   | { phase: 'reading' }
   | { phase: 'failed'; error: UpgradeWizardError }
   | { phase: 'ready'; resumed: boolean };
-
 /**
  * The Full Web Upgrade wizard. Four steps over the two read-only routes:
  * preflight, confirm, progress and result. Every sentence about what the
