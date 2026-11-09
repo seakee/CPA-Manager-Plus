@@ -1910,6 +1910,40 @@ describe('AccountsPage replacement flows', () => {
     );
   });
 
+
+  it('toggles the quota pace projection from the accounts toolbar', async () => {
+    const renderer = await renderAccountsPage();
+    await flushPromises();
+
+    const enabledToggle = findHostButtonByAriaLabel(renderer, 'accounts.quota_pace_hide_hint');
+    expect(enabledToggle.props['aria-pressed']).toBe(true);
+
+    await act(async () => {
+      findDetailButtonByName(renderer, mocks.files[0].name).props.onClick();
+    });
+    await act(async () => {
+      findHostButtonByText(renderer, 'accounts.detail_tab_quota').props.onClick();
+    });
+    expect(renderer.root.findByType(AccountQuotaTab).props.showQuotaPace).toBe(true);
+
+    await act(async () => {
+      findHostButtonByAriaLabel(renderer, 'accounts.quota_pace_hide_hint').props.onClick();
+    });
+    await flushPromises();
+
+    expect(renderer.root.findByType(AccountQuotaTab).props.showQuotaPace).toBe(false);
+
+    await act(async () => {
+      findHostButtonByAriaLabel(renderer, 'accounts.quota_pace_show_hint').props.onClick();
+    });
+    await flushPromises();
+
+    expect(renderer.root.findByType(AccountQuotaTab).props.showQuotaPace).toBe(true);
+    expect(
+      findHostButtonByAriaLabel(renderer, 'accounts.quota_pace_hide_hint').props['aria-pressed']
+    ).toBe(true);
+  });
+
   it('applies the recovery boundary to a confirmed credential after identity rotation', async () => {
     const original = {
       ...makeCodexFile('codex-old.json', 'auth-1', 'workspace@example.com'),

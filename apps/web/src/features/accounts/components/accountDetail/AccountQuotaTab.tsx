@@ -8,6 +8,7 @@ import {
   IconCheck,
   IconDollarSign,
   IconRefreshCw,
+  IconTrendingUp,
 } from '@/components/ui/icons';
 import type { AccountDetailViewModel } from '@/features/accounts/model/accountDetailViewModel';
 import {
@@ -102,6 +103,10 @@ interface AccountQuotaTabProps {
   onRefreshHistory: () => void;
   onResetQuota: () => void;
   resetQuotaDisabled: boolean;
+  /** 是否展示每个额度窗口的消耗速度预测；默认展示。 */
+  showQuotaPace?: boolean;
+  /** 切换额度预测开关；未传入时不渲染 Tab 内的开关。 */
+  onToggleQuotaPace?: () => void;
 }
 
 const renderResetCreditRemainingText = (
@@ -140,6 +145,8 @@ export function AccountQuotaTab({
   onRefreshHistory,
   onResetQuota,
   resetQuotaDisabled,
+  showQuotaPace = true,
+  onToggleQuotaPace,
 }: AccountQuotaTabProps) {
   const { t, i18n } = useTranslation();
   const history = detailView.history;
@@ -153,6 +160,7 @@ export function AccountQuotaTab({
   const otherQuotaItems = allWindows.filter(
     (window) => getAccountQuotaSemanticGroup(window) === 'other'
   );
+  const hasWindowPace = allWindows.some((window) => window.pace !== null);
 
   const formatNumber = (value: number) => new Intl.NumberFormat(i18n.language).format(value);
   const formatTime = (value: number | null) =>
@@ -184,6 +192,23 @@ export function AccountQuotaTab({
           <p>{t('accounts.detail_quota_window_usage_desc')}</p>
         </div>
         <div className={styles.quotaTabActions}>
+          {onToggleQuotaPace ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={onToggleQuotaPace}
+              aria-pressed={showQuotaPace}
+              title={t(
+                showQuotaPace ? 'accounts.quota_pace_hide_hint' : 'accounts.quota_pace_show_hint'
+              )}
+              aria-label={t(
+                showQuotaPace ? 'accounts.quota_pace_hide_hint' : 'accounts.quota_pace_show_hint'
+              )}
+            >
+              <IconTrendingUp size={15} />
+              {t('accounts.quota_pace_toggle')}
+            </Button>
+          ) : null}
           <Button
             variant="secondary"
             size="sm"
@@ -242,6 +267,18 @@ export function AccountQuotaTab({
 
       {windowUsageError ? <div className={styles.errorBox}>{windowUsageError}</div> : null}
 
+      {showQuotaPace && allWindows.length > 0 && !hasWindowPace ? (
+        <div className={styles.quotaPaceEmpty} data-quota-pace-empty="true" role="status">
+          <IconChartLine size={14} />
+          <span>
+            {t('accounts.detail_quota_pace_none', {
+              defaultValue:
+                '额度预测已开启，但暂时没有可预测的窗口：窗口已用 0%、已经用完，或观测数据不足。',
+            })}
+          </span>
+        </div>
+      ) : null}
+
 
 
       {standardWindows.length > 0 || allWindows.length === 0 ? (
@@ -262,6 +299,7 @@ export function AccountQuotaTab({
                   window={window}
                   mode="standard"
                   locale={i18n.language}
+                  showPace={showQuotaPace}
                 />
               ))}
             </div>
@@ -288,6 +326,7 @@ export function AccountQuotaTab({
                 window={window}
                 mode="model"
                 locale={i18n.language}
+                showPace={showQuotaPace}
               />
             ))}
           </div>
@@ -311,6 +350,7 @@ export function AccountQuotaTab({
                 window={window}
                 mode="other"
                 locale={i18n.language}
+                showPace={showQuotaPace}
               />
             ))}
           </div>

@@ -61,6 +61,7 @@ const MANAGED_QUERY_KEYS = [
   'pageSize',
   'display',
   'layout',
+  'pace',
   'account',
   'tab',
   'editor',
@@ -131,6 +132,12 @@ export const readAccountsWorkspaceUrlState = (
         : params.get('layout') === 'table'
           ? 'table'
           : fallback.layoutMode,
+    quotaPaceEnabled:
+      params.get('pace') === 'off'
+        ? false
+        : params.get('pace') === 'on'
+          ? true
+          : fallback.quotaPaceEnabled,
     account: params.get('account') || null,
     detailTab:
       params.get('tab') === 'credential'
@@ -175,6 +182,9 @@ export const writeAccountsWorkspaceUrlSearch = (
   if (state.pageSize !== defaults.pageSize) params.set('pageSize', String(state.pageSize));
   setNonDefault(params, 'display', state.accountDisplayMode, defaults.accountDisplayMode);
   setNonDefault(params, 'layout', state.layoutMode, defaults.layoutMode);
+  if (state.quotaPaceEnabled !== defaults.quotaPaceEnabled) {
+    params.set('pace', state.quotaPaceEnabled ? 'on' : 'off');
+  }
   if (state.account) {
     params.set('account', state.account);
     setNonDefault(params, 'tab', state.detailTab, 'overview');

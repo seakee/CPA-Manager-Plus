@@ -58,4 +58,17 @@ describe('accountsWorkspaceUiState', () => {
       })
     ).toEqual(DEFAULT_ACCOUNTS_WORKSPACE_UI_STATE);
   });
+
+  it('keeps an explicitly disabled quota pace preference', () => {
+    expect(normalizeAccountsWorkspaceUiState({ quotaPaceEnabled: false }).quotaPaceEnabled).toBe(
+      false
+    );
+  });
+
+  it('defaults the quota pace to enabled for older persisted state', () => {
+    expect(normalizeAccountsWorkspaceUiState({ search: 'x' }).quotaPaceEnabled).toBe(true);
+    expect(normalizeAccountsWorkspaceUiState({ quotaPaceEnabled: 'no' }).quotaPaceEnabled).toBe(
+      true
+    );
+  });
 });

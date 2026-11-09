@@ -139,6 +139,7 @@ const buildForecastWindow = (
     current?: Partial<MonitoringAccountWindowUsageItem>;
     previous?: Partial<MonitoringAccountWindowUsageItem>;
     quota?: Partial<AccountDetailQuotaWindowInput>;
+    nowMs?: number;
   } = {}
 ) => {
   const row = makeRow({ provider: 'antigravity' });
@@ -172,6 +173,7 @@ const buildForecastWindow = (
   return buildAccountDetailViewModel(row, {
     quotaWindows: [quotaWindow],
     windowUsageByKey,
+    nowMs: options.nowMs,
   }).quota.windows[0];
 };
 
@@ -3000,3 +3002,111 @@ describe('accountDetailViewModel', () => {
   });
 });
 
+
+describe('buildAccountDetailViewModel window pace', () => {
+  const nowMs = 1_700_000_000_000;
+  const hourMs = 60 * 60 * 1000;
+
+  it('projects when the window runs out and compares it with the reset', () => {
+    const window = buildForecastWindow({
+      quota: {
+        usedPercent: 50,
+        remainingPercent: 50,
+        cycleStartMs: nowMs - 2 * hourMs,
+        cycleEndMs: nowMs + 3 * hourMs,
+        resetAtMs: nowMs + 3 * hourMs,
+        quotaProgressObservedAtMs: nowMs,
+      },
+      nowMs,
+    });
+
+    expect(window.pace).toMatchObject({
+      status: 'exhausts_before_reset',
+      exhaustsAtMs: nowMs + 2 * hourMs,
+      resetsAtMs: nowMs + 3 * hourMs,
+      remainingPercent: 50,
+    });
+  });
+
+  it('keeps pacing independent per quota window', () => {
+    const row = makeRow({ provider: 'antigravity' });
+    const viewModel = buildAccountDetailViewModel(row, {
+      nowMs,
+      quotaWindows: [
+        makeForecastWindow({
+          key: 'fast',
+          providerWindowId: 'fast',
+          usedPercent: 50,
+          remainingPercent: 50,
+          cycleStartMs: nowMs - 2 * hourMs,
+          cycleEndMs: nowMs + 3 * hourMs,
+          resetAtMs: nowMs + 3 * hourMs,
+          quotaProgressObservedAtMs: nowMs,
+        }),
+        makeForecastWindow({
+          key: 'slow',
+          providerWindowId: 'slow',
+          usedPercent: 10,
+          remainingPercent: 90,
+          cycleStartMs: nowMs - 2 * hourMs,
+          cycleEndMs: nowMs + 3 * hourMs,
+          resetAtMs: nowMs + 3 * hourMs,
+          quotaProgressObservedAtMs: nowMs,
+        }),
+      ],
+    });
+
+    expect(viewModel.quota.windows.map((window) => window.pace?.status)).toEqual([
+      'exhausts_before_reset',
+      'lasts_until_reset',
+    ]);
+  });
+
+  it('skips the pace when the lifecycle cycle is not forecast eligible', () => {
+    const window = buildForecastWindow({
+      quota: {
+        usedPercent: 50,
+        remainingPercent: 50,
+        cycleStartMs: nowMs - 2 * hourMs,
+        cycleEndMs: nowMs + 3 * hourMs,
+        resetAtMs: nowMs + 3 * hourMs,
+        quotaProgressObservedAtMs: nowMs,
+        availability: 'active',
+        currentCycle: {
+          id: 2,
+          activationId: 1,
+          state: 'provisional',
+          scheduledStartMs: nowMs - 2 * hourMs,
+          scheduledEndMs: nowMs + 3 * hourMs,
+          actualStartMs: nowMs - 2 * hourMs,
+          actualEndMs: null,
+          durationSeconds: 5 * 60 * 60,
+          boundaryAccuracy: 'estimated',
+          endReason: '',
+          parentCycleId: null,
+          forecastEligible: false,
+        },
+      },
+      nowMs,
+    });
+
+    expect(window.pace).toBeNull();
+  });
+
+  it('skips the pace for inactive lifecycle windows', () => {
+    const window = buildForecastWindow({
+      quota: {
+        usedPercent: 50,
+        remainingPercent: 50,
+        cycleStartMs: nowMs - 2 * hourMs,
+        cycleEndMs: nowMs + 3 * hourMs,
+        resetAtMs: nowMs + 3 * hourMs,
+        quotaProgressObservedAtMs: nowMs,
+        availability: 'inactive',
+      },
+      nowMs,
+    });
+
+    expect(window.pace).toBeNull();
+  });
+});
