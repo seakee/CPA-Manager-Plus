@@ -71,7 +71,7 @@
   overflow: hidden;
   color: var(--text-primary);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.45;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -85,9 +85,9 @@
   overflow: hidden;
   padding: 4px 9px;
   border: 1px solid currentColor;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -101,11 +101,11 @@
 }
 
 .statusOk {
-  color: #10b981;
+  color: color-mix(in srgb, var(--data-badge-success-text) 62%, var(--text-primary));
 }
 
 .statusWarn {
-  color: #f59e0b;
+  color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
 }
 
 .statusPending {
@@ -117,9 +117,9 @@
   gap: 3px;
   margin-top: v.$spacing-lg;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, #f59e0b 34%, var(--border-subtle));
+  border: 1px solid color-mix(in srgb, var(--warning-color) 34%, var(--border-subtle));
   border-radius: var(--app-radius-sm);
-  background: color-mix(in srgb, #f59e0b 8%, var(--surface-subtle));
+  background: color-mix(in srgb, var(--warning-color) 8%, var(--surface-subtle));
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.5;
@@ -127,7 +127,7 @@
   strong {
     color: var(--text-primary);
     font-size: 13px;
-    font-weight: 750;
+    font-weight: 700;
   }
 }
 
@@ -143,9 +143,9 @@
   flex-direction: column;
   gap: 4px;
   padding: 10px 12px;
-  border: 1px solid rgba(245, 158, 11, 0.24);
+  border: 1px solid color-mix(in srgb, var(--warning-color) 24%, transparent);
   border-radius: var(--app-radius-sm);
-  background: rgba(245, 158, 11, 0.08);
+  background: color-mix(in srgb, var(--warning-color) 8%, transparent);
   font-size: 12px;
 
   span {
@@ -154,7 +154,7 @@
 
   strong {
     overflow-wrap: anywhere;
-    color: #f59e0b;
+    color: color-mix(in srgb, var(--data-badge-warning-text) 62%, var(--text-primary));
     font-weight: 600;
   }
 }

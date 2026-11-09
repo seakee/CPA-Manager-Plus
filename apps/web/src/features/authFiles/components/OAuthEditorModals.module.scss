@@ -11,7 +11,7 @@
 .settingsBlock {
   overflow: visible;
   border: 1px solid var(--border-color);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-md);
 }
 
 .settingsHeader {
@@ -106,7 +106,7 @@
   align-items: center;
   padding: 4px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   background-color: var(--surface-subtle);
   color: var(--text-secondary);
   font-size: 12px;
@@ -126,14 +126,14 @@
 }
 
 .tagActive {
-  border-color: var(--primary-color);
-  background-color: var(--primary-color);
-  color: #fff;
+  border-color: var(--primary-solid);
+  background-color: var(--primary-solid);
+  color: var(--primary-contrast);
 
   &:hover {
-    border-color: var(--primary-color);
-    background-color: var(--primary-color);
-    color: #fff;
+    border-color: var(--primary-solid-hover);
+    background-color: var(--primary-solid-hover);
+    color: var(--primary-contrast);
   }
 }
 
@@ -170,7 +170,7 @@
   align-items: flex-start;
   padding: 10px 0;
   border-bottom: 1px solid var(--border-color);
-  border-radius: $radius-sm;
+  border-radius: var(--app-radius-xs);
   transition: background-color $transition-fast;
 
   &:last-child {

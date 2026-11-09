@@ -9,10 +9,10 @@
 
 .prefixProxyError {
   padding: $spacing-sm $spacing-md;
-  border-radius: $radius-md;
-  border: 1px solid var(--danger-color);
-  background-color: rgba($error-color, 0.1);
-  color: var(--danger-color);
+  border-radius: var(--app-radius-sm);
+  border: 1px solid var(--data-badge-danger-border);
+  background-color: var(--data-badge-danger-bg);
+  color: color-mix(in srgb, var(--data-badge-danger-text) 75%, var(--text-primary));
   font-size: 12px;
 }
 
@@ -35,10 +35,10 @@
   box-sizing: border-box;
   padding: $spacing-sm $spacing-md;
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   background-color: var(--surface-subtle);
   color: var(--text-primary);
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
   resize: vertical;

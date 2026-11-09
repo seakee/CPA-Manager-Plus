@@ -42,7 +42,7 @@
     justify-content: space-between;
     padding: $spacing-sm $spacing-md;
     background-color: var(--surface-subtle);
-    border-radius: $radius-md;
+    border-radius: var(--app-radius-sm);
 
     .label {
       font-weight: 500;
@@ -67,7 +67,7 @@
 .modelItem {
   padding: $spacing-sm $spacing-md;
   background-color: var(--surface-subtle);
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
   font-size: 13px;
 
@@ -100,7 +100,7 @@
   align-items: center;
   gap: $spacing-xs;
   padding: 4px 10px;
-  border-radius: $radius-full;
+  border-radius: var(--app-radius-pill);
   border: 1px solid var(--border-subtle);
   background-color: var(--surface-subtle);
   font-family:
@@ -132,7 +132,7 @@
   .versionItem {
     padding: $spacing-md;
     background-color: var(--surface-subtle);
-    border-radius: $radius-md;
+    border-radius: var(--app-radius-sm);
 
     .label {
       font-size: 12px;
@@ -162,7 +162,7 @@
   padding: $spacing-md $spacing-lg;
   background-color: var(--surface-subtle);
   border: 1px solid var(--border-subtle);
-  border-radius: $radius-lg;
+  border-radius: var(--app-radius-md);
   text-decoration: none;
   color: inherit;
   transition: all 0.2s ease;
@@ -170,12 +170,6 @@
   &:hover {
     background-color: var(--bg-hover);
     border-color: var(--primary-color);
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  }
-
-  &:active {
-    transform: translateY(0);
   }
 }
 
@@ -185,7 +179,7 @@
   justify-content: center;
   width: 44px;
   height: 44px;
-  border-radius: $radius-md;
+  border-radius: var(--app-radius-sm);
   background-color: var(--primary-color);
   color: white;
   flex-shrink: 0;

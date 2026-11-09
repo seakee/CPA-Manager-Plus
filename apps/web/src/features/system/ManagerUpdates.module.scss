@@ -37,7 +37,7 @@
   flex: 0 0 28px;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
+  border-radius: var(--app-radius-sm);
   background: var(--app-accent-soft);
   color: var(--color-primary);
 }
@@ -73,9 +73,9 @@
   gap: 5px;
   margin-top: 12px;
   padding: 5px 10px;
-  border-radius: 6px;
-  background: var(--color-primary);
-  color: var(--primary-contrast, #fff);
+  border-radius: var(--app-radius-xs);
+  background: var(--primary-solid);
+  color: var(--primary-contrast);
   font-size: 12px;
   font-weight: 500;
 

@@ -28,7 +28,7 @@
   gap: 16px;
   padding: 14px 18px;
   border: 1px solid var(--border-subtle, var(--border-color));
-  border-radius: var(--app-radius-md, 12px);
+  border-radius: var(--app-radius-md);
   background: var(--app-surface);
 }
 
@@ -36,7 +36,7 @@
   display: inline-flex;
   align-items: center;
   padding: 4px 10px;
-  border-radius: 999px;
+  border-radius: var(--app-radius-pill);
   background: var(--accent-soft, var(--app-accent-soft));
   color: var(--accent, var(--primary-color));
   font-size: 13px;
@@ -66,7 +66,7 @@
 .runtime-status-cards p {
   margin: 0 0 8px;
   font-size: 20px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--text-primary);
   text-transform: capitalize;
 }
@@ -136,7 +136,7 @@
   margin: 0;
   padding: 12px 14px;
   border: 1px solid var(--border-subtle, var(--border-color));
-  border-radius: var(--app-radius-sm, 10px);
+  border-radius: var(--app-radius-sm);
   background: var(--bg-subtle, var(--surface-subtle));
   color: var(--text-primary);
 }
@@ -144,7 +144,7 @@
 .runtime-status-page details {
   padding: 14px 18px;
   border: 1px solid var(--border-subtle, var(--border-color));
-  border-radius: var(--app-radius-md, 12px);
+  border-radius: var(--app-radius-md);
   background: var(--app-surface);
 }
 
@@ -161,7 +161,7 @@
   margin: 12px 0 0;
   padding: 14px;
   border: 1px solid var(--border-subtle, var(--border-color));
-  border-radius: var(--app-radius-sm, 8px);
+  border-radius: var(--app-radius-sm);
   background: var(--bg-subtle, var(--surface-subtle));
   color: var(--text-primary);
   font-size: 12px;
