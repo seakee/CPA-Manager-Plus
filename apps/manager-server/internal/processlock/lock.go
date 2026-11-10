@@ -31,8 +31,24 @@ type Lock struct {
 // AcquireExisting takes the normal Manager ownership lock without creating a
 // directory or file. The returned lock can be retained for normal startup;
 // releasing it between inspection and startup would lose the ownership fence.
+//
+// It never changes the marker. A source this process has not been admitted on is
+// somebody else's volume, so proving exclusivity must not rewrite the marker's
+// mode or its POSIX change stamp; a caller that is about to own the store
+// tightens the marker explicitly with Tighten after admission.
 func AcquireExisting(databasePath string) (*Lock, error) {
-	return acquireExisting(databasePath, os.O_RDWR)
+	return acquireExisting(databasePath, os.O_RDWR, lockExclusive)
+}
+
+// AcquireExistingShared holds the same validated marker with a shared,
+// non-blocking lock for as long as the caller keeps it. It excludes every
+// exclusive holder — a running 1.x or v2 Manager — while two observers of the
+// same stopped source hold it together, which is what a public read-only
+// observation of a preserved volume needs: an exclusive hold would make two
+// concurrent observations refuse each other's fence and report a quiet source as
+// unavailable. It never creates, modifies or replaces the marker.
+func AcquireExistingShared(databasePath string) (*Lock, error) {
+	return acquireExisting(databasePath, os.O_RDONLY, lockShared)
 }
 
 // AcquireExistingReadOnly takes the same exclusive ownership lock through a
@@ -42,13 +58,22 @@ func AcquireExisting(databasePath string) (*Lock, error) {
 // target and the same identity check on the opened marker, so all three
 // ownership paths agree on which file they are talking about.
 func AcquireExistingReadOnly(databasePath string) (*Lock, error) {
-	return acquireExisting(databasePath, os.O_RDONLY)
+	return acquireExisting(databasePath, os.O_RDONLY, lockExclusive)
 }
 
-// acquireExisting takes the ownership fence named by flags. Only the descriptor
-// flags differ between the two acquire paths; sharing the body keeps the
-// validation they gate on from drifting apart.
-func acquireExisting(databasePath string, flags int) (*Lock, error) {
+// lockMode selects the fence a caller holds on the validated marker.
+type lockMode int
+
+const (
+	lockExclusive lockMode = iota
+	lockShared
+)
+
+// acquireExisting takes the ownership fence named by flags and mode. Only the
+// descriptor flags and the lock mode differ between the acquire paths; sharing
+// the body keeps the validation they gate on from drifting apart. No path here
+// changes the marker: Tighten is the one explicit owner action.
+func acquireExisting(databasePath string, flags int, mode lockMode) (*Lock, error) {
 	absolutePath, lockPath, marker, err := existingLockTarget(databasePath)
 	if err != nil {
 		return nil, err
@@ -61,7 +86,11 @@ func acquireExisting(databasePath string, flags int) (*Lock, error) {
 		_ = file.Close()
 		return nil, err
 	}
-	if err := lockFile(file); err != nil {
+	fence := lockFile
+	if mode == lockShared {
+		fence = lockFileShared
+	}
+	if err := fence(file); err != nil {
 		_ = file.Close()
 		return nil, err
 	}
@@ -69,12 +98,6 @@ func acquireExisting(databasePath string, flags int) (*Lock, error) {
 	if err := lock.Validate(); err != nil {
 		_ = errors.Join(unlockFile(file), file.Close())
 		return nil, err
-	}
-	if flags&os.O_RDWR != 0 {
-		if err := tightenLockFile(file); err != nil {
-			_ = errors.Join(unlockFile(file), file.Close())
-			return nil, fmt.Errorf("chmod manager database process lock %s: %w", lockPath, err)
-		}
 	}
 	return lock, nil
 }
@@ -149,6 +172,29 @@ func InspectDatabaseFile(databasePath string) (os.FileInfo, error) {
 		return nil, fmt.Errorf("%w: %s", ErrSymlinkedDatabase, databasePath)
 	}
 	if err := rejectHardLinkedDatabase(databasePath); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+// InspectSourceFile applies the same policy to one file that sits beside a
+// database — a journal, a WAL index, a WAL header — so every reader and every
+// classifier of a source audits the members it reads and the members it must not
+// read alike: a sidecar that is a link, a FIFO or a second name for another file
+// is a source state no read may describe. A missing file is reported as
+// os.IsNotExist, which is the normal shape of a cleanly stopped writer's tree.
+func InspectSourceFile(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s", ErrSymlinkedDatabase, filepath.Base(path))
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("database file %s is not a regular file", filepath.Base(path))
+	}
+	if _, err := InspectDatabaseFile(path); err != nil {
 		return nil, err
 	}
 	return info, nil
@@ -304,6 +350,27 @@ func (l *Lock) Path() string {
 		return ""
 	}
 	return l.lockPath
+}
+
+// Tighten applies the owner-only mode to a marker this process is about to own.
+// It is the explicit half of acquisition: the fence itself never changes the
+// file, because a source the admission then refuses must be left exactly as it
+// was found. A refused admission that had already chmodded a root-owned 1.x
+// marker would have written to the volume the read-only surface promises to
+// preserve and would have refreshed the change stamp the observation cache is
+// keyed on. Callers invoke it only after the source has been admitted for
+// writable startup, and it only ever acts on the marker the held fence names.
+func (l *Lock) Tighten() error {
+	if l == nil || l.file == nil {
+		return errors.New("manager ownership lock is unavailable")
+	}
+	if err := l.Validate(); err != nil {
+		return err
+	}
+	if err := tightenLockFile(l.file); err != nil {
+		return fmt.Errorf("chmod manager database process lock %s: %w", l.lockPath, err)
+	}
+	return nil
 }
 
 // Validate detects a closed fence or replacement of its persistent lock file.

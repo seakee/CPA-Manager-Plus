@@ -2451,7 +2451,7 @@ func TestVerifyAdminComparesTheCredentialItCopiedNotThePath(t *testing.T) {
 	fixture := newCredentialFixture(t, inspectedKey)
 	replacement := newCredentialFixture(t, replacementKey)
 
-	source, err := openCredentialSource(context.Background(), fixture.dbPath)
+	source, err := openCredentialSource(context.Background(), PreservedSource{Database: fixture.dbPath})
 	if err != nil {
 		t.Fatalf("open credential source: %v", err)
 	}

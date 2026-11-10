@@ -16,6 +16,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
+	managersqlite "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	_ "modernc.org/sqlite"
 )
 
@@ -46,6 +47,8 @@ var (
 	// mount; the caller answers the mount's deadline, which is a retry and never
 	// a verdict on the source or the presented key.
 	ErrSnapshotRootTimedOut = errors.New("upgrade credential snapshot root timed out")
+
+	errPendingRollbackJournal = errors.New("database has a pending rollback journal")
 
 	// afterSnapshotCopy is the package's synchronous test seam. It runs once
 	// between the copy and the source's second digest, so a test can prove that
@@ -161,7 +164,7 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 		}
 		var after map[string]databaseFileDigest
 		if after, err = digestDatabaseFiles(ctx, databasePath); err == nil {
-			if !sameDigests(before, after) || !sameDigests(before, copied) {
+			if !sameDigests(before, after) || !sameCopiedDigests(before, copied) {
 				err = ErrSourceChanged
 			}
 		}
@@ -169,6 +172,12 @@ func OpenSnapshot(ctx context.Context, databasePath string, scratchBase string) 
 	if err != nil {
 		_ = snapshot.Close()
 		return nil, err
+	}
+	if wal, hasWAL := copied["-wal"]; hasWAL && wal.size > 0 {
+		if err := managersqlite.ValidateWALHeader(snapshot.path); err != nil {
+			_ = snapshot.Close()
+			return nil, err
+		}
 	}
 	// The WAL index is a derived structure: a copy taken while the writer was
 	// active can pair a stale -shm with a newer -wal. Dropping it lets SQLite
@@ -248,20 +257,72 @@ func snapshotReadError(ctx context.Context, err error) error {
 // operation must not write to, and a snapshot abandoned by a killed process —
 // no deferred cleanup runs — would stay on that volume for good.
 func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) error {
+	return validateScratchRoots(scratchDir, []ScratchRoot{
+		{Label: "the legacy source root", Dir: legacyRoot},
+		{Label: "the target root", Dir: targetDir},
+	})
+}
+
+// ScratchRoot is one directory a private copy must stay out of, named the way the
+// refusal names it to the operator.
+//
+// The label travels with the directory rather than being inferred from its
+// position: the same call excludes differently rooted trees — the Manager's data
+// root and data-key directory on one path, the configured 1.x source root on
+// another — and a refusal that named the wrong tree would send the operator to
+// the wrong directory.
+type ScratchRoot struct {
+	Label string
+	Dir   string
+}
+
+// PreservedSource names the files of a source that a read must never write
+// beside: the database and the Manager data key its secrets are sealed with.
+//
+// The data key is part of the source even though it is a separate file, and a
+// configuration may place it outside the database's directory — a data root
+// mounted at /data with the key at /keys/data.key, for example. A private copy
+// that landed in the key's directory would leave a full database copy in a tree
+// this read promises to preserve, so the key's directory is excluded exactly like
+// the database's own.
+type PreservedSource struct {
+	// Database is the database file being read. Only its directory is used.
+	Database string
+	// DataKey is the Manager data key that unlocks the source's secrets. Empty
+	// means the caller does not know it, which only a source with no sealed
+	// secret (and no caller that resolves one) can honestly report.
+	DataKey string
+}
+
+// ValidatePreservedScratchDir refuses a scratch directory inside any tree a
+// preserved-source read must not write to: the source database's directory, the
+// directory that holds the source's data key, and every extra root the caller
+// resolved (the target data root, the configured 1.x mount). It is the single
+// check every read that stages a private copy beside a preserved source uses, so
+// no entry point can exclude a different set of trees than another.
+func ValidatePreservedScratchDir(scratchDir string, source PreservedSource, extraRoots ...ScratchRoot) error {
+	roots := make([]ScratchRoot, 0, 2+len(extraRoots))
+	if database := strings.TrimSpace(source.Database); database != "" {
+		roots = append(roots, ScratchRoot{Label: "the source database directory", Dir: filepath.Dir(database)})
+	}
+	if dataKey := strings.TrimSpace(source.DataKey); dataKey != "" {
+		roots = append(roots, ScratchRoot{Label: "the Manager data key directory", Dir: filepath.Dir(dataKey)})
+	}
+	return validateScratchRoots(scratchDir, append(roots, extraRoots...))
+}
+
+// validateScratchRoots refuses a scratch directory that lies inside any named
+// root. The canonicalization and the operator-facing message are shared, so a
+// caller cannot weaken the check by naming a tree through another wrapper.
+func validateScratchRoots(scratchDir string, roots []ScratchRoot) error {
 	scratch := strings.TrimSpace(scratchDir)
 	defaulted := scratch == ""
 	if defaulted {
 		scratch = os.TempDir()
 	}
 	scratchPath := canonicalPath(scratch)
-	for _, root := range []struct {
-		label string
-		dir   string
-	}{
-		{label: "the legacy source root", dir: legacyRoot},
-		{label: "the target root", dir: targetDir},
-	} {
-		dir := strings.TrimSpace(root.dir)
+	for _, root := range roots {
+		dir := strings.TrimSpace(root.Dir)
 		if dir == "" {
 			continue
 		}
@@ -279,7 +340,7 @@ func ValidateScratchDir(scratchDir string, legacyRoot string, targetDir string) 
 				hint = "point TMPDIR at a directory on a separate volume"
 			}
 			return fmt.Errorf("%w: %s is inside %s; %s",
-				ErrSnapshotFailed, origin, root.label, hint)
+				ErrSnapshotFailed, origin, root.Label, hint)
 		}
 	}
 	return nil
@@ -379,28 +440,38 @@ func snapshotDataSourceName(path string) string {
 	return dsn.String()
 }
 
-// digestDatabaseFiles hashes the database and every sidecar that exists. A
-// missing database is reported as the missing-source condition; missing
-// sidecars are normal for a cleanly stopped writer.
+// auditedSidecarSuffixes is the single journal sidecar list shared across every
+// reader and classifier of a preserved source.
+var auditedSidecarSuffixes = []string{"-wal", "-shm", "-journal"}
+
+// AuditSourceSidecars applies the shared source-file policy to every journal
+// member beside databasePath and fails closed when a non-empty rollback journal
+// is present.
+func AuditSourceSidecars(databasePath string) error {
+	for _, suffix := range auditedSidecarSuffixes {
+		info, err := inspectSnapshotSourceFile(databasePath + suffix)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if suffix == "-journal" && info.Size() > 0 {
+			return errPendingRollbackJournal
+		}
+	}
+	return nil
+}
+
+// inspectSnapshotSourceFile is the snapshot's use of the one shared source-file
+// policy: the database and every sidecar the copy reads are audited the same way
+// by every reader of a preserved source.
 func inspectSnapshotSourceFile(path string) (os.FileInfo, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%w: %s", processlock.ErrSymlinkedDatabase, filepath.Base(path))
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("database file %s is not a regular file", filepath.Base(path))
-	}
-	if _, err := processlock.InspectDatabaseFile(path); err != nil {
-		return nil, err
-	}
-	return info, nil
+	return processlock.InspectSourceFile(path)
 }
 
 func digestDatabaseFiles(ctx context.Context, databasePath string) (map[string]databaseFileDigest, error) {
-	digests := make(map[string]databaseFileDigest, len(databaseSidecars))
+	digests := make(map[string]databaseFileDigest, len(databaseSidecars)+1)
 	for _, suffix := range databaseSidecars {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -418,6 +489,22 @@ func digestDatabaseFiles(ctx context.Context, databasePath string) (map[string]d
 			return nil, err
 		}
 		digests[suffix] = databaseFileDigest{size: info.Size(), digest: digest}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	journalPath := databasePath + "-journal"
+	if info, err := inspectSnapshotSourceFile(journalPath); err == nil {
+		if info.Size() > 0 {
+			return nil, errPendingRollbackJournal
+		}
+		digest, digestErr := digestInspectedFile(ctx, journalPath, info)
+		if digestErr != nil {
+			return nil, digestErr
+		}
+		digests["-journal"] = databaseFileDigest{size: info.Size(), digest: digest}
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 	if _, ok := digests[""]; !ok {
 		return nil, errDatabaseMissing
@@ -517,4 +604,19 @@ func sameDigests(left, right map[string]databaseFileDigest) bool {
 		}
 	}
 	return true
+}
+
+func sameCopiedDigests(source, copied map[string]databaseFileDigest) bool {
+	wantCount := 0
+	for suffix, expected := range source {
+		if suffix == "-journal" {
+			continue
+		}
+		wantCount++
+		actual, ok := copied[suffix]
+		if !ok || actual != expected {
+			return false
+		}
+	}
+	return len(copied) == wantCount
 }

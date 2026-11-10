@@ -37,6 +37,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/http/controller/upgradesurface"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/legacypreflight"
 	upgradeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
@@ -266,6 +267,12 @@ type Handler struct {
 	// and it is the surface's credential source when the mount holds no
 	// database the shared file policy accepts.
 	Database func() string
+	// DataKey returns the Manager data key that unlocks the store's secrets. It
+	// is often the file beside the database, and a configuration may place it
+	// elsewhere: every private copy taken beside this store must stay out of its
+	// directory too. Optional; an empty or nil accessor only omits that one
+	// exclusion.
+	DataKey func() string
 	// Timeout bounds one preflight. Zero uses DefaultTimeout.
 	Timeout time.Duration
 	// MountTimeout bounds the per-request wait on the mount lookup. Zero uses
@@ -429,7 +436,14 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 	// process's live database.
 	var verifyErr error
 	if mount.database != "" {
-		verifyErr = upgradeservice.VerifyAdminSource(r.Context(), database, key)
+		verifyErr = upgradeservice.VerifyAdminSource(r.Context(), upgradeservice.PreservedSource{
+			Database: database,
+			// The 1.x source's own key sits beside its database; the Manager's
+			// configured key path belongs to the store, not to the mount.
+			DataKey: upgradeservice.SourceDataKeyPath(database),
+		}, key,
+			upgradeservice.ScratchRoot{Label: "the target root", Dir: parentDir(h.managerDatabase())},
+			upgradeservice.ScratchRoot{Label: "the Manager data key directory", Dir: parentDir(h.managerDataKey())})
 	} else {
 		// The Manager fallback is normally this process's live store and is read
 		// in place. When it is a copy-in target that was not materialized
@@ -449,6 +463,7 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 			SourceKnown:    mount.rootKnown,
 			SourceTimedOut: mount.code == CodeMountTimeout,
 			PreserveTarget: h.PreserveManagerStore,
+			DataKey:        h.managerDataKey(),
 		}, key)
 	}
 	switch {
@@ -506,6 +521,25 @@ func (h *Handler) managerDatabase() string {
 		return ""
 	}
 	return strings.TrimSpace(h.Database())
+}
+
+// managerDataKey is the configured data key of the store managerDatabase names.
+// It travels with every private copy taken beside that store: a configuration may
+// keep the key outside the database's directory, and a copy that landed in the
+// key's directory would write a full database into a tree the read preserves.
+func (h *Handler) managerDataKey() string {
+	if h.DataKey == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.DataKey())
+}
+
+func parentDir(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Dir(trimmed)
 }
 
 // mountResolution is the one answer about the operator's mount that a request
@@ -928,7 +962,10 @@ func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount moun
 			writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
 			return
 		}
-		document, err = readStatusPreservingTarget(ctx, database, mount.root)
+		document, err = readStatusPreservingTarget(ctx, upgradeservice.PreservedSource{
+			Database: database,
+			DataKey:  h.managerDataKey(),
+		}, mount.root)
 	} else {
 		document, err = readStatus(ctx, database)
 	}
@@ -1137,15 +1174,16 @@ func validateStatusRow(row statusRow) error {
 // The marker is read before the store, exactly like startup admission. Staging
 // is never polled; absent targets and foreign sidecars remain resume evidence.
 func readStatus(ctx context.Context, databasePath string) (statusDocument, error) {
-	return readStatusWithOptions(ctx, databasePath, false, "")
+	return readStatusWithOptions(ctx, upgradeservice.PreservedSource{Database: databasePath}, false, "")
 }
 
-func readStatusPreservingTarget(ctx context.Context, databasePath string, sourceRoot string) (statusDocument, error) {
-	return readStatusWithOptions(ctx, databasePath, true, sourceRoot)
+func readStatusPreservingTarget(ctx context.Context, source upgradeservice.PreservedSource, sourceRoot string) (statusDocument, error) {
+	return readStatusWithOptions(ctx, source, true, sourceRoot)
 }
 
-func readStatusWithOptions(ctx context.Context, databasePath string, preserve bool, sourceRoot string) (statusDocument, error) {
+func readStatusWithOptions(ctx context.Context, source upgradeservice.PreservedSource, preserve bool, sourceRoot string) (statusDocument, error) {
 	document := emptyStatusDocument()
+	databasePath := strings.TrimSpace(source.Database)
 	marker, inFlight, err := readCopyInMarker(databasePath)
 	if err != nil {
 		return statusDocument{}, err
@@ -1159,7 +1197,7 @@ func readStatusWithOptions(ctx context.Context, databasePath string, preserve bo
 		found    bool
 	)
 	if preserve {
-		recorded, found, err = readRecordedStatusPreserved(ctx, databasePath, sourceRoot, document)
+		recorded, found, err = readRecordedStatusPreserved(ctx, source, sourceRoot, document)
 	} else {
 		recorded, found, err = readRecordedStatus(ctx, databasePath, document)
 	}
@@ -1210,28 +1248,52 @@ func readRecordedStatus(ctx context.Context, databasePath string, document statu
 	return readRecordedStatusFromDB(ctx, db, document)
 }
 
-func readRecordedStatusPreserved(ctx context.Context, databasePath string, sourceRoot string, document statusDocument) (statusDocument, bool, error) {
-	info, err := os.Lstat(databasePath)
+func readRecordedStatusPreserved(ctx context.Context, source upgradeservice.PreservedSource, sourceRoot string, document statusDocument) (statusDocument, bool, error) {
+	databasePath := strings.TrimSpace(source.Database)
+	info, err := processlock.InspectSourceFile(databasePath)
 	if os.IsNotExist(err) {
+		if sideErr := upgradeservice.AuditSourceSidecars(databasePath); sideErr != nil {
+			return statusDocument{}, false, sideErr
+		}
 		return document, false, nil
 	}
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() == 0 {
+	if err != nil {
+		return statusDocument{}, false, err
+	}
+	if err := upgradeservice.AuditSourceSidecars(databasePath); err != nil {
+		return statusDocument{}, false, err
+	}
+	if info.Size() == 0 {
+		if walInfo, walErr := os.Lstat(databasePath + "-wal"); walErr == nil && walInfo.Size() > 0 {
+			return statusDocument{}, false, errors.New("empty database has a pending WAL sidecar")
+		} else if walErr != nil && !os.IsNotExist(walErr) {
+			return statusDocument{}, false, walErr
+		}
 		return document, false, nil
 	}
-	// The private copy must stay out of both trees this read preserves: the data
-	// root that owns the database and the configured 1.x source root.
-	// The table is looked up in the database file alone first: an immutable handle
-	// creates no -shm, so a 1.x volume — which never records an operation — is
-	// answered by the read-only status document instead of a full copy on every
-	// poll.
-	present, probeErr := legacypreflight.RecordedOperationTablePresent(ctx, databasePath)
+	// The table is looked up in the database file alone first: an immutable
+	// handle creates no -shm, so a clean 1.x volume — which never records an
+	// operation — is answered by the read-only status document instead of a full
+	// copy on every poll.
+	//
+	// A pending journal makes that lookup non-conclusive rather than negative. The
+	// table and its row become visible together and stay in the journal until a
+	// checkpoint copies them into the file, so a v2 store whose last transaction
+	// recorded the operation and then lost its process names no table in the file
+	// at all. Answering "nothing recorded" there would tell the operator to start
+	// a preflight for an operation that already exists.
+	inFile, journalPending, probeErr := legacypreflight.RecordedOperationEvidence(ctx, databasePath)
 	if probeErr != nil {
 		return statusDocument{}, false, probeErr
 	}
-	if !present {
+	if !inFile && !journalPending {
 		return document, false, nil
 	}
-	if err := upgradeservice.ValidateScratchDir("", strings.TrimSpace(sourceRoot), filepath.Dir(databasePath)); err != nil {
+	// The private copy must stay out of every tree this read preserves: the source
+	// database's directory, the directory holding the data key its secrets are
+	// sealed with, and the configured 1.x source root.
+	if err := upgradeservice.ValidatePreservedScratchDir("", source,
+		upgradeservice.ScratchRoot{Label: "the configured source root", Dir: strings.TrimSpace(sourceRoot)}); err != nil {
 		return statusDocument{}, false, err
 	}
 	snapshot, err := upgradeservice.OpenSnapshotWithRetry(ctx, upgradeservice.OpenSnapshot, databasePath, "")

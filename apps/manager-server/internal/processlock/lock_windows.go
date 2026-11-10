@@ -67,6 +67,26 @@ func lockFile(file *os.File) error {
 	return err
 }
 
+// lockFileShared holds a shared, non-blocking lock for as long as the handle
+// stays open. It excludes every exclusive holder and admits other readers, so
+// concurrent read-only observations of one stopped source share the fence
+// instead of refusing each other.
+func lockFileShared(file *os.File) error {
+	var overlapped windows.Overlapped
+	err := windows.LockFileEx(
+		windows.Handle(file.Fd()),
+		windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0,
+		1,
+		0,
+		&overlapped,
+	)
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return ErrLocked
+	}
+	return err
+}
+
 func unlockFile(file *os.File) error {
 	var overlapped windows.Overlapped
 	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &overlapped)

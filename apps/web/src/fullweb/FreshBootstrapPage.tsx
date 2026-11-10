@@ -1,5 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { bootstrapDiscoveryText as discoveryText } from '../i18n/bootstrapDiscovery';
+import {
+  bootstrapDiscoveryText as discoveryText,
+  type BootstrapDiscoveryTextKey as BootstrapTextKey,
+} from '../i18n/bootstrapDiscovery';
 import { bootstrapJourneyText as journey } from '../i18n/bootstrapJourney';
 import { shellText } from '../i18n/consoleShell';
 import { bootstrapText, type FreshBootstrapTextKey } from '../i18n/freshBootstrap';
@@ -56,8 +59,6 @@ const LANGUAGE_NAME_KEYS: Record<Language, FreshBootstrapTextKey> = {
   ru: 'languageRussian',
 };
 
-type OwnershipCopyKey = 'ownershipGuidanceTitle' | 'ownershipGuidanceDetail';
-
 // Public discovery never confers write authority. Non-Fresh statuses only
 // enter either the existing-Admin gate or host intervention, never Fresh claim.
 type DiscoveryGuidance =
@@ -66,9 +67,16 @@ type DiscoveryGuidance =
       tone: ActionFeedback['tone'];
       flow: 'ownership';
       retryable: true;
-      copyKey: { title: OwnershipCopyKey; detail: OwnershipCopyKey };
+      // copyKey names the dictionary entries a card must re-derive at render time.
+      // The discovery answer is fetched once and kept in state, so a card built from
+      // resolved strings keeps the language it was fetched in; a card that names its
+      // copy follows the page's language switcher instead.
+      copyKey: { title: BootstrapTextKey; detail: BootstrapTextKey };
     };
 
+// guidanceCopy resolves the one card this page renders. Copy that names its
+// dictionary entries is resolved here, on every render, so a language switch
+// applies to a payload that was fetched once.
 function guidanceCopy(note: DiscoveryGuidance): { title: string; detail: string } {
   if (note.flow === 'ownership') {
     return {

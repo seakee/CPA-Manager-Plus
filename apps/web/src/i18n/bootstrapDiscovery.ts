@@ -76,7 +76,9 @@ const ru: typeof en = {
   recheckButton: 'Проверить состояние источника снова',
 };
 
-export function bootstrapDiscoveryText(key: keyof typeof en, language = fullWebLanguage()): string {
+export type BootstrapDiscoveryTextKey = keyof typeof en;
+
+export function bootstrapDiscoveryText(key: BootstrapDiscoveryTextKey, language = fullWebLanguage()): string {
   if (language === 'zh-TW') return tw[key];
   if (language.startsWith('zh')) return zh[key];
   if (language === 'ru') return ru[key];

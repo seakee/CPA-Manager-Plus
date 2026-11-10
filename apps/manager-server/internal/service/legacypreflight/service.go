@@ -371,6 +371,9 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 			if err := validatePendingSource(ctx, paths, options, lock); err != nil {
 				return nil, err
 			}
+			if err := lock.Tighten(); err != nil {
+				return nil, err
+			}
 			owned = true
 			return &Admission{Lock: lock, PendingFresh: receipt}, nil
 		}
@@ -417,6 +420,14 @@ func AdmitStartup(ctx context.Context, paths sqlite.InspectionPaths, options Opt
 	}
 	if !options.FreshAdmission && before.Observed.FreshOwnershipCheckpointPresent {
 		return nil, errors.New("Fresh store requires its product-owned admission path")
+	}
+	// The marker is tightened here, not when it was opened: an admission that is
+	// refused must leave the source exactly as found, and the refusal cases above
+	// (a 1.x volume, an unfinished operation, an unreadable record) are reached
+	// through the fence every start. Applying the owner-only mode is the first
+	// write this process makes to a source it now owns.
+	if err := lock.Tighten(); err != nil {
+		return nil, err
 	}
 	owned = true
 	if freshAdmission != nil {

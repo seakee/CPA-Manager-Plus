@@ -401,7 +401,7 @@ func TestAcquireSerializesHardLinkedDatabasePaths(t *testing.T) {
 	}
 }
 
-func TestAcquireExistingTightensPermissiveMarkerWhileReadOnlyPathsPreserveMode(t *testing.T) {
+func TestSourceFencesPreserveTheMarkerModeUntilTheOwnerTightensIt(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "usage.sqlite")
 	if err := os.WriteFile(path, []byte("sqlite"), 0o600); err != nil {
@@ -414,6 +414,14 @@ func TestAcquireExistingTightensPermissiveMarkerWhileReadOnlyPathsPreserveMode(t
 	if err := os.Chmod(marker, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	modeOf := func() os.FileMode {
+		t.Helper()
+		info, err := os.Lstat(marker)
+		if err != nil {
+			t.Fatalf("stat marker: %v", err)
+		}
+		return info.Mode().Perm()
+	}
 
 	if err := ProbeExisting(path); err != nil {
 		t.Fatalf("ProbeExisting: %v", err)
@@ -425,25 +433,68 @@ func TestAcquireExistingTightensPermissiveMarkerWhileReadOnlyPathsPreserveMode(t
 	if err := roLock.Close(); err != nil {
 		t.Fatalf("close roLock: %v", err)
 	}
-	infoBefore, err := os.Lstat(marker)
+	shared, err := AcquireExistingShared(path)
 	if err != nil {
-		t.Fatalf("stat marker after read-only paths: %v", err)
+		t.Fatalf("AcquireExistingShared: %v", err)
 	}
-	if runtime.GOOS != "windows" && infoBefore.Mode().Perm() != 0o644 {
-		t.Fatalf("read-only paths modified marker mode to %#04o, want 0644", infoBefore.Mode().Perm())
+	if err := shared.Close(); err != nil {
+		t.Fatalf("close shared: %v", err)
+	}
+	// The read-only paths observe a source this process does not own, so none of
+	// them may change the marker.
+	if runtime.GOOS != "windows" && modeOf() != 0o644 {
+		t.Fatalf("read-only paths modified marker mode to %#04o, want 0644", modeOf())
 	}
 
 	rwLock, err := AcquireExisting(path)
 	if err != nil {
 		t.Fatalf("AcquireExisting: %v", err)
 	}
-	defer func() { _ = rwLock.Close() }()
-
-	infoAfter, err := os.Lstat(marker)
-	if err != nil {
-		t.Fatalf("stat marker after AcquireExisting: %v", err)
+	// A fence that may then be refused must still leave the marker as it found it:
+	// only an admitted owner asks for the owner-only mode.
+	if runtime.GOOS != "windows" && modeOf() != 0o644 {
+		_ = rwLock.Close()
+		t.Fatalf("AcquireExisting modified marker mode to %#04o, want 0644", modeOf())
 	}
-	if runtime.GOOS != "windows" && infoAfter.Mode().Perm() != 0o600 {
-		t.Fatalf("AcquireExisting marker mode = %#04o, want 0600", infoAfter.Mode().Perm())
+	if err := rwLock.Tighten(); err != nil {
+		_ = rwLock.Close()
+		t.Fatalf("Tighten: %v", err)
+	}
+	if runtime.GOOS != "windows" && modeOf() != 0o600 {
+		_ = rwLock.Close()
+		t.Fatalf("Tighten marker mode = %#04o, want 0600", modeOf())
+	}
+	if err := rwLock.Close(); err != nil {
+		t.Fatalf("close rwLock: %v", err)
+	}
+}
+
+func TestAcquireExistingSharedAdmitsConcurrentObserversAndExcludesWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.sqlite")
+	if err := os.WriteFile(path, []byte("sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".manager.lock", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := AcquireExistingShared(path)
+	if err != nil {
+		t.Fatalf("first shared hold: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+	second, err := AcquireExistingShared(path)
+	if err != nil {
+		t.Fatalf("two observers of one stopped source refused each other: %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("close the second hold: %v", err)
+	}
+	// The shared hold is a fence against a live writer, not a reader lock for it.
+	if writer, err := AcquireExisting(path); writer != nil || !errors.Is(err, ErrLocked) {
+		if writer != nil {
+			_ = writer.Close()
+		}
+		t.Fatalf("an exclusive fence was taken while a shared hold was open: lock=%v err=%v", writer, err)
 	}
 }

@@ -41,6 +41,7 @@ type startupHTTPHandler struct {
 	// the one source this process is looking at, and remembers the projection it
 	// already proved for it while the source is unchanged.
 	discoveryObserver *discoveryObservation
+	cancelDiscovery   context.CancelFunc
 	next              atomic.Value // *startupHandlerTarget
 	lifecycle         atomic.Value // routingdomain.DiscoveryLifecycle
 	ready             atomic.Bool
@@ -182,10 +183,14 @@ func (h *startupHTTPHandler) EnableAdmittedDiscovery(paths sqliterepo.Inspection
 func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.InspectionPaths, options legacypreflight.Options, timeout time.Duration, admitted *legacypreflight.Report) {
 	h.projectionMu.Lock()
 	defer h.projectionMu.Unlock()
+	if h.cancelDiscovery != nil {
+		h.cancelDiscovery()
+		h.cancelDiscovery = nil
+	}
+	h.discoveryObserver.drain()
 	// Entropy failure leaves this leaf closed without weakening discovery.
 	h.upgradeAuth = nil
 	h.upgradeWizard = nil
-	// One credential resolution for the whole surface: the entry leaf and both
 	// wizard reads verify the key against the same file, so a key the entry page
 	// accepts is a key the reads accept, and the key kept in the other file is
 	// refused by all three. The resolution also says which file it landed on,
@@ -209,6 +214,7 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 	preserveManagerStore := admitted == nil
 	if handler, err := upgradeauth.New(credentialPaths, os.Getenv("CPAMP_PUBLIC_ORIGIN"), mountSource, legacyRoot); err == nil {
 		handler.SetPreserveManagerStore(preserveManagerStore)
+		handler.SetManagerStorePaths(paths)
 		h.upgradeAuth = handler
 		// The wizard routes resolve the credential with the surface's one rule
 		// from the mount they inspect and this database, exactly as the entry
@@ -220,6 +226,7 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 			LegacyRoot:           configuredLegacyRoot,
 			PublicOrigin:         strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
 			Database:             func() string { return paths.Database },
+			DataKey:              func() string { return paths.DataKey },
 			Timeout:              upgradewizard.DefaultTimeout,
 			Artifact:             h.upgradeArtifact,
 			PreserveManagerStore: preserveManagerStore,
@@ -234,6 +241,8 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 		})
 		return
 	}
+	discoveryCtx, cancelDiscovery := context.WithCancel(context.Background())
+	h.cancelDiscovery = cancelDiscovery
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The discovery document is a GET, and an unauthenticated caller of any
 		// other method must be refused before this process stamps the source with
@@ -244,9 +253,20 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
+		// The observation this caller may start runs on its own lifetime, bounded
+		// by the same timeout off a server context: a client that disconnects is
+		// answered fail-closed by this call's own ctx, and the request still in
+		// flight for the callers that joined it is neither abandoned nor turned
+		// into their verdict. Every caller — the one that started it included —
+		// writes its own response here, after its own ctx was honoured.
 		h.discoveryObserver.observe(ctx, paths.Database,
-			func(consume func(bootstrap.PublicDiscovery)) (bootstrap.PublicDiscovery, bool) {
-				return observeReadOnlyDiscovery(ctx, paths, options, legacyRoot, consume)
+			func() (bootstrap.PublicDiscovery, bool) {
+				flightCtx, flightCancel := context.WithTimeout(discoveryCtx, timeout)
+				defer flightCancel()
+				if beforeDiscoveryObservation != nil {
+					beforeDiscoveryObservation()
+				}
+				return observeReadOnlyDiscovery(flightCtx, paths, options, legacyRoot, func(bootstrap.PublicDiscovery) {})
 			},
 			func(result bootstrap.PublicDiscovery) {
 				bootstrapdiscovery.Handler{Discovery: result}.ServeHTTP(w, r)
@@ -256,10 +276,11 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 
 // observeReadOnlyDiscovery is the one read-only discovery of a source: the
 // Phase4-01 inspection first, and the stopped 1.x journal observation when that
-// inspection cannot describe the source. The projection is served through
-// consume while the ownership fence of whichever stage answered is still held,
-// and the second result says whether that projection may be reused for an
-// unchanged source.
+// inspection cannot describe the source. Each stage hands its verdict to consume
+// while its own quiescence proof is still held — that is where the answer is
+// proved, not where it is written — and the returned projection is what the
+// shared flight publishes to every caller that joined it. The second result says
+// whether that projection may be reused for an unchanged source.
 func observeReadOnlyDiscovery(
 	ctx context.Context,
 	paths sqliterepo.InspectionPaths,
@@ -297,7 +318,10 @@ func observeReadOnlyDiscovery(
 	// are still in a journal — every 1.x v1.14.x release runs in WAL mode — so
 	// the fenced private copy answers instead, and its verdict is the one the
 	// entry page needs before it can offer the 1.x administrator key.
-	_, reusable := upgradeservice.InspectReadOnlyLegacySource(ctx, paths.Database, legacyRoot, func(obs upgradeservice.LegacyDiscoveryObservation) {
+	_, reusable := upgradeservice.InspectReadOnlyLegacySource(ctx, upgradeservice.PreservedSource{
+		Database: paths.Database,
+		DataKey:  paths.DataKey,
+	}, legacyRoot, func(obs upgradeservice.LegacyDiscoveryObservation) {
 		projection = legacyDiscoveryProjection(obs)
 		consume(projection)
 	})
@@ -340,6 +364,7 @@ func legacyDiscoveryProjection(obs upgradeservice.LegacyDiscoveryObservation) bo
 type discoveryObservation struct {
 	mu      sync.Mutex
 	sources map[string]*discoveryObservationState
+	flights sync.WaitGroup
 	// ran counts the observations this instance actually executed, so a poll can
 	// be shown to be answered from memory.
 	ran int
@@ -351,9 +376,15 @@ type discoveryObservationState struct {
 }
 
 // discoveryObservationFlight is one observation in progress. A request that
-// finds it waits for it instead of starting a second fenced read.
+// finds it waits for it and is answered with the projection it produced — the
+// same answer the request that ran it received, whether that answer was a
+// statement about the source or the fail-closed document of this moment. Sharing
+// only successful observations would make each concurrent refusal of one busy
+// source run its own full observation, which is the cost coalescing exists to
+// remove.
 type discoveryObservationFlight struct {
-	done chan struct{}
+	done       chan struct{}
+	projection bootstrap.PublicDiscovery
 }
 
 // discoveryObservationCache is the projection remembered for one source state.
@@ -366,81 +397,164 @@ type discoveryObservationCache struct {
 	projection bootstrap.PublicDiscovery
 }
 
-// observe runs read at most once at a time for one source. read serves the
-// projection it produced through consume while it still holds the source's
-// ownership fence, and reports the same projection plus whether it may be reused
-// for an unchanged source. A caller that finds a flight in progress waits for it
-// and then answers from the projection that flight remembered or runs its own
-// observation; a caller that finds a remembered projection is served directly.
+// afterCacheRevalidation is the package's synchronous test seam. It runs after
+// the marker probe proved the source quiet and before a remembered projection is
+// served, so a test can cancel the request at exactly the moment the answer is
+// decided. Production never sets it.
+var afterCacheRevalidation func()
+
+// probeSource is the package's seam for that marker probe. Production never sets
+// it; a test substitutes a failing probe to prove that a remembered projection is
+// dropped rather than served when quiescence can no longer be proved.
+var probeSource = processlock.ProbeExisting
+
+// beforeDiscoveryObservation and afterDiscoveryFlightJoin are synchronous test
+// seams for deterministic flight-cancellation tests. Production never sets them.
+var (
+	beforeDiscoveryObservation func()
+	afterDiscoveryFlightJoin   func()
+)
+
+// observe runs read at most once at a time for one source. read proves its
+// projection inside whatever fence it takes and returns it plus whether it may be
+// reused for an unchanged source; it runs on a goroutine of its own, so the
+// caller that started it can stop waiting without abandoning the callers that
+// joined it. Every caller — starter and joiner alike — waits for the flight under
+// its own ctx and writes its own answer through consume: one request's
+// cancellation becomes that request's fail-closed document and never another
+// caller's verdict. A caller that finds a remembered projection is served
+// directly.
 func (o *discoveryObservation) observe(
 	ctx context.Context,
 	databasePath string,
-	read func(consume func(bootstrap.PublicDiscovery)) (bootstrap.PublicDiscovery, bool),
+	read func() (bootstrap.PublicDiscovery, bool),
 	consume func(bootstrap.PublicDiscovery),
 ) {
-	for {
-		// A canceled request is never answered from remembered evidence.
+	// A canceled request is never answered from remembered evidence.
+	if ctx.Err() != nil {
+		consume(bootstrapdiscovery.Unavailable())
+		return
+	}
+	identity, identified := upgradeservice.LegacySourceIdentity(databasePath)
+	if identified {
+		if projection, ok := o.cachedProjection(ctx, databasePath, identity); ok {
+			// The probe above is a filesystem call, and the request may have
+			// been canceled while it ran: a canceled caller is answered with
+			// the fail-closed document, never with the evidence it asked for.
+			if ctx.Err() != nil {
+				consume(bootstrapdiscovery.Unavailable())
+				return
+			}
+			consume(projection)
+			return
+		}
 		if ctx.Err() != nil {
 			consume(bootstrapdiscovery.Unavailable())
 			return
 		}
-		identity, identified := upgradeservice.LegacySourceIdentity(databasePath)
-		if identified {
-			if projection, ok := o.cachedProjection(databasePath, identity); ok {
-				consume(projection)
-				return
-			}
-		}
-		o.mu.Lock()
-		state := o.sourceState(databasePath)
-		if state.flight != nil {
-			done := state.flight.done
-			o.mu.Unlock()
-			select {
-			case <-done:
-				// The flight is finished: its projection is remembered now, or it
-				// described this moment and this request decides again.
-				continue
-			case <-ctx.Done():
-				consume(bootstrapdiscovery.Unavailable())
-				return
-			}
-		}
-		flight := &discoveryObservationFlight{done: make(chan struct{})}
-		state.flight = flight
-		o.ran++
+	}
+	o.mu.Lock()
+	state := o.sourceState(databasePath)
+	if state.flight != nil {
+		flight := state.flight
 		o.mu.Unlock()
+		if afterDiscoveryFlightJoin != nil {
+			afterDiscoveryFlightJoin()
+		}
+		waitDiscoveryFlight(ctx, flight, consume)
+		return
+	}
+	flight := &discoveryObservationFlight{
+		done:       make(chan struct{}),
+		projection: bootstrapdiscovery.Unavailable(),
+	}
+	state.flight = flight
+	o.ran++
+	o.flights.Add(1)
+	o.mu.Unlock()
 
-		projection, reusable := read(consume)
+	go o.runFlight(databasePath, identified, identity, flight, read)
+	waitDiscoveryFlight(ctx, flight, consume)
+}
 
+func (o *discoveryObservation) runFlight(
+	databasePath string,
+	identified bool,
+	identity string,
+	flight *discoveryObservationFlight,
+	read func() (bootstrap.PublicDiscovery, bool),
+) {
+	projection := bootstrapdiscovery.Unavailable()
+	reusable := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			projection = bootstrapdiscovery.Unavailable()
+			reusable = false
+		}
 		o.mu.Lock()
+		flight.projection = projection
 		if reusable {
 			if after, ok := upgradeservice.LegacySourceIdentity(databasePath); ok && (!identified || after == identity) {
+				state := o.sourceState(databasePath)
 				state.cached = discoveryObservationCache{identity: after, ready: true, projection: projection}
 			}
 		}
-		state.flight = nil
+		o.sourceState(databasePath).flight = nil
 		o.mu.Unlock()
 		close(flight.done)
-		return
+		o.flights.Done()
+	}()
+	projection, reusable = read()
+}
+
+func waitDiscoveryFlight(ctx context.Context, flight *discoveryObservationFlight, consume func(bootstrap.PublicDiscovery)) {
+	select {
+	case <-flight.done:
+		if ctx.Err() != nil {
+			consume(bootstrapdiscovery.Unavailable())
+			return
+		}
+		consume(flight.projection)
+	case <-ctx.Done():
+		consume(bootstrapdiscovery.Unavailable())
 	}
 }
 
+func (o *discoveryObservation) drain() {
+	o.flights.Wait()
+	o.mu.Lock()
+	o.sources = nil
+	o.mu.Unlock()
+}
+
 // cachedProjection answers from memory only while the source still looks the way
-// the observation that produced it left it, and only while no writer holds the
-// marker. The check is a shared, non-blocking probe: it proves the same
-// quiescence the observation proves, takes no write access, and changes nothing
-// the identity is keyed on, so a poll costs one open instead of one copy.
-func (o *discoveryObservation) cachedProjection(databasePath string, identity string) (bootstrap.PublicDiscovery, bool) {
+// the observation that produced it left it, and only while the marker proves what
+// that observation proved. The check is a shared, non-blocking probe: it proves
+// the same quiescence the observation proves, takes no write access, and changes
+// nothing the identity is keyed on, so a poll costs one open instead of one copy.
+//
+// The remembered document is served only when the probe says nobody holds the
+// marker — or that no marker exists at all, which is the Fresh and partial-source
+// shape the observation itself accepts. Every other answer (a live writer, an
+// unreadable marker, a replaced one, an I/O error) drops the entry and answers
+// unavailable: the state the projection described can no longer be proved, and a
+// stale 200 is exactly what this check exists to prevent.
+func (o *discoveryObservation) cachedProjection(ctx context.Context, databasePath string, identity string) (bootstrap.PublicDiscovery, bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	state := o.sourceState(databasePath)
 	if !state.cached.ready || state.cached.identity != identity {
 		return bootstrap.PublicDiscovery{}, false
 	}
-	if err := processlock.ProbeExisting(databasePath); errors.Is(err, processlock.ErrLocked) {
-		// Another process is writing the source: a remembered projection would
-		// describe a source that is no longer quiet.
+	probeErr := probeSource(databasePath)
+	if afterCacheRevalidation != nil {
+		afterCacheRevalidation()
+	}
+	if probeErr != nil && !errors.Is(probeErr, processlock.ErrNoExistingLock) {
+		state.cached = discoveryObservationCache{}
+		return bootstrapdiscovery.Unavailable(), true
+	}
+	if ctx.Err() != nil {
 		return bootstrap.PublicDiscovery{}, false
 	}
 	return state.cached.projection, true
@@ -472,6 +586,11 @@ func (o *discoveryObservation) sourceState(databasePath string) *discoveryObserv
 func (h *startupHTTPHandler) BeginWritableStartup() {
 	h.projectionMu.Lock()
 	defer h.projectionMu.Unlock()
+	if h.cancelDiscovery != nil {
+		h.cancelDiscovery()
+		h.cancelDiscovery = nil
+	}
+	h.discoveryObserver.drain()
 	h.projection = bootstrapdiscovery.Unavailable()
 	h.readOnlyDiscovery = nil
 	h.upgradeAuth = nil

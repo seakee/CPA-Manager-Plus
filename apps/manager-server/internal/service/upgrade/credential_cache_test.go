@@ -538,7 +538,7 @@ func TestVerifyAdminOwnerCancellationReturnsPromptly(t *testing.T) {
 		time.Sleep(80 * time.Millisecond)
 	}
 	started := time.Now()
-	err := VerifyAdminSource(ctx, fixture.dbPath, key)
+	err := VerifyAdminSource(ctx, PreservedSource{Database: fixture.dbPath}, key)
 	elapsed := time.Since(started)
 	waitForCredentialFlights(t, sourceCredentialCache)
 	if !errors.Is(err, ErrCredentialVerifyTimeout) {
@@ -600,7 +600,7 @@ func TestCancelledCacheHitDoesNotAuthenticate(t *testing.T) {
 	const key = "cancelled-cache-hit"
 	fixture := newCredentialFixture(t, key)
 	// Warm the cache with a real read of the real source.
-	if err := VerifyAdminSource(context.Background(), fixture.dbPath, key); err != nil {
+	if err := VerifyAdminSource(context.Background(), PreservedSource{Database: fixture.dbPath}, key); err != nil {
 		t.Fatalf("warm the credential cache: %v", err)
 	}
 	base, cancel := context.WithCancel(context.Background())
@@ -612,7 +612,7 @@ func TestCancelledCacheHitDoesNotAuthenticate(t *testing.T) {
 	// answer for a caller that is already gone is its own deadline.
 	sourceCredentialCache.mu.Lock()
 	result := make(chan error, 1)
-	go func() { result <- VerifyAdminSource(ctx, fixture.dbPath, key) }()
+	go func() { result <- VerifyAdminSource(ctx, PreservedSource{Database: fixture.dbPath}, key) }()
 	<-ctx.checked
 	cancel()
 	sourceCredentialCache.mu.Unlock()

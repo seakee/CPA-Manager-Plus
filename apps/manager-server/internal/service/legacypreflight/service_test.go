@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
@@ -649,5 +650,121 @@ func TestInspectNeverClaimsExactReleaseOrBackupAndKeepsMissingDistinct(t *testin
 	}
 	if len(report.Unknown) < 5 {
 		t.Fatal("unperformed checks disappeared")
+	}
+}
+
+func TestAdmitStartupRefusesHardLinkedDatabaseAndSidecarsWithoutWAL(t *testing.T) {
+	for _, role := range []string{"database", "wal", "shm", "journal"} {
+		t.Run(role, func(t *testing.T) {
+			paths := fixturePaths(t)
+			db, err := sqlite.Open(paths.Database)
+			if err != nil {
+				t.Fatalf("create native v2 store: %v", err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatalf("close native v2 store: %v", err)
+			}
+			// Ensure clean no-WAL / 0-byte sidecar path.
+			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+				_ = os.Remove(paths.Database + suffix)
+			}
+			lock, err := processlock.Acquire(paths.Database)
+			if err != nil {
+				t.Fatalf("create lock marker: %v", err)
+			}
+			if err := lock.Close(); err != nil {
+				t.Fatalf("close lock marker: %v", err)
+			}
+			lockPath := paths.Database + ".manager.lock"
+			if err := os.Chmod(lockPath, 0o644); err != nil {
+				t.Fatalf("chmod lock 0644: %v", err)
+			}
+
+			target := paths.Database
+			if role != "database" {
+				suffix := "-" + role
+				target = paths.Database + suffix
+				if err := os.WriteFile(target, nil, 0o600); err != nil {
+					t.Fatalf("create empty %s: %v", suffix, err)
+				}
+			}
+			secondLink := filepath.Join(t.TempDir(), "hardlink-"+role)
+			if err := os.Link(target, secondLink); err != nil {
+				t.Fatalf("link %s: %v", role, err)
+			}
+			before := sourceState(t, filepath.Dir(paths.Database))
+
+			admission, err := AdmitStartup(context.Background(), paths, Options{
+				UpgradeAdmission: DatabaseUpgradeAdmission{DatabasePath: paths.Database},
+			})
+			if err == nil || admission != nil {
+				if admission != nil {
+					_ = admission.Close()
+				}
+				t.Fatalf("AdmitStartup accepted hard-linked %s without WAL", role)
+			}
+			if runtime.GOOS != "windows" {
+				info, statErr := os.Lstat(lockPath)
+				if statErr != nil || info.Mode().Perm() != 0o644 {
+					t.Fatalf("refused admission altered marker permissions: info=%v err=%v", info, statErr)
+				}
+			}
+			if !reflect.DeepEqual(before, sourceState(t, filepath.Dir(paths.Database))) {
+				t.Fatalf("refused admission mutated source directory")
+			}
+		})
+	}
+}
+
+func TestPendingFreshAdmissionTightensMarkerOnlyAfterValidation(t *testing.T) {
+	paths := fixturePaths(t)
+	initial, err := AdmitStartup(context.Background(), paths, Options{FreshAdmission: true})
+	if err != nil {
+		t.Fatalf("initial FreshAdmission: %v", err)
+	}
+	if initial.PendingFresh == nil {
+		_ = initial.Close()
+		t.Fatal("initial FreshAdmission produced no receipt")
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatalf("close initial FreshAdmission: %v", err)
+	}
+
+	lockPath := paths.Database + ".manager.lock"
+	if err := os.Chmod(lockPath, 0o644); err != nil {
+		t.Fatalf("relax marker mode: %v", err)
+	}
+
+	// Validation failure must leave the relaxed marker untouched.
+	if err := os.Mkdir(paths.Archives, 0o700); err != nil {
+		t.Fatalf("create conflicting archives dir: %v", err)
+	}
+	if refused, err := AdmitStartup(context.Background(), paths, Options{FreshAdmission: true}); err == nil || refused != nil {
+		if refused != nil {
+			_ = refused.Close()
+		}
+		t.Fatal("PendingFreshAdmission succeeded with conflicting archives directory")
+	}
+	if runtime.GOOS != "windows" {
+		if info, err := os.Lstat(lockPath); err != nil || info.Mode().Perm() != 0o644 {
+			t.Fatalf("refused PendingFreshAdmission altered marker mode: info=%v err=%v", info, err)
+		}
+	}
+	if err := os.Remove(paths.Archives); err != nil {
+		t.Fatalf("remove conflicting archives dir: %v", err)
+	}
+
+	resumed, err := AdmitStartup(context.Background(), paths, Options{FreshAdmission: true})
+	if err != nil {
+		t.Fatalf("resume PendingFreshAdmission: %v", err)
+	}
+	defer func() { _ = resumed.Close() }()
+	if resumed.PendingFresh == nil {
+		t.Fatal("resumed admission lost PendingFresh receipt")
+	}
+	if runtime.GOOS != "windows" {
+		if info, err := os.Lstat(lockPath); err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("resumed PendingFreshAdmission marker mode = %v (err=%v), want 0600", info.Mode().Perm(), err)
+		}
 	}
 }

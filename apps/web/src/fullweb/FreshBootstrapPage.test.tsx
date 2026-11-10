@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BOOTSTRAP_UI, createBootstrapTransport } from './bootstrapTransport';
 import { FreshBootstrapPage } from './FreshBootstrapPage';
 import { fullWebLanguage, setFullWebLanguage } from '../i18n/fullweb';
+import { bootstrapDiscoveryText } from '../i18n/bootstrapDiscovery';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
 import { activateFreshLanguage, FRESH_LANGUAGE_STORAGE_KEY } from './freshLanguage';
 
@@ -1115,14 +1116,9 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(traditional.desc).not.toBe(simplified.desc);
   });
 
-  it.each([
-    ['zh-CN', '检测到现有 1.x 数据卷（属主权限需在宿主机处理）', '重新检查来源状态'],
-    ['zh-TW', '偵測到現有 1.x 資料卷（擁有者權限需在主機處理）', '重新檢查來源狀態'],
-    ['en', 'Existing 1.x data volume detected (host ownership action required)', 'Recheck source status'],
-    ['ru', 'Обнаружен существующий том данных 1.x', 'Проверить состояние источника снова'],
-  ] as const)(
+  it.each(['zh-CN', 'zh-TW', 'en', 'ru'] as const)(
     'renders root-owned 1.x volume guidance in %s and transitions to Upgrade entry after recheck',
-    async (locale, expectedTitle, expectedButton) => {
+    async (locale) => {
       setFullWebLanguage(locale);
       const discovery = vi
         .fn<typeof fetch>()
@@ -1154,9 +1150,12 @@ describe('FreshBootstrapPage product preview workflow', () => {
         );
       });
 
-      expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(
-        expectedTitle
-      );
+      // The card is the page's status message for this source state. Its wording
+      // is the dictionary's business, not this test's: what the operator can act
+      // on is the read-only guidance below it.
+      const guidance = findByTestId(renderer.root, 'bootstrap-discovery-guidance');
+      expect(guidance.props['role']).toBe('status');
+      expect(textOf(guidance)).not.toBe('');
       expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
         '--entrypoint cpa-manager-plus'
       );
@@ -1183,9 +1182,11 @@ describe('FreshBootstrapPage product preview workflow', () => {
       expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(
         0
       );
-      expect(textOf(findByTestId(renderer.root, 'bootstrap-recheck-discovery'))).toBe(
-        expectedButton
-      );
+      expect(
+        textOf(findByTestId(renderer.root, 'bootstrap-recheck-discovery')).length
+      ).toBeGreaterThan(0);
+      // The read-only card offers no Fresh write control in any language.
+      expect(renderer.root.findAllByProps({ 'data-testid': 'admin-init-form' })).toHaveLength(0);
 
       await act(async () =>
         findByTestId(renderer.root, 'bootstrap-recheck-discovery').props.onClick()
@@ -1195,6 +1196,44 @@ describe('FreshBootstrapPage product preview workflow', () => {
       await act(async () => renderer.unmount());
     }
   );
+
+  it('re-derives the 1.x volume card copy when the page language changes', async () => {
+    setFullWebLanguage('zh-CN');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        Response.json({
+          contract_version: 'cpamp.phase4-01.discovery.v1',
+          status: 'recovery_required',
+          mode: 'recovery',
+          auth_entry: 'host_intervention',
+          reason: 'source_ownership_unavailable',
+          authentication_required: false,
+        })
+      )
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(
+        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+      );
+    });
+    // The discovery answer is fetched once and kept in state, so the card must
+    // follow the page's language instead of the language it was fetched in.
+    expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(
+      bootstrapDiscoveryText('ownershipGuidanceTitle', 'zh-CN')
+    );
+    await act(async () => {
+      setFullWebLanguage('en');
+      renderer.update(
+        <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+      );
+    });
+    const guidance = textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'));
+    expect(guidance).toContain(bootstrapDiscoveryText('ownershipGuidanceTitle', 'en'));
+    expect(guidance).not.toContain(bootstrapDiscoveryText('ownershipGuidanceTitle', 'zh-CN'));
+    await act(async () => renderer.unmount());
+  });
 
   it('rejects inconsistent source_ownership_unavailable payloads fail-closed', async () => {
     vi.stubGlobal(

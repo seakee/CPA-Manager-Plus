@@ -303,42 +303,53 @@ func TestPermissionBlockedLegacyVolumeProjectsSourceOwnershipUnavailable(t *test
 	t.Setenv(legacyRootEnvironment, "")
 	const legacyKey = "root-owned-legacy-key-123456"
 	dir, paths := legacyWALSourceFixture(t, legacyKey)
+	beforeTree := readSourceTree(t, dir)
 	lockPath := paths.Database + ".manager.lock"
 	if err := os.Chmod(lockPath, 0o000); err != nil {
 		t.Fatalf("chmod lock 0000: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(lockPath, 0o600) })
-
+	beforeMarker := discoveryMarkerState(t, lockPath)
 	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
 	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
 	server := httptest.NewServer(h)
 	defer server.Close()
 
-	resp, err := server.Client().Get(server.URL + bootstrapdiscovery.Path)
-	if err != nil {
-		t.Fatalf("GET discovery: %v", err)
-	}
-	raw, _ := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("permission-blocked discovery status = %d, want 200; body = %s", resp.StatusCode, raw)
-	}
-	if strings.Contains(string(raw), paths.Database) || strings.Contains(string(raw), dir) {
-		t.Fatalf("discovery leaked filesystem path: %s", raw)
-	}
-	var discovery bootstrapcontract.DiscoveryDTO
-	if err := json.Unmarshal(raw, &discovery); err != nil {
-		t.Fatalf("decode discovery: %v; body = %s", err, raw)
-	}
-	if discovery.Status != bootstrap.PublicRecoveryRequired ||
-		discovery.Mode == nil || *discovery.Mode != bootstrap.Recovery ||
-		discovery.AuthEntry != bootstrap.AuthEntryHostIntervention ||
-		discovery.Reason != bootstrap.ReasonSourceOwnershipUnavailable ||
-		discovery.AuthenticationRequired {
-		t.Fatalf("discovery = %+v, want recovery_required/source_ownership_unavailable", discovery)
+	for poll := range 4 {
+		resp, err := server.Client().Get(server.URL + bootstrapdiscovery.Path)
+		if err != nil {
+			t.Fatalf("poll %d GET discovery: %v", poll, err)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("poll %d permission-blocked discovery status = %d, want 200; body = %s", poll, resp.StatusCode, raw)
+		}
+		if strings.Contains(string(raw), paths.Database) || strings.Contains(string(raw), dir) {
+			t.Fatalf("poll %d discovery leaked filesystem path: %s", poll, raw)
+		}
+		var discovery bootstrapcontract.DiscoveryDTO
+		if err := json.Unmarshal(raw, &discovery); err != nil {
+			t.Fatalf("poll %d decode discovery: %v; body = %s", poll, err, raw)
+		}
+		if discovery.Status != bootstrap.PublicRecoveryRequired ||
+			discovery.Mode == nil || *discovery.Mode != bootstrap.Recovery ||
+			discovery.AuthEntry != bootstrap.AuthEntryHostIntervention ||
+			discovery.Reason != bootstrap.ReasonSourceOwnershipUnavailable ||
+			discovery.AuthenticationRequired {
+			t.Fatalf("poll %d discovery = %+v, want recovery_required/source_ownership_unavailable", poll, discovery)
+		}
 	}
 	assertWriteAndCanonicalPathsClosed(t, server, legacyKey)
-
+	if afterMarker := discoveryMarkerState(t, lockPath); afterMarker != beforeMarker {
+		t.Fatalf("permission-blocked discovery rewrote marker: %s -> %s", beforeMarker, afterMarker)
+	}
+	if err := os.Chmod(lockPath, 0o600); err != nil {
+		t.Fatalf("restore lock 0600: %v", err)
+	}
+	if afterTree := readSourceTree(t, dir); !reflect.DeepEqual(beforeTree, afterTree) {
+		t.Fatalf("permission-blocked discovery mutated source tree")
+	}
 	// Non-SQLite file with unreadable lock marker must NOT manufacture ownership classification.
 	garbageDir := t.TempDir()
 	garbageDB := filepath.Join(garbageDir, "usage.sqlite")

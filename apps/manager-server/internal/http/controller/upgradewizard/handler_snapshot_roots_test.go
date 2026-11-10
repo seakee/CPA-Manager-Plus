@@ -300,3 +300,136 @@ func TestUnresolvedRootRefusesTheMaterializingSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// TestPreservedStatusFailsClosedOnLinkedDatabaseAndSidecarsWithoutWAL verifies
+// that readRecordedStatusPreserved enforces InspectSourceFile on the database
+// and all three journal sidecars (-wal, -shm, -journal) even when no WAL frames
+// are pending, returning 503 rather than 200 recorded:false.
+func TestPreservedStatusFailsClosedOnLinkedDatabaseAndSidecarsWithoutWAL(t *testing.T) {
+	sourceRoot := legacySourceDir(t)
+	sourceDB := filepath.Join(sourceRoot, "usage.sqlite")
+	cleanBytes, err := os.ReadFile(sourceDB)
+	if err != nil {
+		t.Fatalf("read clean 1.x source: %v", err)
+	}
+
+	makePreservedHandler := func(t *testing.T) (string, *Handler) {
+		t.Helper()
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "usage.sqlite")
+		if err := os.WriteFile(dbPath, cleanBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "data.key"), []byte("key"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dbPath, &Handler{
+			LegacyRoot:           func() string { return sourceRoot },
+			Database:             func() string { return dbPath },
+			DataKey:              func() string { return filepath.Join(dir, "data.key") },
+			Timeout:              5 * time.Second,
+			PreserveManagerStore: true,
+		}
+	}
+
+	// Control: clean preserved store without upgrade_operations returns 200 recorded:false.
+	_, controlHandler := makePreservedHandler(t)
+	if status, body := snapshotRouteStatus(t, controlHandler, testPrefix+StatusSuffix); status != http.StatusOK || !strings.Contains(body, `"recorded":false`) {
+		t.Fatalf("clean preserved status = %d: %s, want 200 recorded:false", status, body)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(t *testing.T, dbPath string)
+	}{
+		{
+			name: "symlinked-database",
+			mutate: func(t *testing.T, dbPath string) {
+				realDB := dbPath + ".real"
+				if err := os.Rename(dbPath, realDB); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(realDB, dbPath); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "hardlinked-database",
+			mutate: func(t *testing.T, dbPath string) {
+				if err := os.Link(dbPath, filepath.Join(t.TempDir(), "db-link")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symlinked-shm",
+			mutate: func(t *testing.T, dbPath string) {
+				if err := os.Symlink(dbPath, dbPath+"-shm"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "hardlinked-shm",
+			mutate: func(t *testing.T, dbPath string) {
+				peer := filepath.Join(t.TempDir(), "shm-link")
+				if err := os.WriteFile(peer, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(peer, dbPath+"-shm"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "hardlinked-empty-wal",
+			mutate: func(t *testing.T, dbPath string) {
+				peer := filepath.Join(t.TempDir(), "wal-link")
+				if err := os.WriteFile(peer, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(peer, dbPath+"-wal"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symlinked-journal",
+			mutate: func(t *testing.T, dbPath string) {
+				if err := os.Symlink(dbPath, dbPath+"-journal"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "hardlinked-empty-journal",
+			mutate: func(t *testing.T, dbPath string) {
+				peer := filepath.Join(t.TempDir(), "journal-link")
+				if err := os.WriteFile(peer, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(peer, dbPath+"-journal"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "nonempty-rollback-journal",
+			mutate: func(t *testing.T, dbPath string) {
+				if err := os.WriteFile(dbPath+"-journal", []byte("pending-rollback-journal"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath, handler := makePreservedHandler(t)
+			tc.mutate(t, dbPath)
+			status, body := snapshotRouteStatus(t, handler, testPrefix+StatusSuffix)
+			if status != http.StatusServiceUnavailable || !strings.Contains(body, CodeOperationUnread) {
+				t.Fatalf("%s status = %d (%s), want 503 %s", tc.name, status, body, CodeOperationUnread)
+			}
+		})
+	}
+}

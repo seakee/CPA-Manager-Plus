@@ -25,6 +25,18 @@ func lockFile(file *os.File) error {
 	return err
 }
 
+// lockFileShared holds a shared, non-blocking lock for as long as the descriptor
+// stays open. It excludes every exclusive holder and admits other readers, so
+// concurrent read-only observations of one stopped source share the fence
+// instead of refusing each other.
+func lockFileShared(file *os.File) error {
+	err := unix.Flock(int(file.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
+		return ErrLocked
+	}
+	return err
+}
+
 // probeLockFile takes a shared, non-blocking lock. It conflicts with a live
 // exclusive holder without excluding another reader, so an observer can name a
 // busy source and let it go immediately.

@@ -25,6 +25,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
@@ -219,34 +220,55 @@ func (a DatabaseUpgradeAdmission) Admitted(ctx context.Context) (UpgradeStage, e
 // readRecordedUpgrade reads the row the admission decides on. Before the
 // incremental migration has ever run the table is absent, which is not an error:
 // no Upgrade operation has been recorded.
+//
+// The database file and every journal member beside it are audited by the shared
+// source-file policy first: a linked, special or multi-linked member, an
+// unreadable sidecar or a non-empty rollback journal is a state no file-only
+// answer can describe, so it is reported instead of being read as "no record".
 func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgradeRecord, bool, error) {
 	path := strings.TrimSpace(a.DatabasePath)
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) || info != nil && (!info.Mode().IsRegular() || info.Size() == 0) {
+	info, err := processlock.InspectSourceFile(path)
+	if os.IsNotExist(err) {
 		return upgradeRecord{}, false, nil
 	}
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
-	walPending := false
-	if wal, statErr := os.Lstat(path + "-wal"); statErr == nil && wal.Size() > 0 {
-		walPending = true
+	if err := auditAdmissionSidecars(path); err != nil {
+		return upgradeRecord{}, false, err
 	}
-	// The operation table is looked up in the database file alone first. An
-	// immutable handle opens no journal and creates no -shm, so a source that
-	// records no operations — every 1.x volume — is answered without writing
-	// anything beside the tree v2 must leave untouched, whether or not a journal
-	// is pending. Only a database that records operations at all is read with its
-	// journal applied, and then from a private copy: this read runs before any
-	// classification, so it may be looking at a volume this process will never
-	// own. The copy is therefore only paid by a store that records operations and
-	// still carries a journal, which is a v2 store after a crash — never a 1.x
-	// volume, which has no such table to find.
-	present, err := RecordedOperationTablePresent(ctx, path)
+	walPending, err := pendingJournal(path)
 	if err != nil {
 		return upgradeRecord{}, false, err
 	}
-	if !present {
+	if info.Size() == 0 {
+		if walPending {
+			return upgradeRecord{}, false, errors.New("empty database has a pending journal")
+		}
+		return upgradeRecord{}, false, nil
+	}
+	// The operation table is looked up in the database file alone first. An
+	// immutable handle opens no journal and creates no -shm, so a source that
+	// records no operations — every clean 1.x volume — is answered without writing
+	// anything beside the tree v2 must leave untouched.
+	//
+	// A pending journal makes that lookup non-conclusive, never negative. The
+	// table and the row that fills it become visible together, and SQLite keeps
+	// both in the journal until a checkpoint copies them into the file, so a v2
+	// store whose last transaction created the table and then lost its process
+	// names no table in the file at all. Concluding "no record" from the file
+	// alone would admit exactly that store — a native-v2 schema with an unfinished
+	// Upgrade — for writable startup. A pending journal therefore forces the read
+	// below, which is also the only read that can separate a crashed 1.x volume
+	// from a v2 store whose last transaction is still in its log. A crashed 1.x
+	// volume pays one private copy per read to learn that its journal holds no
+	// operation — a source that was not cleanly stopped — while a 1.x volume with no
+	// journal beside it is still answered without copying anything at all.
+	inFile, err := RecordedOperationTablePresent(ctx, path)
+	if err != nil {
+		return upgradeRecord{}, false, err
+	}
+	if !inFile && !walPending {
 		return upgradeRecord{}, false, nil
 	}
 	readPath := path
@@ -268,6 +290,18 @@ func readRecordedUpgrade(ctx context.Context, a DatabaseUpgradeAdmission) (upgra
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
+	// The copy answers with the journal applied. A journal that held no schema of
+	// its own leaves the store exactly as the file described it: no operation, no
+	// evidence, and the ordinary admission answers.
+	if !inFile {
+		present, probeErr := recordedTablePresent(ctx, db)
+		if probeErr != nil {
+			return upgradeRecord{}, false, probeErr
+		}
+		if !present {
+			return upgradeRecord{}, false, nil
+		}
+	}
 	// The columns a reader may select depend on the build that wrote the table:
 	// a store that predates the completion gate has neither the verification
 	// block nor the External connect table, and reading it must say "no evidence"
@@ -941,21 +975,85 @@ func containsRecordedDomain(domains []string, want string) bool {
 // RecordedOperationTablePresent reports whether the database file names the
 // Upgrade operation table. The handle is immutable, so the answer describes the
 // file as written and never the journal beside it: a source that records no
-// operation — every 1.x volume — is answered without copying it or creating
-// anything beside it.
+// operation — every clean 1.x volume — is answered without copying it or
+// creating anything beside it.
+//
+// A false answer is only conclusive when no journal is pending; record the two
+// facts together with RecordedOperationEvidence before deciding that a store
+// never recorded an operation.
 func RecordedOperationTablePresent(ctx context.Context, databasePath string) (bool, error) {
-	return recordedUpgradeTablePresent(ctx, admissionDataSourceName(databasePath, true))
-}
-
-// recordedUpgradeTablePresent asks one read-only handle whether the table exists.
-func recordedUpgradeTablePresent(ctx context.Context, dsn string) (bool, error) {
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", admissionDataSourceName(databasePath, true))
 	if err != nil {
 		return false, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
+	return recordedTablePresent(ctx, db)
+}
+
+// RecordedOperationEvidence is the pair of facts a reader needs before it may
+// answer "no operation recorded": whether the database file names the table, and
+// whether a journal beside it may still hold the transaction that creates it.
+// The table and its row become visible together, and until a checkpoint copies
+// them into the file an immutable read of the file alone names neither — so only
+// `inFile == false && journalPending == false` proves that nothing was recorded.
+func RecordedOperationEvidence(ctx context.Context, databasePath string) (inFile bool, journalPending bool, err error) {
+	journalPending, err = pendingJournal(databasePath)
+	if err != nil {
+		return false, false, err
+	}
+	inFile, err = RecordedOperationTablePresent(ctx, databasePath)
+	if err != nil {
+		return false, false, err
+	}
+	return inFile, journalPending, nil
+}
+
+// pendingJournal reports whether a WAL or rollback journal beside the database
+// could hold a transaction the main file does not show yet, failing closed when
+// either sidecar entry cannot be inspected.
+//
+// An entry that is not a regular file counts as pending so no file-only fast
+// path can bypass the sidecar policy check. Nothing here follows a link.
+func pendingJournal(databasePath string) (bool, error) {
+	pending := false
+	for _, suffix := range []string{"-wal", "-journal"} {
+		info, err := os.Lstat(databasePath + suffix)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if info.Size() > 0 || !info.Mode().IsRegular() {
+			pending = true
+		}
+	}
+	return pending, nil
+}
+
+// auditAdmissionSidecars enforces the single-link regular-file policy across
+// every journal member beside databasePath and fails closed on a non-empty
+// rollback journal, which a read-only admission check cannot safely roll back.
+func auditAdmissionSidecars(databasePath string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		info, err := processlock.InspectSourceFile(databasePath + suffix)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if suffix == "-journal" && info.Size() > 0 {
+			return errors.New("database has a pending rollback journal")
+		}
+	}
+	return nil
+}
+
+// recordedTablePresent asks one open handle whether the operation table exists.
+func recordedTablePresent(ctx context.Context, db *sql.DB) (bool, error) {
 	var present int
 	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master
 		where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {

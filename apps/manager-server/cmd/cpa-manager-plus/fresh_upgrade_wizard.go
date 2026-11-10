@@ -35,6 +35,7 @@ func (a *freshApplication) newUpgradeWizard() *upgradewizard.Handler {
 		LegacyRoot:   configuredLegacyRoot,
 		PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
 		Database:     func() string { return a.cfg.DBPath },
+		DataKey:      func() string { return a.cfg.DataKeyPath },
 		Timeout:      upgradewizard.DefaultTimeout,
 		Artifact:     artifact,
 	}

@@ -71,13 +71,14 @@ type credentialFileIdentity struct {
 	modifiedNS int64
 }
 
-// sourceCredentialIdentity names one state of a source database. Both the
-// database and its WAL are described: a WAL append leaves the database file
-// untouched, so the database alone would answer from a state that no longer
-// exists.
+// sourceCredentialIdentity names one state of a source database and every
+// journal sidecar beside it, so a sidecar appearing or changing invalidates a
+// cached credential verdict instead of bypassing source-file validation.
 type sourceCredentialIdentity struct {
 	database credentialFileIdentity
 	wal      credentialFileIdentity
+	shm      credentialFileIdentity
+	journal  credentialFileIdentity
 }
 
 // readBytes is the size the first verification must read: the database plus a
@@ -108,7 +109,7 @@ func (i sourceCredentialIdentity) String() string {
 		}
 		return fmt.Sprintf("%d:%d:%d:%d", value.device, value.inode, value.size, value.modifiedNS)
 	}
-	return file(i.database) + "|" + file(i.wal)
+	return file(i.database) + "|" + file(i.wal) + "|" + file(i.shm) + "|" + file(i.journal)
 }
 
 // identifySourceCredential describes the source state the presented key would be
@@ -122,19 +123,27 @@ func identifySourceCredential(databasePath string) (sourceCredentialIdentity, er
 	if err != nil {
 		return sourceCredentialIdentity{}, err
 	}
-	return sourceCredentialIdentity{database: database, wal: wal}, nil
+	shm, err := identifyCredentialFile(databasePath + "-shm")
+	if err != nil {
+		return sourceCredentialIdentity{}, err
+	}
+	journal, err := identifyCredentialFile(databasePath + "-journal")
+	if err != nil {
+		return sourceCredentialIdentity{}, err
+	}
+	return sourceCredentialIdentity{database: database, wal: wal, shm: shm, journal: journal}, nil
 }
 
-// identifyCredentialFile stats one source file. A missing file is the absent
-// state; any other failure means the source cannot be described and is reported
-// instead of being guessed at.
+// identifyCredentialFile applies the shared source-file policy to one member and
+// records its identity. A missing file is the absent state; any link, special
+// file, multi-link file or stat failure is reported instead of guessed at.
 func identifyCredentialFile(path string) (credentialFileIdentity, error) {
-	info, err := os.Stat(path)
+	info, err := inspectSnapshotSourceFile(path)
 	if os.IsNotExist(err) {
 		return credentialFileIdentity{}, nil
 	}
 	if err != nil {
-		return credentialFileIdentity{}, err
+		return credentialFileIdentity{}, credentialSourceError(err)
 	}
 	identity, err := copyinmarker.Identity(path)
 	if err != nil {
