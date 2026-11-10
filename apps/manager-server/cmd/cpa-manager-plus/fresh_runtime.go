@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"sort"
@@ -269,7 +270,10 @@ func (a *freshApplication) runtimeModeFor(op bootstrap.FreshOperation) model.Run
 }
 
 func (a *freshApplication) effectiveRuntimeMode(ctx context.Context) model.RuntimeMode {
-	if a == nil || a.runtime == nil {
+	if a == nil {
+		return ""
+	}
+	if a.runtime == nil {
 		return model.RuntimeModeExternal
 	}
 	if a.runtimeExternal == nil || a.store == nil {
@@ -277,7 +281,7 @@ func (a *freshApplication) effectiveRuntimeMode(ctx context.Context) model.Runti
 	}
 	op, err := a.current(ctx)
 	if err != nil {
-		return model.RuntimeModeExternal
+		return ""
 	}
 	return a.runtimeModeFor(op)
 }
@@ -286,10 +290,14 @@ func (a *freshApplication) runtimeStatusClientFor(mode model.RuntimeMode) runtim
 	if a == nil {
 		return nil
 	}
-	if mode == model.RuntimeModeEmbedded {
+	switch mode {
+	case model.RuntimeModeEmbedded:
 		return a.runtime
+	case model.RuntimeModeExternal:
+		return a.runtimeExternal
+	default:
+		return nil
 	}
-	return a.runtimeExternal
 }
 
 // runtimeStatusClient returns the read-only observation client for the active
@@ -320,7 +328,7 @@ func (c freshRuntimeClientAdapter) client() (runtimeservice.RuntimeClient, error
 }
 
 func (c freshRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
-	mode := model.RuntimeModeExternal
+	var mode model.RuntimeMode
 	var client runtimeservice.RuntimeClient
 	if c.app != nil {
 		mode = c.app.effectiveRuntimeMode(ctx)
@@ -921,4 +929,63 @@ func freshRuntimeOperationError(w http.ResponseWriter, status int, code string) 
 	writeFreshJSON(w, struct {
 		Code string `json:"code"`
 	}{Code: code})
+}
+
+type freshEmbeddedDesiredStateStore struct {
+	app   *freshApplication
+	inner runtimeservice.DesiredStateStore
+}
+
+func (s freshEmbeddedDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	if s.app == nil || s.inner == nil || s.app.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
+		return model.EmbeddedRuntimeDesiredState{}, false, nil
+	}
+	return s.inner.LoadEmbeddedRuntimeDesiredState(ctx)
+}
+
+// runFreshEmbeddedReconciler keeps the Embedded desired-lifecycle reconciler
+// active before strategy selection and throughout New Managed / Adopt Existing,
+// and retires it permanently once Connect External is committed in-process.
+func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, interval time.Duration) {
+	if a == nil || a.runtime == nil || a.runtimeSettings == nil {
+		return
+	}
+	if op, err := a.current(ctx); err == nil && op.Strategy.Strategy == bootstrap.ConnectExternal {
+		return
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	reconciler := runtimeservice.NewReconciler(
+		a.runtime,
+		freshEmbeddedDesiredStateStore{app: a, inner: a.runtimeSettings},
+		interval,
+		log.Printf,
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		reconciler.Run(workerCtx)
+	}()
+	watchInterval := time.Second
+	if interval > 0 && interval < watchInterval {
+		watchInterval = interval
+	}
+	ticker := time.NewTicker(watchInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			<-done
+			return
+		case <-done:
+			return
+		case <-ticker.C:
+			op, err := a.current(ctx)
+			if err == nil && op.Strategy.Strategy == bootstrap.ConnectExternal {
+				cancel()
+				<-done
+				return
+			}
+		}
+	}
 }

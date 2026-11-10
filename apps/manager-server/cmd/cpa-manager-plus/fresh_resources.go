@@ -155,9 +155,6 @@ func (a *freshApplication) externalLegacyDecision(r *http.Request) (externalLega
 		// profiles it is the Console's own contract, not a duplicate route.
 		return legacyDecisionPassthrough, record
 	}
-	if a.clearEmbeddedProxyMutations != nil {
-		a.disableEmbeddedProxyMutationsOnce.Do(a.clearEmbeddedProxyMutations)
-	}
 	if externalLegacyReplacedWrite(r.URL.Path, r.Method) {
 		return legacyDecisionReplacedWrite, record
 	}

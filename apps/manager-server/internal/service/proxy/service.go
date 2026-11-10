@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/application/credentialdeletemutation"
@@ -33,9 +34,10 @@ type Service struct {
 	managerConfigService *managerconfig.Service
 	store                *store.Store
 	authFileMutations    *cpaauthfiles.MutationCoordinator
-	apiKeyMutations      *identitymutation.Service
-	apiKeyMutationMu     sync.Mutex
-	credentialDeletes    *credentialdeletemutation.Service
+	apiKeyMutations          atomic.Pointer[identitymutation.Service]
+	apiKeyMutationMu         sync.Mutex
+	credentialDeletes        atomic.Pointer[credentialdeletemutation.Service]
+	embeddedMutationsEnabled func(context.Context) bool
 }
 
 type authFileOwnershipMutation struct {
@@ -160,11 +162,40 @@ func NewWithMutationCoordinator(
 // SetAPIKeyMutationService enables Embedded-only explicit API-key identity
 // handling before the HTTP server begins accepting requests.
 func (s *Service) SetAPIKeyMutationService(mutations *identitymutation.Service) {
-	s.apiKeyMutations = mutations
+	s.apiKeyMutations.Store(mutations)
 }
 
 func (s *Service) SetCredentialDeleteService(deletes *credentialdeletemutation.Service) {
-	s.credentialDeletes = deletes
+	s.credentialDeletes.Store(deletes)
+}
+
+// SetEmbeddedMutationsEnabled restricts Embedded-only API-key and credential
+// mutation fences to installations that are not proven External. Must be set
+// before the HTTP server begins accepting requests.
+func (s *Service) SetEmbeddedMutationsEnabled(enabled func(context.Context) bool) {
+	s.embeddedMutationsEnabled = enabled
+}
+
+func (s *Service) activeAPIKeyMutations(ctx context.Context) *identitymutation.Service {
+	mutations := s.apiKeyMutations.Load()
+	if mutations == nil {
+		return nil
+	}
+	if s.embeddedMutationsEnabled != nil && !s.embeddedMutationsEnabled(ctx) {
+		return nil
+	}
+	return mutations
+}
+
+func (s *Service) activeCredentialDeletes(ctx context.Context) *credentialdeletemutation.Service {
+	deletes := s.credentialDeletes.Load()
+	if deletes == nil {
+		return nil
+	}
+	if s.embeddedMutationsEnabled != nil && !s.embeddedMutationsEnabled(ctx) {
+		return nil
+	}
+	return deletes
 }
 
 func (s *Service) ProxyManagement(w http.ResponseWriter, r *http.Request, writeError func(http.ResponseWriter, int, error)) {
@@ -357,7 +388,8 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 	if ownershipMutation.clearAll {
 		ownershipMutation.fileNames = ownershipFileNames(revokedOwnership)
 	}
-	credentialDeleteIntentID, err := s.prepareCredentialDelete(r.Context(), setup, r, ownershipMutation, revokedOwnership)
+	activeDeletes := s.activeCredentialDeletes(r.Context())
+	credentialDeleteIntentID, err := s.prepareCredentialDelete(r.Context(), activeDeletes, setup, r, ownershipMutation, revokedOwnership)
 	if err != nil {
 		if restoreErr := s.restoreInspectionOwnershipDetached(r.Context(), revokedOwnership); restoreErr != nil {
 			err = errors.Join(err, restoreErr)
@@ -369,11 +401,12 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 		writeError(w, status, err)
 		return
 	}
-	if s.apiKeyMutations != nil && isAPIKeyMutationRequest(r) {
+	activeAPIKeyMutations := s.activeAPIKeyMutations(r.Context())
+	if activeAPIKeyMutations != nil && isAPIKeyMutationRequest(r) {
 		s.apiKeyMutationMu.Lock()
 		defer s.apiKeyMutationMu.Unlock()
 	}
-	apiKeyIntentID, err := s.prepareAPIKeyMutation(r.Context(), setup, r)
+	apiKeyIntentID, err := s.prepareAPIKeyMutation(r.Context(), activeAPIKeyMutations, setup, r)
 	if err != nil {
 		status := http.StatusConflict
 		if errors.Is(err, identitymutation.ErrRuntimeFence) {
@@ -390,7 +423,7 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 			baseTransport = http.DefaultTransport
 		}
 		proxy.Transport = credentialDeleteTransport{
-			base: baseTransport, deletes: s.credentialDeletes, intentID: credentialDeleteIntentID,
+			base: baseTransport, deletes: activeDeletes, intentID: credentialDeleteIntentID,
 			baseURL: setup.CPAUpstreamURL, managementKey: setup.ManagementKey, physicalName: ownershipMutation.deleteMutation.preparedTarget.File.Name, outcome: &deleteOutcome,
 		}
 	}
@@ -400,7 +433,7 @@ func (s *Service) proxyWithResponseHook(w http.ResponseWriter, r *http.Request, 
 			baseTransport = http.DefaultTransport
 		}
 		proxy.Transport = apiKeyMutationTransport{
-			base: baseTransport, mutations: s.apiKeyMutations, intentID: apiKeyIntentID,
+			base: baseTransport, mutations: activeAPIKeyMutations, intentID: apiKeyIntentID,
 			baseURL: setup.CPAUpstreamURL, managementKey: setup.ManagementKey,
 		}
 	}
@@ -497,8 +530,8 @@ func (s *Service) acquireAuthFileMutation(
 	if err != nil {
 		return nil, err
 	}
-	if s.credentialDeletes != nil {
-		if err := s.credentialDeletes.CheckOverlap(ctx, keys, all); err != nil {
+	if deletes := s.activeCredentialDeletes(ctx); deletes != nil {
+		if err := deletes.CheckOverlap(ctx, keys, all); err != nil {
 			release()
 			return nil, err
 		}

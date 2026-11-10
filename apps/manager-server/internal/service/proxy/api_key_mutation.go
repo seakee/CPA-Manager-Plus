@@ -139,8 +139,8 @@ func inspectAPIKeyMutation(r *http.Request) (apiKeyMutationShape, error) {
 
 // prepareAPIKeyMutation runs after the normal proxy connection was resolved.
 // The closure retains raw values only in this proxy/CPA transport boundary.
-func (s *Service) prepareAPIKeyMutation(ctx context.Context, setup store.Setup, r *http.Request) (string, error) {
-	if s.apiKeyMutations == nil || !isAPIKeyMutationRequest(r) {
+func (s *Service) prepareAPIKeyMutation(ctx context.Context, mutations *identitymutation.Service, setup store.Setup, r *http.Request) (string, error) {
+	if mutations == nil || !isAPIKeyMutationRequest(r) {
 		return "", nil
 	}
 	shape, err := inspectAPIKeyMutation(r)
@@ -148,16 +148,16 @@ func (s *Service) prepareAPIKeyMutation(ctx context.Context, setup store.Setup, 
 		return "", err
 	}
 	if shape.kind == "" || shape.representationOnly {
-		return "", s.apiKeyMutations.CheckTransportAvailable(ctx)
+		return "", mutations.CheckTransportAvailable(ctx)
 	}
-	if err := s.apiKeyMutations.CheckAvailable(ctx); err != nil {
+	if err := mutations.CheckAvailable(ctx); err != nil {
 		return "", err
 	}
 	if strings.TrimSpace(shape.oldRaw) == "" ||
 		(shape.kind == ports.APIKeyMutationRotate && strings.TrimSpace(shape.newRaw) == "") {
 		return "", identitymutation.ErrPreflight
 	}
-	return s.apiKeyMutations.Prepare(ctx, shape.kind, func(fetchCtx context.Context) (ports.APIKeyMutationEvidence, error) {
+	return mutations.Prepare(ctx, shape.kind, func(fetchCtx context.Context) (ports.APIKeyMutationEvidence, error) {
 		return cpaidentityinventory.FetchMutationEvidence(fetchCtx,
 			setup.CPAUpstreamURL, setup.ManagementKey, shape.oldRaw, shape.newRaw)
 	})

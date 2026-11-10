@@ -38,9 +38,9 @@ func supportedDeleteSources(target cpaauthfiles.DeleteMutationTarget) ([]string,
 	return sources, nil
 }
 
-func (s *Service) prepareCredentialDelete(ctx context.Context, setup store.Setup, r *http.Request,
+func (s *Service) prepareCredentialDelete(ctx context.Context, deletes *credentialdeletemutation.Service, setup store.Setup, r *http.Request,
 	mutation authFileOwnershipMutation, revoked []store.CodexInspectionDisableOwnership) (string, error) {
-	if s.credentialDeletes == nil || r.Method != http.MethodDelete ||
+	if deletes == nil || r.Method != http.MethodDelete ||
 		strings.TrimRight(r.URL.Path, "/") != "/v0/management/auth-files" ||
 		mutation.deleteMutation == nil {
 		return "", nil
@@ -54,7 +54,7 @@ func (s *Service) prepareCredentialDelete(ctx context.Context, setup store.Setup
 		return "", nil
 	}
 	physicalName := strings.TrimSpace(deletion.preparedTarget.File.Name)
-	return s.credentialDeletes.Prepare(ctx, physicalName, sources, func(ctx context.Context) (string, []string, error) {
+	return deletes.Prepare(ctx, physicalName, sources, func(ctx context.Context) (string, []string, error) {
 		target, selector, err := resolveVerifiedAuthFileDelete(ctx, setup, deletion)
 		if err != nil || selector != deletion.forwardSelector {
 			return "", nil, credentialdeletemutation.ErrPreflight
