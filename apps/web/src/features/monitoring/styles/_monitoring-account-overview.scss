@@ -1162,7 +1162,7 @@
   }
 
   .quotaRetryButton:hover:not(:disabled) {
-    border-color: var(--primary-text);
+    border-color: var(--primary-color);
     background: color-mix(in srgb, var(--data-blue-base) 18%, var(--bg-primary));
   }
 
