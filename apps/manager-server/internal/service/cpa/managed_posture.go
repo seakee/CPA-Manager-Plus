@@ -26,7 +26,7 @@ var managedOptionalObjectRoots = map[string]bool{
 	"upstream":       true, // Allowed: provider-specific upstream behavior (codex, claude, header-defaults, xai) from /console/config.
 	"client":         true, // Allowed: downstream client compatibility switches (client.codex.*) from /console/config.
 	"multimedia":     true, // Allowed: image generation mode, base model, and video auth cache TTL from /console/config.
-	"models":         true, // Allowed: optional CPA v8 model catalog source selections.
+	"models":         true, // Allowed: optional CPA v8 model catalog source overrides (catalog, codex-catalog, devin-catalog).
 	"credentials":    true, // Allowed: CPA v8 credential concurrency and in-flight observation settings.
 	"quota-exceeded": true, // Allowed: CPA v8 quota-exceeded fallback switches.
 }
@@ -88,20 +88,7 @@ func (p proofPosture) matchesManaged(data []byte) bool {
 		return false
 	}
 
-	var management map[string]json.RawMessage
-	if json.Unmarshal(root["management"], &management) != nil || len(management) != 4 {
-		return false
-	}
-	allowRemote, ok := parseExactJSONBool(management["allow-remote"])
-	if !ok || !p.validDestinationBind(boundHost, allowRemote) {
-		return false
-	}
-	if !exactJSONBool(management["disable-control-panel"], true) ||
-		!exactJSONBool(management["disable-auto-update-panel"], true) {
-		return false
-	}
-	var secret string
-	if json.Unmarshal(management["secret-key"], &secret) != nil || !looksLikeBcrypt(secret) {
+	if !p.matchesManagedManagement(root["management"], boundHost) {
 		return false
 	}
 
@@ -116,6 +103,23 @@ func (p proofPosture) matchesManaged(data []byte) bool {
 		return false
 	}
 	return true
+}
+
+func (p proofPosture) matchesManagedManagement(raw json.RawMessage, boundHost string) bool {
+	var management map[string]json.RawMessage
+	if json.Unmarshal(raw, &management) != nil || len(management) != 4 {
+		return false
+	}
+	allowRemote, ok := parseExactJSONBool(management["allow-remote"])
+	if !ok || !p.validDestinationBind(boundHost, allowRemote) {
+		return false
+	}
+	if !exactJSONBool(management["disable-control-panel"], true) ||
+		!exactJSONBool(management["disable-auto-update-panel"], true) {
+		return false
+	}
+	var secret string
+	return json.Unmarshal(management["secret-key"], &secret) == nil && looksLikeBcrypt(secret)
 }
 
 func (p proofPosture) matchesManagedOAuth(raw json.RawMessage) bool {
@@ -155,7 +159,24 @@ func (p proofPosture) matchesManagedPlugins(raw json.RawMessage) bool {
 			if !isStringSlice(val) {
 				return false
 			}
+		case "store-auth":
+			if !isJSONObjectSlice(val) {
+				return false
+			}
 		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isJSONObjectSlice(raw json.RawMessage) bool {
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil || items == nil {
+		return false
+	}
+	for _, item := range items {
+		if !isJSONObject(item) {
 			return false
 		}
 	}

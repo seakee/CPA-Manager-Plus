@@ -29,6 +29,7 @@ type Repository interface {
 	// revision; effective env ownership and CPA instance identity remain separate.
 	LoadPersistedCPAConnectionRevision(ctx context.Context) (string, bool, error)
 	SetEmbeddedRuntimeDesiredLifecycle(ctx context.Context, desired model.EmbeddedRuntimeDesiredLifecycle) (model.EmbeddedRuntimeDesiredState, error)
+	SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(ctx context.Context, desired model.EmbeddedRuntimeDesiredLifecycle) (bool, error)
 	LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error)
 	SaveAutomationSettings(ctx context.Context, settings model.AutomationSettings) (model.AutomationSettings, error)
 	LoadAutomationSettings(ctx context.Context) (model.AutomationSettings, bool, error)
@@ -287,6 +288,44 @@ func (r *repository) SetEmbeddedRuntimeDesiredLifecycle(
 		return model.EmbeddedRuntimeDesiredState{}, err
 	}
 	return next, nil
+}
+
+// SeedEmbeddedRuntimeDesiredLifecycleIfAbsent atomically inserts an initial
+// revision-1 desired lifecycle row only when runtime_desired_v1 does not yet
+// exist, never overwriting an existing operator Stop or unreadable row.
+func (r *repository) SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(
+	ctx context.Context,
+	desired model.EmbeddedRuntimeDesiredLifecycle,
+) (bool, error) {
+	if !desired.IsValid() {
+		return false, fmt.Errorf("invalid embedded Runtime desired lifecycle %q", desired)
+	}
+	initial := model.EmbeddedRuntimeDesiredState{
+		DesiredLifecycle: desired,
+		Revision:         1,
+		UpdatedAtMS:      time.Now().UnixMilli(),
+	}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		return false, err
+	}
+	result, err := r.db.ExecContext(
+		ctx,
+		`insert into settings(key, value, updated_at_ms)
+		 values(?, ?, ?)
+		 on conflict(key) do nothing`,
+		embeddedRuntimeDesiredKey,
+		string(data),
+		initial.UpdatedAtMS,
+	)
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows == 1, nil
 }
 
 func (r *repository) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {

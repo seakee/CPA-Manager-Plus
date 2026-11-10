@@ -275,6 +275,10 @@ func (s *Store) SetEmbeddedRuntimeDesiredLifecycle(ctx context.Context, desired 
 	return s.Settings.SetEmbeddedRuntimeDesiredLifecycle(ctx, desired)
 }
 
+func (s *Store) SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(ctx context.Context, desired EmbeddedRuntimeDesiredLifecycle) (bool, error) {
+	return s.Settings.SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(ctx, desired)
+}
+
 func (s *Store) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (EmbeddedRuntimeDesiredState, bool, error) {
 	return s.Settings.LoadEmbeddedRuntimeDesiredState(ctx)
 }

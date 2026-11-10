@@ -12,6 +12,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/setting"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
@@ -110,6 +111,9 @@ func migrationFixture(t *testing.T, generation model.RuntimeGeneration, stageErr
 	// The probe is wired exactly as production wires it, so a test can observe that
 	// a saved connection invalidates the previous plugin answer.
 	app := &freshApplication{store: fresh, strategy: service, pluginCapability: newPluginCapabilityProbe(time.Hour, time.Minute, func(context.Context) bool { return true })}
+	app.runtime = runtime
+	app.protector = protector
+	app.runtimeSettings = setting.New(db, protector)
 	checkpoint := bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: string(runtime.status.Identity), TargetGeneration: 7, TargetArtifactID: string(artifact)}
 	if _, err = fresh.Update(t.Context(), id, record.Operation.Revision, func(r *freshstore.Record) error {
 		r.Operation.Strategy = checkpoint
@@ -211,5 +215,57 @@ func TestManagedDestinationMigrationForgetsThePluginCapability(t *testing.T) {
 	}
 	if app.pluginCapability.capable(t.Context()) {
 		t.Fatal("the plugin capability survived a saved connection change")
+	}
+}
+
+func TestPrepareCompletedStartupMigratesWhileOfflineBeforeSeedingDesiredState(t *testing.T) {
+	// 1. Legacy unmigrated start-only new_managed store: migration runs first while
+	// Supervisor is Offline, writes DestinationConnectionIdentity, reloads op, and
+	// only then seeds runtime_desired_v1 = running.
+	app, runtime, fresh := migrationFixture(t, 7, nil)
+	before, err := fresh.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	migratedOp := app.prepareCompletedStartup(t.Context(), before.Operation)
+	if len(runtime.stages) != 1 || len(runtime.starts) != 1 {
+		t.Fatalf("startup migration stages=%d starts=%d, want 1/1", len(runtime.stages), len(runtime.starts))
+	}
+	if !strings.HasPrefix(migratedOp.Strategy.DestinationConnectionIdentity, "managed:sha256:") {
+		t.Fatalf("reloaded startup operation missing DestinationConnectionIdentity: %+v", migratedOp.Strategy)
+	}
+	desired, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context())
+	if err != nil || !found || desired.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning {
+		t.Fatalf("post-migration desired state = %+v found=%v err=%v", desired, found, err)
+	}
+
+	// 2. When migration is blocked (e.g. generation drift), DestinationConnectionIdentity
+	// remains empty and runtime_desired_v1 stays unseeded so Reconciler never starts
+	// an unmigrated CPA.
+	blockedApp, _, blockedFresh := migrationFixture(t, 8, nil)
+	blockedRecord, err := blockedFresh.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = blockedApp.prepareCompletedStartup(t.Context(), blockedRecord.Operation)
+	if _, found, err := blockedApp.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
+		t.Fatalf("blocked migration seeded desired state: found=%v err=%v", found, err)
+	}
+
+	// 3. Historical operator-managed connection (Connection != nil, empty
+	// DestinationConnectionIdentity) stays unmigrated and unseeded.
+	operatorApp, _, operatorFresh := migrationFixture(t, 7, nil)
+	opRecord, err := operatorFresh.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := operatorApp.runtimeSettings.SaveManagerConfig(t.Context(), model.ManagerConfig{
+		CPAConnection: model.ManagerCPAConnectionConfig{CPABaseURL: "http://external-cpa:8317", ManagementKey: "operator-key"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = operatorApp.prepareCompletedStartup(t.Context(), opRecord.Operation)
+	if _, found, err := operatorApp.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
+		t.Fatalf("operator-managed connection seeded desired state: found=%v err=%v", found, err)
 	}
 }

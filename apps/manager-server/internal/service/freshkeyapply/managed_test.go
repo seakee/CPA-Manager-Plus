@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	repo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
@@ -152,8 +153,10 @@ func managedFixture(t *testing.T) (*Service, *managedCPA, *ModelSource, string) 
 	cpa := &managedCPA{management: strings.Repeat("e", 64)}
 	server := cpa.serve(t)
 	rt := &observedRuntime{status: model.RuntimeObservedStatus{Identity: managedRuntimeIdentity, Generation: 9,
+		ProtocolVersion:       "v1",
 		State:                 model.RuntimeStateReady,
-		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{ArtifactID: model.RuntimeArtifactID(managedArtifact()), Version: "v8.0.55"}}}
+		CPAObservedVersion:    "v8.0.55",
+		ActiveGatewayArtifact: &model.ActiveGatewayArtifact{Engine: "cpa", ArtifactID: model.RuntimeArtifactID(managedArtifact()), Version: "v8.0.55"}}}
 	source := &ModelSource{install: ManagedInstall{
 		RunID: "managed:operation-default-install", Generation: "9", Identity: managedRuntimeIdentity,
 		ArtifactID: managedArtifact(), BaseURL: server.URL, ManagementKey: cpa.management,
@@ -254,7 +257,7 @@ func TestManagedLoneKeyRevocationIsRefused(t *testing.T) {
 }
 
 func TestManagedAuthorityFailsClosedOnTargetDrift(t *testing.T) {
-	for _, scenario := range []string{"identity", "zero-generation", "missing-artifact", "invalid-artifact", "ready", "source", "endpoint"} {
+	for _, scenario := range []string{"identity", "zero-generation", "missing-protocol", "missing-artifact", "invalid-artifact", "invalid-engine", "ready", "source", "endpoint"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, cpa, source, installedID := managedFixture(t)
 			switch scenario {
@@ -262,10 +265,14 @@ func TestManagedAuthorityFailsClosedOnTargetDrift(t *testing.T) {
 				s.runtime.(*observedRuntime).status.Identity = "foreign-runtime"
 			case "zero-generation":
 				s.runtime.(*observedRuntime).status.Generation = 0
+			case "missing-protocol":
+				s.runtime.(*observedRuntime).status.ProtocolVersion = ""
 			case "missing-artifact":
 				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact = nil
 			case "invalid-artifact":
 				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = "sha256:bad"
+			case "invalid-engine":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.Engine = "envoy"
 			case "ready":
 				s.runtime.(*observedRuntime).status.State = model.RuntimeStateOffline
 			case "source":
@@ -386,7 +393,7 @@ func TestDefaultInstallCPAAuthorityProvenNeedsClientAuthAndExactTarget(t *testin
 	if !s.DefaultInstallCPAAuthorityProven(t.Context()) {
 		t.Fatal("restored destination not proven")
 	}
-	for _, scenario := range []string{"identity", "zero-generation", "missing-artifact", "invalid-artifact", "ready", "source", "endpoint"} {
+	for _, scenario := range []string{"identity", "zero-generation", "missing-protocol", "missing-artifact", "invalid-artifact", "invalid-engine", "ready", "source", "endpoint"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, cpa, source, installedID := managedFixture(t)
 			if _, err := s.Apply(t.Context(), installedID, 9); err != nil {
@@ -397,10 +404,14 @@ func TestDefaultInstallCPAAuthorityProvenNeedsClientAuthAndExactTarget(t *testin
 				s.runtime.(*observedRuntime).status.Identity = "foreign-runtime"
 			case "zero-generation":
 				s.runtime.(*observedRuntime).status.Generation = 0
+			case "missing-protocol":
+				s.runtime.(*observedRuntime).status.ProtocolVersion = ""
 			case "missing-artifact":
 				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact = nil
 			case "invalid-artifact":
 				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.ArtifactID = "sha256:bad"
+			case "invalid-engine":
+				s.runtime.(*observedRuntime).status.ActiveGatewayArtifact.Engine = "envoy"
 			case "ready":
 				s.runtime.(*observedRuntime).status.State = model.RuntimeStateOffline
 			case "source":
@@ -472,5 +483,46 @@ func TestDefaultInstallCPAAuthorityProvenRejectsDestinationPostureDrift(t *testi
 				t.Fatalf("%s destination proven", scenario)
 			}
 		})
+	}
+}
+
+func TestValidManagerOwnedDestinationCheckpoint(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	for name, tc := range map[string]struct {
+		cp   bootstrap.FreshStrategyCheckpoint
+		want bool
+	}{
+		"committed new_managed with managed digest": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", DestinationConnectionIdentity: "managed:sha256:" + digest},
+			want: true,
+		},
+		"committed adopt network_existing with external digest": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting, Stage: "committed", DestinationConnectionIdentity: "external:sha256:" + digest},
+			want: true,
+		},
+		"unmigrated new_managed without destination identity": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed"},
+			want: false,
+		},
+		"new_managed with wrong prefix": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", DestinationConnectionIdentity: "external:sha256:" + digest},
+			want: false,
+		},
+		"new_managed with truncated digest": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "committed", DestinationConnectionIdentity: "managed:sha256:abcd"},
+			want: false,
+		},
+		"adopt legacy_managed excluded": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptLegacyManaged, Stage: "committed", DestinationConnectionIdentity: "external:sha256:" + digest},
+			want: false,
+		},
+		"connect_external excluded": {
+			cp:   bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.ConnectExternal, Stage: "committed", DestinationConnectionIdentity: "external:sha256:" + digest},
+			want: false,
+		},
+	} {
+		if got := ValidManagerOwnedDestinationCheckpoint(tc.cp); got != tc.want {
+			t.Fatalf("%s: ValidManagerOwnedDestinationCheckpoint = %v, want %v", name, got, tc.want)
+		}
 	}
 }

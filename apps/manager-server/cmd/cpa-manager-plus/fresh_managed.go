@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"strconv"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshstrategy"
+	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
 // managedInstallSource is the only default-install authority. It re-reads the
@@ -140,18 +142,105 @@ func (a *freshApplication) installInitialClientKey(ctx context.Context, op boots
 	return freshstrategy.InitialClientKey{KeyID: string(key.ID), Secret: key.Secret}, nil
 }
 
-// ensureManagedRuntimeDesiredRunning seeds the durable Running desired state
-// once a Manager-owned installation (New Managed or Adopt) completes, while
-// preserving any explicit operator Stop already persisted in runtime_desired_v1.
+// prepareCompletedStartup runs legacy destination migration before HTTP routes
+// or the Runtime reconciler start, reloads the operation so a newly migrated
+// checkpoint is observed, and seeds the initial Running desired state.
+func (a *freshApplication) prepareCompletedStartup(ctx context.Context, op bootstrap.FreshOperation) bootstrap.FreshOperation {
+	if a == nil || !op.ProductComplete {
+		return op
+	}
+	if err := a.migrateManagedDestination(ctx); err != nil {
+		// Migration is durable and idempotent; keep the completed Fresh
+		// server available while a typed blocker waits for the next startup.
+		log.Printf("Fresh managed destination migration unavailable: %v", err)
+	} else if a.store != nil {
+		if reloaded, loadErr := a.store.Load(ctx); loadErr == nil {
+			op = reloaded.Operation
+		} else {
+			log.Printf("Fresh post-migration operation load unavailable: %v", loadErr)
+		}
+	}
+	if _, err := a.ensureManagedRuntimeDesiredRunning(ctx, op); err != nil {
+		log.Printf("Fresh managed runtime desired state unavailable: %v", err)
+	}
+	return op
+}
+
+// ensureManagedRuntimeDesiredRunning atomically seeds the durable Running
+// desired state once a Manager-owned destination checkpoint (New Managed or
+// Adopt) is committed and complete, preserving any existing runtime_desired_v1
+// row and refusing unmigrated or operator-managed checkpoints.
 func (a *freshApplication) ensureManagedRuntimeDesiredRunning(ctx context.Context, op bootstrap.FreshOperation) (bool, error) {
-	if a == nil || a.runtime == nil || a.runtimeSettings == nil || !op.ProductComplete || !freshkeyapply.ManagerOwnedStrategy(op.Strategy) {
+	if a == nil || a.runtime == nil || a.runtimeSettings == nil || !op.ProductComplete || !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
 		return false, nil
 	}
-	if _, found, err := a.runtimeSettings.LoadEmbeddedRuntimeDesiredState(ctx); err != nil || found {
-		return false, err
+	return a.runtimeSettings.SeedEmbeddedRuntimeDesiredLifecycleIfAbsent(ctx, model.EmbeddedRuntimeDesiredRunning)
+}
+
+type freshDesiredStateStore struct {
+	app *freshApplication
+}
+
+func (a *freshApplication) desiredStateStore() runtimeservice.DesiredStateStore {
+	if a == nil || a.runtimeSettings == nil {
+		return nil
 	}
-	if _, err := a.runtimeSettings.SetEmbeddedRuntimeDesiredLifecycle(ctx, model.EmbeddedRuntimeDesiredRunning); err != nil {
-		return false, err
+	return freshDesiredStateStore{app: a}
+}
+
+// LoadEmbeddedRuntimeDesiredState returns the persisted desired state once
+// seeded at completion, or derives an in-memory Running obligation for an
+// incomplete Manager-owned installation whose destination is already committed
+// and whose pinned CPA engine is ready (#1166). While ProductComplete is false,
+// runtime_desired_v1 must remain absent from settings.
+func (s freshDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	if s.app == nil || s.app.runtimeSettings == nil {
+		return model.EmbeddedRuntimeDesiredState{}, false, nil
 	}
-	return true, nil
+	desired, found, err := s.app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(ctx)
+	if err != nil || found {
+		return desired, found, err
+	}
+	return s.app.incompleteManagedDesiredRunning(ctx)
+}
+
+func (a *freshApplication) incompleteManagedDesiredRunning(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	var zero model.EmbeddedRuntimeDesiredState
+	if a == nil || a.store == nil || a.runtime == nil || a.runtimeExternal != nil || a.managedSource == nil {
+		return zero, false, nil
+	}
+	record, err := a.store.Load(ctx)
+	if err != nil {
+		return zero, false, err
+	}
+	op := record.Operation
+	if op.ProductComplete || !freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) {
+		return zero, false, nil
+	}
+	if _, err := a.managedSource(ctx); err != nil {
+		return zero, false, nil
+	}
+	if a.artifact != nil {
+		artifactStatus, artifactErr := a.artifact.Status(ctx)
+		if artifactErr != nil {
+			return zero, false, artifactErr
+		}
+		if !artifactStatus.Ready() || artifactStatus.Active.ArtifactID != op.Strategy.TargetArtifactID {
+			return zero, false, nil
+		}
+	}
+	status, err := a.observeInstallationRuntime(ctx)
+	if err != nil {
+		return zero, false, err
+	}
+	if status.ProtocolVersion != "v1" || status.ActiveGatewayArtifact == nil ||
+		string(status.Identity) != op.Strategy.TargetIdentity ||
+		string(status.ActiveGatewayArtifact.ArtifactID) != op.Strategy.TargetArtifactID {
+		return zero, false, nil
+	}
+	return model.EmbeddedRuntimeDesiredState{
+		DesiredLifecycle: model.EmbeddedRuntimeDesiredRunning,
+		Revision:         1,
+		UpdatedAtMS:      1,
+	}, true, nil
 }

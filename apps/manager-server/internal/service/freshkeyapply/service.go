@@ -124,7 +124,7 @@ func (s *Service) target(ctx context.Context, p Permit) (model.RuntimeObservedSt
 		if string(v.Identity) != p.Identity {
 			return v, ErrGeneration
 		}
-		if v.Generation == 0 || v.State != model.RuntimeStateReady || v.ActiveGatewayArtifact == nil || !v.ActiveGatewayArtifact.ArtifactID.IsValid() {
+		if v.Validate() != nil || v.State != model.RuntimeStateReady || v.ActiveGatewayArtifact == nil {
 			return v, ErrUnavailable
 		}
 		return v, nil

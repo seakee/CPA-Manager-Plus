@@ -1,7 +1,6 @@
 package cpa
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 
@@ -23,26 +22,18 @@ import (
 // with the install-derived credential, and CPA rewrote that credential into its
 // own bcrypt digest.
 
-// adoptRoots is the closed set of root sections the pinned v8 document
-// projection may carry. It is CPA's own accepted vocabulary, not this Manager's
-// page: v8.0.55 derives `v8AllowedRoots()` from `buildV8Paths()`
-// (internal/config/config_v8.go:636), which accepts six literal roots —
-// config-version, api-keys, plugins, quota-exceeded, client, models — plus the
-// first segment of every migrated path (server, management, access, credentials,
-// routing, requests, oauth, upstream, multimedia, observability). `models` is
-// the one literal root the v8 projection never renders (it is not a migrated
-// path, internal/config/model_catalogs.go), so it stays out of this map: the
-// document this test reads cannot carry it.
-//
-// An adopted destination carries whatever its source carried, so this is a subset
-// membership test with no exact count: a root CPA itself would not read is a
-// document this Manager never proved, and nothing else is.
+// adoptRoots is the closed set of top-level sections an adopted CPA v8 document
+// may carry. All 16 CPA v8 roots (`v8AllowedRoots()` in CPA config_v8.go) are
+// enumerated explicitly: the 7 Supervisor-staged required sections plus the 9
+// optional operator/source sections (`api-keys`, `routing`, `requests`,
+// `upstream`, `client`, `multimedia`, `models`, `credentials`, `quota-exceeded`).
 var adoptRoots = map[string]bool{
 	"config-version": true,
 	"api-keys":       true,
 	"plugins":        true,
 	"quota-exceeded": true,
 	"client":         true,
+	"models":         true,
 	"server":         true,
 	"management":     true,
 	"access":         true,
@@ -135,94 +126,160 @@ func (t *Transport) postureOf() proofPosture {
 // minus the three rules an adoption legitimately breaks.
 func (p proofPosture) matchesAdopt(data []byte) bool {
 	var root map[string]json.RawMessage
-	if json.Unmarshal(data, &root) != nil {
+	if json.Unmarshal(data, &root) != nil || root == nil {
 		return false
 	}
-	for name := range root {
-		if !adoptRoots[name] {
-			return false
-		}
-	}
+	requiredSet := make(map[string]bool, len(adoptRequiredRoots))
 	for _, name := range adoptRequiredRoots {
 		if _, ok := root[name]; !ok {
 			return false
 		}
+		requiredSet[name] = true
 	}
-	var version int
-	if json.Unmarshal(root["config-version"], &version) != nil || version != 8 {
+	for name, raw := range root {
+		if requiredSet[name] {
+			continue
+		}
+		if !adoptRoots[name] || !isJSONObject(raw) {
+			return false
+		}
+	}
+	if !exactJSONInt(root["config-version"], 8) {
 		return false
 	}
-	var server struct {
-		Host string `json:"host"`
-		Port int    `json:"port"`
-	}
-	if json.Unmarshal(root["server"], &server) != nil || server.Port != 8317 {
-		return false
-	}
-	var management struct {
-		AllowRemote            bool   `json:"allow-remote"`
-		SecretKey              string `json:"secret-key"`
-		DisableControlPanel    bool   `json:"disable-control-panel"`
-		DisableAutoUpdatePanel bool   `json:"disable-auto-update-panel"`
-	}
-	if json.Unmarshal(root["management"], &management) != nil ||
-		!p.validDestinationBind(server.Host, management.AllowRemote) ||
-		!management.DisableControlPanel || !management.DisableAutoUpdatePanel ||
-		// CPA hashed the install-derived key at first startup. A plaintext value
-		// means this document is not the one the destination wrote back.
-		!looksLikeBcrypt(management.SecretKey) {
+	boundHost, ok := matchesAdoptServer(root["server"])
+	if !ok || !p.matchesManagedManagement(root["management"], boundHost) {
 		return false
 	}
 	var access map[string]json.RawMessage
-	var keys []string
 	// The adopted client list is the source's, so only its shape is checked here;
-	// the key policy is `validKeys`, which the snapshot caller applies. The
-	// section itself is exactly one leaf: `KeySnapshot` proves by blanking this
-	// list, so an extra access key must not be able to hide behind that rewrite.
-	if json.Unmarshal(root["access"], &access) != nil || len(access) != 1 ||
-		json.Unmarshal(access["api-keys"], &keys) != nil || keys == nil {
+	// the key policy is `validKeys`, which `KeySnapshot` applies before blanking
+	// `access.api-keys`. An extra access key is still refused.
+	if json.Unmarshal(root["access"], &access) != nil || len(access) != 1 || !isStringSlice(access["api-keys"]) {
 		return false
 	}
-	var oauth map[string]json.RawMessage
-	var authDir string
-	if json.Unmarshal(root["oauth"], &oauth) != nil || json.Unmarshal(oauth["auth-dir"], &authDir) != nil || !p.validAuthDir(authDir) {
+	if !p.matchesManagedOAuth(root["oauth"]) ||
+		!p.matchesManagedPlugins(root["plugins"]) ||
+		!p.matchesManagedObservability(root["observability"]) {
 		return false
 	}
-	var plugins map[string]json.RawMessage
-	var pluginDir string
-	// The enabled switch is the operator's own decision on the plugin page, which
-	// opens for an adopted installation, so either boolean is this template's. The
-	// recorded opt-in drives the first start only; it is not a proof. What is
-	// pinned is the Supervisor-owned directory, and the closed key set — a store
-	// source, a per-plugin config or an auth revision is a plugin configuration
-	// this Manager never wrote.
-	if json.Unmarshal(root["plugins"], &plugins) != nil || len(plugins) != 2 ||
-		(!bytes.Equal(plugins["enabled"], []byte("true")) && !bytes.Equal(plugins["enabled"], []byte("false"))) ||
-		json.Unmarshal(plugins["dir"], &pluginDir) != nil || !p.validPluginDir(pluginDir) {
-		return false
+	return true
+}
+
+// matchesAdoptServer enforces Supervisor's listener bind/port and disabled
+// TLS/mDNS/custom-path KV invariants while retaining safe source CPA `server.*`
+// settings that an adopted instance may carry:
+//   - Enforced: `host` + `port` (= 8317, paired with `management.allow-remote`).
+//   - Enforced disabled / confined: `tls` (`enable` absent or false),
+//     `discovery` (`enabled` absent or false), `kv-store` (`disabled` bool,
+//     `path` absent or empty so bbolt stays inside `<oauth.auth-dir>/kv.db`).
+//   - Retained safe source settings: `commercial-mode` (bool),
+//     `max-request-body-bytes` (non-negative int), `trusted-proxies` ([]string),
+//     `response-compression` ({enabled?: bool, min-bytes?: int}),
+//     `github-token` (string).
+//   - Rejected: enabled `tls` or `discovery`, non-empty `kv-store.path`, and
+//     every unknown `server` key.
+func matchesAdoptServer(raw json.RawMessage) (string, bool) {
+	var server map[string]json.RawMessage
+	if json.Unmarshal(raw, &server) != nil || server == nil {
+		return "", false
 	}
-	var observability struct {
-		Usage struct {
-			UsageStatisticsEnabled *bool `json:"usage-statistics-enabled"`
-		} `json:"usage"`
+	var boundHost string
+	if json.Unmarshal(server["host"], &boundHost) != nil || !exactJSONInt(server["port"], 8317) {
+		return "", false
 	}
-	if json.Unmarshal(root["observability"], &observability) != nil ||
-		observability.Usage.UsageStatisticsEnabled == nil || !*observability.Usage.UsageStatisticsEnabled {
-		return false
-	}
-	var obs map[string]json.RawMessage
-	if json.Unmarshal(root["observability"], &obs) != nil {
-		return false
-	}
-	if logs, ok := obs["logs"]; ok {
-		var nested struct {
-			LoggingToFile *bool `json:"logging-to-file"`
+	for key, val := range server {
+		switch key {
+		case "host", "port":
+		case "discovery":
+			if !matchesDisabledDiscovery(val) {
+				return "", false
+			}
+		case "tls":
+			if !matchesDisabledTLS(val) {
+				return "", false
+			}
+		case "kv-store":
+			if !matchesAdoptKVStore(val) {
+				return "", false
+			}
+		case "commercial-mode":
+			if _, ok := parseExactJSONBool(val); !ok {
+				return "", false
+			}
+		case "max-request-body-bytes":
+			if !exactJSONNonNegativeInt64(val) {
+				return "", false
+			}
+		case "trusted-proxies":
+			if !isStringSlice(val) {
+				return "", false
+			}
+		case "response-compression":
+			if !matchesResponseCompression(val) {
+				return "", false
+			}
+		case "github-token":
+			var token string
+			if json.Unmarshal(val, &token) != nil {
+				return "", false
+			}
+		default:
+			return "", false
 		}
-		if json.Unmarshal(logs, &nested) != nil || nested.LoggingToFile == nil || *nested.LoggingToFile {
+	}
+	return boundHost, true
+}
+
+func matchesAdoptKVStore(raw json.RawMessage) bool {
+	var kv map[string]json.RawMessage
+	if json.Unmarshal(raw, &kv) != nil || kv == nil {
+		return false
+	}
+	for key, val := range kv {
+		switch key {
+		case "disabled":
+			if _, ok := parseExactJSONBool(val); !ok {
+				return false
+			}
+		case "path":
+			var p string
+			if json.Unmarshal(val, &p) != nil || p != "" {
+				return false
+			}
+		default:
 			return false
 		}
 	}
 	return true
+}
+
+func matchesResponseCompression(raw json.RawMessage) bool {
+	var rc map[string]json.RawMessage
+	if json.Unmarshal(raw, &rc) != nil || rc == nil {
+		return false
+	}
+	for key, val := range rc {
+		switch key {
+		case "enabled":
+			if _, ok := parseExactJSONBool(val); !ok {
+				return false
+			}
+		case "min-bytes":
+			var n int
+			if json.Unmarshal(val, &n) != nil {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func exactJSONNonNegativeInt64(raw json.RawMessage) bool {
+	var v int64
+	return json.Unmarshal(raw, &v) == nil && v >= 0
 }
 
 // adoptMaxClientKeys is the adoption bound: a source with more client keys than

@@ -10,6 +10,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	runtimeservice "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/runtime"
 )
 
@@ -156,6 +157,12 @@ func TestCompletedManagedInstallAutoStartsOfflineRuntimeAfterRestartAndPreserves
 	app.runtime = client
 	app.runtimeExternal = nil
 
+	// An unmigrated or operator-managed checkpoint without DestinationConnectionIdentity
+	// must never seed runtime_desired_v1.
+	if unmigratedSeeded, seedErr := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); seedErr != nil || unmigratedSeeded {
+		t.Fatalf("ensureManagedRuntimeDesiredRunning without destination identity = (%v, %v), want (false, nil)", unmigratedSeeded, seedErr)
+	}
+	op.Strategy.DestinationConnectionIdentity = "managed:sha256:" + strings.Repeat("b", 64)
 	seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op)
 	if err != nil || !seeded {
 		t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
@@ -182,5 +189,126 @@ func TestCompletedManagedInstallAutoStartsOfflineRuntimeAfterRestartAndPreserves
 	}
 	if client.starts != 1 {
 		t.Fatalf("Supervisor restarted an explicitly stopped runtime: starts=%d", client.starts)
+	}
+}
+
+func TestIncompleteManagedInstallAutoStartsAfterRestartAndCompletesAcrossGenerations(t *testing.T) {
+	incompleteManaged := func(r *freshstore.Record, env managedInstallEnv) {
+		completedManagedInstall(r, env)
+		r.Operation.ProductComplete = false
+	}
+	harness := newManagedInstallHarnessWith(t, incompleteManaged, true)
+	app := harness.app
+
+	artifactMode := "ready"
+	artifactID := string(managedInstallRuntimeStatus().ActiveGatewayArtifact.ArtifactID)
+	otherArtifactID := "sha256:" + strings.Repeat("f", 64)
+	artifactServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer artifact-test-token" || r.URL.Path != "/v1/runtime/artifact" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch artifactMode {
+		case "missing":
+			_, _ = w.Write([]byte(`{"schemaVersion":1,"pinned":{"version":"8.0.55","artifactId":"` + artifactID + `"},"active":null,"required":true,"operation":null}`))
+		case "mismatch":
+			_, _ = w.Write([]byte(`{"schemaVersion":1,"pinned":{"version":"8.0.55","artifactId":"` + otherArtifactID + `"},"active":{"artifactId":"` + artifactID + `","origin":"acquired"},"required":false,"operation":null}`))
+		case "recovery":
+			_, _ = w.Write([]byte(`{"schemaVersion":1,"pinned":{"version":"8.0.55","artifactId":"` + artifactID + `"},"active":{"artifactId":"` + artifactID + `","origin":"acquired"},"required":false,"operation":{"id":"op-1","source":"upload","phase":"failed","receivedBytes":1,"totalBytes":1,"code":"recovery_required"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"schemaVersion":1,"pinned":{"version":"8.0.55","artifactId":"` + artifactID + `"},"active":{"artifactId":"` + artifactID + `","origin":"acquired"},"required":false,"operation":null}`))
+		}
+	}))
+	defer artifactServer.Close()
+	app.artifact = runtimeservice.NewArtifactClient(artifactServer.URL, "artifact-test-token")
+
+	restarted := managedInstallRuntimeStatus()
+	restarted.Generation = 991234
+	restarted.State = model.RuntimeStateOffline
+	restarted.Capabilities = model.RuntimeCapabilities{model.RuntimeCapabilityStart, model.RuntimeCapabilityStop}
+	restarted.Recovery = &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive}
+	client := &freshRuntimeTestClient{status: restarted}
+	app.runtime = client
+	app.runtimeExternal = nil
+	app.keyApply = freshkeyapply.NewManaged(app.keyRepo, app.keys, client, harness.endpoint, app.managedSource)
+
+	reconciler := runtimeservice.NewReconciler(app.runtime, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
+
+	// Non-ready #1166 artifact states must never trigger Start.
+	for _, blocked := range []string{"missing", "mismatch", "recovery"} {
+		artifactMode = blocked
+		if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+			t.Fatalf("ReconcileOnce(%s) = %v", blocked, err)
+		}
+		if client.starts != 0 {
+			t.Fatalf("Supervisor started while artifact was %s: starts=%d", blocked, client.starts)
+		}
+	}
+
+	// ConnectExternal checkpoints must never auto-start local Supervisor.
+	beforeExternal, err := app.store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalRec, err := app.store.Update(t.Context(), beforeExternal.Operation.Identity, beforeExternal.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+			Strategy: bootstrap.ConnectExternal, Stage: "committed",
+			TargetIdentity: freshkeyapply.ExternalIdentity(harness.endpoint), TargetGeneration: 1,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactMode = "ready"
+	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+		t.Fatalf("ReconcileOnce(external) = %v", err)
+	}
+	if client.starts != 0 {
+		t.Fatalf("Supervisor started for ConnectExternal: starts=%d", client.starts)
+	}
+
+	// Restore the incomplete NewManaged committed checkpoint.
+	if _, err := app.store.Update(t.Context(), externalRec.Operation.Identity, externalRec.Operation.Revision, func(r *freshstore.Record) error {
+		r.Operation.Strategy = beforeExternal.Operation.Strategy
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// With engine Ready and destination committed, Reconciler starts offline CPA
+	// without writing runtime_desired_v1 into settings before ProductComplete.
+	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+		t.Fatalf("ReconcileOnce(incomplete managed) = %v", err)
+	}
+	if client.starts != 1 {
+		t.Fatalf("Supervisor starts for incomplete managed = %d, want 1", client.starts)
+	}
+	if _, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context()); err != nil || found {
+		t.Fatalf("runtime_desired_v1 persisted before ProductComplete: found=%v err=%v", found, err)
+	}
+	if _, err := app.store.Load(t.Context()); err != nil {
+		t.Fatalf("Fresh store became unloadable before completion: %v", err)
+	}
+
+	// Once CPA reaches Ready on the new Supervisor generation, completion must
+	// still fail closed if destination client authentication is missing, and
+	// succeed once proven, seeding durable runtime_desired_v1 = running.
+	client.status.State = model.RuntimeStateReady
+	savedKeys := harness.destination.installed()
+	harness.destination.seed()
+	unprovenComplete := installationAPI(t, app, http.MethodPost, "complete", strategyTestAdmin)
+	if unprovenComplete.Code != http.StatusServiceUnavailable {
+		t.Fatalf("complete with unproven destination across generation = %d, want 503", unprovenComplete.Code)
+	}
+	harness.destination.seed(savedKeys...)
+	completed := installationAPI(t, app, http.MethodPost, "complete", strategyTestAdmin)
+	if completed.Code != http.StatusOK {
+		t.Fatalf("complete after restart generation rotation = %d %s", completed.Code, completed.Body.String())
+	}
+	desired, found, err := app.runtimeSettings.LoadEmbeddedRuntimeDesiredState(t.Context())
+	if err != nil || !found || desired.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning {
+		t.Fatalf("durable desired state after completion = %+v found=%v err=%v", desired, found, err)
 	}
 }

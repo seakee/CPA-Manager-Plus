@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/identity"
@@ -14,6 +16,8 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeyapply"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshkeys"
 )
+
+const freshKeysGatewayAdmissionTimeout = 1500 * time.Millisecond
 
 // Called only after canonical routing and the existing Admin verifier succeed.
 func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, resource string) {
@@ -96,7 +100,12 @@ func (a *freshApplication) clientKeys(w http.ResponseWriter, r *http.Request, op
 				return
 			}
 		}
-		gatewayPending := !(op.Routing.Committed && a.gatewayAdmissionProven(r.Context()))
+		gatewayPending := true
+		if op.Routing.Committed {
+			admitCtx, cancel := context.WithTimeout(r.Context(), freshKeysGatewayAdmissionTimeout)
+			gatewayPending = !a.gatewayAdmissionProven(admitCtx)
+			cancel()
+		}
 		writeFreshJSON(w, struct {
 			Keys                []freshkeys.Key `json:"keys"`
 			GatewayPending      bool            `json:"gatewayPending"`

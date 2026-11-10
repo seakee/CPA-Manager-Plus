@@ -1,6 +1,10 @@
 package freshkeyapply
 
-import "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+import (
+	"strings"
+
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
+)
 
 // ManagerOwnedStrategy reports whether one Fresh checkpoint describes an
 // installation this Manager itself owns: it staged the destination, started it,
@@ -18,6 +22,36 @@ import "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/b
 func ManagerOwnedStrategy(checkpoint bootstrap.FreshStrategyCheckpoint) bool {
 	_, ok := managerOwnedDestinationPrefix(checkpoint)
 	return ok
+}
+
+// ValidManagerOwnedDestinationCheckpoint reports whether one committed Fresh
+// checkpoint carries a verified Manager-owned destination connection identity
+// (`managed:sha256:<hex>` for New Managed, or `external:sha256:<hex>` for Adopt
+// with `network_existing`). Unmigrated start-only checkpoints and historical
+// operator-managed connections carry an empty DestinationConnectionIdentity and
+// return false.
+func ValidManagerOwnedDestinationCheckpoint(checkpoint bootstrap.FreshStrategyCheckpoint) bool {
+	if checkpoint.Stage != "committed" {
+		return false
+	}
+	prefix, owned := managerOwnedDestinationPrefix(checkpoint)
+	if !owned || !strings.HasPrefix(checkpoint.DestinationConnectionIdentity, prefix) {
+		return false
+	}
+	return validLowerHexDigest(strings.TrimPrefix(checkpoint.DestinationConnectionIdentity, prefix))
+}
+
+func validLowerHexDigest(digest string) bool {
+	if len(digest) != 64 {
+		return false
+	}
+	for index := range len(digest) {
+		ch := digest[index]
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // managerOwnedDestinationPrefix is the connection identity prefix the Manager

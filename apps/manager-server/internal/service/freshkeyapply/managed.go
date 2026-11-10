@@ -2,7 +2,6 @@ package freshkeyapply
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -153,8 +152,7 @@ func (s *Service) Targets(op bootstrap.FreshOperation, surface Surface) bool {
 		// qualify; an adopted destination is bound by the `external:` digest the
 		// adoption recorded, so the prefix is read from the strategy and never
 		// guessed from the value.
-		prefix, owned := managerOwnedDestinationPrefix(op.Strategy)
-		return owned && strings.HasPrefix(op.Strategy.DestinationConnectionIdentity, prefix)
+		return ValidManagerOwnedDestinationCheckpoint(op.Strategy)
 	case ProfilePrivate:
 		// The private H1/direct profile names one attested runtime and artifact;
 		// the Host permit remains the write authority for whatever it names.

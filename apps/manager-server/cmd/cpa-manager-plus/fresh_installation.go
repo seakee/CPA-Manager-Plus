@@ -59,7 +59,17 @@ func (a *freshApplication) managedInstallationReady(ctx context.Context, op boot
 		return false
 	}
 	s, err := a.observeInstallationRuntime(ctx)
-	return err == nil && s.ProtocolVersion == "v1" && s.State == model.RuntimeStateReady && s.ActiveGatewayArtifact != nil &&
-		string(s.Identity) == op.Strategy.TargetIdentity && uint64(s.Generation) == op.Strategy.TargetGeneration &&
-		string(s.ActiveGatewayArtifact.ArtifactID) == op.Strategy.TargetArtifactID
+	if err != nil || s.ProtocolVersion != "v1" || s.State != model.RuntimeStateReady || s.ActiveGatewayArtifact == nil ||
+		string(s.Identity) != op.Strategy.TargetIdentity || string(s.ActiveGatewayArtifact.ArtifactID) != op.Strategy.TargetArtifactID {
+		return false
+	}
+	if uint64(s.Generation) == op.Strategy.TargetGeneration {
+		return true
+	}
+	// Supervisor samples a fresh non-zero runtimeGeneration on every container
+	// restart. A legacy start-only checkpoint has no staged destination to prove
+	// across incarnations, whereas a durable destination-staged checkpoint can
+	// prove that the Ready CPA still serves this installation's credential,
+	// posture and client authentication.
+	return freshkeyapply.ValidManagerOwnedDestinationCheckpoint(op.Strategy) && a.gatewayAdmissionProven(ctx)
 }

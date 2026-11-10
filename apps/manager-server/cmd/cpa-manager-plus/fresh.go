@@ -948,26 +948,14 @@ func serveExistingFresh(ctx context.Context, cfg config.Config, paths sqliterepo
 	// Workers started by an in-process completion must use the host lifetime,
 	// not the request that triggered them.
 	app.runCtx = ctx
+	op := app.prepareCompletedStartup(ctx, opened.Record.Operation)
 	h.SetFreshHandler(app)
-	if app.runtimeExternal == nil && app.runtime != nil && app.runtimeSettings != nil {
-		reconciler := runtimeservice.NewReconciler(app.runtime, app.runtimeSettings, runtimeservice.DefaultReconcileInterval, log.Printf)
+	if desired := app.desiredStateStore(); app.runtimeExternal == nil && app.runtime != nil && desired != nil {
+		reconciler := runtimeservice.NewReconciler(app.runtime, desired, runtimeservice.DefaultReconcileInterval, log.Printf)
 		go reconciler.Run(ctx)
 	}
-	if opened.Record.Operation.ProductComplete {
-		if seeded, err := app.ensureManagedRuntimeDesiredRunning(ctx, opened.Record.Operation); err != nil {
-			log.Printf("Fresh managed runtime desired state unavailable: %v", err)
-		} else if seeded && app.runtimeExternal == nil && app.runtime != nil && app.runtimeSettings != nil {
-			reconciler := runtimeservice.NewReconciler(app.runtime, app.runtimeSettings, runtimeservice.DefaultReconcileInterval, log.Printf)
-			if err := reconciler.ReconcileOnce(ctx); err != nil {
-				log.Printf("[runtime-reconcile] %v", err)
-			}
-		}
-		if err := app.migrateManagedDestination(ctx); err != nil {
-			// Migration is durable and idempotent; keep the completed Fresh
-			// server available while a typed blocker waits for the next startup.
-			log.Printf("Fresh managed destination migration unavailable: %v", err)
-		}
-		app.startUsageCollection(opened.Record.Operation)
+	if op.ProductComplete {
+		app.startUsageCollection(op)
 	}
 	go restoreFreshRouting(ctx, app.routing)
 	go app.runFreshUpdateChecks(ctx)

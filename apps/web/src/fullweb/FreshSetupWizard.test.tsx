@@ -1042,3 +1042,105 @@ it('names the engine step, not the confirmation step, while the engine is not re
   expect(byID('engine-gate-next')).toBeTruthy();
   expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
 });
+
+it('resumes an incomplete committed New Managed installation across Supervisor generation restart', async () => {
+  let runtimeState = 'offline';
+  let operation: FreshOperation = {
+    version: 1,
+    identity,
+    revision: 4,
+    adminInitialized: true,
+    productComplete: false,
+    gatewayPending: true,
+    routing: { committed: false },
+    strategy: {
+      strategy: 'new_managed',
+      stage: 'committed',
+      targetIdentity: runtime.runtimeIdentity,
+      targetGeneration: runtime.runtimeGeneration,
+      targetArtifactId: runtime.activeGatewayArtifact.artifactId,
+      destinationConnectionIdentity: 'managed:sha256:' + 'c'.repeat(64),
+    },
+  };
+  const transport = vi.fn<typeof fetch>(async (url, init) => {
+    const resource = new URL(String(url)).pathname.split('/api/v2/')[1];
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (resource === 'claim/exchange')
+      return Response.json({ token: 'installation-session', operation });
+    if (resource === 'bootstrap/identity') {
+      return Response.json(
+        {
+          installationId: identity.installationId,
+          generation: identity.generation,
+          operationId: identity.operationId,
+          revision: 1,
+          target: operation.routing.target,
+          committed: operation.routing.committed,
+        },
+        { headers: { 'X-CPAMP-Route-Owner': 'manager' } }
+      );
+    }
+    if (resource === 'operation') {
+      if (operation.routing.committed && String(url).includes(BOOTSTRAP_UI.replace('/ui', '/api/')))
+        return new Response('', { status: 404 });
+      return Response.json(operation);
+    }
+    if (resource === 'installation/runtime') {
+      return Response.json({
+        ...runtime,
+        runtimeGeneration: 991234,
+        state: runtimeState,
+      });
+    }
+    if (resource === 'routing/prepare') {
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: {
+          target: body.target,
+          revision: 1,
+          operationId: identity.operationId,
+          stage: 'intent_persisted',
+          committed: false,
+        },
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'routing/activate') {
+      operation = {
+        ...operation,
+        revision: operation.revision + 1,
+        routing: { ...operation.routing, stage: 'committed', committed: true },
+      };
+      return Response.json(operation);
+    }
+    if (resource === 'complete') {
+      operation = { ...operation, revision: operation.revision + 1, productComplete: true };
+      return Response.json(operation);
+    }
+    throw new Error(`Unexpected resource ${resource}`);
+  });
+  setFullWebLanguage('zh-CN');
+  const client = createBootstrapTransport(transport);
+  const initialOperation = await client.start({
+    identity,
+    claimGeneration: 2,
+    token: 'claim-token',
+    resume: true,
+  });
+  await act(async () => {
+    renderer = create(<FreshSetupWizard initialOperation={initialOperation} transport={client} />);
+  });
+
+  // While Supervisor is bringing CPA back up on the new generation, show waitingRuntime, not setupError.
+  await click('setup-resume');
+  expect(JSON.stringify(renderer.toJSON())).toContain('CPA 正在启动');
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('初始化尚未完成');
+  expect(transport.mock.calls.some(([url]) => String(url).endsWith('/strategy'))).toBe(false);
+
+  // Once CPA is ready on the rotated generation, resume finishes routing and completion.
+  runtimeState = 'ready';
+  await click('setup-resume');
+  expect(byID('enter-console').props.href).toBe('/console');
+  expect(JSON.stringify(renderer.toJSON())).toContain('安装已完成');
+});

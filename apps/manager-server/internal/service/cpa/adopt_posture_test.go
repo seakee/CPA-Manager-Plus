@@ -46,6 +46,30 @@ func TestAdoptPostureAcceptsTheAdoptedDestination(t *testing.T) {
 			t.Fatalf("adopted destination rejected native loopback (%s)", name)
 		}
 	}
+	for name, body := range map[string]string{
+		"plugins enabled with installed plugin config and store sources": strings.Replace(
+			adoptDestinationConfig,
+			`"enabled":false,"dir":"/runtime/supervisor/plugins"`,
+			`"enabled":true,"dir":"/runtime/supervisor/plugins","configs":{"sample":{"enabled":true}},"store-sources":["https://plugins.example/index.json"]`,
+			1,
+		),
+		"models root override": strings.Replace(
+			adoptDestinationConfig,
+			`"routing":`,
+			`"models":{"catalog":"builtin","codex-catalog":"remote"},"routing":`,
+			1,
+		),
+		"retained safe server settings and disabled discovery/tls/kv-store": strings.Replace(
+			adoptDestinationConfig,
+			`"port":8317`,
+			`"port":8317,"commercial-mode":true,"max-request-body-bytes":10485760,"trusted-proxies":["10.0.0.0/8"],"response-compression":{"enabled":true,"min-bytes":512},"github-token":"ghp_example","discovery":{"service-type":"_ai-gateway._tcp","subtypes":["_chat-completions"]},"tls":{"enable":false},"kv-store":{"disabled":false}`,
+			1,
+		),
+	} {
+		if !adoptProofPosture().matches([]byte(body)) {
+			t.Fatalf("allowed adopted configuration %q rejected", name)
+		}
+	}
 }
 
 // TestAdoptPostureAcceptsThePluginGroupTheOperatorSaves is the P1 regression: the
@@ -80,6 +104,16 @@ func TestAdoptPostureAcceptsThePluginGroupTheOperatorSaves(t *testing.T) {
 	served.Store(strings.Replace(root, `"enabled":false`, `"enabled":true`, 1))
 	if snap, err := transport.KeySnapshot(t.Context(), testManagement()); err != nil || len(snap.Keys) != 2 {
 		t.Fatalf("a saved plugin switch broke the adopted proof: %v %+v", err, snap)
+	}
+	// Installing a plugin writes `plugins.configs` (and optional `store-sources`).
+	served.Store(strings.Replace(
+		root,
+		`"enabled":false,"dir":"/runtime/supervisor/plugins"`,
+		`"enabled":true,"dir":"/runtime/supervisor/plugins","configs":{"sample":{"enabled":true}},"store-sources":["https://plugins.example/index.json"]`,
+		1,
+	))
+	if snap, err := transport.KeySnapshot(t.Context(), testManagement()); err != nil || len(snap.Keys) != 2 {
+		t.Fatalf("an installed plugin config broke the adopted proof: %v %+v", err, snap)
 	}
 	// And back off again.
 	served.Store(root)
@@ -116,6 +150,14 @@ func TestAdoptPostureRefusesWhatTheManagerNeverStaged(t *testing.T) {
 		// `KeySnapshot` proves by blanking the client list, so an extra access
 		// leaf must be refused rather than hidden by that rewrite.
 		"extra access key": strings.Replace(adoptDestinationConfig, `"api-keys":[]`, `"api-keys":[],"extra":true`, 1),
+		"server tls enabled":              strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"tls":{"enable":true}`, 1),
+		"server discovery enabled":        strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"discovery":{"enabled":true}`, 1),
+		"server kv-store custom path":     strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"kv-store":{"path":"/tmp/kv.db"}`, 1),
+		"server unknown key":              strings.Replace(adoptDestinationConfig, `"port":8317`, `"port":8317,"unknown-server-key":true`, 1),
+		"observability pprof enabled":     strings.Replace(adoptDestinationConfig, `"usage":{"usage-statistics-enabled":true}`, `"usage":{"usage-statistics-enabled":true},"pprof":{"enable":true}`, 1),
+		"management unknown field":        strings.Replace(adoptDestinationConfig, `"disable-auto-update-panel":true`, `"disable-auto-update-panel":true,"base-url":"https://evil.example"`, 1),
+		"management non-bool allow-remote": strings.Replace(adoptDestinationConfig, `"allow-remote":true`, `"allow-remote":"true"`, 1),
+		"plugin auth revision":            strings.Replace(adoptDestinationConfig, `"enabled":false`, `"enabled":false,"auth-revision":2`, 1),
 	} {
 		if adoptProofPosture().matches([]byte(body)) {
 			t.Fatalf("%s permitted", name)
@@ -279,5 +321,21 @@ func TestKeySnapshotProvesTheAdoptedDestination(t *testing.T) {
 	transport.SetPostureSelector(func() (DestinationPosture, bool) { return PostureFor("new_managed") })
 	if _, err = transport.KeySnapshot(t.Context(), testManagement()); err == nil {
 		t.Fatal("new managed posture accepted an adopted destination")
+	}
+}
+
+func TestPostureAcceptsPluginStoreAuthAndRejectsMalformedStoreAuth(t *testing.T) {
+	withStoreAuth := strings.Replace(
+		adoptDestinationConfig,
+		`"enabled":false,"dir":"/runtime/supervisor/plugins"`,
+		`"enabled":true,"dir":"/runtime/supervisor/plugins","store-sources":["http://registry.internal/registry.json"],"store-auth":[{"match":"http://registry.internal/","allow-insecure":true}],"configs":{"sample-provider":{"enabled":true}}`,
+		1,
+	)
+	if !adoptProofPosture().matches([]byte(withStoreAuth)) {
+		t.Fatal("adopt posture rejected valid plugins.store-auth")
+	}
+	badStoreAuth := strings.Replace(withStoreAuth, `[{"match":"http://registry.internal/","allow-insecure":true}]`, `["not-an-object"]`, 1)
+	if adoptProofPosture().matches([]byte(badStoreAuth)) {
+		t.Fatal("adopt posture accepted non-object plugins.store-auth element")
 	}
 }
