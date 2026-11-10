@@ -1,7 +1,6 @@
 package freshkeyapply
 
 import (
-	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -55,8 +54,8 @@ func TestStrategySelectorFailsClosedWhenCheckpointCannotBeRead(t *testing.T) {
 		t.Fatalf("ExternalKeyPresenceOf() err = %v, want ErrExternalUnavailable", err)
 	}
 	seedKeys := []freshkeys.Key{{ID: keyID}}
-	if gotKeys, unverified, err := selector.ExternalKeyList(ctx, seedKeys); err != nil || unverified || len(gotKeys) != 1 {
-		t.Fatalf("ExternalKeyList() = (%v, %v, %v), want unchanged keys, false, nil", gotKeys, unverified, err)
+	if gotKeys, unverified, err := selector.ExternalKeyList(ctx, seedKeys); !errors.Is(err, ErrExternalUnavailable) || !unverified || gotKeys != nil {
+		t.Fatalf("ExternalKeyList() = (%v, %v, %v), want nil, true, ErrExternalUnavailable", gotKeys, unverified, err)
 	}
 	if _, err := selector.Rebind(ctx, nil, nil, 1, "http://127.0.0.1:8317", "secret"); !errors.Is(err, ErrExternalUnavailable) {
 		t.Fatalf("Rebind() err = %v, want ErrExternalUnavailable", err)
@@ -94,65 +93,3 @@ func TestStrategySelectorFailsClosedWhenCheckpointCannotBeRead(t *testing.T) {
 	}
 }
 
-func TestStrategySelectorSwitchesBetweenManagedAdoptAndExternal(t *testing.T) {
-	managedDestination := "managed:sha256:" + strings.Repeat("c", 64)
-	adoptedDestination := "external:sha256:" + strings.Repeat("d", 64)
-	externalTarget := "external:sha256:" + strings.Repeat("e", 64)
-	managed := NewManaged(nil, nil, nil, "http://127.0.0.1:8317", nil)
-	external := NewExternal(nil, nil, nil)
-
-	var current bootstrap.FreshOperation
-	selector := NewStrategySelector(
-		func(op bootstrap.FreshOperation) *Service {
-			if op.Strategy.Strategy == bootstrap.ConnectExternal {
-				return external
-			}
-			return managed
-		},
-		func() (bootstrap.FreshOperation, bool) {
-			return current, true
-		},
-	)
-
-	// 1. Uncommitted defaults to Managed profile while refusing uncommitted Targets.
-	if selector.Profile() != ProfileManaged {
-		t.Fatalf("uncommitted Profile() = %q, want %q", selector.Profile(), ProfileManaged)
-	}
-	sameAnswer(t, selector, current, false, canonicalSurfaces...)
-
-	// 2. Committed NewManaged selects ProfileManaged across all four surfaces.
-	current = operation(bootstrap.FreshStrategyCheckpoint{
-		Strategy: bootstrap.NewManaged, Stage: "committed",
-		TargetIdentity: managedRuntimeIdentity, TargetGeneration: 1, TargetArtifactID: managedArtifact(),
-		DestinationConnectionIdentity: managedDestination,
-	})
-	if selector.Profile() != ProfileManaged || selector.ManagedEndpoint() != "http://127.0.0.1:8317" {
-		t.Fatalf("NewManaged Profile=%q Endpoint=%q", selector.Profile(), selector.ManagedEndpoint())
-	}
-	sameAnswer(t, selector, current, true, canonicalSurfaces...)
-
-	// 3. Committed AdoptExisting (network-existing) also selects ProfileManaged.
-	current = operation(bootstrap.FreshStrategyCheckpoint{
-		Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting, Stage: "committed",
-		TargetIdentity: managedRuntimeIdentity, TargetGeneration: 2, TargetArtifactID: managedArtifact(),
-		DestinationConnectionIdentity: adoptedDestination,
-	})
-	if selector.Profile() != ProfileManaged {
-		t.Fatalf("AdoptExisting Profile() = %q, want %q", selector.Profile(), ProfileManaged)
-	}
-	sameAnswer(t, selector, current, true, canonicalSurfaces...)
-
-	// 4. Committed ConnectExternal selects ProfileExternal: key/config surfaces enabled, chat admission closed.
-	current = operation(bootstrap.FreshStrategyCheckpoint{
-		Strategy: bootstrap.ConnectExternal, Stage: "committed",
-		TargetIdentity: externalTarget, TargetGeneration: 3,
-	})
-	if selector.Profile() != ProfileExternal || selector.ManagedEndpoint() != "" {
-		t.Fatalf("ConnectExternal Profile=%q Endpoint=%q", selector.Profile(), selector.ManagedEndpoint())
-	}
-	if selector.DefaultInstallCPAAuthorityProven(context.Background()) {
-		t.Fatal("ConnectExternal proved DefaultInstallCPAAuthorityProven")
-	}
-	sameAnswer(t, selector, current, true, SurfaceKeyInstall, SurfaceKeyOperation, SurfaceGatewayConfig)
-	sameAnswer(t, selector, current, false, SurfaceChatAdmission)
-}

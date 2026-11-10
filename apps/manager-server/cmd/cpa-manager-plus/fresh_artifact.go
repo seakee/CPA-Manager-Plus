@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"strings"
 
@@ -31,17 +33,68 @@ func (a *freshApplication) fixedArtifact(w http.ResponseWriter, r *http.Request)
 	a.runtimeArtifact(w, r, op, resource)
 }
 
-func (a *freshApplication) artifactClient(op bootstrap.FreshOperation) *runtimeservice.ArtifactClient {
-	if a == nil || op.Strategy.Strategy == bootstrap.ConnectExternal {
+type gatedEmbeddedArtifactRuntime struct {
+	app *freshApplication
+}
+
+func (g gatedEmbeddedArtifactRuntime) enter(ctx context.Context) (*runtimeservice.ArtifactClient, context.Context, func(), error) {
+	if g.app == nil || g.app.artifact == nil {
+		return nil, nil, nil, errEmbeddedRuntimeDisabled
+	}
+	callCtx, release, err := g.app.enterEmbeddedExecution(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if g.app.artifact == nil {
+		release()
+		return nil, nil, nil, errEmbeddedRuntimeDisabled
+	}
+	return g.app.artifact, callCtx, release, nil
+}
+
+func (g gatedEmbeddedArtifactRuntime) Status(ctx context.Context) (runtimeservice.ArtifactStatus, error) {
+	client, callCtx, release, err := g.enter(ctx)
+	if err != nil {
+		return runtimeservice.ArtifactStatus{}, err
+	}
+	defer release()
+	return client.Status(callCtx)
+}
+
+func (g gatedEmbeddedArtifactRuntime) Probe(ctx context.Context) (runtimeservice.ArtifactProbeResult, error) {
+	client, callCtx, release, err := g.enter(ctx)
+	if err != nil {
+		return runtimeservice.ArtifactProbeResult{}, err
+	}
+	defer release()
+	return client.Probe(callCtx)
+}
+
+func (g gatedEmbeddedArtifactRuntime) Acquire(ctx context.Context, source string, cdnPrefix string) (runtimeservice.ArtifactOperationEnvelope, error) {
+	client, callCtx, release, err := g.enter(ctx)
+	if err != nil {
+		return runtimeservice.ArtifactOperationEnvelope{}, err
+	}
+	defer release()
+	return client.Acquire(callCtx, source, cdnPrefix)
+}
+
+func (g gatedEmbeddedArtifactRuntime) Upload(ctx context.Context, body io.Reader, contentLength int64) (runtimeservice.ArtifactOperationEnvelope, error) {
+	client, callCtx, release, err := g.enter(ctx)
+	if err != nil {
+		return runtimeservice.ArtifactOperationEnvelope{}, err
+	}
+	defer release()
+	return client.Upload(callCtx, body, contentLength)
+}
+
+func (a *freshApplication) artifactRuntime(op bootstrap.FreshOperation) artifactproxy.ArtifactRuntime {
+	if a == nil || a.artifact == nil || op.Strategy.Strategy == bootstrap.ConnectExternal {
 		return nil
 	}
-	return a.artifact
+	return gatedEmbeddedArtifactRuntime{app: a}
 }
 
 func (a *freshApplication) runtimeArtifact(w http.ResponseWriter, r *http.Request, op bootstrap.FreshOperation, resource string) {
-	var runtime artifactproxy.ArtifactRuntime
-	if artifact := a.artifactClient(op); artifact != nil {
-		runtime = artifact
-	}
-	artifactproxy.ServeResource(w, r, runtime, resource)
+	artifactproxy.ServeResource(w, r, a.artifactRuntime(op), resource)
 }

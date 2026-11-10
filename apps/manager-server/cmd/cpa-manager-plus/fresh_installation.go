@@ -14,12 +14,13 @@ import (
 // Observe through the existing Host-configured transport. Browser input cannot
 // choose a Runtime endpoint, credential, generation or installation authority.
 func (a *freshApplication) observeInstallationRuntime(ctx context.Context) (model.RuntimeObservedStatus, error) {
-	if a.runtime == nil {
+	client := a.embeddedRuntimeClient()
+	if client == nil {
 		return model.RuntimeObservedStatus{}, errors.New("installation Runtime is unavailable")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	s, err := a.runtime.Status(ctx)
+	s, err := client.Status(ctx)
 	if err == nil {
 		err = s.Validate()
 	}

@@ -136,7 +136,18 @@ func (a *freshApplication) installInitialClientKey(ctx context.Context, op boots
 	if a == nil || a.keyApply == nil {
 		return freshstrategy.InitialClientKey{}, freshkeyapply.ErrUnavailable
 	}
-	key, err := a.keyApply.EnsureInitialInstall(ctx, freshkeyapply.ManagedRunID(string(op.Identity.OperationID)), generation)
+	if a.store != nil {
+		if _, err := a.current(ctx); err != nil {
+			return freshstrategy.InitialClientKey{}, freshkeyapply.ErrUnavailable
+		}
+	}
+	managedOp := op
+	managedOp.Strategy.Strategy = bootstrap.NewManaged
+	authority := a.keyApply.ForOperation(managedOp)
+	if authority == nil {
+		return freshstrategy.InitialClientKey{}, freshkeyapply.ErrUnavailable
+	}
+	key, err := authority.EnsureInitialInstall(ctx, freshkeyapply.ManagedRunID(string(op.Identity.OperationID)), generation)
 	if err != nil {
 		return freshstrategy.InitialClientKey{}, err
 	}

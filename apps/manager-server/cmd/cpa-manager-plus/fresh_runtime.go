@@ -16,6 +16,7 @@ import (
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshstore"
 	sqliterepo "github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/sqlite"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/cpa"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/freshconfig"
@@ -262,22 +263,273 @@ func freshRuntimeResolveOperation(
 	return operation, false
 }
 
+var errEmbeddedRuntimeDisabled = errors.New("CPA runtime client is not configured")
+
+type freshEmbeddedExecutionGate struct {
+	mu                 sync.Mutex
+	inFlight           int
+	drained            chan struct{}
+	committingExternal bool
+	closed             bool
+	cancels            map[uint64]context.CancelFunc
+	nextID             uint64
+	reconcilerCancel   context.CancelFunc
+	reconcilerDone     chan struct{}
+}
+
+func (a *freshApplication) enterEmbeddedExecution(ctx context.Context) (context.Context, func(), error) {
+	if a == nil || a.runtime == nil {
+		return nil, nil, errEmbeddedRuntimeDisabled
+	}
+	gate := &a.embeddedExecution
+	gate.mu.Lock()
+	if gate.closed || gate.committingExternal {
+		gate.mu.Unlock()
+		return nil, nil, errEmbeddedRuntimeDisabled
+	}
+	callCtx, cancel := context.WithCancel(ctx)
+	gate.nextID++
+	id := gate.nextID
+	if gate.cancels == nil {
+		gate.cancels = make(map[uint64]context.CancelFunc)
+	}
+	gate.cancels[id] = cancel
+	if gate.inFlight == 0 {
+		gate.drained = make(chan struct{})
+	}
+	gate.inFlight++
+	gate.mu.Unlock()
+
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			cancel()
+			gate.mu.Lock()
+			delete(gate.cancels, id)
+			gate.inFlight--
+			if gate.inFlight == 0 && gate.drained != nil {
+				close(gate.drained)
+				gate.drained = nil
+			}
+			gate.mu.Unlock()
+		})
+	}
+
+	if a.store != nil {
+		op, err := a.current(callCtx)
+		if err != nil {
+			release()
+			return nil, nil, err
+		}
+		if op.Strategy.Strategy == bootstrap.ConnectExternal {
+			a.markEmbeddedExecutionClosed()
+			release()
+			return nil, nil, errEmbeddedRuntimeDisabled
+		}
+	}
+	if callCtx.Err() != nil {
+		release()
+		return nil, nil, errEmbeddedRuntimeDisabled
+	}
+	return callCtx, release, nil
+}
+
+func (a *freshApplication) cancelEmbeddedExecutionLocked() (chan struct{}, chan struct{}) {
+	gate := &a.embeddedExecution
+	if gate.reconcilerCancel != nil {
+		gate.reconcilerCancel()
+	}
+	for id, cancel := range gate.cancels {
+		cancel()
+		delete(gate.cancels, id)
+	}
+	var drained chan struct{}
+	if gate.inFlight > 0 {
+		drained = gate.drained
+	}
+	return drained, gate.reconcilerDone
+}
+
+func (a *freshApplication) markEmbeddedExecutionClosed() {
+	if a == nil {
+		return
+	}
+	gate := &a.embeddedExecution
+	gate.mu.Lock()
+	gate.closed = true
+	_, _ = a.cancelEmbeddedExecutionLocked()
+	gate.mu.Unlock()
+}
+
+func (a *freshApplication) beginExternalCommit() func() {
+	if a == nil {
+		return func() {}
+	}
+	gate := &a.embeddedExecution
+	gate.mu.Lock()
+	gate.committingExternal = true
+	drained, reconcilerDone := a.cancelEmbeddedExecutionLocked()
+	gate.mu.Unlock()
+	if drained != nil {
+		<-drained
+	}
+	if reconcilerDone != nil {
+		<-reconcilerDone
+	}
+	return func() {
+		gate.mu.Lock()
+		if !gate.closed {
+			gate.committingExternal = false
+		}
+		gate.mu.Unlock()
+	}
+}
+
+func (a *freshApplication) completeExternalCommit() {
+	if a == nil {
+		return
+	}
+	gate := &a.embeddedExecution
+	gate.mu.Lock()
+	gate.closed = true
+	gate.committingExternal = false
+	drained, reconcilerDone := a.cancelEmbeddedExecutionLocked()
+	gate.mu.Unlock()
+	if drained != nil {
+		<-drained
+	}
+	if reconcilerDone != nil {
+		<-reconcilerDone
+	}
+}
+
+func (a *freshApplication) embeddedExecutionStopped() bool {
+	if a == nil {
+		return true
+	}
+	gate := &a.embeddedExecution
+	gate.mu.Lock()
+	stopped := gate.closed || gate.committingExternal
+	gate.mu.Unlock()
+	return stopped
+}
+
+func (a *freshApplication) embeddedRuntimeClient() runtimeservice.RuntimeClient {
+	if a == nil || a.runtime == nil {
+		return nil
+	}
+	return gatedEmbeddedRuntimeClient{app: a}
+}
+
+type gatedEmbeddedRuntimeClient struct {
+	app *freshApplication
+}
+
+func (c gatedEmbeddedRuntimeClient) enter(ctx context.Context) (runtimeservice.RuntimeClient, context.Context, func(), error) {
+	if c.app == nil || c.app.runtime == nil {
+		return nil, nil, nil, errEmbeddedRuntimeDisabled
+	}
+	callCtx, release, err := c.app.enterEmbeddedExecution(ctx)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	client := c.app.runtime
+	if client == nil {
+		release()
+		return nil, nil, nil, errEmbeddedRuntimeDisabled
+	}
+	return client, callCtx, release, nil
+}
+func (c gatedEmbeddedRuntimeClient) wrapErr(err error) error {
+	if err != nil && (c.app == nil || c.app.embeddedExecutionStopped()) {
+		return errEmbeddedRuntimeDisabled
+	}
+	return err
+}
+
+func (c gatedEmbeddedRuntimeClient) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
+	client, callCtx, release, err := c.enter(ctx)
+	if err != nil {
+		return model.RuntimeObservedStatus{}, err
+	}
+	defer release()
+	out, err := client.Status(callCtx)
+	return out, c.wrapErr(err)
+}
+
+func (c gatedEmbeddedRuntimeClient) Start(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	client, callCtx, release, err := c.enter(ctx)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer release()
+	out, err := client.Start(callCtx, request)
+	return out, c.wrapErr(err)
+}
+
+func (c gatedEmbeddedRuntimeClient) Stop(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	client, callCtx, release, err := c.enter(ctx)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer release()
+	out, err := client.Stop(callCtx, request)
+	return out, c.wrapErr(err)
+}
+
+func (c gatedEmbeddedRuntimeClient) Restart(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	client, callCtx, release, err := c.enter(ctx)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer release()
+	out, err := client.Restart(callCtx, request)
+	return out, c.wrapErr(err)
+}
+
+func (c gatedEmbeddedRuntimeClient) PrepareUpdate(ctx context.Context, request model.RuntimePrepareUpdateRequest) (model.RuntimeOperationResult, error) {
+	client, callCtx, release, err := c.enter(ctx)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer release()
+	out, err := client.PrepareUpdate(callCtx, request)
+	return out, c.wrapErr(err)
+}
+
+func (c gatedEmbeddedRuntimeClient) ActivateUpdate(ctx context.Context, request model.RuntimeActivateUpdateRequest) (model.RuntimeOperationResult, error) {
+	client, callCtx, release, err := c.enter(ctx)
+	if err != nil {
+		return model.RuntimeOperationResult{}, err
+	}
+	defer release()
+	out, err := client.ActivateUpdate(callCtx, request)
+	return out, c.wrapErr(err)
+}
+
+func (c gatedEmbeddedRuntimeClient) ObserveUpdateOperation(ctx context.Context, request model.RuntimeObserveUpdateOperationRequest) (model.RuntimeUpdateOperationObservation, error) {
+	client, callCtx, release, err := c.enter(ctx)
+	if err != nil {
+		return model.RuntimeUpdateOperationObservation{}, err
+	}
+	defer release()
+	out, err := client.ObserveUpdateOperation(callCtx, request)
+	return out, c.wrapErr(err)
+}
+
 func (a *freshApplication) runtimeModeFor(op bootstrap.FreshOperation) model.RuntimeMode {
-	if a == nil || a.runtime == nil || op.Strategy.Strategy == bootstrap.ConnectExternal {
+	if a == nil {
+		return ""
+	}
+	if op.Strategy.Strategy == bootstrap.ConnectExternal {
 		return model.RuntimeModeExternal
 	}
 	return model.RuntimeModeEmbedded
 }
 
 func (a *freshApplication) effectiveRuntimeMode(ctx context.Context) model.RuntimeMode {
-	if a == nil {
+	if a == nil || a.store == nil {
 		return ""
-	}
-	if a.runtime == nil {
-		return model.RuntimeModeExternal
-	}
-	if a.runtimeExternal == nil || a.store == nil {
-		return model.RuntimeModeEmbedded
 	}
 	op, err := a.current(ctx)
 	if err != nil {
@@ -292,7 +544,7 @@ func (a *freshApplication) runtimeStatusClientFor(mode model.RuntimeMode) runtim
 	}
 	switch mode {
 	case model.RuntimeModeEmbedded:
-		return a.runtime
+		return a.embeddedRuntimeClient()
 	case model.RuntimeModeExternal:
 		return a.runtimeExternal
 	default:
@@ -304,6 +556,32 @@ func (a *freshApplication) runtimeStatusClientFor(mode model.RuntimeMode) runtim
 // installation profile.
 func (a *freshApplication) runtimeStatusClient() runtimeservice.RuntimeClient {
 	return a.runtimeStatusClientFor(a.effectiveRuntimeMode(context.Background()))
+}
+
+func (a *freshApplication) observeExternalRuntimeStatus(ctx context.Context, client runtimeservice.RuntimeClient) (model.RuntimeObservedStatus, bool, error) {
+	if a == nil || client == nil {
+		return model.RuntimeObservedStatus{}, false, errEmbeddedRuntimeDisabled
+	}
+	gate := &a.legacyCredentialGate
+	requestCtx := ctx
+	if !hasExternalCredentialHold(ctx, gate) {
+		if !gate.acquire(ctx) {
+			return model.RuntimeObservedStatus{}, false, ctx.Err()
+		}
+		var hold *externalCredentialHold
+		hold, requestCtx = beginExternalCredentialHold(ctx, gate, a.externalCredentialHeaderBudget())
+		defer hold.finish()
+	}
+	grant := a.externalReadGrant(requestCtx)
+	if grant.Refused {
+		return model.RuntimeObservedStatus{}, true, externalReadRefusedError()
+	}
+	observed, err := client.Status(requestCtx)
+	if err != nil {
+		a.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
+		return model.RuntimeObservedStatus{}, false, err
+	}
+	return observed, false, nil
 }
 
 type freshDatabaseStatusProvider struct {
@@ -319,10 +597,12 @@ type freshRuntimeClientAdapter struct {
 }
 
 func (c freshRuntimeClientAdapter) embeddedClient(ctx context.Context) (runtimeservice.RuntimeClient, error) {
-	if c.app != nil && c.app.effectiveRuntimeMode(ctx) == model.RuntimeModeEmbedded && c.app.runtime != nil {
-		return c.app.runtime, nil
+	if c.app != nil && c.app.effectiveRuntimeMode(ctx) == model.RuntimeModeEmbedded {
+		if client := c.app.embeddedRuntimeClient(); client != nil {
+			return client, nil
+		}
 	}
-	return nil, errors.New("CPA runtime client is not configured")
+	return nil, errEmbeddedRuntimeDisabled
 }
 
 func (c freshRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
@@ -333,29 +613,11 @@ func (c freshRuntimeClientAdapter) Status(ctx context.Context) (model.RuntimeObs
 		client = c.app.runtimeStatusClientFor(mode)
 	}
 	if client == nil {
-		return model.RuntimeObservedStatus{}, errors.New("CPA runtime client is not configured")
+		return model.RuntimeObservedStatus{}, errEmbeddedRuntimeDisabled
 	}
 	if c.app != nil && mode == model.RuntimeModeExternal {
-		gate := &c.app.legacyCredentialGate
-		requestCtx := ctx
-		if !hasExternalCredentialHold(ctx, gate) {
-			if !gate.acquire(ctx) {
-				return model.RuntimeObservedStatus{}, ctx.Err()
-			}
-			var hold *externalCredentialHold
-			hold, requestCtx = beginExternalCredentialHold(ctx, gate, c.app.externalCredentialHeaderBudget())
-			defer hold.finish()
-		}
-		grant := c.app.externalReadGrant(requestCtx)
-		if grant.Refused {
-			return model.RuntimeObservedStatus{}, externalReadRefusedError()
-		}
-		observed, err := client.Status(requestCtx)
-		if err != nil {
-			c.app.noteExternalRejection(context.WithoutCancel(requestCtx), grant, err)
-			return model.RuntimeObservedStatus{}, err
-		}
-		return observed, nil
+		observed, _, err := c.app.observeExternalRuntimeStatus(ctx, client)
+		return observed, err
 	}
 	return client.Status(ctx)
 }
@@ -427,8 +689,8 @@ func (a *freshApplication) refreshRuntimeOperations(
 	observedOK := false
 	if observed != nil {
 		status, observedOK = *observed, true
-	} else if a.runtime != nil {
-		status, err = a.runtime.Status(ctx)
+	} else if client := a.embeddedRuntimeClient(); client != nil {
+		status, err = client.Status(ctx)
 		observedOK = err == nil
 	}
 	now := time.Now().UTC()
@@ -541,19 +803,22 @@ func (a *freshApplication) runtimeStatus(w http.ResponseWriter, r *http.Request,
 		writeFreshJSON(w, freshRuntimeUnknownResponse(mode, "runtime_unavailable", a.runtimeJournal))
 		return
 	}
-	// An External CPA that already refused the stored credential is not asked
-	// again: CPA bans the address after five failed authentications, and this
-	// page polls. The status is the typed blocker, with whatever was last
-	// observed, until a rebind or a re-verify proves the key.
-	grant := a.externalReadGrant(r.Context())
-	if mode == string(model.RuntimeModeExternal) && grant.Refused {
-		writeFreshJSON(w, freshRuntimeUnknownResponse(mode, freshconfig.ReasonManagementRejected, a.runtimeJournal))
-		return
-	}
 	now := time.Now().UTC()
-	observed, err := statusClient.Status(r.Context())
+	var (
+		observed model.RuntimeObservedStatus
+		err      error
+	)
+	if runtimeMode == model.RuntimeModeExternal {
+		var refused bool
+		observed, refused, err = a.observeExternalRuntimeStatus(r.Context(), statusClient)
+		if refused {
+			writeFreshJSON(w, freshRuntimeUnknownResponse(mode, freshconfig.ReasonManagementRejected, a.runtimeJournal))
+			return
+		}
+	} else {
+		observed, err = statusClient.Status(r.Context())
+	}
 	if err != nil {
-		a.noteExternalRejection(r.Context(), grant, err)
 		writeFreshJSON(w, freshRuntimeUnknownResponse(mode, "runtime_unreachable", a.runtimeJournal))
 		return
 	}
@@ -686,7 +951,7 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 		freshRuntimeOperationError(w, http.StatusBadRequest, "invalid_action")
 		return
 	}
-	if a.runtimeModeFor(op) != model.RuntimeModeEmbedded || a.runtime == nil {
+	if a.runtimeModeFor(op) != model.RuntimeModeEmbedded || a.effectiveRuntimeMode(r.Context()) != model.RuntimeModeEmbedded || a.embeddedRuntimeClient() == nil {
 		freshRuntimeOperationError(w, http.StatusConflict, "runtime_mutation_unsupported")
 		return
 	}
@@ -720,8 +985,12 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 	}
 	// One observation fences the submission and resolves abandoned journal
 	// entries, so no second Runtime call is needed.
-	observed, err := a.runtime.Status(r.Context())
+	observed, err := a.embeddedRuntimeClient().Status(r.Context())
 	if err != nil {
+		if errors.Is(err, errEmbeddedRuntimeDisabled) || a.effectiveRuntimeMode(context.WithoutCancel(r.Context())) == model.RuntimeModeExternal {
+			freshRuntimeOperationError(w, http.StatusConflict, "runtime_mutation_unsupported")
+			return
+		}
 		freshRuntimeOperationError(w, http.StatusServiceUnavailable, "runtime_unreachable")
 		return
 	}
@@ -747,6 +1016,10 @@ func (a *freshApplication) submitRuntimeOperation(w http.ResponseWriter, r *http
 		State:           freshRuntimeStateAccepted,
 		RuntimeIdentity: string(observed.Identity), RuntimeGeneration: uint64(observed.Generation),
 		CreatedAt: now, UpdatedAt: now,
+	}
+	if a.effectiveRuntimeMode(r.Context()) != model.RuntimeModeEmbedded {
+		freshRuntimeOperationError(w, http.StatusConflict, "runtime_mutation_unsupported")
+		return
 	}
 	replayed, code := a.reserveRuntimeOperation(r.Context(), reserved)
 	switch code {
@@ -882,13 +1155,17 @@ func (a *freshApplication) submitRuntimeMutation(
 	operationType model.RuntimeOperationType,
 	request model.RuntimeMutationRequest,
 ) (model.RuntimeOperationResult, error) {
+	client := a.embeddedRuntimeClient()
+	if client == nil {
+		return model.RuntimeOperationResult{}, errEmbeddedRuntimeDisabled
+	}
 	switch operationType {
 	case model.RuntimeOperationStart:
-		return a.runtime.Start(ctx, request)
+		return client.Start(ctx, request)
 	case model.RuntimeOperationStop:
-		return a.runtime.Stop(ctx, request)
+		return client.Stop(ctx, request)
 	case model.RuntimeOperationRestart:
-		return a.runtime.Restart(ctx, request)
+		return client.Restart(ctx, request)
 	}
 	return model.RuntimeOperationResult{}, errors.New("unsupported runtime lifecycle operation")
 }
@@ -897,6 +1174,9 @@ func (a *freshApplication) submitRuntimeMutation(
 // desired lifecycle for a submitted operation. It is never called for a rejected
 // mutation, so a Supervisor conflict cannot leave the lifecycle flipped.
 func (a *freshApplication) applyRuntimeDesiredLifecycle(ctx context.Context, operationType model.RuntimeOperationType) error {
+	if a.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
+		return errEmbeddedRuntimeDisabled
+	}
 	desired := model.EmbeddedRuntimeDesiredRunning
 	if operationType == model.RuntimeOperationStop {
 		desired = model.EmbeddedRuntimeDesiredStopped
@@ -908,6 +1188,9 @@ func (a *freshApplication) applyRuntimeDesiredLifecycle(ctx context.Context, ope
 // runtimeMutationConflictCode maps the Supervisor rejections that guarantee no
 // side effect. Every other error leaves the result unknown.
 func runtimeMutationConflictCode(err error) string {
+	if errors.Is(err, errEmbeddedRuntimeDisabled) {
+		return "runtime_mutation_unsupported"
+	}
 	code, ok := runtimeservice.ErrorCode(err)
 	if !ok {
 		return ""
@@ -929,28 +1212,76 @@ func freshRuntimeOperationError(w http.ResponseWriter, status int, code string) 
 	}{Code: code})
 }
 
+type freshStoreView struct {
+	app *freshApplication
+}
+
+func (s freshStoreView) Load(ctx context.Context) (freshstore.Record, error) {
+	if s.app == nil || s.app.store == nil {
+		return freshstore.Record{}, freshstore.ErrNotFresh
+	}
+	return s.app.store.Load(ctx)
+}
+
+func (s freshStoreView) Create(ctx context.Context, id bootstrap.FreshIdentity, admin *model.AdminCredential) (freshstore.Record, error) {
+	if s.app == nil || s.app.store == nil {
+		return freshstore.Record{}, freshstore.ErrNotFresh
+	}
+	return s.app.store.Create(ctx, id, admin)
+}
+
+func (s freshStoreView) Update(ctx context.Context, id bootstrap.FreshIdentity, rev uint64, fn func(*freshstore.Record) error) (freshstore.Record, error) {
+	if s.app == nil || s.app.store == nil {
+		return freshstore.Record{}, freshstore.ErrNotFresh
+	}
+	return s.app.store.Update(ctx, id, rev, fn)
+}
+
 type freshEmbeddedDesiredStateStore struct {
 	app   *freshApplication
 	inner runtimeservice.DesiredStateStore
 }
 
 func (a *freshApplication) embeddedDesiredStateInner() runtimeservice.DesiredStateStore {
-	if a == nil || a.runtimeSettings == nil {
+	if a == nil {
 		return nil
+	}
+	if a.desiredState != nil {
+		return a.desiredState
 	}
 	return a.runtimeSettings
 }
 
 func (s freshEmbeddedDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
-	if s.app == nil || s.inner == nil || s.app.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
+	if s.app == nil || s.inner == nil {
 		return model.EmbeddedRuntimeDesiredState{}, false, nil
+	}
+	if s.app.store != nil {
+		op, err := s.app.current(ctx)
+		if err != nil {
+			return model.EmbeddedRuntimeDesiredState{}, false, err
+		}
+		if op.Strategy.Strategy == bootstrap.ConnectExternal {
+			s.app.markEmbeddedExecutionClosed()
+			return model.EmbeddedRuntimeDesiredState{}, false, nil
+		}
 	}
 	return s.inner.LoadEmbeddedRuntimeDesiredState(ctx)
 }
 
 func (s freshEmbeddedDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx context.Context) (model.RuntimeArtifactID, bool, error) {
-	if s.app == nil || s.inner == nil || s.app.effectiveRuntimeMode(ctx) != model.RuntimeModeEmbedded {
+	if s.app == nil || s.inner == nil {
 		return "", false, nil
+	}
+	if s.app.store != nil {
+		op, err := s.app.current(ctx)
+		if err != nil {
+			return "", false, err
+		}
+		if op.Strategy.Strategy == bootstrap.ConnectExternal {
+			s.app.markEmbeddedExecutionClosed()
+			return "", false, nil
+		}
 	}
 	committed, ok := s.inner.(interface {
 		LoadEmbeddedRuntimeCommittedArtifact(context.Context) (model.RuntimeArtifactID, bool, error)
@@ -966,21 +1297,42 @@ func (s freshEmbeddedDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx
 // and retires it permanently once Connect External is committed in-process.
 func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, interval time.Duration) {
 	desired := a.embeddedDesiredStateInner()
-	if a == nil || a.runtime == nil || desired == nil {
+	client := a.embeddedRuntimeClient()
+	if a == nil || client == nil || desired == nil {
 		return
 	}
 	if op, err := a.current(ctx); err == nil && op.Strategy.Strategy == bootstrap.ConnectExternal {
+		a.markEmbeddedExecutionClosed()
 		return
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	done := make(chan struct{})
+	gate := &a.embeddedExecution
+	gate.mu.Lock()
+	if gate.closed || gate.committingExternal {
+		gate.mu.Unlock()
+		cancel()
+		close(done)
+		return
+	}
+	gate.reconcilerCancel = cancel
+	gate.reconcilerDone = done
+	gate.mu.Unlock()
+	defer func() {
+		cancel()
+		gate.mu.Lock()
+		if gate.reconcilerDone == done {
+			gate.reconcilerCancel = nil
+			gate.reconcilerDone = nil
+		}
+		gate.mu.Unlock()
+	}()
 	reconciler := runtimeservice.NewReconciler(
-		a.runtime,
+		client,
 		freshEmbeddedDesiredStateStore{app: a, inner: desired},
 		interval,
 		log.Printf,
 	)
-	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		reconciler.Run(workerCtx)
@@ -1001,7 +1353,7 @@ func (a *freshApplication) runFreshEmbeddedReconciler(ctx context.Context, inter
 		case <-ticker.C:
 			op, err := a.current(ctx)
 			if err == nil && op.Strategy.Strategy == bootstrap.ConnectExternal {
-				cancel()
+				a.markEmbeddedExecutionClosed()
 				<-done
 				return
 			}

@@ -283,8 +283,14 @@ func (s *Service) ExternalKeyPresence(ctx context.Context, ids []identity.APIKey
 // are blockers: no read can settle them, and only a rebind resolves them. The list
 // of another profile is returned unchanged.
 func (s *Service) ExternalKeyList(ctx context.Context, keys []freshkeys.Key) ([]freshkeys.Key, bool, error) {
+	if s == nil {
+		return keys, false, nil
+	}
 	s = s.active()
-	if s == nil || s.profile != ProfileExternal {
+	if s == nil {
+		return nil, true, ErrExternalUnavailable
+	}
+	if s.profile != ProfileExternal {
 		return keys, false, nil
 	}
 	ids := make([]identity.APIKeyID, 0, len(keys))

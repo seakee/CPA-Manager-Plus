@@ -122,12 +122,29 @@ func freshRuntimeRequest(t *testing.T, action, requestID string) *http.Request {
 
 func freshRuntimeProductCompleteOperation(t *testing.T, app *freshApplication) bootstrap.FreshOperation {
 	t.Helper()
-	op, err := app.current(t.Context())
+	rec, err := app.store.Load(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	op.ProductComplete = true
-	return op
+	if !rec.Operation.ProductComplete {
+		rec, err = app.store.Update(t.Context(), rec.Operation.Identity, rec.Operation.Revision, func(r *freshstore.Record) error {
+			if r.Operation.Strategy.Strategy == "" {
+				r.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
+					Strategy:         bootstrap.NewManaged,
+					Stage:            "committed",
+					TargetIdentity:   "runtime-test",
+					TargetGeneration: 7,
+					TargetArtifactID: "sha256:" + strings.Repeat("a", 64),
+				}
+			}
+			r.Operation.ProductComplete = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return rec.Operation
 }
 
 func TestFreshRuntimeOperationsCapabilityIdempotencyAndConflict(t *testing.T) {
@@ -274,16 +291,20 @@ func TestFreshRuntimeExternalConstructionKeepsRuntimeStatusOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	installed := validInstallationRuntime()
 	routed, err := records.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected, err := opened.Protector.ProtectString(strings.Repeat("b", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := records.Update(t.Context(), routed.Operation.Identity, routed.Operation.Revision, func(record *freshstore.Record) error {
 		record.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
-			Strategy: bootstrap.NewManaged, Stage: "committed", TargetIdentity: string(installed.Identity),
-			TargetGeneration: uint64(installed.Generation), TargetArtifactID: string(installed.ActiveGatewayArtifact.ArtifactID),
+			Strategy: bootstrap.ConnectExternal, Stage: "committed",
+			TargetIdentity: "external:sha256:" + strings.Repeat("a", 64), TargetGeneration: 1,
 		}
+		record.Connection = &model.ManagerCPAConnectionConfig{CPABaseURL: "http://127.0.0.1:18399", ManagementKey: protected}
 		record.Operation.ProductComplete = true
 		return nil
 	}); err != nil {

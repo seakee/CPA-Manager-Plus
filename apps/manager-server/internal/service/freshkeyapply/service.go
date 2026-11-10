@@ -104,6 +104,13 @@ func (s *Service) activeFor(op bootstrap.FreshOperation) *Service {
 	return s.selectFor(op)
 }
 
+// ForOperation returns the concrete authority for an already-loaded Fresh
+// operation snapshot so a request can bind all authority checks to one
+// consistent decision.
+func (s *Service) ForOperation(op bootstrap.FreshOperation) *Service {
+	return s.activeFor(op)
+}
+
 func New(r *repo.Repository, keys *freshkeys.Service, runtime runtimeservice.RuntimeClient) *Service {
 	s := &Service{repo: r, keys: keys, runtime: runtime, wire: cpa.NewTransport(), permit: loadPermit,
 		keyPermit:     func(context.Context, string, string) (KeyPermit, error) { return loadKeyPermit() },
