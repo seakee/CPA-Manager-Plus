@@ -950,12 +950,13 @@ func serveExistingFresh(ctx context.Context, cfg config.Config, paths sqliterepo
 	app.runCtx = ctx
 	op := app.prepareCompletedStartup(ctx, opened.Record.Operation)
 	h.SetFreshHandler(app)
-	// The reconciler carries the Manager-owned installation's own obligation, so
-	// the committed Fresh checkpoint decides whether this process serves an
-	// embedded Runtime - not the presence of an External client, which the single
-	// official image always configures. It also runs before any installation
-	// commits: the desired state read then finds nothing and no mutation happens.
-	if desired := app.desiredStateStore(); app.runtime != nil && desired != nil && app.servesEmbeddedRuntime(ctx) {
+	// The reconciler worker itself is cheap and decides nothing until the store
+	// answers; LoadEmbeddedRuntimeDesiredState is the real gate and re-reads the
+	// committed checkpoint on every cycle, so an operation that commits
+	// `connect_external` after this process started stops being driven. Starting it
+	// unconditionally keeps that gate in one place instead of splitting the
+	// decision between startup and each cycle.
+	if desired := app.desiredStateStore(); app.runtime != nil && desired != nil {
 		reconciler := runtimeservice.NewReconciler(app.runtime, desired, runtimeservice.DefaultReconcileInterval, log.Printf)
 		go reconciler.Run(ctx)
 	}

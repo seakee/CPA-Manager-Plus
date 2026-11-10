@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
@@ -27,6 +28,36 @@ func (s failingFreshStore) Load(context.Context) (freshstore.Record, error) {
 	return freshstore.Record{}, s.err
 }
 
+// committedManagedCheckpoint is a completed Manager-owned installation: the
+// destination identity is the one fact the reconcile gate trusts, so a fixture
+// without it is an unmigrated checkpoint and drives nothing.
+func committedManagedCheckpoint() bootstrap.FreshStrategyCheckpoint {
+	return bootstrap.FreshStrategyCheckpoint{
+		Strategy: bootstrap.NewManaged, Stage: "committed",
+		TargetIdentity: "runtime-test", TargetGeneration: 7,
+		TargetArtifactID:              "sha256:" + strings.Repeat("a", 64),
+		DestinationConnectionIdentity: "managed:sha256:" + strings.Repeat("b", 64),
+	}
+}
+
+// unmigratedManagedCheckpoint is a committed New Managed checkpoint written
+// before the Manager recorded who staged the destination. It carries no
+// authority over the Runtime.
+func unmigratedManagedCheckpoint() bootstrap.FreshStrategyCheckpoint {
+	checkpoint := committedManagedCheckpoint()
+	checkpoint.DestinationConnectionIdentity = ""
+	return checkpoint
+}
+
+// externalCheckpoint is a Connect External installation, whose Runtime belongs
+// to the operator's CPA at the configured address.
+func externalCheckpoint() bootstrap.FreshStrategyCheckpoint {
+	return bootstrap.FreshStrategyCheckpoint{
+		Strategy: bootstrap.ConnectExternal, Stage: "committed",
+		TargetIdentity: "external:sha256:" + strings.Repeat("c", 64), TargetGeneration: 1,
+	}
+}
+
 // completedRuntimeTestApplication promotes the shared Fresh fixture to a
 // completed installation so the canonical Runtime resource is served through
 // the real ProductComplete gate.
@@ -39,11 +70,7 @@ func completedRuntimeTestApplication(t *testing.T) (*freshApplication, bootstrap
 		t.Fatal(err)
 	}
 	record, err := app.store.Update(t.Context(), op.Identity, op.Revision, func(record *freshstore.Record) error {
-		record.Operation.Strategy = bootstrap.FreshStrategyCheckpoint{
-			Strategy: bootstrap.NewManaged, Stage: "committed",
-			TargetIdentity: "runtime-test", TargetGeneration: 7,
-			TargetArtifactID: "sha256:" + strings.Repeat("a", 64),
-		}
+		record.Operation.Strategy = committedManagedCheckpoint()
 		record.Operation.ProductComplete = true
 		return nil
 	})
@@ -200,6 +227,7 @@ func TestCommittedArtifactPinsOnlyAnIncompleteInstallation(t *testing.T) {
 	// An unmigrated or operator-managed checkpoint was never staged by this
 	// Manager, so it carries no committed engine of its own.
 	unmanaged, _ := completedRuntimeTestApplication(t)
+	overrideCheckpoint(unmanaged, unmigratedManagedCheckpoint())
 	unmanagedAuthority, ok := unmanaged.desiredStateStore().(runtimeservice.CommittedArtifactStore)
 	if !ok {
 		t.Fatal("the completed desired state store does not publish the committed artifact")
@@ -209,71 +237,233 @@ func TestCommittedArtifactPinsOnlyAnIncompleteInstallation(t *testing.T) {
 	}
 }
 
-// The embedded reconcile worker belongs to a Manager-owned installation. The
-// presence of an External client cannot answer which mode this process serves,
-// because the single official image configures one for every installation, so the
-// committed checkpoint decides. A Connect External installation points at the
-// operator's CPA and must never drive the local Supervisor.
-func TestEmbeddedReconcilerServesOnlyManagerOwnedInstallations(t *testing.T) {
-	app, _ := completedRuntimeTestApplication(t)
-	for name, test := range map[string]struct {
-		strategy bootstrap.FreshStrategyCheckpoint
-		err      error
-		want     bool
-	}{
-		"committed managed": {
-			strategy: bootstrap.FreshStrategyCheckpoint{
-				Strategy: bootstrap.NewManaged, Stage: "committed",
-				TargetIdentity: "runtime-test", TargetGeneration: 7,
-				TargetArtifactID:              "sha256:" + strings.Repeat("a", 64),
-				DestinationConnectionIdentity: "managed:sha256:" + strings.Repeat("b", 64),
-			},
-			want: true,
-		},
-		"adopted": {
-			strategy: bootstrap.FreshStrategyCheckpoint{
-				Strategy: bootstrap.AdoptExisting, SourceClass: bootstrap.AdoptNetworkExisting, Stage: "committed",
-				TargetIdentity: "external:sha256:" + strings.Repeat("c", 64), TargetGeneration: 1,
-				TargetArtifactID:              "sha256:" + strings.Repeat("a", 64),
-				DestinationConnectionIdentity: "external:sha256:" + strings.Repeat("c", 64),
-			},
-			want: true,
-		},
-		"connect external": {
-			strategy: bootstrap.FreshStrategyCheckpoint{
-				Strategy: bootstrap.ConnectExternal, Stage: "committed",
-				TargetIdentity: "external:sha256:" + strings.Repeat("c", 64), TargetGeneration: 1,
-			},
-			want: false,
-		},
-		"nothing committed yet": {want: true},
-		// An unreadable checkpoint is not evidence of an External installation: the
-		// worker performs no mutation until it can read the desired state again.
-		"unreadable": {err: errors.New("Fresh store unavailable"), want: true},
-	} {
-		store := staticFreshStore{record: freshstore.Record{Operation: bootstrap.FreshOperation{Strategy: test.strategy}}, err: test.err}
-		subject := freshApplication{store: store}
-		if subject.servesEmbeddedRuntime(t.Context()) != test.want {
-			t.Fatalf("%s: servesEmbeddedRuntime() != %v", name, test.want)
-		}
-	}
-	// A real completed managed installation still serves the embedded Runtime.
-	if !app.servesEmbeddedRuntime(t.Context()) {
-		t.Fatal("completed managed installation does not serve the embedded Runtime")
-	}
-}
-
-// staticFreshStore serves one chosen record, so a decision that only reads the
-// committed checkpoint can be exercised without materialising that checkpoint
-// through the store's own validation.
-type staticFreshStore struct {
+// checkpointOverrideStore answers Load with the real record and one substituted
+// checkpoint, so a test can put any strategy in front of the production gate
+// without materialising a checkpoint the store's own validation would reject.
+// The real store still backs every other read, which is what makes the persisted
+// settings row and the substituted checkpoint meet in the same application.
+type checkpointOverrideStore struct {
 	freshstore.Store
-	record freshstore.Record
-	err    error
+	mu         sync.Mutex
+	checkpoint bootstrap.FreshStrategyCheckpoint
+	err        error
 }
 
-func (s staticFreshStore) Load(context.Context) (freshstore.Record, error) {
-	return s.record, s.err
+func (s *checkpointOverrideStore) Load(ctx context.Context) (freshstore.Record, error) {
+	s.mu.Lock()
+	checkpoint, err := s.checkpoint, s.err
+	s.mu.Unlock()
+	if err != nil {
+		return freshstore.Record{}, err
+	}
+	record, loadErr := s.Store.Load(ctx)
+	if loadErr != nil {
+		return freshstore.Record{}, loadErr
+	}
+	record.Operation.Strategy = checkpoint
+	return record, nil
+}
+
+func (s *checkpointOverrideStore) commit(checkpoint bootstrap.FreshStrategyCheckpoint) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.checkpoint = checkpoint
+}
+
+// fail makes every subsequent read answer with this error, which is how a
+// damaged or unreadable checkpoint reaches the gate.
+func (s *checkpointOverrideStore) fail(err error) *checkpointOverrideStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+	return s
+}
+
+// overrideCheckpoint installs one substituted checkpoint in front of the
+// production store and returns the handle a test uses to change it mid-run. The
+// application is owned by the test, so rewiring its store is local: the real
+// store still backs every other read, which is what makes the persisted settings
+// row and the substituted checkpoint meet in the same application.
+func overrideCheckpoint(app *freshApplication, checkpoint bootstrap.FreshStrategyCheckpoint) *checkpointOverrideStore {
+	store := &checkpointOverrideStore{Store: app.store, checkpoint: checkpoint}
+	app.store = store
+	return store
+}
+
+// The reconcile gate runs on every cycle and asks one question: does the
+// committed Fresh checkpoint name an installation this Manager staged? Every
+// other answer must yield no desired state at all, so a runtime_desired_v1 row
+// that outlives a mode change can never drive a Start or a Stop.
+func TestDesiredStateGateServesOnlyManagerOwnedInstallations(t *testing.T) {
+	for name, test := range map[string]struct {
+		prepare func(*freshApplication)
+		wantErr bool
+		want    bool
+	}{
+		"committed managed installation": {want: true},
+		"connect external": {
+			prepare: func(app *freshApplication) { overrideCheckpoint(app, externalCheckpoint()) },
+		},
+		"uncommitted operation": {
+			prepare: func(app *freshApplication) {
+				overrideCheckpoint(app, bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "staged"})
+			},
+		},
+		"unmigrated managed": {
+			prepare: func(app *freshApplication) { overrideCheckpoint(app, unmigratedManagedCheckpoint()) },
+		},
+		"nothing committed yet": {
+			prepare: func(app *freshApplication) { overrideCheckpoint(app, bootstrap.FreshStrategyCheckpoint{}) },
+		},
+		"unreadable checkpoint": {
+			prepare: func(app *freshApplication) {
+				overrideCheckpoint(app, committedManagedCheckpoint()).fail(errors.New("Fresh store unavailable"))
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			app, _ := completedRuntimeTestApplication(t)
+			// The row is present and says running: exactly the state that must not
+			// leak past the gate once the checkpoint stops naming a Manager-owned
+			// installation.
+			if _, err := app.runtimeSettings.SetEmbeddedRuntimeDesiredLifecycle(t.Context(), model.EmbeddedRuntimeDesiredRunning); err != nil {
+				t.Fatal(err)
+			}
+			if test.prepare != nil {
+				test.prepare(app)
+			}
+			desired, found, err := app.desiredStateStore().LoadEmbeddedRuntimeDesiredState(t.Context())
+			if test.wantErr {
+				// An unreadable checkpoint mutates nothing and reports the failure
+				// instead of quietly degrading to "no desired state".
+				if err == nil || found {
+					t.Fatalf("desired state = (%+v, %v, %v), want an error", desired, found, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadEmbeddedRuntimeDesiredState() error = %v", err)
+			}
+			if found != test.want {
+				t.Fatalf("desired state found = %v, want %v", found, test.want)
+			}
+			if found && desired.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning {
+				t.Fatalf("desired lifecycle = %q", desired.DesiredLifecycle)
+			}
+		})
+	}
+}
+
+// The gate is only worth anything if it reaches the Supervisor as "no mutation".
+// A persisted running desire would start an offline Runtime and a persisted
+// stopped desire would stop a ready one; neither may happen for a checkpoint that
+// does not name a Manager-owned installation.
+func TestNonManagerOwnedCheckpointNeverMutatesTheRuntime(t *testing.T) {
+	offline := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+	offline.State = model.RuntimeStateOffline
+	ready := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+	for name, test := range map[string]struct {
+		checkpoint bootstrap.FreshStrategyCheckpoint
+		desired    model.EmbeddedRuntimeDesiredLifecycle
+		status     model.RuntimeObservedStatus
+	}{
+		"connect external cannot be started": {
+			checkpoint: externalCheckpoint(), desired: model.EmbeddedRuntimeDesiredRunning, status: offline,
+		},
+		"connect external cannot be stopped": {
+			checkpoint: externalCheckpoint(), desired: model.EmbeddedRuntimeDesiredStopped, status: ready,
+		},
+		"uncommitted operation cannot be started": {
+			checkpoint: bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "staged"},
+			desired:    model.EmbeddedRuntimeDesiredRunning, status: offline,
+		},
+		"unmigrated managed cannot be stopped": {
+			checkpoint: unmigratedManagedCheckpoint(), desired: model.EmbeddedRuntimeDesiredStopped, status: ready,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			app, _ := completedRuntimeTestApplication(t)
+			if _, err := app.runtimeSettings.SetEmbeddedRuntimeDesiredLifecycle(t.Context(), test.desired); err != nil {
+				t.Fatal(err)
+			}
+			overrideCheckpoint(app, test.checkpoint)
+			client := &freshRuntimeTestClient{status: test.status}
+			app.runtime = client
+			reconciler := runtimeservice.NewReconciler(client, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
+			if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+				t.Fatalf("ReconcileOnce() error = %v", err)
+			}
+			if client.starts != 0 || client.stops != 0 {
+				t.Fatalf("non-owned checkpoint mutated the Runtime: starts=%d stops=%d", client.starts, client.stops)
+			}
+		})
+	}
+
+	// A store the Manager cannot read is a refusal, not a green light: the cycle
+	// reports the failure and still submits nothing.
+	t.Run("unreadable checkpoint reports and mutates nothing", func(t *testing.T) {
+		app, _ := completedRuntimeTestApplication(t)
+		if _, err := app.runtimeSettings.SetEmbeddedRuntimeDesiredLifecycle(t.Context(), model.EmbeddedRuntimeDesiredRunning); err != nil {
+			t.Fatal(err)
+		}
+		overrideCheckpoint(app, committedManagedCheckpoint()).fail(errors.New("Fresh store unavailable"))
+		client := &freshRuntimeTestClient{status: offline}
+		app.runtime = client
+		reconciler := runtimeservice.NewReconciler(client, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
+		if err := reconciler.ReconcileOnce(t.Context()); err == nil {
+			t.Fatal("ReconcileOnce() with an unreadable checkpoint = nil, want an error")
+		}
+		if client.starts != 0 || client.stops != 0 {
+			t.Fatalf("unreadable checkpoint mutated the Runtime: starts=%d stops=%d", client.starts, client.stops)
+		}
+	})
+}
+
+// One worker spans installation commits, so the gate cannot be a startup
+// decision. An operation that commits `connect_external` after the process
+// started must stop being driven from that cycle on - and it must start being
+// driven again only if a Manager-owned installation is restored.
+func TestReconcileGateFollowsACommitThatFlipsToConnectExternal(t *testing.T) {
+	app, _ := completedRuntimeTestApplication(t)
+	if _, err := app.runtimeSettings.SetEmbeddedRuntimeDesiredLifecycle(t.Context(), model.EmbeddedRuntimeDesiredRunning); err != nil {
+		t.Fatal(err)
+	}
+	offline := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+	offline.State = model.RuntimeStateOffline
+	client := &freshRuntimeTestClient{status: offline}
+
+	store := overrideCheckpoint(app, bootstrap.FreshStrategyCheckpoint{Strategy: bootstrap.NewManaged, Stage: "staged"})
+	app.runtime = client
+	reconciler := runtimeservice.NewReconciler(client, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
+
+	// The same worker instance owns all three cycles.
+	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+		t.Fatalf("ReconcileOnce(uncommitted) = %v", err)
+	}
+	if client.starts != 0 {
+		t.Fatalf("uncommitted operation started the Runtime: starts=%d", client.starts)
+	}
+	store.commit(externalCheckpoint())
+	offline.Generation = 8 // a restart between the two cycles
+	client.status = offline
+	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+		t.Fatalf("ReconcileOnce(connect external) = %v", err)
+	}
+	if client.starts != 0 {
+		t.Fatalf("Connect External commit started the Runtime: starts=%d", client.starts)
+	}
+	// Restoring a Manager-owned checkpoint proves the two negatives above were
+	// the gate and not a worker that had stopped deciding.
+	store.commit(committedManagedCheckpoint())
+	offline.Generation = 9
+	client.status = offline
+	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+		t.Fatalf("ReconcileOnce(committed managed) = %v", err)
+	}
+	if client.starts != 1 {
+		t.Fatalf("Manager-owned checkpoint starts = %d, want 1", client.starts)
+	}
 }
 
 // An unreadable checkpoint is a refusal, not an unfenced automatic start: the
@@ -336,15 +526,16 @@ func TestCompletedManagedInstallAutoStartsOfflineRuntimeAfterRestartAndPreserves
 
 	// An unmigrated or operator-managed checkpoint without DestinationConnectionIdentity
 	// must never seed runtime_desired_v1.
-	if unmigratedSeeded, seedErr := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); seedErr != nil || unmigratedSeeded {
+	unmigrated := op
+	unmigrated.Strategy.DestinationConnectionIdentity = ""
+	if unmigratedSeeded, seedErr := app.ensureManagedRuntimeDesiredRunning(t.Context(), unmigrated); seedErr != nil || unmigratedSeeded {
 		t.Fatalf("ensureManagedRuntimeDesiredRunning without destination identity = (%v, %v), want (false, nil)", unmigratedSeeded, seedErr)
 	}
-	op.Strategy.DestinationConnectionIdentity = "managed:sha256:" + strings.Repeat("b", 64)
 	seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op)
 	if err != nil || !seeded {
 		t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
 	}
-	reconciler := runtimeservice.NewReconciler(app.runtime, app.runtimeSettings, runtimeservice.DefaultReconcileInterval, nil)
+	reconciler := runtimeservice.NewReconciler(app.runtime, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
 	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
 		t.Fatalf("ReconcileOnce after restart = %v", err)
 	}

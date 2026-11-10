@@ -114,6 +114,19 @@ its wizard committed, so that pinned target overrides the observation. A store
 that cannot answer, or answers with a non-canonical identity, refuses the Start
 instead of falling back to an unfenced one.
 
+The reconcile worker therefore asks the committed checkpoint on *every* cycle
+whether this process may drive a Runtime at all. `runtime_desired_v1` is the
+*desired* lifecycle, never the authority over one: the committed Fresh
+checkpoint is. A Connect External installation, an operation that has not
+committed yet, and an unmigrated or operator-managed checkpoint (one carrying no
+verified `DestinationConnectionIdentity`) all answer "no desired state", so a row
+that outlives a mode change can drive neither a Start nor a Stop. A checkpoint
+the Manager cannot read reports its error and mutates nothing in that cycle,
+rather than degrading to an unowned Runtime. The worker is started
+unconditionally and the decision stays inside that one gate, which is what makes
+a `connect_external` commit that lands after the process started take effect on
+the next cycle.
+
 A Start the Supervisor records as failed is replayed under its original operation
 ID. A *new* attempt is issued only after that durable failure, after its retry
 delay, and at most `DefaultReconcileStartAttempts` times per generation, because
