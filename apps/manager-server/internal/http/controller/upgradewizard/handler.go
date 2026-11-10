@@ -280,6 +280,11 @@ type Handler struct {
 	// progress. Optional: when nil, the artifact routes report 503
 	// runtime_unavailable.
 	Artifact ArtifactRuntime
+	// PreserveManagerStore marks the Manager database path as an unadmitted,
+	// protected source (such as a 1.x volume mounted at /data during read-only
+	// discovery) so credential and status reads use private scratch snapshots
+	// instead of opening the database in place.
+	PreserveManagerStore bool
 	// lookupMount is the test seam for the mount lookup: a test substitutes a
 	// lookup that never answers to prove the bound and the one-in-flight rule.
 	// Production leaves it nil and the package's own inspectMount runs, so no
@@ -442,6 +447,7 @@ func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request, mount mou
 			Source:         mount.root,
 			SourceKnown:    mount.rootKnown,
 			SourceTimedOut: mount.code == CodeMountTimeout,
+			PreserveTarget: h.PreserveManagerStore,
 		}, key)
 	}
 	switch {
@@ -912,7 +918,19 @@ func (h *Handler) serveStatus(w http.ResponseWriter, r *http.Request, mount moun
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	document, err := readStatus(ctx, database)
+	var (
+		document statusDocument
+		err      error
+	)
+	if h.PreserveManagerStore {
+		if !mount.rootKnown || mount.code == CodeMountTimeout {
+			writeError(w, http.StatusServiceUnavailable, CodeMountTimeout)
+			return
+		}
+		document, err = readStatusPreservingTarget(ctx, database, mount.root)
+	} else {
+		document, err = readStatus(ctx, database)
+	}
 	if err != nil {
 		// A row that contradicts itself is its own condition: it is not the same
 		// as a store this step cannot read, and neither is a 500.
@@ -1118,6 +1136,14 @@ func validateStatusRow(row statusRow) error {
 // The marker is read before the store, exactly like startup admission. Staging
 // is never polled; absent targets and foreign sidecars remain resume evidence.
 func readStatus(ctx context.Context, databasePath string) (statusDocument, error) {
+	return readStatusWithOptions(ctx, databasePath, false, "")
+}
+
+func readStatusPreservingTarget(ctx context.Context, databasePath string, sourceRoot string) (statusDocument, error) {
+	return readStatusWithOptions(ctx, databasePath, true, sourceRoot)
+}
+
+func readStatusWithOptions(ctx context.Context, databasePath string, preserve bool, sourceRoot string) (statusDocument, error) {
 	document := emptyStatusDocument()
 	marker, inFlight, err := readCopyInMarker(databasePath)
 	if err != nil {
@@ -1127,7 +1153,15 @@ func readStatus(ctx context.Context, databasePath string) (statusDocument, error
 		return withCopyInMarker(document, marker), nil
 	}
 	// A committing marker may outlive the atomically published operation row.
-	recorded, found, err := readRecordedStatus(ctx, databasePath, document)
+	var (
+		recorded statusDocument
+		found    bool
+	)
+	if preserve {
+		recorded, found, err = readRecordedStatusPreserved(ctx, databasePath, sourceRoot, document)
+	} else {
+		recorded, found, err = readRecordedStatus(ctx, databasePath, document)
+	}
 	if err != nil {
 		return statusDocument{}, err
 	}
@@ -1172,6 +1206,31 @@ func readRecordedStatus(ctx context.Context, databasePath string, document statu
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	defer func() { _ = db.Close() }()
+	return readRecordedStatusFromDB(ctx, db, document)
+}
+
+func readRecordedStatusPreserved(ctx context.Context, databasePath string, sourceRoot string, document statusDocument) (statusDocument, bool, error) {
+	info, err := os.Lstat(databasePath)
+	if os.IsNotExist(err) {
+		return document, false, nil
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() == 0 {
+		return document, false, nil
+	}
+	// The private copy must stay out of both trees this read preserves: the data
+	// root that owns the database and the configured 1.x source root.
+	if err := upgradeservice.ValidateScratchDir("", strings.TrimSpace(sourceRoot), filepath.Dir(databasePath)); err != nil {
+		return statusDocument{}, false, err
+	}
+	snapshot, err := upgradeservice.OpenSnapshotWithRetry(ctx, upgradeservice.OpenSnapshot, databasePath, "")
+	if err != nil {
+		return statusDocument{}, false, err
+	}
+	defer func() { _ = snapshot.Close() }()
+	return readRecordedStatusFromDB(ctx, snapshot.DB(), document)
+}
+
+func readRecordedStatusFromDB(ctx context.Context, db *sql.DB, document statusDocument) (statusDocument, bool, error) {
 	var present int
 	if err := db.QueryRowContext(ctx, `select count(*) from sqlite_master where type = 'table' and name = 'upgrade_operations'`).Scan(&present); err != nil {
 		return statusDocument{}, false, err
@@ -1180,7 +1239,7 @@ func readRecordedStatus(ctx context.Context, databasePath string, document statu
 		return document, false, nil
 	}
 	var row statusRow
-	err = db.QueryRowContext(ctx, `select stage, domains_done, source_kind, source_version,
+	err := db.QueryRowContext(ctx, `select stage, domains_done, source_kind, source_version,
 		reconciliation, manual_items, error_code, error_detail, created_at_ms, updated_at_ms
 		from upgrade_operations where id = 1`).Scan(&row.Stage, &row.Domains, &row.SourceKind, &row.SourceVersion,
 		&row.Reconciled, &row.ManualItems, &row.ErrorCode, &row.ErrorDetail, &row.CreatedAtMS, &row.UpdatedAtMS)

@@ -37,13 +37,14 @@ type Handler struct {
 	// that copy must not land in the tree the upgrade preserves. It is resolved
 	// once, here, exactly as the surface's credential rule resolved it; the
 	// wizard reads resolve the mount per request.
-	sourceRoot         string
-	instance           [32]byte
-	mu                 sync.Mutex
-	observed           sqlite.LegacyInspection
-	encoded            string
-	credentialRevision string
-	publicOrigin       string
+	sourceRoot           string
+	preserveManagerStore bool
+	instance             [32]byte
+	mu                   sync.Mutex
+	observed             sqlite.LegacyInspection
+	encoded              string
+	credentialRevision   string
+	publicOrigin         string
 }
 
 // StatusObservationUnavailable is the entry's answer when the presented key is
@@ -65,6 +66,15 @@ func New(paths sqlite.InspectionPaths, publicOrigin string, mountSource bool, so
 	return h, nil
 }
 
+// SetPreserveManagerStore marks the fallback Manager database path as an
+// unadmitted, protected source so credential verification reads a private
+// snapshot rather than opening the store in place.
+func (h *Handler) SetPreserveManagerStore(preserve bool) {
+	if h != nil {
+		h.preserveManagerStore = preserve
+	}
+}
+
 // verifyCredential proves the key against the one credential file this surface
 // resolved, reading it the way that file requires.
 func (h *Handler) verifyCredential(ctx context.Context, key string) error {
@@ -78,9 +88,10 @@ func (h *Handler) verifyCredential(ctx context.Context, key string) error {
 	// startup, and an absent mount resolves to no root at all — so an operator's
 	// TMPDIR inside it is refused by the service instead of staging a copy there.
 	return upgradeservice.VerifyManagerCredential(ctx, h.paths.Database, upgradeservice.CredentialSnapshotRoots{
-		Target:      filepath.Dir(h.paths.Database),
-		Source:      h.sourceRoot,
-		SourceKnown: true,
+		Target:         filepath.Dir(h.paths.Database),
+		Source:         h.sourceRoot,
+		SourceKnown:    true,
+		PreserveTarget: h.preserveManagerStore,
 	}, key)
 }
 

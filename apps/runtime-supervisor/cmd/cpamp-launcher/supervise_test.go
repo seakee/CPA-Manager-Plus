@@ -116,6 +116,7 @@ func runTestHelperProcess(role string) {
 			defer ln.Close()
 			bootstrapOnly := os.Getenv("CPAMP_TEST_HTTP_BOOTSTRAP_ONLY") == "1"
 			readOnlyUnavailable := os.Getenv("CPAMP_TEST_HTTP_READONLY_UNAVAILABLE") == "1"
+			slowBootstrap := os.Getenv("CPAMP_TEST_HTTP_SLOW_BOOTSTRAP") == "1"
 			unsettledGateFile := os.Getenv("CPAMP_TEST_HTTP_SETTLED_FILE")
 			isSettled := func() bool {
 				if unsettledGateFile == "" {
@@ -134,7 +135,14 @@ func runTestHelperProcess(role string) {
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte("ok"))
 			})
-			mux.HandleFunc("/.well-known/cpamp-bootstrap", func(w http.ResponseWriter, _ *http.Request) {
+			mux.HandleFunc("/.well-known/cpamp-bootstrap", func(w http.ResponseWriter, r *http.Request) {
+				if slowBootstrap {
+					select {
+					case <-time.After(600 * time.Millisecond):
+					case <-r.Context().Done():
+						return
+					}
+				}
 				if !isSettled() || readOnlyUnavailable {
 					w.WriteHeader(http.StatusServiceUnavailable)
 					_, _ = w.Write([]byte(`{"status":"unavailable"}`))
@@ -906,6 +914,46 @@ func TestManagerReadOnlyDiscoveryUnavailableStartsIngressOnlyAfterShellMounted(t
 			cancel()
 			t.Fatalf("write settled marker: %v", err)
 		}
+		waitForEvents(t, eventFile, 3, func(events []recordedEvent) bool {
+			for _, e := range events {
+				if e.Kind == "start" && e.Role == "ingress" {
+					return true
+				}
+			}
+			return false
+		})
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("RunSupervisor failed: %v", err)
+		}
+	})
+
+	t.Run("slow discovery snapshot exceeding poll timeout still admits ingress once ui is 200", func(t *testing.T) {
+		eventFile := filepath.Join(t.TempDir(), "events.log")
+		mgrAddr := reserveLoopbackAddr(t)
+
+		var errBuf bytes.Buffer
+		cfg := SupervisorConfig{
+			SupervisorSpec: helperChildSpec(t, "supervisor", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			ManagerSpec: helperChildSpec(t, "manager",
+				"CPAMP_TEST_EVENT_FILE="+eventFile,
+				"CPAMP_TEST_HTTP_LISTEN_ADDR="+mgrAddr,
+				"CPAMP_TEST_HTTP_BOOTSTRAP_ONLY=1",
+				"CPAMP_TEST_HTTP_SLOW_BOOTSTRAP=1",
+			),
+			IngressSpec:      helperChildSpec(t, "ingress", "CPAMP_TEST_EVENT_FILE="+eventFile),
+			ManagerHealthURL: "http://" + mgrAddr + "/health",
+			Timings:          fastTimings(),
+			Stdout:           &bytes.Buffer{},
+			Stderr:           &errBuf,
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			done <- RunSupervisor(ctx, cfg)
+		}()
+
 		waitForEvents(t, eventFile, 3, func(events []recordedEvent) bool {
 			for _, e := range events {
 				if e.Kind == "start" && e.Role == "ingress" {

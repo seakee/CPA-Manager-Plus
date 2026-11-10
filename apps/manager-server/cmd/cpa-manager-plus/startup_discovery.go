@@ -35,6 +35,10 @@ type startupHTTPHandler struct {
 	upgradeAuth       http.Handler
 	upgradeWizard     *upgradewizard.Handler
 	upgradeArtifact   upgradewizard.ArtifactRuntime
+	// discoveryObserver coalesces the concurrent unauthenticated observations of
+	// the one source this process is looking at, and remembers the projection it
+	// already proved for it while the source is unchanged.
+	discoveryObserver *discoveryObservation
 	next              atomic.Value // *startupHandlerTarget
 	lifecycle         atomic.Value // routingdomain.DiscoveryLifecycle
 	ready             atomic.Bool
@@ -46,7 +50,11 @@ type startupHandlerTarget struct {
 }
 
 func newStartupHTTPHandler(result bootstrap.PublicDiscovery) *startupHTTPHandler {
-	h := &startupHTTPHandler{projection: result, readOnlyShell: httpapi.BootstrapWebHandler()}
+	h := &startupHTTPHandler{
+		projection:        result,
+		readOnlyShell:     httpapi.BootstrapWebHandler(),
+		discoveryObserver: &discoveryObservation{},
+	}
 	h.lifecycle.Store(routingdomain.DiscoveryActive)
 	h.discovery = routingdomain.DiscoveryHandler{
 		Lifecycle: h.discoveryLifecycle,
@@ -189,7 +197,16 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 	// per-request filesystem call it cannot bound.
 	legacyRoot := configuredLegacyRoot()
 	credentialPaths, mountSource := upgradeCredentialPaths(legacyRoot, paths)
+	// A database this process was not admitted on is never its own live store:
+	// before startup admission every read of paths.Database is a read of
+	// somebody else's volume, and a 1.x volume mounted at /data with a WAL of
+	// its own is exactly that. Both leaves must therefore prove the key and read
+	// the recorded operation through a private snapshot; opening the file in
+	// place would create or rewrite its -shm beside the source, and a read-only
+	// mount would answer 503 for a source discovery just called upgradable.
+	preserveManagerStore := admitted == nil
 	if handler, err := upgradeauth.New(credentialPaths, os.Getenv("CPAMP_PUBLIC_ORIGIN"), mountSource, legacyRoot); err == nil {
+		handler.SetPreserveManagerStore(preserveManagerStore)
 		h.upgradeAuth = handler
 		// The wizard routes resolve the credential with the surface's one rule
 		// from the mount they inspect and this database, exactly as the entry
@@ -198,11 +215,12 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 		// record, so the fixed surface is the only carrier that can still show
 		// what it recorded — and the only one that can run the completion gate.
 		h.upgradeWizard = &upgradewizard.Handler{
-			LegacyRoot:   configuredLegacyRoot,
-			PublicOrigin: strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
-			Database:     func() string { return paths.Database },
-			Timeout:      upgradewizard.DefaultTimeout,
-			Artifact:     h.upgradeArtifact,
+			LegacyRoot:           configuredLegacyRoot,
+			PublicOrigin:         strings.TrimSpace(os.Getenv("CPAMP_PUBLIC_ORIGIN")),
+			Database:             func() string { return paths.Database },
+			Timeout:              upgradewizard.DefaultTimeout,
+			Artifact:             h.upgradeArtifact,
+			PreserveManagerStore: preserveManagerStore,
 		}
 	}
 	if admitted != nil {
@@ -217,30 +235,176 @@ func (h *startupHTTPHandler) enableReadOnlyDiscovery(paths sqliterepo.Inspection
 	h.readOnlyDiscovery = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
-		handled := false
-		legacypreflight.WithFencedInspection(ctx, paths, options, func(report legacypreflight.Report, err error) {
-			result := bootstrapdiscovery.Project(bootstrapdiscovery.Input{Report: report, InspectionError: err})
-			if result.Status != bootstrap.PublicUnavailable || err == nil {
-				handled = true
+		h.discoveryObserver.observe(ctx, paths.Database,
+			func(consume func(bootstrap.PublicDiscovery)) (bootstrap.PublicDiscovery, bool) {
+				return observeReadOnlyDiscovery(ctx, paths, options, legacyRoot, consume)
+			},
+			func(result bootstrap.PublicDiscovery) {
 				bootstrapdiscovery.Handler{Discovery: result}.ServeHTTP(w, r)
-			}
-		})
-		if handled {
+			})
+	})
+}
+
+// observeReadOnlyDiscovery is the one read-only discovery of a source: the
+// Phase4-01 inspection first, and the stopped 1.x journal observation when that
+// inspection cannot describe the source. The projection is served through
+// consume while the ownership fence of whichever stage answered is still held,
+// and the second result says whether that projection may be reused for an
+// unchanged source.
+func observeReadOnlyDiscovery(
+	ctx context.Context,
+	paths sqliterepo.InspectionPaths,
+	options legacypreflight.Options,
+	legacyRoot string,
+	consume func(bootstrap.PublicDiscovery),
+) (bootstrap.PublicDiscovery, bool) {
+	projection := bootstrapdiscovery.Unavailable()
+	answered := false
+	legacypreflight.WithFencedInspection(ctx, paths, options, func(report legacypreflight.Report, err error) {
+		result := bootstrapdiscovery.Project(bootstrapdiscovery.Input{Report: report, InspectionError: err})
+		if result.Status != bootstrap.PublicUnavailable || err == nil {
+			answered = true
+			projection = result
+			consume(result)
+		}
+	})
+	if answered {
+		// A fail-closed projection is never remembered: it names this moment, not
+		// the source, and the operator's next move is to change it.
+		return projection, projection.Status != bootstrap.PublicUnavailable
+	}
+	// The rollback-mode inspection cannot describe a source whose committed rows
+	// are still in a journal — every 1.x v1.14.x release runs in WAL mode — so
+	// the fenced private copy answers instead, and its verdict is the one the
+	// entry page needs before it can offer the 1.x administrator key.
+	_, reusable := upgradeservice.InspectReadOnlyLegacySource(ctx, paths.Database, legacyRoot, func(obs upgradeservice.LegacyDiscoveryObservation) {
+		projection = legacyDiscoveryProjection(obs)
+		consume(projection)
+	})
+	return projection, reusable
+}
+
+// legacyDiscoveryProjection maps the bounded legacy verdict onto the public
+// contract. Only the conditions that name an operator action are projected; an
+// unavailable answer stays unavailable.
+func legacyDiscoveryProjection(obs upgradeservice.LegacyDiscoveryObservation) bootstrap.PublicDiscovery {
+	switch obs {
+	case upgradeservice.LegacyDiscoveryOwnershipUnavailable:
+		return bootstrapdiscovery.SourceOwnershipUnavailable()
+	case upgradeservice.LegacyDiscoveryUnsupportedUpgrade:
+		return bootstrapdiscovery.UnsupportedUpgrade()
+	case upgradeservice.LegacyDiscoveryRecoveryRequired:
+		return bootstrapdiscovery.RecoveryRequired()
+	default:
+		return bootstrapdiscovery.Unavailable()
+	}
+}
+
+// discoveryObservation coalesces the concurrent unauthenticated observations of
+// one source and remembers the projection it produced while that source was
+// unchanged.
+//
+// Both stages of the read-only path take the source's ownership marker for the
+// duration of their read, so two overlapping requests refuse each other's fence
+// and report a source nobody is writing as unavailable — the public port then
+// looks unreachable for reasons that never touch the source. One flight per
+// source removes that self-contention, and a projection that is a statement
+// about the source's content is served again while LegacySourceIdentity is
+// unchanged, so a poll does not copy the whole database again.
+//
+// A remembered projection grants nothing: it is the bounded public discovery
+// document, and every write gate behind it — the Upgrade entry, the wizard's
+// action and the preflight — fences the source again on its own.
+type discoveryObservation struct {
+	mu      sync.Mutex
+	sources map[string]*discoveryObservationState
+}
+
+type discoveryObservationState struct {
+	flight *discoveryObservationFlight
+	cached discoveryObservationCache
+}
+
+// discoveryObservationFlight is one observation in progress. A request that
+// finds it waits for it instead of starting a second fenced read.
+type discoveryObservationFlight struct {
+	done chan struct{}
+}
+
+// discoveryObservationCache is the projection remembered for one source state.
+// The identity is the source's metadata as it was after the read proved the
+// source quiet, so any later write, checkpoint, permission change or
+// replacement misses the cache and is inspected again.
+type discoveryObservationCache struct {
+	identity   string
+	ready      bool
+	projection bootstrap.PublicDiscovery
+}
+
+// observe runs read at most once at a time for one source. read serves the
+// projection it produced through consume while it still holds the source's
+// ownership fence, and reports the same projection plus whether it may be reused
+// for an unchanged source. A caller that finds a flight in progress waits for it
+// and then answers from the projection that flight remembered or runs its own
+// observation; a caller that finds a remembered projection is served directly.
+func (o *discoveryObservation) observe(
+	ctx context.Context,
+	databasePath string,
+	read func(consume func(bootstrap.PublicDiscovery)) (bootstrap.PublicDiscovery, bool),
+	consume func(bootstrap.PublicDiscovery),
+) {
+	for {
+		identity, identified := upgradeservice.LegacySourceIdentity(databasePath)
+		o.mu.Lock()
+		state := o.sourceState(databasePath)
+		if identified && state.cached.ready && state.cached.identity == identity {
+			projection := state.cached.projection
+			o.mu.Unlock()
+			consume(projection)
 			return
 		}
-		upgradeservice.WithReadOnlyLegacyObservation(ctx, paths.Database, legacyRoot, func(obs upgradeservice.LegacyDiscoveryObservation) {
-			result := bootstrapdiscovery.Unavailable()
-			switch obs {
-			case upgradeservice.LegacyDiscoveryOwnershipUnavailable:
-				result = bootstrapdiscovery.SourceOwnershipUnavailable()
-			case upgradeservice.LegacyDiscoveryUnsupportedUpgrade:
-				result = bootstrapdiscovery.UnsupportedUpgrade()
-			case upgradeservice.LegacyDiscoveryRecoveryRequired:
-				result = bootstrapdiscovery.RecoveryRequired()
+		if state.flight != nil {
+			done := state.flight.done
+			o.mu.Unlock()
+			select {
+			case <-done:
+				// The flight is finished: its projection is remembered now, or it
+				// described this moment and this request decides again.
+				continue
+			case <-ctx.Done():
+				consume(bootstrapdiscovery.Unavailable())
+				return
 			}
-			bootstrapdiscovery.Handler{Discovery: result}.ServeHTTP(w, r)
-		})
-	})
+		}
+		flight := &discoveryObservationFlight{done: make(chan struct{})}
+		state.flight = flight
+		o.mu.Unlock()
+
+		projection, reusable := read(consume)
+
+		o.mu.Lock()
+		if reusable {
+			if after, ok := upgradeservice.LegacySourceIdentity(databasePath); ok && (!identified || after == identity) {
+				state.cached = discoveryObservationCache{identity: after, ready: true, projection: projection}
+			}
+		}
+		state.flight = nil
+		o.mu.Unlock()
+		close(flight.done)
+		return
+	}
+}
+
+func (o *discoveryObservation) sourceState(databasePath string) *discoveryObservationState {
+	if o.sources == nil {
+		o.sources = map[string]*discoveryObservationState{}
+	}
+	state, ok := o.sources[databasePath]
+	if !ok {
+		state = &discoveryObservationState{}
+		o.sources[databasePath] = state
+	}
+	return state
 }
 
 // BeginWritableStartup drains pre-write projections before their evidence can

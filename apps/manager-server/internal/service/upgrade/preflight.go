@@ -904,6 +904,11 @@ type CredentialSnapshotRoots struct {
 	// ErrSnapshotRootTimedOut instead of touching the root again. It is ignored
 	// when SourceKnown is false: an unnamed root already fails closed.
 	SourceTimedOut bool
+	// PreserveTarget treats databasePath as an unadmitted or protected source
+	// (for example a 1.x volume mounted at /data during read-only discovery) so
+	// authentication uses a private scratch snapshot instead of opening the file
+	// in place and creating or rewriting WAL coordination sidecars.
+	PreserveTarget bool
 }
 
 // VerifyManagerCredential is VerifyAdminSource against the Manager's own store
@@ -917,25 +922,30 @@ type CredentialSnapshotRoots struct {
 // snapshot of it would copy a database that changes under it and answer 503 on
 // the copy race, which is the wrong verdict for a poll.
 //
-// The one exception is a target that an unfinished copy-in has not materialized
-// completely. The marker is read before any open: in the `materializing` phase
+// The exceptions are the states in which this path is not this process's live
+// store at all. An unfinished copy-in that has not materialized completely is
+// one: the marker is read before any open, because in the `materializing` phase
 // the target still holds the members the resumed move compares with its backup,
 // and a read-only open of a store holding a copied WAL joins that WAL and
-// rewrites `-shm`. This route authenticates every status poll, so it is the
-// first reader to reach the target; it must leave it exactly as it found it and
-// still prove the administrator key. The key is therefore verified against a
-// private snapshot outside both the target's data root and the configured 1.x
-// source root; CredentialSnapshotRoots names both, and a caller that could not
-// resolve the second root does not get a snapshot at all.
+// rewrites `-shm`. The other is a caller that reports the target as unadmitted or
+// preserved (CredentialSnapshotRoots.PreserveTarget): the read-only Upgrade entry
+// reaches /data before startup admission, so a 1.x volume mounted there with a
+// WAL of its own is somebody else's source, not this process's store. This route
+// authenticates every status poll, so it is the first reader to reach the target;
+// it must leave it exactly as it found it and still prove the administrator key.
+// The key is therefore verified against a private snapshot outside both the
+// target's data root and the configured 1.x source root;
+// CredentialSnapshotRoots names both, and a caller that could not resolve the
+// second root does not get a snapshot at all.
 //
 // The Manager store's credential is not cached either. It is the live database:
 // ordinary Manager traffic appends to its WAL and checkpoints it, so a cached
 // verdict would either miss on almost every poll or, on a filesystem with a
 // coarse modification time, answer with a credential row that was already
 // rotated. The read itself is one indexed row in the process's own open store,
-// not the whole-file copy that makes a preserved source expensive. Only the
-// materializing target is read as a preserved source, and only it may be
-// answered from that state's remembered verdict.
+// not the whole-file copy that makes a preserved source expensive. Only a target
+// that is read as a preserved source may be answered from that state's
+// remembered verdict.
 func VerifyManagerCredential(ctx context.Context, databasePath string, roots CredentialSnapshotRoots, key string) error {
 	if strings.TrimSpace(key) == "" {
 		return ErrAdminUnauthorized
@@ -951,7 +961,7 @@ func VerifyManagerCredential(ctx context.Context, databasePath string, roots Cre
 	if err != nil {
 		return err
 	}
-	if materializing {
+	if materializing || roots.PreserveTarget {
 		if !roots.SourceKnown {
 			// A snapshot under a root this process cannot name could land inside
 			// the tree the copy-in is preserving. Refusing before the read is the

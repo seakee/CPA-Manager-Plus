@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -420,4 +422,310 @@ func TestLegacyWALDiscoveryFailsClosedWhenUnfencedOrBusyOrScratchOverlaps(t *tes
 			}
 		}
 	})
+}
+
+// legacyWALVolumeWithPendingWAL builds a stopped 1.x volume whose committed rows
+// are still in usage.sqlite-wal. A normal Close checkpoints the journal away, so
+// the writer is a helper process that exits without closing its store — the state
+// a 1.x container leaves behind when it is stopped hard.
+func legacyWALVolumeWithPendingWAL(t *testing.T, adminKey string) (string, sqliterepo.InspectionPaths) {
+	t.Helper()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "usage.sqlite")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLegacyWALPendingWriterFixtureProcess$")
+	cmd.Env = append(os.Environ(),
+		"CPAMP_LEGACY_WAL_FIXTURE="+database,
+		"CPAMP_LEGACY_WAL_FIXTURE_KEY="+adminKey,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("legacy pending WAL fixture: %v %s", err, output)
+	}
+	wal, err := os.Lstat(database + "-wal")
+	if err != nil || wal.Size() == 0 {
+		t.Fatalf("the fixture did not keep a pending WAL (err=%v)", err)
+	}
+	paths := legacypreflight.DefaultPaths(database)
+	if err := os.WriteFile(paths.DataKey, []byte("legacy-data-key-bytes-preserved"), 0o600); err != nil {
+		t.Fatalf("write legacy data.key: %v", err)
+	}
+	if err := os.WriteFile(database+".manager.lock", nil, 0o600); err != nil {
+		t.Fatalf("write legacy lock marker: %v", err)
+	}
+	assertWALStore(t, database)
+	return dir, paths
+}
+
+// TestLegacyWALPendingWriterFixtureProcess is the seeding half of
+// legacyWALVolumeWithPendingWAL: it commits rows and leaves without closing, so
+// the journal is still on disk when it exits.
+func TestLegacyWALPendingWriterFixtureProcess(t *testing.T) {
+	database := os.Getenv("CPAMP_LEGACY_WAL_FIXTURE")
+	if database == "" {
+		t.Skip("helper process")
+	}
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatalf("open legacy WAL fixture: %v", err)
+	}
+	for _, stmt := range []string{
+		`pragma journal_mode = wal`,
+		`pragma wal_autocheckpoint = 0`,
+		`create table settings (key text primary key, value text not null, updated_at_ms integer not null default 0)`,
+		`create table usage_events (id integer primary key, total_tokens integer not null default 0)`,
+		`insert into usage_events (id, total_tokens) values (1, 42)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("seed legacy WAL fixture: %v", err)
+		}
+	}
+	if key := os.Getenv("CPAMP_LEGACY_WAL_FIXTURE_KEY"); key != "" {
+		credential, err := security.NewAdminCredential(key, "legacy-v1")
+		if err != nil {
+			t.Fatalf("create legacy admin credential: %v", err)
+		}
+		if err := setting.New(db).SaveAdminCredential(t.Context(), credential); err != nil {
+			t.Fatalf("save legacy admin credential: %v", err)
+		}
+	}
+	os.Exit(0)
+}
+
+// TestLegacyVolumeWithoutOwnershipMarkerStaysUnavailableAndCreatesNone is the
+// missing-marker contract at the HTTP boundary: a source that cannot prove
+// exclusivity is not an upgrade candidate, and the observation must not create
+// the marker it failed to find.
+func TestLegacyVolumeWithoutOwnershipMarkerStaysUnavailableAndCreatesNone(t *testing.T) {
+	t.Setenv(legacyRootEnvironment, "")
+	dir, paths := legacyWALSourceFixture(t, "no-marker-legacy-key-123456")
+	lockPath := paths.Database + ".manager.lock"
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatalf("remove the ownership marker: %v", err)
+	}
+	before := readSourceTree(t, dir)
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	resp, err := server.Client().Get(server.URL + bootstrapdiscovery.Path)
+	if err != nil {
+		t.Fatalf("GET discovery: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("discovery without an ownership marker = %d, want 503: %s", resp.StatusCode, raw)
+	}
+	if _, err := os.Lstat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("discovery created the ownership marker it could not find (err=%v)", err)
+	}
+	if after := readSourceTree(t, dir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("discovery without an ownership marker mutated the source tree")
+	}
+}
+
+// TestWALBackedLegacyVolumeServesReadOnlyUpgradeEntryWithoutWrites is the P0
+// contract of the read-only Upgrade entry: a 1.x volume mounted at /data with a
+// non-empty journal serves discovery, the administrator-key entry and the
+// recorded-status read, and none of the three may create usage.sqlite-shm beside
+// the source or rewrite anything in it — including when the volume is mounted
+// read-only, where an in-place open cannot even succeed.
+func TestWALBackedLegacyVolumeServesReadOnlyUpgradeEntryWithoutWrites(t *testing.T) {
+	const legacyKey = "pending-wal-legacy-key-123456"
+	for _, mount := range []struct {
+		name      string
+		removeSHM bool
+		readOnly  bool
+	}{
+		{name: "writable volume without a -shm", removeSHM: true},
+		{name: "read-only mount with the stopped writer's -shm", readOnly: true},
+	} {
+		t.Run(mount.name, func(t *testing.T) {
+			t.Setenv(legacyRootEnvironment, "")
+			dir, paths := legacyWALVolumeWithPendingWAL(t, legacyKey)
+			if mount.removeSHM {
+				if err := os.Remove(paths.Database + "-shm"); err != nil {
+					t.Fatalf("drop the stale -shm: %v", err)
+				}
+			}
+			if mount.readOnly {
+				readOnlyTree(t, dir)
+			}
+			before := readSourceTree(t, dir)
+
+			h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+			h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+			server := httptest.NewServer(h)
+			defer server.Close()
+
+			request := func(method, path, authorization string) (int, string) {
+				t.Helper()
+				req, err := http.NewRequest(method, server.URL+path, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if authorization != "" {
+					req.Header.Set("Authorization", authorization)
+				}
+				response, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatalf("%s %s: %v", method, path, err)
+				}
+				defer response.Body.Close()
+				body, err := io.ReadAll(response.Body)
+				if err != nil {
+					t.Fatalf("read %s %s: %v", method, path, err)
+				}
+				return response.StatusCode, string(body)
+			}
+
+			status, body := request(http.MethodGet, bootstrapdiscovery.Path, "")
+			if status != http.StatusOK ||
+				!strings.Contains(body, `"status":"unsupported_upgrade"`) ||
+				!strings.Contains(body, `"auth_entry":"admin_session"`) {
+				t.Fatalf("pending WAL discovery = %d: %s", status, body)
+			}
+
+			status, body = request(http.MethodPost, upgradeauth.Path, "Bearer "+legacyKey)
+			if status != http.StatusOK || !strings.Contains(body, `"authenticated":true`) {
+				t.Fatalf("pending WAL upgrade authenticate = %d: %s", status, body)
+			}
+
+			target := bootstrap.FixedBootstrapAPIPath + "installation/upgrade/status"
+			status, body = request(http.MethodGet, target, "Bearer "+legacyKey)
+			if status != http.StatusOK ||
+				!strings.Contains(body, `"recorded":false`) ||
+				!strings.Contains(body, `"evidence":"none"`) {
+				t.Fatalf("pending WAL upgrade status = %d: %s", status, body)
+			}
+
+			if after := readSourceTree(t, dir); !reflect.DeepEqual(before, after) {
+				t.Fatalf("the read-only Upgrade entry mutated the source tree:\nbefore=%v\nafter=%v", before, after)
+			}
+			if mount.removeSHM {
+				if _, err := os.Lstat(paths.Database + "-shm"); !os.IsNotExist(err) {
+					t.Fatalf("the read-only Upgrade entry created usage.sqlite-shm (err=%v)", err)
+				}
+			}
+		})
+	}
+}
+
+// nativeV2StoreWithUnreadableMarker builds a native v2 WAL store whose ownership
+// marker this process may not open: the shape a root member leaves behind after
+// running the Manager as 0:0 on the v2 image.
+func nativeV2StoreWithUnreadableMarker(t *testing.T) (string, sqliterepo.InspectionPaths) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses 0000 file permissions")
+	}
+	dir := t.TempDir()
+	database := filepath.Join(dir, "usage.sqlite")
+	db, err := sqliterepo.Open(database)
+	if err != nil {
+		t.Fatalf("open native v2 store: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close native v2 store: %v", err)
+	}
+	marker, err := processlock.Acquire(database)
+	if err != nil {
+		t.Fatalf("create the native v2 marker: %v", err)
+	}
+	if err := marker.Close(); err != nil {
+		t.Fatalf("release the native v2 marker: %v", err)
+	}
+	return dir, legacypreflight.DefaultPaths(database)
+}
+
+// TestNativeV2StoreWithUnreadableMarkerStaysUnavailable is the fail-closed half
+// of the ownership classification: a marker this process may not open looks the
+// same for a root-owned 1.x volume and for a native v2 store, so only the
+// database may decide. A v2 store is never reported as an upgradable 1.x source.
+func TestNativeV2StoreWithUnreadableMarkerStaysUnavailable(t *testing.T) {
+	t.Setenv(legacyRootEnvironment, "")
+	dir, paths := nativeV2StoreWithUnreadableMarker(t)
+	lockPath := paths.Database + ".manager.lock"
+	before := readSourceTree(t, dir)
+	if err := os.Chmod(lockPath, 0o000); err != nil {
+		t.Fatalf("make the native v2 marker unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(lockPath, 0o600) })
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	resp, err := server.Client().Get(server.URL + bootstrapdiscovery.Path)
+	if err != nil {
+		t.Fatalf("GET discovery: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("native v2 store with an unreadable marker = %d, want 503: %s", resp.StatusCode, raw)
+	}
+	if strings.Contains(string(raw), `"reason":"source_ownership_unavailable"`) {
+		t.Fatalf("a native v2 store was presented as an upgradable 1.x source: %s", raw)
+	}
+
+	if err := os.Chmod(lockPath, 0o600); err != nil {
+		t.Fatalf("restore the native v2 marker: %v", err)
+	}
+	if after := readSourceTree(t, dir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("the ownership classification mutated the native v2 store")
+	}
+}
+
+// TestConcurrentLegacyDiscoveryObservationsDoNotSelfContend is the coalescing
+// contract: the unauthenticated discovery path is reached by several callers at
+// once, and the ownership fence one observation holds must never be what refuses
+// the next one.
+func TestConcurrentLegacyDiscoveryObservationsDoNotSelfContend(t *testing.T) {
+	t.Setenv(legacyRootEnvironment, "")
+	dir, paths := legacyWALVolumeWithPendingWAL(t, "concurrent-legacy-key-123456")
+	before := readSourceTree(t, dir)
+
+	h := newStartupHTTPHandler(bootstrapdiscovery.Unavailable())
+	h.EnableReadOnlyDiscovery(paths, legacypreflight.Options{}, 5*time.Second)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	const requests = 10
+	codes := make([]int, requests)
+	bodies := make([]string, requests)
+	failures := make([]error, requests)
+	var wait sync.WaitGroup
+	wait.Add(requests)
+	for index := 0; index < requests; index++ {
+		go func(index int) {
+			defer wait.Done()
+			resp, err := server.Client().Get(server.URL + bootstrapdiscovery.Path)
+			if err != nil {
+				failures[index] = err
+				return
+			}
+			defer resp.Body.Close()
+			raw, err := io.ReadAll(resp.Body)
+			codes[index], bodies[index] = resp.StatusCode, string(raw)
+			if err != nil {
+				failures[index] = err
+			}
+		}(index)
+	}
+	wait.Wait()
+
+	for index := 0; index < requests; index++ {
+		if failures[index] != nil {
+			t.Fatalf("concurrent discovery %d: %v", index, failures[index])
+		}
+		if codes[index] != http.StatusOK || !strings.Contains(bodies[index], `"status":"unsupported_upgrade"`) {
+			t.Fatalf("concurrent discovery %d = %d: %s", index, codes[index], bodies[index])
+		}
+	}
+	if after := readSourceTree(t, dir); !reflect.DeepEqual(before, after) {
+		t.Fatalf("concurrent discovery mutated the source tree")
+	}
 }

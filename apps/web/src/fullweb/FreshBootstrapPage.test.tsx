@@ -1163,9 +1163,20 @@ describe('FreshBootstrapPage product preview workflow', () => {
       expect(textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))).toContain(
         'upgrade preflight --legacy /legacy --source-version v1.14.10 --target-dir /data --json'
       );
-      expect(textOf(findByTestId(renderer.root, 'legacy-ownership-command'))).toBe(
-        'chown 10002:10002 /data/usage.sqlite* /data/data.key'
+      // Option 2 must be executable on a Docker named volume and must never
+      // hard-code a single pre-release image tag.
+      const ownershipCommand = textOf(
+        findByTestId(renderer.root, 'legacy-ownership-command')
       );
+      expect(ownershipCommand).toContain('docker stop <1x_container>');
+      expect(ownershipCommand).toContain(
+        `seakee/cpa-manager-plus:${__APP_VERSION__} -c 'chown -h 10002:10002 /data/usage.sqlite* /data/data.key'`
+      );
+      expect(ownershipCommand).toContain('docker start <v2_container>');
+      expect(ownershipCommand).not.toContain('2.0.0-beta.1');
+      expect(
+        textOf(findByTestId(renderer.root, 'legacy-upgrade-preflight-command'))
+      ).toContain(`seakee/cpa-manager-plus:${__APP_VERSION__}`);
       expect(textOf(findByTestId(renderer.root, 'legacy-ownership-instructions'))).toContain(
         '/data/runtime'
       );

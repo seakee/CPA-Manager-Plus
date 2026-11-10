@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/security"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/service/upgrade/copyinmarker"
 )
 
 // LegacyDiscoveryObservation is the bounded, read-only verdict on a stopped
@@ -35,77 +37,170 @@ const (
 
 var sqliteFileMagic = []byte("SQLite format 3\x00")
 
-// WithReadOnlyLegacyObservation inspects a stopped 1.x source at databasePath
+// LegacySourceIdentity describes one state of a source database as a read-only
+// observation cache key: the database, the journal files it may carry, and the
+// ownership marker whose permissions decide whether the source can be fenced at
+// all. The POSIX change stamp is part of it because a chown or a chmod is
+// exactly the repair the guidance asks the operator to make, and a remembered
+// refusal must not outlive it.
+//
+// The second result is false when the database itself is absent or its metadata
+// cannot be described: a source with no database is cheap to re-inspect, its
+// tree can change without any of these files changing, and an in-place rewrite
+// that restored the modification time must never be mistaken for an unchanged
+// file.
+func LegacySourceIdentity(databasePath string) (string, bool) {
+	databasePath = strings.TrimSpace(databasePath)
+	if databasePath == "" {
+		return "", false
+	}
+	if _, err := os.Lstat(databasePath); err != nil {
+		return "", false
+	}
+	var identity strings.Builder
+	for _, path := range []string{
+		databasePath,
+		databasePath + "-wal",
+		databasePath + "-shm",
+		databasePath + ".manager.lock",
+	} {
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			identity.WriteString(filepath.Base(path))
+			identity.WriteString("=absent;")
+			continue
+		}
+		if err != nil {
+			return "", false
+		}
+		stamp, err := copyinmarker.ChangeStamp(path)
+		if err != nil {
+			return "", false
+		}
+		fmt.Fprintf(&identity, "%s=%s:%d:%s;", filepath.Base(path), info.Mode(), info.Size(), stamp)
+	}
+	return identity.String(), true
+}
+
+// InspectReadOnlyLegacySource inspects a stopped 1.x source at databasePath
 // through an exclusive read-only ownership fence and a private scratch copy
-// outside both the database's directory and extraExcludedRoot, invoking
-// consume before releasing the ownership fence.
-func WithReadOnlyLegacyObservation(
+// outside both the database's directory and extraExcludedRoot. The verdict is
+// handed to consume before the ownership fence is released, so the answer is
+// written while exclusivity is still proved.
+//
+// The second result reports whether that verdict is a statement about the
+// source's content — which a caller may reuse while LegacySourceIdentity is
+// unchanged — rather than a report about this moment's contention or this
+// request's deadline.
+func InspectReadOnlyLegacySource(
 	ctx context.Context,
 	databasePath string,
 	extraExcludedRoot string,
 	consume func(LegacyDiscoveryObservation),
-) {
+) (LegacyDiscoveryObservation, bool) {
 	if ctx.Err() != nil {
 		consume(LegacyDiscoveryNone)
-		return
+		return LegacyDiscoveryNone, false
 	}
 	dbPath := strings.TrimSpace(databasePath)
 	if dbPath == "" {
 		consume(LegacyDiscoveryNone)
-		return
+		return LegacyDiscoveryNone, false
 	}
 	info, lstatErr := os.Lstat(dbPath)
 	if lstatErr != nil {
-		if errors.Is(lstatErr, os.ErrPermission) && ctx.Err() == nil {
-			consume(LegacyDiscoveryOwnershipUnavailable)
-			return
-		}
+		// A directory this process may not search says nothing about what it
+		// holds: an unreadable path is not evidence of a 1.x volume, so it stays
+		// the fail-closed answer instead of a host-intervention instruction.
 		consume(LegacyDiscoveryNone)
-		return
+		return LegacyDiscoveryNone, false
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= 0 {
 		consume(LegacyDiscoveryNone)
-		return
+		return LegacyDiscoveryNone, false
 	}
 
 	lock, lockErr := processlock.AcquireExistingReadOnly(dbPath)
 	if lockErr != nil {
-		if errors.Is(lockErr, os.ErrPermission) && ctx.Err() == nil && isSQLiteHeaderOrPermissionBlocked(dbPath, info) {
-			consume(LegacyDiscoveryOwnershipUnavailable)
-			return
+		if errors.Is(lockErr, os.ErrPermission) {
+			// A marker this process may not open is not proof of anything by
+			// itself: a native v2 store left behind by a root member (0644
+			// database, 0600 marker) answers EACCES exactly like a root-owned
+			// 1.x volume. Only the database can tell the two apart, and it can
+			// be read without the marker.
+			verdict := classifyUnfenceableSource(ctx, dbPath, info)
+			consume(verdict)
+			return verdict, ctx.Err() == nil
 		}
+		// A busy marker is this source being written, and a missing one is a
+		// source that cannot prove exclusivity: neither is a fact about the
+		// content, so neither is remembered.
 		consume(LegacyDiscoveryNone)
-		return
+		return LegacyDiscoveryNone, false
 	}
 	defer func() { _ = lock.Close() }()
 
 	if err := ValidateScratchDir("", filepath.Dir(dbPath), strings.TrimSpace(extraExcludedRoot)); err != nil {
 		consume(LegacyDiscoveryNone)
-		return
+		return LegacyDiscoveryNone, false
 	}
 
 	snapshot, snapErr := OpenSnapshot(ctx, dbPath, "")
 	if snapErr != nil {
 		if errors.Is(snapErr, os.ErrPermission) && ctx.Err() == nil {
 			consume(LegacyDiscoveryOwnershipUnavailable)
-			return
+			return LegacyDiscoveryOwnershipUnavailable, true
 		}
 		consume(LegacyDiscoveryNone)
-		return
+		return LegacyDiscoveryNone, false
 	}
 	observation := classifyLegacySnapshot(ctx, snapshot.DB())
 	closeErr := snapshot.Close()
 	if closeErr != nil || lock.Validate() != nil || ctx.Err() != nil {
 		consume(LegacyDiscoveryNone)
-		return
+		return LegacyDiscoveryNone, false
 	}
 	consume(observation)
+	return observation, true
 }
 
-func isSQLiteHeaderOrPermissionBlocked(databasePath string, inspected os.FileInfo) bool {
+// classifyUnfenceableSource answers for a database whose ownership marker this
+// process may not open. No fence can be taken, so nothing is copied, locked or
+// created: the file is read through an immutable handle, which ignores any
+// journal beside it instead of joining it, and only the schema and the one
+// operation marker decide between the two conditions that look identical from
+// the outside. A store v2 has already opened — its own tables, or the Fresh
+// operation marker the v2 image writes at the start of its first boot — is
+// never presented as a 1.x source; a 1.x store whose files are root-owned is the
+// condition the host has to repair.
+func classifyUnfenceableSource(ctx context.Context, databasePath string, inspected os.FileInfo) LegacyDiscoveryObservation {
+	if ctx.Err() != nil || !readableSQLiteHeader(databasePath, inspected) {
+		return LegacyDiscoveryNone
+	}
+	db, err := sql.Open("sqlite", readOnlyDataSourceName(databasePath, true))
+	if err != nil {
+		return LegacyDiscoveryNone
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	defer func() { _ = db.Close() }()
+	// sourceKind is SourceKindLegacyManager only when the v2-only tables are
+	// absent, so a native v2 schema can never reach the ownership verdict.
+	schema, err := readSourceSchema(ctx, db)
+	if err != nil || schema.sourceKind() != SourceKindLegacyManager {
+		return LegacyDiscoveryNone
+	}
+	var freshPresent bool
+	if err := db.QueryRowContext(ctx, `select exists(select 1 from settings where key = 'fresh_operation_v1')`).Scan(&freshPresent); err != nil || freshPresent {
+		return LegacyDiscoveryNone
+	}
+	return LegacyDiscoveryOwnershipUnavailable
+}
+
+func readableSQLiteHeader(databasePath string, inspected os.FileInfo) bool {
 	file, err := os.Open(databasePath)
 	if err != nil {
-		return errors.Is(err, os.ErrPermission)
+		return false
 	}
 	defer func() { _ = file.Close() }()
 	if err := processlock.OpenedDatabase(file, inspected); err != nil {

@@ -114,6 +114,9 @@ function publicDiscoveryGuidance(payload: unknown): DiscoveryGuidance | null {
       detail: 'guidanceUpgradeDetail',
     };
   }
+  // A 1.x volume mounted at /data is the one recovery state this build also
+  // names a host action for: the source itself is intact, only the file
+  // ownership stops v2 from fencing it.
   if (
     value.status === 'recovery_required' &&
     value.mode === 'recovery' &&
@@ -416,15 +419,16 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                 )}
 
                 {discoveryNote?.flow === 'ownership' ? (
-                  <div className="legacy-ownership-steps" data-testid="legacy-ownership-instructions">
+                  <div
+                    className="legacy-ownership-steps"
+                    data-testid="legacy-ownership-instructions"
+                  >
                     <div className="alert alert-info">
                       <div className="alert-content">
                         <div className="alert-title">{discoveryText('ownershipUpgradeTitle')}</div>
                         <div className="alert-desc">{discoveryText('ownershipUpgradeDesc')}</div>
                         <div className="code-block" data-testid="legacy-upgrade-preflight-command">
-                          docker run --rm --entrypoint cpa-manager-plus -v &lt;1x_volume&gt;:/legacy:ro
-                          -v &lt;v2_volume&gt;:/data seakee/cpa-manager-plus:2.0.0-beta.1 upgrade
-                          preflight --legacy /legacy --source-version v1.14.10 --target-dir /data --json
+                          {`docker run --rm --entrypoint cpa-manager-plus -v <1x_volume>:/legacy:ro -v <v2_volume>:/data seakee/cpa-manager-plus:${__APP_VERSION__} upgrade preflight --legacy /legacy --source-version v1.14.10 --target-dir /data --json`}
                         </div>
                       </div>
                     </div>
@@ -433,7 +437,9 @@ export function FreshBootstrapPage({ handoff, transport }: FreshBootstrapPagePro
                         <div className="alert-title">{discoveryText('ownershipChownTitle')}</div>
                         <div className="alert-desc">{discoveryText('ownershipChownDesc')}</div>
                         <div className="code-block" data-testid="legacy-ownership-command">
-                          chown 10002:10002 /data/usage.sqlite* /data/data.key
+                          {`docker stop <1x_container>
+docker run --rm -u 0:0 --entrypoint sh -v <1x_volume>:/data seakee/cpa-manager-plus:${__APP_VERSION__} -c 'chown -h 10002:10002 /data/usage.sqlite* /data/data.key'
+docker start <v2_container>`}
                         </div>
                       </div>
                     </div>

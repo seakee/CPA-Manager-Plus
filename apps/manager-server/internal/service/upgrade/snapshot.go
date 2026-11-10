@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
+	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/processlock"
 	_ "modernc.org/sqlite"
 )
 
@@ -381,6 +382,23 @@ func snapshotDataSourceName(path string) string {
 // digestDatabaseFiles hashes the database and every sidecar that exists. A
 // missing database is reported as the missing-source condition; missing
 // sidecars are normal for a cleanly stopped writer.
+func inspectSnapshotSourceFile(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s", processlock.ErrSymlinkedDatabase, filepath.Base(path))
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("database file %s is not a regular file", filepath.Base(path))
+	}
+	if _, err := processlock.InspectDatabaseFile(path); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
 func digestDatabaseFiles(ctx context.Context, databasePath string) (map[string]databaseFileDigest, error) {
 	digests := make(map[string]databaseFileDigest, len(databaseSidecars))
 	for _, suffix := range databaseSidecars {
@@ -388,17 +406,14 @@ func digestDatabaseFiles(ctx context.Context, databasePath string) (map[string]d
 			return nil, err
 		}
 		path := databasePath + suffix
-		info, err := os.Lstat(path)
+		info, err := inspectSnapshotSourceFile(path)
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("database file %s is not a regular file", filepath.Base(path))
-		}
-		digest, err := fileContentDigest(ctx, path)
+		digest, err := digestInspectedFile(ctx, path, info)
 		if err != nil {
 			return nil, err
 		}
@@ -410,6 +425,25 @@ func digestDatabaseFiles(ctx context.Context, databasePath string) (map[string]d
 	return digests, nil
 }
 
+func digestInspectedFile(ctx context.Context, path string, inspected os.FileInfo) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+	if err := processlock.OpenedDatabase(file, inspected); err != nil {
+		return "", err
+	}
+	digest := sha256.New()
+	if _, err := copyChunks(ctx, digest, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
 // copyDatabaseFiles writes the database and its sidecars into destination and
 // returns the digest of every byte it copied.
 func copyDatabaseFiles(ctx context.Context, databasePath string, destination string) (map[string]databaseFileDigest, error) {
@@ -419,17 +453,14 @@ func copyDatabaseFiles(ctx context.Context, databasePath string, destination str
 			return nil, err
 		}
 		sourcePath := databasePath + suffix
-		info, err := os.Lstat(sourcePath)
+		info, err := inspectSnapshotSourceFile(sourcePath)
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("database file %s is not a regular file", filepath.Base(sourcePath))
-		}
-		digest, size, err := copyFileWithDigest(ctx, sourcePath, filepath.Join(destination, filepath.Base(sourcePath)))
+		digest, size, err := copyFileWithDigest(ctx, sourcePath, info, filepath.Join(destination, filepath.Base(sourcePath)))
 		if err != nil {
 			return nil, snapshotCopyFailure(err)
 		}
@@ -453,12 +484,15 @@ func snapshotCopyFailure(err error) error {
 	return fmt.Errorf("%w: %s", ErrSnapshotFailed, rootCause(err))
 }
 
-func copyFileWithDigest(ctx context.Context, sourcePath string, destinationPath string) (string, int64, error) {
+func copyFileWithDigest(ctx context.Context, sourcePath string, inspected os.FileInfo, destinationPath string) (string, int64, error) {
 	source, err := os.Open(sourcePath)
 	if err != nil {
 		return "", 0, err
 	}
 	defer func() { _ = source.Close() }()
+	if err := processlock.OpenedDatabase(source, inspected); err != nil {
+		return "", 0, err
+	}
 	destination, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return "", 0, err
