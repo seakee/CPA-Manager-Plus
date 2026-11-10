@@ -43,6 +43,11 @@
     box-shadow: 0 0 0 1px var(--app-input-border-focus) inset;
   }
 
+  &:focus-visible {
+    outline: 2px solid var(--app-input-border-focus);
+    outline-offset: 1px;
+  }
+
   &[aria-expanded='true'] {
     background-color: var(--app-input-bg-focus);
     border-color: var(--app-input-border-focus);

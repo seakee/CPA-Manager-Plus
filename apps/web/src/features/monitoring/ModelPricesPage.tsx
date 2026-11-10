@@ -289,14 +289,14 @@ export function ModelPricesPage() {
             {t('model_prices.sync_model_count', { count: syncModels.length })}
           </span>
           <Button
-            size="xs"
+            size="sm"
             variant="secondary"
             onClick={() => openManualEditor()}
             className={styles.toolbarButton}
           >
             {t('model_prices.add_manual')}
           </Button>
-          <Button size="xs" onClick={() => void handleSync()} loading={syncing}>
+          <Button size="sm" onClick={() => void handleSync()} loading={syncing}>
             {t('usage_stats.model_price_sync')}
           </Button>
         </div>
@@ -408,7 +408,7 @@ export function ModelPricesPage() {
             </div>
             <div className={styles.compactEditorActions}>
               <Button
-                size="xs"
+                size="sm"
                 variant="ghost"
                 iconOnly
                 aria-label={t('common.cancel')}
@@ -416,7 +416,7 @@ export function ModelPricesPage() {
               >
                 <IconX size={14} />
               </Button>
-              <Button size="xs" onClick={() => void handleSaveDraft()}>
+              <Button size="sm" onClick={() => void handleSaveDraft()}>
                 {t('common.save')}
               </Button>
             </div>

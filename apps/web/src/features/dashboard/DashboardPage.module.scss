@@ -21,16 +21,21 @@
 
   .headerLeft {
     flex: 1 1 auto;
+    flex-wrap: wrap;
+    overflow: hidden;
   }
 
   .headerRight {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .connectionStatus {
     display: flex;
     align-items: center;
     gap: 10px;
+    min-width: 0;
 
     .statusDot {
       width: 10px;
@@ -251,9 +256,10 @@
 
       .configItem {
         display: flex;
+        flex-wrap: wrap;
         justify-content: space-between;
         align-items: center;
-        gap: 10px;
+        gap: 4px 10px;
         min-width: 0;
 
         &.fullWidth {
@@ -278,6 +284,9 @@
           white-space: nowrap;
         }
         .configBadge {
+          // The item wraps when label and badge cannot share one line; keep the
+          // badge on the right edge of its own line instead of squeezing the label.
+          margin-left: auto;
           padding: 2px 8px;
           border-radius: var(--app-radius-xs);
           font-size: 11px;

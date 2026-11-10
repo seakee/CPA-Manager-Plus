@@ -559,6 +559,18 @@ input {
   box-shadow: inset 0 0 0 1px var(--app-input-border-focus);
 }
 
+.form-input:focus-visible {
+  outline: 2px solid var(--app-input-border-focus);
+  outline-offset: 1px;
+}
+
+.form-input:disabled {
+  cursor: not-allowed;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  opacity: 1;
+}
+
 .input-wrap .form-input,
 .input-wrap .form-input:focus {
   background: transparent;
@@ -901,6 +913,35 @@ input {
   border: 1.5px solid var(--accent);
   background: var(--accent-soft);
   box-shadow: inset 0 0 0 0.5px var(--accent);
+}
+
+/* Preparation in progress disables the source choices. Keep the muted surface
+   and secondary text (>= 4.5:1 on both themes) so they read as inert rather
+   than clickable. */
+.journey-choice:disabled {
+  cursor: not-allowed;
+  background: var(--bg-subtle);
+  border-color: var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.journey-choice:disabled h2,
+.journey-choice:disabled p {
+  color: var(--text-secondary);
+}
+
+.journey-choice:disabled .journey-radio {
+  border-color: var(--text-tertiary);
+}
+
+.journey-choice:disabled.selected {
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-subtle);
+  box-shadow: none;
+}
+
+.journey-choice:disabled.selected .journey-radio::after {
+  background: var(--text-tertiary);
 }
 
 .journey-choice h2 {

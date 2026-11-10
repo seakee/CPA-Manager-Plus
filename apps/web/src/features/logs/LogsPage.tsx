@@ -970,7 +970,8 @@ function LogsPageContent() {
             <div className="stack">
               <div className="hint">{t('logs.error_logs_description')}</div>
 
-              {requestLogEnabled && (
+              {/* The banner explains an empty list; when files are listed it contradicts the data. */}
+              {requestLogEnabled && errorLogsLoaded && errorLogs.length === 0 && (
                 <div>
                   <div className="status-badge warning">{t('logs.error_logs_request_log_enabled')}</div>
                 </div>

@@ -346,7 +346,7 @@ $toolbar-control-height: var(--control-height-sm);
   max-height: 300px;
   overflow: hidden;
   background: var(--bg-primary);
-  border: 1px solid var(--border-primary);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-primary));
   border-radius: var(--app-radius-md);
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);
@@ -496,11 +496,17 @@ $toolbar-control-height: var(--control-height-sm);
   gap: 4px;
   min-width: 100%;
   padding: 4px;
-  border: 1px solid var(--border-primary);
+  border: 1px solid color-mix(in srgb, var(--primary-color) 22%, var(--border-primary));
   border-radius: var(--app-radius-md);
   background: var(--bg-primary);
   /* floating layer: elevation allowed */
   box-shadow: var(--floating-shadow-lg);
+}
+
+// Same accent border as `DropdownMenu`, including its dark-theme emphasis.
+:global([data-theme='dark']) .modelDropdownList,
+:global([data-theme='dark']) .sortDropdownList {
+  border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-primary));
 }
 
 .sortDropdownItem {
