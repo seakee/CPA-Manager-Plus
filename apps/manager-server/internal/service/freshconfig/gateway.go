@@ -319,6 +319,17 @@ func (s *Service) EnableManaged(endpoint string) {
 	s.endpoint = strings.TrimRight(endpoint, "/")
 }
 
+// SetTrustedSupervisorRoots binds the managed configuration transport to the
+// installation's canonical Runtime Supervisor root(s).
+func (s *Service) SetTrustedSupervisorRoots(roots []string) {
+	if s == nil {
+		return
+	}
+	if s.transport != nil {
+		s.transport.SetTrustedSupervisorRoots(roots)
+	}
+}
+
 // SetPostureSelector installs the destination posture of the committed strategy
 // this service was switched onto. A Manager-owned installation is either New
 // Managed or Adopt, and the two prove different destination rules, so the page

@@ -438,7 +438,7 @@ func TestAdoptionExactCPAV8WithSupervisor(t *testing.T) {
 				template.Observability.Usage.Enabled == nil || !*template.Observability.Usage.Enabled {
 				t.Fatalf("the adopted destination does not record usage statistics: %s", configBody)
 			}
-			if snap, snapErr := cpa.ProveAdoptedDestination(t.Context(), "http://"+targetAddr, snapshot.Destination.ManagementKey); snapErr != nil || len(snap) == 0 {
+			if snap, snapErr := cpa.ProveAdoptedDestination(t.Context(), "http://"+targetAddr, snapshot.Destination.ManagementKey, targetRoot); snapErr != nil || len(snap) == 0 {
 				t.Fatalf("the adopted destination does not prove the install-derived authority: %v", snapErr)
 			}
 			directHTTP.CloseIdleConnections()

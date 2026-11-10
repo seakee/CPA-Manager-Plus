@@ -68,6 +68,9 @@ type DestinationPosture struct {
 	// Adopt marks a destination staged by an adoption, selecting the adopted rules
 	// instead of the new_managed template.
 	Adopt bool
+	// SupervisorRoots, when non-nil, binds directory posture validation to this
+	// installation's canonical Runtime Supervisor root(s).
+	SupervisorRoots []string
 }
 
 // PostureFor resolves the destination posture of one strategy. Only the
@@ -83,6 +86,21 @@ func PostureFor(strategy string) (DestinationPosture, bool) {
 	default:
 		return DestinationPosture{}, false
 	}
+}
+
+// PostureForWithSupervisorRoots resolves the destination posture of one
+// strategy bound to the installation's canonical Runtime Supervisor root(s).
+func PostureForWithSupervisorRoots(strategy string, roots []string) (DestinationPosture, bool) {
+	posture, ok := PostureFor(strategy)
+	if !ok {
+		return DestinationPosture{}, false
+	}
+	if roots == nil {
+		posture.SupervisorRoots = []string{}
+	} else {
+		posture.SupervisorRoots = append([]string{}, roots...)
+	}
+	return posture, true
 }
 
 // PostureSelector resolves the posture of the installation this transport serves.
@@ -114,10 +132,18 @@ func (t *Transport) postureOf() proofPosture {
 	if !ok {
 		return proofPosture{deny: true}
 	}
+	base := managedProofPosture
 	if v.Adopt {
-		return adoptProofPosture()
+		base = adoptProofPosture()
 	}
-	return managedProofPosture
+	if v.SupervisorRoots != nil {
+		return base.withSupervisorRoots(v.SupervisorRoots)
+	}
+	if t.supervisorRootsConfigured {
+		base.supervisorRoots = t.supervisorRoots
+		base.supervisorRootsConfigured = true
+	}
+	return base
 }
 
 // matchesAdopt accepts the adopted destination posture: the same proof as the
@@ -333,11 +359,15 @@ func (p proofPosture) validKeys(keys []string) bool {
 // function has no record to read, and the whole point is that the document alone
 // must prove the Supervisor template. It is exported because the real-CPA harness
 // runs it after a migration; nothing here grants a write.
-func ProveAdoptedDestination(ctx context.Context, endpoint, managementKey string) ([]string, error) {
+func ProveAdoptedDestination(ctx context.Context, endpoint, managementKey string, supervisorRoots ...string) ([]string, error) {
 	transport := NewTransportForEndpoint(endpoint)
 	// The transport's default is the New Managed template, whose exact root count
 	// an adopted document never carries.
-	transport.posture = adoptProofPosture()
+	posture := adoptProofPosture()
+	if len(supervisorRoots) > 0 {
+		posture = posture.withSupervisorRoots(supervisorRoots)
+	}
+	transport.posture = posture
 	snapshot, err := transport.KeySnapshot(ctx, managementKey)
 	if err != nil {
 		return nil, err

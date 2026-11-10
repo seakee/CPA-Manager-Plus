@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
 )
 
 const configEnvKey = "CPA_MANAGER_CONFIG"
@@ -44,6 +44,8 @@ type Config struct {
 	DataKeyPath                  string
 	RuntimeURL                   string
 	RuntimeTokenFile             string
+	RuntimeDataDir               string
+	RuntimeJournalPath           string
 	CollectorMode                string
 	Queue                        string
 	PopSide                      string
@@ -192,6 +194,8 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		DataKeyPath:                  env("CPA_MANAGER_DATA_KEY_PATH", dataKeyPath),
 		RuntimeURL:                   strings.TrimSpace(os.Getenv("CPAMP_RUNTIME_URL")),
 		RuntimeTokenFile:             strings.TrimSpace(os.Getenv("CPAMP_RUNTIME_TOKEN_FILE")),
+		RuntimeDataDir:               resolveRuntimeEnvPath(os.Getenv("CPAMP_RUNTIME_DATA_DIR")),
+		RuntimeJournalPath:           resolveRuntimeEnvPath(os.Getenv("CPAMP_RUNTIME_JOURNAL_PATH")),
 		CollectorMode:                normalizeCollectorMode(env("USAGE_COLLECTOR_MODE", stringFallback(cfgFile.CollectorMode, "auto"))),
 		Queue:                        env("USAGE_RESP_QUEUE", stringFallback(cfgFile.Queue, "usage")),
 		PopSide:                      env("USAGE_RESP_POP_SIDE", stringFallback(cfgFile.PopSide, "right")),
@@ -239,6 +243,81 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 // state from Runtime availability.
 func (c Config) EmbeddedRuntimeConfigured() bool {
 	return strings.TrimSpace(c.RuntimeURL) != "" && strings.TrimSpace(c.RuntimeTokenFile) != ""
+}
+
+// TrustedSupervisorRoots returns the canonical Supervisor root directory (or
+// directories, for container deployments rooted at /data) owned by this
+// Manager instance. Priority matches Runtime Supervisor and the native
+// launcher: explicit CPAMP_RUNTIME_JOURNAL_PATH, then CPAMP_RUNTIME_DATA_DIR,
+// then DataDir.
+func (c Config) TrustedSupervisorRoots() []string {
+	if strings.TrimSpace(c.RuntimeJournalPath) != "" {
+		journal := cleanCanonicalPath(c.RuntimeJournalPath)
+		if journal == "" {
+			return []string{}
+		}
+		supervisorRoot := path.Dir(journal)
+		if supervisorRoot == "/" || supervisorRoot == "." {
+			return []string{}
+		}
+		return []string{supervisorRoot}
+	}
+	if strings.TrimSpace(c.RuntimeDataDir) != "" {
+		runtimeRoot := cleanCanonicalPath(c.RuntimeDataDir)
+		if runtimeRoot == "" {
+			return []string{}
+		}
+		return []string{path.Join(runtimeRoot, "supervisor")}
+	}
+	rawDataDir := strings.TrimSpace(c.DataDir)
+	if rawDataDir == "" {
+		rawDataDir = "/data"
+	}
+	dataDir := cleanCanonicalPath(rawDataDir)
+	if dataDir == "" {
+		return []string{}
+	}
+	if dataDir == "/data" {
+		return []string{"/data/runtime/supervisor", "/runtime/supervisor"}
+	}
+	return []string{path.Join(dataDir, "runtime", "supervisor")}
+}
+
+func resolveRuntimeEnvPath(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if filepath.IsAbs(trimmed) {
+		return filepath.Clean(trimmed)
+	}
+	if abs, err := filepath.Abs(trimmed); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(trimmed)
+}
+
+func cleanCanonicalPath(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if !filepath.IsAbs(trimmed) {
+		abs, err := filepath.Abs(trimmed)
+		if err != nil {
+			return ""
+		}
+		trimmed = abs
+	}
+	slashed := filepath.ToSlash(trimmed)
+	if !strings.HasPrefix(slashed, "/") {
+		return ""
+	}
+	cleaned := path.Clean(slashed)
+	if cleaned == "/" || cleaned == "." {
+		return ""
+	}
+	return cleaned
 }
 
 func loadFileConfig(options LoadOptions) (fileConfig, string, error) {

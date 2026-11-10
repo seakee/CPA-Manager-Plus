@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -60,6 +61,16 @@ type CommittedArtifactStore interface {
 	LoadEmbeddedRuntimeCommittedArtifact(context.Context) (model.RuntimeArtifactID, bool, error)
 }
 
+// LifecycleLocker is an optional mutual-exclusion boundary shared between
+// explicit operator lifecycle mutations (Start/Stop/Restart) and automatic
+// reconcile cycles. Holding the lock across the reconciler's authoritative
+// desired-state read, Runtime observation, and Start/Stop submission as well
+// as the operator's Supervisor submission and desired-state persistence makes
+// both paths linearizable.
+type LifecycleLocker interface {
+	LockEmbeddedRuntimeLifecycle(ctx context.Context) (unlock func(), err error)
+}
+
 // reconcileAttemptKey scopes the bounded Start retries to one Supervisor
 // generation and one desired-state revision.
 type reconcileAttemptKey struct {
@@ -82,6 +93,7 @@ type reconcileStartAttempts struct {
 }
 
 type Reconciler struct {
+	mu       sync.Mutex
 	client   RuntimeClient
 	desired  DesiredStateStore
 	interval time.Duration
@@ -102,14 +114,59 @@ func NewReconciler(
 	return &Reconciler{client: client, desired: desired, interval: interval, logf: logf, now: time.Now}
 }
 
+func (r *Reconciler) lockLifecycle(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var unlockExternal func()
+	if locker, ok := r.desired.(LifecycleLocker); ok {
+		var err error
+		unlockExternal, err = locker.LockEmbeddedRuntimeLifecycle(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	r.mu.Lock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			r.mu.Unlock()
+			if unlockExternal != nil {
+				unlockExternal()
+			}
+		})
+	}, nil
+}
+
+var reconcileErrorRetryDelays = []time.Duration{
+	200 * time.Millisecond,
+	500 * time.Millisecond,
+	time.Second,
+}
+
+func reconcileErrorRetryDelay(interval time.Duration, consecutiveErrors int) time.Duration {
+	if consecutiveErrors <= 0 || consecutiveErrors > len(reconcileErrorRetryDelays) {
+		return interval
+	}
+	delay := reconcileErrorRetryDelays[consecutiveErrors-1]
+	if interval > 0 && delay > interval {
+		return interval
+	}
+	return delay
+}
+
 // Run performs one initial reconcile and then retries at a bounded interval.
-// Cancellation only stops this worker; it never translates Manager shutdown
-// into a Runtime Stop operation.
+// Transient reconcile errors use a bounded short retry backoff before falling
+// back to the regular poll interval so a transient startup store read error
+// does not stall convergence for a full poll cycle. Cancellation only stops
+// this worker; it never translates Manager shutdown into a Runtime Stop
+// operation.
 func (r *Reconciler) Run(ctx context.Context) {
 	if r == nil || r.client == nil || r.desired == nil {
 		return
 	}
 	lastOutcome := ""
+	consecutiveErrors := 0
 	for {
 		if ctx.Err() != nil {
 			return
@@ -119,8 +176,17 @@ func (r *Reconciler) Run(ctx context.Context) {
 			return
 		}
 		outcome := ""
+		wait := r.interval
 		if err != nil {
 			outcome = err.Error()
+			if !errors.Is(err, ErrReconcileStartDeferred) && !errors.Is(err, ErrReconcileStartExhausted) {
+				consecutiveErrors++
+				wait = reconcileErrorRetryDelay(r.interval, consecutiveErrors)
+			} else {
+				consecutiveErrors = 0
+			}
+		} else {
+			consecutiveErrors = 0
 		}
 		if outcome != lastOutcome && r.logf != nil {
 			switch {
@@ -132,7 +198,7 @@ func (r *Reconciler) Run(ctx context.Context) {
 		}
 		lastOutcome = outcome
 
-		timer := time.NewTimer(r.interval)
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
@@ -149,6 +215,21 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 		return err
 	}
 	desired, found, err := r.desired.LoadEmbeddedRuntimeDesiredState(ctx)
+	if err != nil {
+		return fmt.Errorf("load embedded Runtime desired state: %w", err)
+	}
+	if !found {
+		return nil
+	}
+	if err := desired.Validate(); err != nil {
+		return fmt.Errorf("validate embedded Runtime desired state: %w", err)
+	}
+	unlock, err := r.lockLifecycle(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	desired, found, err = r.desired.LoadEmbeddedRuntimeDesiredState(ctx)
 	if err != nil {
 		return fmt.Errorf("load embedded Runtime desired state: %w", err)
 	}

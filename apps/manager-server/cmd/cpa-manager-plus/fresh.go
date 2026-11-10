@@ -87,25 +87,66 @@ func freshPaths(cfg config.Config) (sqliterepo.InspectionPaths, error) {
 
 var errFreshExternalPermitRevoked = errors.New("fresh external host permit revoked")
 
+// runtimeLifecycleMutex is a context-cancellable 1-slot semaphore shared
+// between explicit operator lifecycle mutations and automatic reconcile cycles.
+type runtimeLifecycleMutex struct {
+	initOnce sync.Once
+	ch       chan struct{}
+}
+
+func (m *runtimeLifecycleMutex) tokenCh() chan struct{} {
+	m.initOnce.Do(func() {
+		m.ch = make(chan struct{}, 1)
+		m.ch <- struct{}{}
+	})
+	return m.ch
+}
+
+func (m *runtimeLifecycleMutex) Lock(ctx context.Context) (func(), error) {
+	if m == nil {
+		return func() {}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ch := m.tokenCh()
+	select {
+	case <-ch:
+		if err := ctx.Err(); err != nil {
+			ch <- struct{}{}
+			return nil, err
+		}
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				ch <- struct{}{}
+			})
+		}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 type freshApplication struct {
-	cfg             config.Config
-	store           freshstore.Store
-	authority       *fresh.Service
-	routing         *freshrouting.Service
-	strategy        *freshstrategy.Service
-	runtime         runtimeservice.RuntimeClient
-	artifact        *runtimeservice.ArtifactClient
-	runtimeExternal *runtimeservice.ExternalClient
-	runtimeSettings setting.Repository
-	runtimeJournal  *freshRuntimeJournal
-	externalPermit  func(bootstrap.FreshOperation, uint64, string, string, string) bool
-	protector       *security.Protector
-	fixed           http.Handler
-	keyRepo         *keyrepo.Repository
-	keys            *freshkeys.Service
-	keyApply        *freshkeyapply.Service
-	updates         *updatecheck.Service
-	gatewayConfig   *freshconfig.Service
+	cfg                config.Config
+	store              freshstore.Store
+	authority          *fresh.Service
+	routing            *freshrouting.Service
+	strategy           *freshstrategy.Service
+	runtime            runtimeservice.RuntimeClient
+	artifact           *runtimeservice.ArtifactClient
+	runtimeExternal    *runtimeservice.ExternalClient
+	runtimeSettings    setting.Repository
+	runtimeJournal     *freshRuntimeJournal
+	runtimeLifecycleMu runtimeLifecycleMutex
+	externalPermit     func(bootstrap.FreshOperation, uint64, string, string, string) bool
+	protector          *security.Protector
+	fixed              http.Handler
+	keyRepo            *keyrepo.Repository
+	keys               *freshkeys.Service
+	keyApply           *freshkeyapply.Service
+	updates            *updatecheck.Service
+	gatewayConfig      *freshconfig.Service
 	// pluginCapability is the short-lived proof behind X-CPA-SUPPORT-PLUGIN.
 	// It is nil until the application knows which connection it serves.
 	pluginCapability *pluginCapabilityProbe
@@ -309,12 +350,15 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 	if a.keyApply == nil && runtime != nil && h1Valid {
 		// Default Compose installations derive CPA management authority from
 		// the committed destination and the protected Manager connection.
+		supervisorRoots := cfg.TrustedSupervisorRoots()
 		a.managedSource = managedInstallSource(st, opened.Protector, cfg.CPAUpstreamURL)
 		a.keyApply = freshkeyapply.NewManaged(a.keyRepo, a.keys, runtime, cfg.CPAUpstreamURL, a.managedSource)
+		a.keyApply.SetTrustedSupervisorRoots(supervisorRoots)
 		a.gatewayConfig = freshconfig.New(st, a.keyApply.ConfigTarget, a.keyApply.TargetsFunc(freshkeyapply.SurfaceGatewayConfig))
 		// The destination address is the managed installation's own CPA, not the
 		// private loopback profile the default Transport dials.
 		a.gatewayConfig.EnableManaged(cfg.CPAUpstreamURL)
+		a.gatewayConfig.SetTrustedSupervisorRoots(supervisorRoots)
 		// New Managed and Adopt prove different destination postures, so the page
 		// asks the same committed checkpoint the key authority asks.
 		a.gatewayConfig.SetPostureSelector(func() (cpa.DestinationPosture, bool) {
@@ -322,7 +366,7 @@ func newFreshApplication(opened *fresh.Opened, cfg config.Config, driver freshro
 			if err != nil {
 				return cpa.DestinationPosture{}, false
 			}
-			return cpa.PostureFor(install.Strategy)
+			return cpa.PostureForWithSupervisorRoots(install.Strategy, supervisorRoots)
 		})
 	}
 	// The plugin capability the navigation reads is proven, not assumed: this

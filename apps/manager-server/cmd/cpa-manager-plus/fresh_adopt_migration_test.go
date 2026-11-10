@@ -440,8 +440,8 @@ func newAdoptMigrationFixtureWithClientKeys(t *testing.T, clientKeys ...string) 
 	destination := newMigrationFakeCPA(t)
 	destination.refuse["unsupported.json"] = true
 	destination.config["server"] = map[string]any{"host": "0.0.0.0", "port": json.Number("8317")}
-	destination.config["plugins"] = map[string]any{"enabled": false, "dir": "/supervisor/plugins"}
-	destination.config["oauth"] = map[string]any{"auth-dir": "/destination/auth"}
+	destination.config["plugins"] = map[string]any{"enabled": false, "dir": "/runtime/supervisor/plugins"}
+	destination.config["oauth"] = map[string]any{"auth-dir": "/runtime/supervisor/destination/auth"}
 	// The staged destination presents the Adopt posture completion proves: the
 	// Supervisor template's version stamp, remote management with the digest CPA
 	// writes back, and the usage switch this Supervisor records.
@@ -630,10 +630,10 @@ func TestCommittedAdoptionMigratesTheBoundedInventory(t *testing.T) {
 	if got := fixture.destination.value("server", "host"); got != "0.0.0.0" {
 		t.Fatalf("the destination listener was overwritten: %v", got)
 	}
-	if got := fixture.destination.value("plugins", "dir"); got != "/supervisor/plugins" {
+	if got := fixture.destination.value("plugins", "dir"); got != "/runtime/supervisor/plugins" {
 		t.Fatalf("the Supervisor plugin root was overwritten: %v", got)
 	}
-	if got := fixture.destination.value("oauth", "auth-dir"); got != "/destination/auth" {
+	if got := fixture.destination.value("oauth", "auth-dir"); got != "/runtime/supervisor/destination/auth" {
 		t.Fatalf("the destination auth directory was overwritten: %v", got)
 	}
 	for _, owned := range []string{"/config/management", "/config/server/host", "/config/server/port", "/config/plugins", "/config/oauth/auth-dir", "/config/access/api-keys"} {

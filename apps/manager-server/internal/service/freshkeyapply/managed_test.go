@@ -40,6 +40,8 @@ type managedCPA struct {
 	authOpen    bool
 	extraRoots  map[string]any
 	pluginsOn   bool
+	authDir     string
+	pluginDir   string
 }
 
 func (m *managedCPA) config() []byte {
@@ -53,22 +55,30 @@ func (m *managedCPA) config() []byte {
 	if m.dirtyConfig {
 		usage = false
 	}
+	authDir := m.authDir
+	if authDir == "" {
+		authDir = "/runtime/supervisor/destination/auth"
+	}
+	pluginDir := m.pluginDir
+	if pluginDir == "" {
+		pluginDir = "/runtime/supervisor/plugins"
+	}
 	body := map[string]any{
 		"config-version": 8,
 		"server":         map[string]any{"host": "0.0.0.0", "port": 8317},
 		"management": map[string]any{"allow-remote": true, "secret-key": managedBcryptSecret,
 			"disable-control-panel": true, "disable-auto-update-panel": true},
 		"access": map[string]any{"api-keys": keys},
-		"oauth":  map[string]any{"auth-dir": "/runtime/gateway/destination/auth"},
+		"oauth":  map[string]any{"auth-dir": authDir},
 		// The Supervisor template always publishes both the switch and its own
 		// plugin root: the root is a sibling of the destination directory so an
 		// installed plugin survives a re-stage, and only this exact closed shape
 		// is the managed posture.
-		"plugins":       map[string]any{"enabled": false, "dir": "/runtime/supervisor/plugins"},
+		"plugins":       map[string]any{"enabled": false, "dir": pluginDir},
 		"observability": map[string]any{"logs": map[string]any{"logging-to-file": false}, "usage": map[string]any{"usage-statistics-enabled": usage}},
 	}
 	if m.pluginsOn {
-		body["plugins"] = map[string]any{"enabled": true, "dir": "/runtime/supervisor/plugins", "configs": map[string]any{"sample": map[string]any{"enabled": true}}}
+		body["plugins"] = map[string]any{"enabled": true, "dir": pluginDir, "configs": map[string]any{"sample": map[string]any{"enabled": true}}}
 	}
 	for k, v := range m.extraRoots {
 		body[k] = v
@@ -463,22 +473,26 @@ func TestManagedAuthoritySurvivesSupervisorRestartUpdateAndOperatorEdits(t *test
 // The destination posture is part of the proof: a CPA that keeps the credential
 // but drops client authentication or remote management is not admitted.
 func TestDefaultInstallCPAAuthorityProvenRejectsDestinationPostureDrift(t *testing.T) {
-	for _, scenario := range []string{"dirty", "forged-management"} {
+	for _, scenario := range []string{"dirty", "forged-management", "untrusted-auth-suffix", "untrusted-plugin-suffix", "gateway-destination-auth"} {
 		t.Run(scenario, func(t *testing.T) {
 			s, cpa, _, installedID := managedFixture(t)
 			if _, err := s.Apply(t.Context(), installedID, 9); err != nil {
 				t.Fatal(err)
 			}
+			cpa.mu.Lock()
 			switch scenario {
 			case "dirty":
-				cpa.mu.Lock()
 				cpa.dirtyConfig = true
-				cpa.mu.Unlock()
 			case "forged-management":
-				cpa.mu.Lock()
 				cpa.management = strings.Repeat("z", 64)
-				cpa.mu.Unlock()
+			case "untrusted-auth-suffix":
+				cpa.authDir = "/tmp/foreign/supervisor/destination/auth"
+			case "untrusted-plugin-suffix":
+				cpa.pluginDir = "/tmp/foreign/supervisor/plugins"
+			case "gateway-destination-auth":
+				cpa.authDir = "/runtime/gateway/destination/auth"
 			}
+			cpa.mu.Unlock()
 			if s.DefaultInstallCPAAuthorityProven(t.Context()) {
 				t.Fatalf("%s destination proven", scenario)
 			}

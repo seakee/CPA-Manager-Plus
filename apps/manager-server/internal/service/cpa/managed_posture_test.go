@@ -1,14 +1,19 @@
 package cpa
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
 // The default new_managed destination template: 0.0.0.0 with a child identity,
 // remote management, usage statistics, the Supervisor-owned auth directory and
 // a bcrypt management digest CPA wrote back at first startup.
-const managedDestinationConfig = `{"config-version":8,"server":{"host":"0.0.0.0","port":8317},"management":{"allow-remote":true,"secret-key":"$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY12","disable-control-panel":true,"disable-auto-update-panel":true},"access":{"api-keys":[]},"oauth":{"auth-dir":"/runtime/gateway/destination/auth"},"plugins":{"enabled":false,"dir":"/runtime/supervisor/plugins"},"observability":{"logs":{"logging-to-file":false},"usage":{"usage-statistics-enabled":true}}}`
+const managedDestinationConfig = `{"config-version":8,"server":{"host":"0.0.0.0","port":8317},"management":{"allow-remote":true,"secret-key":"$2a$10$abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY12","disable-control-panel":true,"disable-auto-update-panel":true},"access":{"api-keys":[]},"oauth":{"auth-dir":"/runtime/supervisor/destination/auth"},"plugins":{"enabled":false,"dir":"/runtime/supervisor/plugins"},"observability":{"logs":{"logging-to-file":false},"usage":{"usage-statistics-enabled":true}}}`
 
 func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *testing.T) {
 	if !managedProofPosture.matches([]byte(managedDestinationConfig)) {
@@ -80,8 +85,8 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 			name: "oauth model alias and excluded models keeping supervisor auth-dir",
 			body: strings.Replace(
 				managedDestinationConfig,
-				`"oauth":{"auth-dir":"/runtime/gateway/destination/auth"}`,
-				`"oauth":{"auth-dir":"/data/runtime/gateway/destination/auth","auth-auto-refresh-workers":2,"model-alias":{"codex":[{"name":"gpt-5","alias":"codex-main"}]},"excluded-models":{"codex":["legacy-model"]},"providers":{"aistudio":{"ws-auth":true}}}`,
+				`"oauth":{"auth-dir":"/runtime/supervisor/destination/auth"}`,
+				`"oauth":{"auth-dir":"/data/runtime/supervisor/destination/auth","auth-auto-refresh-workers":2,"model-alias":{"codex":[{"name":"gpt-5","alias":"codex-main"}]},"excluded-models":{"codex":["legacy-model"]},"providers":{"aistudio":{"ws-auth":true}}}`,
 				1,
 			),
 		},
@@ -180,6 +185,14 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 			body: strings.Replace(managedDestinationConfig, `"dir":"/runtime/supervisor/plugins"`, `"dir":"/runtime/gateway/plugins/sub"`, 1),
 		},
 		{
+			name: "plugin dir suffix under arbitrary temp prefix",
+			body: strings.Replace(managedDestinationConfig, `"dir":"/runtime/supervisor/plugins"`, `"dir":"/tmp/x/supervisor/plugins"`, 1),
+		},
+		{
+			name: "plugin dir unclean repeated slash",
+			body: strings.Replace(managedDestinationConfig, `"dir":"/runtime/supervisor/plugins"`, `"dir":"/runtime//supervisor/plugins"`, 1),
+		},
+		{
 			name: "plugin dir missing",
 			body: strings.Replace(managedDestinationConfig, `,"dir":"/runtime/supervisor/plugins"`, ``, 1),
 		},
@@ -197,15 +210,35 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 		},
 		{
 			name: "foreign oauth auth dir",
-			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/gateway/destination/auth"`, `"auth-dir":"/tmp/auth"`, 1),
+			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/tmp/auth"`, 1),
 		},
 		{
 			name: "bootstrap oauth auth dir",
-			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/gateway/destination/auth"`, `"auth-dir":"/runtime/gateway/auth"`, 1),
+			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/runtime/gateway/auth"`, 1),
+		},
+		{
+			name: "gateway destination auth dir under /runtime",
+			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/runtime/gateway/destination/auth"`, 1),
+		},
+		{
+			name: "gateway destination auth dir under /data/runtime",
+			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/data/runtime/gateway/destination/auth"`, 1),
 		},
 		{
 			name: "oauth auth dir traversal",
-			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/gateway/destination/auth"`, `"auth-dir":"/runtime/gateway/x/../destination/auth"`, 1),
+			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/runtime/supervisor/x/../destination/auth"`, 1),
+		},
+		{
+			name: "oauth auth dir suffix under arbitrary temp prefix",
+			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/tmp/x/destination/auth"`, 1),
+		},
+		{
+			name: "oauth auth dir supervisor suffix under arbitrary temp prefix",
+			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/tmp/x/supervisor/destination/auth"`, 1),
+		},
+		{
+			name: "oauth auth dir unclean repeated slash",
+			body: strings.Replace(managedDestinationConfig, `"auth-dir":"/runtime/supervisor/destination/auth"`, `"auth-dir":"/runtime/supervisor//destination/auth"`, 1),
 		},
 		{
 			name: "logging to file enabled",
@@ -273,7 +306,7 @@ func TestManagedPostureAllowsOperatorEditsWhileEnforcingSecurityInvariants(t *te
 
 func TestPrivatePostureRejectsUsageStatisticsAndRemoteManagement(t *testing.T) {
 	for name, body := range map[string]string{
-		"usage statistics": strings.Replace(proofConfig, `"usage-statistics-enabled":false`, `"usage-statistics-enabled":true`, 1),
+		"usage statistics":  strings.Replace(proofConfig, `"usage-statistics-enabled":false`, `"usage-statistics-enabled":true`, 1),
 		"remote management": strings.Replace(proofConfig, `"allow-remote":false`, `"allow-remote":true`, 1),
 		"foreign auth dir":  strings.Replace(proofConfig, `"/runtime/gateway/auth"`, `"/runtime/gateway/destination/auth"`, 1),
 	} {
@@ -298,5 +331,104 @@ func TestLooksLikeBcrypt(t *testing.T) {
 		if looksLikeBcrypt(value) != want {
 			t.Fatalf("looksLikeBcrypt(%q) != %v", value, want)
 		}
+	}
+}
+
+func TestKeySnapshotBindsManagedAndAdoptedPosturesToConfiguredSupervisorRoot(t *testing.T) {
+	canonicalManagedKey := "cpamp_sk_" + strings.Repeat("a", 64)
+	customDataDir := filepath.ToSlash(t.TempDir())
+	customSupervisorRoot := customDataDir + "/runtime/supervisor"
+
+	for _, tc := range []struct {
+		strategy string
+		baseDoc  string
+		keys     []string
+	}{
+		{
+			strategy: "new_managed",
+			baseDoc:  managedDestinationConfig,
+			keys:     []string{canonicalManagedKey},
+		},
+		{
+			strategy: "adopt_existing",
+			baseDoc:  adoptDestinationConfig,
+			keys:     []string{"source-key-one", "source-key-two"},
+		},
+	} {
+		t.Run(tc.strategy, func(t *testing.T) {
+			keyListJSON, err := json.Marshal(tc.keys)
+			if err != nil {
+				t.Fatal(err)
+			}
+			buildDoc := func(authDir, pluginDir string) string {
+				return strings.NewReplacer(
+					`"api-keys":[]`, `"api-keys":`+string(keyListJSON),
+					`"/runtime/supervisor/destination/auth"`, `"`+authDir+`"`,
+					`"/runtime/supervisor/plugins"`, `"`+pluginDir+`"`,
+				).Replace(tc.baseDoc)
+			}
+
+			var served atomic.Value
+			served.Store(buildDoc(customSupervisorRoot+"/destination/auth", customSupervisorRoot+"/plugins"))
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer "+testManagement() {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				switch r.URL.Path {
+				case "/v8/management/config":
+					_, _ = w.Write([]byte(served.Load().(string)))
+				case "/v8/management/config/access/api-keys":
+					_ = json.NewEncoder(w).Encode(tc.keys)
+				case "/v8/management/config.yaml":
+					_, _ = w.Write([]byte("config-version: 8\n"))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			transport := NewTransportForEndpoint(server.URL)
+			transport.SetTrustedSupervisorRoots([]string{customSupervisorRoot})
+			transport.SetPostureSelector(func() (DestinationPosture, bool) {
+				return PostureForWithSupervisorRoots(tc.strategy, []string{customSupervisorRoot})
+			})
+
+			// Admits the instance's own configured Supervisor root.
+			snap, err := transport.KeySnapshot(t.Context(), testManagement())
+			if err != nil || len(snap.Keys) != len(tc.keys) {
+				t.Fatalf("configured custom Supervisor root rejected on %s: err=%v snap=%+v", tc.strategy, err, snap)
+			}
+
+			// Rejects same-suffix untrusted prefixes, child-writable gateway/destination/auth,
+			// and container roots not configured for this instance.
+			for name, badDoc := range map[string]string{
+				"same suffix untrusted auth prefix": buildDoc(
+					"/tmp/foreign/runtime/supervisor/destination/auth",
+					customSupervisorRoot+"/plugins",
+				),
+				"same suffix untrusted plugin prefix": buildDoc(
+					customSupervisorRoot+"/destination/auth",
+					"/tmp/foreign/runtime/supervisor/plugins",
+				),
+				"gateway destination auth under instance runtime root": buildDoc(
+					customDataDir+"/runtime/gateway/destination/auth",
+					customSupervisorRoot+"/plugins",
+				),
+				"gateway destination auth under /runtime": buildDoc(
+					"/runtime/gateway/destination/auth",
+					customSupervisorRoot+"/plugins",
+				),
+				"unconfigured /runtime/supervisor root": buildDoc(
+					"/runtime/supervisor/destination/auth",
+					"/runtime/supervisor/plugins",
+				),
+			} {
+				served.Store(badDoc)
+				if _, err := transport.KeySnapshot(t.Context(), testManagement()); err == nil {
+					t.Fatalf("%s unexpectedly passed KeySnapshot on %s", name, tc.strategy)
+				}
+			}
+		})
 	}
 }

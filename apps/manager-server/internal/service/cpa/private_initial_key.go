@@ -10,6 +10,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -66,7 +69,9 @@ type Transport struct {
 	// postureFor resolves the per-install posture of a Manager-owned profile whose
 	// strategy is only known after construction (New Managed or Adopt). It is nil
 	// for the private profile and for External, whose posture is fixed.
-	postureFor PostureSelector
+	postureFor                PostureSelector
+	supervisorRoots           []string
+	supervisorRootsConfigured bool
 }
 
 func NewTransport() *Transport {
@@ -93,6 +98,18 @@ func NewTransportForEndpoint(endpoint string) *Transport {
 	direct.DisableKeepAlives = true
 	direct.MaxResponseHeaderBytes = 32 << 10
 	return &Transport{client: &http.Client{Transport: direct, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, endpoint: strings.TrimRight(endpoint, "/"), posture: managedProofPosture}
+}
+
+// SetTrustedSupervisorRoots binds a Manager-owned Transport to the canonical
+// Runtime Supervisor root(s) configured for this installation. An empty or
+// non-canonical root slice fails closed rather than falling back to defaults.
+func (t *Transport) SetTrustedSupervisorRoots(roots []string) {
+	if t == nil {
+		return
+	}
+	t.supervisorRoots = canonicalSupervisorRoots(roots)
+	t.supervisorRootsConfigured = true
+	t.posture = t.posture.withSupervisorRoots(roots)
 }
 
 func (t *Transport) request(ctx context.Context, method, path, managementKey string, payload []byte) (int, []byte, error) {
@@ -215,11 +232,13 @@ type proofPosture struct {
 	adopt bool
 	// deny refuses every read. It is the posture of a Manager-owned profile whose
 	// selector could not answer, which is a destination this Manager may not prove.
-	deny            bool
-	host            string
-	allowRemote     bool
-	usageStatistics bool
-	authDir         string
+	deny                      bool
+	host                      string
+	allowRemote               bool
+	usageStatistics           bool
+	authDir                   string
+	supervisorRoots           []string
+	supervisorRootsConfigured bool
 }
 
 // privateProofPosture is the attested private S1 seed; it is the zero value.
@@ -410,9 +429,50 @@ func (p proofPosture) matches(data []byte) bool {
 	return len(secret) > 0
 }
 
-// validAuthDir accepts the private fixed path, or (default installs) the
-// Supervisor-owned destination auth directory: the immutable destination root
-// is <supervisorRoot>/destination and publishes <root>/auth to the child.
+var defaultSupervisorRoots = []string{
+	"/data/runtime/supervisor",
+	"/runtime/supervisor",
+}
+
+func canonicalSupervisorRoots(roots []string) []string {
+	var out []string
+	for _, raw := range roots {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		slashed := filepath.ToSlash(trimmed)
+		if !strings.HasPrefix(slashed, "/") {
+			continue
+		}
+		cleaned := path.Clean(slashed)
+		if cleaned == "/" || cleaned == "." {
+			continue
+		}
+		if !slices.Contains(out, cleaned) {
+			out = append(out, cleaned)
+		}
+	}
+	return out
+}
+
+func (p proofPosture) withSupervisorRoots(roots []string) proofPosture {
+	p.supervisorRoots = canonicalSupervisorRoots(roots)
+	p.supervisorRootsConfigured = true
+	return p
+}
+
+func (p proofPosture) effectiveSupervisorRoots() []string {
+	if p.supervisorRootsConfigured {
+		return p.supervisorRoots
+	}
+	return defaultSupervisorRoots
+}
+
+// validAuthDir accepts the private fixed path, or the canonical Supervisor-owned
+// destination auth directory of this installation: the immutable destination
+// root is <supervisorRoot>/destination and publishes <supervisorRoot>/destination/auth.
+// Child-writable <runtimeRoot>/gateway paths are never admitted.
 func (p proofPosture) validAuthDir(dir string) bool {
 	if p.authDir != "" {
 		return dir == p.authDir
@@ -420,22 +480,39 @@ func (p proofPosture) validAuthDir(dir string) bool {
 	if !p.managed {
 		return dir == "/runtime/gateway/auth"
 	}
-	return strings.HasPrefix(dir, "/") && strings.HasSuffix(dir, "/destination/auth") && !strings.Contains(dir, "..")
+	if dir == "" || path.Clean(dir) != dir {
+		return false
+	}
+	for _, root := range p.effectiveSupervisorRoots() {
+		if dir == root+"/destination/auth" {
+			return true
+		}
+	}
+	return false
 }
 
 // privatePluginDir is the private S1 seed's plugin root.
 const privatePluginDir = "/runtime/gateway/plugins"
 
-// validPluginDir accepts the private fixed path, or (default installs) the
-// Supervisor-owned plugin root. The immutable destination is
-// <supervisorRoot>/destination, which publish replaces whole, so the plugin root
-// is its sibling <supervisorRoot>/plugins: it survives every re-staged
-// destination and a Runtime restart, and no request can point it elsewhere.
+// validPluginDir accepts the private fixed path, or the canonical
+// Supervisor-owned plugin root (<supervisorRoot>/plugins) of this installation.
+// The immutable destination is <supervisorRoot>/destination, which publish
+// replaces whole, so the plugin root is its sibling <supervisorRoot>/plugins:
+// it survives every re-staged destination and a Runtime restart, and no request
+// can point it elsewhere.
 func (p proofPosture) validPluginDir(dir string) bool {
 	if !p.managed {
 		return dir == privatePluginDir
 	}
-	return strings.HasPrefix(dir, "/") && strings.HasSuffix(dir, "/supervisor/plugins") && !strings.Contains(dir, "..")
+	if dir == "" || path.Clean(dir) != dir {
+		return false
+	}
+	for _, root := range p.effectiveSupervisorRoots() {
+		if dir == root+"/plugins" {
+			return true
+		}
+	}
+	return false
 }
 
 func emptyProofConfig(data []byte) bool { return privateProofPosture.matches(data) }

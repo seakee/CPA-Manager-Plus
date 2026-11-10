@@ -38,6 +38,9 @@ type managedKeyDestination struct {
 	management string
 	keys       []string
 	writes     int
+	authDir    string
+	pluginDir  string
+	extraRoots map[string]any
 }
 
 func (d *managedKeyDestination) document() []byte {
@@ -47,20 +50,28 @@ func (d *managedKeyDestination) document() []byte {
 	for _, key := range d.keys {
 		keys = append(keys, key)
 	}
-	body, _ := json.Marshal(map[string]any{
+	authDir := d.authDir
+	if authDir == "" {
+		authDir = "/runtime/supervisor/destination/auth"
+	}
+	pluginDir := d.pluginDir
+	if pluginDir == "" {
+		pluginDir = "/runtime/supervisor/plugins"
+	}
+	doc := map[string]any{
 		"config-version": 8,
 		"server":         map[string]any{"host": "0.0.0.0", "port": 8317},
 		"management": map[string]any{"allow-remote": true, "secret-key": managedInstallBcrypt,
 			"disable-control-panel": true, "disable-auto-update-panel": true},
-		"access": map[string]any{"api-keys": keys},
-		"oauth":  map[string]any{"auth-dir": "/runtime/gateway/destination/auth"},
-		// The Supervisor template publishes both the switch and its own plugin
-		// root; the root is a sibling of the destination directory so an
-		// installed plugin survives a re-stage, and only this closed shape is
-		// the managed posture.
-		"plugins":       map[string]any{"enabled": false, "dir": "/runtime/supervisor/plugins"},
+		"access":        map[string]any{"api-keys": keys},
+		"oauth":         map[string]any{"auth-dir": authDir},
+		"plugins":       map[string]any{"enabled": false, "dir": pluginDir},
 		"observability": map[string]any{"logs": map[string]any{"logging-to-file": false}, "usage": map[string]any{"usage-statistics-enabled": true}},
-	})
+	}
+	for k, v := range d.extraRoots {
+		doc[k] = v
+	}
+	body, _ := json.Marshal(doc)
 	return body
 }
 
@@ -660,5 +671,166 @@ func TestPrivateProfileKeepsItsOwnAuthoritySelection(t *testing.T) {
 	}
 	if !app.keyApply.Targets(adoptedPrivate, freshkeyapply.SurfaceGatewayConfig) {
 		t.Fatal("the private page lost its adopted target scope")
+	}
+}
+
+func TestGatewayAdmissionProvenBindsManagedAndAdoptedToConfiguredSupervisorRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		strategy bootstrap.CPAStrategy
+	}{
+		{name: "new_managed", strategy: bootstrap.NewManaged},
+		{name: "adopt_existing", strategy: bootstrap.AdoptExisting},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			customDataDir := t.TempDir()
+			customSupRoot := filepath.ToSlash(filepath.Join(customDataDir, "runtime", "supervisor"))
+
+			destination := &managedKeyDestination{
+				management: strings.Repeat("e", 64),
+				authDir:    customSupRoot + "/destination/auth",
+				pluginDir:  customSupRoot + "/plugins",
+			}
+			if tc.strategy == bootstrap.AdoptExisting {
+				destination.extraRoots = map[string]any{
+					"routing": map[string]any{"strategy": "round-robin"},
+				}
+				destination.seed("source-key-one", "source-key-two")
+			}
+			destinationServer := destination.serve(t)
+			status := managedInstallRuntimeStatus()
+			runtimeServer := managedKeyRuntime(t, status, "managed-key-runtime-token")
+			tokenPath := filepath.Join(t.TempDir(), "runtime-token")
+			if err := os.WriteFile(tokenPath, []byte("managed-key-runtime-token"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			storeDir := t.TempDir()
+			paths := legacypreflight.DefaultPaths(filepath.Join(storeDir, "manager.sqlite"))
+			paths.Config = filepath.Join(storeDir, "config.json")
+			opened, err := fresh.Open(t.Context(), paths, fresh.OpenOptions{Initialize: true, AdminKey: strategyTestAdmin})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = opened.Close() })
+
+			app := newFreshApplication(opened, config.Config{
+				DataDir:          customDataDir,
+				RuntimeURL:       runtimeServer.URL,
+				RuntimeTokenFile: tokenPath,
+				CPAUpstreamURL:   destinationServer.URL,
+			}, nil)
+			protected, err := opened.Protector.ProtectString(destination.management)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := app.store.Load(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err = app.store.Update(t.Context(), record.Operation.Identity, record.Operation.Revision, func(r *freshstore.Record) error {
+				r.Operation.Routing = bootstrap.FreshRoutingCheckpoint{
+					OperationID: r.Operation.Identity.OperationID,
+					Revision:    1,
+					Target:      "/control",
+					Stage:       bootstrap.PrefixCommitted,
+					Committed:   true,
+				}
+				checkpoint := bootstrap.FreshStrategyCheckpoint{
+					Strategy:                      tc.strategy,
+					SourceClass:                   bootstrap.AdoptSourceNone,
+					Stage:                         "committed",
+					TargetIdentity:                string(status.Identity),
+					TargetGeneration:              uint64(status.Generation),
+					TargetArtifactID:              string(status.ActiveGatewayArtifact.ArtifactID),
+					DestinationConnectionIdentity: freshstrategy.ManagedDestinationIdentity(destinationServer.URL),
+				}
+				if tc.strategy == bootstrap.AdoptExisting {
+					snapshotCipher, protectErr := opened.Protector.ProtectString("test-only encrypted adopt snapshot")
+					if protectErr != nil {
+						return protectErr
+					}
+					r.AdoptionCiphertext = snapshotCipher
+					checkpoint.SourceClass = bootstrap.AdoptNetworkExisting
+					checkpoint.SourceIdentity = "external:sha256:" + strings.Repeat("b", 64)
+					checkpoint.DestinationConnectionIdentity = freshstrategy.AdoptedDestinationIdentity(destinationServer.URL)
+					checkpoint.AdoptionResources = []bootstrap.ResourceRef{
+						bootstrap.AdoptionRefClientAPIKeys,
+						bootstrap.AdoptionRefCPAAuthFiles,
+						bootstrap.AdoptionRefConfigServer,
+						bootstrap.AdoptionRefProviderStateProviders,
+					}
+					checkpoint.AdoptionDecisions = []bootstrap.AdoptionResourceDecision{
+						{ResourceRef: bootstrap.AdoptionRefClientAPIKeys, Kind: bootstrap.APIKeys, Scope: bootstrap.ClientAPIKeys, ReadEvidenceRef: "preflight:keys-read", ReplayEvidenceRef: "preflight:keys-replay", VerifyEvidenceRef: "preflight:keys-verify", Qualification: bootstrap.CapabilityQualified, Disposition: bootstrap.Migrate},
+						{ResourceRef: bootstrap.AdoptionRefCPAAuthFiles, Kind: bootstrap.Credentials, Scope: bootstrap.CPAAuthFiles, Qualification: bootstrap.CapabilityPending, ManualAction: bootstrap.ReauthenticateAfterAdoption, Disposition: bootstrap.ManualAction},
+						{ResourceRef: bootstrap.AdoptionRefConfigServer, Kind: bootstrap.CPAConfiguration, Scope: bootstrap.ManagementAPIFields, Qualification: bootstrap.CapabilityPending, ManualAction: bootstrap.ReconfigureAfterAdoption, Disposition: bootstrap.ManualAction},
+						{ResourceRef: bootstrap.AdoptionRefProviderStateProviders, Kind: bootstrap.ProviderRuntimeState, Scope: bootstrap.ProviderState, Qualification: bootstrap.CapabilityPending, ManualAction: bootstrap.ReauthenticateAfterAdoption, Disposition: bootstrap.ManualAction},
+					}
+				}
+				r.Operation.Strategy = checkpoint
+				r.Connection = &model.ManagerCPAConnectionConfig{
+					CPABaseURL:    destinationServer.URL,
+					ManagementKey: protected,
+				}
+				r.Operation.ProductComplete = true
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.strategy == bootstrap.NewManaged {
+				key, installErr := app.installInitialClientKey(t.Context(), record.Operation, record.Operation.Strategy.TargetGeneration)
+				if installErr != nil {
+					t.Fatal(installErr)
+				}
+				destination.seed(key.Secret)
+			}
+
+			// 1. Custom <DataDir>/runtime/supervisor root is admitted.
+			if !app.gatewayAdmissionProven(t.Context()) {
+				t.Fatalf("configured custom Supervisor root (%s) was not admitted for %s", customSupRoot, tc.name)
+			}
+
+			// 2. Untrusted same-suffix prefixes, child-writable gateway/destination/auth,
+			// and unconfigured container roots are all rejected.
+			for driftName, mutate := range map[string]func(){
+				"same-suffix untrusted auth prefix": func() {
+					destination.authDir = "/tmp/foreign/runtime/supervisor/destination/auth"
+					destination.pluginDir = customSupRoot + "/plugins"
+				},
+				"same-suffix untrusted plugin prefix": func() {
+					destination.authDir = customSupRoot + "/destination/auth"
+					destination.pluginDir = "/tmp/foreign/runtime/supervisor/plugins"
+				},
+				"child-writable gateway/destination/auth under DataDir": func() {
+					destination.authDir = filepath.ToSlash(filepath.Join(customDataDir, "runtime", "gateway", "destination", "auth"))
+					destination.pluginDir = customSupRoot + "/plugins"
+				},
+				"child-writable /runtime/gateway/destination/auth": func() {
+					destination.authDir = "/runtime/gateway/destination/auth"
+					destination.pluginDir = customSupRoot + "/plugins"
+				},
+				"unconfigured /runtime/supervisor container root": func() {
+					destination.authDir = "/runtime/supervisor/destination/auth"
+					destination.pluginDir = "/runtime/supervisor/plugins"
+				},
+			} {
+				destination.mu.Lock()
+				mutate()
+				destination.mu.Unlock()
+				if app.gatewayAdmissionProven(t.Context()) {
+					t.Fatalf("%s unexpectedly admitted Gateway on %s", driftName, tc.name)
+				}
+			}
+
+			// Restore canonical instance paths and re-verify admission recovers.
+			destination.mu.Lock()
+			destination.authDir = customSupRoot + "/destination/auth"
+			destination.pluginDir = customSupRoot + "/plugins"
+			destination.mu.Unlock()
+			if !app.gatewayAdmissionProven(t.Context()) {
+				t.Fatalf("restored custom Supervisor root failed admission on %s", tc.name)
+			}
+		})
 	}
 }

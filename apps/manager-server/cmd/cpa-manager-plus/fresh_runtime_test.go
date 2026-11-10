@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,12 +25,16 @@ import (
 
 type freshRuntimeTestClient struct {
 	runtimeservice.RuntimeClient
+	mu            sync.Mutex
 	status        model.RuntimeObservedStatus
 	statusErr     error
+	onStatus      func(context.Context)
 	startResult   model.RuntimeOperationResult
 	startErr      error
 	stopResult    model.RuntimeOperationResult
 	stopErr       error
+	onStop        func()
+	onStopRequest func(context.Context, model.RuntimeMutationRequest)
 	restartResult model.RuntimeOperationResult
 	restartErr    error
 	starts        int
@@ -38,11 +43,24 @@ type freshRuntimeTestClient struct {
 	startRequests []model.RuntimeMutationRequest
 }
 
-func (c *freshRuntimeTestClient) Status(_ context.Context) (model.RuntimeObservedStatus, error) {
+func (c *freshRuntimeTestClient) Status(ctx context.Context) (model.RuntimeObservedStatus, error) {
+	c.mu.Lock()
+	onStatus := c.onStatus
+	c.mu.Unlock()
+	if onStatus != nil {
+		onStatus(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return model.RuntimeObservedStatus{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.status, c.statusErr
 }
 
 func (c *freshRuntimeTestClient) Start(_ context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.starts++
 	c.startRequests = append(c.startRequests, request)
 	if c.startResult.OperationID == "" {
@@ -51,12 +69,23 @@ func (c *freshRuntimeTestClient) Start(_ context.Context, request model.RuntimeM
 	return c.startResult, c.startErr
 }
 
-func (c *freshRuntimeTestClient) Stop(_ context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+func (c *freshRuntimeTestClient) Stop(ctx context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {
+	c.mu.Lock()
 	c.stops++
 	if c.stopResult.OperationID == "" {
 		c.stopResult = freshRuntimeResult(request, model.RuntimeOperationStop, model.RuntimeOperationSucceeded)
 	}
-	return c.stopResult, c.stopErr
+	res, err := c.stopResult, c.stopErr
+	onStop := c.onStop
+	onStopRequest := c.onStopRequest
+	c.mu.Unlock()
+	if onStopRequest != nil {
+		onStopRequest(ctx, request)
+	}
+	if onStop != nil {
+		onStop()
+	}
+	return res, err
 }
 
 func (c *freshRuntimeTestClient) Restart(_ context.Context, request model.RuntimeMutationRequest) (model.RuntimeOperationResult, error) {

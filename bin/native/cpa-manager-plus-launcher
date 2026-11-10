@@ -1781,6 +1781,12 @@ spawn_manager_server() {
     export CPAMP_RUNTIME_URL="${runtime_url}"
     export CPAMP_RUNTIME_TOKEN_FILE="${token_file}"
     export CPAMP_INGRESS_CONTROL_URL="${ingress_control_url}"
+    if [ -n "${CPAMP_RUNTIME_DATA_DIR:-}" ]; then
+      export CPAMP_RUNTIME_DATA_DIR="${runtime_data_dir}"
+    fi
+    if [ -n "${CPAMP_RUNTIME_JOURNAL_PATH:-}" ]; then
+      export CPAMP_RUNTIME_JOURNAL_PATH="${journal_path}"
+    fi
     if [ -n "${public_origin}" ]; then
       export CPAMP_PUBLIC_ORIGIN="${public_origin}"
     else

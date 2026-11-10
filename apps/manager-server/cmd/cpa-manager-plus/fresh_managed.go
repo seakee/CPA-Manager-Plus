@@ -39,7 +39,7 @@ func managedInstallSource(store freshstore.Store, protector *security.Protector,
 		}
 		record, err := store.Load(ctx)
 		if err != nil {
-			return freshkeyapply.ManagedInstall{}, freshkeyapply.ErrUnavailable
+			return freshkeyapply.ManagedInstall{}, fmt.Errorf("%w: %w", freshkeyapply.ErrUnavailable, err)
 		}
 		checkpoint := record.Operation.Strategy
 		if !freshkeyapply.ManagerOwnedStrategy(checkpoint) || checkpoint.Stage != "committed" || record.Connection == nil {
@@ -188,6 +188,7 @@ type freshDesiredStateStore struct {
 var (
 	_ runtimeservice.DesiredStateStore      = freshDesiredStateStore{}
 	_ runtimeservice.CommittedArtifactStore = freshDesiredStateStore{}
+	_ runtimeservice.LifecycleLocker        = freshDesiredStateStore{}
 )
 
 func (a *freshApplication) desiredStateStore() runtimeservice.DesiredStateStore {
@@ -195,6 +196,13 @@ func (a *freshApplication) desiredStateStore() runtimeservice.DesiredStateStore 
 		return nil
 	}
 	return freshDesiredStateStore{app: a}
+}
+
+func (s freshDesiredStateStore) LockEmbeddedRuntimeLifecycle(ctx context.Context) (func(), error) {
+	if s.app == nil {
+		return func() {}, nil
+	}
+	return s.app.runtimeLifecycleMu.Lock(ctx)
 }
 
 // LoadEmbeddedRuntimeDesiredState is the reconcile gate, so it runs on every
@@ -301,7 +309,7 @@ func (a *freshApplication) incompleteManagedDesiredRunning(ctx context.Context, 
 		return zero, false, nil
 	}
 	if _, err := a.managedSource(ctx); err != nil {
-		return zero, false, nil
+		return zero, false, fmt.Errorf("resolve incomplete managed destination authority: %w", err)
 	}
 	if a.artifact != nil {
 		artifactStatus, artifactErr := a.artifact.Status(ctx)

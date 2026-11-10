@@ -104,6 +104,17 @@ func NewManaged(r *repo.Repository, keys *freshkeys.Service, runtime runtimeserv
 	return s
 }
 
+// SetTrustedSupervisorRoots binds a Manager-owned key authority to the
+// installation's canonical Runtime Supervisor root(s).
+func (s *Service) SetTrustedSupervisorRoots(roots []string) {
+	if s == nil {
+		return
+	}
+	if transport, ok := s.wire.(*cpa.Transport); ok {
+		transport.SetTrustedSupervisorRoots(roots)
+	}
+}
+
 // ManagedEndpoint is the normalized destination CPA address this authority
 // writes through. It is configuration, not a credential.
 func (s *Service) ManagedEndpoint() string {

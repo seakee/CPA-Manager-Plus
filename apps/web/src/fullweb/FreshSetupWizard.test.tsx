@@ -50,6 +50,18 @@ async function click(id: string) {
     await byID(id).props.onClick();
   });
 }
+function nodeText(node: { children: Array<unknown> }): string {
+  return node.children
+    .map((child) =>
+      typeof child === 'string' || typeof child === 'number'
+        ? String(child)
+        : child && typeof child === 'object' && 'children' in child
+          ? nodeText(child as { children: Array<unknown> })
+          : ''
+    )
+    .join('')
+    .trim();
+}
 async function input(id: string, value: string | boolean) {
   await act(async () => byID(id).props.onChange({ target: { value, checked: value } }));
 }
@@ -1043,104 +1055,143 @@ it('names the engine step, not the confirmation step, while the engine is not re
   expect(renderer.root.findAllByProps({ 'data-testid': 'setup-execute' })).toHaveLength(0);
 });
 
-it('resumes an incomplete committed New Managed installation across Supervisor generation restart', async () => {
-  let runtimeState = 'offline';
-  let operation: FreshOperation = {
-    version: 1,
-    identity,
-    revision: 4,
-    adminInitialized: true,
-    productComplete: false,
-    gatewayPending: true,
-    routing: { committed: false },
-    strategy: {
-      strategy: 'new_managed',
-      stage: 'committed',
-      targetIdentity: runtime.runtimeIdentity,
-      targetGeneration: runtime.runtimeGeneration,
-      targetArtifactId: runtime.activeGatewayArtifact.artifactId,
-      destinationConnectionIdentity: 'managed:sha256:' + 'c'.repeat(64),
-    },
-  };
-  const transport = vi.fn<typeof fetch>(async (url, init) => {
-    const resource = new URL(String(url)).pathname.split('/api/v2/')[1];
-    const body = init?.body ? JSON.parse(String(init.body)) : {};
-    if (resource === 'claim/exchange')
-      return Response.json({ token: 'installation-session', operation });
-    if (resource === 'bootstrap/identity') {
-      return Response.json(
-        {
-          installationId: identity.installationId,
-          generation: identity.generation,
-          operationId: identity.operationId,
-          revision: 1,
-          target: operation.routing.target,
-          committed: operation.routing.committed,
-        },
-        { headers: { 'X-CPAMP-Route-Owner': 'manager' } }
-      );
-    }
-    if (resource === 'operation') {
-      if (operation.routing.committed && String(url).includes(BOOTSTRAP_UI.replace('/ui', '/api/')))
-        return new Response('', { status: 404 });
-      return Response.json(operation);
-    }
-    if (resource === 'installation/runtime') {
-      return Response.json({
-        ...runtime,
-        runtimeGeneration: 991234,
-        state: runtimeState,
-      });
-    }
-    if (resource === 'routing/prepare') {
-      operation = {
-        ...operation,
-        revision: operation.revision + 1,
-        routing: {
-          target: body.target,
-          revision: 1,
-          operationId: identity.operationId,
-          stage: 'intent_persisted',
-          committed: false,
-        },
-      };
-      return Response.json(operation);
-    }
-    if (resource === 'routing/activate') {
-      operation = {
-        ...operation,
-        revision: operation.revision + 1,
-        routing: { ...operation.routing, stage: 'committed', committed: true },
-      };
-      return Response.json(operation);
-    }
-    if (resource === 'complete') {
-      operation = { ...operation, revision: operation.revision + 1, productComplete: true };
-      return Response.json(operation);
-    }
-    throw new Error(`Unexpected resource ${resource}`);
-  });
-  setFullWebLanguage('zh-CN');
-  const client = createBootstrapTransport(transport);
-  const initialOperation = await client.start({
-    identity,
-    claimGeneration: 2,
-    token: 'claim-token',
-    resume: true,
-  });
-  await act(async () => {
-    renderer = create(<FreshSetupWizard initialOperation={initialOperation} transport={client} />);
-  });
+it.each(['zh-CN', 'zh-TW', 'en', 'ru'] as const)(
+  'resumes an incomplete committed New Managed installation across Supervisor generation restart (%s)',
+  async (lang) => {
+    let runtimeState = 'offline';
+    const rotatedRuntimeGeneration = 991234;
+    let operation: FreshOperation = {
+      version: 1,
+      identity,
+      revision: 4,
+      adminInitialized: true,
+      productComplete: false,
+      gatewayPending: true,
+      routing: { committed: false },
+      strategy: {
+        strategy: 'new_managed',
+        stage: 'committed',
+        targetIdentity: runtime.runtimeIdentity,
+        targetGeneration: runtime.runtimeGeneration,
+        targetArtifactId: runtime.activeGatewayArtifact.artifactId,
+        destinationConnectionIdentity: 'managed:sha256:' + 'c'.repeat(64),
+      },
+    };
+    const transport = vi.fn<typeof fetch>(async (url, init) => {
+      const resource = new URL(String(url)).pathname.split('/api/v2/')[1];
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (resource === 'claim/exchange')
+        return Response.json({ token: 'installation-session', operation });
+      if (resource === 'bootstrap/identity') {
+        return Response.json(
+          {
+            installationId: identity.installationId,
+            generation: identity.generation,
+            operationId: identity.operationId,
+            revision: 1,
+            target: operation.routing.target,
+            committed: operation.routing.committed,
+          },
+          { headers: { 'X-CPAMP-Route-Owner': 'manager' } }
+        );
+      }
+      if (resource === 'operation') {
+        if (operation.routing.committed && String(url).includes(BOOTSTRAP_UI.replace('/ui', '/api/')))
+          return new Response('', { status: 404 });
+        return Response.json(operation);
+      }
+      if (resource === 'installation/runtime') {
+        return Response.json({
+          ...runtime,
+          runtimeGeneration: rotatedRuntimeGeneration,
+          state: runtimeState,
+        });
+      }
+      if (resource === 'routing/prepare') {
+        operation = {
+          ...operation,
+          revision: operation.revision + 1,
+          routing: {
+            target: body.target,
+            revision: 1,
+            operationId: identity.operationId,
+            stage: 'intent_persisted',
+            committed: false,
+          },
+        };
+        return Response.json(operation);
+      }
+      if (resource === 'routing/activate') {
+        operation = {
+          ...operation,
+          revision: operation.revision + 1,
+          routing: { ...operation.routing, stage: 'committed', committed: true },
+        };
+        return Response.json(operation);
+      }
+      if (resource === 'complete') {
+        operation = { ...operation, revision: operation.revision + 1, productComplete: true };
+        return Response.json(operation);
+      }
+      throw new Error(`Unexpected resource ${resource}`);
+    });
+    setFullWebLanguage(lang);
+    const client = createBootstrapTransport(transport);
+    const initialOperation = await client.start({
+      identity,
+      claimGeneration: 2,
+      token: 'claim-token',
+      resume: true,
+    });
+    await act(async () => {
+      renderer = create(<FreshSetupWizard initialOperation={initialOperation} transport={client} />);
+    });
 
-  // While Supervisor is bringing CPA back up on the new generation, show waitingRuntime, not setupError.
-  await click('setup-resume');
-  expect(JSON.stringify(renderer.toJSON())).toContain('CPA 正在启动');
-  expect(JSON.stringify(renderer.toJSON())).not.toContain('初始化尚未完成');
-  expect(transport.mock.calls.some(([url]) => String(url).endsWith('/strategy'))).toBe(false);
+    // While Supervisor is bringing CPA back up on the new generation, render the
+    // non-error waiting status banner, keep resume actionable, and do not re-post
+    // strategy or advance to routing/completion prematurely.
+    await click('setup-resume');
+    const waitingStatuses = renderer.root.findAllByProps({ role: 'status' });
+    expect(waitingStatuses).toHaveLength(1);
+    const waitingBannerText = nodeText(waitingStatuses[0]);
+    expect(waitingBannerText.length).toBeGreaterThan(0);
+    expect(waitingBannerText).not.toMatch(/^(?:journey\.|setup\.|waitingRuntime$)/);
+    const waitingHeadingText = nodeText(renderer.root.findByType('h1'));
+    expect(waitingHeadingText.length).toBeGreaterThan(0);
+    expect(waitingHeadingText).not.toMatch(/^(?:journey\.|setup\.|waitingRuntime$)/);
+    expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+    expect(byID('setup-resume').props.disabled).toBe(false);
+    expect(renderer.root.findAllByProps({ 'data-testid': 'enter-console' })).toHaveLength(0);
+    expect(transport.mock.calls.some(([url]) => String(url).endsWith('/strategy'))).toBe(false);
+    expect(transport.mock.calls.some(([url]) => String(url).endsWith('/routing/prepare'))).toBe(
+      false
+    );
+    expect(transport.mock.calls.some(([url]) => String(url).endsWith('/routing/activate'))).toBe(
+      false
+    );
+    expect(transport.mock.calls.some(([url]) => String(url).endsWith('/complete'))).toBe(false);
+    expect(
+      transport.mock.calls.some(([url]) => String(url).endsWith('/installation/runtime'))
+    ).toBe(true);
 
-  // Once CPA is ready on the rotated generation, resume finishes routing and completion.
-  runtimeState = 'ready';
-  await click('setup-resume');
-  expect(byID('enter-console').props.href).toBe('/console');
-  expect(JSON.stringify(renderer.toJSON())).toContain('安装已完成');
-});
+    // Once CPA is ready on the rotated generation, resume finishes routing and completion.
+    runtimeState = 'ready';
+    await click('setup-resume');
+    expect(byID('enter-console').props.href).toBe('/console');
+    expect(renderer.root.findAllByProps({ 'data-testid': 'setup-resume' })).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ role: 'status' })).toHaveLength(0);
+    expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+    expect(transport.mock.calls.some(([url]) => String(url).endsWith('/strategy'))).toBe(false);
+    expect(transport.mock.calls.some(([url]) => String(url).endsWith('/routing/prepare'))).toBe(
+      true
+    );
+    expect(transport.mock.calls.some(([url]) => String(url).endsWith('/routing/activate'))).toBe(
+      true
+    );
+    expect(transport.mock.calls.some(([url]) => String(url).endsWith('/complete'))).toBe(true);
+    const readyHeadingText = nodeText(renderer.root.findByType('h1'));
+    expect(readyHeadingText.length).toBeGreaterThan(0);
+    expect(readyHeadingText).not.toBe(waitingHeadingText);
+    expect(readyHeadingText).not.toMatch(/^(?:journey\.|setup\.|ready$)/);
+  }
+);

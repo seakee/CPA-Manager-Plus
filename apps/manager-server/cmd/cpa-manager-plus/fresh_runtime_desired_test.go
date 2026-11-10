@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/domain/bootstrap"
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/model"
@@ -684,4 +685,326 @@ func TestIncompleteManagedInstallAutoStartsAfterRestartAndCompletesAcrossGenerat
 	if err != nil || !found || desired.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning {
 		t.Fatalf("durable desired state after completion = %+v found=%v err=%v", desired, found, err)
 	}
+}
+
+func TestIncompleteManagedDesiredStateSurfacesManagedSourceFailure(t *testing.T) {
+	incompleteManaged := func(r *freshstore.Record, env managedInstallEnv) {
+		completedManagedInstall(r, env)
+		r.Operation.ProductComplete = false
+	}
+	harness := newManagedInstallHarnessWith(t, incompleteManaged, true)
+	app := harness.app
+	offlineAfterRestart := managedInstallRuntimeStatus()
+	offlineAfterRestart.State = model.RuntimeStateOffline
+	offlineAfterRestart.Capabilities = model.RuntimeCapabilities{model.RuntimeCapabilityStart, model.RuntimeCapabilityStop}
+	offlineAfterRestart.Recovery = &model.RuntimeRecoveryObservation{
+		State:             model.RuntimeRecoveryStateInactive,
+		AttemptsRemaining: 0,
+	}
+	client := &freshRuntimeTestClient{status: offlineAfterRestart}
+	app.runtime = client
+	app.runtimeExternal = nil
+	app.artifact = nil
+
+	realManagedSource := app.managedSource
+	var failOnce sync.Once
+	app.managedSource = func(ctx context.Context) (freshkeyapply.ManagedInstall, error) {
+		var transientErr error
+		failOnce.Do(func() {
+			transientErr = errors.New("sqlite busy on second read")
+		})
+		if transientErr != nil {
+			return freshkeyapply.ManagedInstall{}, transientErr
+		}
+		return realManagedSource(ctx)
+	}
+
+	reconciler := runtimeservice.NewReconciler(app.runtime, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
+	if err := reconciler.ReconcileOnce(t.Context()); err == nil {
+		t.Fatal("ReconcileOnce with transient managedSource failure succeeded; want error")
+	}
+	if client.starts != 0 {
+		t.Fatalf("Supervisor starts during managedSource failure = %d, want 0", client.starts)
+	}
+	if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+		t.Fatalf("ReconcileOnce after transient managedSource failure recovered = %v", err)
+	}
+	if client.starts != 1 {
+		t.Fatalf("Supervisor starts after managedSource recovery = %d, want 1", client.starts)
+	}
+}
+
+type hookedDesiredStateStore struct {
+	runtimeservice.DesiredStateStore
+	onLoad func(call int, desired model.EmbeddedRuntimeDesiredState, found bool, err error)
+	mu     sync.Mutex
+	calls  int
+}
+
+func (s *hookedDesiredStateStore) LoadEmbeddedRuntimeDesiredState(ctx context.Context) (model.EmbeddedRuntimeDesiredState, bool, error) {
+	desired, found, err := s.DesiredStateStore.LoadEmbeddedRuntimeDesiredState(ctx)
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	onLoad := s.onLoad
+	s.mu.Unlock()
+	if onLoad != nil {
+		onLoad(call, desired, found, err)
+	}
+	return desired, found, err
+}
+
+func (s *hookedDesiredStateStore) LockEmbeddedRuntimeLifecycle(ctx context.Context) (func(), error) {
+	if locker, ok := s.DesiredStateStore.(runtimeservice.LifecycleLocker); ok {
+		return locker.LockEmbeddedRuntimeLifecycle(ctx)
+	}
+	return func() {}, nil
+}
+
+func (s *hookedDesiredStateStore) LoadEmbeddedRuntimeCommittedArtifact(ctx context.Context) (model.RuntimeArtifactID, bool, error) {
+	if authority, ok := s.DesiredStateStore.(runtimeservice.CommittedArtifactStore); ok {
+		return authority.LoadEmbeddedRuntimeCommittedArtifact(ctx)
+	}
+	return "", false, nil
+}
+
+func TestOperatorStopSerializesWithConcurrentReconcileAcrossBothWindows(t *testing.T) {
+	t.Run("window 1: reconciler pre-reads running before operator Stop is submitted and acknowledged", func(t *testing.T) {
+		app, op := completedRuntimeTestApplication(t)
+		client := &freshRuntimeTestClient{
+			status: freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop),
+		}
+		app.runtime = client
+		app.runtimeExternal = nil
+		if seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); err != nil || !seeded {
+			t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
+		}
+
+		hooked := &hookedDesiredStateStore{DesiredStateStore: app.desiredStateStore()}
+		hooked.onLoad = func(call int, desired model.EmbeddedRuntimeDesiredState, found bool, err error) {
+			if call != 1 {
+				return
+			}
+			if err != nil || !found || desired.DesiredLifecycle != model.EmbeddedRuntimeDesiredRunning {
+				t.Errorf("first desired read = (%+v, %v, %v), want running", desired, found, err)
+				return
+			}
+			stopRecorder := httptest.NewRecorder()
+			client.onStop = func() {
+				client.mu.Lock()
+				offline := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+				offline.State = model.RuntimeStateOffline
+				offline.Recovery = &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive}
+				client.status = offline
+				client.mu.Unlock()
+			}
+			app.runtimeOperations(stopRecorder, freshRuntimeRequest(t, "stop", "stop-win-1"), op, "runtime/operations")
+			if stopRecorder.Code != http.StatusOK {
+				t.Errorf("operator Stop status = %d body=%s", stopRecorder.Code, stopRecorder.Body.String())
+			}
+		}
+
+		reconciler := runtimeservice.NewReconciler(app.runtime, hooked, runtimeservice.DefaultReconcileInterval, nil)
+		if err := reconciler.ReconcileOnce(t.Context()); err != nil {
+			t.Fatalf("ReconcileOnce() error = %v", err)
+		}
+		if client.starts != 0 {
+			t.Fatalf("Supervisor starts after acknowledged operator Stop in window 1 = %d, want 0", client.starts)
+		}
+	})
+
+	t.Run("window 2: operator Stop succeeds at Supervisor before desired row is updated", func(t *testing.T) {
+		app, op := completedRuntimeTestApplication(t)
+		stopReachedSupervisor := make(chan struct{})
+		reconcilePreReadOldRow := make(chan struct{})
+		client := &freshRuntimeTestClient{
+			status: freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop),
+		}
+		client.onStop = func() {
+			client.mu.Lock()
+			offline := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+			offline.State = model.RuntimeStateOffline
+			offline.Recovery = &model.RuntimeRecoveryObservation{State: model.RuntimeRecoveryStateInactive}
+			client.status = offline
+			client.mu.Unlock()
+			close(stopReachedSupervisor)
+			<-reconcilePreReadOldRow
+		}
+		app.runtime = client
+		app.runtimeExternal = nil
+		if seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); err != nil || !seeded {
+			t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
+		}
+
+		hooked := &hookedDesiredStateStore{DesiredStateStore: app.desiredStateStore()}
+		hooked.onLoad = func(call int, desired model.EmbeddedRuntimeDesiredState, found bool, err error) {
+			if call == 1 && found && desired.DesiredLifecycle == model.EmbeddedRuntimeDesiredRunning {
+				close(reconcilePreReadOldRow)
+			}
+		}
+		reconciler := runtimeservice.NewReconciler(app.runtime, hooked, runtimeservice.DefaultReconcileInterval, nil)
+		reconcileErrCh := make(chan error, 1)
+		go func() {
+			<-stopReachedSupervisor
+			reconcileErrCh <- reconciler.ReconcileOnce(t.Context())
+		}()
+
+		stopRecorder := httptest.NewRecorder()
+		app.runtimeOperations(stopRecorder, freshRuntimeRequest(t, "stop", "stop-win-2"), op, "runtime/operations")
+		if stopRecorder.Code != http.StatusOK {
+			t.Fatalf("operator Stop status = %d body=%s", stopRecorder.Code, stopRecorder.Body.String())
+		}
+		if err := <-reconcileErrCh; err != nil {
+			t.Fatalf("concurrent ReconcileOnce() error = %v", err)
+		}
+		if client.starts != 0 {
+			t.Fatalf("Supervisor starts after acknowledged operator Stop in window 2 = %d, want 0", client.starts)
+		}
+	})
+}
+
+func TestOperatorOperationRespectsCancellationAndPreservesMutationBudgetWhileWaitingOnReconcile(t *testing.T) {
+	t.Run("cancelled HTTP request exits promptly without leaving a blocking accepted journal row", func(t *testing.T) {
+		app, op := completedRuntimeTestApplication(t)
+		reconcileEnteredLock := make(chan struct{})
+		releaseReconcile := make(chan struct{})
+		var statusOnce sync.Once
+		client := &freshRuntimeTestClient{
+			status: freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop),
+			onStatus: func(ctx context.Context) {
+				statusOnce.Do(func() {
+					close(reconcileEnteredLock)
+					select {
+					case <-releaseReconcile:
+					case <-ctx.Done():
+					}
+				})
+			},
+		}
+		app.runtime = client
+		app.runtimeExternal = nil
+		if seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); err != nil || !seeded {
+			t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
+		}
+
+		reconciler := runtimeservice.NewReconciler(app.runtime, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
+		reconcileDone := make(chan error, 1)
+		go func() {
+			reconcileDone <- reconciler.ReconcileOnce(t.Context())
+		}()
+		<-reconcileEnteredLock
+
+		reqCtx, cancelReq := context.WithCancel(t.Context())
+		req := freshRuntimeRequest(t, "stop", "stop-cancel-while-reconciling").WithContext(reqCtx)
+		cancelledRecorder := httptest.NewRecorder()
+		handlerDone := make(chan struct{})
+		go func() {
+			defer close(handlerDone)
+			app.runtimeOperations(cancelledRecorder, req, op, "runtime/operations")
+		}()
+
+		time.Sleep(25 * time.Millisecond)
+		cancelReq()
+		select {
+		case <-handlerDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("cancelled operator Stop stayed blocked on reconcile lifecycle lock")
+		}
+		if cancelledRecorder.Code != http.StatusServiceUnavailable {
+			t.Fatalf("cancelled operator Stop status = %d body=%s, want 503", cancelledRecorder.Code, cancelledRecorder.Body.String())
+		}
+
+		journalData, err := app.runtimeJournal.load(t.Context())
+		if err != nil {
+			t.Fatalf("load runtime journal: %v", err)
+		}
+		if len(journalData.Operations) != 0 {
+			t.Fatalf("cancelled operator Stop left orphan journal entries: %#v", journalData.Operations)
+		}
+
+		close(releaseReconcile)
+		if err := <-reconcileDone; err != nil {
+			t.Fatalf("ReconcileOnce() error = %v", err)
+		}
+
+		nextRecorder := httptest.NewRecorder()
+		app.runtimeOperations(nextRecorder, freshRuntimeRequest(t, "stop", "stop-after-cancelled-waiter"), op, "runtime/operations")
+		if nextRecorder.Code != http.StatusOK {
+			t.Fatalf("follow-up operator Stop status = %d body=%s, want 200", nextRecorder.Code, nextRecorder.Body.String())
+		}
+	})
+
+	t.Run("waiting operator request observes post-reconcile Status and receives full mutationContext budget", func(t *testing.T) {
+		app, op := completedRuntimeTestApplication(t)
+		reconcileEnteredLock := make(chan struct{})
+		releaseReconcile := make(chan struct{})
+		var statusOnce sync.Once
+		var observedStopDeadline time.Time
+		var observedStopHasDeadline bool
+		var observedStopGeneration model.RuntimeGeneration
+
+		client := &freshRuntimeTestClient{
+			status: freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop),
+			onStatus: func(ctx context.Context) {
+				statusOnce.Do(func() {
+					close(reconcileEnteredLock)
+					select {
+					case <-releaseReconcile:
+					case <-ctx.Done():
+					}
+				})
+			},
+			onStopRequest: func(ctx context.Context, request model.RuntimeMutationRequest) {
+				observedStopDeadline, observedStopHasDeadline = ctx.Deadline()
+				observedStopGeneration = request.ExpectedRuntimeGeneration
+			},
+		}
+		app.runtime = client
+		app.runtimeExternal = nil
+		if seeded, err := app.ensureManagedRuntimeDesiredRunning(t.Context(), op); err != nil || !seeded {
+			t.Fatalf("ensureManagedRuntimeDesiredRunning = (%v, %v), want (true, nil)", seeded, err)
+		}
+
+		reconciler := runtimeservice.NewReconciler(app.runtime, app.desiredStateStore(), runtimeservice.DefaultReconcileInterval, nil)
+		reconcileDone := make(chan error, 1)
+		go func() {
+			reconcileDone <- reconciler.ReconcileOnce(t.Context())
+		}()
+		<-reconcileEnteredLock
+
+		stopRecorder := httptest.NewRecorder()
+		stopDone := make(chan struct{})
+		go func() {
+			defer close(stopDone)
+			app.runtimeOperations(stopRecorder, freshRuntimeRequest(t, "stop", "stop-after-brief-wait"), op, "runtime/operations")
+		}()
+
+		// Let the operator request wait on the lifecycle lock while reconcile
+		// rotates the observed generation before releasing the lock.
+		time.Sleep(40 * time.Millisecond)
+		client.mu.Lock()
+		rotated := freshRuntimeReadyStatus(model.RuntimeCapabilityStart, model.RuntimeCapabilityStop)
+		rotated.Generation = 42
+		client.status = rotated
+		client.mu.Unlock()
+		releaseAt := time.Now()
+		close(releaseReconcile)
+
+		if err := <-reconcileDone; err != nil {
+			t.Fatalf("ReconcileOnce() error = %v", err)
+		}
+		<-stopDone
+		if stopRecorder.Code != http.StatusOK {
+			t.Fatalf("operator Stop status = %d body=%s, want 200", stopRecorder.Code, stopRecorder.Body.String())
+		}
+		if !observedStopHasDeadline {
+			t.Fatal("mutationContext passed to Stop had no deadline")
+		}
+		if observedStopDeadline.Before(releaseAt.Add(freshRuntimeMutationBudget)) {
+			t.Fatalf("mutationContext budget was consumed while waiting on lifecycle lock: deadline=%v want >= %v", observedStopDeadline, releaseAt.Add(freshRuntimeMutationBudget))
+		}
+		if observedStopGeneration != 42 {
+			t.Fatalf("ExpectedRuntimeGeneration = %d, want post-lock generation 42", observedStopGeneration)
+		}
+	})
 }
