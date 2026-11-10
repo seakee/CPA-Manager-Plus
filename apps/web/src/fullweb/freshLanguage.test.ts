@@ -74,6 +74,27 @@ describe('Bootstrap entry language preference', () => {
     expect(fullWebLanguage()).toBe('zh-TW');
   });
 
+  it('falls back to the browser language when the page may not touch storage', () => {
+    vi.stubGlobal('navigator', { languages: ['ru-RU'], language: 'ru-RU' });
+    // A blocked or opaque origin throws on the global property itself, before
+    // any method call; setup still has to render.
+    const denied = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('SecurityError: storage is denied');
+      },
+    });
+    try {
+      expect(activateFreshLanguage()).toBe('ru');
+      expect(fullWebLanguage()).toBe('ru');
+      expect(persistedFreshLanguage()).toBeNull();
+      expect(() => persistFreshLanguage('zh-TW')).not.toThrow();
+    } finally {
+      if (denied) Object.defineProperty(globalThis, 'localStorage', denied);
+    }
+  });
+
   it('derives a first visit from the browser exactly as the Console does', () => {
     for (const [tag, expected] of [
       ['zh-HK', 'zh-TW'],

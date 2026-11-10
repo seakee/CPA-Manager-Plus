@@ -49,29 +49,75 @@ const CJK = /[\u4e00-\u9fff]/;
 const CYRILLIC = /[\u0400-\u04ff]/;
 const LATIN = /[A-Za-z]/;
 
+// Product and protocol terms stay in Latin script in every language, so they
+// are removed before asking whether a block was actually localized. Two or
+// more neighbouring Latin words in a translated block mean a sentence stayed
+// in English.
+const PROTOCOL_TERMS =
+  /\bcpa-manager-plus\b|\bbootstrap\b|\bhandoff\b|\bclaim\b|\btoken\b|\bhttp\b|\bmanager\b|\bcpamp\b|\bcommitid\b|\bdata\.(?:key|value)\b|\bfresh\b|\badopt\b|\bupgrade\b|\btransport\b|\bunavailable\b|\bauthority\b|\bmismatch\b|\bpreflight\b|\bsource\b|\badmissionid\b|\binstallationid\b|\bgeneration\b|\boperationid\b|\bfail-closed\b|\bembedded\b|\blinux\b|\bamd64\b|\bcpa\b|\bplus\b|\bsqlite\b|\bjson\b|\bapi\b|\burl\b|\bget\b|\bpost\b|\bput\b|\bpatch\b|\bdelete\b|\bok\b|\bid\b|\bv2\b|\bclaimid\b|\bhmac\b|\bjwt\b|\bcookie\b|\bcsrf\b|\bsha256\b|\bbase64\b|\butf-8\b/g;
+
+function assertLocalized(language: 'zh-CN' | 'zh-TW' | 'ru', text: string): void {
+  const residue = text.toLowerCase().replace(PROTOCOL_TERMS, ' ');
+  // A sentence left in English shows up as neighbouring English words.
+  expect(residue, `unlocalized text in ${language}: ${text}`).not.toMatch(
+    /[a-z]{3,}[\s,.;:—–-]+[a-z]{3,}/
+  );
+  // A block made only of protocol terms needs no translation; anything else
+  // has to carry the target script.
+  if (!/[a-z]{2,}/.test(residue)) return;
+  const script = language === 'ru' ? CYRILLIC : CJK;
+  expect(script.test(residue), `expected ${language} copy in: ${text}`).toBe(true);
+}
+
 // What a reader of that language must actually see: the interface copy is in
 // their script, not the fallback table. Protocol terms (Handoff, Claim,
 // data.key, cpa-manager-plus) stay untranslated in every language.
 function assertRenderedIn(language: 'zh-CN' | 'zh-TW' | 'en' | 'ru', text: string): void {
   expect(text).not.toBe('');
-  if (language === 'ru') {
-    expect(text).toMatch(CYRILLIC);
-  } else {
-    expect(text).toMatch(LATIN);
-  }
   if (language === 'en') {
+    expect(text).toMatch(LATIN);
     expect(text).not.toMatch(CYRILLIC);
-  }
-  if (language === 'zh-CN' || language === 'zh-TW') {
-    expect(text).toMatch(CJK);
-    expect(text).not.toMatch(CYRILLIC);
-  } else {
     expect(text).not.toMatch(CJK);
+    return;
   }
+  if (language === 'ru') {
+    expect(text).not.toMatch(CJK);
+  } else {
+    expect(text).not.toMatch(CYRILLIC);
+  }
+  assertLocalized(language, text);
 }
 
 // Stands in for the browser store the Console language menu persists into.
 const storage = new Map<string, string>();
+
+const isHost = (className: string) => (node: ReactTestInstance) =>
+  typeof node.type === 'string' &&
+  String(node.props?.className ?? '').split(' ').includes(className);
+
+/** Each visible block carrying that class, as its own string. */
+function blocksOf(root: ReactTestInstance, className: string): string[] {
+  return root.findAll(isHost(className)).map((node) => textOf(node));
+}
+
+/** The action alert of a gate: the last one, after any status guidance. */
+function actionAlert(gate: ReactTestInstance): ReactTestInstance {
+  const alerts = gate.findAll(isHost('alert'));
+  return alerts[alerts.length - 1];
+}
+
+/** Every visible block of a card header, asserted on its own. */
+function assertCardHeaderReads(language: 'zh-CN' | 'zh-TW' | 'en' | 'ru', card: ReactTestInstance) {
+  const [tag] = blocksOf(card, 'wizard-step-tag');
+  const [title] = blocksOf(card, 'wizard-title');
+  const [desc] = blocksOf(card, 'wizard-desc');
+  // A block that silently kept the fallback table fails here on its own.
+  assertRenderedIn(language, tag);
+  assertRenderedIn(language, title);
+  assertRenderedIn(language, desc);
+  expect(title).not.toBe(desc);
+  return { tag, title, desc };
+}
 
 describe('FreshBootstrapPage product preview workflow', () => {
   beforeEach(() => {
@@ -808,15 +854,44 @@ describe('FreshBootstrapPage product preview workflow', () => {
             <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
           );
         });
-        const gate = textOf(findByTestId(renderer.root, 'bootstrap-no-handoff'));
-        assertRenderedIn(language, gate);
-        // The gate says which host action applies, with its command present.
-        expect(
-          renderer.root.findAllByProps({ 'data-testid': 'host-preflight-instructions' })
-        ).toHaveLength(state.hostPreflight ? 1 : 0);
-        expect(
-          renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })
-        ).toHaveLength(state.hostPreflight ? 0 : 1);
+        const gate = findByTestId(renderer.root, 'bootstrap-no-handoff');
+        assertCardHeaderReads(language, gate);
+
+        // The status guidance explains why the gate is closed.
+        const guidance = findByTestId(renderer.root, 'bootstrap-discovery-guidance');
+        const [guidanceTitle] = blocksOf(guidance, 'alert-title');
+        const [guidanceDesc] = blocksOf(guidance, 'alert-desc');
+        assertRenderedIn(language, guidanceTitle);
+        assertRenderedIn(language, guidanceDesc);
+        expect(guidanceDesc).not.toBe(guidanceTitle);
+
+        // The action area names the host step on its own, with its command.
+        const action = actionAlert(gate);
+        const [actionTitle] = blocksOf(action, 'alert-title');
+        const [actionDesc] = blocksOf(action, 'alert-desc');
+        assertRenderedIn(language, actionTitle);
+        assertRenderedIn(language, actionDesc);
+        expect(actionDesc).not.toBe(actionTitle);
+        if (state.hostPreflight) {
+          expect(
+            renderer.root.findAllByProps({ 'data-testid': 'host-preflight-instructions' })
+          ).toHaveLength(1);
+          expect(textOf(findByTestId(renderer.root, 'host-preflight-command'))).toBe(
+            'cpa-manager-plus legacy-preflight --db /path/to/usage.sqlite --summary'
+          );
+          expect(
+            renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })
+          ).toHaveLength(0);
+        } else {
+          // The Fresh path keeps the copyable Handoff command and its fragment.
+          expect(textOf(findByTestId(renderer.root, 'cli-handoff-command'))).toBe(
+            'cpa-manager-plus initialize'
+          );
+          expect(actionDesc).toContain('#handoff=');
+          expect(
+            renderer.root.findAllByProps({ 'data-testid': 'host-preflight-instructions' })
+          ).toHaveLength(0);
+        }
         await act(async () => renderer.unmount());
       }
     }
@@ -839,18 +914,75 @@ describe('FreshBootstrapPage product preview workflow', () => {
       assertRenderedIn(language, title);
       assertRenderedIn(language, detail);
       expect(detail).not.toBe(title);
-      const card = textOf(findByTestId(renderer.root, 'bootstrap-authority-error'));
-      // The card keeps the operator-facing facts and the way out, in that language.
-      assertRenderedIn(language, card);
-      expect(card).toContain(identity.operationId);
-      expect(card).toContain(`#${handoff.claimGeneration}`);
-      expect(card).toContain('cpa-manager-plus initialize');
+      // The 401 recovery path stays quotable in every language.
+      expect(detail).toContain('HTTP 401');
+      expect(detail).toContain('cpa-manager-plus initialize');
+
+      const card = findByTestId(renderer.root, 'bootstrap-authority-error');
+      // Each block of the card is checked where it renders, not as one blob.
+      assertCardHeaderReads(language, card);
+      const note = blocksOf(card, 'bootstrap-retry-note');
+      expect(note).toHaveLength(1);
+      note.forEach((text) => assertRenderedIn(language, text));
+      const labels = blocksOf(card, 'info-key');
+      expect(labels.length).toBeGreaterThan(0);
+      labels.forEach((text) => assertRenderedIn(language, text));
+      const values = blocksOf(card, 'info-val');
+      // Data values are quoted verbatim; only the trailing mode row is copy.
+      expect(values).toContain(identity.operationId);
+      expect(values).toContain(`#${handoff.claimGeneration}`);
+      assertRenderedIn(language, values[values.length - 1]);
+
+      // The operator-facing facts and the way out survive translation.
+      const cardText = textOf(card);
+      expect(cardText).toContain(identity.operationId);
+      expect(cardText).toContain(`#${handoff.claimGeneration}`);
+      expect(cardText).toContain('cpa-manager-plus initialize');
       expect(
         renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })
       ).toHaveLength(1);
       await act(async () => renderer.unmount());
     }
   );
+
+  it('re-renders a failure card already on screen when the language changes', async () => {
+    const transport = createBootstrapTransport(
+      vi.fn().mockRejectedValueOnce(new TypeError('network down'))
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
+    });
+    const before = {
+      title: textOf(findByTestId(renderer.root, 'init-error-title')),
+      detail: textOf(findByTestId(renderer.root, 'init-error-detail')),
+    };
+    assertRenderedIn('zh-CN', before.title);
+    assertRenderedIn('zh-CN', before.detail);
+
+    await act(async () => {
+      findByTestId(renderer.root, 'bootstrap-language').props.onChange({
+        target: { value: 'ru' },
+      });
+    });
+
+    const after = {
+      title: textOf(findByTestId(renderer.root, 'init-error-title')),
+      detail: textOf(findByTestId(renderer.root, 'init-error-detail')),
+    };
+    // The feedback is held as keys, so the sentence around the same failure is
+    // written again rather than kept as the string first rendered.
+    assertRenderedIn('ru', after.title);
+    assertRenderedIn('ru', after.detail);
+    expect(after.title).not.toBe(before.title);
+    expect(after.detail).not.toBe(before.detail);
+    // Nothing about the operation changed: same facts, same way out.
+    const card = textOf(findByTestId(renderer.root, 'bootstrap-authority-error'));
+    expect(card).toContain(identity.operationId);
+    expect(card).toContain('cpa-manager-plus initialize');
+    expect(renderer.root.findAllByProps({ 'data-testid': 'retry-start-btn' })).toHaveLength(1);
+    await act(async () => renderer.unmount());
+  });
 
   it.each(['en', 'ru'] as const)('localizes the claim diagnostics in %s', async (language) => {
     let resolveStart!: (value: Response) => void;
@@ -867,11 +999,15 @@ describe('FreshBootstrapPage product preview workflow', () => {
     await act(async () => {
       renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
     });
-    const card = textOf(findByTestId(renderer.root, 'bootstrap-connecting'));
-    assertRenderedIn(language, card);
+    const card = findByTestId(renderer.root, 'bootstrap-connecting');
+    assertCardHeaderReads(language, card);
+    const labels = blocksOf(card, 'info-key');
+    expect(labels.length).toBeGreaterThan(0);
+    labels.forEach((text) => assertRenderedIn(language, text));
     // The diagnostics name the real claim facts an operator quotes back.
-    expect(card).toContain(identity.operationId);
-    expect(card).toContain(`${identity.installationId} · ${identity.generation}`);
+    const cardText = textOf(card);
+    expect(cardText).toContain(identity.operationId);
+    expect(cardText).toContain(`${identity.installationId} · ${identity.generation}`);
     await act(async () => {
       resolveStart(Response.json({ token: 'installation-session', operation: pendingOperation }));
     });

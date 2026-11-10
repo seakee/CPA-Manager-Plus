@@ -23,12 +23,27 @@ export function isFreshLanguage(value: string): value is Language {
 // The Bootstrap entry's only storage touchpoint. Both entries share one key,
 // and this typed accessor exposes no way to name another: a read or write of
 // any other key has to reintroduce a raw `localStorage` call. The runtime gate
-// in tests/frontendTransportIsolation.test.mjs records every key this entry
-// actually touches while it activates and persists the language.
+// in tests/frontendTransportIsolation.test.mjs records every storage access this
+// entry attempts while it activates and persists the language.
 const languageStorage = {
-  read: (): string | null => localStorage.getItem(FRESH_LANGUAGE_STORAGE_KEY),
-  write: (value: string): void => localStorage.setItem(FRESH_LANGUAGE_STORAGE_KEY, value),
+  read: (storage: Storage): string | null => storage.getItem(FRESH_LANGUAGE_STORAGE_KEY),
+  write: (storage: Storage, value: string): void =>
+    storage.setItem(FRESH_LANGUAGE_STORAGE_KEY, value),
 };
+
+/**
+ * The browser's storage, or null when the environment refuses it. Reading the
+ * global itself can throw (`SecurityError` in a blocked or opaque origin), not
+ * only its methods, and this runs before the first render — so the access is
+ * guarded and setup falls back to the browser language instead of blanking.
+ */
+function browserStorage(): Storage | null {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
 
 interface PersistedPayload {
   state: Record<string, unknown>;
@@ -38,10 +53,11 @@ interface PersistedPayload {
 /** The stored Console state; an absent or unreadable payload reads as empty. */
 function persistedPayload(): PersistedPayload {
   const empty: PersistedPayload = { state: {}, version: 0 };
-  if (typeof localStorage === 'undefined') return empty;
+  const storage = browserStorage();
+  if (!storage) return empty;
   let parsed: unknown;
   try {
-    const raw = languageStorage.read();
+    const raw = languageStorage.read(storage);
     if (!raw) return empty;
     try {
       parsed = JSON.parse(raw);
@@ -73,10 +89,12 @@ export function persistedFreshLanguage(): Language | null {
  * its version are carried over instead of being replaced.
  */
 export function persistFreshLanguage(language: Language): void {
-  if (typeof localStorage === 'undefined') return;
+  const storage = browserStorage();
+  if (!storage) return;
   try {
     const payload = persistedPayload();
     languageStorage.write(
+      storage,
       JSON.stringify({ state: { ...payload.state, language }, version: payload.version })
     );
   } catch {

@@ -191,42 +191,52 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
   });
 
   it('keeps the Bootstrap storage exception on the language key alone', () => {
-    const touched = [];
-    let stored = null;
-    const only = (key) => {
-      if (key !== FRESH_LANGUAGE_STORAGE_KEY) throw new Error(`unexpected storage key ${key}`);
-    };
-    vi.stubGlobal('navigator', { languages: ['zh-HK'], language: 'zh-HK' });
-    vi.stubGlobal('localStorage', {
+    // Every attempt is recorded before the stub answers, so production catch
+    // blocks cannot hide a foreign access: the record, not the response, is the
+    // evidence.
+    const record = [];
+    const stored = new Map();
+    const instrumented = {
       getItem: (key) => {
-        only(key);
-        touched.push(`read ${key}`);
-        return stored;
+        record.push(['getItem', key]);
+        return stored.get(key) ?? null;
       },
       setItem: (key, value) => {
-        only(key);
-        touched.push(`write ${key}`);
-        stored = value;
+        record.push(['setItem', key]);
+        stored.set(key, String(value));
       },
       removeItem: (key) => {
-        only(key);
-        touched.push(`remove ${key}`);
+        record.push(['removeItem', key]);
+        stored.delete(key);
       },
       clear: () => {
-        throw new Error('the Bootstrap entry must never clear browser storage');
+        record.push(['clear']);
+        stored.clear();
       },
-    });
+      key: (index) => {
+        record.push(['key', index]);
+        return [...stored.keys()][index] ?? null;
+      },
+      get length() {
+        record.push(['length']);
+        return stored.size;
+      },
+    };
+    vi.stubGlobal('navigator', { languages: ['zh-HK'], language: 'zh-HK' });
+    vi.stubGlobal('localStorage', instrumented);
     try {
       // Activation and the header switch are the entry's whole storage surface.
       expect(activateFreshLanguage()).toBe('zh-TW');
       persistFreshLanguage('ru');
-      // Every read and write the entry made named the one shared language key;
-      // any other key would already have thrown inside the stub above.
-      expect(touched.length).toBeGreaterThan(0);
-      expect(touched.every((entry) => entry.endsWith(` ${FRESH_LANGUAGE_STORAGE_KEY}`))).toBe(true);
-      expect(touched.some((entry) => entry.startsWith('read '))).toBe(true);
-      expect(touched.some((entry) => entry.startsWith('write '))).toBe(true);
-      expect(JSON.parse(stored).state.language).toBe('ru');
+
+      expect(record.length).toBeGreaterThan(0);
+      expect(record.map(([operation]) => operation).filter((op) => op !== 'getItem')).toEqual([
+        'setItem',
+      ]);
+      for (const [, key] of record) {
+        expect(key).toBe(FRESH_LANGUAGE_STORAGE_KEY);
+      }
+      expect(JSON.parse(stored.get(FRESH_LANGUAGE_STORAGE_KEY)).state.language).toBe('ru');
     } finally {
       vi.unstubAllGlobals();
     }
