@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { LocalizedText } from '@/i18n/localizedText';
 import { configurationText } from '@/i18n/configurationWorkspace';
 import { Link } from 'react-router-dom';
 import { Card } from '@/components/ui/Card';
@@ -42,6 +43,7 @@ import iconGrokDark from '@/assets/icons/grok-dark.svg';
 import iconDeepseek from '@/assets/icons/deepseek.svg';
 import iconMinimax from '@/assets/icons/minimax.svg';
 import { DatabaseStatusCard } from './components/DatabaseStatusCard';
+import { formatModelStatus, type ModelStatus } from './modelStatus';
 import { useManagerUpdates } from './ManagerUpdates';
 import styles from './SystemPage.module.scss';
 
@@ -100,10 +102,7 @@ function SystemPageContent({
   const modelsCache = useModelsStore((state) => state.cache);
   const fetchModelsFromStore = useModelsStore((state) => state.fetchModels);
 
-  const [modelStatus, setModelStatus] = useState<{
-    type: 'success' | 'warning' | 'error' | 'muted';
-    message: string;
-  }>();
+  const [modelStatus, setModelStatus] = useState<ModelStatus>();
 
   const [databaseStatus, setDatabaseStatus] = useState<UsageServiceStatus | null>(null);
   const [databaseLoading, setDatabaseLoading] = useState(false);
@@ -125,6 +124,10 @@ function SystemPageContent({
     [i18n.language]
   );
   const groupedModels = useMemo(() => classifyModels(models, { otherLabel }), [models, otherLabel]);
+  const modelStatusText = useMemo(
+    () => (modelStatus ? formatModelStatus(modelStatus, t) : ''),
+    [modelStatus, t]
+  );
   const getIconForCategory = (categoryId: string): string | null => {
     const iconEntry = MODEL_CATEGORY_ICONS[categoryId];
     if (!iconEntry) return null;
@@ -184,10 +187,7 @@ function SystemPageContent({
   const fetchModels = async ({ forceRefresh = false }: { forceRefresh?: boolean } = {}) => {
     const requestId = ++modelRequestId.current;
     if (auth.connectionStatus !== 'connected') {
-      setModelStatus({
-        type: 'warning',
-        message: t('notification.connection_required'),
-      });
+      setModelStatus({ type: 'warning', message: { key: 'notification.connection_required' } });
       return;
     }
 
@@ -200,7 +200,7 @@ function SystemPageContent({
       apiKeysCache.current = [];
     }
 
-    setModelStatus({ type: 'muted', message: t('system_info.models_loading') });
+    setModelStatus({ type: 'muted', message: { key: 'system_info.models_loading' } });
     try {
       const apiKeys = await resolveApiKeysForModels();
       if (requestId !== modelRequestId.current) return;
@@ -220,8 +220,8 @@ function SystemPageContent({
       setModelStatus({
         type: hasModels ? 'success' : 'warning',
         message: hasModels
-          ? t('system_info.models_count', { count: list.length })
-          : t('system_info.models_empty'),
+          ? { key: 'system_info.models_count', params: { count: list.length } }
+          : { key: 'system_info.models_empty' },
       });
     } catch (err: unknown) {
       if (requestId !== modelRequestId.current) return;
@@ -231,23 +231,22 @@ function SystemPageContent({
         !modelsCache &&
         (code === 'invalid_admin_key' || code === 'unauthorized')
       ) {
-        setModelStatus({ type: 'muted', message: t('system_info.models_empty') });
+        setModelStatus({ type: 'muted', message: { key: 'system_info.models_empty' } });
         return;
       }
-      const detail = isGatewayPendingError(err)
-        ? t('system_info.models_gateway_pending')
+      const detail: LocalizedText | undefined = isGatewayPendingError(err)
+        ? { key: 'system_info.models_gateway_pending' }
         : code
-          ? t(`usage_service_errors.${code}`, {
-              defaultValue: t('usage_service_errors.request_failed'),
-            })
+          ? {
+            key: `usage_service_errors.${code}`,
+            fallbackKey: 'usage_service_errors.request_failed',
+          }
           : err instanceof Error
-            ? err.message
+            ? { text: err.message }
             : typeof err === 'string'
-              ? err
-              : '';
-      const suffix = detail ? `: ${detail}` : '';
-      const text = `${t('system_info.models_error')}${suffix}`;
-      setModelStatus({ type: 'error', message: text });
+              ? { text: err }
+              : undefined;
+      setModelStatus({ type: 'error', message: { key: 'system_info.models_error' }, detail });
     }
   };
 
@@ -441,7 +440,7 @@ function SystemPageContent({
           >
             <p className={styles.sectionDescription}>{t('system_info.models_desc')}</p>
             {modelStatus && (
-              <div className={`status-badge ${modelStatus.type}`}>{modelStatus.message}</div>
+              <div className={`status-badge ${modelStatus.type}`}>{modelStatusText}</div>
             )}
             {modelsCache && modelsError && modelStatus?.type !== 'error' && (
               <div className="error-box">{modelsError}</div>

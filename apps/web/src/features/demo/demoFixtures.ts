@@ -25,7 +25,10 @@ import type {
   CodexInspectionRunResult,
   CodexInspectionStoredLogEntry,
 } from '@/features/monitoring/codexInspection';
-import { formatActionLabel } from '@/features/monitoring/model/codexInspectionPresentation';
+import {
+  codexInspectionActionLabelKey,
+  formatStoredLogMessage,
+} from '@/features/monitoring/model/codexInspectionPresentation';
 import type { AuthFileItem, AuthFilesResponse } from '@/types/authFile';
 import type { PluginListResponse, PluginStoreResponse } from '@/types/plugin';
 import type {
@@ -37,7 +40,7 @@ import type {
   XaiQuotaState,
 } from '@/types';
 import type { ModelInfo } from '@/utils/models';
-import { formatXaiProbeIssue } from '@/utils/quota/xaiPresentation';
+import { getXaiProbeIssueKey } from '@/utils/quota/xaiPresentation';
 import { buildQuotaCredentialIdentity } from '@/utils/quota/credentialScope';
 import type { TFunction } from 'i18next';
 import {
@@ -5828,14 +5831,16 @@ const getDemoQuotaStoreStateByFileName = (
       windows: [
         {
           id: 'five-hour',
-          label: '5 小时限额',
+          label: '5-hour limit',
+          labelKey: 'codex_quota.primary_window',
           usedPercent: 55,
           ...demoQuotaReset(2 * hour + 18 * minute, baseNow),
           limitWindowSeconds: 18_000,
         },
         {
           id: 'weekly',
-          label: '周限额',
+          label: 'Weekly limit',
+          labelKey: 'codex_quota.secondary_window',
           usedPercent: 9,
           ...demoQuotaReset(3 * day + 8 * hour, baseNow),
           limitWindowSeconds: 604_800,
@@ -5856,14 +5861,16 @@ const getDemoQuotaStoreStateByFileName = (
       windows: [
         {
           id: 'five-hour',
-          label: '5 小时限额',
+          label: '5-hour limit',
+          labelKey: 'codex_quota.primary_window',
           usedPercent: 48,
           ...demoQuotaReset(3 * hour + 15 * minute, baseNow),
           limitWindowSeconds: 18_000,
         },
         {
           id: 'weekly',
-          label: '周限额',
+          label: 'Weekly limit',
+          labelKey: 'codex_quota.secondary_window',
           usedPercent: 56,
           ...demoQuotaReset(4 * day + 12 * hour, baseNow),
           limitWindowSeconds: 604_800,
@@ -5903,21 +5910,24 @@ const getDemoQuotaStoreStateByFileName = (
       windows: [
         {
           id: 'five-hour',
-          label: '5 小时限额',
+          label: '5-hour limit',
+          labelKey: 'codex_quota.primary_window',
           usedPercent: 88,
           ...demoQuotaReset(2 * hour + 45 * minute, baseNow),
           limitWindowSeconds: 18_000,
         },
         {
           id: 'weekly',
-          label: '周限额',
+          label: 'Weekly limit',
+          labelKey: 'codex_quota.secondary_window',
           usedPercent: 68,
           ...demoQuotaReset(5 * day + 6 * hour, baseNow),
           limitWindowSeconds: 604_800,
         },
         {
           id: 'monthly',
-          label: '月限额',
+          label: 'Monthly limit',
+          labelKey: 'codex_quota.monthly_window',
           usedPercent: 35,
           ...demoQuotaReset(24 * day + 6 * hour, baseNow),
           limitWindowSeconds: 2_592_000,
@@ -5944,14 +5954,16 @@ const getDemoQuotaStoreStateByFileName = (
       windows: [
         {
           id: 'five-hour',
-          label: '5 小时限额',
+          label: '5-hour limit',
+          labelKey: 'codex_quota.primary_window',
           usedPercent: 100,
           ...demoQuotaReset(68 * minute, baseNow),
           limitWindowSeconds: 18_000,
         },
         {
           id: 'weekly',
-          label: '周限额',
+          label: 'Weekly limit',
+          labelKey: 'codex_quota.secondary_window',
           usedPercent: 72,
           ...demoQuotaReset(2 * day + 4 * hour, baseNow),
           limitWindowSeconds: 604_800,
@@ -6816,36 +6828,47 @@ export const getDemoCodexInspectionLocalLogs = (
   t: TFunction = identityT
 ): CodexInspectionStoredLogEntry[] => {
   const detail = demoInspectionRunDetail(baseNow);
-  const actionLabel = (action: string) =>
-    formatActionLabel(normalizeDemoInspectionAction(action), t);
+  const actionKey = (action: string) =>
+    codexInspectionActionLabelKey(normalizeDemoInspectionAction(action));
   const percentLabel = (value?: number) => (value === undefined ? '--' : `${value.toFixed(1)}%`);
   const targetTypes = detail.run.settings?.targetTypes ?? ['codex', 'xai'];
   const providers = new Set(targetTypes.map((item) => item.trim().toLowerCase()));
-  const target =
+  const targetKey =
     providers.has('codex') && providers.has('xai')
-      ? t('monitoring.codex_inspection_target_codex_xai')
+      ? 'monitoring.codex_inspection_target_codex_xai'
       : providers.has('xai')
-        ? t('monitoring.codex_inspection_target_xai')
-        : t('monitoring.codex_inspection_target_codex');
+        ? 'monitoring.codex_inspection_target_xai'
+        : 'monitoring.codex_inspection_target_codex';
+  // A seeded log belongs to the store, not to this render: keep the template
+  // and its raw parameters so the Console can translate it in the language the
+  // user switches to. `message` only carries the text for key-less consumers.
+  const logEntry = (
+    entry: Omit<CodexInspectionStoredLogEntry, 'message'>
+  ): CodexInspectionStoredLogEntry => {
+    const seeded = { ...entry, message: '' };
+    return { ...seeded, message: formatStoredLogMessage(seeded, t) };
+  };
   const logs: CodexInspectionStoredLogEntry[] = [
-    {
+    logEntry({
       id: 'demo-inspection-loading',
       level: 'info',
-      message: t('monitoring.codex_inspection_log_loading', { target }),
+      messageKey: 'monitoring.codex_inspection_log_loading',
+      messageParams: { target: { key: targetKey } },
       timestamp: detail.run.startedAtMs,
       detail: {
         triggerType: 'manual',
         triggerKey: 'manual',
         targetTypes: [...targetTypes],
       },
-    },
-    {
+    }),
+    logEntry({
       id: 'demo-inspection-set-ready',
       level: 'info',
-      message: t('monitoring.codex_inspection_log_set_ready', {
+      messageKey: 'monitoring.codex_inspection_log_set_ready',
+      messageParams: {
         total: detail.run.probeSetCount,
         sampled: detail.run.sampledCount,
-      }),
+      },
       timestamp: detail.run.startedAtMs + 500,
       detail: {
         totalFiles: detail.run.totalFiles,
@@ -6853,23 +6876,26 @@ export const getDemoCodexInspectionLocalLogs = (
         sampledCount: detail.run.sampledCount,
         targetTypes: [...targetTypes],
       },
-    },
+    }),
   ];
 
   detail.results.forEach((item) => {
     if (item.provider !== 'xai') {
-      logs.push({
-        id: `demo-inspection-result-${item.id}`,
-        level: demoCodexInspectionLogLevel(item) as CodexInspectionStoredLogEntry['level'],
-        message: t('monitoring.codex_inspection_log_result', {
-          account: item.displayAccount,
-          action: actionLabel(item.action),
-          status: item.statusCode ?? '--',
-          percent: percentLabel(item.usedPercent),
-        }),
-        timestamp: item.createdAtMs,
-        detail: buildDemoCodexInspectionLogDetail(item),
-      });
+      logs.push(
+        logEntry({
+          id: `demo-inspection-result-${item.id}`,
+          level: demoCodexInspectionLogLevel(item) as CodexInspectionStoredLogEntry['level'],
+          messageKey: 'monitoring.codex_inspection_log_result',
+          messageParams: {
+            account: item.displayAccount,
+            action: { key: actionKey(item.action) },
+            status: item.statusCode ?? '--',
+            percent: percentLabel(item.usedPercent),
+          },
+          timestamp: item.createdAtMs,
+          detail: buildDemoCodexInspectionLogDetail(item),
+        })
+      );
       return;
     }
 
@@ -6880,52 +6906,58 @@ export const getDemoCodexInspectionLocalLogs = (
       official_api_healthy: 'monitoring.xai_inspection_evidence_official_api_healthy',
       inference_healthy: 'monitoring.xai_inspection_evidence_inference_healthy',
     };
+    const surface = inferenceEnabled ? 'inference' : 'billing';
     const evidenceKey = healthyEvidenceKeys[item.errorKind ?? ''];
-    const message = evidenceKey
-      ? t('monitoring.xai_inspection_log_result', {
-          account: item.displayAccount,
-          action: actionLabel(item.action),
-          evidence: t(evidenceKey),
-          percent: percentLabel(item.usedPercent),
-        })
-      : t('monitoring.xai_inspection_log_classified', {
-          account: item.displayAccount,
-          action: actionLabel(item.action),
-          surface: t(
-            inferenceEnabled
-              ? 'monitoring.xai_inspection_surface_inference'
-              : 'monitoring.xai_inspection_surface_billing'
-          ),
-          reason:
-            formatXaiProbeIssue(
-              item.errorKind ?? 'unknown',
-              t,
-              inferenceEnabled ? 'inference' : 'billing'
-            ) ?? t('xai_quota.diagnostic_unknown'),
-        });
-    logs.push({
-      id: `demo-inspection-result-${item.id}`,
-      level: demoXaiInspectionLogLevel(item) as CodexInspectionStoredLogEntry['level'],
-      message,
-      timestamp: item.createdAtMs,
-      detail: buildDemoXaiInspectionLogDetail(item, inferenceEnabled),
-    });
+    logs.push(
+      logEntry({
+        id: `demo-inspection-result-${item.id}`,
+        level: demoXaiInspectionLogLevel(item) as CodexInspectionStoredLogEntry['level'],
+        messageKey: evidenceKey
+          ? 'monitoring.xai_inspection_log_result'
+          : 'monitoring.xai_inspection_log_classified',
+        messageParams: evidenceKey
+          ? {
+              account: item.displayAccount,
+              action: { key: actionKey(item.action) },
+              evidence: { key: evidenceKey },
+              percent: percentLabel(item.usedPercent),
+            }
+          : {
+              account: item.displayAccount,
+              action: { key: actionKey(item.action) },
+              surface: {
+                key: inferenceEnabled
+                  ? 'monitoring.xai_inspection_surface_inference'
+                  : 'monitoring.xai_inspection_surface_billing',
+              },
+              reason: {
+                key: getXaiProbeIssueKey(item.errorKind ?? 'unknown', surface) ??
+                  'xai_quota.diagnostic_unknown',
+              },
+            },
+        timestamp: item.createdAtMs,
+        detail: buildDemoXaiInspectionLogDetail(item, inferenceEnabled),
+      })
+    );
   });
 
   const completedAt = detail.run.finishedAtMs ?? detail.run.updatedAtMs;
-  logs.push({
-    id: 'demo-inspection-completed-summary',
-    level: 'success',
-    message: t('monitoring.codex_inspection_log_completed', {
-      delete: detail.run.deleteCount,
-      disable: detail.run.disableCount,
-      enable: detail.run.enableCount,
-      reauth: detail.run.reauthCount,
-      keep: detail.run.keepCount,
-    }),
-    timestamp: completedAt,
-    detail: buildDemoInspectionCompletionDetail(detail.run),
-  });
+  logs.push(
+    logEntry({
+      id: 'demo-inspection-completed-summary',
+      level: 'success',
+      messageKey: 'monitoring.codex_inspection_log_completed',
+      messageParams: {
+        delete: detail.run.deleteCount,
+        disable: detail.run.disableCount,
+        enable: detail.run.enableCount,
+        reauth: detail.run.reauthCount,
+        keep: detail.run.keepCount,
+      },
+      timestamp: completedAt,
+      detail: buildDemoInspectionCompletionDetail(detail.run),
+    })
+  );
   return logs;
 };
 

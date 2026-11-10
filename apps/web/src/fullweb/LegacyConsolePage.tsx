@@ -15,6 +15,8 @@ import {
   useInRouterContext,
 } from 'react-router-dom';
 import '../i18n';
+import { useTranslation } from 'react-i18next';
+import { setFullWebLanguage } from '../i18n/fullweb';
 import { AppLifecycle } from '../app/AppLifecycle';
 import { MainLayout } from '../components/layout/MainLayout';
 import { LoadingSpinner } from '../components/ui/LoadingSpinner';
@@ -62,6 +64,8 @@ export function LegacyConsolePage({
   // in-memory credential is being installed, so router context must be read
   // before any early loading/unauthorized return.
   const inRouter = useInRouterContext();
+  const { i18n } = useTranslation();
+  const consoleLanguage = i18n.resolvedLanguage || i18n.language;
   const [activated, setActivated] = useState(false);
   const [freshPending, setFreshPending] = useState(false);
   const [freshDirty, setFreshDirty] = useState(false);
@@ -70,6 +74,13 @@ export function LegacyConsolePage({
   useEffect(() => {
     onUnauthorizedRef.current = onUnauthorized;
   }, [onUnauthorized]);
+
+  useEffect(() => {
+    // The Console header switches the original catalog. The Fresh shell renders
+    // through its own instance, so carry the choice across; the tab title and
+    // the retained Fresh editors both read it.
+    setFullWebLanguage(consoleLanguage);
+  }, [consoleLanguage]);
 
   useEffect(() => {
     const verified = resolveRoutingContext({

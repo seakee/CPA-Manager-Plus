@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { getDemoApiCallResult } from './demoFixtures';
+import i18n from '@/i18n';
+import { getDemoApiCallResult, getDemoQuotaStoreState } from './demoFixtures';
 
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
@@ -102,5 +103,25 @@ describe('Codex spend-control demo fixture', () => {
       },
       rate_limit_reached_type: null,
     });
+  });
+});
+
+describe('Codex quota window labels', () => {
+  it('names every demo window through the same i18n keys the live data uses', () => {
+    const windows = Object.values(getDemoQuotaStoreState().codexQuota).flatMap(
+      (quota) => quota.windows ?? []
+    );
+    expect(windows.length).toBeGreaterThan(0);
+    for (const window of windows) {
+      expect(window.labelKey).toMatch(/^codex_quota\./);
+      expect(i18n.t(window.labelKey ?? '', { lng: 'en' })).not.toMatch(/[\u3400-\u9fff]/);
+      expect(i18n.t(window.labelKey ?? '', { lng: 'ru' })).not.toMatch(/[\u3400-\u9fff]/);
+    }
+    expect(
+      i18n.t(
+        windows.find((window) => window.id === 'monthly')?.labelKey ?? '',
+        { lng: 'ru' }
+      )
+    ).toBe('Месячный лимит');
   });
 });

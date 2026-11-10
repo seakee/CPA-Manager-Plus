@@ -242,10 +242,19 @@ export interface CodexInspectionExecutionResult {
   refreshError: string;
 }
 
+export type CodexInspectionLogMessageParam = string | number | { key: string };
+
 export interface CodexInspectionStoredLogEntry {
   id: string;
   level: CodexInspectionLogLevel;
   message: string;
+  /**
+   * Locale-independent template. A stored log outlives the render that created
+   * it, so the display text is translated when it is shown instead of when it
+   * was written; `message` remains the fallback for entries without a key.
+   */
+  messageKey?: string;
+  messageParams?: Record<string, CodexInspectionLogMessageParam>;
   timestamp: number;
   detail?: CodexInspectionLogDetail;
 }

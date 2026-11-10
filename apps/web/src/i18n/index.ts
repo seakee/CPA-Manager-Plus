@@ -28,3 +28,15 @@ i18n.use(initReactI18next).init({
 });
 
 export default i18n;
+
+// index.html ships a static `lang`, and the language menu never touched it, so
+// the document kept claiming Chinese for every locale. Keep the attribute on
+// the language the UI actually renders in.
+function applyDocumentLanguage() {
+  if (typeof document !== 'undefined' && document.documentElement) {
+    document.documentElement.lang = i18n.resolvedLanguage || 'zh-CN';
+  }
+}
+
+applyDocumentLanguage();
+i18n.on('languageChanged', applyDocumentLanguage);

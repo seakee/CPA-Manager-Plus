@@ -11,6 +11,7 @@ import logoOnDark from '../assets/brand/cpamp-logo-horizontal-on-dark.svg?inline
 import './consoleWorkspace.css';
 import { activateFreshSession, clearFreshSession, rememberedFreshCredential } from './freshSession';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
+import { useConsoleDocumentTitle } from './useConsoleDocumentTitle';
 
 const defaultClient = createPublicApiClient();
 const LegacyConsolePage = lazy(() =>
@@ -33,13 +34,13 @@ export function FreshConsolePage({
   const [enteredConsole, setEnteredConsole] = useState(false);
   const [externalSelected, setExternalSelected] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  // Kept as a key: the login form and its language menu must retranslate a
+  // failure that is already on screen.
+  const [error, setError] = useState<Parameters<typeof t>[0] | null>(null);
   const [light, setLight] = useState(true);
   const installationPendingRef = useRef(false);
   const requestId = useRef(0);
-  useEffect(() => {
-    document.title = t('consoleTitle');
-  }, []);
+  useConsoleDocumentTitle();
   useEffect(
     () => () => {
       requestId.current++;
@@ -73,14 +74,14 @@ export function FreshConsolePage({
     setEnteredConsole(false);
     setExternalSelected(false);
     setBusy(false);
-    setError('');
+    setError(null);
   }
 
   async function readOperation(candidate = credential, remember = rememberPassword) {
     if (busy || installationPendingRef.current || !candidate) return false;
     const currentRequest = ++requestId.current;
     setBusy(true);
-    setError('');
+    setError(null);
     try {
       const next = await client.get<FreshOperation>('operation', {
         kind: 'admin',
@@ -107,7 +108,7 @@ export function FreshConsolePage({
         (operation && !sameIdentity(next.identity, operation.identity))
       ) {
         clearAuthentication();
-        setError(t('invalidOperation'));
+        setError('invalidOperation');
         return false;
       }
       activateFreshSession(context, candidate, remember);
@@ -120,9 +121,9 @@ export function FreshConsolePage({
       if (currentRequest !== requestId.current) return false;
       if (err instanceof PublicApiError && err.kind === 'authentication') {
         clearAuthentication();
-        setError(t('authError'));
+        setError('authError');
       } else {
-        setError(t('unavailable'));
+        setError('unavailable');
       }
       return false;
     } finally {
@@ -132,7 +133,7 @@ export function FreshConsolePage({
 
   const unauthorized = () => {
     clearAuthentication();
-    setError(t('authError'));
+    setError('authError');
   };
   if (!operation) {
     return (
@@ -141,7 +142,7 @@ export function FreshConsolePage({
           adapter={{
             address: new URL(context.basePath, window.location.origin).toString(),
             credentialPlaceholder: bootstrapJourneyText('loginKeyPlaceholder'),
-            error,
+            error: error ? t(error) : '',
             authenticate: readOperation,
             restore: async () => {
               const candidate = rememberedFreshCredential(context);
@@ -167,7 +168,7 @@ export function FreshConsolePage({
           <div className="wizard-container">
             {error && (
               <p className="alert alert-warn" role="alert">
-                {error}
+                {t(error)}
               </p>
             )}
             {operation.strategy?.strategy === 'connect_external' ||
