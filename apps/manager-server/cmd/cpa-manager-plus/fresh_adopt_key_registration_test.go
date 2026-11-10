@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/seakee/cpa-manager-plus/apps/manager-server/internal/repository/freshkeys"
@@ -67,6 +68,33 @@ func TestAdoptCompletionRegistersTheDestinationKeys(t *testing.T) {
 		t.Fatalf("journal is not bound to this installation: %#v", journal)
 	}
 
+	// The console's own list is the surface the walkthrough found empty: it now
+	// answers with the destination's credentials and never with their plaintext.
+	response := gatewayRequest(t, fixture.app, http.MethodGet, "api-keys", "", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("api-keys after completion: %d %s", response.Code, response.Body.String())
+	}
+	var listed struct {
+		Keys []struct {
+			ID            string `json:"id"`
+			Origin        string `json:"origin"`
+			MaskedPreview string `json:"maskedPreview"`
+			Lifecycle     string `json:"lifecycle"`
+		} `json:"keys"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil || len(listed.Keys) != len(keys) {
+		t.Fatalf("api-keys body: %s", response.Body.String())
+	}
+	for index, key := range listed.Keys {
+		if key.ID != string(keys[index].ID) || key.Origin != freshkeys.OriginAdopted || key.Lifecycle != "active" ||
+			key.MaskedPreview != keys[index].MaskedPreview {
+			t.Fatalf("api-keys entry %d = %#v", index, key)
+		}
+		if strings.Contains(response.Body.String(), adoptedClientKeys[index]) {
+			t.Fatalf("api-keys disclosed %q", adoptedClientKeys[index])
+		}
+	}
+
 	// A replay of an already-complete installation is idempotent: it answers 200
 	// and registers nothing a second time.
 	completed := fixture.reload(t)
@@ -81,6 +109,35 @@ func TestAdoptCompletionRegistersTheDestinationKeys(t *testing.T) {
 	}
 	if fixture.reload(t).Operation.Revision != completed.Operation.Revision {
 		t.Fatal("completion replay changed the installation record")
+	}
+}
+
+// A journal another installation already owns is a conflict, not an outage: the
+// completion refuses with its own code, keeps the installation incomplete, and
+// leaves the registered keys visible instead of rolling them back silently.
+func TestAdoptCompletionRefusesAForeignInstallJournalAsAConflict(t *testing.T) {
+	fixture := adoptionFixtureWithKeys(t, adoptedClientKeys...)
+	ctx := t.Context()
+	if err := fixture.app.keyRepo.ClaimInitialInstall(ctx, freshkeys.InitialInstall{
+		KeyID: strings.Repeat("a", 32), RunID: "managed:another-install", Generation: "3", AttemptedAtMS: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response := fixture.complete(t)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("foreign journal completion: %d %s", response.Code, response.Body.String())
+	}
+	var failure struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &failure) != nil || failure.Code != "adopt_installation_conflict" {
+		t.Fatalf("foreign journal body: %s", response.Body.String())
+	}
+	if fixture.reload(t).Operation.ProductComplete {
+		t.Fatal("a refused registration completed the installation")
+	}
+	if listed, err := fixture.app.keys.List(ctx); err != nil || len(listed) != len(adoptedClientKeys) {
+		t.Fatalf("refused registration left %#v %v", listed, err)
 	}
 }
 

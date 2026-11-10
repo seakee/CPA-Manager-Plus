@@ -309,7 +309,11 @@ type adoptCompleteRequest struct {
 // Only once all of them hold are the destination's client keys registered in the
 // Key workspace and the install journal claimed for this run: that is the write
 // that makes the adopted installation manageable afterwards, and it must not
-// happen for a migration that is not finished.
+// happen for a migration that is not finished. A destination list this
+// installation cannot represent — a key it already retired, a journal another
+// installation owns — is answered with `adopt_installation_conflict`, because no
+// retry changes those facts; a storage failure keeps the retryable
+// `adopt_installation_unavailable`.
 //
 // Every one of them is decided while `adoptMigrationMu` is held, and the CAS that
 // sets `ProductComplete` runs under the same lock, so a run can never start
@@ -394,6 +398,13 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 	if err != nil || current.Operation.Identity != op.Identity {
 		return adoptCompletion{status: http.StatusConflict}
 	}
+	// The shape the CAS insists on is decided here first, before anything is
+	// written. A registration that outlived a checkpoint this completion may no
+	// longer finish would hand the gateway configuration page and the key journal
+	// authority over an installation that is not (or is no longer) this adoption.
+	if current.Operation.Strategy.Stage != "committed" || current.Operation.Strategy.Strategy != bootstrap.AdoptExisting || current.Operation.ProductComplete {
+		return adoptCompletion{status: http.StatusConflict}
+	}
 	record := current
 	summary := freshstore.AdoptionSummary{}
 	if record.AdoptionSummary != nil {
@@ -432,6 +443,13 @@ func (a *freshApplication) decideAdoptionCompletion(ctx context.Context, op boot
 	// of registering a second identity. They run only after every read-only
 	// condition above holds, so an incomplete migration writes nothing.
 	if _, err := a.keyApply.RegisterAdoption(ctx, destinationKeys); err != nil {
+		// A destination list this installation cannot represent is not an outage:
+		// it is a conflict the operator resolves at the source CPA, and retrying
+		// the same request cannot change it. Everything else may be transient and
+		// keeps the retryable answer.
+		if errors.Is(err, freshkeyapply.ErrAdoptionConflict) || errors.Is(err, freshkeyapply.ErrGeneration) {
+			return adoptCompletion{status: http.StatusConflict, code: "adopt_installation_conflict"}
+		}
 		return adoptCompletion{status: http.StatusServiceUnavailable, code: "adopt_installation_unavailable"}
 	}
 	next, err := a.store.Update(ctx, op.Identity, record.Operation.Revision, func(record *freshstore.Record) error {

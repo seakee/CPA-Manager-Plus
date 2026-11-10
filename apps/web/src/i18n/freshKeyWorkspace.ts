@@ -3,6 +3,8 @@ import { fullWebLanguage } from './fullweb';
 const en = {
   installerOrigin: 'Installation key',
   adoptedOrigin: 'Adopted key',
+  adoptedOriginNote:
+    'Keys marked as adopted were already in use on the source CPA when this installation took it over; Manager has not re-verified them.',
   copyKey: 'Copy key',
   keyCopied: 'Key copied. It was not stored in this browser.',
   keyCopyFailed: 'Clipboard unavailable. Try copying the key again.',
@@ -147,6 +149,8 @@ const en = {
 const zh: typeof en = {
   installerOrigin: '安装生成的密钥',
   adoptedOrigin: '接管时带来的密钥',
+  adoptedOriginNote:
+    '标记为“接管”的密钥在接管时就已在源 CPA 上使用；Manager 尚未重新校验它们。',
   copyKey: '复制密钥',
   keyCopied: '密钥已复制，未保存在此浏览器中。',
   keyCopyFailed: '剪贴板不可用，请重试复制密钥。',
@@ -280,6 +284,8 @@ const zh: typeof en = {
 const tw: typeof en = {
   installerOrigin: '安裝產生的金鑰',
   adoptedOrigin: '接管時帶來的金鑰',
+  adoptedOriginNote:
+    '標記為「接管」的金鑰在接管時就已在來源 CPA 上使用；Manager 尚未重新驗證它們。',
   copyKey: '複製金鑰',
   keyCopied: '金鑰已複製，未儲存在此瀏覽器中。',
   keyCopyFailed: '剪貼簿無法使用，請重試複製金鑰。',
@@ -413,6 +419,8 @@ const tw: typeof en = {
 const ru: typeof en = {
   installerOrigin: 'Ключ установки',
   adoptedOrigin: 'Ключ принятого CPA',
+  adoptedOriginNote:
+    'Ключи с пометкой «принятый» уже использовались в исходном CPA на момент переноса; Manager их не перепроверял.',
   copyKey: 'Скопировать ключ',
   keyCopied: 'Ключ скопирован. В этом браузере он не сохранён.',
   keyCopyFailed: 'Буфер обмена недоступен. Попробуйте скопировать ключ ещё раз.',

@@ -273,6 +273,42 @@ on-demand read behind the copy button, and it refuses a superseded key. The
 `initial-install` route observes the already-installed key and writes nothing,
 while a later workspace key cannot consume that single journal (409).
 
+#### Adopted Client Keys (`origin = 'adopted'`)
+
+An `adopt_existing` installation stages the source CPA's own client key list to the
+destination, so the keys that authenticate model traffic there were never minted by
+this Manager: their shape is the source CPA's — any printable token up to the
+adoption bound — not one of the two canonical shapes above. Completion is where
+they become Manager-managed: `freshkeyapply.RegisterAdoption` records one canonical
+row per destination key with `origin = 'adopted'`, the protected ciphertext, the
+`sha256` digest and a masked preview, and then claims the same one-shot
+initial-install journal as a `new_managed` install.
+
+- The journal's `KeyID` is the first registered adopted key, bound to the staged
+  run, Runtime generation and provider seed. That binding is what
+  `freshkeyapply.operationTarget` compares, so the gateway configuration page, the
+  plugin runtime switch, chat/`initial-install` observation and the revoke/replace
+  journal all answer for an adopted installation exactly as for a New Managed one.
+  Registering does not relax any check: a journal another installation owns, or a
+  destination key this Manager already retired, is `ErrAdoptionConflict` and never
+  a silent rebind.
+- Registration is idempotent by digest: a retried or resumed completion replays the
+  existing rows (`secret_hash` is the fence) instead of creating a second identity,
+  and a destination key that is already this workspace's own key keeps that one
+  record. A digest that resolves to a `superseded` row is refused, because the key
+  operation journal already committed that retirement and the installation may
+  neither own nor revive it.
+- The masked preview is `…` plus the last four characters, and only once the secret
+  is at least 16 characters long — four characters are then at most a quarter of it.
+  A shorter adopted secret is shown as `…` alone. `validKey` in the panel accepts
+  exactly that shape for `origin = 'adopted'`, and the copy button validates the
+  returned secret against the stored preview (`maskedPreviewFor`) instead of
+  assuming one of the two canonical shapes.
+- `POST api-keys/<APIKeyID>/secret` serves adopted keys too, under the same rules as
+  every other key: authenticated Admin only, `Cache-Control: no-store`, superseded
+  keys refused. The plaintext is returned only for that explicit copy action; the
+  list and detail projections stay masked.
+
 #### Where the installer Client Key lives at rest
 
 The installer Client Key is a working credential for model traffic, not a

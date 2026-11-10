@@ -3,6 +3,7 @@ package freshkeyapply
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -286,6 +287,11 @@ func (s *Service) AdoptedDestinationKeys(ctx context.Context, managementKey stri
 // The journal is the same one-shot record a New Managed install claims, so an
 // adoption is refused when another installation already owns it rather than
 // overwriting what that installation's key operations are bound to.
+//
+// A destination list this installation cannot represent — a key it already
+// retired, a binding another installation owns, a list outside the adoption
+// bound — is ErrAdoptionConflict: no retry changes those facts, and the operator
+// resolves them at the source CPA instead of waiting for a transient failure.
 func (s *Service) RegisterAdoption(ctx context.Context, secrets []string) ([]freshkeys.Key, error) {
 	if s == nil || s.profile != ProfileManaged || s.repo == nil || s.keys == nil {
 		return nil, ErrUnavailable
@@ -296,6 +302,10 @@ func (s *Service) RegisterAdoption(ctx context.Context, secrets []string) ([]fre
 	}
 	keys, err := s.keys.RegisterAdopted(ctx, secrets)
 	if err != nil {
+		if errors.Is(err, freshkeys.ErrRequest) || errors.Is(err, freshkeys.ErrAdoptedSecretRetired) ||
+			errors.Is(err, repo.ErrSourceOwned) {
+			return nil, fmt.Errorf("%w: %w", ErrAdoptionConflict, err)
+		}
 		return nil, err
 	}
 	ids := make([]string, 0, len(keys))
@@ -317,7 +327,7 @@ func (s *Service) RegisterAdoption(ctx context.Context, secrets []string) ([]fre
 		}
 		if existing == nil || existing.RunID != p.RunID || existing.Generation != p.Generation ||
 			existing.ProviderSeedSHA256 != p.S2B.Binding() || !slices.Contains(ids, existing.KeyID) {
-			return nil, ErrGeneration
+			return nil, fmt.Errorf("%w: %w", ErrAdoptionConflict, ErrGeneration)
 		}
 	}
 	return keys, nil

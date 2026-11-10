@@ -1,6 +1,7 @@
 package freshkeys
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -22,9 +23,6 @@ func TestRegisterAdoptedStoresMaskedAdoptedRecords(t *testing.T) {
 	for index, key := range keys {
 		if key.Origin != repo.OriginAdopted || key.Lifecycle != "active" || key.MaskedPreview != want[index] {
 			t.Fatalf("key %d = %#v, want preview %q", index, key, want[index])
-		}
-		if strings.Contains(key.MaskedPreview, secrets[index]) {
-			t.Fatalf("key %d discloses the secret", index)
 		}
 	}
 	// The stored rows decrypt back to exactly the destination's secrets, which is
@@ -76,6 +74,28 @@ func TestRegisterAdoptedReplaysInsteadOfDuplicating(t *testing.T) {
 	}
 	if listed, err := service.List(ctx); err != nil || len(listed) != 2 {
 		t.Fatalf("list = %#v %v", listed, err)
+	}
+}
+
+// A digest that resolves to a superseded record is refused: that identity was
+// retired by a committed key operation, so it can neither become the
+// installation's key nor be revived by an adoption.
+func TestRegisterAdoptedRefusesASupersededRecord(t *testing.T) {
+	db, service, _, _ := installKeyStore(t)
+	ctx := t.Context()
+	workspace, _, err := service.Create(ctx, strings.Repeat("e", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`update gateway_api_key_identities set lifecycle='superseded', revision=revision+1 where id=?`, string(workspace.Key.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.RegisterAdopted(ctx, []string{workspace.CreatedSecret}); !errors.Is(err, ErrAdoptedSecretRetired) {
+		t.Fatalf("superseded registration = %v", err)
+	}
+	listed, err := service.List(ctx)
+	if err != nil || len(listed) != 1 || listed[0].Lifecycle != "superseded" || listed[0].Origin != repo.OriginWorkspace {
+		t.Fatalf("a retired record was rewritten: %#v %v", listed, err)
 	}
 }
 

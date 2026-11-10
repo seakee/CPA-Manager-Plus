@@ -19,6 +19,13 @@ import (
 var ErrUnavailable = errors.New("private S1 host proof unavailable")
 var ErrGeneration = errors.New("private S1 generation mismatch")
 
+// ErrAdoptionConflict marks an adoption registration that no retry can resolve:
+// the destination's key list cannot be represented by this installation, or the
+// one-shot journal already belongs to a different binding. It is separated from
+// ErrUnavailable so the completion can answer with a conflict the operator must
+// resolve at the source rather than a transient outage to retry.
+var ErrAdoptionConflict = errors.New("adopted installation cannot be recorded")
+
 type State struct {
 	KeyID             string `json:"keyId"`
 	ManagerStaged     bool   `json:"managerStaged"`

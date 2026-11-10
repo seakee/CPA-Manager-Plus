@@ -21,9 +21,11 @@ export interface Key {
 
 const workspaceSecret = /^cpamp_sk_[a-f0-9]{64}$/;
 const installSecret = /^sk-[A-Za-z0-9]{64}$/;
-// An adopted key carries the source CPA's own shape, so its mask is the
-// ellipsis and, for a secret long enough to keep them, the last four characters.
-const adoptedMask = /^…[\s\S]{0,4}$/u;
+// An adopted key carries the source CPA's own shape: the mask is the ellipsis and,
+// from sixteen characters up, the last four characters — a quarter of the secret
+// at most — and the ellipsis alone below that.
+const adoptedMask = /^…(?:[\s\S]{4})?$/u;
+const adoptedSecret = /^[\x21-\x7E]{1,4096}$/;
 
 /** maskedPreviewOf is the only rendering a saved secret may produce. */
 export function maskedPreviewOf(secret: string): string {
@@ -32,9 +34,29 @@ export function maskedPreviewOf(secret: string): string {
   return '';
 }
 
-/** validSecretShape accepts exactly the two canonical Client Key shapes. */
-export function validSecretShape(secret: string): boolean {
-  return workspaceSecret.test(secret) || installSecret.test(secret);
+/**
+ * maskedPreviewFor is the mask one origin's secret must reproduce. It is the
+ * server's rule, not a second policy: the two canonical origins keep their
+ * shape-owning prefix, and an adopted secret — the source CPA's own printable
+ * token — keeps the last four characters only from sixteen characters up.
+ */
+export function maskedPreviewFor(origin: KeyOrigin, secret: string): string {
+  if (origin === 'workspace') return workspaceSecret.test(secret) ? 'cpamp_sk_…' + secret.slice(-4) : '';
+  if (origin === 'installer') return installSecret.test(secret) ? 'sk-…' + secret.slice(-4) : '';
+  if (!adoptedSecret.test(secret)) return '';
+  return secret.length >= 16 ? '…' + secret.slice(-4) : '…';
+}
+
+/**
+ * validSavedSecret verifies a secret the detail page just received against the
+ * record that produced it. Copying is the same authenticated, no-store read for
+ * every origin; only the shape check differs, and it is the stored preview that
+ * decides whether the response is the key this page is showing.
+ */
+export function validSavedSecret(key: Key, secret: string): boolean {
+  if (typeof secret !== 'string') return false;
+  const mask = maskedPreviewFor(key.origin, secret);
+  return mask !== '' && mask === key.maskedPreview;
 }
 
 /** validMask accepts the mask the origin's secret shape can produce. */

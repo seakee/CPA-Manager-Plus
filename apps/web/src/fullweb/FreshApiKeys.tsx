@@ -991,6 +991,14 @@ export function FreshApiKeys({
             </div>
           </aside>
         )}
+        {!!keys?.some((key) => key.origin === 'adopted') && (
+          <aside className="key-gateway-note" data-testid="adopted-key-note">
+            <FullWebIcon name="shield" />
+            <div>
+              <p>{k('adoptedOriginNote')}</p>
+            </div>
+          </aside>
+        )}
       </div>
       {selected && (
         <FreshKeyDetails

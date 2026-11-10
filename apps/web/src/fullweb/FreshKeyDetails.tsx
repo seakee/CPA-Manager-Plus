@@ -6,7 +6,7 @@ import './freshKeys.css';
 import { PublicApiError, type createPublicApiClient } from './publicApi';
 import { parseKeyUsage, usageCountText, usageCoveragePill, usageReasonText, usageStateText, usageTimeText, type KeyUsage, type UsageState } from './freshKeyUsage';
 import { FreshKeyInstallation } from './FreshKeyInstallation';
-import { keyDisplayName, validKey, validSecretShape, type Key } from './freshKeyMetadata';
+import { keyDisplayName, validKey, validSavedSecret, type Key } from './freshKeyMetadata';
 import { Drawer } from '../components/ui/Drawer';
 import { Modal } from '../components/ui/Modal';
 import { SegmentedTabs } from '../components/ui/SegmentedTabs';
@@ -128,15 +128,18 @@ export function FreshKeyDetails({
   }
 
   // One authenticated read, one clipboard write. The response is not cached and
-  // no part of the secret survives this call.
+  // no part of the secret survives this call. Copying exists for every origin,
+  // including the keys an adopted CPA already carried, so the check validates the
+  // returned secret against this record's own masked preview instead of assuming
+  // one of the two canonical shapes.
   async function copySavedSecret() {
-    if (copyingRef.current || record?.lifecycle === 'superseded') return;
+    if (copyingRef.current || !record || record.lifecycle === 'superseded') return;
     copyingRef.current = true;
     setCopying(true);
     setCopyFeedback('');
     try {
       const value = await client.post<{ secret: string }>(resource + '/secret', {}, auth);
-      if (!value || !validSecretShape(value.secret)) throw new Error();
+      if (!value || !validSavedSecret(record, value.secret)) throw new Error();
       await navigator.clipboard.writeText(value.secret);
       if (active.current) setCopyFeedback('copied');
     } catch (err) {

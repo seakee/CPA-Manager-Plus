@@ -24,6 +24,13 @@ var ErrRequest = errors.New("invalid creation request")
 var ErrNotFound = errors.New("creation result not found")
 var ErrConflict = repo.ErrConflict
 
+// ErrAdoptedSecretRetired refuses to register a destination key whose secret is
+// already a superseded record here. The key operation journal committed that
+// retirement, so reusing the identity would bind the installation to a key it
+// cannot decrypt-and-write, and reviving it would forge a lifecycle transition
+// the journal owns.
+var ErrAdoptedSecretRetired = errors.New("adopted client key was already retired")
+
 type Key struct {
 	ID            identity.APIKeyID  `json:"id"`
 	RequestID     string             `json:"requestId"`
@@ -34,9 +41,11 @@ type Key struct {
 	Name          string             `json:"name"`
 	NameRevision  int64              `json:"nameRevision"`
 	Lifecycle     identity.Lifecycle `json:"lifecycle"`
-	// Origin is "workspace" for a Key the workspace created and "installer" for
-	// the single Key the default installation minted so CPA never starts with
-	// client authentication disabled. It is display metadata, not authority.
+	// Origin is "workspace" for a Key the workspace created, "installer" for the
+	// single Key the default installation minted so CPA never starts with client
+	// authentication disabled, and "adopted" for a Key an adopted destination
+	// already carried when the adoption completed. It is display metadata, not
+	// authority.
 	Origin string `json:"origin"`
 }
 
@@ -50,11 +59,12 @@ type InitialKey struct {
 }
 
 // Origins of a canonical Client Key, mirrored to the Key workspace so the
-// installation's Key is displayed with a localised label instead of the stored
-// default name.
+// installation's Key and the keys an adopted CPA already carried are displayed
+// with a localised label instead of the stored default name.
 const (
 	OriginWorkspace = repo.OriginWorkspace
 	OriginInstaller = repo.OriginInstaller
+	OriginAdopted   = repo.OriginAdopted
 )
 
 // InstallerOriginName is the default display name of the installation's Key.
@@ -125,6 +135,7 @@ func (s *Service) runtimeIdentity(ctx context.Context) string {
 	}
 	return value
 }
+
 // RegisterAdopted persists one canonical record per Client Key an adopted
 // destination already carried, in the order the destination presents them.
 //
@@ -138,6 +149,8 @@ func (s *Service) runtimeIdentity(ctx context.Context) string {
 // It is idempotent by secret digest: a retried or resumed completion replays the
 // existing records instead of registering the same credential twice, and a secret
 // that is already a canonical record of this workspace keeps that single identity.
+// A digest that resolves to a superseded record is refused instead: that identity
+// is retired history, so the installation can neither own it nor revive it.
 func (s *Service) RegisterAdopted(ctx context.Context, secrets []string) ([]Key, error) {
 	if s == nil || s.repo == nil || s.protector == nil || len(secrets) == 0 || len(secrets) > maxAdoptedSecrets {
 		return nil, ErrRequest
@@ -159,6 +172,14 @@ func (s *Service) RegisterAdopted(ctx context.Context, secrets []string) ([]Key,
 		if err != nil {
 			return nil, err
 		}
+		if record != nil && record.Identity.Lifecycle != identity.LifecycleActive {
+			// A superseded record is retained history, not a reusable identity: it
+			// was retired by a committed key operation, so binding the installation
+			// to it would name a key no write path may consume. The operator's source
+			// CPA still carries a credential this Manager already revoked, which is a
+			// conflict to resolve there, never a registration to replay.
+			return nil, ErrAdoptedSecretRetired
+		}
 		if record == nil {
 			ciphertext, err := s.protector.ProtectString(secret)
 			if err != nil {
@@ -174,8 +195,8 @@ func (s *Service) RegisterAdopted(ctx context.Context, secrets []string) ([]Key,
 			}
 			now := s.now()
 			v := repo.Record{
-				RequestID: string(requestID),
-				Identity:  identity.APIKeyIdentity{ID: id, Revision: identity.InitialRevision, Lifecycle: identity.LifecycleActive, CreatedAtMS: now, UpdatedAtMS: now},
+				RequestID:  string(requestID),
+				Identity:   identity.APIKeyIdentity{ID: id, Revision: identity.InitialRevision, Lifecycle: identity.LifecycleActive, CreatedAtMS: now, UpdatedAtMS: now},
 				Ciphertext: ciphertext, Hash: hash, Preview: model.MaskedImportedClientKey(secret), NameRevision: 1, Origin: repo.OriginAdopted,
 			}
 			created, err := s.repo.CreateAdopted(ctx, v, runtimeIdentity)

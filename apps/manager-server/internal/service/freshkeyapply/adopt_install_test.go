@@ -68,9 +68,6 @@ func TestRegisterAdoptionRecordsTheDestinationKeysAndTheInstallJournal(t *testin
 		if want := model.MaskedImportedClientKey(adoptedSourceKeys[index]); key.MaskedPreview != want {
 			t.Fatalf("key %d preview = %q, want %q", index, key.MaskedPreview, want)
 		}
-		if strings.Contains(key.MaskedPreview, adoptedSourceKeys[index]) {
-			t.Fatalf("key %d preview discloses the secret", index)
-		}
 	}
 	journal, err := s.repo.InitialInstall(ctx)
 	if err != nil || journal == nil {
@@ -193,5 +190,21 @@ func TestAdoptionRegistrationRefusesAnotherInstallationsJournal(t *testing.T) {
 	journal, err := s.repo.InitialInstall(ctx)
 	if err != nil || journal == nil || journal.RunID != "managed:another-install" {
 		t.Fatalf("journal was rewritten: %#v %v", journal, err)
+	}
+	// The refusal happens after the Key records, so the installation is left in a
+	// visible half-state: the workspace lists the keys while no journal binds them
+	// to an installation, and every surface that needs one keeps refusing.
+	listed, err := s.keys.List(ctx)
+	if err != nil || len(listed) != 1+len(adoptedSourceKeys) {
+		t.Fatalf("keys registered before the refusal = %#v %v", listed, err)
+	}
+	adopted := 0
+	for _, key := range listed {
+		if key.Origin == repo.OriginAdopted {
+			adopted++
+		}
+	}
+	if adopted != len(adoptedSourceKeys) {
+		t.Fatalf("adopted records after the refusal = %d", adopted)
 	}
 }

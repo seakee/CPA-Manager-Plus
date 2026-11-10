@@ -76,15 +76,20 @@ func MaskedClientKey(secret string) string {
 // source CPA's and therefore not one of this Manager's two canonical shapes.
 //
 // The last four characters are what an operator recognises, so they are kept
-// exactly as for a canonical key; a secret too short for them to be a small
-// fraction of it is rendered as the ellipsis alone rather than disclosed.
+// exactly as for a canonical key — but only once the secret is long enough for
+// four characters to be a small fraction of it. A secret shorter than
+// minImportedMaskLength is rendered as the ellipsis alone rather than disclosed.
 func MaskedImportedClientKey(secret string) string {
 	runes := []rune(secret)
-	if len(runes) < 8 {
+	if len(runes) < minImportedMaskLength {
 		return MaskedClientKeyEllipsis
 	}
 	return MaskedClientKeyEllipsis + string(runes[len(runes)-4:])
 }
+
+// minImportedMaskLength is the shortest imported secret whose last four
+// characters may be shown: a quarter of the secret at most.
+const minImportedMaskLength = 16
 
 func isASCIIAlnum(character rune) bool {
 	return character >= '0' && character <= '9' || character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z'
