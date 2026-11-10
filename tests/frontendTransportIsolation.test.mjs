@@ -6,6 +6,7 @@ import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { createPublicApiClient } from '../apps/web/src/fullweb/publicApi.ts';
 import { resolveRoutingContext } from '../apps/web/src/fullweb/routingContext.ts';
+import { FRESH_LANGUAGE_STORAGE_KEY } from '../apps/web/src/fullweb/freshLanguage.ts';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const web = path.join(root, 'apps/web');
@@ -174,6 +175,16 @@ describe('Full Web / Panel Lite runtime dependency isolation', () => {
     ).toEqual([]);
     for (const file of files) {
       const source = readFileSync(path.join(src, file), 'utf8');
+      // The interface language is the one non-secret preference the Bootstrap
+      // entry shares with the Console, so it owns the only storage read here.
+      // The Console store, the legacy endpoint table and every session/auth
+      // module stay out of this graph; freshLanguage.test.ts pins the key and
+      // the menu order to the Console values.
+      if (file === 'fullweb/freshLanguage.ts') {
+        expect(source).not.toMatch(/\/v0\/management/);
+        expect(source).toContain(`'${FRESH_LANGUAGE_STORAGE_KEY}'`);
+        continue;
+      }
       expect(source, file).not.toMatch(/localStorage|sessionStorage|\/v0\/management/);
     }
   });

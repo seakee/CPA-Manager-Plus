@@ -4,6 +4,8 @@ import { BOOTSTRAP_UI, createBootstrapTransport } from './bootstrapTransport';
 import { FreshBootstrapPage } from './FreshBootstrapPage';
 import { setFullWebLanguage } from '../i18n/fullweb';
 import { bootstrapJourneyText } from '../i18n/bootstrapJourney';
+import { bootstrapText, type FreshBootstrapTextKey } from '../i18n/freshBootstrap';
+import { activateFreshLanguage, FRESH_LANGUAGE_STORAGE_KEY } from './freshLanguage';
 
 vi.mock('./UpgradeAuthenticationEntry', () => ({
   UpgradeAuthenticationEntry: () => <div data-testid="upgrade-auth-entry" />,
@@ -41,6 +43,14 @@ function textOf(node: ReactTestInstance): string {
   return node.children.map((child) => (typeof child === 'string' ? child : textOf(child))).join('');
 }
 
+// The page keeps copy keys, not rendered sentences, so assertions name the key
+// and resolve it in the language under test.
+const copy = (language: 'zh-CN' | 'en' | 'ru', key: FreshBootstrapTextKey) =>
+  bootstrapText(key, undefined, language);
+const CJK = /[\u4e00-\u9fff]/;
+// Stands in for the browser store the Console language menu persists into.
+const storage = new Map<string, string>();
+
 describe('FreshBootstrapPage product preview workflow', () => {
   beforeEach(() => {
     setFullWebLanguage('zh-CN');
@@ -68,6 +78,12 @@ describe('FreshBootstrapPage product preview workflow', () => {
       },
     });
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Discovery unavailable')));
+    storage.clear();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, String(value)),
+      removeItem: (key: string) => void storage.delete(key),
+    });
   });
 
   afterEach(() => {
@@ -92,7 +108,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       );
     });
     expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      '正在读取来源状态'
+      copy('zh-CN', 'checkingTitle')
     );
     expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
     expect(renderer.root.findAllByProps({ 'aria-label': 'Fresh Bootstrap 进度' })).toHaveLength(0);
@@ -157,14 +173,14 @@ describe('FreshBootstrapPage product preview workflow', () => {
       );
     });
     expect(textOf(findByTestId(renderer.root, 'bootstrap-no-handoff'))).toContain(
-      '来源状态无法确认'
+      copy('zh-CN', 'gateUnconfirmedTitle')
     );
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'bootstrap-discovery-guidance' })
     ).toHaveLength(0);
     expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
     expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      '来源状态无法确认'
+      copy('zh-CN', 'unconfirmedTitle')
     );
   });
 
@@ -249,7 +265,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       );
     });
     expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(
-      '来源状态暂无法确认'
+      copy('zh-CN', 'guidanceUnavailableTitle')
     );
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'bootstrap-recheck-discovery' })
@@ -260,7 +276,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
     );
     expect(publicDiscovery).toHaveBeenCalledTimes(2);
     expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      '正在读取来源状态'
+      copy('zh-CN', 'checkingTitle')
     );
     expect(
       renderer.root.findAllByProps({ 'data-testid': 'bootstrap-recheck-discovery' })
@@ -328,7 +344,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       renderer.root.findAllByProps({ 'data-testid': 'bootstrap-recheck-discovery' })
     ).toHaveLength(0);
     expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      '正在读取来源状态'
+      copy('zh-CN', 'checkingTitle')
     );
     await act(async () => {
       resolveRecheck(
@@ -346,7 +362,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
     });
     expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
     expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-guidance'))).toContain(
-      '来源状态暂无法确认'
+      copy('zh-CN', 'guidanceUnavailableTitle')
     );
     expect(bootstrapTransport).not.toHaveBeenCalled();
   });
@@ -358,7 +374,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       'fresh_claim',
       'fresh_claim_required',
       true,
-      '检测到需要宿主机认领的 Fresh 初始化状态',
+      copy('zh-CN', 'guidanceFreshTitle'),
     ],
   ])(
     'shows owned Fresh discovery status %s without claiming an operation',
@@ -427,7 +443,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
     ).toHaveLength(0);
     expect(renderer.root.findAllByProps({ 'data-testid': 'cli-handoff-command' })).toHaveLength(0);
     expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-      '来源状态无法确认'
+      copy('zh-CN', 'unconfirmedTitle')
     );
   });
 
@@ -438,7 +454,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       'admin_session',
       'qualification_unavailable',
       true,
-      '检测到尚未获得升级资格的现有来源',
+      copy('zh-CN', 'guidanceUpgradeTitle'),
     ],
     [
       'recovery_required',
@@ -446,7 +462,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       'host_intervention',
       'recovery_host_intervention',
       false,
-      '检测到需要宿主机介入的恢复状态',
+      copy('zh-CN', 'guidanceRecoveryTitle'),
     ],
   ])(
     'routes non-Fresh %s to its own authentication or host gate',
@@ -514,7 +530,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
       );
     });
     const gate = textOf(findByTestId(renderer.root, 'bootstrap-no-handoff'));
-    expect(gate).toContain('来源状态暂无法确认');
+    expect(gate).toContain(copy('zh-CN', 'guidanceUnavailableTitle'));
     expect(gate).not.toContain('cpa-manager-plus initialize');
     expect(textOf(findByTestId(renderer.root, 'host-preflight-command'))).toBe(
       'cpa-manager-plus legacy-preflight --db /path/to/usage.sqlite --summary'
@@ -609,7 +625,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
         renderer.root.findAllByProps({ 'data-testid': 'bootstrap-discovery-guidance' })
       ).toHaveLength(0);
       expect(textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'))).toContain(
-        '来源状态无法确认'
+        copy('zh-CN', 'unconfirmedTitle')
       );
     }
   );
@@ -665,10 +681,10 @@ describe('FreshBootstrapPage product preview workflow', () => {
     });
 
     expect(textOf(findByTestId(renderer.root, 'init-error-detail'))).toContain(
-      '若服务端已消费本次一次性 Claim Token 并返回 HTTP 401，请在宿主机重新执行 cpa-manager-plus initialize'
+      copy('zh-CN', 'errorTransportStartDetail')
     );
     expect(textOf(findByTestId(renderer.root, 'bootstrap-authority-error'))).toContain(
-      '可尝试重新连接一次；若返回 HTTP 401（令牌已被消费）'
+      copy('zh-CN', 'reconnectNote')
     );
   });
 
@@ -692,5 +708,188 @@ describe('FreshBootstrapPage product preview workflow', () => {
     );
     expect(transport).toHaveBeenCalledTimes(1);
     await act(async () => renderer.unmount());
+  });
+
+  it.each(['en', 'ru'] as const)(
+    'renders every blocked discovery gate in %s without falling back to one language',
+    async (language) => {
+      const states = [
+        {
+          payload: {
+            status: 'fresh_claim_required',
+            mode: 'fresh',
+            auth_entry: 'fresh_claim',
+            reason: 'fresh_claim_required',
+            authentication_required: true,
+          },
+          httpStatus: 200,
+          tag: 'gateTagBootstrap',
+          title: 'guidanceFreshTitle',
+          detail: 'guidanceFreshDetail',
+          hostPreflight: false,
+        },
+        {
+          payload: {
+            status: 'recovery_required',
+            mode: 'recovery',
+            auth_entry: 'host_intervention',
+            reason: 'recovery_host_intervention',
+            authentication_required: false,
+          },
+          httpStatus: 200,
+          tag: 'gateTagPreflight',
+          title: 'guidanceRecoveryTitle',
+          detail: 'guidanceRecoveryDetail',
+          hostPreflight: true,
+        },
+        {
+          payload: {
+            status: 'unavailable',
+            auth_entry: 'unavailable',
+            reason: 'observation_unavailable',
+            authentication_required: false,
+          },
+          httpStatus: 503,
+          tag: 'gateTagPreflight',
+          title: 'guidanceUnavailableTitle',
+          detail: 'guidanceUnavailableDetail',
+          hostPreflight: true,
+        },
+      ] as const;
+      for (const state of states) {
+        vi.stubGlobal(
+          'fetch',
+          vi.fn().mockResolvedValue(
+            Response.json(
+              { contract_version: 'cpamp.phase4-01.discovery.v1', ...state.payload },
+              { status: state.httpStatus }
+            )
+          )
+        );
+        setFullWebLanguage(language);
+        let renderer!: ReactTestRenderer;
+        await act(async () => {
+          renderer = create(
+            <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
+          );
+        });
+        const gate = textOf(findByTestId(renderer.root, 'bootstrap-no-handoff'));
+        expect(gate).toContain(copy(language, state.tag));
+        expect(gate).toContain(copy(language, state.title));
+        expect(gate).toContain(copy(language, state.detail));
+        if (state.hostPreflight) {
+          expect(gate).toContain(copy(language, 'preflightTitle'));
+          expect(gate).toContain(copy(language, 'preflightDesc'));
+        }
+        expect(gate).not.toMatch(CJK);
+        await act(async () => renderer.unmount());
+      }
+    }
+  );
+
+  it.each(['en', 'ru'] as const)(
+    'renders the transport failure, its recovery copy and the diagnostics in %s',
+    async (language) => {
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('network down')));
+      setFullWebLanguage(language);
+      const transport = createBootstrapTransport(
+        vi.fn().mockRejectedValue(new TypeError('network down'))
+      );
+      let renderer!: ReactTestRenderer;
+      await act(async () => {
+        renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
+      });
+      expect(textOf(findByTestId(renderer.root, 'init-error-title'))).toBe(
+        copy(language, 'errorTransportTitle')
+      );
+      expect(textOf(findByTestId(renderer.root, 'init-error-detail'))).toBe(
+        copy(language, 'errorTransportStartDetail')
+      );
+      const card = textOf(findByTestId(renderer.root, 'bootstrap-authority-error'));
+      for (const key of [
+        'authorityFailedTag',
+        'authorityFailedTitle',
+        'authorityFailedDesc',
+        'reconnectNote',
+        'retryBootstrap',
+        'diagnosticsOperationId',
+        'claimGeneration',
+        'handoffMode',
+        'handoffModeFresh',
+      ] as const) {
+        expect(card).toContain(copy(language, key));
+      }
+      expect(card).not.toMatch(CJK);
+      await act(async () => renderer.unmount());
+    }
+  );
+
+  it.each(['en', 'ru'] as const)('localizes the claim diagnostics in %s', async (language) => {
+    let resolveStart!: (value: Response) => void;
+    const transport = createBootstrapTransport(
+      vi.fn().mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveStart = resolve;
+          })
+      )
+    );
+    setFullWebLanguage(language);
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
+    });
+    const card = textOf(findByTestId(renderer.root, 'bootstrap-connecting'));
+    expect(card).toContain(bootstrapJourneyText('claiming', language));
+    expect(card).toContain(copy(language, 'diagnosticsMode'));
+    expect(card).toContain(copy(language, 'diagnosticsModeClaim'));
+    expect(card).toContain(copy(language, 'diagnosticsOperationId'));
+    expect(card).toContain(copy(language, 'diagnosticsInstallation'));
+    expect(card).toContain(identity.operationId);
+    expect(card).not.toMatch(CJK);
+    await act(async () => {
+      resolveStart(Response.json({ token: 'installation-session', operation: pendingOperation }));
+    });
+    await act(async () => renderer.unmount());
+  });
+
+  it('re-renders the whole Bootstrap and wizard surface from the header language menu', async () => {
+    const transport = createBootstrapTransport(
+      vi
+        .fn()
+        .mockResolvedValue(
+          Response.json({ token: 'installation-session', operation: pendingOperation })
+        )
+    );
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
+    });
+    expect(
+      textOf(findByTestId(renderer.root, 'fresh-setup-wizard'))
+    ).toContain(bootstrapJourneyText('welcome', 'zh-CN'));
+    expect(findByTestId(renderer.root, 'bootstrap-language').props.value).toBe('zh-CN');
+
+    await act(async () => {
+      findByTestId(renderer.root, 'bootstrap-language').props.onChange({
+        target: { value: 'ru' },
+      });
+    });
+
+    expect(findByTestId(renderer.root, 'bootstrap-language').props.value).toBe('ru');
+    const wizard = textOf(findByTestId(renderer.root, 'fresh-setup-wizard'));
+    expect(wizard).toContain(bootstrapJourneyText('welcome', 'ru'));
+    expect(wizard).toContain(bootstrapJourneyText('chooseHelp', 'ru'));
+    expect(wizard).not.toContain(bootstrapJourneyText('welcome', 'zh-CN'));
+    // The same persisted store the Console header menu writes.
+    expect(storage.get(FRESH_LANGUAGE_STORAGE_KEY)).toBe(
+      JSON.stringify({ state: { language: 'ru' }, version: 0 })
+    );
+    await act(async () => renderer.unmount());
+
+    // A fresh document starts on that stored choice, not the browser language.
+    setFullWebLanguage('en');
+    expect(activateFreshLanguage()).toBe('ru');
+    expect(bootstrapJourneyText('welcome')).toBe(bootstrapJourneyText('welcome', 'ru'));
   });
 });

@@ -5,6 +5,8 @@ import { fullweb as en } from './locales/en.json';
 import { fullweb as ru } from './locales/ru.json';
 
 // Full Web does not enter the legacy connection or stored-preference graph.
+// The Bootstrap entry re-selects the Console's saved language itself; see
+// fullweb/freshLanguage.
 const i18n = createInstance();
 void i18n.init({
   resources: {

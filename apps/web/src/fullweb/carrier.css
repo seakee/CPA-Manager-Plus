@@ -193,6 +193,42 @@ input {
   flex-wrap: wrap;
 }
 
+/* Same control the Console header exposes: a globe plus the language's own
+   name. The Bootstrap entry has no Console chrome, so it carries its own. */
+.bootstrap-language {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  border-radius: var(--app-radius-sm);
+}
+
+.bootstrap-language-select {
+  min-height: var(--control-height-md);
+  padding: 0 2px;
+  border: 0;
+  border-radius: var(--app-radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.bootstrap-language-select:focus-visible {
+  outline: 3px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.bootstrap-language-select option {
+  color: var(--text-primary);
+  background: var(--bg-surface);
+}
+
+.bootstrap-retry-note {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -1433,6 +1469,16 @@ select:focus-visible {
   .bootstrap-header .header-actions {
     gap: 4px;
     flex-wrap: nowrap;
+  }
+  .bootstrap-language {
+    gap: 2px;
+  }
+  .bootstrap-language-select {
+    width: 92px;
+    font-size: 12px;
+  }
+  .bootstrap-retry-note {
+    font-size: 11px;
   }
   .journey-version {
     font-size: 12px;
