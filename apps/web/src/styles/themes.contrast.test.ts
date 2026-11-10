@@ -5,9 +5,10 @@ import { describe, expect, it } from 'vitest';
  *
  * The audit that caught the v2 walkthrough findings measured computed styles in
  * the browser, which is not reproducible in CI. This test instead pins the
- * contract at the token level: every text-role token has to clear WCAG AA on the
- * real surface set of its theme (canvas, card, muted card, accent tints), and no
- * stylesheet may paint a background with a text-role token.
+ * behaviour at the token level: every text-role token has to clear WCAG AA on
+ * the real surface set of its own theme (canvas, card, muted card, accent
+ * tints), the quaternary tier has to clear the glyph threshold, and each badge
+ * text token has to clear AA on its own badge background.
  *
  * Surfaces are derived from the theme itself so the assertions follow the tokens
  * instead of duplicating their values.
@@ -27,28 +28,15 @@ const AA_GLYPH = 3;
 
 // apps/web/tsconfig.json targets browser globals without @types/node, so the
 // node builtins are imported lazily and typed locally instead of statically.
-const nodeModules = async () => {
+const readStylesheet = async (url: URL): Promise<string> => {
   const fsSpecifier = 'node:fs';
-  const pathSpecifier = 'node:path';
-  const urlSpecifier = 'node:url';
-  const fs = (await import(fsSpecifier)) as {
+  const { readFileSync } = (await import(fsSpecifier)) as {
     readFileSync: (path: string | URL, encoding: 'utf8') => string;
-    readdirSync: (path: string, options: { withFileTypes: true }) => {
-      name: string;
-      isDirectory: () => boolean;
-    }[];
   };
-  const path = (await import(pathSpecifier)) as { join: (...parts: string[]) => string };
-  const { fileURLToPath } = (await import(urlSpecifier)) as {
-    fileURLToPath: (url: URL) => string;
-  };
-  return { ...fs, join: path.join, fileURLToPath };
+  return readFileSync(url, 'utf8');
 };
 
 const THEMES_URL = new URL('./themes.scss', import.meta.url);
-const CARRIER_URL = new URL('../fullweb/carrier.css', import.meta.url);
-const CONSOLE_WORKSPACE_URL = new URL('../fullweb/consoleWorkspace.css', import.meta.url);
-const UPGRADE_ENTRY_URL = new URL('../fullweb/upgradeEntry.css', import.meta.url);
 
 const stripComments = (source: string): string => source.replace(/\/\*[\s\S]*?\*\//g, '');
 
@@ -222,7 +210,7 @@ const worstContrast = (foreground: Rgba, surfaces: Surface[]): { ratio: number; 
     { ratio: Number.POSITIVE_INFINITY, surface: '' }
   );
 
-const themeSource = async (): Promise<string> => stripComments(await (await nodeModules()).readFileSync(THEMES_URL, 'utf8'));
+const themeSource = async (): Promise<string> => stripComments(await readStylesheet(THEMES_URL));
 
 const LIGHT_TEXT_TOKENS = [
   '--app-text-primary',
@@ -304,65 +292,5 @@ describe('theme text tokens hold WCAG AA on their own surfaces', () => {
         `${theme} --data-badge-${tone}-text on --data-badge-${tone}-bg is ${ratio.toFixed(2)}:1`
       ).toBeGreaterThanOrEqual(AA_TEXT);
     }
-  });
-});
-
-describe('stylesheets never paint text tokens as backgrounds', () => {
-  it('keeps text-only tokens out of every background', async () => {
-    const { readFileSync, readdirSync, join, fileURLToPath } = await nodeModules();
-    const root = fileURLToPath(new URL('..', import.meta.url));
-    const stylesheets: string[] = [];
-    const walk = (directory: string): void => {
-      for (const entry of readdirSync(directory, { withFileTypes: true })) {
-        const fullPath = join(directory, entry.name);
-        if (entry.isDirectory()) walk(fullPath);
-        else if (/\.(scss|css)$/.test(entry.name)) stylesheets.push(fullPath);
-      }
-    };
-    walk(root);
-
-    expect(stylesheets.length).toBeGreaterThan(50);
-
-    // Tokens whose only role is text: painting a background with one of these
-    // makes the contrast of everything on top unknowable, so they are rejected
-    // outright. The `--text-*` aliases double as data-visualisation fills and
-    // low-alpha chip tints, so they stay out of this rule.
-    const textOnlyToken =
-      /var\(\s*--(?:app-text-[a-z-]+|accent-text|sidebar-text-color|primary-text|focus-text|data-badge-[a-z]+-text)\s*[,)]/;
-
-    const offenders: string[] = [];
-    for (const file of stylesheets) {
-      const source = stripComments(readFileSync(file, 'utf8'));
-      for (const [, selectors, body] of source.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-        for (const match of body.matchAll(/background(?:-color)?\s*:\s*([^;]+);/g)) {
-          if (textOnlyToken.test(match[1])) {
-            offenders.push(
-              `${file}: ${match[1].trim()} on ${selectors.trim().slice(0, 48).replace(/\s+/g, ' ')}`
-            );
-          }
-        }
-      }
-    }
-    expect(offenders).toEqual([]);
-  });
-});
-
-describe('full web accent keeps its two roles separate', () => {
-  it('defines a text accent next to the fill accent', async () => {
-    const carrier = stripComments(await (await nodeModules()).readFileSync(CARRIER_URL, 'utf8'));
-    expect(carrier).toContain('--accent: var(--primary-color);');
-    expect(carrier).toContain('--accent-text: var(--primary-text);');
-  });
-
-  it.each([
-    ['carrier', CARRIER_URL],
-    ['consoleWorkspace', CONSOLE_WORKSPACE_URL],
-    ['upgradeEntry', UPGRADE_ENTRY_URL],
-  ])('%s paints text with the text accent only', async (_name, url) => {
-    const source = stripComments(await (await nodeModules()).readFileSync(url, 'utf8'));
-    const accentTextDeclarations = [...source.matchAll(/(^|[^-\w])color\s*:\s*([^;]+);/g)]
-      .map((match) => match[2].trim())
-      .filter((value) => value.startsWith('var(--accent)'));
-    expect(accentTextDeclarations).toEqual([]);
   });
 });

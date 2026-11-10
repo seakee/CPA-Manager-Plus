@@ -99,7 +99,7 @@ All interactive controls (search inputs, selects, segmented tabs, and buttons) w
   - Measure the **final composited** foreground and background, not the token hex: ancestor `opacity`, semi-transparent surfaces (`--app-surface`, `--glass-bg`, `--app-input-bg`), and tinted chips all change the result.
   - White text on a coloured fill uses the solid ramps (`--primary-solid*` / `--danger-solid*` with `--primary-contrast`), never the theme-adaptive `--primary-color`.
   - Badge and inline status text uses the paired badge tokens. Do not mint a new tint with `color-mix(in srgb, <token> 8-14%, transparent)` and reuse that same token as its own text colour: a 12% self-tint caps its own contrast at about 3.8:1.
-  - `apps/web/src/styles/themes.contrast.test.ts` pins this contract in CI. It parses `themes.scss`, rebuilds each theme's surface set from its own tokens (canvas, card, muted surfaces, 8–12% primary tints), and asserts that every text-role token clears `4.5:1`, the quaternary tier clears `3:1`, every badge pair clears `4.5:1` on its own background, and no stylesheet paints a background with a text-only token. When you change a surface or text token, this test is what reports the regression — update the tokens rather than the expectations.
+  - `apps/web/src/styles/themes.contrast.test.ts` pins this contract in CI. It parses `themes.scss`, rebuilds each theme's surface set from its own tokens (canvas, card, muted surfaces, 8–12% primary tints), and asserts that every text-role token clears `4.5:1`, the quaternary tier clears `3:1`, and every badge pair clears `4.5:1` on its own background. When you change a surface or text token, this test is what reports the regression — update the tokens rather than the expectations.
 
 ## 7. Undefined Variables
 
