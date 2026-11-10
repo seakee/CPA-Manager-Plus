@@ -49,43 +49,57 @@ const CJK = /[\u4e00-\u9fff]/;
 const CYRILLIC = /[\u0400-\u04ff]/;
 const LATIN = /[A-Za-z]/;
 
-// Product and protocol terms stay in Latin script in every language, so they
-// are removed before asking whether a block was actually localized. Two or
-// more neighbouring Latin words in a translated block mean a sentence stayed
-// in English.
-const PROTOCOL_TERMS =
-  /\bcpa-manager-plus\b|\bbootstrap\b|\bhandoff\b|\bclaim\b|\btoken\b|\bhttp\b|\bmanager\b|\bcpamp\b|\bcommitid\b|\bdata\.(?:key|value)\b|\bfresh\b|\badopt\b|\bupgrade\b|\btransport\b|\bunavailable\b|\bauthority\b|\bmismatch\b|\bpreflight\b|\bsource\b|\badmissionid\b|\binstallationid\b|\bgeneration\b|\boperationid\b|\bfail-closed\b|\bembedded\b|\blinux\b|\bamd64\b|\bcpa\b|\bplus\b|\bsqlite\b|\bjson\b|\bapi\b|\burl\b|\bget\b|\bpost\b|\bput\b|\bpatch\b|\bdelete\b|\bok\b|\bid\b|\bv2\b|\bclaimid\b|\bhmac\b|\bjwt\b|\bcookie\b|\bcsrf\b|\bsha256\b|\bbase64\b|\butf-8\b/g;
+// Names, wire formats and identifiers a translator must not translate. Generic
+// English words are deliberately absent: a block built out of those is
+// untranslated copy, not protocol, and no exemption list may grow to hide it.
+const NAMES =
+  /\bcpa-manager-plus\b|\bdata\.key\b|\bhttp\b|\bsqlite\b|\butf-8\b|\bapi\b|\burl\b|\bjson\b|\bv2\b|\bid\b/gi;
 
-function assertLocalized(language: 'zh-CN' | 'zh-TW' | 'ru', text: string): void {
-  const residue = text.toLowerCase().replace(PROTOCOL_TERMS, ' ');
-  // A sentence left in English shows up as neighbouring English words.
-  expect(residue, `unlocalized text in ${language}: ${text}`).not.toMatch(
-    /[a-z]{3,}[\s,.;:—–-]+[a-z]{3,}/
-  );
-  // A block made only of protocol terms needs no translation; anything else
-  // has to carry the target script.
-  if (!/[a-z]{2,}/.test(residue)) return;
-  const script = language === 'ru' ? CYRILLIC : CJK;
-  expect(script.test(residue), `expected ${language} copy in: ${text}`).toBe(true);
+// Two or more neighbouring lower-case Latin words are an English clause. Copy
+// keeps a product name capitalized ("Claim Token", "Fresh/Adopt/Upgrade") and
+// never carries an English sentence.
+const ENGLISH_CLAUSE = /(?:^|[^A-Za-z])([a-z]{2,}(?:[ \t]+[a-z]{2,})+)/;
+
+type Language = 'zh-CN' | 'zh-TW' | 'en' | 'ru';
+
+function englishClauseIn(text: string): string | null {
+  const match = ENGLISH_CLAUSE.exec(text.replace(NAMES, ' '));
+  return match ? match[1] : null;
 }
 
-// What a reader of that language must actually see: the interface copy is in
-// their script, not the fallback table. Protocol terms (Handoff, Claim,
-// data.key, cpa-manager-plus) stay untranslated in every language.
-function assertRenderedIn(language: 'zh-CN' | 'zh-TW' | 'en' | 'ru', text: string): void {
-  expect(text).not.toBe('');
+// A visible copy block: a title, a description, an action or a recovery
+// explanation. It must be written in the reader's script. Mixed-in English
+// product names are fine; a block that stayed in English is not, whatever
+// words it happens to use.
+function assertCopyIn(language: Language, text: string): void {
+  expect(text, `empty copy block in ${language}`).not.toBe('');
   if (language === 'en') {
     expect(text).toMatch(LATIN);
     expect(text).not.toMatch(CYRILLIC);
     expect(text).not.toMatch(CJK);
     return;
   }
-  if (language === 'ru') {
-    expect(text).not.toMatch(CJK);
-  } else {
+  expect(text, `expected ${language} copy in: ${text}`).toMatch(language === 'ru' ? CYRILLIC : CJK);
+  expect(text, `foreign script in ${language}: ${text}`).not.toMatch(
+    language === 'ru' ? CJK : CYRILLIC
+  );
+  expect(englishClauseIn(text), `English clause left in ${language}: ${text}`).toBeNull();
+}
+
+// A fixed, standalone protocol label such as a card step tag. It may stay in
+// English by design ("Claim", "Bootstrap Gate"), so it is not required to carry
+// the reader's script — only to carry no other script and no English sentence.
+function assertLabelIn(language: Language, text: string): void {
+  expect(text, `empty label in ${language}`).not.toBe('');
+  if (language === 'en') {
     expect(text).not.toMatch(CYRILLIC);
+    expect(text).not.toMatch(CJK);
+    return;
   }
-  assertLocalized(language, text);
+  expect(text, `foreign script in ${language}: ${text}`).not.toMatch(
+    language === 'ru' ? CJK : CYRILLIC
+  );
+  expect(englishClauseIn(text), `English clause left in ${language}: ${text}`).toBeNull();
 }
 
 // Stands in for the browser store the Console language menu persists into.
@@ -106,15 +120,16 @@ function actionAlert(gate: ReactTestInstance): ReactTestInstance {
   return alerts[alerts.length - 1];
 }
 
-/** Every visible block of a card header, asserted on its own. */
-function assertCardHeaderReads(language: 'zh-CN' | 'zh-TW' | 'en' | 'ru', card: ReactTestInstance) {
+/** Every visible block of a card header, asserted on its own kind. */
+function assertCardHeaderReads(language: Language, card: ReactTestInstance) {
   const [tag] = blocksOf(card, 'wizard-step-tag');
   const [title] = blocksOf(card, 'wizard-title');
   const [desc] = blocksOf(card, 'wizard-desc');
-  // A block that silently kept the fallback table fails here on its own.
-  assertRenderedIn(language, tag);
-  assertRenderedIn(language, title);
-  assertRenderedIn(language, desc);
+  // The tag is a fixed protocol label; the title and description are copy, so a
+  // block that silently kept the fallback table fails here on its own.
+  assertLabelIn(language, tag);
+  assertCopyIn(language, title);
+  assertCopyIn(language, desc);
   expect(title).not.toBe(desc);
   return { tag, title, desc };
 }
@@ -800,7 +815,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
     await act(async () => renderer.unmount());
   });
 
-  it.each(['en', 'ru'] as const)(
+  it.each(['en', 'ru', 'zh-CN', 'zh-TW'] as const)(
     'renders every blocked discovery gate in %s without falling back to one language',
     async (language) => {
       const states = [
@@ -861,16 +876,16 @@ describe('FreshBootstrapPage product preview workflow', () => {
         const guidance = findByTestId(renderer.root, 'bootstrap-discovery-guidance');
         const [guidanceTitle] = blocksOf(guidance, 'alert-title');
         const [guidanceDesc] = blocksOf(guidance, 'alert-desc');
-        assertRenderedIn(language, guidanceTitle);
-        assertRenderedIn(language, guidanceDesc);
+        assertCopyIn(language, guidanceTitle);
+        assertCopyIn(language, guidanceDesc);
         expect(guidanceDesc).not.toBe(guidanceTitle);
 
         // The action area names the host step on its own, with its command.
         const action = actionAlert(gate);
         const [actionTitle] = blocksOf(action, 'alert-title');
         const [actionDesc] = blocksOf(action, 'alert-desc');
-        assertRenderedIn(language, actionTitle);
-        assertRenderedIn(language, actionDesc);
+        assertCopyIn(language, actionTitle);
+        assertCopyIn(language, actionDesc);
         expect(actionDesc).not.toBe(actionTitle);
         if (state.hostPreflight) {
           expect(
@@ -897,7 +912,7 @@ describe('FreshBootstrapPage product preview workflow', () => {
     }
   );
 
-  it.each(['en', 'ru'] as const)(
+  it.each(['en', 'ru', 'zh-CN', 'zh-TW'] as const)(
     'renders the transport failure, its recovery copy and the diagnostics in %s',
     async (language) => {
       vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('network down')));
@@ -911,8 +926,8 @@ describe('FreshBootstrapPage product preview workflow', () => {
       });
       const title = textOf(findByTestId(renderer.root, 'init-error-title'));
       const detail = textOf(findByTestId(renderer.root, 'init-error-detail'));
-      assertRenderedIn(language, title);
-      assertRenderedIn(language, detail);
+      assertCopyIn(language, title);
+      assertCopyIn(language, detail);
       expect(detail).not.toBe(title);
       // The 401 recovery path stays quotable in every language.
       expect(detail).toContain('HTTP 401');
@@ -923,15 +938,15 @@ describe('FreshBootstrapPage product preview workflow', () => {
       assertCardHeaderReads(language, card);
       const note = blocksOf(card, 'bootstrap-retry-note');
       expect(note).toHaveLength(1);
-      note.forEach((text) => assertRenderedIn(language, text));
+      note.forEach((text) => assertCopyIn(language, text));
       const labels = blocksOf(card, 'info-key');
       expect(labels.length).toBeGreaterThan(0);
-      labels.forEach((text) => assertRenderedIn(language, text));
+      labels.forEach((text) => assertCopyIn(language, text));
       const values = blocksOf(card, 'info-val');
       // Data values are quoted verbatim; only the trailing mode row is copy.
       expect(values).toContain(identity.operationId);
       expect(values).toContain(`#${handoff.claimGeneration}`);
-      assertRenderedIn(language, values[values.length - 1]);
+      assertCopyIn(language, values[values.length - 1]);
 
       // The operator-facing facts and the way out survive translation.
       const cardText = textOf(card);
@@ -957,8 +972,8 @@ describe('FreshBootstrapPage product preview workflow', () => {
       title: textOf(findByTestId(renderer.root, 'init-error-title')),
       detail: textOf(findByTestId(renderer.root, 'init-error-detail')),
     };
-    assertRenderedIn('zh-CN', before.title);
-    assertRenderedIn('zh-CN', before.detail);
+    assertCopyIn('zh-CN', before.title);
+    assertCopyIn('zh-CN', before.detail);
 
     await act(async () => {
       findByTestId(renderer.root, 'bootstrap-language').props.onChange({
@@ -972,8 +987,8 @@ describe('FreshBootstrapPage product preview workflow', () => {
     };
     // The feedback is held as keys, so the sentence around the same failure is
     // written again rather than kept as the string first rendered.
-    assertRenderedIn('ru', after.title);
-    assertRenderedIn('ru', after.detail);
+    assertCopyIn('ru', after.title);
+    assertCopyIn('ru', after.detail);
     expect(after.title).not.toBe(before.title);
     expect(after.detail).not.toBe(before.detail);
     // Nothing about the operation changed: same facts, same way out.
@@ -984,35 +999,38 @@ describe('FreshBootstrapPage product preview workflow', () => {
     await act(async () => renderer.unmount());
   });
 
-  it.each(['en', 'ru'] as const)('localizes the claim diagnostics in %s', async (language) => {
-    let resolveStart!: (value: Response) => void;
-    const transport = createBootstrapTransport(
-      vi.fn().mockImplementation(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveStart = resolve;
-          })
-      )
-    );
-    setFullWebLanguage(language);
-    let renderer!: ReactTestRenderer;
-    await act(async () => {
-      renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
-    });
-    const card = findByTestId(renderer.root, 'bootstrap-connecting');
-    assertCardHeaderReads(language, card);
-    const labels = blocksOf(card, 'info-key');
-    expect(labels.length).toBeGreaterThan(0);
-    labels.forEach((text) => assertRenderedIn(language, text));
-    // The diagnostics name the real claim facts an operator quotes back.
-    const cardText = textOf(card);
-    expect(cardText).toContain(identity.operationId);
-    expect(cardText).toContain(`${identity.installationId} · ${identity.generation}`);
-    await act(async () => {
-      resolveStart(Response.json({ token: 'installation-session', operation: pendingOperation }));
-    });
-    await act(async () => renderer.unmount());
-  });
+  it.each(['en', 'ru', 'zh-CN', 'zh-TW'] as const)(
+    'localizes the claim diagnostics in %s',
+    async (language) => {
+      let resolveStart!: (value: Response) => void;
+      const transport = createBootstrapTransport(
+        vi.fn().mockImplementation(
+          () =>
+            new Promise<Response>((resolve) => {
+              resolveStart = resolve;
+            })
+        )
+      );
+      setFullWebLanguage(language);
+      let renderer!: ReactTestRenderer;
+      await act(async () => {
+        renderer = create(<FreshBootstrapPage handoff={handoff} transport={transport} />);
+      });
+      const card = findByTestId(renderer.root, 'bootstrap-connecting');
+      assertCardHeaderReads(language, card);
+      const labels = blocksOf(card, 'info-key');
+      expect(labels.length).toBeGreaterThan(0);
+      labels.forEach((text) => assertCopyIn(language, text));
+      // The diagnostics name the real claim facts an operator quotes back.
+      const cardText = textOf(card);
+      expect(cardText).toContain(identity.operationId);
+      expect(cardText).toContain(`${identity.installationId} · ${identity.generation}`);
+      await act(async () => {
+        resolveStart(Response.json({ token: 'installation-session', operation: pendingOperation }));
+      });
+      await act(async () => renderer.unmount());
+    }
+  );
 
   it('re-renders the whole Bootstrap and wizard surface from the header language menu', async () => {
     const transport = createBootstrapTransport(
@@ -1047,7 +1065,11 @@ describe('FreshBootstrapPage product preview workflow', () => {
     expect(findByTestId(renderer.root, 'bootstrap-language').props.value).toBe('ru');
     const wizard = textOf(findByTestId(renderer.root, 'fresh-setup-wizard'));
     expect(wizard).not.toBe(before);
-    assertRenderedIn('ru', wizard);
+    // The wizard is a foreign component (#1181 owns its message state), so the
+    // assertion here is only that the whole surface re-rendered in the reader's
+    // script instead of keeping the previous one.
+    expect(wizard).toMatch(CYRILLIC);
+    expect(wizard).not.toMatch(CJK);
     // The same persisted store the Console header menu writes.
     expect(JSON.parse(storage.get(FRESH_LANGUAGE_STORAGE_KEY) ?? '').state.language).toBe('ru');
     await act(async () => renderer.unmount());
@@ -1074,17 +1096,22 @@ describe('FreshBootstrapPage product preview workflow', () => {
           <FreshBootstrapPage handoff={null} transport={createBootstrapTransport(vi.fn())} />
         );
       });
-      const gate = textOf(findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed'));
+      const alert = findByTestId(renderer.root, 'bootstrap-discovery-unconfirmed');
+      const [title] = blocksOf(alert, 'alert-title');
+      const [desc] = blocksOf(alert, 'alert-desc');
       await act(async () => renderer.unmount());
-      return gate;
+      return { title, desc };
     };
 
     const traditional = await renderGate('zh-TW');
     const simplified = await renderGate('zh-CN');
-    assertRenderedIn('zh-TW', traditional);
-    assertRenderedIn('zh-CN', simplified);
+    assertCopyIn('zh-TW', traditional.title);
+    assertCopyIn('zh-TW', traditional.desc);
+    assertCopyIn('zh-CN', simplified.title);
+    assertCopyIn('zh-CN', simplified.desc);
     // Same state, same component: the only difference is the selected table, so
     // a zh-TW branch that collapsed into zh-CN could not pass this.
-    expect(traditional).not.toBe(simplified);
+    expect(traditional.title).not.toBe(simplified.title);
+    expect(traditional.desc).not.toBe(simplified.desc);
   });
 });
